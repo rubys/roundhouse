@@ -1,0 +1,356 @@
+#!/usr/bin/env bash
+# scripts/bench-http-ceiling — isolate the HTTP serving stack from the app.
+#
+# Serves the SAME ~3KB static body (a captured /articles/new response)
+# through minimal hello-world servers and measures each with the same
+# wrk line scripts/bench uses. Answers: how much of the emitted rust
+# app's throughput ceiling is the framework stack itself, and would an
+# alternative stack (actix) or a socket/runtime tweak (TCP_NODELAY,
+# worker count) raise it?
+#
+# Motivated by roundhouse#32's null result: after the lock fixes, the
+# emitted rust app measures within ~8% of a static-body axum
+# hello-world locally — the serving stack, not the app, is the
+# ceiling. Kotlin/Javalin pushes ~1.3× the rust req/s on the bench
+# host, so the discriminating question is what the same triplet does
+# THERE. Run this on the bench host:
+#
+#   scripts/bench-http-ceiling                  # all variants
+#   scripts/bench-http-ceiling --app /path/to/emitted/app
+#                                               # also bench the real
+#                                               # emitted rust binary
+#                                               # under the same line
+#                                               # (needs its cwd dirs;
+#                                               # run from the emit
+#                                               # tree's root)
+#
+# Variants measured:
+#   axum            — hello-world axum 0.8 (the emitted app's stack)
+#   axum-nodelay    — same + TCP_NODELAY on accepted sockets
+#   axum-workers=N  — same + tokio worker_threads pinned to nproc
+#   actix           — hello-world actix-web 4 (worker-per-core model)
+#   javalin         — hello-world Javalin 6.4.0 (the kotlin target's
+#                     stack), JVM heap pinned to 512m like the bench
+#
+# Interpretation guide:
+#   - axum ≈ emitted app        → the stack is the ceiling; tweaks or
+#                                  a swap are the only levers.
+#   - axum-nodelay/workers >>   → config fix, no swap needed.
+#   - actix >> axum             → a port is worth weighing (contained:
+#                                  runtime/rust/server.rs + the
+#                                  per-action wrapper emit).
+#   - javalin >> all rust rows  → the gap is plumbing-level; profile
+#                                  syscall patterns (perf) before
+#                                  concluding anything about frameworks.
+#
+# Requirements: cargo, wrk; gradle + JDK 17+ for the javalin row
+# (skipped with a warning if missing). First run compiles everything
+# (~2-4 min); later runs reuse the build cache in $WORK_DIR.
+
+set -euo pipefail
+
+WORK_DIR="${RH_CEILING_DIR:-/tmp/rh-http-ceiling}"
+PORT_BASE=9410
+WRK_THREADS=2
+CONNECTIONS=64
+# 20s warmup matches scripts/bench — the javalin row is a JVM and
+# needs the JIT warm before the measurement window.
+WARMUP=20
+DURATION=20
+APP_BIN=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --app)         APP_BIN="$2"; shift 2 ;;
+        --connections) CONNECTIONS="$2"; shift 2 ;;
+        --duration)    DURATION="$2"; shift 2 ;;
+        -h|--help)     sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *) echo "unknown arg: $1" >&2; exit 2 ;;
+    esac
+done
+
+step() { printf '\033[36m→\033[0m %s\n' "$*"; }
+
+mkdir -p "$WORK_DIR"
+
+# ── shared body ──────────────────────────────────────────────────────
+# A captured /articles/new response (3031 bytes). Size is what matters
+# — it pins response framing/writev behavior to the real endpoint's.
+BODY_FILE="$WORK_DIR/body.html"
+if [[ ! -f "$BODY_FILE" ]]; then
+    step "generating 3KB body"
+    python3 - "$BODY_FILE" << 'PYEOF'
+import sys
+# Deterministic 3031-byte HTML body approximating /articles/new.
+head = ("<!DOCTYPE html>\n<html>\n  <head>\n    <title>New article</title>\n"
+        + "    <link rel=\"stylesheet\" href=\"/assets/tailwind.css\">\n" * 8
+        + "  </head>\n  <body>\n    <main>\n")
+tail = "    </main>\n  </body>\n</html>\n"
+filler = "      <div class=\"my-5 rounded-md border px-3 py-2\">form row</div>\n"
+body = head
+while len(body) + len(tail) + len(filler) <= 3031:
+    body += filler
+body += " " * (3031 - len(body) - len(tail)) + tail
+assert len(body) == 3031, len(body)
+open(sys.argv[1], "w").write(body)
+PYEOF
+fi
+
+# ── hello-axum ───────────────────────────────────────────────────────
+AXUM_DIR="$WORK_DIR/hello-axum"
+if [[ ! -f "$AXUM_DIR/Cargo.toml" ]]; then
+    step "writing hello-axum"
+    mkdir -p "$AXUM_DIR/src"
+    cat > "$AXUM_DIR/Cargo.toml" << 'EOF'
+[package]
+name = "hello-axum"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+opt-level = 3
+EOF
+    cat > "$AXUM_DIR/src/main.rs" << 'EOF'
+use axum::{routing::get, Router};
+
+static BODY: &str = include_str!("body.html");
+
+struct NoDelayListener(tokio::net::TcpListener);
+
+impl axum::serve::Listener for NoDelayListener {
+    type Io = tokio::net::TcpStream;
+    type Addr = std::net::SocketAddr;
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            if let Ok((stream, addr)) = self.0.accept().await {
+                let _ = stream.set_nodelay(true);
+                return (stream, addr);
+            }
+        }
+    }
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.0.local_addr()
+    }
+}
+
+async fn run() {
+    let port: u16 = std::env::var("PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(9410);
+    let nodelay = std::env::var("NODELAY").map(|v| v == "1").unwrap_or(false);
+    let app = Router::new().route("/articles/new", get(|| async { axum::response::Html(BODY) }));
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await.unwrap();
+    eprintln!("hello-axum on :{port} nodelay={nodelay}");
+    if nodelay {
+        axum::serve(NoDelayListener(listener), app).await.unwrap();
+    } else {
+        axum::serve(listener, app).await.unwrap();
+    }
+}
+
+fn main() {
+    let mut b = tokio::runtime::Builder::new_multi_thread();
+    b.enable_all();
+    if let Some(w) = std::env::var("WORKERS").ok().and_then(|s| s.parse::<usize>().ok()) {
+        b.worker_threads(w);
+    }
+    b.build().unwrap().block_on(run());
+}
+EOF
+fi
+cp "$BODY_FILE" "$AXUM_DIR/src/body.html"
+
+# ── hello-actix ──────────────────────────────────────────────────────
+ACTIX_DIR="$WORK_DIR/hello-actix"
+if [[ ! -f "$ACTIX_DIR/Cargo.toml" ]]; then
+    step "writing hello-actix"
+    mkdir -p "$ACTIX_DIR/src"
+    cat > "$ACTIX_DIR/Cargo.toml" << 'EOF'
+[package]
+name = "hello-actix"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+actix-web = "4"
+
+[profile.release]
+opt-level = 3
+EOF
+    cat > "$ACTIX_DIR/src/main.rs" << 'EOF'
+use actix_web::{get, App, HttpResponse, HttpServer};
+
+static BODY: &str = include_str!("body.html");
+
+#[get("/articles/new")]
+async fn new_article() -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type("text/html; charset=utf-8")
+        .body(BODY)
+}
+
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    let port: u16 = std::env::var("PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(9411);
+    let mut server = HttpServer::new(|| App::new().service(new_article));
+    if let Some(w) = std::env::var("WORKERS").ok().and_then(|s| s.parse::<usize>().ok()) {
+        server = server.workers(w);
+    }
+    eprintln!("hello-actix on :{port}");
+    server.bind(("0.0.0.0", port))?.run().await
+}
+EOF
+fi
+cp "$BODY_FILE" "$ACTIX_DIR/src/body.html"
+
+# ── hello-javalin ────────────────────────────────────────────────────
+# Mirrors the emitted kotlin target's stack (Javalin 6.4.0, Kotlin
+# 2.4.0, slf4j-simple) so the bench host's gradle cache is reused.
+JAVALIN_DIR="$WORK_DIR/hello-javalin"
+if [[ ! -f "$JAVALIN_DIR/build.gradle.kts" ]]; then
+    step "writing hello-javalin"
+    mkdir -p "$JAVALIN_DIR/src/main/kotlin" "$JAVALIN_DIR/src/main/resources"
+    cat > "$JAVALIN_DIR/settings.gradle.kts" << 'EOF'
+rootProject.name = "hello-javalin"
+EOF
+    cat > "$JAVALIN_DIR/build.gradle.kts" << 'EOF'
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
+plugins {
+    kotlin("jvm") version "2.4.0"
+    application
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation("io.javalin:javalin:6.4.0")
+    implementation("org.slf4j:slf4j-simple:2.0.13")
+}
+
+application {
+    mainClass.set("MainKt")
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
+    }
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+EOF
+    cat > "$JAVALIN_DIR/src/main/kotlin/Main.kt" << 'EOF'
+import io.javalin.Javalin
+
+fun main() {
+    val body = object {}.javaClass.getResource("/body.html")!!.readText()
+    val port = (System.getenv("PORT") ?: "9412").toInt()
+    val app = Javalin.create().start(port)
+    app.get("/articles/new") {
+        it.contentType("text/html; charset=utf-8").result(body)
+    }
+}
+EOF
+fi
+cp "$BODY_FILE" "$JAVALIN_DIR/src/main/resources/body.html"
+
+# ── builds ───────────────────────────────────────────────────────────
+step "building hello-axum (cargo release)"
+(cd "$AXUM_DIR" && cargo build --release --quiet)
+step "building hello-actix (cargo release)"
+(cd "$ACTIX_DIR" && cargo build --release --quiet)
+
+HAVE_JAVALIN=0
+if command -v gradle > /dev/null 2>&1; then
+    # Same JDK resolution as scripts/bench's kotlin branch.
+    KOTLIN_JAVA_HOME="${KOTLIN_JAVA_HOME:-${JAVA_HOME:-/opt/homebrew/opt/openjdk}}"
+    step "building hello-javalin (gradle installDist)"
+    if (cd "$JAVALIN_DIR" && JAVA_HOME="$KOTLIN_JAVA_HOME" PATH="$KOTLIN_JAVA_HOME/bin:$PATH" \
+            gradle installDist --console=plain -q); then
+        HAVE_JAVALIN=1
+    else
+        echo "warning: javalin build failed; skipping that row" >&2
+    fi
+else
+    echo "warning: gradle not found; skipping javalin row" >&2
+fi
+
+# ── measurement ──────────────────────────────────────────────────────
+SERVER_PID=""
+cleanup() { [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+
+RESULTS=()
+
+run_one() {
+    local label="$1" port="$2"; shift 2
+    # Remaining args: the server command (run with PORT=$port).
+    step "measuring $label"
+    PORT="$port" "$@" > "$WORK_DIR/$label.log" 2>&1 &
+    SERVER_PID=$!
+    local ready=0
+    for _ in $(seq 1 60); do
+        if curl --silent --fail --output /dev/null "http://localhost:$port/articles/new"; then
+            ready=1; break
+        fi
+        sleep 0.5
+    done
+    if [[ "$ready" != 1 ]]; then
+        echo "  $label failed to start:" >&2
+        tail -5 "$WORK_DIR/$label.log" >&2
+        kill "$SERVER_PID" 2>/dev/null || true
+        SERVER_PID=""
+        RESULTS+=("$label|failed|-|-")
+        return
+    fi
+    wrk -t"$WRK_THREADS" -c"$CONNECTIONS" -d"${WARMUP}s" \
+        "http://localhost:$port/articles/new" > /dev/null 2>&1 || true
+    local out
+    out="$(wrk -t"$WRK_THREADS" -c"$CONNECTIONS" -d"${DURATION}s" --latency \
+        "http://localhost:$port/articles/new" 2>&1)"
+    local req p50 p99
+    req="$(grep -E '^Requests/sec:' <<< "$out" | awk '{print $2}')"
+    p50="$(awk '/Latency Distribution/{f=1;next} f && /^[[:space:]]*50%/{print $2; exit}' <<< "$out")"
+    p99="$(awk '/Latency Distribution/{f=1;next} f && /^[[:space:]]*99%/{print $2; exit}' <<< "$out")"
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+    SERVER_PID=""
+    sleep 0.5
+    RESULTS+=("$label|${req:-?}|${p50:-?}|${p99:-?}")
+    printf '  %s req/s\n' "${req:-?}"
+}
+
+NPROC="$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+
+port=$PORT_BASE
+run_one "axum"               "$port" "$AXUM_DIR/target/release/hello-axum"; port=$((port+1))
+run_one "axum-nodelay"       "$port" env NODELAY=1 "$AXUM_DIR/target/release/hello-axum"; port=$((port+1))
+run_one "axum-workers-$NPROC" "$port" env WORKERS="$NPROC" "$AXUM_DIR/target/release/hello-axum"; port=$((port+1))
+run_one "actix"              "$port" "$ACTIX_DIR/target/release/hello-actix"; port=$((port+1))
+if [[ "$HAVE_JAVALIN" == 1 ]]; then
+    run_one "javalin" "$port" env JAVA_OPTS="-Xmx512m -Xms512m" \
+        "$JAVALIN_DIR/build/install/hello-javalin/bin/hello-javalin"
+    port=$((port+1))
+fi
+if [[ -n "$APP_BIN" ]]; then
+    run_one "emitted-app" "$port" "$APP_BIN"
+fi
+
+# ── report ───────────────────────────────────────────────────────────
+echo
+echo "## HTTP serving ceiling — static 3031-byte body, wrk -t$WRK_THREADS -c$CONNECTIONS -d${DURATION}s"
+echo
+echo "| server | req/sec | p50 | p99 |"
+echo "|--------|--------:|----:|----:|"
+for row in "${RESULTS[@]}"; do
+    IFS='|' read -r label req p50 p99 <<< "$row"
+    echo "| $label | $req | $p50 | $p99 |"
+done
