@@ -179,7 +179,12 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
     result.hint = Some(IrHint::StringBuilderResult);
     body_stmts.push(result);
 
-    let body = seq(body_stmts);
+    let mut body = seq(body_stmts);
+    // File-grain catch-all: whatever the walk-level stamps didn't reach
+    // (`io = String.new`, the `{`/`}` wrappers, the trailing `io`)
+    // attributes to the template as a whole — same convention as the
+    // ERB lowerer.
+    body.inherit_span(view.body.span);
 
     let mut method = MethodDef {
         name: method_name,
@@ -291,12 +296,23 @@ fn walk_template(body: &Expr, ctx: &Ctx) -> Vec<Expr> {
     // body) — array! and partial! produce a top-level array or method
     // call respectively, no `{}` wrap.
     if classified.len() == 1 {
+        // Synthesis choke point (whole-template forms): everything
+        // emitted for the single DSL statement attributes back to it.
+        let src_span = raw_stmts[0].span;
         match &classified[0] {
             JbStmt::ArrayPartial { collection, partial_path, item_var } => {
-                return emit_array_partial(collection, partial_path, item_var, ctx);
+                let mut out = emit_array_partial(collection, partial_path, item_var, ctx);
+                for e in &mut out {
+                    e.inherit_span(src_span);
+                }
+                return out;
             }
             JbStmt::Partial { partial_path, arg } => {
-                return emit_partial_call(partial_path, arg, ctx);
+                let mut out = emit_partial_call(partial_path, arg, ctx);
+                for e in &mut out {
+                    e.inherit_span(src_span);
+                }
+                return out;
             }
             _ => {}
         }
@@ -308,7 +324,12 @@ fn walk_template(body: &Expr, ctx: &Ctx) -> Vec<Expr> {
     let mut out: Vec<Expr> = Vec::new();
     out.push(io_append_lit(&ctx.accumulator, "{"));
     let mut emitted = 0usize;
-    for stmt in &classified {
+    for (stmt, src) in classified.iter().zip(raw_stmts.iter()) {
+        // Synthesis choke point: everything pushed for this DSL
+        // statement (key/comma appends, encode_value calls) attributes
+        // back to it. The `{` / `}` wrappers belong to the template as
+        // a whole and ride the method-level catch-all instead.
+        let start = out.len();
         match stmt {
             JbStmt::Extract { obj, attrs } => {
                 let obj_is_arg = obj_is_named_local(obj, &ctx.arg_name);
@@ -371,6 +392,9 @@ fn walk_template(body: &Expr, ctx: &Ctx) -> Vec<Expr> {
             JbStmt::Unknown => {
                 out.push(io_append_lit(&ctx.accumulator, ""));
             }
+        }
+        for e in &mut out[start..] {
+            e.inherit_span(src.span);
         }
     }
     out.push(io_append_lit(&ctx.accumulator, "}"));

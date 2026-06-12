@@ -10,7 +10,7 @@
 
 use roundhouse::expr::Expr;
 use roundhouse::ingest::ingest_app;
-use roundhouse::lower::lower_view_to_library_class;
+use roundhouse::lower::{lower_jbuilder_to_library_class, lower_view_to_library_class};
 
 fn for_each_expr(e: &mut Expr, f: &mut impl FnMut(&Expr)) {
     f(e);
@@ -21,8 +21,19 @@ fn for_each_expr(e: &mut Expr, f: &mut impl FnMut(&Expr)) {
 fn lowered_view_bodies_carry_no_synthetic_spans() {
     let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
     assert!(!app.views.is_empty(), "fixture should have views");
-    for view in app.views.iter().filter(|v| v.format.as_str() == "html") {
-        let lc = lower_view_to_library_class(view, &app);
+    let mut saw_json = false;
+    for view in &app.views {
+        // Route by format the same way the bulk emit paths do: ERB
+        // (html) through view_to_library, jbuilder (json) through
+        // jbuilder_to_library. Both must uphold the same convention.
+        let lc = match view.format.as_str() {
+            "html" => lower_view_to_library_class(view, &app),
+            "json" => {
+                saw_json = true;
+                lower_jbuilder_to_library_class(view, &app)
+            }
+            _ => continue,
+        };
         for m in &lc.methods {
             let mut body = m.body.clone();
             let mut synthetic: Vec<String> = Vec::new();
@@ -59,13 +70,15 @@ fn lowered_view_bodies_carry_no_synthetic_spans() {
                 .get(file as usize - 1)
                 .unwrap_or_else(|| panic!("FileId {file:?} out of range"));
             assert!(
-                source.path.ends_with(".erb") && source.path.contains(view.name.as_str()),
-                "view {}: spans resolve to {}, expected its own .erb",
+                (source.path.ends_with(".erb") || source.path.ends_with(".jbuilder"))
+                    && source.path.contains(view.name.as_str()),
+                "view {}: spans resolve to {}, expected its own template",
                 view.name.as_str(),
                 source.path,
             );
         }
     }
+    assert!(saw_json, "fixture should exercise the jbuilder lowerer");
 }
 
 /// Statement-grain, not just file-grain: the top-level statements of a
