@@ -63,7 +63,12 @@ pub fn rewrite_arel_in_expr_with_assocs(
         if let Some((op, owner)) =
             build::try_build_arel_with_assocs(expr, schema, registry, assocs)
         {
-            let replacement = SqliteVisitor.visit(&op, schema, &owner);
+            let mut replacement = SqliteVisitor.visit(&op, schema, &owner);
+            // The expansion replaces the recognized chain wholesale;
+            // its provenance is the chain call site. Subtrees the
+            // builder lifted out of the chain (predicate values, …)
+            // keep their own, tighter spans.
+            replacement.inherit_span(expr.span);
             *expr = replacement;
             return;
         }

@@ -37,11 +37,18 @@ pub(super) fn synthesize_process_action(
         stmts.push(case_dispatch(publics));
     }
 
-    let body = match stmts.len() {
+    let mut body = match stmts.len() {
         0 => syn(ExprNode::Seq { exprs: vec![] }),
         1 => stmts.into_iter().next().unwrap(),
         _ => syn(ExprNode::Seq { exprs: stmts }),
     };
+    // Whole-cloth synthesis — attribute the dispatcher scaffolding to
+    // the controller's source via its first public action (same file).
+    // The per-arm dispatch Sends built in `case_dispatch` carry their
+    // own action's span and win over this coarser stamp.
+    if let Some(first) = publics.first() {
+        body.inherit_span(first.body.span);
+    }
 
     let action_name_param = Symbol::from("action_name");
     MethodDef {
@@ -128,18 +135,21 @@ fn case_dispatch(publics: &[Action]) -> Expr {
         .map(|a| {
             let action_name = a.name.as_str();
             let method_name = method_name_for_action(action_name);
+            let mut dispatch = syn(ExprNode::Send {
+                recv: None,
+                method: Symbol::from(method_name),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            });
+            // Each dispatch Send attributes to the action it invokes.
+            dispatch.inherit_span(a.body.span);
             Arm {
                 pattern: Pattern::Lit {
                     value: Literal::Sym { value: Symbol::from(action_name) },
                 },
                 guard: None,
-                body: syn(ExprNode::Send {
-                    recv: None,
-                    method: Symbol::from(method_name),
-                    args: vec![],
-                    block: None,
-                    parenthesized: false,
-                }),
+                body: dispatch,
             }
         })
         .collect();

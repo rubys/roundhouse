@@ -475,8 +475,11 @@ fn inline_before_filters(action: &Action, filters: &[&Filter], privs: &[Action])
         _ => combined.push(action.body.clone()),
     }
     let mut new_action = action.clone();
+    // The combined Seq wraps this action's statements (plus prepended
+    // filter statements that carry their own spans) — it attributes to
+    // the action body it was derived from.
     new_action.body = Expr::new(
-        crate::span::Span::synthetic(),
+        action.body.span,
         ExprNode::Seq { exprs: combined },
     );
     new_action

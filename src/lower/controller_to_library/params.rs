@@ -67,6 +67,10 @@ pub struct ParamsSpec {
     pub fields: Vec<Symbol>,
     /// Synthesized class name (`ArticleParams` for resource `:article`).
     pub class_id: ClassId,
+    /// Span of the `permit(...)` / `expect(...)` call this spec was
+    /// recognized from — the enclosing source span for everything the
+    /// synthesized class contains.
+    pub span: Span,
 }
 
 /// Walk every controller's action bodies and collect one ParamsSpec per
@@ -90,6 +94,7 @@ fn collect_from_expr(expr: &Expr, out: &mut BTreeMap<Symbol, ParamsSpec>) {
             class_id: params_class_id(&resource),
             resource,
             fields,
+            span: expr.span,
         });
     }
     walk_children(expr, &mut |c| collect_from_expr(c, out));
@@ -276,6 +281,12 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
     }
     methods.push(synth_from_raw(&spec.class_id, &spec.resource, &spec.fields));
     methods.push(synth_to_h(&spec.class_id, &spec.fields));
+
+    // Provenance: every synthesized body attributes to the
+    // `permit(...)` / `expect(...)` call the spec was recognized from.
+    for m in &mut methods {
+        m.body.inherit_span(spec.span);
+    }
 
     LibraryClass {
         name: spec.class_id.clone(),

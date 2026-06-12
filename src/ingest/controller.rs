@@ -123,7 +123,19 @@ fn ingest_controller_body_item(
         let action_name = constant_id_str(&def.name()).to_string();
         let body_expr = match def.body() {
             Some(b) => ingest_expr(&b, file)?,
-            None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+            None => {
+                // Empty `def show; end` — no body node to take a span
+                // from; use the def's own span so downstream synthesis
+                // (implicit render, format dispatch) attributes to the
+                // action declaration rather than rendering location-less.
+                let loc = def.location();
+                let span = Span {
+                    file: super::sources::file_id(file),
+                    start: loc.start_offset() as u32,
+                    end: loc.end_offset() as u32,
+                };
+                Expr::new(span, ExprNode::Seq { exprs: vec![] })
+            }
         };
         return Ok(ControllerBodyItem::Action {
             action: Action {
