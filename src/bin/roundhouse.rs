@@ -22,7 +22,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use roundhouse::analyze::{Analyzer, Severity};
+use roundhouse::analyze::{diagnose, Analyzer, Severity};
 use roundhouse::ingest::ingest_app;
 use roundhouse::project::{self, BuildTarget};
 
@@ -209,6 +209,14 @@ fn run_transpile(
         ingest_app(input).map_err(|e| format!("ingest {}: {e}", input.display()))?;
     Analyzer::new(&app).analyze(&mut app);
 
+    // Analyze-time diagnostics — the same type errors roundhouse-check
+    // reports (dispatch failures, unresolved ivars, incompatible ops).
+    // Emitters only stub *annotated* sites (body-typer `expr.diagnostic`);
+    // walker-found errors would otherwise pass through into target code
+    // that fails later in tsc/cargo/runtime with a worse message, so
+    // they print and gate here alongside the emit-gap inventory.
+    let mut analyze_diags = diagnose(&app);
+
     // Emit inside a diagnostic scope so unsupported-construct gaps in
     // any lowerer/emitter are collected rather than lost (issue #28).
     // Each gap still degrades to a stub in the emitted output, so a
@@ -218,25 +226,45 @@ fn run_transpile(
         roundhouse::emit::diagnostics::scope(|| project::target_files(&app, input, target));
     let files = files_result?;
 
-    // Policy: unsupported-construct errors fail the transpile cleanly by
-    // default. With --allow-unsupported they downgrade to warnings and
-    // the stub'd output is written, so the user can inspect the full
-    // inventory in one pass.
+    // Policy: errors (unsupported constructs and type errors alike) fail
+    // the transpile cleanly by default. With --allow-unsupported they
+    // downgrade to warnings and the output is written anyway, so the
+    // user can inspect the full inventory in one pass.
     if allow_unsupported {
-        for d in &mut diags {
+        for d in diags.iter_mut().chain(analyze_diags.iter_mut()) {
             if d.severity == Severity::Error {
                 d.severity = Severity::Warning;
             }
         }
     }
+    // The emit sink is always small — print it all. Analyze warnings
+    // (gradual_untyped above all) can run to hundreds on a large app,
+    // so by default they collapse to a count; --allow-unsupported asks
+    // for the full inventory and gets every line.
     for d in &diags {
         eprintln!("roundhouse: {}", d.render(&app.sources));
     }
+    let mut suppressed_warnings = 0usize;
+    for d in &analyze_diags {
+        if d.severity == Severity::Error || allow_unsupported {
+            eprintln!("roundhouse: {}", d.render(&app.sources));
+        } else {
+            suppressed_warnings += 1;
+        }
+    }
+    if suppressed_warnings > 0 {
+        eprintln!(
+            "roundhouse: {suppressed_warnings} analyze warning(s) not shown — \
+             rerun with --allow-unsupported to list them"
+        );
+    }
+
     let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();
-    if errors > 0 {
+    let type_errors = analyze_diags.iter().filter(|d| d.severity == Severity::Error).count();
+    if errors + type_errors > 0 {
         return Err(format!(
-            "{errors} unsupported construct(s) — rerun with --allow-unsupported \
-             to emit stubs and write the full inventory"
+            "{errors} unsupported construct(s), {type_errors} type error(s) — rerun \
+             with --allow-unsupported to write the output anyway"
         ));
     }
 

@@ -719,3 +719,41 @@ fn lowered_real_blog_typing_residual() {
             .join("\n  "),
     );
 }
+
+#[test]
+fn unclaimed_model_dsl_reports_spanned_warning() {
+    use roundhouse::analyze::Severity;
+    use roundhouse::diagnostic::DiagnosticKind;
+    use roundhouse::ingest::ingest_model;
+    use roundhouse::schema::Schema;
+
+    let source = br#"class Clip < ApplicationRecord
+  has_one_attached :audio
+
+  validates :name, presence: true
+end
+"#;
+    let model = ingest_model(source, "app/models/clip.rb", &Schema::default())
+        .expect("ingest")
+        .expect("model");
+
+    let (_lc, diags) = roundhouse::emit::diagnostics::scope(|| {
+        lower_model_to_library_class(&model, &Schema::default())
+    });
+
+    let unsupported: Vec<_> = diags
+        .iter()
+        .filter(|d| matches!(&d.kind, DiagnosticKind::Unsupported { construct, .. }
+            if construct.as_str() == "has_one_attached"))
+        .collect();
+    assert_eq!(unsupported.len(), 1, "exactly one report: {diags:?}");
+    let d = unsupported[0];
+    assert_eq!(d.severity, Severity::Warning, "tolerable per-app: warning, not error");
+    assert!(!d.span.is_synthetic(), "declaration site is located");
+    // validates was claimed by the recognizer; only the unclaimed DSL reports.
+    assert!(
+        !diags.iter().any(|d| matches!(&d.kind, DiagnosticKind::Unsupported { construct, .. }
+            if construct.as_str() == "validates")),
+        "claimed DSL must not report: {diags:?}"
+    );
+}

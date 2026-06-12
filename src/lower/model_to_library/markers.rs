@@ -137,7 +137,7 @@ pub(super) fn fold_into_or_push(methods: &mut Vec<MethodDef>, model: &Model, hoo
 /// not in this set fall through to plain Unknown (they're future
 /// lowerer or emit work). Includes the `_commit` variants Rails sugar
 /// adds beyond the raw `after_commit` hook in `CallbackHook`.
-const BLOCK_CALLBACK_HOOKS: &[&str] = &[
+pub(super) const BLOCK_CALLBACK_HOOKS: &[&str] = &[
     "before_validation",
     "after_validation",
     "before_save",

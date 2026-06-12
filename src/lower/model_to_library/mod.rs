@@ -366,11 +366,72 @@ pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryCl
 /// Untyped-body method synthesis — shared by the single-model and
 /// bulk entry points. Body-typing is the caller's responsibility (it
 /// needs the cross-model registry).
+/// Report model-body statements that no lowering pass claims.
+///
+/// `ModelBodyItem::Unknown` is a holding pen, not a verdict: broadcasts
+/// (`broadcasts_to`), markers (`primary_abstract_class`), block-form
+/// callbacks, and class-scope constants are all fished out of it by
+/// later recognizers. Whatever nobody claims simply never reaches the
+/// lowered output — and before this report, that drop was silent:
+/// `has_one_attached :audio` vanished and the user's first signal was a
+/// dispatch failure at some call site three files away. Pushing a
+/// *spanned* diagnostic at the declaration names the actual gap.
+///
+/// Warning, not Error: plenty of unclaimed DSL is tolerable per app
+/// (`include`, concerns the app never calls through typed paths), and
+/// dynamic targets often run fine without it. The skip-list below must
+/// stay in sync with the claiming passes — each entry names the pass
+/// that consumes the shape.
+fn report_unclaimed_unknowns(model: &Model) {
+    use crate::diagnostic::{Diagnostic, Severity};
+    use crate::expr::LValue;
+
+    for item in &model.body {
+        let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        // Class-scope constants — claimed by analyze::extract_const_assignments.
+        if matches!(&*expr.node, ExprNode::Assign { target: LValue::Const { .. }, .. }) {
+            continue;
+        }
+        let ExprNode::Send { recv: None, method, block, .. } = &*expr.node else {
+            // Receiver-bearing or non-Send statements at class scope are
+            // rare and usually inert; reporting them produced no signal
+            // on the corpus, so only DSL-shaped (receiver-less) calls
+            // report today.
+            continue;
+        };
+        let name = method.as_str();
+        // `broadcasts_to` — claimed by lower::broadcasts.
+        if name == "broadcasts_to" {
+            continue;
+        }
+        // `primary_abstract_class` — claimed by markers.rs.
+        if name == "primary_abstract_class" {
+            continue;
+        }
+        // Block-form lifecycle hooks — claimed by markers.rs.
+        if block.is_some() && self::markers::BLOCK_CALLBACK_HOOKS.contains(&name) {
+            continue;
+        }
+        let mut d = Diagnostic::unsupported(
+            expr.span,
+            None,
+            name,
+            format!("model DSL call on `{}` not lowered", model.name.0.as_str()),
+        );
+        d.severity = Severity::Warning;
+        crate::emit::diagnostics::push(d);
+    }
+}
+
 fn build_methods(
     model: &Model,
     schema: &Schema,
     params_specs: &std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>>,
 ) -> Vec<MethodDef> {
+    // No-op outside an emit diagnostics scope, so the many direct
+    // test callers of the lowering entries are unaffected.
+    report_unclaimed_unknowns(model);
+
     let mut methods: Vec<MethodDef> = Vec::new();
 
     if let Some(table) = schema.tables.get(&model.table.0) {
