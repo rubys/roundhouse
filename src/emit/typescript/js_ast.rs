@@ -202,11 +202,15 @@ pub struct JsModule {
     pub decls: Vec<JsDecl>,
 }
 
-/// `import { name as alias, ... } from "from";`
 #[derive(Clone, Debug, PartialEq)]
-pub struct JsImport {
-    pub names: Vec<(String, Option<String>)>,
-    pub from: String,
+pub enum JsImport {
+    /// `import { name as alias, ... } from "from";`
+    Named {
+        names: Vec<(String, Option<String>)>,
+        from: String,
+    },
+    /// `import * as alias from "from";`
+    Star { alias: String, from: String },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -270,6 +274,8 @@ pub enum JsClassMember {
     },
     /// Blank separator between member groups.
     Blank,
+    /// `// text` comment line at member position.
+    Comment(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

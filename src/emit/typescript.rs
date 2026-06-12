@@ -14,7 +14,6 @@
 //! `project_universal_post_lowering_ir`); when the lowerer lands the
 //! output joins the walker without changes here.
 
-use std::fmt::Write;
 use std::path::PathBuf;
 
 use super::EmittedFile;
@@ -1390,8 +1389,18 @@ fn emit_test_setup_ts(
 ///   * `Class`-receiver methods → `static`.
 ///   * `include`s → emitted as a leading `// include: <Name>` comment;
 ///     real mixin support is deferred.
+/// String bridge for `emit_library_class` consumers that compose text
+/// (the cross-target `runtime_loader` table). New TS-side callers use
+/// `js_library_class` and place the decl in a `JsModule`.
 pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String, String> {
+    Ok(printer::render_decl(&js_library_class(class)?))
+}
+
+pub(super) fn js_library_class(
+    class: &crate::dialect::LibraryClass,
+) -> Result<js_ast::JsDecl, String> {
     use crate::dialect::{AccessorKind, MethodReceiver};
+    use js_ast::{JsClassMember, JsDecl, TsType};
 
     // The IR's LibraryClass.name is now the fully-qualified class
     // path (`ActiveRecord::RecordInvalid`); TS doesn't allow `::` in
@@ -1401,7 +1410,6 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
     // pass — `runtime/typescript/errors.ts` exports `RecordInvalid`.
     let raw_name = class.name.0.as_str();
     let class_name = raw_name.rsplit("::").next().unwrap_or(raw_name);
-    let mut out = String::new();
 
     // Identify attribute readers/writers by the lowerer-recorded
     // `kind` field rather than pattern-matching the body — the
@@ -1432,7 +1440,7 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
     // declaration is type-only and the property is provided by
     // the parent or by runtime assignment. Without `declare`, a
     // re-declared parent property trips TS2612.
-    let mut fields: Vec<(String, String, bool, bool)> = Vec::new();
+    let mut fields: Vec<(String, String, bool, bool, crate::span::Span)> = Vec::new();
     let mut field_names_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for m in &class.methods {
         if is_attr_reader(m) {
@@ -1442,7 +1450,7 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
             };
             let is_static = matches!(m.receiver, MethodReceiver::Class);
             field_names_seen.insert(m.name.as_str().to_string());
-            fields.push((m.name.as_str().to_string(), ty, is_static, false));
+            fields.push((m.name.as_str().to_string(), ty, is_static, false, m.body.span));
         }
     }
 
@@ -1476,12 +1484,12 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
     }
     for (name, ty) in ivar_assignments {
         if field_names_seen.insert(name.clone()) {
-            fields.push((name, ts_ty(&ty), false, true));
+            fields.push((name, ts_ty(&ty), false, true, crate::span::Span::synthetic()));
         }
     }
     for (name, ty) in static_ivar_assignments {
         if field_names_seen.insert(name.clone()) {
-            fields.push((name, ts_ty(&ty), true, true));
+            fields.push((name, ts_ty(&ty), true, true, crate::span::Span::synthetic()));
         }
     }
 
@@ -1522,14 +1530,11 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
         None
     };
     let effective_parent = parent.as_deref().or(synthesized_parent.as_deref());
-    match effective_parent {
-        Some(p) => writeln!(out, "export class {class_name} extends {p} {{").unwrap(),
-        None => writeln!(out, "export class {class_name} {{").unwrap(),
-    }
+    let mut members: Vec<JsClassMember> = Vec::new();
 
     if synthesized_parent.is_none() && !class.includes.is_empty() {
         for inc in &class.includes {
-            writeln!(out, "  // include: {}", inc.0.as_str()).unwrap();
+            members.push(JsClassMember::Comment(format!("include: {}", inc.0.as_str())));
         }
     }
 
@@ -1542,8 +1547,7 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
     // parent's field list through emit_library_class; expand when a
     // new framework parent surface materializes.
     const INHERITED_FIELD_NAMES: &[&str] = &["id", "errors", "persisted", "destroyed"];
-    for (name, ty, is_static, from_ivar) in &fields {
-        let prefix = if *is_static { "static " } else { "" };
+    for (name, ty, is_static, from_ivar, span) in &fields {
         // ivar-derived fields on a derived class get `declare` —
         // the constructor body's `this.x = ...` (or a parent
         // declaration) provides the runtime backing; the field
@@ -1554,7 +1558,6 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
         // schema columns the parent doesn't have (title, body).
         let inherited = INHERITED_FIELD_NAMES.contains(&name.as_str());
         let needs_declare = has_parent && (*from_ivar || inherited);
-        let declare_modifier = if needs_declare { "declare " } else { "" };
         // Static fields synthesized from class-method `@ivar = ...`
         // assignments (module-level state in `module ViewHelpers;
         // @slots = {}; def self.reset_slots!; @slots = {}; end; end`)
@@ -1565,15 +1568,19 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
         // load; mirror that with a type-driven default. Skip the
         // initializer when the field is `declare`d (parent provides
         // backing).
-        let initializer = if *is_static && !needs_declare {
+        let init = if *is_static && !needs_declare {
             ts_default_for_type(ty)
         } else {
-            String::new()
+            None
         };
-        writeln!(
-            out,
-            "  {prefix}{declare_modifier}{name}: {ty}{initializer};",
-        ).unwrap();
+        members.push(JsClassMember::Field {
+            is_static: *is_static,
+            declare: needs_declare,
+            name: name.clone(),
+            ty: Some(TsType(ty.clone())),
+            init,
+            span: *span,
+        });
         wrote_fields = true;
     }
 
@@ -1642,39 +1649,38 @@ pub fn emit_library_class(class: &crate::dialect::LibraryClass) -> Result<String
         .collect();
 
     if wrote_fields && !methods_to_emit.is_empty() {
-        writeln!(out).unwrap();
+        members.push(JsClassMember::Blank);
     }
 
     let mut first = true;
     for m in methods_to_emit {
         if !first {
-            writeln!(out).unwrap();
+            members.push(JsClassMember::Blank);
         }
         first = false;
-        let body_str = emit_class_member(m, has_parent)?;
-        for line in body_str.lines() {
-            if line.is_empty() {
-                writeln!(out).unwrap();
-            } else {
-                writeln!(out, "  {line}").unwrap();
-            }
-        }
+        members.push(js_class_member(m, has_parent)?);
     }
 
-    out.push_str("}\n");
-    Ok(out)
+    Ok(JsDecl::Class {
+        export: true,
+        name: class_name.to_string(),
+        extends: effective_parent.map(String::from),
+        members,
+        span: crate::span::Span::synthetic(),
+    })
 }
 
 /// Emit the body of a `constructor` from an `initialize` method's
 /// `Expr`. Floats top-level `super(...)` calls to the front so TS's
 /// strict-derived-class rule (no `this` access before super) holds
 /// even when the source Ruby wrote `@x = arg; super(...)`.
-fn emit_constructor_body(
+fn js_constructor_body(
     body: &crate::expr::Expr,
     return_ty: &Ty,
     has_parent: bool,
-) -> String {
+) -> Vec<js_ast::JsStmt> {
     use crate::expr::{Expr, ExprNode};
+    use js_ast::{Js, JsExpr, JsStmt};
 
     let exprs: Vec<&Expr> = match &*body.node {
         ExprNode::Seq { exprs } => exprs.iter().collect(),
@@ -1694,10 +1700,16 @@ fn emit_constructor_body(
         // so the TS strict-derived-class rule holds. Without this,
         // a class like `Base extends Validations` whose
         // `initialize` writes `@id = 0` trips TS17009 + TS2377.
+        let mut out = Vec::new();
         if has_parent {
-            return format!("super();\n{}", expr::emit_body(body, return_ty));
+            out.push(JsStmt::expr(Js::call(
+                crate::span::Span::synthetic(),
+                Js::synth(JsExpr::Ident("super".into())),
+                vec![],
+            )));
         }
-        return expr::emit_body(body, return_ty);
+        out.extend(expr::js_body(body, return_ty));
+        return out;
     }
 
     let mut reordered_exprs: Vec<Expr> = Vec::new();
@@ -1708,7 +1720,7 @@ fn emit_constructor_body(
         reordered_exprs.push((*r).clone());
     }
     let reordered = Expr::new(body.span, ExprNode::Seq { exprs: reordered_exprs });
-    expr::emit_body(&reordered, return_ty)
+    expr::js_body(&reordered, return_ty)
 }
 
 /// Walk an expression tree looking for `ExprNode::Yield`. Used to
@@ -1716,32 +1728,32 @@ fn emit_constructor_body(
 /// implicit-block yield translates to `__block(args)` in the emit,
 /// so the method signature must declare the parameter for tsc to
 /// resolve the name.
-/// TS initializer fragment (` = <expr>`) for a field whose Ruby
-/// equivalent would default to nil (unset @ivar reads as nil).
-/// For Hash/Array, emit a fresh empty literal so reads don't crash
-/// on `undefined.<key>` / `undefined.length`. Other concrete types
-/// fall back to `null` as a Ruby-nil-aligned default. Untyped /
-/// Var return empty (no initializer) — the consumer must guard.
-fn ts_default_for_type(ty: &str) -> String {
+/// Field initializer for a static field whose Ruby equivalent would
+/// default to nil (unset @ivar reads as nil). For Hash/Array, emit a
+/// fresh empty literal so reads don't crash on `undefined.<key>` /
+/// `undefined.length`. Untyped / class types return None (no
+/// initializer) — the consumer must guard.
+fn ts_default_for_type(ty: &str) -> Option<js_ast::Js> {
+    use js_ast::{Js, JsExpr};
     // String matching is the cheap path — `ts_ty` already collapsed
     // the Ty into its TS form, and the common cases are
     // string-distinguishable.
     if ty.starts_with("Record<") || ty == "any" {
-        " = {}".to_string()
+        Some(Js::synth(JsExpr::Object(vec![])))
     } else if ty.ends_with("[]") || ty.starts_with("Array<") {
-        " = []".to_string()
+        Some(Js::synth(JsExpr::Array(vec![])))
     } else if ty == "string" {
-        " = \"\"".to_string()
+        Some(Js::synth(JsExpr::Str(String::new())))
     } else if ty == "number" {
-        " = 0".to_string()
+        Some(Js::synth(JsExpr::Num("0".into())))
     } else if ty == "boolean" {
-        " = false".to_string()
+        Some(Js::synth(JsExpr::Bool(false)))
     } else {
         // Class types, unions, etc. — leave uninitialized so tsc
         // doesn't infer `null` into a non-nullable position.
         // Static-field-from-class-method usage reassigns before
         // reading anyway in the framework patterns we ship today.
-        String::new()
+        None
     }
 }
 
@@ -1838,15 +1850,16 @@ fn body_contains_yield(body: &crate::expr::Expr) -> bool {
     }
 }
 
-/// Emit one `MethodDef` as a class member (instance method, static,
+/// Build one `MethodDef` as a class member (instance method, static,
 /// or constructor). Uses signature when present (typed params + ret);
 /// falls back to body.ty for return and `any` for params when not
 /// (lowered models don't populate signatures yet).
-fn emit_class_member(
+fn js_class_member(
     m: &crate::dialect::MethodDef,
     has_parent: bool,
-) -> Result<String, String> {
+) -> Result<js_ast::JsClassMember, String> {
     use crate::dialect::MethodReceiver;
+    use js_ast::{Js, JsClassMember, JsExpr, JsParam, MethodKind, TsType};
 
     // Pull (param-types, kinds, return-type) from signature when
     // available. Kinds drive optional-param decoration: Ruby kwargs
@@ -1917,7 +1930,7 @@ fn emit_class_member(
     // signature is `fill_timestamps(creating: boolean)` (positional)
     // → TS2345 "argument of type {creating: boolean} not assignable
     // to parameter of type boolean".
-    let mut param_slots: Vec<String> = Vec::new();
+    let mut param_slots: Vec<JsParam> = Vec::new();
     // (name, ts_ty, optional, default_expr_str)
     let mut kwarg_pieces: Vec<(String, String, bool, Option<String>)> = Vec::new();
     for (i, name) in m.params.iter().enumerate() {
@@ -1946,23 +1959,17 @@ fn emit_class_member(
             // empty hash is what's read from. Both signatures
             // type-check at call sites since `?` and `=` give the
             // caller the same option to omit the argument.
-            if optional && name.default.is_some() {
-                let default_s = expr::emit_expr(name.default.as_ref().unwrap());
-                param_slots.push(format!(
-                    "{}: {} = {}",
-                    escape_reserved(name.as_str()),
-                    ts_ty(ty),
-                    default_s,
-                ));
-            } else {
-                let opt_marker = if optional { "?" } else { "" };
-                param_slots.push(format!(
-                    "{}{}: {}",
-                    escape_reserved(name.as_str()),
-                    opt_marker,
-                    ts_ty(ty),
-                ));
-            }
+            let has_default = optional && name.default.is_some();
+            param_slots.push(JsParam {
+                name: escape_reserved(name.as_str()),
+                optional: optional && !has_default,
+                ty: Some(TsType(ts_ty(ty))),
+                default: if has_default {
+                    Some(expr::js_expr(name.default.as_ref().unwrap()))
+                } else {
+                    None
+                },
+            });
         }
     }
     let body_uses_yield = body_contains_yield(&m.body);
@@ -2010,17 +2017,21 @@ fn emit_class_member(
         // (`fill_timestamps()`) still type-check. TS forbids `?` on
         // a destructuring binding pattern in an implementation
         // signature, so spell the optional via `= {}` default.
-        let default_clause = if kwarg_pieces.iter().all(|(_, _, opt, _)| *opt) {
-            " = {}"
+        let default = if kwarg_pieces.iter().all(|(_, _, opt, _)| *opt) {
+            Some(Js::synth(JsExpr::Object(vec![])))
         } else {
-            ""
+            None
         };
-        param_slots.push(format!(
-            "{{ {} }}: {{ {} }}{}",
-            names.join(", "),
-            typed.join(", "),
-            default_clause,
-        ));
+        // The destructuring pattern and its object type ride the
+        // JsParam name/ty slots as pre-rendered text — they're
+        // binding syntax, not expressions, so the printer treats
+        // them opaquely.
+        param_slots.push(JsParam {
+            name: format!("{{ {} }}", names.join(", ")),
+            optional: false,
+            ty: Some(TsType(format!("{{ {} }}", typed.join(", ")))),
+            default,
+        });
     }
     // Inject a `__block: (...args: any[]) => any` parameter when the
     // method body uses `yield`. The yield-emit code in expr.rs
@@ -2031,11 +2042,14 @@ fn emit_class_member(
     // both ends agree on the param name. Goes LAST in the param
     // list — Ruby blocks always trail positional + keyword args.
     if body_uses_yield {
-        param_slots.push("__block: (...args: any[]) => any".to_string());
+        param_slots.push(JsParam {
+            name: "__block".into(),
+            optional: false,
+            ty: Some(TsType("(...args: any[]) => any".into())),
+            default: None,
+        });
     }
-    let param_list = param_slots;
 
-    let mut out = String::new();
     let raw_name = m.name.as_str();
     let mname = crate::emit::typescript::library::sanitize_identifier(raw_name);
     let is_constructor =
@@ -2061,64 +2075,49 @@ fn emit_class_member(
             // an array, breaking `instanceof` and method dispatch). Emit
             // body as void so the trailing-statement-becomes-return
             // transform is suppressed.
-            emit_constructor_body(&rewritten, &Ty::Nil, has_parent)
+            js_constructor_body(&rewritten, &Ty::Nil, has_parent)
         } else if m.is_async {
             // Yield emit consults `in_async_method()` to decide
             // between `(await __block(...))` and `__block(...)`.
             // Methods marked async (yield-with-capture, propagation
             // via async sends, etc.) get the await; sync methods
             // that yield without capturing get plain __block.
-            expr::with_async_method_context(|| expr::emit_body(&rewritten, &ret_ty))
+            expr::with_async_method_context(|| expr::js_body(&rewritten, &ret_ty))
         } else {
-            expr::emit_body(&rewritten, &ret_ty)
+            expr::js_body(&rewritten, &ret_ty)
         }
     });
 
-    if is_constructor {
-        writeln!(out, "constructor({}) {{", param_list.join(", ")).unwrap();
+    // Async coloring (Phase 3): prepend `async` for methods the
+    // propagation pass colored. Skip attribute slots — TS getters
+    // and setters can't be `async`. The propagation pass also
+    // produces a `SyncSlotViolation` for these cases so the
+    // build can fail loudly instead of silently dropping the
+    // marker. Constructors never get `async`.
+    let emit_async = !is_constructor
+        && m.is_async
+        && !matches!(
+            m.kind,
+            crate::dialect::AccessorKind::AttributeReader
+                | crate::dialect::AccessorKind::AttributeWriter
+        );
+    let ret = if is_constructor {
+        None
+    } else if emit_async {
+        Some(TsType(ts_async_return_ty(&ret_ty)))
     } else {
-        let prefix = if matches!(m.receiver, MethodReceiver::Class) {
-            "static "
-        } else {
-            ""
-        };
-        // Async coloring (Phase 3): prepend `async` for methods the
-        // propagation pass colored. Skip attribute slots — TS getters
-        // and setters can't be `async`. The propagation pass also
-        // produces a `SyncSlotViolation` for these cases so the
-        // build can fail loudly instead of silently dropping the
-        // marker. Constructors handled in the `is_constructor`
-        // branch above (which never gets `async`).
-        let emit_async = m.is_async
-            && !matches!(
-                m.kind,
-                crate::dialect::AccessorKind::AttributeReader
-                    | crate::dialect::AccessorKind::AttributeWriter
-            );
-        let async_keyword = if emit_async { "async " } else { "" };
-        let ret_s = if emit_async {
-            ts_async_return_ty(&ret_ty)
-        } else {
-            ts_return_ty(&ret_ty)
-        };
-        writeln!(
-            out,
-            "{prefix}{async_keyword}{}({}): {} {{",
-            mname,
-            param_list.join(", "),
-            ret_s
-        )
-        .unwrap();
-    }
-    for line in body.lines() {
-        if line.is_empty() {
-            out.push('\n');
-        } else {
-            writeln!(out, "  {line}").unwrap();
-        }
-    }
-    out.push_str("}\n");
-    Ok(out)
+        Some(TsType(ts_return_ty(&ret_ty)))
+    };
+    Ok(JsClassMember::Method {
+        is_static: !is_constructor && matches!(m.receiver, MethodReceiver::Class),
+        is_async: emit_async,
+        kind: if is_constructor { MethodKind::Constructor } else { MethodKind::Normal },
+        name: if is_constructor { "constructor".into() } else { mname },
+        params: param_slots,
+        ret,
+        body,
+        span: m.body.span,
+    })
 }
 
 /// Emit a `LibraryFunction` as a top-level `export function` (no
@@ -2129,6 +2128,14 @@ fn emit_class_member(
 pub fn emit_library_function(
     func: &crate::dialect::LibraryFunction,
 ) -> Result<String, String> {
+    Ok(printer::render_decl(&js_library_function(func)?))
+}
+
+pub(super) fn js_library_function(
+    func: &crate::dialect::LibraryFunction,
+) -> Result<js_ast::JsDecl, String> {
+    use js_ast::{JsDecl, JsParam, TsType};
+
     let (sig_param_tys, sig_param_optional, ret_ty): (Vec<Ty>, Vec<bool>, Ty) =
         match func.signature.as_ref() {
             Some(Ty::Fn { params: sig_params, ret, .. }) => {
@@ -2165,19 +2172,16 @@ pub fn emit_library_function(
             ),
         };
 
-    let param_list: Vec<String> = func
+    let param_list: Vec<JsParam> = func
         .params
         .iter()
         .zip(sig_param_tys.iter())
         .zip(sig_param_optional.iter())
-        .map(|((name, ty), optional)| {
-            let opt_marker = if *optional { "?" } else { "" };
-            format!(
-                "{}{}: {}",
-                escape_reserved(name.as_str()),
-                opt_marker,
-                ts_ty(ty)
-            )
+        .map(|((name, ty), optional)| JsParam {
+            name: escape_reserved(name.as_str()),
+            optional: *optional,
+            ty: Some(TsType(ts_ty(ty))),
+            default: None,
         })
         .collect();
 
@@ -2190,35 +2194,25 @@ pub fn emit_library_function(
     let rewritten = crate::emit::typescript::library::rewrite_for_free_function(&func.body);
     let param_set: std::collections::HashSet<crate::ident::Symbol> =
         func.params.iter().map(|p| p.name.clone()).collect();
-    let body = expr::with_method_params(param_set, || expr::emit_body(&rewritten, &ret_ty));
+    let body = expr::with_method_params(param_set, || expr::js_body(&rewritten, &ret_ty));
 
-    // Async coloring (Phase 3): same gating as `emit_class_member`,
+    // Async coloring (Phase 3): same gating as `js_class_member`,
     // minus the attribute-slot exemption (free functions can't be
     // attribute readers/writers).
-    let async_keyword = if func.is_async { "async " } else { "" };
     let ret_s = if func.is_async {
         ts_async_return_ty(&ret_ty)
     } else {
         ts_return_ty(&ret_ty)
     };
-    let mut out = String::new();
-    writeln!(
-        out,
-        "export {async_keyword}function {}({}): {} {{",
-        mname,
-        param_list.join(", "),
-        ret_s
-    )
-    .unwrap();
-    for line in body.lines() {
-        if line.is_empty() {
-            out.push('\n');
-        } else {
-            writeln!(out, "  {line}").unwrap();
-        }
-    }
-    out.push_str("}\n");
-    Ok(out)
+    Ok(JsDecl::Function {
+        export: true,
+        is_async: func.is_async,
+        name: mname,
+        params: param_list,
+        ret: Some(TsType(ret_s)),
+        body,
+        span: func.body.span,
+    })
 }
 
 /// Emit a list of typed `MethodDef`s — produced by
@@ -2463,18 +2457,23 @@ pub fn emit_method(m: &crate::dialect::MethodDef) -> String {
         m.name
     );
 
-    let param_list: Vec<String> = m
+    let param_list: Vec<js_ast::JsParam> = m
         .params
         .iter()
         .zip(sig_params.iter())
-        .map(|(name, p)| format!("{}: {}", name, ts_ty(&p.ty)))
+        .map(|(name, p)| js_ast::JsParam {
+            name: name.as_str().to_string(),
+            optional: false,
+            ty: Some(js_ast::TsType(ts_ty(&p.ty))),
+            default: None,
+        })
         .collect();
 
     let param_set: std::collections::HashSet<crate::ident::Symbol> =
         m.params.iter().map(|p| p.name.clone()).collect();
-    let body = expr::with_method_params(param_set, || expr::emit_body(&m.body, ret));
+    let body = expr::with_method_params(param_set, || expr::js_body(&m.body, ret));
 
-    // Async coloring (Phase 3): same gating as `emit_class_member`,
+    // Async coloring (Phase 3): same gating as `js_class_member`,
     // skipping attribute slots. Module-level methods can't be
     // constructors so no special-case here.
     let emit_async = m.is_async
@@ -2483,28 +2482,18 @@ pub fn emit_method(m: &crate::dialect::MethodDef) -> String {
             crate::dialect::AccessorKind::AttributeReader
                 | crate::dialect::AccessorKind::AttributeWriter
         );
-    let async_keyword = if emit_async { "async " } else { "" };
     let ret_s = if emit_async {
         ts_async_return_ty(ret)
     } else {
         ts_return_ty(ret)
     };
-    let mut out = String::new();
-    writeln!(
-        out,
-        "export {async_keyword}function {}({}): {} {{",
-        m.name,
-        param_list.join(", "),
-        ret_s
-    )
-    .unwrap();
-    for line in body.lines() {
-        if line.is_empty() {
-            out.push('\n');
-        } else {
-            writeln!(out, "  {line}").unwrap();
-        }
-    }
-    out.push_str("}\n");
-    out
+    printer::render_decl(&js_ast::JsDecl::Function {
+        export: true,
+        is_async: emit_async,
+        name: m.name.as_str().to_string(),
+        params: param_list,
+        ret: Some(js_ast::TsType(ret_s)),
+        body,
+        span: m.body.span,
+    })
 }

@@ -272,13 +272,6 @@ fn return_stmt(value: Option<Js>) -> JsStmt {
 
 // Body + statements -----------------------------------------------------
 
-/// Legacy string entrypoint: render the statement list for a method
-/// body. Callers re-indent line-by-line and append to their own
-/// buffers; the printer emits at indent 0 with no trailing newline.
-pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
-    super::printer::render_stmts(&js_body(body, return_ty))
-}
-
 pub(super) fn js_body(body: &Expr, return_ty: &Ty) -> Vec<JsStmt> {
     // Pre-walk: find local-var names assigned more than once in this
     // method body. They'll emit as `let` at first occurrence and bare

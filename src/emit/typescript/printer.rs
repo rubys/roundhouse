@@ -26,19 +26,13 @@ pub(super) fn render_expr(e: &Js) -> String {
     p.out
 }
 
-/// Render a statement list as source text at indent 0, without a
-/// trailing newline (the legacy `emit_body` contract — callers
-/// re-indent and join lines themselves).
-pub(super) fn render_stmts(stmts: &[JsStmt]) -> String {
+/// Render a single declaration as source text at indent 0 (with its
+/// trailing newline). Bridge for the cross-target `runtime_loader`
+/// table, whose `emit_library_class` hook returns a String.
+pub(super) fn render_decl(d: &JsDecl) -> String {
     let mut p = Printer::new();
-    for s in stmts {
-        p.stmt(s);
-    }
-    let mut out = p.out;
-    if out.ends_with('\n') {
-        out.pop();
-    }
-    out
+    p.decl(d);
+    p.out
 }
 
 /// One token-level source-map entry: the generated position where a
@@ -131,21 +125,33 @@ impl Printer {
     // ── imports / declarations ───────────────────────────────────────
 
     fn import(&mut self, imp: &JsImport) {
-        self.word("import { ");
-        for (i, (name, alias)) in imp.names.iter().enumerate() {
-            if i > 0 {
-                self.word(", ");
+        match imp {
+            JsImport::Named { names, from } => {
+                self.word("import { ");
+                for (i, (name, alias)) in names.iter().enumerate() {
+                    if i > 0 {
+                        self.word(", ");
+                    }
+                    self.word(name);
+                    if let Some(a) = alias {
+                        self.word(" as ");
+                        self.word(a);
+                    }
+                }
+                self.word(" } from \"");
+                self.word(from);
+                self.word("\";");
+                self.newline();
             }
-            self.word(name);
-            if let Some(a) = alias {
-                self.word(" as ");
-                self.word(a);
+            JsImport::Star { alias, from } => {
+                self.word("import * as ");
+                self.word(alias);
+                self.word(" from \"");
+                self.word(from);
+                self.word("\";");
+                self.newline();
             }
         }
-        self.word(" } from \"");
-        self.word(&imp.from);
-        self.word("\";");
-        self.newline();
     }
 
     fn decl(&mut self, d: &JsDecl) {
@@ -282,6 +288,12 @@ impl Printer {
                 self.newline();
             }
             JsClassMember::Blank => self.newline(),
+            JsClassMember::Comment(text) => {
+                self.start_line();
+                self.word("// ");
+                self.word(text);
+                self.newline();
+            }
         }
     }
 
