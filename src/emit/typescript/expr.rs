@@ -2,14 +2,30 @@
 //! the standalone `emit_method` (runtime extraction) and indirectly by
 //! controller / view / model / spec emitters that fall back to
 //! arbitrary `Expr` rendering.
+//!
+//! Since the js_ast migration this module BUILDS a typed JS tree
+//! (`js_ast::Js` / `js_ast::JsStmt`) instead of strings; the printer
+//! (`printer.rs`) owns parenthesization (precedence-driven), escaping,
+//! and layout. The legacy string entrypoints (`emit_expr`,
+//! `emit_body`) survive as thin render wrappers until the module-level
+//! emitters construct `JsModule`s directly — at which point the
+//! `Span`s every node carries become token-level source-map entries.
 
+use std::collections::{HashMap, HashSet};
+
+use super::js_ast::{
+    ArrowBody, Js, JsExpr, JsKey, JsObjEntry, JsParam, JsStmt, JsStmtNode, TplPart, TsType,
+    VarKind,
+};
 use super::naming::{ts_field_name, ts_method_name};
-use crate::expr::{desugar_op_assign, Expr, ExprNode, IrHint, LValue, Literal};
+use crate::expr::{desugar_op_assign, Expr, ExprNode, IrHint, LValue, Literal, RescueClause};
+use crate::ident::Symbol;
+use crate::span::Span;
 use crate::ty::Ty;
 
 // Async-name set ------------------------------------------------------
 //
-// Phase 3 of async coloring: the TS emitter prepends `(await ...)` to
+// Phase 3 of async coloring: the TS emitter prepends `await ` to
 // Send sites whose method name is in the active deployment profile's
 // async-method set. The set is thread-local because the existing
 // emit pipeline is shaped as a deeply-nested call tree of pure
@@ -24,8 +40,8 @@ use crate::ty::Ty;
 // (Gate 1).
 
 std::thread_local! {
-    static ASYNC_METHOD_NAMES: std::cell::RefCell<std::collections::HashSet<crate::ident::Symbol>> =
-        std::cell::RefCell::new(std::collections::HashSet::new());
+    static ASYNC_METHOD_NAMES: std::cell::RefCell<HashSet<Symbol>> =
+        std::cell::RefCell::new(HashSet::new());
     /// Whether the body currently being emitted belongs to an
     /// `async`-marked method. The Yield emit reads this to decide
     /// between `__block(...)` (sync method body, await would be a
@@ -55,10 +71,7 @@ pub(super) fn in_async_method() -> bool {
 /// Run `f` with `names` as the active async-method set. The previous
 /// value is restored on return — supports nested calls (one level of
 /// nesting today; reserved for future re-entrant emit).
-pub(crate) fn with_async_methods<F, R>(
-    names: std::collections::HashSet<crate::ident::Symbol>,
-    f: F,
-) -> R
+pub(crate) fn with_async_methods<F, R>(names: HashSet<Symbol>, f: F) -> R
 where
     F: FnOnce() -> R,
 {
@@ -69,7 +82,7 @@ where
 }
 
 /// True iff `name` is in the active async-method set. Send-site
-/// callers consult this to decide whether to wrap with `(await ...)`.
+/// callers consult this to decide whether to wrap with `await`.
 pub(crate) fn is_async_method_name(name: &str) -> bool {
     ASYNC_METHOD_NAMES.with(|cell| {
         let set = cell.borrow();
@@ -84,9 +97,9 @@ pub(crate) fn is_async_method_name(name: &str) -> bool {
 /// `Base` propagate to async via `insert`/`update`/`delete`; user
 /// model methods like `Article#comments` propagate via `where`).
 /// Without these names in the set, call sites like `this.save()` or
-/// `this.comments()` wouldn't get wrapped with `(await ...)` even
-/// though the resolved method is async.
-pub(crate) fn extend_async_methods(extra: std::collections::HashSet<crate::ident::Symbol>) {
+/// `this.comments()` wouldn't get `await`-wrapped even though the
+/// resolved method is async.
+pub(crate) fn extend_async_methods(extra: HashSet<Symbol>) {
     ASYNC_METHOD_NAMES.with(|cell| cell.borrow_mut().extend(extra));
 }
 
@@ -114,21 +127,19 @@ pub(super) fn body_has_async_send(expr: &Expr) -> bool {
 // cleared on return so nested method emits don't see stale names.
 
 std::thread_local! {
-    static CURRENT_METHOD_PARAMS: std::cell::RefCell<std::collections::HashSet<crate::ident::Symbol>> =
-        std::cell::RefCell::new(std::collections::HashSet::new());
+    static CURRENT_METHOD_PARAMS: std::cell::RefCell<HashSet<Symbol>> =
+        std::cell::RefCell::new(HashSet::new());
 }
 
 /// Run `f` with `params` as the active enclosing-method parameter
 /// name set. Stack-saves and restores so nested emits (HOF blocks,
 /// rescue arms, etc.) don't drop their enclosing context.
-pub(crate) fn with_method_params<F, R>(
-    params: std::collections::HashSet<crate::ident::Symbol>,
-    f: F,
-) -> R
+pub(crate) fn with_method_params<F, R>(params: HashSet<Symbol>, f: F) -> R
 where
     F: FnOnce() -> R,
 {
-    let prev = CURRENT_METHOD_PARAMS.with(|cell| std::mem::replace(&mut *cell.borrow_mut(), params));
+    let prev =
+        CURRENT_METHOD_PARAMS.with(|cell| std::mem::replace(&mut *cell.borrow_mut(), params));
     let r = f();
     CURRENT_METHOD_PARAMS.with(|cell| *cell.borrow_mut() = prev);
     r
@@ -158,7 +169,7 @@ fn recv_is_known_sync_at_emit(recv: Option<&Expr>) -> bool {
     // `Const` receivers (`Route.new(...)`, `MatchResult.new(...)`)
     // don't carry a `.ty` because they refer to the class itself, not
     // a value. Match the leaf segment against the known-sync set so
-    // the `Class.new(...)` call site doesn't get `(await ...)`-wrapped
+    // the `Class.new(...)` call site doesn't get `await`-wrapped
     // when an unrelated class's `new` is in the active async set.
     // Mirrors `analyze::async_color::recv_is_known_sync`.
     if let ExprNode::Const { path } = &*recv.node {
@@ -196,25 +207,90 @@ fn recv_is_known_sync_at_emit(recv: Option<&Expr>) -> bool {
     }
 }
 
-// Body + expressions ---------------------------------------------------
+// Small constructors ---------------------------------------------------
 
+/// Synthesized identifier — emitter-invented glue with no source
+/// position (`__r`, `__block`, `e`, …).
+fn synth_ident(name: &str) -> Js {
+    Js::synth(JsExpr::Ident(name.into()))
+}
+
+fn js_param(name: impl Into<String>) -> JsParam {
+    JsParam { name: name.into(), optional: false, ty: None, default: None }
+}
+
+/// `(() => { <stmts> })()` — statement smuggled into expression
+/// position. The printer derives the parens around the arrow from
+/// precedence.
+fn iife(span: Span, stmts: Vec<JsStmt>) -> Js {
+    Js::call(
+        span,
+        Js::synth(JsExpr::Arrow { params: vec![], body: ArrowBody::Block(stmts), is_async: false }),
+        vec![],
+    )
+}
+
+/// `await (async () => { <stmts> })()` — the async-HOF rewrite shell.
+/// The rewrite owns the outer await: the surrounding coloring
+/// machinery doesn't know `each`/`map`/etc are now async.
+fn async_iife_awaited(span: Span, stmts: Vec<JsStmt>) -> Js {
+    Js::await_(
+        span,
+        Js::call(
+            span,
+            Js::synth(JsExpr::Arrow {
+                params: vec![],
+                body: ArrowBody::Block(stmts),
+                is_async: true,
+            }),
+            vec![],
+        ),
+    )
+}
+
+/// `(() => { throw new Error("<msg>"); })()`
+fn iife_throw_msg(span: Span, msg: &str) -> Js {
+    let err = Js::synth(JsExpr::New {
+        callee: synth_ident("Error"),
+        args: vec![Js::str(Span::synthetic(), msg)],
+    });
+    iife(span, vec![JsStmt::synth(JsStmtNode::Throw(err))])
+}
+
+fn const_decl(name: &str, init: Js) -> JsStmt {
+    JsStmt::synth(JsStmtNode::VarDecl {
+        kind: VarKind::Const,
+        name: name.into(),
+        ty: None,
+        init: Some(init),
+    })
+}
+
+fn return_stmt(value: Option<Js>) -> JsStmt {
+    JsStmt::synth(JsStmtNode::Return(value))
+}
+
+// Body + statements -----------------------------------------------------
+
+/// Legacy string entrypoint: render the statement list for a method
+/// body. Callers re-indent line-by-line and append to their own
+/// buffers; the printer emits at indent 0 with no trailing newline.
 pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
+    super::printer::render_stmts(&js_body(body, return_ty))
+}
+
+pub(super) fn js_body(body: &Expr, return_ty: &Ty) -> Vec<JsStmt> {
     // Pre-walk: find local-var names assigned more than once in this
     // method body. They'll emit as `let` at first occurrence and bare
     // `name = value` thereafter. Names assigned exactly once still
     // emit as `const`. The `declared` set tracks which reassigned names
     // have already had their declaration emitted as we walk in source
     // order.
-    let mut reassigned: std::collections::HashMap<crate::ident::Symbol, usize> =
-        std::collections::HashMap::new();
-    count_var_assignments(body, &mut reassigned);
-    let reassigned: std::collections::HashSet<crate::ident::Symbol> = reassigned
-        .into_iter()
-        .filter(|(_, n)| *n > 1)
-        .map(|(s, _)| s)
-        .collect();
-    let mut declared: std::collections::HashSet<crate::ident::Symbol> =
-        std::collections::HashSet::new();
+    let mut counts: HashMap<Symbol, usize> = HashMap::new();
+    count_var_assignments(body, &mut counts);
+    let reassigned: HashSet<Symbol> =
+        counts.into_iter().filter(|(_, n)| *n > 1).map(|(s, _)| s).collect();
+    let mut declared: HashSet<Symbol> = HashSet::new();
     // Names whose first assignment lives inside a nested block (an
     // `if`/`else` arm, a `case` branch, …) need a hoisted `let`
     // declaration at the function-body level — TS `let` is block-
@@ -231,10 +307,9 @@ pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
     // restrict to vars whose top-level assignment count is strictly
     // less than their total count — i.e., at least one assignment
     // lives in a nested branch.
-    let mut top_level_counts: std::collections::HashMap<crate::ident::Symbol, usize> =
-        std::collections::HashMap::new();
+    let mut top_level_counts: HashMap<Symbol, usize> = HashMap::new();
     count_top_level_var_assignments(body, &mut top_level_counts);
-    let mut hoisted: Vec<crate::ident::Symbol> = reassigned
+    let mut hoisted: Vec<Symbol> = reassigned
         .iter()
         .filter(|name| {
             let total = count_var_for(body, name);
@@ -244,18 +319,18 @@ pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
         .cloned()
         .collect();
     hoisted.sort();
-    let mut hoist_decls = String::new();
+    let mut stmts: Vec<JsStmt> = Vec::new();
     for name in &hoisted {
-        let escaped = escape_reserved_word(name.as_str());
-        hoist_decls.push_str(&format!("let {escaped}: any;\n"));
+        stmts.push(JsStmt::synth(JsStmtNode::VarDecl {
+            kind: VarKind::Let,
+            name: escape_reserved_word(name.as_str()),
+            ty: Some(TsType("any".into())),
+            init: None,
+        }));
         declared.insert(name.clone());
     }
-    let body_s = emit_body_with_state(body, return_ty, &reassigned, &mut declared);
-    if hoist_decls.is_empty() {
-        body_s
-    } else {
-        format!("{hoist_decls}{body_s}")
-    }
+    stmts.extend(js_body_with_state(body, return_ty, &reassigned, &mut declared));
+    stmts
 }
 
 /// Count Var-assignment occurrences only at the top level of a
@@ -263,10 +338,7 @@ pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
 /// statement list. Nested branches (if-arms, case bodies) are NOT
 /// counted; this lets the hoist-detection logic identify vars whose
 /// reassignment splits across scopes.
-fn count_top_level_var_assignments(
-    body: &Expr,
-    out: &mut std::collections::HashMap<crate::ident::Symbol, usize>,
-) {
+fn count_top_level_var_assignments(body: &Expr, out: &mut HashMap<Symbol, usize>) {
     match &*body.node {
         ExprNode::Seq { exprs } => {
             for e in exprs {
@@ -283,25 +355,24 @@ fn count_top_level_var_assignments(
 }
 
 /// Total count of Var-assignments to `name` in `body` (recursive).
-fn count_var_for(body: &Expr, name: &crate::ident::Symbol) -> usize {
-    let mut all: std::collections::HashMap<crate::ident::Symbol, usize> =
-        std::collections::HashMap::new();
+fn count_var_for(body: &Expr, name: &Symbol) -> usize {
+    let mut all: HashMap<Symbol, usize> = HashMap::new();
     count_var_assignments(body, &mut all);
     all.get(name).copied().unwrap_or(0)
 }
 
-fn emit_body_with_state(
+fn js_body_with_state(
     body: &Expr,
     return_ty: &Ty,
-    reassigned: &std::collections::HashSet<crate::ident::Symbol>,
-    declared: &mut std::collections::HashSet<crate::ident::Symbol>,
-) -> String {
+    reassigned: &HashSet<Symbol>,
+    declared: &mut HashSet<Symbol>,
+) -> Vec<JsStmt> {
     let is_void = matches!(return_ty, Ty::Nil);
     match &*body.node {
         // Guard-clause: ingest rewrites `return if cond; rest...` to
         // `If { cond, then: nil, else: <rest> }` (see ingest/expr.rs's
         // "Guard-clause rewrite"). Reverse it on the way out so we
-        // emit `if (cond) return; <rest>` instead of nesting the
+        // emit `if (cond) { return; } <rest>` instead of nesting the
         // whole method body inside the else branch. Only applies when
         // the then branch is the literal nil placeholder the rewrite
         // synthesizes.
@@ -309,32 +380,47 @@ fn emit_body_with_state(
             if matches!(&*then_branch.node, ExprNode::Lit { value: Literal::Nil })
                 && !is_nil_or_empty(else_branch) =>
         {
-            let guard = format!(
-                "if ({}) return{};",
-                emit_expr(cond),
-                if is_void { "" } else { " null" },
+            // Ruby's `return nil` returns nil, not undefined — emit
+            // `return null;` when the method has a value.
+            let ret = JsStmt::new(
+                then_branch.span,
+                JsStmtNode::Return(if is_void { None } else { Some(Js::synth(JsExpr::Null)) }),
             );
-            let rest = emit_body_with_state(else_branch, return_ty, reassigned, declared);
-            format!("{guard}\n{rest}")
+            let mut out = vec![JsStmt::new(
+                body.span,
+                JsStmtNode::If { cond: js_expr(cond), then: vec![ret], else_: None },
+            )];
+            out.extend(js_body_with_state(else_branch, return_ty, reassigned, declared));
+            out
         }
         // `def initialize(owner); @owner = owner; end` — the assignment
         // is the whole body. Emit the assignment as a statement, then
         // return its value if non-void. Without this, the side-effect
-        // of setting the ivar is lost (`{};` of the value alone reads
-        // the local but doesn't write the ivar).
+        // of setting the ivar is lost (the value alone reads the local
+        // but doesn't write the ivar).
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-            let field = ts_field_name(name.as_str());
-            let value_s = emit_expr(value);
+            let assign = Js::new(
+                body.span,
+                JsExpr::Assign {
+                    target: Js::member(
+                        body.span,
+                        Js::ident(body.span, "this"),
+                        ts_field_name(name.as_str()),
+                    ),
+                    op: "=",
+                    value: js_expr(value),
+                },
+            );
             if is_void {
-                format!("this.{field} = {value_s};")
+                vec![JsStmt::expr(assign)]
             } else {
-                format!("return this.{field} = {value_s};")
+                vec![JsStmt::new(body.span, JsStmtNode::Return(Some(assign)))]
             }
         }
         ExprNode::Seq { exprs } if !exprs.is_empty() => {
-            let mut lines: Vec<String> = Vec::new();
+            let mut out = Vec::new();
             for (i, e) in exprs.iter().enumerate() {
-                lines.push(emit_stmt_with_state(
+                out.extend(js_stmts_with_state(
                     e,
                     i == exprs.len() - 1,
                     is_void,
@@ -342,29 +428,27 @@ fn emit_body_with_state(
                     declared,
                 ));
             }
-            lines.join("\n")
+            out
         }
         // Method-body-level begin/rescue emits as native try/catch rather
         // than IIFE-wrapped. Preserves control flow: early `return` inside
         // the body actually exits the method, `throw e` outside the match
         // arms rethrows cleanly, and no needless `(() => { ... })()` noise.
         ExprNode::BeginRescue { body: inner, rescues, else_branch, ensure, .. } => {
-            emit_begin_rescue_stmt(inner, rescues, else_branch.as_ref(), ensure.as_ref(), return_ty)
+            vec![js_begin_rescue_stmt(
+                body.span,
+                inner,
+                rescues,
+                else_branch.as_ref(),
+                ensure.as_ref(),
+                return_ty,
+            )]
         }
         // Single-Case-as-whole-body (e.g., `process_action`'s synthesized
-        // dispatcher): route through emit_stmt so it emits as a `switch`
-        // rather than falling to the default arm that wraps the whole
-        // node in `emit_expr` (which has no Case handler).
-        ExprNode::Case { .. } => {
-            emit_stmt_with_state(body, true, is_void, reassigned, declared)
-        }
-        _ => {
-            if is_void {
-                format!("{};", emit_expr(body))
-            } else {
-                format!("return {};", emit_expr(body))
-            }
-        }
+        // dispatcher): route through the statement walker so it emits as
+        // a `switch` rather than falling to the default arm.
+        ExprNode::Case { .. } => js_stmts_with_state(body, true, is_void, reassigned, declared),
+        _ => vec![default_stmt(body, true, is_void)],
     }
 }
 
@@ -373,10 +457,7 @@ fn emit_body_with_state(
 /// declarations (mutated more than once) versus locals that fit
 /// `const` (single-assignment). The traversal visits all children so
 /// reassignments inside nested if/while/case branches are counted.
-fn count_var_assignments(
-    e: &Expr,
-    out: &mut std::collections::HashMap<crate::ident::Symbol, usize>,
-) {
+fn count_var_assignments(e: &Expr, out: &mut HashMap<Symbol, usize>) {
     match &*e.node {
         ExprNode::Assign { target: LValue::Var { name, .. }, value }
         | ExprNode::OpAssign { target: LValue::Var { name, .. }, value, .. } => {
@@ -386,9 +467,10 @@ fn count_var_assignments(
         ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => {
             count_var_assignments(value, out)
         }
-        // Buffer-accumulate `var << X` is rewritten by `emit_stmt` to
-        // `var += X;` — i.e., an assignment for declaration purposes.
-        // Count it so the var gets `let` (mutable) instead of `const`.
+        // Buffer-accumulate `var << X` is rewritten by the statement
+        // walker to `var += X;` — i.e., an assignment for declaration
+        // purposes. Count it so the var gets `let` (mutable) instead
+        // of `const`.
         //
         // Exception: when the Send is tagged `StringBuilderAppend`,
         // the emit form is `var.push(X)` against a `string[]` array,
@@ -399,8 +481,7 @@ fn count_var_assignments(
         ExprNode::Send { recv: Some(recv), method, args, block, .. }
             if method.as_str() == "<<" && args.len() == 1 =>
         {
-            let is_string_builder_append =
-                matches!(e.hint, Some(IrHint::StringBuilderAppend));
+            let is_string_builder_append = matches!(e.hint, Some(IrHint::StringBuilderAppend));
             if !is_string_builder_append {
                 if let ExprNode::Var { name, .. } = &*recv.node {
                     *out.entry(name.clone()).or_insert(0) += 1;
@@ -496,106 +577,79 @@ fn count_var_assignments(
 /// rather than as an expression. Preserves native TS control flow:
 /// `try { ... } catch (e) { ... } finally { ... }` with early-return
 /// and rethrow working as Ruby's semantics expect.
-fn emit_begin_rescue_stmt(
+fn js_begin_rescue_stmt(
+    span: Span,
     body: &Expr,
-    rescues: &[crate::expr::RescueClause],
+    rescues: &[RescueClause],
     else_branch: Option<&Expr>,
     ensure: Option<&Expr>,
     return_ty: &Ty,
-) -> String {
-    let mut out = String::new();
-    out.push_str("try {\n");
-    let body_s = emit_body(body, return_ty);
-    for line in body_s.lines() {
-        out.push_str("  ");
-        out.push_str(line);
-        out.push('\n');
-    }
+) -> JsStmt {
+    let mut try_body = js_body(body, return_ty);
     if let Some(eb) = else_branch {
         // Ruby's `else` runs iff the body raised nothing. Appending to
         // the try block preserves that ordering.
-        let eb_s = emit_body(eb, return_ty);
-        for line in eb_s.lines() {
-            out.push_str("  ");
-            out.push_str(line);
-            out.push('\n');
-        }
+        try_body.extend(js_body(eb, return_ty));
     }
-    out.push_str("} catch (e) {\n");
-
-    // Chain rescue clauses as `if (e instanceof X) { ... } else if ...
-    // else { throw e; }`. Bare rescue (no classes) is the catchall.
-    let mut bare_catchall = false;
-    for (i, rc) in rescues.iter().enumerate() {
-        let body_s = emit_body(&rc.body, return_ty);
-        let indented = indent_block(&body_s, 4);
-        if rc.classes.is_empty() {
-            out.push_str("  ");
-            out.push_str(&indented.trim_start().to_string());
-            out.push('\n');
-            bare_catchall = true;
-            break;
-        }
-        let instanceof_s: Vec<String> = rc
-            .classes
-            .iter()
-            .map(|c| format!("e instanceof {}", emit_expr(c)))
-            .collect();
-        let keyword = if i == 0 { "if" } else { "} else if" };
-        out.push_str("  ");
-        out.push_str(&format!("{keyword} ({}) {{\n", instanceof_s.join(" || ")));
-        for line in body_s.lines() {
-            out.push_str("    ");
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    if !bare_catchall && !rescues.is_empty() {
-        out.push_str("  } else {\n");
-        out.push_str("    throw e;\n");
-        out.push_str("  }\n");
-    } else if rescues.is_empty() {
-        // `begin; body; ensure; ...; end` with no rescue — must still
-        // rethrow in the catch to preserve exception propagation.
-        out.push_str("  throw e;\n");
-    }
-    out.push_str("}");
-
-    if let Some(en) = ensure {
-        out.push_str(" finally {\n");
-        let en_s = emit_body(en, &Ty::Nil);
-        for line in en_s.lines() {
-            out.push_str("  ");
-            out.push_str(line);
-            out.push('\n');
-        }
-        out.push_str("}");
-    }
-    out
+    let catch = catch_chain(rescues, &|rc| {
+        let mut v = rescue_binding_alias(rc);
+        v.extend(js_body(&rc.body, return_ty));
+        v
+    });
+    let finally = ensure.map(|en| js_body(en, &Ty::Nil));
+    JsStmt::new(
+        span,
+        JsStmtNode::Try { body: try_body, catch: Some((Some("e".into()), catch)), finally },
+    )
 }
 
-fn indent_block(s: &str, spaces: usize) -> String {
-    let pad = " ".repeat(spaces);
-    s.lines()
-        .map(|l| format!("{pad}{l}"))
-        .collect::<Vec<_>>()
-        .join("\n")
+/// Rescue binding (`rescue Err => name`) — alias the catch variable
+/// `e` to the source-named binding so the rescue body's references
+/// resolve.
+fn rescue_binding_alias(rc: &RescueClause) -> Vec<JsStmt> {
+    match &rc.binding {
+        Some(name) => vec![const_decl(name.as_str(), synth_ident("e"))],
+        None => vec![],
+    }
+}
+
+/// Chain rescue clauses inside a `catch (e)` body as
+/// `if (e instanceof X) { ... } else if ... else { throw e; }`.
+/// Bare rescue (no classes) is the catchall; clauses after a bare
+/// one are unreachable in Ruby too. No rescues at all (ensure-only
+/// begin) still rethrows to preserve exception propagation.
+fn catch_chain(rescues: &[RescueClause], clause_body: &dyn Fn(&RescueClause) -> Vec<JsStmt>) -> Vec<JsStmt> {
+    let Some((rc, rest)) = rescues.split_first() else {
+        return vec![JsStmt::synth(JsStmtNode::Throw(synth_ident("e")))];
+    };
+    if rc.classes.is_empty() {
+        return clause_body(rc);
+    }
+    let cond = rc
+        .classes
+        .iter()
+        .map(|c| Js::binary(c.span, "instanceof", synth_ident("e"), js_expr(c)))
+        .reduce(|a, b| Js::binary(Span::synthetic(), "||", a, b))
+        .expect("non-empty classes");
+    vec![JsStmt::synth(JsStmtNode::If {
+        cond,
+        then: clause_body(rc),
+        else_: Some(catch_chain(rest, clause_body)),
+    })]
 }
 
 /// Pre-walk a body to identify reassigned local-variable names.
-/// Public for `view_thin.rs`'s use; the result feeds
-/// `emit_stmt_with_state` so multi-statement bodies emit `let`
-/// (mutable) for names assigned more than once and `const` for
-/// names assigned exactly once.
-pub(super) fn collect_reassigned(body: &Expr) -> std::collections::HashSet<crate::ident::Symbol> {
-    let mut counts: std::collections::HashMap<crate::ident::Symbol, usize> =
-        std::collections::HashMap::new();
+/// The result feeds `js_stmts_with_state` so multi-statement bodies
+/// emit `let` (mutable) for names assigned more than once and
+/// `const` for names assigned exactly once.
+pub(super) fn collect_reassigned(body: &Expr) -> HashSet<Symbol> {
+    let mut counts: HashMap<Symbol, usize> = HashMap::new();
     count_var_assignments(body, &mut counts);
     counts.into_iter().filter(|(_, n)| *n > 1).map(|(s, _)| s).collect()
 }
 
 /// String-accumulator hint consumer at statement position. Init and
-/// Append are statement-shapes (Result lives in `emit_expr`).
+/// Append are statement-shapes (Result lives in `js_expr`).
 /// V8 specializes `[]`+`.push(...)`+`.join("")` better than repeated
 /// string concat — measured 1.4-1.8× lift on HTML view bodies per
 /// the bench in #18.
@@ -610,21 +664,21 @@ pub(super) fn collect_reassigned(body: &Expr) -> std::collections::HashSet<crate
 ///   `<name>.push(<arg>);` — never wrapped in `return` (the Result
 ///   site is the function's tail; an Append at the tail would be
 ///   a lowerer bug).
-fn try_string_builder_stmt(
-    e: &Expr,
-    _is_last: bool,
-    _void_return: bool,
-    declared: &mut std::collections::HashSet<crate::ident::Symbol>,
-) -> Option<String> {
+fn try_string_builder_stmt(e: &Expr, declared: &mut HashSet<Symbol>) -> Option<Vec<JsStmt>> {
     match e.hint? {
         IrHint::StringBuilderInit => {
-            if let ExprNode::Assign {
-                target: LValue::Var { name, .. }, ..
-            } = &*e.node
-            {
+            if let ExprNode::Assign { target: LValue::Var { name, .. }, .. } = &*e.node {
                 let escaped = escape_reserved_word(name.as_str());
                 declared.insert(name.clone());
-                return Some(format!("const {escaped}: string[] = [];"));
+                return Some(vec![JsStmt::new(
+                    e.span,
+                    JsStmtNode::VarDecl {
+                        kind: VarKind::Const,
+                        name: escaped,
+                        ty: Some(TsType("string[]".into())),
+                        init: Some(Js::synth(JsExpr::Array(vec![]))),
+                    },
+                )]);
             }
             None
         }
@@ -632,33 +686,42 @@ fn try_string_builder_stmt(
             if let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node {
                 if method.as_str() == "<<" && args.len() == 1 {
                     if let ExprNode::Var { name, .. } = &*recv.node {
-                        let escaped = escape_reserved_word(name.as_str());
-                        let val = emit_expr(&args[0]);
-                        return Some(format!("{escaped}.push({val});"));
+                        let buf = Js::ident(recv.span, escape_reserved_word(name.as_str()));
+                        return Some(vec![JsStmt::expr(Js::method_call(
+                            e.span,
+                            buf,
+                            "push",
+                            vec![js_expr(&args[0])],
+                        ))]);
                     }
                 }
             }
             None
         }
-        IrHint::StringBuilderResult => None, // handled in emit_expr
+        IrHint::StringBuilderResult => None, // handled in js_expr
     }
 }
 
-pub(super) fn emit_stmt_with_state(
+fn default_stmt(e: &Expr, is_last: bool, void_return: bool) -> JsStmt {
+    if is_last && !void_return {
+        JsStmt::new(e.span, JsStmtNode::Return(Some(js_expr(e))))
+    } else {
+        JsStmt::expr(js_expr(e))
+    }
+}
+
+pub(super) fn js_stmts_with_state(
     e: &Expr,
     is_last: bool,
     void_return: bool,
-    reassigned: &std::collections::HashSet<crate::ident::Symbol>,
-    declared: &mut std::collections::HashSet<crate::ident::Symbol>,
-) -> String {
+    reassigned: &HashSet<Symbol>,
+    declared: &mut HashSet<Symbol>,
+) -> Vec<JsStmt> {
     // IrHint::StringBuilder{Init,Append} — lowerer-tagged accumulator
     // pattern. Init/Append are statement-position; Result is handled
-    // in `emit_expr` (where the terminal Var read lives). V8 prefers
-    // `array.push(...) + array.join("")` over repeated string concat,
-    // so swap the canonical Ruby shape to that idiom here. See
-    // `try_string_builder_stmt` for variant details.
-    if let Some(s) = try_string_builder_stmt(e, is_last, void_return, declared) {
-        return s;
+    // in `js_expr` (where the terminal Var read lives).
+    if let Some(stmts) = try_string_builder_stmt(e, declared) {
+        return stmts;
     }
     match &*e.node {
         ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
@@ -667,72 +730,80 @@ pub(super) fn emit_stmt_with_state(
             // → `const`. Subsequent occurrences (only possible for
             // reassigned names) → bare `name = value`.
             let escaped = escape_reserved_word(name.as_str());
-            if reassigned.contains(name) {
+            let node = if reassigned.contains(name) {
                 if declared.insert(name.clone()) {
-                    format!("let {} = {};", escaped, emit_expr(value))
+                    JsStmtNode::VarDecl {
+                        kind: VarKind::Let,
+                        name: escaped,
+                        ty: None,
+                        init: Some(js_expr(value)),
+                    }
                 } else {
-                    format!("{} = {};", escaped, emit_expr(value))
+                    JsStmtNode::Expr(Js::new(
+                        e.span,
+                        JsExpr::Assign {
+                            target: Js::ident(e.span, escaped),
+                            op: "=",
+                            value: js_expr(value),
+                        },
+                    ))
                 }
             } else {
-                format!("const {} = {};", escaped, emit_expr(value))
-            }
+                JsStmtNode::VarDecl {
+                    kind: VarKind::Const,
+                    name: escaped,
+                    ty: None,
+                    init: Some(js_expr(value)),
+                }
+            };
+            vec![JsStmt::new(e.span, node)]
         }
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-            format!("this.{} = {};", ts_field_name(name.as_str()), emit_expr(value))
+            vec![JsStmt::expr(Js::new(
+                e.span,
+                JsExpr::Assign {
+                    target: Js::member(
+                        e.span,
+                        Js::ident(e.span, "this"),
+                        ts_field_name(name.as_str()),
+                    ),
+                    op: "=",
+                    value: js_expr(value),
+                },
+            ))]
         }
         // Buffer-accumulate idiom at statement position:
         // `buf << X` (Ruby) → `buf += X;` (TS), where `buf` is any
-        // local-variable receiver. The lowered view body uses this
-        // shape (`io << ViewHelpers.x(...)`); form_with's inner
-        // capture uses `body << ...` with a different name. Same
-        // rewrite applies — the receiver just needs to be an
-        // `ExprNode::Var`. At expression position the type-aware
-        // dispatch in `emit_send_with_parens` still handles
-        // typed-Array `.push()` etc.
+        // String-typed (or untyped) local-variable receiver. The
+        // lowered view body uses this shape; form_with's inner
+        // capture uses `body << ...` with a different name. Arrays
+        // fall through to `js_expr` so the type-aware `<<` dispatch
+        // produces `.push(...)`.
         ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
-            if method.as_str() == "<<" && args.len() == 1 =>
+            if method.as_str() == "<<"
+                && args.len() == 1
+                && matches!(&*recv.node, ExprNode::Var { .. })
+                && matches!(recv.ty, Some(Ty::Str) | None) =>
         {
-            // Buffer-accumulate idiom only applies to a String-typed
-            // local variable (the synthesized view `io` buffer or
-            // similar). Arrays go through `emit_expr` so the
-            // type-aware `<<` dispatch produces `.push(...)`. When
-            // the recv has no type (Untyped), fall back to `+=` to
-            // preserve the prior behavior on view bodies that
-            // synthesize a buffer without explicit init.
-            if let ExprNode::Var { name, .. } = &*recv.node {
-                let is_string_buf = matches!(
-                    recv.ty,
-                    Some(Ty::Str) | None,
-                );
-                if is_string_buf {
-                    let val_s = emit_expr(&args[0]);
-                    return format!("{} += {val_s};", escape_reserved_word(name.as_str()));
-                }
-            }
-            // Receiver isn't a String-typed bare local — fall through
-            // to the default arm, which routes through `emit_expr`
-            // (and its type-aware `<<` dispatch for arrays /
-            // class-with-add).
-            if is_last && !void_return {
-                format!("return {};", emit_expr(e))
-            } else {
-                format!("{};", emit_expr(e))
-            }
+            let ExprNode::Var { name, .. } = &*recv.node else { unreachable!() };
+            vec![JsStmt::expr(Js::new(
+                e.span,
+                JsExpr::Assign {
+                    target: Js::ident(recv.span, escape_reserved_word(name.as_str())),
+                    op: "+=",
+                    value: js_expr(&args[0]),
+                },
+            ))]
         }
         // Nested `Seq` at statement position — flatten it. A Seq can
         // reach here as the last element of an enclosing Seq (e.g. the
-        // cache-aware has_many reader, whose body is
-        // `[guard-If, <hydrate Seq>]` — issue #27). Without this arm the
-        // hydrate Seq falls to the default arm and emits
-        // `return <emit_expr(seq)>`, inlining the statement list as a
-        // broken expression (undeclared `stmt`/`instance`, a stray
-        // `return` glued onto the first statement). Recurse per child so
+        // cache-aware has_many reader — issue #27). Recurse per child so
         // each statement gets proper `let`/`const`/`return` treatment;
         // only the final child inherits this Seq's `is_last`/void flags.
         ExprNode::Seq { exprs } if !exprs.is_empty() => {
-            let mut lines: Vec<String> = Vec::with_capacity(exprs.len());
+            let mut out = Vec::with_capacity(exprs.len());
             for (i, inner) in exprs.iter().enumerate() {
-                lines.push(emit_stmt_with_state(
+                out.extend(js_stmts_with_state(
                     inner,
                     is_last && i == exprs.len() - 1,
                     void_return,
@@ -740,14 +811,14 @@ pub(super) fn emit_stmt_with_state(
                     declared,
                 ));
             }
-            lines.join("\n")
+            out
         }
         // Return at statement position: emit as a native `return`
         // rather than wrapping in an IIFE. Ruby's `return nil` returns
         // nil, not undefined — emit `return null;` (not bare `return;`)
         // to preserve that semantic under TS's strict equality rules.
         ExprNode::Return { value } => {
-            format!("return {};", emit_expr(value))
+            vec![JsStmt::new(e.span, JsStmtNode::Return(Some(js_expr(value))))]
         }
         // Guard-return pattern: `if (cond) { return X; }` at statement
         // position, with no else branch (or an else that's nil). Rather
@@ -757,191 +828,163 @@ pub(super) fn emit_stmt_with_state(
             if matches!(&*then_branch.node, ExprNode::Return { .. })
                 && is_nil_or_empty(else_branch) =>
         {
-            if let ExprNode::Return { value } = &*then_branch.node {
-                format!("if ({}) return {};", emit_expr(cond), emit_expr(value))
-            } else {
-                unreachable!()
-            }
+            let ExprNode::Return { value } = &*then_branch.node else { unreachable!() };
+            vec![JsStmt::new(
+                e.span,
+                JsStmtNode::If {
+                    cond: js_expr(cond),
+                    then: vec![JsStmt::new(
+                        then_branch.span,
+                        JsStmtNode::Return(Some(js_expr(value))),
+                    )],
+                    else_: None,
+                },
+            )]
         }
         // Postfix-`if` at statement position with no else branch.
         // Ruby's `x = [] if x.nil?` lowers to `If { cond, then=Assign,
-        // else=nil }`. The default arm below would route through
-        // `emit_expr` (a ternary), which drops the assignment's LHS
+        // else=nil }`. A ternary would drop the assignment's LHS
         // (`Assign` in expression position emits only the rhs). Emit
-        // a native `if (cond) <stmt>;` instead — preserves the side
+        // a native `if (cond) { <stmt> }` instead — preserves the side
         // effect.
         ExprNode::If { cond, then_branch, else_branch } if is_nil_or_empty(else_branch) => {
-            let cond_s = emit_expr(cond);
-            // Use emit_branch_block so multi-statement (or single-elem
-            // Seq) then-branches recurse through the proper stmt path
-            // — without this, a Seq then-branch falls to emit_stmt's
-            // default arm which routes through emit_expr (losing the
-            // `<<` → `+=` rewrite, the `let`/`const` declaration, etc.).
-            // Single non-Seq stmts emit as `if (cond) { stmt }` —
-            // technically braced where Ruby's postfix-if is brace-less,
-            // but the brace form is universally valid TS.
-            let then_block = emit_branch_block(then_branch, reassigned, declared);
-            format!("if ({cond_s}) {then_block}")
+            vec![JsStmt::new(
+                e.span,
+                JsStmtNode::If {
+                    cond: js_expr(cond),
+                    then: js_branch(then_branch, reassigned, declared),
+                    else_: None,
+                },
+            )]
         }
         // Two-branch (or chained-elsif) `if` at statement position
-        // when the value isn't being returned. The default arm would
-        // emit a ternary (correct for value-position) but Ruby's
-        // `if cond; @x = 1 elsif ...` is mutating local/ivar state —
-        // a ternary discards the side effect. Block-form `if/else`
-        // preserves it. When `is_last && !void_return`, fall through
-        // to ternary so the value still flows out.
-        ExprNode::If { cond, then_branch, else_branch }
-            if !is_last || void_return =>
-        {
-            emit_if_block(cond, then_branch, else_branch, reassigned, declared)
+        // when the value isn't being returned. A ternary (correct for
+        // value-position) would discard side effects of mutating
+        // branches; block-form `if/else` preserves them. When
+        // `is_last && !void_return`, fall through to ternary so the
+        // value still flows out.
+        ExprNode::If { cond, then_branch, else_branch } if !is_last || void_return => {
+            vec![js_if_chain(e.span, cond, then_branch, else_branch, reassigned, declared)]
         }
         // `while cond; body; end` and `until cond; body; end` at
         // statement position emit as native loops. The until form
         // negates the condition (TS has no `until` keyword).
         ExprNode::While { cond, body, until_form } => {
-            let cond_s = emit_expr(cond);
-            let cond_s = if *until_form {
-                format!("!({cond_s})")
+            let cond_js = if *until_form {
+                Js::unary(cond.span, "!", js_expr(cond))
             } else {
-                cond_s
+                js_expr(cond)
             };
-            let body_stmt = emit_branch_block(body, reassigned, declared);
-            format!("while ({cond_s}) {body_stmt}")
+            vec![JsStmt::new(
+                e.span,
+                JsStmtNode::While { cond: cond_js, body: js_branch(body, reassigned, declared) },
+            )]
         }
         // `next` inside a Ruby block lowers to `return` from the JS
         // callback (since blocks become arrow functions). `next` with
         // a value (rare) returns that value; bare `next` returns
         // undefined. The synthesized lambda carries no value out, so
         // bare-return is fine.
-        ExprNode::Next { value } => match value {
-            Some(v) => format!("return {};", emit_expr(v)),
-            None => "return;".to_string(),
-        },
+        ExprNode::Next { value } => {
+            vec![JsStmt::new(e.span, JsStmtNode::Return(value.as_ref().map(|v| js_expr(v))))]
+        }
         // `case scrutinee; when X then body; ...; end` at statement
         // position. Emit as a TS `switch` when every arm pattern is a
-        // single literal and the scrutinee is a simple value. Each arm
-        // body is emitted recursively as a stmt (so bare method calls
-        // become `this.method();`) followed by `break;`. Falls through
-        // to the default-arm rendering (a TODO comment via emit_expr)
-        // for non-literal patterns — the `process_action` dispatcher
-        // (the only producer here today) always uses literal-symbol
-        // arms.
+        // single literal and the scrutinee is a simple value. Falls
+        // through to the default-arm rendering for non-literal
+        // patterns — the `process_action` dispatcher (the only
+        // producer here today) always uses literal-symbol arms.
         ExprNode::Case { scrutinee, arms }
             if arms.iter().all(|a| {
-                a.guard.is_none()
-                    && matches!(&a.pattern, crate::expr::Pattern::Lit { .. })
+                a.guard.is_none() && matches!(&a.pattern, crate::expr::Pattern::Lit { .. })
             }) =>
         {
-            let scr_s = emit_expr(scrutinee);
-            let mut out = format!("switch ({scr_s}) {{\n");
-            for arm in arms {
-                let pat_s = match &arm.pattern {
-                    crate::expr::Pattern::Lit { value } => emit_literal(value),
-                    _ => unreachable!(),
-                };
-                let body_stmt = emit_stmt_with_state(
-                    &arm.body, false, true, reassigned, declared,
-                );
-                out.push_str(&format!("  case {pat_s}: {body_stmt} break;\n"));
-            }
-            out.push('}');
-            out
+            let cases = arms
+                .iter()
+                .map(|arm| {
+                    let pat = match &arm.pattern {
+                        crate::expr::Pattern::Lit { value } => {
+                            js_literal(Span::synthetic(), value)
+                        }
+                        _ => unreachable!(),
+                    };
+                    (pat, js_stmts_with_state(&arm.body, false, true, reassigned, declared))
+                })
+                .collect();
+            vec![JsStmt::new(
+                e.span,
+                JsStmtNode::Switch { scrutinee: js_expr(scrutinee), cases, default: None },
+            )]
         }
-        _ => {
-            if is_last && !void_return {
-                format!("return {};", emit_expr(e))
-            } else {
-                format!("{};", emit_expr(e))
-            }
-        }
+        _ => vec![default_stmt(e, is_last, void_return)],
     }
 }
 
-/// Emit a multi-branch `if/else if/.../else` block at statement
-/// position. Recurses on the else-branch when it's another `If`,
-/// producing a flat `else if` chain instead of nested `else { if ... }`.
-fn emit_if_block(
+/// Build a statement-position `if/else if/.../else` chain. The
+/// printer renders a `Some([If])` else-branch as a flat `else if`.
+fn js_if_chain(
+    span: Span,
     cond: &Expr,
     then_branch: &Expr,
     else_branch: &Expr,
-    reassigned: &std::collections::HashSet<crate::ident::Symbol>,
-    declared: &mut std::collections::HashSet<crate::ident::Symbol>,
-) -> String {
-    let mut out = String::new();
-    out.push_str("if (");
-    out.push_str(&emit_expr(cond));
-    out.push_str(") ");
-    out.push_str(&emit_branch_block(then_branch, reassigned, declared));
-
-    let mut current = else_branch;
-    loop {
-        if is_nil_or_empty(current) {
-            return out;
-        }
-        match &*current.node {
-            ExprNode::If { cond, then_branch, else_branch } => {
-                out.push_str(" else if (");
-                out.push_str(&emit_expr(cond));
-                out.push_str(") ");
-                out.push_str(&emit_branch_block(then_branch, reassigned, declared));
-                current = else_branch;
-            }
-            _ => {
-                out.push_str(" else ");
-                out.push_str(&emit_branch_block(current, reassigned, declared));
-                return out;
-            }
-        }
-    }
+    reassigned: &HashSet<Symbol>,
+    declared: &mut HashSet<Symbol>,
+) -> JsStmt {
+    let then = js_branch(then_branch, reassigned, declared);
+    let else_ = if is_nil_or_empty(else_branch) {
+        None
+    } else if let ExprNode::If { cond, then_branch, else_branch: inner_else } = &*else_branch.node
+    {
+        Some(vec![js_if_chain(
+            else_branch.span,
+            cond,
+            then_branch,
+            inner_else,
+            reassigned,
+            declared,
+        )])
+    } else {
+        Some(js_branch(else_branch, reassigned, declared))
+    };
+    JsStmt::new(span, JsStmtNode::If { cond: js_expr(cond), then, else_ })
 }
 
-/// Emit a single branch of an `if` block. Always-braced; multi-stmt
-/// `Seq` indents naturally; single-stmt branches fit on one line
-/// inside the braces. Branches inside `if/else` are statements (no
-/// implicit return), so void_return = true.
-fn emit_branch_block(
+/// Statement list for a single branch of an `if`/`while` block.
+/// Branches are statements (no implicit return), so void_return =
+/// true; a `Seq` flattens so each child gets proper stmt treatment.
+fn js_branch(
     e: &Expr,
-    reassigned: &std::collections::HashSet<crate::ident::Symbol>,
-    declared: &mut std::collections::HashSet<crate::ident::Symbol>,
-) -> String {
+    reassigned: &HashSet<Symbol>,
+    declared: &mut HashSet<Symbol>,
+) -> Vec<JsStmt> {
     match &*e.node {
-        // Multi-stmt Seq → indented block. Single-stmt Seq is also
-        // walked here (rather than falling through to the default,
-        // which would route a Seq node through emit_expr) so its one
-        // child stmt gets the proper emit_stmt treatment.
         ExprNode::Seq { exprs } if !exprs.is_empty() => {
-            if exprs.len() == 1 {
-                let stmt = emit_stmt_with_state(
-                    &exprs[0],
-                    true,
-                    true,
-                    reassigned,
-                    declared,
-                );
-                return format!("{{ {stmt} }}");
-            }
-            let mut s = String::from("{\n");
+            let mut out = Vec::new();
             for (i, sub) in exprs.iter().enumerate() {
-                let stmt = emit_stmt_with_state(
+                out.extend(js_stmts_with_state(
                     sub,
                     i == exprs.len() - 1,
                     true,
                     reassigned,
                     declared,
-                );
-                for line in stmt.lines() {
-                    s.push_str("  ");
-                    s.push_str(line);
-                    s.push('\n');
-                }
+                ));
             }
-            s.push('}');
-            s
+            out
         }
-        _ => {
-            let stmt = emit_stmt_with_state(e, true, true, reassigned, declared);
-            format!("{{ {stmt} }}")
-        }
+        _ => js_stmts_with_state(e, true, true, reassigned, declared),
+    }
+}
+
+/// Statement list from an expression in a context where any locals
+/// belong to the ENCLOSING scope: each `Seq` member becomes a bare
+/// expression statement (assignments stay `name = value`, no
+/// declaration). Used by the expression-position IIFE shells
+/// (while-as-expression, async HOF bodies) whose Ruby source closes
+/// over the surrounding method's locals.
+fn expr_stmts(body: &Expr) -> Vec<JsStmt> {
+    match &*body.node {
+        ExprNode::Seq { exprs } => exprs.iter().map(|x| JsStmt::expr(js_expr(x))).collect(),
+        _ => vec![JsStmt::expr(js_expr(body))],
     }
 }
 
@@ -1005,61 +1048,38 @@ fn strip_nullable(ty: Option<&Ty>) -> Option<&Ty> {
     Some(ty)
 }
 
-/// `!x` parses tighter than `===`, `==`, `||`, `&&`, etc. — without
-/// parentheses, `!x === y` reads as `(!x) === y`. Heuristic: if the
-/// emitted operand contains a binary operator at top level, wrap it.
-/// False positives (over-parenthesizing) are harmless; false negatives
-/// invert the meaning. Skip parens on already-paren'd, identifier, or
-/// member-access forms.
-fn needs_parens_for_unary_not(s: &str) -> bool {
-    if s.starts_with('(') && s.ends_with(')') {
-        return false;
-    }
-    // Conservative: any space-separated infix operator triggers parens.
-    s.contains(" === ")
-        || s.contains(" !== ")
-        || s.contains(" == ")
-        || s.contains(" != ")
-        || s.contains(" && ")
-        || s.contains(" || ")
-        || s.contains(" < ")
-        || s.contains(" > ")
-        || s.contains(" <= ")
-        || s.contains(" >= ")
-        || s.contains(" + ")
-        || s.contains(" - ")
-        || s.contains(" * ")
-        || s.contains(" / ")
-}
-
 fn is_nil_or_empty(e: &Expr) -> bool {
-    matches!(
-        &*e.node,
-        ExprNode::Lit { value: Literal::Nil }
-            | ExprNode::Seq { .. }  // empty Seq also falls here
-    ) && matches!(
-        &*e.node,
-        ExprNode::Lit { value: Literal::Nil }
-            | ExprNode::Seq { exprs: _ }
-    ) && {
-        if let ExprNode::Seq { exprs } = &*e.node {
-            exprs.is_empty()
-        } else {
-            matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
-        }
+    match &*e.node {
+        ExprNode::Lit { value: Literal::Nil } => true,
+        ExprNode::Seq { exprs } => exprs.is_empty(),
+        _ => false,
     }
 }
 
+// Expressions -----------------------------------------------------------
+
+/// Legacy string entrypoint: render one expression. The tree is
+/// rendered at lowest precedence — callers splice the result into
+/// full-expression slots (initializers, parameter defaults).
 pub(super) fn emit_expr(e: &Expr) -> String {
+    super::printer::render_expr(&js_expr(e))
+}
+
+pub(super) fn js_expr(e: &Expr) -> Js {
     // Analyzer-set diagnostic annotations short-circuit to a target
     // raise-equivalent (preserves Ruby's runtime-raise semantics).
     if let Some(kind) = &e.diagnostic {
-        return crate::emit::diagnostics::StubStyle::TsThrow
-            .render(&crate::diagnostic::Diagnostic::stub_text(kind));
+        return Js::new(
+            e.span,
+            JsExpr::Raw(
+                crate::emit::diagnostics::StubStyle::TsThrow
+                    .render(&crate::diagnostic::Diagnostic::stub_text(kind)),
+            ),
+        );
     }
     // IrHint::StringBuilder* — expression-position consumers.
     // Init/Append at statement position are handled in
-    // `emit_stmt_with_state` first; this branch catches
+    // `js_stmts_with_state` first; this branch catches
     // Append-inside-lambda (`articles.forEach(a => io << render(a))`
     // — the partial lowerer's collection-render shape) and the
     // terminal Result Var read at the function tail.
@@ -1068,452 +1088,335 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             if let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node {
                 if method.as_str() == "<<" && args.len() == 1 {
                     if let ExprNode::Var { name, .. } = &*recv.node {
-                        let escaped = escape_reserved_word(name.as_str());
-                        let val = emit_expr(&args[0]);
-                        return format!("{escaped}.push({val})");
+                        let buf = Js::ident(recv.span, escape_reserved_word(name.as_str()));
+                        return Js::method_call(e.span, buf, "push", vec![js_expr(&args[0])]);
                     }
                 }
             }
         }
         Some(IrHint::StringBuilderResult) => {
             if let ExprNode::Var { name, .. } = &*e.node {
-                return format!(
-                    "{}.join(\"\")",
-                    escape_reserved_word(name.as_str())
+                let buf = Js::ident(e.span, escape_reserved_word(name.as_str()));
+                return Js::method_call(
+                    e.span,
+                    buf,
+                    "join",
+                    vec![Js::str(Span::synthetic(), "")],
                 );
             }
         }
         _ => {}
     }
     match &*e.node {
-        ExprNode::Lit { value } => emit_literal(value),
-        ExprNode::Const { path } => {
-            // Ruby `Foo::Bar` gets joined with `.` for TS access.
-            // Framework-namespace paths (`ActionView::ViewHelpers`,
-            // `ActionView::ViewHelpers::FormBuilder`) collapse to the
-            // last segment — TS emits each runtime class flat at its
-            // file's module scope and imports the bare name. The
-            // import collector mirrors this collapse, so the call
-            // site reaches the imported name directly. Other paths
-            // (e.g. `Views::Articles` — a real nested object) pass
-            // through joined.
-            let segs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
-            const FRAMEWORK_NAMESPACES: &[&str] = &[
-                "ActionController",
-                "ActiveRecord",
-                "ActionView",
-                "ActionDispatch",
-                "ActiveSupport",
-            ];
-            if segs.len() >= 2 && FRAMEWORK_NAMESPACES.contains(&segs[0]) {
-                segs.last().copied().unwrap_or("").to_string()
-            } else if segs.len() == 1 {
-                // Ruby builtin error classes — collapse to JS `Error`
-                // wherever they appear as Const references (not just
-                // in `raise`). Without this, `assert_operator(X, :<,
-                // StandardError)` and similar idioms emit a bare
-                // `StandardError` that's neither in scope nor
-                // importable. Same name list as the `raise` lowering
-                // below.
-                match segs[0] {
-                    "StandardError" | "RuntimeError" | "ArgumentError"
-                    | "TypeError" | "NameError" | "NoMethodError"
-                    | "NotImplementedError" | "KeyError" | "IndexError" => "Error".to_string(),
-                    _ => segs[0].to_string(),
-                }
-            } else {
-                segs.join(".")
-            }
-        }
-        ExprNode::Var { name, .. } => escape_reserved_word(name.as_str()),
-        ExprNode::Ivar { name } => format!("this.{}", ts_field_name(name.as_str())),
-        ExprNode::Send { recv, method, args, block, parenthesized } => {
-            emit_send_with_block(
-                recv.as_ref(),
-                method.as_str(),
-                args,
-                block.as_ref(),
-                *parenthesized,
-            )
-        }
+        ExprNode::Lit { value } => js_literal(e.span, value),
+        ExprNode::Const { path } => Js::ident(e.span, const_name(path)),
+        ExprNode::Var { name, .. } => Js::ident(e.span, escape_reserved_word(name.as_str())),
+        ExprNode::Ivar { name } => Js::member(
+            e.span,
+            Js::ident(e.span, "this"),
+            ts_field_name(name.as_str()),
+        ),
+        ExprNode::Send { recv, method, args, block, parenthesized } => js_send_with_block(
+            e.span,
+            recv.as_ref(),
+            method.as_str(),
+            args,
+            block.as_ref(),
+            *parenthesized,
+        ),
         ExprNode::Assign { target, value } => {
             // Expression-position assignment — preserve the side effect.
             // JS `a = b` is an expression that both assigns and yields
-            // the value. Previously this arm dropped the target and
-            // emitted just `value`, which silently lost the assignment
-            // when the expression appeared inside an IIFE (e.g., the
-            // assert_raises BeginRescue-wrapped body).
-            let value_s = emit_expr(value);
-            match target {
+            // the value.
+            let value_js = js_expr(value);
+            let target_js = match target {
                 LValue::Var { name, .. } => {
-                    format!("{} = {}", escape_reserved_word(name.as_str()), value_s)
+                    Js::ident(e.span, escape_reserved_word(name.as_str()))
                 }
-                LValue::Ivar { name } => {
-                    format!("this.{} = {}", ts_field_name(name.as_str()), value_s)
-                }
+                LValue::Ivar { name } => Js::member(
+                    e.span,
+                    Js::ident(e.span, "this"),
+                    ts_field_name(name.as_str()),
+                ),
                 LValue::Attr { recv, name } => {
-                    format!("{}.{} = {}", emit_expr(recv), name.as_str(), value_s)
+                    Js::member(e.span, js_expr(recv), name.as_str())
                 }
-                LValue::Index { recv, index } => {
-                    format!("{}[{}] = {}", emit_expr(recv), emit_expr(index), value_s)
+                LValue::Index { recv, index } => Js::index(e.span, js_expr(recv), js_expr(index)),
+                _ => return value_js,
+            };
+            Js::new(e.span, JsExpr::Assign { target: target_js, op: "=", value: value_js })
+        }
+        // Expression-position statement list. An IIFE evaluates the
+        // members in order and yields the last — the legacy `a; b`
+        // splice was a syntax error in any real expression slot.
+        ExprNode::Seq { exprs } => match exprs.as_slice() {
+            [] => Js::new(e.span, JsExpr::Null),
+            [only] => js_expr(only),
+            many => {
+                let mut stmts: Vec<JsStmt> = Vec::with_capacity(many.len());
+                for x in &many[..many.len() - 1] {
+                    stmts.push(JsStmt::expr(js_expr(x)));
                 }
-                _ => value_s,
+                stmts.push(return_stmt(Some(js_expr(&many[many.len() - 1]))));
+                iife(e.span, stmts)
             }
-        }
-        ExprNode::Seq { exprs } => {
-            exprs.iter().map(emit_expr).collect::<Vec<_>>().join("; ")
-        }
-        ExprNode::If { cond, then_branch, else_branch } => {
-            // TS ternary `cond ? a : b`, always parenthesized. JS's
-            // `?:` has lower precedence than `||`/`&&`/comparisons, so
-            // an unparenthesized ternary inside e.g. `x || (a ? b : c)`
-            // miscompiles — the outer `||` binds first and the ternary
-            // ends up testing `x || a` instead of `a`. Ruby's `||`
-            // binds tighter than `?:` too, but Ruby callers express
-            // the intended grouping with explicit parens; the emit
-            // here can't see those parens, so wrap unconditionally.
-            // `emit_expr` is always called in an expression position;
-            // controller/view emitters have their own statement-form
-            // If handlers.
-            let cond_s = emit_expr(cond);
-            let then_s = emit_expr(then_branch);
-            let else_s = emit_expr(else_branch);
-            format!("({cond_s} ? {then_s} : {else_s})")
-        }
+        },
+        ExprNode::If { cond, then_branch, else_branch } => Js::new(
+            e.span,
+            JsExpr::Ternary {
+                cond: js_expr(cond),
+                then: js_expr(then_branch),
+                else_: js_expr(else_branch),
+            },
+        ),
         ExprNode::BoolOp { op, left, right, .. } => {
             use crate::expr::BoolOpKind;
             let op_s = match op {
                 BoolOpKind::Or => "||",
                 BoolOpKind::And => "&&",
             };
-            format!("{} {} {}", emit_expr(left), op_s, emit_expr(right))
+            Js::binary(e.span, op_s, js_expr(left), js_expr(right))
         }
         ExprNode::Array { elements, .. } => {
-            let parts: Vec<String> = elements.iter().map(emit_expr).collect();
-            format!("[{}]", parts.join(", "))
+            Js::new(e.span, JsExpr::Array(elements.iter().map(js_expr).collect()))
         }
-        ExprNode::Hash { entries, .. } => {
-            let parts: Vec<String> = entries
-                .iter()
-                .map(|(k, v)| format!("{}: {}", emit_expr(k), emit_expr(v)))
-                .collect();
-            format!("{{ {} }}", parts.join(", "))
-        }
+        ExprNode::Hash { entries, .. } => Js::new(
+            e.span,
+            JsExpr::Object(
+                entries
+                    .iter()
+                    .map(|(k, v)| JsObjEntry::Prop(js_obj_key(k), js_expr(v)))
+                    .collect(),
+            ),
+        ),
         ExprNode::StringInterp { parts } => {
             use crate::expr::InterpPart;
-            let mut out = String::from("`");
-            for p in parts {
-                match p {
-                    InterpPart::Text { value } => {
-                        for c in value.chars() {
-                            // Escape control whitespace so the
-                            // template literal stays on one source
-                            // line — the function-body indenter
-                            // adds leading spaces per source line,
-                            // and any raw `\n` inside the literal
-                            // would silently get 2 spaces inserted,
-                            // corrupting the string contents.
-                            match c {
-                                '`' | '\\' => {
-                                    out.push('\\');
-                                    out.push(c);
-                                }
-                                '$' => out.push_str("\\$"),
-                                '\n' => out.push_str("\\n"),
-                                '\r' => out.push_str("\\r"),
-                                '\t' => out.push_str("\\t"),
-                                _ => out.push(c),
-                            }
-                        }
-                    }
-                    InterpPart::Expr { expr } => {
-                        out.push_str("${");
-                        out.push_str(&emit_expr(expr));
-                        out.push('}');
-                    }
-                }
-            }
-            out.push('`');
-            out
+            let tpl = parts
+                .iter()
+                .map(|p| match p {
+                    InterpPart::Text { value } => TplPart::Text(value.clone()),
+                    InterpPart::Expr { expr } => TplPart::Expr(js_expr(expr)),
+                })
+                .collect();
+            Js::new(e.span, JsExpr::Template(tpl))
         }
-        ExprNode::SelfRef => "this".to_string(),
+        ExprNode::SelfRef => Js::ident(e.span, "this"),
         ExprNode::Lambda { params, body, .. } => {
-            let params_s: Vec<String> = params.iter().map(|p| p.as_str().to_string()).collect();
             // Async coloring (Phase 3): a Lambda whose body contains
             // a Send to a name in the active async set must itself
-            // be `async`, otherwise the inner `(await ...)` emit
-            // sites are syntax errors (`await` is only legal inside
-            // an async function or top-level module). When the
-            // lambda is async, the single-param "no-paren" form is
-            // unsafe — TS accepts `async x => x` but a number of
-            // tools (ts-morph, prettier configs in the wild) trip
-            // on it; always paren the params when async to keep
-            // emit boring.
+            // be `async`, otherwise the inner `await` emit sites are
+            // syntax errors.
             let body_async = body_has_async_send(body);
-            let async_prefix = if body_async { "async " } else { "" };
-            let header = if body_async && params.len() == 1 {
-                format!("({})", params_s[0])
-            } else {
-                match params.len() {
-                    0 => "()".to_string(),
-                    1 => params_s[0].clone(),
-                    _ => format!("({})", params_s.join(", ")),
-                }
-            };
+            let js_params: Vec<JsParam> =
+                params.iter().map(|p| js_param(p.as_str())).collect();
             // Multi-statement bodies need a block form so each
             // statement separates cleanly. Single-expression bodies
-            // stay in the concise `args => expr` form. The body-
-            // typer's return-flow tracking gives us the value of the
-            // last statement; emit a `return` for that one.
-            if let ExprNode::Seq { exprs } = &*body.node {
-                if exprs.len() > 1 {
-                    // Lambdas open a fresh scope. Pre-walk the body to
-                    // identify reassigned locals (so e.g. an inner
-                    // capture buffer `body = String.new` followed by
-                    // `body << X` rewrites emits as `let body = ""`
-                    // not `const body = ""`).
+            // stay in the concise `args => expr` form. Lambdas open a
+            // fresh scope: pre-walk the body to identify reassigned
+            // locals (so e.g. an inner capture buffer `body =
+            // String.new` followed by `body << X` emits as `let body`
+            // not `const body`).
+            let arrow_body = match &*body.node {
+                ExprNode::Seq { exprs } if exprs.len() > 1 => {
                     let reassigned = collect_reassigned(body);
-                    let mut declared: std::collections::HashSet<crate::ident::Symbol> =
-                        std::collections::HashSet::new();
-                    let mut out = format!("{async_prefix}{header} => {{ ");
-                    for (i, e) in exprs.iter().enumerate() {
-                        let stmt = emit_stmt_with_state(
-                            e,
+                    let mut declared: HashSet<Symbol> = HashSet::new();
+                    let mut stmts = Vec::new();
+                    for (i, x) in exprs.iter().enumerate() {
+                        stmts.extend(js_stmts_with_state(
+                            x,
                             i == exprs.len() - 1,
                             false,
                             &reassigned,
                             &mut declared,
-                        );
-                        out.push_str(&stmt);
-                        if i + 1 < exprs.len() {
-                            out.push(' ');
-                        }
+                        ));
                     }
-                    out.push_str(" }");
-                    return out;
+                    ArrowBody::Block(stmts)
                 }
-            }
-            format!("{async_prefix}{header} => {}", emit_expr(body))
+                _ => ArrowBody::Expr(js_expr(body)),
+            };
+            Js::new(
+                e.span,
+                JsExpr::Arrow { params: js_params, body: arrow_body, is_async: body_async },
+            )
         }
         ExprNode::Return { value } => {
             // Expression-position return is rare — typically the
-            // statement-level emitter handles Return cleanly. An IIFE
+            // statement-level walker handles Return cleanly. An IIFE
             // preserves semantics when Return appears inside a larger
-            // expression (e.g., ternary guard `cond ? (return x) : y`).
-            format!("(() => {{ return {}; }})()", emit_expr(value))
+            // expression.
+            iife(e.span, vec![return_stmt(Some(js_expr(value)))])
         }
         ExprNode::Super { args } => {
             // Ruby's `super` forwards to the parent class's same-named
             // method. TS requires `super.methodName(...)`, which needs
             // enclosing-method context that this emitter doesn't carry.
             // Emit syntactically-valid `super(...)` — class-level
-            // emitters rewrite to `super.X(...)` where they know X.
-            let args_s: Vec<String> = match args {
+            // emitters rewrite the IR to `super.X(...)` where they
+            // know X.
+            let args_js = match args {
                 None => vec![],
-                Some(a) => a.iter().map(emit_expr).collect(),
+                Some(a) => a.iter().map(js_expr).collect(),
             };
-            format!("super({})", args_s.join(", "))
+            Js::call(e.span, Js::ident(e.span, "super"), args_js)
         }
         ExprNode::BeginRescue { body, rescues, ensure, .. } => {
             // Expression-position begin/rescue — wrap the try/catch in
-            // an IIFE so the whole thing evaluates to a value. Single
-            // bare `rescue` is common; multi-clause becomes an
-            // instanceof chain in the catch body.
-            //
-            // Seq bodies render as statements with the last expression
-            // returned. A naive `return <seq>` breaks because the seq's
-            // first statement would become the return arg and the rest
-            // unreachable.
-            let body_inner = match &*body.node {
+            // an IIFE so the whole thing evaluates to a value. Seq
+            // bodies render as statements with the last expression
+            // returned; locals stay enclosing-scoped (bare
+            // assignments), matching Ruby's begin-block semantics.
+            let mut try_body: Vec<JsStmt> = Vec::new();
+            match &*body.node {
                 ExprNode::Seq { exprs } if !exprs.is_empty() => {
-                    let mut s = String::new();
-                    let last_idx = exprs.len() - 1;
-                    for (i, stmt) in exprs.iter().enumerate() {
-                        if i == last_idx {
-                            s.push_str(&format!("return {};", emit_expr(stmt)));
-                        } else {
-                            s.push_str(&format!("{}; ", emit_expr(stmt)));
-                        }
+                    for x in &exprs[..exprs.len() - 1] {
+                        try_body.push(JsStmt::expr(js_expr(x)));
                     }
-                    s
+                    try_body.push(return_stmt(Some(js_expr(&exprs[exprs.len() - 1]))));
                 }
-                _ => format!("return {};", emit_expr(body)),
-            };
-            let catch_body = build_catch_body(rescues);
-            let ensure_s = match ensure {
-                Some(e) => format!(" finally {{ {}; }}", emit_expr(e)),
-                None => String::new(),
-            };
-            format!(
-                "(() => {{ try {{ {body_inner} }} catch (e) {{ {catch_body} }}{ensure_s} }})()"
+                _ => try_body.push(return_stmt(Some(js_expr(body)))),
+            }
+            let catch = catch_chain(rescues, &|rc| {
+                let mut v = rescue_binding_alias(rc);
+                v.push(return_stmt(Some(js_expr(&rc.body))));
+                v
+            });
+            let finally = ensure.as_ref().map(|en| vec![JsStmt::expr(js_expr(en))]);
+            iife(
+                e.span,
+                vec![JsStmt::new(
+                    e.span,
+                    JsStmtNode::Try {
+                        body: try_body,
+                        catch: Some((Some("e".into()), catch)),
+                        finally,
+                    },
+                )],
             )
         }
-        ExprNode::RescueModifier { expr, fallback } => {
-            format!(
-                "(() => {{ try {{ return {}; }} catch {{ return {}; }} }})()",
-                emit_expr(expr),
-                emit_expr(fallback)
-            )
-        }
+        ExprNode::RescueModifier { expr, fallback } => iife(
+            e.span,
+            vec![JsStmt::new(
+                e.span,
+                JsStmtNode::Try {
+                    body: vec![return_stmt(Some(js_expr(expr)))],
+                    catch: Some((None, vec![return_stmt(Some(js_expr(fallback)))])),
+                    finally: None,
+                },
+            )],
+        ),
         ExprNode::Yield { args } => {
             // Ruby's `yield` invokes the enclosing method's implicit
             // block. Library-class emit gives every yield-using method
             // an injected `__block` parameter (see emit_plain_method);
-            // here we just call it. Yield always targets the enclosing
-            // *method*, not surrounding lambdas, so a naive substitution
-            // is safe — the caller arranges __block to be in scope.
-            //
-            // Awaited only when the enclosing method is async (the
-            // colorer marks methods that capture yield's return into
-            // a binding, like `body = yield(builder)` in form_with).
-            // Sync methods that yield-without-capture (e.g.
-            // HashWithIndifferentAccess#each — `yield k, v` with
-            // value discarded) get plain `__block(...)`; awaiting
-            // there would be a parse error since the function isn't
-            // async. Without the await in async methods, an async
-            // block returned `[object Promise]` instead of the
-            // rendered string into surrounding template strings.
-            let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+            // here we just call it. Awaited only when the enclosing
+            // method is async (the colorer marks methods that capture
+            // yield's return into a binding, like `body =
+            // yield(builder)` in form_with). Sync methods that
+            // yield-without-capture get a plain call; awaiting there
+            // would be a parse error since the function isn't async.
+            let call = Js::call(
+                e.span,
+                Js::ident(e.span, "__block"),
+                args.iter().map(js_expr).collect(),
+            );
             if in_async_method() {
-                format!("(await __block({}))", args_s.join(", "))
+                Js::await_(e.span, call)
             } else {
-                format!("__block({})", args_s.join(", "))
+                call
             }
         }
         ExprNode::While { cond, body, until_form } => {
             // `while`/`until` at expression position is unusual —
             // wrap in IIFE so the syntactic position works. Statement-
-            // position uses are handled in emit_stmt with a flat
-            // form.
-            let cond_s = emit_expr(cond);
-            let cond_s = if *until_form {
-                format!("!({cond_s})")
+            // position uses are handled in `js_stmts_with_state`.
+            let cond_js = if *until_form {
+                Js::unary(cond.span, "!", js_expr(cond))
             } else {
-                cond_s
+                js_expr(cond)
             };
-            let body_s = emit_expr(body);
-            format!("(() => {{ while ({cond_s}) {{ {body_s}; }} }})()")
+            iife(
+                e.span,
+                vec![JsStmt::synth(JsStmtNode::While {
+                    cond: cond_js,
+                    body: expr_stmts(body),
+                })],
+            )
         }
-        ExprNode::Next { value } => match value {
-            Some(v) => format!("(() => {{ return {}; }})()", emit_expr(v)),
-            None => "(() => { return; })()".to_string(),
-        },
+        ExprNode::Next { value } => {
+            iife(e.span, vec![return_stmt(value.as_ref().map(|v| js_expr(v)))])
+        }
         ExprNode::Cast { value, target_ty } => {
             // TS `as T` is a compile-time assertion — no runtime
             // narrowing. The lowerer adds Cast at adapter-row sites
             // where the static value type is wider than the column;
             // TS's `any` lets the assignment through without `as`,
             // but emitting it documents intent and helps TS's narrowing.
-            // Wrap value in parens for precedence safety.
-            format!("({} as {})", emit_expr(value), super::ty::ts_ty(target_ty))
+            Js::new(
+                e.span,
+                JsExpr::Cast { expr: js_expr(value), ty: TsType(super::ty::ts_ty(target_ty)) },
+            )
         }
         ExprNode::Raise { value } => {
-            // `throw` is a statement in JS/TS, but emit_expr is also
-            // called in expression positions (ternary arms, last-
-            // expression-of-method). Wrap in an IIFE so the same emit
-            // form works at both statement and expression position.
-            // Matches the `Next` arm above; the surrounding If/Seq
-            // emitter wraps the IIFE call in `(...)();` at statement
-            // position, which is valid noise.
-            format!("(() => {{ throw {}; }})()", emit_expr(value))
+            // `throw` is a statement in JS/TS, but expressions appear
+            // in ternary arms and the last-expression-of-method slot.
+            // Wrap in an IIFE so the same emit form works at both
+            // statement and expression position.
+            iife(e.span, vec![JsStmt::synth(JsStmtNode::Throw(js_expr(value)))])
         }
         ExprNode::OpAssign { target, op, value } => {
             // Desugar `target op= value` to the existing-IR shape and
             // recurse. TS has native compound assignment, but the
             // desugared form routes back through the Assign + Send/If
-            // arms above without duplicating LValue dispatch. The
-            // Rails dirty-tracking concern that motivated the IR
-            // variant is Ruby-runtime specific — TS has no equivalent
-            // setter side-effect, so the desugar is faithful here.
-            let desugared = desugar_op_assign(target, *op, value, e.span);
-            emit_expr(&desugared)
+            // arms above without duplicating LValue dispatch.
+            js_expr(&desugar_op_assign(target, *op, value, e.span))
         }
-        other => crate::emit::diagnostics::report_unsupported(e.span, "typescript", other.kind_str(), ""),
+        other => Js::new(
+            e.span,
+            JsExpr::Raw(crate::emit::diagnostics::report_unsupported(
+                e.span,
+                "typescript",
+                other.kind_str(),
+                "",
+            )),
+        ),
     }
 }
 
-fn build_catch_body(rescues: &[crate::expr::RescueClause]) -> String {
-    if rescues.is_empty() {
-        return "throw e;".to_string();
-    }
-    // Rescue binding (`rescue Err => name`) — alias the catch variable
-    // `e` to the source-named binding so the rescue body's references
-    // resolve. Emits `const <name> = e;` before the rescue body.
-    let bind_alias = |rc: &crate::expr::RescueClause| -> String {
-        match &rc.binding {
-            Some(name) => format!("const {name} = e; "),
-            None => String::new(),
-        }
-    };
-    // Bare rescue (no explicit classes) catches everything.
-    if rescues.len() == 1 && rescues[0].classes.is_empty() {
-        return format!("{}return {};", bind_alias(&rescues[0]), emit_expr(&rescues[0].body));
-    }
-    let mut out = String::new();
-    let mut has_bare_catchall = false;
-    for (i, rc) in rescues.iter().enumerate() {
-        if rc.classes.is_empty() {
-            out.push_str(&format!(
-                " else {{ {}return {}; }}",
-                bind_alias(rc),
-                emit_expr(&rc.body)
-            ));
-            has_bare_catchall = true;
-            break;
-        }
-        let keyword = if i == 0 { "if" } else { "else if" };
-        let instanceof_s: Vec<String> = rc
-            .classes
-            .iter()
-            .map(|c| format!("e instanceof {}", emit_expr(c)))
-            .collect();
-        out.push_str(&format!(
-            "{keyword} ({}) {{ {}return {}; }}",
-            instanceof_s.join(" || "),
-            bind_alias(rc),
-            emit_expr(&rc.body)
-        ));
-    }
-    if !has_bare_catchall {
-        out.push_str(" else { throw e; }");
-    }
-    out
-}
-
-/// Core send emission. `parenthesized` reflects whether the Ruby
-/// source wrapped args in explicit parens — for 0-arg explicit-
-/// receiver calls we use it to decide between `recv.name` (Ruby
-/// reader convention, JS property access) and `recv.name()` (method
-/// call). Always emits parens when args are present.
-/// Send emission that folds a trailing block (Ruby `do ... end` / `&:sym`)
-/// in as an arrow-function argument — TS's closest equivalent. The
-/// block-less path delegates directly to `emit_send_with_parens`.
-pub(super) fn emit_send_with_block(
+/// Send emission that folds a trailing block (Ruby `do ... end` /
+/// `&:sym`) in as an arrow-function argument — TS's closest
+/// equivalent. The block-less path delegates directly to `js_send`.
+fn js_send_with_block(
+    span: Span,
     recv: Option<&Expr>,
     method: &str,
     args: &[Expr],
     block: Option<&Expr>,
     parenthesized: bool,
-) -> String {
+) -> Js {
     let Some(blk) = block else {
-        return emit_send_with_parens(recv, method, args, parenthesized);
+        return js_send(span, recv, method, args, parenthesized);
     };
     // `N.times { |i| body }` — JS Numbers have no `.times` method,
     // so a fall-through emit produces `3.times(i => …)` which tsc
-    // (and esbuild's parser) reject as `3.t…`. Rewrite to a plain
-    // for loop that invokes the block as a lambda each iteration:
-    // the lambda emit already handles the body's own scope (Seq →
-    // emit_stmt_with_state declares locals as `const`/`let`).
-    // Sync bodies stay sync; the surrounding async-HOF rewrite
-    // handles async-body cases on its own.
+    // (and esbuild's parser) reject. Rewrite to a counted loop that
+    // invokes the block as a lambda each iteration. Sync bodies stay
+    // sync; the async-HOF rewrite below handles async-body cases.
     if method == "times" && args.is_empty() && recv.is_some() {
         if let ExprNode::Lambda { body, .. } = &*blk.node {
             if !body_has_async_send(body) {
-                let count_s = emit_expr(recv.unwrap());
-                let block_s = emit_expr(blk);
-                return format!(
-                    "(() => {{ const __t = {block_s}; for (let __i = 0; __i < {count_s}; __i++) __t(__i); }})()"
-                );
+                let stmts = vec![
+                    const_decl("__t", js_expr(blk)),
+                    JsStmt::synth(JsStmtNode::ForNum {
+                        binding: "__i".into(),
+                        limit: js_expr(recv.unwrap()),
+                        body: vec![JsStmt::expr(Js::call(
+                            Span::synthetic(),
+                            synth_ident("__t"),
+                            vec![synth_ident("__i")],
+                        ))],
+                    }),
+                ];
+                return iife(span, stmts);
             }
         }
     }
@@ -1525,41 +1428,40 @@ pub(super) fn emit_send_with_block(
     // produces `Promise<R>[]` (parallel-pending) instead of `R[]`,
     // and `.filter(async x => ...)` doesn't await predicates at
     // all (the JS array methods don't introspect their callbacks).
-    if let Some(rewritten) = try_emit_async_hof(recv, method, args, blk) {
+    if let Some(rewritten) = try_js_async_hof(span, recv, method, args, blk) {
         return rewritten;
     }
     // Sync HOF rewrite for predicate-style Ruby Array methods
     // (`all?`/`any?`/`none?`) — the `?` sanitizer renames them to
     // `is_all`/`is_any`/`is_none` which don't exist on JS Array.
     // Restricted to predicates because the type-aware Array dispatch
-    // above (Ty::Array) handles `each`/`map`/`filter`/`find` for
-    // typed receivers; broadening this fallback to those methods
-    // misfires when the receiver is actually a Hash (`hash.each
-    // { |k, v| … }` — `Object.entries(...).forEach(...)` rather
-    // than `hash.forEach(...)`).
+    // (Ty::Array) handles `each`/`map`/`filter`/`find` for typed
+    // receivers; broadening this fallback to those methods misfires
+    // when the receiver is actually a Hash.
     if args.is_empty() && recv.is_some() {
         if let ExprNode::Lambda { body, .. } = &*blk.node {
             if !body_has_async_send(body) {
-                let js_method = match method {
-                    "all?" => Some("every"),
-                    "any?" => Some("some"),
-                    "none?" => Some("__none"),
-                    _ => None,
-                };
-                if let Some(js) = js_method {
-                    let recv_s = emit_expr(recv.unwrap());
-                    let blk_s = emit_expr(blk);
-                    return match js {
-                        "__none" => format!("(!{recv_s}.some({blk_s}))"),
-                        _ => format!("{recv_s}.{js}({blk_s})"),
-                    };
+                let recv_js = || js_expr(recv.unwrap());
+                match method {
+                    "all?" => {
+                        return Js::method_call(span, recv_js(), "every", vec![js_expr(blk)])
+                    }
+                    "any?" => return Js::method_call(span, recv_js(), "some", vec![js_expr(blk)]),
+                    "none?" => {
+                        return Js::unary(
+                            span,
+                            "!",
+                            Js::method_call(span, recv_js(), "some", vec![js_expr(blk)]),
+                        )
+                    }
+                    _ => {}
                 }
             }
         }
     }
     let mut all_args: Vec<Expr> = args.to_vec();
     all_args.push(blk.clone());
-    emit_send_with_parens(recv, method, &all_args, true)
+    js_send(span, recv, method, &all_args, true)
 }
 
 /// HOF rewrites for blocks containing async sends. Returns
@@ -1567,17 +1469,18 @@ pub(super) fn emit_send_with_block(
 /// HOF and the block body has at least one async Send; otherwise
 /// `None` (caller falls back to the standard chained-call emit).
 ///
-/// Each rewrite produces an `(await (async () => { ... })())`
+/// Each rewrite produces an `await (async () => { ... })()`
 /// expression so the IIFE's Promise return is awaited at the call
 /// site — the surrounding async-coloring machinery doesn't know
 /// `each`/`map`/etc are now async (they aren't in the extern set),
 /// so the rewrite must own the outer `await`.
-fn try_emit_async_hof(
+fn try_js_async_hof(
+    span: Span,
     recv: Option<&Expr>,
     method: &str,
     args: &[Expr],
     block: &Expr,
-) -> Option<String> {
+) -> Option<Js> {
     // Block must be a Lambda — that's the only shape carrying
     // params + body in a way we can splice into a for-of header.
     let ExprNode::Lambda { params, body, .. } = &*block.node else {
@@ -1588,67 +1491,115 @@ fn try_emit_async_hof(
     }
     let recv = recv?;
 
-    // Single-param HOFs: `each`, `map`, `filter`/`select`,
-    // `reject`, `find`, `any?`, `all?`. The bound name from the
-    // block's `params[0]` becomes the for-of binding; the body
-    // emits with that name in scope (the body-typer already
-    // assigned the right VarId at ingest, so emit_expr will pick
-    // it up).
-    let recv_s = emit_expr(recv);
-    let single_param = || -> Option<String> {
-        let p = params.first()?.as_str().to_string();
-        Some(p)
+    // Single-param HOFs: the bound name from the block's `params[0]`
+    // becomes the for-of binding; the body emits with that name in
+    // scope (the body-typer already assigned the right VarId at
+    // ingest, so js_expr will pick it up).
+    let single_param = || -> Option<String> { Some(params.first()?.as_str().to_string()) };
+    let for_of = |binding: String, body_stmts: Vec<JsStmt>| {
+        JsStmt::synth(JsStmtNode::ForOf { binding, iterable: js_expr(recv), body: body_stmts })
     };
-    let body_s = || emit_expr(body);
 
     match method {
         "each" if args.is_empty() => {
             let p = single_param()?;
-            Some(format!(
-                "(await (async () => {{ for (const {p} of {recv_s}) {{ {body}; }} }})())",
-                body = body_s(),
-            ))
+            Some(async_iife_awaited(span, vec![for_of(p, expr_stmts(body))]))
         }
         "map" | "collect" if args.is_empty() => {
             let p = single_param()?;
-            Some(format!(
-                "(await (async () => {{ const __r = []; for (const {p} of {recv_s}) __r.push({body}); return __r; }})())",
-                body = body_s(),
+            let push = Js::method_call(
+                Span::synthetic(),
+                synth_ident("__r"),
+                "push",
+                vec![js_expr(body)],
+            );
+            Some(async_iife_awaited(
+                span,
+                vec![
+                    const_decl("__r", Js::synth(JsExpr::Array(vec![]))),
+                    for_of(p, vec![JsStmt::expr(push)]),
+                    return_stmt(Some(synth_ident("__r"))),
+                ],
             ))
         }
         "filter" | "select" if args.is_empty() => {
             let p = single_param()?;
-            Some(format!(
-                "(await (async () => {{ const __r = []; for (const {p} of {recv_s}) if ({body}) __r.push({p}); return __r; }})())",
-                body = body_s(),
+            let push = Js::method_call(
+                Span::synthetic(),
+                synth_ident("__r"),
+                "push",
+                vec![synth_ident(&p)],
+            );
+            let guard = JsStmt::synth(JsStmtNode::If {
+                cond: js_expr(body),
+                then: vec![JsStmt::expr(push)],
+                else_: None,
+            });
+            Some(async_iife_awaited(
+                span,
+                vec![
+                    const_decl("__r", Js::synth(JsExpr::Array(vec![]))),
+                    for_of(p, vec![guard]),
+                    return_stmt(Some(synth_ident("__r"))),
+                ],
             ))
         }
         "reject" if args.is_empty() => {
             let p = single_param()?;
-            Some(format!(
-                "(await (async () => {{ const __r = []; for (const {p} of {recv_s}) if (!({body})) __r.push({p}); return __r; }})())",
-                body = body_s(),
+            let push = Js::method_call(
+                Span::synthetic(),
+                synth_ident("__r"),
+                "push",
+                vec![synth_ident(&p)],
+            );
+            let guard = JsStmt::synth(JsStmtNode::If {
+                cond: Js::unary(Span::synthetic(), "!", js_expr(body)),
+                then: vec![JsStmt::expr(push)],
+                else_: None,
+            });
+            Some(async_iife_awaited(
+                span,
+                vec![
+                    const_decl("__r", Js::synth(JsExpr::Array(vec![]))),
+                    for_of(p, vec![guard]),
+                    return_stmt(Some(synth_ident("__r"))),
+                ],
             ))
         }
         "find" | "detect" if args.is_empty() => {
             let p = single_param()?;
-            Some(format!(
-                "(await (async () => {{ for (const {p} of {recv_s}) if ({body}) return {p}; return undefined; }})())",
-                body = body_s(),
+            let found = JsStmt::synth(JsStmtNode::If {
+                cond: js_expr(body),
+                then: vec![return_stmt(Some(synth_ident(&p)))],
+                else_: None,
+            });
+            Some(async_iife_awaited(
+                span,
+                vec![for_of(p, vec![found]), return_stmt(Some(synth_ident("undefined")))],
             ))
         }
         "any?" if args.is_empty() => {
             let p = single_param()?;
-            Some(format!(
-                "(await (async () => {{ for (const {p} of {recv_s}) if ({body}) return true; return false; }})())",
-                body = body_s(),
+            let hit = JsStmt::synth(JsStmtNode::If {
+                cond: js_expr(body),
+                then: vec![return_stmt(Some(Js::synth(JsExpr::Bool(true))))],
+                else_: None,
+            });
+            Some(async_iife_awaited(
+                span,
+                vec![for_of(p, vec![hit]), return_stmt(Some(Js::synth(JsExpr::Bool(false))))],
             ))
         }
         "all?" if args.is_empty() => {
             let p = single_param()?;
-            Some(format!(
-                "(await (async () => {{ for (const {p} of {recv_s}) if (!({body})) return false; return true; }})())",
-                body = body_s(),
+            let miss = JsStmt::synth(JsStmtNode::If {
+                cond: Js::unary(Span::synthetic(), "!", js_expr(body)),
+                then: vec![return_stmt(Some(Js::synth(JsExpr::Bool(false))))],
+                else_: None,
+            });
+            Some(async_iife_awaited(
+                span,
+                vec![for_of(p, vec![miss]), return_stmt(Some(Js::synth(JsExpr::Bool(true))))],
             ))
         }
         "reduce" | "inject" if args.len() == 1 && params.len() == 2 => {
@@ -1657,199 +1608,82 @@ fn try_emit_async_hof(
             // `params[1]` is the element.
             let acc = params[0].as_str().to_string();
             let elem = params[1].as_str().to_string();
-            let init_s = emit_expr(&args[0]);
-            Some(format!(
-                "(await (async () => {{ let {acc} = {init_s}; for (const {elem} of {recv_s}) {acc} = {body}; return {acc}; }})())",
-                body = body_s(),
+            let acc_decl = JsStmt::synth(JsStmtNode::VarDecl {
+                kind: VarKind::Let,
+                name: acc.clone(),
+                ty: None,
+                init: Some(js_expr(&args[0])),
+            });
+            let step = JsStmt::expr(Js::synth(JsExpr::Assign {
+                target: synth_ident(&acc),
+                op: "=",
+                value: js_expr(body),
+            }));
+            Some(async_iife_awaited(
+                span,
+                vec![acc_decl, for_of(elem, vec![step]), return_stmt(Some(synth_ident(&acc)))],
             ))
         }
         _ => None,
     }
 }
 
-pub(super) fn emit_send_with_parens(
+/// Core send emission, with the async-coloring await wrap. Wrapping
+/// happens structurally: a `Cast` result takes the await INSIDE the
+/// cast (`(await <expr>) as <Class>` — awaiting after the cast would
+/// read as casting `Promise<Class>` to `Class`, which TypeScript
+/// rejects with TS2352); anything else gets a plain `await` prefix
+/// whose parenthesization the printer derives from context.
+fn js_send(
+    span: Span,
     recv: Option<&Expr>,
     method: &str,
     args: &[Expr],
     parenthesized: bool,
-) -> String {
-    let result = emit_send_with_parens_inner(recv, method, args, parenthesized);
-    // Async coloring (Phase 3): wrap with `(await ...)` when the
-    // method name is in the active deployment profile's async set.
-    // Wrapping with parens preserves precedence at every use site —
-    // `(await x.find(id)).save` correctly applies `await` to the
-    // inner Send before chaining `.save`, and
-    // `(await x.find(id)) ?? new Post()` correctly applies `??`
-    // after the await resolves. Without parens, `await x.find(id).save`
-    // parses as `await (x.find(id).save)` (property access binds
-    // tighter than await) — silently wrong.
+) -> Js {
+    let result = js_send_inner(span, recv, method, args, parenthesized);
     if !is_async_method_name(method) {
         return result;
     }
     // Receiver-aware filter: mirror the propagation-side
     // `recv_is_known_sync` check so emit doesn't wrap a Hash/Array/
-    // ErrorCollection/Parameters-typed receiver with `(await ...)`
-    // for an AR-adapter-named method. `inner_opts.delete("method")`
-    // (recv ty Hash) emits as a sync IIFE — without this filter we
-    // wrap the IIFE with `(await ...)` and tsc rejects it because
-    // the enclosing method (correctly NOT propagated to async by
-    // the same filter on the prop side) isn't async.
+    // ErrorCollection/Parameters-typed receiver with `await` for an
+    // AR-adapter-named method.
     if recv_is_known_sync_at_emit(recv) {
         return result;
     }
     // Parameter-name filter: a bare `Send { recv: None, method }`
     // whose method matches an enclosing parameter name is a Var
-    // read (Ruby implicit-self), not a method dispatch. Without
-    // this, a view function with parameter `article` emits every
-    // `article` reference as `(await article)` (because
-    // `Views::Articles#article` is in the async set under the same
-    // name) and tsc rejects each.
+    // read (Ruby implicit-self), not a method dispatch.
     if recv.is_none() && is_enclosing_param_name(method) {
         return result;
     }
-    // Self-type narrowing cast injection: `emit_send_with_parens_inner`
-    // emits `(<send_expr> as <Class>)` for `Article.find/all/where/...`
-    // calls so a Base-typed result narrows to Article at the call site.
-    // For an async send, the await needs to land INSIDE the cast paren
-    // — `((await <send_expr>) as <Class>)` — so the cast applies to
-    // the resolved value. The outer-wrap form `(await (<send_expr> as
-    // <Class>))` reads as casting `Promise<Class>` to `Class`, which
-    // TypeScript rejects (TS2352). Detect the cast shape and rewrite
-    // when present; fall through to the simple wrap otherwise.
-    if let Some(injected) = inject_await_inside_cast(&result) {
-        return injected;
+    if let JsExpr::Cast { .. } = &*result.node {
+        let result_span = result.span;
+        let JsExpr::Cast { expr, ty } = *result.node else { unreachable!() };
+        return Js::new(result_span, JsExpr::Cast { expr: Js::await_(result_span, expr), ty });
     }
-    format!("(await {result})")
-}
-
-/// If `s` is a parenthesized cast expression `(<expr> as <type>)`,
-/// return `((await <expr>) as <type>)`. The split is found at paren
-/// depth zero so a nested cast doesn't fool us. Returns `None` when
-/// `s` doesn't match the pattern.
-fn inject_await_inside_cast(s: &str) -> Option<String> {
-    let trimmed = s.trim();
-    if !trimmed.starts_with('(') || !trimmed.ends_with(')') {
-        return None;
-    }
-    let middle = &trimmed[1..trimmed.len() - 1];
-    let bytes = middle.as_bytes();
-    let mut depth: i32 = 0;
-    let mut i = 0;
-    while i + 4 <= bytes.len() {
-        match bytes[i] {
-            b'(' => depth += 1,
-            b')' => depth -= 1,
-            b' ' if depth == 0 && middle[i..].starts_with(" as ") => {
-                let before = &middle[..i];
-                let after = &middle[i + 4..];
-                return Some(format!("((await {before}) as {after})"));
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    None
+    Js::await_(span, result)
 }
 
 /// True if `e` is the integer literal `-1`. Ruby's `i..-1` inclusive
 /// range is the idiomatic "to end of sequence" form and lowers to an
 /// open-ended JS slice rather than the generic `end + 1` shift (see
-/// the inclusive-end branch in `emit_send_with_parens_inner` for the
-/// off-by-one rationale). The `-1` is stored directly as a signed
+/// the inclusive-end branch in `js_send_inner` for the off-by-one
+/// rationale). The `-1` is stored directly as a signed
 /// `Literal::Int { value: -1 }` in the IR — there's no separate
 /// `UnaryOp::Neg` node — so a literal-only pattern is exhaustive.
 fn is_lit_neg_one(e: &Expr) -> bool {
     matches!(&*e.node, ExprNode::Lit { value: Literal::Int { value: -1 } })
 }
 
-fn emit_send_with_parens_inner(
+fn js_send_inner(
+    span: Span,
     recv: Option<&Expr>,
     method: &str,
     args: &[Expr],
     parenthesized: bool,
-) -> String {
-    // `x[range]` slice indexing (handled just below) re-derives `.slice(…)`
-    // straight from the raw Range node and returns before args_s is read for
-    // that arg. Emitting the Range here as a value would hit the
-    // unsupported-Range fallthrough and push a spurious diagnostic, so skip
-    // it — the placeholder is never used.
-    let args_s: Vec<String> = args
-        .iter()
-        .map(|a| {
-            if method == "[]" {
-                if let ExprNode::Range { .. } = &*a.node {
-                    return String::new();
-                }
-            }
-            emit_expr(a)
-        })
-        .collect();
-    if method == "[]" && recv.is_some() && args.len() == 1 {
-        // Ruby's `x[i..j]` slice form — when the indexer's argument is
-        // a Range, lower to `.slice(i, j+1)` (or `.slice(i)` for an
-        // open-ended range, or `.slice(i, j)` for an exclusive range).
-        // Works for Str AND Array receivers; both have `.slice` with
-        // matching JS semantics.
-        if let ExprNode::Range { begin, end, exclusive } = &*args[0].node {
-            let begin_s = begin
-                .as_ref()
-                .map(|e| emit_expr(e))
-                .unwrap_or_else(|| "0".to_string());
-            let recv_s = emit_expr(recv.unwrap());
-            return match end {
-                None => format!("{recv_s}.slice({begin_s})"),
-                // `x[i..-1]` — inclusive range with literal `-1` end —
-                // is Ruby's "from i to last char/element". The generic
-                // `+1` shift below would produce `.slice(i, -1 + 1)`
-                // = `.slice(i, 0)` = empty (off-by-one straddling the
-                // zero boundary). Emit the open-ended form so the
-                // result is "from i to end" instead. The `[i..-n]`
-                // form for n ≥ 2 still falls through to `+1` — those
-                // produce valid negative slice indices (`-2+1=-1`,
-                // meaning "all but last char").
-                Some(e) if !*exclusive && is_lit_neg_one(e) => {
-                    format!("{recv_s}.slice({begin_s})")
-                }
-                Some(e) => {
-                    let end_s = emit_expr(e);
-                    if *exclusive {
-                        format!("{recv_s}.slice({begin_s}, {end_s})")
-                    } else {
-                        format!("{recv_s}.slice({begin_s}, {end_s} + 1)")
-                    }
-                }
-            };
-        }
-    }
-    if method == "[]" && recv.is_some() && args.len() == 2 {
-        // Ruby's two-arg `str[start, length]` / `arr[start, length]`
-        // — substring/subarray of the given length. TS string and
-        // array both expose `.slice(start, end)` with the same
-        // start-inclusive/end-exclusive semantics, so the rewrite
-        // is `recv.slice(start, start + length)`. Without this, the
-        // generic `recv[a, b]` fallback produces JS `recv[(a, b)]`
-        // (comma operator) — silently wrong.
-        let recv_s = emit_expr(recv.unwrap());
-        return format!("{recv_s}.slice({}, {} + {})", args_s[0], args_s[0], args_s[1]);
-    }
-    // Negative-int index on an Array (`arr[-1]` = last element,
-    // `arr[-2]` = second to last, …). JS arrays don't support
-    // negative indexing — `arr[-1]` reads the property "-1", which
-    // is `undefined` for ordinary arrays. Rewrite to
-    // `arr[arr.length + N]` (where N is negative). For dynamic
-    // negative indices the same rewrite would need a runtime
-    // check, but the literal case covers the framework patterns
-    // we ship today (`records[-1]` in `Base.last`'s body).
-    if method == "[]" && recv.is_some() && args.len() == 1 {
-        if let (Some(r), ExprNode::Lit { value: Literal::Int { value } }) =
-            (recv, &*args[0].node)
-        {
-            if *value < 0 && matches!(r.ty.as_ref(), Some(Ty::Array { .. }) | Some(Ty::Str)) {
-                let recv_s = emit_expr(r);
-                return format!("{recv_s}[{recv_s}.length{value}]");
-            }
-        }
-    }
+) -> Js {
     // Framework class-instance receivers route bracket access to
     // method dispatch (`.get(k)` / `.set(k, v)`). JS bracket access
     // on a class instance returns `undefined` for runtime keys
@@ -1858,10 +1692,9 @@ fn emit_send_with_parens_inner(
     // explicit `get` / `set` methods as their cross-target API.
     //
     // Hash-typed and Array-typed receivers fall through to the
-    // bracket-access form below — `Record<K, V>[k]` is correct for
-    // Hash, and `T[][i]` is correct for Array. Same hardcoded class-
-    // name list as the zero-arg-method fix; goes away once the typer
-    // plumbs `AccessorKind` to Send.
+    // bracket-access form below. Same hardcoded class-name list as
+    // the zero-arg-method fix; goes away once the typer plumbs
+    // `AccessorKind` to Send.
     let is_framework_class_recv = |r: &Expr| -> bool {
         let recv_ty = strip_nullable(r.ty.as_ref());
         matches!(
@@ -1869,19 +1702,94 @@ fn emit_send_with_parens_inner(
             Some(Ty::Class { id, .. }) if {
                 let name = id.0.as_str();
                 let last = name.rsplit("::").next().unwrap_or(name);
-                matches!(
-                    last,
-                    "Parameters"
-                        | "ParameterMissing"
-                        | "Router"
-                )
+                matches!(last, "Parameters" | "ParameterMissing" | "Router")
             }
         )
     };
     if method == "[]" && args.len() == 1 {
         if let Some(r) = recv {
+            // Ruby's `x[i..j]` slice form — when the indexer's argument
+            // is a Range, lower to `.slice(i, j+1)` (or `.slice(i)` for
+            // an open-ended range, or `.slice(i, j)` for an exclusive
+            // range). Works for Str AND Array receivers; both have
+            // `.slice` with matching JS semantics.
+            if let ExprNode::Range { begin, end, exclusive } = &*args[0].node {
+                let begin_js = begin
+                    .as_ref()
+                    .map(|b| js_expr(b))
+                    .unwrap_or_else(|| Js::num(Span::synthetic(), "0"));
+                let recv_js = js_expr(r);
+                return match end {
+                    None => Js::method_call(span, recv_js, "slice", vec![begin_js]),
+                    // `x[i..-1]` — inclusive range with literal `-1` end
+                    // — is Ruby's "from i to last char/element". The
+                    // generic `+1` shift below would produce
+                    // `.slice(i, -1 + 1)` = `.slice(i, 0)` = empty
+                    // (off-by-one straddling the zero boundary). Emit
+                    // the open-ended form instead. The `[i..-n]` form
+                    // for n ≥ 2 still takes the `+1` shift — those
+                    // produce valid negative slice indices.
+                    Some(end_e) if !*exclusive && is_lit_neg_one(end_e) => {
+                        Js::method_call(span, recv_js, "slice", vec![begin_js])
+                    }
+                    Some(end_e) => {
+                        let end_js = js_expr(end_e);
+                        let end_js = if *exclusive {
+                            end_js
+                        } else {
+                            Js::binary(span, "+", end_js, Js::num(Span::synthetic(), "1"))
+                        };
+                        Js::method_call(span, recv_js, "slice", vec![begin_js, end_js])
+                    }
+                };
+            }
+        }
+    }
+    if method == "[]" && args.len() == 2 {
+        if let Some(r) = recv {
+            // Ruby's two-arg `str[start, length]` / `arr[start, length]`
+            // — substring/subarray of the given length. TS string and
+            // array both expose `.slice(start, end)` with the same
+            // start-inclusive/end-exclusive semantics, so the rewrite
+            // is `recv.slice(start, start + length)`. Without this, the
+            // generic `recv[a, b]` fallback produces JS `recv[(a, b)]`
+            // (comma operator) — silently wrong.
+            let end_js = Js::binary(span, "+", js_expr(&args[0]), js_expr(&args[1]));
+            return Js::method_call(
+                span,
+                js_expr(r),
+                "slice",
+                vec![js_expr(&args[0]), end_js],
+            );
+        }
+    }
+    // Negative-int index on an Array (`arr[-1]` = last element,
+    // `arr[-2]` = second to last, …). JS arrays don't support
+    // negative indexing — `arr[-1]` reads the property "-1", which
+    // is `undefined` for ordinary arrays. Rewrite to
+    // `arr[arr.length - n]`. For dynamic negative indices the same
+    // rewrite would need a runtime check, but the literal case covers
+    // the framework patterns we ship today (`records[-1]` in
+    // `Base.last`'s body).
+    if method == "[]" && args.len() == 1 {
+        if let (Some(r), ExprNode::Lit { value: Literal::Int { value } }) =
+            (recv, &*args[0].node)
+        {
+            if *value < 0 && matches!(r.ty.as_ref(), Some(Ty::Array { .. }) | Some(Ty::Str)) {
+                let idx = Js::binary(
+                    span,
+                    "-",
+                    Js::member(span, js_expr(r), "length"),
+                    Js::num(Span::synthetic(), (-*value).to_string()),
+                );
+                return Js::index(span, js_expr(r), idx);
+            }
+        }
+    }
+    if method == "[]" && args.len() == 1 {
+        if let Some(r) = recv {
             if is_framework_class_recv(r) {
-                return format!("{}.get({})", emit_expr(r), args_s[0]);
+                return Js::method_call(span, js_expr(r), "get", vec![js_expr(&args[0])]);
             }
             // Legacy hardcode for `@params[:k]` — @params's ty isn't
             // always recovered as Class (it can flow as Hash[Sym, Any]
@@ -1889,26 +1797,48 @@ fn emit_send_with_parens_inner(
             // pays for itself. Subsumed by the framework-class match
             // above when the type is recovered.
             if matches!(&*r.node, ExprNode::Ivar { name } if name.as_str() == "params") {
-                return format!("{}.get({})", emit_expr(r), args_s[0]);
+                return Js::method_call(span, js_expr(r), "get", vec![js_expr(&args[0])]);
             }
         }
     }
-    if method == "[]" && recv.is_some() {
-        return format!("{}[{}]", emit_expr(recv.unwrap()), args_s.join(", "));
+    if method == "[]" {
+        if let Some(r) = recv {
+            let index = if args.len() == 1 {
+                js_expr(&args[0])
+            } else {
+                // Multi-arg bracket beyond the handled shapes (no JS
+                // analog) — joined verbatim, matching the legacy emit.
+                Js::synth(JsExpr::Raw(
+                    args.iter()
+                        .map(|a| super::printer::render_expr(&js_expr(a)))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ))
+            };
+            return Js::index(span, js_expr(r), index);
+        }
     }
     // `recv.[]=(k, v)` — indexed assignment lowered to a Send.
-    if method == "[]=" && recv.is_some() && args.len() == 2 {
-        let r = recv.unwrap();
-        if is_framework_class_recv(r) {
-            return format!("{}.set({}, {})", emit_expr(r), args_s[0], args_s[1]);
+    if method == "[]=" && args.len() == 2 {
+        if let Some(r) = recv {
+            if is_framework_class_recv(r) {
+                return Js::method_call(
+                    span,
+                    js_expr(r),
+                    "set",
+                    vec![js_expr(&args[0]), js_expr(&args[1])],
+                );
+            }
+            // Default: `recv[k] = v`.
+            return Js::new(
+                span,
+                JsExpr::Assign {
+                    target: Js::index(span, js_expr(r), js_expr(&args[0])),
+                    op: "=",
+                    value: js_expr(&args[1]),
+                },
+            );
         }
-        // Default: `recv[k] = v`.
-        return format!(
-            "{}[{}] = {}",
-            emit_expr(r),
-            args_s[0],
-            args_s[1]
-        );
     }
     // Attribute-writer Send: `obj.foo=(v)` → `obj.foo = v`. Ruby's
     // setter sugar dispatches as a method call on the `foo=` name;
@@ -1922,25 +1852,26 @@ fn emit_send_with_parens_inner(
         && args.len() == 1
     {
         let attr = &method[..method.len() - 1];
-        return format!(
-            "{}.{} = {}",
-            emit_expr(recv.unwrap()),
-            ts_field_name(attr),
-            args_s[0]
+        return Js::new(
+            span,
+            JsExpr::Assign {
+                target: Js::member(span, js_expr(recv.unwrap()), ts_field_name(attr)),
+                op: "=",
+                value: js_expr(&args[0]),
+            },
         );
     }
-    // `Target.new(args)` → `new Target(args)`. Ruby's standard constructor
-    // call convention; Juntos-side classes use the JS `new` keyword.
-    // Special cases for built-in types whose JS-side construction
-    // syntax diverges:
+    // `Target.new(args)` → `new Target(args)`. Ruby's standard
+    // constructor call convention. Special cases for built-in types
+    // whose JS-side construction syntax diverges:
     //   `String.new` → `""` (JS `new String()` produces a String
     //     OBJECT, not a primitive — different semantics for `+=`,
-    //     equality, etc. Plain string literal is the correct mapping
-    //     for buffer-accumulate idioms in lowered view bodies.)
+    //     equality, etc.)
     //   `Array.new` → `[]`
     //   `Hash.new` → `{}`
     if method == "new" && recv.is_some() {
-        let recv_s = emit_expr(recv.unwrap());
+        let recv_js = js_expr(recv.unwrap());
+        let recv_s = super::printer::render_expr(&recv_js);
         // Heuristic: only treat `.new(...)` as a constructor call when
         // the receiver is a bare class identifier (e.g. `Article`,
         // `Comment`). Member-access receivers like `Views.Articles`
@@ -1950,16 +1881,18 @@ fn emit_send_with_parens_inner(
         // constructor, which TS rejects at runtime. Fall through to
         // the regular member-call form for those.
         if !recv_s.contains('.') {
-            if args_s.is_empty() {
+            if args.is_empty() {
                 match recv_s.as_str() {
-                    "String" => return "\"\"".to_string(),
-                    "Array" => return "[]".to_string(),
-                    "Hash" => return "{}".to_string(),
+                    "String" => return Js::str(span, ""),
+                    "Array" => return Js::new(span, JsExpr::Array(vec![])),
+                    "Hash" => return Js::new(span, JsExpr::Object(vec![])),
                     _ => {}
                 }
-                return format!("new {recv_s}()");
             }
-            return format!("new {recv_s}({})", args_s.join(", "));
+            return Js::new(
+                span,
+                JsExpr::New { callee: recv_js, args: args.iter().map(js_expr).collect() },
+            );
         }
     }
     // `x.nil?` → `x == null` (loose equality — matches both null
@@ -1967,18 +1900,11 @@ fn emit_send_with_parens_inner(
     // (Ruby reads unset @vars as nil); the TS analog of "unset"
     // is `undefined`, not `null`. Strict `=== null` would miss
     // unset class fields and break the model constructor →
-    // `fill_timestamps` path: when a field isn't supplied in
-    // `new Article({...})`, `this.created_at` is undefined; the
-    // `if self[:created_at].nil?` guard in fill_timestamps must
-    // fire so the timestamp gets populated, otherwise the SQL
-    // INSERT fails the NOT NULL constraint.
-    //
-    // Loose `== null` is safe against the false-vs-nil concern
-    // earlier prose flagged: `false == null` is false in JS, so
-    // `x.nil?` still distinguishes nil from false. Likewise
-    // `0 == null` and `"" == null` are both false.
+    // `fill_timestamps` path. Loose `== null` is safe against the
+    // false-vs-nil concern: `false == null`, `0 == null`, and
+    // `"" == null` are all false in JS.
     if method == "nil?" && recv.is_some() && args.is_empty() {
-        return format!("{} == null", emit_expr(recv.unwrap()));
+        return Js::binary(span, "==", js_expr(recv.unwrap()), Js::synth(JsExpr::Null));
     }
     // `x.class` (Ruby reflection — returns the receiver's class
     // object) → `x.constructor` in TS, which exposes the same
@@ -1986,7 +1912,13 @@ fn emit_send_with_parens_inner(
     // through `any` so downstream property access on the
     // dynamically-typed constructor doesn't trip strict mode.
     if method == "class" && recv.is_some() && args.is_empty() {
-        return format!("({}.constructor as any)", emit_expr(recv.unwrap()));
+        return Js::new(
+            span,
+            JsExpr::Cast {
+                expr: Js::member(span, js_expr(recv.unwrap()), "constructor"),
+                ty: TsType("any".into()),
+            },
+        );
     }
     // `Time.now` → `new Date()`. Ruby's Time class has no JS
     // analog; JS Date covers the use cases the framework runtime
@@ -1995,36 +1927,42 @@ fn emit_send_with_parens_inner(
         if let Some(r) = recv {
             if let ExprNode::Const { path } = &*r.node {
                 if path.len() == 1 && path[0].as_str() == "Time" {
-                    return "new Date()".to_string();
+                    return Js::new(
+                        span,
+                        JsExpr::New { callee: Js::ident(span, "Date"), args: vec![] },
+                    );
                 }
             }
         }
     }
     // Ruby stdlib `JSON.generate(x)` → JS `JSON.stringify(x)`. Same
-    // semantics for the framework runtime's use cases (no
-    // pretty-print options, no symbol-key handling). The companion
+    // semantics for the framework runtime's use cases. The companion
     // `JSON.parse` is identical in both languages — passes through
     // the generic Const-recv dispatch.
     if method == "generate" && args.len() == 1 {
         if let Some(r) = recv {
             if let ExprNode::Const { path } = &*r.node {
                 if path.len() == 1 && path[0].as_str() == "JSON" {
-                    return format!("JSON.stringify({})", args_s[0]);
+                    return Js::method_call(
+                        span,
+                        Js::ident(r.span, "JSON"),
+                        "stringify",
+                        vec![js_expr(&args[0])],
+                    );
                 }
             }
         }
     }
     // Ruby stdlib `Base64.strict_encode64(x)` → portable browser+
     // Node form: UTF-8-encode via TextEncoder, byte-stringify via
-    // String.fromCharCode, base64 via globalThis.btoa.
+    // String.fromCharCode, base64 via btoa.
     //
     // Why not `Buffer.from(x).toString("base64")`: Buffer is a Node
     // global, undefined in browsers / SharedWorker / dedicated
     // Worker. The portable path works everywhere — Node has `btoa`,
-    // `TextEncoder`, and `String.fromCharCode` as globals since 16,
-    // browsers always have. `strict_encode64` differs from
-    // `encode64` only in not inserting newlines; `btoa` is already
-    // strict-shaped (no line breaks), matching Ruby's behavior.
+    // `TextEncoder`, and `String.fromCharCode` as globals since 16.
+    // `strict_encode64` differs from `encode64` only in not inserting
+    // newlines; `btoa` is already strict-shaped, matching Ruby.
     //
     // The `String.fromCharCode(...arr)` spread has an argument-
     // count limit (~100k on most engines), but real call sites
@@ -2036,41 +1974,59 @@ fn emit_send_with_parens_inner(
         if let Some(r) = recv {
             if let ExprNode::Const { path } = &*r.node {
                 if path.len() == 1 && path[0].as_str() == "Base64" {
-                    return format!(
-                        "btoa(String.fromCharCode(...new TextEncoder().encode({})))",
-                        args_s[0],
+                    let encoded = Js::method_call(
+                        span,
+                        Js::synth(JsExpr::New { callee: synth_ident("TextEncoder"), args: vec![] }),
+                        "encode",
+                        vec![js_expr(&args[0])],
                     );
+                    let bytes = Js::method_call(
+                        span,
+                        synth_ident("String"),
+                        "fromCharCode",
+                        vec![Js::synth(JsExpr::Spread(encoded))],
+                    );
+                    return Js::call(span, Js::ident(span, "btoa"), vec![bytes]);
                 }
             }
         }
     }
     // `<date>.utc` → no-op chained access; Date already represents
-    // an absolute UTC instant. `.utc` returns `Date` itself.
+    // an absolute UTC instant. Recognize the `new Date()` form so
+    // `Time.now.utc` collapses to `new Date()` cleanly; otherwise
+    // fall through and keep the chain readable as-is.
     if method == "utc" && args.is_empty() && recv.is_some() {
-        let inner = emit_expr(recv.unwrap());
-        // Recognize `new Date()` form so the emit collapses
-        // `Time.now.utc` → `new Date()` cleanly. Otherwise keep
-        // the chain readable as-is.
-        if inner == "new Date()" {
+        let inner = js_expr(recv.unwrap());
+        let is_new_date = matches!(
+            &*inner.node,
+            JsExpr::New { callee, args }
+                if args.is_empty() && matches!(&*callee.node, JsExpr::Ident(n) if n == "Date")
+        );
+        if is_new_date {
             return inner;
         }
     }
     // `<date>.iso8601` → `.toISOString()` — produces the Z-suffix
     // ISO-8601 string Ruby's Time#iso8601 does.
     if method == "iso8601" && args.is_empty() && recv.is_some() {
-        return format!("{}.toISOString()", emit_expr(recv.unwrap()));
+        return Js::method_call(span, js_expr(recv.unwrap()), "toISOString", vec![]);
     }
     // `<regex>.match?(s)` → `<regex>.test(s)`. Ruby's `Regexp#match?`
     // returns boolean; JS RegExp has `.test()` for the same purpose.
     // Both `match?` (predicate) and `match` (returns MatchData) get
     // mapped: predicate → `.test()`, value form → `.exec()`.
     if method == "match?" && args.len() == 1 && recv.is_some() {
-        return format!("{}.test({})", emit_expr(recv.unwrap()), args_s[0]);
+        return Js::method_call(span, js_expr(recv.unwrap()), "test", vec![js_expr(&args[0])]);
     }
     if method == "match" && args.len() == 1 && recv.is_some() {
-        if let Some(crate::ty::Ty::Class { id, .. }) = recv.unwrap().ty.as_ref() {
+        if let Some(Ty::Class { id, .. }) = recv.unwrap().ty.as_ref() {
             if id.0.as_str() == "Regexp" || id.0.as_str() == "RegExp" {
-                return format!("{}.exec({})", emit_expr(recv.unwrap()), args_s[0]);
+                return Js::method_call(
+                    span,
+                    js_expr(recv.unwrap()),
+                    "exec",
+                    vec![js_expr(&args[0])],
+                );
             }
         }
     }
@@ -2079,12 +2035,14 @@ fn emit_send_with_parens_inner(
     // the hash key) — emit just the receiver. The nil case
     // diverges from Ruby (Ruby's nil.to_s is "" but JS String(null)
     // is "null"); call sites that care should narrow first.
-    if recv.is_some() && args.is_empty() {
-        match method {
-            "to_s" => return format!("String({})", emit_expr(recv.unwrap())),
-            "to_i" => return format!("Number({})", emit_expr(recv.unwrap())),
-            "to_sym" => return emit_expr(recv.unwrap()),
-            _ => {}
+    if let Some(r) = recv {
+        if args.is_empty() {
+            match method {
+                "to_s" => return Js::call(span, Js::ident(span, "String"), vec![js_expr(r)]),
+                "to_i" => return Js::call(span, Js::ident(span, "Number"), vec![js_expr(r)]),
+                "to_sym" => return js_expr(r),
+                _ => {}
+            }
         }
     }
     // `x.is_a?(ClassRef)` → JS form. Most Ruby classes are
@@ -2095,13 +2053,31 @@ fn emit_send_with_parens_inner(
     // Array gets `Array.isArray(x)` (cross-realm safe) instead of
     // `instanceof Array`.
     if method == "is_a?" && recv.is_some() && args.len() == 1 {
-        let recv_s = emit_expr(recv.unwrap());
-        let class_s = &args_s[0];
-        return match class_s.as_str() {
-            "String" => format!("typeof {recv_s} === \"string\""),
-            "Integer" => format!("Number.isInteger({recv_s})"),
-            "Float" => format!("typeof {recv_s} === \"number\" && !Number.isInteger({recv_s})"),
-            "Numeric" => format!("typeof {recv_s} === \"number\""),
+        let r = recv.unwrap();
+        let class_name = match &*args[0].node {
+            ExprNode::Const { path } if path.len() == 1 => Some(path[0].as_str()),
+            _ => None,
+        };
+        let typeof_is =
+            |s: &str| Js::binary(span, "===", Js::unary(span, "typeof ", js_expr(r)), Js::str(span, s));
+        let is_array =
+            || Js::method_call(span, synth_ident("Array"), "isArray", vec![js_expr(r)]);
+        return match class_name {
+            Some("String") => typeof_is("string"),
+            Some("Integer") => {
+                Js::method_call(span, synth_ident("Number"), "isInteger", vec![js_expr(r)])
+            }
+            Some("Float") => Js::binary(
+                span,
+                "&&",
+                typeof_is("number"),
+                Js::unary(
+                    span,
+                    "!",
+                    Js::method_call(span, synth_ident("Number"), "isInteger", vec![js_expr(r)]),
+                ),
+            ),
+            Some("Numeric") => typeof_is("number"),
             // Ruby Symbol values render as TS strings (Lit::Sym
             // emits as a quoted string), so `is_a?(Symbol)` maps to
             // the same `typeof === "string"` check `is_a?(String)`
@@ -2109,49 +2085,53 @@ fn emit_send_with_parens_inner(
             // narrows TS's static type to `symbol`, which then
             // triggers TS2731 ("implicit Symbol-to-string coercion")
             // on subsequent template-literal interpolations.
-            "Symbol" => format!("typeof {recv_s} === \"string\""),
-            "Array" => format!("Array.isArray({recv_s})"),
-            "TrueClass" | "FalseClass" => format!("typeof {recv_s} === \"boolean\""),
+            Some("Symbol") => typeof_is("string"),
+            Some("Array") => is_array(),
+            Some("TrueClass") | Some("FalseClass") => typeof_is("boolean"),
             // Ruby's `Hash` is a plain object in JS — no constructor
             // class to `instanceof` against. The plain-object check
             // is "typeof object && not null && not array".
-            "Hash" => format!(
-                "typeof {recv_s} === \"object\" && {recv_s} !== null && !Array.isArray({recv_s})"
+            Some("Hash") => Js::binary(
+                span,
+                "&&",
+                Js::binary(
+                    span,
+                    "&&",
+                    typeof_is("object"),
+                    Js::binary(span, "!==", js_expr(r), Js::synth(JsExpr::Null)),
+                ),
+                Js::unary(span, "!", is_array()),
             ),
             // `Regexp` is the Ruby builtin name; JS spells it
             // `RegExp` — same semantics, `instanceof` works once
             // the class name is corrected.
-            "Regexp" => format!("{recv_s} instanceof RegExp"),
-            _ => format!("{recv_s} instanceof {class_s}"),
+            Some("Regexp") => {
+                Js::binary(span, "instanceof", js_expr(r), Js::ident(args[0].span, "RegExp"))
+            }
+            _ => Js::binary(span, "instanceof", js_expr(r), js_expr(&args[0])),
         };
     }
     // Kernel `raise` — the runtime_src self-rewrite leaves it as
-    // Send-no-recv. Two source surfaces:
-    //   `raise X, "msg"`  → `throw new X("msg")`
+    // Send-no-recv. Source surfaces:
+    //   `raise X, "msg"`     → `throw new X("msg")`
     //   `raise X.new("msg")` → `throw new X("msg")` (already a Send)
-    //   `raise "msg"`     → `throw new Error("msg")`
-    // The bare-error form (`raise "msg"`) hasn't been observed in the
-    // framework runtime yet; add a case if it appears.
+    //   `raise "msg"`        → throws the string (bare-error form
+    //                          hasn't been observed in the framework
+    //                          runtime; add a case if it appears)
+    // Ruby builtin error classes collapse to `Error` in the Const
+    // emit, so `raise NotImplementedError, "..."` lands as
+    // `throw new Error("...")` without a separate mapping here.
     if method == "raise" && recv.is_none() {
-        match args.len() {
-            2 => {
-                // Ruby builtin error classes that have no TS analog
-                // collapse to `Error`. Without this, the emitted code
-                // references undeclared globals (`new NotImplementedError(...)`)
-                // and tsc bails out with TS2304.
-                let class_s = match args_s[0].as_str() {
-                    "NotImplementedError" | "ArgumentError" | "RuntimeError"
-                    | "TypeError" | "NameError" | "NoMethodError"
-                    | "StandardError" | "KeyError" | "IndexError" => "Error",
-                    other => other,
-                };
-                return format!(
-                    "(() => {{ throw new {}({}); }})()",
-                    class_s, args_s[1],
+        match args {
+            [class_e, msg_e] => {
+                let err = Js::new(
+                    span,
+                    JsExpr::New { callee: js_expr(class_e), args: vec![js_expr(msg_e)] },
                 );
+                return iife(span, vec![JsStmt::synth(JsStmtNode::Throw(err))]);
             }
-            1 => {
-                return format!("(() => {{ throw {}; }})()", args_s[0]);
+            [value] => {
+                return iife(span, vec![JsStmt::synth(JsStmtNode::Throw(js_expr(value)))]);
             }
             _ => {}
         }
@@ -2159,48 +2139,41 @@ fn emit_send_with_parens_inner(
     // Kernel `puts` / `print` / `p` / `pp` — map to `console.log`.
     // The rewrite pass leaves these as Send-no-recv (alongside `raise`)
     // so they don't pick up an inappropriate `this.` prefix in static
-    // method bodies. Ruby's variants differ in inspect-vs-to_s formatting
-    // and trailing-newline handling; `console.log` is close enough for
-    // the diagnostic purpose these calls serve in seeds / generators,
-    // and avoids a per-variant runtime shim.
+    // method bodies. Ruby's variants differ in inspect-vs-to_s
+    // formatting and trailing-newline handling; `console.log` is close
+    // enough for the diagnostic purpose these calls serve.
     if recv.is_none() && matches!(method, "puts" | "print" | "p" | "pp") {
-        return format!("console.log({})", args_s.join(", "));
+        return Js::method_call(
+            span,
+            Js::ident(span, "console"),
+            "log",
+            args.iter().map(js_expr).collect(),
+        );
     }
     // Kernel `require` / `require_relative` / `load` / `autoload`
     // — Ruby's late-bound module loading. TS resolves modules at
     // import time via ES module syntax (handled separately in the
-    // file header), so call-site `require "base64"` has no
-    // analog and drops to a no-op. Emitting `null` keeps the
-    // statement well-formed; treeshake / minifier elide it.
-    if recv.is_none()
-        && matches!(method, "require" | "require_relative" | "load" | "autoload")
-    {
-        return "null".to_string();
+    // file header), so call-site `require "base64"` has no analog
+    // and drops to a no-op. Emitting `null` keeps the statement
+    // well-formed; treeshake / minifier elide it.
+    if recv.is_none() && matches!(method, "require" | "require_relative" | "load" | "autoload") {
+        return Js::new(span, JsExpr::Null);
     }
-    // `x.!` — the Send-channel form of unary `!` (e.g., `!cond` lowered
-    // to `cond.!`). Emit TS's prefix `!`. Parenthesize the operand so
-    // `!x.nil?` (which lowers `nil?` to `x === null`) emits as
-    // `!(x === null)` not `!x === null` — the latter parses as
-    // `(!x) === null` and inverts the meaning.
-    //
-    // Two surface forms reach here, both meaning "logical not":
+    // `x.!` — the Send-channel form of unary `!`. Two surface forms
+    // reach here, both meaning "logical not":
     //   Send { recv: Some(x), method: "!", args: [] }   — Ruby's x.!()
     //   Send { recv: None,    method: "!", args: [x] }  — view_to_library's
     //                                                     `not_x = send(None, "!", [x])`
-    // Handle both with the same prefix-`!` emission.
+    // The printer parenthesizes the operand when its precedence
+    // demands it (`!(x === null)` etc.).
     if method == "!" {
-        let inner_expr: Option<&Expr> = match (recv, args) {
+        let inner: Option<&Expr> = match (recv, args) {
             (Some(r), []) => Some(r),
             (None, [a]) => Some(a),
             _ => None,
         };
-        if let Some(inner) = inner_expr {
-            let inner_s = emit_expr(inner);
-            return if needs_parens_for_unary_not(&inner_s) {
-                format!("!({inner_s})")
-            } else {
-                format!("!{inner_s}")
-            };
+        if let Some(inner) = inner {
+            return Js::unary(span, "!", js_expr(inner));
         }
     }
     // Type-aware per-receiver dispatch. The receiver type may be
@@ -2214,43 +2187,66 @@ fn emit_send_with_parens_inner(
             // they diverge: `.each` → `.forEach`, `.size` → `.length`).
             Some(Ty::Array { .. }) => match method {
                 "each" => {
-                    let recv_s = emit_expr(r);
-                    return if args_s.is_empty() {
-                        format!("{recv_s}.forEach")
+                    return if args.is_empty() {
+                        Js::member(span, js_expr(r), "forEach")
                     } else {
-                        format!("{recv_s}.forEach({})", args_s.join(", "))
+                        Js::method_call(
+                            span,
+                            js_expr(r),
+                            "forEach",
+                            args.iter().map(js_expr).collect(),
+                        )
                     };
                 }
                 "size" | "length" | "count" if args.is_empty() => {
-                    return format!("{}.length", emit_expr(r));
+                    return Js::member(span, js_expr(r), "length");
                 }
                 "empty?" if args.is_empty() => {
-                    return format!("{}.length === 0", emit_expr(r));
+                    return Js::binary(
+                        span,
+                        "===",
+                        Js::member(span, js_expr(r), "length"),
+                        Js::num(span, "0"),
+                    );
                 }
                 "any?" if args.is_empty() => {
-                    return format!("{}.length > 0", emit_expr(r));
+                    return Js::binary(
+                        span,
+                        ">",
+                        Js::member(span, js_expr(r), "length"),
+                        Js::num(span, "0"),
+                    );
                 }
                 "first" if args.is_empty() => {
-                    return format!("{}[0]", emit_expr(r));
+                    return Js::index(span, js_expr(r), Js::num(span, "0"));
                 }
                 "last" if args.is_empty() => {
-                    let recv_s = emit_expr(r);
-                    return format!("{recv_s}[{recv_s}.length - 1]");
+                    let idx = Js::binary(
+                        span,
+                        "-",
+                        Js::member(span, js_expr(r), "length"),
+                        Js::num(Span::synthetic(), "1"),
+                    );
+                    return Js::index(span, js_expr(r), idx);
                 }
                 // Ruby's `arr.reverse` returns a new array; JS Array
                 // has the same name but mutates in place. Pair it with
                 // a `[...arr]` spread so the receiver isn't clobbered.
-                // Also covers the bare-call form (`arr.reverse` without
-                // parens) — Ruby allows zero-arg method calls without
-                // parens, but TS requires `()` so we always emit them.
                 "reverse" if args.is_empty() => {
-                    return format!("[...{}].reverse()", emit_expr(r));
+                    let copy =
+                        Js::new(span, JsExpr::Array(vec![Js::synth(JsExpr::Spread(js_expr(r)))]));
+                    return Js::method_call(span, copy, "reverse", vec![]);
                 }
                 // `arr.to_a` is a no-op on arrays; arr.to_h converts
-                // a `[[k, v], ...]` array to an object via Object.fromEntries.
-                "to_a" if args.is_empty() => return emit_expr(r),
+                // a `[[k, v], ...]` array to an object.
+                "to_a" if args.is_empty() => return js_expr(r),
                 "to_h" if args.is_empty() => {
-                    return format!("Object.fromEntries({})", emit_expr(r));
+                    return Js::method_call(
+                        span,
+                        synth_ident("Object"),
+                        "fromEntries",
+                        vec![js_expr(r)],
+                    );
                 }
                 // `arr.sort_by { |x| key(x) }` returns a new array
                 // sorted by the key. JS Array#sort takes a comparator
@@ -2260,11 +2256,49 @@ fn emit_send_with_parens_inner(
                 // `[...arr]` makes a copy (Ruby sort_by is
                 // non-mutating; JS sort mutates in place).
                 "sort_by" if args.len() == 1 => {
-                    let recv_s = emit_expr(r);
-                    let key_fn = &args_s[0];
-                    return format!(
-                        "((__arr, __key) => [...__arr].sort((a, b) => {{ const ka = __key(a); const kb = __key(b); return ka < kb ? -1 : ka > kb ? 1 : 0; }}))({recv_s}, {key_fn})"
+                    let ka = const_decl(
+                        "ka",
+                        Js::call(Span::synthetic(), synth_ident("__key"), vec![synth_ident("a")]),
                     );
+                    let kb = const_decl(
+                        "kb",
+                        Js::call(Span::synthetic(), synth_ident("__key"), vec![synth_ident("b")]),
+                    );
+                    let cmp = Js::synth(JsExpr::Ternary {
+                        cond: Js::binary(
+                            Span::synthetic(),
+                            "<",
+                            synth_ident("ka"),
+                            synth_ident("kb"),
+                        ),
+                        then: Js::num(Span::synthetic(), "-1"),
+                        else_: Js::synth(JsExpr::Ternary {
+                            cond: Js::binary(
+                                Span::synthetic(),
+                                ">",
+                                synth_ident("ka"),
+                                synth_ident("kb"),
+                            ),
+                            then: Js::num(Span::synthetic(), "1"),
+                            else_: Js::num(Span::synthetic(), "0"),
+                        }),
+                    });
+                    let comparator = Js::synth(JsExpr::Arrow {
+                        params: vec![js_param("a"), js_param("b")],
+                        body: ArrowBody::Block(vec![ka, kb, return_stmt(Some(cmp))]),
+                        is_async: false,
+                    });
+                    let copy = Js::synth(JsExpr::Array(vec![Js::synth(JsExpr::Spread(
+                        synth_ident("__arr"),
+                    ))]));
+                    let sorted =
+                        Js::method_call(Span::synthetic(), copy, "sort", vec![comparator]);
+                    let shell = Js::synth(JsExpr::Arrow {
+                        params: vec![js_param("__arr"), js_param("__key")],
+                        body: ArrowBody::Expr(sorted),
+                        is_async: false,
+                    });
+                    return Js::call(span, shell, vec![js_expr(r), js_expr(&args[0])]);
                 }
                 // `arr.sort` (no block) → JS Array#sort with default
                 // comparator on a fresh copy. JS's default sort is
@@ -2272,17 +2306,24 @@ fn emit_send_with_parens_inner(
                 // diverges for numbers but those need an explicit
                 // comparator anyway).
                 "sort" if args.is_empty() => {
-                    return format!("[...{}].sort()", emit_expr(r));
+                    let copy =
+                        Js::new(span, JsExpr::Array(vec![Js::synth(JsExpr::Spread(js_expr(r)))]));
+                    return Js::method_call(span, copy, "sort", vec![]);
                 }
                 // Ruby's `Array#join` with no args uses `$,` as the
-                // separator (defaults to nil → "").  JS's
+                // separator (defaults to nil → ""). JS's
                 // `Array.prototype.join()` defaults to "," — wrong
                 // semantics. Always pass an explicit separator.
                 "join" if args.is_empty() => {
-                    return format!("{}.join(\"\")", emit_expr(r));
+                    return Js::method_call(
+                        span,
+                        js_expr(r),
+                        "join",
+                        vec![Js::str(Span::synthetic(), "")],
+                    );
                 }
                 "join" if args.len() == 1 => {
-                    return format!("{}.join({})", emit_expr(r), args_s[0]);
+                    return Js::method_call(span, js_expr(r), "join", vec![js_expr(&args[0])]);
                 }
                 _ => {}
             },
@@ -2290,54 +2331,116 @@ fn emit_send_with_parens_inner(
             // case-shift helpers map to JS String methods.
             Some(Ty::Str) => match method {
                 "empty?" if args.is_empty() => {
-                    return format!("{}.length === 0", emit_expr(r));
+                    return Js::binary(
+                        span,
+                        "===",
+                        Js::member(span, js_expr(r), "length"),
+                        Js::num(span, "0"),
+                    );
                 }
                 "size" | "length" if args.is_empty() => {
-                    return format!("{}.length", emit_expr(r));
+                    return Js::member(span, js_expr(r), "length");
                 }
                 "upcase" if args.is_empty() => {
-                    return format!("{}.toUpperCase()", emit_expr(r));
+                    return Js::method_call(span, js_expr(r), "toUpperCase", vec![]);
                 }
                 "downcase" if args.is_empty() => {
-                    return format!("{}.toLowerCase()", emit_expr(r));
+                    return Js::method_call(span, js_expr(r), "toLowerCase", vec![]);
                 }
                 "capitalize" if args.is_empty() => {
                     // JS has no built-in capitalize. Match Ruby's
                     // semantics: uppercase the first char, lowercase
                     // the rest. Wrap in IIFE so the receiver expr is
-                    // evaluated once even when we reference it twice.
-                    let recv_s = emit_expr(r);
-                    return format!(
-                        "(__s => __s.charAt(0).toUpperCase() + __s.slice(1).toLowerCase())({recv_s})"
+                    // evaluated once even though we reference it twice.
+                    let s = || synth_ident("__s");
+                    let head = Js::method_call(
+                        Span::synthetic(),
+                        Js::method_call(
+                            Span::synthetic(),
+                            s(),
+                            "charAt",
+                            vec![Js::num(Span::synthetic(), "0")],
+                        ),
+                        "toUpperCase",
+                        vec![],
                     );
+                    let tail = Js::method_call(
+                        Span::synthetic(),
+                        Js::method_call(
+                            Span::synthetic(),
+                            s(),
+                            "slice",
+                            vec![Js::num(Span::synthetic(), "1")],
+                        ),
+                        "toLowerCase",
+                        vec![],
+                    );
+                    let shell = Js::synth(JsExpr::Arrow {
+                        params: vec![js_param("__s")],
+                        body: ArrowBody::Expr(Js::binary(Span::synthetic(), "+", head, tail)),
+                        is_async: false,
+                    });
+                    return Js::call(span, shell, vec![js_expr(r)]);
                 }
                 "strip" if args.is_empty() => {
-                    return format!("{}.trim()", emit_expr(r));
+                    return Js::method_call(span, js_expr(r), "trim", vec![]);
                 }
                 "reverse" if args.is_empty() => {
-                    return format!("{}.split(\"\").reverse().join(\"\")", emit_expr(r));
+                    let chars = Js::method_call(
+                        span,
+                        js_expr(r),
+                        "split",
+                        vec![Js::str(Span::synthetic(), "")],
+                    );
+                    let reversed = Js::method_call(span, chars, "reverse", vec![]);
+                    return Js::method_call(
+                        span,
+                        reversed,
+                        "join",
+                        vec![Js::str(Span::synthetic(), "")],
+                    );
                 }
                 "chars" if args.is_empty() => {
-                    return format!("{}.split(\"\")", emit_expr(r));
+                    return Js::method_call(
+                        span,
+                        js_expr(r),
+                        "split",
+                        vec![Js::str(Span::synthetic(), "")],
+                    );
                 }
                 "start_with?" if args.len() == 1 => {
-                    return format!("{}.startsWith({})", emit_expr(r), args_s[0]);
+                    return Js::method_call(
+                        span,
+                        js_expr(r),
+                        "startsWith",
+                        vec![js_expr(&args[0])],
+                    );
                 }
                 "end_with?" if args.len() == 1 => {
-                    return format!("{}.endsWith({})", emit_expr(r), args_s[0]);
+                    return Js::method_call(
+                        span,
+                        js_expr(r),
+                        "endsWith",
+                        vec![js_expr(&args[0])],
+                    );
                 }
                 "include?" if args.len() == 1 => {
-                    return format!("{}.includes({})", emit_expr(r), args_s[0]);
+                    return Js::method_call(
+                        span,
+                        js_expr(r),
+                        "includes",
+                        vec![js_expr(&args[0])],
+                    );
                 }
                 // `s.sub(pat, repl)` → `s.replace(pat, repl)` (first
                 // match only — JS replace's default semantics match
                 // Ruby sub).
                 "sub" if args.len() == 2 => {
-                    return format!(
-                        "{}.replace({}, {})",
-                        emit_expr(r),
-                        args_s[0],
-                        args_s[1],
+                    return Js::method_call(
+                        span,
+                        js_expr(r),
+                        "replace",
+                        vec![js_expr(&args[0]), js_expr(&args[1])],
                     );
                 }
                 // `s.gsub(pat, repl)` → `s.replace(pat_with_g, repl)`.
@@ -2349,26 +2452,43 @@ fn emit_send_with_parens_inner(
                 // lookup callback `m => MAP[m]`.
                 "gsub" if args.len() == 2 => {
                     // HTML escaper fast path: `s.gsub(HTML_ESCAPE_PATTERN,
-                    // HTML_ESCAPES)`. The generic Const-pattern branch below
-                    // can't see the named constant's type, so it builds
-                    // `new RegExp(pat.source, pat.flags + "g")` from the
-                    // source string on *every call* — recompiling the regex
-                    // per request. Emit an inline literal `/[&<>"']/g`
-                    // instead: a regex literal is compiled and cached once by
-                    // the engine, so the per-call recompilation goes away.
-                    // Same five-character class and `HTML_ESCAPES` lookup —
-                    // identical output and DOM. Keyed on the `HTML_ESCAPES`
-                    // constant so json_builder's escaper (different set)
-                    // keeps the generic form.
+                    // HTML_ESCAPES)`. The generic Const-pattern branch
+                    // below can't see the named constant's type, so it
+                    // builds `new RegExp(pat.source, pat.flags + "g")`
+                    // from the source string on *every call* —
+                    // recompiling the regex per request. Emit an inline
+                    // literal `/[&<>"']/g` instead: a regex literal is
+                    // compiled and cached once by the engine. Keyed on
+                    // the `HTML_ESCAPES` constant so json_builder's
+                    // escaper (different set) keeps the generic form.
                     if let ExprNode::Const { path } = &*args[1].node {
                         if path.last().map(|s| s.as_str()) == Some("HTML_ESCAPES") {
-                            return format!(
-                                "{}.replace(/[&<>\"']/g, (__m: string) => ({})[__m])",
-                                emit_expr(r), args_s[1],
+                            let pat = Js::synth(JsExpr::Regex {
+                                pattern: "[&<>\"']".into(),
+                                flags: "g".into(),
+                            });
+                            let lookup = Js::synth(JsExpr::Arrow {
+                                params: vec![JsParam {
+                                    name: "__m".into(),
+                                    optional: false,
+                                    ty: Some(TsType("string".into())),
+                                    default: None,
+                                }],
+                                body: ArrowBody::Expr(Js::synth(JsExpr::Index {
+                                    obj: js_expr(&args[1]),
+                                    index: synth_ident("__m"),
+                                })),
+                                is_async: false,
+                            });
+                            return Js::method_call(
+                                span,
+                                js_expr(r),
+                                "replace",
+                                vec![pat, lookup],
                             );
                         }
                     }
-                    let pat_s = if let ExprNode::Lit {
+                    let pat_js = if let ExprNode::Lit {
                         value: Literal::Regex { pattern, flags },
                     } = &*args[0].node
                     {
@@ -2377,22 +2497,74 @@ fn emit_send_with_parens_inner(
                         } else {
                             format!("{flags}g")
                         };
-                        format!("/{pattern}/{new_flags}")
-                    } else {
-                        // Runtime check — covers Const refs to
-                        // regex constants (`HTML_ESCAPE_PATTERN`)
-                        // whose type isn't visible at emit time.
-                        let raw = &args_s[0];
-                        format!(
-                            "{raw} instanceof RegExp && !{raw}.flags.includes(\"g\") ? new RegExp({raw}.source, {raw}.flags + \"g\") : {raw}",
+                        Js::new(
+                            args[0].span,
+                            JsExpr::Regex {
+                                pattern: translate_ruby_regex_anchors(pattern),
+                                flags: new_flags,
+                            },
                         )
-                    };
-                    let repl_s = if matches!(args[1].ty.as_ref(), Some(Ty::Hash { .. })) {
-                        format!("(__m: string) => ({})[__m]", args_s[1])
                     } else {
-                        args_s[1].clone()
+                        // Runtime check — covers Const refs to regex
+                        // constants (`HTML_ESCAPE_PATTERN`) whose type
+                        // isn't visible at emit time.
+                        let raw = || js_expr(&args[0]);
+                        let needs_flag = Js::binary(
+                            Span::synthetic(),
+                            "&&",
+                            Js::binary(
+                                Span::synthetic(),
+                                "instanceof",
+                                raw(),
+                                synth_ident("RegExp"),
+                            ),
+                            Js::unary(
+                                Span::synthetic(),
+                                "!",
+                                Js::method_call(
+                                    Span::synthetic(),
+                                    Js::member(Span::synthetic(), raw(), "flags"),
+                                    "includes",
+                                    vec![Js::str(Span::synthetic(), "g")],
+                                ),
+                            ),
+                        );
+                        let with_flag = Js::synth(JsExpr::New {
+                            callee: synth_ident("RegExp"),
+                            args: vec![
+                                Js::member(Span::synthetic(), raw(), "source"),
+                                Js::binary(
+                                    Span::synthetic(),
+                                    "+",
+                                    Js::member(Span::synthetic(), raw(), "flags"),
+                                    Js::str(Span::synthetic(), "g"),
+                                ),
+                            ],
+                        });
+                        Js::synth(JsExpr::Ternary {
+                            cond: needs_flag,
+                            then: with_flag,
+                            else_: raw(),
+                        })
                     };
-                    return format!("{}.replace({pat_s}, {repl_s})", emit_expr(r));
+                    let repl_js = if matches!(args[1].ty.as_ref(), Some(Ty::Hash { .. })) {
+                        Js::synth(JsExpr::Arrow {
+                            params: vec![JsParam {
+                                name: "__m".into(),
+                                optional: false,
+                                ty: Some(TsType("string".into())),
+                                default: None,
+                            }],
+                            body: ArrowBody::Expr(Js::synth(JsExpr::Index {
+                                obj: js_expr(&args[1]),
+                                index: synth_ident("__m"),
+                            })),
+                            is_async: false,
+                        })
+                    } else {
+                        js_expr(&args[1])
+                    };
+                    return Js::method_call(span, js_expr(r), "replace", vec![pat_js, repl_js]);
                 }
                 // `s.tr(from, to)` — character translation. Limited
                 // to single-char from/to (covers framework Ruby's
@@ -2411,16 +2583,17 @@ fn emit_send_with_parens_inner(
                             // regex character class.
                             let c = from.chars().next().unwrap();
                             let escaped = match c {
-                                '\\' | '/' | '^' | '$' | '.' | '|' | '?'
-                                | '*' | '+' | '(' | ')' | '[' | ']' | '{'
-                                | '}' => format!("\\{c}"),
+                                '\\' | '/' | '^' | '$' | '.' | '|' | '?' | '*' | '+' | '('
+                                | ')' | '[' | ']' | '{' | '}' => format!("\\{c}"),
                                 _ => c.to_string(),
                             };
-                            return format!(
-                                "{}.replace(/{}/g, {:?})",
-                                emit_expr(r),
-                                escaped,
-                                to,
+                            let pat =
+                                Js::synth(JsExpr::Regex { pattern: escaped, flags: "g".into() });
+                            return Js::method_call(
+                                span,
+                                js_expr(r),
+                                "replace",
+                                vec![pat, Js::str(args[1].span, to.clone())],
                             );
                         }
                     }
@@ -2431,22 +2604,40 @@ fn emit_send_with_parens_inner(
             // `.key?` becomes the `in` operator; `.empty?` counts keys;
             // `.each |k, v|` iterates entries.
             Some(Ty::Hash { .. }) => {
-                let recv_s = emit_expr(r);
+                let keys = || {
+                    Js::method_call(span, synth_ident("Object"), "keys", vec![js_expr(r)])
+                };
                 match method {
                     "key?" | "has_key?" | "include?" if args.len() == 1 => {
-                        return format!("{} in {recv_s}", args_s[0]);
+                        return Js::binary(span, "in", js_expr(&args[0]), js_expr(r));
                     }
                     "empty?" if args.is_empty() => {
-                        return format!("Object.keys({recv_s}).length === 0");
+                        return Js::binary(
+                            span,
+                            "===",
+                            Js::member(span, keys(), "length"),
+                            Js::num(span, "0"),
+                        );
                     }
                     "any?" if args.is_empty() => {
-                        return format!("Object.keys({recv_s}).length > 0");
+                        return Js::binary(
+                            span,
+                            ">",
+                            Js::member(span, keys(), "length"),
+                            Js::num(span, "0"),
+                        );
                     }
                     "size" | "length" if args.is_empty() => {
-                        return format!("Object.keys({recv_s}).length");
+                        return Js::member(span, keys(), "length");
                     }
                     "merge" if args.len() == 1 => {
-                        return format!("{{ ...{recv_s}, ...{} }}", args_s[0]);
+                        return Js::new(
+                            span,
+                            JsExpr::Object(vec![
+                                JsObjEntry::Spread(js_expr(r)),
+                                JsObjEntry::Spread(js_expr(&args[0])),
+                            ]),
+                        );
                     }
                     // `hash.delete(key)` — Ruby removes the key in
                     // place and returns the deleted value (or nil).
@@ -2454,61 +2645,98 @@ fn emit_send_with_parens_inner(
                     // `delete` keyword is the statement form. Emit
                     // an IIFE so the Send expression is valid in
                     // both expression and statement position, and so
-                    // the return value matches Ruby (the prior
-                    // value at the key, or `undefined` if absent —
-                    // close enough to nil for the framework's call
-                    // sites).
+                    // the return value matches Ruby (the prior value
+                    // at the key, or `undefined` if absent — close
+                    // enough to nil for the framework's call sites).
                     "delete" if args.len() == 1 => {
-                        return format!(
-                            "((__h, __k) => {{ const __v = __h[__k]; delete __h[__k]; return __v; }})({recv_s}, {})",
-                            args_s[0],
-                        );
+                        let h = || synth_ident("__h");
+                        let k = || synth_ident("__k");
+                        let entry = || {
+                            Js::synth(JsExpr::Index { obj: h(), index: k() })
+                        };
+                        let stmts = vec![
+                            const_decl("__v", entry()),
+                            JsStmt::expr(Js::unary(Span::synthetic(), "delete ", entry())),
+                            return_stmt(Some(synth_ident("__v"))),
+                        ];
+                        let shell = Js::synth(JsExpr::Arrow {
+                            params: vec![js_param("__h"), js_param("__k")],
+                            body: ArrowBody::Block(stmts),
+                            is_async: false,
+                        });
+                        return Js::call(span, shell, vec![js_expr(r), js_expr(&args[0])]);
                     }
-                    "keys" if args.is_empty() => {
-                        return format!("Object.keys({recv_s})");
-                    }
+                    "keys" if args.is_empty() => return keys(),
                     "values" if args.is_empty() => {
-                        return format!("Object.values({recv_s})");
+                        return Js::method_call(
+                            span,
+                            synth_ident("Object"),
+                            "values",
+                            vec![js_expr(r)],
+                        );
                     }
                     // `.to_h` on a Hash is a no-op in Ruby — emit the
                     // receiver verbatim. The strong-params chain
                     // (`params.require(:k).permit(:a, :b).to_h`) is
                     // the common producer.
-                    "to_h" if args.is_empty() => return recv_s,
+                    "to_h" if args.is_empty() => return js_expr(r),
                     // `hash.fetch(key, default)` → `hash[key] ?? default`.
                     // Spec lowering's `<Resource>Params.from_raw` body
                     // emits `params.fetch("title", "")` for each
                     // permitted field; without this rewrite the Send
                     // emits literally and tsc rejects since
                     // `Record<string, any>` has no `.fetch`. The
-                    // single-arg form falls through to a bracket
-                    // index — Ruby's KeyError on missing key isn't
-                    // modeled in TS.
+                    // single-arg form becomes a bracket index — Ruby's
+                    // KeyError on missing key isn't modeled in TS.
                     "fetch" if args.len() == 2 => {
-                        return format!("{recv_s}[{}] ?? {}", args_s[0], args_s[1]);
+                        return Js::binary(
+                            span,
+                            "??",
+                            Js::index(span, js_expr(r), js_expr(&args[0])),
+                            js_expr(&args[1]),
+                        );
                     }
                     "fetch" if args.len() == 1 => {
-                        return format!("{recv_s}[{}]", args_s[0]);
+                        return Js::index(span, js_expr(r), js_expr(&args[0]));
                     }
                     "dup" | "clone" if args.is_empty() => {
-                        return format!("{{ ...{recv_s} }}");
+                        return Js::new(
+                            span,
+                            JsExpr::Object(vec![JsObjEntry::Spread(js_expr(r))]),
+                        );
                     }
-                    "each" if args_s.len() <= 1 => {
+                    "each" if args.len() <= 1 => {
                         // `hash.each |k, v| { ... }` lowers to a
                         // 2-arg block. JS's `Object.entries(o).forEach`
                         // passes a single `[k, v]` tuple; wrap the
                         // block in a forwarder that pulls the pair
                         // apart so the caller-supplied 2-arg lambda
-                        // sees `(k, v)` as Ruby intended. Without the
-                        // forwarder, a `(k, v) =>` block would receive
-                        // `[k, v], index, _arr` instead.
-                        return if args_s.is_empty() {
-                            format!("Object.entries({recv_s})")
+                        // sees `(k, v)` as Ruby intended.
+                        let entries = Js::method_call(
+                            span,
+                            synth_ident("Object"),
+                            "entries",
+                            vec![js_expr(r)],
+                        );
+                        return if args.is_empty() {
+                            entries
                         } else {
-                            format!(
-                                "Object.entries({recv_s}).forEach(__p => ({})(__p[0], __p[1]))",
-                                args_s[0],
-                            )
+                            let pair_index = |i: &str| {
+                                Js::synth(JsExpr::Index {
+                                    obj: synth_ident("__p"),
+                                    index: Js::num(Span::synthetic(), i),
+                                })
+                            };
+                            let forward = Js::synth(JsExpr::Arrow {
+                                params: vec![js_param("__p")],
+                                body: ArrowBody::Expr(Js::call(
+                                    Span::synthetic(),
+                                    js_expr(&args[0]),
+                                    vec![pair_index("0"), pair_index("1")],
+                                )),
+                                is_async: false,
+                            });
+                            Js::method_call(span, entries, "forEach", vec![forward])
                         };
                     }
                     _ => {}
@@ -2529,19 +2757,21 @@ fn emit_send_with_parens_inner(
         if let Some(recv_ty) = &r.ty {
             match recv_ty {
                 Ty::Class { .. } => {
-                    return format!("{}.add({})", emit_expr(r), args_s[0]);
+                    return Js::method_call(span, js_expr(r), "add", vec![js_expr(&args[0])]);
                 }
                 Ty::Array { .. } => {
-                    return format!("{}.push({})", emit_expr(r), args_s[0]);
+                    return Js::method_call(span, js_expr(r), "push", vec![js_expr(&args[0])]);
                 }
                 // Ruby's `str << x` appends in place. TS strings
                 // are immutable, but the receiver is always a
                 // local variable in our view-builder pattern (the
                 // synthesized `io` buffer), so `+=` produces the
-                // same effect at the call site. View bodies use
-                // this as `io << "...html..."` to accumulate output.
+                // same effect at the call site.
                 Ty::Str => {
-                    return format!("{} += {}", emit_expr(r), args_s[0]);
+                    return Js::new(
+                        span,
+                        JsExpr::Assign { target: js_expr(r), op: "+=", value: js_expr(&args[0]) },
+                    );
                 }
                 _ => {}
             }
@@ -2557,13 +2787,16 @@ fn emit_send_with_parens_inner(
             use crate::emit::shared::add::{classify_add, AddCase};
             match classify_add(r, arg) {
                 AddCase::ArrayConcat { .. } => {
-                    return format!("[...{}, ...{}]", emit_expr(r), emit_expr(arg));
+                    return Js::new(
+                        span,
+                        JsExpr::Array(vec![
+                            Js::synth(JsExpr::Spread(js_expr(r))),
+                            Js::synth(JsExpr::Spread(js_expr(arg))),
+                        ]),
+                    );
                 }
                 AddCase::Incompatible => {
-                    // Emit a runtime throw via IIFE; `throw` is a
-                    // statement in JS/TS so wrapping is required to
-                    // keep the form expression-valued.
-                    return r#"(() => { throw new Error("roundhouse: + with incompatible operand types"); })()"#.to_string();
+                    return iife_throw_msg(span, "roundhouse: + with incompatible operand types");
                 }
                 _ => {}
             }
@@ -2574,40 +2807,52 @@ fn emit_send_with_parens_inner(
             use crate::emit::shared::sub::{classify_sub, SubCase};
             match classify_sub(r, arg) {
                 SubCase::ArrayDifference { .. } => {
-                    return format!(
-                        "{}.filter(x => !{}.includes(x))",
-                        emit_expr(r),
-                        emit_expr(arg)
-                    );
+                    let pred = Js::synth(JsExpr::Arrow {
+                        params: vec![js_param("x")],
+                        body: ArrowBody::Expr(Js::unary(
+                            Span::synthetic(),
+                            "!",
+                            Js::method_call(
+                                Span::synthetic(),
+                                js_expr(arg),
+                                "includes",
+                                vec![synth_ident("x")],
+                            ),
+                        )),
+                        is_async: false,
+                    });
+                    return Js::method_call(span, js_expr(r), "filter", vec![pred]);
                 }
                 SubCase::Incompatible => {
-                    return r#"(() => { throw new Error("roundhouse: - with incompatible operand types"); })()"#.to_string();
+                    return iife_throw_msg(span, "roundhouse: - with incompatible operand types");
                 }
                 _ => {}
             }
         }
         // `*` dispatch: TS's native `*` handles numerics. String repeat
-        // uses `.repeat(n)`; array repeat has no built-in (flat
-        // map-ish trick); array join uses `.join(sep)`.
+        // uses `.repeat(n)`; array repeat has no built-in (fill+flat
+        // trick); array join uses `.join(sep)`.
         if method == "*" {
             use crate::emit::shared::mul::{classify_mul, MulCase};
             match classify_mul(r, arg) {
                 MulCase::StringRepeat => {
-                    return format!("{}.repeat({})", emit_expr(r), emit_expr(arg));
+                    return Js::method_call(span, js_expr(r), "repeat", vec![js_expr(arg)]);
                 }
                 MulCase::ArrayRepeat { .. } => {
                     // Array(n).fill(lhs).flat() repeats the array n times.
-                    return format!(
-                        "Array({}).fill({}).flat()",
-                        emit_expr(arg),
-                        emit_expr(r)
+                    let filled = Js::method_call(
+                        span,
+                        Js::call(span, Js::ident(span, "Array"), vec![js_expr(arg)]),
+                        "fill",
+                        vec![js_expr(r)],
                     );
+                    return Js::method_call(span, filled, "flat", vec![]);
                 }
                 MulCase::ArrayJoin { .. } => {
-                    return format!("{}.join({})", emit_expr(r), emit_expr(arg));
+                    return Js::method_call(span, js_expr(r), "join", vec![js_expr(arg)]);
                 }
                 MulCase::Incompatible => {
-                    return r#"(() => { throw new Error("roundhouse: * with incompatible operand types"); })()"#.to_string();
+                    return iife_throw_msg(span, "roundhouse: * with incompatible operand types");
                 }
                 _ => {}
             }
@@ -2617,8 +2862,9 @@ fn emit_send_with_parens_inner(
         if method == "/" || method == "**" {
             use crate::emit::shared::div_pow::{classify_div_pow, DivPowCase};
             if matches!(classify_div_pow(r, arg), DivPowCase::Incompatible) {
-                return format!(
-                    r#"(() => {{ throw new Error("roundhouse: `{method}` with incompatible operand types"); }})()"#
+                return iife_throw_msg(
+                    span,
+                    &format!("roundhouse: `{method}` with incompatible operand types"),
                 );
             }
         }
@@ -2628,10 +2874,13 @@ fn emit_send_with_parens_inner(
             use crate::emit::shared::modulo::{classify_modulo, ModuloCase};
             match classify_modulo(r, arg) {
                 ModuloCase::StringFormat => {
-                    return r#"(() => { throw new Error("roundhouse: String % (sprintf) not yet supported for TypeScript target"); })()"#.to_string();
+                    return iife_throw_msg(
+                        span,
+                        "roundhouse: String % (sprintf) not yet supported for TypeScript target",
+                    );
                 }
                 ModuloCase::Incompatible => {
-                    return r#"(() => { throw new Error("roundhouse: % with incompatible operand types"); })()"#.to_string();
+                    return iife_throw_msg(span, "roundhouse: % with incompatible operand types");
                 }
                 _ => {}
             }
@@ -2645,19 +2894,26 @@ fn emit_send_with_parens_inner(
         if matches!(method, "<" | "<=" | ">" | ">=") {
             use crate::emit::shared::cmp::{classify_cmp, CmpCase};
             if matches!(classify_cmp(r, arg), CmpCase::ClassSubclass) {
-                let l = emit_expr(r);
-                let a = emit_expr(arg);
+                let strict = |sub: &Expr, sup: &Expr| {
+                    Js::binary(
+                        span,
+                        "instanceof",
+                        Js::member(Span::synthetic(), js_expr(sub), "prototype"),
+                        js_expr(sup),
+                    )
+                };
+                let identity = || Js::binary(span, "===", js_expr(r), js_expr(arg));
                 return match method {
-                    "<" => format!("({l}.prototype instanceof {a})"),
-                    "<=" => format!("({l} === {a} || {l}.prototype instanceof {a})"),
-                    ">" => format!("({a}.prototype instanceof {l})"),
-                    ">=" => format!("({l} === {a} || {a}.prototype instanceof {l})"),
+                    "<" => strict(r, arg),
+                    "<=" => Js::binary(span, "||", identity(), strict(r, arg)),
+                    ">" => strict(arg, r),
+                    ">=" => Js::binary(span, "||", identity(), strict(arg, r)),
                     _ => unreachable!(),
                 };
             }
         }
         if let Some(op) = ts_binop(method) {
-            return format!("{} {op} {}", emit_expr(r), emit_expr(arg));
+            return Js::binary(span, op, js_expr(r), js_expr(arg));
         }
     }
     // Ruby stdlib method → TS equivalent, when the Ruby name collides
@@ -2667,9 +2923,9 @@ fn emit_send_with_parens_inner(
     //
     // `include?` (no type info) → `.includes(...)` — the Array dispatch
     // covers known-Array receivers above; this catches the case
-    // where receiver type is `any` (e.g. `(this.constructor as any).schema_columns.include?(...)`).
-    // Hash receivers reach the type-aware branch and emit as `in`,
-    // so they don't fall through here.
+    // where receiver type is `any`. Hash receivers reach the
+    // type-aware branch and emit as `in`, so they don't fall through
+    // here.
     let (mapped_name, force_parens) = match method {
         "strip" => ("trim", true),
         "include?" => ("includes", true),
@@ -2678,14 +2934,13 @@ fn emit_send_with_parens_inner(
     let ts_m = ts_method_name(mapped_name);
     match recv {
         None => {
-            if args_s.is_empty() {
-                ts_m
+            if args.is_empty() {
+                Js::ident(span, ts_m)
             } else {
-                format!("{}({})", ts_m, args_s.join(", "))
+                Js::call(span, Js::ident(span, ts_m), args.iter().map(js_expr).collect())
             }
         }
         Some(r) => {
-            let recv_s = emit_expr(r);
             // Ruby's `obj.name` without parens is typically a reader;
             // Juntos mirrors that with a property accessor / getter,
             // so emit without parens for instance receivers.
@@ -2694,10 +2949,7 @@ fn emit_send_with_parens_inner(
             // import like `ViewHelpers`, `RouteHelpers`, `Inflector`,
             // `Array`, `String`, `Math`, …), zero-arg sends are
             // function CALLS, not property reads — those namespaces
-            // expose callable functions, not getters. Always emit
-            // parens for Const-receiver sends so `RouteHelpers.articles_path`
-            // becomes `RouteHelpers.articles_path()` instead of leaking
-            // the function reference.
+            // expose callable functions, not getters.
             //
             // SUB-EXCEPTION: a small set of class-level attr_accessor
             // fields in the framework runtime (`ActiveRecord.adapter`,
@@ -2711,10 +2963,7 @@ fn emit_send_with_parens_inner(
                 } else {
                     String::new()
                 };
-                matches!(
-                    (path.as_str(), method),
-                    ("ActiveRecord", "adapter")
-                )
+                matches!((path.as_str(), method), ("ActiveRecord", "adapter"))
             };
             let suppress_const_parens = is_const_recv && const_field;
             // Class-instance receivers whose class is one of the
@@ -2723,9 +2972,8 @@ fn emit_send_with_parens_inner(
             // `def` methods (Parameters, HashWithIndifferentAccess,
             // ActionDispatch::Router, etc.), not attr_reader-collapsed
             // TS fields. Without `()`, the emit produces a method
-            // reference (`this.hash.is_empty`) instead of a call
-            // (`this.hash.is_empty()`), which JS lets stand at parse
-            // time and produces wrong values at runtime.
+            // reference instead of a call, which JS lets stand at
+            // parse time and produces wrong values at runtime.
             //
             // App-level model classes (Article, Comment, …) have their
             // attr_readers collapsed to TS fields, so zero-arg
@@ -2734,33 +2982,24 @@ fn emit_send_with_parens_inner(
             // `AccessorKind` per method but doesn't yet thread it
             // through to the Send-emit; this hardcoded class-name list
             // is the bridge until that plumbing lands.
-            // The receiver type may be nullable (`Union<Class, Nil>`
-            // — an ivar's flow-sensitive type is nullable until the
-            // analyzer proves a write-before-read). Strip the Nil
-            // variant so the class-name match fires on the real type.
             let recv_ty_inner = strip_nullable(r.ty.as_ref());
             let is_method_class_recv = matches!(
                 recv_ty_inner,
                 Some(Ty::Class { id, .. }) if {
                     let name = id.0.as_str();
                     let last = name.rsplit("::").next().unwrap_or(name);
-                    matches!(
-                        last,
-                        "Parameters"
-                            | "ParameterMissing"
-                            | "Router"
-                    )
+                    matches!(last, "Parameters" | "ParameterMissing" | "Router")
                 }
             );
-            let raw = if args_s.is_empty()
+            let raw = if args.is_empty()
                 && !parenthesized
                 && !force_parens
                 && !is_method_class_recv
                 && (!is_const_recv || suppress_const_parens)
             {
-                format!("{recv_s}.{ts_m}")
+                Js::member(span, js_expr(r), ts_m)
             } else {
-                format!("{recv_s}.{ts_m}({})", args_s.join(", "))
+                Js::method_call(span, js_expr(r), ts_m, args.iter().map(js_expr).collect())
             };
             // Self-type narrowing: framework Base methods like
             // `find`/`all`/`where`/`last`/`create` declare a return
@@ -2773,10 +3012,7 @@ fn emit_send_with_parens_inner(
             // properties from Article") on every model assignment
             // from a class-method result. Singular methods cast to
             // `<Class>`; collection-returning methods cast to
-            // `<Class>[]`. The result is parenthesized so any
-            // chained access reads from the casted value, not from
-            // the un-parenthesized cast which TS parses as
-            // `<expr> as <Class.member>`.
+            // `<Class>[]`.
             if is_const_recv {
                 // Method names match against the Ruby form (with the
                 // `!`/`?` suffix the source uses) since the IR
@@ -2784,13 +3020,14 @@ fn emit_send_with_parens_inner(
                 // `ts_method_name`. So `Article.create!(...)` lands
                 // here with `method == "create!"`.
                 let stripped = method.trim_end_matches('!').trim_end_matches('?');
+                let recv_s = super::printer::render_expr(&js_expr(r));
                 let cast_target = match stripped {
-                    "find" | "find_by" | "last" | "create" | "first" => Some(recv_s.clone()),
+                    "find" | "find_by" | "last" | "create" | "first" => Some(recv_s),
                     "all" | "where" => Some(format!("{recv_s}[]")),
                     _ => None,
                 };
                 if let Some(target) = cast_target {
-                    return format!("({raw} as {target})");
+                    return Js::new(span, JsExpr::Cast { expr: raw, ty: TsType(target) });
                 }
             }
             raw
@@ -2798,21 +3035,68 @@ fn emit_send_with_parens_inner(
     }
 }
 
-pub(super) fn emit_literal(lit: &Literal) -> String {
+/// Ruby `Foo::Bar` gets joined with `.` for TS access.
+/// Framework-namespace paths (`ActionView::ViewHelpers`, …) collapse
+/// to the last segment — TS emits each runtime class flat at its
+/// file's module scope and imports the bare name. The import
+/// collector mirrors this collapse, so the call site reaches the
+/// imported name directly. Other paths (e.g. `Views::Articles` — a
+/// real nested object) pass through joined. Single-segment Ruby
+/// builtin error classes collapse to JS `Error` wherever they appear
+/// as Const references — without this, `assert_operator(X, :<,
+/// StandardError)` and similar idioms emit a bare `StandardError`
+/// that's neither in scope nor importable.
+fn const_name(path: &[Symbol]) -> String {
+    let segs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
+    const FRAMEWORK_NAMESPACES: &[&str] = &[
+        "ActionController",
+        "ActiveRecord",
+        "ActionView",
+        "ActionDispatch",
+        "ActiveSupport",
+    ];
+    if segs.len() >= 2 && FRAMEWORK_NAMESPACES.contains(&segs[0]) {
+        segs.last().copied().unwrap_or("").to_string()
+    } else if segs.len() == 1 {
+        match segs[0] {
+            "StandardError" | "RuntimeError" | "ArgumentError" | "TypeError" | "NameError"
+            | "NoMethodError" | "NotImplementedError" | "KeyError" | "IndexError" => {
+                "Error".to_string()
+            }
+            _ => segs[0].to_string(),
+        }
+    } else {
+        segs.join(".")
+    }
+}
+
+/// Object-literal key from a Ruby hash-key expression. Symbol and
+/// string literals become quoted keys (matching the legacy emit);
+/// integer literals stay bare; anything else renders verbatim.
+fn js_obj_key(k: &Expr) -> JsKey {
+    match &*k.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => JsKey::Str(value.as_str().to_string()),
+        ExprNode::Lit { value: Literal::Str { value } } => JsKey::Str(value.clone()),
+        ExprNode::Lit { value: Literal::Int { value } } => JsKey::Ident(value.to_string()),
+        _ => JsKey::Ident(super::printer::render_expr(&js_expr(k))),
+    }
+}
+
+pub(super) fn js_literal(span: Span, lit: &Literal) -> Js {
     match lit {
-        Literal::Nil => "null".to_string(),
-        Literal::Bool { value } => value.to_string(),
-        Literal::Int { value } => value.to_string(),
+        Literal::Nil => Js::new(span, JsExpr::Null),
+        Literal::Bool { value } => Js::new(span, JsExpr::Bool(*value)),
+        Literal::Int { value } => Js::num(span, value.to_string()),
         Literal::Float { value } => {
             let s = value.to_string();
-            if s.contains('.') { s } else { format!("{s}.0") }
+            Js::num(span, if s.contains('.') { s } else { format!("{s}.0") })
         }
-        Literal::Str { value } => format!("{value:?}"),
+        Literal::Str { value } => Js::str(span, value.clone()),
         // Ruby symbols map to string literals — the typed analyzer may
         // refine this into a discriminated-union enum later, but for
         // the scaffold a string is unambiguous and round-trips through
         // comparison as expected.
-        Literal::Sym { value } => format!("{:?}", value.as_str()),
+        Literal::Sym { value } => Js::str(span, value.as_str()),
         Literal::Regex { pattern, flags } => {
             // Ruby regex anchors don't have direct JS equivalents:
             //   `\A` / `\z` / `\Z` — Ruby string-boundary anchors,
@@ -2826,15 +3110,13 @@ pub(super) fn emit_literal(lit: &Literal) -> String {
             // string-boundary in practice (no `m` → no per-line shift),
             // matching Ruby `\A` / `\z` for the framework's use cases
             // (validates_format_of, route param matching, etc.).
-            //
-            // Translate only when neither escaped already. `\\A`
-            // (literal-backslash followed by A) keeps that meaning.
-            // Cheap state machine: walk char-by-char, copy escaped
-            // backslash sequences verbatim, replace bare `\A` / `\z` /
-            // `\Z`. Strict-end `\Z` differs from `\z` only in trailing-
-            // newline handling — close enough to `$` for these targets.
-            let translated = translate_ruby_regex_anchors(pattern);
-            format!("/{translated}/{flags}")
+            Js::new(
+                span,
+                JsExpr::Regex {
+                    pattern: translate_ruby_regex_anchors(pattern),
+                    flags: flags.clone(),
+                },
+            )
         }
     }
 }
@@ -2842,15 +3124,27 @@ pub(super) fn emit_literal(lit: &Literal) -> String {
 /// Walk a Ruby regex source, replacing string-boundary anchors with
 /// JS line-boundary anchors. Handles `\\` escapes so a literal
 /// backslash followed by `A`/`z`/`Z` doesn't get clobbered.
+/// Strict-end `\Z` differs from `\z` only in trailing-newline
+/// handling — close enough to `$` for these targets.
 fn translate_ruby_regex_anchors(pattern: &str) -> String {
     let mut out = String::with_capacity(pattern.len());
     let mut chars = pattern.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\\' {
             match chars.peek() {
-                Some('A') => { out.push('^'); chars.next(); }
-                Some('z') | Some('Z') => { out.push('$'); chars.next(); }
-                Some('\\') => { out.push('\\'); out.push('\\'); chars.next(); }
+                Some('A') => {
+                    out.push('^');
+                    chars.next();
+                }
+                Some('z') | Some('Z') => {
+                    out.push('$');
+                    chars.next();
+                }
+                Some('\\') => {
+                    out.push('\\');
+                    out.push('\\');
+                    chars.next();
+                }
                 _ => out.push('\\'),
             }
         } else {
@@ -2936,11 +3230,11 @@ mod async_hof_tests {
         let send = synth_send(Some(synth_var("arr")), "each", vec![], Some(block));
         let out = with_async(&["save"], || emit_expr(&send));
         assert!(
-            out.starts_with("(await (async () => {"),
-            "expected await IIFE prefix in: {out}"
+            out.starts_with("await (async () => {"),
+            "expected awaited async IIFE prefix in: {out}"
         );
         assert!(out.contains("for (const x of arr)"), "got: {out}");
-        assert!(out.contains("(await x.save())"), "got: {out}");
+        assert!(out.contains("await x.save()"), "got: {out}");
     }
 
     #[test]
@@ -2951,7 +3245,7 @@ mod async_hof_tests {
         let send = synth_send(Some(synth_var("arr")), "map", vec![], Some(block));
         let out = with_async(&["save"], || emit_expr(&send));
         assert!(out.contains("const __r = []"), "got: {out}");
-        assert!(out.contains("__r.push((await x.save()))"), "got: {out}");
+        assert!(out.contains("__r.push(await x.save())"), "got: {out}");
         assert!(out.contains("return __r"), "got: {out}");
     }
 
@@ -2962,7 +3256,7 @@ mod async_hof_tests {
         let send = synth_send(Some(synth_var("arr")), "filter", vec![], Some(block));
         let out = with_async(&["save"], || emit_expr(&send));
         assert!(
-            out.contains("if ((await x.save())) __r.push(x)"),
+            out.contains("if (await x.save()) { __r.push(x); }"),
             "got: {out}"
         );
     }
@@ -2974,7 +3268,7 @@ mod async_hof_tests {
         let send = synth_send(Some(synth_var("arr")), "reject", vec![], Some(block));
         let out = with_async(&["save"], || emit_expr(&send));
         assert!(
-            out.contains("if (!((await x.save()))) __r.push(x)"),
+            out.contains("if (!await x.save()) { __r.push(x); }"),
             "got: {out}"
         );
     }
@@ -3034,10 +3328,8 @@ mod async_hof_tests {
         let block = synth_lambda(vec!["x"], body);
         let send = synth_send(Some(synth_var("arr")), "each", vec![], Some(block));
         let out = with_async(&["save"], || emit_expr(&send));
-        // No await + IIFE pattern; standard each path emits forEach
-        // (Array-specific) or the default callback shape.
         assert!(
-            !out.starts_with("(await (async () => {"),
+            !out.starts_with("await (async () => {"),
             "expected NO rewrite for sync-block each, got: {out}"
         );
     }
@@ -3050,7 +3342,7 @@ mod async_hof_tests {
         let send = synth_send(Some(synth_var("arr")), "each", vec![], Some(block));
         let out = with_async(&[], || emit_expr(&send));
         assert!(
-            !out.starts_with("(await (async () => {"),
+            !out.starts_with("await (async () => {"),
             "sync profile must not rewrite, got: {out}"
         );
     }
@@ -3156,4 +3448,3 @@ mod range_slice_tests {
         assert_eq!(out, "s.slice(0, 5 + 1)");
     }
 }
-

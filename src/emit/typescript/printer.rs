@@ -13,9 +13,33 @@
 use crate::span::Span;
 
 use super::js_ast::{
-    ArrowBody, Js, JsClassMember, JsDecl, JsExpr, JsImport, JsKey, JsModule, JsParam, JsStmt,
-    JsStmtNode, MethodKind, TplPart, VarKind,
+    ArrowBody, Js, JsClassMember, JsDecl, JsExpr, JsImport, JsKey, JsModule, JsObjEntry, JsParam,
+    JsStmt, JsStmtNode, MethodKind, TplPart, VarKind,
 };
+
+/// Render one expression as source text, no source-map collection.
+/// Bridge for emit paths still composing strings; the module-level
+/// emit goes through [`Printer::module`] instead.
+pub(super) fn render_expr(e: &Js) -> String {
+    let mut p = Printer::new();
+    p.expr(e, Prec::LOWEST);
+    p.out
+}
+
+/// Render a statement list as source text at indent 0, without a
+/// trailing newline (the legacy `emit_body` contract — callers
+/// re-indent and join lines themselves).
+pub(super) fn render_stmts(stmts: &[JsStmt]) -> String {
+    let mut p = Printer::new();
+    for s in stmts {
+        p.stmt(s);
+    }
+    let mut out = p.out;
+    if out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
 
 /// One token-level source-map entry: the generated position where a
 /// spanned node begins. 0-based line, 0-based column (the source-map
@@ -399,6 +423,18 @@ impl Printer {
                 self.word(") ");
                 self.block(body);
             }
+            JsStmtNode::ForNum { binding, limit, body } => {
+                self.word("for (let ");
+                self.word(binding);
+                self.word(" = 0; ");
+                self.word(binding);
+                self.word(" < ");
+                self.expr(limit, Prec::LOWEST);
+                self.word("; ");
+                self.word(binding);
+                self.word("++) ");
+                self.block(body);
+            }
             JsStmtNode::Switch { scrutinee, cases, default } => {
                 self.word("switch (");
                 self.expr(scrutinee, Prec::LOWEST);
@@ -512,6 +548,29 @@ impl Printer {
         self.expand_block(stmts);
     }
 
+    /// Arrow-function block body. Unlike statement blocks (which only
+    /// inline a single statement), arrow bodies inline any statement
+    /// run that fits the width budget — lambdas appear in expression
+    /// position where vertical expansion costs the most readability.
+    fn arrow_block(&mut self, stmts: &[JsStmt]) {
+        if stmts.is_empty() {
+            self.word("{}");
+            return;
+        }
+        if self.try_inline(stmts).is_some() {
+            self.word("{ ");
+            for (i, s) in stmts.iter().enumerate() {
+                if i > 0 {
+                    self.word(" ");
+                }
+                self.stmt_inline(s);
+            }
+            self.word(" }");
+            return;
+        }
+        self.expand_block(stmts);
+    }
+
     /// Always-multi-line `{ ... }`.
     fn expand_block(&mut self, stmts: &[JsStmt]) {
         self.word("{");
@@ -612,19 +671,27 @@ impl Printer {
                     return;
                 }
                 self.word("{ ");
-                for (i, (k, v)) in entries.iter().enumerate() {
+                for (i, entry) in entries.iter().enumerate() {
                     if i > 0 {
                         self.word(", ");
                     }
-                    match k {
-                        JsKey::Ident(name) => self.word(name),
-                        JsKey::Str(text) => {
-                            let escaped = escape_str(text);
-                            self.word(&escaped);
+                    match entry {
+                        JsObjEntry::Prop(k, v) => {
+                            match k {
+                                JsKey::Ident(name) => self.word(name),
+                                JsKey::Str(text) => {
+                                    let escaped = escape_str(text);
+                                    self.word(&escaped);
+                                }
+                            }
+                            self.word(": ");
+                            self.expr(v, Prec::ASSIGN);
+                        }
+                        JsObjEntry::Spread(inner) => {
+                            self.word("...");
+                            self.expr(inner, Prec::ASSIGN);
                         }
                     }
-                    self.word(": ");
-                    self.expr(v, Prec::ASSIGN);
                 }
                 self.word(" }");
             }
@@ -632,9 +699,12 @@ impl Printer {
                 if *is_async {
                     self.word("async ");
                 }
-                // Single bare parameter prints without parens.
+                // Single bare parameter prints without parens — except
+                // on async arrows, where `async x => x` trips enough
+                // downstream tooling that the parenthesized form is
+                // the boring choice.
                 if let [p] = params.as_slice() {
-                    if p.ty.is_none() && p.default.is_none() && !p.optional {
+                    if !is_async && p.ty.is_none() && p.default.is_none() && !p.optional {
                         self.word(&p.name);
                     } else {
                         self.params(params);
@@ -654,7 +724,7 @@ impl Printer {
                             self.expr(inner, Prec::ASSIGN);
                         }
                     }
-                    ArrowBody::Block(stmts) => self.block(stmts),
+                    ArrowBody::Block(stmts) => self.arrow_block(stmts),
                 }
             }
             JsExpr::Call { callee, args } => {
@@ -739,7 +809,17 @@ impl Printer {
                 self.word("...");
                 self.expr(inner, Prec::ASSIGN);
             }
-            JsExpr::Raw(text) => self.word(text),
+            JsExpr::Raw(text) => {
+                let mut lines = text.lines();
+                if let Some(first) = lines.next() {
+                    self.word(first);
+                }
+                for l in lines {
+                    self.newline();
+                    self.start_line();
+                    self.word(l);
+                }
+            }
         }
     }
 
@@ -813,14 +893,20 @@ fn expr_prec(e: &JsExpr) -> u8 {
         JsExpr::Binary { op, .. } => bin_prec(op),
         JsExpr::Ternary { .. } => Prec::TERNARY,
         JsExpr::Assign { .. } | JsExpr::Arrow { .. } => Prec::ASSIGN,
-        JsExpr::Spread(_) => 1,
+        // `...x` is only legal in arg/array/object positions, where it
+        // must never be parenthesized (`(...x)` is a syntax error).
+        JsExpr::Spread(_) => Prec::ATOM,
     }
 }
 
 // ── escaping ─────────────────────────────────────────────────────────
 
 /// Double-quoted string literal with the escape set the string
-/// emitter used (`\\`, `\"`, `\n`, `\r`, `\t`).
+/// emitter used (`\\`, `\"`, `\n`, `\r`, `\t`). Remaining control
+/// characters take the ES6 `\u{...}` form — raw control bytes in a
+/// literal are at best unreadable and at worst corrupted by
+/// re-indenters (json_builder's `"\u{8}" => "\\b"` escape map is the
+/// shipping case).
 fn escape_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -831,6 +917,9 @@ fn escape_str(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            other if other.is_control() => {
+                out.push_str(&format!("\\u{{{:x}}}", other as u32));
+            }
             other => out.push(other),
         }
     }
@@ -994,7 +1083,7 @@ mod tests {
         // Object body parenthesizes.
         let e = Js::synth(JsExpr::Arrow {
             params: vec![],
-            body: ArrowBody::Expr(Js::synth(JsExpr::Object(vec![(
+            body: ArrowBody::Expr(Js::synth(JsExpr::Object(vec![JsObjEntry::Prop(
                 JsKey::Ident("a".into()),
                 num("1"),
             )]))),

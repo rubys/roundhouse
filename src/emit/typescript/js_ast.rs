@@ -55,7 +55,7 @@ pub enum JsExpr {
     /// Regex literal: `/pattern/flags`, both verbatim.
     Regex { pattern: String, flags: String },
     Array(Vec<Js>),
-    Object(Vec<(JsKey, Js)>),
+    Object(Vec<JsObjEntry>),
     /// Arrow function. `body` is either a bare expression
     /// (`x => x + 1`) or a block (`x => { ... }`).
     Arrow {
@@ -106,6 +106,13 @@ pub enum JsKey {
     Str(String),
 }
 
+/// Object-literal entry: a `key: value` pair or a `...spread`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum JsObjEntry {
+    Prop(JsKey, Js),
+    Spread(Js),
+}
+
 /// Function/method/arrow parameter.
 #[derive(Clone, Debug, PartialEq)]
 pub struct JsParam {
@@ -144,6 +151,13 @@ pub enum JsStmtNode {
     ForOf {
         binding: String,
         iterable: Js,
+        body: Vec<JsStmt>,
+    },
+    /// `for (let <binding> = 0; <binding> < <limit>; <binding>++)` —
+    /// the counted-loop shape the `N.times` rewrite needs.
+    ForNum {
+        binding: String,
+        limit: Js,
         body: Vec<JsStmt>,
     },
     Switch {
