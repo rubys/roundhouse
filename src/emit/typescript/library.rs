@@ -29,11 +29,37 @@ use crate::expr::{Expr, ExprNode, InterpPart, LValue, RescueClause};
 use crate::ident::Symbol;
 use crate::span::Span;
 
-/// Render a finished module to file content. Mapping collection is
-/// plumbed but unconsumed until the VLQ serializer lands.
-fn render_module(module: &JsModule, out_path: PathBuf) -> EmittedFile {
-    let (content, _mappings) = Printer::new().module(module);
-    EmittedFile { path: out_path, content }
+/// Render a finished module to file content plus, when any node maps
+/// back to a real source span, the sibling `<file>.ts.map` and the
+/// trailing `sourceMappingURL` comment. Files made of synthesized
+/// glue only (no resolvable spans) emit without a map.
+fn render_module(
+    module: &JsModule,
+    out_path: PathBuf,
+    sources: &[crate::span::SourceFile],
+) -> Vec<EmittedFile> {
+    let (mut content, mappings) = Printer::with_mappings().module(module);
+    let file_name = out_path
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+    // Consumers resolve `sources` relative to the map file — climb
+    // back to the emit root so the registered (compiler-cwd-relative)
+    // source paths read cleanly from there.
+    let source_prefix = "../".repeat(dir_depth(&out_path));
+    let map =
+        super::sourcemap::build_source_map(&mappings, &file_name, sources, &source_prefix);
+    let mut out = Vec::with_capacity(2);
+    if let Some(map_json) = map {
+        let map_name = format!("{file_name}.map");
+        content.push_str(&format!("//# sourceMappingURL={map_name}\n"));
+        let map_path = out_path.with_file_name(&map_name);
+        out.push(EmittedFile { path: out_path, content });
+        out.push(EmittedFile { path: map_path, content: map_json });
+    } else {
+        out.push(EmittedFile { path: out_path, content });
+    }
+    out
 }
 
 /// The standard file header line.
@@ -93,7 +119,7 @@ pub(super) fn emit_module_file(
     funcs: &[crate::dialect::LibraryFunction],
     app: &App,
     out_path: PathBuf,
-) -> EmittedFile {
+) -> Vec<EmittedFile> {
     // Collect imports across every function's body. The synthesized
     // wrapper class stays in scope only long enough for the import
     // collector to walk the bodies — it's never written to the output.
@@ -141,6 +167,7 @@ pub(super) fn emit_module_file(
     render_module(
         &JsModule { header: module_header(), imports, decls },
         out_path,
+        &app.sources,
     )
 }
 
@@ -255,7 +282,7 @@ pub(super) fn emit_function_file(
     func: &crate::dialect::LibraryFunction,
     app: &App,
     out_path: PathBuf,
-) -> EmittedFile {
+) -> Vec<EmittedFile> {
     let imports = collect_imports_for_function(func, app, &out_path);
     let decls = vec![match super::js_library_function(func) {
         Ok(d) => d,
@@ -264,6 +291,7 @@ pub(super) fn emit_function_file(
     render_module(
         &JsModule { header: module_header(), imports, decls },
         out_path,
+        &app.sources,
     )
 }
 
@@ -275,7 +303,7 @@ pub(super) fn emit_function_file(
 pub(super) fn emit_views_aggregator(
     views: &[crate::dialect::View],
     funcs: &[crate::dialect::LibraryFunction],
-) -> EmittedFile {
+) -> Vec<EmittedFile> {
     use std::collections::BTreeMap;
 
     // One import line per template file — alias each function to a
@@ -324,6 +352,7 @@ pub(super) fn emit_views_aggregator(
     render_module(
         &JsModule { header: module_header(), imports, decls: vec![JsDecl::Raw(text)] },
         PathBuf::from("app/views.ts"),
+        &[],
     )
 }
 
@@ -489,7 +518,7 @@ pub(super) fn emit_class_file(
     lc: &LibraryClass,
     app: &App,
     out_path: PathBuf,
-) -> EmittedFile {
+) -> Vec<EmittedFile> {
     emit_class_file_with_synthesized(lc, app, out_path, &[])
 }
 
@@ -502,7 +531,7 @@ pub(super) fn emit_class_file_with_synthesized(
     app: &App,
     out_path: PathBuf,
     synthesized: &[String],
-) -> EmittedFile {
+) -> Vec<EmittedFile> {
     emit_class_file_with_companions(lc, app, out_path, synthesized, &[])
 }
 
@@ -518,7 +547,7 @@ pub(super) fn emit_class_file_with_companions(
     out_path: PathBuf,
     synthesized: &[String],
     companions: &[LibraryClass],
-) -> EmittedFile {
+) -> Vec<EmittedFile> {
     emit_class_file_full(lc, app, out_path, synthesized, companions, &[])
 }
 
@@ -535,7 +564,7 @@ pub(super) fn emit_class_file_full(
     synthesized: &[String],
     companions: &[LibraryClass],
     constants: &[(crate::ident::Symbol, crate::expr::Expr)],
-) -> EmittedFile {
+) -> Vec<EmittedFile> {
     // Import resolution walks refs across primary + companions; the
     // companions' own names are stripped from the result so they
     // don't try to import themselves.
@@ -607,6 +636,7 @@ pub(super) fn emit_class_file_full(
     render_module(
         &JsModule { header: module_header(), imports, decls },
         out_path,
+        &app.sources,
     )
 }
 

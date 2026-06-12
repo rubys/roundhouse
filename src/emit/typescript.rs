@@ -101,6 +101,7 @@ mod library;
 mod naming;
 mod package;
 pub mod printer;
+mod sourcemap;
 mod ty;
 
 pub use ty::{ts_async_return_ty, ts_return_ty, ts_ty};
@@ -708,7 +709,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     }
 
     if !schema_funcs.is_empty() {
-        files.push(library::emit_module_file(
+        files.extend(library::emit_module_file(
             &schema_funcs,
             app,
             PathBuf::from("src/schema.ts"),
@@ -716,7 +717,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     }
 
     if !route_helper_funcs.is_empty() {
-        files.push(library::emit_module_file(
+        files.extend(library::emit_module_file(
             &route_helper_funcs,
             app,
             PathBuf::from("app/route_helpers.ts"),
@@ -724,7 +725,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     }
 
     if !routes_dispatch_funcs.is_empty() {
-        files.push(library::emit_module_file(
+        files.extend(library::emit_module_file(
             &routes_dispatch_funcs,
             app,
             PathBuf::from("app/routes.ts"),
@@ -732,7 +733,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     }
 
     if !importmap_funcs.is_empty() {
-        files.push(library::emit_module_file(
+        files.extend(library::emit_module_file(
             &importmap_funcs,
             app,
             PathBuf::from("app/importmap.ts"),
@@ -741,7 +742,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 
     let has_seeds = app.seeds.is_some();
     if !seeds_funcs.is_empty() {
-        files.push(library::emit_module_file(
+        files.extend(library::emit_module_file(
             &seeds_funcs,
             app,
             PathBuf::from("db/seeds.ts"),
@@ -764,7 +765,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     for lc in &model_lcs {
         let stem = crate::naming::snake_case(lc.name.0.as_str());
         let out_path = PathBuf::from(format!("app/models/{stem}.ts"));
-        files.push(library::emit_class_file_with_synthesized(
+        files.extend(library::emit_class_file_with_synthesized(
             lc,
             app,
             out_path,
@@ -784,7 +785,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         app.views.iter().filter(|v| v.format.as_str() == "html").collect();
     for (view, func) in html_views.iter().zip(view_funcs.iter()) {
         let out_path = view_output_path(view.name.as_str());
-        files.push(library::emit_function_file(func, app, out_path));
+        files.extend(library::emit_function_file(func, app, out_path));
     }
 
     // Jbuilder (json-format) views — emitted to `<base>_json.ts` so
@@ -796,7 +797,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         app.views.iter().filter(|v| v.format.as_str() == "json").collect();
     for (view, func) in json_views.iter().zip(jbuilder_funcs.iter()) {
         let out_path = jbuilder_view_output_path(view.name.as_str());
-        files.push(library::emit_function_file(func, app, out_path));
+        files.extend(library::emit_function_file(func, app, out_path));
     }
 
     if !view_funcs.is_empty() || !jbuilder_funcs.is_empty() {
@@ -812,7 +813,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             clone.name = crate::ident::Symbol::from(format!("{}_json", v.name.as_str()));
             all_views.push(clone);
         }
-        files.push(library::emit_views_aggregator(&all_views, &all_funcs));
+        files.extend(library::emit_views_aggregator(&all_views, &all_funcs));
     }
 
     // Synthesized `<Resource>Params` classes ride in `controller_lcs`
@@ -827,7 +828,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         } else {
             PathBuf::from(format!("app/controllers/{stem}.ts"))
         };
-        files.push(library::emit_class_file_with_synthesized(
+        files.extend(library::emit_class_file_with_synthesized(
             lc,
             app,
             out_path,
@@ -838,13 +839,13 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     for lc in &app.library_classes {
         let stem = crate::naming::snake_case(lc.name.0.as_str());
         let out_path = PathBuf::from(format!("app/models/{stem}.ts"));
-        files.push(library::emit_class_file(lc, app, out_path));
+        files.extend(library::emit_class_file(lc, app, out_path));
     }
 
     for lc in &fixture_lcs {
         let stem = fixture_file_stem(lc.name.0.as_str());
         let out_path = PathBuf::from(format!("test/fixtures/{stem}.ts"));
-        files.push(library::emit_class_file(lc, app, out_path));
+        files.extend(library::emit_class_file(lc, app, out_path));
     }
 
     if !test_lcs.is_empty() {
@@ -870,20 +871,22 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 &lowered.constants,
             );
 
-            emitted.content.push('\n');
             // setup.ts runs schema + adapter + routes + fixtures setup
             // at module-load time. node:test loads each `.test.ts`
             // file independently in the same process; the first
             // file-load triggers setup, subsequent loads no-op.
             // Imported BEFORE discover_tests so registration sees
             // the prepared world.
-            emitted.content.push_str(&format!(
-                "import \"./_runtime/setup.js\";\n\
-                 import {{ discover_tests }} from \"./_runtime/minitest.js\";\n\
-                 discover_tests({});\n",
-                lc.name.0.as_str(),
-            ));
-            files.push(emitted);
+            append_code(
+                &mut emitted[0],
+                &format!(
+                    "\nimport \"./_runtime/setup.js\";\n\
+                     import {{ discover_tests }} from \"./_runtime/minitest.js\";\n\
+                     discover_tests({});\n",
+                    lc.name.0.as_str(),
+                ),
+            );
+            files.extend(emitted);
         }
     }
 
@@ -902,6 +905,17 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     }
 
     files
+}
+
+/// Append generated code to an emitted `.ts` file, keeping a trailing
+/// `//# sourceMappingURL` comment (if any) as the last line — tools
+/// scan for the comment at the end of the file, and the inserted
+/// lines sit after every mapped position so the map stays valid.
+fn append_code(file: &mut EmittedFile, text: &str) {
+    match file.content.rfind("//# sourceMappingURL=") {
+        Some(pos) => file.content.insert_str(pos, text),
+        None => file.content.push_str(text),
+    }
 }
 
 /// Hand-written `main.ts` shell. Wires together the generated
