@@ -1,6 +1,6 @@
 //! Span preservation through the view lowerer. The lowerer is almost
 //! pure synthesis (the `io` accumulator, `ViewHelpers.*` sends, inlined
-//! form HTML, coalesced StringInterps) — these tests pin the convention
+//! form HTML) — these tests pin the convention
 //! that every synthesized node inherits the nearest enclosing source
 //! span, so emit-time diagnostics on lowered view IR attribute back to
 //! a real `file:line:col` instead of rendering location-less.
