@@ -89,6 +89,11 @@ chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 axum-test = "18"
+# Temporary cap: time 0.3.48 (2026-06-12) added an impl that conflicts
+# (E0119) with cookie 0.18.1's blanket `From<T> for Expiration`; cookie
+# reaches this tree only via axum-test. Drop the cap once cookie ships
+# a fix or time yanks/repairs 0.3.48.
+time = ">=0.3, <0.3.48"
 "#;
 
 /// Fallback `src/main.rs` for apps with no controllers — empty
