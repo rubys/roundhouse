@@ -97,9 +97,11 @@ fn server_source_for_active_profile() -> &'static str {
 }
 
 mod expr;
+pub mod js_ast;
 mod library;
 mod naming;
 mod package;
+pub mod printer;
 mod ty;
 
 pub use ty::{ts_async_return_ty, ts_return_ty, ts_ty};
