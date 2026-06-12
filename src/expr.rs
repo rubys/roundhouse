@@ -127,6 +127,22 @@ impl Expr {
             decisions: 0,
         }
     }
+
+    /// Provenance backfill for lowerer-synthesized subtrees: every node
+    /// with a synthetic span takes the nearest enclosing real span.
+    /// Nodes that already carry a real span keep it — and become the
+    /// enclosing span for their own descendants — so source subtrees
+    /// spliced into synthesized wrappers stay exactly attributed.
+    /// Lowerers call this at synthesis choke points (the lowered
+    /// statement inherits the source statement's span) instead of
+    /// threading a span argument through every small IR constructor.
+    pub fn inherit_span(&mut self, enclosing: Span) {
+        if self.span.is_synthetic() {
+            self.span = enclosing;
+        }
+        let here = self.span;
+        self.node.for_each_child_mut(&mut |c| c.inherit_span(here));
+    }
 }
 
 /// Surface form of an array literal. Source fidelity: `[:a, :b]` (Brackets),
@@ -434,6 +450,179 @@ impl ExprNode {
             ExprNode::Cast { .. } => "Cast",
         }
     }
+
+    /// Visit every direct child `Expr` of this node, mutably — including
+    /// the ones embedded in `LValue` targets, `Case` arms (guards,
+    /// bodies, `Pattern::Expr`), rescue clauses, and `StringInterp`
+    /// parts. Shallow: one level only; callers recurse themselves.
+    pub fn for_each_child_mut(&mut self, f: &mut impl FnMut(&mut Expr)) {
+        fn lvalue_children(lv: &mut LValue, f: &mut impl FnMut(&mut Expr)) {
+            match lv {
+                LValue::Var { .. } | LValue::Ivar { .. } | LValue::Const { .. } => {}
+                LValue::Attr { recv, .. } => f(recv),
+                LValue::Index { recv, index } => {
+                    f(recv);
+                    f(index);
+                }
+            }
+        }
+        fn pattern_children(p: &mut Pattern, f: &mut impl FnMut(&mut Expr)) {
+            match p {
+                Pattern::Wildcard | Pattern::Bind { .. } | Pattern::Lit { .. } => {}
+                Pattern::Array { elems, .. } => {
+                    for e in elems {
+                        pattern_children(e, f);
+                    }
+                }
+                Pattern::Record { fields, .. } => {
+                    for (_, p) in fields {
+                        pattern_children(p, f);
+                    }
+                }
+                Pattern::Expr { expr } => f(expr),
+            }
+        }
+        match self {
+            ExprNode::Lit { .. }
+            | ExprNode::Var { .. }
+            | ExprNode::Ivar { .. }
+            | ExprNode::Const { .. }
+            | ExprNode::SelfRef => {}
+            ExprNode::Hash { entries, .. } => {
+                for (k, v) in entries {
+                    f(k);
+                    f(v);
+                }
+            }
+            ExprNode::Array { elements, .. } => {
+                for e in elements {
+                    f(e);
+                }
+            }
+            ExprNode::StringInterp { parts } => {
+                for p in parts {
+                    if let InterpPart::Expr { expr } = p {
+                        f(expr);
+                    }
+                }
+            }
+            ExprNode::BoolOp { left, right, .. } => {
+                f(left);
+                f(right);
+            }
+            ExprNode::Let { value, body, .. } => {
+                f(value);
+                f(body);
+            }
+            ExprNode::Lambda { body, .. } => f(body),
+            ExprNode::Apply { fun, args, block } => {
+                f(fun);
+                for a in args {
+                    f(a);
+                }
+                if let Some(b) = block {
+                    f(b);
+                }
+            }
+            ExprNode::Send { recv, args, block, .. } => {
+                if let Some(r) = recv {
+                    f(r);
+                }
+                for a in args {
+                    f(a);
+                }
+                if let Some(b) = block {
+                    f(b);
+                }
+            }
+            ExprNode::If { cond, then_branch, else_branch } => {
+                f(cond);
+                f(then_branch);
+                f(else_branch);
+            }
+            ExprNode::Case { scrutinee, arms } => {
+                f(scrutinee);
+                for arm in arms {
+                    pattern_children(&mut arm.pattern, f);
+                    if let Some(g) = arm.guard.as_mut() {
+                        f(g);
+                    }
+                    f(&mut arm.body);
+                }
+            }
+            ExprNode::Seq { exprs } => {
+                for e in exprs {
+                    f(e);
+                }
+            }
+            ExprNode::Assign { target, value } => {
+                lvalue_children(target, f);
+                f(value);
+            }
+            ExprNode::OpAssign { target, value, .. } => {
+                lvalue_children(target, f);
+                f(value);
+            }
+            ExprNode::Yield { args } => {
+                for a in args {
+                    f(a);
+                }
+            }
+            ExprNode::Raise { value } => f(value),
+            ExprNode::RescueModifier { expr, fallback } => {
+                f(expr);
+                f(fallback);
+            }
+            ExprNode::Return { value } => f(value),
+            ExprNode::Super { args } => {
+                if let Some(args) = args {
+                    for a in args {
+                        f(a);
+                    }
+                }
+            }
+            ExprNode::Next { value } | ExprNode::Break { value } => {
+                if let Some(v) = value {
+                    f(v);
+                }
+            }
+            ExprNode::Splat { value } => f(value),
+            ExprNode::MultiAssign { targets, value } => {
+                for t in targets {
+                    lvalue_children(t, f);
+                }
+                f(value);
+            }
+            ExprNode::While { cond, body, .. } => {
+                f(cond);
+                f(body);
+            }
+            ExprNode::Range { begin, end, .. } => {
+                if let Some(b) = begin {
+                    f(b);
+                }
+                if let Some(e) = end {
+                    f(e);
+                }
+            }
+            ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+                f(body);
+                for r in rescues {
+                    for c in &mut r.classes {
+                        f(c);
+                    }
+                    f(&mut r.body);
+                }
+                if let Some(e) = else_branch {
+                    f(e);
+                }
+                if let Some(e) = ensure {
+                    f(e);
+                }
+            }
+            ExprNode::Cast { value, .. } => f(value),
+        }
+    }
 }
 
 /// One `rescue` clause inside a `BeginRescue`.
@@ -671,5 +860,84 @@ pub fn desugar_op_assign(
                 ExprNode::Assign { target: target.clone(), value: combined },
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ident::VarId;
+    use crate::span::FileId;
+
+    fn real(start: u32, end: u32) -> Span {
+        Span { file: FileId(1), start, end }
+    }
+
+    fn var(name: &str, span: Span) -> Expr {
+        Expr::new(span, ExprNode::Var { id: VarId(0), name: Symbol::from(name) })
+    }
+
+    #[test]
+    fn inherit_span_fills_synthetic_nodes() {
+        let mut e = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var("io", Span::synthetic())),
+                method: Symbol::from("<<"),
+                args: vec![var("x", Span::synthetic())],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        e.inherit_span(real(10, 20));
+        assert_eq!(e.span, real(10, 20));
+        let ExprNode::Send { recv, args, .. } = &*e.node else { panic!() };
+        assert_eq!(recv.as_ref().unwrap().span, real(10, 20));
+        assert_eq!(args[0].span, real(10, 20));
+    }
+
+    #[test]
+    fn inherit_span_keeps_real_spans_and_uses_them_for_descendants() {
+        // Synthetic wrapper around a source subtree: the wrapper takes
+        // the enclosing span, the source node keeps its own, and a
+        // synthetic node UNDER the source node takes the source node's
+        // span (nearest enclosing), not the outer one.
+        let source_child = Expr::new(
+            real(30, 40),
+            ExprNode::Send {
+                recv: Some(var("article", Span::synthetic())),
+                method: Symbol::from("title"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let mut wrapper = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("html_escape"),
+                args: vec![source_child],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        wrapper.inherit_span(real(10, 50));
+        assert_eq!(wrapper.span, real(10, 50));
+        let ExprNode::Send { args, .. } = &*wrapper.node else { panic!() };
+        assert_eq!(args[0].span, real(30, 40), "real span survives");
+        let ExprNode::Send { recv, .. } = &*args[0].node else { panic!() };
+        assert_eq!(
+            recv.as_ref().unwrap().span,
+            real(30, 40),
+            "synthetic descendant takes nearest enclosing real span",
+        );
+    }
+
+    #[test]
+    fn inherit_span_with_synthetic_enclosing_is_a_no_op() {
+        let mut e = var("x", Span::synthetic());
+        e.inherit_span(Span::synthetic());
+        assert!(e.span.is_synthetic());
     }
 }

@@ -30,7 +30,16 @@ pub(super) fn walk_body(body: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     };
     let mut out = Vec::new();
     for stmt in &stmts {
-        out.extend(walk_stmt(stmt, ctx));
+        let mut lowered = walk_stmt(stmt, ctx);
+        // Synthesis choke point: everything walk_stmt invented for this
+        // source statement (helper sends, io appends, TODO markers, …)
+        // attributes back to the statement it was derived from. Inner
+        // recursions (if-branches, each-bodies, form_with bodies) have
+        // already stamped their own, finer spans — those win.
+        for e in &mut lowered {
+            e.inherit_span(stmt.span);
+        }
+        out.extend(lowered);
     }
     out
 }
@@ -52,7 +61,14 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 if method.as_str() == "+" && args.len() == 1 {
                     if let ExprNode::Var { name: rn, .. } = &*recv.node {
                         if rn.as_str() == "_buf" {
-                            return emit_io_append(&args[0], ctx);
+                            // Stamp with the appended chunk's span — one
+                            // notch tighter than the enclosing
+                            // `_buf = _buf + …` statement walk_body uses.
+                            let mut out = emit_io_append(&args[0], ctx);
+                            for e in &mut out {
+                                e.inherit_span(args[0].span);
+                            }
+                            return out;
                         }
                     }
                 }
@@ -309,7 +325,8 @@ fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
             parenthesized,
         } => {
             if let Some(kind) = classify_view_helper(method.as_str(), args) {
-                if let Some(call) = emit_view_helper_call(&kind, ctx) {
+                if let Some(mut call) = emit_view_helper_call(&kind, ctx) {
+                    call.inherit_span(e.span);
                     return call;
                 }
             }

@@ -78,6 +78,7 @@ fn flush_run(out: &mut Vec<Expr>, run: &mut Vec<Expr>, accumulator: &str) {
 /// outputs (one Text → Lit::Str, one Expr → bare expr) stay scalar
 /// so emitters keep their literal-arg fast paths.
 fn build_merged_arg(args: Vec<Expr>) -> Expr {
+    let span = union_span(&args);
     let mut parts: Vec<InterpPart> = Vec::new();
     for arg in args {
         match *arg.node {
@@ -100,13 +101,30 @@ fn build_merged_arg(args: Vec<Expr>) -> Expr {
     match parts.len() {
         1 => match parts.into_iter().next().unwrap() {
             InterpPart::Text { value } => Expr::new(
-                Span::synthetic(),
+                span,
                 ExprNode::Lit { value: Literal::Str { value } },
             ),
             InterpPart::Expr { expr } => expr,
         },
-        _ => Expr::new(Span::synthetic(), ExprNode::StringInterp { parts }),
+        _ => Expr::new(span, ExprNode::StringInterp { parts }),
     }
+}
+
+/// Span covering a run of merged append args: union of the real spans
+/// when they share a file (the common case — consecutive chunks of one
+/// template); falls back to the first real span on a file mismatch,
+/// synthetic when none of the args carries one.
+fn union_span(args: &[Expr]) -> Span {
+    let mut it = args.iter().map(|a| a.span).filter(|s| !s.is_synthetic());
+    let Some(first) = it.next() else { return Span::synthetic() };
+    let mut out = first;
+    for s in it {
+        if s.file == out.file {
+            out.start = out.start.min(s.start);
+            out.end = out.end.max(s.end);
+        }
+    }
+    out
 }
 
 fn push_text(parts: &mut Vec<InterpPart>, value: String) {
@@ -125,12 +143,15 @@ fn push_text(parts: &mut Vec<InterpPart>, value: String) {
 /// append. We synthesize here rather than reusing
 /// `accumulator_append_call` because the coalescer is ViewCtx-free.
 fn make_append(arg: Expr, accumulator: &str) -> Expr {
+    // The rebuilt append inherits the arg's provenance — the original
+    // per-chunk appends' own spans were dropped with their Send shells.
+    let span = arg.span;
     let recv = Expr::new(
-        Span::synthetic(),
+        span,
         ExprNode::Var { id: VarId(0), name: Symbol::from(accumulator) },
     );
     let mut e = Expr::new(
-        Span::synthetic(),
+        span,
         ExprNode::Send {
             recv: Some(recv),
             method: Symbol::from("<<"),

@@ -242,7 +242,7 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
     // models the same callability with positional-with-nil-default
     // until kw-args are first-class in `Param`.
     let nil_default = Expr::new(
-        Span::synthetic(),
+        view.body.span,
         ExprNode::Lit { value: Literal::Nil },
     );
     let mut params: Vec<Param> = Vec::new();
@@ -296,7 +296,12 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
     // (and per-target emitters consume) the collapsed shape.
     let body_stmts = self::coalesce::coalesce_appends(body_stmts, &ctx.accumulator);
 
-    let body = seq(body_stmts);
+    let mut body = seq(body_stmts);
+    // File-grain catch-all: whatever synthesis the walk-level stamps
+    // didn't reach (`io = String.new`, the trailing `io`, TODO
+    // markers from unrecognized shapes) attributes to the template as
+    // a whole, so an emit-time diagnostic always names the right file.
+    body.inherit_span(view.body.span);
 
     // View methods render HTML — they're functions in the spinel
     // sense (return String), so Method is the right kind.
