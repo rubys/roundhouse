@@ -81,6 +81,53 @@ fn lowered_view_bodies_carry_no_synthetic_spans() {
     assert!(saw_json, "fixture should exercise the jbuilder lowerer");
 }
 
+/// ERB offset translation: registered view sources are the raw
+/// templates (not the compiled `_buf` Ruby), and spans on tag code
+/// land EXACTLY on the template bytes they came from — tag bodies are
+/// copied byte-identically into the compiled Ruby, so the segment
+/// table translates them with no drift.
+#[test]
+fn view_spans_index_the_raw_template_exactly() {
+    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    // Every registered .erb source is the on-disk template.
+    let mut erb_sources = 0;
+    for s in &app.sources {
+        if s.path.ends_with(".erb") {
+            erb_sources += 1;
+            assert!(
+                !s.text.contains("_buf"),
+                "{}: registered text is compiled Ruby, not the template",
+                s.path,
+            );
+        }
+    }
+    assert!(erb_sources > 0, "fixture should register .erb sources");
+
+    // Pin one span exactly: the `turbo_stream_from` Send in
+    // articles/index sits at the template's byte offset of that call —
+    // line 1, column 5 (after `<%= `).
+    let view = app
+        .views
+        .iter()
+        .find(|v| v.name.as_str() == "articles/index" && v.format.as_str() == "html")
+        .expect("articles/index view");
+    let mut body = view.body.clone();
+    let mut found = None;
+    for_each_expr(&mut body, &mut |e| {
+        if let roundhouse::expr::ExprNode::Send { method, .. } = &*e.node {
+            if method.as_str() == "turbo_stream_from" && found.is_none() {
+                found = Some(e.span);
+            }
+        }
+    });
+    let span = found.expect("turbo_stream_from send in raw view body");
+    let source = &app.sources[span.file.0 as usize - 1];
+    assert!(source.path.ends_with("articles/index.html.erb"), "{}", source.path);
+    let expected = source.text.find("turbo_stream_from").unwrap() as u32;
+    assert_eq!(span.start, expected, "span start should be byte-exact");
+    assert_eq!(source.line_col(span.start), (1, 5));
+}
+
 /// Statement-grain, not just file-grain: the top-level statements of a
 /// multi-statement template must land on several distinct source
 /// offsets. Guards against a regression to "stamp everything with the

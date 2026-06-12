@@ -26,8 +26,18 @@ pub fn ingest_view(source: &str, rel_path: &Path, file: &str) -> IngestResult<Vi
     // Compile ERB to Ruby, then ingest the compiled Ruby through our
     // existing pipeline. The resulting View body is a `Seq` of `_buf`
     // operations the emitter pattern-matches back to template form.
-    let compiled = erb::compile_erb(source);
-    let body = ingest_ruby_program(&compiled, file)?;
+    //
+    // Span coordinates: register the on-disk template text under this
+    // path FIRST — registration is first-text-wins, so the compiled
+    // Ruby that `ingest_ruby_program` registers as it parses is a
+    // no-op. Ingest builds spans as compiled-Ruby offsets; the
+    // `translate_spans` pass below rewrites them to template offsets
+    // via the compiler's segment table, so every span downstream
+    // (diagnostics, source maps) indexes the text actually registered.
+    super::sources::register(file, source);
+    let (compiled, map) = erb::compile_erb_mapped(source);
+    let mut body = ingest_ruby_program(&compiled, file)?;
+    erb::translate_spans(&mut body, &map);
 
     Ok(View {
         name: Symbol::from(name),

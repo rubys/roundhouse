@@ -14,11 +14,12 @@
 //! table into `App::sources` on the way out. `FileId`s are 1-based —
 //! `FileId(0)` stays the synthetic sentinel (`Span::synthetic`).
 //!
-//! Registration records *the text prism parsed*, which for `.html.erb`
-//! views is the compiled Ruby out of `compile_erb`, not the raw
-//! template (the compiler merges text chunks, so byte offsets only
-//! make sense against its output). View diagnostics therefore name
-//! the right file, but line numbers index the compiled template body.
+//! Registration records the text spans index. For plain Ruby that's
+//! the text prism parsed; for `.html.erb` views it's the raw template
+//! — view ingest registers the template first (first-text-wins), then
+//! translates the compiled-Ruby spans back to template offsets via
+//! `erb::translate_spans`, so view diagnostics report real template
+//! lines and columns.
 //!
 //! Standalone ingest entry points (unit tests calling
 //! `ingest_ruby_program` directly) also register; without a

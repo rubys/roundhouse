@@ -32,10 +32,10 @@ impl Default for Span {
 
 /// One source file captured at ingest. `FileId(n)` (1-based) indexes
 /// entry `n - 1` of `App::sources`; `FileId(0)` is the synthetic
-/// sentinel and maps to no file. `text` is the text prism actually
-/// parsed — for `.html.erb` views that's the compiled Ruby out of
-/// `compile_erb`, so spans always index correctly into `text` even
-/// when it differs from the on-disk bytes.
+/// sentinel and maps to no file. `text` is the text spans index —
+/// the text prism parsed for plain Ruby, and the raw template for
+/// `.html.erb` views (view ingest translates compiled-Ruby spans
+/// back to template offsets via `erb::translate_spans`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SourceFile {
     pub path: String,
