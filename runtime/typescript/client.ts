@@ -355,6 +355,26 @@ function toBrowserPath(appPath: string): string {
   return appPath;
 }
 
+// The emitted app's links/forms are root-absolute app paths
+// ("/articles"). Under a subdirectory mount, Turbo would push those
+// straight to history and the address bar would escape the mount
+// (and a later reload 404). Rewrite same-origin root-absolute
+// `href`/`action` targets to mount-prefixed paths so Turbo's own
+// bookkeeping stays inside the mount; the intercept below strips the
+// prefix back off before routing into the worker. No-op at base "/".
+function rebaseLinks(root: ParentNode): void {
+  if (BASE === "/") return;
+  const rebaseAttr = (el: Element, attr: string) => {
+    const v = el.getAttribute(attr);
+    // root-absolute, same-origin, not protocol-relative, not already mounted
+    if (v && v.startsWith("/") && !v.startsWith("//") && !v.startsWith(BASE)) {
+      el.setAttribute(attr, toBrowserPath(v));
+    }
+  };
+  for (const a of Array.from(root.querySelectorAll("a[href]"))) rebaseAttr(a, "href");
+  for (const f of Array.from(root.querySelectorAll("form[action]"))) rebaseAttr(f, "action");
+}
+
 async function renderInitial(bridge: WorkerBridge): Promise<void> {
   const initialPath = toAppPath(location.pathname || "/");
   let response;
@@ -421,6 +441,7 @@ async function renderInitial(bridge: WorkerBridge): Promise<void> {
   document.body.replaceChildren(...Array.from(doc.body.childNodes));
   reActivateScripts(document.body);
   reActivateScripts(document.head);
+  rebaseLinks(document.body);
 
   // Update title (DOMParser preserves <title>, but innerHTML swap
   // sometimes leaves the old title on the document object).
@@ -446,6 +467,10 @@ function reActivateScripts(root: ParentNode): void {
 // ── Turbo intercept ──
 
 function installTurboIntercept(bridge: WorkerBridge): void {
+  // Re-apply the mount prefix to links/forms Turbo renders on each
+  // navigation (the worker returns app-path HTML). No-op at base "/".
+  document.addEventListener("turbo:render", () => rebaseLinks(document.body));
+
   document.addEventListener("turbo:before-fetch-request", async (event: Event) => {
     const detail = (event as CustomEvent<{
       url: string;
@@ -477,17 +502,23 @@ function installTurboIntercept(bridge: WorkerBridge): void {
         "application/x-www-form-urlencoded",
     };
 
-    const response = await bridge.fetch(method, url.href, headers, bodyString);
+    // Route the app path (mount prefix stripped) into the worker; the
+    // rendered links were rebased to the mount, so url.pathname carries
+    // the prefix under a subdirectory deploy.
+    const appUrl = new URL(toAppPath(url.pathname) + url.search, location.origin).href;
+    const response = await bridge.fetch(method, appUrl, headers, bodyString);
 
     // Apply Set-Cookie from response (flash, session).
     const setCookie = response.headers["set-cookie"];
     if (setCookie) document.cookie = setCookie;
 
-    // 301/302 redirects: hand to Turbo.visit so it animates.
+    // 301/302 redirects: hand to Turbo.visit so it animates. The
+    // worker's Location is an app path; re-add the mount so the URL bar
+    // stays inside the mount (and the follow-up intercept strips it).
     if ((response.status === 301 || response.status === 302) && typeof Turbo !== "undefined" && Turbo.visit) {
       const loc = response.headers.location ?? response.headers.Location;
       if (loc) {
-        Turbo.visit(loc);
+        Turbo.visit(toBrowserPath(loc));
         return;
       }
     }

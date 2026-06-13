@@ -1120,6 +1120,18 @@ fn emit_index_html() -> EmittedFile {
          Turbo into a full page reload — which restarts main.ts and
          re-fires auto-visit, infinite loop. Same fix juntos uses. -->
     <meta name=\"turbo-refresh-method\" content=\"morph\">
+    <!-- SPA deep-link restore. A static host (GitHub Pages) 404s on a
+         hard reload of a client-side route; the site 404.html bounces
+         such URLs back to this shell with the original path in `?p=`.
+         Rewrite the address bar to the real path BEFORE the deferred
+         module entry runs, so client.ts routes off the right location.
+         No-op for normal loads (no `?p=`). -->
+    <script>
+      (function () {
+        var p = new URLSearchParams(location.search).get(\"p\");
+        if (p) history.replaceState(null, \"\", location.pathname.replace(/\\/+$/, \"\") + p + location.hash);
+      })();
+    </script>
     <!-- Worker URLs are rewritten by vite.config.ts's manifest plugin
          at build time. The Vite dev server resolves them through the
          manifest virtual module. -->

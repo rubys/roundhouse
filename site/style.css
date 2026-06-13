@@ -415,3 +415,21 @@ footer a:hover {
   color: var(--text-dim);
   margin: 0 0.35rem 0.35rem 0;
 }
+
+.doc-main .run-live {
+  background: var(--bg-light);
+  border: 1px solid var(--accent-typescript);
+  border-radius: 0.5rem;
+  padding: 1rem 1.25rem;
+  margin: 1.5rem 0;
+}
+.doc-main .run-live a {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--accent-typescript);
+}
+.doc-main .run-live small {
+  color: var(--text-dim);
+  display: inline-block;
+  margin-top: 0.5rem;
+}

@@ -24,6 +24,15 @@
       updates over WebSocket.
     </p>
 
+    <p class="run-live">
+      <a href="../blog/">▶ Run the blog live in your browser →</a><br>
+      <small>The TypeScript <code>worker</code> target, served straight from
+      GitHub Pages: the whole Rails app runs client-side in a SharedWorker
+      with a real SQLite database (sqlite-wasm + OPFS) — no server. Create
+      and delete articles; your data persists across reloads. Needs a
+      Chromium- or Firefox-based browser (or Safari 18.2+).</small>
+    </p>
+
     <p>
       The fixture is not hand-written and checked in. It is
       <em>generated</em> by a script — <a href="../create-blog"><code>create-blog</code></a>
@@ -165,6 +174,7 @@ rails db:create</code></pre>
 
     <h2>See it</h2>
     <p>
+      <a href="../blog/">Run the blog live</a> (TypeScript worker target) ·
       <a href="../browse/">Browse the generated output</a> for every target ·
       <a href="../bench/">benchmark results</a> across the live targets ·
       <a href="../create-blog">download the generator script</a> ·

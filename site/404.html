@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Not Found — Roundhouse</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <!--
+      GitHub Pages serves this file for any path under the site that
+      doesn't map to a static file. The live SharedWorker blog demo at
+      /roundhouse/blog/ is a client-side SPA: a hard reload or bookmark
+      of a deep route (e.g. /roundhouse/blog/articles/1) has no backing
+      file, so it lands here. Bounce it back to the blog shell with the
+      deep path stashed in `?p=`; the shell's inline decoder restores
+      the address bar before the worker client routes. Any other 404
+      falls through to the static message below.
+
+      The base path is duplicated in the CI build-site step's
+      ROUNDHOUSE_BASE — keep them in sync.
+    -->
+    <script>
+      (function () {
+        var base = "/roundhouse/blog/";
+        var l = location;
+        if (l.pathname.indexOf(base) === 0 && l.pathname !== base) {
+          var rest = l.pathname.slice(base.length); // e.g. "articles/1"
+          l.replace(base + "?p=/" + rest + l.hash);
+        }
+      })();
+    </script>
+    <style>
+      body { font: 16px/1.5 system-ui, sans-serif; max-width: 36rem; margin: 4rem auto; padding: 0 1rem; }
+      a { color: #2563eb; }
+    </style>
+  </head>
+  <body>
+    <h1>404 — Not Found</h1>
+    <p>That page doesn’t exist. <a href="/roundhouse/">Back to Roundhouse</a>.</p>
+  </body>
+</html>

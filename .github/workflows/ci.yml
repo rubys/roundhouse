@@ -1294,6 +1294,29 @@ jobs:
           ROUNDHOUSE_ASSETS_DIR: build/assets
         run: cargo run --release --bin build-site
 
+      # Live SharedWorker blog demo → _site/blog/. Emits real-blog under
+      # the worker profile, vite-builds it with ROUNDHOUSE_BASE set to the
+      # Pages mount path, and drops dist/ alongside the static site. The
+      # app runs entirely in the browser (SharedWorker + sqlite-wasm via
+      # the opfs-sahpool VFS) — no server, and crucially no COOP/COEP
+      # cross-origin-isolation headers, so it serves straight off Pages.
+      # Deep-link reloads are handled by site/404.html (already copied
+      # into _site by build-site) bouncing back to the shell's decoder.
+      # ROUNDHOUSE_BASE here must match the base hard-coded in
+      # site/404.html.
+      - name: Build live SharedWorker blog demo (→ _site/blog)
+        env:
+          ROUNDHOUSE_BASE: /roundhouse/blog/
+        run: |
+          set -euo pipefail
+          DEMO="$(mktemp -d)"
+          cargo run --release --quiet --bin emit_preview -- \
+            --target typescript --profile worker --out "$DEMO" fixtures/real-blog
+          (cd "$DEMO" && npm install --no-audit --no-fund --silent && npm run build)
+          mkdir -p _site/blog
+          cp -R "$DEMO"/dist/. _site/blog/
+          echo "blog demo files:"; find _site/blog -maxdepth 2 -type f | sort
+
       # Bench results page — fetched from the Hetzner publishing endpoint
       # (cron-driven, populates bench/results/latest on each run). The
       # render step degrades gracefully: if Hetzner is unreachable, the
