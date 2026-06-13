@@ -56,6 +56,8 @@ fn emit_worker_package_json() -> EmittedFile {
     \"@sqlite.org/sqlite-wasm\": \"^3.47.0-build1\"
   },
   \"devDependencies\": {
+    \"@tailwindcss/vite\": \"^4.0.0\",
+    \"tailwindcss\": \"^4.0.0\",
     \"typescript\": \"5.7.3\",
     \"vite\": \"^8.0.0\"
   }

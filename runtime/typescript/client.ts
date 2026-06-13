@@ -437,16 +437,54 @@ async function renderInitial(bridge: WorkerBridge): Promise<void> {
   // assignment doesn't re-run scripts, so we adopt nodes manually
   // for any <script> we want active (Stimulus controllers, Turbo
   // bootstrapping if not already loaded).
-  document.head.replaceChildren(...Array.from(doc.head.childNodes));
+  reconcileHead(doc.head);
   document.body.replaceChildren(...Array.from(doc.body.childNodes));
   reActivateScripts(document.body);
-  reActivateScripts(document.head);
   rebaseLinks(document.body);
 
   // Update title (DOMParser preserves <title>, but innerHTML swap
   // sometimes leaves the old title on the document object).
   const newTitle = doc.querySelector("title")?.textContent;
   if (newTitle) document.title = newTitle;
+}
+
+/** Merge the worker-rendered layout's `<head>` into the live head
+ *  without disturbing Vite-managed assets.
+ *
+ *  The index.html shell's head carries Vite's fingerprinted, base-
+ *  prefixed bundle links — the `<link rel="stylesheet">` for the
+ *  compiled Tailwind CSS and the entry `<script type="module">`. Those
+ *  are SPA infrastructure: identical across pages and already executing,
+ *  so we keep the live nodes in place (re-adding the module would re-run
+ *  it). From the layout head we take title + meta + other non-asset
+ *  nodes, and DROP its Rails asset-pipeline tags — the importmap, module
+ *  preloads, the bare `import "application"` bootstrap, and the
+ *  `stylesheet_link_tag` `/assets/*.css` links — because under the
+ *  bundling model (issue #6) Vite owns assets and those files don't
+ *  exist in the build. Dropping the importmap is also what lets us stop
+ *  replacing the head wholesale (the original reason for the full swap). */
+function reconcileHead(layoutHead: HTMLHeadElement): void {
+  const keep = Array.from(document.head.children).filter(
+    (el) =>
+      (el.tagName === "LINK" && el.getAttribute("rel") === "stylesheet") ||
+      (el.tagName === "SCRIPT" &&
+        el.getAttribute("type") === "module" &&
+        el.hasAttribute("src")),
+  );
+  const incoming = Array.from(layoutHead.childNodes).filter((node) => {
+    if (node.nodeType !== 1) return true; // text / comments
+    const el = node as Element;
+    const rel = el.getAttribute("rel");
+    const type = el.getAttribute("type");
+    if (el.tagName === "SCRIPT" && type === "importmap") return false;
+    if (el.tagName === "LINK" && rel === "modulepreload") return false;
+    if (el.tagName === "LINK" && rel === "stylesheet") return false; // Vite owns CSS
+    if (el.tagName === "SCRIPT" && type === "module" && !el.hasAttribute("src")) {
+      return false; // bare `import "application"` importmap bootstrap
+    }
+    return true;
+  });
+  document.head.replaceChildren(...keep, ...incoming);
 }
 
 /** `innerHTML`/`replaceChildren` with parsed `<script>` nodes
