@@ -211,6 +211,40 @@ function defineStreamSourceElement(): void {
   });
 }
 
+// `turbo_stream_from(stream)` emits the Rails Action-Cable element
+// `<turbo-cable-stream-source signed-stream-name="…">`. On the server
+// targets, turbo-rails' JS upgrades that into a WebSocket cable
+// subscription. The worker target has no cable — it broadcasts over
+// BroadcastChannel — and without turbo-rails the element is an inert
+// unknown tag, so nothing subscribes (broadcasts silently never reach
+// the DOM). Rewrite each into the lifecycle-managed
+// `<juntos-stream-source channel="…">` before the HTML reaches the DOM,
+// so its connected/disconnected callbacks own subscribe/unsubscribe.
+// The channel is the base64(JSON) `signed-stream-name` minus the
+// `--unsigned` suffix Rails appends — and equals the `broadcast(stream,
+// …)` name the worker posts to (e.g. "articles").
+function decodeStreamName(signed: string): string | null {
+  const b64 = signed.replace(/--unsigned$/, "");
+  try {
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    return String(JSON.parse(new TextDecoder().decode(bytes)));
+  } catch {
+    return null;
+  }
+}
+
+function rewriteStreamSources(html: string): string {
+  return html.replace(
+    /<turbo-cable-stream-source\b[^>]*?\bsigned-stream-name="([^"]*)"[^>]*><\/turbo-cable-stream-source>/g,
+    (_match, signed: string) => {
+      const channel = decodeStreamName(signed);
+      return channel
+        ? `<juntos-stream-source channel="${escapeHtml(channel)}"></juntos-stream-source>`
+        : "";
+    },
+  );
+}
+
 // ── Public entry: startClient() ──
 
 export interface StartClientOptions {
@@ -427,7 +461,7 @@ async function renderInitial(bridge: WorkerBridge): Promise<void> {
   // parse (not just innerHTML) because the response includes
   // <html>/<head>/<body> from the application layout.
   const parser = new DOMParser();
-  const doc = parser.parseFromString(response.body, "text/html");
+  const doc = parser.parseFromString(rewriteStreamSources(response.body), "text/html");
 
   // Swap the live <html>'s child structure. Replacing the entire
   // documentElement is heavy-handed and breaks document.body
@@ -563,7 +597,7 @@ function installTurboIntercept(bridge: WorkerBridge): void {
 
     detail.fetchRequest = {
       response: Promise.resolve(
-        new Response(response.body, {
+        new Response(rewriteStreamSources(response.body), {
           status: response.status,
           headers: response.headers,
         }),

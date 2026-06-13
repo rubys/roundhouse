@@ -70,15 +70,12 @@ Driving every CRUD verb through the SharedWorker also covers the
 request surfaces a portability gap tends to hide in: form-encoded
 body parsing (POST/DELETE), the adapter's MessagePort round-trip on
 write (insert / update / delete, not just read), validation failure
-(422), the `_method` override branch, and the broadcaster firing
-across tabs.
+(422), the `_method` override branch, and a Turbo Stream broadcast
+prepending into a second tab's DOM end-to-end (the rendered
+`turbo_stream_from` subscription, not just the raw channel).
 
 ## What this doesn't catch (yet)
 
-- Turbo Stream DOM application — the multi-tab spec asserts the
-  broadcast *payload* reaches tab B (a `<turbo-stream>` fragment over
-  BroadcastChannel), not that Turbo applied it to the receiving DOM.
-  Confirming the rendered result would need DOM assertions on tab B.
 - Visual regressions (would need Playwright screenshot comparison
   or Vitest browser mode with `expect(page).toHaveScreenshot()`).
 - Importmap asset wiring — the specs deliberately ignore `/assets/*.js`

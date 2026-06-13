@@ -433,4 +433,72 @@ test.describe("SharedWorker target — real-blog", () => {
     // Body should be HTML (the re-rendered form).
     expect(response.headers["content-type"] ?? "").toContain("text/html");
   });
+
+  test("broadcast prepends a new article into a subscribed tab's DOM", async ({
+    browser,
+  }) => {
+    // End-to-end Turbo Stream DOM application (the gap the raw
+    // BroadcastChannel probe above can't see): the index view calls
+    // `turbo_stream_from "articles"`, which renders the Rails Action-Cable
+    // `<turbo-cable-stream-source>` element. The worker has no cable, so
+    // client.ts rewrites it into `<juntos-stream-source channel="articles">`
+    // — whose connectedCallback subscribes over BroadcastChannel. When
+    // tab A creates an article, Article#broadcasts_to prepends a
+    // `<turbo-stream action="prepend" target="articles">` onto channel
+    // "articles"; tab B must render it into `#articles` with no reload.
+    const context = await browser.newContext();
+    const tabA = await context.newPage();
+    const tabB = await context.newPage();
+
+    await Promise.all([
+      tabA.goto("/articles", { waitUntil: "domcontentloaded" }),
+      tabB.goto("/articles", { waitUntil: "domcontentloaded" }),
+    ]);
+    for (const tab of [tabA, tabB]) {
+      await tab.waitForFunction(
+        () => (window as Window & { __juntos__?: { ready?: boolean } }).__juntos__?.ready === true,
+        null,
+        { timeout: 15_000 },
+      );
+    }
+
+    // The cable element must have been rewritten + subscribed in tab B.
+    const wiring = await tabB.evaluate(() => ({
+      cableLeft: document.querySelectorAll("turbo-cable-stream-source").length,
+      channels: [...document.querySelectorAll("juntos-stream-source")].map((e) =>
+        e.getAttribute("channel"),
+      ),
+      target: !!document.getElementById("articles"),
+    }));
+    expect(wiring.cableLeft, "turbo-cable-stream-source should be rewritten away").toBe(0);
+    expect(wiring.channels, "tab B should subscribe to the 'articles' stream").toContain("articles");
+    expect(wiring.target, "index should have the #articles prepend target").toBe(true);
+
+    const marker = `Broadcast DOM proof ${Date.now()}`;
+    const before = await tabB.evaluate(
+      (m) => document.getElementById("articles")?.textContent?.includes(m) ?? false,
+      marker,
+    );
+    expect(before, "marker must not be present before the broadcast").toBe(false);
+
+    // Create from tab A (its own port; still fires the shared broadcast).
+    const create = await probeSharedWorker(tabA, {
+      method: "POST",
+      path: "/articles",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body:
+        `article%5Btitle%5D=${encodeURIComponent(marker)}` +
+        "&article%5Bbody%5D=Posted+from+tab+A+to+prove+broadcast+DOM+application.",
+    });
+    expect(create.status, `create returned ${create.status}`).toBeLessThan(400);
+
+    // Tab B renders the prepended article via its subscription — no reload.
+    await tabB.waitForFunction(
+      (m) => document.getElementById("articles")?.textContent?.includes(m) ?? false,
+      marker,
+      { timeout: 8_000 },
+    );
+
+    await context.close();
+  });
 });
