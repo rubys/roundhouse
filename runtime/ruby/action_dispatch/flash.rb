@@ -43,13 +43,16 @@ module ActionDispatch
       @notice_was = nil
       @alert_was  = nil
       return if other.nil?
-      v = other["notice"]
-      if !v.nil?
+      # Guard each read with `key?` — strict targets (Crystal) raise
+      # KeyError on a missing Hash key, and the persisted store carries
+      # only the keys that were set (partial: {} / notice-only / etc.).
+      if other.key?("notice")
+        v = other["notice"]
         @notice = v
         @notice_was = v
       end
-      v = other["alert"]
-      if !v.nil?
+      if other.key?("alert")
+        v = other["alert"]
         @alert = v
         @alert_was = v
       end
