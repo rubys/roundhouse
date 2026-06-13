@@ -37,6 +37,7 @@ fn render_module(
     module: &JsModule,
     out_path: PathBuf,
     sources: &[crate::span::SourceFile],
+    root: &str,
 ) -> Vec<EmittedFile> {
     let (mut content, mappings) = Printer::with_mappings().module(module);
     let file_name = out_path
@@ -48,7 +49,7 @@ fn render_module(
     // source paths read cleanly from there.
     let source_prefix = "../".repeat(dir_depth(&out_path));
     let map =
-        super::sourcemap::build_source_map(&mappings, &file_name, sources, &source_prefix);
+        super::sourcemap::build_source_map(&mappings, &file_name, sources, &source_prefix, root);
     let mut out = Vec::with_capacity(2);
     if let Some(map_json) = map {
         let map_name = format!("{file_name}.map");
@@ -168,6 +169,7 @@ pub(super) fn emit_module_file(
         &JsModule { header: module_header(), imports, decls },
         out_path,
         &app.sources,
+        &app.root,
     )
 }
 
@@ -292,6 +294,7 @@ pub(super) fn emit_function_file(
         &JsModule { header: module_header(), imports, decls },
         out_path,
         &app.sources,
+        &app.root,
     )
 }
 
@@ -353,6 +356,7 @@ pub(super) fn emit_views_aggregator(
         &JsModule { header: module_header(), imports, decls: vec![JsDecl::Raw(text)] },
         PathBuf::from("app/views.ts"),
         &[],
+        "",
     )
 }
 
@@ -637,6 +641,7 @@ pub(super) fn emit_class_file_full(
         &JsModule { header: module_header(), imports, decls },
         out_path,
         &app.sources,
+        &app.root,
     )
 }
 

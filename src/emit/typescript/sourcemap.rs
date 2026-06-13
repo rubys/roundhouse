@@ -8,10 +8,11 @@
 //! source-column delta. Generated-column deltas reset per line
 //! (`;`-separated); the source-side deltas run across the whole file.
 //!
-//! `sources` entries are the paths as registered at ingest (relative
-//! to the compiler's working directory — the original `.rb`/`.erb`
-//! files don't exist in the emitted tree, so no emitted-relative
-//! path would resolve anyway). `sourcesContent` embeds the full text
+//! `sources` entries are app-relative (the `App::root` ingest prefix
+//! is stripped, so fs- and map-VFS ingest produce identical maps —
+//! the original `.rb`/`.erb` files don't exist in the emitted tree,
+//! so no emitted-relative path would resolve anyway; the entries are
+//! labels). `sourcesContent` embeds the full text
 //! so consumers display the Ruby/ERB source without needing the
 //! original tree on disk. View spans index the raw template (the
 //! ERB offset translation from ingest), so a mapped position lands
@@ -52,9 +53,10 @@ fn vlq(value: i64, out: &mut String) {
 ///
 /// `source_prefix` is prepended to every source path — consumers
 /// resolve `sources` relative to the map's own location, so the
-/// caller passes enough `../` hops to climb back to the emit root
-/// and the registered (compiler-cwd-relative) path reads cleanly
-/// from there.
+/// caller passes enough `../` hops to climb back to the emit root.
+/// `root` (`App::root`) is stripped from each registered path first,
+/// making the entries app-relative regardless of how the app was
+/// ingested (fs paths carry the app dir prefix, map-VFS trees don't).
 ///
 /// FileIds that fall outside `sources` are skipped, not mis-mapped:
 /// the per-thread source registry restarts during the runtime-class
@@ -67,6 +69,7 @@ pub(super) fn build_source_map(
     generated_file: &str,
     sources: &[SourceFile],
     source_prefix: &str,
+    root: &str,
 ) -> Option<String> {
     // (gen_line, gen_col, src_index, src_line0, src_col0), in
     // emission order. The printer writes linearly so generated
@@ -137,7 +140,13 @@ pub(super) fn build_source_map(
     let obj = serde_json::json!({
         "version": 3,
         "file": generated_file,
-        "sources": used.iter().map(|s| format!("{source_prefix}{}", s.path)).collect::<Vec<_>>(),
+        "sources": used.iter().map(|s| {
+            let rel = s.path
+                .strip_prefix(root)
+                .map(|r| r.trim_start_matches('/'))
+                .unwrap_or(&s.path);
+            format!("{source_prefix}{rel}")
+        }).collect::<Vec<_>>(),
         "sourcesContent": used.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
         "names": [],
         "mappings": mappings_str,
@@ -186,7 +195,7 @@ mod tests {
             mapping(0, 4, 1, 3),
             mapping(2, 2, 1, 0),
         ];
-        let json = build_source_map(&maps, "a.ts", &sources, "").unwrap();
+        let json = build_source_map(&maps, "a.ts", &sources, "", "").unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["version"], 3);
         assert_eq!(v["file"], "a.ts");
@@ -204,7 +213,7 @@ mod tests {
             mapping(0, 0, 0, 0), // synthetic file sentinel
             mapping(0, 2, 9, 0), // id beyond the registry (collision guard)
         ];
-        assert!(build_source_map(&maps, "a.ts", &sources, "").is_none());
+        assert!(build_source_map(&maps, "a.ts", &sources, "", "").is_none());
     }
 
     #[test]
@@ -213,7 +222,7 @@ mod tests {
         // later (inner) span at offset 3 must win.
         let sources = vec![src("a.rb", "ab\ncd\n")];
         let maps = vec![mapping(0, 0, 1, 0), mapping(0, 0, 1, 3)];
-        let json = build_source_map(&maps, "a.ts", &sources, "").unwrap();
+        let json = build_source_map(&maps, "a.ts", &sources, "", "").unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         // Single segment, line 1 col 0 of the source: [0,0,1,0].
         assert_eq!(v["mappings"], "AACA");
@@ -223,7 +232,7 @@ mod tests {
     fn second_source_file_gets_its_own_index() {
         let sources = vec![src("a.rb", "x\n"), src("b.rb", "y\n")];
         let maps = vec![mapping(0, 0, 1, 0), mapping(1, 0, 2, 0)];
-        let json = build_source_map(&maps, "a.ts", &sources, "").unwrap();
+        let json = build_source_map(&maps, "a.ts", &sources, "", "").unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["sources"], serde_json::json!(["a.rb", "b.rb"]));
         // Line 0: [0,0,0,0]; line 1: [genCol 0, srcIdx +1, line 0, col 0].

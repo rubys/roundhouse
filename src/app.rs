@@ -67,6 +67,13 @@ pub struct App {
     /// built by hand in tests.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<crate::span::SourceFile>,
+    /// App directory as passed to ingest (`fixtures/real-blog`), `""`
+    /// for in-memory trees (map VFS, wasm). `sources` paths keep this
+    /// prefix so diagnostics print compiler-cwd-relative (clickable)
+    /// locations; consumers that need app-relative paths (source-map
+    /// `sources` entries must not differ by ingest mode) strip it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub root: String,
 }
 
 /// A Rails-style importmap: one `<name>` → `<path>` entry per
@@ -107,6 +114,7 @@ impl App {
             stylesheets: Vec::new(),
             rbs_signatures: HashMap::new(),
             sources: Vec::new(),
+            root: String::new(),
         }
     }
 }

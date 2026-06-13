@@ -306,6 +306,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     }
 
     app.sources = super::sources::drain();
+    // Registered source paths are prefixed with this (the fs walk
+    // joins `dir`); map-VFS trees pass `""` and register app-relative.
+    app.root = dir.display().to_string().trim_end_matches('/').to_string();
 
     Ok(app)
 }
