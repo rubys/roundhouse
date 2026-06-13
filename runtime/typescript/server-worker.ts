@@ -82,6 +82,24 @@ let _controllerRegistry: Record<string, ControllerClass> = {};
 const _sessionStore: Record<string, any> = {};
 let _flashStore: Record<string, any> = {};
 
+// Rails shows a flash exactly once, then sweeps it. The flash lives in
+// the SharedWorker's in-memory `_flashStore`, carried from the action
+// that sets it (e.g. `redirect_to …, notice: …`) to the follow-on GET
+// that renders it. After that render it must be discarded, or the
+// notice re-renders on every subsequent page (and persists for the life
+// of the SharedWorker). Carry forward only entries the action SET this
+// request — i.e. that differ from what was carried in (and thus shown).
+function sweepFlash(
+  after: Record<string, any>,
+  incoming: Record<string, any>,
+): Record<string, any> {
+  const next: Record<string, any> = {};
+  for (const k of Object.keys(after)) {
+    if (after[k] != null && after[k] !== incoming[k]) next[k] = after[k];
+  }
+  return next;
+}
+
 // Connected tab ports. We keep the full set for broadcasting `ready`
 // + error notifications; `_tabPorts` is the indexed view used by the
 // lifecycle channel to find the host tab when a Worker proxy needs
@@ -444,6 +462,7 @@ async function dispatchRequest(
 
   let response: ActionResponse;
   try {
+    const incomingFlash = { ..._flashStore };
     const controller = new ctrlClass();
     controller.params = merged;
     controller.session = _sessionStore;
@@ -451,7 +470,7 @@ async function dispatchRequest(
     controller.request_method = method;
     controller.request_path = url.pathname;
     await controller.process_action(match.action);
-    _flashStore = controller.flash ? controller.flash.to_h() : {};
+    _flashStore = controller.flash ? sweepFlash(controller.flash.to_h(), incomingFlash) : {};
     response = {
       body: controller.body,
       status: controller.status,

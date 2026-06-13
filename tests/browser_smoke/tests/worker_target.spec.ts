@@ -549,4 +549,47 @@ test.describe("SharedWorker target — real-blog", () => {
     ).toBe(navsBeforeSubmit);
     await expect(page.locator('input[name="article[title]"]')).toHaveValue("A valid title");
   });
+
+  test("flash notice shows once then is swept (not sticky)", async ({ page }) => {
+    // The flash lives in the SharedWorker's in-memory store, carried
+    // from the action that sets it (destroy → redirect with notice) to
+    // the follow-on render. Rails shows it once then sweeps it; without
+    // the sweep the notice re-renders on every subsequent page for the
+    // life of the SharedWorker. Create → destroy → assert the notice
+    // appears on the first index render and is gone on the next.
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(
+      () => (window as Window & { __juntos__?: { ready?: boolean } }).__juntos__?.ready === true,
+      null,
+      { timeout: 15_000 },
+    );
+
+    const create = await probeSharedWorker(page, {
+      method: "POST",
+      path: "/articles",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body:
+        "article%5Btitle%5D=Flash+sweep+test" +
+        "&article%5Bbody%5D=This+article+exists+only+to+exercise+flash+sweeping.",
+    });
+    const id = (create.headers.location ?? create.headers.Location ?? "").match(/\/articles\/(\d+)/)?.[1];
+    expect(id, `create should redirect to /articles/<id>; got ${create.status}`).toBeTruthy();
+
+    const destroy = await probeSharedWorker(page, {
+      method: "POST",
+      path: `/articles/${id}`,
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "_method=delete",
+    });
+    expect([302, 303], `destroy status ${destroy.status}`).toContain(destroy.status);
+
+    const idx1 = await probeSharedWorker(page, { method: "GET", path: "/articles" });
+    expect(idx1.body, "destroy notice should render once").toMatch(/successfully destroyed/i);
+
+    const idx2 = await probeSharedWorker(page, { method: "GET", path: "/articles" });
+    expect(
+      idx2.body,
+      "flash notice must be swept after one display, not re-render every page",
+    ).not.toMatch(/successfully destroyed/i);
+  });
 });
