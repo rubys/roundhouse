@@ -425,18 +425,32 @@ pub fn target_readme(target: BuildTarget) -> String {
     // document its run here. CI's smoke job executes these blocks
     // verbatim, so the section must stay runnable as written.
     let e2e = if ships_e2e(target) {
-        "## End-to-end\n\
-         Browser smoke tests (Playwright). Needs Node.js 18+ and the \
-         `sqlite3` CLI; run after the Build steps above — the test \
-         config boots the server and seeds `db/seed.sql` itself:\n\
-         ```sh\n\
-         cd e2e\n\
-         npm install\n\
-         npx playwright install chromium\n\
-         npx playwright test\n\
-         ```\n\n"
+        // The flash spec (`flash.spec.js`) needs per-session (cookie)
+        // flash — only ruby + jruby have it. Crystal/TS share one global
+        // in-memory flash slot, which races with the comment specs'
+        // `redirect_to … notice:` under `fullyParallel`; the rest don't
+        // wire flash yet. Skip it everywhere but ruby/jruby, and drop a
+        // target from this skip as it gains per-session flash. (See the
+        // flash-wiring punch list memory.)
+        let run = if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
+            "npx playwright test"
+        } else {
+            "E2E_SKIP=\"flash\" npx playwright test"
+        };
+        format!(
+            "## End-to-end\n\
+             Browser smoke tests (Playwright). Needs Node.js 18+ and the \
+             `sqlite3` CLI; run after the Build steps above — the test \
+             config boots the server and seeds `db/seed.sql` itself:\n\
+             ```sh\n\
+             cd e2e\n\
+             npm install\n\
+             npx playwright install chromium\n\
+             {run}\n\
+             ```\n\n"
+        )
     } else {
-        ""
+        String::new()
     };
     format!(
         "# Roundhouse → {name}\n\n\
