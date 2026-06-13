@@ -269,6 +269,40 @@ fn worker_profile_package_json_uses_vite_not_tsx() {
     );
 }
 
+/// Regression guard for the db.ts picker. The emitted models reach the
+/// database through the low-level `Db` namespace (`src/db.ts`); under
+/// the worker profile that file is reachable from the SharedWorker
+/// (`worker.ts`) bundle, so it must NOT import a Node-only sqlite
+/// binding — otherwise Vite/rolldown fails to resolve the import and
+/// the whole browser build breaks. (`db_source_for_active_profile`
+/// silently fell through to the libsql variant for ~a month because it
+/// lacked the SharedWorker short-circuit its juntos/server siblings
+/// have; the browser-smoke harness was not yet in CI to catch it.)
+#[test]
+fn worker_profile_db_ts_has_no_node_sqlite_import() {
+    let app = analyzed("fixtures/real-blog");
+    let files = typescript::emit_with_profile(&app, &DeploymentProfile::worker());
+
+    let db = find(&files, "src/db.ts").expect("src/db.ts must be emitted");
+
+    // Match the quoted module specifier (the form rolldown resolves),
+    // not the bare name — the proxy's prose comments legitimately name
+    // both libraries while explaining why it avoids them.
+    assert!(
+        !db.content.contains("\"@libsql/client\""),
+        "worker src/db.ts must NOT import @libsql/client (Node-only; unbundlable in a SharedWorker)",
+    );
+    assert!(
+        !db.content.contains("\"better-sqlite3\""),
+        "worker src/db.ts must NOT import better-sqlite3 (Node-only; unbundlable in a SharedWorker)",
+    );
+    // Positive: it's the MessagePort proxy that round-trips to db_worker.
+    assert!(
+        db.content.contains("MessagePort proxy"),
+        "worker src/db.ts should be the db-worker-proxy variant",
+    );
+}
+
 #[test]
 fn node_profiles_do_not_emit_worker_ecosystem_files() {
     let app = analyzed("fixtures/real-blog");

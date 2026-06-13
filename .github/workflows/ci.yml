@@ -227,6 +227,59 @@ jobs:
       - name: cargo test --test framework_tests_typescript -- --ignored
         run: cargo test --test framework_tests_typescript -- --ignored --nocapture
 
+  # Browser smoke for the TypeScript *SharedWorker* deployment profile
+  # (juntos) — distinct from the tsx-server smoke-typescript job below.
+  # Harness + README live in tests/browser_smoke/. The pipeline (driven
+  # by `npm test` → scripts/prebuild.mjs → playwright.config.ts):
+  #   1. emit real-blog under `--profile worker` (cargo run emit_preview),
+  #   2. npm install + vite-build the emitted SPA into .emitted/dist,
+  #   3. `npm run preview` serves it; Playwright drives headless Chromium.
+  # The spec opens its OWN SharedWorker port and dispatches synthetic
+  # GET/POST/DELETE/422 requests + a multi-tab BroadcastChannel probe,
+  # asserting no 5xx. This is the only job that exercises the emitted
+  # framework runtime *inside a SharedWorker*, so it catches portability
+  # gaps the server target can't see: Node-only globals (Buffer/process/
+  # require) in transpiled output, missing browser polyfills, broken
+  # MessagePort / BroadcastChannel wiring, installDb ordering. Builds
+  # from source (needs generate-fixture, like toolchain-typescript),
+  # NOT from the published archive. Playwright config gates on $CI
+  # (GitHub sets it) → fresh server + forbidOnly + github reporter.
+  browser-smoke-typescript:
+    needs: generate-fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      - name: Install Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+      - name: Install harness deps
+        run: npm ci
+        working-directory: tests/browser_smoke
+      - name: Install Playwright Chromium (+ system deps)
+        run: npx playwright install --with-deps chromium
+        working-directory: tests/browser_smoke
+      - name: Run SharedWorker browser smoke (emit → vite build → drive)
+        run: npm test
+        working-directory: tests/browser_smoke
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-smoke-playwright-report
+          path: |
+            tests/browser_smoke/playwright-report
+            tests/browser_smoke/test-results
+          retention-days: 7
+          if-no-files-found: ignore
+
   framework-tests-crystal:
     # Per-target framework-test conformance gate for the Crystal
     # target. Transpiles runtime/ruby/test/**/*_test.rb through

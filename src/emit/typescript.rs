@@ -34,6 +34,8 @@ const BROADCASTS_SOURCE: &str = include_str!("../../runtime/typescript/broadcast
 const DB_SOURCE: &str = include_str!("../../runtime/typescript/db.ts");
 const PARAM_VALUE_SOURCE: &str = include_str!("../../runtime/typescript/param_value.ts");
 const DB_LIBSQL_SOURCE: &str = include_str!("../../runtime/typescript/db-libsql.ts");
+const DB_WORKER_PROXY_SOURCE: &str =
+    include_str!("../../runtime/typescript/db-worker-proxy.ts");
 const MINITEST_RUNTIME_SOURCE: &str = include_str!("../../runtime/typescript/minitest.ts");
 const MINITEST_ASYNC_RUNTIME_SOURCE: &str =
     include_str!("../../runtime/typescript/minitest-async.ts");
@@ -69,12 +71,18 @@ fn juntos_source_for_active_profile() -> &'static str {
     }
 }
 
-/// Pick the `db.ts` runtime variant for the active profile. Sync
-/// profiles get the better-sqlite3 wrap; async (libsql) profiles get
-/// the @libsql/client wrap whose `exec`/`prepare` return Promises.
-/// Same selection rule as the juntos / server pickers — profiles
-/// without a non-empty `active_extern_async_names()` are sync.
+/// Pick the `db.ts` runtime variant for the active profile. The
+/// SharedWorker target gets the MessagePort proxy (the application
+/// tier runs in a SharedWorkerGlobalScope where neither Node sqlite
+/// binding loads; the real sqlite-wasm lives in the dedicated
+/// `db_worker.ts`). Otherwise: sync profiles get the better-sqlite3
+/// wrap; async (libsql) profiles get the @libsql/client wrap whose
+/// `exec`/`prepare` return Promises. Same SharedWorker-first / async
+/// selection rule as the juntos / server pickers above.
 fn db_source_for_active_profile() -> &'static str {
+    if crate::profile::active_http_shim() == crate::profile::HttpShim::SharedWorker {
+        return DB_WORKER_PROXY_SOURCE;
+    }
     if crate::analyze::async_color::active_extern_async_names().is_empty() {
         DB_SOURCE
     } else {

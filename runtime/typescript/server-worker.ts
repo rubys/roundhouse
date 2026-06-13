@@ -37,6 +37,7 @@ import { Flash } from "./flash.js";
 // rename pattern as `juntos-libsql.ts` → `juntos.ts`. Imports
 // reference the emitted name.
 import { installDb, execSQL, type ActionResponse } from "./juntos.js";
+import { Db } from "./db.js";
 import { ViewHelpers } from "./view_helpers.js";
 
 // ── SharedWorker global scope declaration ──
@@ -154,6 +155,11 @@ export async function startApplication(opts: StartOptions): Promise<void> {
     await spawnDbWorker();
     await sendDbInit(_databaseName);
     installDb(_dbWorker!);
+    // The emitted models reach the DB through the low-level `Db`
+    // namespace (Arel compile-time SQL), not the adapter — hand it the
+    // same db_worker handle so its exec/prepare round-trip the
+    // MessagePort. Must precede seeds(), which run model writes.
+    Db.install(_dbWorker!);
 
     for (const stmt of opts.schemaStatements) {
       await execSQL(stmt);
@@ -322,6 +328,7 @@ async function respawnDbWorker(): Promise<void> {
   await spawnDbWorker();
   await sendDbInit(_databaseName);
   installDb(_dbWorker!);
+  Db.install(_dbWorker!);
   console.log("DB Worker respawned");
 }
 
