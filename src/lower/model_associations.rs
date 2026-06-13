@@ -255,6 +255,7 @@ mod tests {
                 assoc,
                 leading_comments: Vec::new(),
                 leading_blank_line: false,
+                span: crate::span::Span::synthetic(),
             })
             .collect();
         Model {
@@ -263,6 +264,7 @@ mod tests {
             table: TableRef(sym(&name.to_lowercase())),
             attributes: Row::default(),
             body,
+            span: crate::span::Span::synthetic(),
         }
     }
 

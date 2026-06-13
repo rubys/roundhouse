@@ -84,7 +84,7 @@ pub(super) fn push_unknown_marker_methods(methods: &mut Vec<MethodDef>, model: &
                         params: Vec::new(),
                         body: with_ty(
                             Expr::new(
-                                Span::synthetic(),
+                                expr.span,
                                 ExprNode::Lit { value: Literal::Bool { value: true } },
                             ),
                             Ty::Bool,
@@ -176,10 +176,14 @@ pub(super) fn push_block_callback_methods(methods: &mut Vec<MethodDef>, model: &
         // Translate Rails-API broadcast calls (`assoc.broadcast_replace_to(...)`
         // etc.) inside the block body to spinel-shape `Broadcasts.<action>(...)`
         // calls. Other content passes through unchanged.
-        let lambda_body = super::broadcasts::rewrite_rails_broadcast_calls(
+        let mut lambda_body = super::broadcasts::rewrite_rails_broadcast_calls(
             lambda_body.clone(),
             model,
         );
+        // The rewrite synthesizes wrapper nodes; whatever it left
+        // span-less attributes to the hook declaration. Source subtrees
+        // spliced through keep their exact spans.
+        lambda_body.inherit_span(expr.span);
 
         let hook_sym = method.clone();
         if let Some(existing) = methods.iter_mut().find(|m| m.name == hook_sym) {

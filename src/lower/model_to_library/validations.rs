@@ -24,7 +24,7 @@ use super::{fn_sig, lit_float, lit_int, lit_sym, seq};
 pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) {
     let mut stmts: Vec<Expr> = Vec::new();
 
-    for v in model.validations() {
+    for (span, v) in model.spanned_validations() {
         // Column type from the model's attributes row (when present).
         // Lets the per-rule generator skip dead `is_a?(Array)` branches
         // for fields the schema declares as `Str` — tsc narrows
@@ -32,7 +32,11 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) 
         // subsequent `.length` access.
         let attr_ty = model.attributes.fields.get(&v.attribute);
         for rule in &v.rules {
-            stmts.extend(validation_rule_to_calls(&v.attribute, rule, attr_ty));
+            for mut check in validation_rule_to_calls(&v.attribute, rule, attr_ty) {
+                // Each expanded check attributes to its `validates` line.
+                check.inherit_span(span);
+                stmts.push(check);
+            }
         }
     }
 
@@ -41,9 +45,11 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) 
     // @<fk>, <Target>)` per non-optional belongs_to. The runtime
     // helper short-circuits when the FK is unset (nil/0) and queries
     // `<Target>.exists?(fk_value)` otherwise.
-    for assoc in model.associations() {
+    for (span, assoc) in model.spanned_associations() {
         if let Association::BelongsTo { name, target, foreign_key, optional: false } = assoc {
-            stmts.push(inline_belongs_to_check(name, foreign_key, target));
+            let mut check = inline_belongs_to_check(name, foreign_key, target);
+            check.inherit_span(span);
+            stmts.push(check);
         }
     }
 

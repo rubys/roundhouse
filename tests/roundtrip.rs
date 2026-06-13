@@ -55,6 +55,7 @@ fn tiny_blog_round_trips() {
         table: TableRef(Symbol::from("posts")),
         attributes: Row { fields: attrs, rest: None },
         body: vec![],
+        span: Span::synthetic(),
     };
 
     // Action body: `Post.all` — a Send to a class-level method.

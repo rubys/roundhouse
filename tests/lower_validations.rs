@@ -43,6 +43,7 @@ fn length_rule_fans_out_into_min_and_max_checks() {
         parent: None,
         table: TableRef(Symbol::from("widgets")),
         attributes: Row::closed(),
+        span: roundhouse::span::Span::synthetic(),
         body: vec![ModelBodyItem::Validation {
             validation: Validation {
                 attribute: Symbol::from("body"),
@@ -50,6 +51,7 @@ fn length_rule_fans_out_into_min_and_max_checks() {
             },
             leading_comments: vec![],
             leading_blank_line: false,
+            span: roundhouse::span::Span::synthetic(),
         }],
     };
     let lowered = lower_validations(&model);
@@ -69,6 +71,7 @@ fn multiple_rules_on_one_attribute_stay_grouped() {
         parent: None,
         table: TableRef(Symbol::from("widgets")),
         attributes: Row::closed(),
+        span: roundhouse::span::Span::synthetic(),
         body: vec![ModelBodyItem::Validation {
             validation: Validation {
                 attribute: Symbol::from("title"),
@@ -79,6 +82,7 @@ fn multiple_rules_on_one_attribute_stay_grouped() {
             },
             leading_comments: vec![],
             leading_blank_line: false,
+            span: roundhouse::span::Span::synthetic(),
         }],
     };
     let lowered = lower_validations(&model);

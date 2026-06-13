@@ -79,12 +79,18 @@ pub fn ingest_model(
         constant_path_of(&n).map(|p| ClassId(Symbol::from(p.join("::"))))
     });
 
+    let class_loc = class.location();
     Ok(Some(Model {
         name: owner,
         parent,
         table: TableRef(Symbol::from(table_name)),
         attributes,
         body,
+        span: Span {
+            file: super::sources::file_id(file),
+            start: class_loc.start_offset() as u32,
+            end: class_loc.end_offset() as u32,
+        },
     }))
 }
 
@@ -97,6 +103,14 @@ fn ingest_model_body_item(
     file: &str,
     leading_comments: Vec<Comment>,
 ) -> IngestResult<ModelBodyItem> {
+    // Span of the whole statement — the typed variants (Association /
+    // Validation / Callback) drop the source Expr during recognition,
+    // so the declaration's location rides the ModelBodyItem wrapper.
+    let span = Span {
+        file: super::sources::file_id(file),
+        start: stmt.location().start_offset() as u32,
+        end: stmt.location().end_offset() as u32,
+    };
     if let Some(call) = stmt.as_call_node() {
         if call.receiver().is_some() {
             return Ok(ModelBodyItem::Unknown {
@@ -107,7 +121,7 @@ fn ingest_model_body_item(
         }
         let method = constant_id_str(&call.name()).to_string();
         if let Some(assoc) = parse_association(&call, owner, &method) {
-            return Ok(ModelBodyItem::Association { assoc, leading_blank_line: false, leading_comments });
+            return Ok(ModelBodyItem::Association { assoc, leading_blank_line: false, leading_comments, span });
         }
         if method == "validates" {
             let mut parsed = parse_validates(&call);
@@ -121,12 +135,14 @@ fn ingest_model_body_item(
                     validation: first,
                     leading_comments,
                     leading_blank_line: false,
+                    span,
                 });
                 for v in parsed.drain(1..) {
                     items.push(ModelBodyItem::Validation {
                         validation: v,
                         leading_comments: Vec::new(),
                         leading_blank_line: false,
+                        span,
                     });
                 }
                 // Degenerate: the caller expects ONE item. If parse_validates
@@ -150,7 +166,7 @@ fn ingest_model_body_item(
             }
         }
         if let Some(callback) = parse_callback(&call, &method) {
-            return Ok(ModelBodyItem::Callback { callback, leading_blank_line: false, leading_comments });
+            return Ok(ModelBodyItem::Callback { callback, leading_blank_line: false, leading_comments, span });
         }
         return Ok(ModelBodyItem::Unknown {
             expr: ingest_expr(stmt, file)?,

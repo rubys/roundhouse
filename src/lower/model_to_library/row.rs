@@ -57,7 +57,14 @@ pub fn synthesize_row_classes(
         let Some(table) = schema.tables.get(&model.table.0) else {
             continue;
         };
-        out.push(build_row_class(&model.name, table));
+        let mut row_lc = build_row_class(&model.name, table);
+        // Whole-cloth synthesis from schema columns — file-grain
+        // attribution to the owning model's class declaration (the Row
+        // class has no source file of its own).
+        for m in &mut row_lc.methods {
+            m.body.inherit_span(model.span);
+        }
+        out.push(row_lc);
     }
     out
 }

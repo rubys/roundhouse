@@ -40,6 +40,12 @@ pub struct Model {
     /// round-trip. Filter via the accessors (`associations()`,
     /// `validations()`, …) when the specialized view is what you want.
     pub body: Vec<ModelBodyItem>,
+    /// Span of the `class … end` declaration in the model source. The
+    /// file-grain fallback for synthesized method bodies whose inputs
+    /// carry no finer span (schema-derived accessors, adapter
+    /// primitives, `dom_prefix`).
+    #[serde(default, skip_serializing_if = "Span::is_synthetic")]
+    pub span: Span,
 }
 
 impl Model {
@@ -50,9 +56,27 @@ impl Model {
         })
     }
 
+    /// Like `associations()`, but paired with each declaration's source
+    /// span — for lowerers that stamp synthesized methods with the
+    /// `has_many`/`belongs_to` line they came from.
+    pub fn spanned_associations(&self) -> impl Iterator<Item = (Span, &Association)> {
+        self.body.iter().filter_map(|item| match item {
+            ModelBodyItem::Association { assoc, .. } => Some((item.span(), assoc)),
+            _ => None,
+        })
+    }
+
     pub fn validations(&self) -> impl Iterator<Item = &Validation> {
         self.body.iter().filter_map(|item| match item {
             ModelBodyItem::Validation { validation, .. } => Some(validation),
+            _ => None,
+        })
+    }
+
+    /// `validations()` paired with each `validates` call's source span.
+    pub fn spanned_validations(&self) -> impl Iterator<Item = (Span, &Validation)> {
+        self.body.iter().filter_map(|item| match item {
+            ModelBodyItem::Validation { validation, .. } => Some((item.span(), validation)),
             _ => None,
         })
     }
@@ -108,6 +132,12 @@ pub enum ModelBodyItem {
         leading_comments: Vec<Comment>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         leading_blank_line: bool,
+        /// Span of the recognized DSL call (`has_many :comments, …`).
+        /// The typed variants drop the source `Expr`, so the span rides
+        /// the wrapper — synthesized methods inherit it (see
+        /// `lower::model_to_library`).
+        #[serde(default, skip_serializing_if = "Span::is_synthetic")]
+        span: Span,
     },
     Validation {
         validation: Validation,
@@ -115,6 +145,9 @@ pub enum ModelBodyItem {
         leading_comments: Vec<Comment>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         leading_blank_line: bool,
+        /// Span of the `validates …` call this rule was recognized from.
+        #[serde(default, skip_serializing_if = "Span::is_synthetic")]
+        span: Span,
     },
     Scope {
         scope: Scope,
@@ -129,6 +162,9 @@ pub enum ModelBodyItem {
         leading_comments: Vec<Comment>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         leading_blank_line: bool,
+        /// Span of the `before_save :…` call this hook was recognized from.
+        #[serde(default, skip_serializing_if = "Span::is_synthetic")]
+        span: Span,
     },
     Method {
         method: MethodDef,
@@ -150,6 +186,20 @@ pub enum ModelBodyItem {
 }
 
 impl ModelBodyItem {
+    /// Source span of this body item. The typed variants (Association /
+    /// Validation / Callback) store the recognized call's span on the
+    /// wrapper; the Expr-carrying variants read it off their payload.
+    pub fn span(&self) -> Span {
+        match self {
+            Self::Association { span, .. }
+            | Self::Validation { span, .. }
+            | Self::Callback { span, .. } => *span,
+            Self::Scope { scope, .. } => scope.body.span,
+            Self::Method { method, .. } => method.body.span,
+            Self::Unknown { expr, .. } => expr.span,
+        }
+    }
+
     /// Return the leading comments attached to this item, regardless of
     /// variant — so emit code can fetch them without re-matching.
     pub fn leading_comments(&self) -> &[Comment] {

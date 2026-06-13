@@ -460,6 +460,16 @@ fn build_methods(
     push_broadcasts_methods(&mut methods, model);
     push_block_callback_methods(&mut methods, model);
 
+    // File-grain catch-all (mirrors view_to_library's
+    // build_library_class): whatever the synthesizers left span-less —
+    // schema accessors, adapter primitives, `from_params`,
+    // `dom_prefix`, Seq wrappers — attributes to the model's class
+    // declaration. Nodes the per-declaration stamps above already
+    // covered keep their finer spans.
+    for m in &mut methods {
+        m.body.inherit_span(model.span);
+    }
+
     methods
 }
 
@@ -881,8 +891,10 @@ fn type_method_body(
 }
 
 // ---------------------------------------------------------------------------
-// Small ExprNode constructors used throughout. Each takes a synthetic span
-// since lowered methods don't correspond to a single source location.
+// Small ExprNode constructors used throughout. Each takes a synthetic span;
+// span attribution happens at the synthesis choke points instead (per-
+// declaration `inherit_span` stamps in the pushers, then `build_methods`'
+// file-grain catch-all) — see a704ad6's convention.
 // ---------------------------------------------------------------------------
 
 pub(super) fn lit_str(s: String) -> Expr {

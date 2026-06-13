@@ -71,24 +71,31 @@ pub(super) fn push_broadcasts_methods(methods: &mut Vec<MethodDef>, model: &Mode
         let canonical_target = canonical_record_target(&model.name);
         let html_partial = views_render_self(&model.name);
 
-        let create_call = broadcasts_call(
+        let mut create_call = broadcasts_call(
             create_action,
             stream_expr.clone(),
             create_target,
             Some(html_partial.clone()),
         );
-        let update_call = broadcasts_call(
+        let mut update_call = broadcasts_call(
             BroadcastAct::Replace,
             stream_expr.clone(),
             canonical_target.clone(),
             Some(html_partial),
         );
-        let destroy_call = broadcasts_call(
+        let mut destroy_call = broadcasts_call(
             BroadcastAct::Remove,
             stream_expr,
             canonical_target,
             None,
         );
+
+        // All three lifecycle expansions attribute to the one
+        // `broadcasts_to` declaration; the channel lambda's source
+        // subtrees keep their exact spans.
+        create_call.inherit_span(expr.span);
+        update_call.inherit_span(expr.span);
+        destroy_call.inherit_span(expr.span);
 
         fold_into_or_push(methods, model, "after_create_commit", create_call);
         fold_into_or_push(methods, model, "after_update_commit", update_call);

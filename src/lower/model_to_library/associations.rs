@@ -15,7 +15,8 @@ use super::{class_const, fn_sig, lit_int, lit_sym, nil_lit, seq, var_ref};
 
 pub(super) fn push_association_methods(methods: &mut Vec<MethodDef>, model: &Model) {
     let owner = &model.name;
-    for assoc in model.associations() {
+    for (span, assoc) in model.spanned_associations() {
+        let before = methods.len();
         match assoc {
             Association::HasMany { name, target, foreign_key, .. } => {
                 methods.push(synth_has_many_reader(owner, name, target, foreign_key));
@@ -26,6 +27,11 @@ pub(super) fn push_association_methods(methods: &mut Vec<MethodDef>, model: &Mod
             }
             // has_one and HABTM land when a fixture demands them.
             _ => {}
+        }
+        // Every method this declaration synthesized attributes to the
+        // `has_many`/`belongs_to` line it came from.
+        for m in &mut methods[before..] {
+            m.body.inherit_span(span);
         }
     }
 }
@@ -298,7 +304,7 @@ fn synth_belongs_to_reader(
 pub(super) fn push_dependent_destroy(methods: &mut Vec<MethodDef>, model: &Model) {
     let mut stmts: Vec<Expr> = Vec::new();
 
-    for assoc in model.associations() {
+    for (span, assoc) in model.spanned_associations() {
         if let Association::HasMany { name, dependent, .. } = assoc {
             if matches!(dependent, Dependent::Destroy) {
                 // assoc_name.each { |c| c.destroy }
@@ -321,7 +327,7 @@ pub(super) fn push_dependent_destroy(methods: &mut Vec<MethodDef>, model: &Model
                         block_style: crate::expr::BlockStyle::Brace,
                     },
                 );
-                stmts.push(Expr::new(
+                let mut cascade = Expr::new(
                     Span::synthetic(),
                     ExprNode::Send {
                         recv: Some(Expr::new(
@@ -339,7 +345,11 @@ pub(super) fn push_dependent_destroy(methods: &mut Vec<MethodDef>, model: &Model
                         block: Some(block),
                         parenthesized: false,
                     },
-                ));
+                );
+                // Each cascade attributes to its `dependent: :destroy`
+                // declaration.
+                cascade.inherit_span(span);
+                stmts.push(cascade);
             }
         }
     }
