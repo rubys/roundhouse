@@ -13,20 +13,46 @@ module ActionDispatch
   # receiver across an untyped Hash channel.
   class Flash
     attr_accessor :notice, :alert
+    # Read-only accessors so typed targets infer `String?` for the
+    # snapshot ivars via the same accessor-nilability path as
+    # notice/alert (bare ivars get a narrower inference).
+    attr_reader :notice_was, :alert_was
 
     # `other` is an optional plain Hash carrying flash state across
     # requests (the server persists flash between redirect_to and the
     # follow-on GET). Nil at first-request boundary; populated on
     # follow-on requests. Keys read as Strings — the server's
     # persistent store is String-keyed.
+    #
+    # Flash lifecycle (the Rails "show exactly once" rule, owned here so
+    # every target's server is just a storage adapter): the constructor
+    # snapshots the loaded values as `@notice_was` / `@alert_was`. A key
+    # is carried to the next request by `to_persisted` only if the action
+    # CHANGED it from that snapshot (i.e. set a new flash this request);
+    # a key merely loaded-and-displayed is unchanged, so it drops out and
+    # the notice shows exactly once. (The snapshot comparison, rather than
+    # hooking `[]=`, is deliberate: typed targets reach the fields
+    # natively — `flash["notice"] = x` is a direct field write in TS, not
+    # a `[]=` method call — so freshness can't live in `[]=`.)
     def initialize(other = nil)
       @notice = nil
       @alert  = nil
+      # Snapshot of the carried-in values; `to_persisted` diffs against
+      # these. Assigned alongside @notice/@alert (same nil-or-String
+      # shape) so target type inference reads them as `String?`.
+      @notice_was = nil
+      @alert_was  = nil
       return if other.nil?
       v = other["notice"]
-      @notice = v if !v.nil?
+      if !v.nil?
+        @notice = v
+        @notice_was = v
+      end
       v = other["alert"]
-      @alert = v if !v.nil?
+      if !v.nil?
+        @alert = v
+        @alert_was = v
+      end
     end
 
     # HWIA-shape `[key]` accessor — accepts Symbol or String key. Routes
@@ -136,6 +162,24 @@ module ActionDispatch
       result = {}
       result["notice"] = @notice if !@notice.nil?
       result["alert"]  = @alert  if !@alert.nil?
+      result
+    end
+
+    # The entries to carry to the NEXT request — only those the action
+    # CHANGED from what it loaded (i.e. set a new flash this request).
+    # Entries loaded from the previous request and merely displayed are
+    # unchanged, so they drop out and a notice shows exactly once. Every
+    # target's server persists this between requests (in-memory var,
+    # cookie, …) and reloads it via `new`, which is what makes the sweep
+    # a property of Flash rather than per-server logic.
+    def to_persisted
+      result = {}
+      # Bind to locals so strict targets narrow `String? → String` across
+      # the compound guard (ivars don't narrow reliably in Crystal).
+      n = @notice
+      result["notice"] = n if !n.nil? && n != @notice_was
+      a = @alert
+      result["alert"]  = a if !a.nil? && a != @alert_was
       result
     end
 

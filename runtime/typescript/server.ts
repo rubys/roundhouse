@@ -261,13 +261,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     controller.request_path = url.pathname;
     controller.request_format = request_format;
     await controller.process_action(match.action);
-    // Rails carries flash forward exactly once: the action that
-    // sets `flash[:notice] = ...` then `redirect_to`s, the next
-    // request reads the notice, and a request after that sees an
-    // empty flash. Mirror that with a per-request swap — keep the
-    // current flash if the action set anything, replace with a
-    // fresh hash for the next request.
-    flashStore = controller.flash ? controller.flash.to_h() : {};
+    // Rails carries flash forward exactly once: the action that sets
+    // `flash[:notice] = ...` then `redirect_to`s, the next request reads
+    // the notice, and the request after that sees an empty flash. The
+    // Flash class owns that sweep now (ActionDispatch::Flash#to_persisted
+    // keeps only entries this request SET); this is just storage.
+    flashStore = controller.flash ? controller.flash.to_persisted() : {};
     response = {
       body: controller.body,
       status: controller.status,

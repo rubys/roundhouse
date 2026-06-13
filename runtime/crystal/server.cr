@@ -37,7 +37,10 @@ module Roundhouse
     @@routes : Array(RouteRow) = [] of RouteRow
     @@controllers : Hash(Symbol, ActionController::Base.class) = {} of Symbol => ActionController::Base.class
     @@session : ActionDispatch::Session = ActionDispatch::Session.new
-    @@flash : ActionDispatch::Flash = ActionDispatch::Flash.new
+    # Persisted flash store between requests. The Flash class owns the
+    # show-once sweep (ActionDispatch::Flash#to_persisted); this is just
+    # storage — load via `Flash.new(store)`, persist `flash.to_persisted`.
+    @@flash_store : Hash(String, String) = {} of String => String
 
     def self.start(
       schema_sql : String,
@@ -176,7 +179,7 @@ module Roundhouse
       ctrl = ctrl_class.new
       ctrl.params = merged
       ctrl.session = @@session
-      ctrl.flash = @@flash
+      ctrl.flash = ActionDispatch::Flash.new(@@flash_store)
       ctrl.request_method = method
       ctrl.request_path = path
       ctrl.request_format = request_format
@@ -192,10 +195,10 @@ module Roundhouse
         return
       end
 
-      # Carry flash forward exactly once: post-redirect, the next
-      # request reads the flash, the request after that sees fresh.
-      flash_for_response = ctrl.flash || ActionDispatch::Flash.new
-      @@flash = ActionDispatch::Flash.new
+      # Persist the swept flash for the next request. Flash#to_persisted
+      # carries forward only entries this request set (show-once); on a
+      # plain render nothing was set, so the displayed notice drops out.
+      @@flash_store = (ctrl.flash || ActionDispatch::Flash.new).to_persisted
 
       status = ctrl.status || 200i64
       body = ctrl.body || ""
@@ -204,7 +207,6 @@ module Roundhouse
       if !location.nil? && !location.empty?
         context.response.status_code = status.to_i
         context.response.headers["Location"] = location
-        @@flash = flash_for_response
         return
       end
 

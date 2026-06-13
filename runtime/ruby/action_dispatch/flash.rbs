@@ -6,12 +6,19 @@ module ActionDispatch
   class Flash
     @notice: String?
     @alert: String?
+    # Snapshot of the values loaded from the previous request; the
+    # `to_persisted` sweep carries forward only entries that differ.
+    @notice_was: String?
+    @alert_was: String?
 
     # `attr_accessor :notice, :alert` — getter+setter pair per name.
     def notice: () -> String?
     def notice=: (String?) -> String?
     def alert: () -> String?
     def alert=: (String?) -> String?
+    # `attr_reader :notice_was, :alert_was` — getters only.
+    def notice_was: () -> String?
+    def alert_was: () -> String?
 
     def initialize: (?Hash[String, String]? other) -> void
 
@@ -29,6 +36,7 @@ module ActionDispatch
     def values: () -> Array[String]
     def each: () { (String, String?) -> void } -> Flash
     def to_h: () -> Hash[String, String]
+    def to_persisted: () -> Hash[String, String]
     def merge: (Hash[String, String] other) -> Flash
   end
 end

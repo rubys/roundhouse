@@ -219,7 +219,9 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     controller.request_path = url.pathname;
     controller.request_format = request_format;
     await controller.process_action(match.action);
-    flashStore = controller.flash ? controller.flash.to_h() : {};
+    // Flash owns the show-once sweep (ActionDispatch::Flash#to_persisted);
+    // this is just storage between requests.
+    flashStore = controller.flash ? controller.flash.to_persisted() : {};
     response = {
       body: controller.body,
       status: controller.status,

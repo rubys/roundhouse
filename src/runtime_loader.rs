@@ -286,10 +286,11 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         mode: Mode::Library,
         imports: NO_IMPORTS,
         prelude: NO_PRELUDE,
-        // Hand-written server.ts constructs `new Flash(flashStore)`
-        // and reads `flash.to_h()` between requests — neither is
-        // visible to the app-side reachability walk.
-        extra_roots: &[("Flash", "to_h")],
+        // Hand-written server{,-worker,-libsql}.ts construct
+        // `new Flash(flashStore)` and persist `flash.to_persisted()`
+        // between requests (`to_h` is still used by the test harness) —
+        // none visible to the app-side reachability walk, so seed them.
+        extra_roots: &[("Flash", "to_h"), ("Flash", "to_persisted")],
     },
     RuntimeEntry {
         rb_src: include_str!("../runtime/ruby/action_dispatch/session.rb"),
@@ -439,7 +440,9 @@ const CRYSTAL_RUNTIME: &[RuntimeEntry] = &[
         mode: Mode::Library,
         imports: NO_IMPORTS,
         prelude: NO_PRELUDE,
-        extra_roots: NO_EXTRA_ROOTS,
+        // Hand-written server.cr persists `flash.to_persisted` between
+        // requests — invisible to the app-side reachability walk.
+        extra_roots: &[("Flash", "to_persisted")],
     },
     RuntimeEntry {
         rb_src: include_str!("../runtime/ruby/action_dispatch/session.rb"),

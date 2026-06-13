@@ -122,10 +122,13 @@ module Main
     # its own cookie (`flash_notice`, `flash_alert`) so the cookie
     # plumbing stays format-free.
     cookies = request[:cookies] || {}
-    inbound_flash = ActionDispatch::Flash.new
-    inbound_flash[:notice] = cookies[:flash_notice] if cookies.key?(:flash_notice)
-    inbound_flash[:alert]  = cookies[:flash_alert]  if cookies.key?(:flash_alert)
-    controller.flash = inbound_flash
+    # Load inbound flash through the constructor (NOT `flash[:k]=`) so the
+    # Flash snapshots these as carried-in; `to_persisted` then sweeps the
+    # ones merely displayed (show-once). See ActionDispatch::Flash.
+    inbound_flash = {}
+    inbound_flash["notice"] = cookies[:flash_notice] if cookies.key?(:flash_notice)
+    inbound_flash["alert"]  = cookies[:flash_alert]  if cookies.key?(:flash_alert)
+    controller.flash = ActionDispatch::Flash.new(inbound_flash)
 
     controller.request_method = request[:method]
     controller.request_path   = request[:path]
@@ -142,26 +145,32 @@ module Main
     # "Redirecting…" body; render-with-`location:` (Rails' POST 201
     # idiom) keeps a 2xx status and ships the rendered body alongside
     # the Location header.
+    # Persist the swept flash as cookies for the next request. Flash owns
+    # the show-once sweep (`to_persisted` keeps only entries this request
+    # set); set those, and clear any inbound cookie that wasn't carried so
+    # a displayed notice doesn't repeat.
     out_cookies = {}
+    persisted = controller.flash.to_persisted
+    if persisted.key?("notice")
+      out_cookies[:flash_notice] = persisted["notice"]
+    elsif cookies.key?(:flash_notice)
+      out_cookies[:flash_notice] = nil
+    end
+    if persisted.key?("alert")
+      out_cookies[:flash_alert] = persisted["alert"]
+    elsif cookies.key?(:flash_alert)
+      out_cookies[:flash_alert] = nil
+    end
     is_redirect = controller.status >= 300 && controller.status < 400
     if is_redirect
-      # Redirect: ship the outbound flash as cookies for the next
-      # request to consume.
-      out_cookies[:flash_notice] = controller.flash[:notice] unless controller.flash[:notice].nil?
-      out_cookies[:flash_alert]  = controller.flash[:alert]  unless controller.flash[:alert].nil?
       [controller.status,
        %(<a href="#{controller.location}">Redirecting</a>),
        "text/html; charset=utf-8", controller.location, out_cookies]
     else
-      # Render: clear inbound flash cookies (the action used them for
-      # display; the next request shouldn't see the same notice
-      # again). JSON responses skip the html layout wrap and ship the
-      # controller body verbatim with the JSON Content-Type. Other
-      # formats ride the application layout. `controller.location`
-      # (set by `render … location: @article`) flows through as the
-      # Location header when present.
-      out_cookies[:flash_notice] = nil if cookies.key?(:flash_notice)
-      out_cookies[:flash_alert]  = nil if cookies.key?(:flash_alert)
+      # JSON responses skip the html layout wrap and ship the controller
+      # body verbatim with the JSON Content-Type. Other formats ride the
+      # application layout. `controller.location` (set by `render …
+      # location: @article`) flows through as the Location header.
       if controller.request_format == :json
         [controller.status, controller.body,
          controller.content_type, controller.location, out_cookies]
