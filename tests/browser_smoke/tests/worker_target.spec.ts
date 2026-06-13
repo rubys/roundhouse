@@ -501,4 +501,52 @@ test.describe("SharedWorker target — real-blog", () => {
 
     await context.close();
   });
+
+  test("real UI navigation stays in-SPA (no full reload) + validation renders in place", async ({
+    page,
+  }) => {
+    // Drives the actual rendered UI through Turbo — the path every
+    // other spec bypasses by talking to its own SharedWorker port.
+    // Catches the class of bug where Turbo force-reloads instead of an
+    // in-place visit: e.g. the worker layout's propshaft asset tags
+    // carry data-turbo-track="reload", so if they leak into rendered
+    // responses Turbo sees a tracked-asset mismatch on every navigation
+    // and does a full page load (losing form state + 422 re-renders).
+    const fullNavs: string[] = [];
+    page.on("request", (r) => {
+      if (r.resourceType() === "document") fullNavs.push(r.url());
+    });
+
+    await page.goto("/articles", { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(
+      () => (window as Window & { __juntos__?: { ready?: boolean } }).__juntos__?.ready === true,
+      null,
+      { timeout: 15_000 },
+    );
+
+    // Click "New article" — a Turbo intercept, not a browser navigation.
+    const navsBeforeClick = fullNavs.length;
+    await page.click('a[href$="/articles/new"]');
+    await page.waitForFunction(() => /\/articles\/new$/.test(location.pathname), null, {
+      timeout: 10_000,
+    });
+    expect(
+      fullNavs.length,
+      `clicking "New article" caused a full navigation: ${JSON.stringify(fullNavs.slice(navsBeforeClick))}`,
+    ).toBe(navsBeforeClick);
+    await expect(page.locator('input[name="article[title]"]')).toBeVisible();
+
+    // Submit invalid (body < 10 chars) — the 422 re-render must appear
+    // in place, with no full page load and the typed title preserved.
+    const navsBeforeSubmit = fullNavs.length;
+    await page.fill('input[name="article[title]"]', "A valid title");
+    await page.fill('[name="article[body]"]', "short");
+    await page.click('input[type="submit"], button[type="submit"]');
+    await expect(page.locator("body")).toContainText(/too short|prohibited/i, { timeout: 8_000 });
+    expect(
+      fullNavs.length,
+      `invalid submit caused a full navigation: ${JSON.stringify(fullNavs.slice(navsBeforeSubmit))}`,
+    ).toBe(navsBeforeSubmit);
+    await expect(page.locator('input[name="article[title]"]')).toHaveValue("A valid title");
+  });
 });

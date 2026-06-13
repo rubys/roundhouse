@@ -245,6 +245,32 @@ function rewriteStreamSources(html: string): string {
   );
 }
 
+// Strip the Rails asset-pipeline tags from a rendered response's <head>:
+// the propshaft `stylesheet_link_tag` `/assets/*` links, the importmap,
+// modulepreloads, and the bare `import "application"` bootstrap. Under
+// the bundling model (issue #6) Vite owns assets, so these point at
+// files that don't exist — but more importantly they carry
+// `data-turbo-track="reload"`. Turbo compares tracked elements between
+// the current page and each rendered response; since the live head no
+// longer has them (reconcileHead drops them), leaving them in responses
+// makes Turbo see a mismatch on EVERY navigation and force a full reload
+// (`turbo:reload`) instead of an in-place visit — which breaks the SPA
+// (full page loads, lost form state, validation re-renders never shown).
+// Removing them from the response keeps Turbo's tracked set stable.
+function stripRailsAssetTags(html: string): string {
+  return html
+    .replace(/<link\b[^>]*\bhref="\/assets\/[^"]*"[^>]*>/g, "")
+    .replace(/<script\b[^>]*\btype="importmap"[^>]*>[\s\S]*?<\/script>/g, "")
+    .replace(/<script\b[^>]*\btype="module"[^>]*>\s*import\s[^<]*<\/script>/g, "");
+}
+
+/** Adapt a worker-rendered HTML response for the browser SPA before it
+ *  reaches the DOM / Turbo: drop dead Rails asset tags, and turn the
+ *  Action-Cable stream sources into BroadcastChannel ones. */
+function adaptWorkerHtml(html: string): string {
+  return rewriteStreamSources(stripRailsAssetTags(html));
+}
+
 // ── Public entry: startClient() ──
 
 export interface StartClientOptions {
@@ -461,7 +487,7 @@ async function renderInitial(bridge: WorkerBridge): Promise<void> {
   // parse (not just innerHTML) because the response includes
   // <html>/<head>/<body> from the application layout.
   const parser = new DOMParser();
-  const doc = parser.parseFromString(rewriteStreamSources(response.body), "text/html");
+  const doc = parser.parseFromString(adaptWorkerHtml(response.body), "text/html");
 
   // Swap the live <html>'s child structure. Replacing the entire
   // documentElement is heavy-handed and breaks document.body
@@ -597,7 +623,7 @@ function installTurboIntercept(bridge: WorkerBridge): void {
 
     detail.fetchRequest = {
       response: Promise.resolve(
-        new Response(rewriteStreamSources(response.body), {
+        new Response(adaptWorkerHtml(response.body), {
           status: response.status,
           headers: response.headers,
         }),
