@@ -13,8 +13,11 @@ deployment target end-to-end against the `real-blog` fixture:
    built `dist/` and points Chromium at `http://localhost:5173`.
 3. **`tests/worker_target.spec.ts`** loads the page, waits for the
    SharedWorker bridge to reach ready, then opens its own
-   SharedWorker port and sends a synthetic `fetch` message to
-   `/articles`. Asserts the response status is < 500.
+   SharedWorker port and drives the CRUD surface — GET (index),
+   POST (create → insert → redirect), POST with invalid params
+   (422 re-render), DELETE via `_method` override (destroy) — plus
+   a multi-tab BroadcastChannel broadcast. Each probe asserts no 5xx
+   and the expected status/redirect.
 
 The synthetic-fetch path matters: when the SharedWorker errors with
 5xx, Turbo Drive falls back to a full-page navigation against vite
@@ -58,15 +61,34 @@ Framework-runtime portability gaps in the transpiled output: Node
 globals (`Buffer`, `process`, `require`) referenced from emitted
 TypeScript that runs inside a SharedWorker; missing browser
 polyfills; broken MessagePort / BroadcastChannel wiring; `installDb`
-ordering bugs.
+ordering bugs; and a Node-only `Db` variant leaking into the browser
+bundle (the worker `src/db.ts` must proxy to the dedicated DB Worker,
+not import `better-sqlite3` / `@libsql/client` — a regression this
+suite caught after it shipped silently for a month).
+
+Driving every CRUD verb through the SharedWorker also covers the
+request surfaces a portability gap tends to hide in: form-encoded
+body parsing (POST/DELETE), the adapter's MessagePort round-trip on
+write (insert / update / delete, not just read), validation failure
+(422), the `_method` override branch, and the broadcaster firing
+across tabs.
 
 ## What this doesn't catch (yet)
 
+- Turbo Stream DOM application — the multi-tab spec asserts the
+  broadcast *payload* reaches tab B (a `<turbo-stream>` fragment over
+  BroadcastChannel), not that Turbo applied it to the receiving DOM.
+  Confirming the rendered result would need DOM assertions on tab B.
 - Visual regressions (would need Playwright screenshot comparison
   or Vitest browser mode with `expect(page).toHaveScreenshot()`).
-- Multi-tab BroadcastChannel coordination (would need a multi-page
-  Playwright spec).
-- Form submission edge cases (need a POST probe).
+- Importmap asset wiring — the specs deliberately ignore `/assets/*.js`
+  404s (Stimulus/Turbo load via the Vite bundle, not the importmap),
+  so a broken importmap pin wouldn't turn the suite red.
+- OPFS persistence across reloads — the specs never reload the page,
+  so "data written through the DB Worker survives a reload" is
+  unverified.
+- Active Storage / file uploads — deferred in `db_worker.ts` (the
+  `file:*` message ops are intentionally unimplemented).
 
 These are natural extensions; the harness is shaped to grow into
 them without restructuring.

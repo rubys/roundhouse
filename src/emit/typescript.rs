@@ -1151,14 +1151,29 @@ import { defineConfig, type Plugin } from \"vite\";
 import { readFileSync, writeFileSync } from \"node:fs\";
 import { resolve } from \"node:path\";
 
+// Deploy base path. Defaults to \"/\" (served from the web root). Set
+// ROUNDHOUSE_BASE (e.g. \"/roundhouse/blog/\", trailing slash required)
+// to mount the app under a subdirectory — needed for project GitHub
+// Pages, which serve under \"/<repo>/...\". Vite rewrites the entry
+// <script> and bundled asset URLs with this base; the meta-injection
+// plugin below applies the same (Vite-normalized) base to the worker
+// <meta> tags, and client.ts strips it back off via import.meta.env.
+const BASE = process.env.ROUNDHOUSE_BASE || \"/\";
+
 /** Rewrite the `<meta name=\"juntos-worker\">` and `juntos-db-worker`
  *  tags in dist/index.html with the fingerprinted bundle URLs Vite
- *  produced. Reads the manifest after closeBundle so the asset
- *  filenames are final. */
+ *  produced, base-prefixed. Reads the manifest after closeBundle so
+ *  the asset filenames are final. */
 function manifestMetaInjection(): Plugin {
+  // Vite normalizes `base` to always end in \"/\"; captured from the
+  // resolved config so it matches what Vite applied to other assets.
+  let base = BASE;
   return {
     name: \"roundhouse-manifest-meta-injection\",
     apply: \"build\",
+    configResolved(config) {
+      base = config.base;
+    },
     closeBundle() {
       const distDir = resolve(\"dist\");
       const manifestPath = resolve(distDir, \".vite\", \"manifest.json\");
@@ -1179,16 +1194,19 @@ function manifestMetaInjection(): Plugin {
       }
       const workerAsset = manifest[\"worker.ts\"]?.file;
       const dbWorkerAsset = manifest[\"src/db_worker.ts\"]?.file;
+      // `base` ends in \"/\"; manifest `file` has no leading slash, so
+      // `${base}${file}` yields e.g. \"/roundhouse/blog/assets/worker-….js\"
+      // (or \"/assets/worker-….js\" at the default root base).
       if (workerAsset) {
         html = html.replace(
           /<meta name=\"juntos-worker\" content=\"[^\"]*\">/,
-          `<meta name=\"juntos-worker\" content=\"/${workerAsset}\">`,
+          `<meta name=\"juntos-worker\" content=\"${base}${workerAsset}\">`,
         );
       }
       if (dbWorkerAsset) {
         html = html.replace(
           /<meta name=\"juntos-db-worker\" content=\"[^\"]*\">/,
-          `<meta name=\"juntos-db-worker\" content=\"/${dbWorkerAsset}\">`,
+          `<meta name=\"juntos-db-worker\" content=\"${base}${dbWorkerAsset}\">`,
         );
       }
       writeFileSync(indexPath, html);
@@ -1197,6 +1215,7 @@ function manifestMetaInjection(): Plugin {
 }
 
 export default defineConfig({
+  base: BASE,
   build: {
     manifest: true,
     rollupOptions: {

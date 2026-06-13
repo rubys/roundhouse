@@ -329,8 +329,34 @@ export async function startClient(opts: StartClientOptions = {}): Promise<void> 
   if (window.__juntos__) window.__juntos__.ready = true;
 }
 
+// Deploy base path, injected by Vite (`import.meta.env.BASE_URL`):
+// "/" when served from the web root, or e.g. "/roundhouse/blog/" when
+// mounted under a subdirectory (project GitHub Pages). Application
+// routes are root-relative ("/articles"), so the worker's router
+// expects app paths with the base stripped off; `toAppPath` strips it
+// from the browser location, `toBrowserPath` re-adds it when writing
+// history/URL so the address bar stays inside the mount. Accessed
+// defensively so the file type-checks without vite/client ambient
+// types in the emitted project.
+const BASE: string =
+  (import.meta as unknown as { env?: { BASE_URL?: string } }).env?.BASE_URL ?? "/";
+
+function toAppPath(browserPath: string): string {
+  if (BASE !== "/" && browserPath.startsWith(BASE)) {
+    return "/" + browserPath.slice(BASE.length);
+  }
+  return browserPath || "/";
+}
+
+function toBrowserPath(appPath: string): string {
+  if (BASE !== "/" && appPath.startsWith("/")) {
+    return BASE.replace(/\/$/, "") + appPath;
+  }
+  return appPath;
+}
+
 async function renderInitial(bridge: WorkerBridge): Promise<void> {
-  const initialPath = location.pathname || "/";
+  const initialPath = toAppPath(location.pathname || "/");
   let response;
   try {
     response = await bridge.fetch("GET", new URL(initialPath, location.origin).href, {
@@ -352,7 +378,7 @@ async function renderInitial(bridge: WorkerBridge): Promise<void> {
     response.headers.location
   ) {
     const redirectTo = response.headers.location;
-    history.replaceState({}, "", redirectTo);
+    history.replaceState({}, "", toBrowserPath(redirectTo));
     try {
       response = await bridge.fetch("GET", new URL(redirectTo, location.origin).href, {
         cookie: document.cookie,
