@@ -43,18 +43,18 @@ module ActionDispatch
       @notice_was = nil
       @alert_was  = nil
       return if other.nil?
-      # Guard each read with `key?` — strict targets (Crystal) raise
-      # KeyError on a missing Hash key, and the persisted store carries
-      # only the keys that were set (partial: {} / notice-only / etc.).
-      if other.key?("notice")
-        v = other["notice"]
-        @notice = v
-        @notice_was = v
-      end
-      if other.key?("alert")
-        v = other["alert"]
-        @alert = v
-        @alert_was = v
+      # Iterate rather than index: the persisted store is partial ({} /
+      # notice-only / alert-only), and strict targets (Crystal) raise
+      # KeyError on a missing Hash key. `each` only visits present keys
+      # and is a proven cross-target idiom (see `merge`).
+      other.each do |k, v|
+        if k == "notice"
+          @notice = v
+          @notice_was = v
+        elsif k == "alert"
+          @alert = v
+          @alert_was = v
+        end
       end
     end
 
