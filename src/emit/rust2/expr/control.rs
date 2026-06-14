@@ -361,11 +361,47 @@ pub(super) fn emit_bool_op(
             return emit_expr(left);
         }
     }
-    let op_s = match op {
-        crate::expr::BoolOpKind::And => "&&",
-        crate::expr::BoolOpKind::Or => "||",
+    match op {
+        // `&&` binds tighter than `||`: an `Or` operand inside an `And`
+        // must be parenthesized or precedence flips (`a && b || c`
+        // parses as `(a && b) || c`, not `a && (b || c)`). This is the
+        // ONLY boolean-operand case that needs parens — And-in-And,
+        // And-in-Or, Or-in-Or, comparisons, and casts all bind at least
+        // as tightly, so wrapping them would only draw Rust's
+        // `unused_parens` lint.
+        crate::expr::BoolOpKind::And => {
+            format!("{} && {}", emit_and_operand(left), emit_and_operand(right))
+        }
+        crate::expr::BoolOpKind::Or => {
+            format!("{} || {}", emit_expr(left), emit_expr(right))
+        }
+    }
+}
+
+/// Emit an `&&` operand, parenthesizing it when it would otherwise emit
+/// as a bare `||` (which binds looser than `&&`). See `emit_bool_op`.
+fn emit_and_operand(e: &Expr) -> String {
+    let s = emit_expr(e);
+    if emits_as_or_infix(e) { format!("({s})") } else { s }
+}
+
+/// True iff `e` is an `Or` that `emit_bool_op` renders as the infix
+/// `l || r` form — NOT the `Option` `unwrap_or` rewrite or the
+/// statically-non-nil RHS-drop (both emit as a primary and need no
+/// wrap). MUST stay in sync with `emit_bool_op`'s `Or` branch above:
+/// option LHS → unwrap_or (non-infix); non-bool *typed* LHS → RHS
+/// dropped (non-infix); bool or untyped LHS → falls through to infix.
+fn emits_as_or_infix(e: &Expr) -> bool {
+    let ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, left, .. } = &*e.node else {
+        return false;
     };
-    format!("{} {op_s} {}", emit_expr(left), emit_expr(right))
+    let lhs_is_option = matches!(
+        left.ty.as_ref(),
+        Some(crate::ty::Ty::Union { variants })
+            if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+    );
+    let lhs_is_bool = matches!(left.ty.as_ref(), Some(crate::ty::Ty::Bool));
+    !lhs_is_option && (lhs_is_bool || left.ty.is_none())
 }
 
 pub(super) fn emit_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> String {
@@ -562,4 +598,74 @@ fn tail_produces_option(branch: &Expr) -> bool {
         } if assign_name.as_str() == name
             && matches!(&*value.node, ExprNode::Lit { value: Literal::Nil })
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::emit::rust2::EmitCtx;
+    use crate::emit::rust2::expr::with_emit_ctx;
+    use crate::expr::{BoolOpKind, BoolOpSurface};
+    use crate::ident::{Symbol, VarId};
+    use crate::span::Span;
+    use crate::ty::Ty;
+
+    fn bool_var(name: &str) -> Expr {
+        let mut e = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(0), name: Symbol::from(name) },
+        );
+        e.ty = Some(Ty::Bool);
+        e
+    }
+
+    fn bool_op(op: BoolOpKind, left: Expr, right: Expr) -> Expr {
+        let mut e = Expr::new(
+            Span::synthetic(),
+            ExprNode::BoolOp { op, surface: BoolOpSurface::Symbol, left, right },
+        );
+        e.ty = Some(Ty::Bool);
+        e
+    }
+
+    fn emit(e: &Expr) -> String {
+        with_emit_ctx(EmitCtx::default(), || emit_expr(e))
+    }
+
+    #[test]
+    fn or_operand_inside_and_is_parenthesized() {
+        // `a && b && (c || d)` — the bug dropped the parens, flipping
+        // precedence to `(a && b && c) || d`. `||` binds looser than
+        // `&&`, so the `Or` operand must be wrapped.
+        let inner_and = bool_op(BoolOpKind::And, bool_var("a"), bool_var("b"));
+        let inner_or = bool_op(BoolOpKind::Or, bool_var("c"), bool_var("d"));
+        let root = bool_op(BoolOpKind::And, inner_and, inner_or);
+        assert_eq!(emit(&root), "a && b && (c || d)");
+    }
+
+    #[test]
+    fn equal_or_tighter_precedence_operands_get_no_parens() {
+        // These must stay paren-free or rustc's `unused_parens` lint
+        // fires. `||` is the only operator looser than `&&`.
+        let or_in_or = bool_op(
+            BoolOpKind::Or,
+            bool_op(BoolOpKind::Or, bool_var("a"), bool_var("b")),
+            bool_var("c"),
+        );
+        assert_eq!(emit(&or_in_or), "a || b || c");
+
+        let and_in_or = bool_op(
+            BoolOpKind::Or,
+            bool_op(BoolOpKind::And, bool_var("a"), bool_var("b")),
+            bool_var("c"),
+        );
+        assert_eq!(emit(&and_in_or), "a && b || c");
+
+        let and_in_and = bool_op(
+            BoolOpKind::And,
+            bool_op(BoolOpKind::And, bool_var("a"), bool_var("b")),
+            bool_var("c"),
+        );
+        assert_eq!(emit(&and_in_and), "a && b && c");
+    }
 }
