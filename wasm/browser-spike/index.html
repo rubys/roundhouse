@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>roundhouse wasm — browser spike</title>
+<style>
+  :root { font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100vh; display: flex; flex-direction: column; color: #1a1a1a; }
+  header { padding: 8px 12px; border-bottom: 1px solid #ddd; display: flex; gap: 12px; align-items: center; }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+  #status { margin-left: auto; color: #555; }
+  #status.ok { color: #176e2b; }
+  #status.err { color: #b00020; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #files { width: 320px; margin: 0; padding: 8px; list-style: none; overflow: auto; border-right: 1px solid #ddd; }
+  #files li { margin: 0; }
+  #files button { width: 100%; text-align: left; border: 0; background: none; padding: 4px 6px; cursor: pointer; font: inherit; border-radius: 4px; color: #1a1a1a; }
+  #files button:hover { background: #f0f0f0; }
+  #files button.active { background: #e3edff; }
+  pre { flex: 1; margin: 0; padding: 12px; overflow: auto; background: #fafafa; }
+  select { font: inherit; padding: 2px 4px; }
+  label { color: #555; }
+</style>
+</head>
+<body>
+<header>
+  <h1>roundhouse → wasm</h1>
+  <label>target <select id="target"></select></label>
+  <span id="status">booting…</span>
+</header>
+<main>
+  <ul id="files"></ul>
+  <pre><code id="code"></code></pre>
+</main>
+<script type="module" src="spike.js"></script>
+</body>
+</html>

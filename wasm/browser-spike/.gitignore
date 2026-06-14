@@ -1,0 +1,4 @@
+# Regenerable / copied artifacts — keep only the source files + README tracked.
+roundhouse_wasm.wasm
+fixture.json
+spike-*.png

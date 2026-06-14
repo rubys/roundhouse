@@ -326,11 +326,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rbs-parse"
-version = "0.1.0"
-source = "git+https://github.com/rubys/rbs-rust#2cc21625b37c6bc0288db49c0de128949bc4b019"
-
-[[package]]
 name = "redox_syscall"
 version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -375,8 +370,7 @@ dependencies = [
  "flate2",
  "indexmap",
  "ruby-prism",
- "ruby-rbs 0.1.0",
- "ruby-rbs 0.3.0",
+ "ruby-rbs",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -403,14 +397,6 @@ checksum = "9f85fd9571455bdca2b3bf0b2f543cd13ac39d5de0026a8eb2deb94ffd264f00"
 dependencies = [
  "bindgen",
  "cc",
-]
-
-[[package]]
-name = "ruby-rbs"
-version = "0.1.0"
-source = "git+https://github.com/rubys/rbs-rust#2cc21625b37c6bc0288db49c0de128949bc4b019"
-dependencies = [
- "rbs-parse",
 ]
 
 [[package]]

@@ -17,3 +17,12 @@ serde_json = "1"
 lto = true
 codegen-units = 1
 opt-level = "z"
+
+# Roundhouse now uses the real `ruby-rbs` (borrowed FFI) on ALL targets. wasm
+# just needs `ruby-rbs-sys` built for wasm32 — its C compiled via the WASI SDK
+# and its bindgen run against the host target (#[repr(C)] is layout-portable).
+# This patch points at a local copy of published ruby-rbs-sys 0.3.0 carrying
+# that build.rs support (upstreamed as rubys/rbs:rust-wasm-bindings). Repin to
+# the published crate once that lands. Requires WASI_SDK_PATH at build time.
+[patch.crates-io]
+ruby-rbs-sys = { path = "/Users/rubys/git/ruby-rbs-sys-wasm" }
