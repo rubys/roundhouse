@@ -3,7 +3,7 @@
 # Hand-written, shipped alongside generated code (copied in by the
 # Elixir emitter as `lib/server.ex`). Runs Plug.Cowboy and dispatches
 # through the app stack — `ActionDispatch.Router.match/3` over
-# `RoutesTable.table/0`, then `Dispatch.call/5` into the per-controller
+# `RoutesTable.table/0`, then `Dispatch.call/6` into the per-controller
 # `process_action`.
 #
 # The DB connection + schema are owned by the shared `Roundhouse.Db` /
@@ -14,6 +14,13 @@ defmodule Server do
   require Logger
 
   alias Roundhouse.Db
+
+  # Flash is cookie-backed and per-session (per browser), so parallel
+  # clients never share a flash slot. The "show exactly once" lifecycle
+  # lives in the transpiled `ActionDispatch.Flash` (to_persisted keeps only
+  # what the action set); this server is just the storage adapter. Mirrors
+  # go (server.go) / kotlin / swift.
+  @flash_cookie "rh_flash"
 
   @doc """
   Open the DB, apply schema, and run Plug.Cowboy until the process
@@ -42,7 +49,7 @@ defmodule Server do
   Core dispatcher: read body, apply the `_method` override, strip a
   `.json` suffix (→ `:json` format), look up the route via the v2
   router over `RoutesTable.table/0`, run the action through
-  `Dispatch.call/5`, and ship the response.
+  `Dispatch.call/6`, and ship the response.
   """
   def dispatch(%{path_info: ["cable"]} = conn) do
     # Action Cable WebSocket. Echo the `actioncable-v1-json` subprotocol the
@@ -59,6 +66,12 @@ defmodule Server do
     raw_path = "/" <> Enum.join(conn.path_info, "/")
 
     {conn, body_params} = read_form_body(conn)
+
+    # Reload the flash carried from the previous request (the redirect that
+    # set `flash[:notice] = …`) so views render it; the Flash constructor
+    # snapshots it as *_was so `to_persisted` drops it after one display.
+    conn = Plug.Conn.fetch_cookies(conn)
+    incoming_flash = read_flash_cookie(conn.cookies[@flash_cookie])
 
     method =
       if raw_method == "POST" and Map.has_key?(body_params, "_method") do
@@ -83,15 +96,15 @@ defmodule Server do
 
       mr ->
         path_params = stringify_keys(mr.path_params)
-        {body, status, content_type, location} =
-          Dispatch.call(mr.controller, mr.action, path_params, body_params, format)
+        {body, status, content_type, location, flash} =
+          Dispatch.call(mr.controller, mr.action, path_params, body_params, format, incoming_flash)
 
         status = if status == 0, do: 200, else: status
-        send_response(conn, status, body, content_type, location)
+        send_response(conn, status, body, content_type, location, flash)
     end
   end
 
-  defp send_response(conn, status, body, content_type, location) do
+  defp send_response(conn, status, body, content_type, location, flash) do
     conn =
       if is_binary(location) and location != "" do
         Plug.Conn.put_resp_header(conn, "location", location)
@@ -99,11 +112,53 @@ defmodule Server do
         conn
       end
 
+    # Carry the flash the action set into the next request (or clear it
+    # once shown — `to_persisted` returns an empty map for a merely-
+    # displayed notice). Must run before send_resp (resp_cookies flush
+    # with the response).
+    conn = write_flash_cookie(conn, flash)
+
     ct = if is_binary(content_type) and content_type != "", do: content_type, else: "text/html; charset=utf-8"
 
     conn
     |> Plug.Conn.put_resp_content_type(ct)
     |> Plug.Conn.send_resp(status, body)
+  end
+
+  # Decode the rh_flash cookie value (`notice=…&alert=…`, percent-encoded)
+  # into the String-keyed map `ActionDispatch.Flash.new/1` reloads from.
+  # nil/empty → empty map (first request in a session carries no flash).
+  defp read_flash_cookie(nil), do: %{}
+
+  defp read_flash_cookie(raw) do
+    raw
+    |> String.split("&")
+    |> Enum.reduce(%{}, fn pair, acc ->
+      case String.split(pair, "=", parts: 2) do
+        [k, v] when k in ["notice", "alert"] ->
+          decoded = URI.decode_www_form(v)
+          if decoded == "", do: acc, else: Map.put(acc, k, decoded)
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  # Persist the entries the action set (Flash.to_persisted already swept the
+  # show-once ones). Empty → clear the cookie so a shown notice doesn't
+  # stick. HttpOnly + Path=/ to match go/kotlin/swift.
+  defp write_flash_cookie(conn, persisted) when map_size(persisted) == 0 do
+    Plug.Conn.delete_resp_cookie(conn, @flash_cookie, path: "/")
+  end
+
+  defp write_flash_cookie(conn, persisted) do
+    value =
+      ["notice", "alert"]
+      |> Enum.filter(&Map.has_key?(persisted, &1))
+      |> Enum.map_join("&", fn k -> "#{k}=#{URI.encode_www_form(persisted[k])}" end)
+
+    Plug.Conn.put_resp_cookie(conn, @flash_cookie, value, http_only: true, path: "/")
   end
 
   # Read + decode the form body by hand (not via Plug.Parsers), then

@@ -8,14 +8,14 @@
 #
 # `TestClient.dispatch/3` mirrors `Server.dispatch/1`'s routing
 # path — `ActionDispatch.Router.match/3` over `RoutesTable
-# .table/0`, then `Dispatch.call/5` — but skips Plug.Conn and
+# .table/0`, then `Dispatch.call/6` — but skips Plug.Conn and
 # returns a `TestResponse` directly. Assertion semantics: substring-
 # match on the response body, loose but good-enough for the blog's HTML.
 
 defmodule TestResponse do
   @moduledoc """
   Wrapper around the `{body, status, content_type, location}` tuple
-  `Dispatch.call/5` returns, exposing Rails-Minitest-compatible
+  `Dispatch.call/6` returns, exposing Rails-Minitest-compatible
   assertion helpers. Bodies substring-match for `assert_select`-style
   queries.
   """
@@ -108,7 +108,7 @@ defmodule TestClient do
   @moduledoc """
   Pure in-process HTTP client — dispatches through the same v2 stack
   as `Server` (`ActionDispatch.Router.match/3` over
-  `RoutesTable.table/0` → `Dispatch.call/5`). No real HTTP, no
+  `RoutesTable.table/0` → `Dispatch.call/6`). No real HTTP, no
   socket setup. Flat bracket-notation body keys (`"article[title]"`)
   are nested to the shape the v2 controllers read, matching the
   server's `read_form_body` path.
@@ -135,8 +135,14 @@ defmodule TestClient do
       mr ->
         path_params = stringify_keys(mr.path_params)
         body_params = nest_params(stringify_keys(body))
-        result = Dispatch.call(mr.controller, mr.action, path_params, body_params, format)
-        TestResponse.from(normalize_status(result))
+        # Dispatch.call/6 returns a 5-tuple now (the trailing element is the
+        # flash to persist to the rh_flash cookie); tests carry no incoming
+        # flash (`%{}`) and assert on the response, not the cookie, so drop
+        # the carried flash and keep the legacy 4-tuple downstream.
+        {body, status, ct, loc, _flash} =
+          Dispatch.call(mr.controller, mr.action, path_params, body_params, format, %{})
+
+        TestResponse.from(normalize_status({body, status, ct, loc}))
     end
   end
 

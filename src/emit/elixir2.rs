@@ -570,16 +570,19 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
         .any(|v| v.name.as_str() == "layouts/application" && v.format.as_str() == "html");
     let finalize = if has_app_layout {
         // The layout's `notice`/`alert` params are unused (the flash is
-        // rendered inside the per-action partial), so pass `nil`.
+        // rendered inside the per-action partial), so pass `nil`. The 5th
+        // tuple element is the flash to carry to the next request —
+        // `to_persisted` keeps only what the action SET (show-once sweep);
+        // `Server.dispatch` writes it to the rh_flash cookie.
         "    body =\n\
          \x20     if String.starts_with?(c.content_type, \"text/html\") and c.body != \"\" do\n\
          \x20       Views.Layouts.application(c.body, nil, nil)\n\
          \x20     else\n\
          \x20       c.body\n\
          \x20     end\n\
-         \x20   {body, c.status, c.content_type, c.location}\n"
+         \x20   {body, c.status, c.content_type, c.location, ActionDispatch.Flash.to_persisted(c.flash)}\n"
     } else {
-        "    {c.body, c.status, c.content_type, c.location}\n"
+        "    {c.body, c.status, c.content_type, c.location, ActionDispatch.Flash.to_persisted(c.flash)}\n"
     };
 
     let mut arms = String::new();
@@ -592,7 +595,7 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
         arms.push_str(&format!(
             "      {raw:?} ->\n\
              \x20       c = {module}.new()\n\
-             \x20       c = %{{c | params: params, request_format: request_format}}\n\
+             \x20       c = %{{c | params: params, request_format: request_format, flash: ActionDispatch.Flash.new(incoming_flash)}}\n\
              \x20       c = {module}.process_action(c, action)\n\
              {finalize}"
         ));
@@ -604,18 +607,20 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
          defmodule Dispatch do\n\
          \x20 @doc \"\"\"\n\
          \x20 Build a controller for `(controller, action)`, thread request\n\
-         \x20 params + format into it, run the action, and return the captured\n\
-         \x20 `{{body, status, content_type, location}}` response state.\n\
-         \x20 `request_format` is an atom (`:html` / `:json`); `path_params`\n\
-         \x20 and `body_params` are string-keyed maps (body params nested,\n\
-         \x20 e.g. `%{{\"article\" => %{{\"title\" => …}}}}`).\n\
+         \x20 params + format + incoming flash into it, run the action, and\n\
+         \x20 return the captured `{{body, status, content_type, location,\n\
+         \x20 flash}}` response state, where `flash` is the String-keyed map\n\
+         \x20 to carry to the next request (`Flash.to_persisted`).\n\
+         \x20 `request_format` is an atom (`:html` / `:json`); `path_params`,\n\
+         \x20 `body_params`, and `incoming_flash` are string-keyed maps (body\n\
+         \x20 params nested, e.g. `%{{\"article\" => %{{\"title\" => …}}}}`).\n\
          \x20 \"\"\"\n\
-         \x20 def call(controller, action, path_params, body_params, request_format) do\n\
+         \x20 def call(controller, action, path_params, body_params, request_format, incoming_flash) do\n\
          \x20   params = Map.merge(path_params, body_params)\n\
          \x20   case controller do\n\
          {arms}\
          \x20     _ ->\n\
-         \x20       {{\"Not Found\", 404, \"text/plain\", nil}}\n\
+         \x20       {{\"Not Found\", 404, \"text/plain\", nil, %{{}}}}\n\
          \x20   end\n  end\nend\n"
     );
     EmittedFile {

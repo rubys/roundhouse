@@ -1539,7 +1539,11 @@ const ELIXIR_RUNTIME: &[RuntimeEntry] = &[
         mode: Mode::Library,
         imports: NO_IMPORTS,
         prelude: NO_PRELUDE,
-        extra_roots: NO_EXTRA_ROOTS,
+        // Hand-written server.ex + emitted dispatch.ex persist
+        // `flash.to_persisted` between requests (cookie-backed) — invisible
+        // to the app-side reachability walk, so seed it. (Inert today —
+        // elixir doesn't treeshake — but documents the dep.)
+        extra_roots: &[("Flash", "to_persisted")],
     },
     RuntimeEntry {
         rb_src: include_str!("../runtime/ruby/action_dispatch/session.rb"),
