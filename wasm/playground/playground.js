@@ -1,20 +1,18 @@
 // Phase 1 — multi-target playground (rung A of docs/browser-demo-plan.md).
 //
-// Builds directly on the Phase 0 spike: reuses ../browser-spike/transpile.mjs
-// (the C-ABI driver) and the spike's already-generated artifacts
-// (roundhouse_wasm.wasm + fixture.json). What's net-new here over the spike:
-// an EDITABLE multi-file source tree, an editor (Monaco w/ textarea fallback),
-// and a debounced edit -> transpile -> render loop.
+// Self-contained: every asset it needs (the C-ABI driver transpile.mjs +
+// wasi-shim.mjs, the compiler roundhouse_wasm.wasm, and the seed app
+// fixture.json) sits in THIS directory, so the whole dir copies straight to
+// GitHub Pages at /playground/ with no rewrite. transpile.mjs + wasi-shim.mjs
+// are vendored copies of the Phase 0 spike's driver (kept in sync by hand —
+// they're small and stable). What's net-new over the spike: an EDITABLE
+// source tree, an editor (Monaco w/ textarea fallback), and a debounced
+// edit -> transpile -> render loop.
 //
-// Serve from the wasm/ directory root and visit /playground/ so the
-// ../browser-spike/ imports + fetches resolve. (Self-contained packaging into
-// its own deploy dir is a follow-on — see README.)
+// Serve THIS directory as the web root (e.g. `python3 -m http.server` here).
 
-import { loadCompiler } from "../browser-spike/transpile.mjs";
+import { loadCompiler } from "./transpile.mjs";
 import { createEditor } from "./editor.js";
-
-// Shared driver + artifacts live in the spike dir, one level up from here.
-const SPIKE = "../browser-spike";
 
 // The six targets the wasm entry point routes to today. (ruby/spinel/kotlin/
 // swift are not yet wired into wasm/src/lib.rs — a one-line match extension.)
@@ -144,8 +142,8 @@ async function boot() {
 
   setStatus("loading wasm + fixture…");
   const [wasmBytes, fixture] = await Promise.all([
-    fetch(`${SPIKE}/roundhouse_wasm.wasm`).then((r) => r.arrayBuffer()),
-    fetch(`${SPIKE}/fixture.json`).then((r) => r.json()),
+    fetch("./roundhouse_wasm.wasm").then((r) => r.arrayBuffer()),
+    fetch("./fixture.json").then((r) => r.json()),
   ]);
   srcMap = fixture;
   compiler = await loadCompiler(wasmBytes, {

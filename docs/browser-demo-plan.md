@@ -115,6 +115,50 @@ verifiable development cycle."**
 Total: rung A alone **~2–3 days**; full arc through D.2 **~9–14 days**.
 A is independently shippable and de-risks everything after it.
 
+## Publishing to Pages
+
+The demos publish to `rubys.github.io/roundhouse/` through the same CI
+`build-site` job that ships `/blog/`, `/browse/`, and `/bench/`. The job
+assembles `_site/` (via `roundhouse::project::build_site`, which copies `site/`
+wholesale + writes the `browse/` archives) and then layers on the dynamic
+demos as extra steps before `upload-pages-artifact`. Two kinds of content:
+
+- **Static** → anything under `site/` is copied as-is (this is how `/demo/`
+  and the landing page ship). Links to the playground live in
+  `site/index.html` and `site/demo/index.html`.
+- **Generated** → a CI step writes into `_site/<dir>/`. `/blog/` emits the
+  worker-profile app and vite-builds it; **`/playground/`** copies the
+  self-contained `wasm/playground/` dir and regenerates `fixture.json` from the
+  just-built real-blog fixture (CI step "Bundle the in-browser playground
+  demo").
+
+**The playground is published with a checked-in compiler wasm — deliberately,
+not blocked on #2992.** Building `roundhouse_wasm.wasm` on a runner needs the
+WASI SDK *and* a `ruby-rbs-sys` reachable from CI; today that's a local-path
+`[patch.crates-io]` (the wasm32 build support is upstream-pending as
+ruby/rbs#2992). Rather than wait — it may be days, weeks, or never — the
+~3.2 MB `wasm/playground/roundhouse_wasm.wasm` is committed and the CI step
+just copies it. The cost is a manual refresh: after compiler/emit changes,
+rebuild and recommit the binary (`WASI_SDK_PATH=/opt/wasi-sdk cargo build
+--release --target wasm32-wasip1` in `wasm/`, copy it in, re-run
+`verify-playground.mjs`). See `wasm/playground/README.md` § Maintenance.
+
+**Switch-to-CI-build trigger:** when #2992 merges and `ruby-rbs-sys` publishes
+(or the patched crate is pushed to a CI-reachable git ref), replace the copy
+with a build step (install WASI SDK → `cargo build --target wasm32-wasip1` →
+regenerate fixture) and delete the checked-in binary. That closes honest-gap
+#1's second half. Until then, the playground is the only published surface
+carrying a binary artifact in git.
+
+The playground is pure static files (no npm/vite at serve time, no COOP/COEP),
+so — like `/blog/` — it serves straight off plain GitHub Pages. One thing to
+eyeball on the **first** deploy: that Pages serves the `.mjs` modules with a
+JS MIME (ES-module imports are MIME-strict) and the `./roundhouse_wasm.wasm`
+fetch succeeds. `transpile.mjs` uses `WebAssembly.instantiate(arrayBuffer)`
+(not `instantiateStreaming`), so the wasm's own MIME is irrelevant — only that
+the bytes load. If a `.mjs` MIME ever bites, rename the two driver modules to
+`.js`.
+
 ## The honest last-mile gaps (read before estimating)
 
 1. **WASI-in-browser (rung A, Phase 0). — RESOLVED.** The hand-rolled
