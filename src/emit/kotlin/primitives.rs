@@ -231,9 +231,16 @@ package roundhouse
 
 import io.javalin.Javalin
 import io.javalin.http.Context
+import io.javalin.http.Cookie
 import io.javalin.http.Handler
 
 object Server {
+    // Flash cookie name. Flash is cookie-backed and per-session (per
+    // browser), so parallel clients never share a flash slot — the
+    // "show exactly once" lifecycle lives in the transpiled Flash class
+    // (Flash.toPersisted keeps only what the action set), and dispatch is
+    // just the storage adapter. Mirrors go (server.go) / rust (http.rs).
+    private const val FLASH_COOKIE = "rh_flash"
     // Compiled assets (tailwind.css, turbo.min.js, …) live under
     // static/assets/ and are served at /assets/* by `serveAsset` (called
     // from `dispatch`). Served in-handler rather than via Javalin's
@@ -288,6 +295,40 @@ object Server {
         ctx.contentType(contentType).result(file.readBytes())
     }
 
+    // Decode the rh_flash cookie into the String-keyed map the Flash
+    // constructor reloads from. Absent/empty -> empty map (first request
+    // in a session carries no flash). Only the closed notice/alert key
+    // set is surfaced. Values are percent-encoded (URLEncoder) so notice
+    // text survives the `key=value&…` structure + cookie-octet rules.
+    private fun readFlashCookie(ctx: Context): MutableMap<String, String> {
+        val out: MutableMap<String, String> = mutableMapOf()
+        val raw = ctx.cookie(FLASH_COOKIE) ?: return out
+        for (pair in raw.split("&")) {
+            val idx = pair.indexOf('=')
+            if (idx <= 0) continue
+            val k = pair.substring(0, idx)
+            if (k != "notice" && k != "alert") continue
+            val v = java.net.URLDecoder.decode(pair.substring(idx + 1), "UTF-8")
+            if (v.isNotEmpty()) out[k] = v
+        }
+        return out
+    }
+
+    // Persist the entries the action set (Flash.toPersisted already swept
+    // the show-once ones). Empty -> clear the cookie so a shown notice
+    // doesn't stick. HttpOnly + Path=/ to match go/rust.
+    private fun writeFlashCookie(ctx: Context, persisted: Map<String, String>) {
+        if (persisted.isEmpty()) {
+            ctx.removeCookie(FLASH_COOKIE, "/")
+            return
+        }
+        val parts = mutableListOf<String>()
+        for (k in listOf("notice", "alert")) {
+            persisted[k]?.let { parts.add("$k=" + java.net.URLEncoder.encode(it, "UTF-8")) }
+        }
+        ctx.cookie(Cookie(name = FLASH_COOKIE, value = parts.joinToString("&"), path = "/", isHttpOnly = true))
+    }
+
     private fun dispatch(
         ctx: Context,
         routes: MutableList<Route>,
@@ -340,9 +381,18 @@ object Server {
         controller.requestFormat = format
         controller.requestMethod = method
         controller.requestPath = path
-        controller.flash = Flash()
+        // Reload the flash carried from the previous request (the redirect
+        // that set `flash[:notice] = …`) so views render it; the
+        // constructor snapshots it as *_was so toPersisted can drop it
+        // after one display.
+        controller.flash = Flash(readFlashCookie(ctx))
         controller.session = Session()
         controller.processAction(match.action)
+
+        // Carry the flash the action SET into the next request (or clear it
+        // once shown). toPersisted keeps only entries changed this request,
+        // so a merely-displayed notice drops out — shows exactly once.
+        writeFlashCookie(ctx, controller.flash.toPersisted())
 
         val code = controller.status.toInt()
         val location = controller.location
