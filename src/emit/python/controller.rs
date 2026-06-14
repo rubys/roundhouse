@@ -434,7 +434,14 @@ impl<'a> PyEmitter<'a> {
                     );
                 }
                 let view_fn = py_view_fn(self.ctx.model_class, sym.as_str());
-                let body_part = format!("body=views.{view_fn}({arg})");
+                // Plumb the incoming flash (loaded from the rh_flash cookie
+                // into context.flash by the server) into the view so the
+                // `<% if notice.present? %>` block renders. Referencing
+                // `context.` flips the action's param from `_context` to
+                // `context` (see `uses_context` in emit_py_action).
+                let body_part = format!(
+                    "body=views.{view_fn}({arg}, context.flash[\"notice\"], context.flash[\"alert\"])"
+                );
                 return match crate::lower::extract_status_from_kwargs(&args[1..]) {
                     Some(status) => format!("return http.ActionResponse(status={status}, {body_part})"),
                     None => format!("return http.ActionResponse({body_part})"),
@@ -452,13 +459,44 @@ impl<'a> PyEmitter<'a> {
         };
         let loc = self.render_expr(first);
         let status = crate::lower::extract_status_from_kwargs(&args[1..]).unwrap_or(303);
+        // Carry `redirect_to … notice:/alert:` into the response so the
+        // server persists it to the rh_flash cookie (shown on the next
+        // request, then swept). Empty when the redirect set no flash.
+        let flash_arg = self.py_redirect_flash_arg(&args[1..]);
         if is_bare_py_ident(&loc) {
             let id_access = format!("{loc}.id");
             return format!(
-                "return http.ActionResponse(status={status}, location={loc}_path({id_access}))"
+                "return http.ActionResponse(status={status}, location={loc}_path({id_access}){flash_arg})"
             );
         }
-        format!("return http.ActionResponse(status={status}, location={loc})")
+        format!("return http.ActionResponse(status={status}, location={loc}{flash_arg})")
+    }
+
+    /// Extract `notice:` / `alert:` from redirect_to kwargs into a
+    /// `, flash={"notice": <expr>, …}` suffix (empty string when none).
+    /// The closed notice/alert key set matches the Flash struct fields.
+    fn py_redirect_flash_arg(&mut self, args: &[Expr]) -> String {
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for a in args {
+            let ExprNode::Hash { entries, .. } = &*a.node else { continue };
+            for (k, v) in entries {
+                if let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node {
+                    let key = key.as_str();
+                    if key == "notice" || key == "alert" {
+                        let val_py = self.render_expr(v);
+                        pairs.push((key.to_string(), val_py));
+                    }
+                }
+            }
+        }
+        if pairs.is_empty() {
+            return String::new();
+        }
+        let items: Vec<String> = pairs
+            .iter()
+            .map(|(k, v)| format!("{k:?}: {v}"))
+            .collect();
+        format!(", flash={{{}}}", items.join(", "))
     }
 }
 

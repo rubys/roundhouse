@@ -426,16 +426,17 @@ pub fn target_readme(target: BuildTarget) -> String {
     // verbatim, so the section must stay runnable as written.
     let e2e = if ships_e2e(target) {
         // The flash spec (`flash.spec.js`) needs per-session (cookie)
-        // flash. ruby + jruby have it via Rails; go + rust + kotlin +
-        // swift + elixir wire it through a cookie-backed store (go:
+        // flash. ruby + jruby have it via Rails; go/rust/kotlin/swift/
+        // elixir/python wire it through a cookie-backed store (go:
         // server.go Read/WriteFlashCookie + Flash#to_persisted; rust:
         // http.rs flash_from_request/apply_flash_cookie + a FLASH_OUT
         // thread-local; kotlin/swift: Server.dispatch read/writeFlashCookie
         // + Flash.toPersisted; elixir: server.ex read/write_flash_cookie +
-        // Dispatch.call 5-tuple + Flash.to_persisted). Crystal/TS share one
+        // Dispatch.call 5-tuple; python: server.py read/apply_flash_cookie +
+        // ActionContext.flash / ActionResponse.flash). Crystal/TS share one
         // global in-memory flash slot, which races with the comment specs'
-        // `redirect_to … notice:` under `fullyParallel`; the rest don't
-        // wire flash yet. Skip it everywhere but the per-session targets,
+        // `redirect_to … notice:` under `fullyParallel`; they're the only
+        // remaining skips. Skip it everywhere but the per-session targets,
         // and drop a target from this skip as it gains per-session flash.
         // (See the flash-wiring punch list memory.)
         let run = if matches!(
@@ -447,6 +448,7 @@ pub fn target_readme(target: BuildTarget) -> String {
                 | BuildTarget::Kotlin
                 | BuildTarget::Swift
                 | BuildTarget::Elixir
+                | BuildTarget::Python
         ) {
             "npx playwright test"
         } else {

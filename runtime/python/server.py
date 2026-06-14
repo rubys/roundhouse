@@ -19,7 +19,7 @@ import os
 import sys
 import traceback
 from typing import Any, Callable
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote, unquote
 
 from aiohttp import web
 
@@ -27,6 +27,50 @@ from . import cable as _cable
 from . import db as _db
 from . import http as _http
 from . import view_helpers as _view_helpers
+from .flash import Flash
+
+# Flash is cookie-backed and per-session (per browser), so parallel clients
+# never share a flash slot. The "show exactly once" lifecycle: the action
+# that sets a flash carries it on `ActionResponse.flash`, which the server
+# writes to the rh_flash cookie; the next request reloads it into
+# `context.flash` for display and sets no new flash, so the cookie is
+# cleared. Storage adapter only — mirrors go/kotlin/swift/elixir.
+_FLASH_COOKIE = "rh_flash"
+
+
+def _read_flash_cookie(request: web.Request) -> Flash:
+    """Decode the rh_flash cookie into a Flash for view display. Absent ->
+    empty Flash (first request in a session). Only the closed notice/alert
+    key set; values percent-encoded, `key:value&…` so the urlencoded
+    structure + cookie-octet rules survive arbitrary notice text (`:`/`&`
+    avoid http.cookies' value-quoting that `=` would trigger)."""
+    raw = request.cookies.get(_FLASH_COOKIE)
+    if not raw:
+        return Flash()
+    out: dict[str, str] = {}
+    for pair in raw.split("&"):
+        if ":" not in pair:
+            continue
+        k, v = pair.split(":", 1)
+        if k in ("notice", "alert"):
+            decoded = unquote(v)
+            if decoded:
+                out[k] = decoded
+    return Flash(out)
+
+
+def _apply_flash_cookie(resp: web.Response, persisted: dict[str, str]) -> None:
+    """Write the entries the action set (already the show-once set) to the
+    rh_flash cookie. Empty -> clear it so a shown notice doesn't stick."""
+    if not persisted:
+        resp.del_cookie(_FLASH_COOKIE, path="/")
+        return
+    parts = [
+        f"{k}:{quote(persisted[k], safe='')}"
+        for k in ("notice", "alert")
+        if k in persisted
+    ]
+    resp.set_cookie(_FLASH_COOKIE, "&".join(parts), path="/", httponly=True)
 
 
 def start(
@@ -127,7 +171,11 @@ async def _dispatch_request(request: web.Request) -> web.StreamResponse:
     params.update(path_params)
     params.update(body_params)
 
-    ctx = _http.ActionContext(params=params, request_format=request_format)
+    ctx = _http.ActionContext(
+        params=params,
+        request_format=request_format,
+        flash=_read_flash_cookie(request),
+    )
     try:
         result = handler(ctx)
         if inspect.isawaitable(result):
@@ -150,24 +198,28 @@ async def _dispatch_request(request: web.Request) -> web.StreamResponse:
     is_redirect = 300 <= status < 400 and bool(result.location)
 
     if is_redirect:
-        return web.Response(
+        resp = web.Response(
             status=status,
             text=body,
             headers={"Location": result.location or ""},
             content_type="text/html",
             charset="utf-8",
         )
+        _apply_flash_cookie(resp, result.flash)
+        return resp
 
     # JSON responses ship the controller body verbatim under the
     # controller-supplied Content-Type and skip the html layout wrap.
     # Mirrors the TS server's `request_format === "json"` branch.
     if request_format == "json" or result.content_type:
-        return web.Response(
+        resp = web.Response(
             status=status,
             text=body,
             content_type=result.content_type or "application/json",
             charset="utf-8",
         )
+        _apply_flash_cookie(resp, result.flash)
+        return resp
 
     # Wrap the view body in the emitted layout (when present). The
     # fallback when no layout is provided matches the rust/typescript
@@ -178,12 +230,14 @@ async def _dispatch_request(request: web.Request) -> web.StreamResponse:
     else:
         wrapped = _fallback_layout(body)
 
-    return web.Response(
+    resp = web.Response(
         status=status,
         text=wrapped,
         content_type="text/html",
         charset="utf-8",
     )
+    _apply_flash_cookie(resp, result.flash)
+    return resp
 
 
 async def _read_form_body(request: web.Request) -> tuple[str, dict[str, Any]]:

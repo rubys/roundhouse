@@ -322,6 +322,23 @@ fn emit_view_file_pass2_py(
             locals.push(n.clone());
         }
     }
+    // `notice`/`alert` are str|None params on non-partial views (see
+    // `py_view_signature`). Register them as locals so `<%= notice %>` and
+    // `<% if notice.present? %>` resolve instead of stubbing to `if False`
+    // / a TODO; `flash_locals` flags them as String-typed so `present?`
+    // emits truthiness (`if notice:`) rather than `len(...)` (which would
+    // raise on `None`).
+    let base = view.name.as_str().rsplit('/').next().unwrap_or(view.name.as_str());
+    let flash_locals: Vec<String> = if base.starts_with('_') {
+        Vec::new()
+    } else {
+        vec!["notice".to_string(), "alert".to_string()]
+    };
+    for n in &flash_locals {
+        if !locals.iter().any(|x| x == n) {
+            locals.push(n.clone());
+        }
+    }
     let resource_dir = view
         .name
         .as_str()
@@ -338,6 +355,7 @@ fn emit_view_file_pass2_py(
         stylesheets: stylesheets.to_vec(),
         form_records: Vec::new(),
         attrs_by_class: attrs_by_class.clone(),
+        flash_locals,
     };
 
     // Apply the shared erubi-trim pass so `<% %>` tags drop their
@@ -368,11 +386,17 @@ pub(super) struct PyViewCtx {
     /// field :title` resolves to the bound record's attr.
     form_records: Vec<(String, String)>,
     attrs_by_class: std::collections::BTreeMap<String, Vec<String>>,
+    /// String-typed locals (`notice`/`alert`) where `present?` is a
+    /// truthiness test, not a `len()` over a collection.
+    flash_locals: Vec<String>,
 }
 
 impl PyViewCtx {
     fn is_local(&self, n: &str) -> bool {
         self.locals.iter().any(|x| x == n)
+    }
+    fn is_flash_local(&self, n: &str) -> bool {
+        self.flash_locals.iter().any(|x| x == n)
     }
     fn arg_has_attr(&self, name: &str, attr: &str) -> bool {
         name == self.arg_name && self.arg_attrs.iter().any(|a| a == attr)
@@ -424,24 +448,30 @@ fn py_view_signature(
         }
         return (format!("{arg_name}: Any"), arg_name, None);
     }
+    // Non-partial views take the uniform flash tail (`notice`, `alert`)
+    // so the controller can plumb flash without per-view signature
+    // knowledge — matching the lowered `(main, notice, alert, …)` shape
+    // the other targets get from `collect_extra_params`. Defaulted to
+    // `None` so views that don't render flash (new/edit) ignore them.
+    let flash = ", notice: str | None = None, alert: str | None = None";
     match stem {
         "index" => {
             let arg_name = dir.to_string();
-            if model_exists {
-                return (
-                    format!("{arg_name}: list[{model_class}]"),
-                    arg_name,
-                    Some(model_class),
-                );
-            }
-            return (format!("{arg_name}: list[Any]"), arg_name, None);
+            let (ty, model) = if model_exists {
+                (format!("list[{model_class}]"), Some(model_class))
+            } else {
+                ("list[Any]".to_string(), None)
+            };
+            (format!("{arg_name}: {ty}{flash}"), arg_name, model)
         }
         _ => {
             let arg_name = singular.clone();
-            if model_exists {
-                return (format!("{arg_name}: {model_class}"), arg_name, Some(model_class));
-            }
-            return (format!("{arg_name}: Any"), arg_name, None);
+            let (ty, model) = if model_exists {
+                (model_class.clone(), Some(model_class))
+            } else {
+                ("Any".to_string(), None)
+            };
+            (format!("{arg_name}: {ty}{flash}"), arg_name, model)
         }
     }
 }
@@ -1276,6 +1306,24 @@ fn unwrap_to_s_py(expr: &Expr) -> &Expr {
     expr
 }
 
+/// Is `expr` a reference to a String-typed flash local (`notice`/`alert`)?
+/// Covers both the `Var` form and the bareword-`Send` form Ruby parses a
+/// local read as. Used to make `present?`/`empty?` emit truthiness rather
+/// than `len(...)` (which raises on a `None` flash slot).
+fn py_recv_flash_local(expr: &Expr, ctx: &PyViewCtx) -> bool {
+    match &*expr.node {
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => {
+            ctx.is_flash_local(name.as_str())
+        }
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if args.is_empty() =>
+        {
+            ctx.is_flash_local(method.as_str())
+        }
+        _ => false,
+    }
+}
+
 fn is_py_simple_expr(expr: &Expr, ctx: &PyViewCtx) -> bool {
     match &*expr.node {
         ExprNode::Lit { .. } => true,
@@ -1388,10 +1436,19 @@ fn emit_py_view_expr_raw(expr: &Expr, ctx: &PyViewCtx) -> String {
                     match method_s {
                         "any?" | "present?" => {
                             let recv_s = emit_py_view_expr_raw(r, ctx);
+                            // String-typed flash locals (notice/alert):
+                            // present? is truthiness — `if notice:` covers
+                            // both None and "". `len()` would raise on None.
+                            if py_recv_flash_local(r, ctx) {
+                                return recv_s;
+                            }
                             return format!("(len({recv_s}) > 0)");
                         }
                         "none?" | "empty?" => {
                             let recv_s = emit_py_view_expr_raw(r, ctx);
+                            if py_recv_flash_local(r, ctx) {
+                                return format!("(not {recv_s})");
+                            }
                             return format!("(len({recv_s}) == 0)");
                         }
                         "size" | "count" | "length" => {

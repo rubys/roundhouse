@@ -17,6 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .flash import Flash
+
 
 @dataclass
 class ActionResponse:
@@ -33,6 +35,10 @@ class ActionResponse:
     # Set by the json-format controller branch; the server ships the
     # body verbatim under this Content-Type and skips the html layout.
     content_type: str = ""
+    # Flash the action SET this request (`redirect_to … notice:`) — a
+    # String-keyed map (notice/alert) the server persists to the rh_flash
+    # cookie so it shows on the next request, exactly once. Empty otherwise.
+    flash: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -44,6 +50,10 @@ class ActionContext:
     # "html" or "json" — inferred from a `.json` path suffix. The
     # controller's implicit-render branch reads it to pick the view.
     request_format: str = "html"
+    # Flash carried from the previous request, loaded from the rh_flash
+    # cookie by the server. A Flash so `context.flash["notice"]` works in
+    # the emitted view calls; empty on the first request in a session.
+    flash: Flash = field(default_factory=Flash)
 
 
 class Params(dict):
