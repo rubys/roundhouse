@@ -37,10 +37,13 @@ module Roundhouse
     @@routes : Array(RouteRow) = [] of RouteRow
     @@controllers : Hash(Symbol, ActionController::Base.class) = {} of Symbol => ActionController::Base.class
     @@session : ActionDispatch::Session = ActionDispatch::Session.new
-    # Persisted flash store between requests. The Flash class owns the
-    # show-once sweep (ActionDispatch::Flash#to_persisted); this is just
-    # storage — load via `Flash.new(store)`, persist `flash.to_persisted`.
-    @@flash_store : Hash(String, String) = {} of String => String
+    # Flash is cookie-backed and per-session (per browser), so parallel
+    # clients never share a flash slot — no cross-request leak racing the
+    # comment specs under fullyParallel. The Flash class owns the show-once
+    # sweep (ActionDispatch::Flash#to_persisted); this server is just the
+    # storage adapter: load via `Flash.new(read_flash_cookie(...))`, persist
+    # `flash.to_persisted` to the rh_flash cookie. Mirrors go/kotlin/swift.
+    FLASH_COOKIE = "rh_flash"
 
     def self.start(
       schema_sql : String,
@@ -179,7 +182,9 @@ module Roundhouse
       ctrl = ctrl_class.new
       ctrl.params = merged
       ctrl.session = @@session
-      ctrl.flash = ActionDispatch::Flash.new(@@flash_store)
+      # Reload the flash carried from the previous request (the redirect
+      # that set `flash[:notice] = …`) so views render it once.
+      ctrl.flash = ActionDispatch::Flash.new(read_flash_cookie(context.request))
       ctrl.request_method = method
       ctrl.request_path = path
       ctrl.request_format = request_format
@@ -195,10 +200,13 @@ module Roundhouse
         return
       end
 
-      # Persist the swept flash for the next request. Flash#to_persisted
-      # carries forward only entries this request set (show-once); on a
-      # plain render nothing was set, so the displayed notice drops out.
-      @@flash_store = (ctrl.flash || ActionDispatch::Flash.new).to_persisted
+      # Persist the swept flash to the rh_flash cookie for the next request.
+      # Flash#to_persisted carries forward only entries this request set
+      # (show-once); on a plain render nothing was set, so the displayed
+      # notice drops out and the cookie clears. Set before any body output —
+      # Set-Cookie is a header (headers flush on first write/finalize).
+      persisted = (ctrl.flash || ActionDispatch::Flash.new).to_persisted
+      context.response.headers["Set-Cookie"] = flash_set_cookie(persisted)
 
       status = ctrl.status || 200i64
       body = ctrl.body || ""
@@ -236,6 +244,44 @@ module Roundhouse
       context.response.status_code = status.to_i
       context.response.content_type = "text/html; charset=utf-8"
       context.response.print response_body
+    end
+
+    # Decode the rh_flash cookie into the String-keyed map `Flash.new`
+    # reloads from. Absent → empty (first request in a session). Only the
+    # closed notice/alert key set; values percent-encoded so the
+    # `key=value&…` structure + cookie-octet rules survive notice text.
+    # Parses the raw Cookie header (no HTTP::Cookie value validation).
+    def self.read_flash_cookie(request : HTTP::Request) : Hash(String, String)
+      result = {} of String => String
+      raw = request.headers["Cookie"]?
+      return result if raw.nil?
+      raw.split(';').each do |jar|
+        trimmed = jar.strip
+        next unless trimmed.starts_with?("#{FLASH_COOKIE}=")
+        val = trimmed[(FLASH_COOKIE.size + 1)..]
+        val.split('&').each do |kv|
+          idx = kv.index('=')
+          next if idx.nil? || idx == 0
+          k = kv[0, idx]
+          next unless k == "notice" || k == "alert"
+          v = URI.decode_www_form(kv[(idx + 1)..])
+          result[k] = v unless v.empty?
+        end
+      end
+      result
+    end
+
+    # Build the rh_flash Set-Cookie value. Empty → a clearing cookie
+    # (Max-Age=0) so a notice shown once doesn't stick. HttpOnly + Path=/.
+    def self.flash_set_cookie(persisted : Hash(String, String)) : String
+      return "#{FLASH_COOKIE}=; Path=/; Max-Age=0; HttpOnly" if persisted.empty?
+      parts = [] of String
+      ["notice", "alert"].each do |k|
+        if v = persisted[k]?
+          parts << "#{k}=#{URI.encode_www_form(v)}"
+        end
+      end
+      "#{FLASH_COOKIE}=#{parts.join('&')}; Path=/; HttpOnly"
     end
 
     # Parse a `application/x-www-form-urlencoded` body into a nested

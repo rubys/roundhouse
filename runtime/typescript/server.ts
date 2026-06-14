@@ -171,6 +171,50 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
+// ── flash: cookie-backed, per-session storage adapter ──────────
+//
+// Flash is cookie-backed and per-session (per browser), so parallel
+// clients never share a flash slot — a request's flash can't leak into
+// another browser's response (the global-store bug that made flash.spec
+// race the comment specs under fullyParallel). The "show exactly once"
+// lifecycle lives in the transpiled Flash class (to_persisted keeps only
+// what the action set); the server is just storage. Mirrors go/kotlin/swift.
+const FLASH_COOKIE = "rh_flash";
+
+/** Decode the rh_flash cookie into the persisted map `new Flash(...)`
+ *  reloads from. Absent → empty (first request in a session). Only the
+ *  closed notice/alert key set; values percent-encoded. */
+function readFlashCookie(req: IncomingMessage): Record<string, string> {
+  const out: Record<string, string> = {};
+  const raw = req.headers.cookie;
+  if (!raw) return out;
+  for (const jar of raw.split(";")) {
+    const trimmed = jar.trim();
+    if (!trimmed.startsWith(`${FLASH_COOKIE}=`)) continue;
+    const val = trimmed.slice(FLASH_COOKIE.length + 1);
+    for (const kv of val.split("&")) {
+      const eq = kv.indexOf("=");
+      if (eq <= 0) continue;
+      const k = kv.slice(0, eq);
+      if (k !== "notice" && k !== "alert") continue;
+      const v = decodeURIComponent(kv.slice(eq + 1));
+      if (v) out[k] = v;
+    }
+  }
+  return out;
+}
+
+/** Set-Cookie value for the carried flash. Empty → a clearing cookie
+ *  (Max-Age=0) so a notice shown once doesn't stick. HttpOnly + Path=/. */
+function flashSetCookie(persisted: Record<string, string>): string {
+  const keys = ["notice", "alert"].filter((k) => k in persisted);
+  if (keys.length === 0) {
+    return `${FLASH_COOKIE}=; Path=/; Max-Age=0; HttpOnly`;
+  }
+  const parts = keys.map((k) => `${k}=${encodeURIComponent(persisted[k])}`);
+  return `${FLASH_COOKIE}=${parts.join("&")}; Path=/; HttpOnly`;
+}
+
 // ── HTTP request dispatcher ────────────────────────────────────
 
 /** Handle one HTTP request: parse body, route to a controller
@@ -250,13 +294,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const controller = new ctrlClass();
     controller.params = merged;
     controller.session = sessionStore;
-    // Wrap the persisted flashStore in a Flash so the controller's
-    // typed-as-Flash `flash` property dispatches correctly
-    // (`flash.get("notice")` etc.). The plain-object store survives
-    // across requests; Flash wraps per-request. (Phase 2.5(b): was
-    // HashWithIndifferentAccess; Flash provides typed notice/alert
-    // fields + HWIA-shape shim methods.)
-    controller.flash = new Flash(flashStore);
+    // Wrap the incoming flash (decoded from the rh_flash cookie) in a Flash
+    // so the controller's typed-as-Flash `flash` property dispatches
+    // correctly (`flash.get("notice")` etc.). Per browser, not a shared
+    // store. (Phase 2.5(b): was HashWithIndifferentAccess; Flash provides
+    // typed notice/alert fields + HWIA-shape shim methods.)
+    controller.flash = new Flash(readFlashCookie(req));
     controller.request_method = method;
     controller.request_path = url.pathname;
     controller.request_format = request_format;
@@ -264,9 +307,12 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     // Rails carries flash forward exactly once: the action that sets
     // `flash[:notice] = ...` then `redirect_to`s, the next request reads
     // the notice, and the request after that sees an empty flash. The
-    // Flash class owns that sweep now (ActionDispatch::Flash#to_persisted
-    // keeps only entries this request SET); this is just storage.
-    flashStore = controller.flash ? controller.flash.to_persisted() : {};
+    // Flash class owns that sweep (ActionDispatch::Flash#to_persisted
+    // keeps only entries this request SET); the server writes it to the
+    // rh_flash cookie (per browser), then clears it once displayed. Set
+    // before any res.end below — Set-Cookie is a header.
+    const persisted = controller.flash ? controller.flash.to_persisted() : {};
+    res.setHeader("Set-Cookie", flashSetCookie(persisted));
     response = {
       body: controller.body,
       status: controller.status,
@@ -556,11 +602,11 @@ export interface StartOptions {
 // `[rootRoute, ...routes]` so GET `/` matches before fallthroughs.
 let dispatchTable: RouteRow[] = [];
 let controllerRegistry: Record<string, ControllerClass> = {};
-// Persistent session/flash stores. Real Rails session/flash carry
-// per-cookie scoping; this minimal stub is process-global so the
-// scaffold blog's flash-after-redirect works in single-user dev.
+// Session store. Real Rails session carries per-cookie scoping; this
+// minimal stub is process-global so single-user dev works. (Flash, by
+// contrast, IS per-session — cookie-backed via readFlashCookie /
+// flashSetCookie — so parallel clients don't share a flash slot.)
 const sessionStore: Record<string, any> = {};
-let flashStore: Record<string, any> = {};
 
 /** Start the server. Returns a promise that resolves once the
  *  HTTP + WebSocket listeners are accepting connections. */

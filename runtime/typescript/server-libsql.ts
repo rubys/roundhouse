@@ -156,6 +156,41 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
+// ── flash: cookie-backed, per-session storage adapter ──────────
+// Per browser (cookie), so parallel clients never share a flash slot.
+// The show-once sweep lives in the Flash class; this is just storage.
+// Mirrors server.ts (the sync-sqlite profile variant).
+const FLASH_COOKIE = "rh_flash";
+
+function readFlashCookie(req: IncomingMessage): Record<string, string> {
+  const out: Record<string, string> = {};
+  const raw = req.headers.cookie;
+  if (!raw) return out;
+  for (const jar of raw.split(";")) {
+    const trimmed = jar.trim();
+    if (!trimmed.startsWith(`${FLASH_COOKIE}=`)) continue;
+    const val = trimmed.slice(FLASH_COOKIE.length + 1);
+    for (const kv of val.split("&")) {
+      const eq = kv.indexOf("=");
+      if (eq <= 0) continue;
+      const k = kv.slice(0, eq);
+      if (k !== "notice" && k !== "alert") continue;
+      const v = decodeURIComponent(kv.slice(eq + 1));
+      if (v) out[k] = v;
+    }
+  }
+  return out;
+}
+
+function flashSetCookie(persisted: Record<string, string>): string {
+  const keys = ["notice", "alert"].filter((k) => k in persisted);
+  if (keys.length === 0) {
+    return `${FLASH_COOKIE}=; Path=/; Max-Age=0; HttpOnly`;
+  }
+  const parts = keys.map((k) => `${k}=${encodeURIComponent(persisted[k])}`);
+  return `${FLASH_COOKIE}=${parts.join("&")}; Path=/; HttpOnly`;
+}
+
 // ── HTTP request dispatcher ────────────────────────────────────
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -214,14 +249,16 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     const controller = new ctrlClass();
     controller.params = merged;
     controller.session = sessionStore;
-    controller.flash = new Flash(flashStore);
+    controller.flash = new Flash(readFlashCookie(req));
     controller.request_method = method;
     controller.request_path = url.pathname;
     controller.request_format = request_format;
     await controller.process_action(match.action);
     // Flash owns the show-once sweep (ActionDispatch::Flash#to_persisted);
-    // this is just storage between requests.
-    flashStore = controller.flash ? controller.flash.to_persisted() : {};
+    // the server writes it to the rh_flash cookie (per browser), then
+    // clears it once displayed. Set before any res.end — it's a header.
+    const persisted = controller.flash ? controller.flash.to_persisted() : {};
+    res.setHeader("Set-Cookie", flashSetCookie(persisted));
     response = {
       body: controller.body,
       status: controller.status,
@@ -428,8 +465,9 @@ export interface StartOptions {
 
 let dispatchTable: RouteRow[] = [];
 let controllerRegistry: Record<string, ControllerClass> = {};
+// Session stays process-global (single-user dev stub); flash is per-session
+// (cookie-backed via readFlashCookie / flashSetCookie).
 const sessionStore: Record<string, any> = {};
-let flashStore: Record<string, any> = {};
 
 /** Start the server. Same lifecycle as `server.ts::startServer` but
  *  awaits the libsql DB open + schema apply before binding the
