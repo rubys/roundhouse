@@ -645,4 +645,83 @@ test.describe("SharedWorker target — real-blog", () => {
         "ORDER BY created_at DESC means newest first",
     ).toBeLessThan(olderPos);
   });
+
+  test("destroy follows the 303 See Other redirect and navigates away", async ({ page }) => {
+    // Rails returns `303 See Other` after a successful destroy
+    // (`redirect_to …, status: :see_other`). The worker hands client.ts
+    // a *synthetic* Response, so Turbo can't auto-follow it the way it
+    // would a real network redirect — client.ts must follow it itself
+    // via Turbo.visit. Handling only 301/302 left destroy/update
+    // stranded: the confirm fired, the record was deleted, but the page
+    // never navigated and kept showing the now-gone article.
+    //
+    // Tested on the *show* page on purpose: on the index,
+    // `after_destroy_commit` broadcasts a Turbo Stream `remove` that
+    // deletes the article's div regardless of the redirect, masking the
+    // bug. The show page can only leave via the redirect, isolating it.
+    //
+    // Entirely in-browser: the POST seed and the DELETE both round-trip
+    // the SharedWorker over MessagePort; the only network is the static
+    // SPA assets.
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(
+      () => (window as Window & { __juntos__?: { ready?: boolean } }).__juntos__?.ready === true,
+      null,
+      { timeout: 15_000 },
+    );
+
+    // Seed a known article (postMessage to the worker, not a fetch).
+    const create = await probeSharedWorker(page, {
+      method: "POST",
+      path: "/articles",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body:
+        "article%5Btitle%5D=Destroy+redirect+probe" +
+        "&article%5Bbody%5D=Exists+only+to+verify+the+303+redirect+after+destroy.",
+    });
+    const id = (create.headers.location ?? create.headers.Location ?? "").match(/\/articles\/(\d+)$/)?.[1];
+    expect(id, `create should redirect to /articles/<id>; got ${create.status}`).toBeTruthy();
+
+    // Auto-accept the `data-turbo-confirm` dialog (Turbo uses
+    // window.confirm by default).
+    page.on("dialog", (d) => d.accept());
+
+    // Track full-document navigations to assert the redirect is followed
+    // in-SPA (Turbo.visit), not via a full page reload.
+    const fullNavs: string[] = [];
+    page.on("request", (r) => {
+      if (r.resourceType() === "document") fullNavs.push(r.url());
+    });
+
+    // Open the article's show page (deep link → vite SPA fallback serves
+    // the shell; client.ts renderInitial renders the show view).
+    await page.goto(`/articles/${id}`, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(
+      () => (window as Window & { __juntos__?: { ready?: boolean } }).__juntos__?.ready === true,
+      null,
+      { timeout: 15_000 },
+    );
+    await expect(page.locator('button:has-text("Destroy this article")')).toBeVisible();
+
+    const navsBefore = fullNavs.length;
+    await page.click('button:has-text("Destroy this article")');
+
+    // The fix: the 303 is followed → Turbo.visit("/articles") → the URL
+    // leaves the show page. Without it we stay on /articles/<id> and this
+    // times out (the original bug).
+    await page.waitForFunction(
+      () => /\/articles\/?$/.test(location.pathname),
+      null,
+      { timeout: 10_000 },
+    );
+
+    // Followed in-SPA — no full document reload.
+    expect(
+      fullNavs.length,
+      `following the destroy redirect caused a full navigation: ${JSON.stringify(fullNavs.slice(navsBefore))}`,
+    ).toBe(navsBefore);
+
+    // And the deleted article is absent from the index we landed on.
+    await expect(page.locator(`#article_${id}`)).toHaveCount(0);
+  });
 });

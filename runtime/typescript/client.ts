@@ -415,6 +415,22 @@ function toBrowserPath(appPath: string): string {
   return appPath;
 }
 
+// Redirect statuses that carry a Location header and should drive a
+// client-side navigation. 303 See Other is the one that bites: Rails
+// emits it after a successful destroy/update (`status: :see_other`),
+// so DELETE/PATCH/PUT flows depend on it. Worker responses are
+// synthetic (no real `redirected`/`url`), so Turbo never auto-follows —
+// the client must. Kept as one helper so the initial-render and
+// Turbo-intercept paths can't drift apart (handling only 301/302 in the
+// intercept while renderInitial handled 303 is exactly how destroy
+// silently stopped navigating).
+function isRedirectStatus(status: number): boolean {
+  return (
+    status === 301 || status === 302 || status === 303 ||
+    status === 307 || status === 308
+  );
+}
+
 // The emitted app's links/forms are root-absolute app paths
 // ("/articles"). Under a subdirectory mount, Turbo would push those
 // straight to history and the address bar would escape the mount
@@ -453,10 +469,7 @@ async function renderInitial(bridge: WorkerBridge): Promise<void> {
   // location string in the body, since runaway redirect chains
   // are very likely a bug worth surfacing rather than papering
   // over.
-  if (
-    (response.status === 301 || response.status === 302 || response.status === 303) &&
-    response.headers.location
-  ) {
+  if (isRedirectStatus(response.status) && response.headers.location) {
     const redirectTo = response.headers.location;
     history.replaceState({}, "", toBrowserPath(redirectTo));
     try {
@@ -610,15 +623,19 @@ function installTurboIntercept(bridge: WorkerBridge): void {
     const setCookie = response.headers["set-cookie"];
     if (setCookie) document.cookie = setCookie;
 
-    // 301/302 redirects: hand to Turbo.visit so it animates. The
-    // worker's Location is an app path; re-add the mount so the URL bar
-    // stays inside the mount (and the follow-up intercept strips it).
-    if ((response.status === 301 || response.status === 302) && typeof Turbo !== "undefined" && Turbo.visit) {
-      const loc = response.headers.location ?? response.headers.Location;
-      if (loc) {
-        Turbo.visit(toBrowserPath(loc));
-        return;
-      }
+    // Redirects: hand to Turbo.visit so it animates. We can't let Turbo
+    // auto-follow — the worker hands back a synthetic Response (no real
+    // `redirected`/`url`), so Turbo never sees it as a redirect. Follow
+    // every redirect status carrying a Location ourselves. 303 See Other
+    // is the one that bit us: Rails returns it after a successful
+    // destroy/update (`status: :see_other`), so handling only 301/302
+    // left DELETE/PATCH/PUT stranded on the pre-action page. The worker's
+    // Location is an app path; re-add the mount so the URL bar stays
+    // inside the mount (and the follow-up intercept strips it).
+    const redirectLoc = response.headers.location ?? response.headers.Location;
+    if (isRedirectStatus(response.status) && redirectLoc && typeof Turbo !== "undefined" && Turbo.visit) {
+      Turbo.visit(toBrowserPath(redirectLoc));
+      return;
     }
 
     detail.fetchRequest = {
