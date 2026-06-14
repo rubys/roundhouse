@@ -592,4 +592,57 @@ test.describe("SharedWorker target — real-blog", () => {
       "flash notice must be swept after one display, not re-render every page",
     ).not.toMatch(/successfully destroyed/i);
   });
+
+  test("GET /articles lists newest first (order(created_at: :desc))", async ({ page }) => {
+    // The index query is `Article.includes(:comments).order(created_at:
+    // :desc)`, which emits `... ORDER BY created_at DESC`. That SQL is
+    // correct, but the ordering only holds if `created_at` is actually
+    // populated: ActiveRecord::Base#fill_timestamps fills it on insert.
+    // The TS emit types string columns non-nullable and inits a fresh
+    // record's `created_at` to "", so a `.nil?`-only guard skipped the
+    // fill, every row shipped created_at="", and `ORDER BY created_at
+    // DESC` collapsed to rowid (insertion) order — newest LAST. This
+    // probe creates two articles back-to-back (the second's created_at
+    // is strictly later — POSTs are awaited, so they differ by many ms)
+    // and asserts the newer one renders ABOVE the older one. Robust to
+    // whatever else the shared OPFS DB already holds: it only compares
+    // the two ids it created, by DOM position.
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(
+      () => (window as Window & { __juntos__?: { ready?: boolean } }).__juntos__?.ready === true,
+      null,
+      { timeout: 15_000 },
+    );
+
+    const createArticle = async (title: string): Promise<string> => {
+      const res = await probeSharedWorker(page, {
+        method: "POST",
+        path: "/articles",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body:
+          `article%5Btitle%5D=${encodeURIComponent(title)}` +
+          "&article%5Bbody%5D=Created+to+exercise+created_at+ordering.",
+      });
+      const loc = res.headers["location"] ?? res.headers["Location"] ?? "";
+      const m = loc.match(/^\/articles\/(\d+)$/);
+      expect(m, `create should redirect to /articles/<id>; got ${res.status} "${loc}"`).not.toBeNull();
+      return m![1];
+    };
+
+    const olderId = await createArticle("Ordering probe — older");
+    const newerId = await createArticle("Ordering probe — newer");
+
+    const index = await probeSharedWorker(page, { method: "GET", path: "/articles" });
+    expect(index.status, `index returned ${index.status}`).toBe(200);
+
+    const olderPos = index.body.indexOf(`id="article_${olderId}"`);
+    const newerPos = index.body.indexOf(`id="article_${newerId}"`);
+    expect(olderPos, `older article (#${olderId}) missing from index`).toBeGreaterThanOrEqual(0);
+    expect(newerPos, `newer article (#${newerId}) missing from index`).toBeGreaterThanOrEqual(0);
+    expect(
+      newerPos,
+      `newer article (#${newerId}) should render before older (#${olderId}) — ` +
+        "ORDER BY created_at DESC means newest first",
+    ).toBeLessThan(olderPos);
+  });
 });

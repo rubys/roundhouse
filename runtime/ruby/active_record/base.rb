@@ -374,7 +374,20 @@ module ActiveRecord
       cols = self.class.schema_columns
       now = Time.now.utc.iso8601
       self[:updated_at] = now if cols.include?(:updated_at)
-      self[:created_at] = now if creating && cols.include?(:created_at) && self[:created_at].nil?
+      if creating && cols.include?(:created_at)
+        # Treat empty string as "unset", not just nil: targets that type
+        # string columns as non-nullable (TS/Crystal/Rust) initialize a
+        # fresh record's `created_at` to `""` rather than nil, so a plain
+        # `.nil?` guard never fires there and the column ships empty —
+        # which collapses `ORDER BY created_at DESC` to insertion order.
+        # Ruby keeps nil, so the extra `== ""` check is a harmless no-op.
+        # The `||` lives in its own modifier-`if` (not nested inside the
+        # `&&` above) on purpose: a parenthesized `||` inside an `&&`
+        # chain currently loses its parens in the Rust emit, flipping the
+        # precedence. Keeping it standalone sidesteps that.
+        current = self[:created_at]
+        self[:created_at] = now if current.nil? || current == ""
+      end
     end
 
     def valid?
