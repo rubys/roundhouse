@@ -426,13 +426,18 @@ pub fn target_readme(target: BuildTarget) -> String {
     // verbatim, so the section must stay runnable as written.
     let e2e = if ships_e2e(target) {
         // The flash spec (`flash.spec.js`) needs per-session (cookie)
-        // flash — only ruby + jruby have it. Crystal/TS share one global
-        // in-memory flash slot, which races with the comment specs'
+        // flash. ruby + jruby have it via Rails; go wires it through a
+        // cookie-backed store (server.go ReadFlashCookie/WriteFlashCookie
+        // + Flash#to_persisted). Crystal/TS share one global in-memory
+        // flash slot, which races with the comment specs'
         // `redirect_to … notice:` under `fullyParallel`; the rest don't
-        // wire flash yet. Skip it everywhere but ruby/jruby, and drop a
-        // target from this skip as it gains per-session flash. (See the
-        // flash-wiring punch list memory.)
-        let run = if matches!(target, BuildTarget::Ruby | BuildTarget::Jruby) {
+        // wire flash yet. Skip it everywhere but the per-session targets,
+        // and drop a target from this skip as it gains per-session flash.
+        // (See the flash-wiring punch list memory.)
+        let run = if matches!(
+            target,
+            BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Go
+        ) {
             "npx playwright test"
         } else {
             "E2E_SKIP=\"flash\" npx playwright test"
@@ -552,6 +557,12 @@ const E2E_SPECS: &[(&str, &str)] = &[
     ("e2e/tailwind.spec.js", include_str!("../e2e/tailwind.spec.js")),
     ("e2e/turbo_comment.spec.js", include_str!("../e2e/turbo_comment.spec.js")),
     ("e2e/action_cable.spec.js", include_str!("../e2e/action_cable.spec.js")),
+    // Ships to every archive, but only runs on per-session (cookie) flash
+    // targets — the others E2E_SKIP it via the README `## End-to-end`
+    // block (see `target_readme`). Without shipping it here the skip list
+    // is inert: `npx playwright test` only discovers specs present in the
+    // archive's e2e/ dir.
+    ("e2e/flash.spec.js", include_str!("../e2e/flash.spec.js")),
 ];
 
 /// Inject the self-contained Playwright e2e suite into an archive:

@@ -1090,7 +1090,7 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
     s.push_str("// style bracket-notation keys like `article[title]` land as\n");
     s.push_str("// nested maps so `params[\"article\"][\"title\"]` resolves.\n");
     s.push_str(
-        "func Dispatch(controller string, action string, pathParams map[string]string, r *http.Request) (body string, status int64, contentType string, location string) {\n",
+        "func Dispatch(controller string, action string, pathParams map[string]string, r *http.Request) (body string, status int64, contentType string, location string, flash map[string]string) {\n",
     );
     s.push_str("\tparams := map[string]RoundhouseParamValue{}\n");
     s.push_str("\tfor k, v := range pathParams {\n");
@@ -1119,6 +1119,11 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
         let struct_name = raw.rsplit("::").next().unwrap_or(raw);
         s.push_str(&format!("\tcase {raw:?}:\n"));
         s.push_str(&format!("\t\tc := New{struct_name}()\n"));
+        // Reload the flash carried from the previous request (the
+        // redirect that set `flash[:notice] = …`). `ReadFlashCookie`
+        // lives in the hand-written server.go; the persisted store is
+        // String-keyed, matching the Flash constructor's `other` param.
+        s.push_str("\t\tc.Flash = NewActionDispatchFlash(ReadFlashCookie(r))\n");
         s.push_str("\t\tc.Params = params\n");
         s.push_str("\t\tc.RequestMethod = r.Method\n");
         s.push_str("\t\tc.RequestPath = r.URL.Path\n");
@@ -1136,13 +1141,17 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
             s.push_str("\t\tif strings.HasPrefix(c.ContentType, \"text/html\") && c.Body != \"\" {\n");
             s.push_str("\t\t\tfinalBody = ViewsLayouts_application(c.Body, c.Flash.OpGet(\"notice\"), c.Flash.OpGet(\"alert\"))\n");
             s.push_str("\t\t}\n");
-            s.push_str("\t\treturn finalBody, c.Status, c.ContentType, c.Location\n");
+            // `to_persisted` keeps only the entries this action SET
+            // (notice_was/alert_was diff) — the show-once sweep. The
+            // caller (router_glue.go) writes the result back to the
+            // cookie; an empty map clears it so the notice shows once.
+            s.push_str("\t\treturn finalBody, c.Status, c.ContentType, c.Location, c.Flash.ToPersisted()\n");
         } else {
-            s.push_str("\t\treturn c.Body, c.Status, c.ContentType, c.Location\n");
+            s.push_str("\t\treturn c.Body, c.Status, c.ContentType, c.Location, c.Flash.ToPersisted()\n");
         }
     }
     s.push_str("\t}\n");
-    s.push_str("\treturn \"\", 404, \"\", \"\"\n");
+    s.push_str("\treturn \"\", 404, \"\", \"\", nil\n");
     s.push_str("}\n");
     EmittedFile {
         path: output_path(OutputKind::Dispatch).path,

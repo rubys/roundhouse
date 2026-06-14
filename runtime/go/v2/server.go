@@ -15,8 +15,71 @@ package v2
 
 import (
 	"net/http"
+	"net/url"
 	"os"
 )
+
+// flashCookieName is the cookie that carries flash between the action
+// that sets it (`redirect_to … notice:`) and the follow-on GET that
+// renders it. Per browser by construction, so parallel sessions (e.g.
+// Playwright workers) never share a flash slot — unlike a process-
+// global store. The lifecycle ("show exactly once") lives in the shared
+// Flash class (ActionDispatch::Flash#to_persisted); the server is only a
+// storage adapter, mirroring runtime/typescript/server.ts.
+const flashCookieName = "rh_flash"
+
+// ReadFlashCookie decodes the persisted flash carried in the rh_flash
+// cookie into the String-keyed map the Flash constructor reloads from
+// (`NewActionDispatchFlash(persisted)`). Returns an empty map when the
+// cookie is absent or unparseable — the first request in a session has
+// no carried flash. Only the closed flash key set (notice/alert) is
+// surfaced, matching the lowerer's recognized fields.
+func ReadFlashCookie(r *http.Request) map[string]string {
+	out := map[string]string{}
+	c, err := r.Cookie(flashCookieName)
+	if err != nil || c.Value == "" {
+		return out
+	}
+	vals, err := url.ParseQuery(c.Value)
+	if err != nil {
+		return out
+	}
+	for _, k := range []string{"notice", "alert"} {
+		if v := vals.Get(k); v != "" {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// WriteFlashCookie persists the entries the action SET this request —
+// `Flash#to_persisted` has already swept the show-once entries, so an
+// empty map means "nothing to carry forward". An empty map clears the
+// cookie (MaxAge<0) so a notice shown once doesn't stick on the next
+// page. Must be called before the response headers are flushed
+// (Set-Cookie is a header), which router_glue.go does before WriteHeader.
+func WriteFlashCookie(w http.ResponseWriter, persisted map[string]string) {
+	if len(persisted) == 0 {
+		http.SetCookie(w, &http.Cookie{
+			Name:     flashCookieName,
+			Value:    "",
+			Path:     "/",
+			MaxAge:   -1,
+			HttpOnly: true,
+		})
+		return
+	}
+	vals := url.Values{}
+	for k, v := range persisted {
+		vals.Set(k, v)
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     flashCookieName,
+		Value:    vals.Encode(),
+		Path:     "/",
+		HttpOnly: true,
+	})
+}
 
 // StartOptions carries the per-process boot configuration. Defaults:
 // db_path → ./storage/development.sqlite3, port → 3000 (or $PORT).

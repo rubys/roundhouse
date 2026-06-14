@@ -1358,7 +1358,10 @@ const GO_RUNTIME: &[RuntimeEntry] = &[
         mode: Mode::Library,
         imports: NO_IMPORTS,
         prelude: GO_PRELUDE,
-        extra_roots: NO_EXTRA_ROOTS,
+        // Hand-written server.go + emitted dispatch.go persist
+        // `flash.to_persisted` between requests (cookie-backed) —
+        // invisible to the app-side reachability walk, so seed it.
+        extra_roots: &[("Flash", "to_persisted")],
     },
     RuntimeEntry {
         rb_src: include_str!("../runtime/ruby/action_view/view_helpers.rb"),

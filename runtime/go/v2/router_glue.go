@@ -72,13 +72,19 @@ func Router() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		body, status, contentType, location := Dispatch(m.Controller, m.Action, m.PathParams, r)
+		body, status, contentType, location, flash := Dispatch(m.Controller, m.Action, m.PathParams, r)
 		if location != "" {
 			w.Header().Set("Location", location)
 		}
 		if contentType != "" {
 			w.Header().Set("Content-Type", contentType)
 		}
+		// Carry the flash the action set into the next request (or clear
+		// it once shown). Set-Cookie is a header, so this must precede
+		// WriteHeader. Dispatch read the incoming flash from `r` and
+		// returned `flash.ToPersisted()` — the show-once sweep already
+		// happened in the shared Flash class.
+		WriteFlashCookie(w, flash)
 		if status == 0 {
 			status = 200
 		}
