@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>roundhouse playground</title>
+<style>
+  :root { font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100vh; display: flex; flex-direction: column; color: #1a1a1a; }
+  header { padding: 8px 12px; border-bottom: 1px solid #ddd; display: flex; gap: 12px; align-items: center; flex: 0 0 auto; }
+  header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+  header .note { color: #888; font-size: 12px; }
+  #status { margin-left: auto; color: #555; max-width: 50%; text-align: right; }
+  #status.ok { color: #176e2b; }
+  #status.err { color: #b00020; }
+  main { flex: 1; display: flex; min-height: 0; }
+  .col { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .col > .head { padding: 4px 8px; background: #f6f6f6; border-bottom: 1px solid #eee; color: #555; font-size: 12px; flex: 0 0 auto; }
+  #sources { width: 230px; border-right: 1px solid #ddd; flex: 0 0 auto; }
+  #editorCol { flex: 1.2 1 0; border-right: 1px solid #ddd; }
+  #outputCol { flex: 1 1 0; }
+  ul.tree { margin: 0; padding: 4px; list-style: none; overflow: auto; flex: 1 1 auto; }
+  ul.tree li { margin: 0; }
+  ul.tree button { width: 100%; text-align: left; border: 0; background: none; padding: 3px 6px; cursor: pointer; font: inherit; border-radius: 4px; color: #1a1a1a; white-space: nowrap; }
+  ul.tree button:hover { background: #f0f0f0; }
+  ul.tree button.active { background: #e3edff; }
+  #editorHost { flex: 1 1 auto; min-height: 0; position: relative; }
+  #editorHost textarea { width: 100%; height: 100%; border: 0; resize: none; padding: 8px; font: inherit; outline: none; }
+  #outfiles { max-height: 35%; flex: 0 0 auto; border-bottom: 1px solid #eee; }
+  pre#outcode { flex: 1 1 auto; margin: 0; padding: 10px; overflow: auto; background: #fafafa; min-height: 0; }
+  select { font: inherit; padding: 2px 4px; }
+  label { color: #555; }
+</style>
+</head>
+<body>
+<header>
+  <h1>roundhouse playground</h1>
+  <label>target <select id="target"></select></label>
+  <span class="note">edit Ruby → transpile in-browser (wasm)</span>
+  <span id="status">booting…</span>
+</header>
+<main>
+  <div id="sources" class="col">
+    <div class="head">sources (.rb / .erb)</div>
+    <ul id="srcfiles" class="tree"></ul>
+  </div>
+  <div id="editorCol" class="col">
+    <div class="head" id="editorHead">editor</div>
+    <div id="editorHost"></div>
+  </div>
+  <div id="outputCol" class="col">
+    <div class="head">output</div>
+    <ul id="outfiles" class="tree"></ul>
+    <pre id="outcode"><code></code></pre>
+  </div>
+</main>
+<script type="module" src="playground.js"></script>
+</body>
+</html>
