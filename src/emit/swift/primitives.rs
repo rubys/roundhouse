@@ -414,6 +414,11 @@ struct DispatchResult {
     var contentType: String?
     var location: String?
     var body: String
+    // Flash the action SET this request (Flash.toPersisted already swept
+    // the show-once ones) — the handler writes it to the rh_flash cookie.
+    // Defaulted so the controller-less paths (404/error/asset) need not
+    // set it; Swift's memberwise init keeps their call sites unchanged.
+    var flash: [String: String] = [:]
 }
 
 enum Server {
@@ -440,8 +445,12 @@ enum Server {
                     let method = request.method.rawValue
                     let path = request.uri.path
                     let query = parseUrlencoded(request.uri.query ?? "")
+                    // Flash carried from the previous request (the redirect
+                    // that set `flash[:notice] = …`) rides the rh_flash
+                    // cookie; reload it for view display.
+                    let incomingFlash = readFlashCookie(request.headers[.cookie])
                     let r = try await NIOThreadPool.singleton.runIfActive {
-                        dispatchScoped(method, path, query, form, routes, controllers, layout)
+                        dispatchScoped(method, path, query, form, incomingFlash, routes, controllers, layout)
                     }
                     var headers = HTTPFields()
                     if let ct = r.contentType {
@@ -450,6 +459,11 @@ enum Server {
                     if let loc = r.location {
                         headers[.location] = loc
                     }
+                    // Carry the flash the action set into the next request
+                    // (or clear it once shown — toPersisted returns empty for
+                    // a merely-displayed notice). Storage adapter only; the
+                    // show-once sweep lives in the transpiled Flash class.
+                    headers[.setCookie] = flashSetCookie(r.flash)
                     return Response(
                         status: HTTPResponse.Status(code: r.status),
                         headers: headers,
@@ -489,16 +503,17 @@ enum Server {
         _ rawPath: String,
         _ query: [String: String],
         _ form: [String: String],
+        _ incomingFlash: [String: String],
         _ routes: [Route],
         _ controllers: [String: () -> ActionControllerBase],
         _ layout: (String, String?, String?) -> String
     ) -> DispatchResult {
         #if canImport(ObjectiveC)
         return autoreleasepool {
-            dispatch(rawMethod, rawPath, query, form, routes, controllers, layout)
+            dispatch(rawMethod, rawPath, query, form, incomingFlash, routes, controllers, layout)
         }
         #else
-        return dispatch(rawMethod, rawPath, query, form, routes, controllers, layout)
+        return dispatch(rawMethod, rawPath, query, form, incomingFlash, routes, controllers, layout)
         #endif
     }
 
@@ -508,6 +523,7 @@ enum Server {
         _ rawPath: String,
         _ query: [String: String],
         _ form: [String: String],
+        _ incomingFlash: [String: String],
         _ routes: [Route],
         _ controllers: [String: () -> ActionControllerBase],
         _ layout: (String, String?, String?) -> String
@@ -556,7 +572,7 @@ enum Server {
         controller.requestFormat = format
         controller.requestMethod = method
         controller.requestPath = path
-        controller.flash = Flash()
+        controller.flash = Flash(incomingFlash)
         controller.session = Session()
         do {
             try controller.processAction(match.action)
@@ -569,16 +585,17 @@ enum Server {
         }
 
         if let location = controller.location {
-            return DispatchResult(status: controller.status, contentType: nil, location: location, body: "")
+            return DispatchResult(status: controller.status, contentType: nil, location: location, body: "", flash: controller.flash.toPersisted())
         }
         if controller.requestFormat == "json" {
-            return DispatchResult(status: controller.status, contentType: "application/json", location: nil, body: controller.body)
+            return DispatchResult(status: controller.status, contentType: "application/json", location: nil, body: controller.body, flash: controller.flash.toPersisted())
         }
         return DispatchResult(
             status: controller.status,
             contentType: "text/html; charset=utf-8",
             location: nil,
-            body: layout(controller.body, controller.flash.notice, controller.flash.alert)
+            body: layout(controller.body, controller.flash.notice, controller.flash.alert),
+            flash: controller.flash.toPersisted()
         )
     }
 
@@ -610,6 +627,58 @@ enum Server {
             out[decode(rawKey)] = decode(rawValue)
         }
         return out
+    }
+
+    // ── flash: cookie-backed, per-session storage adapter ──────────
+    // Flash is cookie-backed and per-session (per browser), so parallel
+    // clients never share a flash slot; the "show exactly once" lifecycle
+    // lives in the transpiled Flash class (toPersisted keeps only what the
+    // action set). Mirrors go (server.go) / kotlin (Server.dispatch).
+
+    // Unreserved set — anything else in a flash value is percent-encoded so
+    // the `key=value&…` structure and cookie-octet rules survive arbitrary
+    // notice text.
+    static let flashValueAllowed = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~"
+    )
+
+    // Decode the rh_flash cookie out of the request's Cookie header into the
+    // map Flash(_:) reloads from. Absent/empty → empty (first request in a
+    // session carries no flash). Only the closed notice/alert key set.
+    static func readFlashCookie(_ cookieHeader: String?) -> [String: String] {
+        var out: [String: String] = [:]
+        guard let raw = cookieHeader else { return out }
+        for jar in raw.split(separator: ";") {
+            let trimmed = jar.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("rh_flash=") else { continue }
+            let val = String(trimmed.dropFirst("rh_flash=".count))
+            for kv in val.split(separator: "&") {
+                let parts = kv.split(separator: "=", maxSplits: 1)
+                guard parts.count == 2 else { continue }
+                let k = String(parts[0])
+                guard k == "notice" || k == "alert" else { continue }
+                let v = String(parts[1]).removingPercentEncoding ?? String(parts[1])
+                if !v.isEmpty { out[k] = v }
+            }
+        }
+        return out
+    }
+
+    // Build the rh_flash Set-Cookie value. Empty → a clearing cookie
+    // (Max-Age=0) so a notice shown once doesn't stick. HttpOnly + Path=/
+    // to match go/kotlin.
+    static func flashSetCookie(_ persisted: [String: String]) -> String {
+        if persisted.isEmpty {
+            return "rh_flash=; Path=/; Max-Age=0; HttpOnly"
+        }
+        var parts: [String] = []
+        for k in ["notice", "alert"] {
+            if let v = persisted[k] {
+                let enc = v.addingPercentEncoding(withAllowedCharacters: flashValueAllowed) ?? v
+                parts.append("\(k)=\(enc)")
+            }
+        }
+        return "rh_flash=\(parts.joined(separator: "&")); Path=/; HttpOnly"
     }
 
     // Serve a file from static/assets/, content-typed by extension.
