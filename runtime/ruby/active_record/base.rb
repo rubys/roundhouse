@@ -364,6 +364,21 @@ module ActiveRecord
     # subclass declares those columns in `schema_columns`. Uses the
     # subclass's `[]=` to assign — no `instance_variable_set`. Mirrors
     # the Rails ActiveRecord::Timestamp callback semantics (UTC ISO-8601).
+    #
+    # `created_at` is stamped on every insert, unconditionally — we do
+    # NOT read the column back and skip when already set. The earlier
+    # `self[:created_at].nil?` guard meant well (don't clobber a value
+    # the caller pre-assigned), but it was the source of a cross-target
+    # bug: targets that type string columns non-nullable (TS/Crystal/
+    # Rust/Swift) initialize a fresh record's `created_at` to `""`, not
+    # nil, so the guard never fired and the column shipped empty — which
+    # collapsed `ORDER BY created_at DESC` to insertion (rowid) order.
+    # The blank-check is also hard to express portably: the generic `[]`
+    # accessor returns a different type per target (String, serde_json::
+    # Value, Any?), so a literal `== ""` won't type-check everywhere.
+    # An unconditional stamp sidesteps all of that and matches how
+    # `updated_at` above is already handled.
+    #
     # Positional `creating` (was kwarg `creating:`). Kwargs in Ruby
     # call sites lower to a Hash arg; rust2 emit doesn't yet unflatten
     # the Hash back to a positional bool, so the call becomes
@@ -374,20 +389,7 @@ module ActiveRecord
       cols = self.class.schema_columns
       now = Time.now.utc.iso8601
       self[:updated_at] = now if cols.include?(:updated_at)
-      if creating && cols.include?(:created_at)
-        # Treat empty string as "unset", not just nil: targets that type
-        # string columns as non-nullable (TS/Crystal/Rust) initialize a
-        # fresh record's `created_at` to `""` rather than nil, so a plain
-        # `.nil?` guard never fires there and the column ships empty —
-        # which collapses `ORDER BY created_at DESC` to insertion order.
-        # Ruby keeps nil, so the extra `== ""` check is a harmless no-op.
-        # The `||` lives in its own modifier-`if` (not nested inside the
-        # `&&` above) on purpose: a parenthesized `||` inside an `&&`
-        # chain currently loses its parens in the Rust emit, flipping the
-        # precedence. Keeping it standalone sidesteps that.
-        current = self[:created_at]
-        self[:created_at] = now if current.nil? || current == ""
-      end
+      self[:created_at] = now if creating && cols.include?(:created_at)
     end
 
     def valid?
