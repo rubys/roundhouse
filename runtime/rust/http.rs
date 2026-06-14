@@ -167,6 +167,16 @@ thread_local! {
         std::cell::RefCell::new(ControllerResponse::default());
     static REQUEST_FORMAT: std::cell::RefCell<String> =
         std::cell::RefCell::new(String::from("html"));
+    // Flash the CURRENT action set (`redirect_to … notice:` /
+    // `flash[:x] = …`) — carried to the NEXT request via the rh_flash
+    // cookie. Only what the action set lands here; the incoming flash
+    // (loaded into the controller's `flash` field for display) is never
+    // copied in, so it naturally shows exactly once. Set synchronously
+    // inside the per-action wrapper (no `.await` between the controller
+    // body and `flash_out_take`), so thread affinity holds — same
+    // discipline as `RESPONSE`.
+    static FLASH_OUT: std::cell::RefCell<std::collections::HashMap<String, String>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
 /// Request extension carrying the inferred format ("html"/"json").
@@ -229,6 +239,145 @@ pub async fn request_format_middleware(
 /// current request.
 pub fn response_clear() {
     RESPONSE.with(|r| *r.borrow_mut() = ControllerResponse::default());
+    // Reset the carried-flash accumulator alongside the response so a
+    // prior request's `redirect_to … notice:` can't leak into this one.
+    FLASH_OUT.with(|f| f.borrow_mut().clear());
+}
+
+// ── flash: cookie-backed, per-session storage adapter ───────────
+//
+// The rust2 server is a storage adapter for the "show exactly once"
+// flash lifecycle: the action that sets a flash (`redirect_to …
+// notice:`) records it in the FLASH_OUT thread-local, which the
+// per-action wrapper writes to the `rh_flash` cookie; the follow-on
+// request reloads it into the controller's `flash` field for display
+// (via `flash_from_request`) and sets no new flash, so the cookie is
+// cleared and the notice shows once. Per-browser by construction —
+// parallel sessions never share a flash slot.
+
+/// Cookie name carrying flash between requests.
+const FLASH_COOKIE: &str = "rh_flash";
+
+/// Record a flash the current action set (notice/alert only — the
+/// closed key set the lowerer recognizes). Called by the controller
+/// `redirect_to` shim (and any `flash[:x] = …` lowering). The map is
+/// swept into the response cookie by `apply_flash_cookie`.
+pub fn flash_out_set(key: &str, value: &str) {
+    if key == "notice" || key == "alert" {
+        FLASH_OUT.with(|f| {
+            f.borrow_mut().insert(key.to_string(), value.to_string());
+        });
+    }
+}
+
+/// Take (and reset) the flash the action set this request. Called by
+/// the per-action wrapper after the controller body returns.
+pub fn flash_out_take() -> std::collections::HashMap<String, String> {
+    FLASH_OUT.with(|f| std::mem::take(&mut *f.borrow_mut()))
+}
+
+/// Build a `Flash` from the incoming `rh_flash` cookie so views can
+/// render `notice` / `alert`. Absent or unparseable cookie → empty
+/// flash (the first request in a session carries none).
+pub fn flash_from_request(headers: &axum::http::HeaderMap) -> crate::flash::Flash {
+    let map = read_flash_cookie(headers);
+    crate::flash::Flash::from_persisted(Some(&map))
+}
+
+/// Write the carried-forward flash onto the response as a `Set-Cookie`
+/// header. An empty map clears the cookie (Max-Age=0) so a notice shown
+/// once doesn't stick. Survives the `layout_wrap` middleware (which
+/// preserves response headers) and redirect pass-through.
+pub fn apply_flash_cookie(
+    resp: &mut axum::response::Response,
+    persisted: &std::collections::HashMap<String, String>,
+) {
+    let cookie = if persisted.is_empty() {
+        format!("{FLASH_COOKIE}=; Path=/; Max-Age=0; HttpOnly")
+    } else {
+        // Deterministic key order; values percent-encoded so the
+        // urlencoded `key=value&…` structure (and cookie-octet rules)
+        // survive arbitrary notice text.
+        let mut parts: Vec<String> = Vec::new();
+        for k in ["notice", "alert"] {
+            if let Some(v) = persisted.get(k) {
+                parts.push(format!("{k}={}", pct_encode(v)));
+            }
+        }
+        format!("{FLASH_COOKIE}={}; Path=/; HttpOnly", parts.join("&"))
+    };
+    if let Ok(hv) = axum::http::HeaderValue::from_str(&cookie) {
+        resp.headers_mut()
+            .append(axum::http::header::SET_COOKIE, hv);
+    }
+}
+
+/// Parse the `rh_flash` cookie out of the request headers into a
+/// String-keyed map (the shape `Flash::from_persisted` reloads from).
+fn read_flash_cookie(
+    headers: &axum::http::HeaderMap,
+) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let raw = match headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(s) => s,
+        None => return out,
+    };
+    // Cookie header is `name=value; name2=value2; …`. Find our jar.
+    for pair in raw.split(';') {
+        let pair = pair.trim();
+        if let Some(val) = pair.strip_prefix("rh_flash=") {
+            for kv in val.split('&') {
+                if let Some((k, v)) = kv.split_once('=') {
+                    if k == "notice" || k == "alert" {
+                        let decoded = pct_decode(v);
+                        if !decoded.is_empty() {
+                            out.insert(k.to_string(), decoded);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Minimal percent-encoder over the unreserved set — keeps the cookie
+/// value within RFC 6265 cookie-octets and our `&`/`=` delimiters
+/// unambiguous (both are escaped when they appear in a value).
+fn pct_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Inverse of `pct_encode`. Unknown/malformed `%` sequences pass
+/// through literally rather than erroring.
+fn pct_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 3 <= bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// `render(content)` — stash the body string. Defaults already

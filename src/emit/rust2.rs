@@ -986,6 +986,13 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     \x20   }}\n\
                     \x20   pub fn request_format(&self) -> String {{ crate::http::request_format_get() }}\n\
                     \x20   pub fn redirect_to(&self, url: String, opts: std::collections::HashMap<String, crate::param_value::ParamValue>) {{\n\
+                    \x20       // Carry `notice:` / `alert:` to the next request via the\n\
+                    \x20       // flash cookie (the per-action wrapper sweeps FLASH_OUT into\n\
+                    \x20       // Set-Cookie). Recorded in a thread-local rather than on\n\
+                    \x20       // `self.flash` because not every controller carries a flash\n\
+                    \x20       // field, but any controller can redirect with a notice.\n\
+                    \x20       if let Some(n) = opts.get(\"notice\").and_then(|v| v.as_str()) {{ crate::http::flash_out_set(\"notice\", n); }}\n\
+                    \x20       if let Some(a) = opts.get(\"alert\").and_then(|v| v.as_str()) {{ crate::http::flash_out_set(\"alert\", a); }}\n\
                     \x20       let status = opts.get(\"status\").and_then(|v| v.as_str()).unwrap_or(\"see_other\");\n\
                     \x20       crate::http::response_set_redirect(url, crate::http::status_name_to_code_pub(status));\n\
                     \x20   }}\n\
@@ -996,9 +1003,18 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     }}\n",
                     name = lc.name.0.as_str()
                 );
+                // Does this controller carry a `flash` field? Only
+                // controllers that read `self.flash` for view display
+                // (index/show/…) get one (see `collect_ivar_types`);
+                // redirect-only controllers like CommentsController
+                // don't. The wrapper loads the incoming flash cookie
+                // into `c.flash` only when the field exists; the
+                // outgoing path is field-independent (thread-local).
+                let has_flash = body.contains("pub flash:");
                 let axum_wrappers = render_axum_handler_wrappers(
                     lc.name.0.as_str(),
                     &flat_routes_2c,
+                    has_flash,
                 );
                 let content = format!("{CONTROLLER_IMPORTS}{body}{ac_shim}{axum_wrappers}");
                 files.push(EmittedFile {
@@ -1311,6 +1327,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 fn render_axum_handler_wrappers(
     controller_name: &str,
     flat_routes: &[crate::lower::FlatRoute],
+    has_flash: bool,
 ) -> String {
     use crate::dialect::HttpMethod;
     // Dedup by action — Rails' `root "articles#index"` and
@@ -1377,6 +1394,13 @@ fn render_axum_handler_wrappers(
             "axum::extract::Extension(_fmt): axum::extract::Extension<crate::http::RequestFormatExt>"
                 .to_string(),
         );
+        // Controllers with a `flash` field load the incoming rh_flash
+        // cookie for view display — they need the request headers.
+        // `HeaderMap` is a `FromRequestParts` extractor, so it sits
+        // before `Path`/`Form` (the body extractor must stay last).
+        if has_flash {
+            args.push("headers: axum::http::HeaderMap".to_string());
+        }
         if !path_extractor.is_empty() {
             args.push(path_extractor);
         }
@@ -1428,8 +1452,20 @@ fn render_axum_handler_wrappers(
                 "    let mut c = {controller_name}::default();\n",
             ));
         }
+        // Load the incoming flash into the controller's `flash` field so
+        // views render `notice` / `alert` exactly once (the cookie is
+        // cleared below when the action sets no new flash).
+        if has_flash {
+            body.push_str("    c.flash = crate::http::flash_from_request(&headers);\n");
+        }
         body.push_str(&format!("    c.{method_name}();\n"));
-        body.push_str("    crate::http::response_into_axum(crate::http::response_take())\n");
+        // Translate the thread-local response, then sweep the flash the
+        // action set (FLASH_OUT) onto a Set-Cookie — empty clears it, so
+        // a shown notice doesn't stick. Field-independent, so every
+        // controller (including redirect-only ones) persists its flash.
+        body.push_str("    let mut __resp = crate::http::response_into_axum(crate::http::response_take());\n");
+        body.push_str("    crate::http::apply_flash_cookie(&mut __resp, &crate::http::flash_out_take());\n");
+        body.push_str("    __resp\n");
 
         out.push_str(&format!(
             "pub async fn _axum_{action}({args_str}) -> axum::response::Response {{\n{body}}}\n",

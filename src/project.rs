@@ -426,17 +426,18 @@ pub fn target_readme(target: BuildTarget) -> String {
     // verbatim, so the section must stay runnable as written.
     let e2e = if ships_e2e(target) {
         // The flash spec (`flash.spec.js`) needs per-session (cookie)
-        // flash. ruby + jruby have it via Rails; go wires it through a
-        // cookie-backed store (server.go ReadFlashCookie/WriteFlashCookie
-        // + Flash#to_persisted). Crystal/TS share one global in-memory
-        // flash slot, which races with the comment specs'
-        // `redirect_to … notice:` under `fullyParallel`; the rest don't
-        // wire flash yet. Skip it everywhere but the per-session targets,
-        // and drop a target from this skip as it gains per-session flash.
-        // (See the flash-wiring punch list memory.)
+        // flash. ruby + jruby have it via Rails; go + rust wire it
+        // through a cookie-backed store (go: server.go Read/WriteFlash-
+        // Cookie + Flash#to_persisted; rust: http.rs flash_from_request/
+        // apply_flash_cookie + a FLASH_OUT thread-local). Crystal/TS
+        // share one global in-memory flash slot, which races with the
+        // comment specs' `redirect_to … notice:` under `fullyParallel`;
+        // the rest don't wire flash yet. Skip it everywhere but the
+        // per-session targets, and drop a target from this skip as it
+        // gains per-session flash. (See the flash-wiring punch list memory.)
         let run = if matches!(
             target,
-            BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Go
+            BuildTarget::Ruby | BuildTarget::Jruby | BuildTarget::Go | BuildTarget::Rust
         ) {
             "npx playwright test"
         } else {
