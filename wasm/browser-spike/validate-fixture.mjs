@@ -1,7 +1,11 @@
 // Node-side validation: load the committed wasm + the generated fixture.json,
-// run the SAME shared driver the browser uses, and assert the output matches
-// the known-good baseline (15 TS files). Confirms the lean fixture is
-// sufficient before we ship it to the browser page.
+// run the SAME shared driver the browser uses, and assert the output is a
+// complete full-stack emission. Confirms the lean fixture is sufficient before
+// we ship it to the browser page.
+//
+// Asserted as a floor + key-file presence rather than an exact count: the TS
+// emit pipeline grows (app + src/ runtime + tests + per-file sourcemaps +
+// config — currently ~79 files for real-blog), so an exact count is brittle.
 //
 // Run from this directory: node validate-fixture.mjs
 
@@ -11,7 +15,15 @@ import { loadCompiler } from "./transpile.mjs";
 
 const WASM = resolve("./roundhouse_wasm.wasm");
 const FIXTURE = resolve("./fixture.json");
-const EXPECTED_FILES = 15;
+const MIN_FILES = 50;
+const KEY_FILES = [
+  "app/models/article.ts",
+  "app/controllers/articles_controller.ts",
+  "app/views/articles/index.ts",
+  "src/router.ts",
+  "test/article.test.ts",
+  "main.ts",
+];
 
 const wasmBytes = await readFile(WASM);
 const srcMap = JSON.parse(await readFile(FIXTURE, "utf8"));
@@ -32,8 +44,16 @@ for (const f of result.files) {
   console.log(`  ${f.path}  (${f.content.length} bytes)`);
 }
 
-if (result.files.length !== EXPECTED_FILES) {
-  console.error(`\nFAIL: expected ${EXPECTED_FILES} files, got ${result.files.length}`);
-  process.exit(1);
+const paths = new Set(result.files.map((f) => f.path));
+const missing = KEY_FILES.filter((p) => !paths.has(p));
+let ok = true;
+if (result.files.length < MIN_FILES) {
+  console.error(`\nFAIL: expected >= ${MIN_FILES} files, got ${result.files.length}`);
+  ok = false;
 }
-console.log(`\nOK: ${EXPECTED_FILES} files as expected`);
+if (missing.length) {
+  console.error(`\nFAIL: missing key files: ${missing.join(", ")}`);
+  ok = false;
+}
+if (!ok) process.exit(1);
+console.log(`\nOK: ${result.files.length} files incl. all ${KEY_FILES.length} key files`);

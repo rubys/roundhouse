@@ -55,8 +55,8 @@ logs.forEach((l) => console.log(l));
 
 await browser.close();
 
-if (tsCount !== 15) {
-  console.error(`\nFAIL: expected 15 TypeScript files, got ${tsCount}`);
+if (tsCount < 50) {
+  console.error(`\nFAIL: expected >= 50 TypeScript files (full-stack emit), got ${tsCount}`);
   process.exit(1);
 }
 if (codeLen < 1) {
