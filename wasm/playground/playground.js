@@ -48,6 +48,7 @@ let outputView = null;      // read-only Monaco (or <pre>) showing the emitted f
 let srcMap = null;          // { path: content } — the live, editable input
 let currentPath = null;     // which source file the editor is showing
 let currentOutIndex = 0;    // which emitted file the output pane is showing
+let currentOutPath = null;  // path of the emitted file shown (to detect re-renders of the same file)
 let openDirs = null;        // Set<string> of expanded directory paths in the source tree
 let outClosedDirs = new Set(); // collapsed dirs in the output picker (default: all open)
 let lastOutput = null;      // last { language, files } | { error }
@@ -293,9 +294,13 @@ function renderOutput(result, ms) {
 function showOutput(i) {
   const files = outFiles();
   if (!files[i]) return;
+  // Same emitted file as before (an edit re-emitted it) → keep the scroll
+  // position; a different file (source/output/target switch) → reset to top.
+  const preserveView = files[i].path === currentOutPath;
   currentOutIndex = i;
+  currentOutPath = files[i].path;
   els.outfileBtn.textContent = `${files[i].path}  (${files[i].content.length} B)`;
-  outputView.setValue(files[i].content, OUT_LANG[els.target.value] || "plaintext");
+  outputView.setValue(files[i].content, OUT_LANG[els.target.value] || "plaintext", preserveView);
   if (!els.outfileMenu.hidden) renderOutTree(); // keep the open popover's highlight in sync
 }
 

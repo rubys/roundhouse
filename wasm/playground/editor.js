@@ -132,14 +132,24 @@ export async function createOutputView(container) {
       automaticLayout: true, minimap: { enabled: false }, fontSize: 13,
       scrollBeyondLastLine: false, tabSize: 2,
     });
+    let curLang = "plaintext";
     return {
       kind: "monaco",
       // Fresh model per file (same reason as the editor's setValue above); the
       // editor's readOnly option applies to whatever model it shows.
-      setValue(text, lang) {
+      // `preserveView` keeps the scroll/cursor across the model swap, so that
+      // editing a source file (which re-emits the SAME output file) doesn't
+      // bounce the output pane back to the top. We still swap the model (the
+      // Monarch tokenizer can underflow on an in-place language change), but
+      // restoreViewState reinstates the scroll offset on the new model.
+      setValue(text, lang, preserveView) {
+        lang = lang || "plaintext";
+        const state = preserveView && lang === curLang ? ed.saveViewState() : null;
         const prev = ed.getModel();
-        ed.setModel(monaco.editor.createModel(text, lang || "plaintext"));
+        ed.setModel(monaco.editor.createModel(text, lang));
         if (prev) prev.dispose();
+        if (state) ed.restoreViewState(state);
+        curLang = lang;
       },
     };
   } catch (err) {
