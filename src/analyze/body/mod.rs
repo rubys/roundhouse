@@ -55,6 +55,13 @@ pub struct Ctx {
     /// parse_library_with_rbs, view_to_library's body-typer pass,
     /// the upcoming TS controller_thin path).
     pub annotate_self_dispatch: bool,
+    /// Set when typing a view/layout body. In that context `yield` renders
+    /// content to a String (bare `yield` → the layout's `body` String param;
+    /// `yield :slot` → `ViewHelpers.get_slot` → String — see
+    /// `lower/view_to_library/partial.rs::emit_yield`), so the Yield arm types
+    /// it `String` instead of the generic `Untyped`. Off elsewhere, where a
+    /// block's return type isn't tracked through the method signature.
+    pub in_view: bool,
 }
 
 /// User-class dispatch data: table name (if any), instance shape,
@@ -712,13 +719,15 @@ impl<'a> BodyTyper<'a> {
 
             ExprNode::Yield { args } => {
                 for a in args.iter_mut() { self.analyze_expr(a, ctx); }
-                // The block's return type isn't tracked through the
-                // method's signature today (would require generics
-                // — `def f<T> { () -> T } -> ...`). Type as Untyped:
-                // the call site signed for an opaque block return,
-                // and propagating Untyped lets downstream dispatch
+                // In a view/layout, `yield` renders content → a String (the
+                // lowering turns it into the `body` String param / a
+                // `ViewHelpers.get_slot` String call). Elsewhere the block's
+                // return type isn't tracked through the method's signature
+                // today (would require generics — `def f<T> { () -> T } -> ...`),
+                // so type as Untyped: the call site signed for an opaque block
+                // return, and propagating Untyped lets downstream dispatch
                 // resolve cleanly instead of bottoming out at Var.
-                Ty::Untyped
+                if ctx.in_view { Ty::Str } else { Ty::Untyped }
             }
 
             ExprNode::Raise { value } => {

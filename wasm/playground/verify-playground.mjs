@@ -9,8 +9,9 @@
 //      length minimum 10 -> 999) re-transpiles and the emitted model TS
 //      changes to match.
 //   3. switching target re-transpiles every backend with no error.
-//   4. diagnostics overlay: baseline warnings are present, and a type-error
-//      edit (`title + 1`) surfaces an incompatible_binop error rendered as a
+//   4. diagnostics overlay: real-blog has NO baseline diagnostics (fully
+//      inferred, incl. yield-in-view typed String), and a type-error edit
+//      (`title + 1`) surfaces an incompatible_binop error rendered as a
 //      Monaco squiggle.
 //   5. inferred-type hovers: `title` in the edited method types as String, and
 //      the result carries many inferred types.
@@ -110,12 +111,17 @@ for (const t of ["typescript", "go", "rust", "python", "elixir", "crystal", "kot
   if (err) fail(`${t} produced no output`);
 }
 
-// --- diagnostics overlay: baseline warnings + edit introduces an error ------
+// --- diagnostics overlay: baseline is clean + edit introduces an error ------
 console.log("\n=== diagnostics (inference overlay) ===");
 await page.evaluate(() => window.__playground.setTarget("typescript"));
 const baseDiag = await page.evaluate(() => window.__playground.diagnostics());
-console.log("baseline:", baseDiag.length, "—", [...new Set(baseDiag.map((d) => d.code))].join(", "));
-if (!baseDiag.some((d) => d.severity === "warning")) fail("expected baseline warnings (gradual_untyped)");
+console.log("baseline:", baseDiag.length,
+  baseDiag.length ? "— " + [...new Set(baseDiag.map((d) => d.code))].join(", ") : "(clean)");
+// real-blog is fully inferred with no annotations — including yield-in-view,
+// now typed String, so there are no baseline gradual_untyped warnings. The
+// live diagnostics pipeline is exercised by the `title + 1` error edit below.
+if (baseDiag.length)
+  fail(`expected 0 baseline diagnostics, got ${baseDiag.length}: ${[...new Set(baseDiag.map((d) => d.code))].join(", ")}`);
 
 const errDiag = await page.evaluate((p) => {
   const orig = window.__playground.source(p);

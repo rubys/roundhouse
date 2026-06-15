@@ -579,7 +579,7 @@ impl Analyzer {
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
                 constants: HashMap::new(),
-                annotate_self_dispatch: false,
+                annotate_self_dispatch: false, in_view: false,
             };
             for item in controller.body.iter_mut() {
                 if let ControllerBodyItem::Unknown { expr, .. } = item {
@@ -593,7 +593,7 @@ impl Analyzer {
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
                 constants: class_constants.clone(),
-                annotate_self_dispatch: false,
+                annotate_self_dispatch: false, in_view: false,
             };
 
             // Snapshot every `before_action` declared on this
@@ -722,7 +722,7 @@ impl Analyzer {
                             ivar_bindings: seed,
                             local_bindings: HashMap::new(),
                             constants: meta.class_constants.clone(),
-                            annotate_self_dispatch: false,
+                            annotate_self_dispatch: false, in_view: false,
                         };
                         self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
                         action.effects = self.collect_effects(&mut action.body, &inner_ctx);
@@ -848,7 +848,7 @@ impl Analyzer {
                 ivar_bindings: class_ivars.clone(),
                 local_bindings: HashMap::new(),
                 constants: HashMap::new(),
-                annotate_self_dispatch: false,
+                annotate_self_dispatch: false, in_view: false,
             };
             for item in model.body.iter_mut() {
                 if let ModelBodyItem::Unknown { expr, .. } = item {
@@ -862,7 +862,7 @@ impl Analyzer {
                 ivar_bindings: class_ivars.clone(),
                 local_bindings: HashMap::new(),
                 constants: class_constants.clone(),
-                annotate_self_dispatch: false,
+                annotate_self_dispatch: false, in_view: false,
             };
 
             // Pass A: type every method body with only `@attributes`
@@ -906,7 +906,7 @@ impl Analyzer {
                     ivar_bindings: reseeded,
                     local_bindings: HashMap::new(),
                     constants: class_constants.clone(),
-                    annotate_self_dispatch: false,
+                    annotate_self_dispatch: false, in_view: false,
                 };
 
                 for scope in model.scopes_mut() {
@@ -936,7 +936,7 @@ impl Analyzer {
                 self_ty: Some(Ty::Class { id: lc.name.clone(), args: vec![] }),
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
-                constants: HashMap::new(), annotate_self_dispatch: false,
+                constants: HashMap::new(), annotate_self_dispatch: false, in_view: false,
             };
 
             let lc_name = lc.name.clone();
@@ -959,7 +959,7 @@ impl Analyzer {
                     self_ty: Some(Ty::Class { id: lc_name.clone(), args: vec![] }),
                     ivar_bindings: reseeded,
                     local_bindings: HashMap::new(),
-                    constants: HashMap::new(), annotate_self_dispatch: false,
+                    constants: HashMap::new(), annotate_self_dispatch: false, in_view: false,
                 };
                 for method in &mut lc.methods {
                     let mctx = self.seed_method_params(&reseeded_ctx, &lc_name, method);
@@ -990,6 +990,7 @@ impl Analyzer {
                 continue;
             }
             let mut view_ctx = Ctx::default();
+            view_ctx.in_view = true; // `yield` here renders to a String
             // Action views look up by view name (e.g. `articles/show`);
             // layout views (`layouts/application`) have no matching
             // action and fall through to the layout-ivar map, which is
@@ -1012,6 +1013,7 @@ impl Analyzer {
                 continue;
             }
             let mut view_ctx = Ctx::default();
+            view_ctx.in_view = true; // `yield` here renders to a String
             if let Some(locals) = partial_locals_by_name.get(&view.name) {
                 view_ctx.local_bindings = locals.clone();
             }
