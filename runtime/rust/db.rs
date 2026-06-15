@@ -32,6 +32,17 @@ thread_local! {
     /// The connection the current thread's test (or request handler)
     /// uses. `None` until `setup_test_db` initializes it.
     static CONN: RefCell<Option<Connection>> = const { RefCell::new(None) };
+
+    /// Test-only SQL capture log. `Some(vec)` while a `capture_sql`
+    /// window is open on this thread; every `prepare`/`exec` records
+    /// its SQL into it. Thread-local — like `CONN` above — so it's
+    /// isolated across the parallel `#[tokio::test]` workers and
+    /// scoped to the in-process request a test drives (axum-test's
+    /// mock transport polls the handler inline on the test thread, so
+    /// the queries land in this thread's log). The query counter is
+    /// the only instrument that sees the `includes(:assoc)` N+1 that
+    /// `compare` is structurally blind to (roundhouse#40, #27).
+    static SQL_CAPTURE: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
 }
 
 /// Process-wide sqlite connection pool for the production server.
@@ -215,9 +226,33 @@ impl Db {
     /// freshly-inserted id (the typical `Db.exec(insert_sql);
     /// id = Db.last_insert_rowid` shape in lowered persistence).
     pub fn exec(sql: &str) {
+        Self::record_sql(sql);
         with_conn(|conn| {
             conn.execute_batch(sql).expect("Db::exec");
             LAST_INSERT_ROWID.with(|c| c.set(conn.last_insert_rowid()));
+        });
+    }
+
+    /// Begin recording every SQL string issued through `prepare` /
+    /// `exec` on this thread, until `capture_sql_take`. Test-only
+    /// instrument mirroring spinel's `Db.capture_sql` — the query
+    /// counter that catches the `includes(:assoc)` N+1 (roundhouse#40,
+    /// #27). See the `SQL_CAPTURE` thread-local for why thread-local.
+    pub fn capture_sql_start() {
+        SQL_CAPTURE.with(|c| *c.borrow_mut() = Some(Vec::new()));
+    }
+
+    /// Stop recording and return the SQL captured since
+    /// `capture_sql_start` (empty if capture was never started).
+    pub fn capture_sql_take() -> Vec<String> {
+        SQL_CAPTURE.with(|c| c.borrow_mut().take().unwrap_or_default())
+    }
+
+    fn record_sql(sql: &str) {
+        SQL_CAPTURE.with(|c| {
+            if let Some(log) = c.borrow_mut().as_mut() {
+                log.push(sql.to_string());
+            }
         });
     }
 
@@ -228,6 +263,7 @@ impl Db {
     /// rusqlite resets the cached statement on checkout and returns it to
     /// the LRU when the `CachedStatement` drops at the end of this closure.
     pub fn prepare(sql: &str) -> i64 {
+        Self::record_sql(sql);
         let rows: Vec<Vec<Value>> = with_conn(|conn| {
             let mut stmt = conn.prepare_cached(sql).expect("Db::prepare");
             let n_cols = stmt.column_count();
