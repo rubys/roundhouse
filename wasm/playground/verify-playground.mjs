@@ -43,9 +43,27 @@ await page.goto(URL, { waitUntil: "load" });
 await page.waitForSelector("#status.ok", { timeout: 30000 });
 await page.waitForFunction(() => window.__playground && window.__playground.ready, { timeout: 30000 });
 
+// Boot defaults: ruby is the initial target, and the dropdown is alphabetical.
+console.log("=== boot defaults ===");
+const defaultTarget = await page.evaluate(() => document.getElementById("target").value);
+const optionOrder = await page.evaluate(() =>
+  [...document.querySelectorAll("#target option")].map((o) => o.value));
+console.log("default target:", defaultTarget, "| options:", optionOrder.join(", "));
+if (defaultTarget !== "ruby") fail(`expected default target ruby, got ${defaultTarget}`);
+if (optionOrder.join() !== [...optionOrder].sort().join())
+  fail(`target options not alphabetical: ${optionOrder.join(", ")}`);
+for (const t of ["kotlin", "swift", "ruby"])
+  if (!optionOrder.includes(t)) fail(`missing newly-wired target ${t}`);
+const rubyBoot = await page.evaluate(() => window.__playground.output());
+if (rubyBoot.error) fail(`ruby default transpile errored: ${rubyBoot.error}`);
+if (!rubyBoot.files?.some((f) => f.path.endsWith(".rb"))) fail("ruby default emitted no .rb files");
+
+// Switch to typescript for the TS-shaped assertions that follow.
+await page.evaluate(() => window.__playground.setTarget("typescript"));
+
 const editorKind = await page.evaluate(() => window.__playground.editorKind);
 const initial = await page.evaluate(() => window.__playground.output());
-console.log("=== boot ===");
+console.log("\n=== boot ===");
 console.log("editor:", editorKind);
 console.log("target: typescript");
 console.log("files:", initial.files?.length, "| sources:", await page.evaluate(() => window.__playground.sourceCount()));
@@ -81,7 +99,7 @@ if (edited.error) {
 
 // --- target sweep: every backend re-transpiles cleanly ----------------------
 console.log("\n=== target sweep (live re-transpile) ===");
-for (const t of ["typescript", "go", "rust", "python", "elixir", "crystal"]) {
+for (const t of ["typescript", "go", "rust", "python", "elixir", "crystal", "kotlin", "swift", "ruby"]) {
   const out = await page.evaluate((target) => {
     window.__playground.setTarget(target);
     return window.__playground.output();
@@ -152,6 +170,14 @@ const rsCtrlOut = await page.evaluate(() => window.__playground.displayedOutput(
 console.log("rust: select app/controllers/application_controller.rb ->", rsCtrlOut);
 if (!/controllers\/application_controller\.rs$/.test(rsCtrlOut || ""))
   fail(`expected a rust controllers/application_controller.rs, got ${rsCtrlOut}`);
+
+// ruby: source .rb and output .rb share a name, and an .rbs sidecar sits beside
+// it — the sidecar exclusion must keep the follow landing on the .rb (not no-op).
+await page.evaluate(() => window.__playground.setTarget("ruby"));
+await page.evaluate(() => window.__playground.selectSource("app/models/article.rb"));
+const rbOut = await page.evaluate(() => window.__playground.displayedOutput());
+console.log("ruby: select app/models/article.rb ->", rbOut);
+if (rbOut !== "app/models/article.rb") fail(`expected app/models/article.rb, got ${rbOut}`);
 
 await page.evaluate(() => { window.__playground.setTarget("typescript"); window.__playground.selectSource("app/models/article.rb"); });
 await page.screenshot({ path: "playground.png" });

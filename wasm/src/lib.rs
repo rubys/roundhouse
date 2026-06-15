@@ -23,7 +23,7 @@ use std::path::PathBuf;
 
 use roundhouse::analyze::{diagnose, Analyzer, Severity};
 use roundhouse::emit::ruby::ty_to_rbs;
-use roundhouse::emit::{crystal, elixir, go, python, rust, typescript};
+use roundhouse::emit::{crystal, elixir, go, kotlin, python, ruby, rust, swift, typescript};
 use roundhouse::ingest::ingest_app_from_tree;
 use serde::{Deserialize, Serialize};
 
@@ -163,6 +163,11 @@ fn transpile_inner(json_in: &str) -> String {
         "python" | "py" => python::emit(&app),
         "elixir" | "ex" => elixir::emit(&app),
         "go" => go::emit(&app),
+        "kotlin" | "kt" => kotlin::emit(&app),
+        "swift" | "sw" => swift::emit(&app),
+        // Ruby/spinel's aggregate emitter is `emit_spinel` (legacy name); it
+        // returns the full project (.rb + .rbs sidecars) like the others' emit().
+        "ruby" | "spinel" => ruby::emit_spinel(&app),
         other => return error_json(&format!("unknown language: {other}")),
     };
 

@@ -14,19 +14,21 @@
 import { loadCompiler } from "./transpile.mjs";
 import { createEditor, createOutputView } from "./editor.js";
 
-// The six targets the wasm entry point routes to today. (ruby/spinel/kotlin/
-// swift are not yet wired into wasm/src/lib.rs — a one-line match extension.)
-const TARGETS = ["typescript", "go", "rust", "python", "elixir", "crystal"];
+// The targets the wasm entry point routes to, in alphabetical order (= the
+// dropdown order). (kotlin/swift use `emit()`; ruby uses `emit_spinel()`.)
+const TARGETS = ["crystal", "elixir", "go", "kotlin", "python", "ruby", "rust", "swift", "typescript"];
 
-// Map a target to a Monaco-ish language id for the (read-only) output pane.
+// Map a target to a Monaco language id for the (read-only) output pane.
 // Elixir/Crystal have no built-in Monaco grammar -> plaintext.
 const OUT_LANG = {
-  typescript: "typescript", go: "go", rust: "rust",
-  python: "python", elixir: "plaintext", crystal: "plaintext",
+  typescript: "typescript", go: "go", rust: "rust", python: "python",
+  kotlin: "kotlin", swift: "swift", ruby: "ruby",
+  elixir: "plaintext", crystal: "plaintext",
 };
 
 const DEBOUNCE_MS = 250;
 const DEFAULT_FILE = "app/models/article.rb";
+const DEFAULT_TARGET = "ruby"; // Ruby is the initial target (most on-message: Ruby -> typed Ruby + .rbs)
 
 const els = {
   target: document.getElementById("target"),
@@ -240,14 +242,15 @@ function endsWithSegs(segs, suffix) {
 // single match, return -1 (leave the pane alone — a wrong jump is worse than
 // none). This is layout-prefix agnostic, so e.g. rust's
 // src/controllers/application_controller.rs still maps from
-// app/controllers/application_controller.rb. `.map` sidecars are excluded.
+// app/controllers/application_controller.rb. `.map`/`.rbs` sidecars are
+// excluded (else ruby's article.rb + article.rbs pair is forever ambiguous).
 function outputIndexForSource(srcPath) {
   if (!srcPath) return -1;
   const src = stemSegs(srcPath);
   if (!src.length) return -1;
   let cands = outFiles()
-    .map((f, idx) => ({ idx, segs: stemSegs(f.path), isMap: f.path.endsWith(".map") }))
-    .filter((o) => o.segs.length && !o.isMap);
+    .map((f, idx) => ({ idx, segs: stemSegs(f.path), sidecar: /\.(map|rbs)$/.test(f.path) }))
+    .filter((o) => o.segs.length && !o.sidecar);
   for (let k = 1; k <= src.length; k++) {
     const suffix = src.slice(src.length - k); // the last k source segments
     const next = cands.filter((o) => endsWithSegs(o.segs, suffix));
@@ -305,6 +308,7 @@ async function boot() {
     opt.textContent = t;
     els.target.appendChild(opt);
   }
+  els.target.value = DEFAULT_TARGET;
 
   setStatus("loading wasm + fixture…");
   const [wasmBytes, fixture] = await Promise.all([
