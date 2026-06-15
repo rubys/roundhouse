@@ -1397,14 +1397,16 @@ jobs:
              wasm/lib/editor.js \
              wasm/lib/tree.js \
              wasm/lib/bundle.mjs \
+             wasm/lib/app-host.mjs \
              _site/lib/
           cp wasm-artifact/roundhouse_wasm.wasm _site/lib/
           # Fresh seed app from the just-generated real-blog fixture (→ lib).
           (cd wasm/browser-spike && node gen-fixture.mjs)
           cp wasm/browser-spike/fixture.json _site/lib/fixture.json
-          # Each surface: just its own HTML + entry module.
+          # Each surface: its own HTML + entry module(s). Studio also ships its
+          # app-host service worker (sw.js), which serves the running app.
           cp wasm/playground/index.html wasm/playground/playground.js _site/playground/
-          cp wasm/studio/index.html     wasm/studio/studio.js         _site/studio/
+          cp wasm/studio/index.html wasm/studio/studio.js wasm/studio/sw.js _site/studio/
           echo "lib files:";        find _site/lib -type f | sort
           echo "playground files:"; find _site/playground -type f | sort
           echo "studio files:";     find _site/studio -type f | sort

@@ -11,41 +11,42 @@ Studio shares the editor, source tree, compiler driver, and seed app with
 right-hand pane — playground shows emitted **code**, studio shows the **running
 app**.
 
-## Status — Phase 4 done
+## Status — Phase 5 done (full-reload loop)
 
-Working today (the whole client-side **edit → compile → bundle** chain):
+Studio runs the emitted blog **live**, entirely client-side:
 
-- Shared `../lib/` editor + source tree + the debounced edit loop, proven on a
-  second surface.
-- Every edit transpiles Ruby → the **worker-profile** TypeScript in the browser
-  (wasm `profile: "worker"` — the runnable SharedWorker app: `main.ts`,
-  `worker.ts`, `src/db_worker.ts`, …), then bundles it to 3 browser-loadable
-  ESM files via **esbuild-wasm** (`../lib/bundle.mjs`). The app pane shows live
-  transpile + bundle readouts (file counts, sizes, ms).
-- Diagnostics squiggles on the open file (same inference overlay as playground).
+> edit Ruby → wasm transpile (worker profile) → esbuild bundle → host in a
+> service worker → run the app in an iframe over sqlite-wasm → edit again → the
+> running app reflects it.
 
-esbuild loads from a CDN (like Monaco), so nothing is vendored; if that load
-fails (offline / strict CSP) studio degrades to transpile-only.
+- The right pane is the **running app**, not code: a service worker (`sw.js`)
+  serves the esbuild bundles + an HTML shell at a same-origin scope
+  (`<studio>/app/`), and an iframe mounts it there so `new SharedWorker`/
+  `new Worker` + module loads + routes resolve from real URLs
+  (`../lib/app-host.mjs` registers the SW + drives the iframe).
+- Every edit re-bundles and reloads the iframe. Bundle URLs carry a per-build
+  `?v=` so a fresh SharedWorker mints each build (they're URL-keyed; the worker
+  is where rendering happens). The app's OPFS DB persists across reloads.
+- **OPFS is namespaced per deploy path** (`import.meta.env.BASE_URL`), so the
+  studio app instance and the standalone `/blog/` never share a pool.
+- esbuild + Monaco + sqlite-wasm/turbo + Tailwind load from CDNs; each piece
+  degrades independently (no esbuild → transpile-only; no SW → no run).
 
-Not yet (Phase 5, the next step):
-
-- **Run** the app: load those 3 bundles as the live app (main thread +
-  SharedWorker + DB worker) over sqlite-wasm — reusing the blog's runtime
-  (`runtime/typescript/sqlite_wasm_engine.ts`, `db_worker.ts`, `juntos*.ts`) —
-  and hot-swap on edit. The app pane shows that roadmap + the live bundle status
-  instead of the app.
+Deferred polish: true module hot-swap (no reload); richer in-app interaction
+tests; ship/run the Minitest suite in-browser (rung D.2).
 
 ## Files
 
 | File | Role | Tracked |
 |---|---|---|
-| `index.html` | three-pane layout (sources / editor / running app) | yes |
-| `studio.js` | app: source tree, debounced transpile+bundle loop, app-pane readouts, test hooks | yes |
-| `verify-studio.mjs` | Playwright: drive the chain in chromium (needs network for the CDNs) | yes |
+| `index.html` | three-pane layout (sources / editor / running app iframe) | yes |
+| `studio.js` | the loop: source tree, transpile→bundle→host, app shell, test hooks | yes |
+| `sw.js` | app-host service worker: serves the in-memory app at its scope | yes |
+| `verify-studio.mjs` | Playwright: boot → run → edit-reflects, in chromium (needs network) | yes |
 | `studio.png` | screenshot from the verifier | no (gitignored) |
 
-Shared assets (compiler driver, editor, tree, **bundler** `bundle.mjs`, binary,
-fixture) live in `../lib/`.
+Shared infra (compiler driver, editor, tree, bundler `bundle.mjs`, app-host
+`app-host.mjs`, the compiler wasm, fixture) lives in `../lib/`.
 
 ## Run
 

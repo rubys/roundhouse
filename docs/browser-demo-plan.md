@@ -140,7 +140,7 @@ verifiable development cycle."**
 | 1 | Monaco editor + multi-file tree + target dropdown → wasm transpile → output pane | A | 1–2 | **DONE & PUBLISHED** — `wasm/playground/`, live at `/playground/` |
 | 3 | Extend wasm contract to return diagnostics + inferred types (+ per-file `source` provenance); Monaco markers | C | 1–2 | **DIAGNOSTICS + INFERRED-TYPE HOVERS DONE**; only the `source` provenance field remains |
 | 4 | `/studio/` scaffold + shared `lib/` + esbuild-wasm TS→JS bundle step in-browser | D | 1 | **DONE** — shared `lib/`, `/studio/`, wasm `profile` contract, esbuild-wasm bundling all landed |
-| 5 | Live loop: edit Ruby → wasm recompile → esbuild bundle → hot-swap running blog | D | 2–3 | unblocked (1,4 done) — next |
+| 5 | Live loop: edit Ruby → wasm recompile → esbuild bundle → run/reload the blog | D | 2–3 | **DONE (full-reload loop)** — SW-hosted iframe runs the app over sqlite-wasm; edits reflect. Hot-swap = later polish |
 | 6 | Emit + ship the Minitest suite into the browser payload | D.2 | ½–1 | blocked on 5 |
 | 7 | `node:test` → browser test-runner harness + in-memory sqlite isolation | D.2 | 1–2 | blocked on 6 |
 | 8 | Test-results UI panel + cross-target CI badge strip | D.2 | ½–1 | blocked on 7 |
@@ -355,6 +355,24 @@ The identity demo — what separates roundhouse from "yet another transpiler."
 
 ### Phase 5 — Live app loop (rung D = `/studio/`, 2–3 days)
 
+> **Status: DONE — full-reload loop shipped.** Studio runs the emitted blog live:
+> a **service worker** (`wasm/studio/sw.js`) hosts the esbuild bundles + an HTML
+> shell at a same-origin scope (`<studio>/app/`), and an **iframe** mounts the
+> app there, so `new SharedWorker(...)`/`new Worker(...)` + module loads + routes
+> all resolve from real URLs (`wasm/lib/app-host.mjs` registers the SW + drives
+> the iframe). The loop: edit Ruby → wasm transpile (worker profile) → esbuild
+> bundle → push files to the SW → reload the iframe. Bundle URLs carry a per-build
+> `?v=` so a fresh SharedWorker mints each build (SharedWorkers are URL-keyed —
+> reusing a fixed URL would reload the iframe but keep the stale worker that does
+> the rendering). **OPFS isolation:** `sqlite_wasm_engine.ts` now namespaces the
+> opfs-sahpool VFS + directory by `import.meta.env.BASE_URL`, so `/studio/app/`
+> and `/blog/` get separate pools (the blog re-seeds once on the next deploy — a
+> distinct, non-default pool name). The wasm rebuild that bakes this in is the
+> CI `build-wasm` job (no committed binary). `verify-studio.mjs` asserts boot →
+> all 3 seeds render → a view edit reaches the running app. **Exit criterion met**
+> (edit reflects via a fast iframe reload, not yet true no-reload hot-swap).
+> Remaining polish: true module hot-swap; richer in-app interaction tests.
+
 The killer demo. Reuses the blog's existing browser runtime wholesale — but as
 `/studio/`'s *own* embedded app instance (its own opfs DB namespace), not the
 published `/blog/`, so editing here never disturbs the standalone blog demo.
@@ -465,8 +483,9 @@ the line of **Ruby** the user wrote, not the emitted TS.
   unresolved, and workers can't use importmaps, so npm deps must be baked in as
   full URLs. esbuild resolves the graph in-memory and keeps the 2 npm deps as
   CDN-external full URLs (worker-safe). See `wasm/lib/bundle.mjs`.
-- **End of Phase 5**: full-reload loop vs. true hot-swap — ship whichever is
-  solid; hot-swap is a polish follow-on, not a gate.
+- **End of Phase 5** — RESOLVED: shipped the **full-reload loop** (SW-hosted
+  iframe; a per-build `?v=` reloads it with a fresh SharedWorker). True module
+  hot-swap is the deferred polish.
 - **End of Phase 7**: harness option (a) shim vs. (b) custom runner — confirm
   the in-browser suite is provably identical to CI's.
 

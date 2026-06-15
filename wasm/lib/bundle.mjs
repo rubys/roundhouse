@@ -108,7 +108,9 @@ export async function loadBundler(opts = {}) {
   const esbuild = await loadEsbuild();
   const cdn = opts.cdn || DEFAULT_CDN;
   return {
-    async bundle(srcMap, entryPoints = ENTRY_POINTS) {
+    // base: the app's deploy path (becomes import.meta.env.BASE_URL — the worker
+    // runtime strips it from routes). Defaults to "/".
+    async bundle(srcMap, entryPoints = ENTRY_POINTS, { base = "/" } = {}) {
       const t0 = performance.now();
       let result;
       try {
@@ -120,6 +122,10 @@ export async function loadBundler(opts = {}) {
           outdir: "out",
           write: false,
           metafile: true,
+          // The emitted client reads import.meta.env.BASE_URL (vite injects it
+          // in the normal build). Nothing else in the runtime reads
+          // import.meta.env, so defining the whole object is safe.
+          define: { "import.meta.env": JSON.stringify({ BASE_URL: base }) },
           plugins: [makeVfsPlugin(srcMap, cdn)],
           logLevel: "silent",
         });

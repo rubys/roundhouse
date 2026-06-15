@@ -72,7 +72,16 @@ export async function initDatabase(options: InitOptions = {}): Promise<void> {
 
   if (opfs && inWorker) {
     try {
+      // Namespace the OPFS-SAHPool VFS + directory per deploy path so two apps
+      // on the same origin (e.g. /blog/ and the studio /studio/app/ instance)
+      // never share a pool — a shared pool would have each app's SAHPool fight
+      // over the same sync access handles and clobber the other's data.
+      // BASE_URL is the deploy path (vite/esbuild-injected); "/" → the default.
+      const base =
+        (import.meta as unknown as { env?: { BASE_URL?: string } }).env?.BASE_URL ?? "/";
+      const ns = base === "/" ? "" : base.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_|_$/g, "");
       const pool = await sqlite3.installOpfsSAHPoolVfs({
+        ...(ns ? { name: "opfs-sahpool-" + ns, directory: "." + ns + "-sahpool" } : {}),
         initialCapacity: 6,
         clearOnInit: false,
       });
