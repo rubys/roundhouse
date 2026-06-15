@@ -57,10 +57,10 @@ container never earns its weight here.
 
 | Rung | Demo | What it shows | New work | Container? |
 |---|---|---|---|---|
-| **A** | Multi-target playground | Edit Ruby → pick TS/Go/Rust/Py/Elixir/Crystal → emitted code | Monaco + load wasm + WASI-in-browser shim | No |
-| **C** | Inference / diagnostics overlay | Monaco markers for inferred types + unsupported-feature diagnostics | expose analyzer/diagnostics through wasm | No |
-| **D** | Live app loop | Edit Ruby → recompile in-browser → hot-swap the running TS blog | esbuild-wasm TS→JS + hot-reload wiring | No |
-| **D.2** | In-browser test runner | …→ run the emitted Minitest suite → green/red → click failure back to Ruby | node:test→browser harness + results panel + runtime sourcemaps | No |
+| **A** | Multi-target playground (`/playground/`) | Edit Ruby → pick TS/Go/Rust/Py/Elixir/Crystal → emitted code | Monaco + load wasm + WASI-in-browser shim | No |
+| **C** | Inference / diagnostics overlay (in `/playground/`) | Monaco markers for inferred types + unsupported-feature diagnostics | expose analyzer/diagnostics through wasm | No |
+| **D** | Live app loop — **separate surface `/studio/`** | Edit Ruby → recompile in-browser → hot-swap the running TS blog | shared `lib/` factor-out + esbuild-wasm TS→JS + hot-reload wiring | No |
+| **D.2** | In-browser test runner (in `/studio/`) | …→ run the emitted Minitest suite → green/red → click failure back to Ruby | node:test→browser harness + results panel + runtime sourcemaps | No |
 
 > **Dropped: rung B ("all-targets-at-once").** Each target is a whole idiomatic
 > project (34–79 files) that *restructures* — different dir layouts, views as
@@ -71,10 +71,12 @@ container never earns its weight here.
 > folds into the rung C contract work instead — see Phase 3.
 
 A is the de-risk spike and the clearest "what is this project" demo (the
-multi-target angle is the differentiator ruby2js structurally lacks). C is a
-UI extension of the same wasm call. **D is the demo nobody else can build**
-— it fuses the two assets roundhouse already has into a live full-stack loop
-on static hosting. **D.2 turns "look, it transpiles" into "look, it's a real,
+multi-target angle is the differentiator ruby2js structurally lacks); A+C ship
+as `/playground/` (live). C is a UI extension of the same wasm call. **D is the
+demo nobody else can build** — it fuses the two assets roundhouse already has
+into a live full-stack loop on static hosting — and ships as its own surface
+`/studio/` ("the blog, editable"), sharing modules with the playground but not
+its UI (decision #6). **D.2 turns "look, it transpiles" into "look, it's a real,
 verifiable development cycle."**
 
 ## Decisions locked in (provisional — confirm at each rung's Phase 0)
@@ -103,6 +105,32 @@ verifiable development cycle."**
    badges. **Do not imply the non-TS runs are live.** This leans into the
    cross-target conformance story (one Minitest suite, every backend) rather
    than hiding the limit.
+6. **Rung D is a SEPARATE surface (`/studio/`), not a mode of the playground.**
+   Decided 2026-06-14. D shares a lot of code with the playground but tells a
+   different story and has a different shape, so it ships as its own published
+   surface — "share code, separate surface." Reasons:
+   - *Different message.* `/playground/` answers "what does my Ruby compile
+     to?" (read output code, compare targets, inspect inferred types).
+     `/studio/` answers "watch my Rails app run and change live."
+   - *Different output shape.* The playground's right pane is source code;
+     studio's is a *running app + a live database*. Not a tab — a different
+     surface.
+   - *TS-only vs six-target.* The playground is proudly multi-target; D only
+     works for TypeScript (the one browser runtime). A "Run" greyed out for 5
+     of 6 targets sits wrong inside the playground; standalone, studio is
+     unambiguously "the TypeScript app, live."
+   - *Weight & risk.* D pulls in esbuild-wasm + the SharedWorker + sqlite-wasm
+     + OPFS + hot-swap. Folding that in taxes the lean playground and lets D's
+     (riskiest-rung) breakage destabilize an already-shipped surface.
+
+   Studio is conceptually **"the blog, editable"** — it composes the existing
+   `/blog/` runtime (`sqlite_wasm_engine.ts`, `db_worker.ts`, `juntos*.ts`) +
+   the playground's editor/driver + esbuild glue, so it sits closer to `/blog/`
+   than to `/playground/`. The factoring: promote the shared pieces
+   (`transpile.mjs` / `wasi-shim.mjs`, `editor.js`, the source-tree + debounced
+   edit→transpile loop) into a shared `lib/` both surfaces import — that's
+   rung D's Phase 4 first step. `/demo/` is the hub page; it links blog +
+   playground + studio so a visitor lands oriented.
 
 ## Phase status
 
@@ -267,9 +295,17 @@ The identity demo — what separates roundhouse from "yet another transpiler."
 - This dramatizes the inference-first / transpile-time-resolvable-Ruby
   positioning live; ruby2js has no type story to show.
 
-### Phase 4 — esbuild-wasm TS→JS step (rung D infra, 1 day)
+### Phase 4 — `/studio/` scaffold + shared `lib/` + esbuild-wasm (rung D infra, 1–1½ days)
 
-- Add `esbuild-wasm` to the page; wire a `transform`/`build` call that takes
+- **First step (the "shared a lot of code" part): factor the reusable pieces
+  into a shared `lib/` both surfaces import** — `transpile.mjs` / `wasi-shim.mjs`
+  (currently vendored in `wasm/playground/`), `editor.js`, and the source-tree +
+  debounced edit→transpile loop. Then stand up `wasm/studio/` (the new
+  `/studio/` surface, decision #6) consuming that `lib/`, so `/playground/`
+  keeps working unchanged. `/playground/` = shared editor + code output;
+  `/studio/` = shared editor + running app. Keep each a self-contained deploy
+  dir (publish via a `build-site` step mirroring the playground's).
+- Add `esbuild-wasm` to `/studio/`; wire a `transform`/`build` call that takes
   the emitted TS files and produces browser-loadable ESM.
 - Confirm it is just-another-wasm-module — no Node, no container (decision
   #4). Measure combined load (roundhouse wasm + esbuild wasm) budget.
@@ -278,9 +314,11 @@ The identity demo — what separates roundhouse from "yet another transpiler."
   is the only need, a lighter path may exist. Pick based on what the emitted
   TS actually requires (bundling vs. bare type-strip).
 
-### Phase 5 — Live app loop (rung D, 2–3 days)
+### Phase 5 — Live app loop (rung D = `/studio/`, 2–3 days)
 
-The killer demo. Reuses the blog's existing browser runtime wholesale.
+The killer demo. Reuses the blog's existing browser runtime wholesale — but as
+`/studio/`'s *own* embedded app instance (its own opfs DB namespace), not the
+published `/blog/`, so editing here never disturbs the standalone blog demo.
 
 - Source of the running app: the `worker` profile TS runtime —
   `runtime/typescript/sqlite_wasm_engine.ts`, `db_worker.ts`, `juntos*.ts`
