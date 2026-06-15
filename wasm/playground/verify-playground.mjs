@@ -20,15 +20,16 @@
 // the transpiler reflects recognized Rails DSL like `validates`, not arbitrary
 // methods — so the edit assertion uses a validation, which IS reflected.)
 //
-// Serve THIS directory as the web root (it's self-contained):
-//   python3 -m http.server 8099    # run from wasm/playground/
-//   node verify-playground.mjs
+// Serve the PARENT (wasm/) as the web root, since the page now imports the
+// shared ../lib/ modules (rung D Phase 4):
+//   python3 -m http.server 8099    # run from wasm/
+//   node verify-playground.mjs     # (run from wasm/playground/)
 
 import { createRequire } from "node:module";
 const require = createRequire("/Users/rubys/git/roundhouse/tests/browser_smoke/");
 const { chromium } = require("playwright");
 
-const URL = "http://localhost:8099/index.html";
+const URL = "http://localhost:8099/playground/index.html";
 const MODEL = "app/models/article.rb";
 
 const browser = await chromium.launch();

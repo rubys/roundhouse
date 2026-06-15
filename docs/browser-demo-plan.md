@@ -139,7 +139,7 @@ verifiable development cycle."**
 | 0 | Audit + WASI-in-browser spike (load `roundhouse_wasm.wasm`, transpile real-blog, render output) | A | ½–1 | **DONE** — see `wasm/browser-spike/` |
 | 1 | Monaco editor + multi-file tree + target dropdown → wasm transpile → output pane | A | 1–2 | **DONE & PUBLISHED** — `wasm/playground/`, live at `/playground/` |
 | 3 | Extend wasm contract to return diagnostics + inferred types (+ per-file `source` provenance); Monaco markers | C | 1–2 | **DIAGNOSTICS + INFERRED-TYPE HOVERS DONE**; only the `source` provenance field remains |
-| 4 | esbuild-wasm TS→JS bundle step in-browser (shared infra for D) | D | 1 | not started |
+| 4 | `/studio/` scaffold + shared `lib/` + esbuild-wasm TS→JS bundle step in-browser | D | 1 | **SHARED `lib/` + `/studio/` SCAFFOLD DONE**; esbuild-wasm next |
 | 5 | Live loop: edit Ruby → wasm recompile → esbuild bundle → hot-swap running blog | D | 2–3 | blocked on 1,4 |
 | 6 | Emit + ship the Minitest suite into the browser payload | D.2 | ½–1 | blocked on 5 |
 | 7 | `node:test` → browser test-runner harness + in-memory sqlite isolation | D.2 | 1–2 | blocked on 6 |
@@ -161,21 +161,26 @@ demos as extra steps before `upload-pages-artifact`. Two kinds of content:
   and the landing page ship). Links to the playground live in
   `site/index.html` and `site/demo/index.html`.
 - **Generated** → a CI step writes into `_site/<dir>/`. `/blog/` emits the
-  worker-profile app and vite-builds it; **`/playground/`** copies the
-  self-contained `wasm/playground/` dir and regenerates `fixture.json` from the
-  just-built real-blog fixture (CI step "Bundle the in-browser playground
-  demo").
+  worker-profile app and vite-builds it; the **`/playground/` + `/studio/`**
+  surfaces copy their HTML+entry-module dirs plus the shared `wasm/lib/`
+  (driver + editor + tree + the prebuilt `roundhouse_wasm.wasm`) into
+  `_site/{lib,playground,studio}/` and regenerate `fixture.json` (→ `_site/lib/`)
+  from the just-built real-blog fixture (CI step "Bundle the in-browser
+  playground + studio demos"). The surfaces import `../lib/`, so `_site/lib/`
+  must stay a sibling of the surface dirs — the whole `_site/` tree deploys
+  together (which is how Pages serves anyway).
 
 **The playground is published with a checked-in compiler wasm — deliberately,
 not blocked on #2992.** Building `roundhouse_wasm.wasm` on a runner needs the
 WASI SDK *and* a `ruby-rbs-sys` reachable from CI; today that's a local-path
 `[patch.crates-io]` (the wasm32 build support is upstream-pending as
 ruby/rbs#2992). Rather than wait — it may be days, weeks, or never — the
-~3.2 MB `wasm/playground/roundhouse_wasm.wasm` is committed and the CI step
-just copies it. The cost is a manual refresh: after compiler/emit changes,
-rebuild and recommit the binary (`WASI_SDK_PATH=/opt/wasi-sdk cargo build
---release --target wasm32-wasip1` in `wasm/`, copy it in, re-run
-`verify-playground.mjs`). See `wasm/playground/README.md` § Maintenance.
+~3.2 MB `wasm/lib/roundhouse_wasm.wasm` (shared by `/playground/` + `/studio/`)
+is committed and the CI step just copies it. The cost is a manual refresh:
+after compiler/emit changes, rebuild and recommit the binary
+(`WASI_SDK_PATH=/opt/wasi-sdk cargo build --release --target wasm32-wasip1` in
+`wasm/`, copy it into `wasm/lib/`, re-run `verify-playground.mjs`). See
+`wasm/playground/README.md` § Maintenance.
 
 **Switch-to-CI-build trigger:** when #2992 merges and `ruby-rbs-sys` publishes
 (or the patched crate is pushed to a CI-reachable git ref), replace the copy
@@ -296,6 +301,21 @@ The identity demo — what separates roundhouse from "yet another transpiler."
   positioning live; ruby2js has no type story to show.
 
 ### Phase 4 — `/studio/` scaffold + shared `lib/` + esbuild-wasm (rung D infra, 1–1½ days)
+
+> **Status: shared `lib/` + `/studio/` scaffold DONE.** The reusable pieces are
+> factored into `wasm/lib/` (`transpile.mjs` w/ new `loadDefaultCompiler` +
+> `loadFixture`, `wasi-shim.mjs`, `editor.js`, the file-tree widget `tree.js`,
+> plus the shared `roundhouse_wasm.wasm` binary + `fixture.json`). `/playground/`
+> was refactored onto `../lib/` and re-verified green (`verify-playground.mjs`);
+> the served root moved up one level (`wasm/` locally, `_site/` published) so
+> `/lib/`, `/playground/`, `/studio/` sit side by side and the surfaces import
+> `../lib/`. `wasm/studio/` is the new surface consuming that `lib/`: editor +
+> source tree + the debounced edit→transpile loop work (TS-only), with the
+> app pane showing a live build readout + the Phase 5 roadmap (it does not yet
+> *run* the app). `verify-studio.mjs` smoke-checks it in chromium; the CI
+> `build-site` step publishes all three dirs. **Remaining for Phase 4:**
+> esbuild-wasm (below). The landing/`/demo/` links to `/studio/` are held until
+> Phase 5 makes it actually run the app (avoid over-claiming).
 
 - **First step (the "shared a lot of code" part): factor the reusable pieces
   into a shared `lib/` both surfaces import** — `transpile.mjs` / `wasi-shim.mjs`

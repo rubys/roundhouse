@@ -3,6 +3,11 @@
 // transpile(language, srcMap) -> { files | error } interface. Uses only
 // WebAssembly + TextEncoder/Decoder, so the same module drives both the
 // Node validator and the browser page.
+//
+// Lives in wasm/lib/ alongside the compiler binary (roundhouse_wasm.wasm) and
+// the seed app (fixture.json), shared by both /playground/ and /studio/.
+// loadDefaultCompiler / loadFixture resolve those two assets relative to THIS
+// module via import.meta.url, so a surface page needn't know where lib/ sits.
 
 import { makeWasi } from "./wasi-shim.mjs";
 
@@ -42,4 +47,20 @@ export async function loadCompiler(wasmBytes, wasiOpts = {}) {
       return JSON.parse(output);
     },
   };
+}
+
+// Browser convenience: fetch the lib's own roundhouse_wasm.wasm (resolved
+// relative to this module, not the loading page) and instantiate it. Falls
+// back through to loadCompiler so the byte-level path stays single-sourced.
+export async function loadDefaultCompiler(wasiOpts = {}) {
+  const url = new URL("./roundhouse_wasm.wasm", import.meta.url);
+  const bytes = await fetch(url).then((r) => r.arrayBuffer());
+  return loadCompiler(bytes, wasiOpts);
+}
+
+// Browser convenience: fetch the lib's seed app (the real-blog fixture as a
+// { path: content } map), resolved relative to this module.
+export async function loadFixture() {
+  const url = new URL("./fixture.json", import.meta.url);
+  return fetch(url).then((r) => r.json());
 }

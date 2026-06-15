@@ -1317,32 +1317,40 @@ jobs:
           cp -R "$DEMO"/dist/. _site/blog/
           echo "blog demo files:"; find _site/blog -maxdepth 2 -type f | sort
 
-      # In-browser playground demo → _site/playground/. Where the blog ships
-      # the *emitted app*, this ships the *compiler itself* as wasm: edit Ruby,
-      # transpile to any target, in the browser. The self-contained
-      # wasm/playground/ dir (editor + vendored driver + prebuilt
-      # roundhouse_wasm.wasm) copies in as-is; fixture.json — the editor's seed
-      # app — is regenerated from the just-built real-blog so it tracks
-      # create-blog. The compiler wasm is CHECKED IN, not built here: a runner
-      # build needs the WASI SDK + a published ruby-rbs-sys (upstream-pending as
-      # ruby/rbs#2992) — see wasm/playground/README.md and the "Publishing to
-      # Pages" section of docs/browser-demo-plan.md. Pure static files (no
-      # npm/vite, no COOP/COEP), so it serves straight off Pages.
-      - name: Bundle the in-browser playground demo (→ _site/playground)
+      # In-browser playground + studio demos → _site/{lib,playground,studio}/.
+      # Where the blog ships the *emitted app*, these ship the *compiler itself*
+      # as wasm. The two surfaces share ../lib/ (driver + editor + tree widget +
+      # the prebuilt roundhouse_wasm.wasm + the seed fixture), so the served
+      # tree must keep lib/ a sibling of the surface dirs (the pages import
+      # ../lib/). /playground/ = edit Ruby → emitted code, any target;
+      # /studio/ = edit Ruby → run the emitted TS blog live (rung D; Phase 4
+      # scaffold today). fixture.json is regenerated from the just-built
+      # real-blog so it tracks create-blog. The compiler wasm is CHECKED IN, not
+      # built here: a runner build needs the WASI SDK + a published ruby-rbs-sys
+      # (upstream-pending as ruby/rbs#2992) — see wasm/lib/README.md,
+      # wasm/playground/README.md, and the "Publishing to Pages" section of
+      # docs/browser-demo-plan.md. Pure static files (no npm/vite, no
+      # COOP/COEP), so they serve straight off Pages.
+      - name: Bundle the in-browser playground + studio demos (→ _site/lib, _site/playground, _site/studio)
         run: |
           set -euo pipefail
-          mkdir -p _site/playground
-          cp wasm/playground/index.html \
-             wasm/playground/editor.js \
-             wasm/playground/playground.js \
-             wasm/playground/transpile.mjs \
-             wasm/playground/wasi-shim.mjs \
-             wasm/playground/roundhouse_wasm.wasm \
-             _site/playground/
-          # Fresh seed app from the just-generated real-blog fixture.
+          mkdir -p _site/lib _site/playground _site/studio
+          # Shared lib: code modules + the prebuilt compiler binary.
+          cp wasm/lib/transpile.mjs \
+             wasm/lib/wasi-shim.mjs \
+             wasm/lib/editor.js \
+             wasm/lib/tree.js \
+             wasm/lib/roundhouse_wasm.wasm \
+             _site/lib/
+          # Fresh seed app from the just-generated real-blog fixture (→ lib).
           (cd wasm/browser-spike && node gen-fixture.mjs)
-          cp wasm/browser-spike/fixture.json _site/playground/fixture.json
+          cp wasm/browser-spike/fixture.json _site/lib/fixture.json
+          # Each surface: just its own HTML + entry module.
+          cp wasm/playground/index.html wasm/playground/playground.js _site/playground/
+          cp wasm/studio/index.html     wasm/studio/studio.js         _site/studio/
+          echo "lib files:";        find _site/lib -type f | sort
           echo "playground files:"; find _site/playground -type f | sort
+          echo "studio files:";     find _site/studio -type f | sort
 
       # Bench results page — fetched from the Hetzner publishing endpoint
       # (cron-driven, populates bench/results/latest on each run). The

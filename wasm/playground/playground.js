@@ -1,18 +1,21 @@
 // Phase 1 — multi-target playground (rung A of docs/browser-demo-plan.md).
 //
-// Self-contained: every asset it needs (the C-ABI driver transpile.mjs +
-// wasi-shim.mjs, the compiler roundhouse_wasm.wasm, and the seed app
-// fixture.json) sits in THIS directory, so the whole dir copies straight to
-// GitHub Pages at /playground/ with no rewrite. transpile.mjs + wasi-shim.mjs
-// are vendored copies of the Phase 0 spike's driver (kept in sync by hand —
-// they're small and stable). What's net-new over the spike: an EDITABLE
-// source tree, an editor (Monaco w/ textarea fallback), and a debounced
-// edit -> transpile -> render loop.
+// Shared-lib model (rung D Phase 4): the compiler driver (transpile.mjs +
+// wasi-shim.mjs + the roundhouse_wasm.wasm binary + the seed fixture.json), the
+// editor abstraction (editor.js), and the file-tree widget (tree.js) all live
+// in ../lib/ and are shared with /studio/. This dir holds only the playground's
+// own UI: index.html + this file. What's playground-specific (not in lib): the
+// debounced edit -> transpile -> render loop, the output-file picker, and the
+// diagnostics/inferred-type overlay.
 //
-// Serve THIS directory as the web root (e.g. `python3 -m http.server` here).
+// Serve the PARENT (wasm/) as the web root so /playground/, /studio/, and /lib/
+// all resolve (mirrors the published _site/ tree):
+//   python3 -m http.server 8099   # run from wasm/
+//   open http://localhost:8099/playground/
 
-import { loadCompiler } from "./transpile.mjs";
-import { createEditor, createOutputView } from "./editor.js";
+import { loadDefaultCompiler, loadFixture } from "../lib/transpile.mjs";
+import { createEditor, createOutputView } from "../lib/editor.js";
+import { allDirPaths, renderTree } from "../lib/tree.js";
 
 // The targets the wasm entry point routes to, in alphabetical order (= the
 // dropdown order). (kotlin/swift use `emit()`; ruby uses `emit_spinel()`.)
@@ -67,70 +70,9 @@ function sourceFiles() {
   return Object.keys(srcMap).filter((p) => /\.(rb|erb)$/.test(p)).sort();
 }
 
-// Build a nested {dirs: Map<name,node>, files: [{name,path}]} tree from the
-// flat, slash-delimited source paths.
-function buildTree(paths) {
-  const root = { dirs: new Map(), files: [] };
-  for (const path of paths) {
-    const parts = path.split("/");
-    let node = root;
-    for (let i = 0; i < parts.length - 1; i++) {
-      if (!node.dirs.has(parts[i])) node.dirs.set(parts[i], { dirs: new Map(), files: [] });
-      node = node.dirs.get(parts[i]);
-    }
-    node.files.push({ name: parts[parts.length - 1], path });
-  }
-  return root;
-}
-
-// Every interior directory path (e.g. "app", "app/views", "app/views/articles").
-function allDirPaths(paths) {
-  const dirs = new Set();
-  for (const path of paths) {
-    const parts = path.split("/");
-    for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join("/"));
-  }
-  return dirs;
-}
-
-// Generic file-tree renderer shared by the source sidebar and the output-file
-// picker. opts: { isOpen(dir)->bool, toggleDir(dir)->void, isActive(path)->bool,
-// onPick(path)->void }. A folder toggle re-renders the same container in place.
-function renderTree(container, paths, opts) {
-  container.innerHTML = "";
-  container.appendChild(treeLevel(buildTree(paths), "", opts, () => renderTree(container, paths, opts)));
-}
-
-function treeLevel(node, prefix, opts, redraw) {
-  const ul = document.createElement("ul");
-  ul.className = "tree";
-  for (const [name, child] of [...node.dirs.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-    const dirPath = prefix ? `${prefix}/${name}` : name;
-    const open = opts.isOpen(dirPath);
-    const li = document.createElement("li");
-    const btn = document.createElement("button");
-    btn.className = "folder";
-    btn.innerHTML = `<span class="tw">${open ? "▾" : "▸"}</span>`;
-    btn.append(`${name}/`);
-    btn.onclick = () => { opts.toggleDir(dirPath); redraw(); };
-    li.appendChild(btn);
-    if (open) li.appendChild(treeLevel(child, dirPath, opts, redraw));
-    ul.appendChild(li);
-  }
-  for (const f of node.files.sort((a, b) => a.name.localeCompare(b.name))) {
-    const li = document.createElement("li");
-    const btn = document.createElement("button");
-    btn.className = "file";
-    btn.textContent = f.name;
-    btn.title = f.path;
-    btn.dataset.path = f.path;
-    btn.classList.toggle("active", opts.isActive(f.path));
-    btn.onclick = () => opts.onPick(f.path);
-    li.appendChild(btn);
-    ul.appendChild(li);
-  }
-  return ul;
-}
+// buildTree / allDirPaths / renderTree now live in ../lib/tree.js (shared with
+// studio). renderSources + renderOutTree below drive that widget with the
+// playground's own open-state and pick handlers.
 
 function renderSources() {
   const paths = sourceFiles();
@@ -316,15 +258,15 @@ async function boot() {
   els.target.value = DEFAULT_TARGET;
 
   setStatus("loading wasm + fixture…");
-  const [wasmBytes, fixture] = await Promise.all([
-    fetch("./roundhouse_wasm.wasm").then((r) => r.arrayBuffer()),
-    fetch("./fixture.json").then((r) => r.json()),
+  const [loaded, fixture] = await Promise.all([
+    loadDefaultCompiler({
+      onStdout: (s) => console.log("[wasm]", s),
+      onStderr: (s) => console.warn("[wasm]", s),
+    }),
+    loadFixture(),
   ]);
+  compiler = loaded;
   srcMap = fixture;
-  compiler = await loadCompiler(wasmBytes, {
-    onStdout: (s) => console.log("[wasm]", s),
-    onStderr: (s) => console.warn("[wasm]", s),
-  });
 
   renderSources();
   setStatus("loading editor…");
