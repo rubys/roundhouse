@@ -41,6 +41,13 @@ node verify-playground.mjs
   (`typescript|go|rust|python|elixir|crystal`); switching re-transpiles live.
 - Monaco loads from a CDN; offline / headless / strict-CSP falls back to a
   `<textarea>` (the loop is identical through both — see `editor.js`).
+- **Inference diagnostics overlay (Phase 3):** analyzer diagnostics render as
+  Monaco squiggles on the source, with counts in the status bar. Editing in a
+  type error (e.g. `title + 1` on a String column) surfaces a red
+  `incompatible_binop` marker live. Diagnostics are target-independent (they're
+  about the Ruby's typeability), and only render in the Monaco editor — the
+  `<textarea>` fallback shows counts only. (Inferred-type hovers + the per-file
+  `source` field are the remaining Phase 3 items — see the plan.)
 
 ## Publishing
 

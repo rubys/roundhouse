@@ -110,7 +110,7 @@ verifiable development cycle."**
 |---|---|---|---|---|
 | 0 | Audit + WASI-in-browser spike (load `roundhouse_wasm.wasm`, transpile real-blog, render output) | A | ½–1 | **DONE** — see `wasm/browser-spike/` |
 | 1 | Monaco editor + multi-file tree + target dropdown → wasm transpile → output pane | A | 1–2 | **DONE & PUBLISHED** — `wasm/playground/`, live at `/playground/` |
-| 3 | Extend wasm contract to return diagnostics + inferred types (+ per-file `source` provenance); Monaco markers | C | 1–2 | not started |
+| 3 | Extend wasm contract to return diagnostics + inferred types (+ per-file `source` provenance); Monaco markers | C | 1–2 | **DIAGNOSTICS DONE & PUBLISHED**; inferred-types-on-hover + `source` field remaining |
 | 4 | esbuild-wasm TS→JS bundle step in-browser (shared infra for D) | D | 1 | not started |
 | 5 | Live loop: edit Ruby → wasm recompile → esbuild bundle → hot-swap running blog | D | 2–3 | blocked on 1,4 |
 | 6 | Emit + ship the Minitest suite into the browser payload | D.2 | ½–1 | blocked on 5 |
@@ -238,6 +238,15 @@ The de-risk step. Goal: a static HTML page that loads
 ### Phase 3 — Diagnostics / inference overlay (rung C, 1–2 days)
 
 The identity demo — what separates roundhouse from "yet another transpiler."
+
+> **Status: diagnostics half SHIPPED.** `wasm/src/lib.rs` now returns
+> `diagnostics: [{path, start_line, start_col, end_line, end_col, severity,
+> code, message}]` from `analyze::diagnose(&app)` (target-independent), and the
+> playground renders them as Monaco squiggles + a status-bar count. Editing in
+> `title + 1` surfaces a live `incompatible_binop` error. **Remaining:**
+> inferred-type hovers (needs a `(Span, Ty)` walker — `Expr.ty` is populated,
+> but there's no immutable child-walker; `ty_to_rbs` in `emit/ruby/rbs.rs` is
+> `pub(super)` so a public Ty→string is needed) and the per-file `source` field.
 
 - Extend the wasm contract: add an optional `diagnostics: [{path, line, col,
   severity, message}]` and/or `inferred_types: [{path, line, col, ty}]` to

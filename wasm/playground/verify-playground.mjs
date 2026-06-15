@@ -9,6 +9,9 @@
 //      length minimum 10 -> 999) re-transpiles and the emitted model TS
 //      changes to match.
 //   3. switching target re-transpiles every backend with no error.
+//   4. diagnostics overlay: baseline warnings are present, and a type-error
+//      edit (`title + 1`) surfaces an incompatible_binop error rendered as a
+//      Monaco squiggle.
 //
 // (Note: a plain `def foo` method is NOT carried into the model emit today —
 // the transpiler reflects recognized Rails DSL like `validates`, not arbitrary
@@ -87,7 +90,36 @@ for (const t of ["typescript", "go", "rust", "python", "elixir", "crystal"]) {
   if (err) fail(`${t} produced no output`);
 }
 
-await page.screenshot({ path: "playground/playground.png" });
+// --- diagnostics overlay: baseline warnings + edit introduces an error ------
+console.log("\n=== diagnostics (inference overlay) ===");
+await page.evaluate(() => window.__playground.setTarget("typescript"));
+const baseDiag = await page.evaluate(() => window.__playground.diagnostics());
+console.log("baseline:", baseDiag.length, "—", [...new Set(baseDiag.map((d) => d.code))].join(", "));
+if (!baseDiag.some((d) => d.severity === "warning")) fail("expected baseline warnings (gradual_untyped)");
+
+const errDiag = await page.evaluate((p) => {
+  const orig = window.__playground.source(p);
+  const next = orig.replace("class Article < ApplicationRecord\n",
+    "class Article < ApplicationRecord\n  def bad\n    title + 1\n  end\n\n");
+  window.__playground.editFile(p, next);
+  return window.__playground.diagnostics();
+}, MODEL);
+const typeErr = errDiag.find((d) =>
+  d.severity === "error" && d.code === "incompatible_binop" && d.path === MODEL);
+console.log("after `title + 1` edit:", errDiag.length,
+  "| incompatible_binop error:", typeErr ? `@${typeErr.start_line}:${typeErr.start_col}` : "MISSING");
+if (!typeErr) fail("expected an incompatible_binop error after the type-error edit");
+
+// confirm the squiggle actually rendered in Monaco (not just plumbed as data)
+const errorMarkers = await page.evaluate(() => {
+  if (!window.monaco) return -1; // textarea fallback — no markers
+  return window.monaco.editor.getModelMarkers({ owner: "roundhouse" })
+    .filter((m) => m.severity === window.monaco.MarkerSeverity.Error).length;
+});
+console.log("monaco error markers on open file:", errorMarkers < 0 ? "(textarea fallback)" : errorMarkers);
+if (errorMarkers === 0) fail("expected an error squiggle rendered in Monaco");
+
+await page.screenshot({ path: "playground.png" });
 
 const noise = /monaco|web worker|cdn\.jsdelivr|loader\.js/i;
 const realErrors = logs.filter((l) => /pageerror|\[error\]/.test(l) && !noise.test(l));
@@ -100,4 +132,4 @@ if (realErrors.length) {
 await browser.close();
 
 if (failed) process.exit(1);
-console.log("\nOK: playground edit -> transpile -> render loop verified in a real browser tab.");
+console.log("\nOK: edit -> transpile -> render loop + diagnostics overlay verified in a real browser tab.");

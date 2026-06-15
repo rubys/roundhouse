@@ -43,6 +43,7 @@ let editor = null;
 let srcMap = null;          // { path: content } — the live, editable input
 let currentPath = null;     // which source file the editor is showing
 let lastOutput = null;      // last { language, files } | { error }
+let lastDiagnostics = [];   // last result's diagnostics (target-independent)
 let debounceTimer = null;
 
 function setStatus(msg, kind = "") {
@@ -80,6 +81,7 @@ function selectFile(path) {
   els.editorHead.textContent = path;
   [...els.srcfiles.querySelectorAll("button")].forEach((b) =>
     b.classList.toggle("active", b.dataset.path === path));
+  renderMarkers(); // squiggles are per-file — refresh for the newly-open file
 }
 
 // ---- transpile loop ------------------------------------------------------
@@ -99,7 +101,27 @@ function transpile() {
   } catch (e) {
     lastOutput = { error: `transpile threw: ${e.message}` };
   }
+  lastDiagnostics = (lastOutput && lastOutput.diagnostics) || [];
   renderOutput(lastOutput, performance.now() - t0);
+  renderMarkers();
+}
+
+// Inference diagnostics (target-independent): squiggles on the open file +
+// a count in the status bar. Editing to introduce a type error (e.g.
+// `title + 1`) surfaces a red marker live — the inference-first demo.
+function renderMarkers() {
+  if (!editor) return;
+  editor.setMarkers(lastDiagnostics.filter((d) => d.path === currentPath));
+}
+
+function diagSummary(diags) {
+  if (!diags.length) return "";
+  const errs = diags.filter((d) => d.severity === "error").length;
+  const warns = diags.length - errs;
+  const parts = [];
+  if (errs) parts.push(`${errs} error${errs > 1 ? "s" : ""}`);
+  if (warns) parts.push(`${warns} warning${warns > 1 ? "s" : ""}`);
+  return " · " + parts.join(", ");
 }
 
 // ---- output pane ---------------------------------------------------------
@@ -111,7 +133,7 @@ function renderOutput(result, ms) {
     els.outcode.textContent = result && result.error ? result.error : "";
     return;
   }
-  setStatus(`${result.language}: ${result.files.length} files in ${ms.toFixed(1)} ms`, "ok");
+  setStatus(`${result.language}: ${result.files.length} files${diagSummary(lastDiagnostics)} in ${ms.toFixed(1)} ms`, "ok");
   result.files.forEach((f, i) => {
     const li = document.createElement("li");
     const btn = document.createElement("button");
@@ -171,6 +193,7 @@ async function boot() {
       transpile();
     },
     output: () => lastOutput,
+    diagnostics: () => lastDiagnostics,
     source: (path) => srcMap[path],
     sourceCount: () => sourceFiles().length,
   };

@@ -52,6 +52,19 @@ export async function createEditor(container, { onChange }) {
         if (lang) monaco.editor.setModelLanguage(ed.getModel(), lang);
         suppress = false;
       },
+      // Render diagnostics as squiggles on the current model. `diags` are the
+      // wasm contract's DiagnosticOut objects (1-based positions), already
+      // filtered to the open file.
+      setMarkers(diags) {
+        const markers = diags.map((d) => ({
+          startLineNumber: d.start_line, startColumn: d.start_col,
+          endLineNumber: d.end_line, endColumn: d.end_col,
+          message: `[${d.code}] ${d.message}`,
+          severity: d.severity === "error"
+            ? monaco.MarkerSeverity.Error : monaco.MarkerSeverity.Warning,
+        }));
+        monaco.editor.setModelMarkers(ed.getModel(), "roundhouse", markers);
+      },
     };
   } catch (err) {
     console.warn("[playground] Monaco unavailable, using textarea fallback:", err.message);
@@ -65,6 +78,7 @@ export async function createEditor(container, { onChange }) {
       kind: "textarea",
       getValue: () => ta.value,
       setValue(text) { ta.value = text; },
+      setMarkers() {}, // textarea can't render squiggles; status bar shows counts
     };
   }
 }

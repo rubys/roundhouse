@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use roundhouse::analyze::Analyzer;
+use roundhouse::analyze::{diagnose, Analyzer, Severity};
 use roundhouse::emit::{crystal, elixir, go, python, rust, typescript};
 use roundhouse::ingest::ingest_app_from_tree;
 use serde::{Deserialize, Serialize};
@@ -36,12 +36,31 @@ struct TranspileInput {
 struct TranspileOutput<'a> {
     language: &'a str,
     files: Vec<EmittedFile>,
+    /// Analyzer diagnostics (inference results) attributed to source
+    /// positions. Target-independent — the same Ruby types (or fails to)
+    /// regardless of the emit backend, so this is identical across targets.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    diagnostics: Vec<DiagnosticOut>,
 }
 
 #[derive(Serialize)]
 struct EmittedFile {
     path: String,
     content: String,
+}
+
+/// A diagnostic resolved to a 1-based source location (UTF-8 char columns),
+/// ready for the playground to drop as a Monaco marker on the source file.
+#[derive(Serialize)]
+struct DiagnosticOut {
+    path: String,
+    start_line: u32,
+    start_col: u32,
+    end_line: u32,
+    end_col: u32,
+    severity: &'static str,
+    code: &'static str,
+    message: String,
 }
 
 #[derive(Serialize)]
@@ -68,6 +87,35 @@ fn transpile_inner(json_in: &str) -> String {
 
     Analyzer::new(&app).analyze(&mut app);
 
+    // Surface analyzer diagnostics, resolved to source positions. Synthetic
+    // spans (no source site) are dropped — there's nowhere to put a marker.
+    let diagnostics: Vec<DiagnosticOut> = diagnose(&app)
+        .into_iter()
+        .filter_map(|d| {
+            if d.span.is_synthetic() {
+                return None;
+            }
+            let sf = app.sources.get((d.span.file.0 as usize).checked_sub(1)?)?;
+            let (start_line, start_col) = sf.line_col(d.span.start);
+            let (end_line, end_col) = sf.line_col(d.span.end);
+            let severity = match d.severity {
+                Severity::Error => "error",
+                Severity::Warning => "warning",
+            };
+            let code = d.code();
+            Some(DiagnosticOut {
+                path: sf.path.clone(),
+                start_line,
+                start_col,
+                end_line,
+                end_col,
+                severity,
+                code,
+                message: d.message,
+            })
+        })
+        .collect();
+
     let emitted = match input.language.as_str() {
         "typescript" | "ts" => typescript::emit(&app),
         "rust" | "rs" => rust::emit(&app),
@@ -89,6 +137,7 @@ fn transpile_inner(json_in: &str) -> String {
     let out = TranspileOutput {
         language: &input.language,
         files,
+        diagnostics,
     };
 
     serde_json::to_string(&out).unwrap_or_else(|e| error_json(&format!("serialize: {e}")))
