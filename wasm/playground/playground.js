@@ -12,7 +12,7 @@
 // Serve THIS directory as the web root (e.g. `python3 -m http.server` here).
 
 import { loadCompiler } from "./transpile.mjs";
-import { createEditor } from "./editor.js";
+import { createEditor, createOutputView } from "./editor.js";
 
 // The six targets the wasm entry point routes to today. (ruby/spinel/kotlin/
 // swift are not yet wired into wasm/src/lib.rs — a one-line match extension.)
@@ -34,14 +34,16 @@ const els = {
   srcfiles: document.getElementById("srcfiles"),
   editorHost: document.getElementById("editorHost"),
   editorHead: document.getElementById("editorHead"),
-  outfiles: document.getElementById("outfiles"),
-  outcode: document.querySelector("#outcode code"),
+  outfile: document.getElementById("outfile"),
+  outputHost: document.getElementById("outputHost"),
 };
 
 let compiler = null;
 let editor = null;
+let outputView = null;      // read-only Monaco (or <pre>) showing the emitted file
 let srcMap = null;          // { path: content } — the live, editable input
 let currentPath = null;     // which source file the editor is showing
+let openDirs = null;        // Set<string> of expanded directory paths in the tree
 let lastOutput = null;      // last { language, files } | { error }
 let lastDiagnostics = [];   // last result's diagnostics (target-independent)
 let lastTypes = [];         // last result's inferred types (target-independent)
@@ -58,18 +60,72 @@ function sourceFiles() {
   return Object.keys(srcMap).filter((p) => /\.(rb|erb)$/.test(p)).sort();
 }
 
-function renderSources() {
-  els.srcfiles.innerHTML = "";
-  for (const path of sourceFiles()) {
+// Build a nested {dirs: Map<name,node>, files: [{name,path}]} tree from the
+// flat, slash-delimited source paths.
+function buildTree(paths) {
+  const root = { dirs: new Map(), files: [] };
+  for (const path of paths) {
+    const parts = path.split("/");
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (!node.dirs.has(parts[i])) node.dirs.set(parts[i], { dirs: new Map(), files: [] });
+      node = node.dirs.get(parts[i]);
+    }
+    node.files.push({ name: parts[parts.length - 1], path });
+  }
+  return root;
+}
+
+// Every interior directory path (e.g. "app", "app/views", "app/views/articles").
+function allDirPaths(paths) {
+  const dirs = new Set();
+  for (const path of paths) {
+    const parts = path.split("/");
+    for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join("/"));
+  }
+  return dirs;
+}
+
+function renderTreeLevel(node, prefix) {
+  const ul = document.createElement("ul");
+  ul.className = "tree";
+  for (const [name, child] of [...node.dirs.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const dirPath = prefix ? `${prefix}/${name}` : name;
+    const open = openDirs.has(dirPath);
     const li = document.createElement("li");
     const btn = document.createElement("button");
-    btn.textContent = path.replace(/^app\//, "");
-    btn.title = path;
-    btn.dataset.path = path;
-    btn.onclick = () => selectFile(path);
+    btn.className = "folder";
+    btn.innerHTML = `<span class="tw">${open ? "▾" : "▸"}</span>`;
+    btn.append(`${name}/`);
+    btn.onclick = () => { open ? openDirs.delete(dirPath) : openDirs.add(dirPath); renderSources(); };
     li.appendChild(btn);
-    els.srcfiles.appendChild(li);
+    if (open) li.appendChild(renderTreeLevel(child, dirPath));
+    ul.appendChild(li);
   }
+  for (const f of node.files.sort((a, b) => a.name.localeCompare(b.name))) {
+    const li = document.createElement("li");
+    const btn = document.createElement("button");
+    btn.className = "file";
+    btn.textContent = f.name;
+    btn.title = f.path;
+    btn.dataset.path = f.path;
+    btn.classList.toggle("active", f.path === currentPath);
+    btn.onclick = () => selectFile(f.path);
+    li.appendChild(btn);
+    ul.appendChild(li);
+  }
+  return ul;
+}
+
+function renderSources() {
+  const paths = sourceFiles();
+  // First render: expand the app/ subtree (the interesting code), collapse the
+  // rest (config/db/test). Subsequent renders preserve the user's toggles.
+  if (openDirs === null) {
+    openDirs = new Set([...allDirPaths(paths)].filter((d) => d === "app" || d.startsWith("app/")));
+  }
+  els.srcfiles.innerHTML = "";
+  els.srcfiles.appendChild(renderTreeLevel(buildTree(paths), ""));
 }
 
 function langForPath(path) {
@@ -137,29 +193,26 @@ function diagSummary(diags) {
 // ---- output pane ---------------------------------------------------------
 
 function renderOutput(result, ms) {
-  els.outfiles.innerHTML = "";
+  els.outfile.innerHTML = "";
   if (!result || result.error) {
     setStatus(`error: ${result ? result.error : "no result"}`, "err");
-    els.outcode.textContent = result && result.error ? result.error : "";
+    outputView.setValue(result && result.error ? result.error : "", "plaintext");
     return;
   }
   setStatus(`${result.language}: ${result.files.length} files${diagSummary(lastDiagnostics)} in ${ms.toFixed(1)} ms`, "ok");
   result.files.forEach((f, i) => {
-    const li = document.createElement("li");
-    const btn = document.createElement("button");
-    btn.textContent = `${f.path}  (${f.content.length} B)`;
-    btn.onclick = () => showOutput(i);
-    li.appendChild(btn);
-    els.outfiles.appendChild(li);
+    const opt = document.createElement("option");
+    opt.value = String(i);
+    opt.textContent = `${f.path}  (${f.content.length} B)`;
+    els.outfile.appendChild(opt);
   });
   showOutput(0);
 }
 
 function showOutput(i) {
   if (!lastOutput || !lastOutput.files) return;
-  els.outcode.textContent = lastOutput.files[i].content;
-  [...els.outfiles.querySelectorAll("button")].forEach((b, j) =>
-    b.classList.toggle("active", j === i));
+  els.outfile.value = String(i);
+  outputView.setValue(lastOutput.files[i].content, OUT_LANG[els.target.value] || "plaintext");
 }
 
 // ---- boot ----------------------------------------------------------------
@@ -185,11 +238,15 @@ async function boot() {
 
   renderSources();
   setStatus("loading editor…");
-  editor = await createEditor(els.editorHost, { onChange: onEditorChange });
+  [editor, outputView] = await Promise.all([
+    createEditor(els.editorHost, { onChange: onEditorChange }),
+    createOutputView(els.outputHost),
+  ]);
 
   const first = srcMap[DEFAULT_FILE] != null ? DEFAULT_FILE : sourceFiles()[0];
   selectFile(first);
   els.target.onchange = transpile;
+  els.outfile.onchange = () => showOutput(Number(els.outfile.value));
   transpile();
 
   // Programmatic hooks for the Playwright verifier — editor-widget agnostic.

@@ -12,8 +12,13 @@ const MONACO_VERSION = "0.52.2";
 const MONACO_BASE = `https://cdn.jsdelivr.net/npm/monaco-editor@${MONACO_VERSION}/min/vs`;
 const LOAD_TIMEOUT_MS = 8000;
 
+// Memoized: the editor and the output view both load Monaco; concurrent
+// callers must share a single AMD-loader injection (a second loader.js
+// re-declares `_amdLoaderGlobal` and throws).
+let monacoPromise = null;
 function loadMonaco() {
-  return new Promise((resolve, reject) => {
+  if (monacoPromise) return monacoPromise;
+  monacoPromise = new Promise((resolve, reject) => {
     if (window.monaco) return resolve(window.monaco);
     const timer = setTimeout(() => reject(new Error("monaco load timeout")), LOAD_TIMEOUT_MS);
     // Run Monaco's language services in the main thread; avoids cross-origin
@@ -29,6 +34,7 @@ function loadMonaco() {
     script.onerror = () => { clearTimeout(timer); reject(new Error("monaco loader.js failed")); };
     document.head.appendChild(script);
   });
+  return monacoPromise;
 }
 
 // container: the DOM element to mount into. onChange(text): fired on user edits
@@ -105,5 +111,32 @@ export async function createEditor(container, { onChange }) {
       setMarkers() {}, // textarea can't render squiggles; status bar shows counts
       setTypes() {}, // no hovers in the textarea fallback
     };
+  }
+}
+
+// Read-only output view for the emitted code: a second Monaco instance (giving
+// the output pane syntax highlighting), with a plain <pre> fallback that
+// mirrors the editor's textarea fallback. setValue(text, lang) swaps both the
+// content and the highlighting grammar (lang is a Monaco language id; targets
+// without a Monaco grammar pass "plaintext").
+export async function createOutputView(container) {
+  try {
+    const monaco = await loadMonaco();
+    const ed = monaco.editor.create(container, {
+      value: "", language: "plaintext", readOnly: true, domReadOnly: true,
+      automaticLayout: true, minimap: { enabled: false }, fontSize: 13,
+      scrollBeyondLastLine: false, tabSize: 2,
+    });
+    return {
+      kind: "monaco",
+      setValue(text, lang) {
+        ed.setValue(text);
+        monaco.editor.setModelLanguage(ed.getModel(), lang || "plaintext");
+      },
+    };
+  } catch (err) {
+    const pre = document.createElement("pre");
+    container.appendChild(pre);
+    return { kind: "pre", setValue(text) { pre.textContent = text; } };
   }
 }

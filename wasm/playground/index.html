@@ -20,17 +20,23 @@
   #sources { width: 230px; border-right: 1px solid #ddd; flex: 0 0 auto; }
   #editorCol { flex: 1.2 1 0; border-right: 1px solid #ddd; }
   #outputCol { flex: 1 1 0; }
-  ul.tree { margin: 0; padding: 4px; list-style: none; overflow: auto; flex: 1 1 auto; }
+  /* The header carries the output-file <select>, so it gets no inner padding. */
+  .col > .head.picker { padding: 0 4px; }
+  #srcfiles { flex: 1 1 auto; overflow: auto; padding: 4px; min-height: 0; }
+  ul.tree { margin: 0; padding: 0; list-style: none; }
+  ul.tree ul.tree { padding-left: 12px; }
   ul.tree li { margin: 0; }
   ul.tree button { width: 100%; text-align: left; border: 0; background: none; padding: 3px 6px; cursor: pointer; font: inherit; border-radius: 4px; color: #1a1a1a; white-space: nowrap; }
   ul.tree button:hover { background: #f0f0f0; }
   ul.tree button.active { background: #e3edff; }
-  #editorHost { flex: 1 1 auto; min-height: 0; position: relative; }
+  ul.tree button.folder { color: #555; }
+  ul.tree button.folder .tw { display: inline-block; width: 12px; color: #999; }
+  #editorHost, #outputHost { flex: 1 1 auto; min-height: 0; position: relative; }
   #editorHost textarea { width: 100%; height: 100%; border: 0; resize: none; padding: 8px; font: inherit; outline: none; }
-  #outfiles { max-height: 35%; flex: 0 0 auto; border-bottom: 1px solid #eee; }
-  pre#outcode { flex: 1 1 auto; margin: 0; padding: 10px; overflow: auto; background: #fafafa; min-height: 0; }
-  select { font: inherit; padding: 2px 4px; }
+  #outputHost > pre { margin: 0; padding: 10px; overflow: auto; height: 100%; background: #fafafa; }
   label { color: #555; }
+  header select { font: inherit; padding: 2px 4px; }
+  .head select { font: inherit; width: 100%; border: 0; background: none; color: #555; padding: 3px 2px; }
 </style>
 </head>
 <body>
@@ -43,16 +49,15 @@
 <main>
   <div id="sources" class="col">
     <div class="head">sources (.rb / .erb)</div>
-    <ul id="srcfiles" class="tree"></ul>
+    <div id="srcfiles"></div>
   </div>
   <div id="editorCol" class="col">
     <div class="head" id="editorHead">editor</div>
     <div id="editorHost"></div>
   </div>
   <div id="outputCol" class="col">
-    <div class="head">output</div>
-    <ul id="outfiles" class="tree"></ul>
-    <pre id="outcode"><code></code></pre>
+    <div class="head picker"><select id="outfile" title="emitted file"></select></div>
+    <div id="outputHost"></div>
   </div>
 </main>
 <script type="module" src="playground.js"></script>
