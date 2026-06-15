@@ -20,8 +20,12 @@
   #sources { width: 230px; border-right: 1px solid #ddd; flex: 0 0 auto; }
   #editorCol { flex: 1.2 1 0; border-right: 1px solid #ddd; }
   #outputCol { flex: 1 1 0; }
-  /* The header carries the output-file <select>, so it gets no inner padding. */
-  .col > .head.picker { padding: 0 4px; }
+  /* The header carries the output-file picker button + popover. */
+  .col > .head.picker { padding: 0; position: relative; }
+  #outfileBtn { width: 100%; text-align: left; border: 0; background: none; color: #555; font: inherit; padding: 4px 8px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #outfileBtn::after { content: " \25be"; color: #999; }
+  #outfileMenu { position: absolute; top: 100%; left: 0; z-index: 10; min-width: 280px; max-width: 95vw; max-height: 65vh; overflow: auto; padding: 4px; background: #fff; border: 1px solid #ccc; border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,0.18); }
+  #outfileMenu[hidden] { display: none; }
   #srcfiles { flex: 1 1 auto; overflow: auto; padding: 4px; min-height: 0; }
   ul.tree { margin: 0; padding: 0; list-style: none; }
   ul.tree ul.tree { padding-left: 12px; }
@@ -36,7 +40,6 @@
   #outputHost > pre { margin: 0; padding: 10px; overflow: auto; height: 100%; background: #fafafa; }
   label { color: #555; }
   header select { font: inherit; padding: 2px 4px; }
-  .head select { font: inherit; width: 100%; border: 0; background: none; color: #555; padding: 3px 2px; }
 </style>
 </head>
 <body>
@@ -56,7 +59,10 @@
     <div id="editorHost"></div>
   </div>
   <div id="outputCol" class="col">
-    <div class="head picker"><select id="outfile" title="emitted file"></select></div>
+    <div class="head picker" id="outpicker">
+      <button id="outfileBtn" title="emitted file"></button>
+      <div id="outfileMenu" hidden></div>
+    </div>
     <div id="outputHost"></div>
   </div>
 </main>

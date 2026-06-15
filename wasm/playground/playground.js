@@ -34,7 +34,9 @@ const els = {
   srcfiles: document.getElementById("srcfiles"),
   editorHost: document.getElementById("editorHost"),
   editorHead: document.getElementById("editorHead"),
-  outfile: document.getElementById("outfile"),
+  picker: document.getElementById("outpicker"),
+  outfileBtn: document.getElementById("outfileBtn"),
+  outfileMenu: document.getElementById("outfileMenu"),
   outputHost: document.getElementById("outputHost"),
 };
 
@@ -43,7 +45,9 @@ let editor = null;
 let outputView = null;      // read-only Monaco (or <pre>) showing the emitted file
 let srcMap = null;          // { path: content } — the live, editable input
 let currentPath = null;     // which source file the editor is showing
-let openDirs = null;        // Set<string> of expanded directory paths in the tree
+let currentOutIndex = 0;    // which emitted file the output pane is showing
+let openDirs = null;        // Set<string> of expanded directory paths in the source tree
+let outClosedDirs = new Set(); // collapsed dirs in the output picker (default: all open)
 let lastOutput = null;      // last { language, files } | { error }
 let lastDiagnostics = [];   // last result's diagnostics (target-independent)
 let lastTypes = [];         // last result's inferred types (target-independent)
@@ -86,20 +90,28 @@ function allDirPaths(paths) {
   return dirs;
 }
 
-function renderTreeLevel(node, prefix) {
+// Generic file-tree renderer shared by the source sidebar and the output-file
+// picker. opts: { isOpen(dir)->bool, toggleDir(dir)->void, isActive(path)->bool,
+// onPick(path)->void }. A folder toggle re-renders the same container in place.
+function renderTree(container, paths, opts) {
+  container.innerHTML = "";
+  container.appendChild(treeLevel(buildTree(paths), "", opts, () => renderTree(container, paths, opts)));
+}
+
+function treeLevel(node, prefix, opts, redraw) {
   const ul = document.createElement("ul");
   ul.className = "tree";
   for (const [name, child] of [...node.dirs.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     const dirPath = prefix ? `${prefix}/${name}` : name;
-    const open = openDirs.has(dirPath);
+    const open = opts.isOpen(dirPath);
     const li = document.createElement("li");
     const btn = document.createElement("button");
     btn.className = "folder";
     btn.innerHTML = `<span class="tw">${open ? "▾" : "▸"}</span>`;
     btn.append(`${name}/`);
-    btn.onclick = () => { open ? openDirs.delete(dirPath) : openDirs.add(dirPath); renderSources(); };
+    btn.onclick = () => { opts.toggleDir(dirPath); redraw(); };
     li.appendChild(btn);
-    if (open) li.appendChild(renderTreeLevel(child, dirPath));
+    if (open) li.appendChild(treeLevel(child, dirPath, opts, redraw));
     ul.appendChild(li);
   }
   for (const f of node.files.sort((a, b) => a.name.localeCompare(b.name))) {
@@ -109,8 +121,8 @@ function renderTreeLevel(node, prefix) {
     btn.textContent = f.name;
     btn.title = f.path;
     btn.dataset.path = f.path;
-    btn.classList.toggle("active", f.path === currentPath);
-    btn.onclick = () => selectFile(f.path);
+    btn.classList.toggle("active", opts.isActive(f.path));
+    btn.onclick = () => opts.onPick(f.path);
     li.appendChild(btn);
     ul.appendChild(li);
   }
@@ -124,8 +136,12 @@ function renderSources() {
   if (openDirs === null) {
     openDirs = new Set([...allDirPaths(paths)].filter((d) => d === "app" || d.startsWith("app/")));
   }
-  els.srcfiles.innerHTML = "";
-  els.srcfiles.appendChild(renderTreeLevel(buildTree(paths), ""));
+  renderTree(els.srcfiles, paths, {
+    isOpen: (d) => openDirs.has(d),
+    toggleDir: (d) => { openDirs.has(d) ? openDirs.delete(d) : openDirs.add(d); },
+    isActive: (p) => p === currentPath,
+    onPick: selectFile,
+  });
 }
 
 function langForPath(path) {
@@ -192,27 +208,45 @@ function diagSummary(diags) {
 
 // ---- output pane ---------------------------------------------------------
 
+function outFiles() {
+  return (lastOutput && lastOutput.files) || [];
+}
+
+// The output-file picker is a popover tree (same widget as the source sidebar)
+// instead of a flat dropdown, so a multi-dir emit (e.g. 79 TS files) is
+// navigable. Output dirs default to expanded; `outClosedDirs` tracks collapses.
+function renderOutTree() {
+  const files = outFiles();
+  renderTree(els.outfileMenu, files.map((f) => f.path), {
+    isOpen: (d) => !outClosedDirs.has(d),
+    toggleDir: (d) => { outClosedDirs.has(d) ? outClosedDirs.delete(d) : outClosedDirs.add(d); },
+    isActive: (p) => files[currentOutIndex] && p === files[currentOutIndex].path,
+    onPick: (p) => { showOutput(files.findIndex((f) => f.path === p)); closeOutMenu(); },
+  });
+}
+
+function openOutMenu() { renderOutTree(); els.outfileMenu.hidden = false; }
+function closeOutMenu() { els.outfileMenu.hidden = true; }
+
 function renderOutput(result, ms) {
-  els.outfile.innerHTML = "";
+  closeOutMenu();
   if (!result || result.error) {
     setStatus(`error: ${result ? result.error : "no result"}`, "err");
+    els.outfileBtn.textContent = "—";
     outputView.setValue(result && result.error ? result.error : "", "plaintext");
     return;
   }
   setStatus(`${result.language}: ${result.files.length} files${diagSummary(lastDiagnostics)} in ${ms.toFixed(1)} ms`, "ok");
-  result.files.forEach((f, i) => {
-    const opt = document.createElement("option");
-    opt.value = String(i);
-    opt.textContent = `${f.path}  (${f.content.length} B)`;
-    els.outfile.appendChild(opt);
-  });
   showOutput(0);
 }
 
 function showOutput(i) {
-  if (!lastOutput || !lastOutput.files) return;
-  els.outfile.value = String(i);
-  outputView.setValue(lastOutput.files[i].content, OUT_LANG[els.target.value] || "plaintext");
+  const files = outFiles();
+  if (!files[i]) return;
+  currentOutIndex = i;
+  els.outfileBtn.textContent = `${files[i].path}  (${files[i].content.length} B)`;
+  outputView.setValue(files[i].content, OUT_LANG[els.target.value] || "plaintext");
+  if (!els.outfileMenu.hidden) renderOutTree(); // keep the open popover's highlight in sync
 }
 
 // ---- boot ----------------------------------------------------------------
@@ -246,7 +280,12 @@ async function boot() {
   const first = srcMap[DEFAULT_FILE] != null ? DEFAULT_FILE : sourceFiles()[0];
   selectFile(first);
   els.target.onchange = transpile;
-  els.outfile.onchange = () => showOutput(Number(els.outfile.value));
+  els.outfileBtn.onclick = () => els.outfileMenu.hidden ? openOutMenu() : closeOutMenu();
+  // Click outside the picker closes the popover (clicks inside it — the button
+  // toggle and the folder toggles — are left to their own handlers).
+  document.addEventListener("click", (e) => {
+    if (!els.outfileMenu.hidden && !els.picker.contains(e.target)) closeOutMenu();
+  });
   transpile();
 
   // Programmatic hooks for the Playwright verifier — editor-widget agnostic.
