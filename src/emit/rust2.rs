@@ -1965,6 +1965,7 @@ fn collect_global_class_methods(
         lc: &LibraryClass,
         out: &mut GlobalMethodsMap,
         out_defaults: &mut GlobalDefaultsMap,
+        out_mutating: &mut std::collections::HashSet<String>,
     ) {
         let raw = lc.name.0.as_str();
         let class_name = raw.rsplit("::").next().unwrap_or(raw).to_string();
@@ -1978,6 +1979,9 @@ fn collect_global_class_methods(
         // (emit_send Const-recv arm) picks the entry by method name;
         // it doesn't care about receiver kind.
         for m in &lc.methods {
+            if m.mutates_self {
+                out_mutating.insert(m.name.as_str().to_string());
+            }
             let params: Vec<Param> = match m.signature.as_ref() {
                 Some(Ty::Fn { params, .. }) => params
                     .iter()
@@ -2026,23 +2030,24 @@ fn collect_global_class_methods(
 
     let mut out: GlobalMethodsMap = std::collections::HashMap::new();
     let mut out_defaults: GlobalDefaultsMap = std::collections::HashMap::new();
+    let mut out_mutating: std::collections::HashSet<String> = std::collections::HashSet::new();
     for lc in model_lcs {
-        collect_one(lc, &mut out, &mut out_defaults);
+        collect_one(lc, &mut out, &mut out_defaults, &mut out_mutating);
     }
     if let Some(lc) = route_helpers_lc {
-        collect_one(lc, &mut out, &mut out_defaults);
+        collect_one(lc, &mut out, &mut out_defaults, &mut out_mutating);
     }
     if let Some(lc) = importmap_lc {
-        collect_one(lc, &mut out, &mut out_defaults);
+        collect_one(lc, &mut out, &mut out_defaults, &mut out_mutating);
     }
     for lc in view_lcs {
-        collect_one(lc, &mut out, &mut out_defaults);
+        collect_one(lc, &mut out, &mut out_defaults, &mut out_mutating);
     }
     for lc in controller_lcs {
-        collect_one(lc, &mut out, &mut out_defaults);
+        collect_one(lc, &mut out, &mut out_defaults, &mut out_mutating);
     }
     for lc in fixture_lcs {
-        collect_one(lc, &mut out, &mut out_defaults);
+        collect_one(lc, &mut out, &mut out_defaults, &mut out_mutating);
     }
     // Framework runtime LCs (ViewHelpers, JsonBuilder, Inflector,
     // Router, ActiveRecord::Base, ActionController::Base) — parsed
@@ -2054,11 +2059,12 @@ fn collect_global_class_methods(
     // arity-only `Untyped` fallback) and the coerce_arg_for_param_ty
     // families fire.
     for lc in runtime_lcs {
-        collect_one(lc, &mut out, &mut out_defaults);
+        collect_one(lc, &mut out, &mut out_defaults, &mut out_mutating);
     }
     EmitCtx {
         global_class_methods: out,
         global_class_method_defaults: out_defaults,
+        global_mutating_methods: out_mutating,
         ..EmitCtx::default()
     }
 }

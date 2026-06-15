@@ -630,6 +630,62 @@ pub(super) fn is_mut_var(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Program-global: is `name` a `mutates_self`-flagged method on any
+/// class? Populated by `collect_global_class_methods`. See
+/// `EmitCtx::global_mutating_methods`.
+pub(super) fn is_global_mutating_method(name: &str) -> bool {
+    current_emit_ctx()
+        .map(|ctx| ctx.global_mutating_methods.contains(name))
+        .unwrap_or(false)
+}
+
+/// True when an `each`-block body mutates its element — it calls a
+/// `mutates_self`-flagged method on the block param. Canonical case is
+/// the eager-load distribute loop's `a._preload_<assoc>(group)`. Such a
+/// block must iterate the receiver with `iter_mut()` over the ORIGINAL
+/// (no defensive `.clone()`); otherwise the `&mut self` writes land on
+/// a throwaway clone and are silently dropped (roundhouse#40). Walks
+/// the structural node kinds an `each` block uses; unrecognized shapes
+/// return `false`, conservatively falling back to the cloning path.
+fn each_block_mutates_param(body: &Expr, param: &str) -> bool {
+    fn walk(e: &Expr, param: &str) -> bool {
+        match &*e.node {
+            ExprNode::Send { recv, method, args, block, .. } => {
+                if let Some(r) = recv {
+                    if matches!(&*r.node, ExprNode::Var { name, .. } if name.as_str() == param)
+                        && is_global_mutating_method(method.as_str())
+                    {
+                        return true;
+                    }
+                    if walk(r, param) {
+                        return true;
+                    }
+                }
+                args.iter().any(|a| walk(a, param))
+                    || block.as_ref().map(|b| walk(b, param)).unwrap_or(false)
+            }
+            ExprNode::Seq { exprs } => exprs.iter().any(|x| walk(x, param)),
+            ExprNode::If { cond, then_branch, else_branch } => {
+                walk(cond, param) || walk(then_branch, param) || walk(else_branch, param)
+            }
+            ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => walk(value, param),
+            ExprNode::Lambda { body, .. } => walk(body, param),
+            ExprNode::Let { value, body, .. } => walk(value, param) || walk(body, param),
+            ExprNode::Return { value } | ExprNode::Raise { value } | ExprNode::Splat { value } => {
+                walk(value, param)
+            }
+            ExprNode::BoolOp { left, right, .. } => walk(left, param) || walk(right, param),
+            ExprNode::While { cond, body, .. } => walk(cond, param) || walk(body, param),
+            ExprNode::Array { elements, .. } => elements.iter().any(|x| walk(x, param)),
+            ExprNode::Hash { entries, .. } => {
+                entries.iter().any(|(k, v)| walk(k, param) || walk(v, param))
+            }
+            _ => false,
+        }
+    }
+    walk(body, param)
+}
+
 pub(super) fn record_back_propagated_hash(name: String) {
     let ctx = current_emit_ctx().expect("record_back_propagated_hash called outside with_emit_ctx");
     ctx.back_propagated_hash_locals.borrow_mut().insert(name);
@@ -939,27 +995,50 @@ fn emit_expr_inner(e: &Expr) -> String {
                         Some(crate::ty::Ty::Array { .. })
                     );
                     if is_array_after_peel && params.len() == 1 {
-                        let recv_s = emit_expr(r);
                         let p = params[0].as_str();
+                        // `Option<Vec<T>>` recv (`Union<Nil, Array>`)
+                        // takes the read-only `.iter().flatten()` chain
+                        // below; the mutating no-clone path applies only
+                        // to the plain-Vec `.iter_mut()` case.
+                        let was_option = matches!(
+                            r.ty.as_ref(),
+                            Some(crate::ty::Ty::Union { variants })
+                                if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+                        );
+                        // A block that mutates its element (calls a
+                        // `mutates_self` method on the param — the
+                        // `_preload_<assoc>` distribute loop) must
+                        // iterate the ORIGINAL via `iter_mut()` with no
+                        // defensive `.clone()`, or the `&mut self`
+                        // writes land on a throwaway temporary and are
+                        // silently dropped (roundhouse#40). Suppress the
+                        // multi-read clone the way every Send recv does
+                        // (`emit_send_recv`). Read-only blocks keep the
+                        // cloning path: it's harmless there and the
+                        // clone supplies the mutable temporary that
+                        // non-`mut` bindings (view params) need for
+                        // `iter_mut()`. Guarded on the receiver being a
+                        // `mut` bare Var (the distribute loop's freshly
+                        // built `let mut results`) so we never emit
+                        // `iter_mut()` against a binding the borrow
+                        // checker would reject.
+                        let recv_mutated = !was_option
+                            && each_block_mutates_param(body, p)
+                            && matches!(&*r.node, ExprNode::Var { name, .. } if is_mut_var(name.as_str()));
+                        let recv_s = if recv_mutated { emit_send_recv(r) } else { emit_expr(r) };
                         let body_s = emit_expr(body);
                         let closure = if body_s.contains('\n') {
                             format!("|{p}| {{\n{};\n}}", indent(&body_s, 1))
                         } else {
                             format!("|{p}| {{ {body_s}; }}")
                         };
-                        // `Option<Vec<T>>` recv (`Union<Nil, Array>`):
-                        // `.iter().flatten().for_each(...)` so the
-                        // closure receives `&T` from the inner Vec
-                        // rather than `Vec<T>` from Option's iter (one
-                        // item if Some). Read-only `iter()` because
-                        // mutating-through-Option needs an as_mut +
-                        // unwrap chain that's overkill for the read-
-                        // only `parts << ...` framework Ruby uses.
-                        let was_option = matches!(
-                            r.ty.as_ref(),
-                            Some(crate::ty::Ty::Union { variants })
-                                if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
-                        );
+                        // `.iter().flatten().for_each(...)` for the
+                        // Option recv so the closure receives `&T` from
+                        // the inner Vec rather than `Vec<T>` from
+                        // Option's iter (one item if Some). Read-only
+                        // `iter()` because mutating-through-Option needs
+                        // an as_mut + unwrap chain that's overkill for
+                        // the read-only `parts << ...` framework Ruby.
                         let iter_chain = if was_option {
                             ".iter().flatten()"
                         } else {

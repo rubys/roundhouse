@@ -59,6 +59,19 @@ pub struct EmitCtx {
     pub global_class_method_defaults:
         HashMap<String, HashMap<String, Vec<Option<String>>>>,
 
+    /// Program-global set of method names flagged `mutates_self`
+    /// (any class). Read by the `recv.each { |x| … }` → `iter_mut`
+    /// bridge in `expr/mod.rs` to tell a *mutating* block (the
+    /// `_preload_<assoc>` distribute loop) from a read-only render
+    /// loop: a mutating block must NOT clone its receiver, or the
+    /// `&mut`-method writes land on a throwaway temporary and are
+    /// silently dropped (roundhouse#40 — the eager-load was dead on
+    /// Rust). Name-keyed (not (class,method)) because the bridge sees
+    /// the block param's call site, not its resolved class; an
+    /// over-match would at worst suppress a clone the borrow checker
+    /// would then flag loudly, never miscompile silently.
+    pub global_mutating_methods: HashSet<String>,
+
     /// Ivar name → declared field type for the class currently being
     /// emitted. Read by `expr/mod.rs::ivar_field_ty` so `emit_assign`
     /// can coerce mismatched RHS types (canonical case: `self.body =
