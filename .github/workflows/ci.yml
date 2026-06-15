@@ -50,6 +50,57 @@ jobs:
           retention-days: 1
 
   # -------------------------------------------------------------------
+  # Build the in-browser compiler wasm (roundhouse_wasm.wasm) from source
+  # and upload it as an artifact for build-site. Runs in PARALLEL with
+  # generate-fixture — they're independent (the wasm embeds the compiler;
+  # the fixture is runtime input fed in the browser), so this multi-minute
+  # LTO build hides behind work build-site already waits on, adding ~0 to
+  # the critical path to deploy. Rebuilds via the in-repo vendored
+  # ruby-rbs-sys (wasm/vendor/ — wasm32 build support upstream-pending as
+  # ruby/rbs#2992), so the 3.8 MB binary is NOT committed and the published
+  # demos (/playground/, /studio/) always track main. The only external
+  # need is the WASI SDK (a manual tarball, cached here).
+  # -------------------------------------------------------------------
+  build-wasm:
+    runs-on: ubuntu-latest
+    env:
+      WASI_SDK_VERSION: "33.0"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: wasm
+      - name: Install libclang (host bindgen)
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+      - name: Cache WASI SDK
+        id: wasi-sdk
+        uses: actions/cache@v4
+        with:
+          path: /opt/wasi-sdk
+          key: wasi-sdk-${{ env.WASI_SDK_VERSION }}-x86_64-linux
+      - name: Install WASI SDK
+        if: steps.wasi-sdk.outputs.cache-hit != 'true'
+        run: |
+          ver="${WASI_SDK_VERSION}"; major="${ver%%.*}"
+          url="https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${major}/wasi-sdk-${ver}-x86_64-linux.tar.gz"
+          curl -fsSL "$url" -o /tmp/wasi-sdk.tar.gz
+          sudo mkdir -p /opt/wasi-sdk
+          sudo tar -xzf /tmp/wasi-sdk.tar.gz -C /opt/wasi-sdk --strip-components=1
+      - name: Build roundhouse_wasm.wasm
+        env:
+          WASI_SDK_PATH: /opt/wasi-sdk
+        run: cargo build --release --target wasm32-wasip1 --manifest-path wasm/Cargo.toml
+      - name: Upload wasm artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: roundhouse-wasm
+          path: wasm/target/wasm32-wasip1/release/roundhouse_wasm.wasm
+          retention-days: 1
+
+  # -------------------------------------------------------------------
   # Build the spinel AOT compiler from matz/spinel@master and publish
   # the toolchain as an artifact. Downstream toolchain-spinel /
   # compare-spinel jobs download + chmod +x and either prepend to PATH
@@ -1226,7 +1277,7 @@ jobs:
   # rebuilding the site.
   # -------------------------------------------------------------------
   build-site:
-    needs: generate-fixture
+    needs: [generate-fixture, build-wasm]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -1237,6 +1288,12 @@ jobs:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
+      # The compiler wasm, built fresh from source by the parallel build-wasm
+      # job (no committed binary). Lands in _site/lib/ for /playground/+/studio/.
+      - uses: actions/download-artifact@v8
+        with:
+          name: roundhouse-wasm
+          path: wasm-artifact
       # Compile the static asset graph once and inject it into every emit
       # archive's static/assets/ (via ROUNDHOUSE_ASSETS_DIR) so the published
       # archives are self-contained — no build step required by a downloader.
@@ -1320,29 +1377,28 @@ jobs:
       # In-browser playground + studio demos → _site/{lib,playground,studio}/.
       # Where the blog ships the *emitted app*, these ship the *compiler itself*
       # as wasm. The two surfaces share ../lib/ (driver + editor + tree widget +
-      # the prebuilt roundhouse_wasm.wasm + the seed fixture), so the served
-      # tree must keep lib/ a sibling of the surface dirs (the pages import
-      # ../lib/). /playground/ = edit Ruby → emitted code, any target;
-      # /studio/ = edit Ruby → run the emitted TS blog live (rung D; Phase 4
-      # scaffold today). fixture.json is regenerated from the just-built
-      # real-blog so it tracks create-blog. The compiler wasm is CHECKED IN, not
-      # built here: a runner build needs the WASI SDK + a published ruby-rbs-sys
-      # (upstream-pending as ruby/rbs#2992) — see wasm/lib/README.md,
-      # wasm/playground/README.md, and the "Publishing to Pages" section of
-      # docs/browser-demo-plan.md. Pure static files (no npm/vite, no
-      # COOP/COEP), so they serve straight off Pages.
+      # bundler + the compiler wasm + the seed fixture), so the served tree must
+      # keep lib/ a sibling of the surface dirs (the pages import ../lib/).
+      # /playground/ = edit Ruby → emitted code, any target; /studio/ = edit
+      # Ruby → run the emitted TS blog live (rung D). fixture.json is regenerated
+      # from the just-built real-blog so it tracks create-blog. The compiler wasm
+      # is built fresh from source by the parallel build-wasm job and pulled in
+      # as an artifact (NOT committed) — see wasm/vendor/ruby-rbs-sys/README.md
+      # and the "Publishing to Pages" section of docs/browser-demo-plan.md. Pure
+      # static files (no npm/vite, no COOP/COEP), so they serve straight off Pages.
       - name: Bundle the in-browser playground + studio demos (→ _site/lib, _site/playground, _site/studio)
         run: |
           set -euo pipefail
           mkdir -p _site/lib _site/playground _site/studio
-          # Shared lib: code modules + the prebuilt compiler binary.
+          # Shared lib: code modules + the freshly-built compiler wasm (from the
+          # build-wasm artifact — not committed; see that job + wasm/vendor/).
           cp wasm/lib/transpile.mjs \
              wasm/lib/wasi-shim.mjs \
              wasm/lib/editor.js \
              wasm/lib/tree.js \
              wasm/lib/bundle.mjs \
-             wasm/lib/roundhouse_wasm.wasm \
              _site/lib/
+          cp wasm-artifact/roundhouse_wasm.wasm _site/lib/
           # Fresh seed app from the just-generated real-blog fixture (→ lib).
           (cd wasm/browser-spike && node gen-fixture.mjs)
           cp wasm/browser-spike/fixture.json _site/lib/fixture.json

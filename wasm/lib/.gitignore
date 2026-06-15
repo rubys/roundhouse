@@ -1,0 +1,3 @@
+# Built by ../build.sh (local) or CI (build-wasm job) — not committed.
+# Rebuilt from source via the in-repo vendored ruby-rbs-sys; see ../vendor/.
+roundhouse_wasm.wasm

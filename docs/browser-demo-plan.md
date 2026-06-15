@@ -170,24 +170,26 @@ demos as extra steps before `upload-pages-artifact`. Two kinds of content:
   must stay a sibling of the surface dirs — the whole `_site/` tree deploys
   together (which is how Pages serves anyway).
 
-**The playground is published with a checked-in compiler wasm — deliberately,
-not blocked on #2992.** Building `roundhouse_wasm.wasm` on a runner needs the
-WASI SDK *and* a `ruby-rbs-sys` reachable from CI; today that's a local-path
-`[patch.crates-io]` (the wasm32 build support is upstream-pending as
-ruby/rbs#2992). Rather than wait — it may be days, weeks, or never — the
-~3.2 MB `wasm/lib/roundhouse_wasm.wasm` (shared by `/playground/` + `/studio/`)
-is committed and the CI step just copies it. The cost is a manual refresh:
-after compiler/emit changes, rebuild and recommit the binary
-(`WASI_SDK_PATH=/opt/wasi-sdk cargo build --release --target wasm32-wasip1` in
-`wasm/`, copy it into `wasm/lib/`, re-run `verify-playground.mjs`). See
-`wasm/playground/README.md` § Maintenance.
+**The compiler wasm is built fresh in CI — not committed.** Building
+`roundhouse_wasm.wasm` on a runner needs the WASI SDK *and* a `ruby-rbs-sys`
+reachable from CI. The latter is solved by **vendoring** the patched
+`ruby-rbs-sys` in-repo at `wasm/vendor/ruby-rbs-sys/` (~750 KB: the wasm32
+build.rs from ruby/rbs#2992 + the v4.0.2 RBS C parser it compiles) — stable and
+frozen until #2992 publishes. A dedicated **`build-wasm`** CI job (parallel with
+`generate-fixture`, so its multi-minute LTO build hides off the critical path)
+installs the WASI SDK, runs `cargo build --release --target wasm32-wasip1
+--manifest-path wasm/Cargo.toml`, and uploads the binary as an artifact;
+`build-site` downloads it into `_site/lib/`. So the 3.8 MB binary is **not in
+git**, and the published `/playground/` + `/studio/` always track `main` — no
+per-commit binary churn, no manual refresh, no contributor gate. For local demo
+work, `wasm/build.sh` (needs `WASI_SDK_PATH`) builds + drops it into
+`wasm/lib/roundhouse_wasm.wasm` (gitignored).
 
-**Switch-to-CI-build trigger:** when #2992 merges and `ruby-rbs-sys` publishes
-(or the patched crate is pushed to a CI-reachable git ref), replace the copy
-with a build step (install WASI SDK → `cargo build --target wasm32-wasip1` →
-regenerate fixture) and delete the checked-in binary. That closes honest-gap
-#1's second half. Until then, the playground is the only published surface
-carrying a binary artifact in git.
+**Migration to the published crate (when #2992 lands):** delete
+`wasm/vendor/ruby-rbs-sys/` and the `[patch.crates-io]` block in
+`wasm/Cargo.toml`, then bump the `ruby-rbs-sys` dependency. The `build-wasm` job
+keeps working unchanged (it still just needs the WASI SDK). See
+`wasm/vendor/ruby-rbs-sys/README.md`.
 
 The playground is pure static files (no npm/vite at serve time, no COOP/COEP),
 so — like `/blog/` — it serves straight off plain GitHub Pages. One thing to
@@ -211,16 +213,17 @@ the bytes load. If a `.mjs` MIME ever bites, rename the two driver modules to
    targets, ~5–22 ms) render in a real tab with no console errors. The
    highest-risk unknown is closed; the existing `wasm32-wasip1` artifact +
    manual C-ABI are sufficient.
-   **Fresh-build gap — now mostly closed (2026-06-14).** The build needs the
-   WASI SDK (`WASI_SDK_PATH=/opt/wasi-sdk`; wasi-sdk is a manual GitHub
-   release tarball, not a brew formula). roundhouse already migrated off the
-   `rubys/rbs-rust` fork to real `ruby-rbs = "0.3"` on all targets, and
-   `WASI_SDK_PATH=/opt/wasi-sdk cargo build --release --target wasm32-wasip1`
-   in `wasm/` is verified clean (3.2 MB artifact, Node round-trip OK).
-   Two follow-ons remain, neither blocking Phase 1: (a) the build still leans
-   on a local-path `[patch.crates-io] ruby-rbs-sys` until **ruby/rbs#2992**
-   merges and publishes — repin then; (b) document `WASI_SDK_PATH` and wire
-   the wasm build into CI.
+   **Fresh-build gap — CLOSED (2026-06-15). The wasm is now CI-built, not
+   committed.** The build needs the WASI SDK (a manual GitHub release tarball)
+   and a CI-reachable `ruby-rbs-sys` with wasm32 support. Both are handled: the
+   patched `ruby-rbs-sys` (ruby/rbs#2992 + the v4.0.2 C parser) is **vendored
+   in-repo** at `wasm/vendor/ruby-rbs-sys/`, and a parallel **`build-wasm`** CI
+   job installs the WASI SDK (cached) and runs `cargo build --release --target
+   wasm32-wasip1`, uploading the binary for `build-site`. So the 3.8 MB binary
+   left git, and the published demos track `main`. Remaining follow-on (not
+   blocking anything): when #2992 publishes, drop `wasm/vendor/` + the
+   `[patch.crates-io]` and depend on the published crate (`build-wasm` is
+   unchanged). Local demo builds: `wasm/build.sh` (needs `WASI_SDK_PATH`).
 2. **No editor/playground UI exists yet.** The published surfaces are
    `blog/` (running app) and `browse/` (static archive). Monaco, the file
    tree, and the output panes are all net-new.

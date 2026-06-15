@@ -70,21 +70,23 @@ regenerates `fixture.json` from the freshly-built real-blog fixture, so the
 published demo lands at `rubys.github.io/roundhouse/playground/`. See the
 "Publishing to Pages" section of `docs/browser-demo-plan.md`.
 
-## Maintenance (the prebuilt wasm)
+## The compiler wasm (built, not committed)
 
-`../lib/roundhouse_wasm.wasm` is **checked in**, not built in CI — building it
-on a runner needs the WASI SDK plus a published `ruby-rbs-sys` (the wasm32 build
-support is upstream-pending as ruby/rbs#2992). Until that lands, refresh the
-compiler by hand after compiler/emit changes:
+`../lib/roundhouse_wasm.wasm` is **gitignored** — CI builds it fresh from source
+on every deploy (the `build-wasm` job → `build-site`), via the in-repo vendored
+`ruby-rbs-sys` (`../vendor/ruby-rbs-sys/`), so the published playground always
+tracks `main` with no committed binary and no manual refresh.
+
+For local work, build it once (needs the WASI SDK):
 
 ```sh
-WASI_SDK_PATH=/opt/wasi-sdk cargo build --release --target wasm32-wasip1   # in wasm/
-cp target/wasm32-wasip1/release/roundhouse_wasm.wasm lib/                  # in wasm/
-(cd playground && node verify-playground.mjs)   # confirm green, then commit the new wasm
+WASI_SDK_PATH=/opt/wasi-sdk ../build.sh            # build + drop into ../lib/
+WASI_SDK_PATH=/opt/wasi-sdk ../build.sh --verify   # + run this smoke check
 ```
 
-When #2992 (or a published patched `ruby-rbs-sys`) lands, switch the CI step to
-build the wasm and drop the checked-in binary.
+When ruby/rbs#2992 publishes, `../vendor/` and the `[patch.crates-io]` in
+`../Cargo.toml` go away (depend on the published crate); `build-wasm` is
+unchanged. See `../vendor/ruby-rbs-sys/README.md`.
 
 ## Known gaps / follow-ons
 
