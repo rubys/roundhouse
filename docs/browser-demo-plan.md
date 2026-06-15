@@ -58,14 +58,21 @@ container never earns its weight here.
 | Rung | Demo | What it shows | New work | Container? |
 |---|---|---|---|---|
 | **A** | Multi-target playground | Edit Ruby → pick TS/Go/Rust/Py/Elixir/Crystal → emitted code | Monaco + load wasm + WASI-in-browser shim | No |
-| **B** | All-targets-at-once view | Same source, every backend side-by-side | UI variant of A | No |
 | **C** | Inference / diagnostics overlay | Monaco markers for inferred types + unsupported-feature diagnostics | expose analyzer/diagnostics through wasm | No |
 | **D** | Live app loop | Edit Ruby → recompile in-browser → hot-swap the running TS blog | esbuild-wasm TS→JS + hot-reload wiring | No |
 | **D.2** | In-browser test runner | …→ run the emitted Minitest suite → green/red → click failure back to Ruby | node:test→browser harness + results panel + runtime sourcemaps | No |
 
+> **Dropped: rung B ("all-targets-at-once").** Each target is a whole idiomatic
+> project (34–79 files) that *restructures* — different dir layouts, views as
+> functions vs files, bundled models, extra test files — so there's no reliable
+> cross-target file correspondence to lay side by side, and a six-project grid
+> isn't legible. The one durable idea it surfaced (a per-file `source`
+> provenance field so a UI could map one source → its output in each target)
+> folds into the rung C contract work instead — see Phase 3.
+
 A is the de-risk spike and the clearest "what is this project" demo (the
-multi-target angle is the differentiator ruby2js structurally lacks). B/C are
-UI extensions of the same wasm call. **D is the demo nobody else can build**
+multi-target angle is the differentiator ruby2js structurally lacks). C is a
+UI extension of the same wasm call. **D is the demo nobody else can build**
 — it fuses the two assets roundhouse already has into a live full-stack loop
 on static hosting. **D.2 turns "look, it transpiles" into "look, it's a real,
 verifiable development cycle."**
@@ -102,9 +109,8 @@ verifiable development cycle."**
 | # | Phase | Rung | Days | Status |
 |---|---|---|---|---|
 | 0 | Audit + WASI-in-browser spike (load `roundhouse_wasm.wasm`, transpile real-blog, render output) | A | ½–1 | **DONE** — see `wasm/browser-spike/` |
-| 1 | Monaco editor + multi-file tree + target dropdown → wasm transpile → output pane | A | 1–2 | not started |
-| 2 | All-targets tabs/columns view | B | ½ | not started |
-| 3 | Extend wasm contract to return diagnostics + inferred types; Monaco markers | C | 1–2 | not started |
+| 1 | Monaco editor + multi-file tree + target dropdown → wasm transpile → output pane | A | 1–2 | **DONE & PUBLISHED** — `wasm/playground/`, live at `/playground/` |
+| 3 | Extend wasm contract to return diagnostics + inferred types (+ per-file `source` provenance); Monaco markers | C | 1–2 | not started |
 | 4 | esbuild-wasm TS→JS bundle step in-browser (shared infra for D) | D | 1 | not started |
 | 5 | Live loop: edit Ruby → wasm recompile → esbuild bundle → hot-swap running blog | D | 2–3 | blocked on 1,4 |
 | 6 | Emit + ship the Minitest suite into the browser payload | D.2 | ½–1 | blocked on 5 |
@@ -229,14 +235,6 @@ The de-risk step. Goal: a static HTML page that loads
   `{error:...}` responses inline.
 - Debounce transpile calls; the wasm is fast but Monaco fires often.
 
-### Phase 2 — All-targets-at-once view (rung B, ½ day)
-
-- UI variant: call `transpile` once per target, lay the outputs out as tabs
-  or columns. Same source → every backend, visible together. This is the most
-  on-message single screen ("one Ruby app, six languages").
-- Cache per-target results; only re-transpile the targets whose input changed
-  (all of them, on any edit — but the call is cheap).
-
 ### Phase 3 — Diagnostics / inference overlay (rung C, 1–2 days)
 
 The identity demo — what separates roundhouse from "yet another transpiler."
@@ -247,6 +245,13 @@ The identity demo — what separates roundhouse from "yet another transpiler."
   diagnostics (thread-local emit sink + Unsupported kind, per the #28
   diagnostics work) and inferred `Ty` — this phase is plumbing them out, not
   new analysis.
+- **Also add a per-file `source` field** to each emitted file (`files:
+  [{path, content, source?}]`) — the source path it was generated from. The
+  compiler already knows this (it's what the TS sourcemaps encode); serializing
+  it for every target lets a UI map one source → its output per target. (This
+  is the salvaged idea from the dropped rung B; it's also what makes "click a
+  diagnostic back to the Ruby line" work across non-TS targets, so it earns its
+  place here, not in a separate side-by-side view.)
 - Render as Monaco markers (squiggles) + hover tooltips for inferred types.
 - This dramatizes the inference-first / transpile-time-resolvable-Ruby
   positioning live; ruby2js has no type story to show.
@@ -362,7 +367,7 @@ the line of **Ruby** the user wrote, not the emitted TS.
   is clean, reconsider before building UI.
 - **End of Phase 1**: is the multi-file editor the right model, or does a
   curated single-file-plus-hidden-app feel better for a first-time visitor?
-  Decide the default-app UX before B/C pile on.
+  Decide the default-app UX before rung C piles on.
 - **End of Phase 4**: esbuild vs. strip-and-importmap — lock the TS→JS path
   before Phase 5 depends on it.
 - **End of Phase 5**: full-reload loop vs. true hot-swap — ship whichever is
