@@ -25,6 +25,11 @@ mod library;
 mod rbs;
 mod shared;
 
+/// Render a `Ty` to its RBS string form (`String`, `Array[Comment]`,
+/// `Article`, `Integer?`). Re-exported for non-emit consumers — e.g. the
+/// browser playground's inferred-type hovers (`wasm/src/lib.rs`).
+pub use rbs::ty_to_rbs;
+
 // External API: the historical surface kept for `tests/` and `bin/`.
 pub use expr::emit_expr;
 

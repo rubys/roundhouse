@@ -12,6 +12,8 @@
 //   4. diagnostics overlay: baseline warnings are present, and a type-error
 //      edit (`title + 1`) surfaces an incompatible_binop error rendered as a
 //      Monaco squiggle.
+//   5. inferred-type hovers: `title` in the edited method types as String, and
+//      the result carries many inferred types.
 //
 // (Note: a plain `def foo` method is NOT carried into the model emit today —
 // the transpiler reflects recognized Rails DSL like `validates`, not arbitrary
@@ -119,6 +121,14 @@ const errorMarkers = await page.evaluate(() => {
 console.log("monaco error markers on open file:", errorMarkers < 0 ? "(textarea fallback)" : errorMarkers);
 if (errorMarkers === 0) fail("expected an error squiggle rendered in Monaco");
 
+// --- inferred-type hovers: `title` in the edited method types as String -----
+console.log("\n=== inferred-type hovers ===");
+const titleType = await page.evaluate(() => window.__playground.typeAt(3, 6));
+const typeCount = await page.evaluate(() => window.__playground.types().length);
+console.log("type at article.rb:3:6 (`title`):", titleType, "| total inferred types:", typeCount);
+if (titleType !== "String") fail(`expected String at the \`title\` position, got ${titleType}`);
+if (typeCount < 100) fail(`expected many inferred types, got ${typeCount}`);
+
 await page.screenshot({ path: "playground.png" });
 
 const noise = /monaco|web worker|cdn\.jsdelivr|loader\.js/i;
@@ -132,4 +142,4 @@ if (realErrors.length) {
 await browser.close();
 
 if (failed) process.exit(1);
-console.log("\nOK: edit -> transpile -> render loop + diagnostics overlay verified in a real browser tab.");
+console.log("\nOK: edit -> transpile -> render loop + diagnostics overlay + inferred-type hovers verified in a real browser tab.");

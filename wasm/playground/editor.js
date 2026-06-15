@@ -43,8 +43,32 @@ export async function createEditor(container, { onChange }) {
     });
     let suppress = false;
     ed.onDidChangeModelContent(() => { if (!suppress) onChange(ed.getValue()); });
+
+    // Inferred-type hovers. `hoverTypes` holds the open file's (span, ty)
+    // pairs; the provider returns the smallest span containing the cursor.
+    let hoverTypes = [];
+    const contains = (t, ln, col) =>
+      (ln > t.start_line || (ln === t.start_line && col >= t.start_col)) &&
+      (ln < t.end_line || (ln === t.end_line && col <= t.end_col));
+    const spanSize = (t) => (t.end_line - t.start_line) * 100000 + (t.end_col - t.start_col);
+    monaco.languages.registerHoverProvider(["ruby", "html"], {
+      provideHover(_model, position) {
+        let best = null;
+        for (const t of hoverTypes) {
+          if (contains(t, position.lineNumber, position.column) &&
+              (!best || spanSize(t) < spanSize(best))) best = t;
+        }
+        if (!best) return null;
+        return {
+          range: new monaco.Range(best.start_line, best.start_col, best.end_line, best.end_col),
+          contents: [{ value: "inferred type" }, { value: "```rbs\n" + best.ty + "\n```" }],
+        };
+      },
+    });
+
     return {
       kind: "monaco",
+      setTypes(types) { hoverTypes = types; },
       getValue: () => ed.getValue(),
       setValue(text, lang) {
         suppress = true;
@@ -79,6 +103,7 @@ export async function createEditor(container, { onChange }) {
       getValue: () => ta.value,
       setValue(text) { ta.value = text; },
       setMarkers() {}, // textarea can't render squiggles; status bar shows counts
+      setTypes() {}, // no hovers in the textarea fallback
     };
   }
 }

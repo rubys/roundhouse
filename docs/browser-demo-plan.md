@@ -110,7 +110,7 @@ verifiable development cycle."**
 |---|---|---|---|---|
 | 0 | Audit + WASI-in-browser spike (load `roundhouse_wasm.wasm`, transpile real-blog, render output) | A | ½–1 | **DONE** — see `wasm/browser-spike/` |
 | 1 | Monaco editor + multi-file tree + target dropdown → wasm transpile → output pane | A | 1–2 | **DONE & PUBLISHED** — `wasm/playground/`, live at `/playground/` |
-| 3 | Extend wasm contract to return diagnostics + inferred types (+ per-file `source` provenance); Monaco markers | C | 1–2 | **DIAGNOSTICS DONE & PUBLISHED**; inferred-types-on-hover + `source` field remaining |
+| 3 | Extend wasm contract to return diagnostics + inferred types (+ per-file `source` provenance); Monaco markers | C | 1–2 | **DIAGNOSTICS + INFERRED-TYPE HOVERS DONE**; only the `source` provenance field remains |
 | 4 | esbuild-wasm TS→JS bundle step in-browser (shared infra for D) | D | 1 | not started |
 | 5 | Live loop: edit Ruby → wasm recompile → esbuild bundle → hot-swap running blog | D | 2–3 | blocked on 1,4 |
 | 6 | Emit + ship the Minitest suite into the browser payload | D.2 | ½–1 | blocked on 5 |
@@ -239,14 +239,16 @@ The de-risk step. Goal: a static HTML page that loads
 
 The identity demo — what separates roundhouse from "yet another transpiler."
 
-> **Status: diagnostics half SHIPPED.** `wasm/src/lib.rs` now returns
-> `diagnostics: [{path, start_line, start_col, end_line, end_col, severity,
-> code, message}]` from `analyze::diagnose(&app)` (target-independent), and the
-> playground renders them as Monaco squiggles + a status-bar count. Editing in
-> `title + 1` surfaces a live `incompatible_binop` error. **Remaining:**
-> inferred-type hovers (needs a `(Span, Ty)` walker — `Expr.ty` is populated,
-> but there's no immutable child-walker; `ty_to_rbs` in `emit/ruby/rbs.rs` is
-> `pub(super)` so a public Ty→string is needed) and the per-file `source` field.
+> **Status: diagnostics + inferred-type hovers SHIPPED.** `wasm/src/lib.rs`
+> returns `diagnostics:[{path,start/end_line/col,severity,code,message}]` from
+> `analyze::diagnose(&app)` and `inferred_types:[{…,ty}]` from a new
+> `analyze::inferred_types(&app)` (a `(Span,Ty)` walker that mirrors
+> `diagnose_expr`'s exhaustive recursion); `Ty`→RBS string via the now-public
+> `emit::ruby::ty_to_rbs`. The playground renders diagnostics as Monaco
+> squiggles + a status-bar count, and registers a Monaco hover provider that
+> shows the smallest-span inferred type (RBS form) under the cursor. Editing in
+> `title + 1` surfaces a live `incompatible_binop` error and a `String` hover on
+> `title`. **Remaining:** only the per-file `source` provenance field.
 
 - Extend the wasm contract: add an optional `diagnostics: [{path, line, col,
   severity, message}]` and/or `inferred_types: [{path, line, col, ty}]` to

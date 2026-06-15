@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use roundhouse::analyze::{diagnose, Analyzer, Severity};
+use roundhouse::emit::ruby::ty_to_rbs;
 use roundhouse::emit::{crystal, elixir, go, python, rust, typescript};
 use roundhouse::ingest::ingest_app_from_tree;
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,11 @@ struct TranspileOutput<'a> {
     /// regardless of the emit backend, so this is identical across targets.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     diagnostics: Vec<DiagnosticOut>,
+    /// Inferred type at each source expression (RBS string form), for hovers.
+    /// Also target-independent. Unresolved placeholders (`Ty::Var`) are
+    /// dropped; everything else (incl. the gradual `untyped`) is kept.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    inferred_types: Vec<TypeOut>,
 }
 
 #[derive(Serialize)]
@@ -61,6 +67,17 @@ struct DiagnosticOut {
     severity: &'static str,
     code: &'static str,
     message: String,
+}
+
+/// An inferred type at a 1-based source span, rendered to its RBS string.
+#[derive(Serialize)]
+struct TypeOut {
+    path: String,
+    start_line: u32,
+    start_col: u32,
+    end_line: u32,
+    end_col: u32,
+    ty: String,
 }
 
 #[derive(Serialize)]
@@ -116,6 +133,29 @@ fn transpile_inner(json_in: &str) -> String {
         })
         .collect();
 
+    // Inferred type at each source expression, for hover tooltips. Drop
+    // unresolved `Ty::Var` placeholders (they'd render a misleading
+    // "untyped") and anything without a real source span.
+    let inferred_types: Vec<TypeOut> = roundhouse::analyze::inferred_types(&app)
+        .into_iter()
+        .filter_map(|(span, ty)| {
+            if span.is_synthetic() || matches!(ty, roundhouse::ty::Ty::Var { .. }) {
+                return None;
+            }
+            let sf = app.sources.get((span.file.0 as usize).checked_sub(1)?)?;
+            let (start_line, start_col) = sf.line_col(span.start);
+            let (end_line, end_col) = sf.line_col(span.end);
+            Some(TypeOut {
+                path: sf.path.clone(),
+                start_line,
+                start_col,
+                end_line,
+                end_col,
+                ty: ty_to_rbs(&ty),
+            })
+        })
+        .collect();
+
     let emitted = match input.language.as_str() {
         "typescript" | "ts" => typescript::emit(&app),
         "rust" | "rs" => rust::emit(&app),
@@ -138,6 +178,7 @@ fn transpile_inner(json_in: &str) -> String {
         language: &input.language,
         files,
         diagnostics,
+        inferred_types,
     };
 
     serde_json::to_string(&out).unwrap_or_else(|e| error_json(&format!("serialize: {e}")))

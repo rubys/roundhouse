@@ -44,6 +44,7 @@ let srcMap = null;          // { path: content } — the live, editable input
 let currentPath = null;     // which source file the editor is showing
 let lastOutput = null;      // last { language, files } | { error }
 let lastDiagnostics = [];   // last result's diagnostics (target-independent)
+let lastTypes = [];         // last result's inferred types (target-independent)
 let debounceTimer = null;
 
 function setStatus(msg, kind = "") {
@@ -82,6 +83,7 @@ function selectFile(path) {
   [...els.srcfiles.querySelectorAll("button")].forEach((b) =>
     b.classList.toggle("active", b.dataset.path === path));
   renderMarkers(); // squiggles are per-file — refresh for the newly-open file
+  renderTypes();   // hovers too
 }
 
 // ---- transpile loop ------------------------------------------------------
@@ -102,8 +104,10 @@ function transpile() {
     lastOutput = { error: `transpile threw: ${e.message}` };
   }
   lastDiagnostics = (lastOutput && lastOutput.diagnostics) || [];
+  lastTypes = (lastOutput && lastOutput.inferred_types) || [];
   renderOutput(lastOutput, performance.now() - t0);
   renderMarkers();
+  renderTypes();
 }
 
 // Inference diagnostics (target-independent): squiggles on the open file +
@@ -112,6 +116,12 @@ function transpile() {
 function renderMarkers() {
   if (!editor) return;
   editor.setMarkers(lastDiagnostics.filter((d) => d.path === currentPath));
+}
+
+// Inferred types for the open file → hover tooltips (Monaco only).
+function renderTypes() {
+  if (!editor) return;
+  editor.setTypes(lastTypes.filter((t) => t.path === currentPath));
 }
 
 function diagSummary(diags) {
@@ -194,6 +204,17 @@ async function boot() {
     },
     output: () => lastOutput,
     diagnostics: () => lastDiagnostics,
+    types: () => lastTypes,
+    // Smallest-span inferred type at a 1-based (line, col) in the open file.
+    typeAt(line, col) {
+      const hits = lastTypes.filter((t) => t.path === currentPath &&
+        (line > t.start_line || (line === t.start_line && col >= t.start_col)) &&
+        (line < t.end_line || (line === t.end_line && col <= t.end_col)));
+      hits.sort((a, b) =>
+        ((a.end_line - a.start_line) * 1e5 + (a.end_col - a.start_col)) -
+        ((b.end_line - b.start_line) * 1e5 + (b.end_col - b.start_col)));
+      return hits.length ? hits[0].ty : null;
+    },
     source: (path) => srcMap[path],
     sourceCount: () => sourceFiles().length,
   };

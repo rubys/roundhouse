@@ -41,13 +41,18 @@ node verify-playground.mjs
   (`typescript|go|rust|python|elixir|crystal`); switching re-transpiles live.
 - Monaco loads from a CDN; offline / headless / strict-CSP falls back to a
   `<textarea>` (the loop is identical through both — see `editor.js`).
-- **Inference diagnostics overlay (Phase 3):** analyzer diagnostics render as
-  Monaco squiggles on the source, with counts in the status bar. Editing in a
-  type error (e.g. `title + 1` on a String column) surfaces a red
-  `incompatible_binop` marker live. Diagnostics are target-independent (they're
-  about the Ruby's typeability), and only render in the Monaco editor — the
-  `<textarea>` fallback shows counts only. (Inferred-type hovers + the per-file
-  `source` field are the remaining Phase 3 items — see the plan.)
+- **Inference overlay (Phase 3):**
+  - *Diagnostics* render as Monaco squiggles on the source, with counts in the
+    status bar. Editing in a type error (e.g. `title + 1` on a String column)
+    surfaces a red `incompatible_binop` marker live.
+  - *Inferred-type hovers*: hovering any typed expression shows its inferred
+    type in RBS form (`String`, `Article`, `Array[Comment]`, …). Note model
+    files like `article.rb` are mostly DSL with few typed expressions — the
+    rich hovers are in controllers/views/method bodies.
+
+  Both are target-independent (about the Ruby's typeability) and Monaco-only —
+  the `<textarea>` fallback shows diagnostic counts but no squiggles/hovers. The
+  per-file `source` provenance field is the remaining Phase 3 item (see plan).
 
 ## Publishing
 

@@ -182,7 +182,7 @@ fn render_block_ty(b: &Ty) -> String {
 }
 
 /// Render a `Ty` as an RBS type expression.
-pub(super) fn ty_to_rbs(ty: &Ty) -> String {
+pub fn ty_to_rbs(ty: &Ty) -> String {
     match ty {
         Ty::Int => "Integer".into(),
         Ty::Float => "Float".into(),
