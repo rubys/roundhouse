@@ -129,6 +129,31 @@ console.log("type at article.rb:3:6 (`title`):", titleType, "| total inferred ty
 if (titleType !== "String") fail(`expected String at the \`title\` position, got ${titleType}`);
 if (typeCount < 100) fail(`expected many inferred types, got ${typeCount}`);
 
+// --- source -> output follow: selecting a source shows its emitted file ------
+// Heuristic name match (no `source` field on EmittedFile yet): basename, then
+// tighten by parent dir until unique. Covers the TS exact-path case and rust's
+// app/ -> src/ prefix divergence.
+console.log("\n=== source → output follow ===");
+await page.evaluate(() => window.__playground.setTarget("typescript"));
+await page.evaluate(() => window.__playground.selectSource("app/models/article.rb"));
+const tsModelOut = await page.evaluate(() => window.__playground.displayedOutput());
+console.log("ts: select app/models/article.rb ->", tsModelOut);
+if (tsModelOut !== "app/models/article.ts") fail(`expected app/models/article.ts, got ${tsModelOut}`);
+
+await page.evaluate(() => window.__playground.selectSource("app/views/articles/index.html.erb"));
+const tsViewOut = await page.evaluate(() => window.__playground.displayedOutput());
+console.log("ts: select app/views/articles/index.html.erb ->", tsViewOut);
+if (tsViewOut !== "app/views/articles/index.ts") fail(`expected app/views/articles/index.ts, got ${tsViewOut}`);
+
+// rust relocates app/ -> src/; the suffix-walk should still map controllers.
+await page.evaluate(() => window.__playground.setTarget("rust"));
+await page.evaluate(() => window.__playground.selectSource("app/controllers/application_controller.rb"));
+const rsCtrlOut = await page.evaluate(() => window.__playground.displayedOutput());
+console.log("rust: select app/controllers/application_controller.rb ->", rsCtrlOut);
+if (!/controllers\/application_controller\.rs$/.test(rsCtrlOut || ""))
+  fail(`expected a rust controllers/application_controller.rs, got ${rsCtrlOut}`);
+
+await page.evaluate(() => { window.__playground.setTarget("typescript"); window.__playground.selectSource("app/models/article.rb"); });
 await page.screenshot({ path: "playground.png" });
 
 const noise = /monaco|web worker|cdn\.jsdelivr|loader\.js/i;

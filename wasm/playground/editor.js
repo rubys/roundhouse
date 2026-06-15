@@ -76,10 +76,15 @@ export async function createEditor(container, { onChange }) {
       kind: "monaco",
       setTypes(types) { hoverTypes = types; },
       getValue: () => ed.getValue(),
+      // Swap in a fresh model rather than mutating the current model's language:
+      // monaco's Monarch tokenizer can underflow ("pop an empty stack") when a
+      // model's language changes (ruby -> html for an .erb), and a per-file
+      // model is the idiomatic file-switcher pattern anyway.
       setValue(text, lang) {
         suppress = true;
-        ed.setValue(text);
-        if (lang) monaco.editor.setModelLanguage(ed.getModel(), lang);
+        const prev = ed.getModel();
+        ed.setModel(monaco.editor.createModel(text, lang || "plaintext"));
+        if (prev) prev.dispose();
         suppress = false;
       },
       // Render diagnostics as squiggles on the current model. `diags` are the
@@ -129,9 +134,12 @@ export async function createOutputView(container) {
     });
     return {
       kind: "monaco",
+      // Fresh model per file (same reason as the editor's setValue above); the
+      // editor's readOnly option applies to whatever model it shows.
       setValue(text, lang) {
-        ed.setValue(text);
-        monaco.editor.setModelLanguage(ed.getModel(), lang || "plaintext");
+        const prev = ed.getModel();
+        ed.setModel(monaco.editor.createModel(text, lang || "plaintext"));
+        if (prev) prev.dispose();
       },
     };
   } catch (err) {

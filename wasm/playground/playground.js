@@ -156,6 +156,8 @@ function selectFile(path) {
     b.classList.toggle("active", b.dataset.path === path));
   renderMarkers(); // squiggles are per-file — refresh for the newly-open file
   renderTypes();   // hovers too
+  const oi = outputIndexForSource(path); // show this source's emitted file, if found
+  if (oi >= 0) showOutput(oi);
 }
 
 // ---- transpile loop ------------------------------------------------------
@@ -212,6 +214,50 @@ function outFiles() {
   return (lastOutput && lastOutput.files) || [];
 }
 
+// Split a path into segments, stripping the basename's extension chain
+// ("app/views/articles/index.html.erb" -> ["app","views","articles","index"]).
+function stemSegs(path) {
+  const segs = path.split("/").filter(Boolean);
+  if (segs.length) {
+    const last = segs[segs.length - 1];
+    const dot = last.indexOf(".");
+    segs[segs.length - 1] = dot > 0 ? last.slice(0, dot) : last;
+  }
+  return segs;
+}
+
+// True if `segs` ends with the segment sequence `suffix`.
+function endsWithSegs(segs, suffix) {
+  if (segs.length < suffix.length) return false;
+  const off = segs.length - suffix.length;
+  return suffix.every((s, i) => segs[off + i] === s);
+}
+
+// Map the open SOURCE file to its emitted file by NAME, not by authoritative
+// provenance (we have no `source` field on EmittedFile). Match on basename;
+// when several outputs share it, tighten by extending the matched path suffix
+// one parent dir at a time until exactly one remains. If it never reduces to a
+// single match, return -1 (leave the pane alone — a wrong jump is worse than
+// none). This is layout-prefix agnostic, so e.g. rust's
+// src/controllers/application_controller.rs still maps from
+// app/controllers/application_controller.rb. `.map` sidecars are excluded.
+function outputIndexForSource(srcPath) {
+  if (!srcPath) return -1;
+  const src = stemSegs(srcPath);
+  if (!src.length) return -1;
+  let cands = outFiles()
+    .map((f, idx) => ({ idx, segs: stemSegs(f.path), isMap: f.path.endsWith(".map") }))
+    .filter((o) => o.segs.length && !o.isMap);
+  for (let k = 1; k <= src.length; k++) {
+    const suffix = src.slice(src.length - k); // the last k source segments
+    const next = cands.filter((o) => endsWithSegs(o.segs, suffix));
+    if (next.length === 0) return -1; // diverged: no output shares this suffix
+    if (next.length === 1) return next[0].idx;
+    cands = next; // still ambiguous → include one more parent dir
+  }
+  return -1; // exhausted the source path and it's still ambiguous
+}
+
 // The output-file picker is a popover tree (same widget as the source sidebar)
 // instead of a flat dropdown, so a multi-dir emit (e.g. 79 TS files) is
 // navigable. Output dirs default to expanded; `outClosedDirs` tracks collapses.
@@ -237,7 +283,8 @@ function renderOutput(result, ms) {
     return;
   }
   setStatus(`${result.language}: ${result.files.length} files${diagSummary(lastDiagnostics)} in ${ms.toFixed(1)} ms`, "ok");
-  showOutput(0);
+  const oi = outputIndexForSource(currentPath); // keep the output on the open source's file
+  showOutput(oi >= 0 ? oi : 0);
 }
 
 function showOutput(i) {
@@ -293,12 +340,16 @@ async function boot() {
     ready: true,
     editorKind: editor.kind,
     setTarget(t) { els.target.value = t; transpile(); },
+    selectSource: (path) => selectFile(path),
     editFile(path, content) {
       srcMap[path] = content;
       if (path === currentPath) editor.setValue(content, langForPath(path));
       transpile();
     },
     output: () => lastOutput,
+    // The emitted file currently shown in the output pane (path), for asserting
+    // the source -> output follow behavior.
+    displayedOutput: () => outFiles()[currentOutIndex]?.path ?? null,
     diagnostics: () => lastDiagnostics,
     types: () => lastTypes,
     // Smallest-span inferred type at a 1-based (line, col) in the open file.
