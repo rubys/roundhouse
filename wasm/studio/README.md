@@ -11,33 +11,41 @@ Studio shares the editor, source tree, compiler driver, and seed app with
 right-hand pane — playground shows emitted **code**, studio shows the **running
 app**.
 
-## Status — Phase 4 scaffold
+## Status — Phase 4 done
 
-This is the Phase 4 scaffold. Working today:
+Working today (the whole client-side **edit → compile → bundle** chain):
 
-- Shared `../lib/` editor + source tree + the debounced **edit → transpile**
-  loop, proven on a second surface. Every edit recompiles to TypeScript in the
-  browser; the app pane shows a live build readout (file count + ms + errors).
+- Shared `../lib/` editor + source tree + the debounced edit loop, proven on a
+  second surface.
+- Every edit transpiles Ruby → the **worker-profile** TypeScript in the browser
+  (wasm `profile: "worker"` — the runnable SharedWorker app: `main.ts`,
+  `worker.ts`, `src/db_worker.ts`, …), then bundles it to 3 browser-loadable
+  ESM files via **esbuild-wasm** (`../lib/bundle.mjs`). The app pane shows live
+  transpile + bundle readouts (file counts, sizes, ms).
 - Diagnostics squiggles on the open file (same inference overlay as playground).
+
+esbuild loads from a CDN (like Monaco), so nothing is vendored; if that load
+fails (offline / strict CSP) studio degrades to transpile-only.
 
 Not yet (Phase 5, the next step):
 
-- **Run** the app. That needs `esbuild-wasm` to bundle the emitted TS, then a
-  hot-swap into the blog's SharedWorker + sqlite-wasm runtime
-  (`runtime/typescript/sqlite_wasm_engine.ts`, `db_worker.ts`, `juntos*.ts`).
-  The app pane currently shows that roadmap + the live build status instead of
-  the app.
+- **Run** the app: load those 3 bundles as the live app (main thread +
+  SharedWorker + DB worker) over sqlite-wasm — reusing the blog's runtime
+  (`runtime/typescript/sqlite_wasm_engine.ts`, `db_worker.ts`, `juntos*.ts`) —
+  and hot-swap on edit. The app pane shows that roadmap + the live bundle status
+  instead of the app.
 
 ## Files
 
 | File | Role | Tracked |
 |---|---|---|
 | `index.html` | three-pane layout (sources / editor / running app) | yes |
-| `studio.js` | app: source tree, debounced transpile loop, app-pane build readout, test hooks | yes |
-| `verify-studio.mjs` | Playwright: drive the scaffold in chromium | yes |
+| `studio.js` | app: source tree, debounced transpile+bundle loop, app-pane readouts, test hooks | yes |
+| `verify-studio.mjs` | Playwright: drive the chain in chromium (needs network for the CDNs) | yes |
 | `studio.png` | screenshot from the verifier | no (gitignored) |
 
-Shared assets (driver, editor, tree, binary, fixture) live in `../lib/`.
+Shared assets (compiler driver, editor, tree, **bundler** `bundle.mjs`, binary,
+fixture) live in `../lib/`.
 
 ## Run
 

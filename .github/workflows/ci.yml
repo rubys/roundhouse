@@ -1340,6 +1340,7 @@ jobs:
              wasm/lib/wasi-shim.mjs \
              wasm/lib/editor.js \
              wasm/lib/tree.js \
+             wasm/lib/bundle.mjs \
              wasm/lib/roundhouse_wasm.wasm \
              _site/lib/
           # Fresh seed app from the just-generated real-blog fixture (→ lib).

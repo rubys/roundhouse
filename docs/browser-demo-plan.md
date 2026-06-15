@@ -139,8 +139,8 @@ verifiable development cycle."**
 | 0 | Audit + WASI-in-browser spike (load `roundhouse_wasm.wasm`, transpile real-blog, render output) | A | ½–1 | **DONE** — see `wasm/browser-spike/` |
 | 1 | Monaco editor + multi-file tree + target dropdown → wasm transpile → output pane | A | 1–2 | **DONE & PUBLISHED** — `wasm/playground/`, live at `/playground/` |
 | 3 | Extend wasm contract to return diagnostics + inferred types (+ per-file `source` provenance); Monaco markers | C | 1–2 | **DIAGNOSTICS + INFERRED-TYPE HOVERS DONE**; only the `source` provenance field remains |
-| 4 | `/studio/` scaffold + shared `lib/` + esbuild-wasm TS→JS bundle step in-browser | D | 1 | **SHARED `lib/` + `/studio/` SCAFFOLD DONE**; esbuild-wasm next |
-| 5 | Live loop: edit Ruby → wasm recompile → esbuild bundle → hot-swap running blog | D | 2–3 | blocked on 1,4 |
+| 4 | `/studio/` scaffold + shared `lib/` + esbuild-wasm TS→JS bundle step in-browser | D | 1 | **DONE** — shared `lib/`, `/studio/`, wasm `profile` contract, esbuild-wasm bundling all landed |
+| 5 | Live loop: edit Ruby → wasm recompile → esbuild bundle → hot-swap running blog | D | 2–3 | unblocked (1,4 done) — next |
 | 6 | Emit + ship the Minitest suite into the browser payload | D.2 | ½–1 | blocked on 5 |
 | 7 | `node:test` → browser test-runner harness + in-memory sqlite isolation | D.2 | 1–2 | blocked on 6 |
 | 8 | Test-results UI panel + cross-target CI badge strip | D.2 | ½–1 | blocked on 7 |
@@ -316,6 +316,22 @@ The identity demo — what separates roundhouse from "yet another transpiler."
 > `build-site` step publishes all three dirs. **Remaining for Phase 4:**
 > esbuild-wasm (below). The landing/`/demo/` links to `/studio/` are held until
 > Phase 5 makes it actually run the app (avoid over-claiming).
+>
+> **Update — esbuild-wasm bundling DONE (Phase 4 complete).** Two pieces landed:
+> (1) the wasm contract gained an optional `profile` field (`wasm/src/lib.rs`
+> `TranspileInput.profile`), routing `typescript` to `emit_with_profile(worker)`
+> — so `/studio/` gets the runnable SharedWorker app (86 files w/ `main.ts`+
+> `worker.ts`+`src/db_worker.ts`+`vite.config.ts`), while `/playground/`'s
+> default emit is unchanged (79 files). Required a wasm rebuild+recommit (3.8 MB).
+> (2) `lib/bundle.mjs` bundles the emitted TS → 3 browser-loadable ESM bundles
+> via **esbuild-wasm** (loaded from a CDN like Monaco — nothing vendored) with a
+> virtual-FS + CDN-external plugin. Decision (below) resolved **in favor of
+> esbuild**, not strip+importmap: the app is a ~50-file/~140-edge 3-entry graph,
+> and workers can't use importmaps, so npm deps (`@hotwired/turbo`,
+> `@sqlite.org/sqlite-wasm`) are kept as full `esm.sh` URLs (worker-safe). Studio
+> bundles live on every edit (main 13KB / worker 75KB / db_worker 3KB, ~130 ms
+> in chromium); `verify-studio.mjs` asserts it. The app pane shows transpile +
+> bundle readouts; Phase 5 loads those bundles as the running app.
 
 - **First step (the "shared a lot of code" part): factor the reusable pieces
   into a shared `lib/` both surfaces import** — `transpile.mjs` / `wasi-shim.mjs`
@@ -411,10 +427,13 @@ the line of **Ruby** the user wrote, not the emitted TS.
    over the existing artifact is fiddly, the fallback (wasm32-unknown-unknown
    + wasm-bindgen) is a compiler-side change. Spike it in Phase 0 before
    committing to any UI work.
-2. **Combined wasm payload size.** roundhouse wasm (3.2 MB) + esbuild-wasm
-   (several MB) + sqlite-wasm. Acceptable for a demo, but measure cold load
-   and consider streaming/caching; it is the difference between "snappy" and
-   "spinner."
+2. **Combined wasm payload size.** Measured: roundhouse wasm **3.8 MB**
+   (checked-in, same-origin) + esbuild **13 MB** uncompressed (loaded from
+   jsdelivr, which serves it gzip/brotli ≈ 4 MB) + sqlite-wasm (esm.sh, Phase 5).
+   esbuild loads from a CDN (like Monaco), so it isn't in our repo or deploy;
+   bundling after init is fast (~130 ms/edit in chromium). Acceptable for a
+   demo, but the esbuild cold-load is the main spinner risk — consider caching
+   or a vendored copy if CDN latency bites.
 3. **Module hot-swap in rung D.** Re-importing changed ESM while keeping the
    SharedWorker + opfs DB alive is the trickiest engineering in the arc.
    De-risk by first doing a full-reload loop (recompile → reload page,
@@ -437,8 +456,12 @@ the line of **Ruby** the user wrote, not the emitted TS.
 - **End of Phase 1**: is the multi-file editor the right model, or does a
   curated single-file-plus-hidden-app feel better for a first-time visitor?
   Decide the default-app UX before rung C piles on.
-- **End of Phase 4**: esbuild vs. strip-and-importmap — lock the TS→JS path
-  before Phase 5 depends on it.
+- **End of Phase 4** — RESOLVED: **esbuild-wasm**, not strip-and-importmap.
+  The worker-profile app is a ~50-file/~140-edge graph across 3 entry points
+  (main + SharedWorker + DB worker); bare type-strip leaves the relative graph
+  unresolved, and workers can't use importmaps, so npm deps must be baked in as
+  full URLs. esbuild resolves the graph in-memory and keeps the 2 npm deps as
+  CDN-external full URLs (worker-safe). See `wasm/lib/bundle.mjs`.
 - **End of Phase 5**: full-reload loop vs. true hot-swap — ship whichever is
   solid; hot-swap is a polish follow-on, not a gate.
 - **End of Phase 7**: harness option (a) shim vs. (b) custom runner — confirm

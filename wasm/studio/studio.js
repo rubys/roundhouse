@@ -19,8 +19,10 @@
 import { loadDefaultCompiler, loadFixture } from "../lib/transpile.mjs";
 import { createEditor } from "../lib/editor.js";
 import { allDirPaths, renderTree } from "../lib/tree.js";
+import { loadBundler } from "../lib/bundle.mjs";
 
 const TARGET = "typescript"; // studio is TS-only — the only browser runtime
+const PROFILE = "worker";    // the SharedWorker browser app (what studio runs)
 const DEBOUNCE_MS = 250;
 const DEFAULT_FILE = "app/views/articles/index.html.erb"; // a view: most visibly "live"
 
@@ -33,11 +35,14 @@ const els = {
 };
 
 let compiler = null;
+let bundler = null;         // esbuild-wasm bundler (null if its CDN load failed)
 let editor = null;
-let srcMap = null;          // { path: content } — the live, editable input
+let srcMap = null;          // { path: content } — the live, editable input (Ruby)
 let currentPath = null;     // which source file the editor is showing
 let openDirs = null;        // Set<string> of expanded directory paths
-let lastBuild = null;       // { files, ms, error, diagnostics }
+let lastBuild = null;       // { files, transpileMs, error, diagnostics }
+let lastBundle = null;      // { ms, errors, warnings, outputs } from esbuild
+let buildSeq = 0;           // guards against a stale async bundle rendering late
 let debounceTimer = null;
 
 function setStatus(msg, kind = "") {
@@ -88,23 +93,39 @@ function onEditorChange(value) {
   debounceTimer = setTimeout(build, DEBOUNCE_MS);
 }
 
-function build() {
+async function build() {
+  const seq = ++buildSeq;
+  // 1. Ruby → worker-profile TypeScript (in-browser wasm).
   const t0 = performance.now();
   let out;
   try {
-    out = compiler.transpile(TARGET, srcMap);
+    out = compiler.transpile(TARGET, srcMap, { profile: PROFILE });
   } catch (e) {
     out = { error: `transpile threw: ${e.message}` };
   }
-  const ms = performance.now() - t0;
   lastBuild = {
     files: out.files || [],
     diagnostics: out.diagnostics || [],
     error: out.error || null,
-    ms,
+    transpileMs: performance.now() - t0,
   };
+  lastBundle = null; // invalidate until the new bundle lands
   renderApp();
   renderMarkers();
+
+  // 2. Bundle the emitted TS → browser-loadable ESM (esbuild-wasm). Async; a
+  // newer edit (higher seq) supersedes this one's result.
+  if (out.error || !bundler) return;
+  const emitted = Object.fromEntries(lastBuild.files.map((f) => [f.path, f.content]));
+  let b;
+  try {
+    b = await bundler.bundle(emitted);
+  } catch (e) {
+    b = { ms: 0, errors: [{ text: `bundler threw: ${e.message}` }], warnings: [], outputs: {} };
+  }
+  if (seq !== buildSeq) return; // a later build already ran
+  lastBundle = b;
+  renderApp();
 }
 
 function renderMarkers() {
@@ -112,44 +133,70 @@ function renderMarkers() {
   editor.setMarkers(lastBuild.diagnostics.filter((d) => d.path === currentPath));
 }
 
-// ---- app pane (Phase 4: build readout + Phase 5 roadmap) -----------------
+// ---- app pane (Phase 4: transpile + esbuild bundle readout) --------------
 
 function renderApp() {
-  const b = lastBuild || { files: [], ms: 0, error: null, diagnostics: [] };
+  const b = lastBuild || { files: [], transpileMs: 0, error: null, diagnostics: [] };
   const errs = b.diagnostics.filter((d) => d.severity === "error").length;
   if (b.error) {
     setStatus(`build error: ${b.error}`, "err");
   } else {
-    setStatus(`compiled ${b.files.length} TS files${errs ? ` · ${errs} error${errs > 1 ? "s" : ""}` : ""} in ${b.ms.toFixed(1)} ms`, errs ? "err" : "ok");
+    const bundleNote = lastBundle
+      ? (lastBundle.errors.length ? ` · bundle: ${lastBundle.errors.length} err` : ` · bundled ${Object.keys(lastBundle.outputs).length} ESM`)
+      : (bundler ? " · bundling…" : "");
+    setStatus(`compiled ${b.files.length} TS files${errs ? ` · ${errs} error${errs > 1 ? "s" : ""}` : ""} in ${b.transpileMs.toFixed(1)} ms${bundleNote}`, errs ? "err" : "ok");
   }
 
   els.appHost.innerHTML = "";
   const h = document.createElement("h2");
-  h.textContent = "Live app loop — coming in Phase 5";
+  h.textContent = "Live app loop — Phase 5 (next)";
   const p = document.createElement("p");
   p.innerHTML =
-    "Studio compiles your Ruby to TypeScript in the browser on every edit " +
-    "(see the build readout below — it's live). The next step bundles that TS " +
-    "with <code>esbuild-wasm</code> and hot-swaps it into the running blog " +
-    "(SharedWorker + sqlite-wasm), so this pane becomes the app itself.";
+    "On every edit, studio compiles your Ruby to the worker-profile TypeScript " +
+    "and bundles it to browser-loadable ESM entirely client-side — both steps " +
+    "are live below. Phase 5 loads those three bundles as the running app " +
+    "(main thread + SharedWorker + DB worker) over sqlite-wasm, and hot-swaps " +
+    "them so this pane becomes the app itself.";
   const road = document.createElement("p");
   road.className = "roadmap";
   road.innerHTML =
-    "Until then: open <a href=\"../blog/\">/blog/</a> to see that running " +
+    "Meanwhile: open <a href=\"../blog/\">/blog/</a> to see that running " +
     "runtime, or <a href=\"../playground/\">/playground/</a> to read the " +
     "emitted code for every target.";
 
-  const build = document.createElement("div");
-  build.id = "buildline";
-  if (b.error) {
-    build.innerHTML = `<span class="k">last build</span> <span style="color:#b00020">${escapeHtml(b.error)}</span>`;
-  } else {
-    build.innerHTML =
-      `<span class="k">last build</span> ${TARGET} · ${b.files.length} files · ` +
-      `${b.ms.toFixed(1)} ms · ${errs} error${errs === 1 ? "" : "s"}`;
-  }
+  els.appHost.append(h, p, road, transpileLine(b, errs), bundleLine());
+}
 
-  els.appHost.append(h, p, road, build);
+function transpileLine(b, errs) {
+  const el = document.createElement("div");
+  el.id = "buildline";
+  el.innerHTML = b.error
+    ? `<span class="k">transpile</span> <span style="color:#b00020">${escapeHtml(b.error)}</span>`
+    : `<span class="k">transpile</span> ${TARGET}/${PROFILE} · ${b.files.length} files · ` +
+      `${b.transpileMs.toFixed(1)} ms · ${errs} error${errs === 1 ? "" : "s"}`;
+  return el;
+}
+
+function bundleLine() {
+  const el = document.createElement("div");
+  el.id = "bundleline";
+  if (!bundler) {
+    el.innerHTML = `<span class="k">bundle</span> esbuild-wasm unavailable (offline?) — transpile still live`;
+    return el;
+  }
+  if (!lastBundle) {
+    el.innerHTML = `<span class="k">bundle</span> …`;
+    return el;
+  }
+  if (lastBundle.errors.length) {
+    el.innerHTML = `<span class="k">bundle</span> <span style="color:#b00020">${escapeHtml(lastBundle.errors[0].text)}</span>`;
+    return el;
+  }
+  const sizes = Object.entries(lastBundle.outputs)
+    .map(([name, o]) => `${name} ${(o.bytes / 1024).toFixed(1)}KB`)
+    .join(" · ");
+  el.innerHTML = `<span class="k">bundle</span> ${sizes} · ${lastBundle.ms.toFixed(0)} ms <span style="color:#176e2b">(ESM, ready to run)</span>`;
+  return el;
 }
 
 function escapeHtml(s) {
@@ -171,8 +218,15 @@ async function boot() {
   srcMap = fixture;
 
   renderSources();
-  setStatus("loading editor…");
-  editor = await createEditor(els.editorHost, { onChange: onEditorChange });
+  setStatus("loading editor + bundler…");
+  // Editor and esbuild load in parallel; if esbuild's CDN load fails (offline /
+  // strict CSP), studio degrades to transpile-only rather than failing to boot.
+  const [ed, bnd] = await Promise.all([
+    createEditor(els.editorHost, { onChange: onEditorChange }),
+    loadBundler().catch((e) => { console.warn("[studio] bundler unavailable:", e.message); return null; }),
+  ]);
+  editor = ed;
+  bundler = bnd;
 
   const first = srcMap[DEFAULT_FILE] != null ? DEFAULT_FILE : sourceFiles()[0];
   selectFile(first);
@@ -182,13 +236,15 @@ async function boot() {
   window.__studio = {
     ready: true,
     editorKind: editor.kind,
+    hasBundler: () => bundler != null,
     selectSource: (path) => selectFile(path),
-    editFile(path, content) {
+    async editFile(path, content) {
       srcMap[path] = content;
       if (path === currentPath) editor.setValue(content, langForPath(path));
-      build();
+      await build();
     },
     build: () => lastBuild,
+    bundle: () => lastBundle,
     source: (path) => srcMap[path],
     sourceCount: () => sourceFiles().length,
   };

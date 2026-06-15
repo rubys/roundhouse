@@ -25,12 +25,19 @@ use roundhouse::analyze::{diagnose, Analyzer, Severity};
 use roundhouse::emit::ruby::ty_to_rbs;
 use roundhouse::emit::{crystal, elixir, go, kotlin, python, ruby, rust, swift, typescript};
 use roundhouse::ingest::ingest_app_from_tree;
+use roundhouse::profile::DeploymentProfile;
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
 struct TranspileInput {
     language: String,
     src: HashMap<String, String>,
+    /// Optional deployment profile, only meaningful for `typescript`:
+    /// `worker` (SharedWorker browser app — what /studio/ runs), `node-async`,
+    /// `node-sync`. Absent/`default` ⇒ the plain `emit()` (what /playground/
+    /// shows). Ignored by every other target.
+    #[serde(default)]
+    profile: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -157,7 +164,17 @@ fn transpile_inner(json_in: &str) -> String {
         .collect();
 
     let emitted = match input.language.as_str() {
-        "typescript" | "ts" => typescript::emit(&app),
+        "typescript" | "ts" => match input.profile.as_deref() {
+            Some("worker") => typescript::emit_with_profile(&app, &DeploymentProfile::worker()),
+            Some("node-async") => {
+                typescript::emit_with_profile(&app, &DeploymentProfile::node_async())
+            }
+            Some("node-sync") => {
+                typescript::emit_with_profile(&app, &DeploymentProfile::node_sync())
+            }
+            None | Some("default") => typescript::emit(&app),
+            Some(other) => return error_json(&format!("unknown profile: {other}")),
+        },
         "rust" | "rs" => rust::emit(&app),
         "crystal" | "cr" => crystal::emit(&app),
         "python" | "py" => python::emit(&app),

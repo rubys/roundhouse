@@ -27,8 +27,11 @@ export async function loadCompiler(wasmBytes, wasiOpts = {}) {
   const decoder = new TextDecoder();
 
   return {
-    transpile(language, srcMap) {
-      const input = JSON.stringify({ language, src: srcMap });
+    // opts.profile (typescript only): "worker" | "node-async" | "node-sync".
+    // Omitted ⇒ the default emit (what /playground/ shows). /studio/ passes
+    // "worker" to get the SharedWorker browser app it runs.
+    transpile(language, srcMap, { profile } = {}) {
+      const input = JSON.stringify(profile ? { language, src: srcMap, profile } : { language, src: srcMap });
       const inputBytes = encoder.encode(input);
 
       const inputPtr = rh_alloc(inputBytes.length);
