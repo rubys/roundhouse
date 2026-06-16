@@ -25,6 +25,7 @@ require_relative "../runtime/base64"
 require_relative "../runtime/json"
 require_relative "../runtime/db"
 require_relative "../runtime/active_record"
+require_relative "../runtime/sqlite_adapter"
 require_relative "../config/schema"
 require_relative "../runtime/action_dispatch"
 require_relative "../runtime/action_controller"
@@ -38,17 +39,28 @@ require_relative "../config/routes"
 # One-time global setup: configure the Db primitive surface (cruby
 # shim under stock CRuby — `runtime/spinel/db.rb` wraps the sqlite3
 # gem; FFI shim under spinel-compiled binaries once matz/spinel#405
-# lands), load the schema via Db.exec, and rely on lowerer-emitted
-# per-model `_adapter_*` Level-3 primitives for all AR access. The
-# 12-method `ActiveRecord.adapter` shape is intentionally NOT wired —
-# any path that falls through to it surfaces a NoMethodError on nil
-# and tells us which AR call needs Level-3 emit next.
+# lands), load the schema via Db.exec, and wire `ActiveRecord.adapter`
+# to `SqliteAdapter`.
+#
+# Wiring the adapter matches the per-target test harnesses (crystal
+# `test_helper.cr`, typescript) and the blog's `main.rb`. The generic AR
+# class methods (`count`/`exists?`/`where`) delegate to
+# `ActiveRecord.adapter` rather than per-model `_adapter_*` primitives, so
+# their base bodies must type-check against a real adapter under spinel
+# AOT — which compiles every method, including ones a per-model override
+# shadows. CRuby tolerated an unwired (nil) adapter because it never
+# compiles a dead base method; spinel does, and `ActiveRecord.adapter`
+# resolved to its nil default makes `_adapter_count` emit a `nil` from an
+# `Integer`-typed function (incompatible-pointer C error). SqliteAdapter
+# shares the single Db configured here, so no separate `.configure` is
+# needed.
 #
 # Per-test isolation comes from `SchemaSetup.reset!` calling each
 # model's `_adapter_truncate`. Each model's lowered class has its
 # own truncate primitive (per-table DELETE).
 Db.configure(":memory:")
 Schema.statements.each { |sql| Db.exec(sql) }
+ActiveRecord.adapter = SqliteAdapter
 
 module SchemaSetup
   # Per-model truncate via lowerer-emitted `_adapter_truncate`. The
