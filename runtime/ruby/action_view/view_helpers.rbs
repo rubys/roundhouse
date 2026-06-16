@@ -104,13 +104,24 @@ module ActionView
     def self.escape_or_empty: (untyped value) -> String
 
     # ── attribute rendering ────────────────────────────────────────
-    # `attrs` is a Hash whose keys are Symbol or String and whose
-    # values are String/Integer/nil/Hash (nested for data:/aria:).
-    # In transpile, callers funnel through a merge helper (rust2's
-    # `merge_attrs`, TS spread, Crystal NamedTuple→Hash) that lifts
-    # Symbol keys to String, so the param key narrows to String at
-    # this boundary; values stay `untyped` because the body branches
-    # on `is_a?(Hash)` to handle nested data/aria maps.
-    def self.render_attrs: (Hash[String, untyped] attrs) -> String
+    # `attrs` is a Symbol-keyed Hash — the shape every caller already
+    # builds (`{ rel: ..., href: ... }.merge(opts.to_h)`, where `opts`
+    # is the Symbol-keyed html-options hash above). Values are
+    # String/Integer/nil/Hash (nested for data:/aria:) and stay
+    # `untyped` because the body branches on `is_a?(Hash)` for nested
+    # maps and stringifies through `k.to_s` at render time.
+    #
+    # Key is `Symbol`, not `String`, on purpose: it matches the callers'
+    # dataflow, which keeps spinel's `SymPolyHash` param/arg consistent
+    # (a `String` hint here is what made spinel's `--rbs` build a
+    # `StrPolyHash *` param against `SymPolyHash *` args and segfault).
+    # Symbol is also the faster monomorphization on the Ruby family —
+    # interned-symbol keys hash by identity with no per-key `to_s`
+    # allocation, where String keys pay content hashing plus a
+    # frozen-key dup on insert. Strict targets are unaffected: they
+    # render `Ty::Sym` as their String/string key type regardless
+    # (rust2 `HashMap<String, Value>`, TS `Record<string, …>`), and
+    # Crystal's already-Symbol-keyed callers finally match the param.
+    def self.render_attrs: (Hash[Symbol, untyped] attrs) -> String
   end
 end

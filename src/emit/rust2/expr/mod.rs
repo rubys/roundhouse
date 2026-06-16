@@ -975,10 +975,16 @@ fn emit_expr_inner(e: &Expr) -> String {
                         // so byte-parity is unaffected. Bind `_m` so the
                         // collected borrow outlives the (possibly cloned)
                         // temporary receiver. Mirrors the go2 fix.
+                        // Both `Ty::Str` and `Ty::Sym` keys render as a
+                        // `String` HashMap key (see ty.rs: `Ty::Sym =>
+                        // String`), so a Symbol-keyed hash iterates in the
+                        // same random per-run order and needs the same
+                        // sort for deterministic attribute output (e.g.
+                        // render_attrs, whose param is `Hash[Symbol, …]`).
                         let key_is_str = matches!(
                             r.ty.as_ref(),
                             Some(crate::ty::Ty::Hash { key, .. })
-                                if matches!(**key, crate::ty::Ty::Str)
+                                if matches!(**key, crate::ty::Ty::Str | crate::ty::Ty::Sym)
                         );
                         if key_is_str {
                             return format!(
