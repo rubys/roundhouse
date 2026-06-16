@@ -37,6 +37,42 @@
   #appStatus .ok { color: #176e2b; }
   #appStatus .err { color: #b00020; }
   #appFrame { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; background: #fff; }
+
+  /* right-column tab bar (app | tests) */
+  .head.tabs { display: flex; gap: 2px; padding: 0; align-items: stretch; }
+  .head.tabs .tab { border: 0; background: none; font: inherit; color: #777; padding: 4px 10px; cursor: pointer; border-bottom: 2px solid transparent; }
+  .head.tabs .tab:hover { color: #1a1a1a; }
+  .head.tabs .tab.active { color: #1a1a1a; border-bottom-color: #3b82f6; }
+  .tbadge { display: inline-block; margin-left: 5px; padding: 0 5px; border-radius: 8px; font-size: 10px; line-height: 15px; color: #fff; background: #aaa; }
+  .tbadge.ok { background: #1a8f3c; }
+  .tbadge.err { background: #c0263a; }
+  .tbadge.run { background: #b8860b; }
+  .pane { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  .pane[hidden] { display: none; }
+
+  /* tests pane */
+  #testBar { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-bottom: 1px solid #eee; background: #fbfbfb; font-size: 12px; }
+  #runTestsBtn { font: inherit; font-size: 12px; border: 1px solid #d0d0d0; background: #fff; border-radius: 5px; padding: 2px 9px; cursor: pointer; }
+  #runTestsBtn:hover { background: #f0f0f0; }
+  #runTestsBtn:disabled { opacity: .5; cursor: default; }
+  #testSummary .ok { color: #176e2b; } #testSummary .err { color: #b00020; } #testSummary .k { color: #999; }
+  #conformance { flex: 0 0 auto; padding: 6px 8px; border-bottom: 1px solid #eee; font-size: 11px; color: #666; }
+  #conformance .row { display: flex; flex-wrap: wrap; gap: 4px 5px; margin-top: 4px; }
+  .chip { border: 1px solid #e0e0e0; border-radius: 9px; padding: 0 7px; line-height: 17px; color: #555; background: #fafafa; }
+  .chip.live { border-color: #bcd6ff; background: #eef4ff; color: #1f4e9c; font-weight: 600; }
+  .chip.live.err { border-color: #f0c2c2; background: #fdeded; color: #a01b2c; }
+  .chip .m { color: #999; font-size: 10px; }
+  #testResults { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px 0; }
+  .suite { margin: 0; }
+  .suite > .suite-h { padding: 3px 8px; color: #444; font-weight: 600; background: #f6f6f6; border-bottom: 1px solid #eee; }
+  .tcase { display: flex; gap: 6px; padding: 2px 8px 2px 14px; align-items: baseline; }
+  .tcase .ico { flex: 0 0 auto; width: 11px; }
+  .tcase.pass .ico { color: #1a8f3c; } .tcase.fail .ico { color: #c0263a; } .tcase.skip .ico { color: #b8860b; }
+  .tcase .nm { flex: 1 1 auto; color: #333; min-width: 0; }
+  .tcase .ms { flex: 0 0 auto; color: #aaa; font-size: 10px; }
+  .tcase.fail .nm { color: #a01b2c; }
+  .terr { color: #a01b2c; background: #fdf3f3; white-space: pre-wrap; padding: 2px 8px 4px 31px; font-size: 11px; }
+  #testResults .empty { padding: 12px; color: #999; }
 </style>
 </head>
 <body>
@@ -56,9 +92,22 @@
     <div id="editorHost"></div>
   </div>
   <div id="appCol" class="col">
-    <div class="head">running app</div>
-    <div id="appStatus">booting…</div>
-    <iframe id="appFrame" title="running app"></iframe>
+    <div class="head tabs" id="rightTabs">
+      <button class="tab active" data-tab="app">running app</button>
+      <button class="tab" data-tab="tests">tests <span id="tabBadge" class="tbadge" hidden></span></button>
+    </div>
+    <div id="appPane" class="pane">
+      <div id="appStatus">booting…</div>
+      <iframe id="appFrame" title="running app"></iframe>
+    </div>
+    <div id="testsPane" class="pane" hidden>
+      <div id="testBar">
+        <button id="runTestsBtn">▶ Run</button>
+        <span id="testSummary" class="k">not run yet</span>
+      </div>
+      <div id="conformance"></div>
+      <div id="testResults"><div class="empty">No run yet — switch here or hit Run.</div></div>
+    </div>
   </div>
 </main>
 <script type="module" src="studio.js"></script>

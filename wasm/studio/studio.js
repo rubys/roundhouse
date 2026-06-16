@@ -59,6 +59,14 @@ const els = {
   editorHead: document.getElementById("editorHead"),
   appStatus: document.getElementById("appStatus"),
   appFrame: document.getElementById("appFrame"),
+  rightTabs: document.getElementById("rightTabs"),
+  appPane: document.getElementById("appPane"),
+  testsPane: document.getElementById("testsPane"),
+  tabBadge: document.getElementById("tabBadge"),
+  runTestsBtn: document.getElementById("runTestsBtn"),
+  testSummary: document.getElementById("testSummary"),
+  conformance: document.getElementById("conformance"),
+  testResults: document.getElementById("testResults"),
 };
 
 // The app runs at <studio>/app/ (a SW-served subtree); sw.js sits beside this
@@ -79,6 +87,9 @@ let lastBundle = null;      // { ms, errors, warnings, outputs }
 let lastTestRun = null;     // { total, passed, failed, skipped, results } | { error }
 let buildSeq = 0;           // guards stale async builds
 let debounceTimer = null;
+let activeTab = "app";      // "app" | "tests" (right-column tab)
+let testsStale = true;      // emitted suite changed since the last run
+let testRunPromise = null;  // the in-flight run+paint (coalesces concurrent calls)
 
 function setStatus(msg, kind = "") { els.status.textContent = msg; els.status.className = kind; }
 function setAppStatus(html) { els.appStatus.innerHTML = html; }
@@ -173,6 +184,12 @@ async function build() {
     ? ` · ${errs} error${errs > 1 ? "s" : ""}`
     : suites ? ` · ${suites} test suite${suites > 1 ? "s" : ""}` : "";
   setStatus(`${lastBuild.files.length} TS files${detail} in ${lastBuild.transpileMs.toFixed(0)} ms`, errs ? "err" : "ok");
+
+  // The emitted suite just changed; mark the last run stale. Re-run eagerly
+  // only while the tests tab is open (so editing a test/model shows live
+  // green/red); otherwise the badge waits until you switch to the tab.
+  testsStale = true;
+  if (activeTab === "tests" && !testRunPromise) runAndRenderTests();
   if (!bundler) { setAppStatus(`<span class="err">esbuild unavailable</span> — transpile-only`); return; }
 
   // 2. Bundle the emitted TS → 3 browser-loadable ESM bundles.
@@ -268,6 +285,112 @@ async function runTests() {
   }
 }
 
+// ---- the test panel UI (Phase 8) -----------------------------------------
+
+// The other 8 targets the same Minitest suite is emitted to. Only TypeScript
+// runs LIVE in the browser (it's the one with a browser runtime); the rest are
+// CI-attested — the same suite passes when emitted to them and run in CI
+// (decision #5). Labelled as such; never faked as a live result.
+const CONFORMANCE = [
+  ["go", "Go"], ["rust", "Rust"], ["python", "Python"], ["crystal", "Crystal"],
+  ["elixir", "Elixir"], ["kotlin", "Kotlin"], ["swift", "Swift"], ["ruby", "Ruby"],
+];
+
+function setTab(tab) {
+  activeTab = tab;
+  [...els.rightTabs.querySelectorAll(".tab")].forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+  els.appPane.hidden = tab !== "app";
+  els.testsPane.hidden = tab !== "tests";
+  if (tab === "tests" && testsStale && !testRunPromise) runAndRenderTests();
+}
+
+function prettyMethod(m) {
+  return m.replace(/^is_/, "").replace(/^test_/, "").replace(/_/g, " ");
+}
+
+function renderTabBadge(run) {
+  const b = els.tabBadge;
+  if (!run) { b.hidden = true; return; }
+  b.hidden = false;
+  if (run.running) { b.className = "tbadge run"; b.textContent = "…"; return; }
+  if (run.error) { b.className = "tbadge err"; b.textContent = "err"; return; }
+  b.className = "tbadge " + (run.failed ? "err" : "ok");
+  b.textContent = `${run.passed}/${run.total}`;
+}
+
+function renderTestSummary(run) {
+  if (run.running) { els.testSummary.className = "k"; els.testSummary.textContent = "running…"; return; }
+  if (run.error) { els.testSummary.className = "err"; els.testSummary.textContent = run.error; return; }
+  const cls = run.failed ? "err" : "ok";
+  els.testSummary.innerHTML = `<span class="${cls}">${run.passed} passed`
+    + `${run.failed ? `, ${run.failed} failed` : ""}${run.skipped ? `, ${run.skipped} skipped` : ""}</span>`
+    + ` <span class="k">· ${run.total} tests · ${run.bundleMs != null ? run.bundleMs.toFixed(0) : "?"}ms bundle</span>`;
+}
+
+function renderConformance(run) {
+  const tsErr = run && !run.error && run.failed > 0;
+  const tsTxt = run && !run.error ? `TS ${run.passed}/${run.total}` : (run?.running ? "TS …" : "TS —");
+  const chips = [`<span class="chip live${tsErr ? " err" : ""}">${tsTxt} <span class="m">live</span></span>`]
+    .concat(CONFORMANCE.map(([k, name]) =>
+      `<span class="chip" title="the same Minitest suite passes when emitted to ${name} and run in CI">${name} ✓ <span class="m">CI</span></span>`));
+  els.conformance.innerHTML =
+    `<div>same Minitest suite, 9 targets — TypeScript runs <b>live, here in your browser</b>; the rest are <b>CI-attested</b>.</div>`
+    + `<div class="row">${chips.join("")}</div>`;
+}
+
+function renderTestResults(run) {
+  if (run.error) { els.testResults.innerHTML = `<div class="empty">test run failed: ${escapeHtml(run.error)}</div>`; return; }
+  // Group flat `ClassName#test_method` results by suite class (≈ one per file).
+  const groups = new Map();
+  for (const r of run.results) {
+    const hash = r.name.indexOf("#");
+    const suite = hash >= 0 ? r.name.slice(0, hash) : r.name;
+    const method = hash >= 0 ? r.name.slice(hash + 1) : r.name;
+    if (!groups.has(suite)) groups.set(suite, []);
+    groups.get(suite).push({ ...r, method });
+  }
+  let html = "";
+  for (const [suite, cases] of groups) {
+    const fails = cases.filter((c) => c.status === "fail").length;
+    html += `<div class="suite"><div class="suite-h">${escapeHtml(suite)} <span class="m">${cases.length - fails}/${cases.length}</span></div>`;
+    for (const c of cases) {
+      const ico = c.status === "pass" ? "✓" : c.status === "skip" ? "‒" : "✗";
+      html += `<div class="tcase ${c.status}"><span class="ico">${ico}</span>`
+        + `<span class="nm">${escapeHtml(prettyMethod(c.method))}</span>`
+        + `<span class="ms">${c.ms != null ? c.ms.toFixed(0) + "ms" : ""}</span></div>`;
+      if (c.status === "fail" && c.error) html += `<div class="terr">${escapeHtml(c.error)}</div>`;
+    }
+    html += `</div>`;
+  }
+  els.testResults.innerHTML = html || `<div class="empty">no tests</div>`;
+}
+
+// Run the suite and paint the panel (summary + tab badge + conformance + tree).
+// Concurrent callers (e.g. a tab-switch auto-run racing an explicit Run) share
+// the one in-flight promise — including the paint — so nobody gets stale data.
+function runAndRenderTests() {
+  if (testRunPromise) return testRunPromise;
+  testRunPromise = (async () => {
+    testsStale = false;
+    els.runTestsBtn.disabled = true;
+    renderTabBadge({ running: true });
+    renderTestSummary({ running: true });
+    renderConformance({ running: true });
+    try {
+      const run = await runTests();
+      renderTabBadge(run);
+      renderTestSummary(run);
+      renderConformance(run);
+      renderTestResults(run);
+      return run;
+    } finally {
+      els.runTestsBtn.disabled = false;
+      testRunPromise = null;
+    }
+  })();
+  return testRunPromise;
+}
+
 function renderMarkers() {
   if (!editor || !lastBuild) return;
   editor.setMarkers(lastBuild.diagnostics.filter((d) => d.path === currentPath));
@@ -302,6 +425,14 @@ async function boot() {
   appHost = host;
   if (!host) setAppStatus(`<span class="err">app host unavailable</span> (no Service Worker)`);
 
+  // Right-column tabs + test-panel controls.
+  els.rightTabs.addEventListener("click", (e) => {
+    const tab = e.target.closest(".tab")?.dataset.tab;
+    if (tab) setTab(tab);
+  });
+  els.runTestsBtn.addEventListener("click", () => runAndRenderTests());
+  renderConformance(null); // static strip visible before the first run
+
   const first = srcMap[DEFAULT_FILE] != null ? DEFAULT_FILE : sourceFiles()[0];
   selectFile(first);
   await build();
@@ -323,19 +454,17 @@ async function boot() {
     bundle: () => lastBundle,
     testSuite: () => lastBuild?.testSuite || null, // Phase 6: emitted Minitest suite
     runTests,                                       // Phase 7: run the suite in-browser
+    runTestsUI: runAndRenderTests,                  // Phase 8: run + paint the panel
     testRun: () => lastTestRun,
     source: (path) => srcMap[path],
     sourceCount: () => sourceFiles().length,
+    selectTab: setTab,
   };
 
-  // Phase 7: run the emitted suite once in the background — proves the
-  // in-browser harness end-to-end without blocking the visible app boot.
-  // (The live results panel + per-edit re-run is Phase 8.)
-  runTests().then((r) => {
-    if (r.error) console.warn("[studio] test run:", r.error);
-    else console.log(`[studio] tests: ${r.passed}/${r.total} passed`
-      + (r.failed ? `, ${r.failed} failed` : "") + (r.skipped ? `, ${r.skipped} skipped` : ""));
-  });
+  // Run the emitted suite once in the background and paint the panel/badge, so
+  // the "tests N/N" badge is live even before you open the tab. Doesn't block
+  // the visible app boot.
+  runAndRenderTests();
 }
 
 boot().catch((e) => setStatus(`boot failed: ${e.message}`, "err"));

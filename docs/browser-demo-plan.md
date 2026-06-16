@@ -143,7 +143,7 @@ verifiable development cycle."**
 | 5 | Live loop: edit Ruby → wasm recompile → esbuild bundle → run/reload the blog | D | 2–3 | **DONE (full-reload loop)** — SW-hosted iframe runs the app over sqlite-wasm; edits reflect. Hot-swap = later polish |
 | 6 | Emit + ship the Minitest suite into the browser payload | D.2 | ½–1 | **DONE** — worker-profile transpile already emits the suite; studio retains + surfaces it (`window.__studio.testSuite()`), verifier proves it ships + is live |
 | 7 | `node:test` → browser test-runner harness + in-memory sqlite isolation | D.2 | 1–2 | **DONE** — `lib/test-runtime.mjs` (node:* shims + in-memory Db) injected at bundle time (suite byte-identical to CI); `bundleTests` + per-file Workers run the real-blog suite **21/21 green** in-browser; verifier covers green + red detection. No emitter change |
-| 8 | Test-results UI panel + cross-target CI badge strip | D.2 | ½–1 | blocked on 7 |
+| 8 | Test-results UI panel + cross-target CI badge strip | D.2 | ½–1 | **DONE** — right-column `app \| tests` tab: per-suite green/red tree + counts + failure messages, live tab badge, 9-target conformance strip (TS live, 8 CI-attested). Auto-runs after boot + on edit (tests tab); verifier covers green + red panels |
 | 9 | Runtime sourcemaps: failing-test stack traces map back to Ruby source | D.2 | 1–2 | blocked on 7 |
 
 Total: rung A alone **~2–3 days**; full arc through D.2 **~9–14 days**.
@@ -460,13 +460,28 @@ shared DB leaked that across files. With it, the real-blog suite is **21/21
 green** in-browser; `verify-studio.mjs` asserts both the green run and that a
 broken assertion turns the run red.
 
-### Phase 8 — Results UI + cross-target badges (rung D.2, ½–1 day)
+### Phase 8 — Results UI + cross-target badges (rung D.2, ½–1 day) — **DONE**
 
-- A results panel: per-test green/red, counts, failure messages.
-- The cross-target conformance strip: "TS ✓ (running now in your browser),
-  Go ✓, Rust ✓, Python ✓ (CI-attested)". The non-TS badges are precomputed
-  from CI (decision #5) — wire them from the existing per-target CI results,
-  and label them as CI-attested, not live.
+The right column gained a tab bar (`running app | tests`); the tab swap doubles
+as the DB-isolation boundary (the App tab is the live iframe on opfs; the Tests
+tab is the harness on a fresh in-memory DB). The **tests pane**:
+- a run bar (**▶ Run** + a summary: `N passed, M failed · T tests · Kms bundle`);
+- the **conformance strip**: 9 chips — `TS N/N live` (the real in-browser count)
+  + `Go ✓ CI`, `Rust ✓ CI`, … for the other 8 targets, **labelled CI-attested**,
+  not live (decision #5 / risk #5);
+- a **results tree** grouped by suite class, each case a green/red/skip row with
+  its timing; failing rows expand to the assertion message.
+- The **tab label carries a live badge** (`21/21`, green/red) so a regression is
+  visible even from the App tab.
+
+Runs fire once after boot (background, paints the badge) and after each edit
+**while the tests tab is open** (so editing a test or model shows live
+green/red); otherwise the suite is marked stale and runs on tab-switch.
+`verify-studio.mjs` asserts both the pristine green panel (badge, suite groups,
+all-pass rows, 9 chips) and that a broken assertion repaints it red (red badge,
+failing rows, messages). All studio-side — no emitter change.
+
+Not yet: clicking a failing row back to the Ruby source line (that's Phase 9).
 
 ### Phase 9 — Runtime sourcemaps for debug (rung D.2, 1–2 days)
 

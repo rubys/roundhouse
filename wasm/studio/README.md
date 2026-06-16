@@ -32,11 +32,18 @@ Studio runs the emitted blog **live**, entirely client-side:
 - esbuild + Monaco + sqlite-wasm/turbo + Tailwind load from CDNs; each piece
   degrades independently (no esbuild → transpile-only; no SW → no run).
 
-**Phases 6-7 (rung D.2) done — the Minitest suite ships AND runs in-browser.**
-Every build's worker-profile transpile emits the suite (`test/<x>.test.ts`, the
-`test/_runtime/` harness, `test/fixtures/*.ts`); `testSuiteFrom()` retains it
-(status line shows a `· N test suites` count, exposed via
-`window.__studio.testSuite()`). `window.__studio.runTests()` then **runs** it:
+**Phases 6-8 (rung D.2) done — the Minitest suite ships, runs, and shows
+green/red in-browser.** The right column has a `running app | tests` tab: the
+App tab is the live iframe (opfs DB); the **Tests tab** is the results panel —
+a run bar + a 9-target **conformance strip** (`TS N/N live` + 8 `✓ CI`
+chips, CI-attested not live) + a per-suite green/red tree with timings and
+failure messages; the tab label carries a live `N/N` badge. Runs fire after
+boot and (on the tests tab) after each edit.
+
+Under it: every build's worker-profile transpile emits the suite
+(`test/<x>.test.ts`, the `test/_runtime/` harness, `test/fixtures/*.ts`);
+`testSuiteFrom()` retains it (exposed via `window.__studio.testSuite()`).
+`window.__studio.runTests()` then **runs** it:
 
 > bundle the suite (one standalone ESM per spec file, via `bundleTests`) →
 > run each file in its own Worker over a FRESH in-memory sqlite-wasm DB →
@@ -54,16 +61,15 @@ Every build's worker-profile transpile emits the suite (`test/<x>.test.ts`, the
 - A run fires once in the background after boot (console-logged); the test
   *sources* are editable in the tree, so an edit re-runs green/red.
 
-Deferred: true module hot-swap (no reload); the **results UI panel** + per-edit
-re-run + cross-target CI badge strip (Phase 8); runtime sourcemaps so a failing
+Deferred: true module hot-swap (no reload); runtime sourcemaps so a failing
 test clicks back to the Ruby line (Phase 9).
 
 ## Files
 
 | File | Role | Tracked |
 |---|---|---|
-| `index.html` | three-pane layout (sources / editor / running app iframe) | yes |
-| `studio.js` | the loop: source tree, transpile→bundle→host, app shell, emitted-test-suite retention (Phase 6) + in-browser run (Phase 7, `runTests`), test hooks | yes |
+| `index.html` | three-pane layout (sources / editor / right column) + the right-column `app \| tests` tab bar and results panel (Phase 8) | yes |
+| `studio.js` | the loop: source tree, transpile→bundle→host, app shell, test-suite retention (Phase 6) + in-browser run (Phase 7, `runTests`) + results panel/tabs (Phase 8), test hooks | yes |
 | `sw.js` | app-host service worker: serves the in-memory app at its scope | yes |
 | `verify-studio.mjs` | Playwright: boot → run → edit-reflects, in chromium (needs network) | yes |
 | `studio.png` | screenshot from the verifier | no (gitignored) |

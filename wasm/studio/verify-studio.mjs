@@ -1,10 +1,11 @@
-// Phase 5-7 smoke: drive /studio/ in chromium and assert the whole client-side
+// Phase 5-8 smoke: drive /studio/ in chromium and assert the whole client-side
 // loop — boot → transpile (worker profile) → esbuild bundle → host in a service
 // worker → RUN the app in an iframe over sqlite-wasm → edit Ruby → the running
 // app reflects it. Phase 6 asserts the emitted Minitest suite ships in the
 // browser payload and is live (a test-source edit reaches the shipped spec);
-// Phase 7 asserts it RUNS in-browser (per-file in-memory DB) — green on the
-// pristine suite, red after a broken assertion.
+// Phase 7 asserts it RUNS in-browser (per-file in-memory DB); Phase 8 asserts
+// the results PANEL paints — green (badge/suites/cases + 9-target conformance
+// strip) and red (failing rows + messages) after a broken assertion.
 // Editor-widget agnostic (via window.__studio).
 // (Needs network: esbuild + Monaco + sqlite-wasm/turbo + Tailwind load from CDNs.)
 //
@@ -85,6 +86,30 @@ if (run.error) {
   if (run.passed < run.total - run.skipped) fail(`not all tests passed (${run.passed}/${run.total})`);
 }
 
+// --- Phase 8: the results panel + cross-target strip render (pristine green) -
+console.log("\n=== results panel (Phase 8) ===");
+await page.evaluate(() => window.__studio.selectTab("tests"));
+await page.evaluate(() => window.__studio.runTestsUI());
+const panel = await page.evaluate(() => ({
+  badge: document.getElementById("tabBadge").textContent.trim(),
+  badgeOk: document.getElementById("tabBadge").classList.contains("ok"),
+  suites: document.querySelectorAll("#testResults .suite").length,
+  cases: document.querySelectorAll("#testResults .tcase").length,
+  passes: document.querySelectorAll("#testResults .tcase.pass").length,
+  chips: [...document.querySelectorAll("#conformance .chip")].map((e) => e.textContent.replace(/\s+/g, " ").trim()),
+  ciChips: document.querySelectorAll("#conformance .chip:not(.live)").length,
+  hasLive: !!document.querySelector("#conformance .chip.live"),
+}));
+console.log("badge:", panel.badge, "| suites:", panel.suites, "| cases:", panel.cases, "| pass:", panel.passes);
+console.log("conformance:", panel.chips.join("  "));
+if (!panel.badgeOk) fail(`tab badge not green (got "${panel.badge}")`);
+if (panel.suites < 4) fail(`expected ≥4 suite groups in the panel, got ${panel.suites}`);
+if (panel.cases < 8) fail(`expected ≥8 case rows in the panel, got ${panel.cases}`);
+if (panel.passes !== panel.cases) fail(`panel shows non-passing rows (${panel.passes}/${panel.cases})`);
+if (!panel.hasLive) fail("no live TS chip in the conformance strip");
+if (panel.ciChips !== 8) fail(`expected 8 CI-attested chips, got ${panel.ciChips}`);
+await page.evaluate(() => window.__studio.selectTab("app")); // back to the app for the next checks
+
 // --- the app RUNS: iframe renders the seeded blog over sqlite-wasm ----------
 console.log("\n=== running app ===");
 try {
@@ -149,13 +174,21 @@ else if (!/STUDIO-PHASE6-SUITE-LIVE/.test(tedit.suite.specs.find((f) => f.path =
   fail("test-source edit did not reach the emitted, shipped spec");
 else console.log("test-source edit flows into the shipped suite ✓");
 
-// --- Phase 7: the harness detects FAILURES (red), not just greens -----------
-// The edit above changed an assert_equal literal in article_test.rb, so
-// test_creates_* now expects the wrong title → re-running must report red.
-const redRun = await page.evaluate(() => window.__studio.runTests());
+// --- Phase 8: a broken assertion paints the panel RED (counts + messages) ---
+// The edits above broke article_test.rb's title assertion, so re-running must
+// report red — a red badge, failing rows, and the failure message in-panel.
+await page.evaluate(() => window.__studio.selectTab("tests"));
+const redRun = await page.evaluate(() => window.__studio.runTestsUI());
+const red = await page.evaluate(() => ({
+  badgeErr: document.getElementById("tabBadge").classList.contains("err"),
+  fails: document.querySelectorAll("#testResults .tcase.fail").length,
+  msgs: document.querySelectorAll("#testResults .terr").length,
+}));
+console.log("red panel:", red.fails, "failing rows,", red.msgs, "messages | badge err:", red.badgeErr);
 if (redRun.error) fail(`red-run errored: ${redRun.error}`);
 else if (!(redRun.failed >= 1)) fail(`expected the broken assertion to fail a test, got ${redRun.failed} failure(s)`);
-else console.log(`harness reports failures (${redRun.failed} red) after a broken assertion ✓`);
+else if (!red.badgeErr || red.fails < 1 || red.msgs < 1) fail(`panel did not render red (rows ${red.fails}, msgs ${red.msgs}, badgeErr ${red.badgeErr})`);
+else console.log(`results panel paints red (${red.fails} rows + messages) after a broken assertion ✓`);
 
 await page.screenshot({ path: "studio.png" });
 
