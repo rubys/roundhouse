@@ -133,6 +133,27 @@ fn article_renders_validate_with_inline_checks() {
 }
 
 #[test]
+fn article_renders_residualized_fill_timestamps() {
+    let files = lowered_real_blog();
+    let src = find(&files, "article.rb");
+    // `ActiveRecord::Base#fill_timestamps` probes the schema at runtime
+    // (`schema_columns.include?(:updated_at)`) on every save. Column
+    // presence is compile-time-constant, so the per-model override drops
+    // the `include?` guards and emits only the live assignments —
+    // `updated_at` on every save, `created_at` only on insert. The Ruby
+    // emitter uses postfix-modifier form for the single-line `if`.
+    assert!(src.contains("def fill_timestamps(creating)"), "{src}");
+    assert!(src.contains("now = Time.now.utc.iso8601"), "{src}");
+    assert!(src.contains("@updated_at = now"), "{src}");
+    assert!(src.contains("@created_at = now if creating"), "{src}");
+    // The runtime schema probe must be fully residualized away.
+    assert!(
+        !src.contains(".include?(:updated_at)") && !src.contains(".include?(:created_at)"),
+        "fill_timestamps still probes the schema at runtime:\n{src}",
+    );
+}
+
+#[test]
 fn article_renders_has_many_reader_and_dependent_destroy() {
     // The has_many proxy body started as `Comment.where(article_id:
     // @id)` and is rewritten by the Arel pass into an inline

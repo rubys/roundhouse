@@ -147,6 +147,128 @@ pub(super) fn push_schema_methods(
         Some(fields) => synth_update_typed(owner, fields),
         None => synth_update(owner, table),
     });
+
+    // def fill_timestamps(creating); now = Time.now.utc.iso8601; @updated_at = now; @created_at = now if creating; end
+    //
+    // Residualizes `ActiveRecord::Base#fill_timestamps`, which probes the
+    // schema at RUNTIME (`schema_columns.include?(:updated_at)`) on every
+    // save. Column presence is a compile-time-constant fact, so the
+    // per-model override drops the `include?` guards and emits only the
+    // live assignments. Models with neither timestamp column get no
+    // override and fall through to Base's (already-inert) generic version.
+    if let Some(m) = synth_fill_timestamps(owner, table) {
+        methods.push(m);
+    }
+}
+
+/// Per-model `fill_timestamps(creating)` — the compile-time
+/// residualization of `ActiveRecord::Base#fill_timestamps`. The Base
+/// version reads `self.class.schema_columns` and tests
+/// `.include?(:updated_at)` / `.include?(:created_at)` on every save;
+/// those facts are statically known per model, so the override drops
+/// the probes and emits only the live assignments:
+///
+///   def fill_timestamps(creating)
+///     now = Time.now.utc.iso8601
+///     @updated_at = now
+///     @created_at = now if creating
+///   end
+///
+/// Returns `None` for a model with neither timestamp column — it keeps
+/// Base's generic version, whose two `include?` checks both return false
+/// (already a no-op), so an empty override would be pure noise.
+/// `updated_at` is stamped on every save, `created_at` only on insert
+/// (`if creating`) — matching the Base semantics exactly. The `now`
+/// local is used at up to two sites; that's the same shape Base's
+/// hand-written body already presents to the rust2 `str_color`
+/// ownership pass, so no new clone-insertion handling is needed.
+fn synth_fill_timestamps(owner: &ClassId, table: &Table) -> Option<MethodDef> {
+    let has_col = |n: &str| table.columns.iter().any(|c| c.name.as_str() == n);
+    let has_updated = has_col("updated_at");
+    let has_created = has_col("created_at");
+    if !has_updated && !has_created {
+        return None;
+    }
+
+    let creating = Symbol::from("creating");
+    let now = Symbol::from("now");
+
+    // now = Time.now.utc.iso8601
+    let time_const = Expr::new(
+        Span::synthetic(),
+        ExprNode::Const { path: vec![Symbol::from("Time")] },
+    );
+    let iso = with_ty(send0(send0(send0(time_const, "now"), "utc"), "iso8601"), Ty::Str);
+    let mut stmts = vec![with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Var { id: VarId(0), name: now.clone() },
+                value: iso,
+            },
+        ),
+        Ty::Str,
+    )];
+
+    // `@<col> = now` — an Assign returning the (String) timestamp value.
+    let assign_now = |col: &str| {
+        with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign {
+                    target: LValue::Ivar { name: Symbol::from(col) },
+                    value: with_ty(var_ref(now.clone()), Ty::Str),
+                },
+            ),
+            Ty::Str,
+        )
+    };
+
+    // @updated_at = now  (every save)
+    if has_updated {
+        stmts.push(assign_now("updated_at"));
+    }
+
+    // @created_at = now if creating  (insert only)
+    if has_created {
+        stmts.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: with_ty(var_ref(creating.clone()), Ty::Bool),
+                then_branch: assign_now("created_at"),
+                else_branch: nil_lit(),
+            },
+        ));
+    }
+
+    Some(MethodDef {
+        name: Symbol::from("fill_timestamps"),
+        receiver: MethodReceiver::Instance,
+        params: vec![Param::positional(creating.clone())],
+        body: seq(stmts),
+        signature: Some(fn_sig(vec![(creating, Ty::Bool)], Ty::Nil)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    })
+}
+
+/// `recv.method` — no-arg, parenthesized send, matching the call shape
+/// the other synthesizers in this module emit.
+fn send0(recv: Expr, method: &str) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(recv),
+            method: Symbol::from(method),
+            args: vec![],
+            block: None,
+            parenthesized: true,
+        },
+    )
 }
 
 fn synth_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
