@@ -540,9 +540,14 @@ function reconcileHead(layoutHead: HTMLHeadElement): void {
   const keep = Array.from(document.head.children).filter(
     (el) =>
       (el.tagName === "LINK" && el.getAttribute("rel") === "stylesheet") ||
-      (el.tagName === "SCRIPT" &&
-        el.getAttribute("type") === "module" &&
-        el.hasAttribute("src")),
+      // Preserve injected <style> + any src'd <script> from the shell head.
+      // Vite builds use a stylesheet <link> (kept above); the studio surface
+      // instead injects a browser Tailwind JIT (a classic <script> that writes
+      // into a <style> it owns), so both must survive the head swap or the JIT
+      // ends up writing CSS into a detached node and nothing is styled. Moving
+      // already-executed nodes via replaceChildren does NOT re-run them.
+      el.tagName === "STYLE" ||
+      (el.tagName === "SCRIPT" && el.hasAttribute("src")),
   );
   const incoming = Array.from(layoutHead.childNodes).filter((node) => {
     if (node.nodeType !== 1) return true; // text / comments

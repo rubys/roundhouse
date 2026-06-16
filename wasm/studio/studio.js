@@ -41,6 +41,7 @@ function appShell(v) {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Roundhouse App</title>
 <meta name="turbo-refresh-method" content="morph">
+<link rel="icon" href="data:,">
 <meta name="juntos-worker" content="worker.js?v=${v}">
 <meta name="juntos-db-worker" content="db_worker.js?v=${v}">
 <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>

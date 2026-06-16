@@ -368,10 +368,19 @@ The identity demo — what separates roundhouse from "yet another transpiler."
 > opfs-sahpool VFS + directory by `import.meta.env.BASE_URL`, so `/studio/app/`
 > and `/blog/` get separate pools (the blog re-seeds once on the next deploy — a
 > distinct, non-default pool name). The wasm rebuild that bakes this in is the
-> CI `build-wasm` job (no committed binary). `verify-studio.mjs` asserts boot →
-> all 3 seeds render → a view edit reaches the running app. **Exit criterion met**
-> (edit reflects via a fast iframe reload, not yet true no-reload hot-swap).
-> Remaining polish: true module hot-swap; richer in-app interaction tests.
+> CI `build-wasm` job (no committed binary). **Styling:** Tailwind via
+> `@tailwindcss/browser@4` (CDN JIT) — which required a `client.ts` fix: its
+> `reconcileHead` (run on the initial render) was wiping the JIT's injected
+> `<style>`, so it now preserves `<style>` + src'd `<script>` (no-op for the
+> blog, which uses a precompiled stylesheet `<link>`). **Cold-start 404:** the
+> app-host waits for the SW to be fully `activated` and retries the iframe mount
+> if the first navigation raced SW control. `verify-studio.mjs` asserts boot →
+> all 3 seeds render → Tailwind applied → a view edit reaches the running app.
+> **Exit criterion met** (edit reflects via a fast iframe reload, not yet true
+> no-reload hot-swap). Remaining polish: true module hot-swap; richer in-app
+> interaction tests. OPFS-sahpool persistence verified (a created article
+> survives a fresh-`?v=`-worker reload) — the SAB/COOP-COEP console warning is
+> the *default* OPFS VFS probe failing, benign (sahpool is the no-header path).
 
 The killer demo. Reuses the blog's existing browser runtime wholesale — but as
 `/studio/`'s *own* embedded app instance (its own opfs DB namespace), not the

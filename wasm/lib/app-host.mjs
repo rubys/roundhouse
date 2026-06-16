@@ -6,41 +6,74 @@
 
 export async function createAppHost(iframe, { swUrl, scope }) {
   if (!("serviceWorker" in navigator)) throw new Error("Service Workers unavailable");
-  // NOTE: register with a scope NARROWER than the studio page (the app subtree),
-  // so this SW controls only the iframe — never the studio UI. Don't await
+  // Register with a scope NARROWER than the studio page (the app subtree), so
+  // this SW controls only the iframe — never the studio UI. Don't await
   // navigator.serviceWorker.ready: that waits for a worker controlling THIS
-  // page, which (by design) is out of scope and never happens. Wait for the
-  // registration's own worker to activate instead.
+  // page, which (by design) is out of scope and never happens.
   const reg = await navigator.serviceWorker.register(swUrl, { scope });
-  const sw = reg.active || (await waitForActive(reg));
+  // Wait for the worker to be fully ACTIVATED (not merely `reg.active` set,
+  // which can happen while still "activating"). A brand-new iframe navigation
+  // racing activation falls through to the network → 404 on the app scope; this
+  // + the mount retry below close that cold-start race.
+  const sw = await waitForActivated(reg);
 
   let mounted = false;
   return {
     scope,
-    /** Replace the served file map, then (first call) mount the iframe or
-     *  (subsequent) reload it so the new bundles take effect. */
     async update(files) {
       await postFiles(sw, files);
       if (!mounted) {
-        iframe.src = scope;
+        await mountWithRetry(iframe, scope);
         mounted = true;
       } else {
-        // Re-navigate (rather than location.reload) so a cross-origin-isolation
-        // or detached-doc state can't wedge the reload.
         iframe.contentWindow?.location.replace(scope);
       }
     },
   };
 }
 
-function waitForActive(reg) {
+function waitForActivated(reg) {
   return new Promise((resolve) => {
-    if (reg.active) return resolve(reg.active);
-    const w = reg.installing || reg.waiting;
-    w?.addEventListener("statechange", () => reg.active && resolve(reg.active));
-    navigator.serviceWorker.addEventListener("controllerchange", () => reg.active && resolve(reg.active));
+    const ready = () => reg.active && reg.active.state === "activated" ? reg.active : null;
+    const r = ready();
+    if (r) return resolve(r);
+    const onChange = () => { const a = ready(); if (a) resolve(a); };
+    (reg.installing || reg.waiting || reg.active)?.addEventListener("statechange", onChange);
+    navigator.serviceWorker.addEventListener("controllerchange", onChange);
+    const t = setInterval(() => { const a = ready(); if (a) { clearInterval(t); resolve(a); } }, 50);
   });
 }
+
+// Mount the iframe, and if the first navigation slipped past the SW (cold start:
+// served a network 404 instead of our shell), reload it — the SW is controlling
+// by then. Detect by the shell's worker <meta>, absent from a Pages 404 page.
+async function mountWithRetry(iframe, scope, tries = 5) {
+  for (let i = 0; i < tries; i++) {
+    await navigateIframe(iframe, scope, i === 0);
+    if (iframeServedShell(iframe)) return;
+    await delay(120 * (i + 1));
+  }
+}
+
+function navigateIframe(iframe, scope, first) {
+  return new Promise((resolve) => {
+    const onload = () => { iframe.removeEventListener("load", onload); resolve(); };
+    iframe.addEventListener("load", onload);
+    if (first) iframe.src = scope;
+    else iframe.contentWindow?.location.replace(scope);
+    setTimeout(resolve, 4000); // don't hang if load never fires
+  });
+}
+
+function iframeServedShell(iframe) {
+  try {
+    return !!iframe.contentDocument?.querySelector('meta[name="juntos-worker"]');
+  } catch {
+    return false;
+  }
+}
+
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Push the file map and await the SW's ack (so the iframe never loads before the
 // SW holds the files). Falls back to a short timeout if the ack path is missed.

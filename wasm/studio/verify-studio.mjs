@@ -62,6 +62,16 @@ try {
   console.log("frame text:", (await frameText()).slice(0, 200));
 }
 
+// Tailwind (browser JIT) actually styles the app: the `bg-blue-600` button must
+// have a real background (not transparent). Guards the reconcileHead fix that
+// keeps the injected <style> from being wiped on the initial render.
+const btnBg = await page.evaluate(() => {
+  const el = document.getElementById("appFrame")?.contentDocument?.querySelector("a.bg-blue-600");
+  return el ? getComputedStyle(el).backgroundColor : null;
+});
+console.log("tailwind: .bg-blue-600 background =", btnBg);
+if (!btnBg || btnBg === "rgba(0, 0, 0, 0)" || btnBg === "transparent") fail("Tailwind styling not applied (bg-blue-600 transparent)");
+
 // --- edit → reload: the running app reflects a view edit --------------------
 console.log("\n=== edit → reload loop ===");
 await page.evaluate((m) => {
