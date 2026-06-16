@@ -1,8 +1,10 @@
-// Phase 5+6 smoke: drive /studio/ in chromium and assert the whole client-side
+// Phase 5-7 smoke: drive /studio/ in chromium and assert the whole client-side
 // loop — boot → transpile (worker profile) → esbuild bundle → host in a service
 // worker → RUN the app in an iframe over sqlite-wasm → edit Ruby → the running
-// app reflects it. Phase 6 also asserts the emitted Minitest suite ships in the
-// browser payload and is live (a test-source edit reaches the shipped spec).
+// app reflects it. Phase 6 asserts the emitted Minitest suite ships in the
+// browser payload and is live (a test-source edit reaches the shipped spec);
+// Phase 7 asserts it RUNS in-browser (per-file in-memory DB) — green on the
+// pristine suite, red after a broken assertion.
 // Editor-widget agnostic (via window.__studio).
 // (Needs network: esbuild + Monaco + sqlite-wasm/turbo + Tailwind load from CDNs.)
 //
@@ -65,6 +67,23 @@ for (const p of ["test/article.test.ts", "test/comment.test.ts", "test/articles_
 if (!suite?.runtime.some((f) => f.path === "test/_runtime/minitest.ts")) fail("emitted suite missing the test/_runtime/minitest.ts harness");
 for (const p of ["test/fixtures/articles.ts", "test/fixtures/comments.ts"])
   if (!suite?.fixtures.some((f) => f.path === p)) fail(`emitted suite missing fixture ${p}`);
+
+// --- Phase 7: the suite RUNS in-browser, green, on a fresh in-memory DB ------
+// Bundle the emitted suite (in-memory DB + node:test/assert shims) and run it
+// in a throwaway worker. The PRISTINE fixture must be all-green.
+console.log("\n=== test run (Phase 7) ===");
+const run = await page.evaluate(() => window.__studio.runTests());
+if (run.error) {
+  fail(`test run errored: ${run.error}`);
+} else {
+  console.log(`tests: ${run.passed}/${run.total} passed`
+    + (run.failed ? `, ${run.failed} failed` : "") + (run.skipped ? `, ${run.skipped} skipped` : "")
+    + ` · bundle ${(run.bundleBytes / 1024).toFixed(0)}K/${run.bundleMs?.toFixed(0)}ms`);
+  for (const r of run.results.filter((x) => x.status === "fail")) console.log(`  FAIL ${r.name}: ${r.error}`);
+  if (!(run.total >= 8)) fail(`expected ≥8 emitted tests, ran ${run.total}`);
+  if (run.failed) fail(`${run.failed} test(s) failed on the pristine suite`);
+  if (run.passed < run.total - run.skipped) fail(`not all tests passed (${run.passed}/${run.total})`);
+}
 
 // --- the app RUNS: iframe renders the seeded blog over sqlite-wasm ----------
 console.log("\n=== running app ===");
@@ -129,6 +148,14 @@ if (tedit.error) fail(`test-source edit: ${tedit.error}`);
 else if (!/STUDIO-PHASE6-SUITE-LIVE/.test(tedit.suite.specs.find((f) => f.path === "test/article.test.ts")?.content || ""))
   fail("test-source edit did not reach the emitted, shipped spec");
 else console.log("test-source edit flows into the shipped suite ✓");
+
+// --- Phase 7: the harness detects FAILURES (red), not just greens -----------
+// The edit above changed an assert_equal literal in article_test.rb, so
+// test_creates_* now expects the wrong title → re-running must report red.
+const redRun = await page.evaluate(() => window.__studio.runTests());
+if (redRun.error) fail(`red-run errored: ${redRun.error}`);
+else if (!(redRun.failed >= 1)) fail(`expected the broken assertion to fail a test, got ${redRun.failed} failure(s)`);
+else console.log(`harness reports failures (${redRun.failed} red) after a broken assertion ✓`);
 
 await page.screenshot({ path: "studio.png" });
 

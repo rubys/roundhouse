@@ -32,24 +32,38 @@ Studio runs the emitted blog **live**, entirely client-side:
 - esbuild + Monaco + sqlite-wasm/turbo + Tailwind load from CDNs; each piece
   degrades independently (no esbuild → transpile-only; no SW → no run).
 
-**Phase 6 (rung D.2) done — the Minitest suite ships in the payload.** Every
-build's worker-profile transpile already emits the suite (`test/<x>.test.ts`,
-the `test/_runtime/` harness, `test/fixtures/*.ts`); `testSuiteFrom()` retains
-it, the status line shows a `· N test suites` count, and it's exposed via
-`window.__studio.testSuite()`. The test *sources* (`test/**/*_test.rb`) are in
-the source tree and editable — a test edit flows straight into the shipped
-spec. The suite isn't *run* yet (no green/red): that's Phase 7 (browser
-harness) + Phase 8 (results UI).
+**Phases 6-7 (rung D.2) done — the Minitest suite ships AND runs in-browser.**
+Every build's worker-profile transpile emits the suite (`test/<x>.test.ts`, the
+`test/_runtime/` harness, `test/fixtures/*.ts`); `testSuiteFrom()` retains it
+(status line shows a `· N test suites` count, exposed via
+`window.__studio.testSuite()`). `window.__studio.runTests()` then **runs** it:
 
-Deferred: true module hot-swap (no reload); run the suite in-browser with a
-results panel (rung D.2 Phases 7-9).
+> bundle the suite (one standalone ESM per spec file, via `bundleTests`) →
+> run each file in its own Worker over a FRESH in-memory sqlite-wasm DB →
+> aggregate `{total,passed,failed,skipped,results}`.
+
+- The browser has no `node:test`/`node:assert`; `../lib/test-runtime.mjs`
+  supplies shims + an in-memory `Db` + `setupTestDb`, injected at **bundle
+  time** (esbuild overrides `src/db.ts`/`src/juntos.ts`, virtual `node:*`), so
+  the emitted suite stays **byte-identical to CI** — the in-browser run and the
+  CI run are provably the same suite. No emitter/compiler change.
+- **DB isolation (risk #4):** the engine's `opfs:false` path opens a throwaway
+  in-memory DB — never the live app's opfs pool. One worker per spec file gives
+  the per-file isolation `node --test` uses in CI (a spec that mutates fixtures,
+  e.g. `ArticleTest#test_destroys_comments`, can't leak into the next file).
+- A run fires once in the background after boot (console-logged); the test
+  *sources* are editable in the tree, so an edit re-runs green/red.
+
+Deferred: true module hot-swap (no reload); the **results UI panel** + per-edit
+re-run + cross-target CI badge strip (Phase 8); runtime sourcemaps so a failing
+test clicks back to the Ruby line (Phase 9).
 
 ## Files
 
 | File | Role | Tracked |
 |---|---|---|
 | `index.html` | three-pane layout (sources / editor / running app iframe) | yes |
-| `studio.js` | the loop: source tree, transpile→bundle→host, app shell, emitted-test-suite retention (Phase 6), test hooks | yes |
+| `studio.js` | the loop: source tree, transpile→bundle→host, app shell, emitted-test-suite retention (Phase 6) + in-browser run (Phase 7, `runTests`), test hooks | yes |
 | `sw.js` | app-host service worker: serves the in-memory app at its scope | yes |
 | `verify-studio.mjs` | Playwright: boot → run → edit-reflects, in chromium (needs network) | yes |
 | `studio.png` | screenshot from the verifier | no (gitignored) |

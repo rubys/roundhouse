@@ -74,8 +74,9 @@ let editor = null;
 let srcMap = null;          // { path: content } — the live, editable input (Ruby)
 let currentPath = null;
 let openDirs = null;
-let lastBuild = null;       // { files, diagnostics, error, transpileMs }
+let lastBuild = null;       // { files, diagnostics, error, transpileMs, testSuite }
 let lastBundle = null;      // { ms, errors, warnings, outputs }
+let lastTestRun = null;     // { total, passed, failed, skipped, results } | { error }
 let buildSeq = 0;           // guards stale async builds
 let debounceTimer = null;
 
@@ -208,6 +209,65 @@ async function build() {
   }
 }
 
+// ---- the test runner (Phase 7) -------------------------------------------
+
+// Run ONE bundled ESM module in a throwaway module Worker; resolve with the
+// {spec,total,passed,failed,skipped,results} summary it posts back. Each worker
+// gets a FRESH in-memory sqlite-wasm DB — never the live app's opfs pool
+// (risk #4).
+function runOneInWorker(text) {
+  const url = URL.createObjectURL(new Blob([text], { type: "text/javascript" }));
+  return new Promise((resolve, reject) => {
+    const w = new Worker(url, { type: "module" });
+    const done = (fn, arg) => { clearTimeout(timer); w.terminate(); URL.revokeObjectURL(url); fn(arg); };
+    const timer = setTimeout(() => done(reject, new Error("test run timed out")), 30000);
+    w.onmessage = (e) => { if (e.data?.type === "rh-test-results") done(resolve, e.data.summary); };
+    w.onerror = (e) => done(reject, new Error(e.message || "test worker error"));
+  });
+}
+
+// Bundle the emitted Minitest suite (in-memory DB + node:test/assert shims;
+// see ../lib/test-runtime.mjs) and run it. Each spec FILE runs in its own
+// worker with its own fresh in-memory DB — the per-file isolation `node --test`
+// gives in CI, so a spec that mutates fixtures can't leak into the next file.
+// Returns an aggregate { total, passed, failed, skipped, results, files } or
+// { error }.
+async function runTests() {
+  if (!bundler) return { error: "esbuild unavailable" };
+  if (!lastBuild || lastBuild.error) return { error: "no successful build to test" };
+  const emitted = Object.fromEntries(lastBuild.files.map((f) => [f.path, f.content]));
+  let tb;
+  try {
+    tb = await bundler.bundleTests(emitted, { base: appScope });
+  } catch (e) {
+    return { error: `test bundle threw: ${e.message}` };
+  }
+  if (tb.errors.length || tb.outputs.length === 0) {
+    return { error: `test bundle: ${tb.errors[0]?.text || "no output"}` };
+  }
+  try {
+    const files = [];
+    // Sequential: one in-memory sqlite-wasm per worker; no need to run 4 at once.
+    for (const o of tb.outputs) {
+      if (!o.text) { files.push({ spec: o.spec, error: "no bundle output" }); continue; }
+      files.push(await runOneInWorker(o.text));
+    }
+    const ran = files.filter((f) => f.results);
+    const agg = (k) => ran.reduce((n, f) => n + f[k], 0);
+    lastTestRun = {
+      total: agg("total"), passed: agg("passed"), failed: agg("failed"), skipped: agg("skipped"),
+      results: ran.flatMap((f) => f.results),
+      files,
+      bundleMs: tb.ms,
+      bundleBytes: tb.outputs.reduce((n, o) => n + (o.bytes || 0), 0),
+    };
+    return lastTestRun;
+  } catch (e) {
+    lastTestRun = { error: e.message };
+    return lastTestRun;
+  }
+}
+
 function renderMarkers() {
   if (!editor || !lastBuild) return;
   editor.setMarkers(lastBuild.diagnostics.filter((d) => d.path === currentPath));
@@ -262,10 +322,20 @@ async function boot() {
     build: () => lastBuild,
     bundle: () => lastBundle,
     testSuite: () => lastBuild?.testSuite || null, // Phase 6: emitted Minitest suite
-
+    runTests,                                       // Phase 7: run the suite in-browser
+    testRun: () => lastTestRun,
     source: (path) => srcMap[path],
     sourceCount: () => sourceFiles().length,
   };
+
+  // Phase 7: run the emitted suite once in the background — proves the
+  // in-browser harness end-to-end without blocking the visible app boot.
+  // (The live results panel + per-edit re-run is Phase 8.)
+  runTests().then((r) => {
+    if (r.error) console.warn("[studio] test run:", r.error);
+    else console.log(`[studio] tests: ${r.passed}/${r.total} passed`
+      + (r.failed ? `, ${r.failed} failed` : "") + (r.skipped ? `, ${r.skipped} skipped` : ""));
+  });
 }
 
 boot().catch((e) => setStatus(`boot failed: ${e.message}`, "err"));

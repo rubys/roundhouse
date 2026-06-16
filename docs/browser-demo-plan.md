@@ -142,7 +142,7 @@ verifiable development cycle."**
 | 4 | `/studio/` scaffold + shared `lib/` + esbuild-wasm TS→JS bundle step in-browser | D | 1 | **DONE** — shared `lib/`, `/studio/`, wasm `profile` contract, esbuild-wasm bundling all landed |
 | 5 | Live loop: edit Ruby → wasm recompile → esbuild bundle → run/reload the blog | D | 2–3 | **DONE (full-reload loop)** — SW-hosted iframe runs the app over sqlite-wasm; edits reflect. Hot-swap = later polish |
 | 6 | Emit + ship the Minitest suite into the browser payload | D.2 | ½–1 | **DONE** — worker-profile transpile already emits the suite; studio retains + surfaces it (`window.__studio.testSuite()`), verifier proves it ships + is live |
-| 7 | `node:test` → browser test-runner harness + in-memory sqlite isolation | D.2 | 1–2 | blocked on 6 |
+| 7 | `node:test` → browser test-runner harness + in-memory sqlite isolation | D.2 | 1–2 | **DONE** — `lib/test-runtime.mjs` (node:* shims + in-memory Db) injected at bundle time (suite byte-identical to CI); `bundleTests` + per-file Workers run the real-blog suite **21/21 green** in-browser; verifier covers green + red detection. No emitter change |
 | 8 | Test-results UI panel + cross-target CI badge strip | D.2 | ½–1 | blocked on 7 |
 | 9 | Runtime sourcemaps: failing-test stack traces map back to Ruby source | D.2 | 1–2 | blocked on 7 |
 
@@ -428,25 +428,37 @@ the emitted specs. Phase 6:
   shipped `test/article.test.ts`. Green in chromium.
 - No wasm rebuild; the existing binary already emits the suite.
 
-### Phase 7 — Browser test-runner harness (rung D.2, 1–2 days)
+### Phase 7 — Browser test-runner harness (rung D.2, 1–2 days) — **DONE**
 
-D.2's real work. Everything *under* the harness is already browser-ready:
+D.2's real work. Everything *under* the harness was already browser-ready:
 
-- **DB**: tests want ephemeral isolation → use the sqlite-wasm **in-memory**
-  fallback the engine already has (not opfs). Each run gets a fresh DB.
-- **HTML assertions** (`assert_select`): *easier* in a browser — real DOM,
-  no jsdom shim needed.
-- **Fixtures**: FixtureLoader already works in the emitted suites.
+- **DB**: the sqlite-wasm engine's `opfs:false` path opens a fresh in-memory
+  `sqlite3.oo1.DB` — the isolation tests want, never the app's opfs pool.
+- **Fixtures**: `FixtureLoader` / `_fixtures_load_bang` already work; they load
+  through the same `Db.*` path as the app's seeds.
 
-The net-new piece is the runner: `node:test` does not exist in the browser
-(gap #3). Two options:
-- **(a)** A small shim exporting `test`/`describe`/`it`/`assert` that maps
-  onto a browser harness and collects results. Lowest churn — the emitted
-  test code stays identical to CI.
-- **(b)** Emit to a custom browser runner. More control, more emit work.
+Took **option (a)** as recommended — keep the emitted suite byte-identical to
+CI. The net-new piece is `wasm/lib/test-runtime.mjs`, injected at **bundle
+time** (no emitter/compiler/wasm change):
+- `node:test` → a registry+runner; `node:assert/strict` → the assert surface
+  `minitest-async.ts` calls (most `assert_*` are already rewritten inline by the
+  lowerer). Resolved as esbuild **virtual modules**.
+- `src/db.ts` → an in-memory `Db` over the engine (same namespace as the
+  emitted `db-worker-proxy.ts`, but each statement runs directly, not over a
+  db_worker MessagePort). `src/juntos.ts` → `setupTestDb` (in-memory engine
+  init + schema) + a no-op `broadcast` — the only two *values* the test graph
+  imports from juntos. Both are srcMap **overrides**, so the rest of the
+  emitted suite is unchanged. Both import the same engine singleton, so
+  `setupTestDb` inits the DB and `Db.*` queries it.
 
-Recommend (a): keep the emitted suite byte-identical to what CI runs, so the
-in-browser run and the CI run are provably the same suite.
+`bundle.mjs` `bundleTests()` builds **one standalone bundle per spec file**;
+`studio.js` `runTests()` runs each in its own Worker (fresh in-memory DB) and
+aggregates. The per-file split reproduces `node --test`'s per-file process
+isolation — required because a spec can mutate shared fixtures
+(`ArticleTest#test_destroys_comments` deletes fixture article 1); a single
+shared DB leaked that across files. With it, the real-blog suite is **21/21
+green** in-browser; `verify-studio.mjs` asserts both the green run and that a
+broken assertion turns the run red.
 
 ### Phase 8 — Results UI + cross-target badges (rung D.2, ½–1 day)
 

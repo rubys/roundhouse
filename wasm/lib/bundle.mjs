@@ -14,6 +14,8 @@
 // esbuild itself is loaded from a CDN (like Monaco in editor.js), so nothing is
 // vendored; bundling runs entirely client-side via esbuild's wasm.
 
+import { TEST_VIRTUALS, TEST_OVERRIDES, testEntries } from "./test-runtime.mjs";
+
 const ESBUILD_VERSION = "0.28.1";
 const ESBUILD_BASE = `https://cdn.jsdelivr.net/npm/esbuild-wasm@${ESBUILD_VERSION}`;
 
@@ -67,7 +69,10 @@ function loaderFor(p) {
   return "ts";
 }
 
-function makeVfsPlugin(srcMap, cdn) {
+// virtuals: { <bare-specifier>: <source> } resolved in-bundle instead of as a
+// CDN external. The test bundle uses it for the `node:test` / `node:assert`
+// browser shims (see test-runtime.mjs); the app bundle passes none.
+function makeVfsPlugin(srcMap, cdn, virtuals = {}) {
   return {
     name: "studio-vfs",
     setup(build) {
@@ -83,8 +88,9 @@ function makeVfsPlugin(srcMap, cdn) {
             ? { path: args.path, namespace: "vfs" }
             : { errors: [{ text: `entry not found: ${args.path}` }] };
         }
-        // Bare specifier → CDN external (kept as a full URL in the output).
+        // Bare specifier → virtual shim, else CDN external (full URL in output).
         if (!args.path.startsWith(".") && !args.path.startsWith("/")) {
+          if (virtuals[args.path] != null) return { path: args.path, namespace: "virtual" };
           if (cdn[args.path]) return { path: cdn[args.path], external: true };
           return { errors: [{ text: `unmapped npm import: ${args.path} (from ${args.importer})` }] };
         }
@@ -93,6 +99,11 @@ function makeVfsPlugin(srcMap, cdn) {
           ? { path: r, namespace: "vfs" }
           : { errors: [{ text: `cannot resolve ${args.path} from ${args.importer}` }] };
       });
+
+      build.onLoad({ filter: /.*/, namespace: "virtual" }, (args) => ({
+        contents: virtuals[args.path],
+        loader: "ts",
+      }));
 
       build.onLoad({ filter: /.*/, namespace: "vfs" }, (args) => ({
         contents: srcMap[args.path],
@@ -138,6 +149,49 @@ export async function loadBundler(opts = {}) {
         const name = f.path.replace(/^.*\//, ""); // basename (main.js, worker.js, db_worker.js)
         outputs[name] = { path: f.path, text: f.text, bytes: f.contents.length };
       }
+      return { ms: performance.now() - t0, errors: result.errors, warnings: result.warnings, outputs };
+    },
+
+    // Bundle the emitted worker-profile test suite into ONE standalone ESM
+    // bundle PER SPEC FILE (rung D.2, Phase 7). `emitted` is the same
+    // { path: content } map `bundle()` takes; this overrides src/db.ts +
+    // src/juntos.ts with the in-memory test runtime, adds the node:test /
+    // node:assert shims, and synthesizes one entry per spec. Each output runs
+    // in its own Worker (fresh in-memory DB) — see studio.js `runTests`, which
+    // gives the per-file isolation `node --test` uses in CI.
+    // Returns { ms, errors, warnings, outputs: [{ spec, text, bytes }] }.
+    async bundleTests(emitted, { base = "/" } = {}) {
+      const t0 = performance.now();
+      const specs = Object.keys(emitted)
+        .filter((p) => /^test\/.*\.test\.ts$/.test(p))
+        .sort();
+      if (specs.length === 0) {
+        return { ms: 0, errors: [{ text: "no emitted test specs found" }], warnings: [], outputs: [] };
+      }
+      const entries = testEntries(specs);
+      const src = { ...emitted, ...TEST_OVERRIDES };
+      for (const e of entries) src[e.path] = e.source;
+      let result;
+      try {
+        result = await esbuild.build({
+          entryPoints: entries.map((e) => e.path),
+          bundle: true,
+          format: "esm",
+          target: "es2022",
+          outdir: "out",
+          write: false,
+          define: { "import.meta.env": JSON.stringify({ BASE_URL: base }) },
+          plugins: [makeVfsPlugin(src, cdn, TEST_VIRTUALS)],
+          logLevel: "silent",
+        });
+      } catch (e) {
+        return { ms: performance.now() - t0, errors: e.errors || [{ text: String(e) }], warnings: [], outputs: [] };
+      }
+      const outputs = entries.map((e) => {
+        const baseName = e.path.replace(/^.*\//, "").replace(/\.ts$/, ".js");
+        const f = result.outputFiles.find((o) => o.path.replace(/^.*\//, "") === baseName);
+        return { spec: e.spec, text: f ? f.text : null, bytes: f ? f.contents.length : 0 };
+      });
       return { ms: performance.now() - t0, errors: result.errors, warnings: result.warnings, outputs };
     },
   };
