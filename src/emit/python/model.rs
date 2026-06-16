@@ -73,6 +73,12 @@ pub(super) fn emit_models(app: &App) -> EmittedFile {
             let _ = writeln!(imports, "{line}");
         }
     };
+    // `import datetime` — needed when a model carries the residualized
+    // `fill_timestamps` (`Time.now.utc.iso8601` → `datetime.datetime.now(
+    // datetime.timezone.utc).isoformat()`). Previously only
+    // active_record_base used Time; per-model timestamp residualization
+    // moved that usage into models.py too.
+    want("datetime.", "import datetime");
     want("(Base)", "from app.active_record_base import Base");
     want("Db.", "from app.db import Db");
     want("views.Views", "from app import views");
