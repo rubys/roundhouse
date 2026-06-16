@@ -141,7 +141,7 @@ verifiable development cycle."**
 | 3 | Extend wasm contract to return diagnostics + inferred types (+ per-file `source` provenance); Monaco markers | C | 1–2 | **DIAGNOSTICS + INFERRED-TYPE HOVERS DONE**; only the `source` provenance field remains |
 | 4 | `/studio/` scaffold + shared `lib/` + esbuild-wasm TS→JS bundle step in-browser | D | 1 | **DONE** — shared `lib/`, `/studio/`, wasm `profile` contract, esbuild-wasm bundling all landed |
 | 5 | Live loop: edit Ruby → wasm recompile → esbuild bundle → run/reload the blog | D | 2–3 | **DONE (full-reload loop)** — SW-hosted iframe runs the app over sqlite-wasm; edits reflect. Hot-swap = later polish |
-| 6 | Emit + ship the Minitest suite into the browser payload | D.2 | ½–1 | blocked on 5 |
+| 6 | Emit + ship the Minitest suite into the browser payload | D.2 | ½–1 | **DONE** — worker-profile transpile already emits the suite; studio retains + surfaces it (`window.__studio.testSuite()`), verifier proves it ships + is live |
 | 7 | `node:test` → browser test-runner harness + in-memory sqlite isolation | D.2 | 1–2 | blocked on 6 |
 | 8 | Test-results UI panel + cross-target CI badge strip | D.2 | ½–1 | blocked on 7 |
 | 9 | Runtime sourcemaps: failing-test stack traces map back to Ruby source | D.2 | 1–2 | blocked on 7 |
@@ -400,7 +400,7 @@ published `/blog/`, so editing here never disturbs the standalone blog demo.
 - Exit criterion: edit a view or controller in Ruby, see the running blog
   change without a page reload.
 
-### Phase 6 — Ship the test suite into the browser (rung D.2, ½–1 day)
+### Phase 6 — Ship the test suite into the browser (rung D.2, ½–1 day) — **DONE**
 
 - roundhouse already transpiles the Rails-style Minitest suites to TS (the
   framework-test transpile work — ValidationsTest et al. run under
@@ -408,6 +408,25 @@ published `/blog/`, so editing here never disturbs the standalone blog demo.
   *included in the browser payload* alongside the app, not just built in CI.
 - The fixtures path (FixtureLoader, belongs_to, the assert_select shim) is
   already proven in the emitted suites — confirm it ships to the browser too.
+
+**Outcome.** No compiler change was needed: the worker-profile transpile that
+studio already runs (`emit_with_profile(worker)`) emits the full suite — 4
+spec files (`test/<x>.test.ts`), the in-browser harness
+(`test/_runtime/minitest.ts` + `setup.ts`), and the fixtures
+(`test/fixtures/{articles,comments}.ts`). The matching test *sources*
+(`test/**/*_test.rb`) are already in the studio's seed tree, so they show in
+the source pane and are editable. The gap was purely studio-side: `build()`
+forwarded only `main/worker/db_worker` to the running app and **discarded**
+the emitted specs. Phase 6:
+- `studio.js` `testSuiteFrom()` picks the suite out of every build
+  (`{specs, runtime, fixtures}`), surfaces a `· N test suites` count in the
+  status line (no pass/fail — running is Phase 7-8), and exposes it via
+  `window.__studio.testSuite()`.
+- `verify-studio.mjs` asserts the suite reaches the browser (4 specs + the
+  `minitest.ts` harness + both fixtures) **and is live** — editing an
+  assertion literal in `test/models/article_test.rb` flows into the emitted,
+  shipped `test/article.test.ts`. Green in chromium.
+- No wasm rebuild; the existing binary already emits the suite.
 
 ### Phase 7 — Browser test-runner harness (rung D.2, 1–2 days)
 

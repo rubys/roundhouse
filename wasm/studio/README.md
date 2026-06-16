@@ -32,15 +32,24 @@ Studio runs the emitted blog **live**, entirely client-side:
 - esbuild + Monaco + sqlite-wasm/turbo + Tailwind load from CDNs; each piece
   degrades independently (no esbuild → transpile-only; no SW → no run).
 
-Deferred polish: true module hot-swap (no reload); richer in-app interaction
-tests; ship/run the Minitest suite in-browser (rung D.2).
+**Phase 6 (rung D.2) done — the Minitest suite ships in the payload.** Every
+build's worker-profile transpile already emits the suite (`test/<x>.test.ts`,
+the `test/_runtime/` harness, `test/fixtures/*.ts`); `testSuiteFrom()` retains
+it, the status line shows a `· N test suites` count, and it's exposed via
+`window.__studio.testSuite()`. The test *sources* (`test/**/*_test.rb`) are in
+the source tree and editable — a test edit flows straight into the shipped
+spec. The suite isn't *run* yet (no green/red): that's Phase 7 (browser
+harness) + Phase 8 (results UI).
+
+Deferred: true module hot-swap (no reload); run the suite in-browser with a
+results panel (rung D.2 Phases 7-9).
 
 ## Files
 
 | File | Role | Tracked |
 |---|---|---|
 | `index.html` | three-pane layout (sources / editor / running app iframe) | yes |
-| `studio.js` | the loop: source tree, transpile→bundle→host, app shell, test hooks | yes |
+| `studio.js` | the loop: source tree, transpile→bundle→host, app shell, emitted-test-suite retention (Phase 6), test hooks | yes |
 | `sw.js` | app-host service worker: serves the in-memory app at its scope | yes |
 | `verify-studio.mjs` | Playwright: boot → run → edit-reflects, in chromium (needs network) | yes |
 | `studio.png` | screenshot from the verifier | no (gitignored) |

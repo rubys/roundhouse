@@ -1,7 +1,9 @@
-// Phase 5 smoke: drive /studio/ in chromium and assert the whole client-side
+// Phase 5+6 smoke: drive /studio/ in chromium and assert the whole client-side
 // loop — boot → transpile (worker profile) → esbuild bundle → host in a service
 // worker → RUN the app in an iframe over sqlite-wasm → edit Ruby → the running
-// app reflects it. Editor-widget agnostic (via window.__studio).
+// app reflects it. Phase 6 also asserts the emitted Minitest suite ships in the
+// browser payload and is live (a test-source edit reaches the shipped spec).
+// Editor-widget agnostic (via window.__studio).
 // (Needs network: esbuild + Monaco + sqlite-wasm/turbo + Tailwind load from CDNs.)
 //
 // Serve the PARENT (wasm/) as the web root:
@@ -47,6 +49,22 @@ await page.waitForFunction(() => window.__studio.bundle()?.outputs && Object.key
 const bundle = await page.evaluate(() => window.__studio.bundle());
 console.log("bundle:", Object.entries(bundle.outputs).map(([n, o]) => `${n} ${(o.bytes / 1024).toFixed(0)}K`).join(" "), `· ${bundle.ms?.toFixed(0)}ms`);
 if (bundle.errors?.length) fail(`bundle errors: ${bundle.errors.map((e) => e.text).join("; ")}`);
+
+// --- Phase 6: the emitted Minitest suite ships in the browser payload --------
+// roundhouse transpiles the Rails Minitest suites to TS under the worker
+// profile; this asserts those specs + the in-browser harness + fixtures reach
+// the browser (not just CI). Running them is Phase 7-8.
+console.log("\n=== test suite shipped (Phase 6) ===");
+const suite = await page.evaluate(() => window.__studio.testSuite());
+const specPaths = suite?.specs.map((f) => f.path) || [];
+console.log("specs:", specPaths.join(", "));
+console.log("runtime:", (suite?.runtime || []).map((f) => f.path).join(", "),
+  "| fixtures:", (suite?.fixtures || []).map((f) => f.path).join(", "));
+for (const p of ["test/article.test.ts", "test/comment.test.ts", "test/articles_controller.test.ts", "test/comments_controller.test.ts"])
+  if (!specPaths.includes(p)) fail(`emitted suite missing spec ${p}`);
+if (!suite?.runtime.some((f) => f.path === "test/_runtime/minitest.ts")) fail("emitted suite missing the test/_runtime/minitest.ts harness");
+for (const p of ["test/fixtures/articles.ts", "test/fixtures/comments.ts"])
+  if (!suite?.fixtures.some((f) => f.path === p)) fail(`emitted suite missing fixture ${p}`);
 
 // --- the app RUNS: iframe renders the seeded blog over sqlite-wasm ----------
 console.log("\n=== running app ===");
@@ -96,6 +114,21 @@ const edited = await page.evaluate((p) => {
 if (edited.error) fail(`model edit: ${edited.error}`);
 else if (!/999/.test(edited.files.find((f) => f.path === "app/models/article.ts")?.content || "")) fail("emitted model TS did not reflect the edit");
 else console.log("\nmodel edit reflected in emitted TS ✓");
+
+// --- a test-SOURCE edit flows into the shipped suite (Phase 6: the suite is
+//     LIVE, not a baked CI artifact). Change an assertion literal in the Ruby
+//     test → it appears in the emitted, shipped test/article.test.ts. --------
+const tedit = await page.evaluate(async (p) => {
+  const orig = window.__studio.source(p);
+  const next = orig.replace("Getting Started with Rails", "STUDIO-PHASE6-SUITE-LIVE");
+  if (next === orig) return { error: "assertion literal not found in test source" };
+  await window.__studio.editFile(p, next);
+  return { suite: window.__studio.testSuite() };
+}, "test/models/article_test.rb");
+if (tedit.error) fail(`test-source edit: ${tedit.error}`);
+else if (!/STUDIO-PHASE6-SUITE-LIVE/.test(tedit.suite.specs.find((f) => f.path === "test/article.test.ts")?.content || ""))
+  fail("test-source edit did not reach the emitted, shipped spec");
+else console.log("test-source edit flows into the shipped suite ✓");
 
 await page.screenshot({ path: "studio.png" });
 

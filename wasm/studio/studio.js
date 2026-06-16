@@ -112,6 +112,25 @@ function selectFile(path) {
   renderMarkers();
 }
 
+// ---- the emitted test suite (Phase 6) ------------------------------------
+
+// roundhouse already transpiles the Rails-style Minitest suites to TS under
+// the worker profile — the spec files (`test/<x>.test.ts`), the in-browser
+// harness (`test/_runtime/minitest.ts` + `setup.ts`), and the fixtures
+// (`test/fixtures/*.ts`). They ride in the build output but the running-app
+// loop ignores them; this picks them out so the suite is a first-class part
+// of the payload (Phase 7's runner consumes it; the verifier proves it
+// reaches the browser). The matching test SOURCES (`test/**/*_test.rb`) are
+// already in `srcMap`, so they show in the source tree and are editable.
+function testSuiteFrom(files) {
+  const pick = (re) => files.filter((f) => re.test(f.path) && !f.path.endsWith(".map"));
+  return {
+    specs: pick(/^test\/.*\.test\.ts$/),       // the per-class *Test suites
+    runtime: pick(/^test\/_runtime\/.*\.ts$/), // minitest harness + setup
+    fixtures: pick(/^test\/fixtures\/.*\.ts$/),// FixtureLoader inputs
+  };
+}
+
 // ---- the loop: transpile → bundle → host → (re)load ----------------------
 
 function onEditorChange(value) {
@@ -138,13 +157,21 @@ async function build() {
     error: out.error || null,
     transpileMs: performance.now() - t0,
   };
+  lastBuild.testSuite = testSuiteFrom(lastBuild.files); // Phase 6: ship the suite
   renderMarkers();
   if (out.error) {
     setStatus(`transpile error: ${out.error}`, "err");
     return;
   }
   const errs = lastBuild.diagnostics.filter((d) => d.severity === "error").length;
-  setStatus(`${lastBuild.files.length} TS files${errs ? ` · ${errs} error${errs > 1 ? "s" : ""}` : ""} in ${lastBuild.transpileMs.toFixed(0)} ms`, errs ? "err" : "ok");
+  const suites = lastBuild.testSuite.specs.length;
+  // Errors take the slot when present (the suite may be incomplete); otherwise
+  // report how many test suites shipped in the payload. Phase 6 only *ships*
+  // the suite — running it (green/red) is Phase 7-8, so don't imply a result.
+  const detail = errs
+    ? ` · ${errs} error${errs > 1 ? "s" : ""}`
+    : suites ? ` · ${suites} test suite${suites > 1 ? "s" : ""}` : "";
+  setStatus(`${lastBuild.files.length} TS files${detail} in ${lastBuild.transpileMs.toFixed(0)} ms`, errs ? "err" : "ok");
   if (!bundler) { setAppStatus(`<span class="err">esbuild unavailable</span> — transpile-only`); return; }
 
   // 2. Bundle the emitted TS → 3 browser-loadable ESM bundles.
@@ -234,6 +261,8 @@ async function boot() {
     },
     build: () => lastBuild,
     bundle: () => lastBundle,
+    testSuite: () => lastBuild?.testSuite || null, // Phase 6: emitted Minitest suite
+
     source: (path) => srcMap[path],
     sourceCount: () => sourceFiles().length,
   };
