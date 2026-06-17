@@ -34,20 +34,20 @@ module Tep
       def encode_unmasked
         head = ""
         b0 = (@fin ? 0x80 : 0x00) | (@opcode & 0x0f)
-        head = head + Frame.byte_to_chr(b0)
+        head << Frame.byte_to_chr(b0)
 
         plen = @payload.length
         if plen <= 125
-          head = head + Frame.byte_to_chr(plen)
+          head << Frame.byte_to_chr(plen)
         elsif plen <= 65535
-          head = head + Frame.byte_to_chr(126)
-          head = head + Frame.byte_to_chr((plen >> 8) & 0xff)
-          head = head + Frame.byte_to_chr(plen & 0xff)
+          head << Frame.byte_to_chr(126)
+          head << Frame.byte_to_chr((plen >> 8) & 0xff)
+          head << Frame.byte_to_chr(plen & 0xff)
         else
-          head = head + Frame.byte_to_chr(127)
+          head << Frame.byte_to_chr(127)
           i = 7
           while i >= 0
-            head = head + Frame.byte_to_chr((plen >> (i * 8)) & 0xff)
+            head << Frame.byte_to_chr((plen >> (i * 8)) & 0xff)
             i -= 1
           end
         end
@@ -181,7 +181,7 @@ module Tep
           else
             mask_byte = m3
           end
-          payload = payload + Frame.byte_to_chr(b ^ mask_byte)
+          payload << Frame.byte_to_chr(b ^ mask_byte)
           i += 1
         end
 

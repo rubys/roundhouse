@@ -59,26 +59,26 @@ module Tep
       while i < n
         c = s[i]
         if c == "\""
-          out = out + "\\\""
+          out << "\\\""
         elsif c == "\\"
-          out = out + "\\\\"
+          out << "\\\\"
         elsif c == "\n"
-          out = out + "\\n"
+          out << "\\n"
         elsif c == "\r"
-          out = out + "\\r"
+          out << "\\r"
         elsif c == "\t"
-          out = out + "\\t"
+          out << "\\t"
         elsif c == "\b"
-          out = out + "\\b"
+          out << "\\b"
         elsif c == "\f"
-          out = out + "\\f"
+          out << "\\f"
         elsif c < " "
           # Other control byte -- emit \u00XX. c.bytes[0] is the
           # raw byte value, mapped to two hex digits.
           b = c.bytes[0]
-          out = out + "\\u00" + Json.hex2(b)
+          out << "\\u00" + Json.hex2(b)
         else
-          out = out + c
+          out << c
         end
         i += 1
       end
@@ -89,8 +89,8 @@ module Tep
     def self.hex2(n)
       hex = "0123456789abcdef"
       out = ""
-      out = out + hex[(n / 16) % 16, 1]
-      out = out + hex[n % 16, 1]
+      out << hex[(n / 16) % 16, 1]
+      out << hex[n % 16, 1]
       out
     end
 
@@ -124,10 +124,10 @@ module Tep
       first = true
       h.each do |k, v|
         if !first
-          out = out + ","
+          out << ","
         end
         first = false
-        out = out + Json.quote(k) + ":" + Json.quote(v)
+        out << Json.quote(k) + ":" + Json.quote(v)
       end
       out + "}"
     end
@@ -138,10 +138,10 @@ module Tep
       first = true
       h.each do |k, v|
         if !first
-          out = out + ","
+          out << ","
         end
         first = false
-        out = out + Json.quote(k) + ":" + v.to_s
+        out << Json.quote(k) + ":" + v.to_s
       end
       out + "}"
     end
@@ -152,9 +152,9 @@ module Tep
       i = 0
       while i < a.length
         if i > 0
-          out = out + ","
+          out << ","
         end
-        out = out + Json.quote(a[i])
+        out << Json.quote(a[i])
         i += 1
       end
       out + "]"
@@ -166,9 +166,9 @@ module Tep
       i = 0
       while i < a.length
         if i > 0
-          out = out + ","
+          out << ","
         end
-        out = out + a[i].to_s
+        out << a[i].to_s
         i += 1
       end
       out + "]"
@@ -403,21 +403,21 @@ module Tep
           end
           esc = s[pos + 1]
           if esc == "\""
-            out = out + "\""
+            out << "\""
           elsif esc == "\\"
-            out = out + "\\"
+            out << "\\"
           elsif esc == "/"
-            out = out + "/"
+            out << "/"
           elsif esc == "n"
-            out = out + "\n"
+            out << "\n"
           elsif esc == "r"
-            out = out + "\r"
+            out << "\r"
           elsif esc == "t"
-            out = out + "\t"
+            out << "\t"
           elsif esc == "b"
-            out = out + "\b"
+            out << "\b"
           elsif esc == "f"
-            out = out + "\f"
+            out << "\f"
           elsif esc == "u"
             # \u00XX -> map the two-digit hex back to a byte. Wider
             # codepoints (Ā+ or surrogate pairs) aren't
@@ -432,20 +432,20 @@ module Tep
                 # non-ASCII the original encoder would have used a
                 # passthrough byte anyway.
                 b = h1 * 16 + h2
-                out = out + Json.byte_to_chr(b)
+                out << Json.byte_to_chr(b)
                 pos += 6
                 next
               end
             end
-            out = out + "?"
+            out << "?"
             pos += 2
             next
           else
-            out = out + esc
+            out << esc
           end
           pos += 2
         else
-          out = out + c
+          out << c
           pos += 1
         end
       end

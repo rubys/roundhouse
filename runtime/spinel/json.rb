@@ -34,17 +34,17 @@ module JSON
     while i < n
       c = s[i]
       if c == "\""
-        out = out + "\\\""
+        out << "\\\""
       elsif c == "\\"
-        out = out + "\\\\"
+        out << "\\\\"
       elsif c == "\n"
-        out = out + "\\n"
+        out << "\\n"
       elsif c == "\r"
-        out = out + "\\r"
+        out << "\\r"
       elsif c == "\t"
-        out = out + "\\t"
+        out << "\\t"
       else
-        out = out + c.to_s
+        out << c.to_s
       end
       i = i + 1
     end

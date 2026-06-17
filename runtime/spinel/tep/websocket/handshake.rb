@@ -74,7 +74,7 @@ module Tep
               "Connection: Upgrade\r\n" +
               "Sec-WebSocket-Accept: " + accept_key + "\r\n"
         if protocol.length > 0
-          out = out + "Sec-WebSocket-Protocol: " + protocol + "\r\n"
+          out << "Sec-WebSocket-Protocol: " + protocol + "\r\n"
         end
         out + "\r\n"
       end
@@ -98,9 +98,9 @@ module Tep
         while i < s.length
           c = s[i]
           if c >= "A" && c <= "Z"
-            out = out + (c.ord + 32).chr
+            out << (c.ord + 32).chr
           else
-            out = out + c
+            out << c
           end
           i += 1
         end

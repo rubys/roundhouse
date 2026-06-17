@@ -26,25 +26,25 @@ module Base64
       b0 = bytes[i]
       b1 = bytes[i + 1]
       b2 = bytes[i + 2]
-      out = out + ALPHABET[(b0 >> 2) & 0x3F].to_s
-      out = out + ALPHABET[((b0 << 4) | (b1 >> 4)) & 0x3F].to_s
-      out = out + ALPHABET[((b1 << 2) | (b2 >> 6)) & 0x3F].to_s
-      out = out + ALPHABET[b2 & 0x3F].to_s
+      out << ALPHABET[(b0 >> 2) & 0x3F].to_s
+      out << ALPHABET[((b0 << 4) | (b1 >> 4)) & 0x3F].to_s
+      out << ALPHABET[((b1 << 2) | (b2 >> 6)) & 0x3F].to_s
+      out << ALPHABET[b2 & 0x3F].to_s
       i = i + 3
     end
     rem = n - i
     if rem == 1
       b0 = bytes[i]
-      out = out + ALPHABET[(b0 >> 2) & 0x3F].to_s
-      out = out + ALPHABET[(b0 << 4) & 0x3F].to_s
-      out = out + "=="
+      out << ALPHABET[(b0 >> 2) & 0x3F].to_s
+      out << ALPHABET[(b0 << 4) & 0x3F].to_s
+      out << "=="
     elsif rem == 2
       b0 = bytes[i]
       b1 = bytes[i + 1]
-      out = out + ALPHABET[(b0 >> 2) & 0x3F].to_s
-      out = out + ALPHABET[((b0 << 4) | (b1 >> 4)) & 0x3F].to_s
-      out = out + ALPHABET[(b1 << 2) & 0x3F].to_s
-      out = out + "="
+      out << ALPHABET[(b0 >> 2) & 0x3F].to_s
+      out << ALPHABET[((b0 << 4) | (b1 >> 4)) & 0x3F].to_s
+      out << ALPHABET[(b1 << 2) & 0x3F].to_s
+      out << "="
     end
     out
   end
@@ -71,7 +71,7 @@ module Base64
       if nbits >= 8
         nbits = nbits - 8
         byte = (acc >> nbits) & 0xFF
-        out = out + byte.chr
+        out << byte.chr
       end
     end
     out

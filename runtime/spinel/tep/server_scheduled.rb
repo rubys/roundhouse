@@ -128,35 +128,49 @@ module Tep
         end
       end
 
-      # Per-connection lifecycle.
+      # Per-connection lifecycle. Per-request work lives in handle_one so
+      # each keep-alive iteration gets its own SP_GC_SAVE/SP_GC_RESTORE
+      # scope. Inline in this while loop, the per-request roots (blob, req,
+      # res, and everything dispatch/render allocates) would hoist to this
+      # function's long-lived scope and pile up across the connection's
+      # requests -- defeating the young-gen GC and racing the heap threshold
+      # upward (idle 2 MB -> multi-GB under sustained keep-alive load).
+      # Mirrors the Tep::Server#handle_one fix (210a5f6) for the prefork
+      # server; this Scheduled server is the one the blog actually runs.
       def self.handle_connection(client)
         keep_going = true
         while keep_going
-          blob = Tep::Server::Scheduled.read_request_blob(client, KEEPALIVE_TIMEOUT)
-          if blob.length == 0
-            break
-          end
-          req = Parser.parse(blob)
-          if req == nil
-            Tep::Server::Scheduled.send_simple(client, 400, "bad request")
-            break
-          end
-
-          req.consume_body_via_scheduler(client)
-
-          res = Response.new
-          Tep::APP.dispatch(req, res)
-
-          # Streaming responses use chunked Connection: close (same
-          # simplification as the prefork server) -- force the
-          # keep-alive loop to end after this response so the stream's
-          # terminator isn't followed by a stale read on the same fd.
-          keep_alive = req.keep_alive? && !res.halted_close? && !res.streaming
-          Tep::Server::Scheduled.write_response(client, req, res, keep_alive)
-          keep_going = keep_alive
+          keep_going = Tep::Server::Scheduled.handle_one(client)
         end
         Sock.sphttp_close(client)
         0
+      end
+
+      # Process exactly one request on `client`. Returns true to keep the
+      # connection open for the next keep-alive request, false to close.
+      def self.handle_one(client)
+        blob = Tep::Server::Scheduled.read_request_blob(client, KEEPALIVE_TIMEOUT)
+        if blob.length == 0
+          return false
+        end
+        req = Parser.parse(blob)
+        if req == nil
+          Tep::Server::Scheduled.send_simple(client, 400, "bad request")
+          return false
+        end
+
+        req.consume_body_via_scheduler(client)
+
+        res = Response.new
+        Tep::APP.dispatch(req, res)
+
+        # Streaming responses use chunked Connection: close (same
+        # simplification as the prefork server) -- force the keep-alive
+        # loop to end after this response so the stream's terminator isn't
+        # followed by a stale read on the same fd.
+        keep_alive = req.keep_alive? && !res.halted_close? && !res.streaming
+        Tep::Server::Scheduled.write_response(client, req, res, keep_alive)
+        keep_alive
       end
 
       # Non-blocking request reader. Returns the accumulated blob
@@ -177,7 +191,7 @@ module Tep
           if chunk.length == 0
             return ""
           end
-          buf = buf + chunk
+          buf << chunk
           if buf.length >= 4 && buf.include?("\r\n\r\n")
             return buf
           end
@@ -224,12 +238,12 @@ module Tep
           reason = Tep.reason(res.status)
           head = req.http_version + " " + res.status.to_s + " " + reason + "\r\n"
           res.headers.each do |k, v|
-            head = head + k + ": " + v + "\r\n"
+            head << k + ": " + v + "\r\n"
           end
           res.set_cookies.each do |line|
-            head = head + "Set-Cookie: " + line + "\r\n"
+            head << "Set-Cookie: " + line + "\r\n"
           end
-          head = head + "Connection: close\r\n\r\n"
+          head << "Connection: close\r\n\r\n"
           Sock.sphttp_write_str(client, head)
           out = Tep::Stream.new(client)
           res.streamer.pump(out)
@@ -247,23 +261,23 @@ module Tep
         reason = Tep.reason(res.status)
         head = req.http_version + " " + res.status.to_s + " " + reason + "\r\n"
         res.headers.each do |k, v|
-          head = head + k + ": " + v + "\r\n"
+          head << k + ": " + v + "\r\n"
         end
         res.set_cookies.each do |line|
-          head = head + "Set-Cookie: " + line + "\r\n"
+          head << "Set-Cookie: " + line + "\r\n"
         end
         if keep_alive
-          head = head + "Connection: keep-alive\r\n"
+          head << "Connection: keep-alive\r\n"
         else
-          head = head + "Connection: close\r\n"
+          head << "Connection: close\r\n"
         end
         if res.file_path.length > 0
           fs = Sock.sphttp_filesize(res.file_path)
-          head = head + "Content-Length: " + fs.to_s + "\r\n\r\n"
+          head << "Content-Length: " + fs.to_s + "\r\n\r\n"
           Sock.sphttp_write_str(client, head)
           Sock.sphttp_sendfile(client, res.file_path)
         else
-          head = head + "Content-Length: " + res.body.length.to_s + "\r\n\r\n"
+          head << "Content-Length: " + res.body.length.to_s + "\r\n\r\n"
           Sock.sphttp_write_str(client, head)
           if res.body.length > 0
             Sock.sphttp_write_str(client, res.body)

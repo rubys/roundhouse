@@ -171,12 +171,12 @@ module Tep
       reason = Tep.reason(res.status)
       head = req.http_version + " " + res.status.to_s + " " + reason + "\r\n"
       res.headers.each do |k, v|
-        head = head + k + ": " + v + "\r\n"
+        head << k + ": " + v + "\r\n"
       end
       # Set-Cookie can repeat; emit each on its own line.
       ci = 0
       while ci < res.set_cookies.length
-        head = head + "Set-Cookie: " + res.set_cookies[ci] + "\r\n"
+        head << "Set-Cookie: " + res.set_cookies[ci] + "\r\n"
         ci += 1
       end
       head + "\r\n"

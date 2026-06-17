@@ -9,20 +9,20 @@ module Tep
       while i < n
         c = s[i]
         if c == "+"
-          out = out + " "
+          out << " "
           i += 1
         elsif c == "%" && i + 2 < n
           hi = Url.hex_nibble(s[i + 1])
           lo = Url.hex_nibble(s[i + 2])
           if hi >= 0 && lo >= 0
-            out = out + ((hi * 16 + lo).chr)
+            out << ((hi * 16 + lo).chr)
             i += 3
           else
-            out = out + c
+            out << c
             i += 1
           end
         else
-          out = out + c
+          out << c
           i += 1
         end
       end
@@ -40,12 +40,12 @@ module Tep
         if (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") ||
            (c >= "0" && c <= "9") || c == "-" || c == "." ||
            c == "_" || c == "~"
-          out = out + c
+          out << c
         else
           b = c.bytes[0]
           hi = b / 16
           lo = b % 16
-          out = out + "%" + Url.hex_char(hi) + Url.hex_char(lo)
+          out << "%" + Url.hex_char(hi) + Url.hex_char(lo)
         end
         i += 1
       end
