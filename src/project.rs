@@ -550,11 +550,10 @@ const E2E_SPECS: &[(&str, &str)] = &[
     ("e2e/tailwind.spec.js", include_str!("../e2e/tailwind.spec.js")),
     ("e2e/turbo_comment.spec.js", include_str!("../e2e/turbo_comment.spec.js")),
     ("e2e/action_cable.spec.js", include_str!("../e2e/action_cable.spec.js")),
-    // Ships to every archive, but only runs on per-session (cookie) flash
-    // targets — the others E2E_SKIP it via the README `## End-to-end`
-    // block (see `target_readme`). Without shipping it here the skip list
-    // is inert: `npx playwright test` only discovers specs present in the
-    // archive's e2e/ dir.
+    // Ships to — and runs on — every archive: all targets now back flash
+    // with a per-session cookie, so none E2E_SKIP it (see the 428 comment
+    // in `target_readme`). Must be shipped here regardless: `npx playwright
+    // test` only discovers specs present in the archive's e2e/ dir.
     ("e2e/flash.spec.js", include_str!("../e2e/flash.spec.js")),
 ];
 

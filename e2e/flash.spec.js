@@ -15,12 +15,13 @@ import { test, expect } from '@playwright/test'
 // sweep is checked by reloading the article's own show page, not the index,
 // to steer clear of index.spec entirely.
 //
-// Scoping (via E2E_SKIP in each target's README ## End-to-end block): runs
-// only on cookie-backed, per-session targets (ruby, jruby, go, rust). The
-// in-memory-flash targets (crystal, typescript) share ONE global flash slot,
-// which races with the comment specs' `redirect_to … notice:` under
-// `fullyParallel`; the remaining targets don't wire flash yet. As a target
-// gains per-session flash, drop it from that skip list.
+// Scoping: runs on every target. All targets now back flash with a
+// per-session `rh_flash` cookie (HttpOnly, cleared when empty), so the
+// sweep is isolated per browser and no longer races the comment specs'
+// `redirect_to … notice:` under `fullyParallel` — no target sets E2E_SKIP
+// for flash. (History: crystal/typescript once shared one global in-memory
+// flash slot and were skipped here; that was removed when they gained
+// cookie-backed per-session flash, matching go/rust/kotlin/swift/etc.)
 test('flash notice shows once then is swept', async ({ page }) => {
   await page.goto('/articles/1/edit')
 
