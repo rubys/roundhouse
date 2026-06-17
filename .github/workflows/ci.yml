@@ -113,13 +113,15 @@ jobs:
   # churn turns flaky.
   # -------------------------------------------------------------------
   build-spinel:
-    # TEMPORARILY DISABLED (2026-06-08): gated off to validate the e2e
-    # work on a fully-green main. build-spinel tracks matz/spinel master
-    # and can go red independently; re-enable (drop this `if`) once the
-    # e2e matrix is landed. Cascade-skips framework-tests/toolchain/
-    # compare-spinel (they `needs: build-spinel`), which are also gated
-    # below for clarity.
-    if: false
+    # Re-enabled 2026-06-17 (framework-tests-spinel 5/5 + compare-spinel 7/7
+    # green again on matz/spinel master). Tracks matz/spinel master UNPINNED,
+    # so it can go red independently of any roundhouse change; continue-on-error
+    # keeps that advisory rather than failing the whole run (the downstream
+    # framework-tests / compare-spinel jobs are likewise advisory). If a build
+    # failure here cascades to skipped/failed downstream jobs, that's fine — the
+    # signal is still visible without blocking unrelated work. (toolchain-spinel
+    # stays gated below pending matz/spinel#1447.)
+    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -455,7 +457,7 @@ jobs:
   # `ar_base` is disabled in-test (b453fcf) pending real-sqlite
   # rewiring of the test_helper.
   framework-tests-spinel:
-    if: false  # TEMPORARILY DISABLED (2026-06-08) — see build-spinel
+    # Re-enabled 2026-06-17 (5/5 green on matz/spinel master). Advisory.
     needs: build-spinel
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -526,7 +528,10 @@ jobs:
   # closes. Running it (vs `if: false`) keeps the model-suite progress
   # visible and catches regressions in the compile path.
   toolchain-spinel:
-    if: false  # TEMPORARILY DISABLED (2026-06-08) — see build-spinel
+    if: false  # STILL GATED — blocked on matz/spinel#1447 (dropped `||=` into a
+               # poly-receiver setter → null Flash → segfault in the controller
+               # integration test). The void-tail compile error is fixed (#1444).
+               # Re-enable once #1447 lands and the real-blog suite runs green.
     needs: [generate-fixture, build-spinel]
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -928,7 +933,7 @@ jobs:
   # spinel master can churn faster than this job rebuilds against it;
   # drop it once the upstream cadence settles.
   compare-spinel:
-    if: false  # TEMPORARILY DISABLED (2026-06-08) — see build-spinel
+    # Re-enabled 2026-06-17 (7/7 paths match Rails on matz/spinel master). Advisory.
     needs: [generate-fixture, build-spinel]
     runs-on: ubuntu-latest
     continue-on-error: true
