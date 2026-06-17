@@ -145,6 +145,19 @@ module Cable
       return true
     end
     drv = Tep::WebSocket::Driver.new(0)
+    # Echo the Action Cable subprotocol. The browser's ActionCable client
+    # opens with `Sec-WebSocket-Protocol: actioncable-v1-json` and, per its
+    # isProtocolSupported() check, IGNORES every frame (welcome,
+    # confirm_subscription, and all broadcasts) unless the server echoes a
+    # supported subprotocol in the 101 — so without this the
+    # `<turbo-cable-stream-source>` never flips to `connected` and no live
+    # updates arrive. Select it only when offered (a raw ws client that
+    # offers none leaves it "" and the header is omitted, per RFC 6455).
+    hs.protocols.each do |proto|
+      if proto == "actioncable-v1-json"
+        drv.set_subprotocol("actioncable-v1-json")
+      end
+    end
 
     cb_open = Cable::WsOpen.new
     cb_open.ws = drv
