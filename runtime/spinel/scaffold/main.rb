@@ -211,15 +211,12 @@ module Main
     end
   end
 
-  # Tep::Server callback — MINIMAL form. Routes, runs the controller,
-  # copies status/body back. Skips flash + session lifecycle for now
-  # so the transport-only validation (sphttp eliminates io.write/read
-  # on int) can be measured without poly-dispatch collisions from
-  # cookie/session data flow narrowing field types.
-  #
-  # Discovery loop: add features back one at a time, each time noting
-  # what shape pressure the integration produces. See WHY.md /
-  # tep-transport-experiment branch notes for the inventory.
+  # Tep::Server callback. Routes, runs the controller, copies
+  # status/body/location back, and persists per-request flash via
+  # cookies (flash_notice / flash_alert) so a `redirect_to … notice:`
+  # shows once on the redirect target and is then swept — matching the
+  # cookie-backed Rack path in ruby_overlay/main.rb. Session is still a
+  # fresh per-request object (not yet cookie-persisted), same as Rack.
   def self.dispatch(req, res)
     ActionView::ViewHelpers.reset_slots!
     Broadcasts.reset_log!
@@ -276,7 +273,18 @@ module Main
     # re-nest them + merge the route's path captures (id, ...).
     controller.params = Main.nest_params(req.req_params, matched.path_params)
     controller.session = ActionDispatch::Session.new
-    controller.flash   = ActionDispatch::Flash.new
+    # Inbound flash: each message rides its own cookie (flash_notice /
+    # flash_alert) so the value carries verbatim, no serialization. Load
+    # through the constructor (NOT flash[:k]=) so to_persisted's show-once
+    # diff sees them as carried-in (value == @notice_was) and sweeps them.
+    # `fetch(name, "")` avoids a missing-key raise; a flash message is
+    # never empty, so non-empty == present.
+    inbound_flash = Tep.str_hash
+    cin = req.cookies.fetch("flash_notice", "")
+    inbound_flash["notice"] = cin if cin.length > 0
+    ain = req.cookies.fetch("flash_alert", "")
+    inbound_flash["alert"] = ain if ain.length > 0
+    controller.flash = ActionDispatch::Flash.new(inbound_flash)
     controller.request_format = request_format
 
     begin
@@ -294,6 +302,42 @@ module Main
       res.body = Views::Layouts.application(controller.body)
     end
     res.headers["Location"] = controller.location unless controller.location.nil?
+
+    # Outbound flash: persist messages set THIS request for the NEXT one.
+    # `to_persisted` returns only notice/alert that differ from the
+    # carried-in value (show-once); clear any inbound cookie that wasn't
+    # re-persisted so a consumed flash doesn't stick on the next nav.
+    persisted = controller.flash.to_persisted
+    pn = persisted.fetch("notice", "")
+    if pn.length > 0
+      Main.set_flash_cookie(res, "flash_notice", pn)
+    elsif req.cookies.fetch("flash_notice", "").length > 0
+      Main.clear_flash_cookie(res, "flash_notice")
+    end
+    pa = persisted.fetch("alert", "")
+    if pa.length > 0
+      Main.set_flash_cookie(res, "flash_alert", pa)
+    elsif req.cookies.fetch("flash_alert", "").length > 0
+      Main.clear_flash_cookie(res, "flash_alert")
+    end
+  end
+
+  # Flash cookies are HttpOnly + Path=/; the read side is server-only
+  # (no JS access). A set carries the message to the next request; a
+  # clear (empty value + Max-Age=0) expires a consumed one.
+  def self.set_flash_cookie(res, name, value)
+    opts = Tep.str_hash
+    opts["Path"] = "/"
+    opts["HttpOnly"] = ""
+    res.set_cookie(name, value, opts)
+  end
+
+  def self.clear_flash_cookie(res, name)
+    opts = Tep.str_hash
+    opts["Path"] = "/"
+    opts["Max-Age"] = "0"
+    opts["HttpOnly"] = ""
+    res.set_cookie(name, "", opts)
   end
 end
 
