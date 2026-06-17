@@ -107,10 +107,10 @@ jobs:
   # or pass SPINEL=.../spinel to the scaffold Makefile (runtime/spinel/
   # scaffold/Makefile honors SPINEL ?= spinel).
   #
-  # The `spinel` shell wrapper resolves spinel_parse / spinel_analyze /
-  # spinel_codegen / lib/ relative to its own directory, so the tree
-  # ships as a unit. Tracking master rather than pinning a SHA — bump
-  # to a pin if upstream churn turns flaky.
+  # The single `spinel` binary resolves its `spinel_rbs_extract` sidecar
+  # and `lib/` relative to its own directory, so the tree ships as a unit.
+  # Tracking master rather than pinning a SHA — bump to a pin if upstream
+  # churn turns flaky.
   # -------------------------------------------------------------------
   build-spinel:
     # TEMPORARILY DISABLED (2026-06-08): gated off to validate the e2e
@@ -132,15 +132,20 @@ jobs:
       - name: make all
         run: make -C spinel-src all
       - name: Stage artifact tree
+        # `make all` now builds a single `spinel` binary (a symlink to
+        # build/spinel) plus the `spinel_rbs_extract` sidecar; the legacy
+        # spinel_parse/spinel_analyze/spinel_codegen split moved under
+        # legacy/ and is no longer produced. The single binary locates
+        # both `spinel_rbs_extract` and `lib/` relative to the directory
+        # it is invoked from, so they must ship alongside it. The extractor
+        # is REQUIRED for the --rbs path (toolchain-spinel / compare-spinel);
+        # without it, --rbs is silently a no-op and the seeded path goes
+        # untested. `cp -L` dereferences the symlink to copy the real binary.
         run: |
           mkdir spinel-dist
-          cp spinel-src/spinel             spinel-dist/
-          cp spinel-src/spinel_parse       spinel-dist/
-          cp spinel-src/spinel_analyze     spinel-dist/
-          cp spinel-src/spinel_codegen     spinel-dist/
-          cp spinel-src/spinel_analyze.rb  spinel-dist/
-          cp spinel-src/spinel_codegen.rb  spinel-dist/
-          cp -R spinel-src/lib             spinel-dist/lib
+          cp -L spinel-src/spinel             spinel-dist/spinel
+          cp    spinel-src/spinel_rbs_extract spinel-dist/
+          cp -R spinel-src/lib                spinel-dist/lib
       - name: Upload spinel toolchain
         uses: actions/upload-artifact@v7
         with:
@@ -464,8 +469,7 @@ jobs:
           path: spinel-dist
       - name: Stage spinel binaries
         run: |
-          chmod +x spinel-dist/spinel spinel-dist/spinel_parse \
-                   spinel-dist/spinel_analyze spinel-dist/spinel_codegen
+          chmod +x spinel-dist/spinel spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: cargo test --test framework_tests_spinel -- --ignored
         run: cargo test --test framework_tests_spinel -- --ignored --nocapture
@@ -541,8 +545,7 @@ jobs:
           path: spinel-dist
       - name: Stage spinel binaries
         run: |
-          chmod +x spinel-dist/spinel spinel-dist/spinel_parse \
-                   spinel-dist/spinel_analyze spinel-dist/spinel_codegen
+          chmod +x spinel-dist/spinel spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: Install libsqlite3-dev
         run: sudo apt-get update -qq && sudo apt-get install -y libsqlite3-dev
@@ -573,7 +576,7 @@ jobs:
           mkdir -p ci-spinel-repro
           cc --version > ci-spinel-repro/cc-version.txt 2>&1
           uname -a >> ci-spinel-repro/cc-version.txt
-          spinel-dist/spinel_analyze --version >> ci-spinel-repro/cc-version.txt 2>&1 || true
+          spinel-dist/spinel --version >> ci-spinel-repro/cc-version.txt 2>&1 || true
           if [ -z "$SC" ]; then echo "scratch not found"; exit 0; fi
           T=test/controllers/articles_controller_test.rb
           ( cd "$SC" && spinel -c --rbs sig "$T" -o /tmp/out.c ) \
@@ -944,8 +947,7 @@ jobs:
           path: spinel-dist
       - name: Stage spinel binaries
         run: |
-          chmod +x spinel-dist/spinel spinel-dist/spinel_parse \
-                   spinel-dist/spinel_analyze spinel-dist/spinel_codegen
+          chmod +x spinel-dist/spinel spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: Install libsqlite3-dev
         run: sudo apt-get update -qq && sudo apt-get install -y libsqlite3-dev
