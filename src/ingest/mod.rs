@@ -22,6 +22,7 @@ pub mod fixture;
 pub mod jbuilder;
 pub mod library_class;
 pub mod model;
+pub mod prism;
 pub mod routes;
 pub mod schema;
 pub mod sources;

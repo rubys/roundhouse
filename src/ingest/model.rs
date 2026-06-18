@@ -3,7 +3,7 @@
 //! and methods.
 
 use indexmap::IndexMap;
-use ruby_prism::{Node, parse};
+use ruby_prism::Node;
 
 use crate::dialect::{Comment, Model, ModelBodyItem};
 use crate::effect::EffectSet;
@@ -29,7 +29,7 @@ pub fn ingest_model(
     schema: &Schema,
 ) -> IngestResult<Option<Model>> {
     super::sources::register(file, &String::from_utf8_lossy(source));
-    let result = parse(source);
+    let result = super::prism::parse(source, file);
     let root = result.node();
     let Some(class) = find_first_class(&root) else {
         return Ok(None);

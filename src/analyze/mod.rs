@@ -2265,6 +2265,10 @@ fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
                 }
                 m
             }
+            // Parse diagnostics are produced by the ingest parse wrapper,
+            // never carried as an `Expr.diagnostic` annotation; handled
+            // defensively so the match stays exhaustive.
+            DiagnosticKind::Parse { message } => format!("syntax error: {message}"),
         };
         out.push(Diagnostic {
             span: expr.span,

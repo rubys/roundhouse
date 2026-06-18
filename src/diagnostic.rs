@@ -56,6 +56,7 @@ impl Diagnostic {
             DiagnosticKind::IncompatibleBinop { .. } => "incompatible_binop",
             DiagnosticKind::GradualUntyped { .. } => "gradual_untyped",
             DiagnosticKind::Unsupported { .. } => "unsupported",
+            DiagnosticKind::Parse { .. } => "parse",
         }
     }
 
@@ -96,6 +97,23 @@ impl Diagnostic {
             message.push_str(&detail);
         }
         let kind = DiagnosticKind::Unsupported { target, construct, detail };
+        Diagnostic {
+            span,
+            severity: Self::default_severity(&kind),
+            kind,
+            message,
+        }
+    }
+
+    /// Construct a `Parse` diagnostic for a Prism syntax error. `span`
+    /// covers the offending source range — it renders `file:line:col`
+    /// when it resolves against `App::sources`, message-only otherwise
+    /// (e.g. a standalone ingest that never registered a path). `message`
+    /// is Prism's own error text; severity is the kind default (`Error`),
+    /// so a syntax error gates the build like any other.
+    pub fn parse(span: Span, message: impl Into<String>) -> Self {
+        let message = message.into();
+        let kind = DiagnosticKind::Parse { message: message.clone() };
         Diagnostic {
             span,
             severity: Self::default_severity(&kind),
@@ -148,6 +166,7 @@ impl Diagnostic {
             DiagnosticKind::Unsupported { target, construct, .. } => {
                 Self::unsupported_text(target.as_ref(), construct)
             }
+            DiagnosticKind::Parse { message } => format!("syntax error: {message}"),
         }
     }
 
@@ -254,6 +273,15 @@ mod tests {
     }
 
     #[test]
+    fn parse_constructor_is_error_with_prism_message() {
+        let d = Diagnostic::parse(Span::synthetic(), "unexpected end-of-input, assuming it is closing the parent top level context");
+        assert_eq!(d.severity, Severity::Error);
+        assert_eq!(d.code(), "parse");
+        assert!(d.to_string().starts_with("error[parse]: "));
+        assert!(d.to_string().contains("unexpected end-of-input"));
+    }
+
+    #[test]
     fn unsupported_constructor_target_agnostic_no_detail() {
         let d = Diagnostic::unsupported(Span::synthetic(), None, "ColumnSpec::Named", "");
         assert_eq!(
@@ -347,4 +375,14 @@ pub enum DiagnosticKind {
         construct: Symbol,
         detail: String,
     },
+    /// Ruby source Prism itself couldn't parse — a genuine syntax error
+    /// in the input, distinct from `Unsupported` (valid Ruby the tool
+    /// can't compile *yet*). Prism is error-recovering, so ingest still
+    /// walks the partial AST it returns; this diagnostic records the
+    /// dropped `errors()` — produced by the ingest parse wrapper
+    /// ([`crate::ingest::prism::parse`]) — so a syntax error surfaces
+    /// with file:line:col instead of being silently swallowed and
+    /// resurfacing later as a confusing downstream gap. `message` is
+    /// Prism's own error text. Default severity `Error`.
+    Parse { message: String },
 }

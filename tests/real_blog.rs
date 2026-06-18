@@ -28,6 +28,25 @@ fn ingests_without_errors() {
 }
 
 #[test]
+fn ingests_without_parse_diagnostics() {
+    // A clean fixture must produce ZERO Prism parse diagnostics. Guards
+    // the false-positive class where a layout's `<%= yield %>` compiles
+    // to a top-level `yield` ("Invalid yield" as a standalone program):
+    // the ERB-compiled buffer is parsed out of its method-body context,
+    // so it must NOT route through the parse-diagnostic wrapper. If this
+    // regresses, every fixture with a layout starts reporting phantom
+    // syntax errors. See `ingest::prism` and `ingest_ruby_program`.
+    let (app, parse_diags) =
+        roundhouse::ingest::prism::scope(|| ingest_app(fixture_path()));
+    app.expect("ingest real-blog");
+    assert!(
+        parse_diags.is_empty(),
+        "expected no parse diagnostics on a clean fixture, got: {:?}",
+        parse_diags.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
 fn model_tests_ingest_into_test_modules() {
     // Phase 2a forcing function: real-blog has two model test files
     // (article_test.rb, comment_test.rb). Ingest should produce one
@@ -174,6 +193,7 @@ fn diagnostic_signature(d: &roundhouse::analyze::Diagnostic) -> (String, String)
                 if detail.is_empty() { String::new() } else { format!(":{detail}") },
             ),
         ),
+        DiagnosticKind::Parse { message } => ("Parse".into(), message.clone()),
     }
 }
 

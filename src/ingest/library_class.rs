@@ -27,7 +27,7 @@ pub fn ingest_library_class(
     file: &str,
 ) -> IngestResult<Option<LibraryClass>> {
     super::sources::register(file, &String::from_utf8_lossy(source));
-    let result = parse(source);
+    let result = super::prism::parse(source, file);
     let root = result.node();
     let Some(class) = find_first_class(&root) else {
         return Ok(None);
@@ -54,7 +54,7 @@ pub fn ingest_library_classes(
     file: &str,
 ) -> IngestResult<Vec<LibraryClass>> {
     super::sources::register(file, &String::from_utf8_lossy(source));
-    let result = parse(source);
+    let result = super::prism::parse(source, file);
     let root = result.node();
     let mut out = Vec::new();
     for (scope, class) in find_all_classes_with_scope(&root) {

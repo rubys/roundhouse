@@ -205,8 +205,24 @@ fn run_transpile(
     if !input.exists() {
         return Err(format!("input {} does not exist", input.display()));
     }
-    let mut app =
-        ingest_app(input).map_err(|e| format!("ingest {}: {e}", input.display()))?;
+    // Ingest inside a parse-diagnostic scope so Prism syntax errors —
+    // which the error-recovering parser otherwise drops on the floor —
+    // are collected and routed through the same report as emit gaps.
+    let (app_result, parse_diags) =
+        roundhouse::ingest::prism::scope(|| ingest_app(input));
+    let mut app = match app_result {
+        Ok(app) => app,
+        Err(e) => {
+            // Ingest failed outright. Surface any syntax errors first: a
+            // malformed file is usually the root cause of the construct
+            // ingest then choked on. The sources table isn't populated on
+            // the error path, so these render message-only.
+            for d in &parse_diags {
+                eprintln!("roundhouse: {}", d.render(&[]));
+            }
+            return Err(format!("ingest {}: {e}", input.display()));
+        }
+    };
     Analyzer::new(&app).analyze(&mut app);
 
     // Analyze-time diagnostics — the same type errors roundhouse-check
@@ -224,7 +240,14 @@ fn run_transpile(
     // first one.
     let (files_result, mut diags) =
         roundhouse::emit::diagnostics::scope(|| project::target_files(&app, input, target));
-    let files = files_result?;
+
+    // Prism syntax errors recorded during ingest join the emit-gap
+    // inventory: same `Diagnostic` shape, same print/policy/gate
+    // treatment. They lead the list — earliest phase, and usually the
+    // root cause of any downstream emit noise on the recovered AST. The
+    // materialized `files` are deferred to after the gate (below) so a
+    // gate failure reports every diagnostic before the run aborts.
+    diags.splice(0..0, parse_diags);
 
     // Policy: errors (unsupported constructs and type errors alike) fail
     // the transpile cleanly by default. With --allow-unsupported they
@@ -263,11 +286,14 @@ fn run_transpile(
     let type_errors = analyze_diags.iter().filter(|d| d.severity == Severity::Error).count();
     if errors + type_errors > 0 {
         return Err(format!(
-            "{errors} unsupported construct(s), {type_errors} type error(s) — rerun \
+            "{errors} unsupported/syntax error(s), {type_errors} type error(s) — rerun \
              with --allow-unsupported to write the output anyway"
         ));
     }
 
+    // Gate passed (or every error was downgraded): materialize the emit
+    // output, propagating any hard emit failure now.
+    let files = files_result?;
     project::write_to_dir(&files, out)?;
     eprintln!(
         "roundhouse: wrote {} files to {} ({})",

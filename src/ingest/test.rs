@@ -4,7 +4,7 @@
 //! `ActionDispatch::IntegrationTest`) whose body is a sequence of
 //! `test "name" do ... end` declarations.
 
-use ruby_prism::{Node, parse};
+use ruby_prism::Node;
 
 use crate::dialect::{MethodDef, Test, TestModule};
 use crate::expr::{Expr, ExprNode};
@@ -34,7 +34,7 @@ use super::{IngestError, IngestResult};
 /// per-target plumbing changes.
 pub fn ingest_test_file(source: &[u8], file: &str) -> IngestResult<Option<TestModule>> {
     super::sources::register(file, &String::from_utf8_lossy(source));
-    let result = parse(source);
+    let result = super::prism::parse(source, file);
     let root = result.node();
     let mut top_classes: Vec<ruby_prism::ClassNode<'_>> = Vec::new();
     collect_top_level_classes(&root, &mut top_classes);

@@ -2,10 +2,12 @@
 //! print the diagnostics. Exit zero if empty, one if not.
 //!
 //! This is the first user-facing path for roundhouse's typed IR
-//! diagnostics. It's the "did my Ruby type cleanly?" check: point
-//! it at a fixture or a real Rails app, get back a list of sites
+//! diagnostics. It's the "did my Ruby parse and type cleanly?" check:
+//! point it at a fixture or a real Rails app, get back a list of sites
 //! the analyzer flagged (unresolved ivars, method dispatch failures,
-//! incompatible operator uses).
+//! incompatible operator uses) plus any Prism syntax errors collected
+//! during ingest. Parse errors and analyze errors both gate the exit
+//! code; warnings and survey gaps are informational.
 //!
 //! Today's output is message-only — spans are not yet resolvable to
 //! file:line:column. Identifier names in the messages are the user's
@@ -61,7 +63,11 @@ fn main() -> ExitCode {
         survey::activate();
     }
 
-    let ingest_result = ingest_app(path);
+    // Ingest inside a parse-diagnostic scope so Prism syntax errors —
+    // which the error-recovering parser otherwise drops — are collected
+    // and reported alongside the analyze diagnostics.
+    let (ingest_result, parse_diags) =
+        roundhouse::ingest::prism::scope(|| ingest_app(path));
 
     let survey_errors = if continue_on_error { survey::drain() } else { Vec::new() };
 
@@ -69,6 +75,12 @@ fn main() -> ExitCode {
         Ok(app) => app,
         Err(err) => {
             eprintln!("roundhouse-check: ingest failed: {err}");
+            // Surface any syntax errors first — a malformed file is
+            // usually the root cause of the construct ingest then choked
+            // on. Sources aren't populated on this path, so message-only.
+            for d in &parse_diags {
+                eprintln!("{}", d.render(&[]));
+            }
             // Even on hard failure, surface any partial survey results
             // so the user still gets some signal.
             if !survey_errors.is_empty() {
@@ -82,8 +94,15 @@ fn main() -> ExitCode {
 
     let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();
     let warnings = diags.iter().filter(|d| d.severity == Severity::Warning).count();
+    let parse_errors = parse_diags.iter().filter(|d| d.severity == Severity::Error).count();
 
     let mut had_output = false;
+    // Parse diagnostics lead — earliest phase, and usually the root
+    // cause of any downstream analyze noise on the recovered AST.
+    for d in &parse_diags {
+        eprintln!("{}", d.render(&app.sources));
+        had_output = true;
+    }
     for d in &diags {
         eprintln!("{}", d.render(&app.sources));
         had_output = true;
@@ -98,17 +117,18 @@ fn main() -> ExitCode {
         eprintln!();
     }
     eprintln!(
-        "roundhouse-check: {} — {} error(s), {} warning(s), {} survey gap(s)",
+        "roundhouse-check: {} — {} parse error(s), {} error(s), {} warning(s), {} survey gap(s)",
         fixture,
+        parse_errors,
         errors,
         warnings,
         survey_errors.len(),
     );
 
     // Survey errors are informational; they don't gate exit code.
-    // Strict-mode ingest errors are caught above. Analyze errors
-    // remain the gate.
-    if errors > 0 {
+    // Strict-mode ingest errors are caught above. Parse (syntax) errors
+    // and analyze errors both gate.
+    if errors + parse_errors > 0 {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS

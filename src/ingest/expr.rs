@@ -3,7 +3,7 @@
 //! pull a Ruby body (methods, actions, scopes, seeds, views, tests,
 //! and model/controller "Unknown" fallbacks).
 
-use ruby_prism::{Node, parse};
+use ruby_prism::Node;
 
 use crate::Symbol;
 use crate::expr::{Arm, BoolOpKind, BoolOpSurface, Expr, ExprNode, InterpPart, Literal, Pattern};
@@ -1424,7 +1424,15 @@ fn ingest_index_argument(
 /// can share it.
 pub(super) fn ingest_ruby_program(source: &str, file: &str) -> IngestResult<Expr> {
     super::sources::register(file, source);
-    let result = parse(source.as_bytes());
+    // Raw parse, NOT the parse-diagnostic wrapper: `source` here is the
+    // compiled-from-ERB buffer (or a seeds script), parsed out of its
+    // true method-body context. Prism flags context-only errors on it —
+    // a layout's `<%= yield %>` compiles to a top-level `yield`, which is
+    // "Invalid yield" as a standalone program but legitimate in the view
+    // method roundhouse ingests it into. Reporting those would be a false
+    // positive on every layout, so this path stays silent (as it was
+    // before the wrapper); real `.rb` source files report via the wrapper.
+    let result = ruby_prism::parse(source.as_bytes());
     let root = result.node();
     let program = root.as_program_node().ok_or_else(|| IngestError::Parse {
         file: file.into(),

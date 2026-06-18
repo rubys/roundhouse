@@ -3,7 +3,7 @@
 //! `root`, and `resources` (with nested blocks and `only:` / `except:`).
 
 use indexmap::IndexMap;
-use ruby_prism::{Node, parse};
+use ruby_prism::Node;
 
 use crate::dialect::{HttpMethod, RouteSpec, RouteTable};
 use crate::naming::camelize;
@@ -17,7 +17,7 @@ use super::{IngestError, IngestResult};
 
 pub fn ingest_routes(source: &[u8], file: &str) -> IngestResult<RouteTable> {
     super::sources::register(file, &String::from_utf8_lossy(source));
-    let result = parse(source);
+    let result = super::prism::parse(source, file);
     let root = result.node();
 
     // Find the outer `Rails.application.routes.draw do ... end` call.

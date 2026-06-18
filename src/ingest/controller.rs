@@ -2,7 +2,7 @@
 //! into a `Controller`, splitting class-body items into actions,
 //! filters, a `private` marker, and unknown fall-throughs.
 
-use ruby_prism::{Node, parse};
+use ruby_prism::Node;
 
 use crate::dialect::{Action, Comment, Controller, ControllerBodyItem, LayoutDecl, RenderTarget};
 use crate::effect::EffectSet;
@@ -21,7 +21,7 @@ use super::{IngestError, IngestResult};
 
 pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Controller>> {
     super::sources::register(file, &String::from_utf8_lossy(source));
-    let result = parse(source);
+    let result = super::prism::parse(source, file);
     let root = result.node();
     let Some(class) = find_first_class(&root) else {
         return Ok(None);

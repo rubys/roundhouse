@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use ruby_prism::{Node, parse};
+use ruby_prism::Node;
 
 use crate::App;
 use crate::vfs::{FsVfs, MapVfs, Vfs};
@@ -335,7 +335,8 @@ fn ingest_importmap<V: Vfs + ?Sized>(
     file: &str,
 ) -> IngestResult<crate::app::Importmap> {
     use crate::app::{Importmap, ImportmapPin};
-    let result = parse(source.as_bytes());
+    super::sources::register(file, source);
+    let result = super::prism::parse(source.as_bytes(), file);
     let root = result.node();
     let program = root.as_program_node().ok_or_else(|| IngestError::Parse {
         file: file.into(),

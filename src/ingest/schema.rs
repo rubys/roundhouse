@@ -12,7 +12,7 @@
 //! where migrations use symbols and with `t.timestamps` already
 //! materialized into explicit datetime columns.
 
-use ruby_prism::{Node, parse};
+use ruby_prism::Node;
 
 use crate::schema::{Column, ColumnType, Index, Schema, Table};
 use crate::{Symbol, TableRef};
@@ -23,8 +23,9 @@ use super::util::{
 };
 use super::{IngestError, IngestResult};
 
-pub fn ingest_schema(source: &[u8], _file: &str) -> IngestResult<Schema> {
-    let result = parse(source);
+pub fn ingest_schema(source: &[u8], file: &str) -> IngestResult<Schema> {
+    super::sources::register(file, &String::from_utf8_lossy(source));
+    let result = super::prism::parse(source, file);
     let root = result.node();
 
     let mut schema = Schema::default();
@@ -53,7 +54,8 @@ pub fn ingest_schema(source: &[u8], _file: &str) -> IngestResult<Schema> {
 /// are ignored: migrations legitimately contain arbitrary Ruby (data
 /// backfills, `say`, …) that doesn't affect the schema.
 pub fn ingest_migration(source: &[u8], file: &str, schema: &mut Schema) -> IngestResult<()> {
-    let result = parse(source);
+    super::sources::register(file, &String::from_utf8_lossy(source));
+    let result = super::prism::parse(source, file);
     let root = result.node();
     let Some(class) = find_first_class(&root) else {
         return Ok(());
