@@ -528,10 +528,13 @@ jobs:
   # closes. Running it (vs `if: false`) keeps the model-suite progress
   # visible and catches regressions in the compile path.
   toolchain-spinel:
-    if: false  # STILL GATED — blocked on matz/spinel#1447 (dropped `||=` into a
-               # poly-receiver setter → null Flash → segfault in the controller
-               # integration test). The void-tail compile error is fixed (#1444).
-               # Re-enable once #1447 lands and the real-blog suite runs green.
+    # Un-gated 2026-06-18: matz/spinel#1447 (the `||=`-into-poly-setter →
+    # null-Flash segfault in the controller integration test) closed
+    # upstream, clearing the last blocker on the real-blog AOT suite (the
+    # void-tail compile error was already fixed in #1444). Stays advisory
+    # via continue-on-error — like every spinel job it tracks matz/spinel
+    # master UNPINNED, so it surfaces regressions without gating unrelated
+    # work; if master churns red, the signal is visible but non-blocking.
     needs: [generate-fixture, build-spinel]
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -1260,6 +1263,47 @@ jobs:
           npx playwright install --with-deps chromium
       - name: scripts/smoke swift
         run: scripts/smoke --tgz browse/swift.tgz swift
+
+  # spinel: the archive's README § Build AOT-compiles main.rb → build/blog
+  # with the spinel toolchain (build-spinel artifact); § Test runs the
+  # scaffold Makefile's `spinel-test` (each emitted test → a native binary);
+  # § End-to-end boots build/blog under Playwright. Unlike ruby it needs no
+  # MRI/bundler — static assets ship prebuilt in the archive (ensure_static_
+  # assets, like jruby) so Build is the bare native compile. Toolchain =
+  # spinel on PATH + a C compiler + libsqlite3-dev (the binary links
+  # -lsqlite3) + Node for Playwright. Advisory (continue-on-error) like every
+  # spinel job — it tracks matz/spinel master UNPINNED. needs build-spinel
+  # for the compiler and build-site for the published spinel.tgz.
+  smoke-spinel:
+    needs: [build-site, build-spinel]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: browse-archives
+          path: browse
+      - uses: actions/download-artifact@v8
+        with:
+          name: spinel-dist
+          path: spinel-dist
+      - name: Stage spinel binaries
+        run: |
+          chmod +x spinel-dist/spinel spinel-dist/spinel_rbs_extract
+          echo "$PWD/spinel-dist" >> $GITHUB_PATH
+      - name: Install libsqlite3-dev
+        run: sudo apt-get update -qq && sudo apt-get install -y libsqlite3-dev
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+      - name: Pre-warm Playwright (chromium + system deps)
+        run: |
+          cd e2e
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: scripts/smoke spinel
+        run: scripts/smoke --tgz browse/spinel.tgz spinel
 
   # -------------------------------------------------------------------
   # Build the Pages site: per-target manifests (real-blog fixture) +
