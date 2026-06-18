@@ -35,13 +35,14 @@ module Tep
       # The header is assembled as an array of byte values and emitted
       # with `pack("C*")` rather than `String#<<`-ing each byte: the
       # 16-bit length form has a `0x00` high byte for any 126..255-byte
-      # payload, and spinel's `String#<<` drops an embedded NUL
-      # (matz/spinel#1479) — so a `<<`-built header loses that byte and
-      # corrupts the frame (e.g. Action Cable's ~140-byte
-      # confirm_subscription never reaches the browser). `pack` yields a
-      # length-tracked, binary-safe string; `+ @payload` is likewise a
-      # NUL-safe concat. This is also just the idiomatic way to build
-      # binary in Ruby, independent of the spinel bug.
+      # payload, so the header must be binary-safe (e.g. Action Cable's
+      # ~140-byte confirm_subscription corrupts and never reaches the
+      # browser otherwise). `pack` yields a length-tracked, binary-safe
+      # string; `+ @payload` is likewise a NUL-safe concat. This is the
+      # idiomatic way to build binary in Ruby — kept deliberately, not as
+      # a workaround: spinel's old `String#<<` NUL-drop (matz/spinel#1479)
+      # is now fixed, but `pack` stays clearer and doesn't couple the
+      # codec to a particular spinel version.
       def encode_unmasked
         head = []
         b0 = (@fin ? 0x80 : 0x00) | (@opcode & 0x0f)
@@ -172,8 +173,8 @@ module Tep
         end
 
         # Decode + unmask. Collect bytes into an int array and pack("C*")
-        # rather than `<<`-ing chars: a NUL payload byte is binary-safe
-        # this way (the same reason encode_unmasked packs — matz/spinel#1479).
+        # rather than `<<`-ing chars — the idiomatic binary build, the
+        # same reason encode_unmasked packs (see its note on #1479).
         bytes = []
         i = 0
         while i < plen
