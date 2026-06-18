@@ -3,15 +3,16 @@
 # Designed to run inside a Tep::Scheduler-managed fiber spawned by
 # the upgrade route after the 101 response is written. The fiber:
 #   1. Parks on Tep::Scheduler.io_wait(fd, READ, timeout) for bytes.
-#   2. Reads via Sock.sphttp_recv_into_frame into the binary frame buf.
-#   3. Walks the accumulated buffer with Frame.parse_from_buf,
-#      dispatching events to the Driver's handlers.
+#   2. Reads via Sock.sp_net_recv_some(:binstr) into a binary String,
+#      appended to a per-connection accumulator (binary-safe `+`).
+#   3. Walks the accumulator with Frame.parse_from_buf, dispatching
+#      events to the Driver's handlers and carrying any partial trailing
+#      frame forward via byteslice.
 #   4. On close (sent OR received), exits cleanly + closes the fd.
 #
-# The recv buffer (sphttp_frame_buf, 64 KiB) is the per-fork static
-# from Phase 0.5; cross-fiber sharing within one worker process is
-# bounded by the worker's cooperative scheduling -- only one fiber
-# parses at a time. A future Phase 2.1 (or whenever multi-fiber WS
+# The accumulator is a per-fiber Ruby String (binary-safe via :binstr +
+# pack), so it needs no shared static buffer. A future Phase 2.1 (or
+# whenever multi-fiber WS
 # concurrency-per-worker becomes a goal) replaces this with
 # per-fiber buffers via Fiber.storage (matz/spinel#578).
 module Tep
@@ -43,6 +44,12 @@ module Tep
         # often want to send a welcome message.
         Connection.dispatch_open(@driver)
 
+        # Inbound byte accumulator. sp_net_recv_some(:binstr) returns a
+        # binary-safe String; append it (binary-safe `+`) and parse as many
+        # whole frames as the buffer holds, carrying any partial trailing
+        # frame forward via byteslice. Replaces the old static recv buffer
+        # + per-byte C accessor (sphttp.c is retired — matz/spinel#1466).
+        inbuf = ""
         while true
           ready = Tep::Scheduler.io_wait(@fd, Tep::Scheduler::READ, @idle_timeout_seconds)
           if ready == 0
@@ -51,24 +58,17 @@ module Tep
             return 0
           end
 
-          n = Sock.sphttp_recv_into_frame(@fd)
-          if n <= 0
-            # EOF or error: dispatch close without sending one back
-            # (peer already gone) and exit.
+          chunk = Sock.sp_net_recv_some(@fd, 65536)
+          if chunk.length == 0
+            # EOF / peer gone: dispatch close without sending one back.
             Connection.dispatch_close(@driver, Tep::WebSocket::CLOSE_GOING_AWAY, "")
-            if n == 0
-              return 0
-            end
-            return -1
+            return 0
           end
+          inbuf = inbuf + chunk
 
-          # Parse + dispatch as many complete frames as possible
-          # from this recv.
-          state = Tep::WebSocket::ConnectionState.new
-          state.start = 0
-          state.avail = n
+          # Parse + dispatch every complete frame the buffer now holds.
           while true
-            r = Tep::WebSocket::Frame.parse_from_buf(state.start, state.avail)
+            r = Tep::WebSocket::Frame.parse_from_buf(inbuf, 0, inbuf.length)
             if r.outcome == "need"
               break
             end
@@ -77,10 +77,11 @@ module Tep
               return 0
             end
             Connection.dispatch_frame(@driver, r.frame)
-            state.start = state.start + r.consumed
-            if state.start >= state.avail
+            if r.consumed >= inbuf.length
+              inbuf = ""
               break
             end
+            inbuf = inbuf.byteslice(r.consumed, inbuf.length - r.consumed)
           end
         end
         0
@@ -155,16 +156,6 @@ module Tep
         Tep::Broadcast.unsubscribe_fd(driver.fd)
         Tep::Presence.untrack_by_fd(driver.fd)
         0
-      end
-    end
-
-    # Per-recv-loop iteration state. Avoids tuple-returns from
-    # parse_from_buf calls (spinel multi-return support is uneven).
-    class ConnectionState
-      attr_accessor :start, :avail
-      def initialize
-        @start = 0
-        @avail = 0
       end
     end
   end

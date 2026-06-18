@@ -138,24 +138,14 @@ tmp/blog.sqlite3: db/seed.sql
 	@mkdir -p tmp
 	sqlite3 $@ < db/seed.sql
 
-# Tep's FFI HTTP server links a C extension (runtime/tep/sphttp.c). Its
-# `net.rb` declares `ffi_cflags "@TEP_SPHTTP_O@"` — a placeholder for the
-# compiled object's path, since spinel doesn't resolve it from the source.
-# `bin/rh transpile` resolves this in the roundhouse build tree, but a
-# standalone archive ships it unresolved, so do it here too: compile
-# sphttp.o (freestanding C — system headers only) and substitute the
-# placeholder with the relative path. The grep guard makes it a no-op when
-# the substitution has already happened (e.g. in the build tree), so this
-# rule is safe in both contexts.
-$(BUILD)/blog: $(RUBY_SRC) $(RBS_SRC) runtime/tep/sphttp.o
-	@if grep -q '@TEP_SPHTTP_O@' runtime/tep/net.rb 2>/dev/null; then \
-	  sed -i.bak 's#@TEP_SPHTTP_O@#runtime/tep/sphttp.o#' runtime/tep/net.rb && rm -f runtime/tep/net.rb.bak; \
-	fi
+# spinel AOT-compiles main.rb (+ its whole require graph) straight to a
+# native binary. The HTTP/WebSocket transport now rides spinel's built-in,
+# auto-linked `sp_net` — there's no vendored C extension to compile or
+# link (the former runtime/tep/sphttp.c + `@TEP_SPHTTP_O@` placeholder
+# were retired in the sp_net migration, matz/spinel#1466).
+$(BUILD)/blog: $(RUBY_SRC) $(RBS_SRC)
 	@mkdir -p $(BUILD)
 	$(SPINEL) main.rb $(RBS_FLAG) -o $@
-
-runtime/tep/sphttp.o: runtime/tep/sphttp.c
-	cc -O2 -c $< -o $@
 
 # ── Tests / lint ─────────────────────────────────────────────────
 

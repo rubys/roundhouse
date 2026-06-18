@@ -92,10 +92,29 @@ module Tep
     # Process exactly one request on `client`. Returns true if the
     # connection should remain open for the next request (keep-alive)
     # or false if it should close.
+    # Blocking request reader: accumulate recv_some until the header
+    # terminator "\r\n\r\n" (or EOF / 64 KiB cap). The prefork server's
+    # client fd is blocking, so each recv parks the worker until bytes
+    # arrive — no scheduler. Replaces the C sphttp_read_request +
+    # request_buf (sphttp.c retired — matz/spinel#1466). `+` is binary-safe.
+    def read_request_blocking(client)
+      buf = ""
+      while buf.length < 65535
+        chunk = Sock.sp_net_recv_some(client, 4096)
+        if chunk.length == 0
+          return ""
+        end
+        buf = buf + chunk
+        if buf.length >= 4 && buf.include?("\r\n\r\n")
+          return buf
+        end
+      end
+      ""
+    end
+
     def handle_one(client)
-      n = Sock.sphttp_read_request(client)
-      return false if n <= 0
-      blob = Sock.sphttp_request_buf
+      blob = read_request_blocking(client)
+      return false if blob.length == 0
       req = Parser.parse(blob)
       if req == nil
         send_simple(client, 400, "bad request")
