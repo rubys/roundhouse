@@ -1,80 +1,93 @@
 # All FFI plumbing lives at the top level so spinel's name resolver
 # finds it from anywhere in the Tep tree (nested modules confuse it).
 #
-# The `@TEP_SPHTTP_O@` placeholder is substituted by `bin/tep` (or
-# the Makefile) with the absolute path to the built sphttp.o on the
-# current host. Spinel doesn't support `__dir__` or `ENV.fetch` in
-# top-level ffi_cflags, so a build-time substitution is the cleanest
-# portable shape.
+# Transport migration (matz/spinel#1466): the socket + process layer is
+# being moved off our vendored C shim (sphttp.c) onto spinel's maintained,
+# auto-linked `sp_net`. STAGE 1 (this commit) routes accept/poll/recv/
+# write/connect/fork/clock through `sp_net` via thin `sphttp_*` delegators
+# (call sites unchanged), with `now_us` reimplemented on the native
+# monotonic clock. The HTTP request buffer, body drain, the binary WS
+# frame-recv buffer, sendfile, and chunked write still ride sphttp.c
+# (Stage 2 ports those to `sp_net` + `:binstr` and deletes sphttp.c).
+#
+# `@TEP_SPHTTP_O@` is substituted by `bin/tep` / the Makefile with the
+# built sphttp.o path; it stays until Stage 2 removes the last sphttp.c
+# dependency.
 module Sock
   ffi_cflags "@TEP_SPHTTP_O@"
 
-  ffi_func :sphttp_listen,        [:int, :int],     :int
-  ffi_func :sphttp_accept,        [:int],           :int
-  # Non-blocking accept variant used by Tep::Server::Scheduled.
-  # Listen fd must be in non-blocking mode (sphttp_set_nonblock).
-  # Returns -1 with errno EAGAIN/EWOULDBLOCK if no pending connection.
-  ffi_func :sphttp_accept_nb,     [:int],           :int
-  ffi_func :sphttp_read_request,  [:int],           :int
-  ffi_func :sphttp_request_buf,   [],               :str
-  ffi_func :sphttp_request_len,   [],               :int
-  ffi_func :sphttp_drain_body,    [:int, :int],     :str
-  ffi_func :sphttp_write_str,     [:int, :str],     :int
+  # ── Socket + process layer: spinel's maintained sp_net (auto-linked) ──
+  # recv uses the `:binstr` return mode (matz/spinel ac1e0d2c) — builds a
+  # binary-safe String from (ptr, sp_net_bin_len) rather than strlen, so a
+  # recv'd 0x00 no longer truncates.
+  ffi_func :sp_net_listen,                [:int, :int],       :int
+  ffi_func :sp_net_accept,                [:int],             :int
+  ffi_func :sp_net_accept_nb,             [:int],             :int
+  ffi_func :sp_net_set_nonblock,          [:int],             :int
+  ffi_func :sp_net_close,                 [:int],             :int
+  ffi_func :sp_net_write_str,             [:int, :str],       :int
+  ffi_func :sp_net_write_bytes,           [:int, :str, :int], :int
+  ffi_func :sp_net_recv_some,             [:int, :int],       :binstr
+  ffi_func :sp_net_recv_all,              [:int, :int],       :binstr
+  ffi_func :sp_net_connect,               [:str, :int],       :int
+  ffi_func :sp_net_fork,                  [],                 :int
+  ffi_func :sp_net_exit,                  [:int],             :int
+  ffi_func :sp_net_getpid,                [],                 :int
+  ffi_func :sp_net_wait_any,              [],                 :int
+  ffi_func :sp_net_install_term_handlers, [],                 :int
+  ffi_func :sp_net_shutdown_requested,    [],                 :int
+  ffi_func :sp_net_poll_reset,            [],                 :int
+  ffi_func :sp_net_poll_add,              [:int, :int],       :int
+  ffi_func :sp_net_poll_run,              [:int],             :int
+  ffi_func :sp_net_poll_ready,            [:int],             :int
+  ffi_func :sp_net_shell_capture,         [:str, :int],       :binstr
 
-  # Binary-safe write + recv pair, used by Tep::WebSocket (and any
-  # other caller that needs to send/receive bytes containing 0x00).
-  # The recv side mirrors the request_buf / _len accessor pattern.
-  # See sphttp.c for the binary-safety contract.
-  ffi_func :sphttp_write_bytes,   [:int, :str, :int], :int
+  # Delegators: keep the existing `Sock.sphttp_*` call sites unchanged
+  # while routing them through sp_net (Stage 1 of retiring sphttp.c).
+  def self.sphttp_listen(port, reuse);      Sock.sp_net_listen(port, reuse);      end
+  def self.sphttp_accept(sfd);              Sock.sp_net_accept(sfd);              end
+  def self.sphttp_accept_nb(sfd);           Sock.sp_net_accept_nb(sfd);           end
+  def self.sphttp_set_nonblock(fd);         Sock.sp_net_set_nonblock(fd);         end
+  def self.sphttp_close(fd);                Sock.sp_net_close(fd);                end
+  def self.sphttp_write_str(fd, s);         Sock.sp_net_write_str(fd, s);         end
+  def self.sphttp_write_bytes(fd, data, n); Sock.sp_net_write_bytes(fd, data, n); end
+  def self.sphttp_recv_some(fd, n);         Sock.sp_net_recv_some(fd, n);         end
+  def self.sphttp_recv_all(fd, n);          Sock.sp_net_recv_all(fd, n);          end
+  def self.sphttp_connect(host, port);      Sock.sp_net_connect(host, port);      end
+  def self.sphttp_fork;                     Sock.sp_net_fork;                     end
+  def self.sphttp_exit(status);             Sock.sp_net_exit(status);             end
+  def self.sphttp_getpid;                   Sock.sp_net_getpid;                   end
+  def self.sphttp_wait_any;                 Sock.sp_net_wait_any;                 end
+  def self.sphttp_install_term_handlers;    Sock.sp_net_install_term_handlers;    end
+  def self.sphttp_shutdown_requested;       Sock.sp_net_shutdown_requested;       end
+  def self.sphttp_poll_reset;               Sock.sp_net_poll_reset;               end
+  def self.sphttp_poll_add(fd, mode);       Sock.sp_net_poll_add(fd, mode);       end
+  def self.sphttp_poll_run(timeout_ms);     Sock.sp_net_poll_run(timeout_ms);     end
+  def self.sphttp_poll_ready(slot);         Sock.sp_net_poll_ready(slot);         end
+  def self.sphttp_shell_capture(cmd, n);    Sock.sp_net_shell_capture(cmd, n);    end
+
+  # Monotonic clock in microseconds. Replaces the C `sphttp_now_us`:
+  # spinel exposes a native monotonic clock (Process.clock_gettime →
+  # sp_process_clock_gettime / CLOCK_MONOTONIC). Float seconds → µs Int.
+  def self.sphttp_now_us
+    (Process.clock_gettime(Process::CLOCK_MONOTONIC) * 1000000.0).to_i
+  end
+
+  # ── Still on sphttp.c (ported in Stage 2): the HTTP request buffer +
+  # body drain, the binary WS frame-recv buffer + per-byte accessor,
+  # sendfile, filesize, and chunked write. ──
+  ffi_func :sphttp_read_request,    [:int],         :int
+  ffi_func :sphttp_request_buf,     [],             :str
+  ffi_func :sphttp_request_len,     [],             :int
+  ffi_func :sphttp_drain_body,      [:int, :int],   :str
   ffi_func :sphttp_recv_into_frame, [:int],         :int
-  ffi_func :sphttp_recv_frame_buf, [],              :str
-  ffi_func :sphttp_recv_frame_len, [],              :int
-  # Per-byte frame accessor (returns 0..255, or -1 OOB). Used by the
-  # WebSocket frame codec instead of `sphttp_recv_frame_buf.bytes`:
-  # the :str accessor is NUL-terminated on the Ruby side, so a masked
-  # frame truncates at its first 0x00 (the 16-bit length high byte is
-  # 0x00 for any payload <= 255 bytes). See sphttp.c for the contract.
+  ffi_func :sphttp_recv_frame_buf,  [],             :str
+  ffi_func :sphttp_recv_frame_len,  [],             :int
   ffi_func :sphttp_recv_frame_byte, [:int],         :int
-
-  ffi_func :sphttp_sendfile,      [:int, :str],     :int
-  ffi_func :sphttp_filesize,      [:str],           :int
-  ffi_func :sphttp_close,         [:int],           :int
-  ffi_func :sphttp_fork,          [],               :int
-  ffi_func :sphttp_exit,          [:int],           :int
-  ffi_func :sphttp_getpid,        [],               :int
-  ffi_func :sphttp_wait_any,      [],               :int
-
-  # SIGTERM/SIGINT shutdown plumbing, used by Tep::Server::Scheduled's
-  # accept loop. install_term_handlers arms the signal handlers (call
-  # once before fork); shutdown_requested returns nonzero once a
-  # TERM/INT has been delivered so the accept loop can break cleanly.
-  ffi_func :sphttp_install_term_handlers, [],       :int
-  ffi_func :sphttp_shutdown_requested,    [],       :int
-  ffi_func :sphttp_write_chunk,   [:int, :str],     :int
+  ffi_func :sphttp_sendfile,        [:int, :str],   :int
+  ffi_func :sphttp_filesize,        [:str],         :int
+  ffi_func :sphttp_write_chunk,     [:int, :str],   :int
   ffi_func :sphttp_write_chunk_end, [:int],         :int
-
-  # Poll-based I/O readiness, used by Tep::Scheduler.io_wait. Mode
-  # bits in/out: 1=READ, 2=WRITE.
-  ffi_func :sphttp_poll_reset,    [],               :int
-  ffi_func :sphttp_poll_add,      [:int, :int],     :int
-  ffi_func :sphttp_poll_run,      [:int],           :int
-  ffi_func :sphttp_poll_ready,    [:int],           :int
-  ffi_func :sphttp_set_nonblock,  [:int],           :int
-
-  # Monotonic clock in microseconds. The scheduler uses this for
-  # wake_at bookkeeping so ready fibers are ordered at sub-second
-  # resolution (see sphttp.c sphttp_now_us / Tep::Scheduler).
-  ffi_func :sphttp_now_us,        [],               :long
-
-  # Outbound TCP for clients (Tep::Http, etc.).
-  ffi_func :sphttp_connect,       [:str, :int],     :int
-  ffi_func :sphttp_recv_some,     [:int, :int],     :str
-  ffi_func :sphttp_recv_all,      [:int, :int],     :str
-
-  # popen-shaped shell capture used by Tep::Shell.run. File I/O goes
-  # through spinel's built-in File.read / File.write since master
-  # (matz/spinel#505 made File.write binary-safe).
-  ffi_func :sphttp_shell_capture, [:str, :int],     :str
 end
 
 # Crypto FFI -- SHA-256/HMAC/PBKDF2/B64URL/random. Symbols live in
