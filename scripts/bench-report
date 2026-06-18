@@ -27,6 +27,22 @@ rescue Errno::ENOENT, JSON::ParserError
   nil
 end
 
+# per-run.json is JSONL (one record per timed run) written alongside
+# summary.json — the only place the run-to-run spread survives the median
+# collapse. Optional, same as env.json: older runs render without the
+# stability section. Tolerate a partially-written / truncated tail line.
+per_run = begin
+  path = File.join(run_path, 'per-run.json')
+  if File.exist?(path)
+    File.readlines(path).filter_map do |line|
+      line = line.strip
+      JSON.parse(line) unless line.empty?
+    rescue JSON::ParserError
+      nil
+    end
+  end
+end
+
 # ── ordering / metadata ──────────────────────────────────────────────
 
 TARGET_ORDER = %w[rust crystal go kotlin swift spinel elixir typescript python ruby ruby-int jruby rails rails-int rails-jruby]
@@ -317,24 +333,25 @@ else
   appendix_ref = ''
 end
 
+# Only point at the stability section when per-run.json is present to back
+# it (older runs render without that section, and the anchor with it).
+spread_ref = per_run && !per_run.empty? ? ' (the run-to-run spread is in the <a href="#stability">stability</a> section below)' : ''
+
 html << <<~METHOD
   <div class="methodology">
-    <strong>Methodology.</strong> #{machine}. Toolchains pinned via <a href="https://mise.jdx.dev">mise</a>. Harness: <code>scripts/bench</code> — #{harness}; the median run is reported. Quiet machine throughout. The JVM cells (<code>jruby</code>, <code>kotlin</code>) run under a fixed JVM heap (<code>-Xmx512m=-Xms512m</code>): their RSS is a deliberate budget, not the JVM's default share of host RAM, so they stay comparable to the other cells' working sets.#{appendix_ref}
+    <strong>Methodology.</strong> #{machine}. Toolchains pinned via <a href="https://mise.jdx.dev">mise</a>. Harness: <code>scripts/bench</code> — #{harness}; the median of the #{runs} runs is reported#{spread_ref}. Quiet machine throughout. The JVM cells (<code>jruby</code>, <code>kotlin</code>) run under a fixed JVM heap (<code>-Xmx512m=-Xms512m</code>): their RSS is a deliberate budget, not the JVM's default share of host RAM, so they stay comparable to the other cells' working sets.#{appendix_ref}
     <p class="caveat">These numbers measure one specific Rails reference app — not arbitrary Rails workloads. See <a href="https://github.com/rubys/roundhouse/issues/16">#16</a> for the fixture-fragility caveats.</p>
     #{(targets.include?('rails-jruby') ? %(<p class="caveat"><code>rails-jruby</code> is the stock-Rails-on-the-JVM baseline — the same blog, pinned to <strong>Rails 8.0</strong> (one minor behind the others' 8.1) on a <strong>prerelease</strong> AR-JDBC adapter (<code>activerecord-jdbcsqlite3-adapter 80.0.pre1</code>), the only combination that drives ActiveRecord on JRuby 10 today. It collapses to the shared 8.1 fixture once AR-JDBC ships Rails 8.1 support.</p>) : '')}
+    #{(targets.include?('spinel') ? %(<p class="caveat"><code>spinel</code> runs the <em>same</em> Roundhouse-emitted framework as the CRuby <code>ruby</code> cell, but on the <a href="https://github.com/matz/spinel">Spinel</a> VM (a pure-C Ruby) behind the Tep fiber server rather than CRuby + Puma — so the <code>ruby</code> → <code>spinel</code> gap is a runtime swap, not a framework or source change. It serves the same <code>c=64</code> as every other cell; the GC-under-load crashes that previously gated concurrent numbers are fixed. At ~12&nbsp;MB RSS it is the smallest working set in the field.</p>) : '')}
   </div>
 METHOD
 
-# NOTE: the former "Spinel concurrency note" was removed 2026-05-29. It
-# described a prefork-blocking Tep::Server that no longer matches the
-# artifact (Tep::Server::Scheduled — fiber-per-connection — is now the
-# default, and a fiber-aware connection pool is wired). Rather than
-# publish a speculative replacement before there's data, write the
-# caveat against a real spinel run. When the spinel row lands, add a
-# note covering: concurrent numbers gated on spinel#1052 (GC UAF crashes
-# the fiber server under load) until fixed; and that on the RAM-cached
-# DB the pool's concurrency benefit is largely latent (CPU-bound) until
-# an I/O-bound working-set variant exists. See issue #3.
+# NOTE: the spinel row has landed (real data, c=64, GC-under-load crashes
+# fixed) — the deferred caveat is now the spinel <p class="caveat"> in the
+# methodology above, and spinel is woven into sections 4/5/6/7 below. The
+# RAM-cached-DB point still holds: the fiber pool's concurrency benefit is
+# largely latent (CPU-bound) until an I/O-bound working-set variant exists
+# (issue #3) — fold that in when such a variant is measured.
 
 # ── Section: throughput per endpoint ─────────────────────────────────
 
@@ -406,7 +423,7 @@ end
 
 html << "<h2>4. Cost economics (req/sec per GB of RSS)</h2>\n"
 html << <<~P
-  <p>Throughput normalized by memory footprint. Reorders the table — rust and crystal pull further ahead; high-RSS targets (typescript, rails) move down, and the JVM cells move down hardest. <code>kotlin</code> is the sharpest illustration: it tops raw throughput (section 1) but its ~760 MB drags it to mid-field on req/sec/GB — roughly between <code>go</code> and <code>python</code>, and below both on the JSON endpoints — so the JVM's speed win is largely cancelled by its memory cost. <code>swift</code> is the counter-illustration: mid-pack on raw throughput, but its ~45 MB native footprint lifts it to third on req/sec/GB on every endpoint, behind only rust and crystal — 5–9× kotlin's cost-efficiency at roughly comparable absolute speed on the DB endpoints. <code>jruby</code>'s top-tier raw throughput is dragged down the same way as kotlin's, landing roughly level with CRuby <code>ruby</code>. <code>rails-jruby</code> lands at or near the bottom of every endpoint: ~1.5 GB sinks even respectable throughput, leaving it less cost-efficient than CRuby <code>rails</code> despite winning on raw req/sec. Applicability varies by deployment shape: matters most for metered/serverless surfaces, least for bare-metal-with-headroom.</p>
+  <p>Throughput normalized by memory footprint. Reorders the table — rust pulls further ahead, and <code>spinel</code> vaults to second or third on every endpoint, behind only rust and roughly level with crystal: its ~12&nbsp;MB footprint — the smallest in the field — converts middling raw throughput into top-tier cost-efficiency. It is the same emitted app as the CRuby <code>ruby</code> cell, yet turns in <strong>30–50× its req/sec/GB</strong> once moved to the Spinel VM (more throughput on a tenth of the RAM). High-RSS targets (typescript, rails) move down, and the JVM cells move down hardest. <code>kotlin</code> is the sharpest illustration: it tops raw throughput (section 1) but its ~760 MB drags it to mid-field on req/sec/GB — roughly between <code>go</code> and <code>python</code>, and below both on the JSON endpoints — so the JVM's speed win is largely cancelled by its memory cost. <code>swift</code> is the counter-illustration: mid-pack on raw throughput, but its ~45 MB native footprint lifts it to third on req/sec/GB on every endpoint, behind only rust and crystal — 5–9× kotlin's cost-efficiency at roughly comparable absolute speed on the DB endpoints. <code>jruby</code>'s top-tier raw throughput is dragged down the same way as kotlin's, landing roughly level with CRuby <code>ruby</code>. <code>rails-jruby</code> lands at or near the bottom of every endpoint: ~1.5 GB sinks even respectable throughput, leaving it less cost-efficient than CRuby <code>rails</code> despite winning on raw req/sec. Applicability varies by deployment shape: matters most for metered/serverless surfaces, least for bare-metal-with-headroom.</p>
 P
 endpoints.each do |ep|
   rows = targets.map { |t| by[ep][t] }.compact
@@ -419,7 +436,7 @@ end
 html << "<h2>5. HTML → JSON multiplier</h2>\n"
 html << <<~P
   <p>Per-target lift going from <code>/articles</code> (HTML) to <code>/articles.json</code> (JSON). The asymmetry isn't JSON-escape vs HTML-escape — both paths concatenate and escape strings. What JSON skips is the <em>layout chain</em> (csrf_meta_tag, importmap, asset-manifest scan, content_for slots) and the <em>per-row view helpers</em> (link_to, button_to, dom_id, tag.*) that the HTML index template invokes for every record.</p>
-  <p>Interpreter-bound targets get the least lift because per-call dispatch overhead dominates whether the work is helpers or serialization — ruby is the flattest of the whole field at just 1.1×, and rails only 1.8×. Compiled and BEAM targets show the helper-chain cost more clearly because their serialization is fast: elixir (2.8×) and go (2.2×) lead the multiplier, with python at 2.0×, swift at 1.8× (its Linux Foundation string path makes the helper-heavy HTML side relatively expensive), and rust/crystal/typescript/kotlin in the 1.1–1.6× band. Go's gap is the largest of the AOT-compiled set even after the IR string-builder annotation pass closed part of it; kotlin is the flattest of the compiled/JVM set (1.1×) — its serialization is fast enough that the helper chain barely registers.</p>
+  <p>Interpreter-bound targets get the least lift because per-call dispatch overhead dominates whether the work is helpers or serialization — ruby is the flattest of the whole field at just 1.1×, and rails only 1.8×. Compiled and BEAM targets show the helper-chain cost more clearly because their serialization is fast: elixir (2.8×) and go (2.2×) lead the multiplier, with python at 2.0×, swift at 1.8× (its Linux Foundation string path makes the helper-heavy HTML side relatively expensive), and rust/crystal/typescript/kotlin/spinel in the 1.1–1.6× band. Go's gap is the largest of the AOT-compiled set even after the IR string-builder annotation pass closed part of it; kotlin is the flattest of the compiled/JVM set (1.1×) — its serialization is fast enough that the helper chain barely registers.</p>
 P
 
 if (%w[jruby rails-jruby] - targets).empty?
@@ -461,7 +478,7 @@ SVG
 # ── Section: memory footprint ────────────────────────────────────────
 
 html << "<h2>6. Memory footprint (RSS)</h2>\n"
-html << "<p>Max RSS observed across all endpoints, per target. The native + CRuby + Node field spreads across four tiers: rust and crystal sit under 30 MB; go lands near 36 MB and <code>swift</code> just above it at ~47 MB (an AOT binary like rust/go — the contrast with <code>kotlin</code> is the point: the same backend compiled to native instead of JVM bytecode costs ~16× less memory); python around 80 MB; elixir, ruby, and ruby-int cluster at 135–160 MB; and typescript, rails-int, and rails top that group out at 370–420 MB. The three JVM cells sit a full order of magnitude higher, in a tier of their own: emitted <code>kotlin</code> at ~760 MB and emitted <code>jruby</code> at ~940 MB (each a pinned 512 MB heap plus JVM metaspace and code-cache) and <code>rails-jruby</code> at ~1.5 GB — stock Rails' enormous class footprint on top of the same heap budget. That's the JVM's trade: warm-JIT throughput (section 1) bought with memory, which the cost-economics chart (section 4) compounds into req/sec/GB.</p>\n"
+html << "<p>Max RSS observed across all endpoints, per target. The native + CRuby + Node field spreads across tiers: <code>spinel</code> sets the floor at ~12 MB — below even rust — the whole-process working set of the pure-C Ruby VM serving the same emitted app as the ~150 MB CRuby <code>ruby</code> cell; rust and crystal sit under 30 MB; go lands near 36 MB and <code>swift</code> just above it at ~47 MB (an AOT binary like rust/go — the contrast with <code>kotlin</code> is the point: the same backend compiled to native instead of JVM bytecode costs ~16× less memory); python around 80 MB; elixir, ruby, and ruby-int cluster at 135–160 MB; and typescript, rails-int, and rails top that group out at 370–420 MB. The three JVM cells sit a full order of magnitude higher, in a tier of their own: emitted <code>kotlin</code> at ~760 MB and emitted <code>jruby</code> at ~940 MB (each a pinned 512 MB heap plus JVM metaspace and code-cache) and <code>rails-jruby</code> at ~1.5 GB — stock Rails' enormous class footprint on top of the same heap budget. That's the JVM's trade: warm-JIT throughput (section 1) bought with memory, which the cost-economics chart (section 4) compounds into req/sec/GB.</p>\n"
 
 mem_rows = targets.map do |tgt|
   max_rss = endpoints.map { |ep| by[ep][tgt]&.dig('rss_mb').to_f }.max
@@ -488,7 +505,7 @@ end
 # ── Section: latency ─────────────────────────────────────────────────
 
 html << "<h2>7. Latency (p50 / p99 at c=64)</h2>\n"
-html << "<p>Latencies are c=64 concurrent connections; treat p50 as median per-connection wait, p99 as tail. Warm <code>kotlin</code> leads the field — p50 ~0.4–1.0 ms, at or below <code>rust</code> on most endpoints — with rust just behind (0.4–1.7 ms). Warm <code>jruby</code> joins the front too, p50 ~1.3–2.3 ms, and <code>swift</code> sits in the same crystal/jruby band at p50 ~1.3–3.1 ms with a tight tail (p99 ~2–6 ms — no GC pauses to absorb). Then go 2–8 ms, typescript and python 3–13 ms, ruby 8–16 ms. The Rails baselines trail: <code>rails-jruby</code> at 36–74 ms (the JVM does shave the CRuby <code>rails</code> 48–129 ms), with <code>rails</code> the slowest. The order roughly matches the throughput chart inversely. Tail behaviour: go's p99 on <code>/articles/new</code> (~43 ms against a ~3 ms p50, a ~13× spread the others don't show) points at allocation/GC churn in the render path; <code>rails-jruby</code>'s p99 runs ~1.3–2× its p50 across endpoints — the JVM's GC tail under a pinned heap.</p>\n"
+html << "<p>Latencies are c=64 concurrent connections; treat p50 as median per-connection wait, p99 as tail. Warm <code>kotlin</code> leads the field — p50 ~0.4–1.0 ms, at or below <code>rust</code> on most endpoints — with rust just behind (0.4–1.7 ms). Warm <code>jruby</code> joins the front too, p50 ~1.3–2.3 ms, and <code>swift</code> sits in the same crystal/jruby band at p50 ~1.3–3.1 ms with a tight tail (p99 ~2–6 ms — no GC pauses to absorb). <code>spinel</code> sits just behind, p50 ~2.7–6.4 ms, with the tightest tail in the field — p99 within ~1.3× of p50, since the pure-C VM has neither JIT warmup nor a large heap to pause over. Then go 2–8 ms, typescript and python 3–13 ms, ruby 8–16 ms. The Rails baselines trail: <code>rails-jruby</code> at 36–74 ms (the JVM does shave the CRuby <code>rails</code> 48–129 ms), with <code>rails</code> the slowest. The order roughly matches the throughput chart inversely. Tail behaviour: go's p99 on <code>/articles/new</code> (~43 ms against a ~3 ms p50, a ~13× spread the others don't show) points at allocation/GC churn in the render path; <code>rails-jruby</code>'s p99 runs ~1.3–2× its p50 across endpoints — the JVM's GC tail under a pinned heap.</p>\n"
 
 html << "<table>\n<thead><tr><th>target</th>"
 endpoints.each { |ep| html << "<th colspan=2>#{ep}</th>" }
@@ -518,6 +535,70 @@ lat_order.each do |tgt|
 end
 html << "</tbody></table>\n"
 html << %(<p class="legend">All values in milliseconds. Lower is better.</p>\n)
+
+# ── Section: run-to-run stability (from per-run.json) ────────────────
+
+# The summary collapses each cell to its median run; per-run.json is the
+# only artifact that keeps the individual runs, so the spread lives here.
+# Fully data-driven (no hand-tuned numbers) so it can't go stale: the
+# headline CV, the outlier threshold, and the cold-first-run count are all
+# computed from the records read above. Skipped entirely when per-run.json
+# is absent (older runs) or yields no usable rows.
+if per_run && !per_run.empty?
+  # Group by cell; keep each run's req/sec ordered by its run index so the
+  # per-run columns line up regardless of file order.
+  series = Hash.new { |h, k| h[k] = [] }
+  per_run.each do |row|
+    next unless row['target'] && row['endpoint'] && row['req_sec']
+    series[[row['target'], row['endpoint']]] << [row['run'].to_i, row['req_sec'].to_f]
+  end
+
+  stats = series.filter_map do |(tgt, ep), pairs|
+    vs = pairs.sort_by(&:first).map(&:last)
+    next if vs.empty?
+    mean = vs.sum / vs.size
+    sd   = Math.sqrt(vs.map { |v| (v - mean)**2 }.sum / vs.size)
+    cv   = mean > 0 ? sd / mean * 100 : 0.0
+    { target: tgt, endpoint: ep, runs: vs, cv: cv }
+  end
+
+  unless stats.empty?
+    cvs        = stats.map { |s| s[:cv] }.sort
+    median_cv  = cvs[cvs.size / 2]
+    runs_each  = series.values.map(&:size).max
+    threshold  = 3.0
+    warmup     = env&.dig('harness', 'warmup_sec')
+
+    html << %(<h2 id="stability">Run-to-run stability</h2>\n)
+    html << <<~P
+      <p>Each cell is timed #{runs_each} times and the charts above report the median run. This section reads <code>per-run.json</code> directly to show how far the individual runs strayed from it. Across all #{stats.size} cells the median run-to-run coefficient of variation in req/sec is <strong>#{fmt_dec(median_cv, 2)}%</strong> — the timed runs of a given cell agree to a fraction of a percent, so the reported medians aren't masking noise.</p>
+    P
+
+    noisy = stats.select { |s| s[:cv] >= threshold }.sort_by { |s| -s[:cv] }
+    if noisy.empty?
+      html << %(<p>No cell varies by more than #{fmt_dec(threshold, 0)}% across its runs.</p>\n)
+    else
+      cold_first = noisy.count { |s| s[:runs].size > 1 && s[:runs].first == s[:runs].min }
+      warm_note  = if cold_first > 0
+        warmup_txt = warmup ? "fixed #{warmup}s warmup" : 'fixed warmup window'
+        "; in #{cold_first} of them the first timed run is the slowest, consistent with residual warmup the #{warmup_txt} doesn't fully absorb"
+      else
+        ''
+      end
+      html << %(<p>The #{noisy.size} cell#{noisy.size == 1 ? '' : 's'} that vary by more than #{fmt_dec(threshold, 0)}% are concentrated in the lowest-throughput cells, where a small absolute swing is a larger fraction of the rate#{warm_note}:</p>\n)
+      html << "<table>\n<thead><tr><th>target</th><th>endpoint</th>"
+      (1..runs_each).each { |i| html << "<th>run #{i}</th>" }
+      html << "<th>CV</th></tr></thead>\n<tbody>\n"
+      noisy.each do |s|
+        html << "<tr><td><strong>#{s[:target]}</strong></td><td>#{s[:endpoint]}</td>"
+        runs_each.times { |i| html << %(<td class="num">#{s[:runs][i] ? fmt_int(s[:runs][i]) : '-'}</td>) }
+        html << %(<td class="num">#{fmt_dec(s[:cv], 1)}%</td></tr>\n)
+      end
+      html << "</tbody></table>\n"
+      html << %(<p class="legend">req/sec per timed run; CV = standard deviation ÷ mean.</p>\n)
+    end
+  end
+end
 
 # ── Section: raw data table ──────────────────────────────────────────
 

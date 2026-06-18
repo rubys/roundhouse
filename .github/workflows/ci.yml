@@ -1432,6 +1432,7 @@ jobs:
           mkdir -p _site/bench
           if curl -fsSL --max-time 30 "$BENCH_URL/summary.json" -o _site/bench/summary.json; then
             curl -fsSL --max-time 30 "$BENCH_URL/env.json"     -o _site/bench/env.json     || true
+            curl -fsSL --max-time 30 "$BENCH_URL/per-run.json" -o _site/bench/per-run.json || true
             curl -fsSL --max-time 30 "$BENCH_URL/summary.md"   -o _site/bench/summary.md   || true
             echo "bench_data=present" >> "$GITHUB_OUTPUT"
           else
