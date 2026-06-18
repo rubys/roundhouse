@@ -31,27 +31,38 @@ module Tep
 
       # Build the unmasked server-side wire bytes. Length-encoding
       # picks the smallest form that fits the payload. No mask.
+      #
+      # The header is assembled as an array of byte values and emitted
+      # with `pack("C*")` rather than `String#<<`-ing each byte: the
+      # 16-bit length form has a `0x00` high byte for any 126..255-byte
+      # payload, and spinel's `String#<<` drops an embedded NUL
+      # (matz/spinel#1479) — so a `<<`-built header loses that byte and
+      # corrupts the frame (e.g. Action Cable's ~140-byte
+      # confirm_subscription never reaches the browser). `pack` yields a
+      # length-tracked, binary-safe string; `+ @payload` is likewise a
+      # NUL-safe concat. This is also just the idiomatic way to build
+      # binary in Ruby, independent of the spinel bug.
       def encode_unmasked
-        head = ""
+        head = []
         b0 = (@fin ? 0x80 : 0x00) | (@opcode & 0x0f)
-        head << Frame.byte_to_chr(b0)
+        head << b0
 
         plen = @payload.length
         if plen <= 125
-          head << Frame.byte_to_chr(plen)
+          head << plen
         elsif plen <= 65535
-          head << Frame.byte_to_chr(126)
-          head << Frame.byte_to_chr((plen >> 8) & 0xff)
-          head << Frame.byte_to_chr(plen & 0xff)
+          head << 126
+          head << ((plen >> 8) & 0xff)
+          head << (plen & 0xff)
         else
-          head << Frame.byte_to_chr(127)
+          head << 127
           i = 7
           while i >= 0
-            head << Frame.byte_to_chr((plen >> (i * 8)) & 0xff)
+            head << ((plen >> (i * 8)) & 0xff)
             i -= 1
           end
         end
-        head + @payload
+        head.pack("C*") + @payload
       end
 
       # Convert a single byte value (0..255) to a 1-char String.
