@@ -76,7 +76,7 @@ fn gradle_test_lock() -> &'static Mutex<()> {
 }
 
 fn build_and_run(test_file: &Path, tag: &str) {
-    let _guard = gradle_test_lock()
+    let _gradle_lock = gradle_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let scratch = scratch_dir(tag);
