@@ -1,21 +1,17 @@
 # All FFI plumbing lives at the top level so spinel's name resolver
 # finds it from anywhere in the Tep tree (nested modules confuse it).
 #
-# Transport migration (matz/spinel#1466): the socket + process layer is
-# being moved off our vendored C shim (sphttp.c) onto spinel's maintained,
-# auto-linked `sp_net`. STAGE 1 (this commit) routes accept/poll/recv/
-# write/connect/fork/clock through `sp_net` via thin `sphttp_*` delegators
-# (call sites unchanged), with `now_us` reimplemented on the native
-# monotonic clock. The HTTP request buffer, body drain, the binary WS
-# frame-recv buffer, sendfile, and chunked write still ride sphttp.c
-# (Stage 2 ports those to `sp_net` + `:binstr` and deletes sphttp.c).
-#
-# `@TEP_SPHTTP_O@` is substituted by `bin/tep` / the Makefile with the
-# built sphttp.o path; it stays until Stage 2 removes the last sphttp.c
-# dependency.
+# Transport (matz/spinel#1466): the socket/process/IO layer rides spinel's
+# maintained, auto-linked `sp_net` — the vendored C shim (sphttp.c) is
+# retired. The socket + process ops are `sp_net_*` (called through thin
+# `sphttp_*` delegators so call sites are unchanged); everything sphttp.c
+# used to do that isn't a raw socket op — the monotonic clock, body drain,
+# sendfile, filesize, and chunked write — is reimplemented in Ruby on top
+# of `sp_net` + spinel's File primitives below. The HTTP request read
+# (server.rb / server_scheduled.rb) and the WS frame recv
+# (websocket/connection.rb) read via `sp_net_recv_some(:binstr)` directly.
+# No `ffi_cflags` / `@TEP_SPHTTP_O@`: nothing links sphttp.o anymore.
 module Sock
-  ffi_cflags "@TEP_SPHTTP_O@"
-
   # ── Socket + process layer: spinel's maintained sp_net (auto-linked) ──
   # recv uses the `:binstr` return mode (matz/spinel ac1e0d2c) — builds a
   # binary-safe String from (ptr, sp_net_bin_len) rather than strlen, so a
@@ -73,21 +69,59 @@ module Sock
     (Process.clock_gettime(Process::CLOCK_MONOTONIC) * 1000000.0).to_i
   end
 
-  # ── Still on sphttp.c (ported in Stage 2): the HTTP request buffer +
-  # body drain, the binary WS frame-recv buffer + per-byte accessor,
-  # sendfile, filesize, and chunked write. ──
-  ffi_func :sphttp_read_request,    [:int],         :int
-  ffi_func :sphttp_request_buf,     [],             :str
-  ffi_func :sphttp_request_len,     [],             :int
-  ffi_func :sphttp_drain_body,      [:int, :int],   :str
-  ffi_func :sphttp_recv_into_frame, [:int],         :int
-  ffi_func :sphttp_recv_frame_buf,  [],             :str
-  ffi_func :sphttp_recv_frame_len,  [],             :int
-  ffi_func :sphttp_recv_frame_byte, [:int],         :int
-  ffi_func :sphttp_sendfile,        [:int, :str],   :int
-  ffi_func :sphttp_filesize,        [:str],         :int
-  ffi_func :sphttp_write_chunk,     [:int, :str],   :int
-  ffi_func :sphttp_write_chunk_end, [:int],         :int
+  # ── Protocol/IO helpers reimplemented in Ruby on sp_net + File ──
+  # (Formerly sphttp.c; kept under the `sphttp_*` names so call sites are
+  # unchanged.)
+
+  # Blocking body drain: read exactly `n` more body bytes (used by the
+  # prefork server's consume_body, whose fd is blocking). `+` concat is
+  # binary-safe.
+  def self.sphttp_drain_body(fd, n)
+    out = ""
+    while out.length < n
+      chunk = Sock.sp_net_recv_some(fd, n - out.length)
+      if chunk.length == 0
+        break   # peer closed mid-body
+      end
+      out = out + chunk
+    end
+    out
+  end
+
+  # Static file size in bytes, or -1 when the path doesn't exist (callers
+  # 404 on `< 0`). File.read is binary-safe (matz/spinel#505); File.size
+  # isn't in spinel yet, so length the read. Small static assets only.
+  def self.sphttp_filesize(path)
+    if !File.exist?(path)
+      return -1
+    end
+    File.read(path).length
+  end
+
+  # Serve a static file: read it (binary-safe) and write the bytes. The
+  # caller has already emitted headers + checked existence via filesize.
+  def self.sphttp_sendfile(fd, path)
+    if !File.exist?(path)
+      return -1
+    end
+    data = File.read(path)
+    Sock.sp_net_write_bytes(fd, data, data.length)
+  end
+
+  # One Transfer-Encoding chunk: hex byte-size + CRLF, the data, CRLF.
+  # bytesize (not length) so multibyte payloads frame correctly; the body
+  # write is binary-safe.
+  def self.sphttp_write_chunk(fd, s)
+    Sock.sp_net_write_str(fd, s.bytesize.to_s(16) + "\r\n")
+    Sock.sp_net_write_bytes(fd, s, s.bytesize)
+    Sock.sp_net_write_str(fd, "\r\n")
+    0
+  end
+
+  # Chunked-encoding terminator: the zero-length chunk.
+  def self.sphttp_write_chunk_end(fd)
+    Sock.sp_net_write_str(fd, "0\r\n\r\n")
+  end
 end
 
 # Crypto FFI -- SHA-256/HMAC/PBKDF2/B64URL/random. Symbols live in

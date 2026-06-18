@@ -70,32 +70,26 @@ module Tep
         (n & 0xff).chr
       end
 
-      # Parse one frame from the sphttp recv frame buffer. `start`
-      # is the byte offset to begin reading; `avail` is the count of
-      # valid bytes in the buffer. Byte reads go through the Ruby
-      # String binding sphttp_recv_frame_buf returns; matz/spinel#657
-      # made slice / bytes[i] survive embedded NULs so binary
-      # payloads parse correctly without the per-byte C accessor we
-      # used before.
+      # Parse one frame from `s` (a binary String of recv'd bytes, read
+      # from `sp_net_recv_some(:binstr)`). `start` is the byte offset to
+      # begin reading; `avail` is the count of valid bytes. Byte reads go
+      # through `String#getbyte`, which is binary-safe (returns the 0..255
+      # value at an index regardless of embedded NULs) — so the 16-bit
+      # length high byte (0x00 for payloads 126..255) parses correctly.
       #
       # Returns a ParseResult with one of three shapes:
-      #   .status == "ok"      -> .frame populated + .consumed bytes used
-      #   .status == "need"    -> need more bytes (consumed == 0)
-      #   .status == "close"   -> protocol violation; close with .close_code
-      def self.parse_from_buf(start, avail)
+      #   .outcome == "ok"     -> .frame populated + .consumed bytes used
+      #   .outcome == "need"   -> need more bytes (consumed == 0)
+      #   .outcome == "close"  -> protocol violation; close with .close_code
+      def self.parse_from_buf(s, start, avail)
         out = Tep::WebSocket::ParseResult.new
         if avail - start < 2
           out.outcome = "need"
           return out
         end
 
-        # Read bytes through the per-byte C accessor rather than
-        # `sphttp_recv_frame_buf.bytes`: the :str accessor is NUL-
-        # terminated on the Ruby side, so a masked frame truncates at
-        # its first 0x00 (the 16-bit length high byte is 0x00 for any
-        # payload <= 255 bytes). See sphttp.c / net.rb.
-        b0 = Sock.sphttp_recv_frame_byte(start)
-        b1 = Sock.sphttp_recv_frame_byte(start + 1)
+        b0 = s.getbyte(start)
+        b1 = s.getbyte(start + 1)
         fin    = (b0 & 0x80) != 0
         rsv    = b0 & 0x70
         opcode = b0 & 0x0f
@@ -141,8 +135,8 @@ module Tep
             out.outcome = "need"
             return out
           end
-          h = Sock.sphttp_recv_frame_byte(pos)
-          l = Sock.sphttp_recv_frame_byte(pos + 1)
+          h = s.getbyte(pos)
+          l = s.getbyte(pos + 1)
           plen = (h << 8) | l
           pos += 2
         else
@@ -154,7 +148,7 @@ module Tep
           plen = 0
           i = 0
           while i < 8
-            plen = (plen << 8) | Sock.sphttp_recv_frame_byte(pos + i)
+            plen = (plen << 8) | s.getbyte(pos + i)
             i += 1
           end
           pos += 8
@@ -165,10 +159,10 @@ module Tep
           out.outcome = "need"
           return out
         end
-        m0 = Sock.sphttp_recv_frame_byte(pos)
-        m1 = Sock.sphttp_recv_frame_byte(pos + 1)
-        m2 = Sock.sphttp_recv_frame_byte(pos + 2)
-        m3 = Sock.sphttp_recv_frame_byte(pos + 3)
+        m0 = s.getbyte(pos)
+        m1 = s.getbyte(pos + 1)
+        m2 = s.getbyte(pos + 2)
+        m3 = s.getbyte(pos + 3)
         pos += 4
 
         # Payload bytes.
@@ -177,11 +171,13 @@ module Tep
           return out
         end
 
-        # Decode + unmask in one pass.
-        payload = ""
+        # Decode + unmask. Collect bytes into an int array and pack("C*")
+        # rather than `<<`-ing chars: a NUL payload byte is binary-safe
+        # this way (the same reason encode_unmasked packs — matz/spinel#1479).
+        bytes = []
         i = 0
         while i < plen
-          b = Sock.sphttp_recv_frame_byte(pos + i)
+          b = s.getbyte(pos + i)
           mask_byte = 0
           if (i & 3) == 0
             mask_byte = m0
@@ -192,9 +188,10 @@ module Tep
           else
             mask_byte = m3
           end
-          payload << Frame.byte_to_chr(b ^ mask_byte)
+          bytes << (b ^ mask_byte)
           i += 1
         end
+        payload = bytes.pack("C*")
 
         out.outcome   = "ok"
         out.frame    = Tep::WebSocket::Frame.new(fin, opcode, payload)

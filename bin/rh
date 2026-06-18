@@ -426,7 +426,6 @@ def cmd_transpile(argv)
 
   case target
   when 'ruby', 'jruby' then post_transpile_ruby(out)
-  when 'spinel'     then post_transpile_spinel(out)
   when 'crystal'    then post_transpile_crystal(out)
   when 'rust'       then post_transpile_rust(out)
   when 'typescript' then post_transpile_typescript(out)
@@ -446,28 +445,10 @@ def post_transpile_ruby(out)
   FileUtils.cp(seed, File.join(tmp, 'blog.sqlite3'))
 end
 
-# Spinel target's post-build: compile the Tep FFI HTTP server's C
-# extension, then sed-substitute the resulting path into net.rb (which
-# ships with an @TEP_SPHTTP_O@ placeholder).
-def post_transpile_spinel(out)
-  tep_dir = File.join(out, 'runtime', 'tep')
-  c_src = File.join(tep_dir, 'sphttp.c')
-  o_out = File.join(tep_dir, 'sphttp.o')
-  net_rb = File.join(tep_dir, 'net.rb')
-  unless File.exist?(c_src)
-    warn "rh transpile spinel: #{c_src} missing — extend spinel_files in src/project.rs"
-    return
-  end
-  unless system('cc', '-O2', '-c', c_src, '-o', o_out)
-    warn 'rh transpile spinel: cc failed'
-    exit 1
-  end
-  if File.exist?(net_rb)
-    content = File.read(net_rb)
-    content.gsub!('@TEP_SPHTTP_O@', 'runtime/tep/sphttp.o')
-    File.write(net_rb, content)
-  end
-end
+# The spinel target needs no post-transpile step: the HTTP/WebSocket
+# transport rides spinel's built-in, auto-linked `sp_net` (matz/spinel#1466),
+# so there's no vendored C extension to compile or `@TEP_SPHTTP_O@` to
+# substitute — `make build` AOT-compiles the tree straight to a binary.
 
 # Crystal target's post-build: build Tailwind CSS and stage turbo.min.js
 # into static/assets/, mirroring what the Ruby target's Rakefile does
