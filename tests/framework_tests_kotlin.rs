@@ -21,6 +21,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 use roundhouse::analyze::Analyzer;
 use roundhouse::emit::kotlin;
@@ -69,7 +70,15 @@ fn scratch_dir(tag: &str) -> PathBuf {
     base.join("roundhouse-framework-tests-kotlin").join(tag)
 }
 
+fn gradle_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 fn build_and_run(test_file: &Path, tag: &str) {
+    let _guard = gradle_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let scratch = scratch_dir(tag);
     if scratch.exists() {
         std::fs::remove_dir_all(&scratch).expect("clean scratch");
