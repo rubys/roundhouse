@@ -61,6 +61,11 @@ interface PendingResolver {
   resolve: (data: ResponsePayload) => void;
 }
 
+// The dedicated DB Worker, owned by the main thread (the SharedWorker can't
+// spawn it in Chrome). Kept at module scope so it survives SharedWorker
+// hot-swaps — each new bridge re-points it at its own port (handleCreateDbWorker).
+let _dbWorker: Worker | null = null;
+
 // ── WorkerBridge: MessagePort fetch correlation ──
 
 class WorkerBridge {
@@ -116,6 +121,16 @@ class WorkerBridge {
     return this._ready;
   }
 
+  /** Tear down this bridge's connection to its SharedWorker. Closing our
+   *  port (the only one in the studio's single iframe) leaves the worker
+   *  with no clients, so it terminates. The dedicated DB Worker is owned by
+   *  the main thread (`_dbWorker`), not by the SharedWorker, so it survives —
+   *  the next bridge re-wires it. Used by the hot-swap reconnect. */
+  dispose(): void {
+    try { this.port.close(); } catch { /* already closed */ }
+    this.pending.clear();
+  }
+
   /** Send a fetch-shaped request to the SharedWorker, await the
    *  serialized Response. */
   fetch(
@@ -140,7 +155,14 @@ class WorkerBridge {
       return;
     }
     try {
-      const dbWorker = new Worker(url, { type: "module" });
+      // Reuse the existing DB Worker across SharedWorker hot-swaps: it's a raw
+      // SQL relay (no app code), holds the opfs-sahpool's exclusive handles, and
+      // re-init is idempotent (see sqlite_wasm_engine.initDatabase). Spawning a
+      // second one against the same pool would clobber it; reusing also skips a
+      // DB re-open + re-seed on every edit. Re-point its message handler at the
+      // new SharedWorker's port.
+      if (!_dbWorker) _dbWorker = new Worker(url, { type: "module" });
+      const dbWorker = _dbWorker;
       dbWorker.onmessage = (e: MessageEvent) => workerPort.postMessage(e.data);
       workerPort.onmessage = (e: MessageEvent) => dbWorker.postMessage(e.data);
       workerPort.start();
@@ -355,7 +377,8 @@ export async function startClient(opts: StartClientOptions = {}): Promise<void> 
     return;
   }
 
-  installTurboIntercept(_bridge);
+  installTurboIntercept();
+  installHotSwapListener();
 
   const loadingEl = document.getElementById("loading");
   const appEl = document.getElementById("app");
@@ -387,6 +410,62 @@ export async function startClient(opts: StartClientOptions = {}): Promise<void> 
   await renderInitial(_bridge);
 
   if (window.__juntos__) window.__juntos__.ready = true;
+}
+
+// ── Hot-swap reconnect (studio worker-reconnect loop) ──
+//
+// The studio rebuilds only the SharedWorker bundle on each edit — app code
+// (views/controllers/models) lives entirely there; this file is the transport
+// bridge, db_worker.ts is the DB. Instead of reloading the iframe, the studio
+// posts `{ type: "rh-hot-swap", v }` here; we respawn the SharedWorker from the
+// versioned URL, re-point the bridge (and REUSE the DB Worker), then ask Turbo
+// to morph-refresh the current route in place — preserving scroll/focus. Any
+// failure acks false so the studio falls back to a full reload. (Dormant in the
+// standalone blog, which never sends the message.)
+function installHotSwapListener(): void {
+  window.addEventListener("message", (event: MessageEvent) => {
+    if (event.origin !== location.origin) return;
+    const data = event.data as { type?: string; v?: number | string } | null;
+    if (!data || data.type !== "rh-hot-swap") return;
+    const port = event.ports && event.ports[0];
+    const ack = port ? (ok: boolean) => port.postMessage({ type: "rh-swap-ack", ok }) : undefined;
+    void reconnect(data.v, ack);
+  });
+}
+
+async function reconnect(v: number | string | undefined, ack?: (ok: boolean) => void): Promise<void> {
+  const g = window.__juntos__;
+  if (!globalThis.SharedWorker || !g) { ack?.(false); return; }
+  try {
+    const url = new URL(g.workerUrl, location.href);
+    if (v != null) url.searchParams.set("v", String(v)); // mint a fresh worker
+
+    // Drop the old bridge → its SharedWorker terminates (no remaining ports).
+    // The DB Worker is main-thread-owned, so it survives and gets re-wired.
+    _bridge?.dispose();
+
+    const worker = new SharedWorker(url.href, { type: "module", name: "juntos" });
+    worker.port.postMessage({ type: "config", dbWorkerUrl: g.dbWorkerUrl, tabId: crypto.randomUUID() });
+    const bridge = new WorkerBridge(worker);
+    _bridge = bridge;
+    await bridge.waitForReady();
+
+    // Morph the new render into the live DOM. The head is already layout-shaped
+    // (the initial render swapped it), so Turbo.visit is safe — and a same-URL
+    // `replace` visit morphs (turbo-refresh-method meta in the shell). No iframe
+    // reload, no DB re-open. We restore scroll ourselves after the render:
+    // Turbo's `refresh-scroll: preserve` holds scroll at the top level but not
+    // reliably inside the studio's app iframe.
+    if (typeof Turbo !== "undefined" && Turbo.visit) {
+      const sx = window.scrollX, sy = window.scrollY;
+      document.addEventListener("turbo:load", () => requestAnimationFrame(() => window.scrollTo(sx, sy)), { once: true });
+      Turbo.visit(location.href, { action: "replace" });
+    }
+    ack?.(true);
+  } catch (e) {
+    console.error("[juntos] hot-swap reconnect failed:", e);
+    ack?.(false);
+  }
 }
 
 // Deploy base path, injected by Vite (`import.meta.env.BASE_URL`):
@@ -547,7 +626,13 @@ function reconcileHead(layoutHead: HTMLHeadElement): void {
       // ends up writing CSS into a detached node and nothing is styled. Moving
       // already-executed nodes via replaceChildren does NOT re-run them.
       el.tagName === "STYLE" ||
-      (el.tagName === "SCRIPT" && el.hasAttribute("src")),
+      (el.tagName === "SCRIPT" && el.hasAttribute("src")) ||
+      // Keep the shell's Turbo render-behaviour metas (turbo-refresh-method /
+      // turbo-refresh-scroll). They're SPA config, like the kept assets above —
+      // the Rails layout head doesn't carry them, so without this the first
+      // head swap drops them and later page refreshes silently stop morphing /
+      // preserving scroll (the studio's hot-swap depends on both).
+      (el.tagName === "META" && /^turbo-refresh-/.test(el.getAttribute("name") ?? "")),
   );
   const incoming = Array.from(layoutHead.childNodes).filter((node) => {
     if (node.nodeType !== 1) return true; // text / comments
@@ -560,6 +645,8 @@ function reconcileHead(layoutHead: HTMLHeadElement): void {
     if (el.tagName === "SCRIPT" && type === "module" && !el.hasAttribute("src")) {
       return false; // bare `import "application"` importmap bootstrap
     }
+    // Don't duplicate the turbo-refresh metas we kept from the live head.
+    if (el.tagName === "META" && /^turbo-refresh-/.test(el.getAttribute("name") ?? "")) return false;
     return true;
   });
   document.head.replaceChildren(...keep, ...incoming);
@@ -582,7 +669,7 @@ function reActivateScripts(root: ParentNode): void {
 
 // ── Turbo intercept ──
 
-function installTurboIntercept(bridge: WorkerBridge): void {
+function installTurboIntercept(): void {
   // Re-apply the mount prefix to links/forms Turbo renders on each
   // navigation (the worker returns app-path HTML). No-op at base "/".
   document.addEventListener("turbo:render", () => rebaseLinks(document.body));
@@ -605,6 +692,12 @@ function installTurboIntercept(bridge: WorkerBridge): void {
 
     // Same-origin only — let the browser handle cross-origin requests.
     if (url.origin !== location.origin) return;
+
+    // Route through the CURRENT bridge (read live, not closed-over): a hot-swap
+    // replaces `_bridge` with one wired to the freshly-built SharedWorker, so
+    // the very next navigation/morph renders the new code.
+    const bridge = _bridge;
+    if (!bridge) return;
 
     event.preventDefault();
 

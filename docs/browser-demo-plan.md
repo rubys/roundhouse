@@ -140,7 +140,7 @@ verifiable development cycle."**
 | 1 | Monaco editor + multi-file tree + target dropdown → wasm transpile → output pane | A | 1–2 | **DONE & PUBLISHED** — `wasm/playground/`, live at `/playground/` |
 | 3 | Extend wasm contract to return diagnostics + inferred types (+ per-file `source` provenance); Monaco markers | C | 1–2 | **DIAGNOSTICS + INFERRED-TYPE HOVERS DONE**; only the `source` provenance field remains |
 | 4 | `/studio/` scaffold + shared `lib/` + esbuild-wasm TS→JS bundle step in-browser | D | 1 | **DONE** — shared `lib/`, `/studio/`, wasm `profile` contract, esbuild-wasm bundling all landed |
-| 5 | Live loop: edit Ruby → wasm recompile → esbuild bundle → run/reload the blog | D | 2–3 | **DONE (full-reload loop)** — SW-hosted iframe runs the app over sqlite-wasm; edits reflect. Hot-swap = later polish |
+| 5 | Live loop: edit Ruby → wasm recompile → esbuild bundle → run/reload the blog | D | 2–3 | **DONE + Turbo-morph HOT-SWAP** — SW-hosted iframe runs the app over sqlite-wasm; an edit respawns just the SharedWorker (reusing the DB Worker) and Turbo-morphs in place — no iframe reload, scroll/focus preserved. Falls back to reload on first mount / schema change / no-ack |
 | 6 | Emit + ship the Minitest suite into the browser payload | D.2 | ½–1 | **DONE** — worker-profile transpile already emits the suite; studio retains + surfaces it (`window.__studio.testSuite()`), verifier proves it ships + is live |
 | 7 | `node:test` → browser test-runner harness + in-memory sqlite isolation | D.2 | 1–2 | **DONE** — `lib/test-runtime.mjs` (node:* shims + in-memory Db) injected at bundle time (suite byte-identical to CI); `bundleTests` + per-file Workers run the real-blog suite **21/21 green** in-browser; verifier covers green + red detection. No emitter change |
 | 8 | Test-results UI panel + cross-target CI badge strip | D.2 | ½–1 | **DONE** — right-column `app \| tests` tab: per-suite green/red tree + counts + failure messages, live tab badge, 9-target conformance strip (TS live, 8 CI-attested). Auto-runs after boot + on edit (tests tab); verifier covers green + red panels |
@@ -376,11 +376,19 @@ The identity demo — what separates roundhouse from "yet another transpiler."
 > app-host waits for the SW to be fully `activated` and retries the iframe mount
 > if the first navigation raced SW control. `verify-studio.mjs` asserts boot →
 > all 3 seeds render → Tailwind applied → a view edit reaches the running app.
-> **Exit criterion met** (edit reflects via a fast iframe reload, not yet true
-> no-reload hot-swap). Remaining polish: true module hot-swap; richer in-app
-> interaction tests. OPFS-sahpool persistence verified (a created article
-> survives a fresh-`?v=`-worker reload) — the SAB/COOP-COEP console warning is
-> the *default* OPFS VFS probe failing, benign (sahpool is the no-header path).
+> **Exit criterion met, then exceeded: true no-reload hot-swap shipped.** App
+> code lives only in the SharedWorker, so an edit respawns just that worker
+> (reusing the DB Worker — it holds the opfs-sahpool handles, and
+> `initDatabase` is now idempotent) and `Turbo.visit(location.href,
+> {action:"replace"})` morphs the new render into the live DOM. The morph needed
+> two things the spike surfaced: the shell's `turbo-refresh-method` meta must
+> survive `reconcileHead` (it was being dropped → the blog's declared-but-inert
+> morph intent now actually fires), and scroll must be restored manually after
+> `turbo:load` (Turbo's `refresh-scroll: preserve` holds at top level but not in
+> the app iframe). `verify-studio.mjs` asserts the edit morphs in with no iframe
+> reload (a window sentinel survives, no `load` event) and scroll preserved.
+> OPFS-sahpool persistence verified — the SAB/COOP-COEP console warning is the
+> *default* OPFS VFS probe failing, benign (sahpool is the no-header path).
 
 The killer demo. Reuses the blog's existing browser runtime wholesale — but as
 `/studio/`'s *own* embedded app instance (its own opfs DB namespace), not the

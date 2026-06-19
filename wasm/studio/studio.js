@@ -42,6 +42,7 @@ function appShell(v) {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Roundhouse App</title>
 <meta name="turbo-refresh-method" content="morph">
+<meta name="turbo-refresh-scroll" content="preserve">
 <link rel="icon" href="data:,">
 <meta name="juntos-worker" content="worker.js?v=${v}">
 <meta name="juntos-db-worker" content="db_worker.js?v=${v}">
@@ -91,6 +92,7 @@ let debounceTimer = null;
 let activeTab = "app";      // "app" | "tests" (right-column tab)
 let testsStale = true;      // emitted suite changed since the last run
 let testRunPromise = null;  // the in-flight run+paint (coalesces concurrent calls)
+let lastSchema = null;      // emitted src/schema.ts — a change forces a full reload
 
 function setStatus(msg, kind = "") { els.status.textContent = msg; els.status.className = kind; }
 function setAppStatus(html) { els.appStatus.innerHTML = html; }
@@ -211,7 +213,11 @@ async function build() {
   const sizes = Object.entries(b.outputs).map(([n, o]) => `${n} ${(o.bytes / 1024).toFixed(0)}K`).join(" ");
   if (!appHost) { setAppStatus(`<span class="k">bundle</span> ${sizes} · ${b.ms.toFixed(0)}ms — app host unavailable`); return; }
 
-  // 3. Host the bundles in the SW + (re)load the app iframe.
+  // 3. Host the bundles in the SW, then update the running app. Prefer a
+  // HOT-SWAP (respawn just the SharedWorker + Turbo-morph in place, keeping the
+  // iframe/main-thread/DB alive → scroll+focus preserved); fall back to a full
+  // iframe reload on first mount, on a schema change (the in-memory DB layout
+  // can't morph), or if the app doesn't ack the swap.
   setAppStatus(`<span class="k">bundle</span> ${sizes} · ${b.ms.toFixed(0)}ms · <span class="k">loading app…</span>`);
   const files = {
     "index.html": { body: appShell(seq), type: "text/html; charset=utf-8" },
@@ -219,9 +225,14 @@ async function build() {
     "worker.js": { body: b.outputs["worker.js"].text, type: "text/javascript" },
     "db_worker.js": { body: b.outputs["db_worker.js"].text, type: "text/javascript" },
   };
+  const schema = lastBuild.files.find((f) => f.path === "src/schema.ts")?.content ?? "";
+  const schemaChanged = lastSchema !== null && schema !== lastSchema;
+  lastSchema = schema;
   try {
-    await appHost.update(files);
-    setAppStatus(`<span class="k">bundle</span> ${sizes} · <span class="ok">running</span>`);
+    let swapped = false;
+    if (!schemaChanged && appHost.hotSwap) swapped = await appHost.hotSwap(files, seq);
+    if (!swapped) await appHost.update(files);
+    setAppStatus(`<span class="k">bundle</span> ${sizes} · <span class="ok">${swapped ? "hot-swapped" : "running"}</span>`);
   } catch (e) {
     setAppStatus(`<span class="err">app load failed: ${escapeHtml(e.message)}</span>`);
   }

@@ -61,6 +61,11 @@ export interface InitOptions {
 /** Open the database. Tries opfs-sahpool first (worker-only,
  *  no isolation headers needed), falls back to in-memory. */
 export async function initDatabase(options: InitOptions = {}): Promise<void> {
+  // Idempotent: a DB worker reused across a SharedWorker hot-swap (the studio's
+  // worker-reconnect loop) receives a fresh `init` from the new app instance;
+  // re-opening the already-open opfs-sahpool would fight its own exclusive sync
+  // access handles. First-open path is unchanged (_db starts null).
+  if (_db) return;
   const { opfs = true, database: dbName = "app.sqlite3" } = options;
 
   const sqlite3InitModule =

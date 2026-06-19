@@ -135,8 +135,32 @@ const btnBg = await page.evaluate(() => {
 console.log("tailwind: .bg-blue-600 background =", btnBg);
 if (!btnBg || btnBg === "rgba(0, 0, 0, 0)" || btnBg === "transparent") fail("Tailwind styling not applied (bg-blue-600 transparent)");
 
-// --- edit → reload: the running app reflects a view edit --------------------
-console.log("\n=== edit → reload loop ===");
+// --- edit → HOT-SWAP: the view edit morphs in WITHOUT an iframe reload -------
+// Seed transient state in the running app (a window sentinel + scroll), then
+// edit a view. The studio should respawn just the SharedWorker and Turbo-morph
+// the new render in place: the sentinel survives (no reload), the iframe fires
+// no `load`, and scroll is preserved — while the edit still appears.
+console.log("\n=== edit → hot-swap loop ===");
+const pre = await page.evaluate(() => {
+  const f = document.getElementById("appFrame");
+  const w = f.contentWindow, d = f.contentDocument;
+  window.__iframeReloaded = false;
+  f.addEventListener("load", () => { window.__iframeReloaded = true; });
+  w.__turboEvents = [];
+  for (const n of ["turbo:before-visit", "turbo:visit", "turbo:before-render", "turbo:render", "turbo:morph", "turbo:load"]) {
+    d.addEventListener(n, (e) => w.__turboEvents.push(n + (e.detail?.renderMethod ? `(${e.detail.renderMethod})` : "")));
+  }
+  w.__rhSentinel = "KEEP";
+  w.scrollTo(0, 140);
+  return {
+    refreshMethod: d.querySelector('meta[name="turbo-refresh-method"]')?.content ?? null,
+    refreshScroll: d.querySelector('meta[name="turbo-refresh-scroll"]')?.content ?? null,
+    bodyHeight: d.body.scrollHeight,
+    scrollY: w.scrollY,
+  };
+});
+console.log("iframe head metas:", JSON.stringify(pre));
+const beforeScroll = pre.scrollY;
 await page.evaluate((m) => {
   const orig = window.__studio.source("app/views/articles/index.html.erb");
   return window.__studio.editFile("app/views/articles/index.html.erb", `<p data-test="marker">${m}</p>\n` + orig);
@@ -147,6 +171,19 @@ try {
 } catch (e) {
   fail(`edit did not reach the running app: ${e.message}`);
 }
+const swap = await page.evaluate(() => {
+  const w = document.getElementById("appFrame").contentWindow;
+  let sentinel = null, scrollY = -1, events = [];
+  try { sentinel = w.__rhSentinel; scrollY = w.scrollY; events = w.__turboEvents || []; } catch { /* same-origin, shouldn't throw */ }
+  return { sentinel, reloaded: window.__iframeReloaded, scrollY, events };
+});
+console.log("turbo events in iframe:", swap.events.join(" ") || "(none)");
+const swapStatus = await page.evaluate(() => document.getElementById("appStatus")?.textContent || "");
+console.log(`status: "${swapStatus.trim()}" | sentinel: ${swap.sentinel} | iframe reloaded: ${swap.reloaded} | scroll: ${beforeScroll}→${swap.scrollY}`, { beforeScroll });
+if (swap.sentinel !== "KEEP" || swap.reloaded) fail(`view edit reloaded the iframe instead of hot-swapping (sentinel=${swap.sentinel}, reloaded=${swap.reloaded})`);
+else console.log("view edit hot-swapped (no reload — window state survived) ✓");
+if (beforeScroll >= 100 && swap.scrollY !== beforeScroll) fail(`scroll not preserved across hot-swap (${beforeScroll} → ${swap.scrollY})`);
+else if (beforeScroll >= 100) console.log("scroll preserved across hot-swap ✓");
 
 // --- a model edit still moves the emitted TS (transpile is live) ------------
 const edited = await page.evaluate((p) => {
@@ -229,4 +266,4 @@ if (realErrors.length) {
 
 await browser.close();
 if (failed) process.exit(1);
-console.log("\nOK: studio runs the emitted blog live in-browser and reflects Ruby edits (full-reload loop).");
+console.log("\nOK: studio runs the emitted blog live in-browser, hot-swaps Ruby edits (Turbo morph, no reload), runs + maps its tests.");

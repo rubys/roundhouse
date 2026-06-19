@@ -11,22 +11,29 @@ Studio shares the editor, source tree, compiler driver, and seed app with
 right-hand pane — playground shows emitted **code**, studio shows the **running
 app**.
 
-## Status — Phase 5 done (full-reload loop)
+## Status — live, with Turbo-morph hot-swap
 
 Studio runs the emitted blog **live**, entirely client-side:
 
 > edit Ruby → wasm transpile (worker profile) → esbuild bundle → host in a
 > service worker → run the app in an iframe over sqlite-wasm → edit again → the
-> running app reflects it.
+> running app **hot-swaps** the change in place.
 
 - The right pane is the **running app**, not code: a service worker (`sw.js`)
   serves the esbuild bundles + an HTML shell at a same-origin scope
   (`<studio>/app/`), and an iframe mounts it there so `new SharedWorker`/
   `new Worker` + module loads + routes resolve from real URLs
   (`../lib/app-host.mjs` registers the SW + drives the iframe).
-- Every edit re-bundles and reloads the iframe. Bundle URLs carry a per-build
-  `?v=` so a fresh SharedWorker mints each build (they're URL-keyed; the worker
-  is where rendering happens). The app's OPFS DB persists across reloads.
+- **Hot-swap (no iframe reload).** App code lives entirely in the SharedWorker
+  (`worker.ts` — views/controllers/models); `main.ts`/`client.ts` is the
+  transport bridge, `db_worker.ts` is the DB. On each edit the studio pushes the
+  new bundles to the SW and posts the running app `{ rh-hot-swap, v }`;
+  `client.ts` respawns **just** the SharedWorker (`worker.js?v=N`), re-points its
+  bridge, **reuses** the DB Worker (it holds the opfs-sahpool handles; re-init is
+  idempotent), and `Turbo.visit(location.href, {action:"replace"})` **morphs**
+  the new render into the live DOM — scroll/focus preserved, DB warm, no flash.
+  Falls back to a full reload on first mount, a schema change, or if the app
+  doesn't ack the swap.
 - **OPFS is namespaced per deploy path** (`import.meta.env.BASE_URL`), so the
   studio app instance and the standalone `/blog/` never share a pool.
 - esbuild + Monaco + sqlite-wasm/turbo + Tailwind load from CDNs; each piece
@@ -63,10 +70,11 @@ Under it: every build's worker-profile transpile emits the suite
 - A run fires once in the background after boot (console-logged); the test
   *sources* are editable in the tree, so an edit re-runs green/red.
 
-Deferred: true module hot-swap (no reload); exact-assertion-line debug (esbuild
-output sourcemaps + browser stack-frame mapping — Phase 9 lands test-declaration
-granularity; see the plan's Phase 9 note for why stack-walking is moot for the
-inline string-throw assertions).
+Deferred: exact-assertion-line debug (esbuild output sourcemaps + browser
+stack-frame mapping — Phase 9 lands test-declaration granularity; see the plan's
+Phase 9 note for why stack-walking is moot for the inline string-throw
+assertions). Schema/migration edits still fall back to a full reload (the opfs
+DB layout can't morph). True hot-swap (Turbo morph) is **done** — see Status.
 
 ## Files
 

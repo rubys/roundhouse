@@ -29,7 +29,31 @@ export async function createAppHost(iframe, { swUrl, scope }) {
         iframe.contentWindow?.location.replace(scope);
       }
     },
+    // Hot-swap (no iframe reload): push the new bundles to the SW, then ask the
+    // RUNNING app to respawn just its SharedWorker and Turbo-morph in place
+    // (client.ts `reconnect`). Resolves true if the app acked the swap, false if
+    // it timed out or isn't mounted yet — the caller falls back to update().
+    async hotSwap(files, v) {
+      if (!mounted) return false;
+      await postFiles(sw, files);
+      return await requestSwap(iframe, v);
+    },
   };
+}
+
+// postMessage the running app a swap request + a reply port; resolve true on its
+// ack, false on timeout (→ caller reloads instead).
+function requestSwap(iframe, v) {
+  return new Promise((resolve) => {
+    const win = iframe.contentWindow;
+    if (!win) return resolve(false);
+    const ch = new MessageChannel();
+    let done = false;
+    const finish = (ok) => { if (!done) { done = true; resolve(ok); } };
+    ch.port1.onmessage = (e) => { if (e.data?.type === "rh-swap-ack") finish(e.data.ok !== false); };
+    win.postMessage({ type: "rh-hot-swap", v }, location.origin, [ch.port2]);
+    setTimeout(() => finish(false), 8000);
+  });
 }
 
 function waitForActivated(reg) {
