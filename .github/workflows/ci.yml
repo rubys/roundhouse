@@ -1449,6 +1449,7 @@ jobs:
              wasm/lib/tree.js \
              wasm/lib/bundle.mjs \
              wasm/lib/test-runtime.mjs \
+             wasm/lib/sourcemap.mjs \
              wasm/lib/app-host.mjs \
              _site/lib/
           cp wasm-artifact/roundhouse_wasm.wasm _site/lib/

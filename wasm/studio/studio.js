@@ -17,6 +17,7 @@ import { createEditor } from "../lib/editor.js";
 import { allDirPaths, renderTree } from "../lib/tree.js";
 import { loadBundler } from "../lib/bundle.mjs";
 import { createAppHost } from "../lib/app-host.mjs";
+import { originalPositionFor, normPath } from "../lib/sourcemap.mjs";
 
 const TARGET = "typescript"; // studio is TS-only — the only browser runtime
 const PROFILE = "worker";    // the SharedWorker browser app (what studio runs)
@@ -273,7 +274,8 @@ async function runTests() {
     const agg = (k) => ran.reduce((n, f) => n + f[k], 0);
     lastTestRun = {
       total: agg("total"), passed: agg("passed"), failed: agg("failed"), skipped: agg("skipped"),
-      results: ran.flatMap((f) => f.results),
+      // Tag each result with its spec file so the panel can map it back to Ruby.
+      results: ran.flatMap((f) => f.results.map((r) => ({ ...r, spec: f.spec }))),
       files,
       bundleMs: tb.ms,
       bundleBytes: tb.outputs.reduce((n, o) => n + (o.bytes || 0), 0),
@@ -308,6 +310,63 @@ function prettyMethod(m) {
   return m.replace(/^is_/, "").replace(/^test_/, "").replace(/_/g, " ");
 }
 
+// Phase 9: map a test result back to its Ruby source location — the "debug" leg
+// (a failing test points to the line of Ruby the user wrote, not the emitted
+// TS). The emitted token-level `.test.ts.map` names the Ruby spec in its
+// `sources`; from there the `test "..."` declaration line is found by a
+// punctuation-tolerant search keyed on the method name (the mangling
+// test "should get index" → test_should_get_index is lossy, so `_` matches any
+// non-alphanumeric run). Falls back to the raw sourcemap position if the
+// declaration can't be located. Returns { path, line } in the Ruby source, or
+// null.
+function rubyLocForResult(r) {
+  if (!r || !r.spec || !lastBuild) return null;
+  const ts = lastBuild.files.find((f) => f.path === r.spec);
+  const mapF = lastBuild.files.find((f) => f.path === r.spec + ".map");
+  if (!ts || !mapF) return null;
+  let map;
+  try { map = JSON.parse(mapF.content); } catch { return null; }
+  if (!map.sources || !map.sources.length) return null;
+  const rubyPath = normPath(r.spec.replace(/[^/]*$/, "") + map.sources[0]); // .map dir + source
+  if (srcMap[rubyPath] == null) return null;
+
+  const method = r.name.includes("#") ? r.name.slice(r.name.indexOf("#") + 1) : r.name;
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  // 1) the `test "..."` declaration line for this method.
+  const words = method.replace(/^test_/, "").split(/_+/).filter(Boolean).map(esc);
+  if (words.length) {
+    const re = new RegExp(`\\btest\\s+["'].*?${words.join("[^A-Za-z0-9]+")}.*?["']`);
+    const rb = srcMap[rubyPath].split("\n");
+    for (let i = 0; i < rb.length; i++) if (re.test(rb[i])) return { path: rubyPath, line: i + 1 };
+  }
+
+  // 2) fall back to the emitted sourcemap: the method's first mapped line.
+  const tsLines = ts.content.split("\n");
+  const decl = new RegExp("\\b" + esc(method) + "\\s*\\(");
+  const declLine0 = tsLines.findIndex((l) => decl.test(l));
+  if (declLine0 >= 0) {
+    for (let g = declLine0; g <= Math.min(declLine0 + 12, tsLines.length - 1); g++) {
+      const pos = originalPositionFor(map, g + 1, 0);
+      if (pos) return { path: rubyPath, line: pos.line };
+    }
+  }
+  return { path: rubyPath, line: 1 };
+}
+
+// Open a Ruby source location in the editor: reveal its dir in the tree, select
+// the file, scroll + flash the line.
+function jumpToSource(loc) {
+  if (!loc || srcMap[loc.path] == null) return false;
+  const dirs = loc.path.split("/").slice(0, -1);
+  let d = "";
+  for (const seg of dirs) { d = d ? d + "/" + seg : seg; if (openDirs) openDirs.add(d); }
+  renderSources();
+  selectFile(loc.path);
+  editor.revealLine?.(loc.line);
+  return true;
+}
+
 function renderTabBadge(run) {
   const b = els.tabBadge;
   if (!run) { b.hidden = true; return; }
@@ -340,22 +399,24 @@ function renderConformance(run) {
 
 function renderTestResults(run) {
   if (run.error) { els.testResults.innerHTML = `<div class="empty">test run failed: ${escapeHtml(run.error)}</div>`; return; }
-  // Group flat `ClassName#test_method` results by suite class (≈ one per file).
+  // Group flat `ClassName#test_method` results by suite class (≈ one per file),
+  // keeping each result's index into run.results for click→source.
   const groups = new Map();
-  for (const r of run.results) {
+  run.results.forEach((r, ri) => {
     const hash = r.name.indexOf("#");
     const suite = hash >= 0 ? r.name.slice(0, hash) : r.name;
     const method = hash >= 0 ? r.name.slice(hash + 1) : r.name;
     if (!groups.has(suite)) groups.set(suite, []);
-    groups.get(suite).push({ ...r, method });
-  }
+    groups.get(suite).push({ ...r, method, ri });
+  });
   let html = "";
   for (const [suite, cases] of groups) {
     const fails = cases.filter((c) => c.status === "fail").length;
     html += `<div class="suite"><div class="suite-h">${escapeHtml(suite)} <span class="m">${cases.length - fails}/${cases.length}</span></div>`;
     for (const c of cases) {
       const ico = c.status === "pass" ? "✓" : c.status === "skip" ? "‒" : "✗";
-      html += `<div class="tcase ${c.status}"><span class="ico">${ico}</span>`
+      html += `<div class="tcase ${c.status} clickable" data-ri="${c.ri}" title="open this test in the editor">`
+        + `<span class="ico">${ico}</span>`
         + `<span class="nm">${escapeHtml(prettyMethod(c.method))}</span>`
         + `<span class="ms">${c.ms != null ? c.ms.toFixed(0) + "ms" : ""}</span></div>`;
       if (c.status === "fail" && c.error) html += `<div class="terr">${escapeHtml(c.error)}</div>`;
@@ -363,6 +424,15 @@ function renderTestResults(run) {
     html += `</div>`;
   }
   els.testResults.innerHTML = html || `<div class="empty">no tests</div>`;
+}
+
+// Click a result row → jump to its Ruby source (Phase 9).
+function onTestResultsClick(e) {
+  const row = e.target.closest(".tcase");
+  if (!row || !lastTestRun?.results) return;
+  const r = lastTestRun.results[Number(row.dataset.ri)];
+  const loc = rubyLocForResult(r);
+  if (loc) jumpToSource(loc);
 }
 
 // Run the suite and paint the panel (summary + tab badge + conformance + tree).
@@ -431,6 +501,7 @@ async function boot() {
     if (tab) setTab(tab);
   });
   els.runTestsBtn.addEventListener("click", () => runAndRenderTests());
+  els.testResults.addEventListener("click", onTestResultsClick); // Phase 9: row → Ruby
   renderConformance(null); // static strip visible before the first run
 
   const first = srcMap[DEFAULT_FILE] != null ? DEFAULT_FILE : sourceFiles()[0];
@@ -459,6 +530,8 @@ async function boot() {
     source: (path) => srcMap[path],
     sourceCount: () => sourceFiles().length,
     selectTab: setTab,
+    currentFile: () => currentPath,                                  // Phase 9
+    sourceLocForTest: (name) => rubyLocForResult((lastTestRun?.results || []).find((r) => r.name === name)),
   };
 
   // Run the emitted suite once in the background and paint the panel/badge, so

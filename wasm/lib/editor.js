@@ -100,6 +100,18 @@ export async function createEditor(container, { onChange }) {
         }));
         monaco.editor.setModelMarkers(ed.getModel(), "roundhouse", markers);
       },
+      // Scroll to a 1-based line, place the cursor, and flash the line (used by
+      // the studio test panel to jump a failing test to its Ruby source).
+      revealLine(line) {
+        ed.revealLineInCenter(line);
+        ed.setPosition({ lineNumber: line, column: 1 });
+        ed.focus();
+        const ids = ed.deltaDecorations([], [{
+          range: new monaco.Range(line, 1, line, 1),
+          options: { isWholeLine: true, className: "rh-flash-line" },
+        }]);
+        setTimeout(() => { try { ed.deltaDecorations(ids, []); } catch { /* model swapped */ } }, 1500);
+      },
     };
   } catch (err) {
     console.warn("[playground] Monaco unavailable, using textarea fallback:", err.message);
@@ -115,6 +127,10 @@ export async function createEditor(container, { onChange }) {
       setValue(text) { ta.value = text; },
       setMarkers() {}, // textarea can't render squiggles; status bar shows counts
       setTypes() {}, // no hovers in the textarea fallback
+      revealLine(line) { // best-effort: move the caret to the line's start
+        const off = ta.value.split("\n").slice(0, Math.max(0, line - 1)).reduce((n, l) => n + l.length + 1, 0);
+        ta.focus(); ta.setSelectionRange(off, off);
+      },
     };
   }
 }

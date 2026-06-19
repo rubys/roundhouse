@@ -144,7 +144,7 @@ verifiable development cycle."**
 | 6 | Emit + ship the Minitest suite into the browser payload | D.2 | ½–1 | **DONE** — worker-profile transpile already emits the suite; studio retains + surfaces it (`window.__studio.testSuite()`), verifier proves it ships + is live |
 | 7 | `node:test` → browser test-runner harness + in-memory sqlite isolation | D.2 | 1–2 | **DONE** — `lib/test-runtime.mjs` (node:* shims + in-memory Db) injected at bundle time (suite byte-identical to CI); `bundleTests` + per-file Workers run the real-blog suite **21/21 green** in-browser; verifier covers green + red detection. No emitter change |
 | 8 | Test-results UI panel + cross-target CI badge strip | D.2 | ½–1 | **DONE** — right-column `app \| tests` tab: per-suite green/red tree + counts + failure messages, live tab badge, 9-target conformance strip (TS live, 8 CI-attested). Auto-runs after boot + on edit (tests tab); verifier covers green + red panels |
-| 9 | Runtime sourcemaps: failing-test stack traces map back to Ruby source | D.2 | 1–2 | blocked on 7 |
+| 9 | Runtime sourcemaps: failing-test stack traces map back to Ruby source | D.2 | 1–2 | **DONE** — clicking any test row jumps Monaco to its Ruby `test "..."` line, resolved via the emitted token-level `.test.ts.map` (`lib/sourcemap.mjs`). Verifier covers resolve + click→open. (Exact-assertion-line via esbuild output maps deferred — see note) |
 
 Total: rung A alone **~2–3 days**; full arc through D.2 **~9–14 days**.
 A is independently shippable and de-risks everything after it.
@@ -483,19 +483,33 @@ failing rows, messages). All studio-side — no emitter change.
 
 Not yet: clicking a failing row back to the Ruby source line (that's Phase 9).
 
-### Phase 9 — Runtime sourcemaps for debug (rung D.2, 1–2 days)
+### Phase 9 — Runtime sourcemaps for debug (rung D.2, 1–2 days) — **DONE**
 
-The "debug" leg of edit/compile/debug. A failing test should point back to
-the line of **Ruby** the user wrote, not the emitted TS.
+The "debug" leg of edit/compile/debug. A failing test points back to the line
+of **Ruby** the user wrote, not the emitted TS.
 
-- Token-level ERB/controller/model sourcemaps already exist; this phase adds
-  the *runtime* sourcemaps that let a browser stack trace walk through the
-  framework runtime to the source (gap #4).
-- Wire emitted sourcemaps into esbuild's output (Phase 4) so the browser's
-  own stack traces resolve to Ruby; make failure locations in the results
-  panel click back into Monaco at the right line.
-- This is the phase that makes the cycle genuinely a *debug* cycle rather
-  than a pass/fail readout.
+Every row in the results panel is **clickable**: it jumps Monaco to that test's
+Ruby `test "..."` declaration line (tree expands, file opens, line flashes).
+The mapping (`wasm/lib/sourcemap.mjs`, a ~60-line base64-VLQ source-map v3
+consumer) uses the **emitted token-level `.test.ts.map`**: its `sources`
+entry names the Ruby spec file, and the exact `test "..."` line is found by a
+punctuation-tolerant search keyed on the test method name (the
+`test "should get index"` → `test_should_get_index` mangling is lossy, so each
+`_` matches any non-alphanumeric run); it falls back to the raw sourcemap
+position. `verify-studio.mjs` asserts a failing test resolves to the right Ruby
+file + test line and that clicking the row opens it.
+
+**Scope note — what this is and isn't.** This wires the existing Ruby→TS
+sourcemaps to the panel (the deliverable: "failure locations click back into
+Monaco at the right line"). It does **not** compose esbuild *output* maps so the
+browser's own stack traces resolve to Ruby (the more ambitious half of gap #4).
+That was deliberately skipped: the dominant failure is an inline
+`throw "assert_equal failed"` — a thrown **string**, which carries no stack — so
+stack-walking would yield nothing for most failures regardless of map
+composition. Test-declaration granularity (which test failed → its Ruby line)
+is the reliable, useful target here; exact-assertion-line + devtools stack
+resolution (esbuild `sourcemap` + a stack-frame mapper) is a later refinement if
+the emitter ever attaches positions to the inline throws.
 
 ## Risk callouts
 

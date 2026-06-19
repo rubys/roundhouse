@@ -32,13 +32,15 @@ Studio runs the emitted blog **live**, entirely client-side:
 - esbuild + Monaco + sqlite-wasm/turbo + Tailwind load from CDNs; each piece
   degrades independently (no esbuild → transpile-only; no SW → no run).
 
-**Phases 6-8 (rung D.2) done — the Minitest suite ships, runs, and shows
-green/red in-browser.** The right column has a `running app | tests` tab: the
-App tab is the live iframe (opfs DB); the **Tests tab** is the results panel —
-a run bar + a 9-target **conformance strip** (`TS N/N live` + 8 `✓ CI`
-chips, CI-attested not live) + a per-suite green/red tree with timings and
-failure messages; the tab label carries a live `N/N` badge. Runs fire after
-boot and (on the tests tab) after each edit.
+**Phases 6-9 (rung D.2) done — the Minitest suite ships, runs, shows green/red,
+and clicks back to Ruby in-browser.** The right column has a `running app |
+tests` tab: the App tab is the live iframe (opfs DB); the **Tests tab** is the
+results panel — a run bar + a 9-target **conformance strip** (`TS N/N live` + 8
+`✓ CI` chips, CI-attested not live) + a per-suite green/red tree with timings
+and failure messages; the tab label carries a live `N/N` badge. Runs fire after
+boot and (on the tests tab) after each edit. **Every row is clickable** — it
+jumps Monaco to that test's Ruby `test "..."` line (the debug leg), resolved via
+the emitted token-level `.test.ts.map` (`../lib/sourcemap.mjs`).
 
 Under it: every build's worker-profile transpile emits the suite
 (`test/<x>.test.ts`, the `test/_runtime/` harness, `test/fixtures/*.ts`);
@@ -61,15 +63,17 @@ Under it: every build's worker-profile transpile emits the suite
 - A run fires once in the background after boot (console-logged); the test
   *sources* are editable in the tree, so an edit re-runs green/red.
 
-Deferred: true module hot-swap (no reload); runtime sourcemaps so a failing
-test clicks back to the Ruby line (Phase 9).
+Deferred: true module hot-swap (no reload); exact-assertion-line debug (esbuild
+output sourcemaps + browser stack-frame mapping — Phase 9 lands test-declaration
+granularity; see the plan's Phase 9 note for why stack-walking is moot for the
+inline string-throw assertions).
 
 ## Files
 
 | File | Role | Tracked |
 |---|---|---|
 | `index.html` | three-pane layout (sources / editor / right column) + the right-column `app \| tests` tab bar and results panel (Phase 8) | yes |
-| `studio.js` | the loop: source tree, transpile→bundle→host, app shell, test-suite retention (Phase 6) + in-browser run (Phase 7, `runTests`) + results panel/tabs (Phase 8), test hooks | yes |
+| `studio.js` | the loop: source tree, transpile→bundle→host, app shell, test-suite retention (Phase 6) + in-browser run (Phase 7, `runTests`) + results panel/tabs (Phase 8) + click-to-Ruby (Phase 9), test hooks | yes |
 | `sw.js` | app-host service worker: serves the in-memory app at its scope | yes |
 | `verify-studio.mjs` | Playwright: boot → run → edit-reflects, in chromium (needs network) | yes |
 | `studio.png` | screenshot from the verifier | no (gitignored) |

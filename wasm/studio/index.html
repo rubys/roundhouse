@@ -71,8 +71,13 @@
   .tcase .nm { flex: 1 1 auto; color: #333; min-width: 0; }
   .tcase .ms { flex: 0 0 auto; color: #aaa; font-size: 10px; }
   .tcase.fail .nm { color: #a01b2c; }
+  .tcase.clickable { cursor: pointer; }
+  .tcase.clickable:hover { background: #eef4ff; }
+  .tcase.clickable:hover .nm { text-decoration: underline; }
   .terr { color: #a01b2c; background: #fdf3f3; white-space: pre-wrap; padding: 2px 8px 4px 31px; font-size: 11px; }
   #testResults .empty { padding: 12px; color: #999; }
+  /* flash the line jumped-to from a test row (Monaco whole-line decoration) */
+  .rh-flash-line { background: rgba(59, 130, 246, .16); transition: background .8s ease-out; }
 </style>
 </head>
 <body>

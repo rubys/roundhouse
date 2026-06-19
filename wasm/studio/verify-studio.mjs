@@ -5,7 +5,8 @@
 // browser payload and is live (a test-source edit reaches the shipped spec);
 // Phase 7 asserts it RUNS in-browser (per-file in-memory DB); Phase 8 asserts
 // the results PANEL paints — green (badge/suites/cases + 9-target conformance
-// strip) and red (failing rows + messages) after a broken assertion.
+// strip) and red (failing rows + messages) after a broken assertion; Phase 9
+// asserts a failing test maps + jumps back to its Ruby `test "..."` source line.
 // Editor-widget agnostic (via window.__studio).
 // (Needs network: esbuild + Monaco + sqlite-wasm/turbo + Tailwind load from CDNs.)
 //
@@ -189,6 +190,30 @@ if (redRun.error) fail(`red-run errored: ${redRun.error}`);
 else if (!(redRun.failed >= 1)) fail(`expected the broken assertion to fail a test, got ${redRun.failed} failure(s)`);
 else if (!red.badgeErr || red.fails < 1 || red.msgs < 1) fail(`panel did not render red (rows ${red.fails}, msgs ${red.msgs}, badgeErr ${red.badgeErr})`);
 else console.log(`results panel paints red (${red.fails} rows + messages) after a broken assertion ✓`);
+
+// --- Phase 9: a failing test maps + jumps back to its Ruby source line -------
+console.log("\n=== debug leg: test → Ruby source (Phase 9) ===");
+// (a) the sourcemap-driven resolver lands on the right Ruby file + test line.
+const loc = await page.evaluate(() =>
+  window.__studio.sourceLocForTest("ArticleTest#test_creates_an_article_with_valid_attributes"));
+const rubyLine = await page.evaluate((l) =>
+  l && (window.__studio.source(l.path) || "").split("\n")[l.line - 1], loc);
+console.log("resolved:", loc ? `${loc.path}:${loc.line}` : "(null)", "|", (rubyLine || "").trim());
+if (!loc) fail("failing test did not resolve to a Ruby source location");
+else if (loc.path !== "test/models/article_test.rb") fail(`wrong Ruby file: ${loc.path}`);
+else if (!/test\s+["']creates an article with valid attributes["']/.test(rubyLine || ""))
+  fail(`Ruby line ${loc.line} is not the test declaration: ${JSON.stringify(rubyLine)}`);
+
+// (b) clicking a failing row opens that Ruby file in the editor.
+const clicked = await page.evaluate(() => {
+  const row = document.querySelector("#testResults .tcase.fail");
+  if (!row) return null;
+  row.click();
+  return window.__studio.currentFile();
+});
+console.log("clicked failing row → editor file:", clicked);
+if (!clicked || !/_test\.rb$/.test(clicked)) fail(`clicking a failing row did not open a Ruby test file (got ${clicked})`);
+else console.log("clicking a failing test jumps to its Ruby source ✓");
 
 await page.screenshot({ path: "studio.png" });
 
