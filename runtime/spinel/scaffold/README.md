@@ -295,22 +295,25 @@ from this fixture:
 ### Persistence
 
 - **Tests use `:memory:` SQLite** — single-process, start fresh.
-  The dev server writes to `tmp/blog.sqlite3` (configurable via
-  `BLOG_DB`) so state survives across requests within one dev-server
-  run. `:memory:` and `tmp/blog.sqlite3` are both gitignored and
-  discarded between sessions. There's no backup, no migration system,
-  no schema versioning.
+  The server defaults to the Rails-traditional
+  `storage/development.sqlite3` (override via `BLOG_DB`) so state
+  survives across requests. The archive ships `storage/.keep` so the
+  directory exists on first run; the seeded DB itself is rebuilt with
+  `make seed` (or `sqlite3 storage/development.sqlite3 < db/seed.sql`)
+  and is discarded between sessions. There's no backup, no migration
+  system, no schema versioning.
 - **End-to-end demo seeds from `fixtures/real-blog`'s
   Rails-populated SQLite.** `bin/rh transpile ruby` copies real-blog's
   `storage/development.sqlite3` (populated by `bin/rails db:prepare` →
-  `db/seeds.rb`) into the demo's `tmp/blog.sqlite3`. Rails-generated
-  schema (varchar/text/datetime affinities) reads + writes through
-  `SqliteAdapter` transparently. `bin/rh clean ruby` resets the demo
-  to its seeded state.
+  `db/seeds.rb`) into the demo's `storage/development.sqlite3`. Rails-
+  generated schema (varchar/text/datetime affinities) reads + writes
+  through `SqliteAdapter` transparently. `bin/rh clean ruby` resets the
+  demo to its seeded state.
 - **`:memory:` SQLite loses everything on process exit.** Used by
-  `make run` (single-shot CGI), tests, and the spinel-compiled binary
-  in the unset-`BLOG_DB` fallback path. Fine for ephemeral scenarios;
-  point `BLOG_DB` at a file for persistence.
+  tests, which configure it explicitly. `make run` (single-shot CGI)
+  and the server's unset-`BLOG_DB` default both now open
+  `storage/development.sqlite3`; pass `BLOG_DB=:memory:` for an
+  ephemeral run.
 - **No transactions, no foreign-key enforcement at DB level**, no
   prepared-statement caching, no connection pooling. The application
   doesn't need them; production wouldn't be served by this stack.

@@ -613,25 +613,25 @@ stage_db() {
             sqlite3 "$dev" ".backup $prod"
             ;;
         ruby|ruby-int)
-            local db="$RUBY_OUT/tmp/blog.sqlite3"
+            local db="$RUBY_OUT/storage/development.sqlite3"
             mkdir -p "$(dirname "$db")"
             rm -f "$db" "$db-wal" "$db-shm"
             sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
             ;;
         jruby)
-            local db="$JRUBY_OUT/tmp/blog.sqlite3"
+            local db="$JRUBY_OUT/storage/development.sqlite3"
             mkdir -p "$(dirname "$db")"
             rm -f "$db" "$db-wal" "$db-shm"
             sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
             ;;
         typescript)
-            local db="$TS_OUT/db/development.sqlite3"
+            local db="$TS_OUT/storage/development.sqlite3"
             mkdir -p "$(dirname "$db")"
             rm -f "$db" "$db-wal" "$db-shm"
             sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
             ;;
         crystal)
-            local db="$CR_OUT/db/development.sqlite3"
+            local db="$CR_OUT/storage/development.sqlite3"
             mkdir -p "$(dirname "$db")"
             rm -f "$db" "$db-wal" "$db-shm"
             sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
@@ -655,7 +655,7 @@ stage_db() {
             sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
             ;;
         spinel)
-            local db="$SP_OUT/tmp/blog.sqlite3"
+            local db="$SP_OUT/storage/development.sqlite3"
             mkdir -p "$(dirname "$db")"
             rm -f "$db" "$db-wal" "$db-shm"
             sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
@@ -750,7 +750,7 @@ start_target() {
         ruby)
             (cd "$RUBY_OUT" && \
                 BUNDLE_GEMFILE="$TARGET_GEMFILE" \
-                BLOG_DB=tmp/blog.sqlite3 \
+                BLOG_DB=storage/development.sqlite3 \
                 RAILS_MAX_THREADS="$THREADS" \
                 WEB_CONCURRENCY="$workers" \
                 RAILS_ENV=production \
@@ -764,7 +764,7 @@ start_target() {
         ruby-int)
             (cd "$RUBY_OUT" && \
                 BUNDLE_GEMFILE="$TARGET_GEMFILE" \
-                BLOG_DB=tmp/blog.sqlite3 \
+                BLOG_DB=storage/development.sqlite3 \
                 RAILS_MAX_THREADS="$THREADS" \
                 WEB_CONCURRENCY="$workers" \
                 RAILS_ENV=production \
@@ -791,7 +791,7 @@ start_target() {
             # measurements — a host-dependent artifact, not a footprint.
             (cd "$JRUBY_OUT" && \
                 BUNDLE_GEMFILE="$JRUBY_OUT/Gemfile" \
-                BLOG_DB=tmp/blog.sqlite3 \
+                BLOG_DB=storage/development.sqlite3 \
                 RAILS_MAX_THREADS="$THREADS" \
                 WEB_CONCURRENCY=0 \
                 RAILS_ENV=production \
@@ -869,7 +869,7 @@ start_target() {
             # once, so a smaller pool would make fibers park on a handle.
             # Same DATABASE_POOL_SIZE knob the rust target reads.
             (cd "$SP_OUT" && \
-                BLOG_DB=tmp/blog.sqlite3 \
+                BLOG_DB=storage/development.sqlite3 \
                 PORT="$port" \
                 DATABASE_POOL_SIZE="$CONNECTIONS" \
                 ./build/blog \

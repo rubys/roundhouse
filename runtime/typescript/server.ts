@@ -498,8 +498,8 @@ async function attachCable(
 
 function openDatabase(dbPath: string, schemaStatements: string[]): void {
   // better-sqlite3 creates the file if it doesn't exist, but
-  // NOT the parent directory — if we're opening `./db/
-  // development.sqlite3` and `./db/` doesn't exist, the
+  // NOT the parent directory — if we're opening `./storage/
+  // development.sqlite3` and `./storage/` doesn't exist, the
   // constructor throws. Create intermediate dirs so first-run
   // startup works without the user having to mkdir manually.
   // In-memory DBs (`:memory:`) don't have a parent dir; skip.
@@ -561,7 +561,7 @@ export type RouteRow = RouteClass;
 export type ControllerClass = new () => any;
 
 export interface StartOptions {
-  /** File path for the sqlite DB. Defaults to `./db/development.sqlite3`. */
+  /** File path for the sqlite DB. Defaults to `./storage/development.sqlite3`. */
   dbPath?: string;
   /** HTTP port. Defaults to 3000 or `PORT` env var. */
   port?: number;
@@ -611,7 +611,7 @@ const sessionStore: Record<string, any> = {};
 /** Start the server. Returns a promise that resolves once the
  *  HTTP + WebSocket listeners are accepting connections. */
 export async function startServer(opts: StartOptions): Promise<void> {
-  const dbPath = opts.dbPath ?? "./db/development.sqlite3";
+  const dbPath = opts.dbPath ?? "./storage/development.sqlite3";
   const port = opts.port ?? Number(process.env.PORT ?? 3000);
 
   layoutRenderer = opts.layout ?? null;
