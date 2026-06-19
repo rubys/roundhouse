@@ -89,16 +89,19 @@ module Sock
   end
 
   # Static file size in bytes, or -1 when the path doesn't exist (callers
-  # 404 on `< 0`). File.size stats the path (matz/spinel#1485) instead of
-  # slurping it with File.read(path).length — no read, and binary-safe by
-  # construction (st_size counts embedded NULs rather than stopping at the
-  # first). The File.exist? guard keeps File.size's missing-path raise out
-  # of callers, which rely on the -1 sentinel.
+  # 404 on `< 0`). File.read is binary-safe (matz/spinel#505); we length the
+  # read rather than File.size(path) (matz/spinel#1485) on purpose. File.size
+  # returns the right value in isolation, but swapping it in wedges the whole
+  # Tep fiber server under the browser e2e workload (a live /cable WebSocket +
+  # Turbo Drive + concurrent asset fetches) — every page.goto then times out.
+  # A/B confirmed on one spinel binary: File.read passes the e2e, File.size
+  # fails it. Restore File.size once the spinel-side interaction is fixed.
+  # Small static assets only.
   def self.sphttp_filesize(path)
     if !File.exist?(path)
       return -1
     end
-    File.size(path)
+    File.read(path).length
   end
 
   # Serve a static file: read it (binary-safe) and write the bytes. The
