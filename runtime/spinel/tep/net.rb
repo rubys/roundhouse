@@ -88,30 +88,35 @@ module Sock
     out
   end
 
-  # Static file size in bytes, or -1 when the path doesn't exist (callers
-  # 404 on `< 0`). File.read is binary-safe (matz/spinel#505); we length the
-  # read rather than File.size(path) (matz/spinel#1485) on purpose. File.size
-  # returns the right value in isolation, but swapping it in wedges the whole
-  # Tep fiber server under the browser e2e workload (a live /cable WebSocket +
-  # Turbo Drive + concurrent asset fetches) — every page.goto then times out.
-  # A/B confirmed on one spinel binary: File.read passes the e2e, File.size
-  # fails it. Restore File.size once the spinel-side interaction is fixed.
+  # Static file size in BYTES, or -1 when the path doesn't exist (callers
+  # 404 on `< 0`). This is the Content-Length the response advertises, so it
+  # MUST be the byte count (File.size, matz/spinel#1485) and MUST match the
+  # number of bytes sphttp_sendfile actually writes. The body write uses
+  # `data.bytesize` for exactly this reason — using `data.length` (character
+  # count) there delivered 7 fewer bytes than Content-Length on the only
+  # multibyte asset (turbo.min.js: 105562 bytes / 105555 UTF-8 chars), so the
+  # browser hung waiting for the missing bytes and every page.goto timed out
+  # (the #1500 "wedge"; not a spinel/sp_net bug). The earlier File.read.length
+  # here only "worked" by serving a file truncated to the char count. Keep
+  # filesize (File.size) and sendfile (data.bytesize) both byte-based.
   # Small static assets only.
   def self.sphttp_filesize(path)
     if !File.exist?(path)
       return -1
     end
-    File.read(path).length
+    File.size(path)
   end
 
   # Serve a static file: read it (binary-safe) and write the bytes. The
   # caller has already emitted headers + checked existence via filesize.
+  # bytesize (not length): the byte count must match the Content-Length
+  # (File.size) sphttp_filesize advertised, or a multibyte asset truncates.
   def self.sphttp_sendfile(fd, path)
     if !File.exist?(path)
       return -1
     end
     data = File.read(path)
-    Sock.sp_net_write_bytes(fd, data, data.length)
+    Sock.sp_net_write_bytes(fd, data, data.bytesize)
   end
 
   # One Transfer-Encoding chunk: hex byte-size + CRLF, the data, CRLF.
