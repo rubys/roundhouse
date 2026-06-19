@@ -522,6 +522,13 @@ build_target() {
             fi
             if [[ ! -f "$SP_OUT/static/assets/tailwind.css" ]]; then
                 step "building spinel assets (tailwind + turbo.min.js)"
+                # `make assets` shells `bundle exec` (gem_dir for turbo.min.js),
+                # so the scaffold bundle must be satisfied for the active CRuby.
+                # After a Ruby bump the new Ruby's gem dir is empty → bundle exec
+                # returns nothing → the Makefile cp collapses to /app/... and
+                # aborts. Self-heal first; bundle check is a fast no-op when set.
+                (cd "$SP_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" bundle check >/dev/null 2>&1 \
+                    || BUNDLE_GEMFILE="$TARGET_GEMFILE" bundle install >/dev/null) || return 1
                 (cd "$SP_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" make assets >/dev/null) || return 1
             fi
             # Recompile whenever we re-emitted (SKIP_EMIT==0) — the spinel
