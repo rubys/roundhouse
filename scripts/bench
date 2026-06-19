@@ -345,6 +345,13 @@ build_target() {
                 step "regenerating fixtures/real-blog"
                 (cd "$REPO_ROOT" && bin/rh fixture >/dev/null) || return 1
             fi
+            # Gems install into the active Ruby's gem dir, which is
+            # per-version: a Ruby bump (or pruning the old version) leaves
+            # the new Ruby's dir empty and boot dies with GemNotFound. Keep
+            # the build self-healing — bundle check is a fast no-op when the
+            # bundle is satisfied, install runs only when it isn't.
+            step "bundling rails fixture"
+            (cd "$FIXTURE" && bundle check >/dev/null 2>&1 || bundle install >/dev/null) || return 1
             ;;
         rails-jruby)
             TARGET_BUILD_DIR="$FIXTURE80"
@@ -383,6 +390,12 @@ build_target() {
                 step "regenerating ruby target (bin/rh transpile ruby)"
                 (cd "$REPO_ROOT" && bin/rh transpile ruby >/dev/null) || return 1
             fi
+            # Same per-version gem-dir hazard as the rails cells: make sure
+            # the scaffold bundle is satisfied for the active Ruby before the
+            # asset build and the puma boot rely on it.
+            step "bundling ruby target"
+            (cd "$RUBY_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" bundle check >/dev/null 2>&1 \
+                || BUNDLE_GEMFILE="$TARGET_GEMFILE" bundle install >/dev/null) || return 1
             # Assets — Tailwind compile + JS deps. Needed for full
             # response bytes; without it the index page is naked.
             if [[ ! -f "$RUBY_OUT/static/assets/tailwind.css" ]]; then
