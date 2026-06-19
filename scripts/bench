@@ -414,10 +414,18 @@ build_target() {
                 (cd "$REPO_ROOT" && bin/rh transpile jruby >/dev/null) || return 1
             fi
             # JRuby resolves the jdbc-sqlite3 driver (and JRuby builds of
-            # puma/rack/etc.) into this tree. Slow under the JVM, so only
-            # run when the emit is fresh or the lock is missing.
-            if (( SKIP_EMIT == 0 )) || [[ ! -f "$JRUBY_OUT/Gemfile.lock" ]]; then
+            # puma/rack/etc.) into this tree. The transpile drops the MRI
+            # lock so this resolves a fresh, java-only lock — but a lock left
+            # from a prior run survives the re-emit, and if it carries a CRuby
+            # platform (e.g. x86_64-linux) a later `bundle exec` dies with
+            # GemNotFound, since JRuby can't build C-ext gems for it. So
+            # re-resolve whenever the bundle isn't satisfied (bundle check),
+            # clearing any stale lock first so the resolve stays java-only.
+            # Slow under the JVM, hence gated rather than run every build.
+            if (( SKIP_EMIT == 0 )) || \
+               ! (cd "$JRUBY_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" jruby -S bundle check >/dev/null 2>&1); then
                 step "installing jruby bundle"
+                rm -f "$JRUBY_OUT/Gemfile.lock"
                 (cd "$JRUBY_OUT" && BUNDLE_GEMFILE="$TARGET_GEMFILE" jruby -S bundle install >/dev/null) || return 1
             fi
             # Assets — Tailwind + JS deps. The output is byte-identical to
