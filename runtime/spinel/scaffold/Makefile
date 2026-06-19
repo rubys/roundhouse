@@ -129,13 +129,15 @@ $(STATIC)/icon.svg:
 
 build: $(BUILD)/blog
 
-# Populate tmp/blog.sqlite3 with the demo blog's seed data (db/seed.sql).
-# The binary boots against an empty DB fine (Schema.load! is idempotent),
-# but a self-contained run/repro wants rows to serve — `make seed` provides
-# them with nothing but sqlite3. Override the path with BLOG_DB=… at runtime.
-seed: tmp/blog.sqlite3
-tmp/blog.sqlite3: db/seed.sql
-	@mkdir -p tmp
+# Populate storage/development.sqlite3 (the Rails-traditional path, and
+# the binary's default when BLOG_DB is unset) with the demo blog's seed
+# data (db/seed.sql). The binary boots against an empty DB fine
+# (Schema.load! is idempotent), but a self-contained run/repro wants rows
+# to serve — `make seed` provides them with nothing but sqlite3. Override
+# the path with BLOG_DB=… at runtime.
+seed: storage/development.sqlite3
+storage/development.sqlite3: db/seed.sql
+	@mkdir -p storage
 	sqlite3 $@ < db/seed.sql
 
 # spinel AOT-compiles main.rb (+ its whole require graph) straight to a

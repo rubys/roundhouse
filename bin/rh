@@ -440,9 +440,9 @@ end
 def post_transpile_ruby(out)
   seed = File.join(fixture_path, 'storage', 'development.sqlite3')
   return unless File.exist?(seed)
-  tmp = File.join(out, 'tmp')
-  FileUtils.mkdir_p(tmp)
-  FileUtils.cp(seed, File.join(tmp, 'blog.sqlite3'))
+  storage = File.join(out, 'storage')
+  FileUtils.mkdir_p(storage)
+  FileUtils.cp(seed, File.join(storage, 'development.sqlite3'))
 end
 
 # The spinel target needs no post-transpile step: the HTTP/WebSocket

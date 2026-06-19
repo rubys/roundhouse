@@ -146,16 +146,17 @@ module Main
   # setup).
   #
   # When `BLOG_DB` env var names a path, configure SqliteAdapter
-  # against that file — required for the dev server, which forks a
-  # fresh CGI process per request and would otherwise lose all data
-  # between requests. Without BLOG_DB, fall back to `:memory:` — works
-  # for the spinel-compiled binary (FFI sqlite is universal) and the
-  # one-shot CGI invocation, and is per-process (no persistence across
-  # forks, which is fine for both).
+  # against that file. Otherwise default to the Rails-traditional
+  # `storage/development.sqlite3` — persisted across requests and
+  # consistent with every other target's default. The archive ships
+  # `storage/.keep`, so the directory exists for first-run open.
+  # Tests configure `:memory:` explicitly through their own setup, so
+  # this server default never reaches them (the `adapter.nil?` guard
+  # also short-circuits when a test already configured the adapter).
   def self.configure_default_adapter!
     return unless ActiveRecord.adapter.nil?
     db_path = ENV["BLOG_DB"]
-    path = (!db_path.nil? && !db_path.empty?) ? db_path : ":memory:"
+    path = (!db_path.nil? && !db_path.empty?) ? db_path : "storage/development.sqlite3"
     # SqliteAdapter.configure delegates to Db.configure (single shared
     # connection); both the legacy AR-adapter dispatch path and the
     # Level-3 lowerer-emitted `_adapter_*` path read through one handle.

@@ -108,12 +108,13 @@ task :assets => [
 # Override with env vars: RAILS_MAX_THREADS=5 WEB_CONCURRENCY=2 PORT=4000.
 desc "Start Puma on :3000 (override PORT, WEB_CONCURRENCY, RAILS_MAX_THREADS)"
 task :dev => :assets do
-  # Default to the seeded SQLite file produced by `make ruby-transpile`
-  # so the demo opens with three articles + seven comments. Override
-  # with BLOG_DB=:memory: for an empty start, or any file path.
+  # Default to the seeded SQLite file (`make seed`, Rails-traditional
+  # storage/development.sqlite3) so the demo opens with three articles
+  # + seven comments. Override with BLOG_DB=:memory: for an empty
+  # start, or any file path.
   env = {
     "RUBYOPT" => "--yjit",
-    "BLOG_DB" => ENV.fetch("BLOG_DB", "tmp/blog.sqlite3"),
+    "BLOG_DB" => ENV.fetch("BLOG_DB", "storage/development.sqlite3"),
   }
   sh(env, "bundle exec puma -C config/puma.rb config.ru")
 end
@@ -138,7 +139,7 @@ task :bench => :assets do
 
   # Boot puma in the background. Caller must `rake bench:setup` (or
   # equivalent) to ensure a clean DB / fresh seed. For now, just
-  # assume tmp/blog.sqlite3 exists with seed data.
+  # assume storage/development.sqlite3 exists with seed data.
   pid = spawn({
     "PORT" => port.to_s,
     "RAILS_ENV" => "production",

@@ -443,7 +443,7 @@ export type ControllerClass = new () => any;
 
 export interface StartOptions {
   /** libsql URL or local file path. Defaults to
-   *  `./db/development.sqlite3` (interpreted as `file:` URL). For
+   *  `./storage/development.sqlite3` (interpreted as `file:` URL). For
    *  Turso remote DBs, pass `libsql://<host>` or set via
    *  `TURSO_DATABASE_URL` env var; auth tokens go through the
    *  client constructor and are out of scope for this minimal
@@ -473,7 +473,7 @@ const sessionStore: Record<string, any> = {};
  *  awaits the libsql DB open + schema apply before binding the
  *  HTTP listener. */
 export async function startServer(opts: StartOptions): Promise<void> {
-  const dbPath = opts.dbPath ?? "./db/development.sqlite3";
+  const dbPath = opts.dbPath ?? "./storage/development.sqlite3";
   const port = opts.port ?? Number(process.env.PORT ?? 3000);
 
   layoutRenderer = opts.layout ?? null;

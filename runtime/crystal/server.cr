@@ -54,7 +54,7 @@ module Roundhouse
       db_path : String? = nil,
       port : Int32? = nil,
     ) : Nil
-      resolved_path = db_path || "db/development.sqlite3"
+      resolved_path = db_path || "storage/development.sqlite3"
       resolved_port = port || (ENV["PORT"]?.try(&.to_i) || 3000)
 
       Roundhouse::Db.open_production_db(resolved_path, schema_sql)

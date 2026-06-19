@@ -168,7 +168,7 @@ TARGET_LOG="$LOG_DIR/target.log"
 case "$TARGET" in
     typescript)
         BUILD_DIR="/tmp/rh-ts-pass2"
-        DB_DEST="$BUILD_DIR/db/development.sqlite3"
+        DB_DEST="$BUILD_DIR/storage/development.sqlite3"
         ;;
     rust)
         BUILD_DIR="/tmp/rh-rs-pass2"
@@ -184,7 +184,7 @@ case "$TARGET" in
         ;;
     crystal)
         BUILD_DIR="/tmp/rh-cr-pass2"
-        DB_DEST="$BUILD_DIR/db/development.sqlite3"
+        DB_DEST="$BUILD_DIR/storage/development.sqlite3"
         ;;
     kotlin)
         BUILD_DIR="/tmp/rh-kt-pass2"
@@ -201,26 +201,25 @@ case "$TARGET" in
     ruby)
         # Ruby reuses the demo's transpile output (`bin/rh transpile
         # ruby`), which lives under build/transpiled-blog-ruby/. The
-        # dev server reads BLOG_DB; the staged DB lands at
-        # tmp/blog.sqlite3 inside that tree.
+        # dev server reads BLOG_DB; the staged DB lands at the Rails-
+        # traditional storage/development.sqlite3 inside that tree.
         BUILD_DIR="$REPO_ROOT/build/transpiled-blog-ruby"
-        DB_DEST="$BUILD_DIR/tmp/blog.sqlite3"
+        DB_DEST="$BUILD_DIR/storage/development.sqlite3"
         ;;
     jruby)
         # JRuby reuses `bin/rh transpile jruby` — byte-identical emit to
         # the ruby tree but with the JDBC db backend. Same DB layout
-        # (BLOG_DB → tmp/blog.sqlite3) inside its own build dir.
+        # (BLOG_DB → storage/development.sqlite3) inside its own build dir.
         BUILD_DIR="$REPO_ROOT/build/transpiled-blog-jruby"
-        DB_DEST="$BUILD_DIR/tmp/blog.sqlite3"
+        DB_DEST="$BUILD_DIR/storage/development.sqlite3"
         ;;
     spinel)
         # Spinel uses `bin/rh transpile spinel`, which mirrors the
-        # ruby path but additionally vendors the Tep transport
-        # (sphttp.c → .o + @TEP_SPHTTP_O@ substitution in net.rb).
-        # The AOT-compiled binary reads BLOG_DB and serves over
-        # Tep::Server on $PORT; same DB layout as the ruby target.
+        # ruby path but compiles main.rb to a native binary. The
+        # AOT-compiled binary reads BLOG_DB and serves over Tep::Server
+        # on $PORT; same DB layout as the ruby target.
         BUILD_DIR="$REPO_ROOT/build/transpiled-blog-spinel"
-        DB_DEST="$BUILD_DIR/tmp/blog.sqlite3"
+        DB_DEST="$BUILD_DIR/storage/development.sqlite3"
         ;;
 esac
 
@@ -502,7 +501,7 @@ if [[ -z "$TARGET_CMD" ]]; then
             # (both supplied by ruby_overlay). BLOG_DB points at the
             # staged seeded SQLite; BUNDLE_GEMFILE points at the
             # scaffold's Gemfile so CI's bundler-cache is reused.
-            (cd "$BUILD_DIR" && BLOG_DB=tmp/blog.sqlite3 BUNDLE_GEMFILE="$REPO_ROOT/runtime/spinel/scaffold/Gemfile" PORT="$TARGET_PORT" bundle exec puma -C config/puma.rb >"$TARGET_LOG" 2>&1) &
+            (cd "$BUILD_DIR" && BLOG_DB="$DB_DEST" BUNDLE_GEMFILE="$REPO_ROOT/runtime/spinel/scaffold/Gemfile" PORT="$TARGET_PORT" bundle exec puma -C config/puma.rb >"$TARGET_LOG" 2>&1) &
             TARGET_PID=$!
             ;;
         jruby)
@@ -510,7 +509,7 @@ if [[ -z "$TARGET_CMD" ]]; then
             # (WEB_CONCURRENCY=0 — Puma cluster mode forks, unsupported on
             # the JVM); its own tree Gemfile drives the JRuby bundle. Heap
             # pinned to 512 MB to match the bench harness (-Xmx==-Xms).
-            (cd "$BUILD_DIR" && BLOG_DB=tmp/blog.sqlite3 BUNDLE_GEMFILE="$BUILD_DIR/Gemfile" WEB_CONCURRENCY=0 PORT="$TARGET_PORT" JRUBY_OPTS="-J-Xmx512m -J-Xms512m" jruby -S bundle exec puma -C config/puma.rb >"$TARGET_LOG" 2>&1) &
+            (cd "$BUILD_DIR" && BLOG_DB="$DB_DEST" BUNDLE_GEMFILE="$BUILD_DIR/Gemfile" WEB_CONCURRENCY=0 PORT="$TARGET_PORT" JRUBY_OPTS="-J-Xmx512m -J-Xms512m" jruby -S bundle exec puma -C config/puma.rb >"$TARGET_LOG" 2>&1) &
             TARGET_PID=$!
             ;;
         typescript)
@@ -522,7 +521,7 @@ if [[ -z "$TARGET_CMD" ]]; then
             TARGET_PID=$!
             ;;
         spinel)
-            (cd "$BUILD_DIR" && BLOG_DB=tmp/blog.sqlite3 PORT="$TARGET_PORT" ./build/blog >"$TARGET_LOG" 2>&1) &
+            (cd "$BUILD_DIR" && BLOG_DB="$DB_DEST" PORT="$TARGET_PORT" ./build/blog >"$TARGET_LOG" 2>&1) &
             TARGET_PID=$!
             ;;
     esac

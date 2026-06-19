@@ -189,7 +189,7 @@ pub fn target_readme(target: BuildTarget) -> String {
              ```\n\n\
              ## Run\n\
              ```sh\n\
-             BLOG_DB=tmp/blog.sqlite3 ./build/blog\n\
+             ./build/blog\n\
              ```\n\n\
              ## Test\n\
              ```sh\n\
@@ -220,7 +220,7 @@ pub fn target_readme(target: BuildTarget) -> String {
              ```\n\n\
              ## Run\n\
              ```sh\n\
-             BLOG_DB=tmp/blog.sqlite3 bundle exec puma -C config/puma.rb\n\
+             bundle exec puma -C config/puma.rb\n\
              ```\n\n\
              ## Test\n\
              ```sh\n\
@@ -251,7 +251,7 @@ pub fn target_readme(target: BuildTarget) -> String {
              ```\n\n\
              ## Run\n\
              ```sh\n\
-             BLOG_DB=tmp/blog.sqlite3 WEB_CONCURRENCY=0 jruby -S bundle exec puma -C config/puma.rb\n\
+             WEB_CONCURRENCY=0 jruby -S bundle exec puma -C config/puma.rb\n\
              ```\n\n\
              ## Test\n\
              ```sh\n\
@@ -422,6 +422,31 @@ pub fn target_readme(target: BuildTarget) -> String {
              runs in a `SharedWorker` context.\n"
         }
     };
+    // Inject a uniform `## Setup` step before `## Run`, for every target
+    // that ships a DB-backed server (`ships_e2e`). It seeds the Rails-
+    // traditional `storage/development.sqlite3` from the bundled
+    // `db/seed.sql`, which is self-contained (CREATE TABLE IF NOT EXISTS
+    // + INSERT) so it runs standalone — no build/boot first — and
+    // `storage/.keep` (shipped by `ensure_storage_keep`) guarantees the
+    // directory exists. scripts/smoke executes this block (it skips only
+    // Run / Regenerate), so the previously-untested human setup path is
+    // now CI-covered.
+    let body = if ships_e2e(target) {
+        body.replacen(
+            "## Run\n",
+            "## Setup\n\
+             Seed the database — the Rails-traditional \
+             `storage/development.sqlite3`, from the bundled `db/seed.sql` \
+             (needs the `sqlite3` CLI):\n\
+             ```sh\n\
+             sqlite3 storage/development.sqlite3 < db/seed.sql\n\
+             ```\n\n\
+             ## Run\n",
+            1,
+        )
+    } else {
+        body.to_string()
+    };
     // Every server target serves the same blog with the same env
     // conventions (PORT, default 3000; Action Cable at /cable), so
     // the "what you get" sentence lives here, not per target. Blog
@@ -530,6 +555,7 @@ pub fn target_files(
         files
     } else {
         let files = ensure_seed_sql(files)?;
+        let files = ensure_storage_keep(files, target);
         let files = ensure_static_assets(files, target);
         ensure_e2e(files, target)
     };
@@ -608,10 +634,10 @@ fn ensure_e2e(
     // boot, not compilation.
     let (boot, db_rel) = match target {
         BuildTarget::Go => ("./server", "storage/development.sqlite3"),
-        BuildTarget::Typescript => ("npm start", "db/development.sqlite3"),
+        BuildTarget::Typescript => ("npm start", "storage/development.sqlite3"),
         BuildTarget::Rust => ("./target/release/app", "storage/development.sqlite3"),
         BuildTarget::Python => ("uv run python -m app", "storage/development.sqlite3"),
-        BuildTarget::Crystal => ("./server", "db/development.sqlite3"),
+        BuildTarget::Crystal => ("./server", "storage/development.sqlite3"),
         // mix.exs declares no `mod:` (the app doesn't auto-start), so
         // the entry point must be explicit — bare `mix run --no-halt`
         // starts the BEAM and nothing else.
@@ -624,22 +650,22 @@ fn ensure_e2e(
             "storage/development.sqlite3",
         ),
         BuildTarget::Swift => ("./.build/debug/App", "storage/development.sqlite3"),
-        // BLOG_DB must be explicit: bare puma (without the rake dev
-        // task's env defaulting) falls back to :memory: and the seed
-        // file is never opened.
+        // The server now defaults to storage/development.sqlite3 (Rails-
+        // traditional) when BLOG_DB is unset, so the boot command is bare —
+        // seed.js seeds that same path before this runs.
         BuildTarget::Ruby => (
-            "BLOG_DB=tmp/blog.sqlite3 bundle exec puma -C config/puma.rb",
-            "tmp/blog.sqlite3",
+            "bundle exec puma -C config/puma.rb",
+            "storage/development.sqlite3",
         ),
         BuildTarget::Jruby => (
-            "BLOG_DB=tmp/blog.sqlite3 WEB_CONCURRENCY=0 jruby -S bundle exec puma -C config/puma.rb",
-            "tmp/blog.sqlite3",
+            "WEB_CONCURRENCY=0 jruby -S bundle exec puma -C config/puma.rb",
+            "storage/development.sqlite3",
         ),
-        // The AOT binary (built by the README's `make build`) reads BLOG_DB
-        // (else falls back to :memory:) and PORT (default 3000, which the
-        // playwright config expects). Serves /assets/* from the prebuilt
-        // static/assets/ via sphttp sendfile.
-        BuildTarget::Spinel => ("BLOG_DB=tmp/blog.sqlite3 ./build/blog", "tmp/blog.sqlite3"),
+        // The AOT binary (built by the README's `make build`) defaults to
+        // storage/development.sqlite3 when BLOG_DB is unset, and reads PORT
+        // (default 3000, which the playwright config expects). Serves
+        // /assets/* from the prebuilt static/assets/.
+        BuildTarget::Spinel => ("./build/blog", "storage/development.sqlite3"),
         _ => unreachable!("ships_e2e gates the match"),
     };
 
@@ -879,8 +905,9 @@ fn blog_files(fixture: &Path) -> Result<Vec<(String, String)>, String> {
 ///      from the fixture verbatim. Binary files are silently
 ///      skipped (text-only archive).
 ///
-/// The seeded `tmp/blog.sqlite3` that the Makefile copies in is NOT
-/// included — `Schema.load!` is idempotent so a fresh DB still boots.
+/// The seeded `storage/development.sqlite3` that `bin/rh` stages in is
+/// NOT included — `Schema.load!` is idempotent so a fresh DB still boots
+/// (the archive ships `storage/.keep` so the directory exists).
 fn ruby_runtime_files(
     app: &App,
     fixture: &Path,
@@ -1103,6 +1130,27 @@ fn ensure_seed_sql(files: Vec<(String, String)>) -> Result<Vec<(String, String)>
     files.push(("db/seed.sql".to_string(), content));
     files.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(files)
+}
+
+/// Ship an empty `storage/.keep` so the Rails-traditional
+/// `storage/development.sqlite3` always has a parent directory in the
+/// extracted archive. The server's default DB path (BLOG_DB unset) and
+/// the README's `## Setup` step (`sqlite3 storage/development.sqlite3 <
+/// db/seed.sql`) both open that path, and sqlite creates the *file* but
+/// not the *directory* — without `.keep` the first open fails with
+/// `SQLITE_CANTOPEN`. Only DB-backed server archives (`ships_e2e`) need
+/// it; TypescriptWorker/Blog have no server. No-op if already present.
+fn ensure_storage_keep(
+    files: Vec<(String, String)>,
+    target: BuildTarget,
+) -> Vec<(String, String)> {
+    if !ships_e2e(target) || files.iter().any(|(p, _)| p == "storage/.keep") {
+        return files;
+    }
+    let mut files = files;
+    files.push(("storage/.keep".to_string(), String::new()));
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files
 }
 
 /// Resolve duplicate paths by keeping the last-inserted entry, then

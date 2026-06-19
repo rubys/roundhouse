@@ -144,14 +144,12 @@ ok "extracted ($APP_DIR)"
 
 # -------- 3. seed (Ruby-free) --------
 
-# Per-target DB path. Each target creates its schema on boot
-# (idempotent), and db/seed.sql's CREATE TABLE IF NOT EXISTS makes the
-# seed self-sufficient against a fresh empty file.
-case "$TARGET" in
-    go|rust|python|elixir|kotlin|swift)  DB_REL="storage/development.sqlite3" ;;
-    typescript|crystal)     DB_REL="db/development.sqlite3" ;;
-    ruby|jruby|spinel)      DB_REL="tmp/blog.sqlite3" ;;
-esac
+# DB path — now uniform across every target: the Rails-traditional
+# storage/development.sqlite3 (archives ship storage/.keep so the dir
+# exists). Each target creates its schema on boot (idempotent), and
+# db/seed.sql's CREATE TABLE IF NOT EXISTS makes the seed self-sufficient
+# against a fresh empty file.
+DB_REL="storage/development.sqlite3"
 step "seeding $DB_REL from db/seed.sql"
 mkdir -p "$APP_DIR/$(dirname "$DB_REL")"
 rm -f "$APP_DIR/$DB_REL" "$APP_DIR/$DB_REL-wal" "$APP_DIR/$DB_REL-shm"
