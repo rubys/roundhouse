@@ -1080,6 +1080,88 @@ where
     Ok(out)
 }
 
+// -------- C# target --------
+//
+// Transpiles the framework runtime (`runtime/ruby/*.rb`) to C# under the
+// emitted project's `app/runtime/`. The whole emit is a single `Roundhouse`
+// namespace, so imports are unnecessary (same-namespace resolution) and
+// namespaces collapse — `wrap_namespace` is a no-op like Kotlin's. The
+// runtime is grown one file at a time (inflector → json_builder → …),
+// mirroring the Kotlin/Swift arc (see `docs/csharp-migration-plan.md`).
+
+const CSHARP_TARGET: TargetEmit = TargetEmit {
+    emit_module: crate::emit::csharp::emit_module,
+    emit_library_class: crate::emit::csharp::emit_library_class_result,
+    format_import: csharp_format_import,
+    format_constant: csharp_format_constant,
+    format_module_ivar: None,
+    wrap_namespace: csharp_wrap_namespace,
+    // Each runtime file opens with the usings + file-scoped namespace. The
+    // `using static` brings the shared `RuntimeConstants` members into bare
+    // scope (C# has no top-level constant — see `csharp_format_constant`).
+    module_prelude: "using System;\n\
+                     using System.Collections.Generic;\n\
+                     using System.Linq;\n\
+                     using System.Text;\n\
+                     using System.Text.RegularExpressions;\n\
+                     using static Roundhouse.RuntimeConstants;\n\n\
+                     namespace Roundhouse;\n\n",
+};
+
+/// Same-namespace resolution → no per-symbol imports needed.
+fn csharp_format_import(_name: &str, _source: &str) -> String {
+    String::new()
+}
+
+/// Module-level constants have no top-level form in C# — they're emitted as
+/// fragments of a shared `partial class RuntimeConstants`, reached via the
+/// `using static` in `module_prelude`.
+fn csharp_format_constant(name: &str, value: &Expr) -> String {
+    crate::emit::csharp::emit_module_constant(name, value)
+}
+
+/// C# uses the file-scoped `namespace Roundhouse;` from `module_prelude`; no
+/// nested namespace wrapping needed.
+fn csharp_wrap_namespace(_namespace: &str, body: &str) -> String {
+    body.to_string()
+}
+
+const CSHARP_RUNTIME: &[RuntimeEntry] = &[
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/inflector.rb"),
+        rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
+        rb_path: "runtime/ruby/inflector.rb",
+        namespace: "",
+        out_path: "app/runtime/Inflector.cs",
+        mode: Mode::Module,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/json_builder.rb"),
+        rbs_src: include_str!("../runtime/ruby/json_builder.rbs"),
+        rb_path: "runtime/ruby/json_builder.rb",
+        namespace: "",
+        out_path: "app/runtime/JsonBuilder.cs",
+        mode: Mode::Module,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+];
+
+pub fn csharp_units<F>(mut transform: F) -> Result<Vec<RuntimeUnit>, String>
+where
+    F: FnMut(&str, Vec<LibraryClass>) -> Vec<LibraryClass>,
+{
+    let mut out = Vec::with_capacity(CSHARP_RUNTIME.len());
+    for entry in CSHARP_RUNTIME {
+        out.push(transpile_entry(entry, &CSHARP_TARGET, "//", &mut transform)?);
+    }
+    Ok(out)
+}
+
 // -------- Swift target --------
 //
 // Transpiles the framework runtime (`runtime/ruby/*.rb`) to Swift under

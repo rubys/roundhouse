@@ -4,6 +4,14 @@ using System.Collections.Generic;
 
 namespace Roundhouse;
 
+// Module-level constants from the transpiled framework runtime (json_builder's
+// ESCAPES, router's STATUS_CODES, …) have no top-level form in C#, so the
+// emitter appends them as fragments of this partial class. This empty base
+// declaration guarantees the type always exists, so the `using static
+// Roundhouse.RuntimeConstants` in each runtime file resolves even when a file
+// (or the whole runtime) carries no constants.
+public static partial class RuntimeConstants { }
+
 // Small bridging helpers the emitter targets for a few Ruby idioms that have
 // no direct C# operator: `Hash#merge` and the `rescue` modifier.
 public static class RhRuntime
@@ -34,11 +42,4 @@ public static class RhRuntime
         try { return body(); }
         catch { return fallback(); }
     }
-}
-
-// Minimal JSON encoder the emitter targets for `JSON.generate(x)`.
-public static class JsonBuilder
-{
-    public static string EncodeValue(object? value) =>
-        System.Text.Json.JsonSerializer.Serialize(value);
 }

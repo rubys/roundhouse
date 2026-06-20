@@ -1073,7 +1073,7 @@ fn emit_send(
                     );
                 }
                 (Some("JSON"), "generate") => {
-                    return format!("JsonBuilder.EncodeValue({})", args_s[0]);
+                    return format!("JsonBuilder.encodeValue({})", args_s[0]);
                 }
                 _ => {}
             }
@@ -1140,13 +1140,14 @@ fn emit_send(
         }
     }
 
-    // `recv.gsub(pattern, hash)` → regex replace with a map lookup.
+    // `recv.gsub(regex, hash)` → `regex.Replace(recv, m => hash[m] ?? m)`.
+    // The pattern is a `Regex` (constant/literal), so dispatch off it.
     if method == "gsub" && args.len() == 2 {
         if let Some(r) = recv {
             return format!(
-                "Regex.Replace({}, {}, m => Convert.ToString(({}).GetValueOrDefault(m.Value, m.Value)) ?? m.Value)",
-                emit_expr(r),
+                "{}.Replace({}, m => {}.GetValueOrDefault(m.Value, m.Value))",
                 args_s[0],
+                emit_expr(r),
                 args_s[1]
             );
         }
@@ -1417,6 +1418,19 @@ fn emit_return_stmt(value: &Expr) -> String {
 /// `if` in statement position → block form. Props the condition proves
 /// non-null are read with `!` in the branch where they hold.
 fn emit_if_stmt(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> String {
+    // `is_a?` narrowing guard: `if (x is T) { …x… }` → `if (x is T xAsT)
+    // { …xAsT… }`. C# doesn't narrow `x` in the true arm without a pattern
+    // variable (and can't reuse `x`'s name), so bind a fresh name and rewrite
+    // the then-branch's references. Only the then-branch narrows.
+    if let Some((var, ty)) = narrowing_guard(cond) {
+        let patvar = format!("{var}As{}", sanitize_type(&ty));
+        let then = rename_word(&emit_stmt(then_branch), &var, &patvar);
+        let head = format!("if ({var} is {ty} {patvar}) {{\n{}\n}}", indent(&then));
+        if is_empty_branch(else_branch) {
+            return head;
+        }
+        return format!("{head} else {{\n{}\n}}", indent(&emit_stmt(else_branch)));
+    }
     let c = emit_expr(cond);
     let (mut then_nn, mut else_nn) = (Vec::new(), Vec::new());
     guarded_nonnull(cond, &mut then_nn, &mut else_nn);
@@ -1427,6 +1441,57 @@ fn emit_if_stmt(cond: &Expr, then_branch: &Expr, else_branch: &Expr) -> String {
         let els = with_nonnull(&else_nn, || indent(&emit_stmt(else_branch)));
         format!("if ({c}) {{\n{then}\n}} else {{\n{els}\n}}")
     }
+}
+
+/// An `is_a?(Var, Class)` guard with a clean cast type → `(camelCased var,
+/// C# type)`. Only bare-`Var` receivers narrow (a param/local).
+fn narrowing_guard(cond: &Expr) -> Option<(String, String)> {
+    if let ExprNode::Send { recv: Some(r), method, args, .. } = &*cond.node {
+        if method.as_str() == "is_a?" && args.len() == 1 {
+            if let (ExprNode::Var { name, .. }, ExprNode::Const { path }) =
+                (&*r.node, &*args[0].node)
+            {
+                if let Some(t) = is_a_cast_type(path.last().map(|s| s.as_str()).unwrap_or("")) {
+                    return Some((camel(name.as_str()), t));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// A C# type → an identifier-safe suffix for the pattern variable
+/// (`string`→`String`, `long`→`Long`, `Article`→`Article`).
+fn sanitize_type(t: &str) -> String {
+    let cleaned: String = t.chars().filter(|c| c.is_alphanumeric()).collect();
+    let mut chars = cleaned.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => "X".to_string(),
+    }
+}
+
+/// Whole-word identifier replace (narrowed-var rewrite). Safe here: the
+/// emitted branch references the var only as a bare token.
+fn rename_word(body: &str, from: &str, to: &str) -> String {
+    let bytes = body.as_bytes();
+    let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut out = String::with_capacity(body.len());
+    let mut i = 0;
+    while i < body.len() {
+        if body[i..].starts_with(from)
+            && (i == 0 || !is_word(bytes[i - 1]))
+            && (i + from.len() >= body.len() || !is_word(bytes[i + from.len()]))
+        {
+            out.push_str(to);
+            i += from.len();
+        } else {
+            let ch = body[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
 }
 
 /// `case` in statement position → an `if`/`else if` chain on scrutinee

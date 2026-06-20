@@ -54,6 +54,42 @@ pub fn emit_library_class_result(lc: &LibraryClass) -> Result<String, String> {
     Ok(emit_library_class(lc))
 }
 
+/// Render a module-level constant (`ESCAPES = {...}`) as a fragment of the
+/// shared `partial class RuntimeConstants` — C# has no top-level constant, so
+/// the runtime files reach these via `using static Roundhouse.RuntimeConstants`
+/// (added to the runtime `module_prelude`). The type is inferred from the
+/// literal so the field is precisely typed (`Dictionary<string,string>` for a
+/// string→string hash), and the RHS is target-typed `new()` to match.
+pub fn emit_module_constant(name: &str, value: &Expr) -> String {
+    let (ty, rhs) = match &*value.node {
+        ExprNode::Hash { entries, .. } if !entries.is_empty() => {
+            let all_str = entries
+                .iter()
+                .all(|(_, v)| matches!(&*v.node, ExprNode::Lit { value: Literal::Str { .. } }));
+            let vty = if all_str { "string" } else { "object?" };
+            let pairs: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| format!("[{}] = {}", emit_expr(k), emit_expr(v)))
+                .collect();
+            (format!("Dictionary<string, {vty}>"), format!("new() {{ {} }}", pairs.join(", ")))
+        }
+        ExprNode::Array { elements, .. } if !elements.is_empty() => {
+            let all_str = elements
+                .iter()
+                .all(|v| matches!(&*v.node, ExprNode::Lit { value: Literal::Str { .. } }));
+            let ety = if all_str { "string" } else { "object?" };
+            let els: Vec<String> = elements.iter().map(emit_expr).collect();
+            (format!("List<{ety}>"), format!("new() {{ {} }}", els.join(", ")))
+        }
+        ExprNode::Lit { value: Literal::Regex { .. } } => ("Regex".to_string(), emit_expr(value)),
+        _ => {
+            let ty = value.ty.as_ref().map(csharp_ty).unwrap_or_else(|| "object?".to_string());
+            (ty, emit_expr(value))
+        }
+    };
+    format!("public static partial class RuntimeConstants {{ public static readonly {ty} {name} = {rhs}; }}")
+}
+
 /// Render a Ruby `module X` (a set of class methods) as a C# `static class`.
 pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
     set_instance_prop_types(std::collections::HashMap::new());

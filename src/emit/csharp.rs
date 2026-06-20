@@ -28,6 +28,11 @@ mod package;
 mod primitives;
 mod ty;
 
+// Entry points consumed by `runtime_loader::csharp_units` (the framework
+// runtime transpile).
+pub use expr::{emit_constant_for_runtime, emit_expr_for_runtime};
+pub use library::{emit_library_class_result, emit_module, emit_module_constant};
+
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
 
@@ -49,6 +54,20 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // These names must match the `virtual` members in
     // `runtime/csharp/ActiveRecordBase.cs`.
     register_runtime_base();
+
+    // Transpiled framework runtime — `runtime/ruby/*.rb` → C# under
+    // `app/runtime/`. Grown one file at a time (Phase 3); the pre-scan
+    // registers each runtime class's object accessors + hierarchy before any
+    // model renders, mirroring `kotlin_units`.
+    let runtime_units = crate::runtime_loader::csharp_units(|_path, classes| {
+        library::register_object_accessors(&classes);
+        library::register_class_hierarchy(&classes);
+        classes
+    })
+    .expect("csharp runtime transpile failed (Ruby source error)");
+    for unit in runtime_units {
+        files.push(EmittedFile { path: unit.out_path, content: unit.content });
+    }
 
     // Preliminary view pass: seeds the model lowerer's association element
     // types, and gives the view-module method names for the Phase-2 stubs.
