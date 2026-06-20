@@ -18,6 +18,7 @@
 
 import { test as nodeTest } from "node:test";
 import assert from "node:assert/strict";
+import { parseHTML } from "linkedom";
 
 // minitest-async.ts is emitted to `test/_runtime/`; `router.ts` and
 // `flash.ts` are emitted to `src/`. Two levels up.
@@ -226,50 +227,32 @@ const RESPONSE_SYMBOLS: Record<string, number> = {
   missing: 404,
 };
 
-/** Turn a loose selector into a substring fragment that probably
- *  appears in matching HTML. `#id` → `id="id"`, `.class` →
- *  `class"`, bare tag → `<tag`. Compound selectors split and pick
- *  the first chunk. */
-function selectorFragment(selector: string): string {
-  const first = selector.split(/\s+/)[0] ?? "";
-  if (first.startsWith("#")) return `id="${first.slice(1)}"`;
-  if (first.startsWith(".")) return `${first.slice(1)}"`;
-  return `<${first}`;
-}
-
 // ── Dom primitive surface (the assert_select substrate) ────────────
 //
-// The HTML-query contract `assert_select` lowers to, shared in shape
-// with the Ruby/Python/Rust/Elixir twins (cross-target contract in
-// runtime/spinel/test/test_helper.rbs). Stub: the substring matcher
-// dressed as a Dom — `select` fabricates one synthetic node (the whole
-// document) per fragment occurrence and `text` returns it verbatim.
-// The upgrade path is to swap these three methods for a cheerio/
-// linkedom-backed engine — real nodes, real CSS selectors — touching
-// only this object; the assert_select call site stays put.
+// Backed by linkedom: a real, worker-bundle-able DOM + CSS selector
+// engine (css-select), exposed through the cross-target contract
+// (runtime/spinel/test/test_helper.rbs). `parse` builds a document,
+// `select` runs a real CSS query, `text` reads an element's
+// textContent — so `assert_select` does genuine structural matching
+// instead of substring guessing. linkedom is the one engine that runs
+// in BOTH execution contexts this runtime targets: the node test
+// runner (installed from package.json) and the browser SharedWorker /
+// studio (bundled as a CDN external — see wasm/lib/bundle.mjs). jsdom
+// is node-only and can't bundle into a worker; css-select covers every
+// selector assert_select needs. Typed `any` at the boundary to avoid
+// global-lib-DOM vs linkedom-DOM type friction.
 const Dom = {
-  // Parse an HTML document. Stub: the document *is* its html string.
-  parse(html: string): string {
-    return html ?? "";
+  // Parse an HTML document into a queryable root.
+  parse(html: string): any {
+    return parseHTML(html ?? "").document;
   },
-  // Nodes matching `selector` within `root` (a document or node). Stub:
-  // one synthetic node (the root's html) per substring-fragment
-  // occurrence.
-  select(root: string, selector: string): string[] {
-    const fragment = selectorFragment(selector);
-    const nodes: string[] = [];
-    let from = 0;
-    for (;;) {
-      const i = root.indexOf(fragment, from);
-      if (i < 0) break;
-      nodes.push(root);
-      from = i + fragment.length;
-    }
-    return nodes;
+  // Elements matching `selector` within `root` (a document or element).
+  select(root: any, selector: string): any[] {
+    return Array.from(root.querySelectorAll(selector));
   },
-  // Concatenated descendant text of a node. Stub: the node verbatim.
-  text(node: string): string {
-    return node;
+  // An element's concatenated descendant text.
+  text(node: any): string {
+    return node.textContent ?? "";
   },
 };
 
