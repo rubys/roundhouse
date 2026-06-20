@@ -232,15 +232,15 @@ export class Test {
     }
   }
 
-  // `assert_select` substring-matches on the opening tag or
-  // `id=`/`class=` attribute fragment derived from the selector.
-  // Rough but effective for the scaffold-blog HTML shapes —
-  // bodies of the form `"#articles"`, `".p-4"`, `"h1"`, etc.
+  // `assert_select` over the Dom primitive surface (defined below).
+  // Presence check: the selector matches at least one node. The stub
+  // Dom is a substring matcher, so this stays rough-but-effective for
+  // the scaffold-blog HTML shapes (`"#articles"`, `".p-4"`, `"h1"`, …);
+  // a real engine tightens it without changing this call site.
   assert_select(selector: string, _arg?: any, _msg?: string): void {
-    const fragment = selectorFragment(selector);
-    if (!this.body.includes(fragment)) {
+    if (Dom.select(Dom.parse(this.body), selector).length === 0) {
       assert.fail(
-        `expected body to match selector ${JSON.stringify(selector)} (looked for ${JSON.stringify(fragment)})`,
+        `expected body to match selector ${JSON.stringify(selector)}`,
       );
     }
   }
@@ -288,6 +288,42 @@ function selectorFragment(selector: string): string {
   if (first.startsWith(".")) return `${first.slice(1)}"`;
   return `<${first}`;
 }
+
+// ── Dom primitive surface (the assert_select substrate) ────────────
+//
+// The HTML-query contract `assert_select` lowers to, shared in shape
+// with the Ruby/Python/Rust/Elixir twins (cross-target contract in
+// runtime/spinel/test/test_helper.rbs). Stub: the substring matcher
+// dressed as a Dom — `select` fabricates one synthetic node (the whole
+// document) per fragment occurrence and `text` returns it verbatim.
+// The upgrade path is to swap these three methods for a cheerio/
+// linkedom-backed engine — real nodes, real CSS selectors — touching
+// only this object; the assert_select call site stays put.
+const Dom = {
+  // Parse an HTML document. Stub: the document *is* its html string.
+  parse(html: string): string {
+    return html ?? "";
+  },
+  // Nodes matching `selector` within `root` (a document or node). Stub:
+  // one synthetic node (the root's html) per substring-fragment
+  // occurrence.
+  select(root: string, selector: string): string[] {
+    const fragment = selectorFragment(selector);
+    const nodes: string[] = [];
+    let from = 0;
+    for (;;) {
+      const i = root.indexOf(fragment, from);
+      if (i < 0) break;
+      nodes.push(root);
+      from = i + fragment.length;
+    }
+    return nodes;
+  },
+  // Concatenated descendant text of a node. Stub: the node verbatim.
+  text(node: string): string {
+    return node;
+  },
+};
 
 // Rails-side alias. `ActiveSupport::TestCase` and `ActionDispatch::-
 // IntegrationTest` both lower to `extends TestCase` in the emitter;

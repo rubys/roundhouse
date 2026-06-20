@@ -20,6 +20,22 @@ module FixtureLoader
   def self.load_all!: () -> void
 end
 
+# Dom primitive surface — the cross-target contract `assert_select`
+# lowers to (mirrored by the per-target test runtimes: TS `Dom`,
+# Python `Dom`, Rust `dom_*`, Elixir `Dom`, …). `parse` yields an
+# opaque document; `select` yields opaque nodes scoped to a root
+# (document or node); `text` reads a node's concatenated descendant
+# text. The stub represents both doc and node as the html String and
+# substring-matches; a real CSS engine keeps this surface and returns
+# tree/node handles instead. `fragment_for` is the stub's selector →
+# substring rule and goes away under a real engine.
+module Dom
+  def self.parse: (String html) -> String
+  def self.select: (String root, String selector) -> Array[String]
+  def self.text: (String node) -> String
+  def self.fragment_for: (String selector) -> String
+end
+
 # Captured response from a dispatched in-process request. The four
 # attr_readers + `?` query methods are exercised by emitted controller
 # tests via `assert_response` / `assert_redirected_to` / `assert_select`.

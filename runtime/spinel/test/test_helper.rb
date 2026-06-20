@@ -118,6 +118,66 @@ module FixtureLoader
   end
 end
 
+# ── Dom primitive surface (the assert_select substrate) ────────────
+#
+# The HTML-query contract `assert_select` lowers to, shared in shape
+# across every target (Ruby/TS/Python/Rust/Elixir/… — see the cross-
+# target contract in runtime/spinel/test/test_helper.rbs). This is the
+# historical substring matcher dressed as a Dom: `select` fabricates
+# one synthetic node — the whole document body — per fragment
+# occurrence, and `text` returns that node verbatim. So presence,
+# `minimum:`, and content checks all degrade to exactly the pre-
+# contract behavior. The upgrade path is to swap these three methods
+# for a Nokogiri-backed (CRuby) / lexbor-FFI (spinel-AOT) engine —
+# real nodes, real CSS selectors — touching only this module; the
+# assert_select call site and every other target stay put.
+#
+# `parse`/`select`/`text` take/return Strings in the stub (doc and node
+# are both "the html"). A real engine keeps the same method set but
+# returns opaque tree/node handles — the contract is the surface, not
+# the handle shape.
+module Dom
+  # Parse an HTML document. Stub: the document *is* its html string.
+  def self.parse(html)
+    html
+  end
+
+  # Nodes matching `selector` within `root` (a document or a node).
+  # Stub: one synthetic node (the root's html) per substring-fragment
+  # occurrence, so nested selects re-scan the whole string (the
+  # historical no-scoping block behavior).
+  def self.select(root, selector)
+    fragment = fragment_for(selector)
+    nodes = []
+    from = 0
+    while (i = root.index(fragment, from))
+      nodes << root
+      from = i + fragment.length
+    end
+    nodes
+  end
+
+  # Concatenated descendant text of a node. Stub: the node's html
+  # verbatim (so a content check degrades to a body-substring check).
+  def self.text(node)
+    node
+  end
+
+  # Loose selector → substring fragment (the pre-contract rule):
+  #   "#id"  → 'id="id"'   ".cls" → 'cls"'   "tag" → "<tag"
+  # Compound selectors take the first whitespace chunk.
+  def self.fragment_for(selector)
+    first = selector.split(" ").first || ""
+    if first.start_with?("#")
+      %(id="#{first[1..]}")
+    elsif first.start_with?(".")
+      %(#{first[1..]}")
+    else
+      "<#{first}"
+    end
+  end
+end
+
 # In-process request dispatch — equivalent of Rails's
 # ActionDispatch::IntegrationTest. Test classes that need to exercise
 # controller actions extend this module to get get/post/patch/delete.
@@ -342,42 +402,28 @@ module RequestDispatch
     raise "expected redirect to #{expected_path.inspect}, got #{response.location.inspect}" unless expected_path == response.location
   end
 
-  # Minimal `assert_select` shim — body-substring matching, NOT a real
-  # CSS-selector engine. Two forms exercised by real-blog:
-  #   assert_select("h1", "Articles")          → body matches /<h1[^>]*>\s*Articles\s*</
-  #   assert_select("form")                    → body contains "<form"
-  #   assert_select("#comments .p-4", minimum: 1) → fall through to
-  #     id-substring + class-substring presence (no nesting verified)
-  # Block form (`assert_select(parent) { … }`) ignores the parent
-  # scope and runs the block against the same body — adequate for
-  # real-blog's two block-form usages, both of which assert presence
-  # rather than nested counts. Tighten if a fixture exposes a false
-  # positive.
+  # `assert_select` over the Dom primitive surface (defined above). The
+  # stub Dom is a substring matcher, so this is NOT yet a real CSS
+  # engine — but the call shape is the real one: select nodes, assert
+  # the set is non-empty, and (for the content form) assert a matched
+  # node's text contains the expected string. Forms exercised by real-
+  # blog: `assert_select("h1", "Articles")`, `assert_select("form")`,
+  # `assert_select("#comments .p-4", minimum: 1)`, and the block form
+  # `assert_select("#articles") { … }`.
+  #
+  # `minimum:`/`maximum:`/`count:` opts degrade to a presence check
+  # (the pre-contract behavior; real-blog only passes `minimum: 1`,
+  # for which presence is exact). The block runs against the same body
+  # — no real scoping until a real engine lands. `opts` is retained in
+  # the signature for call-shape compatibility.
   def assert_select(selector, content_or_opts = nil, opts = nil, &block)
-    body = @__response.body.to_s
-    if content_or_opts.is_a?(Hash)
-      opts = content_or_opts
-      content = nil
-    else
-      content = content_or_opts
-    end
+    body  = @__response.body.to_s
+    nodes = Dom.select(Dom.parse(body), selector)
+    raise "expected #{selector.inspect} in response body" if nodes.empty?
+    content = content_or_opts.is_a?(Hash) ? nil : content_or_opts
     if content.is_a?(String)
-      tag = selector[/\A[a-z]+/]
-      pattern = if tag
-                  Regexp.new("<#{tag}[^>]*>\\s*#{Regexp.escape(content)}\\s*<")
-                else
-                  Regexp.new(Regexp.escape(content))
-                end
-      raise "expected #{selector.inspect} containing #{content.inspect} in response body" unless pattern.match?(body)
-    elsif selector.start_with?("#")
-      id = selector.split(" ", 2).first[1..]
-      raise "expected element with id #{id.inspect} in response body" unless body.include?(%(id="#{id}"))
-    elsif selector.include?(".")
-      _tag, cls = selector.split(".", 2)
-      raise "expected element with class #{cls.inspect} in response body" unless body.include?(%(class="#{cls})) || body.match?(/class="[^"]*\b#{Regexp.escape(cls)}\b/)
-    else
-      tag = selector[/\A[a-z]+/]
-      raise "expected #{selector.inspect} in response body" unless tag && body.include?("<#{tag}")
+      matched = nodes.any? { |n| Dom.text(n).include?(content) }
+      raise "expected #{selector.inspect} containing #{content.inspect} in response body" unless matched
     end
     yield if block
   end

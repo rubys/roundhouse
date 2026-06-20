@@ -21,11 +21,45 @@ from typing import Any
 from . import http as _http
 
 
+class Dom:
+    """Dom primitive surface — the HTML-query contract `assert_select`
+    lowers to (shared in shape with the Ruby/TS/Rust/Elixir twins; see
+    the cross-target contract in test_helper.rbs).
+
+    Stub: the substring matcher dressed as a Dom. `select` fabricates
+    one synthetic node — the whole document — per fragment occurrence,
+    and `text` returns that node verbatim, so presence / minimum /
+    text checks degrade to exactly the pre-contract behavior. A later
+    phase swaps these three methods for an lxml/BeautifulSoup-backed
+    engine — real nodes, real CSS selectors — touching only this class;
+    the TestResponse call sites and every other target stay put."""
+
+    @staticmethod
+    def parse(html: str) -> str:
+        return html or ""
+
+    @staticmethod
+    def select(root: str, selector: str) -> list[str]:
+        fragment = _selector_fragment(selector)
+        nodes: list[str] = []
+        start = 0
+        while True:
+            i = root.find(fragment, start)
+            if i < 0:
+                break
+            nodes.append(root)
+            start = i + len(fragment)
+        return nodes
+
+    @staticmethod
+    def text(node: str) -> str:
+        return node
+
+
 class TestResponse:
     """Wrapper around `ActionResponse` exposing Rails-Minitest-
     compatible assertion helpers. Method names mirror the Ruby
-    source (snake_case); bodies substring-match for
-    `assert_select`-style queries."""
+    source (snake_case); bodies query via the `Dom` surface above."""
 
     def __init__(self, raw: _http.ActionResponse):
         self.body: str = raw.body or ""
@@ -55,31 +89,24 @@ class TestResponse:
             )
 
     def assert_select(self, selector: str) -> None:
-        fragment = _selector_fragment(selector)
-        if fragment not in self.body:
+        if not Dom.select(Dom.parse(self.body), selector):
             raise AssertionError(
-                f"expected body to match selector {selector!r} "
-                f"(looked for {fragment!r})"
+                f"expected body to match selector {selector!r}"
             )
 
     def assert_select_text(self, selector: str, text: str) -> None:
-        self.assert_select(selector)
-        if str(text) not in self.body:
+        nodes = Dom.select(Dom.parse(self.body), selector)
+        if not nodes:
             raise AssertionError(
-                f"expected body to contain text {text!r} "
-                f"under selector {selector!r}"
+                f"expected body to match selector {selector!r}"
+            )
+        if not any(str(text) in Dom.text(n) for n in nodes):
+            raise AssertionError(
+                f"expected text {text!r} under selector {selector!r}"
             )
 
     def assert_select_min(self, selector: str, n: int) -> None:
-        fragment = _selector_fragment(selector)
-        count = 0
-        start = 0
-        while True:
-            i = self.body.find(fragment, start)
-            if i < 0:
-                break
-            count += 1
-            start = i + len(fragment)
+        count = len(Dom.select(Dom.parse(self.body), selector))
         if count < n:
             raise AssertionError(
                 f"expected at least {n} matches for selector "
