@@ -86,40 +86,78 @@ impl TestResponseExt for TestResponse {
     }
 
     fn assert_select(&self, selector: &str) {
-        let body = self.text();
-        let fragment = selector_fragment(selector);
+        let doc = dom_parse(&self.text());
         assert!(
-            body.contains(&fragment),
-            "expected body to match selector {selector:?} (looked for substring {fragment:?})",
+            !dom_select(&doc, selector).is_empty(),
+            "expected body to match selector {selector:?}",
         );
     }
 
     fn assert_select_text(&self, selector: &str, text: &str) {
-        self.assert_select(selector);
-        let body = self.text();
+        let doc = dom_parse(&self.text());
+        let nodes = dom_select(&doc, selector);
         assert!(
-            body.contains(text),
-            "expected body to contain text {text:?} under selector {selector:?}",
+            !nodes.is_empty(),
+            "expected body to match selector {selector:?}",
+        );
+        assert!(
+            nodes.iter().any(|n| dom_text(n).contains(text)),
+            "expected text {text:?} under selector {selector:?}",
         );
     }
 
     fn assert_select_min(&self, selector: &str, n: usize) {
-        let body = self.text();
-        let fragment = selector_fragment(selector);
-        let count = body.matches(&fragment).count();
+        let doc = dom_parse(&self.text());
+        let count = dom_select(&doc, selector).len();
         assert!(
             count >= n,
-            "expected at least {n} matches for selector {selector:?} (fragment {fragment:?}), got {count}",
+            "expected at least {n} matches for selector {selector:?}, got {count}",
         );
     }
 }
 
+// ── Dom primitive surface (the assert_select substrate) ────────────
+//
+// The HTML-query contract `assert_select` lowers to, shared in shape
+// with the Ruby/TS/Python/Elixir twins (cross-target contract in
+// runtime/spinel/test/test_helper.rbs). Stub: the substring matcher
+// dressed as a Dom — `dom_select` fabricates one synthetic node (the
+// whole document) per fragment occurrence and `dom_text` returns it
+// verbatim, so presence / `minimum:` / text checks degrade to exactly
+// the pre-contract behavior. The upgrade path is to swap these three
+// functions for a `scraper`/`html5ever`-backed engine — real nodes,
+// real CSS selectors — touching only this file; the `TestResponseExt`
+// call sites and every other target stay put.
+
+/// Parsed-document handle. Stub: the document *is* its html string.
+type DomDoc = String;
+/// Matched-node handle. Stub: the html the node was found in.
+type DomNode = String;
+
+/// Parse an HTML document.
+fn dom_parse(html: &str) -> DomDoc {
+    html.to_string()
+}
+
+/// Nodes matching `selector` within `root` (a document or node). Stub:
+/// one synthetic node (the root's html) per substring-fragment
+/// occurrence, so nested selects re-scan the whole string.
+fn dom_select(root: &str, selector: &str) -> Vec<DomNode> {
+    let fragment = selector_fragment(selector);
+    root.match_indices(&fragment).map(|_| root.to_string()).collect()
+}
+
+/// Concatenated descendant text of a node. Stub: the node's html
+/// verbatim (so a content check degrades to a body-substring check).
+fn dom_text(node: &DomNode) -> &str {
+    node
+}
+
 /// Map a loose selector to a substring fragment that probably appears
-/// in matching HTML. Phase 4d: handles `#id`, `.class`, `tag`, and
-/// the first element of compound selectors like `"#comments .p-4"`
-/// (splits on whitespace, picks the first chunk). Every match is a
-/// substring search — false positives are possible but the blog's
-/// HTML is narrow enough that the tests are a reliable signal.
+/// in matching HTML. The stub's selector rule (replaced by a real CSS
+/// engine on upgrade): handles `#id`, `.class`, `tag`, and the first
+/// element of compound selectors like `"#comments .p-4"` (splits on
+/// whitespace, picks the first chunk).
 fn selector_fragment(selector: &str) -> String {
     let first = selector.split_whitespace().next().unwrap_or("");
     if let Some(id) = first.strip_prefix('#') {

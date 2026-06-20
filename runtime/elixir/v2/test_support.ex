@@ -12,12 +12,57 @@
 # returns a `TestResponse` directly. Assertion semantics: substring-
 # match on the response body, loose but good-enough for the blog's HTML.
 
+defmodule Dom do
+  @moduledoc """
+  Dom primitive surface — the HTML-query contract `assert_select`
+  lowers to (shared in shape with the Ruby/TS/Python/Rust twins; see
+  the cross-target contract in runtime/spinel/test/test_helper.rbs).
+
+  Stub: the substring matcher dressed as a Dom. `select/2` returns one
+  synthetic node — the whole document — per fragment occurrence, and
+  `text/1` returns it verbatim, so presence / minimum / text checks
+  degrade to exactly the pre-contract behavior. A later phase swaps
+  these three functions for a `Floki`-backed engine — real nodes, real
+  CSS selectors — touching only this module; the `TestResponse` call
+  sites and every other target stay put.
+  """
+
+  # Parse an HTML document. Stub: the document *is* its html string.
+  def parse(html), do: html || ""
+
+  # Nodes matching `selector` within `root` (a document or node). Stub:
+  # one synthetic node (the root's html) per substring-fragment
+  # occurrence.
+  def select(root, selector) do
+    List.duplicate(root, count_occurrences(root, selector_fragment(selector)))
+  end
+
+  # Concatenated descendant text of a node. Stub: the node verbatim.
+  def text(node), do: node
+
+  defp count_occurrences(body, fragment) do
+    body
+    |> String.split(fragment)
+    |> length()
+    |> Kernel.-(1)
+  end
+
+  defp selector_fragment(selector) do
+    first = selector |> String.split(~r/\s+/) |> List.first() || ""
+
+    cond do
+      String.starts_with?(first, "#") -> "id=\"" <> String.slice(first, 1..-1//1) <> "\""
+      String.starts_with?(first, ".") -> String.slice(first, 1..-1//1) <> "\""
+      true -> "<" <> first
+    end
+  end
+end
+
 defmodule TestResponse do
   @moduledoc """
   Wrapper around the `{body, status, content_type, location}` tuple
   `Dispatch.call/6` returns, exposing Rails-Minitest-compatible
-  assertion helpers. Bodies substring-match for `assert_select`-style
-  queries.
+  assertion helpers. Bodies are queried via the `Dom` surface above.
   """
 
   defstruct body: "", status: 200, location: ""
@@ -56,50 +101,30 @@ defmodule TestResponse do
   end
 
   def assert_select(%TestResponse{body: body}, selector) do
-    fragment = selector_fragment(selector)
-
-    unless String.contains?(body, fragment) do
+    if Dom.select(Dom.parse(body), selector) == [] do
       raise ExUnit.AssertionError,
-        message:
-          "expected body to match selector #{inspect(selector)} (looked for #{inspect(fragment)})"
+        message: "expected body to match selector #{inspect(selector)}"
     end
   end
 
   def assert_select_text(%TestResponse{body: body} = resp, selector, text) do
     assert_select(resp, selector)
+    nodes = Dom.select(Dom.parse(body), selector)
 
-    unless String.contains?(body, to_string(text)) do
+    unless Enum.any?(nodes, fn n -> String.contains?(Dom.text(n), to_string(text)) end) do
       raise ExUnit.AssertionError,
         message:
-          "expected body to contain text #{inspect(text)} under selector #{inspect(selector)}"
+          "expected text #{inspect(text)} under selector #{inspect(selector)}"
     end
   end
 
   def assert_select_min(%TestResponse{body: body}, selector, n) do
-    fragment = selector_fragment(selector)
-    count = count_occurrences(body, fragment)
+    count = length(Dom.select(Dom.parse(body), selector))
 
     unless count >= n do
       raise ExUnit.AssertionError,
         message:
           "expected at least #{n} matches for selector #{inspect(selector)}, got #{count}"
-    end
-  end
-
-  defp count_occurrences(body, fragment) do
-    body
-    |> String.split(fragment)
-    |> length()
-    |> Kernel.-(1)
-  end
-
-  defp selector_fragment(selector) do
-    first = selector |> String.split(~r/\s+/) |> List.first() || ""
-
-    cond do
-      String.starts_with?(first, "#") -> "id=\"" <> String.slice(first, 1..-1//1) <> "\""
-      String.starts_with?(first, ".") -> String.slice(first, 1..-1//1) <> "\""
-      true -> "<" <> first
     end
   end
 end
