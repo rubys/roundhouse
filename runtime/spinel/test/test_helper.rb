@@ -422,7 +422,16 @@ module RequestDispatch
     raise "expected #{selector.inspect} in response body" if nodes.empty?
     content = content_or_opts.is_a?(Hash) ? nil : content_or_opts
     if content.is_a?(String)
-      matched = nodes.any? { |n| Dom.text(n).include?(content) }
+      # `needle = content.to_s` rather than bare `content`: spinel's
+      # strict AOT typer doesn't apply the `is_a?(String)` narrowing at a
+      # `const char*` primitive boundary, so passing the nilable `content`
+      # straight to `String#include?` (→ sp_str_include) reaches it as
+      # sp_RbVal and fails C compilation. `#to_s` has an unconditional
+      # String return type, which types cleanly. See matz/spinel#1512;
+      # drop the `.to_s` once it lands. (CRuby: `#to_s` on a String is
+      # identity, so no behavior change on the other targets.)
+      needle  = content.to_s
+      matched = nodes.any? { |n| Dom.text(n).include?(needle) }
       raise "expected #{selector.inspect} containing #{content.inspect} in response body" unless matched
     end
     yield if block
