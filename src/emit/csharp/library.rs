@@ -1,0 +1,1012 @@
+//! `LibraryClass` → C# file.
+//!
+//! Ported from `src/emit/kotlin/library.rs`, adapted to C#'s class shape:
+//!   - Ruby `initialize` → a C# constructor (no `init` block); a
+//!     `super(args)` becomes a `: base(args)` clause. A default `attrs = {}`
+//!     param (not a compile-time constant in C#) becomes a nullable param
+//!     coalesced in the body.
+//!   - Instance `Method`s → methods; class methods (`def self.x`) → `static`
+//!     methods (C# has no `companion object`).
+//!   - Ruby `[]` / `[]=` collapse into a single C# indexer (`this[string …]`).
+//!   - `attr_*` accessors collapse into auto-properties.
+//!   - Ruby's implicit return becomes an explicit `return` on the final
+//!     statement of value-returning methods.
+//!
+//! Phase 2 covers the model subset (models + `<Model>Row`/`<Model>Params`
+//! siblings + the abstract `ApplicationRecord`). Identifiers stay camelCase
+//! (see `expr.rs`).
+#![allow(dead_code)]
+
+use std::collections::{BTreeMap, HashSet};
+use std::path::PathBuf;
+
+use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
+use crate::emit::EmittedFile;
+use crate::expr::{Expr, ExprNode, LValue, Literal};
+use crate::ty::Ty;
+
+use super::expr::{
+    begin_method, emit_expr, emit_stmt, hoisted_decls, register_method_params, set_current_class,
+    set_instance_prop_types, set_instance_props, set_param_names, set_returns_unit,
+};
+use super::naming::{camel, type_name};
+use super::ty::csharp_ty;
+
+/// The `using` + `namespace` header every emitted C# file carries.
+const FILE_HEADER: &str = "using System;\n\
+                           using System.Collections.Generic;\n\
+                           using System.Linq;\n\
+                           using System.Text;\n\
+                           using System.Text.RegularExpressions;\n\n\
+                           namespace Roundhouse;\n\n";
+
+/// Emit a `LibraryClass` as a standalone C# file under `app/models/<Name>.cs`.
+pub fn emit_class_file(lc: &LibraryClass) -> EmittedFile {
+    let name = lc.name.0.as_str();
+    let last = name.rsplit("::").next().unwrap_or(name);
+    EmittedFile {
+        path: PathBuf::from(format!("app/models/{last}.cs")),
+        content: format!("{FILE_HEADER}{}", emit_library_class(lc)),
+    }
+}
+
+pub fn emit_library_class_result(lc: &LibraryClass) -> Result<String, String> {
+    Ok(emit_library_class(lc))
+}
+
+/// Render a Ruby `module X` (a set of class methods) as a C# `static class`.
+pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
+    set_instance_prop_types(std::collections::HashMap::new());
+    set_current_class("");
+    super::expr::set_object_tl_fields(HashSet::new());
+    set_instance_props(HashSet::new());
+    let name = methods
+        .first()
+        .and_then(|m| m.enclosing_class.as_ref())
+        .map(|s| type_name(s.as_str()))
+        .unwrap_or_default();
+    register_params_for(&name, methods);
+    let mut out = format!("public static class {name} {{\n");
+    for m in methods {
+        out.push_str(&indent_method(&emit_method(m, "static ")));
+        out.push('\n');
+    }
+    out.push_str("}\n");
+    Ok(out)
+}
+
+pub fn emit_library_class(lc: &LibraryClass) -> String {
+    let name = lc.name.0.as_str();
+    let class_name = type_name(name);
+    register_params_for(&class_name, &lc.methods);
+
+    if lc.is_module {
+        return emit_static_class(lc, &class_name);
+    }
+
+    super::expr::set_object_tl_fields(HashSet::new());
+
+    // 1. Accessor-derived properties (name → type).
+    let mut prop_types: BTreeMap<String, Ty> = BTreeMap::new();
+    for m in &lc.methods {
+        match m.kind {
+            AccessorKind::AttributeReader => {
+                if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+                    prop_types.entry(camel(m.name.as_str())).or_insert_with(|| (**ret).clone());
+                }
+            }
+            AccessorKind::AttributeWriter => {
+                if let Some(Ty::Fn { params, .. }) = m.signature.as_ref() {
+                    if let Some(p) = params.first() {
+                        let base = m.name.as_str().trim_end_matches('=');
+                        prop_types.entry(camel(base)).or_insert_with(|| p.ty.clone());
+                    }
+                }
+            }
+            AccessorKind::Method => {}
+        }
+    }
+
+    // 2. Body-only ivars.
+    let mut body_ivars: BTreeMap<String, ()> = BTreeMap::new();
+    for m in &lc.methods {
+        collect_ivars(&m.body, &mut body_ivars);
+    }
+
+    let init = lc
+        .methods
+        .iter()
+        .find(|m| m.receiver == MethodReceiver::Instance && m.name.as_str() == "initialize");
+
+    let parent_name = lc.parent.as_ref().map(|p| {
+        let last = type_name(p.0.as_str());
+        match last.as_str() {
+            "StandardError" | "RuntimeError" => "Exception".to_string(),
+            other => other.to_string(),
+        }
+    });
+
+    let inherited: HashSet<String> = lc
+        .parent
+        .as_ref()
+        .map(|p| type_name(p.0.as_str()))
+        .map(|p| super::expr::ancestor_members(&p))
+        .unwrap_or_default();
+    let inherited_props: HashSet<String> = lc
+        .parent
+        .as_ref()
+        .map(|p| type_name(p.0.as_str()))
+        .map(|p| super::expr::ancestor_props(&p))
+        .unwrap_or_default();
+
+    let parent_clause = match &parent_name {
+        Some(pn) => format!(" : {pn}"),
+        None => String::new(),
+    };
+    let mut out = format!("public class {class_name}{parent_clause} {{\n");
+
+    // Properties (auto-properties). Constructor-param-backed properties are
+    // assigned in the constructor; column props are plain `public` (leaf, not
+    // overridden). Inherited slots (e.g. `id` from the base) are skipped.
+    let ctor_param_names: HashSet<String> = init
+        .map(|m| m.params.iter().map(|p| camel(p.name.as_str())).collect())
+        .unwrap_or_default();
+    for (n, ty) in &prop_types {
+        if inherited_props.contains(n) && !ctor_param_names.contains(n) {
+            continue;
+        }
+        out.push_str(&format!("    {}\n", render_member(n, ty)));
+    }
+    let inferred_ivar_types = infer_body_ivar_types(&lc.methods);
+    for n in body_ivars.keys() {
+        if !prop_types.contains_key(n) && !inherited_props.contains(n) {
+            match inferred_ivar_types.get(n) {
+                Some(ty) => out.push_str(&format!("    {}\n", render_member(n, ty))),
+                None => out.push_str(&format!("    public object? {n} = null;\n")),
+            }
+        }
+    }
+    if !prop_types.is_empty() || !body_ivars.is_empty() {
+        out.push('\n');
+    }
+
+    // Property/type registries for body emit.
+    let instance_props: HashSet<String> = prop_types
+        .keys()
+        .chain(body_ivars.keys())
+        .chain(inherited_props.iter())
+        .cloned()
+        .collect();
+    set_instance_props(instance_props);
+    let mut prop_ty_map: std::collections::HashMap<String, Ty> =
+        prop_types.iter().map(|(n, t)| (n.clone(), t.clone())).collect();
+    for (n, t) in &inferred_ivar_types {
+        prop_ty_map.entry(n.clone()).or_insert_with(|| t.clone());
+    }
+    set_instance_prop_types(prop_ty_map);
+    set_current_class(&class_name);
+
+    // Constructor (from `initialize`).
+    if let Some(m) = init {
+        out.push_str(&indent_method(&emit_constructor(&class_name, m)));
+        out.push('\n');
+    }
+
+    let member_modifier = |name: &str| -> &'static str {
+        if inherited.contains(name) {
+            "override "
+        } else {
+            "virtual "
+        }
+    };
+
+    // Instance methods (skip accessors, initialize, and []/[]= — handled as an
+    // indexer below).
+    for m in &lc.methods {
+        if m.receiver == MethodReceiver::Instance
+            && m.kind == AccessorKind::Method
+            && m.name.as_str() != "initialize"
+            && !matches!(m.name.as_str(), "[]" | "[]=")
+        {
+            out.push_str(&indent_method(&emit_method(m, member_modifier(&member_name(m)))));
+            out.push('\n');
+        }
+    }
+
+    // Indexer: merge `[]` (get) and `[]=` (set) into one C# indexer.
+    let getter = lc.methods.iter().find(|m| {
+        m.receiver == MethodReceiver::Instance && m.name.as_str() == "[]"
+    });
+    let setter = lc.methods.iter().find(|m| {
+        m.receiver == MethodReceiver::Instance && m.name.as_str() == "[]="
+    });
+    if getter.is_some() || setter.is_some() {
+        let modifier = if inherited.contains("get") || inherited.contains("set") {
+            "override "
+        } else {
+            "virtual "
+        };
+        out.push_str(&indent_method(&emit_indexer(modifier, getter, setter)));
+        out.push('\n');
+    }
+
+    // Polymorphic `schemaColumns` (virtual instance shadow of the static
+    // column list) — see the Kotlin emitter's note.
+    if lc.methods.iter().any(|m| {
+        m.receiver == MethodReceiver::Class && m.name.as_str() == "schema_columns"
+    }) {
+        let (modifier, body) = if lc.parent.is_none() {
+            (
+                "virtual",
+                "throw new NotImplementedException(\"ActiveRecord::Base.schema_columns must be overridden\");".to_string(),
+            )
+        } else {
+            ("override", format!("return {class_name}.schemaColumnsList();"))
+        };
+        out.push_str(&format!(
+            "    public {modifier} List<string> schemaColumns() {{ {body} }}\n\n"
+        ));
+    }
+
+    // Class methods → `static` methods.
+    let class_methods: Vec<&MethodDef> = lc
+        .methods
+        .iter()
+        .filter(|m| m.receiver == MethodReceiver::Class)
+        .collect();
+    let needs_name = references_class_name(&lc.methods)
+        && !lc.methods.iter().any(|m| m.name.as_str() == "name");
+    if needs_name {
+        out.push_str(&format!(
+            "    public static string name() {{\n        return {:?};\n    }}\n",
+            lc.name.0.as_str()
+        ));
+    }
+    // C# forbids a static member sharing a name with an instance member. A
+    // class method colliding with an instance accessor/method (e.g.
+    // `ApplicationRecord`'s `abstract` marker) is dropped — these markers are
+    // never called on a concrete model. (`schema_columns` is exempt: it's
+    // renamed to `schemaColumnsList`, so it doesn't collide.)
+    let mut inst_members = instance_member_names(lc);
+    inst_members.extend(prop_types.keys().cloned());
+    inst_members.extend(body_ivars.keys().cloned());
+    for m in class_methods.iter() {
+        if m.name.as_str() != "schema_columns" && inst_members.contains(&member_name(m)) {
+            continue;
+        }
+        out.push_str(&indent_method(&emit_method(m, "static ")));
+        out.push('\n');
+    }
+    let present: HashSet<String> = class_methods.iter().map(|m| member_name(m)).collect();
+    out.push_str(&synth_inherited_finders(&class_name, &present));
+
+    out.push_str("}\n");
+    out
+}
+
+/// A Ruby `module` → C# `static class`. Class-level `attr_accessor` (from
+/// `class << self`) collapses to a static property.
+fn emit_static_class(lc: &LibraryClass, class_name: &str) -> String {
+    set_instance_prop_types(std::collections::HashMap::new());
+    set_current_class("");
+    super::expr::set_object_tl_fields(HashSet::new());
+    set_instance_props(HashSet::new());
+    let accessor_props = class_accessor_props(&lc.methods);
+    let mut out = format!("public static class {class_name} {{\n");
+    for (n, ty) in &accessor_props {
+        out.push_str(&format!("    public static {} {n} = {};\n", csharp_ty(ty), default_for(ty)));
+    }
+    if !accessor_props.is_empty() {
+        out.push('\n');
+    }
+    for m in &lc.methods {
+        if m.kind == AccessorKind::Method {
+            out.push_str(&indent_method(&emit_method(m, "static ")));
+            out.push('\n');
+        }
+    }
+    out.push_str("}\n");
+    out
+}
+
+/// Per-model copies of the public AR class methods Base defines, delegating
+/// to the model's own `_adapter_*` static members. Emitted (indented) only
+/// for a Base-subclass model (the `_adapterAll` marker) and only for finders
+/// the class doesn't already define.
+fn synth_inherited_finders(t: &str, present: &HashSet<String>) -> String {
+    if !present.contains("_adapterAll") {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut emit = |name: &str, body: String| {
+        if !present.contains(name) {
+            out.push_str(&indent_method(&body));
+            out.push('\n');
+        }
+    };
+    emit("all", format!("public static List<{t}> all() {{\n    return _adapterAll();\n}}\n"));
+    emit(
+        "find",
+        format!(
+            "public static {t} find(long id) {{\n    var result = _adapterFindById(id);\n    if (result == null) {{\n        throw new RecordNotFound($\"Couldn't find {t} with id={{id}}\");\n    }}\n    return result;\n}}\n"
+        ),
+    );
+    emit("count", "public static long count() {\n    return _adapterCount();\n}\n".to_string());
+    emit(
+        "exists",
+        "public static bool exists(long id) {\n    return _adapterExistsById(id);\n}\n".to_string(),
+    );
+    emit(
+        "last",
+        format!(
+            "public static {t}? last() {{\n    var records = all();\n    return records.Count == 0 ? null : records[records.Count - 1];\n}}\n"
+        ),
+    );
+    emit(
+        "destroyAll",
+        format!(
+            "public static List<{t}> destroyAll() {{\n    var records = all();\n    foreach (var it in records) {{ it.destroy(); }}\n    return records;\n}}\n"
+        ),
+    );
+    emit(
+        "create",
+        format!(
+            "public static {t} create(Dictionary<string, object?>? attrs = null) {{\n    attrs ??= new Dictionary<string, object?>();\n    var instance = new {t}(attrs);\n    instance.save();\n    return instance;\n}}\n"
+        ),
+    );
+    emit(
+        "createBang",
+        format!(
+            "public static {t} createBang(Dictionary<string, object?>? attrs = null) {{\n    attrs ??= new Dictionary<string, object?>();\n    var instance = new {t}(attrs);\n    if (!instance.save()) {{\n        throw new RecordInvalid(instance);\n    }}\n    return instance;\n}}\n"
+        ),
+    );
+    out
+}
+
+fn register_params_for(receiver: &str, methods: &[MethodDef]) {
+    for m in methods {
+        register_method_params(
+            receiver,
+            m.name.as_str(),
+            m.params.iter().map(|p| camel(p.name.as_str())).collect(),
+        );
+    }
+}
+
+fn indent_method(s: &str) -> String {
+    s.lines()
+        .map(|l| if l.is_empty() { String::new() } else { format!("    {l}") })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn member_name(m: &MethodDef) -> String {
+    match m.name.as_str() {
+        "[]" => "get".to_string(),
+        "[]=" => "set".to_string(),
+        _ => camel(m.name.as_str()),
+    }
+}
+
+fn instance_member_names(lc: &LibraryClass) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for m in &lc.methods {
+        if m.receiver != MethodReceiver::Instance {
+            continue;
+        }
+        match m.kind {
+            AccessorKind::AttributeReader | AccessorKind::AttributeWriter => {
+                out.insert(camel(m.name.as_str().trim_end_matches('=')));
+            }
+            AccessorKind::Method if m.name.as_str() != "initialize" => {
+                out.insert(member_name(m));
+            }
+            AccessorKind::Method => {}
+        }
+    }
+    let mut body_ivars: BTreeMap<String, ()> = BTreeMap::new();
+    for m in &lc.methods {
+        collect_ivars(&m.body, &mut body_ivars);
+    }
+    out.extend(body_ivars.into_keys());
+    out
+}
+
+pub fn register_class_hierarchy(classes: &[LibraryClass]) {
+    for lc in classes {
+        if lc.is_module {
+            continue;
+        }
+        let name = type_name(lc.name.0.as_str());
+        let parent = lc.parent.as_ref().map(|p| type_name(p.0.as_str()));
+        super::expr::register_class_hierarchy(&name, parent.as_deref(), instance_member_names(lc));
+        super::expr::register_instance_methods(&name, instance_method_names(lc));
+    }
+}
+
+fn instance_method_names(lc: &LibraryClass) -> HashSet<String> {
+    lc.methods
+        .iter()
+        .filter(|m| {
+            m.receiver == MethodReceiver::Instance
+                && m.kind == AccessorKind::Method
+                && m.name.as_str() != "initialize"
+                && m.params.is_empty()
+        })
+        .map(member_name)
+        .collect()
+}
+
+/// Emit a constructor from the Ruby `initialize`. A `super(args)` becomes a
+/// `: base(args)` clause; a default `attrs = {}` (non-constant in C#) becomes
+/// a nullable param coalesced at the top of the body.
+fn emit_constructor(class_name: &str, m: &MethodDef) -> String {
+    let (params, prelude) = render_params(m);
+    let super_args = find_super_args(&m.body);
+    let base_clause = match super_args {
+        Some(args) => format!(" : base({})", args.join(", ")),
+        None => String::new(),
+    };
+
+    begin_method(&m.body);
+    set_param_names(m.params.iter().map(|p| camel(p.name.as_str())).collect());
+    set_returns_unit(true);
+    // Drop the `super(...)` call from the body (it's in the base clause) and
+    // render the rest as statements.
+    let body = emit_body_no_super(&m.body);
+    let hoist = hoisted_decls();
+    let mut lines: Vec<String> = Vec::new();
+    lines.extend(prelude);
+    lines.extend(hoist);
+    if !body.is_empty() {
+        lines.push(body);
+    }
+    let body = lines.join("\n");
+
+    format!(
+        "public {class_name}({}){base_clause} {{\n{}\n}}\n",
+        params.join(", "),
+        indent4(&body)
+    )
+}
+
+/// Emit a C# indexer from the lowered `[]`/`[]=` methods.
+fn emit_indexer(modifier: &str, getter: Option<&MethodDef>, setter: Option<&MethodDef>) -> String {
+    let key = getter
+        .or(setter)
+        .and_then(|m| m.params.first())
+        .map(|p| camel(p.name.as_str()))
+        .unwrap_or_else(|| "name".to_string());
+
+    let mut accessors = String::new();
+    if let Some(g) = getter {
+        begin_method(&g.body);
+        set_param_names(g.params.iter().map(|p| camel(p.name.as_str())).collect());
+        set_returns_unit(false);
+        let body = emit_body(&g.body, true);
+        let hoist = hoisted_decls();
+        let body = prepend_hoist(hoist, body);
+        accessors.push_str(&format!("    get {{\n{}\n    }}\n", indent4(&indent4(&body))));
+    }
+    if let Some(s) = setter {
+        begin_method(&s.body);
+        // The setter's second param is the value; C# exposes it as `value`.
+        // Bind the lowered value-param name to `value`.
+        let mut pnames: HashSet<String> = s.params.iter().map(|p| camel(p.name.as_str())).collect();
+        pnames.insert("value".to_string());
+        set_param_names(pnames);
+        set_returns_unit(true);
+        let value_param = s.params.get(1).map(|p| camel(p.name.as_str()));
+        let body = emit_body(&s.body, false);
+        // Rename the lowered value param to C#'s implicit `value`.
+        let body = match value_param {
+            Some(vp) if vp != "value" => rename_ident(&body, &vp, "value"),
+            _ => body,
+        };
+        let hoist = hoisted_decls();
+        let body = prepend_hoist(hoist, body);
+        accessors.push_str(&format!("    set {{\n{}\n    }}\n", indent4(&indent4(&body))));
+    }
+    format!("public {modifier}object? this[string {key}] {{\n{accessors}}}\n")
+}
+
+/// Crude whole-word identifier rename (setter value-param → `value`). The
+/// emitted body only references the param as a bare word, so a token-boundary
+/// replace is safe here.
+fn rename_ident(body: &str, from: &str, to: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let bytes = body.as_bytes();
+    let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut i = 0;
+    while i < body.len() {
+        if body[i..].starts_with(from)
+            && (i == 0 || !is_word(bytes[i - 1]))
+            && (i + from.len() >= body.len() || !is_word(bytes[i + from.len()]))
+        {
+            out.push_str(to);
+            i += from.len();
+        } else {
+            let ch = body[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+fn prepend_hoist(hoist: Vec<String>, body: String) -> String {
+    if hoist.is_empty() {
+        body
+    } else {
+        format!("{}\n{}", hoist.join("\n"), body)
+    }
+}
+
+fn emit_method(m: &MethodDef, modifier: &str) -> String {
+    // The static `schema_columns` column-list method would collide with the
+    // synthesized virtual instance `schemaColumns()` (C# forbids same-name
+    // static + instance members), so the static is renamed.
+    let name = if m.receiver == MethodReceiver::Class && m.name.as_str() == "schema_columns" {
+        "schemaColumnsList".to_string()
+    } else {
+        camel(m.name.as_str())
+    };
+    let (mut params, prelude) = render_params(m);
+
+    // A `yield`ing method takes an explicit block parameter.
+    if body_has_yield(&m.body) {
+        let bt = match m.signature.as_ref() {
+            Some(Ty::Fn { block: Some(b), .. }) => csharp_ty(b),
+            _ => "Action<object?>".to_string(),
+        };
+        params.push(format!("{bt} block"));
+    }
+
+    let ret_ty = match m.signature.as_ref() {
+        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
+        _ => None,
+    };
+    let returns_value = matches!(&ret_ty, Some(t) if !matches!(t, Ty::Nil));
+    let ret_decl = match &ret_ty {
+        Some(t) if !matches!(t, Ty::Nil) => csharp_ty(t),
+        _ => "void".to_string(),
+    };
+
+    begin_method(&m.body);
+    set_param_names(m.params.iter().map(|p| camel(p.name.as_str())).collect());
+    set_returns_unit(!returns_value);
+
+    let body = if returns_value && is_empty_body(&m.body) {
+        let ret = ret_ty.clone().unwrap_or(Ty::Untyped);
+        format!("return {};", default_for(&ret))
+    } else {
+        emit_body(&m.body, returns_value)
+    };
+    let hoist = hoisted_decls();
+    let mut lines: Vec<String> = Vec::new();
+    lines.extend(prelude);
+    lines.extend(hoist);
+    if !body.is_empty() {
+        lines.push(body);
+    }
+    let body = lines.join("\n");
+
+    format!(
+        "public {modifier}{ret_decl} {name}({}) {{\n{}\n}}\n",
+        params.join(", "),
+        indent4(&body)
+    )
+}
+
+/// Render a method's params (always typed) plus any coalesce-prelude lines for
+/// non-constant defaults (`attrs = {}` → `attrs ??= new …()`).
+fn render_params(m: &MethodDef) -> (Vec<String>, Vec<String>) {
+    let sig_params = match m.signature.as_ref() {
+        Some(Ty::Fn { params, .. }) => Some(params),
+        _ => None,
+    };
+    let mut decls = Vec::new();
+    let mut prelude = Vec::new();
+    for (i, p) in m.params.iter().enumerate() {
+        let pn = camel(p.name.as_str());
+        let ty = sig_params
+            .and_then(|sp| sp.get(i))
+            .map(|sp| csharp_ty(&sp.ty))
+            .unwrap_or_else(|| "object?".to_string());
+        match &p.default {
+            Some(d) if is_empty_container(d) => {
+                let ctor = match &*d.node {
+                    ExprNode::Hash { .. } => container_ctor(&ty, "Dictionary<string, object?>"),
+                    _ => container_ctor(&ty, "List<object?>"),
+                };
+                let nty = if ty.ends_with('?') { ty.clone() } else { format!("{ty}?") };
+                decls.push(format!("{nty} {pn} = null"));
+                prelude.push(format!("{pn} ??= {ctor};"));
+            }
+            Some(d) if is_constant(d) => {
+                decls.push(format!("{ty} {pn} = {}", emit_expr(d)));
+            }
+            Some(d) => {
+                // Non-constant, non-container default: fall back to nullable +
+                // coalesce so it stays a legal C# optional param.
+                let nty = if ty.ends_with('?') { ty.clone() } else { format!("{ty}?") };
+                decls.push(format!("{nty} {pn} = null"));
+                prelude.push(format!("{pn} ??= {};", emit_expr(d)));
+            }
+            None => decls.push(format!("{ty} {pn}")),
+        }
+    }
+    (decls, prelude)
+}
+
+fn container_ctor(ty: &str, fallback: &str) -> String {
+    let base = ty.trim_end_matches('?');
+    if base.starts_with("Dictionary<") || base.starts_with("List<") {
+        format!("new {base}()")
+    } else {
+        format!("new {fallback}()")
+    }
+}
+
+fn is_empty_container(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Hash { entries, .. } if entries.is_empty())
+        || matches!(&*e.node, ExprNode::Array { elements, .. } if elements.is_empty())
+}
+
+fn is_constant(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Lit { .. })
+}
+
+fn indent4(s: &str) -> String {
+    s.lines()
+        .map(|l| if l.is_empty() { String::new() } else { format!("    {l}") })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Emit a method body as statements, adding an explicit `return` to the final
+/// statement when the method returns a value.
+fn emit_body(body: &Expr, returns_value: bool) -> String {
+    if !returns_value {
+        return emit_stmt(body);
+    }
+    match &*body.node {
+        ExprNode::Seq { exprs } if !exprs.is_empty() => {
+            let mut lines: Vec<String> =
+                exprs[..exprs.len() - 1].iter().map(emit_stmt).filter(|s| !s.is_empty()).collect();
+            lines.push(wrap_return(&exprs[exprs.len() - 1]));
+            lines.join("\n")
+        }
+        _ => wrap_return(body),
+    }
+}
+
+/// Like `emit_body` (statement form) but drops a top-level `super(...)` call
+/// (it lives in the constructor's `: base(...)` clause).
+fn emit_body_no_super(body: &Expr) -> String {
+    match &*body.node {
+        ExprNode::Seq { exprs } => exprs
+            .iter()
+            .filter(|e| !matches!(&*e.node, ExprNode::Super { .. }))
+            .map(emit_stmt)
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        ExprNode::Super { .. } => String::new(),
+        _ => emit_stmt(body),
+    }
+}
+
+/// Render the final statement of a value-returning method with `return`.
+fn wrap_return(e: &Expr) -> String {
+    if let ExprNode::Seq { exprs } = &*e.node {
+        if !exprs.is_empty() {
+            return emit_body(e, true);
+        }
+    }
+    // Hash/array literals in return position → target-typed `new()` so the
+    // declared return type drives element types (`toH()` →
+    // `Dictionary<string,string>`, not the literal's `<string,object?>`).
+    match &*e.node {
+        ExprNode::Hash { entries, .. } if entries.is_empty() => return "return new();".to_string(),
+        ExprNode::Array { elements, .. } if elements.is_empty() => {
+            return "return new();".to_string()
+        }
+        ExprNode::Hash { entries, .. } => {
+            let pairs: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| format!("[{}] = {}", emit_expr(k), emit_expr(v)))
+                .collect();
+            return format!("return new() {{ {} }};", pairs.join(", "));
+        }
+        ExprNode::Array { elements, .. } => {
+            let els: Vec<String> = elements.iter().map(emit_expr).collect();
+            return format!("return new() {{ {} }};", els.join(", "));
+        }
+        // A value-position `if` → return from each branch (C# has no
+        // block-valued `if`). Empty branches return the type default.
+        ExprNode::If { cond, then_branch, else_branch } => {
+            let c = emit_expr(cond);
+            let then = if branch_is_empty(then_branch) {
+                "return default;".to_string()
+            } else {
+                wrap_return(then_branch)
+            };
+            let els = if branch_is_empty(else_branch) {
+                "return default;".to_string()
+            } else {
+                wrap_return(else_branch)
+            };
+            return format!(
+                "if ({c}) {{\n{}\n}} else {{\n{}\n}}",
+                indent4(&then),
+                indent4(&els)
+            );
+        }
+        _ => {}
+    }
+    // Terminal statements take no `return` prefix.
+    let is_raise_send = matches!(
+        &*e.node,
+        ExprNode::Send { recv: None, method, .. } if method.as_str() == "raise"
+    );
+    let terminal = is_raise_send
+        || matches!(
+            &*e.node,
+            ExprNode::Return { .. }
+                | ExprNode::Raise { .. }
+                | ExprNode::While { .. }
+                | ExprNode::Assign { .. }
+                | ExprNode::OpAssign { .. }
+                | ExprNode::Super { .. }
+                | ExprNode::Next { .. }
+                | ExprNode::Break { .. }
+                | ExprNode::If { .. }
+        );
+    if terminal {
+        emit_stmt(e)
+    } else {
+        format!("return {};", emit_expr(e))
+    }
+}
+
+fn branch_is_empty(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Seq { exprs } if exprs.is_empty())
+        || matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
+}
+
+fn body_has_yield(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Yield { .. }) || expr_children(e).iter().any(|c| body_has_yield(c))
+}
+
+fn find_super_args(e: &Expr) -> Option<Vec<String>> {
+    if let ExprNode::Super { args } = &*e.node {
+        return Some(
+            args.as_ref().map(|a| a.iter().map(emit_expr).collect()).unwrap_or_default(),
+        );
+    }
+    for c in expr_children(e) {
+        if let Some(r) = find_super_args(c) {
+            return Some(r);
+        }
+    }
+    None
+}
+
+fn collect_ivars(e: &Expr, out: &mut BTreeMap<String, ()>) {
+    match &*e.node {
+        ExprNode::Ivar { name } => {
+            out.insert(camel(name.as_str()), ());
+        }
+        ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+            out.insert(camel(name.as_str()), ());
+            collect_ivars(value, out);
+        }
+        _ => {}
+    }
+    for child in expr_children(e) {
+        collect_ivars(child, out);
+    }
+}
+
+fn expr_children(e: &Expr) -> Vec<&Expr> {
+    let mut v = Vec::new();
+    match &*e.node {
+        ExprNode::Seq { exprs } => v.extend(exprs.iter()),
+        ExprNode::If { cond, then_branch, else_branch } => {
+            v.push(cond);
+            v.push(then_branch);
+            v.push(else_branch);
+        }
+        ExprNode::While { cond, body, .. } => {
+            v.push(cond);
+            v.push(body);
+        }
+        ExprNode::Assign { value, .. } => v.push(value),
+        ExprNode::Case { scrutinee, arms } => {
+            v.push(scrutinee);
+            for a in arms {
+                v.push(&a.body);
+            }
+        }
+        ExprNode::Send { recv, args, block, .. } => {
+            if let Some(r) = recv {
+                v.push(r);
+            }
+            v.extend(args.iter());
+            if let Some(b) = block {
+                v.push(b);
+            }
+        }
+        ExprNode::BoolOp { left, right, .. } => {
+            v.push(left);
+            v.push(right);
+        }
+        ExprNode::Return { value } | ExprNode::Raise { value } => v.push(value),
+        ExprNode::Lambda { body, .. } => v.push(body),
+        ExprNode::Hash { entries, .. } => {
+            for (k, val) in entries {
+                v.push(k);
+                v.push(val);
+            }
+        }
+        ExprNode::Array { elements, .. } => v.extend(elements.iter()),
+        ExprNode::StringInterp { parts } => {
+            for p in parts {
+                if let crate::expr::InterpPart::Expr { expr } = p {
+                    v.push(expr);
+                }
+            }
+        }
+        _ => {}
+    }
+    v
+}
+
+pub fn register_object_accessors(classes: &[LibraryClass]) {
+    for lc in classes {
+        if !lc.is_module {
+            continue;
+        }
+        let object = lc.name.0.as_str().rsplit("::").next().unwrap_or(lc.name.0.as_str());
+        for prop in class_accessor_props(&lc.methods).keys() {
+            super::expr::register_object_accessor(object, prop);
+        }
+    }
+}
+
+fn class_accessor_props(methods: &[MethodDef]) -> BTreeMap<String, Ty> {
+    let mut props: BTreeMap<String, Ty> = BTreeMap::new();
+    for m in methods {
+        if m.receiver != MethodReceiver::Class {
+            continue;
+        }
+        match m.kind {
+            AccessorKind::AttributeReader => {
+                if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+                    props.entry(camel(m.name.as_str())).or_insert_with(|| (**ret).clone());
+                }
+            }
+            AccessorKind::AttributeWriter => {
+                if let Some(Ty::Fn { params, .. }) = m.signature.as_ref() {
+                    if let Some(p) = params.first() {
+                        let base = m.name.as_str().trim_end_matches('=');
+                        props.entry(camel(base)).or_insert_with(|| p.ty.clone());
+                    }
+                }
+            }
+            AccessorKind::Method => {}
+        }
+    }
+    props
+}
+
+fn references_class_name(methods: &[MethodDef]) -> bool {
+    methods.iter().any(|m| sends_class_name(&m.body))
+}
+
+fn sends_class_name(e: &Expr) -> bool {
+    let hit = matches!(
+        &*e.node,
+        ExprNode::Send { recv, method, args, .. }
+            if method.as_str() == "name"
+                && args.is_empty()
+                && matches!(recv.as_ref().map(|r| &*r.node), None | Some(ExprNode::SelfRef))
+    );
+    hit || expr_children(e).iter().any(|c| sends_class_name(c))
+}
+
+fn is_empty_body(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Seq { exprs } if exprs.is_empty())
+}
+
+fn infer_body_ivar_types(methods: &[MethodDef]) -> BTreeMap<String, Ty> {
+    let mut out: BTreeMap<String, Ty> = BTreeMap::new();
+    for m in methods {
+        if let (Some(ivar), Some(Ty::Fn { ret, .. })) =
+            (body_returns_ivar(&m.body), m.signature.as_ref())
+        {
+            if !matches!(&**ret, Ty::Nil) {
+                out.entry(ivar).or_insert_with(|| (**ret).clone());
+            }
+        }
+    }
+    for m in methods {
+        collect_ivar_node_types(&m.body, &mut out);
+    }
+    for m in methods {
+        collect_ivar_literal_types(&m.body, &mut out);
+    }
+    out
+}
+
+fn collect_ivar_node_types(e: &Expr, out: &mut BTreeMap<String, Ty>) {
+    let useful = |ty: &Ty| !matches!(ty, Ty::Untyped | Ty::Var { .. } | Ty::Nil);
+    match &*e.node {
+        ExprNode::Ivar { name } => {
+            if let Some(ty) = e.ty.as_ref().filter(|t| useful(t)) {
+                out.entry(camel(name.as_str())).or_insert_with(|| ty.clone());
+            }
+        }
+        ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+            if let Some(ty) = value.ty.as_ref().filter(|t| useful(t)) {
+                out.entry(camel(name.as_str())).or_insert_with(|| ty.clone());
+            }
+        }
+        _ => {}
+    }
+    for child in expr_children(e) {
+        collect_ivar_node_types(child, out);
+    }
+}
+
+fn body_returns_ivar(e: &Expr) -> Option<String> {
+    match &*e.node {
+        ExprNode::Ivar { name } => Some(camel(name.as_str())),
+        ExprNode::Return { value } => body_returns_ivar(value),
+        ExprNode::Seq { exprs } => exprs.last().and_then(body_returns_ivar),
+        _ => None,
+    }
+}
+
+fn collect_ivar_literal_types(e: &Expr, out: &mut BTreeMap<String, Ty>) {
+    if let ExprNode::Assign { target: LValue::Ivar { name }, value } = &*e.node {
+        if let Some(ty) = literal_ty(value) {
+            out.entry(camel(name.as_str())).or_insert(ty);
+        }
+    }
+    for child in expr_children(e) {
+        collect_ivar_literal_types(child, out);
+    }
+}
+
+fn literal_ty(e: &Expr) -> Option<Ty> {
+    match &*e.node {
+        ExprNode::Lit { value: Literal::Bool { .. } } => Some(Ty::Bool),
+        ExprNode::Lit { value: Literal::Int { .. } } => Some(Ty::Int),
+        ExprNode::Lit { value: Literal::Float { .. } } => Some(Ty::Float),
+        ExprNode::Lit { value: Literal::Str { .. } } => Some(Ty::Str),
+        _ => None,
+    }
+}
+
+/// Render an auto-property with a default initializer (C# requires non-null
+/// reference props be initialized).
+fn render_member(name: &str, ty: &Ty) -> String {
+    format!("public {} {name} {{ get; set; }} = {};", csharp_ty(ty), default_for(ty))
+}
+
+fn default_for(ty: &Ty) -> String {
+    match ty {
+        Ty::Int => "0L".to_string(),
+        Ty::Float => "0.0".to_string(),
+        Ty::Bool => "false".to_string(),
+        Ty::Str | Ty::Sym => "\"\"".to_string(),
+        Ty::Array { elem } => format!("new List<{}>()", csharp_ty(elem)),
+        Ty::Hash { key, value } => format!("new Dictionary<{}, {}>()", csharp_ty(key), csharp_ty(value)),
+        Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil)) => {
+            "null".to_string()
+        }
+        _ => "null".to_string(),
+    }
+}

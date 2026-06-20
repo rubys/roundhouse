@@ -142,6 +142,7 @@ TOOLCHAINS = {
   'shards'  => '--version',
   'python3' => '--version',
   'uv'      => '--version',
+  'dotnet'  => '--version',
   'wrk'     => '--version',
   'curl'    => '--version',
   'mise'    => '--version',

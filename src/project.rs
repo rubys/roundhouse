@@ -68,6 +68,11 @@ pub enum BuildTarget {
     /// several published targets) — see `docs/swift-migration-plan.md`
     /// and issue #34.
     Swift,
+    /// C# / .NET emit (backend-only). Scaffold stage — `emit` produces the
+    /// .NET project scaffold (`roundhouse-app.csproj`, `Program.cs`) and the
+    /// `ty`/`naming` mappings; models/controllers/views/runtime land in later
+    /// phases. See `docs/csharp-migration-plan.md`.
+    CSharp,
     Typescript,
     /// TypeScript emit under the `worker` deployment profile
     /// (SharedWorker browser deployment).
@@ -89,6 +94,7 @@ impl BuildTarget {
         BuildTarget::Python,
         BuildTarget::Rust,
         BuildTarget::Swift,
+        BuildTarget::CSharp,
         BuildTarget::Typescript,
         BuildTarget::TypescriptWorker,
     ];
@@ -108,6 +114,7 @@ impl BuildTarget {
         BuildTarget::Python,
         BuildTarget::Rust,
         BuildTarget::Swift,
+        BuildTarget::CSharp,
         BuildTarget::Typescript,
         BuildTarget::TypescriptWorker,
     ];
@@ -127,6 +134,7 @@ impl BuildTarget {
             BuildTarget::Python => "python",
             BuildTarget::Rust => "rust",
             BuildTarget::Swift => "swift",
+            BuildTarget::CSharp => "csharp",
             BuildTarget::Typescript => "typescript",
             BuildTarget::TypescriptWorker => "typescript-worker",
         }
@@ -390,6 +398,22 @@ pub fn target_readme(target: BuildTarget) -> String {
              cargo test\n\
              ```\n"
         }
+        BuildTarget::CSharp => {
+            "## Prerequisites\n\
+             - .NET SDK 10+ (`dotnet`)\n\n\
+             ## Build\n\
+             ```sh\n\
+             dotnet build\n\
+             ```\n\n\
+             ## Run\n\
+             ```sh\n\
+             dotnet run\n\
+             ```\n\n\
+             ## Test\n\
+             ```sh\n\
+             dotnet test\n\
+             ```\n"
+        }
         BuildTarget::Typescript => {
             "## Prerequisites\n\
              - Node.js 18+\n\n\
@@ -538,6 +562,7 @@ pub fn target_files(
         BuildTarget::Python => Ok(sort_files(emit::python::emit(app))),
         BuildTarget::Rust => Ok(sort_files(emit::rust::emit(app))),
         BuildTarget::Swift => Ok(sort_files(emit::swift::emit(app))),
+        BuildTarget::CSharp => Ok(sort_files(emit::csharp::emit(app))),
         BuildTarget::Typescript => Ok(sort_files(emit::typescript::emit(app))),
         BuildTarget::TypescriptWorker => Ok(sort_files(emit::typescript::emit_with_profile(
             app,
