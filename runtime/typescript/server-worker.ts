@@ -97,6 +97,15 @@ let _dbWorker: DbWorkerHandle | null = null;
 let _dbWorkerUrl: string | null = null;
 let _dbWorkerHostId: string | null = null;
 let _canCreateWorker: boolean | null = null;
+// When true (set by a tab's `config.preferTabHostedDb`), skip the direct
+// `new Worker()` fast path and always tab-host the DB Worker — even on
+// Firefox, where the SharedWorker *could* own it directly. The studio embeds
+// the app in an iframe and hot-swaps this SharedWorker on every edit; a
+// tab-owned DB Worker outlives those swaps (the swappable tier must not own
+// durable state), at the cost of the tab-close resilience the studio doesn't
+// need. The standalone blog loads top-level, never sets this, and keeps
+// SharedWorker ownership.
+let _preferTabHostedDb = false;
 let _databaseName = "app.sqlite3";
 
 let _ready = false;
@@ -188,6 +197,7 @@ interface ConfigMessage {
   type: "config";
   dbWorkerUrl?: string;
   tabId?: string;
+  preferTabHostedDb?: boolean;
 }
 
 interface FetchMessage {
@@ -210,6 +220,7 @@ async function onTabMessage(
     const cfg = message as ConfigMessage;
     if (cfg.dbWorkerUrl) _dbWorkerUrl = cfg.dbWorkerUrl;
     if (cfg.tabId) _tabPorts.set(cfg.tabId, port);
+    if (cfg.preferTabHostedDb) _preferTabHostedDb = true;
     configResolve();
     return;
   }
@@ -266,8 +277,10 @@ function handleTabDisconnect(port: MessagePort): void {
 async function spawnDbWorker(tabPort: MessagePort | null = null): Promise<void> {
   if (!_dbWorkerUrl) throw new Error("dbWorkerUrl not set — first tab must send config");
 
-  // Try direct spawn first (works in Firefox).
-  if (_canCreateWorker === null || _canCreateWorker === true) {
+  // Try direct spawn first (works in Firefox) — unless a tab asked us to
+  // tab-host the DB Worker so it survives SharedWorker hot-swaps, in which
+  // case fall straight through to the tab-delegation path on every browser.
+  if (!_preferTabHostedDb && (_canCreateWorker === null || _canCreateWorker === true)) {
     try {
       _dbWorker = new Worker(_dbWorkerUrl, { type: "module" });
       _canCreateWorker = true;

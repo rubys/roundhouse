@@ -322,6 +322,22 @@ declare global {
 
 let _bridge: WorkerBridge | null = null;
 
+/** True when this document is embedded in a frame. The studio hosts the
+ *  emitted app in a same-origin iframe and hot-swaps its SharedWorker on every
+ *  edit, so the DB Worker must outlive those swaps — we tell the SharedWorker
+ *  to tab-host it (`preferTabHostedDb`) instead of letting Firefox parent it to
+ *  the swappable SharedWorker. A top-level load (the standalone blog) never
+ *  hot-swaps and keeps SharedWorker ownership for tab-close resilience. A
+ *  cross-origin embed throws on `window.top` — treat that as framed too (it
+ *  can't hot-swap either, but tab-hosting is always safe). */
+function isFramed(): boolean {
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true;
+  }
+}
+
 export async function startClient(opts: StartClientOptions = {}): Promise<void> {
   if (!globalThis.SharedWorker) {
     const msg =
@@ -356,7 +372,7 @@ export async function startClient(opts: StartClientOptions = {}): Promise<void> 
     return;
   }
 
-  worker.port.postMessage({ type: "config", dbWorkerUrl, tabId });
+  worker.port.postMessage({ type: "config", dbWorkerUrl, tabId, preferTabHostedDb: isFramed() });
 
   // Announce close so the SharedWorker can release our port and, if
   // we're hosting the dedicated DB Worker (Chrome workaround), pick
@@ -445,7 +461,7 @@ async function reconnect(v: number | string | undefined, ack?: (ok: boolean) => 
     _bridge?.dispose();
 
     const worker = new SharedWorker(url.href, { type: "module", name: "juntos" });
-    worker.port.postMessage({ type: "config", dbWorkerUrl: g.dbWorkerUrl, tabId: crypto.randomUUID() });
+    worker.port.postMessage({ type: "config", dbWorkerUrl: g.dbWorkerUrl, tabId: crypto.randomUUID(), preferTabHostedDb: isFramed() });
     const bridge = new WorkerBridge(worker);
     _bridge = bridge;
     await bridge.waitForReady();
