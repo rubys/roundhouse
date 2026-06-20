@@ -28,13 +28,51 @@ function loadMonaco() {
     script.src = `${MONACO_BASE}/loader.js`;
     script.onload = () => {
       window.require.config({ paths: { vs: MONACO_BASE } });
-      window.require(["vs/editor/editor.main"], () => { clearTimeout(timer); resolve(window.monaco); },
-        (e) => { clearTimeout(timer); reject(e); });
+      window.require(["vs/editor/editor.main"], () => {
+        clearTimeout(timer);
+        silenceWorkerLanguageServices(window.monaco);
+        resolve(window.monaco);
+      }, (e) => { clearTimeout(timer); reject(e); });
     };
     script.onerror = () => { clearTimeout(timer); reject(new Error("monaco loader.js failed")); };
     document.head.appendChild(script);
   });
   return monacoPromise;
+}
+
+// Monaco's HTML/CSS/JSON/TS "language services" (hover, completion, validation,
+// formatting, …) run in a Web Worker, which we deliberately stub above to avoid
+// cross-origin worker setup. A stubbed worker never replies, so every
+// worker-backed provider hangs: hovering inside an .erb (an `html` model) spins
+// Monaco's own "Loading…" tooltip forever, because its HTML hover provider is
+// waiting on the dead worker. Turn those providers off — the Monarch syntax
+// highlighters are main-thread and keep working, and our inferred-type hover
+// (registered per-editor) is independent. `setModeConfiguration` replaces the
+// whole config, so any key we omit defaults to disabled, which is what we want;
+// optional chaining guards languages/methods absent in a given Monaco build.
+function silenceWorkerLanguageServices(monaco) {
+  const off = {
+    completionItems: false, hovers: false, documentSymbols: false, links: false,
+    documentHighlights: false, rename: false, colors: false, foldingRanges: false,
+    diagnostics: false, selectionRanges: false, documentFormattingEdits: false,
+    documentRangeFormattingEdits: false, tokens: false, definitions: false,
+    references: false, inlayHints: false, codeActions: false, onTypeFormattingEdits: false,
+  };
+  const langs = monaco.languages;
+  // HTML (+ its handlebars/razor variants) — what .erb opens as.
+  langs.html?.htmlDefaults?.setModeConfiguration(off);
+  langs.html?.handlebarDefaults?.setModeConfiguration(off);
+  langs.html?.razorDefaults?.setModeConfiguration(off);
+  // CSS/SCSS/LESS and JSON — reached via embedded <style>/<script> and the
+  // output pane; same dead-worker hang otherwise.
+  langs.css?.cssDefaults?.setModeConfiguration(off);
+  langs.css?.scssDefaults?.setModeConfiguration(off);
+  langs.css?.lessDefaults?.setModeConfiguration(off);
+  langs.json?.jsonDefaults?.setModeConfiguration(off);
+  // TS/JS — the output view renders emitted TypeScript; guard the method since
+  // older monaco-typescript lacks setModeConfiguration.
+  langs.typescript?.typescriptDefaults?.setModeConfiguration?.(off);
+  langs.typescript?.javascriptDefaults?.setModeConfiguration?.(off);
 }
 
 // container: the DOM element to mount into. onChange(text): fired on user edits
@@ -67,7 +105,7 @@ export async function createEditor(container, { onChange }) {
         if (!best) return null;
         return {
           range: new monaco.Range(best.start_line, best.start_col, best.end_line, best.end_col),
-          contents: [{ value: "inferred type" }, { value: "```rbs\n" + best.ty + "\n```" }],
+          contents: [{ value: "inferred type" }, { value: "`" + best.ty + "`" }],
         };
       },
     });

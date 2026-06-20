@@ -84,7 +84,7 @@ let editor = null;
 let srcMap = null;          // { path: content } — the live, editable input (Ruby)
 let currentPath = null;
 let openDirs = null;
-let lastBuild = null;       // { files, diagnostics, error, transpileMs, testSuite }
+let lastBuild = null;       // { files, diagnostics, types, error, transpileMs, testSuite }
 let lastBundle = null;      // { ms, errors, warnings, outputs }
 let lastTestRun = null;     // { total, passed, failed, skipped, results } | { error }
 let buildSeq = 0;           // guards stale async builds
@@ -125,6 +125,7 @@ function selectFile(path) {
   [...els.srcfiles.querySelectorAll("button")].forEach((b) =>
     b.classList.toggle("active", b.dataset.path === path));
   renderMarkers();
+  renderTypes(); // hovers are per-file — refresh for the newly-open file
 }
 
 // ---- the emitted test suite (Phase 6) ------------------------------------
@@ -169,11 +170,13 @@ async function build() {
   lastBuild = {
     files: out.files || [],
     diagnostics: out.diagnostics || [],
+    types: out.inferred_types || [], // inferred-type spans → editor hover tooltips
     error: out.error || null,
     transpileMs: performance.now() - t0,
   };
   lastBuild.testSuite = testSuiteFrom(lastBuild.files); // Phase 6: ship the suite
   renderMarkers();
+  renderTypes();
   if (out.error) {
     setStatus(`transpile error: ${out.error}`, "err");
     return;
@@ -477,6 +480,13 @@ function renderMarkers() {
   editor.setMarkers(lastBuild.diagnostics.filter((d) => d.path === currentPath));
 }
 
+// Inferred types for the open file → editor hover tooltips (same source the
+// playground feeds Monaco). Per-file, so refresh on each build and file switch.
+function renderTypes() {
+  if (!editor || !lastBuild) return;
+  editor.setTypes((lastBuild.types || []).filter((t) => t.path === currentPath));
+}
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 }
@@ -540,6 +550,20 @@ async function boot() {
     testRun: () => lastTestRun,
     source: (path) => srcMap[path],
     sourceCount: () => sourceFiles().length,
+    // Inferred-type hover data — parity with __playground. These read the spans
+    // the studio now feeds the editor via setTypes(); the verifier asserts the
+    // wiring (so a regression that drops the setTypes calls is caught).
+    types: () => lastBuild?.types || [],
+    // Smallest-span inferred type at a 1-based (line, col) in the open file.
+    typeAt(line, col) {
+      const hits = (lastBuild?.types || []).filter((t) => t.path === currentPath &&
+        (line > t.start_line || (line === t.start_line && col >= t.start_col)) &&
+        (line < t.end_line || (line === t.end_line && col <= t.end_col)));
+      hits.sort((a, b) =>
+        ((a.end_line - a.start_line) * 1e5 + (a.end_col - a.start_col)) -
+        ((b.end_line - b.start_line) * 1e5 + (b.end_col - b.start_col)));
+      return hits.length ? hits[0].ty : null;
+    },
     selectTab: setTab,
     currentFile: () => currentPath,                                  // Phase 9
     sourceLocForTest: (name) => rubyLocForResult((lastTestRun?.results || []).find((r) => r.name === name)),

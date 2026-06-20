@@ -54,6 +54,35 @@ const bundle = await page.evaluate(() => window.__studio.bundle());
 console.log("bundle:", Object.entries(bundle.outputs).map(([n, o]) => `${n} ${(o.bytes / 1024).toFixed(0)}K`).join(" "), `· ${bundle.ms?.toFixed(0)}ms`);
 if (bundle.errors?.length) fail(`bundle errors: ${bundle.errors.map((e) => e.text).join("; ")}`);
 
+// --- inferred-type hovers reach the editor -----------------------------------
+// The studio feeds Monaco the same inferred-type spans the playground does (via
+// setTypes on each build + file switch), so hovering a variable shows its type.
+// Assert the spans reach the editor layer and the smallest-span lookup works;
+// guards a regression that drops the setTypes wiring. (Per-file: select the
+// model, confirm its spans are present and typeAt round-trips one of them.)
+console.log("\n=== inferred-type hovers ===");
+const hov = await page.evaluate(() => {
+  const all = window.__studio.types();
+  // Spans are keyed by SOURCE path. A bare model is mostly declarations (no
+  // hoverable expressions), so pick the richest file — a view/controller — and
+  // confirm selecting it makes the per-file lookup resolve a span.
+  const byPath = {};
+  for (const t of all) byPath[t.path] = (byPath[t.path] || 0) + 1;
+  const [topPath, topCount] = Object.entries(byPath).sort((a, b) => b[1] - a[1])[0] || [null, 0];
+  window.__studio.selectSource(topPath);
+  const span = all.find((t) => t.path === topPath);
+  return {
+    total: all.length,
+    files: Object.keys(byPath).length,
+    topPath, topCount,
+    roundTrip: span ? window.__studio.typeAt(span.start_line, span.start_col) : null,
+  };
+});
+console.log(`total ${hov.total} spans across ${hov.files} files | richest ${hov.topPath} (${hov.topCount}) | typeAt -> ${hov.roundTrip}`);
+if (hov.total < 100) fail(`expected many inferred types fed to the editor, got ${hov.total}`);
+if (!hov.topPath || hov.topCount === 0) fail("no per-file inferred-type spans — studio not feeding setTypes");
+if (hov.roundTrip == null) fail("typeAt round-trip returned null for a known span — hover lookup broken");
+
 // --- Phase 6: the emitted Minitest suite ships in the browser payload --------
 // roundhouse transpiles the Rails Minitest suites to TS under the worker
 // profile; this asserts those specs + the in-browser harness + fixtures reach
