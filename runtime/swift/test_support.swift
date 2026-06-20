@@ -124,21 +124,24 @@ class RoundhouseTestCase: XCTestCase {
         }
     }
 
-    // `assert_select` substring shim: match on the opening tag or the
-    // id="x" fragment derived from the selector. Rough but effective
-    // for the scaffold-blog HTML shapes; cardinality kwargs are
-    // best-effort no-ops (same loose semantics as the crystal/ts shims).
+    // `assertSelect` over the Dom primitive surface (defined below).
+    // Presence check: the selector matches at least one node. The stub
+    // Dom is a substring matcher, so this stays rough-but-effective for
+    // the scaffold-blog HTML shapes; cardinality kwargs are best-effort
+    // no-ops. A real engine tightens it without changing these sites.
     func assertSelect(_ selector: String) {
-        let fragment = selectorFragment(selector)
-        if !__body.contains(fragment) {
-            XCTFail("expected body to match selector \(selector) (looked for \(fragment))")
+        if Dom.select(Dom.parse(__body), selector).isEmpty {
+            XCTFail("expected body to match selector \(selector)")
         }
     }
 
     func assertSelect(_ selector: String, _ content: String) {
-        assertSelect(selector)
-        if !__body.contains(content) {
-            XCTFail("expected body to contain \(content) matching selector \(selector)")
+        let nodes = Dom.select(Dom.parse(__body), selector)
+        if nodes.isEmpty {
+            XCTFail("expected body to match selector \(selector)")
+        }
+        if !nodes.contains(where: { Dom.text($0).contains(content) }) {
+            XCTFail("expected text \(content) under selector \(selector)")
         }
     }
 
@@ -150,15 +153,47 @@ class RoundhouseTestCase: XCTestCase {
         assertSelect(selector)
         try body()
     }
+}
 
-    private func selectorFragment(_ selector: String) -> String {
+// ── Dom primitive surface (the assertSelect substrate) ─────────────
+//
+// The HTML-query contract assertSelect lowers to, shared in shape with
+// the Ruby/TS/Python/Rust/Elixir twins (cross-target contract in
+// runtime/spinel/test/test_helper.rbs). Stub: the substring matcher
+// dressed as a Dom — select fabricates one synthetic node (the whole
+// document) per fragment occurrence and text returns it verbatim, so
+// presence / minimum / content checks degrade to exactly the pre-
+// contract behavior. The upgrade path is to swap these three functions
+// for a SwiftSoup-backed engine — real nodes, real CSS selectors —
+// touching only this enum; the RoundhouseTestCase call sites stay put.
+enum Dom {
+    // Parse an HTML document. Stub: the document *is* its html string.
+    static func parse(_ html: String) -> String { html }
+
+    // Nodes matching `selector` within `root` (a document or node).
+    // Stub: one synthetic node (the root's html) per substring-fragment
+    // occurrence.
+    static func select(_ root: String, _ selector: String) -> [String] {
+        let fragment = fragmentFor(selector)
+        var nodes: [String] = []
+        var from = root.startIndex
+        while let r = root.range(of: fragment, range: from..<root.endIndex) {
+            nodes.append(root)
+            from = r.upperBound
+        }
+        return nodes
+    }
+
+    // Concatenated descendant text of a node. Stub: the node verbatim.
+    static func text(_ node: String) -> String { node }
+
+    // Loose selector → substring fragment (the stub's rule, replaced by
+    // a real CSS engine on upgrade): "#id" → id="id", ".cls" → cls",
+    // "tag" → <tag. Compound selectors take the first chunk.
+    private static func fragmentFor(_ selector: String) -> String {
         let first = selector.split(separator: " ").first.map(String.init) ?? selector
-        if first.hasPrefix("#") {
-            return "id=\"\(first.dropFirst())\""
-        }
-        if first.hasPrefix(".") {
-            return "\(first.dropFirst())\""
-        }
+        if first.hasPrefix("#") { return "id=\"\(first.dropFirst())\"" }
+        if first.hasPrefix(".") { return "\(first.dropFirst())\"" }
         return "<\(first)"
     }
 }

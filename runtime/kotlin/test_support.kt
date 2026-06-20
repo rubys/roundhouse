@@ -126,22 +126,24 @@ open class RoundhouseTestCase {
         }
     }
 
-    // `assert_select` substring shim: match on the opening tag or the
-    // id="x" fragment derived from the selector. Rough but effective
-    // for the scaffold-blog HTML shapes; cardinality kwargs are
-    // best-effort no-ops (same loose semantics as the crystal/ts/swift
-    // shims).
+    // `assertSelect` over the Dom primitive surface (defined below).
+    // Presence check: the selector matches at least one node. The stub
+    // Dom is a substring matcher, so this stays rough-but-effective for
+    // the scaffold-blog HTML shapes; cardinality kwargs are best-effort
+    // no-ops. A real engine tightens it without changing these sites.
     fun assertSelect(selector: String) {
-        val fragment = selectorFragment(selector)
-        if (!__body.contains(fragment)) {
-            fail<Unit>("expected body to match selector $selector (looked for $fragment)")
+        if (Dom.select(Dom.parse(__body), selector).isEmpty()) {
+            fail<Unit>("expected body to match selector $selector")
         }
     }
 
     fun assertSelect(selector: String, content: String) {
-        assertSelect(selector)
-        if (!__body.contains(content)) {
-            fail<Unit>("expected body to contain $content matching selector $selector")
+        val nodes = Dom.select(Dom.parse(__body), selector)
+        if (nodes.isEmpty()) {
+            fail<Unit>("expected body to match selector $selector")
+        }
+        if (nodes.none { Dom.text(it).contains(content) }) {
+            fail<Unit>("expected text $content under selector $selector")
         }
     }
 
@@ -153,15 +155,50 @@ open class RoundhouseTestCase {
         assertSelect(selector)
         body()
     }
+}
 
-    private fun selectorFragment(selector: String): String {
+// ── Dom primitive surface (the assertSelect substrate) ─────────────
+//
+// The HTML-query contract assertSelect lowers to, shared in shape with
+// the Ruby/TS/Python/Rust/Elixir twins (cross-target contract in
+// runtime/spinel/test/test_helper.rbs). Stub: the substring matcher
+// dressed as a Dom — select fabricates one synthetic node (the whole
+// document) per fragment occurrence and text returns it verbatim, so
+// presence / minimum / content checks degrade to exactly the pre-
+// contract behavior. The upgrade path is to swap these three functions
+// for a jsoup-backed engine — real nodes, real CSS selectors —
+// touching only this object; the RoundhouseTestCase call sites stay
+// put.
+object Dom {
+    // Parse an HTML document. Stub: the document *is* its html string.
+    fun parse(html: String): String = html
+
+    // Nodes matching `selector` within `root` (a document or node).
+    // Stub: one synthetic node (the root's html) per substring-fragment
+    // occurrence.
+    fun select(root: String, selector: String): List<String> {
+        val fragment = fragmentFor(selector)
+        val nodes = mutableListOf<String>()
+        var from = 0
+        while (true) {
+            val i = root.indexOf(fragment, from)
+            if (i < 0) break
+            nodes.add(root)
+            from = i + fragment.length
+        }
+        return nodes
+    }
+
+    // Concatenated descendant text of a node. Stub: the node verbatim.
+    fun text(node: String): String = node
+
+    // Loose selector → substring fragment (the stub's rule, replaced by
+    // a real CSS engine on upgrade): "#id" → id="id", ".cls" → cls",
+    // "tag" → <tag. Compound selectors take the first chunk.
+    private fun fragmentFor(selector: String): String {
         val first = selector.split(" ").firstOrNull() ?: selector
-        if (first.startsWith("#")) {
-            return "id=\"" + first.drop(1) + "\""
-        }
-        if (first.startsWith(".")) {
-            return first.drop(1) + "\""
-        }
+        if (first.startsWith("#")) return "id=\"" + first.drop(1) + "\""
+        if (first.startsWith(".")) return first.drop(1) + "\""
         return "<" + first
     }
 }

@@ -237,21 +237,21 @@ abstract class RoundhouseTest
     fail(msg || "expected Location to contain #{expected_path.inspect}, got #{@__location.inspect}")
   end
 
-  # `assert_select` substring-matches on the opening tag or
-  # id="x" / class="x"-style fragment derived from the selector.
-  # Rough but effective for the scaffold-blog HTML shapes —
-  # bodies like `"#articles"`, `".p-4"`, `"h1"`. Block form
-  # additionally yields so nested `assert_select`s further narrow
-  # within the matched section; we don't shrink the body here, so
-  # nested checks still see the full response body — same loose
-  # semantic as the TS shim.
+  # `assert_select` over the shared Dom primitive surface
+  # (`Roundhouse::Dom`, defined in test_support.cr). Presence check:
+  # the selector matches at least one node; the content form also
+  # checks a matched node's text. The stub Dom is a substring matcher,
+  # so this stays rough-but-effective for the scaffold-blog HTML shapes
+  # (`"#articles"`, `".p-4"`, `"h1"`). Block form yields without
+  # narrowing scope (same loose semantic as the other targets) until a
+  # real engine lands.
   def assert_select(selector : String, content : String? = nil, msg : String? = nil) : Nil
-    fragment = selector_fragment(selector)
-    unless @__body.includes?(fragment)
-      fail(msg || "expected body to match selector #{selector.inspect} (looked for #{fragment.inspect})")
+    nodes = Roundhouse::Dom.select(Roundhouse::Dom.parse(@__body), selector)
+    if nodes.empty?
+      fail(msg || "expected body to match selector #{selector.inspect}")
       return
     end
-    if !content.nil? && !@__body.includes?(content)
+    if !content.nil? && !nodes.any? { |n| Roundhouse::Dom.text(n).includes?(content) }
       fail(msg || "expected body to contain #{content.inspect} matching selector #{selector.inspect}")
     end
   end
@@ -275,15 +275,6 @@ abstract class RoundhouseTest
   def assert_select(selector : String, &block) : Nil
     assert_select(selector)
     yield
-  end
-
-  private def selector_fragment(selector : String) : String
-    first = selector.split(/\s+/).first
-    case first
-    when .starts_with?("#") then %(id="#{first[1..]}")
-    when .starts_with?(".") then %(#{first[1..]}")
-    else                         "<#{first}"
-    end
   end
 
   # ── per-test registry + reset hooks ──────────────────────────────

@@ -16,6 +16,57 @@
 require "./http"
 
 module Roundhouse
+  # ── Dom primitive surface (the assert_select substrate) ──────────
+  #
+  # The HTML-query contract assert_select lowers to, shared in shape
+  # with the Ruby/TS/Python/Rust/Elixir twins (cross-target contract
+  # in runtime/spinel/test/test_helper.rbs). Stub: the substring
+  # matcher dressed as a Dom — `select` fabricates one synthetic node
+  # (the whole document) per fragment occurrence and `text` returns it
+  # verbatim, so presence / minimum / content checks degrade to exactly
+  # the pre-contract behavior. The upgrade path is to swap these three
+  # methods for an XML::Node-backed engine — real nodes, real CSS
+  # selectors — touching only this module; every assert_select call
+  # site (RoundhouseTest, TestResponse) stays put. Single home for the
+  # selector logic that the two test surfaces previously each copied.
+  module Dom
+    # Parse an HTML document. Stub: the document *is* its html string.
+    def self.parse(html : String) : String
+      html
+    end
+
+    # Nodes matching `selector` within `root` (a document or node).
+    # Stub: one synthetic node (the root's html) per substring-fragment
+    # occurrence.
+    def self.select(root : String, selector : String) : Array(String)
+      fragment = fragment_for(selector)
+      nodes = [] of String
+      from = 0
+      while (i = root.index(fragment, from))
+        nodes << root
+        from = i + fragment.size
+      end
+      nodes
+    end
+
+    # Concatenated descendant text of a node. Stub: the node verbatim.
+    def self.text(node : String) : String
+      node
+    end
+
+    # Loose selector → substring fragment (the stub's rule, replaced by
+    # a real CSS engine on upgrade): "#id" → id="id", ".cls" → cls",
+    # "tag" → <tag. Compound selectors take the first chunk.
+    def self.fragment_for(selector : String) : String
+      first = selector.split(/\s+/).first? || ""
+      case first
+      when .starts_with?("#") then %(id="#{first[1..]}")
+      when .starts_with?(".") then %(#{first[1..]}")
+      else                         "<#{first}"
+      end
+    end
+  end
+
   module TestSupport
     # Pure-Crystal test client — dispatches through Router.match,
     # calls the resolved handler, wraps the response. No real HTTP,
@@ -86,56 +137,33 @@ module Roundhouse
         end
       end
 
-      # `assert_select <selector>` — body contains a match for the
-      # selector. Substring-matches on the opening tag or
-      # `id=`/`class=` fragment. Covers the scaffold blog shapes:
-      #   "h1"        → contains "<h1"
-      #   "#articles" → contains `id="articles"`
-      #   ".p-4"      → contains `p-4"`
-      #   "form"      → contains "<form"
+      # `assert_select <selector>` — the selector matches at least one
+      # node (via the shared `Dom` surface above).
       def assert_select(selector : String) : Nil
-        fragment = TestSupport.selector_fragment(selector)
-        unless @body.includes?(fragment)
-          raise "expected body to match selector #{selector.inspect} (looked for #{fragment.inspect})"
+        if Dom.select(Dom.parse(@body), selector).empty?
+          raise "expected body to match selector #{selector.inspect}"
         end
       end
 
-      # `assert_select <selector>, <text>` — selector check + body
-      # also contains the text.
+      # `assert_select <selector>, <text>` — selector check + a matched
+      # node's text contains the text.
       def assert_select_text(selector : String, text : String) : Nil
-        assert_select(selector)
-        unless @body.includes?(text)
-          raise "expected body to contain text #{text.inspect} under selector #{selector.inspect}"
+        nodes = Dom.select(Dom.parse(@body), selector)
+        if nodes.empty?
+          raise "expected body to match selector #{selector.inspect}"
+        end
+        unless nodes.any? { |n| Dom.text(n).includes?(text) }
+          raise "expected text #{text.inspect} under selector #{selector.inspect}"
         end
       end
 
-      # `assert_select <selector>, minimum: N` — at least `n`
-      # occurrences of the selector fragment.
+      # `assert_select <selector>, minimum: N` — at least `n` matched
+      # nodes.
       def assert_select_min(selector : String, n : Int32) : Nil
-        fragment = TestSupport.selector_fragment(selector)
-        count = 0
-        from = 0
-        while (i = @body.index(fragment, from))
-          count += 1
-          from = i + fragment.size
-        end
+        count = Dom.select(Dom.parse(@body), selector).size
         if count < n
           raise "expected at least #{n} matches for selector #{selector.inspect}, got #{count}"
         end
-      end
-    end
-
-    # Loose selector → substring fragment. Same rules as the Rust
-    # and TS twins.
-    def self.selector_fragment(selector : String) : String
-      first = selector.split.first? || ""
-      case first[0]?
-      when '#'
-        %(id="#{first[1..]}")
-      when '.'
-        %(#{first[1..]}")
-      else
-        "<#{first}"
       end
     end
   end
