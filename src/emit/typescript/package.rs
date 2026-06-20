@@ -28,7 +28,7 @@ pub(super) fn emit_package_json() -> EmittedFile {
         )
     };
     let content = format!(
-        "{{\n  \"name\": \"app\",\n  \"version\": \"0.1.0\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": {{\n    \"start\": \"tsx main.ts\",\n    \"test\": \"tsx --test test/*.test.ts\"\n  }},\n  \"dependencies\": {{\n{db_dep}\n    \"ws\": \"^8.18.0\"\n  }},\n  \"devDependencies\": {{\n    \"@types/node\": \"^20\",\n{db_types_dep}    \"@types/ws\": \"^8.5.0\",\n    \"typescript\": \"5.7.3\",\n    \"tsx\": \"4.19.2\"\n  }}\n}}\n",
+        "{{\n  \"name\": \"app\",\n  \"version\": \"0.1.0\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": {{\n    \"start\": \"tsx main.ts\",\n    \"test\": \"tsx --test test/*.test.ts\"\n  }},\n  \"dependencies\": {{\n{db_dep}\n    \"linkedom\": \"^0.18.0\",\n    \"ws\": \"^8.18.0\"\n  }},\n  \"devDependencies\": {{\n    \"@types/node\": \"^20\",\n{db_types_dep}    \"@types/ws\": \"^8.5.0\",\n    \"typescript\": \"5.7.3\",\n    \"tsx\": \"4.19.2\"\n  }}\n}}\n",
     );
     EmittedFile {
         path: PathBuf::from("package.json"),
@@ -53,7 +53,8 @@ fn emit_worker_package_json() -> EmittedFile {
   },
   \"dependencies\": {
     \"@hotwired/turbo\": \"^8.0.0\",
-    \"@sqlite.org/sqlite-wasm\": \"^3.47.0-build1\"
+    \"@sqlite.org/sqlite-wasm\": \"^3.47.0-build1\",
+    \"linkedom\": \"^0.18.0\"
   },
   \"devDependencies\": {
     \"@tailwindcss/vite\": \"^4.0.0\",

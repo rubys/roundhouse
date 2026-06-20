@@ -24,6 +24,11 @@ const ESBUILD_BASE = `https://cdn.jsdelivr.net/npm/esbuild-wasm@${ESBUILD_VERSIO
 export const DEFAULT_CDN = {
   "@hotwired/turbo": "https://esm.sh/@hotwired/turbo@8",
   "@sqlite.org/sqlite-wasm": "https://esm.sh/@sqlite.org/sqlite-wasm@3.47.0-build1",
+  // assert_select's Dom engine in the worker-bundled test runtime
+  // (runtime/typescript/minitest-async.ts). esm.sh ships linkedom with
+  // its transitive deps (htmlparser2, css-select) pre-bundled into one
+  // worker-safe ESM, so it resolves as an external URL like the others.
+  "linkedom": "https://esm.sh/linkedom@0.18",
 };
 
 // The worker-profile entry points (relative to the emitted project root).
