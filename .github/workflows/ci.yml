@@ -631,6 +631,27 @@ jobs:
       - name: cargo test --test python_toolchain -- --ignored
         run: cargo test --test python_toolchain -- --ignored --nocapture
 
+  toolchain-csharp:
+    needs: generate-fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      # `dotnet build` of the emitted ASP.NET Core project — the C# analog of
+      # crystal's `--no-codegen` / go's `vet`: compiles the model layer, the
+      # transpiled framework runtime, and the primitives together.
+      - name: cargo test --test csharp_toolchain -- --ignored
+        run: cargo test --test csharp_toolchain -- --ignored --nocapture
+
   # -------------------------------------------------------------------
   # DOM equivalence: boot Rails + the target server side-by-side and
   # diff response bodies via tools/compare. The toolchain jobs above
@@ -747,6 +768,35 @@ jobs:
           working-directory: ./fixtures/real-blog
       - name: scripts/compare swift
         run: scripts/compare swift
+
+  # compare-csharp: DOM-diff the live Kestrel server against Rails. Needs Ruby
+  # (Rails reference) + the .NET SDK (scripts/compare builds with `dotnet build
+  # -c Release` and boots bin/Release/net10.0/roundhouse-app.dll). The sqlite
+  # native lib ships in the SQLitePCLRaw bundle, so no libsqlite3-dev needed.
+  compare-csharp:
+    needs: generate-fixture
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      # setup-ruby LAST so its MRI 3.4 wins PATH over the system Ruby when
+      # Rails boots — same ordering rationale as compare-kotlin/compare-swift.
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+          working-directory: ./fixtures/real-blog
+      - name: scripts/compare csharp
+        run: scripts/compare csharp
 
   compare-typescript:
     needs: generate-fixture
@@ -1263,6 +1313,35 @@ jobs:
           npx playwright install --with-deps chromium
       - name: scripts/smoke swift
         run: scripts/smoke --tgz browse/swift.tgz swift
+
+  # csharp: the archive's README § Build runs `dotnet build`, § Test runs
+  # `dotnet test` (no-op until a test project is emitted), and § End-to-end
+  # boots bin/Debug/net10.0/roundhouse-app.dll under Playwright — all 6 specs,
+  # including action_cable (live Turbo Streams over the /cable WebSocket).
+  # Needs the .NET SDK + Node for Playwright; build-site bakes static/assets/
+  # (turbo.min.js et al.) into the archive so Turbo and the cable boot.
+  smoke-csharp:
+    needs: build-site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: browse-archives
+          path: browse
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+      - name: Pre-warm Playwright (chromium + system deps)
+        run: |
+          cd e2e
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: scripts/smoke csharp
+        run: scripts/smoke --tgz browse/csharp.tgz csharp
 
   # spinel: the archive's README § Build AOT-compiles main.rb → build/blog
   # with the spinel toolchain (build-spinel artifact); § Test runs the
