@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Threading;
 using Microsoft.Data.Sqlite;
 
 namespace Roundhouse;
@@ -7,80 +9,103 @@ namespace Roundhouse;
 // The sqlite primitive layer the lowered model IR dispatches against
 // (`Db.prepare` / `Db.step` / `Db.columnInt` / `Db.columnText` /
 // `Db.escapeString` / `Db.escapeInt` / `Db.exec` / `Db.lastInsertRowid` /
-// `Db.finalize`). camelCase to match the emitter's rendering.
-//
-// Prepared-statement handles are `long`s (the emitter renders integer
-// literals with an `L` suffix, so the column-index args are `long`) mapped to
-// live `SqliteDataReader`s. A single shared connection backs the process; the
-// DB path comes from `BLOG_DB` / `DATABASE_PATH` (Rails-traditional default
+// `Db.finalize`). camelCase to match the emitter's rendering. Prepared-
+// statement handles are `long`s (the emitter renders integer literals with an
+// `L` suffix). The DB path comes from `BLOG_DB` / `DATABASE_PATH` (default
 // `storage/development.sqlite3`).
+//
+// Concurrency: reads use a BOUNDED connection pool (~cores), so the number of
+// open connections — and their per-connection WAL page cache — stays bounded
+// under load rather than growing one-per-Kestrel-thread (which balloons RSS).
+// The pool gate also caps concurrent DB work to the pool size. Writes (rare —
+// POST only) use a per-thread connection so `exec`(INSERT) and
+// `last_insert_rowid()` stay on the same connection; WAL + autocommit makes a
+// committed write visible to the read pool immediately.
 public static class Db
 {
-    private static SqliteConnection? _conn;
-    private static readonly Dictionary<long, SqliteDataReader> _readers = new();
+    private static string DbPath =>
+        Environment.GetEnvironmentVariable("BLOG_DB")
+        ?? Environment.GetEnvironmentVariable("DATABASE_PATH")
+        ?? "storage/development.sqlite3";
+
+    private static readonly int PoolSize = Math.Max(4, Environment.ProcessorCount);
+    private static readonly SemaphoreSlim Gate = new(PoolSize, PoolSize);
+    private static readonly ConcurrentBag<SqliteConnection> Pool = new();
+    private static readonly ConcurrentDictionary<long, (SqliteConnection conn, SqliteDataReader reader)> OpenReaders = new();
     private static long _nextHandle;
 
-    private static SqliteConnection Conn
+    [ThreadStatic] private static SqliteConnection? _writeConn;
+
+    private static SqliteConnection Open()
     {
-        get
-        {
-            if (_conn == null)
-            {
-                var path = Environment.GetEnvironmentVariable("BLOG_DB")
-                    ?? Environment.GetEnvironmentVariable("DATABASE_PATH")
-                    ?? "storage/development.sqlite3";
-                _conn = new SqliteConnection($"Data Source={path}");
-                _conn.Open();
-            }
-            return _conn;
-        }
+        var c = new SqliteConnection($"Data Source={DbPath}");
+        c.Open();
+        using var pragma = c.CreateCommand();
+        pragma.CommandText = "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;";
+        pragma.ExecuteNonQuery();
+        return c;
     }
 
-    // Prepare + execute a query, returning a handle to its result cursor.
+    private static SqliteConnection Rent()
+    {
+        Gate.Wait();
+        return Pool.TryTake(out var c) ? c : Open();
+    }
+
+    private static void ReturnConn(SqliteConnection c)
+    {
+        Pool.Add(c);
+        Gate.Release();
+    }
+
+    // Prepare + execute a read query, returning a handle to its cursor (and the
+    // rented connection it holds until `finalize`).
     public static long prepare(string sql)
     {
-        var cmd = Conn.CreateCommand();
+        var conn = Rent();
+        var cmd = conn.CreateCommand();
         cmd.CommandText = sql;
         var reader = cmd.ExecuteReader();
-        var handle = ++_nextHandle;
-        _readers[handle] = reader;
+        var handle = Interlocked.Increment(ref _nextHandle);
+        OpenReaders[handle] = (conn, reader);
         return handle;
     }
 
-    // Advance the cursor; false when exhausted.
-    public static bool step(long stmt) => _readers[stmt].Read();
+    public static bool step(long stmt) => OpenReaders[stmt].reader.Read();
 
     public static long columnInt(long stmt, long index)
     {
-        var r = _readers[stmt];
+        var r = OpenReaders[stmt].reader;
         return r.IsDBNull((int)index) ? 0L : Convert.ToInt64(r.GetValue((int)index));
     }
 
     public static string columnText(long stmt, long index)
     {
-        var r = _readers[stmt];
+        var r = OpenReaders[stmt].reader;
         return r.IsDBNull((int)index) ? "" : Convert.ToString(r.GetValue((int)index)) ?? "";
     }
 
     public static void finalize(long stmt)
     {
-        if (_readers.Remove(stmt, out var reader))
+        if (OpenReaders.TryRemove(stmt, out var e))
         {
-            reader.Dispose();
+            e.reader.Dispose();
+            ReturnConn(e.conn);
         }
     }
 
-    // Run a statement with no result set (INSERT/UPDATE/DELETE/DDL).
+    private static SqliteConnection WriteConn() => _writeConn ??= Open();
+
     public static void exec(string sql)
     {
-        var cmd = Conn.CreateCommand();
+        var cmd = WriteConn().CreateCommand();
         cmd.CommandText = sql;
         cmd.ExecuteNonQuery();
     }
 
     public static long lastInsertRowid()
     {
-        var cmd = Conn.CreateCommand();
+        var cmd = WriteConn().CreateCommand();
         cmd.CommandText = "SELECT last_insert_rowid()";
         return Convert.ToInt64(cmd.ExecuteScalar());
     }

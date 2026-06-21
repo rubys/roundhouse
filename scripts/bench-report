@@ -45,7 +45,7 @@ end
 
 # ── ordering / metadata ──────────────────────────────────────────────
 
-TARGET_ORDER = %w[rust crystal go kotlin swift spinel elixir typescript python ruby ruby-int jruby rails rails-int rails-jruby]
+TARGET_ORDER = %w[rust crystal go csharp-aot kotlin swift csharp spinel elixir typescript python ruby ruby-int jruby rails rails-int rails-jruby]
 ENDPOINT_ORDER = %w[/articles /articles/1 /articles/new /articles.json /articles/1.json]
 
 # Brand-ish but muted; enough contrast in greyscale.
@@ -53,8 +53,10 @@ COLOR = {
   'rust'       => '#b7410e',
   'crystal'    => '#1c1c1c',
   'go'         => '#00add8',
+  'csharp-aot' => '#512bd4',
   'kotlin'     => '#c711a8',
   'swift'      => '#f05138',
+  'csharp'     => '#8a6fe0',
   'spinel'     => '#7d4cdb',
   'elixir'     => '#4b275f',
   'typescript' => '#3178c6',
@@ -339,7 +341,7 @@ spread_ref = per_run && !per_run.empty? ? ' (the run-to-run spread is in the <a 
 
 html << <<~METHOD
   <div class="methodology">
-    <strong>Methodology.</strong> #{machine}. Toolchains pinned via <a href="https://mise.jdx.dev">mise</a>. Harness: <code>scripts/bench</code> — #{harness}; the median of the #{runs} runs is reported#{spread_ref}. Quiet machine throughout. The JVM cells (<code>jruby</code>, <code>kotlin</code>) run under a fixed JVM heap (<code>-Xmx512m=-Xms512m</code>): their RSS is a deliberate budget, not the JVM's default share of host RAM, so they stay comparable to the other cells' working sets.#{appendix_ref}
+    <strong>Methodology.</strong> #{machine}. Toolchains pinned via <a href="https://mise.jdx.dev">mise</a>. Harness: <code>scripts/bench</code> — #{harness}; the median of the #{runs} runs is reported#{spread_ref}. Quiet machine throughout. The managed-heap cells run under a fixed heap budget so their RSS is comparable to the other cells' working sets rather than the runtime's default share of host RAM: the JVM cells (<code>jruby</code>, <code>kotlin</code>) via <code>-Xmx512m=-Xms512m</code>, and the .NET cells (<code>csharp</code>, <code>csharp-aot</code>) via the equivalent <code>DOTNET_GCHeapHardLimit</code> (512&nbsp;MB).#{appendix_ref}
     <p class="caveat">These numbers measure one specific Rails reference app — not arbitrary Rails workloads. See <a href="https://github.com/rubys/roundhouse/issues/16">#16</a> for the fixture-fragility caveats.</p>
     #{(targets.include?('rails-jruby') ? %(<p class="caveat"><code>rails-jruby</code> is the stock-Rails-on-the-JVM baseline — the same blog, pinned to <strong>Rails 8.0</strong> (one minor behind the others' 8.1) on a <strong>prerelease</strong> AR-JDBC adapter (<code>activerecord-jdbcsqlite3-adapter 80.0.pre1</code>), the only combination that drives ActiveRecord on JRuby 10 today.</p>) : '')}
     #{(targets.include?('spinel') ? %(<p class="caveat"><code>spinel</code> runs the <em>same</em> Roundhouse-emitted framework as the CRuby <code>ruby</code> cell, but on the <a href="https://github.com/matz/spinel">Spinel</a> VM behind the Tep fiber server rather than CRuby + Puma — so the <code>ruby</code> → <code>spinel</code> gap is a runtime swap, not a framework or source change.</p>) : '')}
@@ -471,7 +473,7 @@ SVG
 # ── Section: memory footprint ────────────────────────────────────────
 
 html << "<h2>6. Memory footprint (RSS)</h2>\n"
-html << "<p>Max RSS observed across all endpoints, per target, sorted low to high. The field spans more than two orders of magnitude. The three JVM cells run under a fixed heap budget rather than an organically-grown working set — see the note below the chart.</p>\n"
+html << "<p>Max RSS observed across all endpoints, per target, sorted low to high. The field spans more than two orders of magnitude. The managed-heap cells (the JVM and .NET targets) run under a fixed heap budget rather than an organically-grown working set — see the note below the chart.</p>\n"
 
 mem_rows = targets.map do |tgt|
   max_rss = endpoints.map { |ep| by[ep][tgt]&.dig('rss_mb').to_f }.max
@@ -493,6 +495,9 @@ end
 html << svg_close
 if targets.include?('jruby')
   html << %(<p class="caveat">The JVM cells run under a fixed <code>-Xmx512m</code> heap, so the heap can't grab a host-dependent share of RAM; the rest is metaspace and code-cache, bounded by the app's class count rather than the box. Read the JVM bars as a pinned budget, not an organically-grown working set like the other cells.</p>\n)
+end
+if targets.include?('csharp') || targets.include?('csharp-aot')
+  html << %(<p class="caveat">The .NET cells are capped the same way — <code>DOTNET_GCHeapHardLimit</code> at 512&nbsp;MB, the <code>-Xmx</code> analog — so their RSS is a budget the GC collects within, not the host-proportional reservation Server GC takes by default. NativeAOT (<code>csharp-aot</code>) carries no JIT or warmup, so its working set is the leanest of the managed-heap cells.</p>\n)
 end
 
 # ── Section: latency ─────────────────────────────────────────────────

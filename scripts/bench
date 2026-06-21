@@ -121,7 +121,7 @@ fi
 NORMALIZED=()
 for t in "${TARGETS[@]}"; do
     case "$t" in
-        rails|rails-int|ruby|ruby-int|jruby|rails-jruby|typescript|crystal|rust|spinel|go|elixir|python|kotlin|swift) NORMALIZED+=("$t") ;;
+        rails|rails-int|ruby|ruby-int|jruby|rails-jruby|typescript|crystal|rust|spinel|go|elixir|python|kotlin|swift|csharp|csharp-aot) NORMALIZED+=("$t") ;;
         jr) NORMALIZED+=(jruby) ;;
         ts) NORMALIZED+=(typescript) ;;
         cr) NORMALIZED+=(crystal) ;;
@@ -131,8 +131,10 @@ for t in "${TARGETS[@]}"; do
         py) NORMALIZED+=(python) ;;
         kt) NORMALIZED+=(kotlin) ;;
         sw) NORMALIZED+=(swift) ;;
+        cs) NORMALIZED+=(csharp) ;;
+        cs-aot) NORMALIZED+=(csharp-aot) ;;
         *) echo "target not yet supported in this initial cut: $t" >&2
-           echo "supported: rails rails-int ruby ruby-int jruby rails-jruby typescript crystal rust spinel go elixir python kotlin swift" >&2; exit 2 ;;
+           echo "supported: rails rails-int ruby ruby-int jruby rails-jruby typescript crystal rust spinel go elixir python kotlin swift csharp csharp-aot" >&2; exit 2 ;;
     esac
 done
 TARGETS=("${NORMALIZED[@]}")
@@ -184,6 +186,11 @@ KT_OUT="/tmp/rh-kt-pass2"
 # BUILD_DIR). `swift build -c release` produces a single AOT binary;
 # main.swift reads BLOG_DB + PORT and serves via Hummingbird.
 SW_OUT="/tmp/rh-swift-pass2"
+# C# / .NET target — emit_preview writes here (matches scripts/compare's
+# BUILD_DIR). `csharp` runs the JIT build (dotnet build -c Release → the
+# DLL); `csharp-aot` runs the NativeAOT publish (a single native binary).
+# Program.cs/Server.cs/Db.cs read BLOG_DB + PORT and serve via Kestrel.
+CS_OUT="/tmp/rh-cs-pass2"
 # JDK for the kotlin build/run (non-interactive shells otherwise resolve an
 # older `java` via PATH). Honors $KOTLIN_JAVA_HOME, then an existing
 # $JAVA_HOME (e.g. mise's `mise where java`), then the macOS Homebrew path.
@@ -496,6 +503,49 @@ build_target() {
                 (cd "$SW_OUT" && swift build -c release >/dev/null) || return 1
             fi
             ;;
+        csharp)
+            # JIT: emit_preview → $CS_OUT, then `dotnet build -c Release` →
+            # bin/Release/net10.0/roundhouse-app.dll (run via `dotnet <dll>`).
+            TARGET_BUILD_DIR="$CS_OUT"
+            TARGET_GEMFILE=""
+            if (( SKIP_EMIT == 0 )) || [[ ! -f "$CS_OUT/Program.cs" ]]; then
+                step "regenerating csharp target (emit_preview)"
+                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target csharp "$FIXTURE" >/dev/null 2>&1) || return 1
+            fi
+            if (( SKIP_EMIT == 0 )) || [[ ! -f "$CS_OUT/bin/Release/net10.0/roundhouse-app.dll" ]]; then
+                step "building csharp target (dotnet build -c Release)"
+                (cd "$CS_OUT" && dotnet build -c Release -nologo -v q) || return 1
+            fi
+            ;;
+        csharp-aot)
+            # NativeAOT: emit_preview → $CS_OUT, then `dotnet publish` with
+            # PublishAot → a single native binary (publish-aot/roundhouse-app).
+            TARGET_BUILD_DIR="$CS_OUT"
+            TARGET_GEMFILE=""
+            if (( SKIP_EMIT == 0 )) || [[ ! -f "$CS_OUT/Program.cs" ]]; then
+                step "regenerating csharp target (emit_preview)"
+                (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target csharp "$FIXTURE" >/dev/null 2>&1) || return 1
+            fi
+            if (( SKIP_EMIT == 0 )) || [[ ! -x "$CS_OUT/publish-aot/roundhouse-app" ]]; then
+                local rid
+                case "$(uname -s)-$(uname -m)" in
+                    Darwin-arm64)   rid=osx-arm64 ;;
+                    Darwin-x86_64)  rid=osx-x64 ;;
+                    Linux-x86_64)   rid=linux-x64 ;;
+                    Linux-aarch64)  rid=linux-arm64 ;;
+                    *)              rid=osx-arm64 ;;
+                esac
+                # macOS: the NativeAOT link needs the keg-only openssl
+                # (libssl/libcrypto) + brotli on the linker path; clang honors
+                # LIBRARY_PATH. No-op on Linux (system libs on the default path).
+                local libpath=""
+                if [[ "$(uname -s)" == Darwin ]]; then
+                    libpath="$(brew --prefix openssl@3 2>/dev/null)/lib:/opt/homebrew/lib:/usr/local/lib"
+                fi
+                step "publishing csharp NativeAOT (dotnet publish -r $rid -p:PublishAot=true)"
+                (cd "$CS_OUT" && LIBRARY_PATH="$libpath" dotnet publish -c Release -r "$rid" -p:PublishAot=true -o publish-aot -nologo -v q) || return 1
+            fi
+            ;;
         rust)
             TARGET_BUILD_DIR="$RS_OUT"
             TARGET_GEMFILE=""
@@ -644,6 +694,12 @@ stage_db() {
             ;;
         swift)
             local db="$SW_OUT/storage/development.sqlite3"
+            mkdir -p "$(dirname "$db")"
+            rm -f "$db" "$db-wal" "$db-shm"
+            sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
+            ;;
+        csharp|csharp-aot)
+            local db="$CS_OUT/storage/development.sqlite3"
             mkdir -p "$(dirname "$db")"
             rm -f "$db" "$db-wal" "$db-shm"
             sqlite3 "$FIXTURE/storage/development.sqlite3" ".backup $db"
@@ -847,6 +903,35 @@ start_target() {
                 BLOG_DB="storage/development.sqlite3" \
                 PORT="$port" \
                 ./.build/release/App \
+                >"$log" 2>&1) &
+            TARGET_PID=$!
+            disown 2>/dev/null || true
+            ;;
+        csharp)
+            # .NET JIT (Kestrel) — single process, scheduler concurrency, no
+            # worker concept (workers=1 recorded like go/kotlin/swift). The
+            # GC heap is capped at 512 MB (DOTNET_GCHeapHardLimit, the -Xmx
+            # analog) so the RSS comparison is apples-to-apples with the JVM
+            # targets' -Xmx512m pin — without it Server GC reserves memory
+            # proportional to core count. Run the DLL via the runtime host.
+            (cd "$CS_OUT" && \
+                BLOG_DB="storage/development.sqlite3" \
+                PORT="$port" \
+                DOTNET_GCHeapHardLimit=0x20000000 \
+                dotnet bin/Release/net10.0/roundhouse-app.dll \
+                >"$log" 2>&1) &
+            TARGET_PID=$!
+            disown 2>/dev/null || true
+            ;;
+        csharp-aot)
+            # NativeAOT (Kestrel) — single native binary. Same 512 MB GC heap
+            # cap as the JIT cell (and the JVM targets) for an apples-to-apples
+            # RSS comparison.
+            (cd "$CS_OUT" && \
+                BLOG_DB="storage/development.sqlite3" \
+                PORT="$port" \
+                DOTNET_GCHeapHardLimit=0x20000000 \
+                ./publish-aot/roundhouse-app \
                 >"$log" 2>&1) &
             TARGET_PID=$!
             disown 2>/dev/null || true
