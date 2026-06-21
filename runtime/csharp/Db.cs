@@ -28,10 +28,13 @@ public static class Db
         ?? Environment.GetEnvironmentVariable("DATABASE_PATH")
         ?? "storage/development.sqlite3";
 
-    private static readonly int PoolSize = Math.Max(4, Environment.ProcessorCount);
+    // Clamp to [4, 16]: 16 concurrent readers already saturate SQLite, and an
+    // unbounded ProcessorCount pool means one connection (+ its WAL page cache)
+    // per core — hundreds of MB of baseline on a many-core host for no gain.
+    private static readonly int PoolSize = Math.Clamp(Environment.ProcessorCount, 4, 16);
     private static readonly SemaphoreSlim Gate = new(PoolSize, PoolSize);
     private static readonly ConcurrentBag<SqliteConnection> Pool = new();
-    private static readonly ConcurrentDictionary<long, (SqliteConnection conn, SqliteDataReader reader)> OpenReaders = new();
+    private static readonly ConcurrentDictionary<long, (SqliteConnection conn, SqliteCommand cmd, SqliteDataReader reader)> OpenReaders = new();
     private static long _nextHandle;
 
     [ThreadStatic] private static SqliteConnection? _writeConn;
@@ -59,7 +62,7 @@ public static class Db
     }
 
     // Prepare + execute a read query, returning a handle to its cursor (and the
-    // rented connection it holds until `finalize`).
+    // rented connection + command it holds until `finalize`).
     public static long prepare(string sql)
     {
         var conn = Rent();
@@ -67,7 +70,7 @@ public static class Db
         cmd.CommandText = sql;
         var reader = cmd.ExecuteReader();
         var handle = Interlocked.Increment(ref _nextHandle);
-        OpenReaders[handle] = (conn, reader);
+        OpenReaders[handle] = (conn, cmd, reader);
         return handle;
     }
 
@@ -85,11 +88,17 @@ public static class Db
         return r.IsDBNull((int)index) ? "" : Convert.ToString(r.GetValue((int)index)) ?? "";
     }
 
+    // Dispose BOTH the reader and the command — the command owns the native
+    // sqlite3_stmt, which `reader.Dispose()` only resets, not frees. Leaking
+    // the command lets prepared statements pile up in native memory faster
+    // than the GC finalizes the wrappers → unbounded RSS growth under load
+    // that no managed GC heap limit can cap.
     public static void finalize(long stmt)
     {
         if (OpenReaders.TryRemove(stmt, out var e))
         {
             e.reader.Dispose();
+            e.cmd.Dispose();
             ReturnConn(e.conn);
         }
     }
@@ -98,14 +107,14 @@ public static class Db
 
     public static void exec(string sql)
     {
-        var cmd = WriteConn().CreateCommand();
+        using var cmd = WriteConn().CreateCommand();
         cmd.CommandText = sql;
         cmd.ExecuteNonQuery();
     }
 
     public static long lastInsertRowid()
     {
-        var cmd = WriteConn().CreateCommand();
+        using var cmd = WriteConn().CreateCommand();
         cmd.CommandText = "SELECT last_insert_rowid()";
         return Convert.ToInt64(cmd.ExecuteScalar());
     }
