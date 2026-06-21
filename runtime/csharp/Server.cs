@@ -37,6 +37,9 @@ public static class Server
         builder.Logging.ClearProviders();
         builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
         var app = builder.Build();
+        // Action Cable rides the same Kestrel listener; UseWebSockets enables
+        // the upgrade so Dispatch can hand /cable off to the Cable handler.
+        app.UseWebSockets();
         app.Run(ctx => Dispatch(ctx, routes, controllers, layout));
         Console.WriteLine($"Roundhouse C# server listening on http://0.0.0.0:{port}");
         app.Run();
@@ -52,6 +55,20 @@ public static class Server
 
         var reqMethod = ctx.Request.Method;
         var path = ctx.Request.Path.Value ?? "/";
+
+        // Action Cable WebSocket — upgrade /cable and hand the socket to the
+        // Cable handler, negotiating the actioncable-v1-json subprotocol Turbo
+        // requires. Checked before route dispatch (the greedy app router would
+        // otherwise 404 it) and before ReadFormAsync (a WS request has no form).
+        if (path == "/cable" && ctx.WebSockets.IsWebSocketRequest)
+        {
+            var sub = ctx.WebSockets.WebSocketRequestedProtocols.Contains("actioncable-v1-json")
+                ? "actioncable-v1-json"
+                : null;
+            using var ws = await ctx.WebSockets.AcceptWebSocketAsync(sub);
+            await Cable.HandleAsync(ws);
+            return;
+        }
 
         // Compiled assets (/assets/tailwind.css, …) — served before route
         // dispatch so the greedy app router doesn't 404 them.

@@ -609,6 +609,7 @@ fn ships_e2e(target: BuildTarget) -> bool {
             | BuildTarget::Elixir
             | BuildTarget::Kotlin
             | BuildTarget::Swift
+            | BuildTarget::CSharp
             | BuildTarget::Ruby
             | BuildTarget::Jruby
             | BuildTarget::Spinel
@@ -675,6 +676,14 @@ fn ensure_e2e(
             "storage/development.sqlite3",
         ),
         BuildTarget::Swift => ("./.build/debug/App", "storage/development.sqlite3"),
+        // The README's `## Build` runs `dotnet build` (Debug); boot the
+        // produced DLL via the runtime host. Defaults to storage/
+        // development.sqlite3 when BLOG_DB is unset (seed.js seeds it) and
+        // reads PORT. /cable rides the same Kestrel listener (Action Cable).
+        BuildTarget::CSharp => (
+            "dotnet bin/Debug/net10.0/roundhouse-app.dll",
+            "storage/development.sqlite3",
+        ),
         // The server now defaults to storage/development.sqlite3 (Rails-
         // traditional) when BLOG_DB is unset, so the boot command is bare —
         // seed.js seeds that same path before this runs.
@@ -833,6 +842,7 @@ fn ensure_static_assets(
             | BuildTarget::Rust
             | BuildTarget::Spinel
             | BuildTarget::Swift
+            | BuildTarget::CSharp
             | BuildTarget::Typescript
             | BuildTarget::TypescriptWorker
     );

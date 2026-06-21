@@ -20,6 +20,7 @@ const ADAPTER_INTERFACE_CS: &str = include_str!("../../../runtime/csharp/Adapter
 const DB_CS: &str = include_str!("../../../runtime/csharp/Db.cs");
 const TIME_CS: &str = include_str!("../../../runtime/csharp/Time.cs");
 const BROADCASTS_CS: &str = include_str!("../../../runtime/csharp/Broadcasts.cs");
+const CABLE_CS: &str = include_str!("../../../runtime/csharp/Cable.cs");
 const RH_RUNTIME_CS: &str = include_str!("../../../runtime/csharp/RhRuntime.cs");
 const SERVER_CS: &str = include_str!("../../../runtime/csharp/Server.cs");
 
@@ -30,6 +31,7 @@ pub fn primitives() -> Vec<EmittedFile> {
         ("app/runtime/Db.cs", DB_CS),
         ("app/runtime/Time.cs", TIME_CS),
         ("app/runtime/Broadcasts.cs", BROADCASTS_CS),
+        ("app/runtime/Cable.cs", CABLE_CS),
         ("app/runtime/RhRuntime.cs", RH_RUNTIME_CS),
         ("app/runtime/Server.cs", SERVER_CS),
     ];
