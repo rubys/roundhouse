@@ -19,6 +19,7 @@
 //! characters land where the editor expects.
 
 use crate::app::App;
+use crate::dialect::{ControllerBodyItem, ModelBodyItem};
 use crate::expr::Expr;
 use crate::span::{FileId, SourceFile, Span};
 use crate::ty::{Row, Ty};
@@ -283,14 +284,24 @@ pub fn position_to_offset(text: &str, pos: Position) -> u32 {
     text.len() as u32
 }
 
-/// Every root body in the app whose subtree the analyzer types — the same
-/// set [`crate::analyze::diagnose`] walks: controller actions, model
-/// scopes and methods, view bodies, and `db/seeds.rb`.
+/// Every root body in the app whose subtree the analyzer types. Beyond
+/// the set [`crate::analyze::diagnose`] walks (controller actions, model
+/// scopes and methods, views, `db/seeds.rb`), this also visits the
+/// `Unknown` model/controller body items — the class-body DSL argument
+/// expressions (`broadcasts_to ->(_a) { "articles" }`, bare macro calls)
+/// that the analyzer types in its Phase-0 pass. Including them is what
+/// lets `type_at`/hover resolve *inside* class-level DSL, not only method
+/// bodies.
 fn root_bodies(app: &App) -> Vec<&Expr> {
     let mut roots = Vec::new();
     for controller in &app.controllers {
         for action in controller.actions() {
             roots.push(&action.body);
+        }
+        for item in &controller.body {
+            if let ControllerBodyItem::Unknown { expr, .. } = item {
+                roots.push(expr);
+            }
         }
     }
     for model in &app.models {
@@ -299,6 +310,11 @@ fn root_bodies(app: &App) -> Vec<&Expr> {
         }
         for method in model.methods() {
             roots.push(&method.body);
+        }
+        for item in &model.body {
+            if let ModelBodyItem::Unknown { expr, .. } = item {
+                roots.push(expr);
+            }
         }
     }
     for view in &app.views {
@@ -393,6 +409,32 @@ mod tests {
             position_to_offset(text, Position { line: 0, character: 99 }),
             2 // clamps to the newline at end of line 0
         );
+    }
+
+    /// Regression for the class-body DSL coverage gap: the
+    /// `broadcasts_to ->(_article) { "articles" }` lambda in
+    /// `app/models/article.rb` lives in a `ModelBodyItem::Unknown`, which
+    /// the analyzer types but `root_bodies` once skipped. Its string
+    /// literal must now resolve to `String`.
+    #[test]
+    fn type_at_reaches_class_body_dsl() {
+        use crate::analyze::Analyzer;
+        use crate::ingest::ingest_app;
+        use std::path::Path;
+
+        let (ingest_result, _) =
+            crate::ingest::prism::scope(|| ingest_app(Path::new("fixtures/real-blog")));
+        let mut app = ingest_result.expect("real-blog should ingest");
+        Analyzer::new(&app).analyze(&mut app);
+
+        let file = file_id(&app, "app/models/article.rb").expect("article.rb is a source");
+        let src = source(&app, file).unwrap();
+        let quote = src.text.find("\"articles\"").expect("broadcasts_to string literal");
+        // A byte inside the string literal (past the opening quote).
+        let info = type_at(&app, file, quote as u32 + 2)
+            .expect("class-body DSL string should now resolve to a typed node");
+        assert_eq!(info.display, "String");
+        assert!(!info.nilable);
     }
 
     /// End-to-end: ingest + analyze the real-blog fixture, then exercise
