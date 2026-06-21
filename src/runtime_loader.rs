@@ -1175,6 +1175,19 @@ const CSHARP_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
+    // Router: the (method, path) → (controller, action, params) matcher +
+    // its typed Route / MatchResult rows. Self-contained (no AR/AC deps).
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_dispatch/router.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_dispatch/router.rbs"),
+        rb_path: "runtime/ruby/action_dispatch/router.rb",
+        namespace: "",
+        out_path: "app/runtime/Router.cs",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
     // Flash + Session: the per-request state ActionController::Base holds.
     // Independent of the AR layer; needed before AC::Base (it instantiates
     // both and uses `@flash[:notice] = …`).

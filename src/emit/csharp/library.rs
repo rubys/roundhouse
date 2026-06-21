@@ -104,7 +104,6 @@ fn homogeneous_lit_type<'a>(mut elems: impl Iterator<Item = &'a Expr>) -> &'stat
 /// Render a Ruby `module X` (a set of class methods) as a C# `static class`.
 pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
     set_instance_prop_types(std::collections::HashMap::new());
-    set_current_class("");
     super::expr::set_object_tl_fields(HashSet::new());
     set_instance_props(HashSet::new());
     set_ivar_renames(std::collections::HashMap::new());
@@ -113,6 +112,9 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
         .and_then(|m| m.enclosing_class.as_ref())
         .map(|s| type_name(s.as_str()))
         .unwrap_or_default();
+    // `self` in a module function is the static class — set it so a sibling
+    // call (`Router.match` → `self.match_pattern`) resolves to `Router.…`.
+    set_current_class(&name);
     register_params_for(&name, methods);
     let mut out = format!("public static class {name} {{\n");
     for m in methods {
@@ -378,7 +380,8 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
 /// `class << self`) collapses to a static property.
 fn emit_static_class(lc: &LibraryClass, class_name: &str) -> String {
     set_instance_prop_types(std::collections::HashMap::new());
-    set_current_class("");
+    // `self` in a module function is the static class itself.
+    set_current_class(class_name);
     super::expr::set_object_tl_fields(HashSet::new());
     set_instance_props(HashSet::new());
     set_ivar_renames(std::collections::HashMap::new());

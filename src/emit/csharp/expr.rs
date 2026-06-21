@@ -1248,6 +1248,9 @@ fn emit_send(
             "end_with?" => return format!("{}.EndsWith({})", emit_expr(r), args_s[0]),
             "include?" => return format!("{}.Contains({})", emit_expr(r), args_s[0]),
             "join" => return format!("string.Join({}, {})", args_s[0], emit_expr(r)),
+            // `str.split(sep)` → C# `Split` materialized to a `List<string>`
+            // (Ruby `split` yields an Array; the runtime treats it as one).
+            "split" => return format!("{}.Split({}).ToList()", emit_expr(r), args_s[0]),
             _ => {}
         }
     }
