@@ -1149,6 +1149,32 @@ const CSHARP_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
+    // `base` before `errors`: errors.rb's `RecordInvalid#initialize` calls
+    // `record.errors` (a method on Base), which only resolves as a call once
+    // `ActiveRecordBase` is registered. base.rb only *raises* RecordNotFound/
+    // RecordInvalid (name-only), so it needs nothing from errors at emit time.
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/active_record/base.rb"),
+        rbs_src: include_str!("../runtime/ruby/active_record/base.rbs"),
+        rb_path: "runtime/ruby/active_record/base.rb",
+        namespace: "ActiveRecord",
+        out_path: "app/runtime/ActiveRecordBase.cs",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/active_record/errors.rb"),
+        rbs_src: include_str!("../runtime/ruby/active_record/errors.rbs"),
+        rb_path: "runtime/ruby/active_record/errors.rb",
+        namespace: "ActiveRecord",
+        out_path: "app/runtime/Errors.cs",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
 ];
 
 pub fn csharp_units<F>(mut transform: F) -> Result<Vec<RuntimeUnit>, String>

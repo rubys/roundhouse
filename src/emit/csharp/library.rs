@@ -27,7 +27,8 @@ use crate::ty::Ty;
 
 use super::expr::{
     begin_method, emit_expr, emit_stmt, hoisted_decls, register_method_params, set_current_class,
-    set_instance_prop_types, set_instance_props, set_param_names, set_returns_unit,
+    set_instance_prop_types, set_instance_props, set_ivar_renames, set_param_names,
+    set_returns_unit,
 };
 use super::naming::{camel, type_name};
 use super::ty::csharp_ty;
@@ -96,6 +97,7 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
     set_current_class("");
     super::expr::set_object_tl_fields(HashSet::new());
     set_instance_props(HashSet::new());
+    set_ivar_renames(std::collections::HashMap::new());
     let name = methods
         .first()
         .and_then(|m| m.enclosing_class.as_ref())
@@ -193,12 +195,30 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         }
         out.push_str(&format!("    {}\n", render_member(n, ty)));
     }
+    // A body ivar whose name collides with a same-named instance method
+    // (`@errors` + `def errors`) can't share that name in C#, so the ivar
+    // emits as a private renamed field (`_errors`) that every `@ivar`
+    // reference rewrites to. The method keeps the public name.
+    let methods_set = instance_method_names(lc);
+    let ivar_renames: std::collections::HashMap<String, String> = body_ivars
+        .keys()
+        .filter(|n| methods_set.contains(*n))
+        .map(|n| (n.clone(), format!("_{n}")))
+        .collect();
+    set_ivar_renames(ivar_renames.clone());
+
     let inferred_ivar_types = infer_body_ivar_types(&lc.methods);
     for n in body_ivars.keys() {
         if !prop_types.contains_key(n) && !inherited_props.contains(n) {
+            let (vis, field) = match ivar_renames.get(n) {
+                Some(renamed) => ("private", renamed.clone()),
+                None => ("public", n.clone()),
+            };
             match inferred_ivar_types.get(n) {
-                Some(ty) => out.push_str(&format!("    {}\n", render_member(n, ty))),
-                None => out.push_str(&format!("    public object? {n} = null;\n")),
+                Some(ty) => {
+                    out.push_str(&format!("    {}\n", render_member_vis(vis, &field, ty)))
+                }
+                None => out.push_str(&format!("    {vis} object? {field} = null;\n")),
             }
         }
     }
@@ -206,11 +226,13 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         out.push('\n');
     }
 
-    // Property/type registries for body emit.
+    // Property/type registries for body emit. Renamed (private) ivars are
+    // excluded — a self-send of that name resolves to the method, not a prop.
     let instance_props: HashSet<String> = prop_types
         .keys()
         .chain(body_ivars.keys())
         .chain(inherited_props.iter())
+        .filter(|n| !ivar_renames.contains_key(*n))
         .cloned()
         .collect();
     set_instance_props(instance_props);
@@ -306,11 +328,19 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     let mut inst_members = instance_member_names(lc);
     inst_members.extend(prop_types.keys().cloned());
     inst_members.extend(body_ivars.keys().cloned());
+    // Static methods that shadow an ancestor's static (`Article.find` over
+    // `Base.find`) take `new` (C# statics don't override — CS0108 otherwise).
+    let ancestor_statics = super::expr::ancestor_static_methods(&class_name);
     for m in class_methods.iter() {
         if m.name.as_str() != "schema_columns" && inst_members.contains(&member_name(m)) {
             continue;
         }
-        out.push_str(&indent_method(&emit_method(m, "static ")));
+        let modifier = if ancestor_statics.contains(&class_method_emitted_name(m)) {
+            "new static "
+        } else {
+            "static "
+        };
+        out.push_str(&indent_method(&emit_method(m, modifier)));
         out.push('\n');
     }
     let present: HashSet<String> = class_methods.iter().map(|m| member_name(m)).collect();
@@ -327,10 +357,23 @@ fn emit_static_class(lc: &LibraryClass, class_name: &str) -> String {
     set_current_class("");
     super::expr::set_object_tl_fields(HashSet::new());
     set_instance_props(HashSet::new());
+    set_ivar_renames(std::collections::HashMap::new());
     let accessor_props = class_accessor_props(&lc.methods);
     let mut out = format!("public static class {class_name} {{\n");
     for (n, ty) in &accessor_props {
-        out.push_str(&format!("    public static {} {n} = {};\n", csharp_ty(ty), default_for(ty)));
+        let cs = csharp_ty(ty);
+        // The `ActiveRecord.adapter` global is never assigned for C# (models go
+        // Db-direct). Default it to a throwing `NullAdapter` so it stays
+        // non-null (the dead Base defaults that read it compile without
+        // nullable-deref warnings, and throw if ever actually hit).
+        if cs == "AdapterInterface" {
+            out.push_str(&format!("    public static {cs} {n} = new NullAdapter();\n"));
+            continue;
+        }
+        // Other class-type slots defaulting to null need a nullable type.
+        let default = default_for(ty);
+        let cs = if default == "null" && !cs.ends_with('?') { format!("{cs}?") } else { cs };
+        out.push_str(&format!("    public static {cs} {n} = {default};\n"));
     }
     if !accessor_props.is_empty() {
         out.push('\n');
@@ -360,40 +403,40 @@ fn synth_inherited_finders(t: &str, present: &HashSet<String>) -> String {
             out.push('\n');
         }
     };
-    emit("all", format!("public static List<{t}> all() {{\n    return _adapterAll();\n}}\n"));
+    emit("all", format!("public new static List<{t}> all() {{\n    return _adapterAll();\n}}\n"));
     emit(
         "find",
         format!(
-            "public static {t} find(long id) {{\n    var result = _adapterFindById(id);\n    if (result == null) {{\n        throw new RecordNotFound($\"Couldn't find {t} with id={{id}}\");\n    }}\n    return result;\n}}\n"
+            "public new static {t} find(long id) {{\n    var result = _adapterFindById(id);\n    if (result == null) {{\n        throw new RecordNotFound($\"Couldn't find {t} with id={{id}}\");\n    }}\n    return result;\n}}\n"
         ),
     );
-    emit("count", "public static long count() {\n    return _adapterCount();\n}\n".to_string());
+    emit("count", "public new static long count() {\n    return _adapterCount();\n}\n".to_string());
     emit(
         "exists",
-        "public static bool exists(long id) {\n    return _adapterExistsById(id);\n}\n".to_string(),
+        "public new static bool exists(long id) {\n    return _adapterExistsById(id);\n}\n".to_string(),
     );
     emit(
         "last",
         format!(
-            "public static {t}? last() {{\n    var records = all();\n    return records.Count == 0 ? null : records[records.Count - 1];\n}}\n"
+            "public new static {t}? last() {{\n    var records = all();\n    return records.Count == 0 ? null : records[records.Count - 1];\n}}\n"
         ),
     );
     emit(
         "destroyAll",
         format!(
-            "public static List<{t}> destroyAll() {{\n    var records = all();\n    foreach (var it in records) {{ it.destroy(); }}\n    return records;\n}}\n"
+            "public new static List<{t}> destroyAll() {{\n    var records = all();\n    foreach (var it in records) {{ it.destroy(); }}\n    return records;\n}}\n"
         ),
     );
     emit(
         "create",
         format!(
-            "public static {t} create(Dictionary<string, object?>? attrs = null) {{\n    attrs ??= new Dictionary<string, object?>();\n    var instance = new {t}(attrs);\n    instance.save();\n    return instance;\n}}\n"
+            "public new static {t} create(Dictionary<string, object?>? attrs = null) {{\n    attrs ??= new Dictionary<string, object?>();\n    var instance = new {t}(attrs);\n    instance.save();\n    return instance;\n}}\n"
         ),
     );
     emit(
         "createBang",
         format!(
-            "public static {t} createBang(Dictionary<string, object?>? attrs = null) {{\n    attrs ??= new Dictionary<string, object?>();\n    var instance = new {t}(attrs);\n    if (!instance.save()) {{\n        throw new RecordInvalid(instance);\n    }}\n    return instance;\n}}\n"
+            "public new static {t} createBang(Dictionary<string, object?>? attrs = null) {{\n    attrs ??= new Dictionary<string, object?>();\n    var instance = new {t}(attrs);\n    if (!instance.save()) {{\n        throw new RecordInvalid(instance);\n    }}\n    return instance;\n}}\n"
         ),
     );
     out
@@ -457,6 +500,23 @@ pub fn register_class_hierarchy(classes: &[LibraryClass]) {
         let parent = lc.parent.as_ref().map(|p| type_name(p.0.as_str()));
         super::expr::register_class_hierarchy(&name, parent.as_deref(), instance_member_names(lc));
         super::expr::register_instance_methods(&name, instance_method_names(lc));
+        let statics: HashSet<String> = lc
+            .methods
+            .iter()
+            .filter(|m| m.receiver == MethodReceiver::Class)
+            .map(class_method_emitted_name)
+            .collect();
+        super::expr::register_static_methods(&name, statics);
+    }
+}
+
+/// The C# name a class (static) method emits under — `schema_columns` is
+/// renamed to avoid colliding with the virtual instance `schemaColumns()`.
+fn class_method_emitted_name(m: &MethodDef) -> String {
+    if m.name.as_str() == "schema_columns" {
+        "schemaColumnsList".to_string()
+    } else {
+        camel(m.name.as_str())
     }
 }
 
@@ -487,6 +547,7 @@ fn emit_constructor(class_name: &str, m: &MethodDef) -> String {
     begin_method(&m.body);
     set_param_names(m.params.iter().map(|p| camel(p.name.as_str())).collect());
     set_returns_unit(true);
+    super::expr::set_in_static(false);
     // Drop the `super(...)` call from the body (it's in the base clause) and
     // render the rest as statements.
     let body = emit_body_no_super(&m.body);
@@ -514,6 +575,7 @@ fn emit_indexer(modifier: &str, getter: Option<&MethodDef>, setter: Option<&Meth
         .map(|p| camel(p.name.as_str()))
         .unwrap_or_else(|| "name".to_string());
 
+    super::expr::set_in_static(false);
     let mut accessors = String::new();
     if let Some(g) = getter {
         begin_method(&g.body);
@@ -611,6 +673,9 @@ fn emit_method(m: &MethodDef, modifier: &str) -> String {
     begin_method(&m.body);
     set_param_names(m.params.iter().map(|p| camel(p.name.as_str())).collect());
     set_returns_unit(!returns_value);
+    // `self` in a static method is the class — render `self.x()` as
+    // `Class.x()`, not `this.x()` (illegal in a C# static member).
+    super::expr::set_in_static(modifier.contains("static"));
 
     let body = if returns_value && is_empty_body(&m.body) {
         let ret = ret_ty.clone().unwrap_or(Ty::Untyped);
@@ -1029,7 +1094,16 @@ fn literal_ty(e: &Expr) -> Option<Ty> {
 /// Render an auto-property with a default initializer (C# requires non-null
 /// reference props be initialized).
 fn render_member(name: &str, ty: &Ty) -> String {
-    format!("public {} {name} {{ get; set; }} = {};", csharp_ty(ty), default_for(ty))
+    render_member_vis("public", name, ty)
+}
+
+fn render_member_vis(vis: &str, name: &str, ty: &Ty) -> String {
+    let cs = csharp_ty(ty);
+    let default = default_for(ty);
+    // A reference-typed property defaulting to `null` (a slot populated later,
+    // e.g. RecordInvalid's `@record`) must be nullable to avoid CS8625.
+    let cs = if default == "null" && !cs.ends_with('?') { format!("{cs}?") } else { cs };
+    format!("{vis} {cs} {name} {{ get; set; }} = {default};")
 }
 
 fn default_for(ty: &Ty) -> String {

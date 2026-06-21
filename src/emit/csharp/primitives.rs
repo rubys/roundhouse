@@ -14,21 +14,21 @@ use std::path::PathBuf;
 
 use crate::emit::EmittedFile;
 
-const ACTIVE_RECORD_BASE_CS: &str = include_str!("../../../runtime/csharp/ActiveRecordBase.cs");
+// `ActiveRecordBase` and `Errors` are now transpiled from `runtime/ruby/` (see
+// `CSHARP_RUNTIME`), so they're no longer shipped as hand-written primitives.
+const ADAPTER_INTERFACE_CS: &str = include_str!("../../../runtime/csharp/AdapterInterface.cs");
 const DB_CS: &str = include_str!("../../../runtime/csharp/Db.cs");
 const TIME_CS: &str = include_str!("../../../runtime/csharp/Time.cs");
 const BROADCASTS_CS: &str = include_str!("../../../runtime/csharp/Broadcasts.cs");
-const ERRORS_CS: &str = include_str!("../../../runtime/csharp/Errors.cs");
 const RH_RUNTIME_CS: &str = include_str!("../../../runtime/csharp/RhRuntime.cs");
 
 /// The hand-written runtime primitives, emitted under `app/runtime/`.
 pub fn primitives() -> Vec<EmittedFile> {
     let files = [
-        ("app/runtime/ActiveRecordBase.cs", ACTIVE_RECORD_BASE_CS),
+        ("app/runtime/AdapterInterface.cs", ADAPTER_INTERFACE_CS),
         ("app/runtime/Db.cs", DB_CS),
         ("app/runtime/Time.cs", TIME_CS),
         ("app/runtime/Broadcasts.cs", BROADCASTS_CS),
-        ("app/runtime/Errors.cs", ERRORS_CS),
         ("app/runtime/RhRuntime.cs", RH_RUNTIME_CS),
     ];
     files

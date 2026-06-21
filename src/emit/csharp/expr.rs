@@ -84,6 +84,50 @@ thread_local! {
     /// camelCased `@ivar` names of the current object/module that hold mutable
     /// singleton state — emitted as a thread-local (`name.Value`).
     static OBJECT_TL_FIELDS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// `@ivar` (camelCased) → the C# field name to read/write it as, when the
+    /// ivar's natural name collides with a same-named method (C# forbids a
+    /// property and method sharing a name — `base.rb`'s `@errors` + `errors`).
+    /// The colliding ivar emits as a private renamed field.
+    static IVAR_RENAMES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+}
+
+pub(super) fn set_ivar_renames(m: HashMap<String, String>) {
+    IVAR_RENAMES.with(|r| *r.borrow_mut() = m);
+}
+
+thread_local! {
+    /// True while emitting a `static` (class) method body — `self` there is
+    /// the class, not an instance, so `self.x()` must render as `Class.x()`
+    /// (C# forbids `this` in a static member).
+    static IN_STATIC: RefCell<bool> = const { RefCell::new(false) };
+}
+
+pub(super) fn set_in_static(b: bool) {
+    IN_STATIC.with(|s| *s.borrow_mut() = b);
+}
+
+fn in_static() -> bool {
+    IN_STATIC.with(|s| *s.borrow())
+}
+
+/// Map a Ruby stdlib exception class to its C# analog (app/runtime exception
+/// classes like `RecordNotFound` pass through unchanged).
+fn map_exception_class(name: &str) -> String {
+    match name {
+        "NotImplementedError" => "NotImplementedException".to_string(),
+        "ArgumentError" => "ArgumentException".to_string(),
+        "RuntimeError" | "StandardError" => "Exception".to_string(),
+        "TypeError" => "InvalidCastException".to_string(),
+        "KeyError" | "IndexError" => "KeyNotFoundException".to_string(),
+        other => type_name(other),
+    }
+}
+
+/// The C# field name an `@ivar` reads/writes as — its camelCase name, or the
+/// collision-avoiding rename when one is registered.
+fn ivar_name(name: &str) -> String {
+    let c = camel(name);
+    IVAR_RENAMES.with(|r| r.borrow().get(&c).cloned()).unwrap_or(c)
 }
 
 pub(super) fn set_object_tl_fields(names: HashSet<String>) {
@@ -210,6 +254,40 @@ fn kwargs_match_params(recv: Option<&Expr>, method: &str, keys: &[String]) -> bo
 
 pub(super) fn register_instance_methods(name: &str, methods: HashSet<String>) {
     CLASS_INSTANCE_METHODS.with(|m| m.borrow_mut().insert(name.to_string(), methods));
+}
+
+thread_local! {
+    /// Class simple name → its emitted *static* method names. A model static
+    /// (`Article.find`) that matches a name an ancestor also defines as a
+    /// static (`Base.find`) HIDES it in C# (statics don't override), which
+    /// warns CS0108 unless marked `new`.
+    static CLASS_STATIC_METHODS: RefCell<HashMap<String, HashSet<String>>> =
+        RefCell::new(HashMap::new());
+}
+
+pub(super) fn register_static_methods(name: &str, methods: HashSet<String>) {
+    CLASS_STATIC_METHODS.with(|m| m.borrow_mut().insert(name.to_string(), methods));
+}
+
+/// The static method names visible from `class_name`'s *ancestors* (walking
+/// parents, excluding the class itself) — the set a static must mark `new` to
+/// shadow without a warning.
+pub(super) fn ancestor_static_methods(class_name: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut cur = CLASS_HIERARCHY
+        .with(|h| h.borrow().get(class_name).and_then(|(p, _)| p.clone()));
+    let mut guard = 0;
+    while let Some(name) = cur {
+        guard += 1;
+        if guard > 32 {
+            break;
+        }
+        if let Some(set) = CLASS_STATIC_METHODS.with(|m| m.borrow().get(&name).cloned()) {
+            out.extend(set);
+        }
+        cur = CLASS_HIERARCHY.with(|h| h.borrow().get(&name).and_then(|(p, _)| p.clone()));
+    }
+    out
 }
 
 fn instance_prop_ty(name: &str) -> Option<crate::ty::Ty> {
@@ -692,10 +770,16 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
             if is_object_tl_field(&n) {
                 format!("{n}.Value")
             } else {
-                nonnull_read(n)
+                nonnull_read(ivar_name(name.as_str()))
             }
         }
-        ExprNode::SelfRef => "this".to_string(),
+        ExprNode::SelfRef => {
+            if in_static() {
+                CURRENT_CLASS.with(|c| c.borrow().clone())
+            } else {
+                "this".to_string()
+            }
+        }
         ExprNode::Const { path } => {
             let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
             type_name(&joined)
@@ -1100,7 +1184,11 @@ fn emit_send(
     if method == "raise" && recv.is_none() && !args.is_empty() {
         if let ExprNode::Const { path } = &*args[0].node {
             let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-            let cls = if joined.is_empty() { "Exception".to_string() } else { type_name(&joined) };
+            let cls = if joined.is_empty() {
+                "Exception".to_string()
+            } else {
+                map_exception_class(&joined)
+            };
             return format!("throw new {cls}({})", args_s[1..].join(", "));
         }
         return format!("throw new Exception({})", args_s.join(", "));
@@ -1575,7 +1663,7 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
 fn lvalue_ref(target: &LValue) -> String {
     match target {
         LValue::Var { name, .. } => camel(name.as_str()),
-        LValue::Ivar { name } => format!("this.{}", camel(name.as_str())),
+        LValue::Ivar { name } => format!("this.{}", ivar_name(name.as_str())),
         LValue::Attr { recv, name } => format!("{}.{}", emit_expr(recv), camel(name.as_str())),
         LValue::Index { recv, index } => format!("{}[{}]", emit_expr(recv), emit_expr(index)),
         LValue::Const { path } => path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("."),

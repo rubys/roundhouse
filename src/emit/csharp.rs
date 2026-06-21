@@ -48,13 +48,6 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     expr::reset_object_accessors();
     expr::reset_method_params();
 
-    // Register the hand-written `ActiveRecordBase`'s members so a model that
-    // extends it (Article → ApplicationRecord → ActiveRecordBase) marks the
-    // framework methods it overrides with `override` (the C# requirement).
-    // These names must match the `virtual` members in
-    // `runtime/csharp/ActiveRecordBase.cs`.
-    register_runtime_base();
-
     // Transpiled framework runtime — `runtime/ruby/*.rb` → C# under
     // `app/runtime/`. Grown one file at a time (Phase 3); the pre-scan
     // registers each runtime class's object accessors + hierarchy before any
@@ -126,48 +119,6 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     }
 
     files
-}
-
-/// Register `ActiveRecordBase`'s member + zero-arg-method names so the model
-/// emitter resolves `override` against the hand-written base. Kept in sync
-/// with `runtime/csharp/ActiveRecordBase.cs`.
-fn register_runtime_base() {
-    // Members a model overrides (must be `virtual` in the base, with a
-    // base-compatible signature). `get`/`set` are the indexer accessors.
-    let overridable: std::collections::HashSet<String> = [
-        "id",
-        "get",
-        "set",
-        "assignFromRow",
-        "attributes",
-        "fillTimestamps",
-        "validate",
-        "_adapterInsert",
-        "_adapterUpdate",
-        "_adapterDelete",
-        "_adapterReload",
-        "beforeDestroy",
-        "domPrefix",
-        "afterCreateCommit",
-        "afterUpdateCommit",
-        "afterDestroyCommit",
-        "schemaColumns",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-    expr::register_class_hierarchy("ActiveRecordBase", None, overridable);
-
-    // Zero-arg instance methods, so a typed-receiver send keeps its `()`
-    // (`comment.destroy()`).
-    let methods: std::collections::HashSet<String> = [
-        "save", "destroy", "reload", "validate", "attributes", "errors", "persisted",
-        "markPersistedBang", "domId", "domPrefix",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-    expr::register_instance_methods("ActiveRecordBase", methods);
 }
 
 /// Emit `app/views/ViewStubs.cs` — one `static class` per view module, with a
