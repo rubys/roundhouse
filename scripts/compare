@@ -115,8 +115,9 @@ case "$TARGET" in
     spinel|sp)     TARGET=spinel ;;
     kotlin|kt)     TARGET=kotlin ;;
     swift|sw)      TARGET=swift ;;
+    csharp|cs)     TARGET=csharp ;;
     *)
-        echo "unsupported target: $TARGET (want typescript, rust, python, go, crystal, elixir, ruby, jruby, kotlin, swift, or spinel)" >&2
+        echo "unsupported target: $TARGET (want typescript, rust, python, go, crystal, elixir, ruby, jruby, kotlin, swift, csharp, or spinel)" >&2
         exit 2
         ;;
 esac
@@ -142,7 +143,7 @@ if [[ ${#PATHS[@]} -eq 0 ]]; then
     # runtime/typescript/server.ts:206-217, runtime/python/server.py:95-102,
     # and runtime/spinel/scaffold/main.rb:82-93 for the pattern).
     case "$TARGET" in
-        ruby|jruby|spinel|typescript|crystal|go|rust|kotlin|swift|python)
+        ruby|jruby|spinel|typescript|crystal|go|rust|kotlin|swift|csharp|python)
             PATHS+=(/articles.json /articles/1.json)
             ;;
         elixir)
@@ -192,6 +193,10 @@ case "$TARGET" in
         ;;
     swift)
         BUILD_DIR="/tmp/rh-swift-pass2"
+        DB_DEST="$BUILD_DIR/storage/development.sqlite3"
+        ;;
+    csharp)
+        BUILD_DIR="/tmp/rh-cs-pass2"
         DB_DEST="$BUILD_DIR/storage/development.sqlite3"
         ;;
     elixir)
@@ -394,6 +399,12 @@ case "$TARGET" in
         step "building swift target (swift build -c release)"
         (cd "$BUILD_DIR" && swift build -c release 2>&1 | tail -2)
         ;;
+    csharp)
+        # `dotnet build -c Release` → bin/Release/net10.0/roundhouse-app.dll,
+        # run directly below. Restores NuGet packages on first build.
+        step "building csharp target (dotnet build -c Release)"
+        (cd "$BUILD_DIR" && dotnet build -c Release -nologo -v q)
+        ;;
     elixir)
         step "building elixir target"
         (cd "$BUILD_DIR" && mix deps.get && MIX_ENV=prod mix compile)
@@ -486,6 +497,12 @@ if [[ -z "$TARGET_CMD" ]]; then
         swift)
             # The release binary reads BLOG_DB + PORT (main.swift).
             (cd "$BUILD_DIR" && BLOG_DB="$DB_DEST" PORT="$TARGET_PORT" ./.build/release/App >"$TARGET_LOG" 2>&1) &
+            TARGET_PID=$!
+            ;;
+        csharp)
+            # Run the built DLL directly (reads BLOG_DB + PORT in Program.cs/
+            # Server.cs / Db.cs). `dotnet <dll>` avoids a `dotnet run` rebuild.
+            (cd "$BUILD_DIR" && BLOG_DB="$DB_DEST" PORT="$TARGET_PORT" dotnet bin/Release/net10.0/roundhouse-app.dll >"$TARGET_LOG" 2>&1) &
             TARGET_PID=$!
             ;;
         elixir)
