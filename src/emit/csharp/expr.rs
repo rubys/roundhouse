@@ -1539,6 +1539,12 @@ fn emit_call_args(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
 /// else as an expression-statement terminated with `;`. Empty/`nil` no-ops
 /// render to the empty string.
 pub(super) fn emit_stmt(e: &Expr) -> String {
+    // The view string-builder sites (`io = String.new`, `io << chunk`) are
+    // statements — route them through `try_string_builder` so the init emits
+    // `var io = new StringBuilder()` (else `io` is a bare `string`).
+    if let Some(s) = try_string_builder(e) {
+        return format!("{s};");
+    }
     match &*e.node {
         ExprNode::Seq { exprs } => exprs
             .iter()

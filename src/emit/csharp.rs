@@ -16,7 +16,7 @@
 //! reference view modules); controllers + the transpiled framework runtime
 //! land in Phase 3. See `docs/csharp-migration-plan.md`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use super::EmittedFile;
 use crate::App;
@@ -88,31 +88,58 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         files.push(library::emit_class_file(lc));
     }
 
-    // Shared lowering extras: the model registry + the (preliminary) view
-    // class info, so controller/jbuilder bodies dispatch model attributes and
-    // view-module calls.
-    let mut base_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
+    // Shared lowering extras for views/jbuilder/controllers: the model
+    // registry + (preliminary) view class info + route-helper + importmap
+    // function signatures.
+    let mut view_lower_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
         model_registry.into_iter().collect();
-    base_extras.extend(crate::lower::extras_from_lcs(&preliminary_views));
+    view_lower_extras.extend(crate::lower::extras_from_lcs(&preliminary_views));
 
-    // Route helpers (`RouteHelpers.article_path(id)`) → a `static class`. The
-    // controllers' redirects/links dispatch against these.
+    // Route helpers (`RouteHelpers.article_path(id)`) → a `static class`.
     let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
+    view_lower_extras.extend(crate::lower::extras_from_funcs(&route_helper_funcs));
     if let Some(f) = library::emit_function_module(&route_helper_funcs) {
         files.push(f);
     }
 
-    // Jbuilder (`.json.jbuilder`) view render methods — lowered only to harvest
-    // their method names (`indexJson`, `showJson`) for the view stubs the
-    // controllers' JSON branches call.
+    // Importmap (`javascript_importmap_tags`) helpers → a `static class`.
+    let importmap_funcs = crate::lower::lower_importmap_to_library_functions(app);
+    view_lower_extras.extend(crate::lower::extras_from_funcs(&importmap_funcs));
+    if let Some(f) = library::emit_function_module(&importmap_funcs) {
+        files.push(f);
+    }
+
+    // Views: each ERB template lowers to a string-builder render method on its
+    // `Views::<Plural>` module; jbuilder templates lower to `<name>_json`
+    // methods on the same module. C# static classes can't be reopened, so the
+    // per-template LibraryClasses merge into one `static class <Plural>` per
+    // module, emitted to app/views/.
+    let view_lcs =
+        crate::lower::lower_views_to_library_classes(&app.views, app, view_lower_extras.clone());
     let jbuilder_lcs =
-        crate::lower::lower_jbuilder_to_library_classes(&app.views, app, base_extras.clone());
+        crate::lower::lower_jbuilder_to_library_classes(&app.views, app, view_lower_extras.clone());
+    let mut all_view_lcs = view_lcs.clone();
+    all_view_lcs.extend(jbuilder_lcs);
+    let merged_views = merge_by_module(all_view_lcs);
+    library::register_class_hierarchy(&merged_views);
+    // Register the view-module methods so a controller's `Articles.new(...)` /
+    // `Articles.index(...)` resolves as a method call, not a constructor.
+    for lc in &merged_views {
+        let module = naming::type_name(lc.name.0.as_str());
+        for m in &lc.methods {
+            let params = m.params.iter().map(|p| naming::camel(p.name.as_str())).collect();
+            expr::register_method_params(&module, m.name.as_str(), params);
+        }
+    }
+    for lc in &merged_views {
+        files.push(library::emit_class_file_in(lc, "app/views"));
+    }
 
     // Controllers. The synthesized `<Resource>Params` siblings are origin-
-    // tagged and route to `app/models` alongside the models; the real
-    // controllers route to `app/controllers`.
-    let mut controller_extras = base_extras;
-    controller_extras.extend(crate::lower::extras_from_funcs(&route_helper_funcs));
+    // tagged and route to `app/models`; the real controllers to
+    // `app/controllers`.
+    let mut controller_extras = view_lower_extras;
+    controller_extras.extend(crate::lower::extras_from_lcs(&view_lcs));
     let assocs = crate::lower::model_associations::compute_association_graph(app);
     let controller_lcs = crate::lower::lower_controllers_with_arel_views_and_assocs(
         &app.controllers,
@@ -136,28 +163,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         });
     }
 
-    // Register the view-module methods so a controller's `Articles.new(...)` /
-    // `Articles.index(...)` resolves as a *method call*, not a constructor
-    // (the views themselves are stubbed until Phase 4).
-    for lc in preliminary_views.iter().chain(jbuilder_lcs.iter()) {
-        let module = naming::type_name(lc.name.0.as_str());
-        for m in &lc.methods {
-            let params = m.params.iter().map(|p| naming::camel(p.name.as_str())).collect();
-            expr::register_method_params(&module, m.name.as_str(), params);
-        }
-    }
-
     library::register_class_hierarchy(&controller_lcs);
     for lc in &controller_lcs {
         let dir = if lc.origin.is_some() { "app/models" } else { "app/controllers" };
         files.push(library::emit_class_file_in(lc, dir));
-    }
-
-    // View stubs (html + jbuilder method names): the broadcast callbacks and
-    // controller render branches reference view modules whose real
-    // string-builder renderers land in Phase 4. Stub each so the app compiles.
-    if let Some(stub) = emit_view_stubs(&preliminary_views, &jbuilder_lcs) {
-        files.push(stub);
     }
 
     // Program.cs — the entry point wiring the routes table + controller factory
@@ -231,42 +240,21 @@ fn route_table_literals(app: &App) -> (Vec<String>, Vec<String>) {
     (route_lines, ctrl_lines)
 }
 
-/// Emit `app/views/ViewStubs.cs` — one `static class` per view module, with a
-/// `params object?[]`-accepting stub per method (html + jbuilder/JSON),
-/// returning `""`. The model broadcast callbacks + the controllers' render
-/// branches call these; Phase 4 replaces the stubs with the real
-/// string-builder view renderers.
-fn emit_view_stubs(
-    preliminary_views: &[crate::dialect::LibraryClass],
-    jbuilder_lcs: &[crate::dialect::LibraryClass],
-) -> Option<EmittedFile> {
-    let mut by_module: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for lc in preliminary_views.iter().chain(jbuilder_lcs.iter()) {
-        let module = naming::type_name(lc.name.0.as_str());
-        let methods = by_module.entry(module).or_default();
-        for m in &lc.methods {
-            methods.insert(naming::camel(m.name.as_str()));
+/// Merge `LibraryClass`es that share a module name into one (concatenating
+/// their methods), preserving first-seen order. The view lowerer produces one
+/// LC per template, several sharing a `Views::<Plural>` name; C# `static
+/// class`es can't be reopened across declarations, so they collapse into a
+/// single class before emit.
+fn merge_by_module(
+    lcs: Vec<crate::dialect::LibraryClass>,
+) -> Vec<crate::dialect::LibraryClass> {
+    let mut merged: Vec<crate::dialect::LibraryClass> = Vec::new();
+    for lc in lcs {
+        if let Some(existing) = merged.iter_mut().find(|m| m.name == lc.name) {
+            existing.methods.extend(lc.methods);
+        } else {
+            merged.push(lc);
         }
     }
-    if by_module.is_empty() {
-        return None;
-    }
-    let mut content = String::from(
-        "// Generated by Roundhouse (csharp). Phase-2 view stubs — the model\n\
-         // broadcast callbacks reference these; Phase 4 emits the real views.\n\n\
-         namespace Roundhouse;\n\n",
-    );
-    for (module, methods) in by_module {
-        content.push_str(&format!("public static class {module} {{\n"));
-        for m in methods {
-            content.push_str(&format!(
-                "    public static string {m}(params object?[] args) => \"\";\n"
-            ));
-        }
-        content.push_str("}\n\n");
-    }
-    Some(EmittedFile {
-        path: std::path::PathBuf::from("app/views/ViewStubs.cs"),
-        content,
-    })
+    merged
 }
