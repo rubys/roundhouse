@@ -24,6 +24,10 @@ pub mod lower;
 /// wasm build.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod lsp;
+/// MCP server exposing the [`ide`] query layer + lowering gaps as agent
+/// tools. Host-only (stdio JSON-RPC); excluded from the wasm build.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mcp;
 pub mod naming;
 pub mod profile;
 #[cfg(not(target_arch = "wasm32"))]
