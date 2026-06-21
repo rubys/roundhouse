@@ -19,7 +19,12 @@ ruby-prism = "1.9.0"
 ruby-rbs = "0.3"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-# (none yet)
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# LSP server: rust-analyzer's *synchronous* transport crate (no tokio —
+# keeps the analysis engine sync). Host-only; the wasm build excludes it.
+lsp-server = "0.7.9"
+lsp-types = "0.97"
 
 [build-dependencies]
 # (none yet)

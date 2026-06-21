@@ -121,6 +121,27 @@ fn covers(span: Span, file: FileId, offset: u32) -> bool {
     span.file == file && span.start <= offset && offset < span.end
 }
 
+/// Visit every node whose span overlaps the byte range `[start, end)` in
+/// `file`, in pre-order. The range-scoped counterpart of
+/// [`find_at_offset`], for consumers that decorate a viewport rather than
+/// a point — inlay hints, semantic tokens. Synthetic-span nodes never
+/// overlap a real file and are skipped.
+pub fn nodes_in_range<'a>(
+    app: &'a App,
+    file: FileId,
+    start: u32,
+    end: u32,
+    f: &mut dyn FnMut(&'a Expr),
+) {
+    for root in root_bodies(app) {
+        walk(root, &mut |e| {
+            if e.span.file == file && e.span.start < end && start < e.span.end {
+                f(e);
+            }
+        });
+    }
+}
+
 fn describe(expr: &Expr) -> TypeAt {
     TypeAt {
         span: expr.span,

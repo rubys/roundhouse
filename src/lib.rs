@@ -19,6 +19,11 @@ pub mod ide;
 pub mod ident;
 pub mod ingest;
 pub mod lower;
+/// Standalone read-only LSP server over the [`ide`] query layer. Host-only
+/// (uses stdio + the synchronous `lsp-server` transport); excluded from the
+/// wasm build.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod lsp;
 pub mod naming;
 pub mod profile;
 #[cfg(not(target_arch = "wasm32"))]
