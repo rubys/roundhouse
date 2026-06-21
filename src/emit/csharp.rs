@@ -88,14 +88,31 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         files.push(library::emit_class_file(lc));
     }
 
-    // The synthesized `<Resource>Params` classes (which models reference in
-    // `update`/`from_params`) come from the controller lowering, origin-tagged
-    // to route to `app/models`. Phase 2 lowers controllers only to harvest
-    // these — the real controllers land in Phase 3, so non-origin classes are
-    // dropped here.
-    let mut controller_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
+    // Shared lowering extras: the model registry + the (preliminary) view
+    // class info, so controller/jbuilder bodies dispatch model attributes and
+    // view-module calls.
+    let mut base_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
         model_registry.into_iter().collect();
-    controller_extras.extend(crate::lower::extras_from_lcs(&preliminary_views));
+    base_extras.extend(crate::lower::extras_from_lcs(&preliminary_views));
+
+    // Route helpers (`RouteHelpers.article_path(id)`) → a `static class`. The
+    // controllers' redirects/links dispatch against these.
+    let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
+    if let Some(f) = library::emit_function_module(&route_helper_funcs) {
+        files.push(f);
+    }
+
+    // Jbuilder (`.json.jbuilder`) view render methods — lowered only to harvest
+    // their method names (`indexJson`, `showJson`) for the view stubs the
+    // controllers' JSON branches call.
+    let jbuilder_lcs =
+        crate::lower::lower_jbuilder_to_library_classes(&app.views, app, base_extras.clone());
+
+    // Controllers. The synthesized `<Resource>Params` siblings are origin-
+    // tagged and route to `app/models` alongside the models; the real
+    // controllers route to `app/controllers`.
+    let mut controller_extras = base_extras;
+    controller_extras.extend(crate::lower::extras_from_funcs(&route_helper_funcs));
     let assocs = crate::lower::model_associations::compute_association_graph(app);
     let controller_lcs = crate::lower::lower_controllers_with_arel_views_and_assocs(
         &app.controllers,
@@ -104,30 +121,127 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         &app.views,
         &assocs,
     );
-    let params_lcs: Vec<crate::dialect::LibraryClass> =
-        controller_lcs.into_iter().filter(|lc| lc.origin.is_some()).collect();
-    library::register_class_hierarchy(&params_lcs);
-    for lc in &params_lcs {
-        files.push(library::emit_class_file(lc));
+
+    // Synthesize `ApplicationController` when a controller extends it but the
+    // app doesn't define one (Rails scaffolds assume it).
+    let needs_app_controller = app
+        .controllers
+        .iter()
+        .any(|c| matches!(c.parent.as_ref(), Some(p) if p.0.as_str() == "ApplicationController"))
+        && !app.controllers.iter().any(|c| c.name.0.as_str() == "ApplicationController");
+    if needs_app_controller {
+        files.push(EmittedFile {
+            path: std::path::PathBuf::from("app/controllers/ApplicationController.cs"),
+            content: "namespace Roundhouse;\n\npublic class ApplicationController : ActionControllerBase\n{\n}\n".to_string(),
+        });
     }
 
-    // Phase-2 view stubs: the broadcast callbacks (`Broadcasts.prepend(...,
-    // Articles.article(this))`) reference view modules that aren't emitted
-    // until Phase 4. Stub each referenced module so the model layer compiles.
-    if let Some(stub) = emit_view_stubs(&preliminary_views) {
+    // Register the view-module methods so a controller's `Articles.new(...)` /
+    // `Articles.index(...)` resolves as a *method call*, not a constructor
+    // (the views themselves are stubbed until Phase 4).
+    for lc in preliminary_views.iter().chain(jbuilder_lcs.iter()) {
+        let module = naming::type_name(lc.name.0.as_str());
+        for m in &lc.methods {
+            let params = m.params.iter().map(|p| naming::camel(p.name.as_str())).collect();
+            expr::register_method_params(&module, m.name.as_str(), params);
+        }
+    }
+
+    library::register_class_hierarchy(&controller_lcs);
+    for lc in &controller_lcs {
+        let dir = if lc.origin.is_some() { "app/models" } else { "app/controllers" };
+        files.push(library::emit_class_file_in(lc, dir));
+    }
+
+    // View stubs (html + jbuilder method names): the broadcast callbacks and
+    // controller render branches reference view modules whose real
+    // string-builder renderers land in Phase 4. Stub each so the app compiles.
+    if let Some(stub) = emit_view_stubs(&preliminary_views, &jbuilder_lcs) {
         files.push(stub);
     }
+
+    // Program.cs — the entry point wiring the routes table + controller factory
+    // map + layout into the Kestrel Server.
+    files.push(emit_program(app));
 
     files
 }
 
+/// `Program.cs` — top-level statements building the routes table + controller
+/// factory map (app-specific) and handing them to `Server.Start`.
+fn emit_program(app: &App) -> EmittedFile {
+    let (route_lines, ctrl_lines) = route_table_literals(app);
+    // The layout wraps every html response; `Layouts.application` when the app
+    // has a layout (identity otherwise).
+    let has_layout = app.views.iter().any(|v| v.name.as_str() == "layouts/application");
+    let layout = if has_layout {
+        "(body, notice, alert) => Layouts.application(body, notice, alert)"
+    } else {
+        "(body, notice, alert) => body"
+    };
+    let content = format!(
+        "// Generated by Roundhouse (csharp). Entry point — wires the routes\n\
+         // table + controllers into the Kestrel Server primitive.\n\n\
+         using Roundhouse;\n\
+         // Disambiguate from Microsoft.AspNetCore.Routing.Route (web SDK implicit using).\n\
+         using Route = Roundhouse.Route;\n\n\
+         var port = int.Parse(Environment.GetEnvironmentVariable(\"PORT\") ?? \"3000\");\n\n\
+         var routes = new List<Route>\n{{\n{}\n}};\n\n\
+         var controllers = new Dictionary<string, Func<ActionControllerBase>>\n{{\n{}\n}};\n\n\
+         Func<string, string?, string?, string> layout = {layout};\n\n\
+         Server.Start(port, routes, controllers, layout);\n",
+        route_lines.join("\n"),
+        ctrl_lines.join("\n"),
+    );
+    EmittedFile { path: std::path::PathBuf::from("Program.cs"), content }
+}
+
+/// The routes-table + controller-factory-map C# literal lines for `Program.cs`.
+fn route_table_literals(app: &App) -> (Vec<String>, Vec<String>) {
+    use crate::dialect::HttpMethod;
+    let routes = crate::lower::flatten_routes(app);
+    let verb = |m: &HttpMethod| match m {
+        HttpMethod::Get => "GET",
+        HttpMethod::Post => "POST",
+        HttpMethod::Put => "PUT",
+        HttpMethod::Patch => "PATCH",
+        HttpMethod::Delete => "DELETE",
+        HttpMethod::Head => "HEAD",
+        HttpMethod::Options => "OPTIONS",
+        HttpMethod::Any => "GET",
+    };
+    let route_lines: Vec<String> = routes
+        .iter()
+        .map(|r| {
+            format!(
+                "    new Route({:?}, {:?}, {:?}, {:?}),",
+                verb(&r.method),
+                r.path,
+                r.controller.0.as_str(),
+                r.action.as_str(),
+            )
+        })
+        .collect();
+    let mut controllers: Vec<String> =
+        routes.iter().map(|r| r.controller.0.as_str().to_string()).collect();
+    controllers.sort();
+    controllers.dedup();
+    let ctrl_lines: Vec<String> =
+        controllers.iter().map(|c| format!("    [{c:?}] = () => new {c}(),")).collect();
+    (route_lines, ctrl_lines)
+}
+
 /// Emit `app/views/ViewStubs.cs` — one `static class` per view module, with a
-/// `params object?[]`-accepting stub per method, returning `""`. The Phase-2
-/// model layer's broadcast callbacks call these; Phase 4 replaces the stubs
-/// with the real string-builder view renderers.
-fn emit_view_stubs(preliminary_views: &[crate::dialect::LibraryClass]) -> Option<EmittedFile> {
+/// `params object?[]`-accepting stub per method (html + jbuilder/JSON),
+/// returning `""`. The model broadcast callbacks + the controllers' render
+/// branches call these; Phase 4 replaces the stubs with the real
+/// string-builder view renderers.
+fn emit_view_stubs(
+    preliminary_views: &[crate::dialect::LibraryClass],
+    jbuilder_lcs: &[crate::dialect::LibraryClass],
+) -> Option<EmittedFile> {
     let mut by_module: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for lc in preliminary_views {
+    for lc in preliminary_views.iter().chain(jbuilder_lcs.iter()) {
         let module = naming::type_name(lc.name.0.as_str());
         let methods = by_module.entry(module).or_default();
         for m in &lc.methods {

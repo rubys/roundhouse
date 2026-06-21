@@ -43,12 +43,49 @@ const FILE_HEADER: &str = "using System;\n\
 
 /// Emit a `LibraryClass` as a standalone C# file under `app/models/<Name>.cs`.
 pub fn emit_class_file(lc: &LibraryClass) -> EmittedFile {
+    emit_class_file_in(lc, "app/models")
+}
+
+/// Emit a `LibraryClass` under `<dir>/<Name>.cs` (controllers route to
+/// `app/controllers`, origin-tagged Params siblings to `app/models`).
+pub fn emit_class_file_in(lc: &LibraryClass, dir: &str) -> EmittedFile {
     let name = lc.name.0.as_str();
     let last = name.rsplit("::").next().unwrap_or(name);
     EmittedFile {
-        path: PathBuf::from(format!("app/models/{last}.cs")),
+        path: PathBuf::from(format!("{dir}/{last}.cs")),
         content: format!("{FILE_HEADER}{}", emit_library_class(lc)),
     }
+}
+
+/// Emit a module of free functions (one `module_path`, e.g. `RouteHelpers`'
+/// `article_path(id)`) as a C# `static class` under `app/runtime/<Name>.cs`.
+/// They're class-method-shaped (no instance state), so they reuse the module
+/// (`static class`) emit path.
+pub fn emit_function_module(funcs: &[crate::dialect::LibraryFunction]) -> Option<EmittedFile> {
+    let first = funcs.first()?;
+    let name = first.module_path.last().map(|s| s.as_str().to_string()).unwrap_or_default();
+    let enclosing = first.module_path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+    let methods: Vec<MethodDef> = funcs
+        .iter()
+        .map(|f| MethodDef {
+            name: f.name.clone(),
+            receiver: MethodReceiver::Class,
+            params: f.params.clone(),
+            block_param: None,
+            body: f.body.clone(),
+            signature: f.signature.clone(),
+            effects: f.effects.clone(),
+            enclosing_class: Some(crate::ident::Symbol::from(enclosing.clone())),
+            kind: AccessorKind::Method,
+            is_async: f.is_async,
+            mutates_self: false,
+        })
+        .collect();
+    let content = emit_module(&methods).ok()?;
+    Some(EmittedFile {
+        path: PathBuf::from(format!("app/runtime/{name}.cs")),
+        content: format!("{FILE_HEADER}{content}"),
+    })
 }
 
 pub fn emit_library_class_result(lc: &LibraryClass) -> Result<String, String> {

@@ -21,6 +21,7 @@ const DB_CS: &str = include_str!("../../../runtime/csharp/Db.cs");
 const TIME_CS: &str = include_str!("../../../runtime/csharp/Time.cs");
 const BROADCASTS_CS: &str = include_str!("../../../runtime/csharp/Broadcasts.cs");
 const RH_RUNTIME_CS: &str = include_str!("../../../runtime/csharp/RhRuntime.cs");
+const SERVER_CS: &str = include_str!("../../../runtime/csharp/Server.cs");
 
 /// The hand-written runtime primitives, emitted under `app/runtime/`.
 pub fn primitives() -> Vec<EmittedFile> {
@@ -30,6 +31,7 @@ pub fn primitives() -> Vec<EmittedFile> {
         ("app/runtime/Time.cs", TIME_CS),
         ("app/runtime/Broadcasts.cs", BROADCASTS_CS),
         ("app/runtime/RhRuntime.cs", RH_RUNTIME_CS),
+        ("app/runtime/Server.cs", SERVER_CS),
     ];
     files
         .iter()

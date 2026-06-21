@@ -90,4 +90,9 @@ public static class Db
     public static string escapeString(string? value) =>
         "'" + (value ?? "").Replace("'", "''") + "'";
     public static string escapeInt(long value) => value.ToString();
+
+    // Comma-joined ids for an `IN (...)` clause (the association preload).
+    // Empty → `NULL` so `IN (NULL)` stays valid SQL and matches nothing.
+    public static string escapeIntList(List<long> ids) =>
+        ids.Count == 0 ? "NULL" : string.Join(", ", ids);
 }

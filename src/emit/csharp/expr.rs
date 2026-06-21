@@ -1456,6 +1456,21 @@ fn emit_send(
                 }
             }
         }
+        // `Array#each { |x| … }` → a C# `foreach` (the block body is
+        // statements — preload grouping, destroy loops — which a `.ForEach`
+        // expression-lambda can't hold).
+        if method == "each" && recv_arr {
+            if let (Some(r), ExprNode::Lambda { params, body, .. }) = (recv, &*b.node) {
+                if params.len() == 1 {
+                    let p = camel(params[0].as_str());
+                    return format!(
+                        "foreach (var {p} in {}) {{\n{}\n}}",
+                        emit_expr(r),
+                        indent(&emit_stmt(body))
+                    );
+                }
+            }
+        }
         let cs_method = if method == "each" && recv_arr {
             "ForEach".to_string()
         } else if method == "map" {
