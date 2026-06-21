@@ -623,6 +623,185 @@ impl ExprNode {
             ExprNode::Cast { value, .. } => f(value),
         }
     }
+
+    /// Visit every direct child `Expr`, immutably — the read-side mirror
+    /// of [`ExprNode::for_each_child_mut`], covering the same embedded
+    /// children (`LValue` targets, `Case` arm guards/bodies/patterns,
+    /// rescue clauses, `StringInterp` parts). Shallow: one level only;
+    /// callers recurse themselves.
+    ///
+    /// The handed-out references share the `&'a self` borrow, so a caller
+    /// may *retain* them past the call (e.g. to return the node covering a
+    /// cursor offset) — the lifetime is what `for_each_child_mut` can't
+    /// offer and what the position-query layer (`crate::ide`) needs.
+    pub fn for_each_child<'a>(&'a self, f: &mut dyn FnMut(&'a Expr)) {
+        fn lvalue_children<'a>(lv: &'a LValue, f: &mut dyn FnMut(&'a Expr)) {
+            match lv {
+                LValue::Var { .. } | LValue::Ivar { .. } | LValue::Const { .. } => {}
+                LValue::Attr { recv, .. } => f(recv),
+                LValue::Index { recv, index } => {
+                    f(recv);
+                    f(index);
+                }
+            }
+        }
+        fn pattern_children<'a>(p: &'a Pattern, f: &mut dyn FnMut(&'a Expr)) {
+            match p {
+                Pattern::Wildcard | Pattern::Bind { .. } | Pattern::Lit { .. } => {}
+                Pattern::Array { elems, .. } => {
+                    for e in elems {
+                        pattern_children(e, f);
+                    }
+                }
+                Pattern::Record { fields, .. } => {
+                    for (_, p) in fields {
+                        pattern_children(p, f);
+                    }
+                }
+                Pattern::Expr { expr } => f(expr),
+            }
+        }
+        match self {
+            ExprNode::Lit { .. }
+            | ExprNode::Var { .. }
+            | ExprNode::Ivar { .. }
+            | ExprNode::Const { .. }
+            | ExprNode::SelfRef => {}
+            ExprNode::Hash { entries, .. } => {
+                for (k, v) in entries {
+                    f(k);
+                    f(v);
+                }
+            }
+            ExprNode::Array { elements, .. } => {
+                for e in elements {
+                    f(e);
+                }
+            }
+            ExprNode::StringInterp { parts } => {
+                for p in parts {
+                    if let InterpPart::Expr { expr } = p {
+                        f(expr);
+                    }
+                }
+            }
+            ExprNode::BoolOp { left, right, .. } => {
+                f(left);
+                f(right);
+            }
+            ExprNode::Let { value, body, .. } => {
+                f(value);
+                f(body);
+            }
+            ExprNode::Lambda { body, .. } => f(body),
+            ExprNode::Apply { fun, args, block } => {
+                f(fun);
+                for a in args {
+                    f(a);
+                }
+                if let Some(b) = block {
+                    f(b);
+                }
+            }
+            ExprNode::Send { recv, args, block, .. } => {
+                if let Some(r) = recv {
+                    f(r);
+                }
+                for a in args {
+                    f(a);
+                }
+                if let Some(b) = block {
+                    f(b);
+                }
+            }
+            ExprNode::If { cond, then_branch, else_branch } => {
+                f(cond);
+                f(then_branch);
+                f(else_branch);
+            }
+            ExprNode::Case { scrutinee, arms } => {
+                f(scrutinee);
+                for arm in arms {
+                    pattern_children(&arm.pattern, f);
+                    if let Some(g) = arm.guard.as_ref() {
+                        f(g);
+                    }
+                    f(&arm.body);
+                }
+            }
+            ExprNode::Seq { exprs } => {
+                for e in exprs {
+                    f(e);
+                }
+            }
+            ExprNode::Assign { target, value } => {
+                lvalue_children(target, f);
+                f(value);
+            }
+            ExprNode::OpAssign { target, value, .. } => {
+                lvalue_children(target, f);
+                f(value);
+            }
+            ExprNode::Yield { args } => {
+                for a in args {
+                    f(a);
+                }
+            }
+            ExprNode::Raise { value } => f(value),
+            ExprNode::RescueModifier { expr, fallback } => {
+                f(expr);
+                f(fallback);
+            }
+            ExprNode::Return { value } => f(value),
+            ExprNode::Super { args } => {
+                if let Some(args) = args {
+                    for a in args {
+                        f(a);
+                    }
+                }
+            }
+            ExprNode::Next { value } | ExprNode::Break { value } => {
+                if let Some(v) = value {
+                    f(v);
+                }
+            }
+            ExprNode::Splat { value } => f(value),
+            ExprNode::MultiAssign { targets, value } => {
+                for t in targets {
+                    lvalue_children(t, f);
+                }
+                f(value);
+            }
+            ExprNode::While { cond, body, .. } => {
+                f(cond);
+                f(body);
+            }
+            ExprNode::Range { begin, end, .. } => {
+                if let Some(b) = begin {
+                    f(b);
+                }
+                if let Some(e) = end {
+                    f(e);
+                }
+            }
+            ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+                f(body);
+                for r in rescues {
+                    for c in &r.classes {
+                        f(c);
+                    }
+                    f(&r.body);
+                }
+                if let Some(e) = else_branch {
+                    f(e);
+                }
+                if let Some(e) = ensure {
+                    f(e);
+                }
+            }
+            ExprNode::Cast { value, .. } => f(value),
+        }
+    }
 }
 
 /// One `rescue` clause inside a `BeginRescue`.

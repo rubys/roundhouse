@@ -15,6 +15,7 @@ pub mod effect;
 pub mod emit;
 pub mod erb;
 pub mod expr;
+pub mod ide;
 pub mod ident;
 pub mod ingest;
 pub mod lower;
@@ -44,6 +45,7 @@ pub use dialect::{
 pub use effect::{Effect, EffectSet};
 pub use expr::{Arm, BlockStyle, Expr, ExprNode, LValue, Literal, Pattern};
 pub use ident::{ClassId, EffectVar, Symbol, TableRef, TyVar, VarId};
+pub use ide::{Position, TypeAt};
 pub use query::{ColumnExpr, JoinKind, OrderKey, Predicate, Query, ValueExpr};
 pub use schema::{Column, ColumnType, ForeignKey, Index, ReferentialAction, Schema, Table};
 pub use span::{FileId, Span};
