@@ -64,10 +64,7 @@ pub fn emit_library_class_result(lc: &LibraryClass) -> Result<String, String> {
 pub fn emit_module_constant(name: &str, value: &Expr) -> String {
     let (ty, rhs) = match &*value.node {
         ExprNode::Hash { entries, .. } if !entries.is_empty() => {
-            let all_str = entries
-                .iter()
-                .all(|(_, v)| matches!(&*v.node, ExprNode::Lit { value: Literal::Str { .. } }));
-            let vty = if all_str { "string" } else { "object?" };
+            let vty = homogeneous_lit_type(entries.iter().map(|(_, v)| v));
             let pairs: Vec<String> = entries
                 .iter()
                 .map(|(k, v)| format!("[{}] = {}", emit_expr(k), emit_expr(v)))
@@ -75,10 +72,7 @@ pub fn emit_module_constant(name: &str, value: &Expr) -> String {
             (format!("Dictionary<string, {vty}>"), format!("new() {{ {} }}", pairs.join(", ")))
         }
         ExprNode::Array { elements, .. } if !elements.is_empty() => {
-            let all_str = elements
-                .iter()
-                .all(|v| matches!(&*v.node, ExprNode::Lit { value: Literal::Str { .. } }));
-            let ety = if all_str { "string" } else { "object?" };
+            let ety = homogeneous_lit_type(elements.iter());
             let els: Vec<String> = elements.iter().map(emit_expr).collect();
             (format!("List<{ety}>"), format!("new() {{ {} }}", els.join(", ")))
         }
@@ -89,6 +83,22 @@ pub fn emit_module_constant(name: &str, value: &Expr) -> String {
         }
     };
     format!("public static partial class RuntimeConstants {{ public static readonly {ty} {name} = {rhs}; }}")
+}
+
+/// The C# element type for a homogeneous-literal collection — `long`/`double`/
+/// `bool`/`string` when every element is that literal kind, else `object?`.
+fn homogeneous_lit_type<'a>(mut elems: impl Iterator<Item = &'a Expr>) -> &'static str {
+    let kind = |e: &Expr| match &*e.node {
+        ExprNode::Lit { value: Literal::Int { .. } } => Some("long"),
+        ExprNode::Lit { value: Literal::Float { .. } } => Some("double"),
+        ExprNode::Lit { value: Literal::Bool { .. } } => Some("bool"),
+        ExprNode::Lit { value: Literal::Str { .. } } => Some("string"),
+        _ => None,
+    };
+    match elems.next().and_then(kind) {
+        Some(first) if elems.all(|e| kind(e) == Some(first)) => first,
+        _ => "object?",
+    }
 }
 
 /// Render a Ruby `module X` (a set of class methods) as a C# `static class`.
@@ -156,6 +166,17 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         .iter()
         .find(|m| m.receiver == MethodReceiver::Instance && m.name.as_str() == "initialize");
 
+    // Ivars assigned in `initialize` — their properties are non-null after
+    // construction, so a reference-typed one defaults to `null!` (the C#
+    // "set in the ctor" marker) rather than going nullable.
+    let init_assigned: HashSet<String> = {
+        let mut m: BTreeMap<String, ()> = BTreeMap::new();
+        if let Some(i) = init {
+            collect_ivars(&i.body, &mut m);
+        }
+        m.into_keys().collect()
+    };
+
     let parent_name = lc.parent.as_ref().map(|p| {
         let last = type_name(p.0.as_str());
         match last.as_str() {
@@ -193,7 +214,10 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         if inherited_props.contains(n) && !ctor_param_names.contains(n) {
             continue;
         }
-        out.push_str(&format!("    {}\n", render_member(n, ty)));
+        out.push_str(&format!(
+            "    {}\n",
+            render_member_full("public", n, ty, init_assigned.contains(n))
+        ));
     }
     // A body ivar whose name collides with a same-named instance method
     // (`@errors` + `def errors`) can't share that name in C#, so the ivar
@@ -574,6 +598,32 @@ fn emit_indexer(modifier: &str, getter: Option<&MethodDef>, setter: Option<&Meth
         .and_then(|m| m.params.first())
         .map(|p| camel(p.name.as_str()))
         .unwrap_or_else(|| "name".to_string());
+    // Key + element types. An `override` indexer must match the base's
+    // `object? this[string]`; a class defining its own (Flash → `string?`
+    // values over `untyped` keys, Session → `object?`) takes them from its
+    // own signature (getter return = element type, first param = key type).
+    let is_override = modifier.contains("override");
+    let key_ty = if is_override {
+        "string".to_string()
+    } else {
+        getter
+            .or(setter)
+            .and_then(|m| match m.signature.as_ref() {
+                Some(Ty::Fn { params, .. }) => params.first().map(|p| csharp_ty(&p.ty)),
+                _ => None,
+            })
+            .unwrap_or_else(|| "string".to_string())
+    };
+    let element_ty = if is_override {
+        "object?".to_string()
+    } else {
+        getter
+            .and_then(|m| match m.signature.as_ref() {
+                Some(Ty::Fn { ret, .. }) => Some(csharp_ty(ret)),
+                _ => None,
+            })
+            .unwrap_or_else(|| "object?".to_string())
+    };
 
     super::expr::set_in_static(false);
     let mut accessors = String::new();
@@ -605,7 +655,7 @@ fn emit_indexer(modifier: &str, getter: Option<&MethodDef>, setter: Option<&Meth
         let body = prepend_hoist(hoist, body);
         accessors.push_str(&format!("    set {{\n{}\n    }}\n", indent4(&indent4(&body))));
     }
-    format!("public {modifier}object? this[string {key}] {{\n{accessors}}}\n")
+    format!("public {modifier}{element_ty} this[{key_ty} {key}] {{\n{accessors}}}\n")
 }
 
 /// Crude whole-word identifier rename (setter value-param → `value`). The
@@ -1098,11 +1148,22 @@ fn render_member(name: &str, ty: &Ty) -> String {
 }
 
 fn render_member_vis(vis: &str, name: &str, ty: &Ty) -> String {
+    render_member_full(vis, name, ty, false)
+}
+
+/// Render an auto-property. A reference-typed property defaulting to `null`
+/// goes nullable (CS8625) — unless it's assigned in the constructor
+/// (`init_assigned`), in which case it stays non-null with the `null!`
+/// "set-in-ctor" marker so later non-null uses (`@flash[...]`) don't warn.
+fn render_member_full(vis: &str, name: &str, ty: &Ty, init_assigned: bool) -> String {
     let cs = csharp_ty(ty);
     let default = default_for(ty);
-    // A reference-typed property defaulting to `null` (a slot populated later,
-    // e.g. RecordInvalid's `@record`) must be nullable to avoid CS8625.
-    let cs = if default == "null" && !cs.ends_with('?') { format!("{cs}?") } else { cs };
+    if default == "null" && !cs.ends_with('?') {
+        if init_assigned {
+            return format!("{vis} {cs} {name} {{ get; set; }} = null!;");
+        }
+        return format!("{vis} {cs}? {name} {{ get; set; }} = null;");
+    }
     format!("{vis} {cs} {name} {{ get; set; }} = {default};")
 }
 

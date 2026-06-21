@@ -136,7 +136,12 @@ fn render_union(variants: &[Ty]) -> String {
     let non_nil: Vec<&Ty> = variants.iter().filter(|t| !matches!(t, Ty::Nil)).collect();
     match non_nil.as_slice() {
         [] => "object?".to_string(),
-        [single] if has_nil => format!("{}?", csharp_ty(single)),
+        [single] if has_nil => {
+            // Don't double the `?` when the variant is already nullable
+            // (a nested `Union{Str?, Nil}` → `string?`, not `string??`).
+            let s = csharp_ty(single);
+            if s.ends_with('?') { s } else { format!("{s}?") }
+        }
         [single] => csharp_ty(single),
         _ => "object?".to_string(),
     }

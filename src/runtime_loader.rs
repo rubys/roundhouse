@@ -1175,6 +1175,42 @@ const CSHARP_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
+    // Flash + Session: the per-request state ActionController::Base holds.
+    // Independent of the AR layer; needed before AC::Base (it instantiates
+    // both and uses `@flash[:notice] = …`).
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_dispatch/flash.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_dispatch/flash.rbs"),
+        rb_path: "runtime/ruby/action_dispatch/flash.rb",
+        namespace: "ActionDispatch",
+        out_path: "app/runtime/Flash.cs",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_dispatch/session.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_dispatch/session.rbs"),
+        rb_path: "runtime/ruby/action_dispatch/session.rb",
+        namespace: "ActionDispatch",
+        out_path: "app/runtime/Session.cs",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_controller/base.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_controller/base.rbs"),
+        rb_path: "runtime/ruby/action_controller/base.rb",
+        namespace: "ActionController",
+        out_path: "app/runtime/ActionControllerBase.cs",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
 ];
 
 pub fn csharp_units<F>(mut transform: F) -> Result<Vec<RuntimeUnit>, String>

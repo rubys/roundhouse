@@ -1393,6 +1393,21 @@ fn emit_send(
             recv.is_some_and(|r| ty_is(r.ty.as_ref(), |t| matches!(t, crate::ty::Ty::Array { .. })));
         let recv_hash =
             recv.is_some_and(|r| ty_is(r.ty.as_ref(), |t| matches!(t, crate::ty::Ty::Hash { .. })));
+        // `Hash#each { |k, v| … }` → a C# `foreach` over KeyValuePairs (the
+        // body is statements, which a method-call lambda can't hold).
+        if method == "each" && recv_hash {
+            if let (Some(r), ExprNode::Lambda { params, body, .. }) = (recv, &*b.node) {
+                if params.len() == 2 {
+                    let k = camel(params[0].as_str());
+                    let v = camel(params[1].as_str());
+                    return format!(
+                        "foreach (var __kv in {}) {{\n    var {k} = __kv.Key;\n    var {v} = __kv.Value;\n{}\n}}",
+                        emit_expr(r),
+                        indent(&emit_stmt(body))
+                    );
+                }
+            }
+        }
         let cs_method = if method == "each" && recv_arr {
             "ForEach".to_string()
         } else if method == "map" {
@@ -1480,8 +1495,15 @@ pub(super) fn emit_stmt(e: &Expr) -> String {
         ExprNode::Return { value } => emit_return_stmt(value),
         ExprNode::Raise { value } => format!("{};", emit_raise(value)),
         ExprNode::Super { .. } => "/* super() */".to_string(),
-        // No-op statements.
-        ExprNode::Lit { value: Literal::Nil } => String::new(),
+        // A bare value expression in statement position is a Ruby implicit-
+        // return no-op (the method's trailing `value` / `self`); C# rejects it
+        // as a statement (CS0201), so drop it. (A value in *return* position is
+        // handled by `wrap_return`, not here.)
+        ExprNode::Lit { .. }
+        | ExprNode::Var { .. }
+        | ExprNode::Ivar { .. }
+        | ExprNode::Const { .. }
+        | ExprNode::SelfRef => String::new(),
         // A bare expression used for effect.
         _ => {
             let s = emit_expr(e);
