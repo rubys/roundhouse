@@ -26,8 +26,12 @@ const CSPROJ: &str = r#"<Project Sdk="Microsoft.NET.Sdk.Web">
     <InvariantGlobalization>true</InvariantGlobalization>
   </PropertyGroup>
 
-  <!-- Phase 3 adds the `Microsoft.Data.Sqlite` package reference here, when
-       the real ADO.NET adapter replaces the Phase-2 `Db` stub. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
+    <!-- Override the native sqlite bundle to a patched build (Microsoft.Data.
+         Sqlite 10.0.0 pulls a transitive version flagged by GHSA-2m69-gcr7-jv3q). -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
+  </ItemGroup>
 
 </Project>
 "#;

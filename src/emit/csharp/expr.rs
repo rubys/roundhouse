@@ -1285,6 +1285,11 @@ fn emit_send(
                 if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Array { .. })) {
                     return format!("{rs}[(int)({})]", args_s[0]);
                 }
+                // Ruby `Hash#[]` returns nil for a missing key; C#'s Dictionary
+                // indexer throws — read via `GetValueOrDefault` to match.
+                if recv_is_hash(r) {
+                    return format!("{rs}.GetValueOrDefault({})", args_s[0]);
+                }
                 return format!("{rs}[{}]", args_s[0]);
             }
             if args.len() == 2 {
