@@ -101,7 +101,7 @@ if (edited.error) {
 
 // --- target sweep: every backend re-transpiles cleanly ----------------------
 console.log("\n=== target sweep (live re-transpile) ===");
-for (const t of ["typescript", "go", "rust", "python", "elixir", "crystal", "kotlin", "swift", "ruby"]) {
+for (const t of ["typescript", "go", "rust", "python", "elixir", "crystal", "kotlin", "swift", "csharp", "ruby"]) {
   const out = await page.evaluate((target) => {
     window.__playground.setTarget(target);
     return window.__playground.output();

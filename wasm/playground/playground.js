@@ -18,14 +18,14 @@ import { createEditor, createOutputView } from "../lib/editor.js";
 import { allDirPaths, renderTree } from "../lib/tree.js";
 
 // The targets the wasm entry point routes to, in alphabetical order (= the
-// dropdown order). (kotlin/swift use `emit()`; ruby uses `emit_spinel()`.)
-const TARGETS = ["crystal", "elixir", "go", "kotlin", "python", "ruby", "rust", "swift", "typescript"];
+// dropdown order). (kotlin/swift/csharp use `emit()`; ruby uses `emit_spinel()`.)
+const TARGETS = ["crystal", "csharp", "elixir", "go", "kotlin", "python", "ruby", "rust", "swift", "typescript"];
 
 // Map a target to a Monaco language id for the (read-only) output pane.
 // Elixir/Crystal have no built-in Monaco grammar -> plaintext.
 const OUT_LANG = {
   typescript: "typescript", go: "go", rust: "rust", python: "python",
-  kotlin: "kotlin", swift: "swift", ruby: "ruby",
+  kotlin: "kotlin", swift: "swift", csharp: "csharp", ruby: "ruby",
   elixir: "plaintext", crystal: "plaintext",
 };
 
