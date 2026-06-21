@@ -32,12 +32,15 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Exit, Notification as _,
     PublishDiagnostics,
 };
-use lsp_types::request::{HoverRequest, InlayHintRequest, Request as _};
+use lsp_types::request::{
+    GotoDefinition, HoverRequest, InlayHintRequest, References, Request as _,
+};
 use lsp_types::{
     Diagnostic as LspDiagnostic, DiagnosticSeverity, DidChangeTextDocumentParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, Hover, HoverContents, HoverParams,
-    InitializeParams, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, MarkupContent,
-    MarkupKind, OneOf, Position as LspPosition, PublishDiagnosticsParams, Range as LspRange,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, InitializeParams, InlayHint,
+    InlayHintKind, InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind, OneOf,
+    Position as LspPosition, PublishDiagnosticsParams, Range as LspRange, ReferenceParams,
     ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
 };
 
@@ -79,6 +82,8 @@ fn server_capabilities() -> ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
         inlay_hint_provider: Some(OneOf::Left(true)),
+        references_provider: Some(OneOf::Left(true)),
+        definition_provider: Some(OneOf::Left(true)),
         ..Default::default()
     }
 }
@@ -148,6 +153,14 @@ impl Server {
         } else if req.method == InlayHintRequest::METHOD {
             let (id, params) = extract::<InlayHintParams>(req)?;
             let result = self.inlay_hints(params);
+            self.respond(id, &result)?;
+        } else if req.method == References::METHOD {
+            let (id, params) = extract::<ReferenceParams>(req)?;
+            let result = self.references(params);
+            self.respond(id, &result)?;
+        } else if req.method == GotoDefinition::METHOD {
+            let (id, params) = extract::<GotoDefinitionParams>(req)?;
+            let result = self.goto_definition(params);
             self.respond(id, &result)?;
         } else {
             // Unknown request: reply MethodNotFound so the client doesn't
@@ -329,6 +342,42 @@ impl Server {
         hints
     }
 
+    fn references(&self, params: ReferenceParams) -> Option<Vec<Location>> {
+        let app = self.app.as_ref()?;
+        let tdp = params.text_document_position;
+        let path = uri_to_path(&tdp.text_document.uri)?;
+        let file = ide::file_id(app, path.to_str()?)?;
+        let src = ide::source(app, file)?;
+        let offset = ide::position_to_offset(&src.text, lsp_to_ide(tdp.position));
+        let include_decl = params.context.include_declaration;
+        let decl = ide::definition(app, file, offset);
+        let locations = ide::references(app, file, offset)
+            .into_iter()
+            .filter(|r| include_decl || Some(r.span) != decl)
+            .filter_map(|r| self.location_of(r.span))
+            .collect();
+        Some(locations)
+    }
+
+    fn goto_definition(&self, params: GotoDefinitionParams) -> Option<GotoDefinitionResponse> {
+        let app = self.app.as_ref()?;
+        let tdp = params.text_document_position_params;
+        let path = uri_to_path(&tdp.text_document.uri)?;
+        let file = ide::file_id(app, path.to_str()?)?;
+        let src = ide::source(app, file)?;
+        let offset = ide::position_to_offset(&src.text, lsp_to_ide(tdp.position));
+        let span = ide::definition(app, file, offset)?;
+        Some(GotoDefinitionResponse::Scalar(self.location_of(span)?))
+    }
+
+    /// An LSP `Location` for a span — its file as a `file://` URI plus the
+    /// UTF-16 range. `None` for the synthetic file or an unencodable path.
+    fn location_of(&self, span: Span) -> Option<Location> {
+        let app = self.app.as_ref()?;
+        let src = ide::source(app, span.file)?;
+        Some(Location { uri: path_to_uri(Path::new(&src.path))?, range: span_to_range(&src.text, span) })
+    }
+
     fn respond<T: serde::Serialize>(&self, id: RequestId, result: &T) -> LspResult<()> {
         let resp = Response { id, result: Some(serde_json::to_value(result)?), error: None };
         self.connection.sender.send(Message::Response(resp))?;
@@ -420,6 +469,27 @@ fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
     // path starting at '/'. (A non-empty authority would start with a host
     // before the first '/', which we don't expect for local files.)
     Some(PathBuf::from(percent_decode(rest)))
+}
+
+/// Filesystem path → `file://` URI. Percent-encodes everything outside
+/// the unreserved set, keeping `/` as the separator. POSIX-focused (it
+/// assumes an absolute path with `/` separators), matching `uri_to_path`.
+fn path_to_uri(path: &Path) -> Option<Uri> {
+    let encoded = percent_encode_path(path.to_str()?);
+    format!("file://{encoded}").parse().ok()
+}
+
+fn percent_encode_path(s: &str) -> String {
+    let mut out = String::new();
+    for &b in s.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/') {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push_str(&format!("{b:02X}"));
+        }
+    }
+    out
 }
 
 fn percent_decode(s: &str) -> String {

@@ -20,7 +20,8 @@
 
 use crate::app::App;
 use crate::dialect::{ControllerBodyItem, ModelBodyItem};
-use crate::expr::Expr;
+use crate::expr::{Expr, ExprNode, LValue};
+use crate::ident::{Symbol, VarId};
 use crate::span::{FileId, SourceFile, Span};
 use crate::ty::{Row, Ty};
 
@@ -284,46 +285,58 @@ pub fn position_to_offset(text: &str, pos: Position) -> u32 {
     text.len() as u32
 }
 
-/// Every root body in the app whose subtree the analyzer types. Beyond
-/// the set [`crate::analyze::diagnose`] walks (controller actions, model
-/// scopes and methods, views, `db/seeds.rb`), this also visits the
-/// `Unknown` model/controller body items — the class-body DSL argument
-/// expressions (`broadcasts_to ->(_a) { "articles" }`, bare macro calls)
-/// that the analyzer types in its Phase-0 pass. Including them is what
-/// lets `type_at`/hover resolve *inside* class-level DSL, not only method
-/// bodies.
-fn root_bodies(app: &App) -> Vec<&Expr> {
-    let mut roots = Vec::new();
+/// The app's typed bodies grouped by the class scope that owns them — one
+/// inner vec per controller, model, view, and `db/seeds.rb`. Within a
+/// scope: controller action bodies (plus the `Unknown` class-body DSL
+/// exprs the analyzer types in its Phase-0 pass — `broadcasts_to ->(_a)
+/// { "articles" }`, bare macro calls); model scope/method bodies (plus
+/// `Unknown`); a view's body; the seeds expression.
+///
+/// The grouping is what lets [`references`] scope an instance-variable
+/// lookup to a single class; [`root_bodies`] flattens it for whole-app
+/// point queries.
+fn scope_groups(app: &App) -> Vec<Vec<&Expr>> {
+    let mut groups = Vec::new();
     for controller in &app.controllers {
-        for action in controller.actions() {
-            roots.push(&action.body);
-        }
+        let mut group: Vec<&Expr> = controller.actions().map(|a| &a.body).collect();
         for item in &controller.body {
             if let ControllerBodyItem::Unknown { expr, .. } = item {
-                roots.push(expr);
+                group.push(expr);
             }
+        }
+        if !group.is_empty() {
+            groups.push(group);
         }
     }
     for model in &app.models {
+        let mut group: Vec<&Expr> = Vec::new();
         for scope in model.scopes() {
-            roots.push(&scope.body);
+            group.push(&scope.body);
         }
         for method in model.methods() {
-            roots.push(&method.body);
+            group.push(&method.body);
         }
         for item in &model.body {
             if let ModelBodyItem::Unknown { expr, .. } = item {
-                roots.push(expr);
+                group.push(expr);
             }
+        }
+        if !group.is_empty() {
+            groups.push(group);
         }
     }
     for view in &app.views {
-        roots.push(&view.body);
+        groups.push(vec![&view.body]);
     }
     if let Some(seeds) = &app.seeds {
-        roots.push(seeds);
+        groups.push(vec![seeds]);
     }
-    roots
+    groups
+}
+
+/// Every typed root body in the app, flattened from [`scope_groups`].
+fn root_bodies(app: &App) -> Vec<&Expr> {
+    scope_groups(app).into_iter().flatten().collect()
 }
 
 /// Pre-order subtree walk: visit `e`, then recurse into its children.
@@ -332,10 +345,172 @@ fn walk<'a>(e: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
     e.node.for_each_child(&mut |c| walk(c, f));
 }
 
+// ── References (Rung 4) ──────────────────────────────────────────────
+//
+// A reverse def→use lookup over the two variable kinds the IR identifies
+// exactly: locals carry a `VarId` binding id (unique within a body), and
+// instance variables a name (resolved within a class). Method and
+// constant references — which need type-aware dispatch resolution — are a
+// later increment; this covers the precise, high-value cases.
+
+/// One occurrence of a variable — a read, or a write (its binding or an
+/// assignment to it). `write` lets consumers distinguish reads from
+/// writes (document highlights) and honor `includeDeclaration`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reference {
+    pub span: Span,
+    pub write: bool,
+}
+
+/// Which variable a position names.
+enum VarRef {
+    /// Local, by its exact binding id (unique within one body).
+    Local(VarId),
+    /// Instance variable, by name (resolved within its class).
+    Ivar(Symbol),
+}
+
+/// All references to the local or instance variable at `offset` in `file`.
+///
+/// Locals resolve by their exact binding id, scoped to the enclosing
+/// method/action body (a `VarId` is only unique there). Instance variables
+/// resolve by name, scoped to the enclosing class — every action of a
+/// controller, every method of a model — matching how a Rails dev reads
+/// `@article`. Empty when `offset` isn't on a resolvable variable (a method
+/// call, constant, literal, or whitespace).
+///
+/// Reads carry their real span; write targets in `x = …` / `x += …` carry
+/// a span synthesized at the assigned name (the statement begins there).
+/// Results are position-sorted and deduplicated.
+pub fn references(app: &App, file: FileId, offset: u32) -> Vec<Reference> {
+    let Some((group, body)) = locate(app, file, offset) else {
+        return Vec::new();
+    };
+    let Some(node) = find_at_offset(app, file, offset) else {
+        return Vec::new();
+    };
+    let Some(var) = var_at(node, offset) else {
+        return Vec::new();
+    };
+    // Locals are body-scoped; instance variables span the whole class.
+    let bodies: Vec<&Expr> = match var {
+        VarRef::Local(_) => vec![body],
+        VarRef::Ivar(_) => group,
+    };
+    let mut out = Vec::new();
+    for &b in &bodies {
+        collect_refs(b, &var, &mut out);
+    }
+    out.sort_by_key(|r| (r.span.file.0, r.span.start, r.span.end));
+    out.dedup();
+    out
+}
+
+/// The defining occurrence — the binding / earliest write — of the
+/// variable at `offset`, if one exists in the searched scope. A
+/// method-parameter local has reads but no in-body binding, so this is
+/// `None` even though [`references`] still finds its uses.
+pub fn definition(app: &App, file: FileId, offset: u32) -> Option<Span> {
+    references(app, file, offset).into_iter().find(|r| r.write).map(|r| r.span)
+}
+
+/// The variable named at a position: a `Var`/`Ivar` read node, or — when
+/// the cursor sits on the left of an assignment, whose target has no `Expr`
+/// of its own — the assignment's target.
+fn var_at(node: &Expr, offset: u32) -> Option<VarRef> {
+    match &*node.node {
+        ExprNode::Var { id, .. } => Some(VarRef::Local(*id)),
+        ExprNode::Ivar { name } => Some(VarRef::Ivar(name.clone())),
+        ExprNode::Assign { target, value } if offset < value.span.start => lvalue_var(target),
+        ExprNode::OpAssign { target, value, .. } if offset < value.span.start => lvalue_var(target),
+        _ => None,
+    }
+}
+
+fn lvalue_var(lv: &LValue) -> Option<VarRef> {
+    match lv {
+        LValue::Var { id, .. } => Some(VarRef::Local(*id)),
+        LValue::Ivar { name } => Some(VarRef::Ivar(name.clone())),
+        _ => None,
+    }
+}
+
+fn collect_refs(body: &Expr, var: &VarRef, out: &mut Vec<Reference>) {
+    walk(body, &mut |e| {
+        match (&*e.node, var) {
+            (ExprNode::Var { id, .. }, VarRef::Local(want)) if id == want => {
+                out.push(Reference { span: e.span, write: false });
+            }
+            (ExprNode::Ivar { name }, VarRef::Ivar(want)) if name == want => {
+                out.push(Reference { span: e.span, write: false });
+            }
+            (ExprNode::Assign { target, .. }, _) => write_target(target, e.span, var, out),
+            (ExprNode::OpAssign { target, .. }, _) => write_target(target, e.span, var, out),
+            // Only the first target of a multi-assign sits at the statement
+            // start, so only that one gets an accurate synthesized span.
+            (ExprNode::MultiAssign { targets, .. }, _) => {
+                if let Some(first) = targets.first() {
+                    write_target(first, e.span, var, out);
+                }
+            }
+            _ => {}
+        }
+    });
+}
+
+/// Push a write reference if `lv` names the variable, with a span
+/// synthesized at the assigned name (a statement begins at its target).
+fn write_target(lv: &LValue, stmt: Span, var: &VarRef, out: &mut Vec<Reference>) {
+    let (matches, name_len) = match (lv, var) {
+        (LValue::Var { id, name }, VarRef::Local(want)) => (id == want, name.as_str().len() as u32),
+        // The `@` prefix is part of the source token but not the symbol name.
+        (LValue::Ivar { name }, VarRef::Ivar(want)) => (name == want, name.as_str().len() as u32 + 1),
+        _ => (false, 0),
+    };
+    if matches {
+        out.push(Reference {
+            span: Span { file: stmt.file, start: stmt.start, end: stmt.start + name_len },
+            write: true,
+        });
+    }
+}
+
+/// The scope group (a class's bodies) and the single body within it that
+/// contains `offset`. The group scopes ivar lookups; the body scopes
+/// locals (whose `VarId`s are only unique per body).
+fn locate(app: &App, file: FileId, offset: u32) -> Option<(Vec<&Expr>, &Expr)> {
+    for group in scope_groups(app) {
+        if let Some(body) = group.iter().copied().find(|&b| subtree_contains(b, file, offset)) {
+            return Some((group, body));
+        }
+    }
+    None
+}
+
+fn subtree_contains(body: &Expr, file: FileId, offset: u32) -> bool {
+    let mut found = false;
+    walk(body, &mut |e| {
+        if covers(e.span, file, offset) {
+            found = true;
+        }
+    });
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::expr::{ExprNode, Literal};
+    use crate::analyze::Analyzer;
+    use crate::expr::Literal;
+    use crate::ingest::ingest_app;
+    use std::path::Path;
+
+    fn real_blog() -> App {
+        let (ir, _) = crate::ingest::prism::scope(|| ingest_app(Path::new("fixtures/real-blog")));
+        let mut app = ir.expect("real-blog should ingest");
+        Analyzer::new(&app).analyze(&mut app);
+        app
+    }
     use crate::ident::{ClassId, Symbol, TyVar};
 
     fn class(name: &str) -> Ty {
@@ -411,6 +586,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn references_finds_ivar_across_controller_actions() {
+        let app = real_blog();
+        let file = file_id(&app, "app/controllers/articles_controller.rb").expect("controller");
+        let src = source(&app, file).unwrap();
+        // `@article = …` (singular; `find("@article")` alone would match the
+        // plural `@articles`). Landing on the assignment LHS also exercises
+        // resolving a reference from a write site.
+        let at = src.text.find("@article =").expect("@article assignment") as u32 + 1;
+
+        let refs = references(&app, file, at);
+        assert!(refs.len() >= 5, "expected many @article refs, got {}", refs.len());
+        assert!(refs.iter().any(|r| r.write), "should include the @article assignment(s)");
+        assert!(refs.iter().all(|r| r.span.file == file), "ivar scope is the one controller file");
+        // The declaration resolves to a write site.
+        assert!(definition(&app, file, at).is_some());
+    }
+
+    #[test]
+    fn references_local_is_body_scoped() {
+        let app = real_blog();
+        let file = file_id(&app, "app/controllers/articles_controller.rb").unwrap();
+        let src = source(&app, file).unwrap();
+        // The `format` block param of a `respond_to do |format|` is read at
+        // `format.html` / `format.json` within one action body.
+        let at = src.text.find("format.html").expect("respond_to block") as u32 + 1;
+
+        let refs = references(&app, file, at);
+        assert!(refs.len() >= 2, "format used 2+ times in its body, got {}", refs.len());
+    }
+
+    #[test]
+    fn references_empty_off_a_variable() {
+        let app = real_blog();
+        let file = file_id(&app, "app/models/article.rb").unwrap();
+        let src = source(&app, file).unwrap();
+        // Inside the `"articles"` string literal — not a variable.
+        let at = src.text.find("\"articles\"").unwrap() as u32 + 2;
+        assert!(references(&app, file, at).is_empty());
+    }
+
     /// Regression for the class-body DSL coverage gap: the
     /// `broadcasts_to ->(_article) { "articles" }` lambda in
     /// `app/models/article.rb` lives in a `ModelBodyItem::Unknown`, which
@@ -418,15 +634,7 @@ mod tests {
     /// literal must now resolve to `String`.
     #[test]
     fn type_at_reaches_class_body_dsl() {
-        use crate::analyze::Analyzer;
-        use crate::ingest::ingest_app;
-        use std::path::Path;
-
-        let (ingest_result, _) =
-            crate::ingest::prism::scope(|| ingest_app(Path::new("fixtures/real-blog")));
-        let mut app = ingest_result.expect("real-blog should ingest");
-        Analyzer::new(&app).analyze(&mut app);
-
+        let app = real_blog();
         let file = file_id(&app, "app/models/article.rb").expect("article.rb is a source");
         let src = source(&app, file).unwrap();
         let quote = src.text.find("\"articles\"").expect("broadcasts_to string literal");
@@ -443,15 +651,7 @@ mod tests {
     /// every byte of every file, and real inferred types surface.
     #[test]
     fn query_real_blog_end_to_end() {
-        use crate::analyze::Analyzer;
-        use crate::ingest::ingest_app;
-        use std::path::Path;
-
-        let path = Path::new("fixtures/real-blog");
-        let (ingest_result, _parse_diags) =
-            crate::ingest::prism::scope(|| ingest_app(path));
-        let mut app = ingest_result.expect("real-blog should ingest");
-        Analyzer::new(&app).analyze(&mut app);
+        let app = real_blog();
 
         // 1. Robustness: querying every byte of every source never panics,
         //    and offset<->position round-trips hold across real source.

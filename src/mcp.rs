@@ -127,6 +127,7 @@ impl Server {
         let outcome = match name {
             "type_at" => self.tool_type_at(&args),
             "can_be_nil" => self.tool_can_be_nil(&args),
+            "references" => self.tool_references(&args),
             "diagnostics" => self.tool_diagnostics(&args),
             "wont_lower" => self.tool_wont_lower(&args),
             other => Err(format!("unknown tool: {other}")),
@@ -172,6 +173,28 @@ impl Server {
             Some(info) => Ok(format!("No — type is `{}`, which cannot be nil.", info.display)),
             None => Ok(format!("No typed expression at {path}.")),
         }
+    }
+
+    fn tool_references(&self, args: &Value) -> Result<String, String> {
+        let (app, _) = self.analyze()?;
+        let (path, pos) = position_args(args)?;
+        let file = ide::file_id(&app, &path).ok_or_else(|| format!("unknown file: {path}"))?;
+        let src = ide::source(&app, file).ok_or("no source for file")?;
+        let offset = ide::position_to_offset(&src.text, pos);
+
+        let refs = ide::references(&app, file, offset);
+        if refs.is_empty() {
+            return Ok("No references — the position isn't on a local or instance variable.".to_string());
+        }
+        let lines: Vec<String> = refs
+            .iter()
+            .map(|r| {
+                let s = ide::source(&app, r.span.file).expect("reference span has a source");
+                let p = ide::offset_to_position(&s.text, r.span.start);
+                format!("{}:{}:{} ({})", s.path, p.line + 1, p.character + 1, if r.write { "write" } else { "read" })
+            })
+            .collect();
+        Ok(format!("{} reference(s):\n{}", lines.len(), lines.join("\n")))
     }
 
     fn tool_diagnostics(&self, args: &Value) -> Result<String, String> {
@@ -278,6 +301,11 @@ fn tools_list() -> Value {
                 "inputSchema": position_schema,
             },
             {
+                "name": "references",
+                "description": "Every read and write of the local or instance variable at a position. Locals resolve by exact binding (body-scoped); instance variables by name (class-scoped).",
+                "inputSchema": position_schema,
+            },
+            {
                 "name": "diagnostics",
                 "description": "Type/analysis problems across the app (unresolved ivars, failed method dispatch, incompatible operators, syntax errors). Optionally filter to one file.",
                 "inputSchema": {
@@ -335,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_advertises_the_four_tools() {
+    fn tools_list_advertises_every_tool() {
         let msg = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
         let resp = server().handle(&msg).unwrap();
         let names: Vec<&str> = resp["result"]["tools"]
@@ -344,10 +372,29 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert!(names.contains(&"type_at"));
-        assert!(names.contains(&"can_be_nil"));
-        assert!(names.contains(&"diagnostics"));
-        assert!(names.contains(&"wont_lower"));
+        for tool in ["type_at", "can_be_nil", "references", "diagnostics", "wont_lower"] {
+            assert!(names.contains(&tool), "missing tool {tool}");
+        }
+    }
+
+    #[test]
+    fn references_lists_ivar_uses() {
+        let content =
+            std::fs::read_to_string("fixtures/real-blog/app/controllers/articles_controller.rb")
+                .unwrap();
+        let byte = content.find("@article =").unwrap() + 1;
+        let before = &content[..byte];
+        let line = before.matches('\n').count() as u64 + 1;
+        let column = (byte - before.rfind('\n').map(|p| p + 1).unwrap_or(0)) as u64 + 1;
+
+        let resp = call(
+            &server(),
+            "references",
+            json!({ "path": "app/controllers/articles_controller.rb", "line": line, "column": column }),
+        );
+        let text = text_of(&resp);
+        assert!(text.contains("reference(s)"), "got: {text}");
+        assert!(text.contains("(write)"), "should mark the assignment a write: {text}");
     }
 
     #[test]

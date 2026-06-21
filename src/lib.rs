@@ -54,7 +54,7 @@ pub use dialect::{
 pub use effect::{Effect, EffectSet};
 pub use expr::{Arm, BlockStyle, Expr, ExprNode, LValue, Literal, Pattern};
 pub use ident::{ClassId, EffectVar, Symbol, TableRef, TyVar, VarId};
-pub use ide::{Position, TypeAt};
+pub use ide::{Position, Reference, TypeAt};
 pub use query::{ColumnExpr, JoinKind, OrderKey, Predicate, Query, ValueExpr};
 pub use schema::{Column, ColumnType, ForeignKey, Index, ReferentialAction, Schema, Table};
 pub use span::{FileId, Span};
