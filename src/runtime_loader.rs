@@ -1224,6 +1224,20 @@ const CSHARP_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
+    // View helpers — module functions (link_to, dom_id, render_attrs, the
+    // content_for slot store, …) invoked from Views::* render methods.
+    // References Inflector + Base; the last runtime file.
+    RuntimeEntry {
+        rb_src: include_str!("../runtime/ruby/action_view/view_helpers.rb"),
+        rbs_src: include_str!("../runtime/ruby/action_view/view_helpers.rbs"),
+        rb_path: "runtime/ruby/action_view/view_helpers.rb",
+        namespace: "",
+        out_path: "app/runtime/ViewHelpers.cs",
+        mode: Mode::Library,
+        imports: NO_IMPORTS,
+        prelude: NO_PRELUDE,
+        extra_roots: NO_EXTRA_ROOTS,
+    },
 ];
 
 pub fn csharp_units<F>(mut transform: F) -> Result<Vec<RuntimeUnit>, String>

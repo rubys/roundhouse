@@ -110,6 +110,20 @@ fn in_static() -> bool {
     IN_STATIC.with(|s| *s.borrow())
 }
 
+thread_local! {
+    /// Per-method counter for unique `foreach` entry-var names (nested
+    /// hash-each would otherwise collide on `__kv`). Reset in `begin_method`.
+    static LOOP_ID: RefCell<usize> = const { RefCell::new(0) };
+}
+
+fn next_loop_id() -> usize {
+    LOOP_ID.with(|c| {
+        let mut b = c.borrow_mut();
+        *b += 1;
+        *b
+    })
+}
+
 /// Map a Ruby stdlib exception class to its C# analog (app/runtime exception
 /// classes like `RecordNotFound` pass through unchanged).
 fn map_exception_class(name: &str) -> String {
@@ -452,6 +466,7 @@ pub(super) fn begin_method(body: &Expr) {
     let mut nil_types: HashMap<String, String> = HashMap::new();
     count_assigns(body, &mut counts, &mut nil_types);
     DECLARED.with(|d| d.borrow_mut().clear());
+    LOOP_ID.with(|c| *c.borrow_mut() = 0);
     NIL_TYPES.with(|t| *t.borrow_mut() = nil_types);
 
     let mut container_types: HashMap<String, String> = HashMap::new();
@@ -768,7 +783,9 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         ExprNode::Ivar { name } => {
             let n = camel(name.as_str());
             if is_object_tl_field(&n) {
-                format!("{n}.Value")
+                // `ThreadLocal<T>.Value` is annotated maybe-null; the field is
+                // always initialized, so a null-forgiving read is safe.
+                format!("{n}.Value!")
             } else {
                 nonnull_read(ivar_name(name.as_str()))
             }
@@ -818,6 +835,8 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         | ExprNode::Assign { .. }
         | ExprNode::OpAssign { .. }
         | ExprNode::Raise { .. }
+        | ExprNode::Next { .. }
+        | ExprNode::Break { .. }
         | ExprNode::Super { .. } => emit_stmt(e),
         other => format!("/* TODO {} */ null", other.kind_str()),
     }
@@ -1398,15 +1417,36 @@ fn emit_send(
             recv.is_some_and(|r| ty_is(r.ty.as_ref(), |t| matches!(t, crate::ty::Ty::Hash { .. })));
         // `Hash#each { |k, v| … }` → a C# `foreach` over KeyValuePairs (the
         // body is statements, which a method-call lambda can't hold).
-        if method == "each" && recv_hash {
+        // A 2-param block IS a hash iteration. A param/ivar of a statically
+        // dictionary type (Flash/Session's `other`) yields typed
+        // `KeyValuePair`s (`k`/`v` keep their element types — Flash's
+        // `k == "notice"` needs `k: string`); anything else — a local that
+        // may be C#-`object?` even when the IR narrows it to Hash
+        // (render_attrs' nested `v`) — iterates the non-generic `IDictionary`
+        // (object key/value). Each loop gets a unique entry var (nested
+        // hash-each, e.g. render_attrs, would otherwise reuse `__kv`).
+        if method == "each" {
             if let (Some(r), ExprNode::Lambda { params, body, .. }) = (recv, &*b.node) {
                 if params.len() == 2 {
                     let k = camel(params[0].as_str());
                     let v = camel(params[1].as_str());
+                    let typed = recv_hash
+                        && match &*r.node {
+                            ExprNode::Var { name, .. } => is_param(name.as_str()),
+                            ExprNode::Ivar { .. } => true,
+                            _ => false,
+                        };
+                    let entry = format!("__kv{}", next_loop_id());
+                    let inner = indent(&emit_stmt(body));
+                    if typed {
+                        return format!(
+                            "foreach (var {entry} in {}) {{\n    var {k} = {entry}.Key;\n    var {v} = {entry}.Value;\n{inner}\n}}",
+                            emit_expr(r)
+                        );
+                    }
                     return format!(
-                        "foreach (var __kv in {}) {{\n    var {k} = __kv.Key;\n    var {v} = __kv.Value;\n{}\n}}",
-                        emit_expr(r),
-                        indent(&emit_stmt(body))
+                        "foreach (System.Collections.DictionaryEntry {entry} in (System.Collections.IDictionary)({})) {{\n    var {k} = {entry}.Key;\n    var {v} = {entry}.Value;\n{inner}\n}}",
+                        emit_expr(r)
                     );
                 }
             }
@@ -1498,6 +1538,9 @@ pub(super) fn emit_stmt(e: &Expr) -> String {
         ExprNode::Return { value } => emit_return_stmt(value),
         ExprNode::Raise { value } => format!("{};", emit_raise(value)),
         ExprNode::Super { .. } => "/* super() */".to_string(),
+        // Loop control (inside an emitted `while`/`foreach`).
+        ExprNode::Next { .. } => "continue;".to_string(),
+        ExprNode::Break { .. } => "break;".to_string(),
         // A bare value expression in statement position is a Ruby implicit-
         // return no-op (the method's trailing `value` / `self`); C# rejects it
         // as a statement (CS0201), so drop it. (A value in *return* position is
@@ -1679,7 +1722,18 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
             }
         }
         LValue::Ivar { name } if is_object_tl_field(&camel(name.as_str())) => {
-            format!("{}.Value = {val}", camel(name.as_str()))
+            // Reset to an empty container → target-typed `new()` so it adopts
+            // the thread-local's declared element type (the `@slots` value type
+            // is nullable; an explicit `new Dictionary<string,string>()` would
+            // mismatch).
+            let rhs = if matches!(&*value.node, ExprNode::Hash { entries, .. } if entries.is_empty())
+                || matches!(&*value.node, ExprNode::Array { elements, .. } if elements.is_empty())
+            {
+                "new()".to_string()
+            } else {
+                val
+            };
+            format!("{}.Value = {rhs}", camel(name.as_str()))
         }
         _ => format!("{} = {val}", lvalue_ref(target)),
     }

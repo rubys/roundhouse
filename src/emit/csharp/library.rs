@@ -402,6 +402,40 @@ fn emit_static_class(lc: &LibraryClass, class_name: &str) -> String {
         let cs = if default == "null" && !cs.ends_with('?') { format!("{cs}?") } else { cs };
         out.push_str(&format!("    public static {cs} {n} = {default};\n"));
     }
+
+    // Module-level `@ivar` state (ViewHelpers' `@slots` content_for store) →
+    // thread-local static fields: a concurrent server (Kestrel) would
+    // otherwise bleed singleton state across requests. Reads/writes route
+    // through `.Value` (OBJECT_TL_FIELDS). Excludes anything already declared
+    // as a class accessor.
+    let mut body_ivars: BTreeMap<String, ()> = BTreeMap::new();
+    for m in &lc.methods {
+        collect_ivars(&m.body, &mut body_ivars);
+    }
+    let body_ivars: BTreeMap<String, ()> =
+        body_ivars.into_iter().filter(|(n, _)| !accessor_props.contains_key(n)).collect();
+    if !body_ivars.is_empty() {
+        let inferred = infer_body_ivar_types(&lc.methods);
+        super::expr::set_object_tl_fields(body_ivars.keys().cloned().collect());
+        set_instance_props(body_ivars.keys().cloned().collect());
+        for n in body_ivars.keys() {
+            let (ty, init) = match inferred.get(n) {
+                // A module store's hash values are nullable — `@slots` is read
+                // via `fetch(slot, nil)`, so the value type must admit null.
+                Some(Ty::Hash { key, value }) => {
+                    let vt = csharp_ty(value);
+                    let vt = if vt.ends_with('?') { vt } else { format!("{vt}?") };
+                    (format!("Dictionary<{}, {vt}>", csharp_ty(key)), "new()".to_string())
+                }
+                Some(t) => (csharp_ty(t), default_for(t)),
+                // An untyped module ivar assigned `{}` defaults to a dict.
+                None => ("Dictionary<string, object?>".to_string(), "new()".to_string()),
+            };
+            out.push_str(&format!(
+                "    private static readonly ThreadLocal<{ty}> {n} = new(() => {init});\n"
+            ));
+        }
+    }
     if !accessor_props.is_empty() {
         out.push('\n');
     }
