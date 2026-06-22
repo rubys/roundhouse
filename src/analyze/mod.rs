@@ -179,6 +179,10 @@ impl Analyzer {
             // DSL block, backed by a serialized column, so absent from the
             // schema-derived attributes above. Register them as typed methods.
             register_typed_store(&model.body, &mut cls.instance_methods);
+            // Plain `attr_accessor :previewing, :vote, …` virtual attributes:
+            // real methods at runtime, absent from the schema, untyped. Register
+            // reader/writer as gradual (`Untyped`) so dispatch resolves them.
+            register_attr_accessors(&model.body, &mut cls.instance_methods);
 
             // Named scopes resolve as relation-returning class methods, so
             // `Story.active` types and chains like `Story.active.recent`
@@ -2359,6 +2363,40 @@ pub use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 /// attribute pass never sees them. Each `s.<type> :name` adds a getter
 /// (`name`), a setter (`name=`), and for booleans a predicate (`name?`).
 /// Purely additive — fires only for models that declare such a block.
+/// Register plain `attr_accessor` / `attr_reader` / `attr_writer`
+/// declarations in a model body as instance methods. These are virtual
+/// attributes (e.g. `attr_accessor :previewing, :vote` on Story) — real
+/// methods at runtime but absent from `db/schema.rb` and untyped, so they
+/// resolve to `Untyped` (the gradual escape). `attr_reader` registers a
+/// getter, `attr_writer` a setter, `attr_accessor` both. Additive:
+/// `or_insert` so a schema column, typed_store, or harvested method of the
+/// same name keeps its more precise type.
+fn register_attr_accessors(body: &[ModelBodyItem], methods: &mut HashMap<Symbol, Ty>) {
+    for item in body {
+        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv, method, args, .. } = &*expr.node else { continue };
+        if recv.is_some() {
+            continue;
+        }
+        let (reader, writer) = match method.as_str() {
+            "attr_accessor" => (true, true),
+            "attr_reader" => (true, false),
+            "attr_writer" => (false, true),
+            _ => continue,
+        };
+        for arg in args {
+            let Some(name) = symbol_arg(arg) else { continue };
+            if reader {
+                methods.entry(name.clone()).or_insert(Ty::Untyped);
+            }
+            if writer {
+                let setter = Symbol::from(format!("{}=", name.as_str()));
+                methods.entry(setter).or_insert(Ty::Untyped);
+            }
+        }
+    }
+}
+
 fn register_typed_store(body: &[ModelBodyItem], methods: &mut HashMap<Symbol, Ty>) {
     for item in body {
         let ModelBodyItem::Unknown { expr, .. } = item else { continue };
