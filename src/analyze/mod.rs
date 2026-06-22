@@ -613,11 +613,15 @@ impl Analyzer {
                 annotate_self_dispatch: false, in_view: false,
             };
 
-            // Snapshot every `before_action` declared on this
-            // controller (not yet including parent's — that's Phase B).
+            // Snapshot the seeding filters declared on this controller
+            // (not yet including parent's — that's Phase B). `before_action`
+            // runs before the action; `around_action` assigns its ivars
+            // before `yield` (the canonical `@story = Story.find(..); yield`
+            // shape), so both contribute ivars the action and its view see.
+            // `after_action` runs after rendering, so it's excluded.
             let before_filters: Vec<Filter> = controller
                 .filters()
-                .filter(|f| matches!(f.kind, FilterKind::Before))
+                .filter(|f| matches!(f.kind, FilterKind::Before | FilterKind::Around))
                 .cloned()
                 .collect();
 
