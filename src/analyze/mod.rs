@@ -1113,10 +1113,6 @@ impl Analyzer {
         for model in &app.models {
             let class_id = &model.name;
             for method in model.methods() {
-                let Some(body_ty) = method.body.ty.clone() else { continue };
-                if matches!(body_ty, Ty::Var { .. }) {
-                    continue;
-                }
                 let target = match method.receiver {
                     crate::dialect::MethodReceiver::Instance => {
                         &mut self.classes.entry(class_id.clone()).or_default().instance_methods
@@ -1125,7 +1121,7 @@ impl Analyzer {
                         &mut self.classes.entry(class_id.clone()).or_default().class_methods
                     }
                 };
-                Self::insert_inferred_return(target, &method.name, body_ty);
+                Self::register_method_return(target, &method.name, method.body.ty.as_ref());
             }
         }
         for lc in &app.library_classes {
@@ -1153,6 +1149,29 @@ impl Analyzer {
     /// overwrite a more-concrete type with `Ty::Var`. Otherwise replace
     /// or insert. This is the join rule that keeps RBS-declared
     /// signatures authoritative while letting inference fill the rest.
+    /// Register a model method's return type. A resolved body type is
+    /// authoritative. When the body couldn't be typed (`Var`/`None`) after
+    /// analysis, register the method's *existence* as `Untyped` (a gradual
+    /// escape) so calls to it resolve — turning a dispatch error into a
+    /// gradual warning rather than a hard "no known method". A real type
+    /// found by any pass is never clobbered by the fallback.
+    fn register_method_return(
+        table: &mut HashMap<Symbol, Ty>,
+        method: &Symbol,
+        body_ty: Option<&Ty>,
+    ) {
+        match body_ty {
+            Some(t) if !matches!(t, Ty::Var { .. }) => {
+                Self::insert_inferred_return(table, method, t.clone());
+            }
+            _ => {
+                if !matches!(table.get(method), Some(t) if !matches!(t, Ty::Var { .. })) {
+                    table.insert(method.clone(), Ty::Untyped);
+                }
+            }
+        }
+    }
+
     fn insert_inferred_return(
         table: &mut HashMap<Symbol, Ty>,
         method: &Symbol,
@@ -2774,6 +2793,33 @@ mod typed_store_tests {
         let mut methods: HashMap<Symbol, Ty> = HashMap::new();
         register_typed_store(&body, &mut methods);
         assert!(methods.is_empty());
+    }
+
+    #[test]
+    fn method_return_fallback_is_clobber_safe() {
+        use crate::ident::TyVar;
+        let mut t: HashMap<Symbol, Ty> = HashMap::new();
+
+        // Resolved body → register the real return type.
+        Analyzer::register_method_return(&mut t, &Symbol::from("to_html"), Some(&Ty::Str));
+        assert_eq!(t.get(&Symbol::from("to_html")), Some(&Ty::Str));
+
+        // Unresolved (None or Var) → register existence as a gradual escape.
+        Analyzer::register_method_return(&mut t, &Symbol::from("current_vote"), None);
+        assert_eq!(t.get(&Symbol::from("current_vote")), Some(&Ty::Untyped));
+        Analyzer::register_method_return(
+            &mut t,
+            &Symbol::from("enabled"),
+            Some(&Ty::Var { var: TyVar(0) }),
+        );
+        assert_eq!(t.get(&Symbol::from("enabled")), Some(&Ty::Untyped));
+
+        // The fallback must never clobber a real type from another pass…
+        Analyzer::register_method_return(&mut t, &Symbol::from("to_html"), None);
+        assert_eq!(t.get(&Symbol::from("to_html")), Some(&Ty::Str));
+        // …but a real type does upgrade a prior gradual fallback.
+        Analyzer::register_method_return(&mut t, &Symbol::from("current_vote"), Some(&Ty::Bool));
+        assert_eq!(t.get(&Symbol::from("current_vote")), Some(&Ty::Bool));
     }
 }
 
