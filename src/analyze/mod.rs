@@ -175,6 +175,10 @@ impl Analyzer {
                 let writer = Symbol::from(format!("{}=", name.as_str()));
                 cls.instance_methods.entry(writer).or_insert(ty.clone());
             }
+            // `typed_store` (activerecord-typedstore) accessors: declared in a
+            // DSL block, backed by a serialized column, so absent from the
+            // schema-derived attributes above. Register them as typed methods.
+            register_typed_store(&model.body, &mut cls.instance_methods);
             // Core AR instance methods every model gets. Sourced
             // from the shared catalog — same mechanism as class
             // methods above. Covers mutation (save/update/destroy),
@@ -2167,6 +2171,63 @@ fn widen_hash_ivar_value(out: &mut HashMap<Symbol, Ty>, name: &Symbol, incoming:
 /// to import them from `roundhouse::analyze` as before.
 pub use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 
+/// Register `typed_store` accessors (the `activerecord-typedstore` gem) as
+/// typed instance methods. A `typed_store :col do |s| s.string :name … end`
+/// block declares attributes backed by one serialized column — real methods
+/// at runtime, but absent from `db/schema.rb`, so the schema-derived
+/// attribute pass never sees them. Each `s.<type> :name` adds a getter
+/// (`name`), a setter (`name=`), and for booleans a predicate (`name?`).
+/// Purely additive — fires only for models that declare such a block.
+fn register_typed_store(body: &[ModelBodyItem], methods: &mut HashMap<Symbol, Ty>) {
+    for item in body {
+        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { method, block: Some(block), .. } = &*expr.node else { continue };
+        if method.as_str() == "typed_store" {
+            register_typed_store_decls(block, methods);
+        }
+    }
+}
+
+/// Walk a `typed_store` block, registering each `s.<type> :name` declaration.
+/// A recursive walk (rather than assuming the block's exact node shape) finds
+/// the declarations wherever they sit; only `s.<known-type> :symbol` calls
+/// match, so nothing else in the block is picked up.
+fn register_typed_store_decls(expr: &Expr, methods: &mut HashMap<Symbol, Ty>) {
+    if let ExprNode::Send { method, args, .. } = &*expr.node {
+        if let (Some(ty), Some(name)) =
+            (typed_store_ty(method.as_str()), args.first().and_then(symbol_arg))
+        {
+            methods.entry(name.clone()).or_insert(ty.clone());
+            let setter = Symbol::from(format!("{}=", name.as_str()));
+            methods.entry(setter).or_insert(ty.clone());
+            if matches!(ty, Ty::Bool) {
+                let predicate = Symbol::from(format!("{}?", name.as_str()));
+                methods.entry(predicate).or_insert(Ty::Bool);
+            }
+        }
+    }
+    expr.node.for_each_child(&mut |child| register_typed_store_decls(child, methods));
+}
+
+/// A `typed_store` column type → its Roundhouse `Ty`. Unsupported types
+/// (`datetime`/`date`/`time`/`any`) return `None` and are left unregistered.
+fn typed_store_ty(type_method: &str) -> Option<Ty> {
+    Some(match type_method {
+        "string" | "text" => Ty::Str,
+        "boolean" => Ty::Bool,
+        "integer" | "big_integer" => Ty::Int,
+        "float" | "decimal" => Ty::Float,
+        _ => return None,
+    })
+}
+
+fn symbol_arg(expr: &Expr) -> Option<&Symbol> {
+    match &*expr.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value),
+        _ => None,
+    }
+}
+
 /// Walk an analyzed `App` collecting every position where typing failed
 /// in a way that matters for downstream typed emission. Does not modify
 /// the IR — purely a read pass.
@@ -2647,6 +2708,72 @@ fn collect_types_expr(e: &Expr, out: &mut Vec<(crate::span::Span, crate::ty::Ty)
         | ExprNode::Ivar { .. }
         | ExprNode::Const { .. }
         | ExprNode::SelfRef => {}
+    }
+}
+
+#[cfg(test)]
+mod typed_store_tests {
+    use super::*;
+    use crate::span::Span;
+
+    fn send(method: &str, args: Vec<Expr>, block: Option<Expr>) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from(method),
+                args,
+                block,
+                parenthesized: false,
+            },
+        )
+    }
+    fn sym(name: &str) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit { value: Literal::Sym { value: Symbol::from(name) } },
+        )
+    }
+    fn unknown_item(expr: Expr) -> ModelBodyItem {
+        ModelBodyItem::Unknown { expr, leading_comments: vec![], leading_blank_line: false }
+    }
+
+    #[test]
+    fn registers_string_and_boolean_accessors() {
+        // typed_store :settings do |s|
+        //   s.string :twitter_username
+        //   s.boolean :email_replies
+        // end
+        let block = Expr::new(
+            Span::synthetic(),
+            ExprNode::Seq {
+                exprs: vec![
+                    send("string", vec![sym("twitter_username")], None),
+                    send("boolean", vec![sym("email_replies")], None),
+                ],
+            },
+        );
+        let body = vec![unknown_item(send("typed_store", vec![sym("settings")], Some(block)))];
+
+        let mut methods: HashMap<Symbol, Ty> = HashMap::new();
+        register_typed_store(&body, &mut methods);
+
+        // string → getter + setter, no predicate
+        assert_eq!(methods.get(&Symbol::from("twitter_username")), Some(&Ty::Str));
+        assert_eq!(methods.get(&Symbol::from("twitter_username=")), Some(&Ty::Str));
+        assert!(!methods.contains_key(&Symbol::from("twitter_username?")));
+        // boolean → getter + setter + predicate
+        assert_eq!(methods.get(&Symbol::from("email_replies")), Some(&Ty::Bool));
+        assert_eq!(methods.get(&Symbol::from("email_replies=")), Some(&Ty::Bool));
+        assert_eq!(methods.get(&Symbol::from("email_replies?")), Some(&Ty::Bool));
+    }
+
+    #[test]
+    fn ignores_unknown_items_without_typed_store() {
+        let body = vec![unknown_item(send("some_macro", vec![sym("x")], None))];
+        let mut methods: HashMap<Symbol, Ty> = HashMap::new();
+        register_typed_store(&body, &mut methods);
+        assert!(methods.is_empty());
     }
 }
 
