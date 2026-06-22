@@ -179,6 +179,19 @@ impl Analyzer {
             // DSL block, backed by a serialized column, so absent from the
             // schema-derived attributes above. Register them as typed methods.
             register_typed_store(&model.body, &mut cls.instance_methods);
+
+            // Named scopes resolve as relation-returning class methods, so
+            // `Story.active` types and chains like `Story.active.recent`
+            // compose. The relation type (`Array[Self]`) is what lets a scope
+            // also chain on a relation (see the `Array[Class]` dispatch, which
+            // delegates relation-returning class methods to the element model).
+            // Scope bodies are typed separately; this only records the call
+            // surface. `or_insert` so an explicit catalog method still wins.
+            for scope in model.scopes() {
+                cls.class_methods
+                    .entry(scope.name.clone())
+                    .or_insert_with(|| array_of_self.clone());
+            }
             // Core AR instance methods every model gets. Sourced
             // from the shared catalog — same mechanism as class
             // methods above. Covers mutation (save/update/destroy),

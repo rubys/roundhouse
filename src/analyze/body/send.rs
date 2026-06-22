@@ -393,7 +393,24 @@ impl<'a> BodyTyper<'a> {
                 }
                 unknown()
             }
-            Some(Ty::Array { elem }) => array_method(method, elem, block_ret),
+            Some(Ty::Array { elem }) => {
+                let elem: &Ty = elem;
+                // A relation delegates scope/builder calls to its element
+                // model, so `user.comments.active` and `Story.where(..).hottest`
+                // chain: any class method that returns a relation
+                // (`Array[Self]`) — named scopes plus the query builders —
+                // resolves on the relation and re-returns the relation.
+                if let Ty::Class { id, .. } = elem {
+                    if let Some(cls) = self.classes().get(id) {
+                        if let Some(scope_ret @ Ty::Array { .. }) =
+                            cls.class_methods.get(method)
+                        {
+                            return scope_ret.clone();
+                        }
+                    }
+                }
+                array_method(method, elem, block_ret)
+            }
             Some(Ty::Hash { key, value }) => hash_method(method, key, value, block_ret),
             Some(Ty::Record { row }) => record_method(method, row, args),
             Some(Ty::Str) => str_method(method),
