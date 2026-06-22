@@ -1726,8 +1726,12 @@ impl Analyzer {
         // Controller-side IO effects — Rails dialect, not adapter
         // territory. Every backend renders views and redirects the
         // same way at the effect level; the concrete implementation
-        // lives in each target's runtime, not here.
-        if id.0.as_str() == "ApplicationController" {
+        // lives in each target's runtime, not here. The receiver is the
+        // controller's own class now (self_ty), so match any controller
+        // by the Rails `*Controller` convention — `ApplicationController`,
+        // `StoriesController`, etc. — not just the literal base. (View
+        // renders dispatch with no receiver and never reach here.)
+        if id.0.as_str().ends_with("Controller") {
             match method.as_str() {
                 "render" | "redirect_to" | "head" => {
                     out.insert(Effect::Io);
