@@ -2048,6 +2048,19 @@ pub(crate) fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty
                 out.insert(name.clone(), merged);
             }
         }
+        // Short-circuit compound assignment to an ivar (`@x ||= y`,
+        // `@x &&= y`) — the memoization idiom. Recorded the same way as
+        // a plain assignment so a controller's `@story ||= Story.find(..)`
+        // still flows its type to before_action seeds and views.
+        ExprNode::OpAssign { target: LValue::Ivar { name }, value, .. } => {
+            if let Some(ty) = value.ty.clone() {
+                let merged = match out.remove(name) {
+                    Some(prev) => crate::analyze::body::union_of(prev, ty),
+                    None => ty,
+                };
+                out.insert(name.clone(), merged);
+            }
+        }
         // `@hash[k] = v` parses as Send to `[]=` with @hash as the
         // receiver. The Hash literal `@hash = {}` only seeds key/value
         // as fresh type variables; the actual stored value-type lives
@@ -2090,15 +2103,21 @@ pub(crate) fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty
                 extract_ivar_assignments(e, out);
             }
         }
-        ExprNode::If { then_branch, else_branch, .. } => {
+        // The condition is walked too: `if (@message = Model.find(..))`
+        // assigns the ivar inside the test, a common `find_*` filter
+        // idiom. Without visiting `cond`, that ivar never gets typed.
+        ExprNode::If { cond, then_branch, else_branch } => {
+            extract_ivar_assignments(cond, out);
             extract_ivar_assignments(then_branch, out);
             extract_ivar_assignments(else_branch, out);
         }
         // `while cond; body; end` — body may contain `@hash[k] = v`
         // (Parameters' initialize loop). Without this arm, ivar
         // value-type widening from `[]=` writes inside loops is
-        // invisible.
-        ExprNode::While { body, .. } => {
+        // invisible. The condition is walked for the same
+        // assignment-in-test reason as `If`.
+        ExprNode::While { cond, body, .. } => {
+            extract_ivar_assignments(cond, out);
             extract_ivar_assignments(body, out);
         }
         ExprNode::RescueModifier { expr, fallback } => {
@@ -2110,9 +2129,10 @@ pub(crate) fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty
                 extract_ivar_assignments(&arm.body, out);
             }
         }
-        // `@x ||= y` lowers to `BoolOp::Or(Ivar, Assign(Ivar, y))`.
-        // The assignment lives inside the Or's right branch, so we
-        // must descend or the memoization idiom's ivar never gets typed.
+        // `a && (@x = y)` / `a || (@x = y)` — an ivar assigned inside a
+        // boolean chain (the `find_*` guard idiom). Descend both sides
+        // so the buried assignment still gets typed. (Compound `@x ||= y`
+        // is `OpAssign`, handled by its own arm above — not `BoolOp`.)
         ExprNode::BoolOp { left, right, .. } => {
             extract_ivar_assignments(left, out);
             extract_ivar_assignments(right, out);

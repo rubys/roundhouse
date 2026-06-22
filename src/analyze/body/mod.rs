@@ -648,6 +648,44 @@ impl<'a> BodyTyper<'a> {
                             }
                         }
                     }
+                    // Short-circuit compound assignment (`@x ||= y`,
+                    // `@x &&= y`) threads its binding forward too — the
+                    // memoization idiom `@story ||= Story.find(...)` is
+                    // pervasive in controllers, and without this the
+                    // following `@story.title` reads `@story` as unknown.
+                    // `OpAssign`'s node type is the value-expression's
+                    // type (the naive desugar), so reuse it — but union
+                    // with any prior binding and skip an unknown RHS so a
+                    // before_action-seeded type isn't clobbered.
+                    if let ExprNode::OpAssign { target, .. } = &*e.node {
+                        if let Some(ty) = e.ty.clone() {
+                            if !matches!(ty, Ty::Var { .. }) {
+                                match target {
+                                    LValue::Ivar { name } => {
+                                        let merged = match local_ctx
+                                            .ivar_bindings
+                                            .remove(name)
+                                        {
+                                            Some(prev) => union_of(prev, ty),
+                                            None => ty,
+                                        };
+                                        local_ctx.ivar_bindings.insert(name.clone(), merged);
+                                    }
+                                    LValue::Var { name, .. } => {
+                                        let merged = match local_ctx
+                                            .local_bindings
+                                            .remove(name)
+                                        {
+                                            Some(prev) => union_of(prev, ty),
+                                            None => ty,
+                                        };
+                                        local_ctx.local_bindings.insert(name.clone(), merged);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
                     // Diverging-then narrowing: `raise X if m.nil?` —
                     // when the then-branch always diverges (Bottom),
                     // control proceeds only via the else, so the
