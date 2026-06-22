@@ -1671,6 +1671,45 @@ end
 }
 
 #[test]
+fn app_helper_module_singletons_resolve() {
+    // Helper modules under app/helpers/ are walked as library classes, so a
+    // helper called as a bare singleton (`TrafficHelper.novelty_logo`) — its
+    // methods declared `def self.x` — dispatches against the registered
+    // module instead of failing "no known method on Class { TrafficHelper }".
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/pages_controller.rb",
+            r#"class PagesController < ApplicationController
+  def show
+    @logo = TrafficHelper.novelty_logo
+  end
+end
+"#,
+        ),
+        (
+            "app/helpers/traffic_helper.rb",
+            r#"module TrafficHelper
+  def self.novelty_logo
+    nil
+  end
+end
+"#,
+        ),
+    ]);
+
+    let failures = send_dispatch_failures(&app);
+    assert!(
+        !failures.iter().any(|f| f == "novelty_logo"),
+        "`TrafficHelper.novelty_logo` should resolve once app/helpers is \
+         walked; dispatch failures = {failures:?}"
+    );
+}
+
+#[test]
 fn multi_symbol_before_action_seeds_every_target() {
     // `before_action :load_user, :load_widget` declares two filters on one
     // line. The old single-target parse captured only `:load_user`, so

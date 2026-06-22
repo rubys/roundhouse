@@ -108,15 +108,21 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     }
 
     // Vendored / support classes under extras/ and lib/ (Markdowner,
-    // Sponge, Utils, monkey-patches, …). Ingest each as a library class so
-    // dotted calls like `Markdowner.to_html` resolve instead of dispatching
-    // to "no known method". These are the least Rails-conventional files in
-    // the tree — HTTP clients, monkey-patches, refinements — so isolate per
-    // file: a parse or unsupported-construct failure degrades that one file
-    // to "class not registered" (references stay unknown, same as before)
-    // rather than aborting the whole app ingest. We never propagate; in
-    // survey mode the error is still recorded for scope estimation.
-    for sub in ["extras", "lib"] {
+    // Sponge, Utils, monkey-patches, …) plus helper modules under
+    // app/helpers/. Ingest each as a library class so dotted calls like
+    // `Markdowner.to_html` or `TrafficHelper.novelty_logo` resolve instead
+    // of dispatching to "no known method". Helpers are conventionally mixed
+    // into views as instance methods (`include`-resolution into a view's
+    // self-type is a separate gap), but the ones called as bare singletons
+    // declare `def self.x` / `module_function`, which `ingest_library_classes`
+    // records as class methods — exactly the call surface we need here.
+    // extras/lib are the least Rails-conventional files in the tree (HTTP
+    // clients, monkey-patches, refinements), so isolate per file: a parse or
+    // unsupported-construct failure degrades that one file to "class not
+    // registered" (references stay unknown, same as before) rather than
+    // aborting the whole app ingest. We never propagate; in survey mode the
+    // error is still recorded for scope estimation.
+    for sub in ["extras", "lib", "app/helpers"] {
         let support_dir = dir.join(sub);
         if !vfs.is_dir(&support_dir) {
             continue;
