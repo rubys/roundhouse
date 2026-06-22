@@ -50,13 +50,10 @@ pub fn classify_cmp(lhs: &Expr, rhs: &Expr) -> CmpCase {
     // posture as missing type info. Otherwise the catch-all arm
     // below would mis-flag e.g. `untyped <= Integer` as Incompatible
     // and the runtime would throw on a perfectly valid comparison.
-    let is_unknown = |t: Option<&Ty>| {
-        matches!(
-            t,
-            None | Some(Ty::Var { .. }) | Some(Ty::Untyped),
-        )
-    };
-    if is_unknown(lhs_ty) || is_unknown(rhs_ty) {
+    // The shared helper also folds in unions with a gradual arm
+    // (`(Float | untyped) > Int`), which the old inline check missed.
+    use super::operand::is_gradual_operand;
+    if is_gradual_operand(lhs_ty) || is_gradual_operand(rhs_ty) {
         return CmpCase::Unknown;
     }
 

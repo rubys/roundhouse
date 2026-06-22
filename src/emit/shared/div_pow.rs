@@ -31,8 +31,8 @@ pub fn classify_div_pow(lhs: &Expr, rhs: &Expr) -> DivPowCase {
     let lhs_ty = lhs.ty.as_ref();
     let rhs_ty = rhs.ty.as_ref();
 
-    let is_unknown = |t: Option<&Ty>| matches!(t, None | Some(Ty::Var { .. }));
-    if is_unknown(lhs_ty) || is_unknown(rhs_ty) {
+    use super::operand::is_gradual_operand;
+    if is_gradual_operand(lhs_ty) || is_gradual_operand(rhs_ty) {
         return DivPowCase::Unknown;
     }
 

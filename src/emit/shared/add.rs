@@ -56,10 +56,8 @@ pub fn classify_add<'a>(lhs: &'a Expr, rhs: &'a Expr) -> AddCase<'a> {
     let lhs_ty = lhs.ty.as_ref();
     let rhs_ty = rhs.ty.as_ref();
 
-    let is_unknown = |t: Option<&Ty>| {
-        matches!(t, None | Some(Ty::Var { .. }))
-    };
-    if is_unknown(lhs_ty) || is_unknown(rhs_ty) {
+    use super::operand::is_gradual_operand;
+    if is_gradual_operand(lhs_ty) || is_gradual_operand(rhs_ty) {
         return AddCase::Unknown;
     }
 
@@ -210,6 +208,24 @@ mod tests {
         let l = int_lit(1);
         let r = untyped_var("b");
         assert!(matches!(classify_add(&l, &r), AddCase::Unknown));
+    }
+
+    #[test]
+    fn untyped_operand_is_unknown_not_incompatible() {
+        // `untyped + 1` is the gradual escape — must fall through to
+        // native infix, not refuse with a runtime raise.
+        let l = var_with("a", Ty::Untyped);
+        let r = int_lit(2);
+        assert!(matches!(classify_add(&l, &r), AddCase::Unknown));
+        // A union with a gradual arm collapses the same way.
+        let u = var_with(
+            "a",
+            Ty::Union {
+                variants: vec![Ty::Float, Ty::Untyped],
+            },
+        );
+        let s = var_with("b", Ty::Str);
+        assert!(matches!(classify_add(&u, &s), AddCase::Unknown));
     }
 
     #[test]

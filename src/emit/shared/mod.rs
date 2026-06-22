@@ -14,5 +14,6 @@ pub mod div_pow;
 pub mod eq;
 pub mod modulo;
 pub mod mul;
+pub mod operand;
 pub mod schema_sql;
 pub mod sub;
