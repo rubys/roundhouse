@@ -191,10 +191,20 @@ impl Server {
             .map(|r| {
                 let s = ide::source(&app, r.span.file).expect("reference span has a source");
                 let p = ide::offset_to_position(&s.text, r.span.start);
-                format!("{}:{}:{} ({})", s.path, p.line + 1, p.character + 1, if r.write { "write" } else { "read" })
+                let kind = if r.write { "write" } else { "read" };
+                // Type-uncertain method matches (receiver type unresolved) are
+                // labeled so an agent can treat them as lower-confidence.
+                let conf = if r.certain { "" } else { ", uncertain" };
+                format!("{}:{}:{} ({kind}{conf})", s.path, p.line + 1, p.character + 1)
             })
             .collect();
-        Ok(format!("{} reference(s):\n{}", lines.len(), lines.join("\n")))
+        let uncertain = refs.iter().filter(|r| !r.certain).count();
+        let summary = if uncertain > 0 {
+            format!("{} reference(s) ({uncertain} type-uncertain):", refs.len())
+        } else {
+            format!("{} reference(s):", refs.len())
+        };
+        Ok(format!("{summary}\n{}", lines.join("\n")))
     }
 
     fn tool_diagnostics(&self, args: &Value) -> Result<String, String> {

@@ -353,6 +353,10 @@ impl Server {
         let decl = ide::definition(app, file, offset);
         let locations = ide::references(app, file, offset)
             .into_iter()
+            // Only type-certain matches: a flat LSP Location list can't
+            // convey confidence, so we keep the precise set (uncertain
+            // name-only method matches surface in the MCP, which can label).
+            .filter(|r| r.certain)
             .filter(|r| include_decl || Some(r.span) != decl)
             .filter_map(|r| self.location_of(r.span))
             .collect();

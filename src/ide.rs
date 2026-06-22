@@ -21,7 +21,7 @@
 use crate::app::App;
 use crate::dialect::{ControllerBodyItem, ModelBodyItem};
 use crate::expr::{Expr, ExprNode, LValue};
-use crate::ident::{Symbol, VarId};
+use crate::ident::{ClassId, Symbol, VarId};
 use crate::span::{FileId, SourceFile, Span};
 use crate::ty::{Row, Ty};
 
@@ -353,13 +353,16 @@ fn walk<'a>(e: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
 // constant references — which need type-aware dispatch resolution — are a
 // later increment; this covers the precise, high-value cases.
 
-/// One occurrence of a variable — a read, or a write (its binding or an
-/// assignment to it). `write` lets consumers distinguish reads from
-/// writes (document highlights) and honor `includeDeclaration`.
+/// One occurrence of a variable or method. `write` marks an assignment /
+/// binding (variables only). `certain` marks a type-resolved match: it is
+/// always true for locals/ivars (which are exact), and for a method call
+/// distinguishes a receiver whose type resolves to the target class from a
+/// same-named call whose receiver type couldn't be resolved (`false`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Reference {
     pub span: Span,
     pub write: bool,
+    pub certain: bool,
 }
 
 /// Which variable a position names.
@@ -370,28 +373,34 @@ enum VarRef {
     Ivar(Symbol),
 }
 
-/// All references to the local or instance variable at `offset` in `file`.
+/// All references to the variable or method at `offset` in `file`.
 ///
-/// Locals resolve by their exact binding id, scoped to the enclosing
-/// method/action body (a `VarId` is only unique there). Instance variables
-/// resolve by name, scoped to the enclosing class — every action of a
-/// controller, every method of a model — matching how a Rails dev reads
-/// `@article`. Empty when `offset` isn't on a resolvable variable (a method
-/// call, constant, literal, or whitespace).
+/// Variables resolve exactly and come back `certain`: locals by their
+/// binding id (scoped to the enclosing body — a `VarId` is only unique
+/// there), instance variables by name (scoped to the enclosing class, as a
+/// Rails dev reads `@article`). Reads carry their real span; write targets
+/// in `x = …` / `x += …` carry a span synthesized at the assigned name.
 ///
-/// Reads carry their real span; write targets in `x = …` / `x += …` carry
-/// a span synthesized at the assigned name (the statement begins there).
+/// A method/attribute call resolves by the inferred **receiver type**:
+/// every `recv.m` whose receiver type is the same class is `certain`, calls
+/// on a different class are excluded, and same-named calls whose receiver
+/// type couldn't be resolved come back `uncertain`. That type direction is
+/// what lets `article.title` references exclude `comment.title` — precision
+/// a name-based tool can't reach. Method spans point at the name token.
+///
+/// Empty when `offset` isn't on a resolvable variable or typed call.
 /// Results are position-sorted and deduplicated.
 pub fn references(app: &App, file: FileId, offset: u32) -> Vec<Reference> {
-    let Some((group, body)) = locate(app, file, offset) else {
-        return Vec::new();
-    };
-    let Some(node) = find_at_offset(app, file, offset) else {
-        return Vec::new();
-    };
-    let Some(var) = var_at(node, offset) else {
-        return Vec::new();
-    };
+    if let Some(refs) = variable_references(app, file, offset) {
+        return refs;
+    }
+    method_references(app, file, offset).unwrap_or_default()
+}
+
+fn variable_references(app: &App, file: FileId, offset: u32) -> Option<Vec<Reference>> {
+    let (group, body) = locate(app, file, offset)?;
+    let node = find_at_offset(app, file, offset)?;
+    let var = var_at(node, offset)?;
     // Locals are body-scoped; instance variables span the whole class.
     let bodies: Vec<&Expr> = match var {
         VarRef::Local(_) => vec![body],
@@ -403,7 +412,89 @@ pub fn references(app: &App, file: FileId, offset: u32) -> Vec<Reference> {
     }
     out.sort_by_key(|r| (r.span.file.0, r.span.start, r.span.end));
     out.dedup();
-    out
+    Some(out)
+}
+
+/// References to the method/attribute named at `offset`, resolved by the
+/// receiver's inferred type. `None` unless the cursor is on the name of an
+/// explicit-receiver call whose receiver type resolves to a class — the
+/// case where type direction is meaningful. (Implicit-`self` calls and
+/// method *definitions* aren't handled yet; the latter needs a def-header
+/// span the IR doesn't carry.)
+fn method_references(app: &App, file: FileId, offset: u32) -> Option<Vec<Reference>> {
+    let node = find_at_offset(app, file, offset)?;
+    let ExprNode::Send { recv: Some(recv), method, .. } = &*node.node else {
+        return None;
+    };
+    // The cursor must be on the method name, not the receiver — clicking the
+    // receiver is a variable lookup (handled above). The receiver subtree
+    // ends before the `.method` token.
+    if offset < recv.span.end {
+        return None;
+    }
+    let target = resolve_receiver_class(recv.ty.as_ref())?;
+
+    let mut out = Vec::new();
+    for body in root_bodies(app) {
+        walk(body, &mut |e| {
+            let ExprNode::Send { recv: Some(r), method: m, .. } = &*e.node else {
+                return;
+            };
+            if m != method {
+                return;
+            }
+            let certain = match resolve_receiver_class(r.ty.as_ref()) {
+                Some(id) if id == target => true,
+                Some(_) => return, // a different class — type rules it out
+                None => false,     // receiver type unknown — name-only match
+            };
+            if let Some(span) = method_name_span(e, r, m, app) {
+                out.push(Reference { span, write: false, certain });
+            }
+        });
+    }
+    out.sort_by_key(|r| (r.span.file.0, r.span.start, r.span.end));
+    out.dedup();
+    Some(out)
+}
+
+/// The class a receiver resolves to, if its type pins exactly one: a
+/// `Class`, or a union of one class arm with `nil` (`Article?` → `Article`).
+fn resolve_receiver_class(ty: Option<&Ty>) -> Option<ClassId> {
+    match ty? {
+        Ty::Class { id, .. } => Some(id.clone()),
+        Ty::Union { variants } => {
+            let mut found: Option<ClassId> = None;
+            for v in variants {
+                match v {
+                    Ty::Nil => {}
+                    Ty::Class { id, .. } if found.is_none() => found = Some(id.clone()),
+                    // a second class, or a non-nil non-class arm → ambiguous
+                    _ => return None,
+                }
+            }
+            found
+        }
+        _ => None,
+    }
+}
+
+/// The span of just the method-name token within a call. The IR carries no
+/// selector span, so it's recovered from source: the first occurrence of
+/// the name after the receiver (i.e. right after the `.`/`&.`). Falls back
+/// to the whole call span when it can't be located (e.g. operator methods).
+fn method_name_span(send: &Expr, recv: &Expr, method: &Symbol, app: &App) -> Option<Span> {
+    let src = source(app, send.span.file)?;
+    let from = recv.span.end as usize;
+    let to = (send.span.end as usize).min(src.text.len());
+    let name = method.as_str();
+    if let Some(slice) = src.text.get(from..to) {
+        if let Some(pos) = slice.find(name) {
+            let start = (from + pos) as u32;
+            return Some(Span { file: send.span.file, start, end: start + name.len() as u32 });
+        }
+    }
+    Some(send.span)
 }
 
 /// The defining occurrence — the binding / earliest write — of the
@@ -439,10 +530,10 @@ fn collect_refs(body: &Expr, var: &VarRef, out: &mut Vec<Reference>) {
     walk(body, &mut |e| {
         match (&*e.node, var) {
             (ExprNode::Var { id, .. }, VarRef::Local(want)) if id == want => {
-                out.push(Reference { span: e.span, write: false });
+                out.push(Reference { span: e.span, write: false, certain: true });
             }
             (ExprNode::Ivar { name }, VarRef::Ivar(want)) if name == want => {
-                out.push(Reference { span: e.span, write: false });
+                out.push(Reference { span: e.span, write: false, certain: true });
             }
             (ExprNode::Assign { target, .. }, _) => write_target(target, e.span, var, out),
             (ExprNode::OpAssign { target, .. }, _) => write_target(target, e.span, var, out),
@@ -471,6 +562,7 @@ fn write_target(lv: &LValue, stmt: Span, var: &VarRef, out: &mut Vec<Reference>)
         out.push(Reference {
             span: Span { file: stmt.file, start: stmt.start, end: stmt.start + name_len },
             write: true,
+            certain: true,
         });
     }
 }
@@ -615,6 +707,26 @@ mod tests {
 
         let refs = references(&app, file, at);
         assert!(refs.len() >= 2, "format used 2+ times in its body, got {}", refs.len());
+    }
+
+    #[test]
+    fn references_method_is_type_directed() {
+        let app = real_blog();
+        let file = file_id(&app, "app/controllers/articles_controller.rb").unwrap();
+        let src = source(&app, file).unwrap();
+        // `@article.errors` — a method call on an Article-typed receiver,
+        // appearing in more than one action.
+        let dot = src.text.find(".errors").expect("an .errors call");
+        let at = dot as u32 + 1; // inside the `errors` name token
+
+        let refs = references(&app, file, at);
+        assert!(refs.len() >= 2, "expected the @article.errors calls, got {}", refs.len());
+        assert!(refs.iter().all(|r| r.certain), "Article-typed receivers are certain");
+        // Spans point at just the method-name token, not the whole call.
+        assert!(
+            refs.iter().all(|r| r.span.len() == "errors".len() as u32),
+            "method references should span only the name token"
+        );
     }
 
     #[test]
