@@ -2521,30 +2521,57 @@ fn register_typed_store(body: &[ModelBodyItem], methods: &mut HashMap<Symbol, Ty
 /// match, so nothing else in the block is picked up.
 fn register_typed_store_decls(expr: &Expr, methods: &mut HashMap<Symbol, Ty>) {
     if let ExprNode::Send { method, args, .. } = &*expr.node {
-        if let (Some(ty), Some(name)) =
+        if let (Some(elem_ty), Some(name)) =
             (typed_store_ty(method.as_str()), args.first().and_then(symbol_arg))
         {
+            // `array: true` stores a list of the column type. `any` stays
+            // `Untyped` even as an array — the element is unknown, so the
+            // gradual escape covers every call (`push`/`reject!`/`each`/…)
+            // without depending on the Array method registry.
+            let ty = if typed_store_is_array(args) && !matches!(elem_ty, Ty::Untyped) {
+                Ty::Array { elem: Box::new(elem_ty.clone()) }
+            } else {
+                elem_ty
+            };
             methods.entry(name.clone()).or_insert(ty.clone());
             let setter = Symbol::from(format!("{}=", name.as_str()));
-            methods.entry(setter).or_insert(ty.clone());
-            if matches!(ty, Ty::Bool) {
-                let predicate = Symbol::from(format!("{}?", name.as_str()));
-                methods.entry(predicate).or_insert(Ty::Bool);
-            }
+            methods.entry(setter).or_insert(ty);
+            // typedstore generates a `name?` presence predicate for every
+            // column, regardless of type — same as the schema-column loop.
+            let predicate = Symbol::from(format!("{}?", name.as_str()));
+            methods.entry(predicate).or_insert(Ty::Bool);
         }
     }
     expr.node.for_each_child(&mut |child| register_typed_store_decls(child, methods));
 }
 
-/// A `typed_store` column type → its Roundhouse `Ty`. Unsupported types
-/// (`datetime`/`date`/`time`/`any`) return `None` and are left unregistered.
+/// A `typed_store` column type → its Roundhouse `Ty`. `any` is the
+/// untyped escape (`Ty::Untyped`); `datetime`/`time`/`date` map to the
+/// registered temporal classes. Anything unrecognized returns `None` and
+/// stays unregistered.
 fn typed_store_ty(type_method: &str) -> Option<Ty> {
+    let class = |name: &str| Ty::Class { id: ClassId(Symbol::from(name)), args: vec![] };
     Some(match type_method {
         "string" | "text" => Ty::Str,
         "boolean" => Ty::Bool,
         "integer" | "big_integer" => Ty::Int,
         "float" | "decimal" => Ty::Float,
+        "any" => Ty::Untyped,
+        "datetime" | "time" => class("Time"),
+        "date" => class("Date"),
         _ => return None,
+    })
+}
+
+/// True when a `typed_store` declaration carries `array: true` — the
+/// column stores a list of its element type rather than a scalar.
+fn typed_store_is_array(args: &[Expr]) -> bool {
+    args.iter().any(|a| {
+        let ExprNode::Hash { entries, .. } = &*a.node else { return false };
+        entries.iter().any(|(k, v)| {
+            matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "array")
+                && matches!(&*v.node, ExprNode::Lit { value: Literal::Bool { value: true } })
+        })
     })
 }
 
@@ -3085,10 +3112,11 @@ mod typed_store_tests {
         let mut methods: HashMap<Symbol, Ty> = HashMap::new();
         register_typed_store(&body, &mut methods);
 
-        // string → getter + setter, no predicate
+        // string → getter + setter + presence predicate (typedstore
+        // generates `name?` for every column, like a schema column).
         assert_eq!(methods.get(&Symbol::from("twitter_username")), Some(&Ty::Str));
         assert_eq!(methods.get(&Symbol::from("twitter_username=")), Some(&Ty::Str));
-        assert!(!methods.contains_key(&Symbol::from("twitter_username?")));
+        assert_eq!(methods.get(&Symbol::from("twitter_username?")), Some(&Ty::Bool));
         // boolean → getter + setter + predicate
         assert_eq!(methods.get(&Symbol::from("email_replies")), Some(&Ty::Bool));
         assert_eq!(methods.get(&Symbol::from("email_replies=")), Some(&Ty::Bool));
@@ -3101,6 +3129,48 @@ mod typed_store_tests {
         let mut methods: HashMap<Symbol, Ty> = HashMap::new();
         register_typed_store(&body, &mut methods);
         assert!(methods.is_empty());
+    }
+
+    #[test]
+    fn registers_any_and_array_columns() {
+        // typed_store :settings do |s|
+        //   s.any :keybase_signatures, array: true
+        //   s.string :tags, array: true
+        // end
+        let array_kw = Expr::new(
+            Span::synthetic(),
+            ExprNode::Hash {
+                entries: vec![(
+                    sym("array"),
+                    Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Bool { value: true } }),
+                )],
+                kwargs: true,
+            },
+        );
+        let block = Expr::new(
+            Span::synthetic(),
+            ExprNode::Seq {
+                exprs: vec![
+                    send("any", vec![sym("keybase_signatures"), array_kw.clone()], None),
+                    send("string", vec![sym("tags"), array_kw], None),
+                ],
+            },
+        );
+        let body = vec![unknown_item(send("typed_store", vec![sym("settings")], Some(block)))];
+
+        let mut methods: HashMap<Symbol, Ty> = HashMap::new();
+        register_typed_store(&body, &mut methods);
+
+        // `any` stays the gradual escape even with `array: true` — element
+        // is unknown, so Untyped (not Array<Untyped>) keeps every call live.
+        assert_eq!(methods.get(&Symbol::from("keybase_signatures")), Some(&Ty::Untyped));
+        assert_eq!(methods.get(&Symbol::from("keybase_signatures=")), Some(&Ty::Untyped));
+        assert_eq!(methods.get(&Symbol::from("keybase_signatures?")), Some(&Ty::Bool));
+        // a typed `array: true` column wraps the element type.
+        assert_eq!(
+            methods.get(&Symbol::from("tags")),
+            Some(&Ty::Array { elem: Box::new(Ty::Str) })
+        );
     }
 
     #[test]
