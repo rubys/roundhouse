@@ -465,16 +465,22 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         match method.as_str() {
             // Relation chain methods preserve Array<Self>.
             "where" | "order" | "limit" | "offset" | "includes" | "preload"
-            | "joins" | "distinct" | "group" | "having"
+            | "joins" | "left_outer_joins" | "distinct" | "group" | "having"
             | "references" | "eager_load" | "readonly" | "reorder"
-            | "rewhere" | "merge" | "extending" | "unscope" => {
+            | "rewhere" | "merge" | "extending" | "unscope"
+            | "not" | "or" | "and" | "none" | "load" | "reload" | "reselect" => {
                 return Ty::Array { elem: Box::new(elem.clone()) };
             }
-            // CollectionProxy constructors return an element instance.
+            // CollectionProxy constructors / first-or-X return an element.
             "build" | "create" | "create!" | "find" | "find!" | "find_by!"
-            | "first!" | "last!" | "take!" => {
+            | "first!" | "last!" | "take!" | "sole" | "sole!"
+            | "first_or_initialize" | "first_or_create" | "first_or_create!"
+            | "find_or_initialize_by" | "find_or_create_by" | "find_or_create_by!" => {
                 return elem.clone();
             }
+            // `ids` projects the primary keys; `arel` escapes to raw SQL.
+            "ids" => return Ty::Array { elem: Box::new(Ty::Int) },
+            "arel" => return Ty::Untyped,
             // `find_by` / `take` on a relation return Element | Nil
             // (same as a class call). Already covered by AR_CATALOG
             // for class receivers; cover the Array<Model> shape here.
@@ -561,6 +567,26 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         "find" | "detect" => Ty::Union {
             variants: vec![elem.clone(), Ty::Nil],
         },
+        // Enumerable extrema return an element or nil (empty collection).
+        "max" | "min" | "max_by" | "min_by" => Ty::Union {
+            variants: vec![elem.clone(), Ty::Nil],
+        },
+        // In-place / index-yielding transforms return the array itself.
+        "each_with_index" | "keep_if" | "delete_if" | "select!" | "reject!" | "sort!"
+        | "uniq!" | "compact!" | "reverse!" => Ty::Array { elem: Box::new(elem.clone()) },
+        // `group_by`/`index_by` (ActiveSupport) force evaluation to a Hash.
+        "group_by" => Ty::Hash {
+            key: Box::new(Ty::Untyped),
+            value: Box::new(Ty::Array { elem: Box::new(elem.clone()) }),
+        },
+        "index_by" => Ty::Hash {
+            key: Box::new(Ty::Untyped),
+            value: Box::new(elem.clone()),
+        },
+        "tally" => Ty::Hash { key: Box::new(elem.clone()), value: Box::new(Ty::Int) },
+        // Fold/accumulate — result type depends on the block/seed (untracked).
+        "inject" | "reduce" | "each_with_object" => Ty::Untyped,
+        "to_sentence" => Ty::Str,
         // `Array#to_h { |elem| [k, v] }` — block returns a [k, v]
         // tuple; result is Hash<k, v>. We approximate as Hash<elem, elem>
         // when the block's tuple types aren't tracked at this layer;

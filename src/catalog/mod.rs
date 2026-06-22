@@ -248,7 +248,9 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         receiver: ReceiverContext::Class,
         effect: EffectClass::DbRead,
         chain: ChainKind::Terminal,
-        return_kind: None,
+        // `find_by!` raises rather than returning nil, so the result is the
+        // record itself (not `Self | Nil` like `find_by`).
+        return_kind: Some(ReturnKind::SelfType),
     },
     CatalogedMethod {
         name: "first",
@@ -400,7 +402,8 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         receiver: ReceiverContext::Class,
         effect: EffectClass::DbRead,
         chain: ChainKind::Builder,
-        return_kind: None,
+        // `Model.select(:col)` is a relation builder (column projection).
+        return_kind: Some(ReturnKind::ArrayOfSelf),
     },
     CatalogedMethod {
         name: "distinct",
