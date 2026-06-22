@@ -1249,10 +1249,6 @@ impl Analyzer {
         for lc in &app.library_classes {
             let class_id = &lc.name;
             for method in &lc.methods {
-                let Some(body_ty) = method.body.ty.clone() else { continue };
-                if matches!(body_ty, Ty::Var { .. }) {
-                    continue;
-                }
                 let target = match method.receiver {
                     crate::dialect::MethodReceiver::Instance => {
                         &mut self.classes.entry(class_id.clone()).or_default().instance_methods
@@ -1261,7 +1257,13 @@ impl Analyzer {
                         &mut self.classes.entry(class_id.clone()).or_default().class_methods
                     }
                 };
-                Self::insert_inferred_return(target, &method.name, body_ty);
+                // Register method existence even when the body can't be
+                // typed: these classes are now ingested (their `def`s are
+                // real), so a call resolves to the inferred return or to
+                // Untyped (gradual) rather than "no known method". Unlike an
+                // unregistered class, this doesn't mask a typo — the method
+                // has to be defined in the file to land here.
+                Self::register_method_return(target, &method.name, method.body.ty.as_ref());
             }
         }
         // Controllers: harvest each action/helper method's return type so a

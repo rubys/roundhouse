@@ -20,13 +20,15 @@ use super::controller::ingest_controller;
 use super::expr::ingest_ruby_program;
 use super::fixture::ingest_fixture_file;
 use super::jbuilder::ingest_jbuilder;
-use super::library_class::{ClassKind, classify_class_file, ingest_library_class};
+use super::library_class::{
+    ClassKind, classify_class_file, ingest_library_class, ingest_library_classes,
+};
 use super::model::ingest_model;
 use super::routes::ingest_routes;
 use super::schema::{ingest_migration, ingest_schema};
 use super::test::ingest_test_file;
 use super::view::ingest_view;
-use super::survey::unwrap_or_record;
+use super::survey::{self, unwrap_or_record};
 use super::{IngestError, IngestResult};
 
 /// Ingest an entire Rails app directory from disk.
@@ -99,6 +101,35 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         if let Some(lc) = maybe_lc {
                             app.library_classes.push(lc);
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // Vendored / support classes under extras/ and lib/ (Markdowner,
+    // Sponge, Utils, monkey-patches, …). Ingest each as a library class so
+    // dotted calls like `Markdowner.to_html` resolve instead of dispatching
+    // to "no known method". These are the least Rails-conventional files in
+    // the tree — HTTP clients, monkey-patches, refinements — so isolate per
+    // file: a parse or unsupported-construct failure degrades that one file
+    // to "class not registered" (references stay unknown, same as before)
+    // rather than aborting the whole app ingest. We never propagate; in
+    // survey mode the error is still recorded for scope estimation.
+    for sub in ["extras", "lib"] {
+        let support_dir = dir.join(sub);
+        if !vfs.is_dir(&support_dir) {
+            continue;
+        }
+        let Ok(entries) = read_rb_files(vfs, &support_dir) else { continue };
+        for entry in entries {
+            let Ok(source) = vfs.read(&entry) else { continue };
+            let path_str = entry.display().to_string();
+            match ingest_library_classes(&source, &path_str) {
+                Ok(classes) => app.library_classes.extend(classes),
+                Err(err) => {
+                    if survey::is_active() {
+                        survey::record(&err);
                     }
                 }
             }
