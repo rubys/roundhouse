@@ -416,6 +416,7 @@ impl<'a> BodyTyper<'a> {
             Some(Ty::Str) => str_method(method),
             Some(Ty::Sym) => sym_method(method),
             Some(Ty::Int) => int_method(method),
+            Some(Ty::Float) => float_method(method),
             Some(Ty::Bool) => bool_method(method),
             // Union dispatch: try each concrete (non-Nil, non-Var) variant
             // and union the resolved results. Covers the common
@@ -820,6 +821,13 @@ pub(super) fn int_method(method: &Symbol) -> Ty {
         // refine when a fixture demands it).
         "+" | "-" | "*" | "/" | "%" | "**" | "&" | "|" | "^" | "<<" | ">>" => Ty::Int,
         "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>" | "eql?" | "equal?" => Ty::Bool,
+        // Bit access (`flags[0]`) returns the bit as Int; `times` returns
+        // the receiver (Int) — `n.times { }` evaluates to `n`.
+        "[]" | "times" => Ty::Int,
+        // ActiveSupport byte-size helpers — like the duration helpers,
+        // they yield a Numeric-ish value we don't model structurally.
+        "bytes" | "kilobytes" | "megabytes" | "gigabytes" | "terabytes"
+        | "petabytes" | "exabytes" => Ty::Untyped,
         // ActiveSupport Numeric duration helpers — `1.day`, `2.hours`,
         // `30.minutes`, etc. Each returns an ActiveSupport::Duration
         // instance; we don't model that structurally so propagate
@@ -833,6 +841,22 @@ pub(super) fn int_method(method: &Symbol) -> Ty {
         "ago" | "from_now" | "since" | "until" => Ty::Untyped,
         // Common Int formatters from ActiveSupport.
         "ordinalize" | "ordinal" => Ty::Str,
+        _ => unknown(),
+    }
+}
+
+pub(super) fn float_method(method: &Symbol) -> Ty {
+    match method.as_str() {
+        "to_s" | "inspect" => Ty::Str,
+        // No-arg rounding returns Int (the common shape); with a digits
+        // arg it returns Float, but we don't see args here — Int is the
+        // safer default for the bare call.
+        "to_i" | "to_int" | "round" | "ceil" | "floor" | "truncate" => Ty::Int,
+        "to_f" | "abs" => Ty::Float,
+        "zero?" | "positive?" | "negative?" | "nan?" | "finite?" | "infinite?" => Ty::Bool,
+        // Float arithmetic stays Float (Float op Int is also Float).
+        "+" | "-" | "*" | "/" | "%" | "**" => Ty::Float,
+        "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>" | "eql?" | "equal?" => Ty::Bool,
         _ => unknown(),
     }
 }
