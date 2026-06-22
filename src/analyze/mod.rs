@@ -492,6 +492,22 @@ impl Analyzer {
             classes.entry(lc.name.clone()).or_default();
         }
 
+        // Controllers: register each as a known class so self-method
+        // dispatch (a bare `find_story` inside an action) resolves against
+        // the controller's own methods and walks the parent chain to the
+        // hardcoded ApplicationController surface (params/session/render).
+        // Return types are filled by `harvest_returns_to_registry` during
+        // the fixpoint; here we only establish the class and its parent
+        // link. `or_default` preserves the hardcoded ApplicationController
+        // entry when a real `application_controller.rb` is also present —
+        // we only set its parent, never clobber its methods.
+        for controller in &app.controllers {
+            let cls = classes.entry(controller.name.clone()).or_default();
+            if controller.parent.is_some() {
+                cls.parent = controller.parent.clone();
+            }
+        }
+
         Self { classes, inferred_params: HashMap::new(), adapter }
     }
 
@@ -584,11 +600,14 @@ impl Analyzer {
             // `TOTP_SESSION_TIMEOUT = (60 * 15)`, etc.) get
             // `value.ty` populated for the extract pass below. Same
             // rationale as the model loop.
+            // Self is the controller's own class (registered in the class
+            // registry with its parent link) so a bare sibling call like
+            // `find_story` dispatches against this controller's methods and
+            // walks the parent chain to the ApplicationController surface
+            // (params/session/render). Previously self_ty was the *parent*,
+            // which hid same-controller helpers from dispatch.
             let self_ty = Ty::Class {
-                id: controller
-                    .parent
-                    .clone()
-                    .unwrap_or_else(|| ClassId(Symbol::from("ApplicationController"))),
+                id: controller.name.clone(),
                 args: vec![],
             };
             let const_ctx = Ctx {
@@ -1239,6 +1258,24 @@ impl Analyzer {
                     }
                 };
                 Self::insert_inferred_return(target, &method.name, body_ty);
+            }
+        }
+        // Controllers: harvest each action/helper method's return type so a
+        // sibling call (`@story = find_story`) resolves. Conservative like
+        // library classes — only concrete (non-Var) bodies are registered;
+        // an untypeable helper stays unresolved rather than masking to
+        // Untyped. All controller methods are instance methods (Action has
+        // no class-receiver variant).
+        for controller in &app.controllers {
+            let class_id = &controller.name;
+            for action in controller.actions() {
+                let Some(body_ty) = action.body.ty.clone() else { continue };
+                if matches!(body_ty, Ty::Var { .. }) {
+                    continue;
+                }
+                let target =
+                    &mut self.classes.entry(class_id.clone()).or_default().instance_methods;
+                Self::insert_inferred_return(target, &action.name, body_ty);
             }
         }
     }
