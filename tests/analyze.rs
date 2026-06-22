@@ -11,7 +11,7 @@ use roundhouse::effect::Effect;
 use roundhouse::expr::{ExprNode, LValue, Literal};
 use roundhouse::ingest::ingest_app;
 use roundhouse::ty::Ty;
-use roundhouse::{ClassId, Symbol, TableRef};
+use roundhouse::{ClassId, RenderTarget, Symbol, TableRef};
 
 fn fixture_path() -> &'static Path {
     Path::new("fixtures/tiny-blog")
@@ -1713,6 +1713,68 @@ end
             .any(|(n, ty)| n.as_str() == "count" && matches!(ty, Some(Ty::Int))),
         "@count should read as Int in the view; got {:?}",
         reads.iter().filter(|(n, _)| n.as_str() == "count").collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn explicit_render_template_binds_view_and_skips_respond_to() {
+    // `reused` renders `:show` at the top level — the "this action reuses
+    // another action's template" idiom — so its view is `things/show`, not
+    // the convention `things/reused`. `formatted` only renders inside a
+    // `respond_to` block (where each MIME type names its own template), so
+    // it must keep its convention view rather than mis-binding to `new`.
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/things_controller.rb",
+            r#"class ThingsController < ApplicationController
+  def reused
+    @greeting = "hi"
+    render :show
+  end
+
+  def formatted
+    respond_to do |format|
+      format.html { render :new }
+      format.json { render :show }
+    end
+  end
+end
+"#,
+        ),
+        ("app/views/things/show.html.erb", "<p><%= @greeting %></p>\n"),
+    ]);
+
+    let ctrl = app
+        .controllers
+        .iter()
+        .find(|c| c.name.0.as_str() == "ThingsController")
+        .expect("ThingsController");
+
+    let reused = ctrl.actions().find(|a| a.name.as_str() == "reused").expect("reused");
+    assert!(
+        matches!(&reused.renders, RenderTarget::Template { name, .. } if name.as_str() == "show"),
+        "top-level `render :show` should set Template{{show}}; got {:?}",
+        reused.renders
+    );
+
+    // Safety: respond_to-only renders stay Inferred (this is what keeps
+    // real-blog's multi-format create/update at 0/0).
+    let formatted = ctrl.actions().find(|a| a.name.as_str() == "formatted").expect("formatted");
+    assert!(
+        matches!(formatted.renders, RenderTarget::Inferred),
+        "respond_to-nested renders must stay Inferred; got {:?}",
+        formatted.renders
+    );
+
+    // The reused template's view resolves @greeting (set only by `reused`).
+    let unresolved = ivar_unresolved_names(&app);
+    assert!(
+        !unresolved.iter().any(|n| n == "greeting"),
+        "@greeting should resolve in things/show via `render :show`; unresolved = {unresolved:?}"
     );
 }
 

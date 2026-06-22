@@ -6,7 +6,7 @@ use ruby_prism::Node;
 
 use crate::dialect::{Action, Comment, Controller, ControllerBodyItem, LayoutDecl, RenderTarget};
 use crate::effect::EffectSet;
-use crate::expr::{Expr, ExprNode};
+use crate::expr::{Expr, ExprNode, Literal};
 use crate::span::Span;
 use crate::ty::Row;
 use crate::{ClassId, Symbol};
@@ -159,12 +159,15 @@ fn ingest_controller_body_item(
                 Expr::new(span, ExprNode::Seq { exprs: vec![] })
             }
         };
+        let renders = infer_render_template(&body_expr)
+            .map(|name| RenderTarget::Template { name, formats: Vec::new() })
+            .unwrap_or(RenderTarget::Inferred);
         return Ok(ControllerBodyItem::Action {
             action: Action {
                 name: Symbol::from(action_name),
                 params: Row::closed(),
                 body: body_expr,
-                renders: RenderTarget::Inferred,
+                renders,
                 effects: EffectSet::pure(),
             },
             leading_comments,
@@ -278,4 +281,78 @@ fn parse_filter_call(stmt: &Node<'_>) -> Option<Vec<crate::dialect::Filter>> {
             })
             .collect(),
     )
+}
+
+/// Resolve the template an action explicitly renders, so the analyzer can
+/// bind its ivars to the view it actually produces rather than the
+/// convention `controller/<action_name>`. Returns `Some(name)` only when
+/// the body renders exactly one distinct template *outside* any
+/// `respond_to` block.
+///
+/// The `respond_to do |format| … end` exclusion is the safety property:
+/// format dispatch routinely renders several templates by MIME type
+/// (`format.json { render :show }` next to `format.html { render :new }`),
+/// so no single one is "the action's view" — those actions keep their
+/// convention name. A plain top-level `render :show` (the "reuse another
+/// action's template" idiom — e.g. RepliesController's
+/// all/comments/stories/unread all `render :show`) is unambiguous, and is
+/// exactly the shape whose view otherwise received no controller ivars.
+fn infer_render_template(body: &Expr) -> Option<Symbol> {
+    let mut names: Vec<Symbol> = Vec::new();
+    collect_template_renders(body, &mut names);
+    let first = names.first()?.clone();
+    // Conflicting templates (`if … render :a else render :b`) are
+    // ambiguous — fall back to the convention name.
+    names.iter().all(|n| *n == first).then_some(first)
+}
+
+/// Walk an action body collecting every explicit template-render name,
+/// skipping `respond_to` blocks (their renders are format-specific).
+fn collect_template_renders(expr: &Expr, out: &mut Vec<Symbol>) {
+    if let ExprNode::Send { recv, method, args, .. } = &*expr.node {
+        if recv.is_none() {
+            match method.as_str() {
+                "respond_to" => return,
+                "render" => {
+                    if let Some(name) = render_template_name(args) {
+                        out.push(name);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    expr.node.for_each_child(&mut |c| collect_template_renders(c, out));
+}
+
+/// Extract a template name from `render` arguments for the forms that name
+/// a template view: `render :show`, `render "users/show"`,
+/// `render template: "x"`, `render action: :y`. Returns `None` for the
+/// non-template forms (`render json:/plain:/partial:/inline:/…`,
+/// `render @record`, bare `render`) so they keep convention semantics.
+fn render_template_name(args: &[Expr]) -> Option<Symbol> {
+    let first = args.first()?;
+    match &*first.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(Symbol::from(value.as_str())),
+        // `render template: "x"` / `render action: :y` — a leading options
+        // hash. Only `template:`/`action:` name a view; every other key
+        // (`json:`, `plain:`, `partial:`, `status:`, …) does not.
+        ExprNode::Hash { entries, .. } => entries.iter().find_map(|(k, v)| {
+            let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
+                return None;
+            };
+            if !matches!(key.as_str(), "template" | "action") {
+                return None;
+            }
+            match &*v.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+                ExprNode::Lit { value: Literal::Str { value } } => {
+                    Some(Symbol::from(value.as_str()))
+                }
+                _ => None,
+            }
+        }),
+        _ => None,
+    }
 }
