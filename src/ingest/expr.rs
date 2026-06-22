@@ -1084,6 +1084,39 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 name: Symbol::from(format!("${}", r.number())),
             }
         }
+        // `@@config`, `$stdout`, `$~`/`$&` (back-references) — the three
+        // remaining special-read forms, handled like `$1` above: ingest
+        // each as a `Var` whose name keeps the sigil verbatim. `@@`/`$`
+        // prefixes aren't valid local-variable names, so these can't
+        // collide with real locals, and the Ruby emitter round-trips by
+        // reading the name back. We don't model class-variable / global
+        // state, so the read types as `Var` (gradual). Their value is
+        // letting support classes that touch these forms (Keybase's
+        // `@@config`, Sponge's `$stdout`, Markdowner's `$&`) ingest at
+        // all — without this, one such read drops the whole file under
+        // the per-file isolation in `ingest_app`, taking every method on
+        // the class with it.
+        n if n.as_class_variable_read_node().is_some() => {
+            let v = n.as_class_variable_read_node().unwrap();
+            ExprNode::Var {
+                id: crate::ident::VarId(0),
+                name: Symbol::from(constant_id_str(&v.name())),
+            }
+        }
+        n if n.as_global_variable_read_node().is_some() => {
+            let v = n.as_global_variable_read_node().unwrap();
+            ExprNode::Var {
+                id: crate::ident::VarId(0),
+                name: Symbol::from(constant_id_str(&v.name())),
+            }
+        }
+        n if n.as_back_reference_read_node().is_some() => {
+            let v = n.as_back_reference_read_node().unwrap();
+            ExprNode::Var {
+                id: crate::ident::VarId(0),
+                name: Symbol::from(constant_id_str(&v.name())),
+            }
+        }
         n if n.as_while_node().is_some() => {
             let w = n.as_while_node().unwrap();
             if w.is_begin_modifier() {

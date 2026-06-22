@@ -304,6 +304,40 @@ fn literal_ingested_expr() {
 }
 
 #[test]
+fn special_variable_reads_ingest_as_sigil_named_vars() {
+    // `@@classvar`, `$global`, and `$&` (back-reference) each ingest as a
+    // `Var` whose name keeps the sigil verbatim — the same convention the
+    // numbered-reference (`$1`) handler uses. Without these, a single such
+    // read in a support class (e.g. Keybase's `@@config`, Sponge's
+    // `$stdout`) fails ingest and, under per-file isolation, drops every
+    // method on the class so external calls fall to "no known method".
+    fn read_var_name(source: &[u8]) -> String {
+        let result = ruby_prism::parse(source);
+        let program = result.node();
+        let prog = program.as_program_node().unwrap();
+        let stmt = prog.statements().body().iter().next().unwrap();
+        let expr = roundhouse::ingest::ingest_expr(&stmt, "<literal>").unwrap();
+        match *expr.node {
+            ExprNode::Var { name, .. } => name.as_str().to_string(),
+            ref other => panic!("expected Var, got {other:?}"),
+        }
+    }
+    assert_eq!(read_var_name(b"@@config"), "@@config");
+    assert_eq!(read_var_name(b"$stdout"), "$stdout");
+    // A back-reference is set by a preceding match; parse it in context so
+    // prism produces a BackReferenceReadNode rather than a plain global.
+    let result = ruby_prism::parse(b"\"x\" =~ /x/; $&");
+    let program = result.node();
+    let prog = program.as_program_node().unwrap();
+    let stmt = prog.statements().body().iter().nth(1).unwrap();
+    let expr = roundhouse::ingest::ingest_expr(&stmt, "<literal>").unwrap();
+    match *expr.node {
+        ExprNode::Var { name, .. } => assert_eq!(name.as_str(), "$&"),
+        ref other => panic!("expected Var($&), got {other:?}"),
+    }
+}
+
+#[test]
 fn block_delimiter_style_is_preserved() {
     use roundhouse::{BlockStyle, ExprNode, ModelBodyItem};
 
