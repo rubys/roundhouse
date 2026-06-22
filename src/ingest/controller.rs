@@ -47,7 +47,7 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
             let leading_area_start =
                 comments.first().map(|(off, _)| *off).filter(|off| *off < stmt_start)
                     .unwrap_or(stmt_start);
-            let leading = drain_comments_before(&mut comments, stmt_start);
+            let mut leading = drain_comments_before(&mut comments, stmt_start);
             let leading_blank = prev_end
                 .map(|pe| source_has_blank_line(source, pe, leading_area_start))
                 .unwrap_or(false);
@@ -59,6 +59,28 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
             // analyze reads to seed layout-view ivar types.
             if let Some(decl) = parse_layout_call(&stmt) {
                 layout = decl;
+            }
+            // A `before_action :a, :b` line declares one filter per leading
+            // symbol; expand to one `Filter` body item each so every target's
+            // ivar assignments seed the actions it guards (the single-target
+            // parse only ever captured the first symbol). Block-form filters
+            // (`before_action { ... }`, no symbol target) return `None` here,
+            // fall through to `Unknown`, and round-trip verbatim — analyze
+            // harvests their ivars separately.
+            if let Some(filters) = parse_filter_call(&stmt) {
+                for (i, filter) in filters.into_iter().enumerate() {
+                    body_items.push(ControllerBodyItem::Filter {
+                        filter,
+                        leading_comments: if i == 0 {
+                            std::mem::take(&mut leading)
+                        } else {
+                            Vec::new()
+                        },
+                        leading_blank_line: i == 0 && leading_blank,
+                    });
+                }
+                prev_end = Some(stmt.location().end_offset());
+                continue;
             }
             let mut item = ingest_controller_body_item(&stmt, file, leading)?;
             item.set_leading_blank_line(leading_blank);
@@ -158,13 +180,8 @@ fn ingest_controller_body_item(
             });
         }
         let method = constant_id_str(&call.name()).to_string();
-        if let Some(filter) = parse_filter(&call, &method) {
-            return Ok(ControllerBodyItem::Filter {
-                filter,
-                leading_blank_line: false,
-                leading_comments,
-            });
-        }
+        // Filter calls (`before_action` etc.) are intercepted by the caller,
+        // which expands multi-symbol forms into one `Filter` item per target.
         if method == "private" && call.arguments().is_none() && call.block().is_none() {
             return Ok(ControllerBodyItem::PrivateMarker {
                 leading_blank_line: false,
@@ -184,13 +201,27 @@ fn ingest_controller_body_item(
     })
 }
 
-fn parse_filter(
-    call: &ruby_prism::CallNode<'_>,
-    method: &str,
-) -> Option<crate::dialect::Filter> {
+/// Recognize a controller filter declaration (`before_action`,
+/// `around_action`, `after_action`, `skip_before_action`) and return one
+/// [`Filter`] per leading symbol target, all sharing the call's `only:` /
+/// `except:` scoping. Rails runs every named target on the same actions,
+/// so `before_action :a, :b, only: [:x]` becomes two filters guarding `x`
+/// — the previous single-target parse silently dropped every symbol after
+/// the first, hiding their ivar assignments from analyze and their calls
+/// from the emitted dispatch chain.
+///
+/// Returns `None` for non-filter calls and for filter calls with no symbol
+/// target — notably the block form `before_action { ... }`, which has no
+/// named method to reference. Those fall through to `Unknown`, round-trip
+/// verbatim, and have their ivars harvested directly during analyze.
+fn parse_filter_call(stmt: &Node<'_>) -> Option<Vec<crate::dialect::Filter>> {
     use crate::dialect::{Filter, FilterKind};
 
-    let kind = match method {
+    let call = stmt.as_call_node()?;
+    if call.receiver().is_some() {
+        return None;
+    }
+    let kind = match constant_id_str(&call.name()) {
         "before_action" => FilterKind::Before,
         "around_action" => FilterKind::Around,
         "after_action" => FilterKind::After,
@@ -199,17 +230,18 @@ fn parse_filter(
     };
 
     let args = call.arguments()?;
-    let all_args = args.arguments();
-    let mut iter = all_args.iter();
-    let first = iter.next()?;
-    let target = Symbol::from(symbol_value(&first)?.as_str());
 
+    let mut targets: Vec<Symbol> = Vec::new();
     let mut only: Vec<Symbol> = Vec::new();
     let mut except: Vec<Symbol> = Vec::new();
     let mut only_style = crate::expr::ArrayStyle::default();
     let mut except_style = crate::expr::ArrayStyle::default();
 
-    for arg in iter {
+    for arg in args.arguments().iter() {
+        if let Some(sym) = symbol_value(&arg) {
+            targets.push(Symbol::from(sym.as_str()));
+            continue;
+        }
         let Some(kh) = arg.as_keyword_hash_node() else { continue };
         for el in kh.elements().iter() {
             let Some(assoc) = el.as_assoc_node() else { continue };
@@ -229,5 +261,21 @@ fn parse_filter(
         }
     }
 
-    Some(Filter { kind, target, only, except, only_style, except_style })
+    if targets.is_empty() {
+        return None;
+    }
+
+    Some(
+        targets
+            .into_iter()
+            .map(|target| Filter {
+                kind: kind.clone(),
+                target,
+                only: only.clone(),
+                except: except.clone(),
+                only_style,
+                except_style,
+            })
+            .collect(),
+    )
 }

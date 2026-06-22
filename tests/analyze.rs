@@ -1596,3 +1596,123 @@ fn analysis_is_idempotent() {
     assert_eq!(first, app, "analyzer must be idempotent");
 }
 
+// before_action filter ivar seeding -------------------------------------
+
+/// Ingest + analyze a hand-built in-memory app tree.
+fn app_from_files(files: &[(&str, &str)]) -> roundhouse::App {
+    let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = files
+        .iter()
+        .map(|(p, c)| (std::path::PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
+    let mut app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest tree");
+    Analyzer::new(&app).analyze(&mut app);
+    app
+}
+
+/// Names of every `@ivar` the analyzer couldn't bind a type for.
+fn ivar_unresolved_names(app: &roundhouse::App) -> Vec<String> {
+    diagnose(app)
+        .into_iter()
+        .filter_map(|d| match d.kind {
+            DiagnosticKind::IvarUnresolved { name } => Some(name.as_str().to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn multi_symbol_before_action_seeds_every_target() {
+    // `before_action :load_user, :load_widget` declares two filters on one
+    // line. The old single-target parse captured only `:load_user`, so
+    // @widget_count — set solely by `load_widget` — never reached the
+    // `show` view. Both targets must seed now.
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/things_controller.rb",
+            r#"class ThingsController < ApplicationController
+  before_action :load_user, :load_widget
+
+  def show
+  end
+
+  private
+
+  def load_user
+    @user_name = "alice"
+  end
+
+  def load_widget
+    @widget_count = 7
+  end
+end
+"#,
+        ),
+        (
+            "app/views/things/show.html.erb",
+            "<p><%= @user_name %></p>\n<p><%= @widget_count %></p>\n",
+        ),
+    ]);
+
+    let unresolved = ivar_unresolved_names(&app);
+    assert!(
+        !unresolved.iter().any(|n| n == "widget_count"),
+        "@widget_count (the dropped 2nd before_action target) should resolve; \
+         unresolved = {unresolved:?}"
+    );
+    assert!(
+        !unresolved.iter().any(|n| n == "user_name"),
+        "@user_name (1st before_action target) should resolve; unresolved = {unresolved:?}"
+    );
+}
+
+#[test]
+fn block_form_before_action_seeds_ivars() {
+    // A block filter `before_action { @count = 5 }` names no method, so it
+    // survives ingest as an `Unknown` body item rather than a `Filter`. Its
+    // ivar must still seed the guarded actions and their views.
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/widgets_controller.rb",
+            r#"class WidgetsController < ApplicationController
+  before_action { @count = 5 }
+
+  def index
+  end
+end
+"#,
+        ),
+        ("app/views/widgets/index.html.erb", "<p><%= @count %></p>\n"),
+    ]);
+
+    let unresolved = ivar_unresolved_names(&app);
+    assert!(
+        !unresolved.iter().any(|n| n == "count"),
+        "@count (set by the block-form before_action) should resolve; \
+         unresolved = {unresolved:?}"
+    );
+
+    // And it should carry the concrete literal type, not just "present".
+    let view = app
+        .views
+        .iter()
+        .find(|v| v.name.as_str() == "widgets/index")
+        .expect("widgets/index view");
+    let mut reads = Vec::new();
+    collect_ivar_reads(&view.body, &mut reads);
+    assert!(
+        reads
+            .iter()
+            .any(|(n, ty)| n.as_str() == "count" && matches!(ty, Some(Ty::Int))),
+        "@count should read as Int in the view; got {:?}",
+        reads.iter().filter(|(n, _)| n.as_str() == "count").collect::<Vec<_>>()
+    );
+}
+

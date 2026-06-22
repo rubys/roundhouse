@@ -36,7 +36,8 @@ use std::collections::{BTreeSet, HashMap};
 use crate::adapter::{ArMethodKind, DatabaseAdapter, SqliteAdapter};
 use crate::App;
 use crate::dialect::{
-    Action, ControllerBodyItem, Filter, FilterKind, LayoutDecl, ModelBodyItem, RenderTarget,
+    Action, Controller, ControllerBodyItem, Filter, FilterKind, LayoutDecl, ModelBodyItem,
+    RenderTarget,
 };
 use crate::effect::{Effect, EffectSet};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
@@ -642,11 +643,18 @@ impl Analyzer {
             // before `yield` (the canonical `@story = Story.find(..); yield`
             // shape), so both contribute ivars the action and its view see.
             // `after_action` runs after rendering, so it's excluded.
-            let before_filters: Vec<Filter> = controller
+            let mut before_filters: Vec<Filter> = controller
                 .filters()
                 .filter(|f| matches!(f.kind, FilterKind::Before | FilterKind::Around))
                 .cloned()
                 .collect();
+
+            // Block-form filters (`before_action { @page = page }`) name no
+            // method, so they're kept as `Unknown` for round-trip and don't
+            // appear in `filters()`. Synthesize a filter + bindings for each
+            // so their ivars seed actions and views like a named filter. The
+            // block bodies were already typed by the Phase 0 pass above.
+            let block_filters = harvest_block_filters(controller);
 
             // Pass A: analyze every action body once with no seed.
             // Required before we can harvest each action's produced
@@ -660,7 +668,7 @@ impl Analyzer {
             // Snapshot each action's ivar bindings (this controller's
             // own actions only — parent's actions get layered in by
             // Phase B's `chained_bindings` builder).
-            let action_bindings: HashMap<Symbol, HashMap<Symbol, Ty>> = controller
+            let mut action_bindings: HashMap<Symbol, HashMap<Symbol, Ty>> = controller
                 .actions()
                 .map(|a| {
                     let mut ivars = HashMap::new();
@@ -668,6 +676,13 @@ impl Analyzer {
                     (a.name.clone(), ivars)
                 })
                 .collect();
+
+            // Register each block filter's synthetic target so the seeding
+            // lookups (`merged_before_seed`, the view-ivar build) resolve it.
+            for (target, ivars, filter) in block_filters {
+                action_bindings.insert(target, ivars);
+                before_filters.push(filter);
+            }
 
             let layout = controller.layout.clone();
             meta_by_name.insert(
@@ -1800,6 +1815,61 @@ fn merged_before_seed(
         }
     }
     seed
+}
+
+/// Harvest the ivar assignments of block-form filters
+/// (`before_action { @page = page }`). A block filter names no method, so
+/// it survives ingest as an `Unknown` body item (preserving round-trip)
+/// rather than a `Filter`; the named-symbol seeding path therefore never
+/// sees it. Here we pull the ivars its body assigns — already typed by the
+/// Phase 0 `Unknown`-item pass — and synthesize a `Filter` whose target
+/// keys those bindings, so the existing before/around seeding machinery
+/// flows them into the guarded actions and their views exactly like a
+/// named filter.
+///
+/// Returns `(synthetic_target, harvested_ivars, synthetic_filter)` per
+/// block filter. The synthetic target is a sentinel name that can't
+/// collide with a real method (so it never resolves a view). `only:` /
+/// `except:` scoping on a block filter is not modelled — the form is rare
+/// and a missing guard only over-seeds an unread ivar — so a block filter
+/// is treated as applying to every action.
+fn harvest_block_filters(controller: &Controller) -> Vec<(Symbol, HashMap<Symbol, Ty>, Filter)> {
+    let mut out = Vec::new();
+    for (idx, item) in controller.body.iter().enumerate() {
+        let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv: None, method, block: Some(block), .. } = &*expr.node else {
+            continue;
+        };
+        let kind = match method.as_str() {
+            "before_action" => FilterKind::Before,
+            "around_action" => FilterKind::Around,
+            _ => continue,
+        };
+        // The attached block is a Lambda whose body is the filter code.
+        let body = match &*block.node {
+            ExprNode::Lambda { body, .. } => body,
+            _ => block,
+        };
+        let mut ivars: HashMap<Symbol, Ty> = HashMap::new();
+        extract_ivar_assignments(body, &mut ivars);
+        if ivars.is_empty() {
+            continue;
+        }
+        let target = Symbol::from(format!("__{}_block_{idx}__", method.as_str()));
+        out.push((
+            target.clone(),
+            ivars,
+            Filter {
+                kind,
+                target,
+                only: Vec::new(),
+                except: Vec::new(),
+                only_style: crate::expr::ArrayStyle::default(),
+                except_style: crate::expr::ArrayStyle::default(),
+            },
+        ));
+    }
+    out
 }
 
 /// Unify a stored param type with a freshly observed argument type.
