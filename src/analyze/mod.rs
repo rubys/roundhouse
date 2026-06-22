@@ -170,11 +170,27 @@ impl Analyzer {
             // `@user.is_admin?` (predicate), and `@user.user_id = x`
             // (writer) all resolve.
             for (name, ty) in &model.attributes.fields {
+                let n = name.as_str();
                 cls.instance_methods.insert(name.clone(), ty.clone());
-                let predicate = Symbol::from(format!("{}?", name.as_str()));
+                let predicate = Symbol::from(format!("{n}?"));
                 cls.instance_methods.entry(predicate).or_insert(Ty::Bool);
-                let writer = Symbol::from(format!("{}=", name.as_str()));
+                let writer = Symbol::from(format!("{n}="));
                 cls.instance_methods.entry(writer).or_insert(ty.clone());
+                // ActiveModel::Dirty per-attribute methods Rails generates
+                // for every column: `<col>_changed?`,
+                // `<col>_previously_changed?`, `saved_change_to_<col>?`
+                // (predicates) and `<col>_was` (the prior value).
+                for suffix in ["_changed?", "_previously_changed?"] {
+                    cls.instance_methods
+                        .entry(Symbol::from(format!("{n}{suffix}")))
+                        .or_insert(Ty::Bool);
+                }
+                cls.instance_methods
+                    .entry(Symbol::from(format!("saved_change_to_{n}?")))
+                    .or_insert(Ty::Bool);
+                cls.instance_methods
+                    .entry(Symbol::from(format!("{n}_was")))
+                    .or_insert(ty.clone());
             }
             // `typed_store` (activerecord-typedstore) accessors: declared in a
             // DSL block, backed by a serialized column, so absent from the
@@ -209,42 +225,58 @@ impl Analyzer {
                 let Some(kind) = entry.return_kind else { continue };
                 cls.instance_methods.insert(Symbol::from(entry.name), instantiate(kind));
             }
-            // Associations as instance methods (return types derived from cardinality).
+            // AR instance methods not (yet) in the catalog: dirty-tracking
+            // snapshots, mass assignment, marked-for-destruction, and the
+            // timestamp/column writers. `Bool` for predicates/persistence
+            // writers; `Untyped` (gradual) where the return is a
+            // heterogeneous changes-hash. Mirrors the class-side Untyped
+            // block above. `or_insert` so a catalog entry always wins.
+            for (name, ty) in [
+                ("marked_for_destruction?", Ty::Bool),
+                ("mark_for_destruction", Ty::Bool),
+                ("record_timestamps=", Ty::Bool),
+                ("attributes=", Ty::Untyped),
+                ("assign_attributes", Ty::Untyped),
+                ("update_column", Ty::Bool),
+                ("update_columns", Ty::Bool),
+                ("saved_changes", Ty::Untyped),
+                ("saved_changes?", Ty::Bool),
+                ("changes", Ty::Untyped),
+                ("previous_changes", Ty::Untyped),
+                ("changed_attributes", Ty::Untyped),
+                ("changed", Ty::Array { elem: Box::new(Ty::Str) }),
+            ] {
+                cls.instance_methods.entry(Symbol::from(name)).or_insert(ty);
+            }
+            // Associations as instance methods (return types derived from
+            // cardinality). Each also gets a writer `name=`: belongs_to/
+            // has_one assign a record-or-nil, has_many/HABTM assign a
+            // collection. The writer was previously absent, so
+            // `comment.story = s` / `tag.category = c` failed dispatch.
             for assoc in model.associations() {
                 use crate::dialect::Association;
-                match assoc {
-                    Association::BelongsTo { name, target, .. } => {
-                        cls.instance_methods.insert(
-                            name.clone(),
-                            Ty::Union {
-                                variants: vec![
-                                    Ty::Class { id: target.clone(), args: vec![] },
-                                    Ty::Nil,
-                                ],
-                            },
-                        );
-                    }
-                    Association::HasOne { name, target, .. } => {
-                        cls.instance_methods.insert(
-                            name.clone(),
-                            Ty::Union {
-                                variants: vec![
-                                    Ty::Class { id: target.clone(), args: vec![] },
-                                    Ty::Nil,
-                                ],
-                            },
-                        );
-                    }
+                let (name, ty) = match assoc {
+                    Association::BelongsTo { name, target, .. }
+                    | Association::HasOne { name, target, .. } => (
+                        name.clone(),
+                        Ty::Union {
+                            variants: vec![
+                                Ty::Class { id: target.clone(), args: vec![] },
+                                Ty::Nil,
+                            ],
+                        },
+                    ),
                     Association::HasMany { name, target, .. }
-                    | Association::HasAndBelongsToMany { name, target, .. } => {
-                        cls.instance_methods.insert(
-                            name.clone(),
-                            Ty::Array {
-                                elem: Box::new(Ty::Class { id: target.clone(), args: vec![] }),
-                            },
-                        );
-                    }
-                }
+                    | Association::HasAndBelongsToMany { name, target, .. } => (
+                        name.clone(),
+                        Ty::Array {
+                            elem: Box::new(Ty::Class { id: target.clone(), args: vec![] }),
+                        },
+                    ),
+                };
+                let writer = Symbol::from(format!("{}=", name.as_str()));
+                cls.instance_methods.insert(name, ty.clone());
+                cls.instance_methods.entry(writer).or_insert(ty);
             }
 
             classes.insert(model.name.clone(), cls);

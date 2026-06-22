@@ -1620,6 +1620,56 @@ fn ivar_unresolved_names(app: &roundhouse::App) -> Vec<String> {
         .collect()
 }
 
+/// Method names that failed dispatch on a known receiver type.
+fn send_dispatch_failures(app: &roundhouse::App) -> Vec<String> {
+    diagnose(app)
+        .into_iter()
+        .filter_map(|d| match d.kind {
+            DiagnosticKind::SendDispatchFailed { method, .. } => {
+                Some(method.as_str().to_string())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn association_writers_and_ar_instance_methods_resolve() {
+    // belongs_to/has_one register a writer `name=` (not just the reader),
+    // and the AR Dirty/persistence instance methods missing from the
+    // catalog (`update_column`, `marked_for_destruction?`, …) resolve on a
+    // model instance.
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  belongs_to :owner
+  has_many :parts
+
+  def reassign(o, list)
+    self.owner = o
+    self.parts = list
+    self.update_column(:name, "x")
+    self.marked_for_destruction?
+  end
+end
+"#,
+        ),
+    ]);
+
+    let failures = send_dispatch_failures(&app);
+    for m in ["owner=", "parts=", "update_column", "marked_for_destruction?"] {
+        assert!(
+            !failures.iter().any(|f| f == m),
+            "`{m}` should resolve on a model instance; dispatch failures = {failures:?}"
+        );
+    }
+}
+
 #[test]
 fn multi_symbol_before_action_seeds_every_target() {
     // `before_action :load_user, :load_widget` declares two filters on one
