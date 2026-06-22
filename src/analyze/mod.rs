@@ -999,6 +999,22 @@ impl Analyzer {
         // fixpoint); real-blog's dependency graph is shallow enough to skip.
         let mut partial_locals_by_name: HashMap<Symbol, HashMap<Symbol, Ty>> = HashMap::new();
 
+        // The ivar context each view carries: action views key by their
+        // own name, layouts fall through to the layout-ivar union. Built
+        // here so it can both seed non-partial views and be propagated to
+        // the partials they render.
+        let view_ivar_seed = |name: &Symbol| -> HashMap<Symbol, Ty> {
+            action_ivars_by_view
+                .get(name)
+                .or_else(|| layout_ivars_by_view.get(name))
+                .cloned()
+                .unwrap_or_default()
+        };
+
+        // Renderer → partials-it-renders edges, harvested as views are
+        // walked. Drives the ivar propagation below.
+        let mut render_edges: HashMap<Symbol, Vec<Symbol>> = HashMap::new();
+
         // Phase 3a: non-partial views (action views + layouts). Analyze with
         // the controller→view ivar seed, then walk the body to record every
         // `render` call's effect on partial_locals_by_name.
@@ -1013,18 +1029,81 @@ impl Analyzer {
             // action and fall through to the layout-ivar map, which is
             // the union of every action whose `effective_layout`
             // resolved to this layout.
-            if let Some(ivars) = action_ivars_by_view
-                .get(&view.name)
-                .or_else(|| layout_ivars_by_view.get(&view.name))
-            {
-                view_ctx.ivar_bindings = ivars.clone();
-            }
+            view_ctx.ivar_bindings = view_ivar_seed(&view.name);
             self.body_typer().analyze_expr(&mut view.body, &view_ctx);
-            extract_partial_render_sites(&view.body, &view.name, &mut partial_locals_by_name);
+            let mut targets = Vec::new();
+            extract_partial_render_sites(
+                &view.body,
+                &view.name,
+                &mut partial_locals_by_name,
+                &mut targets,
+            );
+            render_edges.insert(view.name.clone(), targets);
         }
 
-        // Phase 3b: partials. Seed local_bindings from the map built above,
-        // then analyze.
+        // Harvest partial→partial render edges too (comment trees etc.).
+        // Partials aren't typed yet, so collection-form renders (`render
+        // @x`) won't resolve here — but the string/`partial:` forms that
+        // nest in practice resolve by name without types. The throwaway
+        // locals map is discarded; only the edges matter.
+        for view in &app.views {
+            if !is_partial_view_name(&view.name) {
+                continue;
+            }
+            let mut throwaway = HashMap::new();
+            let mut targets = Vec::new();
+            extract_partial_render_sites(&view.body, &view.name, &mut throwaway, &mut targets);
+            render_edges.insert(view.name.clone(), targets);
+        }
+
+        // Propagate each renderer's ivar context onto the partials it
+        // renders, to a fixpoint so nested partials (a partial rendering a
+        // partial) inherit transitively. A renderer's own ivars are its
+        // seed (non-partial) or its accumulated partial ivars. `Var` /
+        // `Untyped` are dropped on merge — they carry no shape and only
+        // pollute the union (mirrors the layout-ivar merge above).
+        let mut partial_ivars_by_name: HashMap<Symbol, HashMap<Symbol, Ty>> = HashMap::new();
+        let noise = |t: &Ty| matches!(t, Ty::Var { .. } | Ty::Untyped);
+        // Depth cap guards against a render cycle (`_a` renders `_b`
+        // renders `_a`); 16 is far beyond any real partial nesting.
+        for _ in 0..16 {
+            let mut changed = false;
+            for (renderer, partials) in &render_edges {
+                let renderer_ivars = if is_partial_view_name(renderer) {
+                    partial_ivars_by_name.get(renderer).cloned().unwrap_or_default()
+                } else {
+                    view_ivar_seed(renderer)
+                };
+                if renderer_ivars.is_empty() {
+                    continue;
+                }
+                for partial in partials {
+                    let entry = partial_ivars_by_name.entry(partial.clone()).or_default();
+                    for (k, v) in &renderer_ivars {
+                        if noise(v) {
+                            continue;
+                        }
+                        let merged = match entry.get(k) {
+                            Some(prev) if noise(prev) => v.clone(),
+                            Some(prev) if prev == v => prev.clone(),
+                            Some(prev) => crate::analyze::body::union_of(prev.clone(), v.clone()),
+                            None => v.clone(),
+                        };
+                        if entry.get(k) != Some(&merged) {
+                            entry.insert(k.clone(), merged);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        // Phase 3b: partials. Seed local_bindings from the render-site map
+        // and ivar_bindings from the propagated controller context, then
+        // analyze.
         for view in &mut app.views {
             if !is_partial_view_name(&view.name) {
                 continue;
@@ -1033,6 +1112,9 @@ impl Analyzer {
             view_ctx.in_view = true; // `yield` here renders to a String
             if let Some(locals) = partial_locals_by_name.get(&view.name) {
                 view_ctx.local_bindings = locals.clone();
+            }
+            if let Some(ivars) = partial_ivars_by_name.get(&view.name) {
+                view_ctx.ivar_bindings = ivars.clone();
             }
             self.body_typer().analyze_expr(&mut view.body, &view_ctx);
         }
@@ -1739,6 +1821,7 @@ fn extract_partial_render_sites(
     expr: &Expr,
     current_view: &Symbol,
     out: &mut HashMap<Symbol, HashMap<Symbol, Ty>>,
+    targets: &mut Vec<Symbol>,
 ) {
     match &*expr.node {
         ExprNode::Send { recv, method, args, block, .. } => {
@@ -1746,6 +1829,11 @@ fn extract_partial_render_sites(
             // receiver is an implicit context — Rails makes both work).
             if recv.is_none() && method.as_str() == "render" {
                 if let Some((partial_name, locals)) = interpret_render_call(args, current_view) {
+                    // Record the renderer→partial edge so the caller can
+                    // propagate the renderer's ivar context to the partial
+                    // (partials render in their parent's view context and
+                    // read its `@ivars`).
+                    targets.push(partial_name.clone());
                     let entry = out.entry(partial_name).or_default();
                     for (k, v) in locals {
                         entry.insert(k, v);
@@ -1753,68 +1841,68 @@ fn extract_partial_render_sites(
                 }
             }
             if let Some(r) = recv {
-                extract_partial_render_sites(r, current_view, out);
+                extract_partial_render_sites(r, current_view, out, targets);
             }
             for a in args {
-                extract_partial_render_sites(a, current_view, out);
+                extract_partial_render_sites(a, current_view, out, targets);
             }
             if let Some(b) = block {
-                extract_partial_render_sites(b, current_view, out);
+                extract_partial_render_sites(b, current_view, out, targets);
             }
         }
         ExprNode::Seq { exprs } | ExprNode::Array { elements: exprs, .. } => {
             for e in exprs {
-                extract_partial_render_sites(e, current_view, out);
+                extract_partial_render_sites(e, current_view, out, targets);
             }
         }
         ExprNode::Hash { entries, .. } => {
             for (k, v) in entries {
-                extract_partial_render_sites(k, current_view, out);
-                extract_partial_render_sites(v, current_view, out);
+                extract_partial_render_sites(k, current_view, out, targets);
+                extract_partial_render_sites(v, current_view, out, targets);
             }
         }
         ExprNode::If { cond, then_branch, else_branch } => {
-            extract_partial_render_sites(cond, current_view, out);
-            extract_partial_render_sites(then_branch, current_view, out);
-            extract_partial_render_sites(else_branch, current_view, out);
+            extract_partial_render_sites(cond, current_view, out, targets);
+            extract_partial_render_sites(then_branch, current_view, out, targets);
+            extract_partial_render_sites(else_branch, current_view, out, targets);
         }
         ExprNode::Case { scrutinee, arms } => {
-            extract_partial_render_sites(scrutinee, current_view, out);
+            extract_partial_render_sites(scrutinee, current_view, out, targets);
             for arm in arms {
                 if let Some(g) = &arm.guard {
-                    extract_partial_render_sites(g, current_view, out);
+                    extract_partial_render_sites(g, current_view, out, targets);
                 }
-                extract_partial_render_sites(&arm.body, current_view, out);
+                extract_partial_render_sites(&arm.body, current_view, out, targets);
             }
         }
         ExprNode::BoolOp { left, right, .. }
         | ExprNode::RescueModifier { expr: left, fallback: right } => {
-            extract_partial_render_sites(left, current_view, out);
-            extract_partial_render_sites(right, current_view, out);
+            extract_partial_render_sites(left, current_view, out, targets);
+            extract_partial_render_sites(right, current_view, out, targets);
         }
         ExprNode::Let { value, body, .. } => {
-            extract_partial_render_sites(value, current_view, out);
-            extract_partial_render_sites(body, current_view, out);
+            extract_partial_render_sites(value, current_view, out, targets);
+            extract_partial_render_sites(body, current_view, out, targets);
         }
         ExprNode::Lambda { body, .. } => {
-            extract_partial_render_sites(body, current_view, out);
+            extract_partial_render_sites(body, current_view, out, targets);
         }
         ExprNode::Apply { fun, args, block } => {
-            extract_partial_render_sites(fun, current_view, out);
+            extract_partial_render_sites(fun, current_view, out, targets);
             for a in args {
-                extract_partial_render_sites(a, current_view, out);
+                extract_partial_render_sites(a, current_view, out, targets);
             }
             if let Some(b) = block {
-                extract_partial_render_sites(b, current_view, out);
+                extract_partial_render_sites(b, current_view, out, targets);
             }
         }
         ExprNode::Assign { value, .. } => {
-            extract_partial_render_sites(value, current_view, out);
+            extract_partial_render_sites(value, current_view, out, targets);
         }
         ExprNode::StringInterp { parts } => {
             for p in parts {
                 if let crate::expr::InterpPart::Expr { expr } = p {
-                    extract_partial_render_sites(expr, current_view, out);
+                    extract_partial_render_sites(expr, current_view, out, targets);
                 }
             }
         }
