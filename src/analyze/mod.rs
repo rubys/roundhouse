@@ -586,6 +586,89 @@ impl Analyzer {
         }
     }
 
+    /// Collect every app-level constant (`CONST = <value>`) declared in a
+    /// model or controller body, type its value, and build a global
+    /// name→type registry keyed by the constant's last path segment — the
+    /// shape `ExprNode::Const` dispatch consults (`Vote::COMMENT_REASONS`
+    /// looks up `COMMENT_REASONS`). This is the cross-class channel: a
+    /// constant declared in `Vote` resolves when referenced from a
+    /// controller, a view, another model, or seeds — none of which the
+    /// per-class `extract_*_const_assignments` tables reach.
+    ///
+    /// Typed as a small fixpoint so a constant defined in terms of another
+    /// (`ALL_COMMENT_REASONS = COMMENT_REASONS.merge(...).freeze`) resolves
+    /// once its dependency does. A name declared in two classes with
+    /// conflicting types is dropped as ambiguous: a bare reference can't
+    /// be disambiguated without lexical scope (mirrors `expand_bare_const`).
+    /// `Ty::Var` results are skipped — uninformative, and registering them
+    /// would only mask the `Const` fallback without adding signal.
+    fn build_constant_registry(&self, app: &App) -> HashMap<Symbol, Ty> {
+        // (defining class's self_ty, last-segment name, cloned value expr).
+        let mut entries: Vec<(Ty, Symbol, Expr)> = Vec::new();
+        let mut push_const = |self_ty: Ty, expr: &Expr| {
+            if let ExprNode::Assign { target: LValue::Const { path }, value } = &*expr.node {
+                if let Some(last) = path.last() {
+                    entries.push((self_ty, last.clone(), value.clone()));
+                }
+            }
+        };
+        for model in &app.models {
+            for item in &model.body {
+                if let ModelBodyItem::Unknown { expr, .. } = item {
+                    push_const(Ty::Class { id: model.name.clone(), args: vec![] }, expr);
+                }
+            }
+        }
+        for controller in &app.controllers {
+            for item in &controller.body {
+                if let ControllerBodyItem::Unknown { expr, .. } = item {
+                    push_const(Ty::Class { id: controller.name.clone(), args: vec![] }, expr);
+                }
+            }
+        }
+
+        let mut map: HashMap<Symbol, Ty> = HashMap::new();
+        let mut ambiguous: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
+        // Cap matches the outer analyze fixpoint; one level of constant
+        // dependency needs two passes, the cap leaves slack.
+        for _ in 0..4 {
+            let mut next: HashMap<Symbol, Ty> = HashMap::new();
+            for (self_ty, name, value) in entries.iter_mut() {
+                if ambiguous.contains(name) {
+                    continue;
+                }
+                let ctx = Ctx {
+                    self_ty: Some(self_ty.clone()),
+                    ivar_bindings: HashMap::new(),
+                    local_bindings: HashMap::new(),
+                    constants: map.clone(),
+                    annotate_self_dispatch: false,
+                    in_view: false,
+                };
+                let ty = self.body_typer().analyze_expr(value, &ctx);
+                if matches!(ty, Ty::Var { .. }) {
+                    continue;
+                }
+                match next.get(name) {
+                    Some(prev) if *prev != ty => {
+                        ambiguous.insert(name.clone());
+                    }
+                    _ => {
+                        next.insert(name.clone(), ty);
+                    }
+                }
+            }
+            for a in &ambiguous {
+                next.remove(a);
+            }
+            if next == map {
+                break;
+            }
+            map = next;
+        }
+        map
+    }
+
     /// One full typing pass over the whole app. Extracted from
     /// `analyze` so the fixpoint loop above can re-invoke it after
     /// each registry refinement. The Rails-aware orchestration
@@ -593,6 +676,13 @@ impl Analyzer {
     /// per-model two-pass ivar discovery, partial locals threading)
     /// stays internal to this method; the fixpoint just calls it.
     fn run_typing_passes(&self, app: &mut App) {
+        // Global constant registry (`Vote::COMMENT_REASONS` → `Hash[..]`,
+        // `User::NEW_USER_DAYS` → `Int`), shared across every class, view,
+        // and seeds so cross-class constant references resolve to the
+        // value's type instead of the `Ty::Class { id: ConstName }`
+        // fallback. Seeded under each class's own constants (own shadows
+        // global on a name clash).
+        let global_constants = self.build_constant_registry(app);
         // Controller→view ivar channel: as each action is analyzed, we harvest
         // the ivars it sets and key them by the view that action renders.
         // When we reach the view pass below, the view's Ctx is seeded from
@@ -651,7 +741,7 @@ impl Analyzer {
                 self_ty: Some(self_ty.clone()),
                 ivar_bindings: HashMap::new(),
                 local_bindings: HashMap::new(),
-                constants: HashMap::new(),
+                constants: global_constants.clone(),
                 annotate_self_dispatch: false, in_view: false,
             };
             for item in controller.body.iter_mut() {
@@ -659,7 +749,10 @@ impl Analyzer {
                     self.body_typer().analyze_expr(expr, &const_ctx);
                 }
             }
-            let class_constants = extract_controller_const_assignments(&controller.body);
+            // Own constants layered over the global registry — a same-named
+            // constant declared on this controller shadows another class's.
+            let mut class_constants = global_constants.clone();
+            class_constants.extend(extract_controller_const_assignments(&controller.body));
 
             let ctx = Ctx {
                 self_ty: Some(self_ty.clone()),
@@ -938,7 +1031,7 @@ impl Analyzer {
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
                 ivar_bindings: class_ivars.clone(),
                 local_bindings: HashMap::new(),
-                constants: HashMap::new(),
+                constants: global_constants.clone(),
                 annotate_self_dispatch: false, in_view: false,
             };
             for item in model.body.iter_mut() {
@@ -946,7 +1039,9 @@ impl Analyzer {
                     self.body_typer().analyze_expr(expr, &const_ctx);
                 }
             }
-            let class_constants = extract_const_assignments(&model.body);
+            // Own constants layered over the global registry (own shadows).
+            let mut class_constants = global_constants.clone();
+            class_constants.extend(extract_const_assignments(&model.body));
 
             let class_ctx = Ctx {
                 self_ty: Some(Ty::Class { id: model.name.clone(), args: vec![] }),
@@ -1098,6 +1193,7 @@ impl Analyzer {
             }
             let mut view_ctx = Ctx::default();
             view_ctx.in_view = true; // `yield` here renders to a String
+            view_ctx.constants = global_constants.clone();
             // Action views look up by view name (e.g. `articles/show`);
             // layout views (`layouts/application`) have no matching
             // action and fall through to the layout-ivar map, which is
@@ -1184,6 +1280,7 @@ impl Analyzer {
             }
             let mut view_ctx = Ctx::default();
             view_ctx.in_view = true; // `yield` here renders to a String
+            view_ctx.constants = global_constants.clone();
             if let Some(locals) = partial_locals_by_name.get(&view.name) {
                 view_ctx.local_bindings = locals.clone();
             }
@@ -1200,7 +1297,8 @@ impl Analyzer {
         // `Article.count`), which the emitter uses for await
         // placement under async adapters.
         if let Some(expr) = app.seeds.as_mut() {
-            let ctx = Ctx::default();
+            let mut ctx = Ctx::default();
+            ctx.constants = global_constants.clone();
             self.body_typer().analyze_expr(expr, &ctx);
             let _ = self.collect_effects(expr, &ctx);
         }

@@ -1671,6 +1671,61 @@ end
 }
 
 #[test]
+fn cross_class_constants_resolve_by_value() {
+    // A constant declared on one class (`Vote::COMMENT_REASONS = {…}.freeze`)
+    // must resolve to its *value* type — Hash / Range / Int — when
+    // referenced from another class, not the `Ty::Class { id: ConstName }`
+    // fallback. Exercises the whole chain: `.freeze` identity, the
+    // merge-dependency fixpoint (`ALL = BASE.merge(…)`), Hash `[]`, Range
+    // `.include?`, and `Int > Int` (no incompatible_binop).
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/vote.rb",
+            r#"class Vote < ApplicationRecord
+  COMMENT_REASONS = { "O" => "Off-topic" }.freeze
+  ALL_COMMENT_REASONS = COMMENT_REASONS.merge({ "I" => "Incorrect" }).freeze
+  SCORE_RANGE = (-2..4).freeze
+  MIN_DAYS = 90
+end
+"#,
+        ),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/votes_controller.rb",
+            r#"class VotesController < ApplicationController
+  def show
+    @a = Vote::COMMENT_REASONS["O"]
+    @b = Vote::ALL_COMMENT_REASONS["I"]
+    @c = Vote::SCORE_RANGE.include?(1)
+    @d = (5 > Vote::MIN_DAYS)
+  end
+end
+"#,
+        ),
+    ]);
+
+    let failures = send_dispatch_failures(&app);
+    for m in ["[]", "include?"] {
+        assert!(
+            !failures.iter().any(|f| f == m),
+            "constant-by-value should resolve `{m}` cross-class; failures = {failures:?}"
+        );
+    }
+    let binops = diagnose(&app)
+        .into_iter()
+        .filter(|d| matches!(d.kind, DiagnosticKind::IncompatibleBinop { .. }))
+        .count();
+    assert_eq!(binops, 0, "`Int > Vote::MIN_DAYS` is Int > Int — must not flag");
+}
+
+#[test]
 fn app_helper_module_singletons_resolve() {
     // Helper modules under app/helpers/ are walked as library classes, so a
     // helper called as a bare singleton (`TrafficHelper.novelty_logo`) — its

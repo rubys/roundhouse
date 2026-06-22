@@ -236,6 +236,20 @@ impl<'a> BodyTyper<'a> {
                 },
             };
         }
+        // `freeze` / `itself` are receiver-identity: they return the
+        // receiver unchanged. Receiver-aware (so they can't sit in the
+        // receiver-agnostic `universal_method` table) and resolved before
+        // the per-type tables so they work on every type — most
+        // importantly the `CONST = {…}.freeze` idiom, where the trailing
+        // `.freeze` must preserve the literal's Hash/Array/Range type for
+        // the constant registry. With a known receiver, hand it back; with
+        // none, fall through to `unknown()` like any other receiver-less
+        // call.
+        if matches!(method.as_str(), "freeze" | "itself") {
+            if let Some(ty) = recv_ty {
+                return ty.clone();
+            }
+        }
         // Universal Ruby methods — available on every object regardless
         // of receiver type. Resolved first so `nil?`, `is_a?`, etc.
         // don't fall through to per-type method tables that would miss.
@@ -251,6 +265,18 @@ impl<'a> BodyTyper<'a> {
             // `unknown()`).
             Some(Ty::Untyped) => Ty::Untyped,
             Some(Ty::Class { id, args }) => {
+                // `Range` is modeled as `Ty::Class { id: "Range", args:
+                // [elem] }` (see the body-typer's `ExprNode::Range` arm),
+                // not a dedicated `Ty` variant, so its methods live in a
+                // small table keyed off the element type rather than the
+                // class registry. Covers the `CONST = (a..b).freeze` idiom
+                // (`SCORE_RANGE_TO_HIDE.include?(score)`, `.first`) and
+                // any other range value flowing through dispatch.
+                if id.0.as_str() == "Range" {
+                    if let Some(ty) = range_method(method, args.first()) {
+                        return ty;
+                    }
+                }
                 // Walk the parent chain so inherited methods resolve:
                 // `Article.last` looks up `last` on Article → Application
                 // Record → ActiveRecord::Base (where the RBS-declared
@@ -457,6 +483,31 @@ impl<'a> BodyTyper<'a> {
 // its return type. Entries grow as the type system gains coverage
 // of Ruby's standard library; mining `functions_spec.rb` in the
 // ruby2js codebase for additional translations is the ongoing work.
+
+/// Methods on a `Range` value (`Ty::Class { id: "Range", args: [elem] }`).
+/// `elem` is the bound type (`Int` for `(1..10)`); `None` when the range
+/// is unparameterized (beginless+endless). Returns `None` for a method
+/// this table doesn't model, so dispatch falls through to the generic
+/// class handling. Range is enumerable, so collection-ish accessors
+/// return the element type; bounds/predicates return their fixed types.
+pub(super) fn range_method(method: &Symbol, elem: Option<&Ty>) -> Option<Ty> {
+    let elem_ty = || elem.cloned().unwrap_or_else(unknown);
+    let ty = match method.as_str() {
+        // Endpoint / single-element accessors yield the bound type.
+        "first" | "last" | "min" | "max" | "begin" | "end" => elem_ty(),
+        // Membership / shape predicates.
+        "include?" | "member?" | "cover?" | "===" | "exclude_end?" => Ty::Bool,
+        "size" | "count" | "sum" => Ty::Int,
+        "to_a" | "to_ary" | "entries" => Ty::Array { elem: Box::new(elem_ty()) },
+        // `step` / `each` return the receiver range for chaining.
+        "step" | "each" => Ty::Class {
+            id: ClassId(Symbol::from("Range")),
+            args: elem.cloned().into_iter().collect(),
+        },
+        _ => return None,
+    };
+    Some(ty)
+}
 
 pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -> Ty {
     // AR-specific dispatches go FIRST so they win over the generic
