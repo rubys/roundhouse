@@ -1132,8 +1132,8 @@ impl Analyzer {
                 // that partial's seed. Drives `@domain` / `@tag` /
                 // `@categories` in the home content partials, which
                 // `render partial: @above` only reaches at runtime.
+                let prefix = controller_view_prefix(&ctrl_name);
                 if !dynamic_render_ivars.is_empty() {
-                    let prefix = controller_view_prefix(&ctrl_name);
                     let mut literals = Vec::new();
                     collect_content_partial_literals(
                         &action.body,
@@ -1158,8 +1158,34 @@ impl Analyzer {
                         }
                     }
                 }
+                // Action→view ivar channel. An action's ivars seed
+                // every full template it renders: its primary
+                // RenderTarget plus any `render :action`/`:template`/
+                // `render_to_string :action` buried in a block. Union
+                // (not overwrite) across all actions that feed a given
+                // view — multiple actions render `:action => "index"`,
+                // and the shared template reads the union of their
+                // ivars, exactly like the layout-ivar union above.
+                let mut view_targets: Vec<Symbol> = Vec::new();
                 if let Some(view_name) = view_name_for_action(&ctrl_name, action) {
-                    action_ivars_by_view.insert(view_name, ivars);
+                    view_targets.push(view_name);
+                }
+                collect_action_render_views(&action.body, &prefix, &mut view_targets);
+                view_targets.sort();
+                view_targets.dedup();
+                for view_name in view_targets {
+                    let entry = action_ivars_by_view.entry(view_name).or_default();
+                    for (k, v) in &ivars {
+                        let noise = |t: &Ty| matches!(t, Ty::Var { .. } | Ty::Untyped);
+                        let merged = match entry.remove(k) {
+                            Some(prev) if noise(&prev) => v.clone(),
+                            Some(prev) if noise(v) => prev,
+                            Some(prev) if prev == *v => prev,
+                            Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
+                            None => v.clone(),
+                        };
+                        entry.insert(k.clone(), merged);
+                    }
                 }
             }
         }
@@ -2414,6 +2440,49 @@ fn content_partial_view_name(literal: &str, prefix: &str) -> Symbol {
         }
         None => Symbol::from(format!("{}/_{}", prefix, literal)),
     }
+}
+
+/// Collect every full-template view an action renders via an explicit
+/// `render :action => "x"` / `render :template => "x"` /
+/// `render_to_string :action => "x"` call anywhere in its body —
+/// including calls buried in a `respond_to`/`Rails.cache.fetch` block
+/// that never surface as the action's primary `RenderTarget`. The
+/// `tree` action's `render_to_string :action => "tree"` inside a cache
+/// block is the motivating case: without this the `tree` view gets no
+/// ivar seed at all. `:action` names resolve relative to the
+/// controller's view prefix; `:template` names are taken verbatim
+/// (they already carry their directory).
+fn collect_action_render_views(expr: &Expr, prefix: &str, out: &mut Vec<Symbol>) {
+    if let ExprNode::Send { recv, method, args, .. } = &*expr.node {
+        if recv.is_none() && matches!(method.as_str(), "render" | "render_to_string") {
+            for arg in args {
+                if let ExprNode::Hash { entries, .. } = &*arg.node {
+                    for (k, v) in entries {
+                        let key = match &*k.node {
+                            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str(),
+                            _ => continue,
+                        };
+                        let ExprNode::Lit { value: Literal::Str { value } } = &*v.node else {
+                            continue;
+                        };
+                        match key {
+                            "action" => {
+                                let name = if value.contains('/') {
+                                    value.clone()
+                                } else {
+                                    format!("{}/{}", prefix, value)
+                                };
+                                out.push(Symbol::from(name));
+                            }
+                            "template" => out.push(Symbol::from(value.clone())),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+    expr.node.for_each_child(&mut |c| collect_action_render_views(c, prefix, out));
 }
 
 /// Figure out the target partial name and the locals a `render(...)` call
