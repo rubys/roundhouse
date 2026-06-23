@@ -866,6 +866,8 @@ pub(super) fn int_method(method: &Symbol) -> Ty {
     match method.as_str() {
         "to_s" => Ty::Str,
         "to_i" | "abs" | "succ" | "pred" => Ty::Int,
+        // Unary minus/plus: Ruby desugars `-n` to `n.-@`. Int stays Int.
+        "-@" | "+@" => Ty::Int,
         "to_f" => Ty::Float,
         "zero?" | "positive?" | "negative?" | "even?" | "odd?" => Ty::Bool,
         // Arithmetic: Int op Int → Int (we approximate Int/Float mixing here;
@@ -904,6 +906,8 @@ pub(super) fn float_method(method: &Symbol) -> Ty {
         // safer default for the bare call.
         "to_i" | "to_int" | "round" | "ceil" | "floor" | "truncate" => Ty::Int,
         "to_f" | "abs" => Ty::Float,
+        // Unary minus/plus: `-x` desugars to `x.-@`. Float stays Float.
+        "-@" | "+@" => Ty::Float,
         "zero?" | "positive?" | "negative?" | "nan?" | "finite?" | "infinite?" => Ty::Bool,
         // Float arithmetic stays Float (Float op Int is also Float).
         "+" | "-" | "*" | "/" | "%" | "**" => Ty::Float,

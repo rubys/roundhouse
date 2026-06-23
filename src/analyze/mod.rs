@@ -490,6 +490,80 @@ impl Analyzer {
             classes.insert(ClassId(Symbol::from(name)), cls);
         }
 
+        // Ruby stdlib singletons + Set — referenced by ~every Rails app but
+        // not structurally modeled. Register the common call surface so
+        // `File.read`, `SecureRandom.hex`, `CGI.escape`, `Set#<<` resolve to
+        // a return type instead of "no known method". Return types follow
+        // the official rbs gem core/stdlib signatures, narrowed to the
+        // concrete cases; opaque/handle returns (`File.open`, `URI.parse`)
+        // and unparameterized collection elements degrade to `Untyped` (the
+        // gradual escape) so chained calls still flow. Hardcoded like the
+        // Rails/Time/Date blocks above — `register_stdlib_class` never
+        // clobbers an app-defined method/class of the same name.
+        let str_arr = || Ty::Array { elem: Box::new(Ty::Str) };
+        register_stdlib_class(&mut classes, "SecureRandom", &[
+            ("hex", Ty::Str), ("base64", Ty::Str), ("urlsafe_base64", Ty::Str),
+            ("base58", Ty::Str), ("uuid", Ty::Str), ("alphanumeric", Ty::Str),
+            ("random_bytes", Ty::Str), ("random_number", Ty::Untyped),
+        ], &[]);
+        register_stdlib_class(&mut classes, "File", &[
+            ("read", Ty::Str), ("binread", Ty::Str), ("write", Ty::Int),
+            ("exist?", Ty::Bool), ("exists?", Ty::Bool), ("file?", Ty::Bool),
+            ("directory?", Ty::Bool), ("open", Ty::Untyped),
+            ("unlink", Ty::Int), ("delete", Ty::Int), ("rename", Ty::Int),
+            ("join", Ty::Str), ("basename", Ty::Str), ("dirname", Ty::Str),
+            ("extname", Ty::Str), ("expand_path", Ty::Str), ("size", Ty::Int),
+        ], &[]);
+        register_stdlib_class(&mut classes, "Dir", &[
+            ("entries", str_arr()), ("glob", str_arr()), ("[]", str_arr()),
+            ("exist?", Ty::Bool), ("exists?", Ty::Bool), ("mkdir", Ty::Int),
+            ("pwd", Ty::Str), ("home", Ty::Str),
+        ], &[]);
+        register_stdlib_class(&mut classes, "Math", &[
+            ("sqrt", Ty::Float), ("cbrt", Ty::Float), ("log", Ty::Float),
+            ("log2", Ty::Float), ("log10", Ty::Float), ("exp", Ty::Float),
+            ("sin", Ty::Float), ("cos", Ty::Float), ("tan", Ty::Float),
+            ("atan", Ty::Float), ("atan2", Ty::Float), ("hypot", Ty::Float),
+            ("pow", Ty::Float),
+        ], &[]);
+        register_stdlib_class(&mut classes, "CGI", &[
+            ("escape", Ty::Str), ("unescape", Ty::Str),
+            ("escapeHTML", Ty::Str), ("unescapeHTML", Ty::Str),
+            ("escape_html", Ty::Str), ("unescape_html", Ty::Str),
+        ], &[]);
+        register_stdlib_class(&mut classes, "ERB::Util", &[
+            ("html_escape", Ty::Str), ("h", Ty::Str),
+            ("url_encode", Ty::Str), ("u", Ty::Str), ("json_escape", Ty::Str),
+        ], &[]);
+        for digest in ["Digest::MD5", "Digest::SHA1", "Digest::SHA256"] {
+            register_stdlib_class(&mut classes, digest, &[
+                ("hexdigest", Ty::Str), ("digest", Ty::Str),
+                ("base64digest", Ty::Str),
+            ], &[]);
+        }
+        // `URI.parse` returns a URI object we don't model; `Untyped` lets
+        // chained `.scheme` / `.host` flow gradually instead of erroring.
+        register_stdlib_class(&mut classes, "URI", &[
+            ("parse", Ty::Untyped), ("join", Ty::Untyped),
+            ("escape", Ty::Str), ("unescape", Ty::Str),
+            ("encode_www_form", Ty::Str), ("decode_www_form", Ty::Untyped),
+        ], &[]);
+        // `Set` is a value type: `Set.new` yields `Class { Set }` (via the
+        // universal `.new`), then these instance methods dispatch on it.
+        // Mutators return the receiver (self) for chaining; element-typed
+        // accessors are `Untyped` (Set isn't parameterized here).
+        let set_self = Ty::Class { id: ClassId(Symbol::from("Set")), args: vec![] };
+        register_stdlib_class(&mut classes, "Set", &[], &[
+            ("<<", set_self.clone()), ("add", set_self.clone()),
+            ("delete", set_self.clone()), ("merge", set_self.clone()),
+            ("add?", Ty::Untyped), ("each", Ty::Untyped),
+            ("map", Ty::Array { elem: Box::new(Ty::Untyped) }),
+            ("include?", Ty::Bool), ("member?", Ty::Bool), ("empty?", Ty::Bool),
+            ("size", Ty::Int), ("length", Ty::Int), ("count", Ty::Int),
+            ("to_a", Ty::Array { elem: Box::new(Ty::Untyped) }),
+            ("subset?", Ty::Bool), ("superset?", Ty::Bool),
+        ]);
+
         // Hardcoded ApplicationController-ish surface. Real inheritance chains
         // and per-controller overrides land when a fixture forces them.
         let mut app_ctrl = ClassInfo::default();
@@ -2336,6 +2410,31 @@ fn view_name_for_action(controller: &ClassId, action: &Action) -> Option<Symbol>
 /// the common single-name case; qualified writes `Foo::BAR = 1` use
 /// the joined path as their key, matching how the body-typer's
 /// Const-read arm looks up `path.last()`).
+/// Register a hardcoded stdlib/library class into the dispatch registry
+/// with the given class (singleton) and instance method return types.
+/// Never clobbers an app-defined method or class of the same name —
+/// `.or_insert` means a real `def` always wins, so this only fills gaps
+/// the app didn't define. Used for the Ruby stdlib catalog (SecureRandom,
+/// File, Dir, Math, CGI, ERB::Util, Digest::*, URI, Set) in `Analyzer::new`.
+fn register_stdlib_class(
+    classes: &mut HashMap<ClassId, ClassInfo>,
+    name: &str,
+    class_methods: &[(&str, Ty)],
+    instance_methods: &[(&str, Ty)],
+) {
+    let cls = classes.entry(ClassId(Symbol::from(name))).or_default();
+    for (m, ty) in class_methods {
+        cls.class_methods
+            .entry(Symbol::from(*m))
+            .or_insert_with(|| ty.clone());
+    }
+    for (m, ty) in instance_methods {
+        cls.instance_methods
+            .entry(Symbol::from(*m))
+            .or_insert_with(|| ty.clone());
+    }
+}
+
 pub(crate) fn extract_const_assignments(body: &[ModelBodyItem]) -> HashMap<Symbol, Ty> {
     let mut out: HashMap<Symbol, Ty> = HashMap::new();
     for item in body {

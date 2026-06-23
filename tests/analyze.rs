@@ -1726,6 +1726,47 @@ end
 }
 
 #[test]
+fn stdlib_singletons_and_set_resolve() {
+    // The hardcoded Ruby stdlib catalog (SecureRandom, CGI, Digest::*,
+    // Math, File, Dir, Set) resolves the common call surface, and unary
+    // minus (`-x` → `x.-@`) dispatches on the now-concrete numeric.
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/thing.rb",
+            r#"class Thing < ApplicationRecord
+  def compute
+    token = SecureRandom.hex(8)
+    safe = CGI.escape(token)
+    digest = Digest::MD5.hexdigest(safe)
+    root = Math.sqrt(4.0)
+    files = Dir.entries("/tmp")
+    seen = Set.new
+    seen << digest
+    seen.each { |x| x }
+    score = -((root * 2.0).round(3))
+    [token, safe, digest, files, score]
+  end
+end
+"#,
+        ),
+    ]);
+
+    let failures = send_dispatch_failures(&app);
+    for m in [
+        "hex", "escape", "hexdigest", "sqrt", "entries", "<<", "each", "-@",
+    ] {
+        assert!(
+            !failures.iter().any(|f| f == m),
+            "stdlib `{m}` should resolve via the hardcoded catalog; failures = {failures:?}"
+        );
+    }
+}
+
+#[test]
 fn app_helper_module_singletons_resolve() {
     // Helper modules under app/helpers/ are walked as library classes, so a
     // helper called as a bare singleton (`TrafficHelper.novelty_logo`) — its
