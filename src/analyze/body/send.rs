@@ -573,11 +573,30 @@ pub(super) fn range_method(method: &Symbol, elem: Option<&Ty>) -> Option<Ty> {
     Some(ty)
 }
 
+/// Is this array element type a model relation's element — a single
+/// model class, or a union of model classes (a relation threaded
+/// through a helper that several models share)? Used to gate the
+/// ActiveRecord relation-builder surface in `array_method`.
+fn is_model_relation_elem(elem: &Ty) -> bool {
+    match elem {
+        Ty::Class { .. } => true,
+        Ty::Union { variants } => {
+            !variants.is_empty()
+                && variants.iter().all(|v| matches!(v, Ty::Class { .. }))
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -> Ty {
     // AR-specific dispatches go FIRST so they win over the generic
     // array methods that share a name (`find` on a relation raises, so
     // it returns Class; on a plain Array it returns `Union<elem, Nil>`).
-    if matches!(elem, Ty::Class { .. }) {
+    // A relation's element is a model class — or, for a helper that
+    // takes relations of several models (`period(query)` called with
+    // both `Story…` and `Comment…`), a union of model classes. Both
+    // admit the relation-builder surface.
+    if is_model_relation_elem(elem) {
         match method.as_str() {
             // Relation chain methods preserve Array<Self>.
             "where" | "order" | "limit" | "offset" | "includes" | "preload"
@@ -586,6 +605,15 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
             | "rewhere" | "merge" | "extending" | "unscope"
             | "not" | "or" | "and" | "none" | "load" | "reload" | "reselect" => {
                 return Ty::Array { elem: Box::new(elem.clone()) };
+            }
+            // `relation.model` is the element model class. With a union
+            // element it's ambiguous, so fall back to the gradual
+            // escape (the common use is `query.model.table_name`).
+            "model" => {
+                return match elem {
+                    Ty::Class { .. } => elem.clone(),
+                    _ => Ty::Untyped,
+                };
             }
             // CollectionProxy constructors / first-or-X return an element.
             "build" | "create" | "create!" | "find" | "find!" | "find_by!"
@@ -873,6 +901,10 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         "to_i" => Ty::Int,
         "to_f" => Ty::Float,
         "to_sym" | "intern" => Ty::Sym,
+        // Case-insensitive comparison: `casecmp` returns -1/0/1 (Int),
+        // `casecmp?` returns Bool.
+        "casecmp" => Ty::Int,
+        "casecmp?" => Ty::Bool,
         "chars" | "lines" | "split" | "bytes" | "scan" => Ty::Array { elem: Box::new(Ty::Str) },
         "empty?" | "blank?" | "present?" | "include?" | "start_with?"
         | "end_with?" | "match?" => Ty::Bool,

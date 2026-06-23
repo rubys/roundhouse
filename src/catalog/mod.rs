@@ -412,6 +412,82 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::Builder,
         return_kind: Some(ReturnKind::ArrayOfSelf),
     },
+    // Remaining relation builders. These were modeled for the relation
+    // (`Array[Self]`) receiver but missing from the class surface, so a
+    // chain that *opens* with one — `Comment.eager_load(:user)…` — left
+    // the whole relation untyped. Same DbRead/Builder/ArrayOfSelf shape
+    // as the builders above; kept in sync with the relation-method list
+    // in `analyze::body::send::array_method`.
+    CatalogedMethod {
+        name: "eager_load",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::ArrayOfSelf),
+    },
+    CatalogedMethod {
+        name: "left_outer_joins",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::ArrayOfSelf),
+    },
+    CatalogedMethod {
+        name: "references",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::ArrayOfSelf),
+    },
+    CatalogedMethod {
+        name: "reorder",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::ArrayOfSelf),
+    },
+    CatalogedMethod {
+        name: "rewhere",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::ArrayOfSelf),
+    },
+    CatalogedMethod {
+        name: "unscope",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::ArrayOfSelf),
+    },
+    CatalogedMethod {
+        name: "readonly",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::ArrayOfSelf),
+    },
+    CatalogedMethod {
+        name: "reselect",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::ArrayOfSelf),
+    },
+    CatalogedMethod {
+        name: "extending",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::ArrayOfSelf),
+    },
+    CatalogedMethod {
+        name: "merge",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::ArrayOfSelf),
+    },
     // ---- Class-method writes ----
     // Bulk / class-level mutations — always execute, no chain
     // semantic (you can't chain after `create_all`, you just run

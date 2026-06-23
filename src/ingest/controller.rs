@@ -8,7 +8,7 @@ use crate::dialect::{Action, Comment, Controller, ControllerBodyItem, LayoutDecl
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::span::Span;
-use crate::ty::Row;
+use crate::ty::{Row, Ty};
 use crate::{ClassId, Symbol};
 
 use super::expr::ingest_expr;
@@ -162,10 +162,29 @@ fn ingest_controller_body_item(
         let renders = infer_render_template(&body_expr)
             .map(|name| RenderTarget::Template { name, formats: Vec::new() })
             .unwrap_or(RenderTarget::Inferred);
+        // Capture required positional params (`def period(query)`).
+        // Routed actions take none (they read `params[...]`); helper
+        // methods do, and without the param names the analyzer can't
+        // seed their types from call sites — so a body like
+        // `query.where(...)` never resolves and the method's return
+        // type is lost. Value types are placeholders (`Untyped`); the
+        // real types come from the inferred-params table. Optional /
+        // keyword / rest params need richer modeling and stay
+        // unhandled for now.
+        let mut params = Row::closed();
+        if let Some(pn) = def.parameters() {
+            for req in pn.requireds().iter() {
+                if let Some(rp) = req.as_required_parameter_node() {
+                    params
+                        .fields
+                        .insert(Symbol::from(constant_id_str(&rp.name())), Ty::Untyped);
+                }
+            }
+        }
         return Ok(ControllerBodyItem::Action {
             action: Action {
                 name: Symbol::from(action_name),
-                params: Row::closed(),
+                params,
                 body: body_expr,
                 renders,
                 effects: EffectSet::pure(),

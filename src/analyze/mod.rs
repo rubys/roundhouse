@@ -42,7 +42,7 @@ use crate::dialect::{
 use crate::effect::{Effect, EffectSet};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol};
-use crate::ty::Ty;
+use crate::ty::{Row, Ty};
 
 pub struct Analyzer {
     classes: HashMap<ClassId, ClassInfo>,
@@ -884,13 +884,17 @@ impl Analyzer {
             // block bodies were already typed by the Phase 0 pass above.
             let block_filters = harvest_block_filters(controller);
 
-            // Pass A: analyze every action body once with no seed.
-            // Required before we can harvest each action's produced
-            // ivar bindings — the callback targets (`set_article`)
-            // are themselves actions.
+            // Pass A: analyze every action body once. Helper-method
+            // params (`period(query)`) are seeded from the inferred-
+            // params table so their bodies — and thus their harvested
+            // return types — resolve; routed actions have empty param
+            // rows and seed nothing.
+            let ctrl_id = controller.name.clone();
             for action in controller.actions_mut() {
-                self.body_typer().analyze_expr(&mut action.body, &ctx);
-                action.effects = self.collect_effects(&mut action.body, &ctx);
+                let mctx =
+                    self.seed_action_params(&ctx, &ctrl_id, &action.name, &action.params);
+                self.body_typer().analyze_expr(&mut action.body, &mctx);
+                action.effects = self.collect_effects(&mut action.body, &mctx);
             }
 
             // Snapshot each action's ivar bindings (this controller's
@@ -1058,13 +1062,22 @@ impl Analyzer {
                     if seed.is_empty() {
                         continue;
                     }
-                    let inner_ctx = Ctx {
+                    let base_ctx = Ctx {
                         self_ty: Some(meta.self_ty.clone()),
                         ivar_bindings: seed,
                         local_bindings: HashMap::new(),
                         constants: meta.class_constants.clone(),
                         annotate_self_dispatch: false, in_view: false,
                     };
+                    // Seed helper-method params from the inferred-params
+                    // table too, so `period(query)`'s body resolves on
+                    // the re-analysis pass (matches Pass A).
+                    let inner_ctx = self.seed_action_params(
+                        &base_ctx,
+                        &ctrl_name,
+                        &action.name,
+                        &action.params,
+                    );
                     self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
                     action.effects = self.collect_effects(&mut action.body, &inner_ctx);
                 }
@@ -1557,6 +1570,34 @@ impl Analyzer {
         ctx
     }
 
+    /// As `seed_method_params`, but for a controller `Action` — whose
+    /// params are a `Row` (ordered name→Ty map) rather than a
+    /// `MethodDef`. Controller helper methods (`period(query)`,
+    /// `paginate(rel)`) take real Ruby params whose types are only
+    /// known from their call sites; without seeding them the body
+    /// types every param read as `Var`, so the method's return type
+    /// (`query.where(...)`) never resolves. Routed actions have empty
+    /// param rows, so this is a no-op for them.
+    fn seed_action_params(
+        &self,
+        base: &Ctx,
+        class_id: &ClassId,
+        action_name: &Symbol,
+        params: &Row,
+    ) -> Ctx {
+        let key = (class_id.clone(), action_name.clone());
+        let Some(types) = self.inferred_params.get(&key) else {
+            return base.clone();
+        };
+        let mut ctx = base.clone();
+        for (name, ty) in params.fields.keys().zip(types.iter()) {
+            if !matches!(ty, Ty::Var { .. }) {
+                ctx.local_bindings.insert(name.clone(), ty.clone());
+            }
+        }
+        ctx
+    }
+
     /// Fingerprint of the data the fixpoint refines: per-class
     /// instance/class method return types in `self.classes` plus the
     /// parameter-type table in `self.inferred_params`. The fixpoint
@@ -1704,27 +1745,27 @@ impl Analyzer {
         let mut sites: Vec<(ClassId, Symbol, Vec<Ty>)> = Vec::new();
         for model in &app.models {
             for method in model.methods() {
-                self.collect_send_sites(&method.body, &mut sites);
+                self.collect_send_sites(&method.body, Some(&model.name), &mut sites);
             }
             for scope in model.scopes() {
-                self.collect_send_sites(&scope.body, &mut sites);
+                self.collect_send_sites(&scope.body, Some(&model.name), &mut sites);
             }
         }
         for lc in &app.library_classes {
             for method in &lc.methods {
-                self.collect_send_sites(&method.body, &mut sites);
+                self.collect_send_sites(&method.body, Some(&lc.name), &mut sites);
             }
         }
         for controller in &app.controllers {
             for action in controller.actions() {
-                self.collect_send_sites(&action.body, &mut sites);
+                self.collect_send_sites(&action.body, Some(&controller.name), &mut sites);
             }
         }
         for view in &app.views {
-            self.collect_send_sites(&view.body, &mut sites);
+            self.collect_send_sites(&view.body, None, &mut sites);
         }
         if let Some(seeds) = &app.seeds {
-            self.collect_send_sites(seeds, &mut sites);
+            self.collect_send_sites(seeds, None, &mut sites);
         }
 
         for (class_id, method, arg_tys) in sites {
@@ -1756,16 +1797,22 @@ impl Analyzer {
     fn collect_send_sites(
         &self,
         expr: &Expr,
+        self_class: Option<&ClassId>,
         out: &mut Vec<(ClassId, Symbol, Vec<Ty>)>,
     ) {
         match &*expr.node {
             ExprNode::Send { recv, method, args, block, .. } => {
+                // Resolve the receiver class: an explicit receiver
+                // typed as a class, or — for an implicit-self call
+                // (`period(query)` inside a controller) — the
+                // enclosing class. The latter is what lets a sibling
+                // method's params be inferred from its self-call sites.
                 let recv_class = match recv {
                     Some(r) => match r.ty.as_ref() {
                         Some(Ty::Class { id, .. }) => Some(id.clone()),
                         _ => None,
                     },
-                    None => None,
+                    None => self_class.cloned(),
                 };
                 if let Some(class_id) = recv_class {
                     let arg_tys: Vec<Ty> = args
@@ -1774,97 +1821,99 @@ impl Analyzer {
                         .collect();
                     out.push((class_id, method.clone(), arg_tys));
                 }
-                if let Some(r) = recv { self.collect_send_sites(r, out); }
-                for a in args { self.collect_send_sites(a, out); }
-                if let Some(b) = block { self.collect_send_sites(b, out); }
+                if let Some(r) = recv { self.collect_send_sites(r, self_class, out); }
+                for a in args { self.collect_send_sites(a, self_class, out); }
+                if let Some(b) = block { self.collect_send_sites(b, self_class, out); }
             }
             ExprNode::Seq { exprs } | ExprNode::Array { elements: exprs, .. } => {
-                for e in exprs { self.collect_send_sites(e, out); }
+                for e in exprs { self.collect_send_sites(e, self_class, out); }
             }
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {
-                    self.collect_send_sites(k, out);
-                    self.collect_send_sites(v, out);
+                    self.collect_send_sites(k, self_class, out);
+                    self.collect_send_sites(v, self_class, out);
                 }
             }
             ExprNode::If { cond, then_branch, else_branch } => {
-                self.collect_send_sites(cond, out);
-                self.collect_send_sites(then_branch, out);
-                self.collect_send_sites(else_branch, out);
+                self.collect_send_sites(cond, self_class, out);
+                self.collect_send_sites(then_branch, self_class, out);
+                self.collect_send_sites(else_branch, self_class, out);
             }
             ExprNode::Case { scrutinee, arms } => {
-                self.collect_send_sites(scrutinee, out);
+                self.collect_send_sites(scrutinee, self_class, out);
                 for arm in arms {
-                    if let Some(g) = &arm.guard { self.collect_send_sites(g, out); }
-                    self.collect_send_sites(&arm.body, out);
+                    if let Some(g) = &arm.guard { self.collect_send_sites(g, self_class, out); }
+                    self.collect_send_sites(&arm.body, self_class, out);
                 }
             }
             ExprNode::BoolOp { left, right, .. }
             | ExprNode::RescueModifier { expr: left, fallback: right } => {
-                self.collect_send_sites(left, out);
-                self.collect_send_sites(right, out);
+                self.collect_send_sites(left, self_class, out);
+                self.collect_send_sites(right, self_class, out);
             }
             ExprNode::Let { value, body, .. } => {
-                self.collect_send_sites(value, out);
-                self.collect_send_sites(body, out);
+                self.collect_send_sites(value, self_class, out);
+                self.collect_send_sites(body, self_class, out);
             }
-            ExprNode::Lambda { body, .. } => self.collect_send_sites(body, out),
+            ExprNode::Lambda { body, .. } => self.collect_send_sites(body, self_class, out),
             ExprNode::Apply { fun, args, block } => {
-                self.collect_send_sites(fun, out);
-                for a in args { self.collect_send_sites(a, out); }
-                if let Some(b) = block { self.collect_send_sites(b, out); }
+                self.collect_send_sites(fun, self_class, out);
+                for a in args { self.collect_send_sites(a, self_class, out); }
+                if let Some(b) = block { self.collect_send_sites(b, self_class, out); }
             }
             ExprNode::Assign { target, value }
             | ExprNode::OpAssign { target, value, .. } => {
-                self.collect_send_sites(value, out);
+                self.collect_send_sites(value, self_class, out);
                 if let LValue::Attr { recv, .. } = target {
-                    self.collect_send_sites(recv, out);
+                    self.collect_send_sites(recv, self_class, out);
                 }
                 if let LValue::Index { recv, index } = target {
-                    self.collect_send_sites(recv, out);
-                    self.collect_send_sites(index, out);
+                    self.collect_send_sites(recv, self_class, out);
+                    self.collect_send_sites(index, self_class, out);
                 }
             }
             ExprNode::StringInterp { parts } => {
                 for p in parts {
                     if let crate::expr::InterpPart::Expr { expr } = p {
-                        self.collect_send_sites(expr, out);
+                        self.collect_send_sites(expr, self_class, out);
                     }
                 }
             }
             ExprNode::Yield { args } => {
-                for a in args { self.collect_send_sites(a, out); }
+                for a in args { self.collect_send_sites(a, self_class, out); }
             }
-            ExprNode::Raise { value } => self.collect_send_sites(value, out),
-            ExprNode::Return { value } => self.collect_send_sites(value, out),
+            ExprNode::Raise { value } => self.collect_send_sites(value, self_class, out),
+            ExprNode::Return { value } => self.collect_send_sites(value, self_class, out),
             ExprNode::Super { args } => {
                 if let Some(args) = args {
-                    for a in args { self.collect_send_sites(a, out); }
+                    for a in args { self.collect_send_sites(a, self_class, out); }
                 }
             }
             ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
-                self.collect_send_sites(body, out);
+                self.collect_send_sites(body, self_class, out);
                 for rc in rescues {
-                    for c in &rc.classes { self.collect_send_sites(c, out); }
-                    self.collect_send_sites(&rc.body, out);
+                    for c in &rc.classes { self.collect_send_sites(c, self_class, out); }
+                    self.collect_send_sites(&rc.body, self_class, out);
                 }
-                if let Some(e) = else_branch { self.collect_send_sites(e, out); }
-                if let Some(e) = ensure { self.collect_send_sites(e, out); }
+                if let Some(e) = else_branch { self.collect_send_sites(e, self_class, out); }
+                if let Some(e) = ensure { self.collect_send_sites(e, self_class, out); }
             }
             ExprNode::Next { value } | ExprNode::Break { value } => {
-                if let Some(v) = value { self.collect_send_sites(v, out); }
+                if let Some(v) = value { self.collect_send_sites(v, self_class, out); }
             }
-            ExprNode::Splat { value } => self.collect_send_sites(value, out),
-            ExprNode::MultiAssign { value, .. } => self.collect_send_sites(value, out),
+            ExprNode::Splat { value } => self.collect_send_sites(value, self_class, out),
+            ExprNode::MultiAssign { value, .. } => {
+                self.collect_send_sites(value, self_class, out)
+            }
             ExprNode::While { cond, body, .. } => {
-                self.collect_send_sites(cond, out);
-                self.collect_send_sites(body, out);
+                self.collect_send_sites(cond, self_class, out);
+                self.collect_send_sites(body, self_class, out);
             }
             ExprNode::Range { begin, end, .. } => {
-                if let Some(b) = begin { self.collect_send_sites(b, out); }
-                if let Some(e) = end { self.collect_send_sites(e, out); }
+                if let Some(b) = begin { self.collect_send_sites(b, self_class, out); }
+                if let Some(e) = end { self.collect_send_sites(e, self_class, out); }
             }
-            ExprNode::Cast { value, .. } => self.collect_send_sites(value, out),
+            ExprNode::Cast { value, .. } => self.collect_send_sites(value, self_class, out),
             ExprNode::Lit { .. }
             | ExprNode::Var { .. }
             | ExprNode::Ivar { .. }
