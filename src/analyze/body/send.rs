@@ -380,6 +380,18 @@ impl<'a> BodyTyper<'a> {
                         return ty;
                     }
                 }
+                // `Rails.env` returns an `ActiveSupport::StringInquirer`
+                // — a String subclass whose `method_missing` answers any
+                // `<word>?` (`development?`/`production?`/`staging?`) as
+                // Bool. Model it exactly: a trailing-`?` method is a Bool
+                // inquiry; everything else dispatches as a String
+                // (`==`/interpolation/`upcase`/`to_sym` all work).
+                if id.0.as_str() == "ActiveSupport::StringInquirer" {
+                    if method.as_str().ends_with('?') {
+                        return Ty::Bool;
+                    }
+                    return str_method(method);
+                }
                 // Base64 stdlib — `Base64.strict_encode64(JSON.generate(x))`
                 // appears in turbo_stream_from. All Base64 module-level
                 // encoders/decoders return String.

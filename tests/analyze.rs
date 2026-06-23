@@ -1767,6 +1767,40 @@ end
 }
 
 #[test]
+fn rails_env_is_a_string_inquirer() {
+    // `Rails.env` is an ActiveSupport::StringInquirer: `development?` /
+    // `production?` (any `<word>?`) resolve to Bool via method_missing,
+    // and it's otherwise a String (`==`/`upcase`/`to_sym`). It used to
+    // type as plain Str and reject the env predicates.
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/post.rb",
+            r#"class Post < ApplicationRecord
+  def check
+    a = Rails.env.development?
+    b = Rails.env.production?
+    c = Rails.env.upcase
+    [a, b, c]
+  end
+end
+"#,
+        ),
+    ]);
+    let failures = send_dispatch_failures(&app);
+    for m in ["development?", "production?", "upcase"] {
+        assert!(
+            !failures.iter().any(|f| f == m),
+            "`Rails.env.{m}` should resolve (StringInquirer is a String \
+             that answers `?` inquiries); failures = {failures:?}"
+        );
+    }
+}
+
+#[test]
 fn hash_accumulator_value_widens_from_writes() {
     // The `hash[k] ||= []; hash[k].push x` accumulator idiom: an empty
     // `{}` seeds the value type as Var, but `hash[k] ||= []` widens it

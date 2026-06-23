@@ -465,7 +465,16 @@ impl Analyzer {
         rails_cls.class_methods.insert(Symbol::from("cache"), Ty::Untyped);
         rails_cls.class_methods.insert(Symbol::from("configuration"), Ty::Untyped);
         rails_cls.class_methods.insert(Symbol::from("root"), Ty::Untyped);
-        rails_cls.class_methods.insert(Symbol::from("env"), Ty::Str);
+        // `Rails.env` is an ActiveSupport::StringInquirer (a String
+        // that also answers `development?`/`production?`/… as Bool),
+        // not a plain Str — see the StringInquirer dispatch in send.rs.
+        rails_cls.class_methods.insert(
+            Symbol::from("env"),
+            Ty::Class {
+                id: ClassId(Symbol::from("ActiveSupport::StringInquirer")),
+                args: vec![],
+            },
+        );
         classes.insert(ClassId(Symbol::from("Rails")), rails_cls);
 
         // Time singleton — `Time.current` (Rails) / `Time.now`
