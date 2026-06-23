@@ -44,6 +44,9 @@
 
 use std::collections::BTreeSet;
 
+pub mod gems;
+pub use gems::{GemClass, GemTy, GEM_CATALOG};
+
 /// One cataloged method. Static-lifetime strings keep entries
 /// zero-allocation at runtime — the catalog is const data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

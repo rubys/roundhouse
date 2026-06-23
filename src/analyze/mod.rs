@@ -564,6 +564,20 @@ impl Analyzer {
             ("subset?", Ty::Bool), ("superset?", Ty::Bool),
         ]);
 
+        // Gem / ecosystem catalog (`crate::catalog::gems`). Targeting
+        // Rails realistically means targeting its gem ecosystem;
+        // rather than enumerate every gem, we register the surface
+        // apps actually call (Arel, ROTP, Nokogiri, …) by discovery.
+        // Registered like the stdlib singletons — `or_insert`, so a
+        // user class of the same name still wins.
+        for gem in crate::catalog::GEM_CATALOG {
+            let class_methods: Vec<(&str, Ty)> =
+                gem.class_methods.iter().map(|(n, k)| (*n, k.to_ty())).collect();
+            let instance_methods: Vec<(&str, Ty)> =
+                gem.instance_methods.iter().map(|(n, k)| (*n, k.to_ty())).collect();
+            register_stdlib_class(&mut classes, gem.name, &class_methods, &instance_methods);
+        }
+
         // Hardcoded ApplicationController-ish surface. Real inheritance chains
         // and per-controller overrides land when a fixture forces them.
         let mut app_ctrl = ClassInfo::default();

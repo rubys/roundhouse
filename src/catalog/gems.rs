@@ -1,0 +1,171 @@
+//! Gem / ecosystem catalog — declarative signatures for the
+//! third-party gem surface a Rails app actually calls.
+//!
+//! ## Why a separate catalog
+//!
+//! Most compilers target a *language*. roundhouse nominally targets a
+//! *framework* (Rails), but realistically it targets that framework's
+//! *gem ecosystem* — and not by enumeration, but by **discovery**.
+//! When an app calls `Arel.sql(...)` or `ROTP::TOTP#secret` and the
+//! analyzer can't resolve the dispatch, the gem's signature lands
+//! here. The set grows as real apps surface real calls.
+//!
+//! ## What an entry carries
+//!
+//! A concrete return type where one is knowable (`#secret -> Str`,
+//! `ROTP::Base32.random -> Str`) and the gradual escape (`Untyped`)
+//! for opaque gem objects we don't model structurally (`Arel.sql`'s
+//! AST node, a parsed `Nokogiri` document). Either way the dispatch
+//! *resolves* — never a hard `send_dispatch_failed`. `Untyped` is the
+//! floor, not the ceiling: an entry is free to declare a precise type
+//! the moment one is worth modeling.
+//!
+//! ## Shape
+//!
+//! Const data, same spirit as [`super::AR_CATALOG`]; registered into
+//! the class registry in `Analyzer::new` via `register_stdlib_class`
+//! (so a user class of the same name always wins). Centralized here
+//! for now. Culling the list and admitting external, gem-author- or
+//! user-supplied catalogs (an "enumerated federation") is deferred —
+//! the data shape is the same either way, so externalization is a
+//! loader, not a rewrite.
+
+use crate::ident::{ClassId, Symbol};
+use crate::ty::Ty;
+
+/// Const-friendly return-type descriptor (no `Box`/`Vec`), expanded
+/// to a [`Ty`] at registry-build time — mirrors [`super::ReturnKind`]
+/// for the AR catalog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GemTy {
+    Str,
+    Int,
+    Bool,
+    Float,
+    /// Gradual escape: the gem returns an object we don't model
+    /// structurally. Dispatch resolves and the choice propagates.
+    Untyped,
+    /// An instance of the named (dotted-path) class, so a *factory*
+    /// method can return another cataloged gem type and chains
+    /// resolve. (`.new` is already universal, so this is only for
+    /// non-`new` constructors.)
+    Instance(&'static str),
+}
+
+impl GemTy {
+    pub fn to_ty(self) -> Ty {
+        match self {
+            GemTy::Str => Ty::Str,
+            GemTy::Int => Ty::Int,
+            GemTy::Bool => Ty::Bool,
+            GemTy::Float => Ty::Float,
+            GemTy::Untyped => Ty::Untyped,
+            GemTy::Instance(path) => Ty::Class {
+                id: ClassId(Symbol::from(path)),
+                args: vec![],
+            },
+        }
+    }
+}
+
+/// One gem class/module's cataloged surface.
+pub struct GemClass {
+    /// Fully-qualified constant path as written in source
+    /// (`"ROTP::TOTP"`, `"Mail::Address"`).
+    pub name: &'static str,
+    /// Methods called on the class/module itself (`Arel.sql`).
+    pub class_methods: &'static [(&'static str, GemTy)],
+    /// Methods called on an instance (`totp.secret`). The instance
+    /// arrives through the universal `.new`, which already yields
+    /// `Class { id: <name> }`, so these resolve without a factory
+    /// entry.
+    pub instance_methods: &'static [(&'static str, GemTy)],
+}
+
+/// The catalog. One entry per gem class/module; add a gem by adding a
+/// row.
+pub const GEM_CATALOG: &[GemClass] = &[
+    // Arel — ActiveRecord's low-level SQL AST builder. `sql` wraps a
+    // raw fragment, `star` is the `*` projection node; both produce
+    // opaque AST consumed by where/order/select, so gradual.
+    GemClass {
+        name: "Arel",
+        class_methods: &[("sql", GemTy::Untyped), ("star", GemTy::Untyped)],
+        instance_methods: &[],
+    },
+    // ROTP — TOTP/HOTP one-time passwords (the 2FA surface).
+    GemClass {
+        name: "ROTP::TOTP",
+        class_methods: &[],
+        instance_methods: &[
+            ("secret", GemTy::Str),
+            ("provisioning_uri", GemTy::Str),
+            ("now", GemTy::Str),
+            ("at", GemTy::Str),
+            // `verify` returns the matching timestamp Integer or nil —
+            // gradual rather than committing to `Int?`.
+            ("verify", GemTy::Untyped),
+        ],
+    },
+    GemClass {
+        name: "ROTP::Base32",
+        class_methods: &[("random", GemTy::Str), ("random_base32", GemTy::Str)],
+        instance_methods: &[],
+    },
+    // RQRCode — QR-code rendering; the `as_*` methods serialize to a
+    // String in the requested format.
+    GemClass {
+        name: "RQRCode::QRCode",
+        class_methods: &[],
+        instance_methods: &[
+            ("as_svg", GemTy::Str),
+            ("as_png", GemTy::Str),
+            ("as_ansi", GemTy::Str),
+        ],
+    },
+    // Nokogiri — HTML/XML parsing. The `HTML`/`XML` module methods
+    // (`Nokogiri::HTML(str)`) return a Document we don't model.
+    GemClass {
+        name: "Nokogiri",
+        class_methods: &[("HTML", GemTy::Untyped), ("XML", GemTy::Untyped)],
+        instance_methods: &[],
+    },
+    // pdf-reader — PDF metadata/text extraction.
+    GemClass {
+        name: "PDF::Reader",
+        class_methods: &[],
+        instance_methods: &[
+            ("info", GemTy::Untyped),
+            ("pages", GemTy::Untyped),
+            ("page_count", GemTy::Int),
+        ],
+    },
+    // pushover — push notifications. `SUBSCRIPTION_CODE` is a config
+    // accessor (truthiness-checked), `subscription_url` builds a URL.
+    GemClass {
+        name: "Pushover",
+        class_methods: &[
+            ("SUBSCRIPTION_CODE", GemTy::Untyped),
+            ("subscription_url", GemTy::Str),
+            ("notification", GemTy::Untyped),
+        ],
+        instance_methods: &[],
+    },
+    // mail — RFC822 address parsing; the parts are Strings.
+    GemClass {
+        name: "Mail::Address",
+        class_methods: &[],
+        instance_methods: &[
+            ("address", GemTy::Str),
+            ("domain", GemTy::Str),
+            ("local", GemTy::Str),
+        ],
+    },
+    // rack-mini-profiler — dev profiling middleware; the gate call is
+    // side-effecting.
+    GemClass {
+        name: "Rack::MiniProfiler",
+        class_methods: &[("authorize_request", GemTy::Untyped)],
+        instance_methods: &[],
+    },
+];

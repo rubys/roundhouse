@@ -1767,6 +1767,51 @@ end
 }
 
 #[test]
+fn gem_catalog_resolves_third_party_surface() {
+    // The gem catalog (src/catalog/gems.rs) resolves the third-party
+    // surface apps call: class methods (`Arel.sql`, `ROTP::Base32.random`),
+    // instance methods reached through the universal `.new`
+    // (`ROTP::TOTP.new.secret`, `Mail::Address.new(x).domain`), and
+    // module methods (`Nokogiri::HTML`). `.random`/`.secret` carry a
+    // real `Str` type, not just `Untyped`, so a chained String method
+    // resolves too — `random.upcase` would fail "no known method on
+    // Untyped"... no, Untyped absorbs; it would fail on a *Var*. We
+    // assert the gem methods AND the chained `upcase` all resolve.
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/thing.rb",
+            r#"class Thing < ApplicationRecord
+  def compute
+    frag = Arel.sql("a = b")
+    secret = ROTP::Base32.random
+    loud = secret.upcase
+    totp = ROTP::TOTP.new(secret)
+    uri = totp.provisioning_uri("x")
+    doc = Nokogiri::HTML("<p>")
+    addr = Mail::Address.new("a@b.com").domain
+    [frag, secret, loud, uri, doc, addr]
+  end
+end
+"#,
+        ),
+    ]);
+
+    let failures = send_dispatch_failures(&app);
+    for m in [
+        "sql", "random", "upcase", "provisioning_uri", "HTML", "domain",
+    ] {
+        assert!(
+            !failures.iter().any(|f| f == m),
+            "gem method `{m}` should resolve via the gem catalog; failures = {failures:?}"
+        );
+    }
+}
+
+#[test]
 fn app_helper_module_singletons_resolve() {
     // Helper modules under app/helpers/ are walked as library classes, so a
     // helper called as a bare singleton (`TrafficHelper.novelty_logo`) — its
