@@ -91,6 +91,13 @@ pub struct ClassInfo {
     /// `AccessorKind::Method` and forcing the parens). Class lookups
     /// use the same `ClassId` shape the registry keys use.
     pub parent: Option<crate::ident::ClassId>,
+    /// Modules mixed in via `include` (e.g. a controller's
+    /// `include IntervalHelper`). A mixed-in module's instance methods
+    /// become instance methods of the includer, so dispatch consults
+    /// these (their own instance_methods in the registry) after the
+    /// class's own methods and before walking the parent. Empty for
+    /// most classes.
+    pub includes: Vec<crate::ident::ClassId>,
 }
 
 /// Resolve a single-segment Const ref (like `Const { path:

@@ -600,7 +600,11 @@ impl Analyzer {
         // proper signatures is a follow-up; for now an empty ClassInfo
         // is enough to type the constructor reference.
         for lc in &app.library_classes {
-            classes.entry(lc.name.clone()).or_default();
+            let cls = classes.entry(lc.name.clone()).or_default();
+            // A helper module's own `include`s carry transitively to
+            // any class that includes it; record them so dispatch can
+            // chase nested mixins.
+            cls.includes = lc.includes.clone();
         }
 
         // Controllers: register each as a known class so self-method
@@ -613,9 +617,17 @@ impl Analyzer {
         // entry when a real `application_controller.rb` is also present —
         // we only set its parent, never clobber its methods.
         for controller in &app.controllers {
+            let includes = controller_includes(controller);
             let cls = classes.entry(controller.name.clone()).or_default();
             if controller.parent.is_some() {
                 cls.parent = controller.parent.clone();
+            }
+            // `include IntervalHelper` etc. — mixed-in helper methods
+            // (e.g. `time_interval`) are callable via implicit self in
+            // every action. Recording the mixin lets dispatch resolve
+            // them against the helper's registered instance methods.
+            if !includes.is_empty() {
+                cls.includes = includes;
             }
         }
 
@@ -2708,6 +2720,30 @@ pub(crate) fn extract_controller_const_assignments(
     for item in body {
         let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
         record_const(expr, &mut out);
+    }
+    out
+}
+
+/// Collect the modules a controller mixes in via top-level
+/// `include X` / `include X, Y` calls (round-tripped as `Unknown`
+/// body items). Each becomes a `ClassId` whose registered instance
+/// methods dispatch will consult for the controller. `include` with a
+/// non-constant argument (rare metaprogramming) is skipped.
+fn controller_includes(controller: &Controller) -> Vec<ClassId> {
+    let mut out = Vec::new();
+    for item in &controller.body {
+        let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
+        if method.as_str() != "include" {
+            continue;
+        }
+        for arg in args {
+            if let ExprNode::Const { path } = &*arg.node {
+                let joined =
+                    path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+                out.push(ClassId(Symbol::from(joined)));
+            }
+        }
     }
     out
 }

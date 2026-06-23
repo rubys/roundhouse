@@ -302,6 +302,16 @@ impl<'a> BodyTyper<'a> {
                     if let Some(ty) = cls.instance_methods.get(method) {
                         return unwrap_fn_ret(ty);
                     }
+                    // Mixed-in modules (`include IntervalHelper`)
+                    // contribute their instance methods to this class.
+                    // Checked after the class's own methods, before the
+                    // parent — Ruby's ancestor order puts an included
+                    // module between the class and its superclass.
+                    for module_id in &cls.includes {
+                        if let Some(ty) = self.lookup_in_module(module_id, method) {
+                            return ty;
+                        }
+                    }
                     current_id = cls.parent.as_ref();
                 }
                 let _ = args; // already shadowed below for new-call shortcut
@@ -480,6 +490,32 @@ impl<'a> BodyTyper<'a> {
             // resolves the read instead of leaving it `Var`.
             _ => conversion_fallback(method).unwrap_or_else(unknown),
         }
+    }
+
+    /// Resolve `method` against a mixed-in module's registered methods,
+    /// chasing the module's own `include`s transitively. Returns the
+    /// call-site result type (return type unwrapped). `Module`s carry
+    /// their instance methods in the same registry slot classes use, so
+    /// this is the class lookup minus the parent walk. A `seen` set
+    /// guards the pathological `module A; include B; end; module B;
+    /// include A; end` cycle.
+    fn lookup_in_module(&self, module_id: &ClassId, method: &Symbol) -> Option<Ty> {
+        let mut stack = vec![module_id.clone()];
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let Some(m) = self.classes().get(&id) else { continue };
+            if let Some(ty) = m.instance_methods.get(method) {
+                return Some(unwrap_fn_ret(ty));
+            }
+            if let Some(ty) = m.class_methods.get(method) {
+                return Some(unwrap_fn_ret(ty));
+            }
+            stack.extend(m.includes.iter().cloned());
+        }
+        None
     }
 }
 
