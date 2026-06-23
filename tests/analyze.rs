@@ -1767,6 +1767,40 @@ end
 }
 
 #[test]
+fn diverging_tail_method_harvests_early_returns() {
+    // A method whose *tail* diverges (here a `raise`; in lobsters a
+    // `begin/case` whose arms all `return`) but which returns a
+    // concrete value on an early path must harvest that early return's
+    // type — not `Bottom`. Without it, a caller's `lookup["k"]` fails
+    // dispatch on `Bottom`.
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/post.rb",
+            r#"class Post < ApplicationRecord
+  def lookup
+    return({ "found" => "yes" }) if @ready
+    raise "not ready"
+  end
+  def use
+    lookup["found"]
+  end
+end
+"#,
+        ),
+    ]);
+    let failures = send_dispatch_failures(&app);
+    assert!(
+        !failures.iter().any(|f| f == "[]"),
+        "`lookup[...]` should resolve — lookup returns Hash via its early \
+         return, not Bottom from the raising tail; failures = {failures:?}"
+    );
+}
+
+#[test]
 fn datetime_columns_type_as_time() {
     // A schema datetime column is a `Time` at the Ruby level, so
     // `created_at.strftime` / `.to_i` / `.after?` / `>=` all resolve.

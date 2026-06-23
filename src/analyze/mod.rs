@@ -1679,7 +1679,11 @@ impl Analyzer {
                         &mut self.classes.entry(class_id.clone()).or_default().class_methods
                     }
                 };
-                Self::register_method_return(target, &method.name, method.body.ty.as_ref());
+                Self::register_method_return(
+                    target,
+                    &method.name,
+                    effective_return_ty(&method.body).as_ref(),
+                );
             }
         }
         for lc in &app.library_classes {
@@ -1699,7 +1703,11 @@ impl Analyzer {
                 // Untyped (gradual) rather than "no known method". Unlike an
                 // unregistered class, this doesn't mask a typo — the method
                 // has to be defined in the file to land here.
-                Self::register_method_return(target, &method.name, method.body.ty.as_ref());
+                Self::register_method_return(
+                    target,
+                    &method.name,
+                    effective_return_ty(&method.body).as_ref(),
+                );
             }
         }
         // Controllers: harvest each action/helper method's return type so a
@@ -1711,7 +1719,7 @@ impl Analyzer {
         for controller in &app.controllers {
             let class_id = &controller.name;
             for action in controller.actions() {
-                let Some(body_ty) = action.body.ty.clone() else { continue };
+                let Some(body_ty) = effective_return_ty(&action.body) else { continue };
                 if matches!(body_ty, Ty::Var { .. }) {
                     continue;
                 }
@@ -2851,6 +2859,86 @@ fn strip_nil(ty: Ty) -> Ty {
         0 => Ty::Nil,
         1 => kept.into_iter().next().unwrap(),
         _ => Ty::Union { variants: kept },
+    }
+}
+
+/// A method's return type is the union of every `return X` value type
+/// reachable in its body PLUS the tail (implicit-return) expression's
+/// type. The body-typer types a `return` *expression* as `Bottom` — it
+/// diverges at that source position — so a method whose tail diverges
+/// (every path `return`s, or the tail is a `case`/`begin` whose arms
+/// all return) reports `body.ty == Bottom` even though the early
+/// `return`s carry the real type. Reading only `body.ty` then harvests
+/// `Bottom`, and a caller's `result[:k]` fails dispatch on `Bottom`.
+/// Collect the returns and union them with the non-`Bottom` tail.
+fn effective_return_ty(body: &Expr) -> Option<Ty> {
+    let mut tys: Vec<Ty> = Vec::new();
+    collect_return_types(body, &mut tys);
+    // Tail (implicit return). Drop `Bottom` so an all-diverging tail
+    // doesn't poison the union; keep everything else.
+    if let Some(t) = &body.ty {
+        if !matches!(t, Ty::Bottom) {
+            tys.push(t.clone());
+        }
+    }
+    if tys.is_empty() {
+        // Nothing usable collected — preserve prior behavior so the
+        // `Var`/`Bottom`/`None` fallbacks downstream are unchanged.
+        return body.ty.clone();
+    }
+    Some(crate::analyze::body::union_many(tys))
+}
+
+/// Collect the value type of every `return X` reachable from `expr`
+/// without crossing a closure boundary. `Bottom`/`Var` values are
+/// skipped (no usable shape). Does not descend into `Lambda`: a stabby
+/// `-> { return }` returns from the lambda, not the method (block
+/// `do…end` returns do exit the method, but the two share the same IR
+/// node, so skipping is the safe under-approximation).
+fn collect_return_types(expr: &Expr, out: &mut Vec<Ty>) {
+    match &*expr.node {
+        ExprNode::Return { value } => {
+            if let Some(t) = &value.ty {
+                if !matches!(t, Ty::Bottom | Ty::Var { .. }) {
+                    out.push(t.clone());
+                }
+            }
+            collect_return_types(value, out);
+        }
+        ExprNode::Seq { exprs } => {
+            for e in exprs {
+                collect_return_types(e, out);
+            }
+        }
+        ExprNode::If { cond, then_branch, else_branch } => {
+            collect_return_types(cond, out);
+            collect_return_types(then_branch, out);
+            collect_return_types(else_branch, out);
+        }
+        ExprNode::Case { arms, .. } => {
+            for arm in arms {
+                collect_return_types(&arm.body, out);
+            }
+        }
+        ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
+            collect_return_types(body, out);
+            for r in rescues {
+                collect_return_types(&r.body, out);
+            }
+            if let Some(e) = else_branch {
+                collect_return_types(e, out);
+            }
+            if let Some(e) = ensure {
+                collect_return_types(e, out);
+            }
+        }
+        ExprNode::BoolOp { left, right, .. }
+        | ExprNode::RescueModifier { expr: left, fallback: right } => {
+            collect_return_types(left, out);
+            collect_return_types(right, out);
+        }
+        ExprNode::While { body, .. } => collect_return_types(body, out),
+        _ => {}
     }
 }
 
