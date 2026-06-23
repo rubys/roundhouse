@@ -20,9 +20,7 @@ use super::controller::ingest_controller;
 use super::expr::ingest_ruby_program;
 use super::fixture::ingest_fixture_file;
 use super::jbuilder::ingest_jbuilder;
-use super::library_class::{
-    ClassKind, classify_class_file, ingest_library_class, ingest_library_classes,
-};
+use super::library_class::{ClassKind, classify_class_file, ingest_library_classes};
 use super::model::ingest_model;
 use super::routes::ingest_routes;
 use super::schema::{ingest_migration, ingest_schema};
@@ -95,12 +93,15 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                     }
                 }
                 Some(ClassKind::LibraryClass) => {
-                    if let Some(maybe_lc) =
-                        unwrap_or_record(ingest_library_class(&source, &path_str))?
+                    // Plural ingest so a bare `module Foo` under
+                    // app/models/ (e.g. InactiveUser — a namespace of
+                    // `def self.x`) registers as a library class, not
+                    // just PORO classes. The singular path uses
+                    // find_first_class and would drop a module.
+                    if let Some(classes) =
+                        unwrap_or_record(ingest_library_classes(&source, &path_str))?
                     {
-                        if let Some(lc) = maybe_lc {
-                            app.library_classes.push(lc);
-                        }
+                        app.library_classes.extend(classes);
                     }
                 }
             }

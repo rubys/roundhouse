@@ -1767,6 +1767,53 @@ end
 }
 
 #[test]
+fn bare_module_under_app_models_registers_as_library_class() {
+    // A bare `module Foo; def self.x; …` under app/models/ (e.g.
+    // lobsters' InactiveUser) is a namespace of singleton methods, not
+    // a model. It used to classify as None → ingest_model → dropped, so
+    // `Foo.x` failed dispatch. Now it ingests as a library class and the
+    // `def self.x` resolve as dotted-call class methods.
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/inactive_user.rb",
+            r#"module InactiveUser
+  def self.label
+    "inactive"
+  end
+  def self.disown!(x)
+    x
+  end
+end
+"#,
+        ),
+        (
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  def caption
+    InactiveUser.label.upcase
+  end
+  def drop(c)
+    InactiveUser.disown!(c)
+  end
+end
+"#,
+        ),
+    ]);
+    let failures = send_dispatch_failures(&app);
+    for m in ["label", "disown!", "upcase"] {
+        assert!(
+            !failures.iter().any(|f| f == m),
+            "`InactiveUser.{m}` (module singleton method) should resolve; \
+             failures = {failures:?}"
+        );
+    }
+}
+
+#[test]
 fn send_dispatches_on_known_receiver() {
     // Reflective `send` on a known receiver resolves, not "no known
     // method send". A LITERAL symbol arg dispatches the named method

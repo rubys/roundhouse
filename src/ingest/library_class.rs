@@ -439,7 +439,20 @@ pub(super) fn ingest_library_method(
 pub fn classify_class_file(source: &[u8]) -> Option<ClassKind> {
     let result = parse(source);
     let root = result.node();
-    let class = find_first_class(&root)?;
+    let Some(class) = find_first_class(&root) else {
+        // No class node. A bare top-level module under app/models/
+        // (`module InactiveUser; def self.x; …; end`) is a namespace of
+        // singleton methods, not a model — classify it as a library
+        // class so the module-aware (plural) ingest registers its
+        // `def self.x` as dotted-call class methods. (`find_first_class`
+        // already descends modules, so a model nested in a namespace
+        // module — `module Admin; class User < ApplicationRecord` — is
+        // still found above and classified Model.)
+        if !find_all_modules_with_scope(&root).is_empty() {
+            return Some(ClassKind::LibraryClass);
+        }
+        return None;
+    };
     let parent_path = class
         .superclass()
         .and_then(|n| constant_path_of(&n))
