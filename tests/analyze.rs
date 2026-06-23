@@ -1767,6 +1767,54 @@ end
 }
 
 #[test]
+fn datetime_columns_type_as_time() {
+    // A schema datetime column is a `Time` at the Ruby level, so
+    // `created_at.strftime` / `.to_i` / `.after?` / `>=` all resolve.
+    // It used to mis-type as `Str` (a runtime-storage detail that
+    // belongs on the emit side) and reject every Time method. The
+    // chained `.to_i` result feeds Int arithmetic, proving the real
+    // type, not a gradual escape.
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define(version: 1) do
+  create_table "posts", force: :cascade do |t|
+    t.string "title"
+    t.datetime "created_at", null: false
+    t.datetime "published_at"
+  end
+end
+"#,
+        ),
+        (
+            "app/models/post.rb",
+            r#"class Post < ApplicationRecord
+  def stamps
+    label = self.created_at.strftime("%Y-%m-%d")
+    epoch = self.created_at.to_i + 1
+    fresh = self.created_at.after?(self.published_at)
+    recent = self.created_at >= self.published_at
+    [label, epoch, fresh, recent]
+  end
+end
+"#,
+        ),
+    ]);
+
+    let failures = send_dispatch_failures(&app);
+    for m in ["strftime", "to_i", "after?", ">=", "+"] {
+        assert!(
+            !failures.iter().any(|f| f == m),
+            "Time method `{m}` should resolve on a datetime column; failures = {failures:?}"
+        );
+    }
+}
+
+#[test]
 fn gem_catalog_resolves_third_party_surface() {
     // The gem catalog (src/catalog/gems.rs) resolves the third-party
     // surface apps call: class methods (`Arel.sql`, `ROTP::Base32.random`),

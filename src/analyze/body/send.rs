@@ -376,18 +376,8 @@ impl<'a> BodyTyper<'a> {
                 // only track the methods this corpus actually calls;
                 // grow as new uses surface.
                 if id.0.as_str() == "Time" {
-                    let time_class = || Ty::Class {
-                        id: ClassId(Symbol::from("Time")),
-                        args: vec![],
-                    };
-                    match method.as_str() {
-                        "now" | "utc" | "local" | "at" => return time_class(),
-                        "iso8601" | "rfc2822" | "to_s" | "strftime" | "httpdate" => {
-                            return Ty::Str
-                        }
-                        "to_i" | "tv_sec" | "year" | "month" | "day"
-                        | "hour" | "min" | "sec" => return Ty::Int,
-                        _ => {}
+                    if let Some(ty) = time_method(method) {
+                        return ty;
                     }
                 }
                 // Base64 stdlib — `Base64.strict_encode64(JSON.generate(x))`
@@ -568,6 +558,57 @@ pub(super) fn range_method(method: &Symbol, elem: Option<&Ty>) -> Option<Ty> {
             id: ClassId(Symbol::from("Range")),
             args: elem.cloned().into_iter().collect(),
         },
+        _ => return None,
+    };
+    Some(ty)
+}
+
+/// Methods on a `Time` value — modeled as `Ty::Class { id: "Time" }`
+/// (like `Range`), not a `Ty` variant. AR datetime columns now type as
+/// `Time` (see `ingest::model::ty_of_column`), so this is the surface a
+/// column read like `story.created_at.strftime(...)` dispatches
+/// against. Class and instance flatten onto the same `Class { Time }`,
+/// so the class-side constructors (`Time.now`) live here too. Date /
+/// DateTime columns also map to `Time` (its method surface is a
+/// superset for everything the corpus calls); a dedicated `date_method`
+/// can split them out if a Date-only method ever surfaces. Returns
+/// `None` for unmodeled methods so dispatch falls through to the
+/// parent-chain walk.
+pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
+    let time = || Ty::Class {
+        id: ClassId(Symbol::from("Time")),
+        args: vec![],
+    };
+    let ty = match method.as_str() {
+        // Constructors, coercions, and Time-returning transforms.
+        "now" | "current" | "utc" | "local" | "at" | "today"
+        | "to_time" | "in_time_zone" | "localtime" | "getlocal" | "getutc"
+        | "beginning_of_day" | "end_of_day" | "beginning_of_hour" | "end_of_hour"
+        | "beginning_of_week" | "end_of_week" | "beginning_of_month" | "end_of_month"
+        | "beginning_of_year" | "end_of_year" | "midnight" | "noon"
+        | "change" | "advance" | "ago" | "since" | "from_now"
+        | "round" | "floor" | "ceil" | "to_date" | "to_datetime" => time(),
+        // `Time - x` is `Time` for a Duration arg but a Float for a
+        // Time arg — the receiver-only dispatch can't disambiguate, so
+        // gradual `Untyped` (the chains read `.before?`/`/ 60`/`> 1.minute`
+        // off the result, all of which absorb Untyped).
+        "+" | "-" => Ty::Untyped,
+        // String renderings.
+        "iso8601" | "rfc2822" | "rfc3339" | "to_s" | "to_fs" | "to_formatted_s"
+        | "strftime" | "httpdate" | "ctime" | "asctime" | "inspect" | "zone" => Ty::Str,
+        // Integer components / epoch seconds / spaceship.
+        "to_i" | "tv_sec" | "tv_usec" | "tv_nsec" | "year" | "month" | "mon"
+        | "day" | "mday" | "hour" | "min" | "sec" | "usec" | "nsec"
+        | "wday" | "yday" | "<=>" => Ty::Int,
+        "to_f" => Ty::Float,
+        // Predicates / comparisons that read as method calls.
+        // `==`/`!=` are handled by `universal_method` (checked before
+        // this arm); the ordered comparisons aren't, so type them here:
+        // `created_at >= cutoff` → Bool.
+        "<" | ">" | "<=" | ">=" | "between?"
+        | "after?" | "before?" | "past?" | "future?" | "today?"
+        | "monday?" | "tuesday?" | "wednesday?" | "thursday?" | "friday?"
+        | "saturday?" | "sunday?" | "on_weekend?" | "on_weekday?" => Ty::Bool,
         _ => return None,
     };
     Some(ty)

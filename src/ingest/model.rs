@@ -514,14 +514,23 @@ fn row_from_table(table: &Table) -> Row {
 }
 
 fn ty_of_column(t: &ColumnType) -> Ty {
-    // Date/DateTime/Time map to `Ty::Str` — see
-    // `lower::model_to_library::ty_of_column` for the rationale.
+    // ANALYZE-side column types. This INTENTIONALLY diverges from
+    // `lower::model_to_library::ty_of_column` (the EMIT side) on
+    // temporal columns: at the Ruby source level a datetime column is
+    // a `Time` (every use in practice is `created_at.strftime` /
+    // `.to_i` / `.after?` / `Time.current` assignment / passed to a
+    // Time helper — never a String), so the analyzer must see `Time`
+    // for those calls to resolve. The runtime *stores* them as
+    // ISO-8601 strings, which is the emit side's concern — kept there.
     match t {
         ColumnType::Integer | ColumnType::BigInt => Ty::Int,
         ColumnType::Float | ColumnType::Decimal { .. } => Ty::Float,
         ColumnType::String { .. } | ColumnType::Text => Ty::Str,
         ColumnType::Boolean => Ty::Bool,
-        ColumnType::Date | ColumnType::DateTime | ColumnType::Time => Ty::Str,
+        ColumnType::Date | ColumnType::DateTime | ColumnType::Time => Ty::Class {
+            id: crate::ident::ClassId(crate::ident::Symbol::from("Time")),
+            args: vec![],
+        },
         ColumnType::Binary => Ty::Str,
         ColumnType::Json => Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) },
         ColumnType::Reference { .. } => Ty::Int,
