@@ -1767,6 +1767,40 @@ end
 }
 
 #[test]
+fn hash_accumulator_value_widens_from_writes() {
+    // The `hash[k] ||= []; hash[k].push x` accumulator idiom: an empty
+    // `{}` seeds the value type as Var, but `hash[k] ||= []` widens it
+    // to Array, so the following `hash[k].push` resolves (it used to
+    // dispatch `push` on the `hash[k]` read type `Var|Nil`).
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/post.rb",
+            r#"class Post < ApplicationRecord
+  def grouped(items)
+    h = {}
+    items.each do |x|
+      h[x.k] ||= []
+      h[x.k].push(x)
+    end
+    h
+  end
+end
+"#,
+        ),
+    ]);
+    let failures = send_dispatch_failures(&app);
+    assert!(
+        !failures.iter().any(|f| f == "push"),
+        "hash[k].push should resolve after `hash[k] ||= []` widens the \
+         value to Array; failures = {failures:?}"
+    );
+}
+
+#[test]
 fn diverging_tail_method_harvests_early_returns() {
     // A method whose *tail* diverges (here a `raise`; in lobsters a
     // `begin/case` whose arms all `return`) but which returns a

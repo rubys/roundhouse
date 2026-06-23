@@ -2991,6 +2991,23 @@ pub(crate) fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty
             }
             extract_ivar_assignments(value, out);
         }
+        // `@hash[k] ||= v` / `@hash[k] = v` in the OpAssign / Assign
+        // Index forms (the `||=` accumulator idiom — `@hat_groups[k] ||=
+        // []` — and plain index-assign). Widen the ivar hash's value
+        // type from the written element so a cross-method or view read
+        // (`@hat_groups[hg].sort_by`) sees `Array`, not `Var`. The plain
+        // `[]=` Send form is handled by the arm below.
+        ExprNode::Assign { target: LValue::Index { recv, index }, value }
+        | ExprNode::OpAssign { target: LValue::Index { recv, index }, value, .. } => {
+            if let ExprNode::Ivar { name } = &*recv.node {
+                if let Some(v_ty) = &value.ty {
+                    widen_hash_ivar_value(out, name, v_ty);
+                }
+            }
+            extract_ivar_assignments(recv, out);
+            extract_ivar_assignments(index, out);
+            extract_ivar_assignments(value, out);
+        }
         // `@hash[k] = v` parses as Send to `[]=` with @hash as the
         // receiver. The Hash literal `@hash = {}` only seeds key/value
         // as fresh type variables; the actual stored value-type lives

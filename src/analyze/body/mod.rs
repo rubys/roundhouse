@@ -716,6 +716,53 @@ impl<'a> BodyTyper<'a> {
                             }
                         }
                     }
+                    // Container element write — `hash[k] ||= []` /
+                    // `hash[k] = v`. Widen the container's value type so
+                    // a following `hash[k].push x` / `.join` in the same
+                    // scope reads `Array|Nil` (resolvable via union
+                    // dispatch) instead of `Var|Nil`. An empty `{}` seeds
+                    // the value as Var; the accumulator idiom only
+                    // reveals the element type at the write. The `{}` is
+                    // bound on the recv ivar/local; a computed recv
+                    // (`a.b[k]`) has no binding to refine, so skip it.
+                    let elem_write = match &*e.node {
+                        ExprNode::Assign { target: LValue::Index { recv, .. }, value }
+                        | ExprNode::OpAssign {
+                            target: LValue::Index { recv, .. }, value, ..
+                        } => value.ty.clone().map(|t| (recv, t)),
+                        _ => None,
+                    };
+                    if let Some((recv, rhs)) = elem_write {
+                        if !matches!(rhs, Ty::Var { .. } | Ty::Bottom) {
+                            let slot = match &*recv.node {
+                                ExprNode::Ivar { name } => Some((true, name.clone())),
+                                ExprNode::Var { name, .. } => Some((false, name.clone())),
+                                _ => None,
+                            };
+                            if let Some((is_ivar, name)) = slot {
+                                let bindings = if is_ivar {
+                                    &mut local_ctx.ivar_bindings
+                                } else {
+                                    &mut local_ctx.local_bindings
+                                };
+                                if let Some(Ty::Hash { key, value }) = bindings.get(&name) {
+                                    // A Var value is the empty-literal
+                                    // placeholder — replace it; otherwise
+                                    // union the observed element in.
+                                    let new_value = if matches!(**value, Ty::Var { .. }) {
+                                        rhs
+                                    } else {
+                                        union_of((**value).clone(), rhs)
+                                    };
+                                    let widened = Ty::Hash {
+                                        key: key.clone(),
+                                        value: Box::new(new_value),
+                                    };
+                                    bindings.insert(name, widened);
+                                }
+                            }
+                        }
+                    }
                     // Diverging-then narrowing: `raise X if m.nil?` —
                     // when the then-branch always diverges (Bottom),
                     // control proceeds only via the else, so the
