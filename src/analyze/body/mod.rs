@@ -686,6 +686,29 @@ impl<'a> BodyTyper<'a> {
                             }
                         }
                     }
+                    // Destructuring assignment threads each target
+                    // forward: `@stories, @show_more = paginate(...)`
+                    // in stmt i lets `render json: @stories` in stmt
+                    // i+1 (or a nested `respond_to` block) resolve.
+                    // Per-position typing via `multiassign_target_ty`;
+                    // targets with no usable RHS signal are left as-is.
+                    if let ExprNode::MultiAssign { targets, value } = &*e.node {
+                        let rhs = value.ty.clone();
+                        for (i, target) in targets.iter().enumerate() {
+                            let Some(ty) = multiassign_target_ty(&rhs, i) else {
+                                continue;
+                            };
+                            match target {
+                                LValue::Ivar { name } => {
+                                    local_ctx.ivar_bindings.insert(name.clone(), ty);
+                                }
+                                LValue::Var { name, .. } => {
+                                    local_ctx.local_bindings.insert(name.clone(), ty);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     // Diverging-then narrowing: `raise X if m.nil?` —
                     // when the then-branch always diverges (Bottom),
                     // control proceeds only via the else, so the
@@ -907,6 +930,27 @@ fn peel_nilable(ty: &Ty) -> &Ty {
         }
     }
     ty
+}
+
+/// Type a single destructuring target of `a, b, ... = rhs` at
+/// position `index`. Three RHS shapes carry a per-position type:
+///   - `Array<T>` — every scalar target gets the element type `T`
+///     (`@a, @b = list` where `list : Array<Story>`).
+///   - `Tuple` — each target takes its positional element type.
+///   - `Untyped` — the gradual escape flows to every target (the
+///     pervasive `@x, @y = get_from_cache { ... }` /
+///     `yield`-returning idiom, whose return type the analyzer can't
+///     pin). Untyped reads surface as a gradual warning, not a hard
+///     `ivar_unresolved` error.
+/// Anything else yields `None` (no usable signal — leave the target
+/// unbound rather than guess).
+pub(crate) fn multiassign_target_ty(rhs: &Option<Ty>, index: usize) -> Option<Ty> {
+    match rhs {
+        Some(Ty::Array { elem }) => Some((**elem).clone()),
+        Some(Ty::Tuple { elems }) => elems.get(index).cloned(),
+        Some(Ty::Untyped) => Some(Ty::Untyped),
+        _ => None,
+    }
 }
 
 /// Walk an Expr collecting every `Assign { target: LValue::Var, .. }`

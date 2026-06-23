@@ -764,6 +764,23 @@ impl Analyzer {
         // against the `@article` bound in `ArticlesController#show`.
         let mut action_ivars_by_view: HashMap<Symbol, HashMap<Symbol, Ty>> = HashMap::new();
 
+        // Content-partial channel: the `render partial: @above` idiom.
+        // `dynamic_render_ivars` is the set of ivars any view renders
+        // dynamically (`@above`); `content_partial_ivars` keys a
+        // partial view name (`home/_for_domain`) to the union of ivars
+        // from every action that names it (`@above = 'for_domain'`).
+        // Built during Pass B, consumed when seeding partials below.
+        let dynamic_render_ivars: std::collections::HashSet<Symbol> = {
+            let mut set = std::collections::HashSet::new();
+            for view in &app.views {
+                collect_dynamic_render_ivars(&view.body, &mut set);
+            }
+            set
+        };
+        let existing_view_names: std::collections::HashSet<Symbol> =
+            app.views.iter().map(|v| v.name.clone()).collect();
+        let mut content_partial_ivars: HashMap<Symbol, HashMap<Symbol, Ty>> = HashMap::new();
+
         // Per-controller metadata captured during Pass A so Pass B
         // (below) can resolve parent-class filters + action bindings
         // without an inner re-borrow of `app.controllers`. Restructured
@@ -964,27 +981,80 @@ impl Analyzer {
                 chained_bindings.insert(name.clone(), ivars.clone());
             }
 
-            // Pass B: re-analyze actions affected by any before_action
-            // (own or inherited) with the target's bindings pre-seeded
-            // into Ctx.
-            if !chained_filters.is_empty() {
-                for action in controller.actions_mut() {
-                    let seed = merged_before_seed(
-                        &chained_filters,
-                        &action.name,
-                        &chained_bindings,
-                    );
-                    if !seed.is_empty() {
-                        let inner_ctx = Ctx {
-                            self_ty: Some(meta.self_ty.clone()),
-                            ivar_bindings: seed,
-                            local_bindings: HashMap::new(),
-                            constants: meta.class_constants.clone(),
-                            annotate_self_dispatch: false, in_view: false,
+            // Controller-wide ivar environment: in Ruby, instance
+            // variables are shared mutable state across every method
+            // invoked during a request, not per-method locals. A
+            // `before_action :find_story` sets `@story`; a private
+            // helper (`load_user_votes`) or a sibling action then
+            // reads it without any syntactic assignment in its own
+            // body. The per-action `merged_before_seed` only seeds
+            // routed actions gated by `only:`/`except:`, so those
+            // helper reads — and reads of assignments buried inside a
+            // branch (`if (@message = ...)`) earlier in the same
+            // method — bottom out as `ivar_unresolved`.
+            //
+            // Build a controller-wide union of every ivar assignment
+            // (own + inherited, across all methods/filters) and seed
+            // it as the BASE layer of every method. The per-action
+            // `merged_before_seed` overlays on top (more precise for
+            // the action's actual entry state), and the body-typer's
+            // own flow refines further per-statement.
+            //
+            // The Nil arm is stripped from each base type: across a
+            // method boundary the type system can't see the
+            // find-then-guard idiom (`@x = M.find_by(..); redirect
+            // unless @x`) that makes these ivars non-nil on the path
+            // that reaches the reader, and keeping the Nil arm would
+            // only trade an `ivar_unresolved` for a `send_dispatch`
+            // on the (unreachable) nil case. `Var`/`Bottom` carry no
+            // usable shape and are dropped.
+            let controller_wide: HashMap<Symbol, Ty> = {
+                let mut env: HashMap<Symbol, Ty> = HashMap::new();
+                for ivars in chained_bindings.values() {
+                    for (k, v) in ivars {
+                        if matches!(v, Ty::Var { .. } | Ty::Bottom) {
+                            continue;
+                        }
+                        let merged = match env.remove(k) {
+                            Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
+                            None => v.clone(),
                         };
-                        self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
-                        action.effects = self.collect_effects(&mut action.body, &inner_ctx);
+                        env.insert(k.clone(), merged);
                     }
+                }
+                env.into_iter()
+                    .map(|(k, v)| (k, strip_nil(v)))
+                    .collect()
+            };
+
+            // Pass B: re-analyze every method with the controller-wide
+            // base seed plus any before_action-specific overlay. Every
+            // method (routed action or private helper) is re-analyzed
+            // so cross-method ivar reads resolve.
+            if !controller_wide.is_empty() || !chained_filters.is_empty() {
+                for action in controller.actions_mut() {
+                    let mut seed = controller_wide.clone();
+                    // Overlay the action's precise before_action seed:
+                    // for an action that actually runs the filter, the
+                    // filter's exact binding (including any Nil arm the
+                    // action narrows itself) wins over the stripped base.
+                    for (k, v) in
+                        merged_before_seed(&chained_filters, &action.name, &chained_bindings)
+                    {
+                        seed.insert(k, v);
+                    }
+                    if seed.is_empty() {
+                        continue;
+                    }
+                    let inner_ctx = Ctx {
+                        self_ty: Some(meta.self_ty.clone()),
+                        ivar_bindings: seed,
+                        local_bindings: HashMap::new(),
+                        constants: meta.class_constants.clone(),
+                        annotate_self_dispatch: false, in_view: false,
+                    };
+                    self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
+                    action.effects = self.collect_effects(&mut action.body, &inner_ctx);
                 }
             }
 
@@ -1053,6 +1123,39 @@ impl Analyzer {
                             None => v.clone(),
                         };
                         layout_map.insert(k.clone(), merged);
+                    }
+                }
+                // Content-partial seeding: when this action assigns a
+                // string literal to a dynamic-render ivar
+                // (`@above = 'for_domain'`) and a partial with the
+                // resolved name exists, fold this action's ivars into
+                // that partial's seed. Drives `@domain` / `@tag` /
+                // `@categories` in the home content partials, which
+                // `render partial: @above` only reaches at runtime.
+                if !dynamic_render_ivars.is_empty() {
+                    let prefix = controller_view_prefix(&ctrl_name);
+                    let mut literals = Vec::new();
+                    collect_content_partial_literals(
+                        &action.body,
+                        &dynamic_render_ivars,
+                        &mut literals,
+                    );
+                    for lit in literals {
+                        let partial = content_partial_view_name(&lit, &prefix);
+                        if !existing_view_names.contains(&partial) {
+                            continue;
+                        }
+                        let entry = content_partial_ivars.entry(partial).or_default();
+                        for (k, v) in &ivars {
+                            if matches!(v, Ty::Var { .. } | Ty::Bottom) {
+                                continue;
+                            }
+                            let merged = match entry.remove(k) {
+                                Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
+                                None => v.clone(),
+                            };
+                            entry.insert(k.clone(), merged);
+                        }
                     }
                 }
                 if let Some(view_name) = view_name_for_action(&ctrl_name, action) {
@@ -1307,6 +1410,12 @@ impl Analyzer {
         // `Untyped` are dropped on merge — they carry no shape and only
         // pollute the union (mirrors the layout-ivar merge above).
         let mut partial_ivars_by_name: HashMap<Symbol, HashMap<Symbol, Ty>> = HashMap::new();
+        // Seed the content partials (`render partial: @above`) up front
+        // so the fixpoint below propagates their ivars into any further
+        // partials they render, just like a statically-resolved edge.
+        for (partial, ivars) in content_partial_ivars {
+            partial_ivars_by_name.insert(partial, ivars);
+        }
         let noise = |t: &Ty| matches!(t, Ty::Var { .. } | Ty::Untyped);
         // Depth cap guards against a render cycle (`_a` renders `_b`
         // renders `_a`); 16 is far beyond any real partial nesting.
@@ -2235,6 +2344,78 @@ fn extract_partial_render_sites(
     }
 }
 
+/// Collect the ivar names that views use as *dynamic* partial-render
+/// targets — `render @above` or `render partial: @above`. These name
+/// a content partial whose identity is only known at runtime (the
+/// ivar holds a string literal like `'for_domain'` assigned by the
+/// action). Pairing this set with the per-action string-literal
+/// assignments (`@above = 'for_domain'`) lets the analyzer seed the
+/// `_for_domain` partial with that action's ivars — the edge
+/// `extract_partial_render_sites` can't resolve statically.
+fn collect_dynamic_render_ivars(expr: &Expr, out: &mut std::collections::HashSet<Symbol>) {
+    if let ExprNode::Send { recv, method, args, .. } = &*expr.node {
+        if recv.is_none() && method.as_str() == "render" {
+            for arg in args {
+                match &*arg.node {
+                    // `render @above`
+                    ExprNode::Ivar { name } => {
+                        out.insert(name.clone());
+                    }
+                    // `render partial: @above` (the kwarg-hash form)
+                    ExprNode::Hash { entries, .. } => {
+                        for (k, v) in entries {
+                            let is_partial_key = matches!(
+                                &*k.node,
+                                ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "partial"
+                            );
+                            if is_partial_key {
+                                if let ExprNode::Ivar { name } = &*v.node {
+                                    out.insert(name.clone());
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    expr.node.for_each_child(&mut |c| collect_dynamic_render_ivars(c, out));
+}
+
+/// Collect `@ivar = "string literal"` assignments whose ivar name is
+/// in `targets` (the dynamic-render ivar set). Returns each literal
+/// value — the content-partial basename the action wants rendered.
+fn collect_content_partial_literals(
+    expr: &Expr,
+    targets: &std::collections::HashSet<Symbol>,
+    out: &mut Vec<String>,
+) {
+    if let ExprNode::Assign { target: LValue::Ivar { name }, value } = &*expr.node {
+        if targets.contains(name) {
+            if let ExprNode::Lit { value: Literal::Str { value } } = &*value.node {
+                out.push(value.clone());
+            }
+        }
+    }
+    expr.node.for_each_child(&mut |c| collect_content_partial_literals(c, targets, out));
+}
+
+/// Resolve a content-partial literal (`"for_domain"`, `"saved/subnav"`)
+/// to a partial view name. A value with a `/` carries its own
+/// directory (`saved/subnav` → `saved/_subnav`); a bare value is
+/// relative to the rendering controller's view prefix (`for_domain` in
+/// HomeController → `home/_for_domain`).
+fn content_partial_view_name(literal: &str, prefix: &str) -> Symbol {
+    match literal.rfind('/') {
+        Some(idx) => {
+            let (dir, base) = literal.split_at(idx);
+            Symbol::from(format!("{}/_{}", dir, &base[1..]))
+        }
+        None => Symbol::from(format!("{}/_{}", prefix, literal)),
+    }
+}
+
 /// Figure out the target partial name and the locals a `render(...)` call
 /// passes to it. Returns `None` for shapes not yet handled.
 fn interpret_render_call(
@@ -2472,6 +2653,24 @@ fn record_const(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
     }
 }
 
+/// Remove the `Nil` arm from a union. A bare `Nil` (or a union that
+/// was nothing but `Nil`) is preserved — there's no non-nil shape to
+/// fall back to. Used when building the controller-wide ivar base,
+/// where the find-then-guard idiom makes nilable ivars effectively
+/// non-nil on the path that reaches a cross-method reader.
+fn strip_nil(ty: Ty) -> Ty {
+    let Ty::Union { variants } = ty else { return ty };
+    let kept: Vec<Ty> = variants
+        .into_iter()
+        .filter(|v| !matches!(v, Ty::Nil))
+        .collect();
+    match kept.len() {
+        0 => Ty::Nil,
+        1 => kept.into_iter().next().unwrap(),
+        _ => Ty::Union { variants: kept },
+    }
+}
+
 pub(crate) fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
     match &*expr.node {
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
@@ -2498,6 +2697,28 @@ pub(crate) fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty
                 };
                 out.insert(name.clone(), merged);
             }
+        }
+        // `@a, @b = expr` — destructuring assignment. Each ivar target
+        // takes its per-position type from the RHS (Array element /
+        // Tuple slot / Untyped escape) so a controller's
+        // `@stories, @show_more = paginate(...)` flows `@stories` into
+        // the view-ivar seed and the controller-wide ivar union.
+        // Without this arm the targets are invisible to every harvest.
+        ExprNode::MultiAssign { targets, value } => {
+            for (i, target) in targets.iter().enumerate() {
+                if let LValue::Ivar { name } = target {
+                    if let Some(ty) =
+                        crate::analyze::body::multiassign_target_ty(&value.ty, i)
+                    {
+                        let merged = match out.remove(name) {
+                            Some(prev) => crate::analyze::body::union_of(prev, ty),
+                            None => ty,
+                        };
+                        out.insert(name.clone(), merged);
+                    }
+                }
+            }
+            extract_ivar_assignments(value, out);
         }
         // `@hash[k] = v` parses as Send to `[]=` with @hash as the
         // receiver. The Hash literal `@hash = {}` only seeds key/value
