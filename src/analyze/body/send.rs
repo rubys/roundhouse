@@ -250,6 +250,37 @@ impl<'a> BodyTyper<'a> {
                 return ty.clone();
             }
         }
+        // `recv.send(:m, …)` / `public_send` / `__send__` — Ruby's
+        // reflective dispatch. With a LITERAL symbol/string argument
+        // it's just a renamed call: dispatch the named method on the
+        // receiver (tier 1 — `self.send(:title)` → the `title` method's
+        // return). With a dynamic argument it can land on any of the
+        // receiver's methods, so bound it by the union of the receiver
+        // class's instance-method return types (tier 2), which absorbs
+        // to `Untyped` when any is gradual. Either way it resolves —
+        // never "no known method `send`". (The argument set is often a
+        // literal array iterated by a block, e.g. `as_json`; tightening
+        // the dynamic case to that enumerated set is a tier-3 follow-up.)
+        if matches!(method.as_str(), "send" | "public_send" | "__send__") {
+            if let Some(first) = args.first() {
+                let literal_name = match &*first.node {
+                    ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => {
+                        Some(value.clone())
+                    }
+                    ExprNode::Lit { value: crate::expr::Literal::Str { value } } => {
+                        Some(Symbol::from(value.as_str()))
+                    }
+                    _ => None,
+                };
+                if let Some(name) = literal_name {
+                    return self.dispatch(recv_ty, &name, block_ret, &args[1..]);
+                }
+            }
+            return match recv_ty {
+                Some(t) => self.receiver_method_return_union(t),
+                None => Ty::Untyped,
+            };
+        }
         // Universal Ruby methods — available on every object regardless
         // of receiver type. Resolved first so `nil?`, `is_a?`, etc.
         // don't fall through to per-type method tables that would miss.
@@ -518,6 +549,50 @@ impl<'a> BodyTyper<'a> {
             stack.extend(m.includes.iter().cloned());
         }
         None
+    }
+
+    /// The bound on a dynamic `recv.send(x)` (non-literal `x`): the
+    /// union of every instance-method return type reachable on the
+    /// receiver class — own methods plus parents plus mixed-in modules.
+    /// A reflective dispatch can land on any of them, so this is the
+    /// tightest sound bound from the receiver type alone. If any of
+    /// those returns is `Untyped` (the gradual fallback most models
+    /// carry on at least one method), the union absorbs to `Untyped` —
+    /// the honest type for an opaque dynamic call. A non-class receiver
+    /// (Var / primitive) carries no method table, so → `Untyped`.
+    fn receiver_method_return_union(&self, recv_ty: &Ty) -> Ty {
+        let Ty::Class { id, .. } = recv_ty else {
+            return Ty::Untyped;
+        };
+        let mut rets: Vec<Ty> = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut stack = vec![id.clone()];
+        while let Some(cid) = stack.pop() {
+            if !seen.insert(cid.clone()) {
+                continue;
+            }
+            let Some(cls) = self.classes().get(&cid) else { continue };
+            for ty in cls.instance_methods.values() {
+                let r = unwrap_fn_ret(ty);
+                // A single gradual method makes the dynamic union
+                // gradual — bail early with the absorbing type.
+                if matches!(r, Ty::Untyped) {
+                    return Ty::Untyped;
+                }
+                if !matches!(r, Ty::Var { .. } | Ty::Bottom) {
+                    rets.push(r);
+                }
+            }
+            if let Some(p) = &cls.parent {
+                stack.push(p.clone());
+            }
+            stack.extend(cls.includes.iter().cloned());
+        }
+        if rets.is_empty() {
+            Ty::Untyped
+        } else {
+            union_many(rets)
+        }
     }
 }
 

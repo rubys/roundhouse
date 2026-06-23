@@ -1767,6 +1767,59 @@ end
 }
 
 #[test]
+fn send_dispatches_on_known_receiver() {
+    // Reflective `send` on a known receiver resolves, not "no known
+    // method send". A LITERAL symbol arg dispatches the named method
+    // exactly (`self.send(:title)` → the title reader). A DYNAMIC arg
+    // (`self.send(k)` in an as_json loop) is bounded by the receiver's
+    // method-return union, which absorbs to Untyped — either way no
+    // send_dispatch_failed.
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define(version: 1) do
+  create_table "posts", force: :cascade do |t|
+    t.string "title"
+  end
+end
+"#,
+        ),
+        (
+            "app/models/post.rb",
+            r#"class Post < ApplicationRecord
+  def shout
+    self.send(:title).upcase
+  end
+  def dump(keys)
+    js = {}
+    keys.each do |k|
+      js[k] = self.send(k)
+    end
+    js
+  end
+end
+"#,
+        ),
+    ]);
+    let failures = send_dispatch_failures(&app);
+    // `send` itself always resolves now.
+    assert!(
+        !failures.iter().any(|f| f == "send"),
+        "`send` should resolve on a known receiver; failures = {failures:?}"
+    );
+    // Tier 1: literal `send(:title)` → Str, so `.upcase` resolves too.
+    assert!(
+        !failures.iter().any(|f| f == "upcase"),
+        "`self.send(:title).upcase` should resolve via literal dispatch; \
+         failures = {failures:?}"
+    );
+}
+
+#[test]
 fn rails_env_is_a_string_inquirer() {
     // `Rails.env` is an ActiveSupport::StringInquirer: `development?` /
     // `production?` (any `<word>?`) resolve to Bool via method_missing,
