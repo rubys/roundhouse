@@ -134,20 +134,22 @@ jobs:
       - name: make all
         run: make -C spinel-src all
       - name: Stage artifact tree
-        # `make all` now builds a single `spinel` binary (a symlink to
-        # build/spinel) plus the `spinel_rbs_extract` sidecar; the legacy
-        # spinel_parse/spinel_analyze/spinel_codegen split moved under
-        # legacy/ and is no longer produced. The single binary locates
-        # both `spinel_rbs_extract` and `lib/` relative to the directory
-        # it is invoked from, so they must ship alongside it. The extractor
-        # is REQUIRED for the --rbs path (toolchain-spinel / compare-spinel);
-        # without it, --rbs is silently a no-op and the seeded path goes
-        # untested. `cp -L` dereferences the symlink to copy the real binary.
+        # `make all` now builds a single `spinel` binary (a top-level symlink
+        # to bin/spinel) plus the `spinel_rbs_extract` sidecar under build/;
+        # the legacy spinel_parse/spinel_analyze/spinel_codegen split moved
+        # under legacy/ and is no longer produced. (The build also emits
+        # bin/spinel-{doctor,reduce,flatten}, which roundhouse doesn't ship.)
+        # The single binary locates both `spinel_rbs_extract` and `lib/`
+        # relative to the directory it is invoked from, so they must ship
+        # alongside it. The extractor is REQUIRED for the --rbs path
+        # (toolchain-spinel / compare-spinel); without it, --rbs is silently
+        # a no-op and the seeded path goes untested. `cp -L` dereferences the
+        # symlink to copy the real binary.
         run: |
           mkdir spinel-dist
-          cp -L spinel-src/spinel             spinel-dist/spinel
-          cp    spinel-src/spinel_rbs_extract spinel-dist/
-          cp -R spinel-src/lib                spinel-dist/lib
+          cp -L spinel-src/spinel               spinel-dist/spinel
+          cp    spinel-src/build/spinel_rbs_extract spinel-dist/
+          cp -R spinel-src/lib                  spinel-dist/lib
       - name: Upload spinel toolchain
         uses: actions/upload-artifact@v7
         with:
