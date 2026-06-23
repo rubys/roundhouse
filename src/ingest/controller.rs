@@ -14,8 +14,8 @@ use crate::{ClassId, Symbol};
 use super::expr::ingest_expr;
 use super::util::{
     class_name_path, collect_comments, constant_id_str, constant_path_of, drain_comments_before,
-    find_first_class, flatten_statements, source_has_blank_line, symbol_list_style,
-    symbol_list_value, symbol_value,
+    find_all_classes_with_scope, find_first_class, flatten_statements, source_has_blank_line,
+    symbol_list_style, symbol_list_value, symbol_value,
 };
 use super::{IngestError, IngestResult};
 
@@ -23,7 +23,24 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
     let root = result.node();
-    let Some(class) = find_first_class(&root) else {
+    // A controller file may declare several top-level classes — e.g.
+    // `login_controller.rb` defines `LoginBannedError < StandardError`
+    // (and siblings) *before* `class LoginController`. The controller
+    // is the class whose name ends in `Controller`, not the first
+    // class in the file; picking the first ingests an empty error
+    // class as the controller and drops every real action (so its
+    // view ivars never resolve). Fall back to the first class when no
+    // name matches the convention.
+    let class = find_all_classes_with_scope(&root)
+        .into_iter()
+        .map(|(_, c)| c)
+        .find(|c| {
+            class_name_path(c)
+                .and_then(|p| p.last().cloned())
+                .is_some_and(|last| last.ends_with("Controller"))
+        })
+        .or_else(|| find_first_class(&root));
+    let Some(class) = class else {
         return Ok(None);
     };
 

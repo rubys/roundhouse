@@ -577,6 +577,14 @@ impl Analyzer {
         app_ctrl.class_methods.insert(Symbol::from("render"), Ty::Nil);
         app_ctrl.class_methods.insert(Symbol::from("redirect_to"), Ty::Nil);
         app_ctrl.class_methods.insert(Symbol::from("head"), Ty::Nil);
+        // `request` / `response` / `logger` return framework objects
+        // (ActionDispatch::Request, etc.) we don't model structurally.
+        // Gradual `Untyped` so chains like `request.referer` /
+        // `request.remote_ip` / `request.env[...]` flow through
+        // dispatch instead of bottoming out at Var.
+        app_ctrl.class_methods.insert(Symbol::from("request"), Ty::Untyped);
+        app_ctrl.class_methods.insert(Symbol::from("response"), Ty::Untyped);
+        app_ctrl.class_methods.insert(Symbol::from("logger"), Ty::Untyped);
         classes.insert(ClassId(Symbol::from("ApplicationController")), app_ctrl);
 
         // User-authored RBS sidecars. Signatures discovered under
@@ -1244,6 +1252,13 @@ impl Analyzer {
                         variants: vec![ty.clone(), Ty::Nil],
                     },
                 );
+            }
+            // `attr_accessor :edit_user_id` virtual attributes: real
+            // ivars, untyped, absent from the schema. Seed as gradual
+            // so a direct `@edit_user_id` read resolves (don't clobber
+            // a schema column of the same name).
+            for name in collect_attr_accessor_names(&model.body) {
+                class_ivars.entry(name).or_insert(Ty::Untyped);
             }
 
             // Phase 0: type the model's `Unknown` body items so the
@@ -3051,6 +3066,33 @@ pub use crate::diagnostic::{Diagnostic, DiagnosticKind, Severity};
 /// getter, `attr_writer` a setter, `attr_accessor` both. Additive:
 /// `or_insert` so a schema column, typed_store, or harvested method of the
 /// same name keeps its more precise type.
+/// Collect the ivar names declared by `attr_accessor` / `attr_reader`
+/// / `attr_writer` in a model body. These are virtual attributes
+/// (`attr_accessor :edit_user_id`) — real ivars at runtime, absent
+/// from the schema, of unknown (gradual) type. Seeding them lets a
+/// direct `@edit_user_id` read in a model method resolve as `Untyped`
+/// rather than `Var`. (`register_attr_accessors` registers the
+/// reader/writer *methods*; this is the ivar-seed companion.)
+fn collect_attr_accessor_names(body: &[ModelBodyItem]) -> Vec<Symbol> {
+    let mut out = Vec::new();
+    for item in body {
+        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv, method, args, .. } = &*expr.node else { continue };
+        if recv.is_some() {
+            continue;
+        }
+        if !matches!(method.as_str(), "attr_accessor" | "attr_reader" | "attr_writer") {
+            continue;
+        }
+        for arg in args {
+            if let Some(name) = symbol_arg(arg) {
+                out.push(name.clone());
+            }
+        }
+    }
+    out
+}
+
 fn register_attr_accessors(body: &[ModelBodyItem], methods: &mut HashMap<Symbol, Ty>) {
     for item in body {
         let ModelBodyItem::Unknown { expr, .. } = item else { continue };
