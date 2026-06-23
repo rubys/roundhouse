@@ -1033,17 +1033,47 @@ pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
         }
         _ => {}
     }
-    Ty::Union { variants: vec![a, b] }
+    // Flatten nested unions and drop duplicate variants. Without this,
+    // joining `Int` into an existing `Int` (or `Union[Int]`) produced
+    // `Int | Int` / `Union[Union[Int], Int]` — a degenerate union that
+    // breaks binop classification (`Int > (Int | Int)`) and, when an
+    // ivar like `@page` accumulates across many actions into the
+    // layout-ivar union, nests dozens of levels deep.
+    let mut variants = Vec::new();
+    push_union_variants(a, &mut variants);
+    push_union_variants(b, &mut variants);
+    match variants.len() {
+        0 => Ty::Bottom,
+        1 => variants.into_iter().next().unwrap(),
+        _ => Ty::Union { variants },
+    }
 }
 
-pub(super) fn union_many(mut tys: Vec<Ty>) -> Ty {
-    // Filter Bottom variants — same reasoning as `union_of`.
-    tys.retain(|t| !matches!(t, Ty::Bottom));
-    match tys.len() {
-        // All branches diverged; the union itself is Bottom.
-        0 => Ty::Bottom,
-        1 => tys.pop().unwrap(),
-        _ => Ty::Union { variants: tys },
+/// Append `t`'s constituent variants to `out`, flattening nested
+/// `Union`s and skipping any variant already present (structural
+/// equality) so the result carries each distinct type once.
+fn push_union_variants(t: Ty, out: &mut Vec<Ty>) {
+    match t {
+        Ty::Union { variants } => {
+            for v in variants {
+                push_union_variants(v, out);
+            }
+        }
+        other => {
+            if !out.contains(&other) {
+                out.push(other);
+            }
+        }
+    }
+}
+
+pub(super) fn union_many(tys: Vec<Ty>) -> Ty {
+    // Fold through `union_of` so the same Bottom-filtering, structural
+    // container join, and flatten/dedup normalization applies.
+    let mut iter = tys.into_iter().filter(|t| !matches!(t, Ty::Bottom));
+    match iter.next() {
+        None => Ty::Bottom,
+        Some(first) => iter.fold(first, union_of),
     }
 }
 

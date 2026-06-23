@@ -472,9 +472,37 @@ impl<'a> BodyTyper<'a> {
                     _ => union_many(resolved),
                 }
             }
-            _ => unknown(),
+            // Receiver type is a `Var` (inference gap) or otherwise
+            // unmodeled. Ruby's `to_*` conversions have a fixed return
+            // type regardless of receiver, so even when we couldn't
+            // type the receiver, `rows.to_h` is a Hash and `x.to_s` is
+            // a String. Falling back to these (gradual element types)
+            // resolves the read instead of leaving it `Var`.
+            _ => conversion_fallback(method).unwrap_or_else(unknown),
         }
     }
+}
+
+/// Canonical return type of a universal Ruby conversion method, used
+/// as a last resort when the receiver type is unknown. NOT placed in
+/// `universal_method` (which is consulted before per-type dispatch) so
+/// the precise per-type versions — `array.to_h → Hash[K, V]` keyed off
+/// the block, `array.to_a → Array[elem]` — still win when the receiver
+/// IS typed. Element/value types are `Untyped` (gradual) here since
+/// there's no receiver shape to derive them from.
+fn conversion_fallback(method: &Symbol) -> Option<Ty> {
+    Some(match method.as_str() {
+        "to_h" => Ty::Hash {
+            key: Box::new(Ty::Untyped),
+            value: Box::new(Ty::Untyped),
+        },
+        "to_a" | "to_ary" => Ty::Array { elem: Box::new(Ty::Untyped) },
+        "to_s" | "to_str" => Ty::Str,
+        "to_i" => Ty::Int,
+        "to_f" => Ty::Float,
+        "to_sym" => Ty::Sym,
+        _ => return None,
+    })
 }
 
 // Primitive method tables --------------------------------------------
@@ -866,6 +894,12 @@ pub(super) fn int_method(method: &Symbol) -> Ty {
     match method.as_str() {
         "to_s" => Ty::Str,
         "to_i" | "abs" | "succ" | "pred" => Ty::Int,
+        // Integer rounding is identity-typed: `n.ceil` / `n.floor` /
+        // `n.round` / `n.truncate` with no digits arg return an Integer
+        // (`(count / per_page).ceil` → page count). Float has these too
+        // (line below) — Int needs its own entry or the chain bottoms
+        // out at Var.
+        "round" | "ceil" | "floor" | "truncate" => Ty::Int,
         // Unary minus/plus: Ruby desugars `-n` to `n.-@`. Int stays Int.
         "-@" | "+@" => Ty::Int,
         "to_f" => Ty::Float,
