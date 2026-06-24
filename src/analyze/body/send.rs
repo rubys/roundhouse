@@ -101,16 +101,42 @@ impl<'a> BodyTyper<'a> {
             // in this match. Single-param yield only — multi-param
             // destructure isn't expressible in Ty::Fn::block today.
             Ty::Class { id, .. } => {
-                let cls = self.classes().get(id)?;
-                let sig = cls
-                    .instance_methods
-                    .get(method)
-                    .or_else(|| cls.class_methods.get(method))?;
-                if let Ty::Fn { block: Some(block_ty), .. } = sig {
-                    Some(vec![(**block_ty).clone()])
-                } else {
-                    None
+                // Walk the class + parent chain (and includes) for a
+                // registered method whose `Ty::Fn` declares a block param,
+                // so a block-yielding helper registered on a base class
+                // binds the param for subclasses too (`respond_to` on
+                // ApplicationController, `form_with` on ActionView::Base).
+                // Mirrors the parent walk in result dispatch. A method
+                // found without block info stops the walk (it shadows).
+                let mut current = Some(id.clone());
+                let mut depth = 0usize;
+                while let Some(cid) = current {
+                    depth += 1;
+                    if depth > 32 {
+                        break;
+                    }
+                    let cls = self.classes().get(&cid)?;
+                    // Own methods, then included modules — both ahead of
+                    // the parent in Ruby's ancestor order.
+                    for c in std::iter::once(cls)
+                        .chain(cls.includes.iter().filter_map(|m| self.classes().get(m)))
+                    {
+                        if let Some(sig) = c
+                            .instance_methods
+                            .get(method)
+                            .or_else(|| c.class_methods.get(method))
+                        {
+                            return match sig {
+                                Ty::Fn { block: Some(block_ty), .. } => {
+                                    Some(vec![(**block_ty).clone()])
+                                }
+                                _ => None,
+                            };
+                        }
+                    }
+                    current = cls.parent.clone();
                 }
+                None
             }
             // Union receivers (typically `T | Nil` from RBS optionals or
             // flow-sensitive ivar reads). Unwrap to the first concrete

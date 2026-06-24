@@ -555,6 +555,70 @@ impl Analyzer {
         }
         classes.insert(ClassId(Symbol::from("Arel::SelectManager")), arel_select);
 
+        // ActionView form builder — `form_with do |form| form.text_field
+        // ... end`. `form_with` yields a FormBuilder whose field helpers
+        // render to strings (`ActiveSupport::SafeBuffer`, modeled as Str).
+        // Registered so both the block param AND the per-field calls type:
+        // once `form` is a FormBuilder, an unregistered `form.x` would be a
+        // dispatch *error*, so the field surface is covered here.
+        let form_builder_id = ClassId(Symbol::from("ActionView::Helpers::FormBuilder"));
+        let form_builder_ty = Ty::Class { id: form_builder_id.clone(), args: vec![] };
+        let block_fn = |block_ty: &Ty, ret: Ty| Ty::Fn {
+            params: vec![],
+            block: Some(Box::new(block_ty.clone())),
+            ret: Box::new(ret),
+            effects: EffectSet::default(),
+        };
+        let mut form_builder = ClassInfo::default();
+        for m in [
+            "label", "submit", "button", "text_field", "text_area", "textarea",
+            "hidden_field", "password_field", "email_field", "number_field",
+            "url_field", "tel_field", "telephone_field", "phone_field",
+            "search_field", "color_field", "range_field", "date_field",
+            "time_field", "datetime_field", "datetime_local_field", "month_field",
+            "week_field", "file_field", "check_box", "radio_button", "select",
+            "collection_select", "grouped_collection_select", "time_zone_select",
+            "collection_check_boxes", "collection_radio_buttons", "date_select",
+            "time_select", "datetime_select", "rich_text_area", "weekday_select",
+            "id", "to_s",
+        ] {
+            form_builder.instance_methods.insert(Symbol::from(m), Ty::Str);
+        }
+        // `form.object` is the form's model (unknown model → gradual);
+        // nested `fields_for`/`fields` yield another builder.
+        form_builder.instance_methods.insert(Symbol::from("object"), Ty::Untyped);
+        for m in ["fields_for", "fields"] {
+            form_builder
+                .instance_methods
+                .insert(Symbol::from(m), block_fn(&form_builder_ty, Ty::Str));
+        }
+        classes.insert(form_builder_id, form_builder);
+
+        // `respond_to do |format| format.html { } format.json { } end` —
+        // the block yields a mime Collector whose format methods return
+        // nil. (`respond_to` itself is registered on ApplicationController.)
+        let mut collector = ClassInfo::default();
+        for m in [
+            "html", "json", "xml", "js", "rss", "atom", "text", "csv", "any",
+            "all", "none",
+        ] {
+            collector.instance_methods.insert(Symbol::from(m), Ty::Nil);
+        }
+        classes.insert(
+            ClassId(Symbol::from("ActionController::MimeResponds::Collector")),
+            collector,
+        );
+
+        // View context — the `self` a view body types against. `form_with`
+        // lives here (flat view helpers — `link_to`/`render`/… — will join
+        // it); the view loops set this as `self_ty` so implicit-self helper
+        // calls dispatch against it.
+        let mut action_view = ClassInfo::default();
+        action_view
+            .instance_methods
+            .insert(Symbol::from("form_with"), block_fn(&form_builder_ty, Ty::Str));
+        classes.insert(ClassId(Symbol::from("ActionView::Base")), action_view);
+
         // Rails singleton — `Rails.application` / `Rails.logger` /
         // `Rails.cache` / `Rails.env` / `Rails.root` are pervasive
         // call shapes in real Rails code. Each maps to a runtime
@@ -715,6 +779,19 @@ impl Analyzer {
         app_ctrl.class_methods.insert(Symbol::from("render"), Ty::Nil);
         app_ctrl.class_methods.insert(Symbol::from("redirect_to"), Ty::Nil);
         app_ctrl.class_methods.insert(Symbol::from("head"), Ty::Nil);
+        // `respond_to do |format| ... end` — yields the mime Collector
+        // registered above, so the `format` block param (and `format.html`/
+        // `format.json` calls) type. Block-yielding Fn; result is nil.
+        app_ctrl.class_methods.insert(
+            Symbol::from("respond_to"),
+            block_fn(
+                &Ty::Class {
+                    id: ClassId(Symbol::from("ActionController::MimeResponds::Collector")),
+                    args: vec![],
+                },
+                Ty::Nil,
+            ),
+        );
         // `request` / `response` / `logger` return framework objects
         // (ActionDispatch::Request, etc.) we don't model structurally.
         // Gradual `Untyped` so chains like `request.referer` /
@@ -1574,6 +1651,12 @@ impl Analyzer {
             }
             let mut view_ctx = Ctx::default();
             view_ctx.in_view = true; // `yield` here renders to a String
+            // The view body types against the ActionView context, so
+            // implicit-self helper calls (`form_with`, …) dispatch there.
+            view_ctx.self_ty = Some(Ty::Class {
+                id: ClassId(Symbol::from("ActionView::Base")),
+                args: vec![],
+            });
             view_ctx.constants = global_constants.clone();
             // Action views look up by view name (e.g. `articles/show`);
             // layout views (`layouts/application`) have no matching
@@ -1667,6 +1750,12 @@ impl Analyzer {
             }
             let mut view_ctx = Ctx::default();
             view_ctx.in_view = true; // `yield` here renders to a String
+            // The view body types against the ActionView context, so
+            // implicit-self helper calls (`form_with`, …) dispatch there.
+            view_ctx.self_ty = Some(Ty::Class {
+                id: ClassId(Symbol::from("ActionView::Base")),
+                args: vec![],
+            });
             view_ctx.constants = global_constants.clone();
             if let Some(locals) = partial_locals_by_name.get(&view.name) {
                 view_ctx.local_bindings = locals.clone();
