@@ -617,6 +617,53 @@ impl Analyzer {
         action_view
             .instance_methods
             .insert(Symbol::from("form_with"), block_fn(&form_builder_ty, Ty::Str));
+        // Flat view helpers — links, tags, asset/meta tags, text and number
+        // formatting, dom ids, render, turbo helpers. All render to strings
+        // (`ActiveSupport::SafeBuffer`, modeled as Str), so the implicit-self
+        // call types and any `.html_safe`/`.gsub`/etc. chained on the result
+        // resolves through `str_method`. (Route helpers `*_path`/`*_url`,
+        // flash `notice`/`alert`, and jbuilder `json` are registered
+        // elsewhere.)
+        for helper in [
+            // links / urls
+            "link_to", "button_to", "link_to_if", "link_to_unless",
+            "link_to_unless_current", "mail_to", "url_for",
+            // tags / assets / meta
+            "content_tag", "image_tag", "image_url", "image_path",
+            "video_tag", "audio_tag", "asset_path", "asset_url",
+            "favicon_link_tag", "stylesheet_link_tag", "stylesheet_path",
+            "javascript_include_tag", "javascript_path",
+            "javascript_importmap_tags", "javascript_tag",
+            "stylesheet_pack_tag", "javascript_pack_tag", "csrf_meta_tags",
+            "csrf_meta_tag", "csp_meta_tag", "auto_discovery_link_tag",
+            "preload_link_tag", "action_cable_meta_tag",
+            // text / number formatting
+            "pluralize", "truncate", "simple_format", "highlight", "excerpt",
+            "word_wrap", "sanitize", "sanitize_css", "strip_tags",
+            "strip_links", "raw", "h", "html_escape", "concat", "safe_join",
+            "cycle", "current_cycle", "number_to_currency", "number_to_human",
+            "number_to_human_size", "number_to_percentage", "number_to_phone",
+            "number_with_delimiter", "number_with_precision",
+            // dates
+            "time_ago_in_words", "distance_of_time_in_words",
+            "distance_of_time_in_words_to_now",
+            // dom / rendering / capture
+            "dom_id", "dom_class", "render", "render_to_string", "capture",
+            "content_for", "provide", "escape_javascript", "j",
+            // turbo / hotwire
+            "turbo_frame_tag", "turbo_stream_from", "turbo_refreshes_with",
+            "turbo_include_tags", "turbo_page_requires_reload",
+        ] {
+            action_view
+                .instance_methods
+                .entry(Symbol::from(helper))
+                .or_insert(Ty::Str);
+        }
+        // `tag` is the dynamic TagBuilder — `tag.div`/`tag.details` build an
+        // element from the *method name*, so it can't be a fixed Str return
+        // (that turns `tag.foo` into a dispatch error). Untyped (gradual):
+        // both `tag("br")` and `tag.section` flow through without erroring.
+        action_view.instance_methods.insert(Symbol::from("tag"), Ty::Untyped);
         classes.insert(ClassId(Symbol::from("ActionView::Base")), action_view);
 
         // Rails singleton — `Rails.application` / `Rails.logger` /
