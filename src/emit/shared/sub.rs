@@ -58,6 +58,18 @@ pub fn classify_sub<'a>(lhs: &'a Expr, rhs: &'a Expr) -> SubCase<'a> {
         (Ty::Array { elem: l }, Ty::Array { elem: r }) if l == r => {
             SubCase::ArrayDifference { elem: l.as_ref() }
         }
+        // Time `-` is receiver-overloaded and not disambiguable from
+        // the operand types alone: `Time - Duration → Time`, but
+        // `Time - Time → Float` (elapsed seconds). Both are valid Ruby,
+        // so this is *not* `Incompatible` — fall through to native infix
+        // (`Unknown`), the same gradual treatment `time_method` gives
+        // `-` (→ `Untyped`). A concrete `Class { Time }` reaches here via
+        // datetime columns and `Time.now`/`Time.current`/`Time.at`.
+        (Ty::Class { id, .. }, _) | (_, Ty::Class { id, .. })
+            if id.0.as_str() == "Time" =>
+        {
+            SubCase::Unknown
+        }
         _ => SubCase::Incompatible,
     }
 }
@@ -66,7 +78,7 @@ pub fn classify_sub<'a>(lhs: &'a Expr, rhs: &'a Expr) -> SubCase<'a> {
 mod tests {
     use super::*;
     use crate::expr::{ExprNode, Literal};
-    use crate::ident::{Symbol, VarId};
+    use crate::ident::{ClassId, Symbol, VarId};
     use crate::span::Span;
 
     fn typed(node: ExprNode, ty: Ty) -> Expr {
@@ -154,6 +166,21 @@ mod tests {
         let l = var_typed("a", Ty::Int);
         let r = var_typed("b", Ty::Str);
         assert!(matches!(classify_sub(&l, &r), SubCase::Incompatible));
+    }
+
+    #[test]
+    fn time_minus_time_is_not_incompatible() {
+        // `Time - Time → Float` (seconds) and `Time - Duration → Time`
+        // are both valid Ruby; the classifier must not flag concrete
+        // Time arithmetic as `Incompatible`. Falls back to native infix.
+        let time = || Ty::Class { id: ClassId(Symbol::from("Time")), args: vec![] };
+        let l = var_typed("a", time());
+        let r = var_typed("b", time());
+        assert!(matches!(classify_sub(&l, &r), SubCase::Unknown));
+        // Mixed Time/Int (epoch-second arithmetic) likewise gradual.
+        let i = var_typed("c", Ty::Int);
+        assert!(matches!(classify_sub(&l, &i), SubCase::Unknown));
+        assert!(matches!(classify_sub(&i, &l), SubCase::Unknown));
     }
 
     #[test]

@@ -480,15 +480,27 @@ impl Analyzer {
         );
         classes.insert(ClassId(Symbol::from("Rails")), rails_cls);
 
-        // Time singleton — `Time.current` (Rails) / `Time.now`
-        // (Ruby core) / `Time.zone` (Rails). Time arithmetic
-        // (`Time.current - 1.day`, etc.) flows through Untyped
-        // because we don't model the Time class structurally.
+        // Time singleton — `Time.now` (Ruby core) / `Time.current`
+        // (Rails) / `Time.at` all yield a Time *value*, and `Time.zone`
+        // is a TimeZone whose `.now`/`.at`/`.local` likewise yield Time,
+        // so modeling it as Time too lets those chains resolve. Time
+        // values are already modeled structurally (`time_method` in
+        // send.rs) and AR datetime columns type as Time, so these
+        // constructors join that same surface — `Time.now.to_i` → Int,
+        // `Time.current.utc` → Time — instead of bottoming out at the
+        // `Untyped` gradual escape (and dragging every chained call into
+        // it). `Time - x` arithmetic still resolves to `Untyped` inside
+        // `time_method` because receiver-only dispatch can't tell a
+        // Duration arg (→ Time) from a Time arg (→ Float).
+        let time_ty = || Ty::Class {
+            id: ClassId(Symbol::from("Time")),
+            args: vec![],
+        };
         let mut time_cls = ClassInfo::default();
-        time_cls.class_methods.insert(Symbol::from("current"), Ty::Untyped);
-        time_cls.class_methods.insert(Symbol::from("now"), Ty::Untyped);
-        time_cls.class_methods.insert(Symbol::from("zone"), Ty::Untyped);
-        time_cls.class_methods.insert(Symbol::from("at"), Ty::Untyped);
+        time_cls.class_methods.insert(Symbol::from("current"), time_ty());
+        time_cls.class_methods.insert(Symbol::from("now"), time_ty());
+        time_cls.class_methods.insert(Symbol::from("zone"), time_ty());
+        time_cls.class_methods.insert(Symbol::from("at"), time_ty());
         classes.insert(ClassId(Symbol::from("Time")), time_cls);
 
         // Date / DateTime singletons — analogous to Time. Same
