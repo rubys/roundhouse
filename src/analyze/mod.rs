@@ -200,6 +200,9 @@ impl Analyzer {
             // real methods at runtime, absent from the schema, untyped. Register
             // reader/writer as gradual (`Untyped`) so dispatch resolves them.
             register_attr_accessors(&model.body, &mut cls.instance_methods);
+            // `has_secure_password` generates `password=`/
+            // `password_confirmation=` writers + `authenticate`.
+            register_has_secure_password(&model.body, &mut cls.instance_methods, &self_ty);
 
             // Named scopes resolve as relation-returning class methods, so
             // `Story.active` types and chains like `Story.active.recent`
@@ -3219,6 +3222,49 @@ fn collect_attr_accessor_names(body: &[ModelBodyItem]) -> Vec<Symbol> {
         }
     }
     out
+}
+
+/// Register the methods `has_secure_password` generates. The macro
+/// (default attribute `:password`, or a custom one passed as the first
+/// symbol) adds a write-only virtual attribute and an authenticator:
+///   - `<attr>=` / `<attr>_confirmation=` — writers taking the plaintext
+///     (Str); they return the assigned value.
+///   - `authenticate` (default) / `authenticate_<attr>` (custom) — checks
+///     the plaintext against the digest, returning the record on success
+///     or false; typed as the model instance (the dominant truthy use).
+/// `or_insert`, so a real `def` of the same name still wins.
+fn register_has_secure_password(
+    body: &[ModelBodyItem],
+    methods: &mut HashMap<Symbol, Ty>,
+    self_ty: &Ty,
+) {
+    for item in body {
+        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
+        if method.as_str() != "has_secure_password" {
+            continue;
+        }
+        // First positional symbol is the attribute name (kwargs like
+        // `validations: false` are Hash args, skipped by symbol_arg);
+        // default is `password`.
+        let attr = args
+            .iter()
+            .find_map(|a| symbol_arg(a))
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_else(|| "password".to_string());
+        methods
+            .entry(Symbol::from(format!("{attr}=")))
+            .or_insert(Ty::Str);
+        methods
+            .entry(Symbol::from(format!("{attr}_confirmation=")))
+            .or_insert(Ty::Str);
+        let auth = if attr == "password" {
+            "authenticate".to_string()
+        } else {
+            format!("authenticate_{attr}")
+        };
+        methods.entry(Symbol::from(auth)).or_insert(self_ty.clone());
+    }
 }
 
 fn register_attr_accessors(body: &[ModelBodyItem], methods: &mut HashMap<Symbol, Ty>) {

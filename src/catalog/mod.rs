@@ -519,6 +519,15 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         return_kind: None,
     },
     CatalogedMethod {
+        // `Model.update_counters(id, counter: n)` — atomic counter
+        // bump; returns the affected-row count.
+        name: "update_counters",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbWrite,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::Int),
+    },
+    CatalogedMethod {
         name: "destroy_all",
         receiver: ReceiverContext::Class,
         effect: EffectClass::DbWrite,

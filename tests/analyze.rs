@@ -1767,6 +1767,40 @@ end
 }
 
 #[test]
+fn has_secure_password_and_update_counters_resolve() {
+    // `has_secure_password` generates `password=`/`password_confirmation=`
+    // writers and `authenticate`; `Model.update_counters(id, col: n)` is
+    // an AR class method (atomic counter bump → Int). Both used to fail
+    // dispatch.
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/user.rb",
+            r#"class User < ApplicationRecord
+  has_secure_password
+  def reset
+    self.password = "x"
+    self.password_confirmation = "x"
+    User.update_counters(self.id, karma: 1)
+  end
+end
+"#,
+        ),
+    ]);
+    let failures = send_dispatch_failures(&app);
+    for m in ["password=", "password_confirmation=", "update_counters"] {
+        assert!(
+            !failures.iter().any(|f| f == m),
+            "`{m}` should resolve (has_secure_password / AR catalog); \
+             failures = {failures:?}"
+        );
+    }
+}
+
+#[test]
 fn bare_module_under_app_models_registers_as_library_class() {
     // A bare `module Foo; def self.x; …` under app/models/ (e.g.
     // lobsters' InactiveUser) is a namespace of singleton methods, not
