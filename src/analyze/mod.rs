@@ -144,18 +144,57 @@ impl Analyzer {
             cls.class_methods.insert(Symbol::from("establish_connection"), Ty::Untyped);
             cls.class_methods.insert(Symbol::from("table_name"), Ty::Str);
             cls.class_methods.insert(Symbol::from("primary_key"), Ty::Str);
-            cls.class_methods.insert(Symbol::from("arel_table"), Ty::Untyped);
+            // Arel entry points: `Model.arel_table` is an `Arel::Table`
+            // (`table[:col]` → attribute → predicate node); `Model.arel`
+            // (and `relation.arel`, handled in send.rs) is the underlying
+            // `Arel::SelectManager`. Typed (not `Untyped`) so advanced
+            // scopes that drop into Arel stay typed end-to-end.
+            cls.class_methods.insert(
+                Symbol::from("arel_table"),
+                Ty::Class { id: ClassId(Symbol::from("Arel::Table")), args: vec![] },
+            );
+            cls.class_methods.insert(
+                Symbol::from("arel"),
+                Ty::Class { id: ClassId(Symbol::from("Arel::SelectManager")), args: vec![] },
+            );
             cls.class_methods.insert(Symbol::from("attribute_names"), Ty::Array { elem: Box::new(Ty::Str) });
             cls.class_methods.insert(Symbol::from("column_names"), Ty::Array { elem: Box::new(Ty::Str) });
             cls.class_methods.insert(Symbol::from("columns_hash"), Ty::Untyped);
-            // `Model.unscoped { }` block escape; `Model.none` returns
-            // an empty relation (Array<Model>). `delete_all` /
-            // `update_all` return Int (affected row count).
-            cls.class_methods.insert(Symbol::from("unscoped"), Ty::Untyped);
-            cls.class_methods.insert(Symbol::from("none"),
-                Ty::Array { elem: Box::new(self_ty.clone()) });
+            // `Model.unscoped`/`Model.none` return a relation
+            // (`Array<Model>`, the chainable stand-in) so chains through
+            // them stay typed instead of leaking to `untyped`. (The block
+            // form `unscoped { }` returns the block value, which we don't
+            // track — the relation type is the better default for the
+            // common bare/chained use.) `delete_all`/`update_all` return
+            // Int (affected row count).
+            cls.class_methods.insert(Symbol::from("unscoped"), array_of_self.clone());
+            cls.class_methods.insert(Symbol::from("none"), array_of_self.clone());
             cls.class_methods.insert(Symbol::from("delete_all"), Ty::Int);
             cls.class_methods.insert(Symbol::from("update_all"), Ty::Int);
+
+            // Chainable query-builder methods beyond the catalog set.
+            // Each returns the relation (modeled as `Array<Self>`, the
+            // same chainable stand-in the catalog uses), so a scope or
+            // controller chain types end-to-end rather than leaking to
+            // `untyped` at the first uncatalogued link, and the
+            // `Array<Self>` re-chain in `send.rs` resolves the next step.
+            // `entry().or_insert` so a catalog entry or named scope still
+            // wins. `not`/`missing` are really `WhereChain` methods
+            // (`where.not(...)`/`where.missing(...)`); since `where`
+            // already yields the relation, the chain lands on
+            // `Array<Self>` and these resolve there — typing `Model.not`
+            // directly is harmless (not real code) and beats `untyped`.
+            for builder in [
+                "or", "and", "rewhere", "reorder", "reselect", "regroup",
+                "except", "only", "unscope", "reverse_order", "left_joins",
+                "readonly", "lock", "from", "extending", "strict_loading",
+                "create_with", "annotate", "optimizer_hints",
+                "not", "missing",
+            ] {
+                cls.class_methods
+                    .entry(Symbol::from(builder))
+                    .or_insert_with(|| array_of_self.clone());
+            }
 
             // Instance methods from schema-derived attributes.
             // These are per-model (column names differ across
@@ -454,6 +493,67 @@ impl Analyzer {
             ClassId(Symbol::from("ActiveRecord::AdapterInterface")),
             adapter_iface,
         );
+
+        // Arel — the low-level SQL AST that advanced scopes reach for
+        // (`Model.arel_table[:col].not_in(subquery)`, `relation.arel.exists`,
+        // `Arel.sql(...)`). A small class family whose methods all return
+        // Arel nodes (never `Untyped`), so a chain that drops into Arel
+        // stays typed instead of collapsing to a gradual escape at the
+        // first `arel_table`/`arel`/`Arel.sql` hop. Precision is coarse —
+        // every predicate/combinator returns the same `Arel::Node`; the
+        // win is that the chain resolves rather than which node it is.
+        let arel_node = Ty::Class { id: ClassId(Symbol::from("Arel::Node")), args: vec![] };
+        let arel_attribute_ty =
+            Ty::Class { id: ClassId(Symbol::from("Arel::Attribute")), args: vec![] };
+        let arel_select_mgr =
+            Ty::Class { id: ClassId(Symbol::from("Arel::SelectManager")), args: vec![] };
+
+        // `Arel.sql(...)` / `Arel.star` — module-level node constructors.
+        let mut arel_mod = ClassInfo::default();
+        arel_mod.class_methods.insert(Symbol::from("sql"), arel_node.clone());
+        arel_mod.class_methods.insert(Symbol::from("star"), arel_node.clone());
+        classes.insert(ClassId(Symbol::from("Arel")), arel_mod);
+
+        // `Model.arel_table` → table; `table[:col]` → attribute. A table
+        // also delegates query-builder calls to a select manager
+        // (`table.project(Arel.star)`, `table.where(...)`).
+        let mut arel_table = ClassInfo::default();
+        arel_table.instance_methods.insert(Symbol::from("[]"), arel_attribute_ty.clone());
+        for m in [
+            "project", "where", "order", "group", "having", "join", "on",
+            "take", "skip", "from", "distinct",
+        ] {
+            arel_table.instance_methods.insert(Symbol::from(m), arel_select_mgr.clone());
+        }
+        classes.insert(ClassId(Symbol::from("Arel::Table")), arel_table);
+
+        // `Arel::Attribute` predicates → node.
+        let mut arel_attribute = ClassInfo::default();
+        for pred in [
+            "eq", "not_eq", "in", "not_in", "gt", "gteq", "lt", "lteq",
+            "matches", "does_not_match", "between", "eq_any", "in_any",
+            "asc", "desc", "count", "sum", "minimum", "maximum", "average",
+        ] {
+            arel_attribute.instance_methods.insert(Symbol::from(pred), arel_node.clone());
+        }
+        classes.insert(ClassId(Symbol::from("Arel::Attribute")), arel_attribute);
+
+        // `Arel::Node` boolean combinators chain into nodes; `where(node)`
+        // already accepts any argument type.
+        let mut arel_node_cls = ClassInfo::default();
+        for m in ["and", "or", "not"] {
+            arel_node_cls.instance_methods.insert(Symbol::from(m), arel_node.clone());
+        }
+        classes.insert(ClassId(Symbol::from("Arel::Node")), arel_node_cls);
+
+        // `relation.arel` / `Model.arel` → select manager; `.exists` →
+        // node; further builder calls stay on the manager.
+        let mut arel_select = ClassInfo::default();
+        arel_select.instance_methods.insert(Symbol::from("exists"), arel_node.clone());
+        for m in ["where", "project", "join", "on", "group", "order", "take", "skip"] {
+            arel_select.instance_methods.insert(Symbol::from(m), arel_select_mgr.clone());
+        }
+        classes.insert(ClassId(Symbol::from("Arel::SelectManager")), arel_select);
 
         // Rails singleton — `Rails.application` / `Rails.logger` /
         // `Rails.cache` / `Rails.env` / `Rails.root` are pervasive

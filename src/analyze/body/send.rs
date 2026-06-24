@@ -477,6 +477,18 @@ impl<'a> BodyTyper<'a> {
                             return scope_ret.clone();
                         }
                     }
+                    // `relation.arel` exposes the relation's underlying
+                    // Arel select manager (`Tagging.where(..).select(..).arel`),
+                    // so `.arel.exists` and further Arel calls type instead
+                    // of collapsing to untyped at `.arel`. Gated on a
+                    // model-class element so it's a relation, not a plain
+                    // array.
+                    if method.as_str() == "arel" {
+                        return Ty::Class {
+                            id: ClassId(Symbol::from("Arel::SelectManager")),
+                            args: vec![],
+                        };
+                    }
                 }
                 array_method(method, elem, block_ret)
             }
