@@ -14,6 +14,8 @@
 
 use ruby_prism::Node;
 
+use indexmap::IndexMap;
+
 use crate::schema::{Column, ColumnType, Index, Schema, Table};
 use crate::{Symbol, TableRef};
 
@@ -30,11 +32,27 @@ pub fn ingest_schema(source: &[u8], file: &str) -> IngestResult<Schema> {
 
     let mut schema = Schema::default();
     walk_calls(&root, &mut |call| {
-        if constant_id_str(&call.name()) != "create_table" {
-            return;
-        }
-        if let Some((name, table)) = table_from_create_table(call) {
-            schema.tables.insert(name, table);
+        match constant_id_str(&call.name()) {
+            "create_table" => {
+                if let Some((name, table)) = table_from_create_table(call) {
+                    schema.tables.insert(name, table);
+                }
+            }
+            // `create_view "name", sql_definition: <<~SQL …` (the
+            // scenic gem / Rails 6 schema dumper). A SQL view backs a
+            // model just like a table, so register its columns —
+            // extracted from the SELECT's `AS <alias>` list — as a
+            // Table. ReplyingComment is the lobsters case.
+            "create_view" => {
+                // `create_table`s are dumped before views, so the
+                // tables a view projects are already in `schema.tables`
+                // — pass them so direct column projections get their
+                // real types instead of a name guess.
+                if let Some((name, table)) = view_from_create_view(call, &schema.tables) {
+                    schema.tables.insert(name, table);
+                }
+            }
+            _ => {}
         }
     });
 
@@ -401,6 +419,145 @@ fn table_from_create_table(call: &ruby_prism::CallNode<'_>) -> Option<(Symbol, T
             foreign_keys: vec![],
         },
     ))
+}
+
+/// `create_view "name", sql_definition: "<SELECT …>"` → (view key,
+/// Table). A SQL view's "columns" are the SELECT's output aliases, so
+/// we register a Table whose columns are every `AS <alias>` in the
+/// definition. The schema dumper writes each projected column with an
+/// explicit `AS`, so the alias list is the column list.
+fn view_from_create_view(
+    call: &ruby_prism::CallNode<'_>,
+    tables: &IndexMap<Symbol, Table>,
+) -> Option<(Symbol, Table)> {
+    let args = call.arguments()?;
+    let first = args.arguments().iter().next();
+    let view_name = first.as_ref().and_then(name_value)?;
+
+    let mut sql: Option<String> = None;
+    for arg in args.arguments().iter().skip(1) {
+        let Some(kh) = arg.as_keyword_hash_node() else { continue };
+        for el in kh.elements().iter() {
+            let Some(assoc) = el.as_assoc_node() else { continue };
+            let Some(key) = symbol_value(&assoc.key()) else { continue };
+            if key.as_str() == "sql_definition" {
+                sql = string_value(&assoc.value());
+            }
+        }
+    }
+    let columns = view_columns_from_sql(&sql?, tables);
+    if columns.is_empty() {
+        return None;
+    }
+
+    Some((
+        Symbol::from(view_name.clone()),
+        Table {
+            name: Symbol::from(view_name),
+            columns,
+            indexes: vec![],
+            foreign_keys: vec![],
+        },
+    ))
+}
+
+/// Extract a view's columns from its SQL definition: each `<expr> AS
+/// <alias>` in the SELECT list. When `<expr>` is a plain `table.column`
+/// projection that is the whole select item, resolve its REAL type from
+/// the already-parsed `tables` (a view just re-exposes table columns).
+/// Only genuinely-computed items — comparisons (`a < b AS is_unread`)
+/// and subqueries (`(select …) AS current_vote_vote`) — fall back to
+/// `view_column_type`'s name heuristic, since they have no single source
+/// column. Tokens keep their glued punctuation (a trailing `)` marks a
+/// subquery, a preceding operator marks an expression) so the
+/// direct-projection case is distinguishable without a full SQL parser.
+fn view_columns_from_sql(sql: &str, tables: &IndexMap<Symbol, Table>) -> Vec<Column> {
+    let mut columns = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let toks: Vec<&str> = sql.split_whitespace().collect();
+    for i in 1..toks.len() {
+        if !toks[i].eq_ignore_ascii_case("as") {
+            continue;
+        }
+        let Some(alias_raw) = toks.get(i + 1) else { continue };
+        let alias = alias_raw.trim_matches(|c| c == '`' || c == '"' || c == '\'' || c == ',');
+        if alias.is_empty() || !alias.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            continue;
+        }
+        if !seen.insert(alias.to_string()) {
+            continue;
+        }
+        // The source is a direct `table.column` projection only when the
+        // token before `AS` is a clean column ref AND it's the whole
+        // select item (preceded by `select` or a comma-terminated prior
+        // alias) — otherwise it's the tail of an expression/subquery.
+        let item_start = i < 2
+            || toks[i - 2].eq_ignore_ascii_case("select")
+            || toks[i - 2].ends_with(',');
+        let resolved = if item_start {
+            parse_col_ref(toks[i - 1]).and_then(|(t, c)| lookup_column_type(tables, &t, &c))
+        } else {
+            None
+        };
+        columns.push(Column {
+            name: Symbol::from(alias),
+            col_type: resolved.unwrap_or_else(|| view_column_type(alias)),
+            nullable: true,
+            default: None,
+            primary_key: false,
+        });
+    }
+    columns
+}
+
+/// Parse a clean `table.column` ref (optionally backtick/quote quoted)
+/// into its parts. Returns None for anything with parens, operators, or
+/// not exactly two dotted segments — i.e. anything that isn't a single
+/// column projection.
+fn parse_col_ref(tok: &str) -> Option<(String, String)> {
+    if tok.contains('(') || tok.contains(')') {
+        return None;
+    }
+    let cleaned: String = tok.chars().filter(|c| *c != '`' && *c != '"').collect();
+    let mut parts = cleaned.split('.');
+    let table = parts.next()?;
+    let column = parts.next()?;
+    if parts.next().is_some() || table.is_empty() || column.is_empty() {
+        return None;
+    }
+    let ok = |s: &str| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !ok(table) || !ok(column) {
+        return None;
+    }
+    Some((table.to_string(), column.to_string()))
+}
+
+/// Look up a column's declared type in the already-parsed schema.
+fn lookup_column_type(
+    tables: &IndexMap<Symbol, Table>,
+    table: &str,
+    column: &str,
+) -> Option<ColumnType> {
+    tables
+        .get(&Symbol::from(table))?
+        .columns
+        .iter()
+        .find(|c| c.name.as_str() == column)
+        .map(|c| c.col_type.clone())
+}
+
+/// Fallback column type for a computed view column (no single source
+/// column to consult), keyed on the alias name (AR conventions).
+fn view_column_type(name: &str) -> ColumnType {
+    if name == "id" || name.ends_with("_id") {
+        ColumnType::Integer
+    } else if name.ends_with("_at") {
+        ColumnType::DateTime
+    } else if name.starts_with("is_") || name.starts_with("has_") {
+        ColumnType::Boolean
+    } else {
+        ColumnType::String { limit: None }
+    }
 }
 
 /// The two columns `t.timestamps` expands to (Rails 5+ default:

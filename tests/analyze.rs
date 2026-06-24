@@ -1767,6 +1767,64 @@ end
 }
 
 #[test]
+fn create_view_columns_register_with_real_schema_types() {
+    // A model backed by a SQL `create_view` gets its columns from the
+    // SELECT `AS <alias>` list. A direct `table.column` projection
+    // resolves to that column's REAL type from the already-parsed
+    // schema; computed columns (comparisons, subqueries — lobsters'
+    // current_vote_*/is_unread) fall back to a name heuristic. Both
+    // resolve as model attributes.
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define(version: 1) do
+  create_table "comments", force: :cascade do |t|
+    t.integer "score"
+  end
+  create_view "scored_comments", sql_definition: <<-SQL
+      select `comments`.`score` AS `tally`,
+        (`a` < `b`) AS `is_flagged`,
+        (select `v`.`vote` from `votes` `v`) AS `current_vote_vote`
+      from `comments`
+  SQL
+end
+"#,
+        ),
+        (
+            "app/models/scored_comment.rb",
+            r#"class ScoredComment < ApplicationRecord
+  def check
+    [self.tally.zero?, self.is_flagged, self.current_vote_vote]
+  end
+end
+"#,
+        ),
+    ]);
+    let failures = send_dispatch_failures(&app);
+    // `tally` is a direct projection of comments.score (integer), so
+    // schema lookup gives Int → `.zero?` resolves. If it had fallen
+    // back to the String heuristic, `zero?` would fail on Str.
+    assert!(
+        !failures.iter().any(|f| f == "tally" || f == "zero?"),
+        "direct-projection view column should resolve to its real Int \
+         type (zero? proves it); failures = {failures:?}"
+    );
+    // Computed columns (no single source column) still resolve via the
+    // name-heuristic fallback.
+    for m in ["is_flagged", "current_vote_vote"] {
+        assert!(
+            !failures.iter().any(|f| f == m),
+            "computed view column `{m}` should resolve via fallback; \
+             failures = {failures:?}"
+        );
+    }
+}
+
+#[test]
 fn has_secure_password_and_update_counters_resolve() {
     // `has_secure_password` generates `password=`/`password_confirmation=`
     // writers and `authenticate`; `Model.update_counters(id, col: n)` is
