@@ -1,0 +1,13 @@
+{
+  "name": "roundhouse-lsp-client",
+  "displayName": "Roundhouse LSP (dev)",
+  "description": "F5 dev client for roundhouse-lsp.",
+  "version": "0.0.1",
+  "private": true,
+  "engines": { "vscode": "^1.82.0" },
+  "activationEvents": ["onLanguage:ruby"],
+  "main": "./extension.js",
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}
