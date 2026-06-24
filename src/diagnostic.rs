@@ -55,6 +55,7 @@ impl Diagnostic {
             DiagnosticKind::SendDispatchFailed { .. } => "send_dispatch_failed",
             DiagnosticKind::IncompatibleBinop { .. } => "incompatible_binop",
             DiagnosticKind::GradualUntyped { .. } => "gradual_untyped",
+            DiagnosticKind::UnresolvedType { .. } => "unresolved_type",
             DiagnosticKind::Unsupported { .. } => "unsupported",
             DiagnosticKind::Parse { .. } => "parse",
         }
@@ -67,6 +68,7 @@ impl Diagnostic {
     pub fn default_severity(kind: &DiagnosticKind) -> Severity {
         match kind {
             DiagnosticKind::GradualUntyped { .. } => Severity::Warning,
+            DiagnosticKind::UnresolvedType { .. } => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -163,6 +165,9 @@ impl Diagnostic {
             DiagnosticKind::GradualUntyped { expr_kind } => {
                 format!("{} resolves to untyped", expr_kind.as_str())
             }
+            DiagnosticKind::UnresolvedType { expr_kind, name } => {
+                Self::unresolved_type_text(expr_kind, name.as_ref())
+            }
             DiagnosticKind::Unsupported { target, construct, .. } => {
                 Self::unsupported_text(target.as_ref(), construct)
             }
@@ -182,6 +187,20 @@ impl Diagnostic {
             None => "all targets",
         };
         format!("{construct} not supported ({where_})")
+    }
+
+    /// Canonical human text for an [`DiagnosticKind::UnresolvedType`],
+    /// shared between the walker that emits it and the kind-only
+    /// reconstruction paths so the rendering stays identical. Names the
+    /// culprit in backticks when known (`method call `controller_name`
+    /// has unresolved type`), matching the grep-friendly convention of
+    /// `IvarUnresolved` / `SendDispatchFailed`; falls back to the bare
+    /// position label for nameless sites (`yield has unresolved type`).
+    pub fn unresolved_type_text(expr_kind: &Symbol, name: Option<&Symbol>) -> String {
+        match name {
+            Some(n) => format!("{} `{}` has unresolved type", expr_kind.as_str(), n.as_str()),
+            None => format!("{} has unresolved type", expr_kind.as_str()),
+        }
     }
 }
 
@@ -357,6 +376,21 @@ pub enum DiagnosticKind {
     /// variant can name "method receiver", "argument", "return",
     /// etc., for downstream rendering.
     GradualUntyped { expr_kind: Symbol },
+    /// An expression whose type the body-typer left *unresolved* — an
+    /// open inference variable (`Ty::Var`) or a node it never stamped
+    /// (`ty: None`) — at a leaf value position where no more specific
+    /// diagnostic fires. Distinct from `GradualUntyped` (`Ty::Untyped`,
+    /// an author-signed escape) and from `IvarUnresolved` /
+    /// `SendDispatchFailed` (which cover ivars and known-receiver
+    /// sends): this is the *silent* residue — implicit-self sends
+    /// (`controller_name`), bare local/constant reads, applies, and
+    /// yields the inferencer couldn't pin down. Default severity is
+    /// Warning; it's a coverage-measurement signal, not a hard error.
+    /// `expr_kind` names the syntactic position; `name` carries the
+    /// called method / read local / constant path when one is in hand
+    /// (`None` for nameless positions like `yield`) so the message can
+    /// name the culprit and tools can group by it without parsing text.
+    UnresolvedType { expr_kind: Symbol, name: Option<Symbol> },
     /// Valid Ruby the tool can't compile *yet* — a coverage gap in a
     /// lowerer or emitter, distinct from `IncompatibleBinop` (where the
     /// *source* is wrong and Ruby itself would raise). Default severity

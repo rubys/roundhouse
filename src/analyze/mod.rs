@@ -3418,6 +3418,19 @@ pub fn diagnose(app: &App) -> Vec<Diagnostic> {
     if let Some(seeds) = &app.seeds {
         diagnose_expr(seeds, &mut out);
     }
+
+    // Collapse diagnostics that render to the same place with the same
+    // text — same start position, same kind, same message. Method chains
+    // whose links share a (not-yet-precise) start each emit there, so
+    // `a.b`, `a.b.c`, `a.b.c.d` stack 2-5 squiggles of differing length
+    // but identical tooltip on one spot. Key on `start` (what line:col
+    // and the squiggle's anchor derive from), not the full range, so the
+    // nested links collapse. `retain` keeps the first — and since the
+    // walker emits the outer node before recursing, that's the longest,
+    // outermost span. Self-correcting: once span preservation gives links
+    // distinct starts, they survive on their own again.
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|d| seen.insert((d.span.file, d.span.start, d.code(), d.message.clone())));
     out
 }
 
@@ -3449,6 +3462,22 @@ fn expr_kind_label(expr: &Expr) -> &'static str {
     }
 }
 
+/// The identifier at an unresolved leaf position, for the
+/// `UnresolvedType` message — the called method, read local, or
+/// constant path. `None` for nameless positions (`yield`). An `Apply`
+/// names its callee when that callee is itself a named leaf.
+fn unresolved_name(expr: &Expr) -> Option<crate::ident::Symbol> {
+    match &*expr.node {
+        ExprNode::Send { method, .. } => Some(method.clone()),
+        ExprNode::Var { name, .. } => Some(name.clone()),
+        ExprNode::Const { path } => Some(crate::ident::Symbol::new(
+            &path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"),
+        )),
+        ExprNode::Apply { fun, .. } => unresolved_name(fun),
+        _ => None,
+    }
+}
+
 fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
     // Diagnostic annotations set by the body-typer during analyze.
     // These are the IR-carried path: detection happens once at the
@@ -3471,6 +3500,9 @@ fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
             }
             DiagnosticKind::GradualUntyped { expr_kind } => {
                 format!("{} resolves to RBS `untyped` (gradual escape)", expr_kind.as_str())
+            }
+            DiagnosticKind::UnresolvedType { expr_kind, name } => {
+                Diagnostic::unresolved_type_text(expr_kind, name.as_ref())
             }
             DiagnosticKind::Unsupported { target, construct, detail } => {
                 let mut m = Diagnostic::unsupported_text(target.as_ref(), construct);
@@ -3546,6 +3578,41 @@ fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
             }
         }
         _ => {}
+    }
+
+    // Residual unresolved positions the specific checks above don't
+    // cover — the "silently unresolved" set. The body-typer left these
+    // as an open inference variable (`Ty::Var`) or never stamped a type
+    // (`None`), but no diagnostic fires today, so they pass invisibly:
+    //   - implicit-self sends (`controller_name`, recv: None)
+    //   - bare local and constant reads
+    //   - function applies and yields
+    // Ivars are reported by IvarUnresolved; explicit-receiver sends with
+    // a *known* receiver by SendDispatchFailed. An explicit receiver that
+    // is itself unresolved is reported on the receiver node when we
+    // recurse, so the outer send is skipped here to avoid double-counting
+    // the same root cause.
+    if is_unknown_ty(expr.ty.as_ref()) {
+        let report = matches!(
+            &*expr.node,
+            ExprNode::Send { recv: None, .. }
+                | ExprNode::Var { .. }
+                | ExprNode::Const { .. }
+                | ExprNode::Apply { .. }
+                | ExprNode::Yield { .. }
+        );
+        if report {
+            let label = crate::ident::Symbol::new(expr_kind_label(expr));
+            let name = unresolved_name(expr);
+            let message = Diagnostic::unresolved_type_text(&label, name.as_ref());
+            let kind = DiagnosticKind::UnresolvedType { expr_kind: label, name };
+            out.push(Diagnostic {
+                span: expr.span,
+                severity: Diagnostic::default_severity(&kind),
+                kind,
+                message,
+            });
+        }
     }
 
     // Recurse into children so we surface every unresolved position.

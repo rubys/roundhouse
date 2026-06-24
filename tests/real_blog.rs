@@ -184,6 +184,13 @@ fn diagnostic_signature(d: &roundhouse::analyze::Diagnostic) -> (String, String)
             "GradualUntyped".into(),
             expr_kind.as_str().to_string(),
         ),
+        DiagnosticKind::UnresolvedType { expr_kind, name } => (
+            "UnresolvedType".into(),
+            match name {
+                Some(n) => format!("{}:{}", expr_kind.as_str(), n.as_str()),
+                None => expr_kind.as_str().to_string(),
+            },
+        ),
         DiagnosticKind::Unsupported { target, construct, detail } => (
             "Unsupported".into(),
             format!(

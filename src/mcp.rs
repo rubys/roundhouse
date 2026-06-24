@@ -433,9 +433,16 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_reports_clean_for_real_blog() {
+    fn diagnostics_real_blog_has_no_errors() {
+        // real-blog carries no hard type ERRORS. It does surface
+        // coverage-class WARNINGS (unresolved framework helpers,
+        // gradual-untyped) — visible modeling debt we ratchet to zero as
+        // the framework gets typed, not a regression. "No errors" is the
+        // durable invariant; the old "clean" assertion only held while
+        // those silently-unresolved positions were invisible.
         let resp = call(&server(), "diagnostics", json!({}));
-        assert!(text_of(&resp).contains("clean"), "got: {}", text_of(&resp));
+        let text = text_of(&resp);
+        assert!(!text.contains("error["), "real-blog should report no errors, got: {text}");
     }
 
     #[test]
