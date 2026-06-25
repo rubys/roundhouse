@@ -2418,3 +2418,56 @@ end
         );
     }
 }
+
+#[test]
+fn active_record_base_and_class_side_finders_resolve() {
+    // Two class-side AR gaps:
+    //  (1) `ActiveRecord::Base.transaction { ... }` /
+    //      `ActiveRecord::Base.connection.exec_query(...)` — the literal
+    //      base class (parent-chain sentinel) is now a registered class.
+    //  (2) `Story.find_each` / `Category.pluck(:name)` — relation-terminal
+    //      methods Rails delegates from the class to `all`, now on the
+    //      model's class methods (not just the `Array<Self>` relation).
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/category.rb",
+            "class Category < ApplicationRecord\nend\n",
+        ),
+        (
+            "app/models/story.rb",
+            r#"class Story < ApplicationRecord
+  def self.recompute
+    Story.find_each(&:touch)
+    Category.pluck(:name)
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/admin_controller.rb",
+            r#"class AdminController < ApplicationController
+  def run
+    ActiveRecord::Base.transaction { @story.save }
+    @rows = ActiveRecord::Base.connection.exec_query("select 1")
+  end
+end
+"#,
+        ),
+    ]);
+
+    let failures = send_dispatch_failures(&app);
+    for m in ["transaction", "connection", "find_each", "pluck"] {
+        assert!(
+            !failures.iter().any(|f| f == m),
+            "class-side AR `{m}` should resolve; dispatch failures = {failures:?}"
+        );
+    }
+}

@@ -196,6 +196,31 @@ impl Analyzer {
                     .or_insert_with(|| array_of_self.clone());
             }
 
+            // Relation-terminal methods Rails delegates from the class to
+            // `all` (`Story.find_each`, `Category.pluck(:name)`). Unlike the
+            // builders above these don't return a relation, so they sit
+            // outside that loop; their return types match the `Array<Self>`
+            // (relation) dispatch in send.rs so a class-side call and the
+            // equivalent `.all`-chained call agree. `entry().or_insert` so a
+            // catalog entry or named scope still wins. `find_each` &
+            // friends yield the element to a block and return the relation
+            // for chaining; `pluck`/`pick` project column values (column
+            // type unknowable from the name alone → `Array<Untyped>`);
+            // `ids` projects primary keys.
+            for batch in ["find_each", "find_in_batches", "in_batches"] {
+                cls.class_methods
+                    .entry(Symbol::from(batch))
+                    .or_insert_with(|| array_of_self.clone());
+            }
+            for proj in ["pluck", "pick"] {
+                cls.class_methods
+                    .entry(Symbol::from(proj))
+                    .or_insert_with(|| Ty::Array { elem: Box::new(Ty::Untyped) });
+            }
+            cls.class_methods
+                .entry(Symbol::from("ids"))
+                .or_insert_with(|| Ty::Array { elem: Box::new(Ty::Int) });
+
             // Instance methods from schema-derived attributes.
             // These are per-model (column names differ across
             // models), so they stay outside the catalog — the
@@ -322,6 +347,33 @@ impl Analyzer {
             }
 
             classes.insert(model.name.clone(), cls);
+        }
+
+        // `ActiveRecord::Base` itself — the literal base class, called
+        // directly as `ActiveRecord::Base.transaction { ... }` and
+        // `ActiveRecord::Base.connection.exec_query(...)`. It sits at the
+        // end of every model's parent chain but was never registered as a
+        // class, so dispatch on the non-model receiver `Class
+        // { ActiveRecord::Base }` found nothing and errored. `transaction`
+        // runs the block in a DB transaction (return = the block value,
+        // not statically tracked) and `connection` hands back a raw
+        // connection adapter — both gradual (`Untyped`), exactly mirroring
+        // the per-model class-side framework block above. `or_insert` so a
+        // real `active_record/base.rb` library file (none in practice)
+        // would still win.
+        {
+            let mut base = ClassInfo::default();
+            for m in [
+                "transaction",
+                "connection",
+                "connection_pool",
+                "establish_connection",
+            ] {
+                base.class_methods.insert(Symbol::from(m), Ty::Untyped);
+            }
+            classes
+                .entry(ClassId(Symbol::from("ActiveRecord::Base")))
+                .or_insert(base);
         }
 
         // ActiveModel::Errors — the collection returned by `model.errors`.
