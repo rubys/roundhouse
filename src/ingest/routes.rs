@@ -196,7 +196,17 @@ fn ingest_explicit_route(
                             to_is_unsupported = true;
                         }
                     }
-                    "as" => as_name = symbol_value(value).map(Symbol::from),
+                    // `:as` accepts either a symbol (`as: :user`) or a
+                    // string (`:as => "user"`); lobsters uses the string
+                    // form throughout. Without the string fallback the name
+                    // was dropped and the helper fell back to the action
+                    // name (`show_path` for `user_path`), leaving every
+                    // `user_path`/`tag_path`/… call unresolved.
+                    "as" => {
+                        as_name = symbol_value(value)
+                            .map(Symbol::from)
+                            .or_else(|| string_value(value).map(Symbol::from));
+                    }
                     // `via: :all` (HTTP-method override) and similar
                     // method-shaping options aren't modeled today; the
                     // route still resolves to the outer verb. Other

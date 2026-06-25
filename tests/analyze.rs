@@ -1651,6 +1651,20 @@ fn send_dispatch_failures(app: &roundhouse::App) -> Vec<String> {
         .collect()
 }
 
+/// Names flagged `unresolved_type` (the local/method-call reads whose
+/// type stayed `Var`). Used to assert a registered surface resolves.
+fn unresolved_type_names(app: &roundhouse::App) -> Vec<String> {
+    diagnose(app)
+        .into_iter()
+        .filter_map(|d| match d.kind {
+            DiagnosticKind::UnresolvedType { name: Some(name), .. } => {
+                Some(name.as_str().to_string())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
 fn association_writers_and_ar_instance_methods_resolve() {
     // belongs_to/has_one register a writer `name=` (not just the reader),
@@ -2593,6 +2607,60 @@ end
         assert!(
             !failures.iter().any(|f| f == m),
             "gem-class surface `{m}` should resolve; dispatch failures = {failures:?}"
+        );
+    }
+}
+
+#[test]
+fn flash_defined_and_route_helper_surface_resolves() {
+    // Warning-sweep levers: `flash` (FlashHash — `[]`/`now`/`each`), the
+    // `defined?` marker, controller-context `action_name`, and route
+    // helpers from both the string `:as` form and Rails' path-derived
+    // auto-name (`/settings` → `settings_path`). None should land on the
+    // unresolved-type ledger.
+    let app = app_from_files(&[
+        (
+            "config/routes.rb",
+            r#"Rails.application.routes.draw do
+  get "/u/:username" => "users#show", :as => "user"
+  get "/settings" => "settings#index"
+end
+"#,
+        ),
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/things_controller.rb",
+            r#"class ThingsController < ApplicationController
+  def show
+    flash[:error] = "x"
+    flash.now[:notice] = "y"
+    @here = defined?(maybe_local)
+    @who = action_name
+    @a = user_path(1)
+    @b = settings_path
+  end
+end
+"#,
+        ),
+    ]);
+
+    // No send-dispatch errors on the FlashHash surface.
+    let failures = send_dispatch_failures(&app);
+    for m in ["[]", "[]=", "now"] {
+        assert!(
+            !failures.iter().any(|f| f == m),
+            "flash `{m}` should resolve; failures = {failures:?}"
+        );
+    }
+    // No unresolved-type warnings on these reads.
+    let unresolved = unresolved_type_names(&app);
+    for n in ["flash", "action_name", "user_path", "settings_path"] {
+        assert!(
+            !unresolved.iter().any(|u| u == n),
+            "`{n}` should resolve (not unresolved_type); unresolved = {unresolved:?}"
         );
     }
 }

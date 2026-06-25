@@ -1310,6 +1310,13 @@ pub(super) fn universal_method(method: &Symbol) -> Option<Ty> {
         // harvest as `Ty::Var` and the dispatch registry never
         // learns their declared return type from the RBS contract.
         "raise" | "throw" => Some(Ty::Bottom),
+        // `defined?(x)` — Ruby keyword ingested as a marker Send (recv:None,
+        // method "defined?"). Returns a description String when the operand
+        // is defined, else nil. Universal because the operand is arbitrary;
+        // resolving it here keeps the common `defined?(local) && local`
+        // partial-local guard off the unresolved-type ledger. (The view
+        // lowerer later rewrites the marker to `!name.nil?` — emit unaffected.)
+        "defined?" => Some(Ty::Union { variants: vec![Ty::Str, Ty::Nil] }),
         // ActiveSupport's universal `try` / `try!` — call a method if
         // the receiver responds, else nil. Return type is opaque
         // (depends on the dispatched method); `Ty::Untyped` propagates

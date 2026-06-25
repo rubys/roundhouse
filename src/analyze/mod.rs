@@ -737,10 +737,34 @@ impl Analyzer {
         let route_helper_names: Vec<String> = {
             let mut names = Vec::new();
             let mut seen = std::collections::BTreeSet::new();
+            // Rails auto-names a `:as`-less route from its path's static
+            // segments (`get "/settings"` → `settings_path`, `get
+            // "/replies/unread"` → `replies_unread_path`). `flatten_routes`
+            // (which also feeds *emit*) keeps its action-name fallback, so we
+            // add the path-derived candidate here, on the analyze dispatch
+            // surface ONLY — purely additive (extra `*_path` readers can only
+            // resolve a call, never alter emitted output). A genuinely-named
+            // route still registers its real `as_name` first.
+            let path_candidate = |path: &str| -> String {
+                path.split('/')
+                    .filter(|seg| {
+                        !seg.is_empty()
+                            && !seg.starts_with(':')
+                            && !seg.starts_with('*')
+                            && seg.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    })
+                    .collect::<Vec<_>>()
+                    .join("_")
+            };
             for route in crate::lower::flatten_routes(app) {
-                if seen.insert(route.as_name.clone()) {
-                    names.push(format!("{}_path", route.as_name));
-                    names.push(format!("{}_url", route.as_name));
+                for candidate in [route.as_name.clone(), path_candidate(&route.path)] {
+                    if candidate.is_empty() {
+                        continue;
+                    }
+                    if seen.insert(candidate.clone()) {
+                        names.push(format!("{candidate}_path"));
+                        names.push(format!("{candidate}_url"));
+                    }
                 }
             }
             names
@@ -786,6 +810,21 @@ impl Analyzer {
             // turbo / hotwire
             "turbo_frame_tag", "turbo_stream_from", "turbo_refreshes_with",
             "turbo_include_tags", "turbo_page_requires_reload",
+            // form option builders + FormTagHelper (all render to SafeBuffer
+            // strings, like the tag helpers above).
+            "options_for_select", "options_from_collection_for_select",
+            "option_groups_from_collection_for_select", "grouped_options_for_select",
+            "time_zone_options_for_select", "collection_select",
+            "form_tag", "label_tag", "text_field_tag", "password_field_tag",
+            "hidden_field_tag", "text_area_tag", "check_box_tag",
+            "radio_button_tag", "select_tag", "submit_tag", "button_tag",
+            "field_set_tag", "file_field_tag", "email_field_tag",
+            "number_field_tag", "search_field_tag", "telephone_field_tag",
+            "url_field_tag", "date_field_tag", "color_field_tag",
+            "fields_for", "token_list", "class_names",
+            // controller/request context exposed to views (and controllers,
+            // registered there too) — both return the current name as Str.
+            "action_name", "controller_name", "controller_path",
         ] {
             action_view
                 .instance_methods
@@ -805,6 +844,18 @@ impl Analyzer {
         for m in ["notice", "alert"] {
             action_view.instance_methods.insert(Symbol::from(m), Ty::Str);
         }
+        // `flash` — the FlashHash. Bare `flash` was unmodeled, so
+        // `flash[:error]` / `flash.now[:error]` / `flash.each` / `flash.keep`
+        // (pervasive in controllers and views) all bottomed out at Var. Type
+        // it as a FlashHash whose surface is registered below; both the view
+        // (instance) and controller (class-side) contexts get it.
+        let flash_ty = Ty::Class {
+            id: ClassId(Symbol::from("ActionDispatch::Flash::FlashHash")),
+            args: vec![],
+        };
+        action_view
+            .instance_methods
+            .insert(Symbol::from("flash"), flash_ty.clone());
         // jbuilder `json` builder (in `*.json.jbuilder` views) is dynamic —
         // `json.<field>`/`json.array!`/`json.partial!` build from the method
         // name, so Untyped (gradual) is the honest type and chains through
@@ -818,6 +869,57 @@ impl Analyzer {
                 .or_insert(Ty::Str);
         }
         classes.insert(ClassId(Symbol::from("ActionView::Base")), action_view);
+
+        // The FlashHash returned by `flash`. Values are messages (Str); `now`
+        // is the same hash scoped to this request (so `flash.now[:x]` types);
+        // `notice`/`alert`/`error`/`success` are the convenience readers Rails
+        // generates; `keep`/`discard`/`each` return the hash for chaining;
+        // predicates and `[]` round out the surface. Lookups not listed fall
+        // through to "no known method" — extend as the corpus demands.
+        {
+            let mut flash = ClassInfo::default();
+            let flash_self = Ty::Class {
+                id: ClassId(Symbol::from("ActionDispatch::Flash::FlashHash")),
+                args: vec![],
+            };
+            for (m, ty) in [
+                ("[]", Ty::Str),
+                ("[]=", Ty::Nil),
+                ("store", Ty::Nil),
+                ("now", flash_self.clone()),
+                ("notice", Ty::Str),
+                ("alert", Ty::Str),
+                ("error", Ty::Str),
+                ("success", Ty::Str),
+                ("notice=", Ty::Str),
+                ("alert=", Ty::Str),
+                ("delete", Ty::Str),
+                ("keep", flash_self.clone()),
+                ("discard", flash_self.clone()),
+                ("each", flash_self.clone()),
+                ("each_pair", flash_self.clone()),
+                ("clear", flash_self.clone()),
+                ("update", flash_self.clone()),
+                ("merge!", flash_self.clone()),
+                ("key?", Ty::Bool),
+                ("has_key?", Ty::Bool),
+                ("include?", Ty::Bool),
+                ("any?", Ty::Bool),
+                ("empty?", Ty::Bool),
+                ("present?", Ty::Bool),
+                ("blank?", Ty::Bool),
+                ("keys", Ty::Array { elem: Box::new(Ty::Sym) }),
+                ("values", Ty::Array { elem: Box::new(Ty::Str) }),
+                ("to_h", Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) }),
+                ("to_hash", Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) }),
+            ] {
+                flash.instance_methods.insert(Symbol::from(m), ty);
+            }
+            classes.insert(
+                ClassId(Symbol::from("ActionDispatch::Flash::FlashHash")),
+                flash,
+            );
+        }
 
         // Rails singleton — `Rails.application` / `Rails.logger` /
         // `Rails.cache` / `Rails.env` / `Rails.root` are pervasive
@@ -979,6 +1081,18 @@ impl Analyzer {
         app_ctrl.class_methods.insert(Symbol::from("render"), Ty::Nil);
         app_ctrl.class_methods.insert(Symbol::from("redirect_to"), Ty::Nil);
         app_ctrl.class_methods.insert(Symbol::from("head"), Ty::Nil);
+        // `flash` (FlashHash) and the current action/controller names are
+        // available on the controller via implicit self, same as in views.
+        app_ctrl.class_methods.insert(
+            Symbol::from("flash"),
+            Ty::Class {
+                id: ClassId(Symbol::from("ActionDispatch::Flash::FlashHash")),
+                args: vec![],
+            },
+        );
+        for m in ["action_name", "controller_name", "controller_path"] {
+            app_ctrl.class_methods.insert(Symbol::from(m), Ty::Str);
+        }
         // Route URL helpers (controller side — `redirect_to articles_url`).
         for name in &route_helper_names {
             app_ctrl
