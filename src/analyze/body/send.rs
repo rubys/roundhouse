@@ -846,7 +846,7 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
             _ => Ty::Array { elem: Box::new(elem.clone()) },
         },
         // `each`, predicates, and shape-preserving transforms keep elem.
-        "each" | "select" | "filter" | "reject"
+        "each" | "reverse_each" | "select" | "filter" | "reject"
         | "sort" | "sort_by" | "reverse" | "compact" | "flatten" | "uniq" => {
             Ty::Array { elem: Box::new(elem.clone()) }
         }
@@ -1028,14 +1028,58 @@ pub(super) fn hash_method(
         "map" | "collect" => Ty::Array {
             elem: Box::new(block_ret.cloned().unwrap_or_else(unknown)),
         },
-        // `transform_values { |v| ... }` → Hash[K, U].
-        "transform_values" => Ty::Hash {
+        // `transform_values { |v| ... }` → Hash[K, U] (the bang form
+        // mutates in place but returns self — same resulting shape).
+        "transform_values" | "transform_values!" => Ty::Hash {
             key: Box::new(key.clone()),
             value: Box::new(block_ret.cloned().unwrap_or_else(|| value.clone())),
         },
         // `transform_keys { |k| ... }` → Hash[U, V].
-        "transform_keys" => Ty::Hash {
+        "transform_keys" | "transform_keys!" => Ty::Hash {
             key: Box::new(block_ret.cloned().unwrap_or_else(|| key.clone())),
+            value: Box::new(value.clone()),
+        },
+        // Subset selections keep the Hash shape. `except`/`slice`/
+        // `without` drop or keep named keys; `select`/`filter`/`reject`/
+        // `compact` filter by a block/value. ActiveSupport adds
+        // `except`/`without`; Ruby 3.0+ has `except` natively.
+        "except" | "except!" | "slice" | "slice!" | "without"
+        | "select" | "filter" | "reject" | "compact" | "compact!"
+        | "select!" | "filter!" | "reject!" | "keep_if" | "delete_if"
+        | "merge!" | "update" => Ty::Hash {
+            key: Box::new(key.clone()),
+            value: Box::new(value.clone()),
+        },
+        // `values_at`/`fetch_values(*keys)` → Array of the value type.
+        "values_at" | "fetch_values" => Ty::Array { elem: Box::new(value.clone()) },
+        // `sort`/`sort_by` evaluate the hash to a sorted Array of
+        // `[key, value]` pairs (same element shape as `to_a`).
+        "sort" | "sort_by" => Ty::Array {
+            elem: Box::new(Ty::Tuple { elems: vec![key.clone(), value.clone()] }),
+        },
+        // `min_by`/`max_by`/`find`/`detect` yield (k, v) and return a
+        // single `[key, value]` pair, or nil on an empty hash.
+        "min_by" | "max_by" | "find" | "detect" => Ty::Union {
+            variants: vec![
+                Ty::Tuple { elems: vec![key.clone(), value.clone()] },
+                Ty::Nil,
+            ],
+        },
+        // `invert` swaps keys and values.
+        "invert" => Ty::Hash {
+            key: Box::new(value.clone()),
+            value: Box::new(key.clone()),
+        },
+        // `flat_map` returns an Array (block return flattened by one);
+        // we don't track the block's element type here.
+        "flat_map" => Ty::Array { elem: Box::new(unknown()) },
+        // Folds / aggregates whose result depends on the block or seed,
+        // and nested `dig` access — gradual.
+        "reduce" | "inject" | "each_with_object" | "sum" | "dig" => Ty::Untyped,
+        // Shape-neutral iteration helpers that return self (the hash)
+        // for chaining (`length`/`size`/`count` are Int, handled above).
+        "each_value" | "each_key" | "each_with_index" => Ty::Hash {
+            key: Box::new(key.clone()),
             value: Box::new(value.clone()),
         },
         // Rails strong-params: `params.expect(:id)` returns the
@@ -1071,6 +1115,11 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         // `casecmp?` returns Bool.
         "casecmp" => Ty::Int,
         "casecmp?" => Ty::Bool,
+        // `ord` → the codepoint of the first character.
+        "ord" => Ty::Int,
+        // `=~` (regex-match operator, desugars to `str.=~(re)`) → the
+        // match position or nil. `match` (below) is the MatchData form.
+        "=~" => Ty::Union { variants: vec![Ty::Int, Ty::Nil] },
         "chars" | "lines" | "split" | "bytes" | "scan" => Ty::Array { elem: Box::new(Ty::Str) },
         "empty?" | "blank?" | "present?" | "include?" | "start_with?"
         | "end_with?" | "match?" => Ty::Bool,
@@ -1119,6 +1168,13 @@ pub(super) fn sym_method(method: &Symbol) -> Ty {
         "length" | "size" => Ty::Int,
         "upcase" | "downcase" | "capitalize" | "swapcase" => Ty::Sym,
         "empty?" => Ty::Bool,
+        // Symbol delegates string-ish matching to `to_s`: `match` →
+        // MatchData|nil (Untyped, mirroring `String#match` — typically
+        // chained as `m[1]`, gradual from there); `match?` the predicate
+        // form; `=~` the match-position operator.
+        "match" => Ty::Untyped,
+        "match?" => Ty::Bool,
+        "=~" => Ty::Union { variants: vec![Ty::Int, Ty::Nil] },
         "<=>" | "<" | ">" | "<=" | ">=" => Ty::Bool,
         _ => unknown(),
     }

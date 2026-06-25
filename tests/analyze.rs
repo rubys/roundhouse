@@ -2471,3 +2471,46 @@ end
         );
     }
 }
+
+#[test]
+fn str_sym_hash_method_surface_resolves() {
+    // Method-surface gaps the Lobsters corpus exercised on primitive
+    // receivers: String#ord / #=~, Symbol#match, and the Hash methods
+    // except / transform_values! / values_at / sort_by (the last chained
+    // into Array#reverse_each). Each previously dispatched to "no known
+    // method" because the dispatch table returned an open Var.
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  def crunch
+    n = "x".ord
+    matched = ("a200" =~ /\A2/)
+    sym_hit = :delete_5.match(/^delete_(.+)$/)
+    h = { :a => 1, :b => 2 }
+    kept = h.except(:a)
+    h.transform_values! { 0 }
+    picked = h.values_at(:a, :b)
+    h.sort_by { |_k, v| v }.reverse_each { |kv| kv[1] }
+    [n, matched, sym_hit, kept, picked]
+  end
+end
+"#,
+        ),
+    ]);
+
+    let failures = send_dispatch_failures(&app);
+    for m in [
+        "ord", "=~", "match", "except", "transform_values!", "values_at",
+        "sort_by", "reverse_each",
+    ] {
+        assert!(
+            !failures.iter().any(|f| f == m),
+            "primitive method `{m}` should resolve; dispatch failures = {failures:?}"
+        );
+    }
+}
