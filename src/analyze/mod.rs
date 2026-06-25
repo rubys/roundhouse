@@ -613,6 +613,23 @@ impl Analyzer {
         // lives here (flat view helpers — `link_to`/`render`/… — will join
         // it); the view loops set this as `self_ty` so implicit-self helper
         // calls dispatch against it.
+        // Route URL helper names from the ingested route table — one
+        // `<as_name>_path` / `<as_name>_url` per named route (same flattening
+        // the route emitters use). Derived from real routes, not a `_path$`
+        // name heuristic, so only declared routes resolve. Registered on
+        // both the view context and ApplicationController below.
+        let route_helper_names: Vec<String> = {
+            let mut names = Vec::new();
+            let mut seen = std::collections::BTreeSet::new();
+            for route in crate::lower::flatten_routes(app) {
+                if seen.insert(route.as_name.clone()) {
+                    names.push(format!("{}_path", route.as_name));
+                    names.push(format!("{}_url", route.as_name));
+                }
+            }
+            names
+        };
+
         let mut action_view = ClassInfo::default();
         action_view
             .instance_methods
@@ -664,6 +681,26 @@ impl Analyzer {
         // (that turns `tag.foo` into a dispatch error). Untyped (gradual):
         // both `tag("br")` and `tag.section` flow through without erroring.
         action_view.instance_methods.insert(Symbol::from("tag"), Ty::Untyped);
+        // Flash convenience accessors — Rails 7 scaffolds emit bare
+        // `notice`/`alert` in views; both read `flash[:notice]`/`[:alert]`.
+        // Typed Str (not Str|Nil): consistent with the other Str-returning
+        // helpers, and a nilable here trips Crystal's strict nil-concat
+        // narrowing in `<%= notice %>`. `.present?` still resolves on Str.
+        for m in ["notice", "alert"] {
+            action_view.instance_methods.insert(Symbol::from(m), Ty::Str);
+        }
+        // jbuilder `json` builder (in `*.json.jbuilder` views) is dynamic —
+        // `json.<field>`/`json.array!`/`json.partial!` build from the method
+        // name, so Untyped (gradual) is the honest type and chains through
+        // it without erroring.
+        action_view.instance_methods.insert(Symbol::from("json"), Ty::Untyped);
+        // Route URL helpers (view side).
+        for name in &route_helper_names {
+            action_view
+                .instance_methods
+                .entry(Symbol::from(name.as_str()))
+                .or_insert(Ty::Str);
+        }
         classes.insert(ClassId(Symbol::from("ActionView::Base")), action_view);
 
         // Rails singleton — `Rails.application` / `Rails.logger` /
@@ -826,6 +863,13 @@ impl Analyzer {
         app_ctrl.class_methods.insert(Symbol::from("render"), Ty::Nil);
         app_ctrl.class_methods.insert(Symbol::from("redirect_to"), Ty::Nil);
         app_ctrl.class_methods.insert(Symbol::from("head"), Ty::Nil);
+        // Route URL helpers (controller side — `redirect_to articles_url`).
+        for name in &route_helper_names {
+            app_ctrl
+                .class_methods
+                .entry(Symbol::from(name.as_str()))
+                .or_insert(Ty::Str);
+        }
         // `respond_to do |format| ... end` — yields the mime Collector
         // registered above, so the `format` block param (and `format.html`/
         // `format.json` calls) type. Block-yielding Fn; result is nil.

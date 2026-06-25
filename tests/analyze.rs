@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use roundhouse::analyze::{diagnose, Analyzer, DiagnosticKind, Severity};
+use roundhouse::analyze::{diagnose, Analyzer, DiagnosticKind};
 use roundhouse::effect::Effect;
 use roundhouse::expr::{ExprNode, LValue, Literal};
 use roundhouse::ingest::ingest_app;
@@ -1568,28 +1568,21 @@ fn diagnose_flags_send_dispatch_failure_on_known_receiver() {
 #[test]
 fn diagnose_is_silent_on_tiny_blog() {
     // Tiny-blog's full surface — controllers, scopes, methods, and the
-    // ERB index view — types with zero hard ERRORS after:
-    //   • P1 (local Var + block params)
-    //   • P2 (controller→view channel + partial locals)
-    //   • AR instance-method seeding (save/destroy/update/etc.)
-    //   • Str/Int operator entries (handles the ERB-compiled `_buf + "..."`)
+    // ERB index view — types with ZERO diagnostics: no errors, and (since
+    // the route/view helpers it uses like `posts_path` are now modeled) no
+    // coverage-class warnings either. Re-tightened to fully-clean after the
+    // view-helper catalog landed; it had briefly relaxed to "zero errors"
+    // while `unresolved_type` surfaced the unmodeled helpers.
     //
-    // It still surfaces coverage-class WARNINGS (unmodeled framework
-    // helpers like `posts_path`, gradual-untyped) — visible modeling debt
-    // we ratchet to zero as the framework gets typed, not a regression.
-    // The old assertion required zero *diagnostics*, which only held while
-    // those silently-unresolved positions were invisible.
-    //
-    // If an ERROR appears here, the delta is a real gap — extend the
-    // registry rather than loosen the assertion.
+    // If a diagnostic appears here, the delta lists the new gap — extend
+    // the registry rather than loosen the assertion.
     let mut app = ingest_app(fixture_path()).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
     let diags = diagnose(&app);
-    let errors: Vec<_> = diags.iter().filter(|d| d.severity == Severity::Error).collect();
     assert!(
-        errors.is_empty(),
-        "tiny-blog should produce zero ERROR diagnostics; got {:#?}",
-        errors,
+        diags.is_empty(),
+        "tiny-blog should produce zero diagnostics; got {:#?}",
+        diags,
     );
 }
 

@@ -244,4 +244,28 @@ fn type_analysis_coverage() {
             .collect::<Vec<_>>()
             .join("\n")
     );
+
+    // Inference-gap floor: every `unresolved_type` (an open `Ty::Var` the
+    // body-typer couldn't resolve) is closed on real-blog — only
+    // *intentional* gradual escapes (`gradual_untyped`, e.g. the dynamic
+    // jbuilder `json` builder) may remain. Ratchets in the view-helper +
+    // AR-query catalog work; a new unresolved position re-fails this.
+    let unresolved: Vec<_> = diags
+        .iter()
+        .filter(|d| matches!(d.kind, DiagnosticKind::UnresolvedType { .. }))
+        .collect();
+    assert!(
+        unresolved.is_empty(),
+        "real-blog has {} unresolved_type (inference-gap) diagnostic(s) \
+         (expected zero; only gradual escapes may remain):\n{}",
+        unresolved.len(),
+        unresolved
+            .iter()
+            .map(|d| {
+                let (kind, detail) = diagnostic_signature(d);
+                format!("  {kind}: {detail}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 }

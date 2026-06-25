@@ -458,6 +458,11 @@ impl<'a> BodyTyper<'a> {
                         for a in args.iter_mut() { self.analyze_expr(a, ctx); }
                         return Ty::Bool;
                     }
+                    // Kernel IO — `puts`/`print`/`warn` return nil.
+                    if matches!(method.as_str(), "puts" | "print" | "warn") {
+                        for a in args.iter_mut() { self.analyze_expr(a, ctx); }
+                        return Ty::Nil;
+                    }
                 }
 
                 // Self-dispatch annotation. When `recv == None` and the
