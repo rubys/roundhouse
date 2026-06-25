@@ -523,18 +523,48 @@ fn walk_erb<V: Vfs + ?Sized>(
     for path in vfs.read_dir(dir)? {
         if vfs.is_dir(&path) {
             walk_erb(vfs, &path, out)?;
-        } else if path.extension().and_then(|e| e.to_str()) == Some("erb") {
-            // Only HTML templates — `.html.erb`. Mailer plain-text
-            // templates (`.text.erb`) aren't part of the scaffold
-            // render path and would collide on emit (their stems
-            // strip to the same name as the HTML template).
-            let path_str = path.to_string_lossy();
-            if path_str.ends_with(".html.erb") {
-                out.push(path);
+            continue;
+        }
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("erb") => {
+                // Only HTML templates — `.html.erb`. Mailer plain-text
+                // templates (`.text.erb`) aren't part of the scaffold
+                // render path and would collide on emit (their stems
+                // strip to the same name as the HTML template).
+                let path_str = path.to_string_lossy();
+                if path_str.ends_with(".html.erb") {
+                    out.push(path);
+                } else {
+                    // `.text.erb` / `.js.erb` / …: carries Ruby we don't
+                    // type. Surface as a coverage gap rather than dropping
+                    // it silently (no-op outside survey mode).
+                    record_skipped_view(&path, "erb (non-html format)");
+                }
             }
+            // jbuilder is ingested by `walk_jbuilder`; leave it alone.
+            Some("jbuilder") => {}
+            // Template engines we don't ingest yet — they hold Ruby (or are
+            // pure Ruby, like `.json.ruby`) the analyzer never sees. Record
+            // so the hole is visible to `--continue` and the LSP/MCP.
+            Some(engine @ ("haml" | "slim" | "ruby" | "builder" | "rabl")) => {
+                record_skipped_view(&path, engine);
+            }
+            _ => {}
         }
     }
     Ok(())
+}
+
+/// Record an un-ingested view template as a survey gap. A no-op when
+/// survey mode is off, so the strict/CI path is unchanged; under
+/// `--continue` (and the LSP/MCP, which now ingest in survey mode) it
+/// makes the HAML / `.text.erb` / `.ruby` coverage hole visible instead
+/// of letting whole template files vanish without a trace.
+fn record_skipped_view(path: &Path, engine: &str) {
+    survey::record(&IngestError::Unsupported {
+        file: path.display().to_string(),
+        message: format!("view template not ingested: {engine}"),
+    });
 }
 
 fn read_jbuilder_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<PathBuf>> {

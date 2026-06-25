@@ -740,3 +740,63 @@ fn classifies_models_vs_library_classes() {
         );
     }
 }
+
+/// Survey-mode ingest must recover from an unsupported construct (rather
+/// than aborting the whole app) and must record skipped view templates.
+/// This is the behavior the LSP/MCP rely on to stay usable on real apps,
+/// and the surfacing that keeps HAML/`.text.erb`/`.ruby` views from
+/// vanishing silently.
+#[test]
+fn survey_mode_recovers_from_unsupported_construct_and_records_skipped_views() {
+    use roundhouse::ingest::{ingest_app_from_tree, survey, IngestError};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    let files: &[(&str, &str)] = &[
+        // A backtick command (`XStringNode`) — an expression roundhouse
+        // doesn't model, so it aborts strict ingest.
+        (
+            "app/controllers/widgets_controller.rb",
+            "class WidgetsController < ApplicationController\n  def index\n    @out = `echo hi`\n  end\nend\n",
+        ),
+        // A HAML view: a template the analyzer never ingests.
+        ("app/views/widgets/show.html.haml", "%h1= @widget.name\n"),
+    ];
+    let tree = || -> HashMap<PathBuf, Vec<u8>> {
+        files
+            .iter()
+            .map(|(p, c)| (PathBuf::from(*p), c.as_bytes().to_vec()))
+            .collect()
+    };
+
+    // Strict mode (default): the unsupported construct aborts ingest.
+    assert!(
+        ingest_app_from_tree(tree()).is_err(),
+        "expected strict ingest to abort on the unsupported backtick command"
+    );
+
+    // Survey mode: ingest recovers to a best-effort App and records every
+    // gap — both the unsupported construct and the skipped HAML view.
+    survey::activate();
+    let result = ingest_app_from_tree(tree());
+    let gaps = survey::drain();
+    assert!(result.is_ok(), "survey-mode ingest should recover, not abort");
+
+    let messages: Vec<String> = gaps
+        .iter()
+        .map(|g| match g {
+            IngestError::Unsupported { message, .. } => message.clone(),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("view template not ingested: haml")),
+        "skipped HAML view should be recorded as a gap, got: {messages:?}"
+    );
+    assert!(
+        !messages.is_empty(),
+        "unsupported backtick command should be recorded as a gap"
+    );
+}

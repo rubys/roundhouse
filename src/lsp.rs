@@ -222,8 +222,16 @@ impl Server {
 
     fn reanalyze(&mut self) -> Vec<RhDiagnostic> {
         let vfs = OverlayVfs { disk: FsVfs::new(), overlay: &self.overlay };
+        // Survey mode: degrade past unsupported constructs (every real app
+        // has some) with a placeholder + recorded gap instead of aborting
+        // the whole ingest. Without it, one exotic node anywhere leaves the
+        // editor inert — no hovers, no diagnostics — on any app past the
+        // demo fixture. The recovered gaps aren't published as squiggles
+        // (they have no resolvable span); the win is a working `App`.
+        crate::ingest::survey::activate();
         let (result, mut parse_diags) =
             crate::ingest::prism::scope(|| ingest_app_with_vfs(&vfs, &self.root));
+        let _gaps = crate::ingest::survey::drain();
         match result {
             Ok(mut app) => {
                 Analyzer::new(&app).analyze(&mut app);

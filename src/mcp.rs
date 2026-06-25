@@ -28,7 +28,7 @@ use crate::analyze::{diagnose, Analyzer};
 use crate::app::App;
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::ide;
-use crate::ingest::ingest_app;
+use crate::ingest::{ingest_app, survey, IngestError};
 use crate::project::{self, BuildTarget};
 
 type McpResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -143,16 +143,27 @@ impl Server {
 
     /// Ingest + analyse the app fresh from disk — agents edit files between
     /// calls, so each query reflects the current on-disk state.
-    fn analyze(&self) -> Result<(App, Vec<Diagnostic>), String> {
+    ///
+    /// Ingest runs in *survey mode*: a single unsupported construct (which
+    /// every real app has — `alias_method`, `class << self`, …) records a
+    /// gap and substitutes a placeholder instead of aborting, so the rest
+    /// of the app stays queryable. Without this, one exotic node anywhere
+    /// turns every `type_at`/`diagnostics` call into "ingest failed",
+    /// making the server useless on any app larger than the demo fixture.
+    /// Returns the recovered gaps so `diagnostics` can report the coverage
+    /// hole rather than implying a clean bill of health.
+    fn analyze(&self) -> Result<(App, Vec<Diagnostic>, Vec<IngestError>), String> {
+        survey::activate();
         let (result, parse_diags) =
             crate::ingest::prism::scope(|| ingest_app(&self.root));
+        let gaps = survey::drain();
         let mut app = result.map_err(|e| format!("ingest failed: {e}"))?;
         Analyzer::new(&app).analyze(&mut app);
-        Ok((app, parse_diags))
+        Ok((app, parse_diags, gaps))
     }
 
     fn tool_type_at(&self, args: &Value) -> Result<String, String> {
-        let (app, _) = self.analyze()?;
+        let (app, _, _) = self.analyze()?;
         let (path, pos) = position_args(args)?;
         match ide::type_at_position(&app, &path, pos) {
             Some(info) => Ok(format!(
@@ -166,7 +177,7 @@ impl Server {
     }
 
     fn tool_can_be_nil(&self, args: &Value) -> Result<String, String> {
-        let (app, _) = self.analyze()?;
+        let (app, _, _) = self.analyze()?;
         let (path, pos) = position_args(args)?;
         match ide::type_at_position(&app, &path, pos) {
             Some(info) if info.nilable => Ok(format!("Yes — type is `{}`, which admits nil.", info.display)),
@@ -176,7 +187,7 @@ impl Server {
     }
 
     fn tool_references(&self, args: &Value) -> Result<String, String> {
-        let (app, _) = self.analyze()?;
+        let (app, _, _) = self.analyze()?;
         let (path, pos) = position_args(args)?;
         let file = ide::file_id(&app, &path).ok_or_else(|| format!("unknown file: {path}"))?;
         let src = ide::source(&app, file).ok_or("no source for file")?;
@@ -209,7 +220,7 @@ impl Server {
 
     fn tool_diagnostics(&self, args: &Value) -> Result<String, String> {
         let path_filter = args.get("path").and_then(|v| v.as_str());
-        let (app, parse_diags) = self.analyze()?;
+        let (app, parse_diags, gaps) = self.analyze()?;
         let mut diags = diagnose(&app);
         diags.extend(parse_diags);
 
@@ -223,10 +234,39 @@ impl Server {
             .map(|d| d.render(&app.sources))
             .collect();
 
-        if rendered.is_empty() {
+        // Ingest gaps recovered under survey mode: constructs/templates the
+        // analyzer skipped (so the result above is best-effort, not a clean
+        // bill of health). These have no resolvable span — render file +
+        // message. `survey::drain` flattens every gap to `Unsupported`.
+        let gap_lines: Vec<String> = gaps
+            .iter()
+            .filter_map(|g| match g {
+                IngestError::Unsupported { file, message } => Some((file, message)),
+                _ => None,
+            })
+            .filter(|(file, _)| match path_filter {
+                Some(p) => file.ends_with(p) || p.ends_with(file.as_str()),
+                None => true,
+            })
+            .map(|(file, message)| format!("{file}: ingest gap: {message}"))
+            .collect();
+
+        let mut sections = Vec::new();
+        if !rendered.is_empty() {
+            sections.push(format!("{} diagnostic(s):\n{}", rendered.len(), rendered.join("\n")));
+        }
+        if !gap_lines.is_empty() {
+            sections.push(format!(
+                "{} ingest gap(s) — not analyzed, result above is best-effort:\n{}",
+                gap_lines.len(),
+                gap_lines.join("\n")
+            ));
+        }
+
+        if sections.is_empty() {
             Ok("No diagnostics — the app type-checks clean.".to_string())
         } else {
-            Ok(format!("{} diagnostic(s):\n{}", rendered.len(), rendered.join("\n")))
+            Ok(sections.join("\n\n"))
         }
     }
 
@@ -237,7 +277,7 @@ impl Server {
             .ok_or_else(|| {
                 format!("unknown transpile target `{target_str}`; valid: {}", transpile_target_names())
             })?;
-        let (app, _) = self.analyze()?;
+        let (app, _, _) = self.analyze()?;
 
         // Run lower+emit for the target inside the emit-diagnostic scope so
         // every unsupported-construct gap is collected (issue #28's sink).
@@ -443,6 +483,21 @@ mod tests {
         let resp = call(&server(), "diagnostics", json!({}));
         let text = text_of(&resp);
         assert!(!text.contains("error["), "real-blog should report no errors, got: {text}");
+    }
+
+    #[test]
+    fn diagnostics_surfaces_uningested_view_templates() {
+        // Regression for the silent-view-drop gap: real-blog ships
+        // `mailer.text.erb` / `manifest.json.erb` (non-`.html.erb`
+        // templates the analyzer doesn't type). They must show up as
+        // ingest gaps rather than vanishing. This also guards the survey-
+        // mode wiring in `analyze()`: drop `survey::activate()` and the
+        // gap collector stays empty, so this line disappears.
+        let text = text_of(&call(&server(), "diagnostics", json!({})));
+        assert!(
+            text.contains("view template not ingested"),
+            "expected un-ingested view templates to be surfaced as gaps, got: {text}"
+        );
     }
 
     #[test]
