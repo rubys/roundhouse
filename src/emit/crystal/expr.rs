@@ -579,6 +579,15 @@ fn emit_node(n: &ExprNode) -> String {
             None => "break".to_string(),
             Some(v) => format!("break {}", emit_expr(v)),
         },
+        // Crystal has no `retry`/`redo` keyword — degrade to the
+        // unsupported-construct stub (a `raise`). emit_node has no span,
+        // so the diagnostic renders message-only (see diagnostics.rs).
+        ExprNode::Retry | ExprNode::Redo => crate::emit::diagnostics::report_unsupported(
+            crate::span::Span::synthetic(),
+            "crystal",
+            n.kind_str(),
+            "Crystal has no retry/redo equivalent",
+        ),
         ExprNode::Splat { value } => format!("*{}", emit_expr(value)),
         ExprNode::MultiAssign { targets, value } => {
             let lhs: Vec<String> = targets.iter().map(emit_lvalue).collect();

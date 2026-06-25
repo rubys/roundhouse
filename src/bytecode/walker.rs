@@ -519,6 +519,8 @@ fn node_kind(node: &ExprNode) -> &'static str {
         ExprNode::BeginRescue { .. } => "BeginRescue",
         ExprNode::Next { .. } => "Next",
         ExprNode::Break { .. } => "Break",
+        ExprNode::Retry => "Retry",
+        ExprNode::Redo => "Redo",
         ExprNode::Splat { .. } => "Splat",
         ExprNode::MultiAssign { .. } => "MultiAssign",
         ExprNode::While { .. } => "While",

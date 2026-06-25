@@ -223,6 +223,8 @@ fn collect_var_reads(
         ExprNode::Lit { .. }
         | ExprNode::Ivar { .. }
         | ExprNode::Const { .. }
+        | ExprNode::Retry
+        | ExprNode::Redo
         | ExprNode::SelfRef => {}
     }
 }
@@ -413,6 +415,8 @@ fn stamp_var_reads(
         ExprNode::Lit { .. }
         | ExprNode::Ivar { .. }
         | ExprNode::Const { .. }
+        | ExprNode::Retry
+        | ExprNode::Redo
         | ExprNode::SelfRef => {}
     }
 }

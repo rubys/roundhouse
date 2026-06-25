@@ -600,6 +600,8 @@ fn walk_expr<F: FnMut(&Expr) -> bool>(expr: &Expr, pred: &mut F) -> bool {
         | ExprNode::Var { .. }
         | ExprNode::Ivar { .. }
         | ExprNode::Const { .. }
+        | ExprNode::Retry
+        | ExprNode::Redo
         | ExprNode::SelfRef => false,
         ExprNode::Hash { entries, .. } => entries
             .iter()

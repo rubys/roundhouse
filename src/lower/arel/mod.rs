@@ -144,6 +144,8 @@ fn walk_subexprs_mut(expr: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
         | ExprNode::Var { .. }
         | ExprNode::Ivar { .. }
         | ExprNode::Const { .. }
+        | ExprNode::Retry
+        | ExprNode::Redo
         | ExprNode::SelfRef => {}
         ExprNode::Hash { entries, .. } => {
             for (k, v) in entries {

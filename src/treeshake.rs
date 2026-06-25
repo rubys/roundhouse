@@ -335,6 +335,8 @@ where
         | ExprNode::Var { .. }
         | ExprNode::Ivar { .. }
         | ExprNode::Const { .. }
+        | ExprNode::Retry
+        | ExprNode::Redo
         | ExprNode::SelfRef => {}
     }
 }

@@ -501,6 +501,8 @@ fn visit_subexprs(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         | ExprNode::Var { .. }
         | ExprNode::Ivar { .. }
         | ExprNode::Const { .. }
+        | ExprNode::Retry
+        | ExprNode::Redo
         | ExprNode::SelfRef => {}
         ExprNode::If { cond, then_branch, else_branch } => {
             f(cond); visit_subexprs(cond, f);

@@ -89,6 +89,8 @@ fn walk_children(e: &mut Expr) {
         | ExprNode::Var { .. }
         | ExprNode::Ivar { .. }
         | ExprNode::Const { .. }
+        | ExprNode::Retry
+        | ExprNode::Redo
         | ExprNode::SelfRef => {}
         ExprNode::Hash { entries, .. } => {
             for (k, v) in entries {

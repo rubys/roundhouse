@@ -2259,6 +2259,8 @@ impl Analyzer {
             | ExprNode::Var { .. }
             | ExprNode::Ivar { .. }
             | ExprNode::Const { .. }
+            | ExprNode::Retry
+            | ExprNode::Redo
             | ExprNode::SelfRef => {}
         }
     }
@@ -2281,6 +2283,8 @@ impl Analyzer {
             | ExprNode::Var { .. }
             | ExprNode::Ivar { .. }
             | ExprNode::Const { .. }
+            | ExprNode::Retry
+            | ExprNode::Redo
             | ExprNode::SelfRef => {}
 
             ExprNode::Return { value } => self.visit_effects(value, ctx, out),
@@ -4030,6 +4034,8 @@ fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
         | ExprNode::Var { .. }
         | ExprNode::Ivar { .. }
         | ExprNode::Const { .. }
+        | ExprNode::Retry
+        | ExprNode::Redo
         | ExprNode::SelfRef => {}
     }
 }
@@ -4208,6 +4214,8 @@ fn collect_types_expr(e: &Expr, out: &mut Vec<(crate::span::Span, crate::ty::Ty)
         | ExprNode::Var { .. }
         | ExprNode::Ivar { .. }
         | ExprNode::Const { .. }
+        | ExprNode::Retry
+        | ExprNode::Redo
         | ExprNode::SelfRef => {}
     }
 }

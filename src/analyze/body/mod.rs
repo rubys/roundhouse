@@ -869,6 +869,14 @@ impl<'a> BodyTyper<'a> {
                 Ty::Bottom
             }
 
+            ExprNode::Retry | ExprNode::Redo => {
+                // `retry` re-runs the enclosing begin/rescue; `redo`
+                // re-runs the current loop/block iteration. Both carry no
+                // value and divert control, so they type as `Bottom` and
+                // drop out of joins just like `next` / `break`.
+                Ty::Bottom
+            }
+
             ExprNode::Splat { value } => {
                 // Splat propagates the inner expression's type
                 // unchanged; the splat itself is a structural marker

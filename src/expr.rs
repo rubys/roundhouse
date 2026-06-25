@@ -344,6 +344,16 @@ pub enum ExprNode {
     /// site (`Ty::Bottom`); only meaningful inside a Lambda attached
     /// as a block.
     Break { value: Option<Expr> },
+    /// `retry` inside a `rescue` body — re-runs the enclosing
+    /// `begin`/`rescue` block from the top. Carries no value; divergent
+    /// at the source site (`Ty::Bottom`). Only legal lexically inside a
+    /// `BeginRescue` rescue clause (the parser enforces placement).
+    Retry,
+    /// `redo` inside an iterator block or loop — re-runs the current
+    /// iteration without re-evaluating the loop condition, advancing the
+    /// iterator, or rebinding block params. Carries no value; divergent
+    /// at the source site (`Ty::Bottom`).
+    Redo,
     /// `*expr` in argument position (`foo(*arr)`), array-literal
     /// position (`[a, *rest, b]`), or assignment LHS (rest pattern —
     /// not yet wired). At call sites the receiver spreads the array
@@ -442,6 +452,8 @@ impl ExprNode {
             ExprNode::Super { .. } => "Super",
             ExprNode::Next { .. } => "Next",
             ExprNode::Break { .. } => "Break",
+            ExprNode::Retry => "Retry",
+            ExprNode::Redo => "Redo",
             ExprNode::Splat { .. } => "Splat",
             ExprNode::MultiAssign { .. } => "MultiAssign",
             ExprNode::While { .. } => "While",
@@ -487,6 +499,8 @@ impl ExprNode {
             | ExprNode::Var { .. }
             | ExprNode::Ivar { .. }
             | ExprNode::Const { .. }
+            | ExprNode::Retry
+            | ExprNode::Redo
             | ExprNode::SelfRef => {}
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {
@@ -666,6 +680,8 @@ impl ExprNode {
             | ExprNode::Var { .. }
             | ExprNode::Ivar { .. }
             | ExprNode::Const { .. }
+            | ExprNode::Retry
+            | ExprNode::Redo
             | ExprNode::SelfRef => {}
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {

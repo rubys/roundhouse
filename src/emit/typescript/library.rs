@@ -1448,6 +1448,8 @@ fn collect_class_refs(e: &Expr, out: &mut BTreeSet<String>) {
         ExprNode::Lit { .. }
         | ExprNode::Var { .. }
         | ExprNode::Ivar { .. }
+        | ExprNode::Retry
+        | ExprNode::Redo
         | ExprNode::SelfRef => {}
     }
 }
@@ -1656,6 +1658,8 @@ fn rewrite_free(e: &Expr) -> Expr {
         | ExprNode::Var { .. }
         | ExprNode::Ivar { .. }
         | ExprNode::Const { .. }
+        | ExprNode::Retry
+        | ExprNode::Redo
         | ExprNode::SelfRef => (*e.node).clone(),
     };
     Expr {
@@ -1904,6 +1908,8 @@ fn rewrite(e: &Expr, super_method: Option<&str>) -> Expr {
         | ExprNode::Var { .. }
         | ExprNode::Ivar { .. }
         | ExprNode::Const { .. }
+        | ExprNode::Retry
+        | ExprNode::Redo
         | ExprNode::SelfRef => (*e.node).clone(),
     };
 

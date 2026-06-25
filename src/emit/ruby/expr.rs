@@ -146,6 +146,8 @@ fn emit_node(n: &ExprNode) -> String {
             None => "break".to_string(),
             Some(v) => format!("break {}", emit_expr(v)),
         },
+        ExprNode::Retry => "retry".to_string(),
+        ExprNode::Redo => "redo".to_string(),
         ExprNode::Splat { value } => format!("*{}", emit_expr(value)),
         ExprNode::MultiAssign { targets, value } => {
             let lhs: Vec<String> = targets.iter().map(emit_lvalue).collect();

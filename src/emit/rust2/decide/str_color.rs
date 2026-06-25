@@ -839,7 +839,9 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
         | ExprNode::SelfRef
         | ExprNode::Super { args: None }
         | ExprNode::Next { value: None }
-        | ExprNode::Break { value: None } => {}
+        | ExprNode::Break { value: None }
+        | ExprNode::Retry
+        | ExprNode::Redo => {}
     }
     count
 }

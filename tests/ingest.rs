@@ -338,6 +338,60 @@ fn special_variable_reads_ingest_as_sigil_named_vars() {
 }
 
 #[test]
+fn retry_and_redo_ingest_and_round_trip_through_ruby() {
+    // `retry` (inside a rescue body) and `redo` (inside a block) ingest as
+    // the value-less divergent nodes `ExprNode::Retry` / `ExprNode::Redo`
+    // and round-trip verbatim through the Ruby emitter.
+    use roundhouse::emit::ruby::emit_expr;
+
+    fn ingest_first(source: &[u8]) -> Expr {
+        let result = ruby_prism::parse(source);
+        let program = result.node();
+        let prog = program.as_program_node().unwrap();
+        let stmt = prog.statements().body().iter().next().unwrap();
+        roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap()
+    }
+
+    // Depth-first search for any node satisfying `pred`.
+    fn any_node(e: &Expr, pred: &dyn Fn(&ExprNode) -> bool) -> bool {
+        if pred(&e.node) {
+            return true;
+        }
+        let mut found = false;
+        e.node.for_each_child(&mut |c| {
+            if any_node(c, pred) {
+                found = true;
+            }
+        });
+        found
+    }
+
+    let with_retry = ingest_first(b"begin\n  foo\nrescue\n  retry\nend");
+    assert!(
+        any_node(&with_retry, &|n| matches!(n, ExprNode::Retry)),
+        "expected an ExprNode::Retry; got {:?}",
+        with_retry.node
+    );
+    assert!(
+        emit_expr(&with_retry).contains("retry"),
+        "Ruby emit should keep `retry`; got:\n{}",
+        emit_expr(&with_retry)
+    );
+
+    let with_redo = ingest_first(b"[1].each do |x|\n  redo\nend");
+    assert!(
+        any_node(&with_redo, &|n| matches!(n, ExprNode::Redo)),
+        "expected an ExprNode::Redo; got {:?}",
+        with_redo.node
+    );
+    assert!(
+        emit_expr(&with_redo).contains("redo"),
+        "Ruby emit should keep `redo`; got:\n{}",
+        emit_expr(&with_redo)
+    );
+}
+
+#[test]
 fn block_delimiter_style_is_preserved() {
     use roundhouse::{BlockStyle, ExprNode, ModelBodyItem};
 

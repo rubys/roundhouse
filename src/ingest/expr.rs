@@ -1233,6 +1233,11 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             };
             ExprNode::Break { value }
         }
+        // `retry` / `redo` — value-less divergent jumps. Placement
+        // (retry only inside a rescue body, redo inside a block/loop) is
+        // already enforced by the parser, so no validation is needed here.
+        n if n.as_retry_node().is_some() => ExprNode::Retry,
+        n if n.as_redo_node().is_some() => ExprNode::Redo,
         // `*expr` — splat. Valid in argument lists (`foo(*arr)`) and
         // array literals (`[a, *rest, b]`). The caller (Send/Apply/
         // Array ingest) sees `ExprNode::Splat` wrapping the inner
