@@ -2514,3 +2514,85 @@ end
         );
     }
 }
+
+#[test]
+fn gem_class_and_framework_surface_resolves() {
+    // The "gem-class" bucket: receivers backed by macros, ActiveModel
+    // mixins, an unmodeled gem superclass, framework base classes, and
+    // Array#[]=. Each previously dispatched to "no known method".
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        // `attribute :name, :type` virtual attribute (not a schema column).
+        (
+            "app/models/message.rb",
+            r#"class Message < ApplicationRecord
+  attribute :mod_note, :boolean
+  def note?
+    self.mod_note
+  end
+end
+"#,
+        ),
+        // `cattr_accessor :DOMAIN` → `Keybase.DOMAIN` class-side reader.
+        (
+            "extras/keybase.rb",
+            r#"class Keybase
+  cattr_accessor :DOMAIN
+  def self.host
+    Keybase.DOMAIN
+  end
+end
+"#,
+        ),
+        // ActiveModel::Validations mixin → `Search.new.valid?`.
+        (
+            "app/models/search.rb",
+            r#"class Search
+  include ActiveModel::Validations
+  def ok?
+    Search.new.valid?
+  end
+end
+"#,
+        ),
+        // Unmodeled gem superclass → inherited methods are gradual, not errors.
+        (
+            "lib/time_series.rb",
+            r#"class TimeSeries < SVG::Graph::TimeSeries
+  def render
+    g = TimeSeries.new
+    g.add_data(data: [])
+    g.burn_svg_only
+  end
+end
+"#,
+        ),
+        // ActionController::Base.helpers + Array#[]= in a model method.
+        (
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  def stuff
+    url = ActionController::Base.helpers.image_url("x.png")
+    buckets = [0, 0, 0]
+    buckets[1] = 5
+    [url, buckets]
+  end
+end
+"#,
+        ),
+    ]);
+
+    let failures = send_dispatch_failures(&app);
+    for m in [
+        "mod_note", "DOMAIN", "valid?", "add_data", "burn_svg_only",
+        "helpers", "[]=",
+    ] {
+        assert!(
+            !failures.iter().any(|f| f == m),
+            "gem-class surface `{m}` should resolve; dispatch failures = {failures:?}"
+        );
+    }
+}

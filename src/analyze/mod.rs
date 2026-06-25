@@ -260,6 +260,10 @@ impl Analyzer {
             // DSL block, backed by a serialized column, so absent from the
             // schema-derived attributes above. Register them as typed methods.
             register_typed_store(&model.body, &mut cls.instance_methods);
+            // `attribute :name, :type` virtual attributes (ActiveModel) —
+            // backed by something other than a schema column, so absent
+            // from `model.attributes` above.
+            register_ar_attributes(&model.body, &mut cls.instance_methods);
             // Plain `attr_accessor :previewing, :vote, …` virtual attributes:
             // real methods at runtime, absent from the schema, untyped. Register
             // reader/writer as gradual (`Untyped`) so dispatch resolves them.
@@ -374,6 +378,66 @@ impl Analyzer {
             classes
                 .entry(ClassId(Symbol::from("ActiveRecord::Base")))
                 .or_insert(base);
+        }
+
+        // `ActionController::Base.helpers` — the view-helper proxy a model
+        // or library reaches for to build paths/URLs outside a request
+        // (`ActionController::Base.helpers.image_url(...)` in user.rb). The
+        // literal class is unmodeled (controllers carry a hardcoded
+        // surface, but `ActionController::Base` itself was never a
+        // registered class), so the call errored. `helpers` returns the
+        // proxy (gradual — its method surface is the full view-helper set);
+        // the other entries are the framework class-side config readers
+        // that occasionally appear on the bare base class.
+        {
+            let mut acb = ClassInfo::default();
+            for m in ["helpers", "helper", "default_url_options"] {
+                acb.class_methods.insert(Symbol::from(m), Ty::Untyped);
+            }
+            classes
+                .entry(ClassId(Symbol::from("ActionController::Base")))
+                .or_insert(acb);
+        }
+
+        // `ActiveModel::Validations` / `ActiveModel::Model` — mixed into
+        // plain-Ruby form/query objects (`class Search; include
+        // ActiveModel::Validations`). A class that includes them gains the
+        // validation surface, resolved via the includer's `includes` and
+        // `lookup_in_module`. Registered as module ClassInfos carrying that
+        // surface. `ActiveModel::Model` bundles Validations + Conversion +
+        // attribute assignment, so it gets the same predicates plus the
+        // persistence-shape readers.
+        {
+            let errors_ty = Ty::Class {
+                id: ClassId(Symbol::from("ActiveModel::Errors")),
+                args: vec![],
+            };
+            let mut validations = ClassInfo::default();
+            for (m, ty) in [
+                ("valid?", Ty::Bool),
+                ("invalid?", Ty::Bool),
+                ("validate", Ty::Bool),
+                ("validate!", Ty::Bool),
+                ("errors", errors_ty.clone()),
+            ] {
+                validations.instance_methods.insert(Symbol::from(m), ty);
+            }
+            classes
+                .entry(ClassId(Symbol::from("ActiveModel::Validations")))
+                .or_insert(validations.clone());
+
+            let mut model = validations;
+            for (m, ty) in [
+                ("persisted?", Ty::Bool),
+                ("new_record?", Ty::Bool),
+                ("to_model", Ty::Untyped),
+                ("model_name", Ty::Untyped),
+            ] {
+                model.instance_methods.insert(Symbol::from(m), ty);
+            }
+            classes
+                .entry(ClassId(Symbol::from("ActiveModel::Model")))
+                .or_insert(model);
         }
 
         // ActiveModel::Errors — the collection returned by `model.errors`.
@@ -971,6 +1035,15 @@ impl Analyzer {
             // any class that includes it; record them so dispatch can
             // chase nested mixins.
             cls.includes = lc.includes.clone();
+            // Carry the superclass link so inheritance dispatch walks it.
+            // Crucial for classes extending an *unmodeled* gem parent
+            // (`TimeSeries < SVG::Graph::TimeSeries`): the walk reaches the
+            // unknown ancestor and treats inherited methods as gradual
+            // rather than erroring. `is_some` guard so we never clobber a
+            // parent another pass established with `None`.
+            if lc.parent.is_some() {
+                cls.parent = lc.parent.clone();
+            }
         }
 
         // ActionMailer classes: a mailer declares its actions as plain
@@ -3729,6 +3802,34 @@ fn register_attr_accessors(body: &[ModelBodyItem], methods: &mut HashMap<Symbol,
                 methods.entry(setter).or_insert(Ty::Untyped);
             }
         }
+    }
+}
+
+/// `attribute :name, :type` (ActiveModel::Attributes) declares a typed
+/// virtual attribute backed by something other than a schema column
+/// (a casted form field, a default-valued non-persisted value, …). It's
+/// absent from the schema-derived attributes, so register reader, writer,
+/// and presence predicate typed per the `:type` symbol — same shape as
+/// `typed_store`, reusing its type map. A bare `attribute :name` with no
+/// type, or an unrecognized type, falls back to `Untyped` (gradual).
+fn register_ar_attributes(body: &[ModelBodyItem], methods: &mut HashMap<Symbol, Ty>) {
+    for item in body {
+        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv, method, args, .. } = &*expr.node else { continue };
+        if recv.is_some() || method.as_str() != "attribute" {
+            continue;
+        }
+        let Some(name) = args.first().and_then(symbol_arg) else { continue };
+        let ty = args
+            .get(1)
+            .and_then(symbol_arg)
+            .and_then(|t| typed_store_ty(t.as_str()))
+            .unwrap_or(Ty::Untyped);
+        methods.entry(name.clone()).or_insert(ty.clone());
+        let setter = Symbol::from(format!("{}=", name.as_str()));
+        methods.entry(setter).or_insert(ty.clone());
+        let predicate = Symbol::from(format!("{}?", name.as_str()));
+        methods.entry(predicate).or_insert(Ty::Bool);
     }
 }
 

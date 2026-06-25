@@ -201,12 +201,19 @@ fn walk_decl_body<'pr>(
                             }
                         }
                     }
-                    "attr_reader" | "attr_writer" | "attr_accessor" => {
+                    "attr_reader" | "attr_writer" | "attr_accessor"
+                    | "cattr_reader" | "cattr_writer" | "cattr_accessor"
+                    | "mattr_reader" | "mattr_writer" | "mattr_accessor" => {
                         // Lower to method definitions at ingest time
                         // (per the YAGNI-on-round-trip decision):
                         //   attr_reader :foo  → def foo; @foo; end
                         //   attr_writer :foo  → def foo=(v); @foo = v; end
                         //   attr_accessor :foo → both
+                        // The `cattr_*` / `mattr_*` (ActiveSupport class- and
+                        // module-level attribute accessors) generate the same
+                        // pair on the *singleton*, so a bare `Keybase.DOMAIN`
+                        // resolves; we model the class form (Rails also makes
+                        // instance-level copies, not needed by the corpus).
                         let mut names: Vec<Symbol> = Vec::new();
                         if let Some(args) = call.arguments() {
                             for arg in args.arguments().iter() {
@@ -215,14 +222,16 @@ fn walk_decl_body<'pr>(
                                 }
                             }
                         }
-                        let recv = if force_class_receiver {
+                        let is_class_attr =
+                            kw.starts_with("cattr_") || kw.starts_with("mattr_");
+                        let recv = if is_class_attr || force_class_receiver {
                             MethodReceiver::Class
                         } else {
                             MethodReceiver::Instance
                         };
                         for name in &names {
-                            let want_reader = matches!(kw, "attr_reader" | "attr_accessor");
-                            let want_writer = matches!(kw, "attr_writer" | "attr_accessor");
+                            let want_reader = kw.ends_with("_reader") || kw.ends_with("_accessor");
+                            let want_writer = kw.ends_with("_writer") || kw.ends_with("_accessor");
                             if want_reader {
                                 methods.push(synth_attr_reader(owner, name, recv));
                             }

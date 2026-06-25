@@ -345,14 +345,27 @@ impl<'a> BodyTyper<'a> {
                 // `normalize_trailing_kwargs` (same shape, same cap).
                 let mut current_id: Option<&ClassId> = Some(id);
                 let mut depth = 0usize;
+                // Set when the chain reaches a *named* superclass we don't
+                // model (a gem/external class like `SVG::Graph::TimeSeries`).
+                // Only meaningful once we've resolved the class itself
+                // (`steps > 0`): a modeled class inheriting from an unmodeled
+                // gem parent has a genuinely-unknown inherited surface, so an
+                // unresolved method is a gradual escape (`Untyped`), not an
+                // error. A wholly-unregistered receiver keeps erroring.
+                let mut steps = 0usize;
+                let mut unknown_named_ancestor = false;
                 while let Some(cid) = current_id {
                     depth += 1;
                     if depth > 32 {
                         break;
                     }
                     let Some(cls) = self.classes().get(cid) else {
+                        if steps > 0 {
+                            unknown_named_ancestor = true;
+                        }
                         break;
                     };
+                    steps += 1;
                     if let Some(ty) = cls.class_methods.get(method) {
                         return unwrap_fn_ret(ty);
                     }
@@ -485,6 +498,14 @@ impl<'a> BodyTyper<'a> {
                         "options" | "casefold?" => return Ty::Int,
                         _ => {}
                     }
+                }
+                // The receiver is a modeled class that inherits from an
+                // unmodeled gem/external superclass — the method is most
+                // likely inherited from that gem, so treat it as a gradual
+                // escape rather than an "unknown method" error. Reached only
+                // after the precise builtins above have had their say.
+                if unknown_named_ancestor {
+                    return Ty::Untyped;
                 }
                 unknown()
             }
@@ -917,6 +938,12 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         },
         "to_a" => Ty::Array { elem: Box::new(elem.clone()) },
         "join" => Ty::Str,
+        // `arr[i] = v` returns the assigned value in Ruby, but the value
+        // type isn't available from the receiver alone and the result is
+        // rarely chained. Return Nil to keep the expression's type known
+        // (avoids a false "unresolved" when elem is a type variable),
+        // mirroring the Hash `[]=` handling.
+        "[]=" | "store" => Ty::Nil,
         _ => unknown(),
     }
 }
