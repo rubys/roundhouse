@@ -921,6 +921,97 @@ impl Analyzer {
             cls.includes = lc.includes.clone();
         }
 
+        // ActionMailer classes: a mailer declares its actions as plain
+        // instance `def`s (`def notify(user, …)`) but Rails invokes them
+        // on the *class* and returns a deliverable
+        // (`BanNotification.notify(…).deliver_now`). The library-class
+        // ingest above captured those as instance methods + the
+        // `ApplicationMailer < ActionMailer::Base` parent link, so here we
+        // (a) identify mailer classes by walking the parent chain to
+        // `ActionMailer::Base`, then (b) re-expose each public action as a
+        // *class* method returning `ActionMailer::MessageDelivery`. Without
+        // this, `Mailer.action` dispatches to "no known method" (no
+        // class-side method exists). `entry().or_insert` so a real
+        // class-side `def self.x` always wins.
+        {
+            let parent_of: HashMap<&ClassId, Option<&ClassId>> = app
+                .library_classes
+                .iter()
+                .map(|lc| (&lc.name, lc.parent.as_ref()))
+                .collect();
+            let is_mailer = |start: &ClassId| -> bool {
+                let mut cur = Some(start);
+                let mut depth = 0usize;
+                while let Some(id) = cur {
+                    if id.0.as_str() == "ActionMailer::Base" {
+                        return true;
+                    }
+                    depth += 1;
+                    if depth > 32 {
+                        break;
+                    }
+                    cur = parent_of.get(id).copied().flatten();
+                }
+                false
+            };
+            let delivery_ty = Ty::Class {
+                id: ClassId(Symbol::from("ActionMailer::MessageDelivery")),
+                args: vec![],
+            };
+            for lc in &app.library_classes {
+                if !is_mailer(&lc.name) {
+                    continue;
+                }
+                let cls = classes.entry(lc.name.clone()).or_default();
+                cls.parent = lc.parent.clone();
+                for method in &lc.methods {
+                    // Only source-defined instance actions become
+                    // class-callable. Real `def self.x` (Class receiver),
+                    // synthesized accessors, and `initialize` are not
+                    // mailer actions.
+                    if method.receiver != crate::dialect::MethodReceiver::Instance
+                        || method.kind != crate::dialect::AccessorKind::Method
+                        || method.name.as_str() == "initialize"
+                    {
+                        continue;
+                    }
+                    cls.class_methods
+                        .entry(method.name.clone())
+                        .or_insert_with(|| delivery_ty.clone());
+                }
+            }
+
+            // The deliverable returned by a mailer action. `deliver_now`
+            // sends synchronously (really returning the `Mail::Message`);
+            // `deliver_later` enqueues an ActiveJob. We model *every*
+            // `deliver_*` as returning the delivery itself — the actual
+            // `Mail::Message` return is deliberately NOT modeled, because a
+            // bare `Mail::Message` class would collide with an app `Message`
+            // model under single-segment const resolution (a real lobsters
+            // hazard: `Message.find` would resolve to the mail class). The
+            // delivery result is invariably discarded at the call site, so
+            // a concrete self-type both avoids that collision and keeps the
+            // `.deliver_*` link off the gradual-escape (`Untyped`) path.
+            let mut delivery_cls = ClassInfo::default();
+            for m in [
+                "deliver_now",
+                "deliver_now!",
+                "deliver",
+                "deliver_later",
+                "deliver_later!",
+            ] {
+                delivery_cls
+                    .instance_methods
+                    .insert(Symbol::from(m), delivery_ty.clone());
+            }
+            delivery_cls
+                .instance_methods
+                .insert(Symbol::from("processed?"), Ty::Bool);
+            classes
+                .entry(ClassId(Symbol::from("ActionMailer::MessageDelivery")))
+                .or_insert(delivery_cls);
+        }
+
         // Controllers: register each as a known class so self-method
         // dispatch (a bare `find_story` inside an action) resolves against
         // the controller's own methods and walks the parent chain to the

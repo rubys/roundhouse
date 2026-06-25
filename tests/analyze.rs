@@ -2368,3 +2368,53 @@ end
     );
 }
 
+
+#[test]
+fn mailer_actions_dispatch_on_the_class_and_chain_deliver() {
+    // An ActionMailer subclass declares its actions as plain *instance*
+    // `def`s but Rails invokes them on the *class*, returning a deliverable:
+    //   `Notifier.welcome(user).deliver_now`
+    // The mailer ingests as a library class (parent → ActionMailer::Base);
+    // analyze re-exposes each public action as a class method returning
+    // `ActionMailer::MessageDelivery`, whose `deliver_*` methods resolve so
+    // the whole chain types. None of `welcome` / `deliver_now` /
+    // `deliver_later` should hit "no known method".
+    let app = app_from_files(&[
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/mailers/application_mailer.rb",
+            "class ApplicationMailer < ActionMailer::Base\nend\n",
+        ),
+        (
+            "app/mailers/notifier.rb",
+            r#"class Notifier < ApplicationMailer
+  def welcome(user)
+    @user = user
+    mail(:to => user.email, :subject => "hi")
+  end
+end
+"#,
+        ),
+        (
+            "app/models/widget.rb",
+            r#"class Widget < ApplicationRecord
+  def announce
+    Notifier.welcome(self).deliver_now
+    Notifier.welcome(self).deliver_later
+  end
+end
+"#,
+        ),
+    ]);
+
+    let failures = send_dispatch_failures(&app);
+    for m in ["welcome", "deliver_now", "deliver_later"] {
+        assert!(
+            !failures.iter().any(|f| f == m),
+            "mailer chain `{m}` should resolve; dispatch failures = {failures:?}"
+        );
+    }
+}
