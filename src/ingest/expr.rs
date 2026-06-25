@@ -109,16 +109,13 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         // path stays on `Literal::Regex` for round-trip fidelity;
         // interp regexes are inherently runtime constructs anyway.
         //
-        // Flag handling is partial: only the no-flags case is wired
-        // because lobsters and real-blog don't have flag-bearing
-        // interp regexes. With-flags surfaces via Unsupported so the
-        // gap is visible.
+        // The standard option flags i/m/x are carried through as
+        // `Regexp.new`'s second argument (the options bitmask). The
+        // `o` (once) and encoding flags (e/s/u/n) have no options-int
+        // equivalent and stay a (rarer) visible gap.
         n if n.as_interpolated_regular_expression_node().is_some() => {
             let r = n.as_interpolated_regular_expression_node().unwrap();
-            if r.is_ignore_case()
-                || r.is_multi_line()
-                || r.is_extended()
-                || r.is_once()
+            if r.is_once()
                 || r.is_euc_jp()
                 || r.is_windows_31j()
                 || r.is_utf_8()
@@ -126,19 +123,30 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             {
                 return Err(IngestError::Unsupported {
                     file: file.into(),
-                    message: "interpolated regex with flags not yet supported".into(),
+                    message: "interpolated regex with once/encoding flag not yet supported".into(),
                 });
             }
             let mut parts: Vec<InterpPart> = Vec::new();
             collect_interp_parts(r.parts(), &mut parts, file)?;
             let pattern_expr = Expr::new(Span::synthetic(), ExprNode::StringInterp { parts });
+            // Ruby Regexp option bits: IGNORECASE=1, EXTENDED=2, MULTILINE=4.
+            let opts = (r.is_ignore_case() as i64)
+                | ((r.is_extended() as i64) << 1)
+                | ((r.is_multi_line() as i64) << 2);
+            let mut args = vec![pattern_expr];
+            if opts != 0 {
+                args.push(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lit { value: Literal::Int { value: opts } },
+                ));
+            }
             ExprNode::Send {
                 recv: Some(Expr::new(
                     Span::synthetic(),
                     ExprNode::Const { path: vec![Symbol::from("Regexp")] },
                 )),
                 method: Symbol::from("new"),
-                args: vec![pattern_expr],
+                args,
                 block: None,
                 parenthesized: true,
             }
@@ -1282,6 +1290,12 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                     let raw = constant_id_str(&ivt.name());
                     let name = raw.strip_prefix('@').unwrap_or(raw);
                     targets.push(crate::expr::LValue::Ivar { name: Symbol::from(name) });
+                } else if let Some(it) = left.as_index_target_node() {
+                    // `recv[index], … = …` — index write as a multi-write
+                    // target (e.g. `link['href'], title, alt = attrs`).
+                    let recv = ingest_expr(&it.receiver(), file)?;
+                    let index = ingest_index_argument(it.arguments(), file)?;
+                    targets.push(crate::expr::LValue::Index { recv, index });
                 } else {
                     return Err(IngestError::Unsupported {
                         file: file.into(),

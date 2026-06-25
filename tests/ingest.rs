@@ -391,6 +391,63 @@ fn retry_and_redo_ingest_and_round_trip_through_ruby() {
     );
 }
 
+fn ingest_snippet(source: &[u8]) -> Expr {
+    let result = ruby_prism::parse(source);
+    let program = result.node();
+    let prog = program.as_program_node().unwrap();
+    let stmt = prog.statements().body().iter().next().unwrap();
+    roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap()
+}
+
+#[test]
+fn interpolated_regex_with_flags_carries_options() {
+    // `/…#{…}…/i` desugars to `Regexp.new(<interp>, options)` where the
+    // options integer carries the i/m/x bits (IGNORECASE=1 here).
+    let expr = ingest_snippet(b"/^X-BeenThere: #{shortname}-/i");
+    match &*expr.node {
+        ExprNode::Send { recv, method, args, .. } => {
+            assert!(
+                matches!(recv.as_ref().map(|r| &*r.node), Some(ExprNode::Const { .. })),
+                "receiver should be the Regexp const"
+            );
+            assert_eq!(method.as_str(), "new");
+            assert_eq!(args.len(), 2, "pattern + options arg; got {args:?}");
+            match &*args[1].node {
+                ExprNode::Lit { value: Literal::Int { value } } => assert_eq!(*value, 1),
+                other => panic!("expected Int options arg, got {other:?}"),
+            }
+        }
+        other => panic!("expected Regexp.new Send, got {other:?}"),
+    }
+
+    // A flag-free interp regex stays single-arg (no options appended).
+    let plain = ingest_snippet(b"/^#{shortname}-/");
+    match &*plain.node {
+        ExprNode::Send { args, .. } => assert_eq!(args.len(), 1, "no options arg expected"),
+        other => panic!("expected Regexp.new Send, got {other:?}"),
+    }
+}
+
+#[test]
+fn multi_write_index_target_ingests_as_index_lvalue() {
+    // `recv[k], a, b = rhs` — an index write used as a parallel-assignment
+    // target (lobsters markdowner.rb:82).
+    let expr = ingest_snippet(b"link['href'], title, alt = attrs");
+    match &*expr.node {
+        ExprNode::MultiAssign { targets, .. } => {
+            assert_eq!(targets.len(), 3);
+            assert!(
+                matches!(&targets[0], LValue::Index { .. }),
+                "first target should be Index, got {:?}",
+                targets[0]
+            );
+            assert!(matches!(&targets[1], LValue::Var { .. }));
+            assert!(matches!(&targets[2], LValue::Var { .. }));
+        }
+        other => panic!("expected MultiAssign, got {other:?}"),
+    }
+}
+
 #[test]
 fn block_delimiter_style_is_preserved() {
     use roundhouse::{BlockStyle, ExprNode, ModelBodyItem};
