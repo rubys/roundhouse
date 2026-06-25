@@ -567,6 +567,8 @@ fn action_aggregate_equals_subtree_fold() {
             | ExprNode::Var { .. }
             | ExprNode::Ivar { .. }
             | ExprNode::Const { .. }
+            | ExprNode::Retry
+            | ExprNode::Redo
             | ExprNode::SelfRef => {}
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {
@@ -1006,7 +1008,12 @@ fn collect_ivar_reads(expr: &roundhouse::expr::Expr, out: &mut Vec<(Symbol, Opti
             if let Some(e) = end { collect_ivar_reads(e, out); }
         }
         ExprNode::Cast { value, .. } => collect_ivar_reads(value, out),
-        ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Const { .. } | ExprNode::SelfRef => {}
+        ExprNode::Lit { .. }
+        | ExprNode::Var { .. }
+        | ExprNode::Const { .. }
+        | ExprNode::Retry
+        | ExprNode::Redo
+        | ExprNode::SelfRef => {}
     }
 }
 
@@ -1174,7 +1181,12 @@ fn collect_var_reads(expr: &roundhouse::expr::Expr, out: &mut Vec<(Symbol, Optio
             if let Some(e) = end { collect_var_reads(e, out); }
         }
         ExprNode::Cast { value, .. } => collect_var_reads(value, out),
-        ExprNode::Lit { .. } | ExprNode::Ivar { .. } | ExprNode::Const { .. } | ExprNode::SelfRef => {}
+        ExprNode::Lit { .. }
+        | ExprNode::Ivar { .. }
+        | ExprNode::Const { .. }
+        | ExprNode::Retry
+        | ExprNode::Redo
+        | ExprNode::SelfRef => {}
     }
 }
 
@@ -1311,7 +1323,13 @@ fn collect_bare_name_sends(
             if let Some(e) = end { collect_bare_name_sends(e, out); }
         }
         ExprNode::Cast { value, .. } => collect_bare_name_sends(value, out),
-        ExprNode::Lit { .. } | ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::Const { .. } | ExprNode::SelfRef => {}
+        ExprNode::Lit { .. }
+        | ExprNode::Var { .. }
+        | ExprNode::Ivar { .. }
+        | ExprNode::Const { .. }
+        | ExprNode::Retry
+        | ExprNode::Redo
+        | ExprNode::SelfRef => {}
     }
 }
 

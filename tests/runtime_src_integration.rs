@@ -140,7 +140,13 @@ fn count_gradual_recurse(e: &Expr, total: &mut usize) {
     }
     use ExprNode as N;
     match &*e.node {
-        N::Lit { .. } | N::Var { .. } | N::Ivar { .. } | N::Const { .. } | N::SelfRef => {}
+        N::Lit { .. }
+        | N::Var { .. }
+        | N::Ivar { .. }
+        | N::Const { .. }
+        | N::Retry
+        | N::Redo
+        | N::SelfRef => {}
         N::If { cond, then_branch, else_branch } => {
             count_gradual_recurse(cond, total);
             count_gradual_recurse(then_branch, total);
@@ -234,6 +240,8 @@ fn collect_untyped(e: &Expr, path: &str, out: &mut Vec<String>) {
         | ExprNode::Var { .. }
         | ExprNode::Ivar { .. }
         | ExprNode::Const { .. }
+        | ExprNode::Retry
+        | ExprNode::Redo
         | ExprNode::SelfRef => {}
         ExprNode::If { cond, then_branch, else_branch } => {
             collect_untyped(cond, &format!("{path}/if.cond"), out);
