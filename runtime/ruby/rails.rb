@@ -1,89 +1,98 @@
 # frozen_string_literal: true
 
-# Minimal `Rails` global for the roundhouse runtime. Covers the
-# framework-level surface app code reaches *outside* the request path —
-# `Rails.env` / `Rails.cache` / `Rails.logger` — plus an app-config
-# stand-in (`Rails.application`).
+# Minimal, statically-resolvable `Rails` global for the roundhouse
+# runtime — `Rails.env` / `Rails.cache` / `Rails.logger` plus an (empty)
+# `Rails.application` config stand-in.
 #
-# env/cache/logger are real (in-process) so the request path runs.
-# `Rails.application`'s methods are defined in the source app's config,
-# which roundhouse doesn't ingest yet, so they resolve to nil here rather
-# than NameError-ing — a deliberate stub, not the app's real config.
+# Deliberately metaprogramming-free: every method is explicit so the
+# strict-target (spinel AOT) compile and the runtime typing bar both hold
+# — no `method_missing`, no built-in subclassing. `Rails.application`'s
+# real methods are app-specific config roundhouse doesn't ingest yet, so
+# they surface as honest gaps rather than being dynamically stubbed.
+#
+# `Rails.cache` is a no-op store (every `fetch` recomputes via its block);
+# correct, just not actually caching, which is adequate until a real cache
+# backend is wired.
 module Rails
   def self.env
-    @env ||= StringInquirer.new(ENV["RAILS_ENV"] || ENV["RACK_ENV"] || "development")
+    Env.new("development")
   end
 
   def self.cache
-    @cache ||= Cache.new
+    Cache.new
   end
 
   def self.logger
-    @logger ||= Logger.new
+    Logger.new
   end
 
   def self.application
-    @application ||= Application.new
+    Application.new
   end
 
-  def self.root
-    @root ||= Dir.pwd
-  end
-
-  # `Rails.env.production?` etc. — a String that answers `<value>?`.
-  class StringInquirer < String
-    def method_missing(name, *args)
-      s = name.to_s
-      s.end_with?("?") ? self == s[0..-2] : super
+  # `Rails.env.production?` etc. — a plain object answering the known
+  # environment predicates (no `method_missing`, no `String` subclass).
+  class Env
+    def initialize(name)
+      @name = name
     end
 
-    def respond_to_missing?(name, _include_private = false)
-      name.to_s.end_with?("?") || super
+    def development?
+      @name == "development"
+    end
+
+    def production?
+      @name == "production"
+    end
+
+    def test?
+      @name == "test"
+    end
+
+    def staging?
+      @name == "staging"
+    end
+
+    def to_s
+      @name
     end
   end
 
-  # In-process cache: `fetch` computes-and-stores on miss via the block.
+  # No-op cache: `fetch` always recomputes via its block.
   class Cache
-    def initialize
-      @store = {}
-    end
-
-    def fetch(key, _opts = {})
-      return @store[key] if @store.key?(key)
-
-      @store[key] = yield if block_given?
+    def fetch(key, opts = {})
+      yield
     end
 
     def read(key)
-      @store[key]
+      nil
     end
 
-    def write(key, value, _opts = {})
-      @store[key] = value
+    def write(key, value)
+      value
     end
 
     def delete(key)
-      @store.delete(key)
+      nil
+    end
+
+    def exist?(key)
+      false
     end
   end
 
   # No-op logger — the request path doesn't depend on log output.
   class Logger
-    def info(*); end
-    def error(*); end
-    def warn(*); end
-    def debug(*); end
-    def fatal(*); end
+    def info(message); end
+    def error(message); end
+    def warn(message); end
+    def debug(message); end
+    def fatal(message); end
   end
 
-  # App-config stand-in (see module note). Unknown methods → nil.
+  # App-config stand-in (see module note). Intentionally empty — the
+  # app's real config methods aren't ingested, so they NameError rather
+  # than being silently stubbed.
   class Application
-    def method_missing(*)
-      nil
-    end
-
-    def respond_to_missing?(*)
-      true
-    end
   end
 end

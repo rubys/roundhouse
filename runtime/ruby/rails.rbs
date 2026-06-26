@@ -1,0 +1,36 @@
+module Rails
+  def self.env: () -> Env
+  def self.cache: () -> Cache
+  def self.logger: () -> Logger
+  def self.application: () -> Application
+
+  class Env
+    @name: String
+
+    def initialize: (String name) -> void
+    def development?: () -> bool
+    def production?: () -> bool
+    def test?: () -> bool
+    def staging?: () -> bool
+    def to_s: () -> String
+  end
+
+  class Cache
+    def fetch: (untyped key, ?Hash[untyped, untyped] opts) { () -> untyped } -> untyped
+    def read: (untyped key) -> untyped
+    def write: (untyped key, untyped value) -> untyped
+    def delete: (untyped key) -> untyped
+    def exist?: (untyped key) -> bool
+  end
+
+  class Logger
+    def info: (untyped message) -> void
+    def error: (untyped message) -> void
+    def warn: (untyped message) -> void
+    def debug: (untyped message) -> void
+    def fatal: (untyped message) -> void
+  end
+
+  class Application
+  end
+end
