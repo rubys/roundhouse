@@ -155,7 +155,7 @@ fn build_route_new(r: &FlatRoute, class_id: &ClassId, route_ty: &Ty) -> Expr {
 
 /// `ArticlesController` → `articles` (the controller-symbol form
 /// the spinel router uses). Mirrors the existing per-target convention.
-fn controller_symbol(class_name: &str) -> String {
+pub(crate) fn controller_symbol(class_name: &str) -> String {
     let base = class_name.strip_suffix("Controller").unwrap_or(class_name);
     crate::naming::snake_case(base)
 }

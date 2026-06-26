@@ -973,7 +973,47 @@ fn ruby_runtime_files(
     // spinel binary now serves `/assets/*` too). Nothing CRuby-specific
     // to add here beyond the overlay above. The scaffold README → SPECIMEN
     // rename already happened in `spinel_files`.
-    Ok(dedupe_last_wins(files))
+    let mut files = dedupe_last_wins(files);
+    apply_controller_dispatch(&mut files, app);
+    Ok(files)
+}
+
+/// Replace the scaffold `main.rb`'s blog-hardcoded
+/// `instantiate_controller` (`:articles`/`:comments` only) with a
+/// dispatch generated from the app's own route table — one
+/// `when :<sym> then <Controller>.new` arm per controller the router can
+/// reach. Without this, every non-blog app's routes resolve to a `nil`
+/// controller and crash at dispatch (`controller.params=` on nil). The
+/// symbol derivation (`controller_symbol`) is the same one the emitted
+/// route table uses, so the arms match the router's `:sym` exactly. For
+/// the blog the generated arms equal the hardcoded stub, so its output is
+/// byte-identical.
+fn apply_controller_dispatch(files: &mut [(String, String)], app: &App) {
+    use std::fmt::Write;
+    const HARDCODED: &str = "  def self.instantiate_controller(sym)\n    case sym\n    when :articles then ArticlesController.new\n    when :comments then CommentsController.new\n    end\n  end";
+
+    let flat = crate::lower::flatten_routes(app);
+    let mut seen = std::collections::HashSet::new();
+    let mut arms = String::new();
+    for r in &flat {
+        let class = r.controller.0.as_str();
+        let sym = crate::lower::routes_to_library::controller_symbol(class);
+        if !seen.insert(sym.clone()) {
+            continue;
+        }
+        writeln!(arms, "    when :{sym} then {class}.new").unwrap();
+    }
+    if arms.is_empty() {
+        return;
+    }
+    let generated =
+        format!("  def self.instantiate_controller(sym)\n    case sym\n{arms}    end\n  end");
+
+    for (path, content) in files.iter_mut() {
+        if path.ends_with("main.rb") && content.contains(HARDCODED) {
+            *content = content.replace(HARDCODED, &generated);
+        }
+    }
 }
 
 /// The scaffold targets (spinel/ruby/jruby) ship the scaffold's
