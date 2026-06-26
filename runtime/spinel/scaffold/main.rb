@@ -43,6 +43,7 @@ require_relative "runtime/json"
 # `JsonBuilder.encode_value` / `encode_string` for per-value encoding.
 require_relative "runtime/json_builder"
 require_relative "runtime/importmap"
+require_relative "runtime/rails"
 require_relative "runtime/active_record"
 require_relative "config/schema"
 require_relative "runtime/action_dispatch"

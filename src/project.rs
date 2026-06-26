@@ -1157,6 +1157,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         )?;
     }
     for stem in [
+        "rails",
         "active_record",
         "action_view",
         "action_controller",
