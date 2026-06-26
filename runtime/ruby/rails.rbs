@@ -12,7 +12,6 @@ module Rails
     def production?: () -> bool
     def test?: () -> bool
     def staging?: () -> bool
-    def to_s: () -> String
   end
 
   class Cache

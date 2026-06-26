@@ -52,10 +52,6 @@ module Rails
     def staging?
       @name == "staging"
     end
-
-    def to_s
-      @name
-    end
   end
 
   # No-op cache: `fetch` always recomputes via its block.
