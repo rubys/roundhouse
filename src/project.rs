@@ -1036,6 +1036,17 @@ fn jruby_runtime_files(
         .1
         .replace("gem \"sqlite3\"", "gem \"jdbc-sqlite3\"");
 
+    // Pin `rdoc` below 8 for the JRuby tree. rdoc 8.0.0 (2026-06-26) added
+    // a runtime dependency on `rbs (>= 4.0.0)`, whose 4.x line ships a C
+    // parser extension with no JRuby build — `jruby -S bundle install`
+    // dies in extconf ("The compiler failed to generate an executable
+    // file"). rdoc only enters this tree transitively (stimulus-rails →
+    // railties → irb → rdoc), and the CRuby/Spinel targets dodge it via
+    // their frozen `Gemfile.lock` (which pins rdoc 7.2.0 — no rbs). The
+    // JRuby tree resolves a fresh lock (it drops the MRI lock below), so
+    // hold rdoc at the pre-8 line here to keep rbs out of the graph.
+    gemfile.1.push_str("\n# rdoc 8 pulls rbs (C ext, no JRuby build); see jruby_runtime_files.\ngem \"rdoc\", \"< 8\"\n");
+
     // Drop the committed MRI `Gemfile.lock` from the JRuby tree: it pins
     // the C-ext `sqlite3` and omits `jdbc-sqlite3`, so shipping it would
     // make the tree's `jruby -S bundle install` a frozen-mode mismatch.
