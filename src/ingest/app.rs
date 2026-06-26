@@ -25,7 +25,7 @@ use super::model::ingest_model;
 use super::routes::ingest_routes;
 use super::schema::{ingest_migration, ingest_schema};
 use super::test::ingest_test_file;
-use super::view::ingest_view;
+use super::view::{ViewEngine, ingest_template};
 use super::survey::{self, unwrap_or_record};
 use super::{IngestError, IngestResult};
 
@@ -176,7 +176,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     let views_dir = dir.join("app/views");
     if vfs.is_dir(&views_dir) {
         let erb_files = read_erb_files(vfs, &views_dir)?;
-        for erb_path in erb_files {
+        for (erb_path, engine) in erb_files {
             let source = vfs.read_to_string(&erb_path)?;
             let rel = erb_path
                 .strip_prefix(&views_dir)
@@ -184,10 +184,11 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                     file: erb_path.display().to_string(),
                     message: "view path outside views dir".into(),
                 })?;
-            if let Some(view) = unwrap_or_record(ingest_view(
+            if let Some(view) = unwrap_or_record(ingest_template(
                 &source,
                 rel,
                 &erb_path.display().to_string(),
+                engine.compile_fn(),
             ))? {
                 app.views.push(view);
             }
@@ -508,46 +509,51 @@ fn read_yml_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<Path
     Ok(out)
 }
 
-fn read_erb_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<PathBuf>> {
+fn read_erb_files<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+) -> IngestResult<Vec<(PathBuf, ViewEngine)>> {
     let mut out = Vec::new();
     walk_erb(vfs, dir, &mut out)?;
-    out.sort();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
 }
 
 fn walk_erb<V: Vfs + ?Sized>(
     vfs: &V,
     dir: &Path,
-    out: &mut Vec<PathBuf>,
+    out: &mut Vec<(PathBuf, ViewEngine)>,
 ) -> IngestResult<()> {
     for path in vfs.read_dir(dir)? {
         if vfs.is_dir(&path) {
             walk_erb(vfs, &path, out)?;
             continue;
         }
-        match path.extension().and_then(|e| e.to_str()) {
-            Some("erb") => {
-                // Only HTML templates — `.html.erb`. Mailer plain-text
-                // templates (`.text.erb`) aren't part of the scaffold
-                // render path and would collide on emit (their stems
-                // strip to the same name as the HTML template).
-                let path_str = path.to_string_lossy();
-                if path_str.ends_with(".html.erb") {
-                    out.push(path);
-                } else {
-                    // `.text.erb` / `.js.erb` / …: carries Ruby we don't
-                    // type. Surface as a coverage gap rather than dropping
-                    // it silently (no-op outside survey mode).
-                    record_skipped_view(&path, "erb (non-html format)");
-                }
-            }
+        let ext = path.extension().and_then(|e| e.to_str());
+        match ext {
             // jbuilder is ingested by `walk_jbuilder`; leave it alone.
             Some("jbuilder") => {}
+            // A supported text-template engine (ERB today; HAML/herb as
+            // they land). Only HTML-format templates render through the
+            // view path: mailer plain-text variants (`.text.erb` /
+            // `.text.haml`) carry Ruby we don't type and would collide on
+            // emit (their stems strip to the HTML template's name), so
+            // surface them as a coverage gap rather than dropping silently.
+            Some(e) if ViewEngine::from_extension(e).is_some() => {
+                let engine = ViewEngine::from_extension(e).expect("checked is_some");
+                if path.to_string_lossy().ends_with(&format!(".html.{e}")) {
+                    out.push((path, engine));
+                } else {
+                    record_skipped_view(&path, &format!("{e} (non-html format)"));
+                }
+            }
             // Template engines we don't ingest yet — they hold Ruby (or are
             // pure Ruby, like `.json.ruby`) the analyzer never sees. Record
             // so the hole is visible to `--continue` and the LSP/MCP.
-            Some(engine @ ("haml" | "slim" | "ruby" | "builder" | "rabl")) => {
-                record_skipped_view(&path, engine);
+            // Moving one of these into `ViewEngine::from_extension` (above)
+            // is the whole walker-side change to support a new engine.
+            Some("haml" | "slim" | "ruby" | "builder" | "rabl") => {
+                record_skipped_view(&path, ext.expect("matched a Some arm"));
             }
             _ => {}
         }
