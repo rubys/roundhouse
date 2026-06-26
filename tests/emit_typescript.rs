@@ -400,6 +400,8 @@ fn controller_new_action_is_reserved_word_escaped() {
             action: Action {
                 name: Symbol::from("new"),
                 params: Row::closed(),
+                opt_params: vec![],
+                block_param: None,
                 body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
                 renders: RenderTarget::Inferred,
                 effects: EffectSet::pure(),

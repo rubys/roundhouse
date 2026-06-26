@@ -278,6 +278,8 @@ fn action(name: &str, body: Expr) -> roundhouse::dialect::Action {
     roundhouse::dialect::Action {
         name: Symbol::from(name),
         params: Row::closed(),
+        opt_params: vec![],
+        block_param: None,
         body,
         renders: RenderTarget::Inferred,
         effects: EffectSet::pure(),

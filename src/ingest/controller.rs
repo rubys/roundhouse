@@ -189,6 +189,8 @@ fn ingest_controller_body_item(
         // keyword / rest params need richer modeling and stay
         // unhandled for now.
         let mut params = Row::closed();
+        let mut opt_params: Vec<(Symbol, Expr)> = Vec::new();
+        let mut block_param: Option<Symbol> = None;
         if let Some(pn) = def.parameters() {
             for req in pn.requireds().iter() {
                 if let Some(rp) = req.as_required_parameter_node() {
@@ -197,11 +199,31 @@ fn ingest_controller_body_item(
                         .insert(Symbol::from(constant_id_str(&rp.name())), Ty::Untyped);
                 }
             }
+            // Optional positionals (`opts = {}`) — keep the name + default
+            // so the emitted signature round-trips. Keyword / rest / post
+            // params still need richer modeling and stay unhandled.
+            for opt in pn.optionals().iter() {
+                if let Some(op) = opt.as_optional_parameter_node() {
+                    let name = Symbol::from(constant_id_str(&op.name()));
+                    let default = ingest_expr(&op.value(), file)?;
+                    opt_params.push((name, default));
+                }
+            }
+            // Block param (`&block`) — methods that name their block so
+            // the body can pass it on (`&block`) or that crash without the
+            // arity slot.
+            if let Some(bn) = pn.block() {
+                if let Some(n) = bn.name() {
+                    block_param = Some(Symbol::from(constant_id_str(&n)));
+                }
+            }
         }
         return Ok(ControllerBodyItem::Action {
             action: Action {
                 name: Symbol::from(action_name),
                 params,
+                opt_params,
+                block_param,
                 body: body_expr,
                 renders,
                 effects: EffectSet::pure(),

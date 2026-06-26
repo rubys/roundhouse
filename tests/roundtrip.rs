@@ -74,6 +74,8 @@ fn tiny_blog_round_trips() {
     let index_action = Action {
         name: Symbol::from("index"),
         params: Row::closed(),
+        opt_params: vec![],
+        block_param: None,
         body: action_body,
         renders: RenderTarget::Inferred,
         effects: EffectSet::singleton(Effect::DbRead {

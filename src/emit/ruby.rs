@@ -42,17 +42,22 @@ pub fn emit_method(m: &MethodDef) -> String {
         MethodReceiver::Instance => "",
         MethodReceiver::Class => "self.",
     };
-    let params = if m.params.is_empty() {
+    let mut ps: Vec<String> = m
+        .params
+        .iter()
+        .map(|p| match &p.default {
+            Some(default) => format!("{} = {}", p.name.as_str(), expr::emit_expr(default)),
+            None => p.name.as_str().to_string(),
+        })
+        .collect();
+    // The captured block param (`&block`) closes the list — methods that
+    // pass their block on (`fetch(&block)`) need it named at the def site.
+    if let Some(bp) = &m.block_param {
+        ps.push(format!("&{}", bp.name.as_str()));
+    }
+    let params = if ps.is_empty() {
         String::new()
     } else {
-        let ps: Vec<String> = m
-            .params
-            .iter()
-            .map(|p| match &p.default {
-                Some(default) => format!("{} = {}", p.name.as_str(), expr::emit_expr(default)),
-                None => p.name.as_str().to_string(),
-            })
-            .collect();
         format!("({})", ps.join(", "))
     };
     let mut out = String::new();
@@ -858,3 +863,42 @@ fn test_file_stem(class_name: &str) -> String {
     crate::naming::snake_case(stem)
 }
 
+
+#[cfg(test)]
+mod method_sig_tests {
+    use super::*;
+    use crate::dialect::{AccessorKind, Param};
+    use crate::effect::EffectSet;
+    use crate::expr::{Expr, ExprNode, Literal};
+    use crate::ident::Symbol;
+    use crate::span::Span;
+
+    // `def get_from_cache(opts = {}, &block)` — an optional positional with
+    // a default plus a captured block param must both round-trip into the
+    // emitted signature (regression: both were dropped → `def f` + arity
+    // crash / undefined `block`). See the lobsters runtime-wiring probe.
+    #[test]
+    fn emit_method_renders_optional_default_and_block_param() {
+        let m = MethodDef {
+            name: Symbol::from("get_from_cache"),
+            receiver: MethodReceiver::Instance,
+            params: vec![Param::with_default(
+                Symbol::from("opts"),
+                Expr::new(Span::synthetic(), ExprNode::Hash { entries: vec![], kwargs: false }),
+            )],
+            body: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+            signature: None,
+            effects: EffectSet::pure(),
+            enclosing_class: None,
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: Some(Param::positional(Symbol::from("block"))),
+        };
+        let out = emit_method(&m);
+        assert!(
+            out.contains("def get_from_cache(opts = {}, &block)"),
+            "got:\n{out}"
+        );
+    }
+}

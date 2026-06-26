@@ -743,6 +743,18 @@ pub enum FilterKind {
 pub struct Action {
     pub name: Symbol,
     pub params: Row,
+    /// Optional positional params with their default-value exprs, in
+    /// declaration order (after the required `params`). Preserved so a
+    /// helper method's emitted signature matches the source — e.g.
+    /// `def get_from_cache(opts = {})` — rather than dropping the params
+    /// and crashing the body that still reads them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub opt_params: Vec<(Symbol, Expr)>,
+    /// The captured block parameter name (`def f(&block)`), if the method
+    /// names its block. Occupies the `def`-site `&`-slot, distinct from
+    /// the positional `params`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_param: Option<Symbol>,
     pub body: Expr,
     pub renders: RenderTarget,
     pub effects: EffectSet,

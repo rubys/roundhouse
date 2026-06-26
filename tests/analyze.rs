@@ -428,6 +428,8 @@ fn actions_without_db_calls_stay_pure() {
     let mut action = Action {
         name: Symbol::from("noop"),
         params: Row::closed(),
+        opt_params: vec![],
+        block_param: None,
         body: empty_body,
         renders: RenderTarget::Inferred,
         effects: EffectSet::singleton(Effect::Io), // seed a bogus effect
@@ -725,6 +727,8 @@ fn analyze_action_body(body: roundhouse::expr::Expr) -> roundhouse::expr::Expr {
     let action = Action {
         name: Symbol::from("test_action"),
         params: Row::closed(),
+        opt_params: vec![],
+        block_param: None,
         body,
         renders: RenderTarget::Inferred,
         effects: EffectSet { effects: BTreeSet::new() },

@@ -606,12 +606,18 @@ fn action_to_method(
     json_actions: &std::collections::HashSet<Symbol>,
 ) -> MethodDef {
     let method_name = method_name_for_action(a.name.as_str());
-    let params: Vec<Param> = a
+    // Required positionals first, then optional positionals with their
+    // defaults — so `def get_from_cache(opts = {})` round-trips instead of
+    // emitting `def get_from_cache` and crashing the body that reads `opts`.
+    let mut params: Vec<Param> = a
         .params
         .fields
         .iter()
         .map(|(n, _)| Param::positional(n.clone()))
         .collect();
+    for (n, default) in &a.opt_params {
+        params.push(Param::with_default(n.clone(), default.clone()));
+    }
     let has_json_variant = json_actions.contains(&a.name);
     let body = lower_action_body(
         &a.body,
@@ -666,7 +672,7 @@ fn action_to_method(
         kind: AccessorKind::Method,
         is_async: false,
             mutates_self: false,
-            block_param: None,
+            block_param: a.block_param.clone().map(Param::positional),
     }
 }
 
