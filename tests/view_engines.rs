@@ -34,13 +34,22 @@ struct Case {
 /// The engine table. HAML/herb rows drop in here once their
 /// `compile_*_mapped` fns exist and `ViewEngine` carries the variant.
 fn cases() -> Vec<Case> {
-    vec![Case {
-        engine: ViewEngine::Erb,
-        rel_path: "posts/index.html.erb",
-        source: "<h1><%= title %></h1>\n",
-        expect_name: "posts/index",
-        expect_format: "html",
-    }]
+    vec![
+        Case {
+            engine: ViewEngine::Erb,
+            rel_path: "posts/index.html.erb",
+            source: "<h1><%= title %></h1>\n",
+            expect_name: "posts/index",
+            expect_format: "html",
+        },
+        Case {
+            engine: ViewEngine::Haml,
+            rel_path: "posts/show.html.haml",
+            source: "%h1= @post.title\n.body\n  = @post.body\n",
+            expect_name: "posts/show",
+            expect_format: "html",
+        },
+    ]
 }
 
 fn for_each(e: &mut Expr, f: &mut impl FnMut(&Expr)) {

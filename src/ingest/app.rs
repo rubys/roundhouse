@@ -552,7 +552,7 @@ fn walk_erb<V: Vfs + ?Sized>(
             // so the hole is visible to `--continue` and the LSP/MCP.
             // Moving one of these into `ViewEngine::from_extension` (above)
             // is the whole walker-side change to support a new engine.
-            Some("haml" | "slim" | "ruby" | "builder" | "rabl") => {
+            Some("slim" | "ruby" | "builder" | "rabl") => {
                 record_skipped_view(&path, ext.expect("matched a Some arm"));
             }
             _ => {}

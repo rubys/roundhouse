@@ -262,7 +262,7 @@ pub fn compile_erb_mapped(source: &str) -> (String, Vec<ErbSegment>) {
 
 /// Does `code` end in a block opener (`do`, `do |p|`, `{`, `{ |p| `)?
 /// Mirrors ruby2js's `BLOCK_EXPR = /((\s|\))do|\{)(\s*\|[^|]*\|)?\s*\z/`.
-fn is_block_expr(code: &str) -> bool {
+pub(crate) fn is_block_expr(code: &str) -> bool {
     let code = code.trim_end();
     // If the tail is `|params|`, strip it and keep checking the prefix.
     let prefix = if let Some(without_trailing_bar) = code.strip_suffix('|') {
@@ -292,7 +292,7 @@ fn is_block_expr(code: &str) -> bool {
 /// need to track? Covers the control-flow keywords plus method calls with
 /// trailing `do`/`{`. Middle markers (`else`, `elsif ...`, `when ...`,
 /// `rescue`, `ensure`, `in ...`) do NOT open a new block.
-fn opens_passthrough_block(code: &str) -> bool {
+pub(crate) fn opens_passthrough_block(code: &str) -> bool {
     let t = code.trim();
     if t.is_empty() {
         return false;
@@ -309,7 +309,7 @@ fn opens_passthrough_block(code: &str) -> bool {
     is_block_expr(t)
 }
 
-fn ruby_string_literal(s: &str) -> String {
+pub(crate) fn ruby_string_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {

@@ -744,8 +744,8 @@ fn classifies_models_vs_library_classes() {
 /// Survey-mode ingest must recover from an unsupported construct (rather
 /// than aborting the whole app) and must record skipped view templates.
 /// This is the behavior the LSP/MCP rely on to stay usable on real apps,
-/// and the surfacing that keeps HAML/`.text.erb`/`.ruby` views from
-/// vanishing silently.
+/// and the surfacing that keeps unsupported (Slim/`.text.erb`/`.ruby`)
+/// views from vanishing silently.
 #[test]
 fn survey_mode_recovers_from_unsupported_construct_and_records_skipped_views() {
     use roundhouse::ingest::{ingest_app_from_tree, survey, IngestError};
@@ -759,8 +759,10 @@ fn survey_mode_recovers_from_unsupported_construct_and_records_skipped_views() {
             "app/controllers/widgets_controller.rb",
             "class WidgetsController < ApplicationController\n  def index\n    @out = `echo hi`\n  end\nend\n",
         ),
-        // A HAML view: a template the analyzer never ingests.
+        // A HAML view: now ingested through the shared view pipeline.
         ("app/views/widgets/show.html.haml", "%h1= @widget.name\n"),
+        // A Slim view: still an unsupported engine the analyzer skips.
+        ("app/views/widgets/show.html.slim", "h1 = @widget.name\n"),
     ];
     let tree = || -> HashMap<PathBuf, Vec<u8>> {
         files
@@ -780,7 +782,13 @@ fn survey_mode_recovers_from_unsupported_construct_and_records_skipped_views() {
     survey::activate();
     let result = ingest_app_from_tree(tree());
     let gaps = survey::drain();
-    assert!(result.is_ok(), "survey-mode ingest should recover, not abort");
+    let app = result.expect("survey-mode ingest should recover, not abort");
+
+    // The HAML view is now ingested rather than skipped.
+    assert!(
+        app.views.iter().any(|v| v.name.as_str() == "widgets/show"),
+        "HAML view should be ingested through the shared view pipeline"
+    );
 
     let messages: Vec<String> = gaps
         .iter()
@@ -792,8 +800,8 @@ fn survey_mode_recovers_from_unsupported_construct_and_records_skipped_views() {
     assert!(
         messages
             .iter()
-            .any(|m| m.contains("view template not ingested: haml")),
-        "skipped HAML view should be recorded as a gap, got: {messages:?}"
+            .any(|m| m.contains("view template not ingested: slim")),
+        "skipped Slim view should be recorded as a gap, got: {messages:?}"
     );
     assert!(
         !messages.is_empty(),

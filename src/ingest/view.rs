@@ -18,7 +18,7 @@ use std::path::Path;
 
 use crate::Symbol;
 use crate::dialect::View;
-use crate::erb;
+use crate::{erb, haml};
 use crate::ty::Row;
 
 use super::IngestResult;
@@ -43,6 +43,7 @@ pub type CompileFn = fn(&str) -> (String, Vec<TemplateSegment>);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewEngine {
     Erb,
+    Haml,
 }
 
 impl ViewEngine {
@@ -52,6 +53,7 @@ impl ViewEngine {
     pub fn from_extension(ext: &str) -> Option<Self> {
         match ext {
             "erb" => Some(ViewEngine::Erb),
+            "haml" => Some(ViewEngine::Haml),
             _ => None,
         }
     }
@@ -60,6 +62,7 @@ impl ViewEngine {
     pub fn compile_fn(self) -> CompileFn {
         match self {
             ViewEngine::Erb => erb::compile_erb_mapped,
+            ViewEngine::Haml => haml::compile_haml_mapped,
         }
     }
 }
@@ -185,12 +188,12 @@ mod tests {
     }
 
     #[test]
-    fn view_engine_dispatch_resolves_erb_only_for_now() {
+    fn view_engine_dispatch() {
         assert_eq!(ViewEngine::from_extension("erb"), Some(ViewEngine::Erb));
+        assert_eq!(ViewEngine::from_extension("haml"), Some(ViewEngine::Haml));
         // Not-yet-supported engines resolve to None (recorded as survey
         // gaps by the walker) — flipping one to `Some(..)` + a
         // `compile_fn` arm is the whole drop-in for a new engine.
-        assert_eq!(ViewEngine::from_extension("haml"), None);
         assert_eq!(ViewEngine::from_extension("herb"), None);
         assert_eq!(ViewEngine::from_extension("jbuilder"), None);
     }

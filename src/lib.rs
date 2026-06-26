@@ -15,6 +15,7 @@ pub mod effect;
 pub mod emit;
 pub mod erb;
 pub mod expr;
+pub mod haml;
 pub mod ide;
 pub mod ident;
 pub mod ingest;
