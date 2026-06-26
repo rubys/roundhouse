@@ -344,15 +344,18 @@ fn emit_hash(entries: &[(Expr, Expr)], kwargs: bool) -> String {
             // with special characters (e.g. `"turbo_confirm"`, `"text-sm"`)
             // use the quoted-key form `"name": value`. Rocket `k => v`
             // falls through for non-symbol keys.
+            // Values go through `emit_arg`: a modifier-if value
+            // (`open: true if cond`, often from a `cond ? x : nil` ternary)
+            // needs the same parenthesization as a positional argument.
             if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
                 let name = value.as_str();
                 if is_simple_ident(name) {
-                    format!("{name}: {}", emit_expr(v))
+                    format!("{name}: {}", emit_arg(v))
                 } else {
-                    format!("{:?}: {}", name, emit_expr(v))
+                    format!("{:?}: {}", name, emit_arg(v))
                 }
             } else {
-                format!("{} => {}", emit_expr(k), emit_expr(v))
+                format!("{} => {}", emit_expr(k), emit_arg(v))
             }
         })
         .collect();
@@ -744,5 +747,17 @@ mod tests {
         // modifier-if must still round-trip without parens.
         let stmt = modifier_if(lit_sym("b"), send(None, "cond?", vec![]));
         assert_eq!(emit_expr(&stmt), ":b if cond?");
+    }
+
+    #[test]
+    fn modifier_if_as_hash_value_is_parenthesized() {
+        // A `cond ? x : nil` ternary lowers to a modifier-if; as a hash
+        // value (`open: (x if cond)`) it needs the same parens as an arg.
+        let val = modifier_if(lit_str("y"), send(None, "cond?", vec![]));
+        let hash = Expr::new(
+            Span::default(),
+            ExprNode::Hash { entries: vec![(lit_sym("open"), val)], kwargs: false },
+        );
+        assert_eq!(emit_expr(&hash), r#"{ open: ("y" if cond?) }"#);
     }
 }

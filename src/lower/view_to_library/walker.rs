@@ -16,7 +16,8 @@ use super::helpers::emit_view_helper_call;
 use super::partial::{emit_render_partial, emit_yield};
 use super::predicates::rewrite_predicates;
 use super::{
-    accumulator_append_call, lit_sym, nil_lit, seq, todo_io_append, view_helpers_call, ViewCtx,
+    accumulator_append_call, accumulator_result_ref, assign_accumulator_string_new, lit_sym,
+    nil_lit, seq, todo_io_append, view_helpers_call, ViewCtx,
 };
 
 /// Walk a compiled-ERB body (`Seq` of `_buf = …` statements + control-
@@ -288,6 +289,57 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         }
     }
 
+    // Generic block-form output helper: `<%= form_tag(...) do %> INNER
+    // <% end %>` (form_tag / content_tag / link_to-with-block — anything
+    // not form_with, form_builder, or render). The block body is template
+    // buffer ops; walk it into a fresh capture accumulator the block
+    // *returns*, so the inner `_buf = _buf + …` lines become real appends
+    // instead of surviving raw (an undefined `_buf`, and a paren-less
+    // helper arg whose comma Ruby reads as a multi-assign target). The
+    // wrapping call's parens bind the `do`-block to the helper, not `<<`.
+    if let ExprNode::Send {
+        recv,
+        method,
+        args: sa,
+        block: Some(block),
+        parenthesized,
+    } = &*inner.node
+    {
+        if let ExprNode::Lambda { params, block_param, body, block_style } = &*block.node {
+            if block_body_is_template(body) {
+                let cap = "_cap";
+                let cap_ctx = ViewCtx {
+                    accumulator: cap.to_string(),
+                    ..ctx.with_locals(params.iter().map(|p| p.as_str().to_string()))
+                };
+                let mut cap_stmts = vec![assign_accumulator_string_new(cap)];
+                cap_stmts.extend(walk_body(body, &cap_ctx));
+                cap_stmts.push(accumulator_result_ref(cap));
+                let new_block = Expr::new(
+                    block.span,
+                    ExprNode::Lambda {
+                        params: params.clone(),
+                        block_param: block_param.clone(),
+                        body: seq(cap_stmts),
+                        block_style: *block_style,
+                    },
+                );
+                let rebuilt = Expr::new(
+                    inner.span,
+                    ExprNode::Send {
+                        recv: recv.as_ref().map(|r| rewrite_helpers_in_expr(r, ctx)),
+                        method: method.clone(),
+                        args: sa.iter().map(|a| rewrite_helpers_in_expr(a, ctx)).collect(),
+                        block: Some(new_block),
+                        parenthesized: *parenthesized,
+                    },
+                );
+                let escaped = view_helpers_call("html_escape", vec![rebuilt]);
+                return vec![accumulator_append_call(escaped, ctx)];
+            }
+        }
+    }
+
     // Default: bare interpolation `<%= expr %>` of a non-helper —
     // auto-escape. `<%= article.title %>` becomes
     // `io << ViewHelpers.html_escape(article.title)`. This matches
@@ -356,6 +408,22 @@ fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
     Expr::new(e.span, new_node)
 }
 
+/// Does a block body hold compiled-template buffer ops (`_buf = _buf + …`)?
+/// Distinguishes a capture block (`<%= form_tag … do %> INNER <% end %>`)
+/// from a plain value block (`<%= items.map { |x| … } %>`), so only the
+/// former is rewritten into a returned capture accumulator.
+fn block_body_is_template(body: &Expr) -> bool {
+    let stmts: Vec<&Expr> = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.iter().collect(),
+        _ => vec![body],
+    };
+    stmts.iter().any(|s| {
+        matches!(&*s.node,
+            ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+                if name.as_str() == "_buf")
+    })
+}
+
 fn unwrap_to_s(expr: &Expr) -> &Expr {
     if let ExprNode::Send { recv: Some(inner), method, args, .. } = &*expr.node {
         if method.as_str() == "to_s" && args.is_empty() {
@@ -363,5 +431,98 @@ fn unwrap_to_s(expr: &Expr) -> &Expr {
         }
     }
     expr
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::expr::BlockStyle;
+    use crate::ident::VarId;
+    use crate::span::Span;
+
+    fn str_lit(s: &str) -> Expr {
+        Expr::new(Span::default(), ExprNode::Lit { value: Literal::Str { value: s.into() } })
+    }
+    fn var(name: &str) -> Expr {
+        Expr::new(Span::default(), ExprNode::Var { id: VarId(0), name: Symbol::from(name) })
+    }
+    /// `_buf = _buf + arg` — the compiled-ERB append shape.
+    fn buf_append(arg: Expr) -> Expr {
+        let plus = Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: Some(var("_buf")),
+                method: Symbol::from("+"),
+                args: vec![arg],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        Expr::new(
+            Span::default(),
+            ExprNode::Assign {
+                target: LValue::Var { id: VarId(0), name: Symbol::from("_buf") },
+                value: plus,
+            },
+        )
+    }
+    fn test_ctx() -> ViewCtx {
+        ViewCtx {
+            locals: Vec::new(),
+            arg_name: String::new(),
+            resource_dir: String::new(),
+            accumulator: "io".to_string(),
+            form_records: Vec::new(),
+            nullable_locals: Default::default(),
+            stylesheets: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn form_block_body_lowers_to_capture_accumulator() {
+        // Compiled `<%= form_tag(x) do %> inner <% end %>` is
+        //   _buf = _buf + (form_tag(x) do _buf = _buf + "inner" end).to_s
+        // The inner `_buf` ops must be walked into a returned capture
+        // accumulator, not left raw (the bug found against lobsters).
+        let inner = Expr::new(
+            Span::default(),
+            ExprNode::Lambda {
+                params: Vec::new(),
+                block_param: None,
+                body: buf_append(str_lit("inner")),
+                block_style: BlockStyle::Do,
+            },
+        );
+        let form_call = Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("form_tag"),
+                args: vec![var("x")],
+                block: Some(inner),
+                parenthesized: false,
+            },
+        );
+        let to_s = Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: Some(form_call),
+                method: Symbol::from("to_s"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let stmts = walk_body(&buf_append(to_s), &test_ctx());
+        let emitted = stmts
+            .iter()
+            .map(crate::emit::ruby::emit_expr)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(emitted.contains("_cap"), "expected capture accumulator:\n{emitted}");
+        assert!(emitted.contains("form_tag"), "form_tag call preserved:\n{emitted}");
+        assert!(!emitted.contains("_buf"), "raw _buf must not survive:\n{emitted}");
+    }
 }
 
