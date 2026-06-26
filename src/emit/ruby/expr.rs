@@ -49,7 +49,7 @@ fn emit_node(n: &ExprNode) -> String {
             }
         }
         ExprNode::Apply { fun, args, block } => {
-            let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+            let args_s: Vec<String> = args.iter().map(emit_arg).collect();
             let base = format!("{}.call({})", emit_expr(fun), args_s.join(", "));
             if let Some(b) = block { format!("{base} {{ {} }}", emit_expr(b)) } else { base }
         }
@@ -116,7 +116,7 @@ fn emit_node(n: &ExprNode) -> String {
             format!("{} {} {}", emit_lvalue(target), op.as_ruby(), emit_expr(value))
         }
         ExprNode::Yield { args } => {
-            let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+            let args_s: Vec<String> = args.iter().map(emit_arg).collect();
             if args_s.is_empty() { "yield".to_string() } else { format!("yield {}", args_s.join(", ")) }
         }
         ExprNode::Raise { value } => format!("raise {}", emit_expr(value)),
@@ -134,7 +134,7 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::Super { args } => match args {
             None => "super".to_string(),
             Some(args) => {
-                let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+                let args_s: Vec<String> = args.iter().map(emit_arg).collect();
                 format!("super({})", args_s.join(", "))
             }
         },
@@ -396,6 +396,29 @@ fn is_simple_ident(s: &str) -> bool {
     true
 }
 
+/// Emit an expression in argument position. A bare modifier `if`/`unless`
+/// (`x if c`) is a syntax error as a call argument — `foo(x if c)` — so
+/// wrap it in parens. Everything else passes through unchanged.
+fn emit_arg(e: &Expr) -> String {
+    if renders_as_modifier_if(e) {
+        format!("({})", emit_expr(e))
+    } else {
+        emit_expr(e)
+    }
+}
+
+/// Does `e` emit as a top-level modifier conditional (`then if cond`)?
+/// Mirrors the modifier-form condition in `emit_expr`'s `If` arm.
+fn renders_as_modifier_if(e: &Expr) -> bool {
+    if let ExprNode::If { then_branch, else_branch, .. } = &*e.node {
+        is_empty_branch(else_branch)
+            && !matches!(&*then_branch.node, ExprNode::Seq { .. })
+            && !emit_expr(then_branch).contains('\n')
+    } else {
+        false
+    }
+}
+
 /// Emit the receiver/method/args portion of a Send without its block.
 /// Used by normal Ruby emission and by ERB template reconstruction.
 pub(super) fn emit_send_base(
@@ -404,7 +427,7 @@ pub(super) fn emit_send_base(
     args: &[Expr],
     parenthesized: bool,
 ) -> String {
-    let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+    let args_s: Vec<String> = args.iter().map(emit_arg).collect();
     let m = method.as_str();
     // Index-read (`recv[idx]`) and index-write (`recv[idx] = value`)
     // Sends round-trip to bracket-syntax regardless of receiver shape
@@ -692,5 +715,34 @@ mod tests {
         // method: "[]", args: [:k] }` → `self[:k]`, not `[](:k)`.
         let expr = send(Some(self_ref()), "[]", vec![lit_sym("k")]);
         assert_eq!(emit_expr(&expr), "self[:k]");
+    }
+
+    fn modifier_if(then_branch: Expr, cond: Expr) -> Expr {
+        Expr::new(
+            Span::default(),
+            ExprNode::If {
+                cond,
+                then_branch,
+                else_branch: Expr::new(Span::default(), ExprNode::Lit { value: Literal::Nil }),
+            },
+        )
+    }
+
+    #[test]
+    fn modifier_if_in_arg_position_is_parenthesized() {
+        // `foo(x if c)` is a Ruby syntax error; a modifier-if argument
+        // must be wrapped: `foo((x if c))`. Found against lobsters
+        // (`html_escape(... if cond)`, strong-params `permit(..., :sym if cond)`).
+        let arg = modifier_if(lit_sym("b"), send(None, "cond?", vec![]));
+        let expr = send(None, "permit", vec![lit_sym("a"), arg]);
+        assert_eq!(emit_expr(&expr), "permit(:a, (:b if cond?))");
+    }
+
+    #[test]
+    fn modifier_if_in_statement_position_is_not_parenthesized() {
+        // The wrap is surgical to argument position — a bare statement-level
+        // modifier-if must still round-trip without parens.
+        let stmt = modifier_if(lit_sym("b"), send(None, "cond?", vec![]));
+        assert_eq!(emit_expr(&stmt), ":b if cond?");
     }
 }
