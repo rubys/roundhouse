@@ -283,6 +283,13 @@ module RequestDispatch
 
   def dispatch_request(method, path, params)
     require_relative "../config/routes"
+    # Controllers load on demand (the CRuby target's routes.rb no longer
+    # eager-requires them; they're lazy-loaded at dispatch). The blog's
+    # RequestDispatch case-table is hardcoded to articles/comments, so
+    # require exactly those — idempotent on targets whose routes.rb still
+    # requires controllers eagerly.
+    require_relative "../app/controllers/articles_controller"
+    require_relative "../app/controllers/comments_controller"
     ViewHelpers.reset_slots!
     matched = Router.match(method, path, Routes.table)
     raise "No route matches #{method} #{path}" if matched.nil?
