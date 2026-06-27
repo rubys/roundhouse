@@ -104,6 +104,16 @@ module SqliteAdapter
   end
 
   def self.escape_value(v)
-    v.is_a?(Integer) ? Db.escape_int(v) : Db.escape_string(v)
+    if v.is_a?(Integer)
+      Db.escape_int(v)
+    elsif v == true
+      "1"
+    elsif v == false
+      "0"
+    elsif v.nil?
+      "NULL"
+    else
+      Db.escape_string(v.to_s)
+    end
   end
 end

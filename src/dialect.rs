@@ -311,7 +311,11 @@ pub enum ValidationRule {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Scope {
     pub name: Symbol,
-    pub params: Vec<Symbol>,
+    /// Lambda parameters, in source order (`scope :hottest, ->(user = nil,
+    /// tags = nil) { … }`). Defaults are carried so the lowered class
+    /// method reproduces them; a trailing relation parameter is appended
+    /// at lowering time (see `push_scope_methods`).
+    pub params: Vec<Param>,
     pub body: Expr,
 }
 

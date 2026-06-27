@@ -111,9 +111,13 @@ fn lower_models_inner(
     // resolve correctly.
     let row_classes = self::row::synthesize_row_classes(models, schema);
 
+    // Scope registry across all models, for scope-chain normalization.
+    let scopes = crate::lower::scope_chain::build_scope_registry(models);
+    let models_set = crate::lower::scope_chain::model_set(models);
+
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
     for model in models {
-        let methods = build_methods(model, schema, params_specs);
+        let methods = build_methods(model, schema, params_specs, &scopes, &models_set);
         let table = schema.tables.get(&model.table.0);
         all_methods.push((methods, model.name.clone(), table, model));
     }
@@ -338,7 +342,10 @@ pub fn class_info_from_library_class(lc: &LibraryClass) -> crate::analyze::Class
 /// `initialize` lowerings. Models whose table isn't in the schema (rare;
 /// abstract or virtual) get only the non-schema-driven methods.
 pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryClass {
-    let mut methods = build_methods(model, schema, &Default::default());
+    let single = std::slice::from_ref(model);
+    let scopes = crate::lower::scope_chain::build_scope_registry(single);
+    let models_set = crate::lower::scope_chain::model_set(single);
+    let mut methods = build_methods(model, schema, &Default::default(), &scopes, &models_set);
     let table = schema.tables.get(&model.table.0);
     let class_info = build_class_info(model, &methods, table);
     let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::new();
@@ -429,6 +436,8 @@ fn build_methods(
     model: &Model,
     schema: &Schema,
     params_specs: &std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>>,
+    scopes: &crate::lower::scope_chain::ScopeRegistry,
+    models_set: &std::collections::HashSet<ClassId>,
 ) -> Vec<MethodDef> {
     // No-op outside an emit diagnostics scope, so the many direct
     // test callers of the lowering entries are unaffected.
@@ -455,6 +464,7 @@ fn build_methods(
     }
 
     push_validate_method(&mut methods, model);
+    push_scope_methods(&mut methods, model, scopes, models_set);
     push_association_methods(&mut methods, model);
     push_dependent_destroy(&mut methods, model);
     push_unknown_marker_methods(&mut methods, model);
@@ -473,6 +483,70 @@ fn build_methods(
     }
 
     methods
+}
+
+/// Emit each `scope :name, ->(args){ body }` as a class method
+/// `def self.name(args, __rel = ActiveRecord::Relation.new(self))` whose
+/// body is rewritten (scope-chain normalization) to thread `__rel`: bare
+/// query calls (`where`/`order`/…) target `__rel`, and nested scope calls
+/// become `Model.scope(args, recv)`. The trailing relation parameter is
+/// what lets `Story.base(u).positive_ranked` chain without metaprogramming.
+fn push_scope_methods(
+    methods: &mut Vec<MethodDef>,
+    model: &Model,
+    scopes: &crate::lower::scope_chain::ScopeRegistry,
+    models_set: &std::collections::HashSet<ClassId>,
+) {
+    use crate::dialect::{AccessorKind, ModelBodyItem, Param};
+    let rel_param = Symbol::from("__rel");
+    for item in &model.body {
+        let ModelBodyItem::Scope { scope, .. } = item else { continue };
+        let mut params = scope.params.clone();
+        params.push(Param::with_default(rel_param.clone(), relation_new_self()));
+
+        let mut body = scope.body.clone();
+        crate::lower::scope_chain::rewrite_scope_body(
+            &mut body,
+            &model.name,
+            &rel_param,
+            scopes,
+            models_set,
+        );
+
+        methods.push(MethodDef {
+            name: scope.name.clone(),
+            receiver: MethodReceiver::Class,
+            params,
+            body,
+            signature: None,
+            effects: crate::effect::EffectSet::default(),
+            enclosing_class: Some(model.name.0.clone()),
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        });
+    }
+}
+
+/// `ActiveRecord::Relation.new(self)` — the default relation a scope class
+/// method starts from when called on the class rather than chained.
+fn relation_new_self() -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Const {
+                    path: vec![Symbol::from("ActiveRecord"), Symbol::from("Relation")],
+                },
+            )),
+            method: Symbol::from("new"),
+            args: vec![Expr::new(Span::synthetic(), ExprNode::SelfRef)],
+            block: None,
+            parenthesized: true,
+        },
+    )
 }
 
 /// Construct the `ClassInfo` for a lowered model: schema-derived

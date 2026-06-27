@@ -1,0 +1,333 @@
+//! Scope-call normalization — the lowering that lets ActiveRecord scope
+//! chains run against the metaprogramming-free `ActiveRecord::Relation`
+//! runtime (see project_lobsters_benchmark_parity_plan).
+//!
+//! A model `scope :name, ->(args){ body }` lowers (in `push_scope_methods`)
+//! to a class method `def self.name(args, _rel = ActiveRecord::Relation.new(self))`.
+//! For `Story.base(u).positive_ranked` to work without `method_missing`,
+//! every scope INVOCATION is rewritten so the scope is an ordinary class
+//! method taking the current relation as a trailing argument:
+//!
+//!   recv.scope(args)        (recv is a relation)  ->  Model.scope(args, recv)
+//!   Model.scope(args)       (call on the class)   ->  Model.scope(args)   [default rel]
+//!   <implicit>.scope(args)  (inside a scope body) ->  Model.scope(args, _rel)
+//!
+//! Relation built-ins (`where`/`order`/`limit`/…) stay `recv.method(args)`;
+//! a `Model.where(...)` / `Model.all` chain-start (no scope) is seeded with
+//! `ActiveRecord::Relation.new(Model)` so it, too, is chainable.
+
+use std::collections::{HashMap, HashSet};
+
+use crate::dialect::{Model, ModelBodyItem};
+use crate::expr::{Expr, ExprNode};
+use crate::ident::{ClassId, Symbol, VarId};
+
+/// model class id -> set of its scope names.
+pub type ScopeRegistry = HashMap<ClassId, HashSet<Symbol>>;
+
+/// Build `model -> {scope names}` from the app's models.
+pub fn build_scope_registry(models: &[Model]) -> ScopeRegistry {
+    let mut reg: ScopeRegistry = HashMap::new();
+    for m in models {
+        let set = reg.entry(m.name.clone()).or_default();
+        for item in &m.body {
+            if let ModelBodyItem::Scope { scope, .. } = item {
+                set.insert(scope.name.clone());
+            }
+        }
+    }
+    reg
+}
+
+/// The set of model class ids (so a `Const([M])` receiver can be recognized
+/// as a class-level scope call vs. an arbitrary constant).
+pub fn model_set(models: &[Model]) -> HashSet<ClassId> {
+    models.iter().map(|m| m.name.clone()).collect()
+}
+
+/// True when any model declares a scope (the whole pass is a no-op
+/// otherwise — e.g. the scope-free blog).
+pub fn any_scopes(scopes: &ScopeRegistry) -> bool {
+    scopes.values().any(|s| !s.is_empty())
+}
+
+/// Union of every scope name across all models — a cheap pre-filter so a
+/// body that names no scope is left completely untouched.
+pub fn all_scope_names(scopes: &ScopeRegistry) -> HashSet<Symbol> {
+    scopes.values().flatten().cloned().collect()
+}
+
+/// True if `expr` (or a descendant) calls a method whose name is a scope.
+pub fn mentions_scope(expr: &Expr, names: &HashSet<Symbol>) -> bool {
+    let mut found = false;
+    fn walk(e: &Expr, names: &HashSet<Symbol>, found: &mut bool) {
+        if *found {
+            return;
+        }
+        if let ExprNode::Send { method, .. } = &*e.node {
+            if names.contains(method) {
+                *found = true;
+                return;
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, names, found));
+    }
+    walk(expr, names, &mut found);
+    found
+}
+
+/// Relation methods that return a Relation — calls on them stay on the
+/// receiver and the chain keeps its model. Terminals / Enumerable methods
+/// (`to_a`/`first`/`map`/`pluck`/…) are deliberately absent: they end the
+/// relation, so model-tracking stops after them (a scope can't follow).
+fn is_relation_chain_method(name: &str) -> bool {
+    matches!(
+        name,
+        "where"
+            | "not"
+            | "order"
+            | "limit"
+            | "offset"
+            | "group"
+            | "having"
+            | "joins"
+            | "left_outer_joins"
+            | "select"
+            | "distinct"
+            | "includes"
+            | "preload"
+            | "eager_load"
+            | "merge"
+            | "none"
+    )
+}
+
+/// Shared lookup tables; `scope_body` is `Some((self_model, rel_param))`
+/// when rewriting a scope's own body (so implicit-self query roots thread
+/// the relation parameter), `None` at every other call site.
+pub struct Ctx<'a> {
+    pub scopes: &'a ScopeRegistry,
+    pub models: &'a HashSet<ClassId>,
+    pub scope_body: Option<(ClassId, Symbol)>,
+}
+
+impl Ctx<'_> {
+    fn scope_of(&self, model: &ClassId, method: &Symbol) -> bool {
+        self.scopes.get(model).is_some_and(|s| s.contains(method))
+    }
+    /// A copy of self with no scope-body relation (for args / blocks /
+    /// non-receiver subtrees, which root at their own constants).
+    fn at_callsite(&self) -> Ctx<'_> {
+        Ctx { scopes: self.scopes, models: self.models, scope_body: None }
+    }
+}
+
+fn syn(span: crate::span::Span, node: ExprNode) -> Expr {
+    Expr::new(span, node)
+}
+
+fn const_expr(span: crate::span::Span, model: &ClassId) -> Expr {
+    let path: Vec<Symbol> = model.0.as_str().split("::").map(Symbol::from).collect();
+    syn(span, ExprNode::Const { path })
+}
+
+fn var_expr(span: crate::span::Span, name: &Symbol) -> Expr {
+    syn(span, ExprNode::Var { id: VarId(0), name: name.clone() })
+}
+
+/// `ActiveRecord::Relation.new(Model)`.
+fn relation_new(span: crate::span::Span, model: &ClassId) -> Expr {
+    let recv = syn(
+        span,
+        ExprNode::Const { path: vec![Symbol::from("ActiveRecord"), Symbol::from("Relation")] },
+    );
+    syn(
+        span,
+        ExprNode::Send {
+            recv: Some(recv),
+            method: Symbol::from("new"),
+            args: vec![const_expr(span, model)],
+            block: None,
+            parenthesized: true,
+        },
+    )
+}
+
+/// If `expr` is a bare `Const([M])` for a known model, return that model.
+fn const_model(expr: &Expr, models: &HashSet<ClassId>) -> Option<ClassId> {
+    if let ExprNode::Const { path } = &*expr.node {
+        let joined = ClassId(Symbol::from(
+            path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"),
+        ));
+        if models.contains(&joined) {
+            return Some(joined);
+        }
+    }
+    None
+}
+
+/// Local variable -> relation model, accumulated as a method body's
+/// statements are processed in order (so `q = Story.base(u); q.not_deleted`
+/// resolves `not_deleted` against `q`'s Story relation).
+type Locals = HashMap<Symbol, ClassId>;
+
+/// Rewrite scope chains in `expr` (in place). Returns the relation-model of
+/// the whole expression when it evaluates to a Relation of a known model.
+pub fn rewrite(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<ClassId> {
+    match &*expr.node {
+        // Statement sequence: thread `locals` left-to-right; the Seq's value
+        // (and model) is its last statement.
+        ExprNode::Seq { .. } => {
+            let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
+            let ExprNode::Seq { exprs } = node else { unreachable!() };
+            let mut last = None;
+            let mut out = Vec::with_capacity(exprs.len());
+            for mut e in exprs {
+                last = rewrite(&mut e, ctx, locals);
+                out.push(e);
+            }
+            *expr.node = ExprNode::Seq { exprs: out };
+            last
+        }
+        // `name = value`: record the local's relation model (if any).
+        ExprNode::Assign { .. } => {
+            let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
+            let ExprNode::Assign { target, mut value } = node else { unreachable!() };
+            let m = rewrite(&mut value, ctx, locals);
+            if let crate::expr::LValue::Var { name, .. } = &target {
+                match &m {
+                    Some(model) => {
+                        locals.insert(name.clone(), model.clone());
+                    }
+                    None => {
+                        locals.remove(name);
+                    }
+                }
+            }
+            *expr.node = ExprNode::Assign { target, value };
+            m
+        }
+        ExprNode::Send { .. } => rewrite_send(expr, ctx, locals),
+        _ => {
+            // Any other node (If/BoolOp/Case/…): recurse children, keeping
+            // the same ctx + locals so the relation thread survives across
+            // branches (a scope body's `if … q.preload … else q.not_deleted`).
+            expr.node.for_each_child_mut(&mut |c| {
+                rewrite(c, ctx, locals);
+            });
+            None
+        }
+    }
+}
+
+fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<ClassId> {
+    let span = expr.span;
+    let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
+    let ExprNode::Send { recv, method, mut args, mut block, parenthesized } = node else {
+        unreachable!()
+    };
+
+    // Args + block are independent subtrees: they root at their own
+    // constants (drop the scope-body relation), but may still read outer
+    // locals.
+    let arg_ctx = ctx.at_callsite();
+    for a in &mut args {
+        rewrite(a, &arg_ctx, locals);
+    }
+    if let Some(b) = &mut block {
+        rewrite(b, &arg_ctx, locals);
+    }
+
+    let put = |span: crate::span::Span, recv, method, args, block, parenthesized| -> Expr {
+        syn(span, ExprNode::Send { recv, method, args, block, parenthesized })
+    };
+
+    match recv {
+        None => {
+            if let Some((self_model, rel)) = &ctx.scope_body {
+                if ctx.scope_of(self_model, &method) {
+                    let mut new_args = args;
+                    new_args.push(var_expr(span, rel));
+                    *expr = put(span, Some(const_expr(span, self_model)), method, new_args, block, true);
+                    return Some(self_model.clone());
+                }
+                if is_relation_chain_method(method.as_str()) {
+                    *expr = put(span, Some(var_expr(span, rel)), method, args, block, parenthesized);
+                    return Some(self_model.clone());
+                }
+            }
+            *expr = put(span, None, method, args, block, parenthesized);
+            None
+        }
+        Some(mut r) => {
+            // Class-level call on a model constant.
+            if let Some(m) = const_model(&r, ctx.models) {
+                if ctx.scope_of(&m, &method) {
+                    *expr = put(span, Some(r), method, args, block, parenthesized);
+                    return Some(m);
+                }
+                if is_relation_chain_method(method.as_str()) || method.as_str() == "all" {
+                    let seed = relation_new(span, &m);
+                    if method.as_str() == "all" {
+                        *expr = seed;
+                    } else {
+                        *expr = put(span, Some(seed), method, args, block, parenthesized);
+                    }
+                    return Some(m);
+                }
+                *expr = put(span, Some(r), method, args, block, parenthesized);
+                return None;
+            }
+
+            // Receiver model: a local var holding a relation, else the
+            // (rewritten) receiver chain's model.
+            let r_model = match &*r.node {
+                ExprNode::Var { name, .. } => locals.get(name).cloned(),
+                _ => rewrite(&mut r, ctx, locals),
+            };
+
+            if let Some(mr) = r_model {
+                if ctx.scope_of(&mr, &method) {
+                    let mut new_args = args;
+                    new_args.push(r);
+                    *expr = put(span, Some(const_expr(span, &mr)), method, new_args, block, true);
+                    return Some(mr);
+                }
+                if is_relation_chain_method(method.as_str()) {
+                    *expr = put(span, Some(r), method, args, block, parenthesized);
+                    return Some(mr);
+                }
+                *expr = put(span, Some(r), method, args, block, parenthesized);
+                return None;
+            }
+
+            *expr = put(span, Some(r), method, args, block, parenthesized);
+            None
+        }
+    }
+}
+
+/// Rewrite a scope body: implicit-self query roots thread `rel_param`.
+pub fn rewrite_scope_body(
+    body: &mut Expr,
+    self_model: &ClassId,
+    rel_param: &Symbol,
+    scopes: &ScopeRegistry,
+    models: &HashSet<ClassId>,
+) {
+    let ctx = Ctx {
+        scopes,
+        models,
+        scope_body: Some((self_model.clone(), rel_param.clone())),
+    };
+    let mut locals = Locals::new();
+    rewrite(body, &ctx, &mut locals);
+}
+
+/// Rewrite a non-scope-body expression (controller action, library-class
+/// method, model instance method): scope chains root at a model constant.
+pub fn rewrite_call_site(expr: &mut Expr, scopes: &ScopeRegistry, models: &HashSet<ClassId>) {
+    let ctx = Ctx { scopes, models, scope_body: None };
+    let mut locals = Locals::new();
+    rewrite(expr, &ctx, &mut locals);
+}

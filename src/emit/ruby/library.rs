@@ -192,6 +192,28 @@ pub(super) fn emit_library_class_decl_with_synthesized(
     out_path: PathBuf,
     synthesized_siblings: &[(String, String)],
 ) -> EmittedFile {
+    // Scope-chain normalization at the emit seam: every library-shaped
+    // class (models, controllers, library_classes) flows through here, so a
+    // single pass rewrites `Story.base(u).positive_ranked`-style chains in
+    // any method body to run against `ActiveRecord::Relation`. Idempotent
+    // on the model scope methods the lowerer already normalized; a strict
+    // no-op for scope-free apps (the blog), so its output is unchanged.
+    let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
+    let owned: Option<LibraryClass> = if crate::lower::scope_chain::any_scopes(&scopes) {
+        let names = crate::lower::scope_chain::all_scope_names(&scopes);
+        let models = crate::lower::scope_chain::model_set(&app.models);
+        let mut c = lc.clone();
+        for m in &mut c.methods {
+            if crate::lower::scope_chain::mentions_scope(&m.body, &names) {
+                crate::lower::scope_chain::rewrite_call_site(&mut m.body, &scopes, &models);
+            }
+        }
+        Some(c)
+    } else {
+        None
+    };
+    let lc = owned.as_ref().unwrap_or(lc);
+
     let name = lc.name.0.as_str();
     let out_dir = out_path
         .parent()

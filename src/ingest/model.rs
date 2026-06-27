@@ -296,8 +296,33 @@ fn parse_scope(
         });
     };
 
-    // Parameter parsing lands when a fixture needs parameterized scopes.
-    let params: Vec<Symbol> = vec![];
+    // Lambda parameters: required (`->(user)`) then optional-with-default
+    // (`->(user = nil)`). Defaults are carried so the lowered class method
+    // reproduces the signature; the lowerer appends a trailing relation
+    // parameter. Block/keyword/splat scope params are rare on real models
+    // and fall through unrecorded.
+    let mut params: Vec<crate::dialect::Param> = Vec::new();
+    if let Some(pn) = lambda
+        .parameters()
+        .and_then(|p| p.as_block_parameters_node().and_then(|bpn| bpn.parameters()))
+    {
+        for req in pn.requireds().iter() {
+            if let Some(rp) = req.as_required_parameter_node() {
+                params.push(crate::dialect::Param::positional(Symbol::from(
+                    constant_id_str(&rp.name()),
+                )));
+            }
+        }
+        for opt in pn.optionals().iter() {
+            if let Some(op) = opt.as_optional_parameter_node() {
+                let default = ingest_expr(&op.value(), file)?;
+                params.push(crate::dialect::Param::with_default(
+                    Symbol::from(constant_id_str(&op.name())),
+                    default,
+                ));
+            }
+        }
+    }
 
     let body = match lambda.body() {
         Some(b) => ingest_expr(&b, file)?,
