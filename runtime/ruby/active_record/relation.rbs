@@ -1,0 +1,52 @@
+module ActiveRecord
+  # Lazy chainable query builder. Chain methods return `self` (typed as
+  # Relation); terminals execute and return rows / scalars. The element
+  # type is `untyped` in v1 — the lowered model methods carry the model
+  # identity; per-element typing is a later (generic-Relation) refinement.
+  class Relation
+    def initialize: (untyped model) -> void
+
+    def where: (?untyped condition, *untyped args) -> Relation
+    def not: (?untyped condition, *untyped args) -> Relation
+    def add_condition: (untyped condition, Array[untyped] args, bool negate) -> void
+    def order: (*untyped parts) -> Relation
+    def limit: (Integer n) -> Relation
+    def offset: (Integer n) -> Relation
+    def group: (*untyped parts) -> Relation
+    def having: (untyped condition, *untyped args) -> Relation
+    def joins: (untyped spec) -> Relation
+    def left_outer_joins: (untyped spec) -> Relation
+    def select: (untyped spec) -> Relation
+    def distinct: () -> Relation
+    def includes: (*untyped names) -> Relation
+    def preload: (*untyped names) -> Relation
+    def eager_load: (*untyped names) -> Relation
+    def merge: (Relation other) -> Relation
+    def where_clauses: () -> Array[String]
+    def none: () -> Relation
+
+    def to_a: () -> Array[untyped]
+    def each: () { (untyped) -> void } -> Array[untyped]
+    def map: () { (untyped) -> untyped } -> Array[untyped]
+    def first: () -> untyped
+    def last: () -> untyped
+    def count: () -> Integer
+    def empty?: () -> bool
+    def any?: () -> bool
+    def exists?: () -> bool
+    def length: () -> Integer
+    def size: () -> Integer
+    def pluck: (untyped col) -> Array[String]
+    def ids: () -> Array[Integer]
+    def find: (Integer id) -> untyped
+    def find_by: (untyped conditions) -> untyped
+
+    def to_sql: () -> String
+    def count_sql: () -> String
+    def hash_conditions: (untyped hash) -> String
+    def column_predicate: (String col, untyped val) -> String
+    def substitute_binds: (String sql, Array[untyped] args) -> String
+    def escape_list: (Array[untyped] vals) -> String
+    def order_term: (untyped p) -> String
+  end
+end

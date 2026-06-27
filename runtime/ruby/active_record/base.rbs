@@ -27,6 +27,13 @@ module ActiveRecord
     def delete: (String table_name, Integer id) -> void
     %a{abstract}
     def truncate: (String table_name) -> void
+    # Raw-SQL escape hatch used by ActiveRecord::Relation: run a composed
+    # SELECT and return its rows; escape a value for inline SQL. The
+    # SqliteAdapter (CRuby/spinel) already implements both.
+    %a{abstract}
+    def select_rows: (String sql) -> Array[Hash[String, untyped]]
+    %a{abstract}
+    def escape_value: (untyped value) -> String
   end
 
   # The global adapter slot. Set once during boot; read everywhere
