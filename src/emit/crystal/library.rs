@@ -80,6 +80,7 @@ fn synthesize_module_lc(funcs: &[LibraryFunction]) -> LibraryClass {
         includes: Vec::new(),
         methods,
         origin: None,
+        constants: Vec::new(),
     }
 }
 

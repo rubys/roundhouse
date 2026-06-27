@@ -298,6 +298,7 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
             resource: spec.resource.clone(),
             fields: spec.fields.clone(),
         }),
+        constants: Vec::new(),
     }
 }
 

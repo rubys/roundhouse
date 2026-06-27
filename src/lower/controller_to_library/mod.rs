@@ -146,6 +146,31 @@ pub fn lower_controllers_with_arel_views_and_assocs(
     views: &[crate::dialect::View],
     assocs: &[crate::lower::model_associations::AssociationEdge],
 ) -> Vec<LibraryClass> {
+    lower_controllers_with_arel_views_assocs_and_routes(
+        controllers, extras, schema, views, assocs, None,
+    )
+}
+
+/// As `lower_controllers_with_arel_views_and_assocs`, plus a per-controller
+/// map of route-reachable action names. When supplied, a public controller
+/// method is treated as a routable action (implicit render + `process_action`
+/// dispatch) ONLY if a route reaches it; other public methods are emitted as
+/// plain helper methods (no implicit render). This is what lets a base
+/// controller's `helper_method` / filter methods (e.g.
+/// `ApplicationController#tags_filtered_by_cookie`) keep their real return
+/// value instead of being clobbered by a synthesized `render`. `None`
+/// preserves the legacy "every public method is an action" behavior for
+/// callers that haven't wired routes yet.
+pub fn lower_controllers_with_arel_views_assocs_and_routes(
+    controllers: &[Controller],
+    extras: Vec<(ClassId, crate::analyze::ClassInfo)>,
+    schema: Option<&crate::schema::Schema>,
+    views: &[crate::dialect::View],
+    assocs: &[crate::lower::model_associations::AssociationEdge],
+    routed_by_controller: Option<
+        &std::collections::HashMap<ClassId, std::collections::HashSet<Symbol>>,
+    >,
+) -> Vec<LibraryClass> {
     // Scan source-shape action bodies for `permit(...)` declarations.
     // Each unique resource yields one `<Resource>Params` synthesized
     // class plus the (resource, fields, class_id) record we need to
@@ -156,7 +181,12 @@ pub fn lower_controllers_with_arel_views_and_assocs(
     let mut all_methods: Vec<(Vec<MethodDef>, &Controller)> = Vec::new();
     for controller in controllers {
         let json_actions = json_actions_for(controller, views);
-        let methods = build_methods(controller, &params_specs, &json_actions);
+        // `Some(map)` → this controller's routed actions (empty set if it
+        // has no routes, e.g. a base controller → all publics are helpers).
+        // `None` → legacy: every public method is an action.
+        let routed = routed_by_controller
+            .map(|m| m.get(&controller.name).cloned().unwrap_or_default());
+        let methods = build_methods(controller, &params_specs, &json_actions, routed.as_ref());
         all_methods.push((methods, controller));
     }
 
@@ -327,6 +357,7 @@ pub fn lower_controllers_with_arel_views_and_assocs(
             includes: Vec::new(),
             methods,
             origin: None,
+            constants: collect_class_constants(controller),
         });
     }
     // Type-check synthesized Params class method bodies with a per-class
@@ -361,7 +392,7 @@ pub fn lower_controllers_with_arel_views_and_assocs(
 /// `lower_controllers_to_library_classes`.
 pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClass {
     let specs = self::params::collect_specs(std::slice::from_ref(controller));
-    let methods = build_methods(controller, &specs, &std::collections::HashSet::new());
+    let methods = build_methods(controller, &specs, &std::collections::HashSet::new(), None);
     LibraryClass {
         name: controller.name.clone(),
         is_module: false,
@@ -369,17 +400,49 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         includes: Vec::new(),
         methods,
         origin: None,
+        constants: collect_class_constants(controller),
     }
+}
+
+/// Collect class-level constant definitions (`NAME = <expr>`) from a
+/// controller body. They ride in as `Unknown` items wrapping an `Assign`
+/// to a single-segment `Const` lvalue; everything else (filters,
+/// `caches_page`, …) stays dropped. Carried onto the `LibraryClass` so
+/// refs like `ApplicationController::TAG_FILTER_COOKIE` resolve.
+fn collect_class_constants(controller: &Controller) -> Vec<(Symbol, Expr)> {
+    let mut out = Vec::new();
+    for item in &controller.body {
+        let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
+        if let ExprNode::Assign {
+            target: crate::expr::LValue::Const { path },
+            value,
+        } = &*expr.node
+        {
+            if let [name] = path.as_slice() {
+                out.push((name.clone(), value.clone()));
+            }
+        }
+    }
+    out
 }
 
 fn build_methods(
     controller: &Controller,
     params_specs: &BTreeMap<Symbol, ParamsSpec>,
     json_actions: &std::collections::HashSet<Symbol>,
+    routed: Option<&std::collections::HashSet<Symbol>>,
 ) -> Vec<MethodDef> {
     let mut methods: Vec<MethodDef> = Vec::new();
 
-    let (publics, privs) = split_public_private_actions(controller);
+    let (publics_all, privs) = split_public_private_actions(controller);
+    // With route info, a public method is a routable action only if a route
+    // reaches it; the rest are helper/filter methods that must keep their
+    // return value (no synthesized render) — emitted like privates. Without
+    // route info, every public is an action (legacy behavior).
+    let (publics, helper_publics): (Vec<Action>, Vec<Action>) = match routed {
+        Some(set) => publics_all.into_iter().partition(|a| set.contains(&a.name)),
+        None => (publics_all, Vec::new()),
+    };
     let before_filters: Vec<&Filter> = controller
         .filters()
         .filter(|f| matches!(f.kind, FilterKind::Before))
@@ -427,6 +490,15 @@ fn build_methods(
         ));
     }
     for a in &privs_kept {
+        methods.push(action_to_method(
+            a, controller, &privs, /*is_public=*/ false, params_specs, json_actions,
+        ));
+    }
+    // Public methods no route reaches are helpers/filters, not actions:
+    // emit them verbatim (no implicit render) so callers see their real
+    // return value. (Whether before_action auto-runs them is handled by
+    // the filter-chain work, not here.)
+    for a in &helper_publics {
         methods.push(action_to_method(
             a, controller, &privs, /*is_public=*/ false, params_specs, json_actions,
         ));

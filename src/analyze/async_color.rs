@@ -722,6 +722,7 @@ mod tests {
             includes: Vec::new(),
             methods,
             origin: None,
+            constants: Vec::new(),
         }
     }
 

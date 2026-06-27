@@ -215,6 +215,7 @@ fn synthesize_module_lc(
         includes: Vec::new(),
         methods,
         origin: None,
+        constants: Vec::new(),
     }
 }
 
@@ -511,6 +512,7 @@ fn collect_imports_for_function(
             block_param: None,
         }],
         origin: None,
+        constants: Vec::new(),
     };
     collect_imports(&synthetic_lc, app, out_path)
 }

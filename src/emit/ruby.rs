@@ -291,12 +291,24 @@ fn lower_controllers_for_spinel(app: &App) -> Vec<LibraryClass> {
     // (issue #27) — without it the Arel pass drops includes and the
     // reader N+1s.
     let assocs = crate::lower::model_associations::compute_association_graph(app);
-    crate::lower::lower_controllers_with_arel_views_and_assocs(
+    // Route-reachability per controller: a public method is a routable
+    // action (gets implicit render + process_action dispatch) only if a
+    // route reaches it. Lets base-controller helper/filter methods keep
+    // their return value instead of being clobbered by a synthesized render.
+    let mut routed: std::collections::HashMap<
+        crate::ident::ClassId,
+        std::collections::HashSet<crate::ident::Symbol>,
+    > = std::collections::HashMap::new();
+    for r in crate::lower::flatten_routes(app) {
+        routed.entry(r.controller).or_default().insert(r.action);
+    }
+    crate::lower::lower_controllers_with_arel_views_assocs_and_routes(
         &app.controllers,
         model_extras,
         Some(&app.schema),
         &app.views,
         &assocs,
+        Some(&routed),
     )
 }
 

@@ -279,6 +279,7 @@ mod tests {
             includes: vec![],
             methods: vec![out],
             origin: None,
+            constants: Vec::new(),
         };
         let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
         eprintln!("--- accumulation ---\n{ex}\n--------------------");
@@ -323,6 +324,7 @@ mod tests {
             includes: vec![],
             methods: vec![transform_method(m)],
             origin: None,
+            constants: Vec::new(),
         };
         let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
         assert!(ex.contains("acc = acc ++ [v]"), "`<<` → append rebind:\n{ex}");
@@ -371,6 +373,7 @@ mod tests {
             includes: vec![],
             methods: vec![transform_method(m)],
             origin: None,
+            constants: Vec::new(),
         };
         let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
         eprintln!("--- string builder ---\n{ex}\n----------------------");
@@ -416,6 +419,7 @@ mod tests {
             includes: vec![],
             methods: vec![transform_method(m)],
             origin: None,
+            constants: Vec::new(),
         };
         let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
         assert!(ex.contains("r = %{r | notice: v}"), "attr setter → struct update:\n{ex}");
@@ -465,6 +469,7 @@ mod tests {
             includes: vec![],
             methods: vec![transform_method(m)],
             origin: None,
+            constants: Vec::new(),
         };
         let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
         eprintln!("--- block reduce ---\n{ex}\n--------------------");
@@ -506,6 +511,7 @@ mod tests {
             includes: vec![],
             methods: vec![transform_method(m)],
             origin: None,
+            constants: Vec::new(),
         };
         let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
         assert!(

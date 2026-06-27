@@ -1256,6 +1256,7 @@ mod tests {
             includes: vec![],
             methods,
             origin: None,
+            constants: Vec::new(),
         };
         crate::emit::elixir2::emit_library_class(&class).expect("emit")
     }
@@ -1479,6 +1480,7 @@ mod tests {
             includes: vec![],
             methods: vec![init],
             origin: None,
+            constants: Vec::new(),
         };
         let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
         eprintln!("--- ctor ---\n{ex}\n------------");

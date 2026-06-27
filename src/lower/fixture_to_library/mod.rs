@@ -95,6 +95,7 @@ fn build_fixture_class(f: &LoweredFixture, all: &LoweredFixtureSet) -> LibraryCl
         includes: Vec::new(),
         methods,
         origin: None,
+        constants: Vec::new(),
     }
 }
 

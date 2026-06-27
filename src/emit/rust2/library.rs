@@ -48,6 +48,7 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
         includes: Vec::new(),
         methods: std::mem::take(&mut colored),
         origin: None,
+        constants: Vec::new(),
     }];
     super::decide::decide_classes(&mut wrap);
     colored = wrap.into_iter().next().unwrap().methods;

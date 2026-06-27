@@ -940,6 +940,7 @@ mod tests {
             includes: vec![],
             methods: vec![callee, forwarder],
             origin: None,
+            constants: Vec::new(),
         };
         block_refine::propagate_one(&mut class);
         let fwd = class

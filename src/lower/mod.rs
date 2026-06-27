@@ -56,6 +56,7 @@ pub use controller_to_library::{
     lower_controller_to_library_class, lower_controllers_to_library_classes,
     lower_controllers_with_arel, lower_controllers_with_arel_and_views,
     lower_controllers_with_arel_views_and_assocs,
+    lower_controllers_with_arel_views_assocs_and_routes,
 };
 pub use model_to_library::{
     class_info_from_library_class, lower_model_to_library_class, lower_models_to_library_classes,

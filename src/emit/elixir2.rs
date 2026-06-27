@@ -766,6 +766,7 @@ fn module_funcs_to_library_class(
         includes: Vec::new(),
         methods,
         origin: None,
+        constants: Vec::new(),
     }
 }
 

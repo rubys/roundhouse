@@ -445,6 +445,7 @@ fn build_library_class(tm: &TestModule) -> LibraryClass {
         includes: tm.includes.clone(),
         methods,
         origin: None,
+        constants: Vec::new(),
     }
 }
 

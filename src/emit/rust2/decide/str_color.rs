@@ -1044,6 +1044,7 @@ mod tests {
             includes: vec![],
             methods,
             origin: None,
+            constants: Vec::new(),
         }
     }
 

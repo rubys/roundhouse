@@ -134,6 +134,7 @@ fn module_singleton_shape() {
         includes: vec![],
         methods: vec![reader, writer],
         origin: None,
+        constants: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit module singleton");
@@ -254,6 +255,7 @@ fn module_singleton_does_not_fire_on_plain_class() {
         includes: vec![],
         methods: vec![reader],
         origin: None,
+        constants: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit plain class");
@@ -370,6 +372,7 @@ fn raise_panic_peephole() {
         includes: vec![],
         methods: vec![fail_method, abort_method],
         origin: None,
+        constants: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit crasher class");
@@ -468,6 +471,7 @@ fn time_now_utc_iso8601_peephole() {
         includes: vec![],
         methods: vec![stamp],
         origin: None,
+        constants: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit clock class");
@@ -546,6 +550,7 @@ fn include_array_recv_routes_to_slices_contains() {
         includes: vec![],
         methods: vec![probe],
         origin: None,
+        constants: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit colcheck class");
@@ -618,6 +623,7 @@ fn negative_index_rewrites_to_len_minus_n() {
         includes: vec![],
         methods: vec![last_method],
         origin: None,
+        constants: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit tailer class");
@@ -771,6 +777,7 @@ fn class_reflection_rewrites() {
         includes: vec![],
         methods: vec![lookup_cols, lookup_name, diag],
         origin: None,
+        constants: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit reflect class");
@@ -855,6 +862,7 @@ fn bare_new_in_class_method_resolves_to_constructor() {
         includes: vec![],
         methods: vec![create],
         origin: None,
+        constants: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit widget class");
@@ -989,6 +997,7 @@ fn implicit_self_method_call_resolution() {
         includes: vec![],
         methods: vec![status_reader, notify, tick],
         origin: None,
+        constants: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit worker class");
@@ -1077,6 +1086,7 @@ fn each_array_block_shape() {
         includes: vec![],
         methods: vec![method],
         origin: None,
+        constants: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit each-block class");
@@ -1155,6 +1165,7 @@ fn each_hash_block_shape() {
         includes: vec![],
         methods: vec![method],
         origin: None,
+        constants: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit each hash-block class");
@@ -1230,6 +1241,7 @@ fn map_array_block_shape() {
         includes: vec![],
         methods: vec![method],
         origin: None,
+        constants: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit map-block class");
@@ -1327,6 +1339,7 @@ fn empty_body_with_nonvoid_return_synthesizes_zero_value() {
         includes: vec![],
         methods: vec![m1, m2],
         origin: None,
+        constants: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit empty-body class");
@@ -1429,6 +1442,7 @@ fn typed_empty_literals_back_propagate() {
         includes: vec![],
         methods: vec![errors, lookup],
         origin: None,
+        constants: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit typed-literal class");
@@ -1707,6 +1721,7 @@ fn nil_check_to_comma_ok_rewrites_pair() {
         includes: vec![],
         methods: vec![method],
         origin: None,
+        constants: Vec::new(),
     };
 
     let out = lower_for_go(vec![class]);
@@ -1792,6 +1807,7 @@ fn nil_check_to_comma_ok_skips_non_hash_receiver() {
         includes: vec![],
         methods: vec![method],
         origin: None,
+        constants: Vec::new(),
     };
 
     let out = lower_for_go(vec![class]);

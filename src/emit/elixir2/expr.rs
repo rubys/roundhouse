@@ -2356,6 +2356,7 @@ mod tests {
                 includes: vec![],
                 methods: vec![],
                 origin: None,
+                constants: Vec::new(),
             }
         }
         fn const_ref(path: &[&str]) -> Expr {
@@ -2473,6 +2474,7 @@ mod tests {
             includes: vec![],
             methods: vec![render, resolve],
             origin: None,
+            constants: Vec::new(),
         };
         let class = crate::lower::functionalize::functionalize(vec![class]).pop().unwrap();
         let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
@@ -2683,6 +2685,7 @@ mod tests {
             includes: vec![],
             methods: vec![truncate],
             origin: None,
+            constants: Vec::new(),
         };
         clear_modules();
         register_modules(std::iter::once(&vh));

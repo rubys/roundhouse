@@ -498,6 +498,13 @@ pub struct LibraryClass {
     /// instantiated it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<LibraryClassOrigin>,
+    /// Class-level constant definitions (`NAME = <expr>`), in source
+    /// order. Carried from a controller's / model's class body so refs
+    /// like `ApplicationController::TAG_FILTER_COOKIE` or
+    /// `Story::COMMENTABLE_DAYS` resolve. Emitted before the methods.
+    /// Most synthesized classes have none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constants: Vec<(Symbol, Expr)>,
 }
 
 /// What synthesized a `LibraryClass`. Used by per-target collapsers to

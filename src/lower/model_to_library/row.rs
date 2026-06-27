@@ -103,6 +103,7 @@ fn build_row_class(model_name: &ClassId, table: &Table) -> LibraryClass {
             resource: resource_sym(model_name),
             fields,
         }),
+        constants: Vec::new(),
     }
 }
 

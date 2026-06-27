@@ -107,6 +107,7 @@ pub(super) fn library_class_from_node_with_scope(
         includes,
         methods,
         origin: None,
+        constants: Vec::new(),
     })
 }
 
@@ -137,6 +138,7 @@ fn library_class_from_module_node_with_scope(
         includes,
         methods,
         origin: None,
+        constants: Vec::new(),
     })
 }
 

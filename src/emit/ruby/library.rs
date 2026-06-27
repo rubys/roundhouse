@@ -163,6 +163,7 @@ fn synthesize_module_lc(
         includes: Vec::new(),
         methods,
         origin: None,
+        constants: Vec::new(),
     }
 }
 
@@ -210,9 +211,24 @@ pub(super) fn emit_library_class_decl_with_synthesized(
             }
         }
     }
+    // `include`d modules must be LOADED before the `include` executes at
+    // class-definition time — unlike body const-refs (request-time), so we
+    // require them even when they're same-dir siblings (plain Ruby has no
+    // Rails autoload). Resolve through the same model/library_class anchor.
+    for inc in &lc.includes {
+        let path = vec![inc.0.as_str().to_string()];
+        if let Some(anchor) = require_path_for_body_const(&path, app, name) {
+            if anchor != self_anchor {
+                requires.push(relpath(&out_dir, &anchor));
+            }
+        }
+    }
     let mut const_paths: BTreeSet<Vec<String>> = BTreeSet::new();
     for m in &lc.methods {
         walk_const_paths(&m.body, &mut const_paths);
+    }
+    for (_, value) in &lc.constants {
+        walk_const_paths(value, &mut const_paths);
     }
     let mut body_requires: BTreeSet<String> = BTreeSet::new();
     for path in &const_paths {
@@ -279,6 +295,30 @@ pub(super) fn emit_library_class_decl_with_synthesized(
         writeln!(s).unwrap();
     }
 
+    // Class-level constants (`NAME = <expr>`), emitted before methods so
+    // refs in method bodies resolve. A multi-line value (proc/array) keeps
+    // its continuation lines indented to the class body.
+    for (cname, value) in &lc.constants {
+        let rendered = super::emit_expr(value);
+        let mut lines = rendered.lines();
+        match lines.next() {
+            Some(first_line) => {
+                writeln!(s, "{body_pad}{} = {first_line}", cname.as_str()).unwrap();
+                for line in lines {
+                    if line.is_empty() {
+                        writeln!(s).unwrap();
+                    } else {
+                        writeln!(s, "{body_pad}{line}").unwrap();
+                    }
+                }
+            }
+            None => writeln!(s, "{body_pad}{} = nil", cname.as_str()).unwrap(),
+        }
+    }
+    if !lc.constants.is_empty() && !lc.methods.is_empty() {
+        writeln!(s).unwrap();
+    }
+
     let mut first = true;
     for m in &lc.methods {
         if !first {
@@ -326,6 +366,28 @@ fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {
     None
 }
 
+/// Core Ruby classes an app may reopen (monkeypatch) without them being
+/// `app/models` files. Kept in sync with `rbs::is_builtin_class_name`.
+fn is_core_class_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Integer"
+            | "Float"
+            | "String"
+            | "Symbol"
+            | "TrueClass"
+            | "FalseClass"
+            | "NilClass"
+            | "Array"
+            | "Hash"
+            | "Object"
+            | "Numeric"
+            | "Comparable"
+            | "Enumerable"
+            | "Kernel"
+    )
+}
+
 /// Project-root-anchored require target for a body-referenced constant.
 /// `Views::<Plural>` resolves to `app/views/<plural>/_<singular>`; runtime
 /// modules resolve to `runtime/<x>`. The caller relpaths the result against
@@ -339,6 +401,15 @@ fn require_path_for_body_const(
 ) -> Option<String> {
     let first = path.first()?;
     if first == self_name {
+        return None;
+    }
+    // A core Ruby class an app reopens (e.g. `class String` in
+    // lib/monkey.rb) lands in `library_classes`, but it is NOT an
+    // `app/models/<name>` file — every `String.new` would otherwise emit
+    // a dangling `require_relative "app/models/string"`. The reference
+    // resolves to the builtin; any monkeypatch is loaded via its own file
+    // (lib/), not through this model anchor.
+    if is_core_class_name(first) {
         return None;
     }
     if app.models.iter().any(|m| m.name.0.as_str() == first.as_str())

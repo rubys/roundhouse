@@ -1049,6 +1049,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     includes: Vec::new(),
                     methods: Vec::new(),
                     origin: None,
+                    constants: Vec::new(),
                 });
                 let _ = stem;
             }
@@ -2104,5 +2105,6 @@ fn module_funcs_to_library_class(
         includes: Vec::new(),
         methods,
         origin: None,
+        constants: Vec::new(),
     }
 }

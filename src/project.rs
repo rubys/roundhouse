@@ -968,6 +968,18 @@ fn ruby_runtime_files(
         &mut files,
     )?;
 
+    // Emit the ingested support classes (extras/, lib/, app/helpers/,
+    // app/mailers/, and non-AR classes under app/models/ — Markdowner,
+    // TrafficHelper, StoriesPaginator, …) as `app/models/<stem>.rb`.
+    // `emit_spinel` (the shared Rails-shape path) emits only the lowered
+    // models/controllers/views; these `app.library_classes` are ingested
+    // for analysis and *referenced* by emitted code (so a require is
+    // generated) but were never produced, leaving the require graph
+    // dangling. CRuby/JRuby only for now — the bodies are source-shape
+    // (un-lowered) Ruby, faithful under the Ruby→Ruby round-trip but not
+    // yet vetted against the spinel AOT subset (that's the spinel phase).
+    files.extend(sort_files(emit::ruby::emit_library(app)));
+
     // The source app's `app/javascript/` + `public/` static assets are
     // already folded in by `spinel_files` (both targets need them — the
     // spinel binary now serves `/assets/*` too). Nothing CRuby-specific
@@ -975,7 +987,66 @@ fn ruby_runtime_files(
     // rename already happened in `spinel_files`.
     let mut files = dedupe_last_wins(files);
     apply_controller_dispatch(&mut files, app);
+    apply_views_aggregator(&mut files);
     Ok(files)
+}
+
+/// Regenerate `app/views.rb` (the per-app `Views::*` aggregator) from the
+/// view files actually emitted into the tree, replacing the scaffold's
+/// blog-hardcoded require list. Without this, every non-blog app's emitted
+/// views are orphaned — `app/views.rb` ships the blog's `views/articles/*`
+/// requires (most of which don't exist for another app), and the real
+/// emitted views are never loaded, so any `Views::X.method` call fails at
+/// dispatch.
+///
+/// View `.rb` files only reference each other at *request* time (via
+/// `render partial:`), never at load time, so the require order is free; we
+/// list partials (`_name`) before templates and otherwise sort, purely for
+/// a stable, legible file. For the blog the emitted view set matches the
+/// scaffold's, so the generated aggregator loads the same modules the
+/// hand-written one did.
+fn apply_views_aggregator(files: &mut [(String, String)]) {
+    use std::fmt::Write;
+
+    let mut views: Vec<&str> = files
+        .iter()
+        .map(|(p, _)| p.as_str())
+        .filter(|p| p.starts_with("app/views/") && p.ends_with(".rb"))
+        .collect();
+    if views.is_empty() {
+        return;
+    }
+    // Partials (`_foo.rb`) first, then alphabetical — deterministic.
+    views.sort_by_key(|p| {
+        let is_partial = Path::new(p)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .is_some_and(|f| f.starts_with('_'));
+        (!is_partial, *p)
+    });
+
+    let mut body = String::from(
+        "# Loads every view module into the Views::* namespace. Generated\n\
+         # from the emitted app/views/ tree (see apply_views_aggregator).\n\
+         # Each file pulls its own dependencies, so the order here is only\n\
+         # for legibility (partials first).\n",
+    );
+    for path in views {
+        // `app/views/x/y.rb` -> require_relative "views/x/y" (relative to
+        // `app/views.rb`, whose directory is `app/`).
+        let anchor = path
+            .strip_prefix("app/")
+            .unwrap_or(path)
+            .strip_suffix(".rb")
+            .unwrap_or(path);
+        writeln!(body, "require_relative {anchor:?}").unwrap();
+    }
+
+    for (path, content) in files.iter_mut() {
+        if path == "app/views.rb" {
+            *content = body.clone();
+        }
+    }
 }
 
 /// Replace the scaffold `main.rb`'s blog-hardcoded
@@ -1001,7 +1072,20 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App) {
         if !seen.insert(sym.clone()) {
             continue;
         }
-        writeln!(arms, "    when :{sym} then {class}.new").unwrap();
+        // Lazy-require the controller at dispatch rather than eagerly at
+        // boot. This is Rails-faithful (controllers autoload on first use)
+        // and, crucially, means a never-dispatched controller whose deps we
+        // can't yet satisfy (a gem superclass, an unmodeled framework
+        // mixin) doesn't abort boot — only the routes actually served need
+        // to load. `require_relative` is idempotent, so repeat dispatches
+        // are free. Paired with stripping the eager controller-require
+        // header from `config/routes.rb` below.
+        let stem = crate::naming::snake_case(class);
+        writeln!(
+            arms,
+            "    when :{sym} then require_relative \"app/controllers/{stem}\"; {class}.new"
+        )
+        .unwrap();
     }
     if arms.is_empty() {
         return;
@@ -1012,6 +1096,18 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App) {
     for (path, content) in files.iter_mut() {
         if path.ends_with("main.rb") && content.contains(HARDCODED) {
             *content = content.replace(HARDCODED, &generated);
+        }
+        // Drop the eager `require_relative "../app/controllers/<x>"` header
+        // from routes.rb — controllers now load lazily via
+        // instantiate_controller. Routing itself only needs the route
+        // table (data), not the controller classes.
+        if path.ends_with("config/routes.rb") {
+            *content = content
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("require_relative \"../app/controllers/"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            content.push('\n');
         }
     }
 }
