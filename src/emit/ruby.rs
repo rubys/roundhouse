@@ -150,6 +150,10 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
         relax_from_stmt_handle(lc);
     }
 
+    // Ruby-family scope lowering: synthesize model scope methods +
+    // normalize scope chains before rendering (no-op for scope-free apps).
+    library::apply_scope_lowering(&mut lcs, app);
+
     // Synthesized siblings need explicit `require_relative` even when
     // they live in the same directory as their referencer — nothing else
     // in the require chain loads them. Build a (name, anchor) map from
@@ -263,7 +267,8 @@ pub fn emit_lowered_routes(app: &App) -> EmittedFile {
 /// `app/models/<name>.rb` because they're plain holders, not request
 /// handlers.
 pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
-    let lcs = lower_controllers_for_spinel(app);
+    let mut lcs = lower_controllers_for_spinel(app);
+    library::apply_scope_lowering(&mut lcs, app);
     emit_lowered_controllers_from_lcs(&lcs, app)
 }
 

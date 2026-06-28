@@ -19,14 +19,49 @@ use crate::ident::ClassId;
 use crate::naming::{singularize, snake_case};
 
 pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
-    app.library_classes
-        .iter()
+    let mut lcs: Vec<LibraryClass> = app.library_classes.clone();
+    apply_scope_lowering(&mut lcs, app);
+    lcs.iter()
         .flat_map(|lc| {
             let file_stem = snake_case(lc.name.0.as_str());
             let out_path = PathBuf::from(format!("app/models/{file_stem}.rb"));
             emit_library_class_pair(lc, app, out_path)
         })
         .collect()
+}
+
+/// Ruby-family pre-emit pass: synthesize each model's scope class methods
+/// and normalize scope chains (`Story.base(u).positive_ranked` ->
+/// `Story.positive_ranked(Story.base(u))`) across a group of library
+/// classes, so they run against `ActiveRecord::Relation`. Lives on the
+/// Ruby emit path — these methods reference a runtime only the CRuby/JRuby
+/// tree provides, so the shared `lower/` must stay target-agnostic. Run
+/// once per LC group (models / controllers / library_classes) before
+/// rendering. A strict no-op for scope-free apps (the blog).
+pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
+    let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
+    if !crate::lower::scope_chain::any_scopes(&scopes) {
+        return;
+    }
+    let names = crate::lower::scope_chain::all_scope_names(&scopes);
+    let models = crate::lower::scope_chain::model_set(&app.models);
+    for lc in lcs.iter_mut() {
+        // Models gain their scope class methods (already chain-normalized).
+        if let Some(model) = app.models.iter().find(|m| m.name == lc.name) {
+            crate::lower::model_to_library::push_scope_methods(
+                &mut lc.methods,
+                model,
+                &scopes,
+                &models,
+            );
+        }
+        // Every method body: normalize scope chains (call-site form).
+        for m in &mut lc.methods {
+            if crate::lower::scope_chain::mentions_scope(&m.body, &names) {
+                crate::lower::scope_chain::rewrite_call_site(&mut m.body, &scopes, &models);
+            }
+        }
+    }
 }
 
 /// Emit both the `.rb` file and its `.rbs` sidecar for a single
@@ -192,42 +227,6 @@ pub(super) fn emit_library_class_decl_with_synthesized(
     out_path: PathBuf,
     synthesized_siblings: &[(String, String)],
 ) -> EmittedFile {
-    // Scope-chain normalization at the emit seam: every library-shaped
-    // class (models, controllers, library_classes) flows through here, so a
-    // single pass rewrites `Story.base(u).positive_ranked`-style chains in
-    // any method body to run against `ActiveRecord::Relation`. Idempotent
-    // on the model scope methods the lowerer already normalized; a strict
-    // no-op for scope-free apps (the blog), so its output is unchanged.
-    let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
-    let owned: Option<LibraryClass> = if crate::lower::scope_chain::any_scopes(&scopes) {
-        let names = crate::lower::scope_chain::all_scope_names(&scopes);
-        let models = crate::lower::scope_chain::model_set(&app.models);
-        let mut c = lc.clone();
-        // If this class is a model, synthesize its scope class methods here
-        // (Ruby-target only — they reference ActiveRecord::Relation, which
-        // other targets' runtimes don't have, so they can't live in the
-        // shared model lowering).
-        if let Some(model) = app.models.iter().find(|m| m.name == c.name) {
-            crate::lower::model_to_library::push_scope_methods(
-                &mut c.methods,
-                model,
-                &scopes,
-                &models,
-            );
-        }
-        // Normalize scope chains in every method body (call-site form);
-        // idempotent on the scope methods just synthesized.
-        for m in &mut c.methods {
-            if crate::lower::scope_chain::mentions_scope(&m.body, &names) {
-                crate::lower::scope_chain::rewrite_call_site(&mut m.body, &scopes, &models);
-            }
-        }
-        Some(c)
-    } else {
-        None
-    };
-    let lc = owned.as_ref().unwrap_or(lc);
-
     let name = lc.name.0.as_str();
     let out_dir = out_path
         .parent()
