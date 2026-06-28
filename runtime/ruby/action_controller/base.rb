@@ -27,75 +27,26 @@ module ActionController
     internal_server_error: 500,
   }.freeze
 
-  # Minimal cookie jar. `cookies[:k]` reads the inbound value (or a
-  # pending write); `cookies[:k] = v` records a write; `cookies.permanent`
-  # returns self (expiry isn't modeled); `to_set` exposes the pending
-  # writes for the dispatcher to serialize as Set-Cookie. Keys are Symbols
-  # (the request parser symbolizes cookie names). No metaprogramming — the
-  # jar is a plain pair of hashes.
-  class CookieJar
-    # No-arg constructor with empty ivars (pinned by the `inbound` /
-    # `to_set` getter return types — a defaulted `inbound = {}` param
-    # transpiles to a mistyped empty-hash literal on strict targets). The
-    # dispatcher seeds the inbound values via `load`.
-    def initialize
-      @inbound = {}
-      @out = {}
-    end
-
-    # Seed the inbound cookies (the dispatcher passes the request's cookie
-    # hash). Stored String-keyed: the empty-hash ivars then transpile with
-    # a consistent key type on strict targets (a Symbol-keyed empty hash
-    # restricts badly against the default `{}`), and Symbol lookups
-    # normalize via `to_s` below.
-    def load(values)
-      values.each { |name, value| @inbound[name.to_s] = value }
-    end
-
-    # Getter that pins `@inbound`'s element types for the body-typer.
-    def inbound
-      @inbound
-    end
-
-    def [](key)
-      k = key.to_s
-      @out.key?(k) ? @out[k] : @inbound[k]
-    end
-
-    def []=(key, value)
-      @out[key.to_s] = value
-    end
-
-    # `cookies.permanent[:k] = v` — expiry not modeled; permanence is a
-    # no-op that returns the same jar so the index-assign lands here.
-    def permanent
-      self
-    end
-
-    def delete(key)
-      @out[key.to_s] = nil
-    end
-
-    # Pending writes, for the dispatcher's Set-Cookie serialization.
-    def to_set
-      @out
-    end
-  end
-
   # Base controller class. Holds the per-request state (params,
-  # session, flash, cookies) and the response state (status, body,
-  # location). Subclasses define their actions and a `process_action`
-  # dispatch case (since spinel forbids `send` with non-literal symbols,
-  # the action dispatch has to be explicit per-controller).
+  # session, flash) and the response state (status, body, location).
+  # Subclasses define their actions and a `process_action` dispatch
+  # case (since spinel forbids `send` with non-literal symbols, the
+  # action dispatch has to be explicit per-controller).
+  #
+  # NOTE: `cookies` is intentionally NOT here. It's a CRuby-target
+  # feature (used by lobsters, not the blog) provided via the Ruby
+  # overlay (runtime/action_controller_cookies.rb), so the shared
+  # runtime stays target-agnostic — a CookieJar in this transpiled
+  # file would have to satisfy every strict target's type system for
+  # a feature none of them exercise yet.
   class Base
-    attr_accessor :params, :session, :flash, :cookies, :request_method, :request_path, :request_format
+    attr_accessor :params, :session, :flash, :request_method, :request_path, :request_format
     attr_reader   :status, :body, :location, :content_type
 
     def initialize
       @params  = {}
       @session = ActionDispatch::Session.new
       @flash   = ActionDispatch::Flash.new
-      @cookies = ActionController::CookieJar.new
       @status  = 200
       @body    = ""
       @location = nil

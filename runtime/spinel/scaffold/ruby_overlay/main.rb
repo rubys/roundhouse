@@ -54,6 +54,7 @@ require_relative "runtime/active_record"
 require_relative "config/schema"
 require_relative "runtime/action_dispatch"
 require_relative "runtime/action_controller"
+require_relative "runtime/action_controller_cookies"
 require_relative "runtime/broadcasts"
 require_relative "runtime/cgi_io"
 require_relative "config/routes"
@@ -123,10 +124,10 @@ module Main
     # its own cookie (`flash_notice`, `flash_alert`) so the cookie
     # plumbing stays format-free.
     cookies = request[:cookies] || {}
-    # Seed the controller's CookieJar with the inbound cookies so
+    # Expose the inbound cookies to the controller as a CookieJar so
     # `cookies[:k]` reads (and `cookies[:k] = v` records writes, surfaced
-    # below as Set-Cookie). The jar itself is created in Base#initialize.
-    controller.cookies.load(cookies)
+    # below as Set-Cookie). CookieJar is the CRuby-only overlay class.
+    controller.cookies = ActionController::CookieJar.new(cookies)
     # Load inbound flash through the constructor (NOT `flash[:k]=`) so the
     # Flash snapshots these as carried-in; `to_persisted` then sweeps the
     # ones merely displayed (show-once). See ActionDispatch::Flash.
