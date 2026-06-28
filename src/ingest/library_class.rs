@@ -99,7 +99,7 @@ pub(super) fn library_class_from_node_with_scope(
         constant_path_of(&n).map(|p| ClassId(Symbol::from(p.join("::"))))
     });
 
-    let (includes, methods) = walk_decl_body(class.body(), &owner, file, false)?;
+    let (includes, methods, constants) = walk_decl_body(class.body(), &owner, file, false)?;
     Ok(LibraryClass {
         name: owner,
         is_module: false,
@@ -107,7 +107,7 @@ pub(super) fn library_class_from_node_with_scope(
         includes,
         methods,
         origin: None,
-        constants: Vec::new(),
+        constants,
     })
 }
 
@@ -130,7 +130,7 @@ fn library_class_from_module_node_with_scope(
     full_path.extend(name_path);
     let owner = ClassId(Symbol::from(full_path.join("::")));
 
-    let (includes, methods) = walk_decl_body(module.body(), &owner, file, false)?;
+    let (includes, methods, constants) = walk_decl_body(module.body(), &owner, file, false)?;
     Ok(LibraryClass {
         name: owner,
         is_module: true,
@@ -138,7 +138,7 @@ fn library_class_from_module_node_with_scope(
         includes,
         methods,
         origin: None,
-        constants: Vec::new(),
+        constants,
     })
 }
 
@@ -152,14 +152,17 @@ fn library_class_from_module_node_with_scope(
 /// `class << self` block; it overrides every synthesized method's
 /// receiver to `Class`, so e.g. `attr_accessor :adapter` inside
 /// `class << self` produces class-level getter/setter pairs.
+type DeclBody = (Vec<ClassId>, Vec<MethodDef>, Vec<(Symbol, Expr)>);
+
 fn walk_decl_body<'pr>(
     body: Option<ruby_prism::Node<'pr>>,
     owner: &ClassId,
     file: &str,
     force_class_receiver: bool,
-) -> IngestResult<(Vec<ClassId>, Vec<MethodDef>)> {
+) -> IngestResult<DeclBody> {
     let mut includes: Vec<ClassId> = Vec::new();
     let mut methods: Vec<MethodDef> = Vec::new();
+    let mut constants: Vec<(Symbol, Expr)> = Vec::new();
     // `module_function` (called bare inside a module body) marks every
     // subsequent direct `def` as a module-function — both an instance
     // method AND a class method. For our targets (which call these as
@@ -169,10 +172,17 @@ fn walk_decl_body<'pr>(
     let mut module_function_active = false;
 
     let Some(b) = body else {
-        return Ok((includes, methods));
+        return Ok((includes, methods, constants));
     };
 
     for stmt in flatten_statements(b) {
+        // Class-level constant `NAME = <expr>` (e.g. `STORIES_PER_PAGE = 25`).
+        if let Some(cw) = stmt.as_constant_write_node() {
+            let name = Symbol::from(constant_id_str(&cw.name()));
+            let value = ingest_expr(&cw.value(), file)?;
+            constants.push((name, value));
+            continue;
+        }
         if let Some(def) = stmt.as_def_node() {
             let mut m = ingest_library_method(&def, owner, file)?;
             if force_class_receiver || module_function_active {
@@ -184,10 +194,11 @@ fn walk_decl_body<'pr>(
         // `class << self ... end` — singleton class block. Body
         // defines class-level methods on the enclosing scope.
         if let Some(sc) = stmt.as_singleton_class_node() {
-            let (inner_includes, inner_methods) =
+            let (inner_includes, inner_methods, inner_constants) =
                 walk_decl_body(sc.body(), owner, file, true)?;
             includes.extend(inner_includes);
             methods.extend(inner_methods);
+            constants.extend(inner_constants);
             continue;
         }
         if let Some(call) = stmt.as_call_node() {
@@ -263,7 +274,7 @@ fn walk_decl_body<'pr>(
         // surface as separate entries via the plural API.
     }
 
-    Ok((includes, methods))
+    Ok((includes, methods, constants))
 }
 
 /// Synthesize `def <name>; @<name>; end` (instance receiver) or

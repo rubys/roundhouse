@@ -5,9 +5,21 @@ module ActionController
   # test (the test exercises method bodies); it's accessed inside
   # `resolve_status` via `STATUS_CODES.fetch(s, 200)`.
 
-  # Base controller. Holds per-request state (params, session, flash)
-  # and response state (status, body, location). Subclasses define
-  # their actions and override process_action.
+  # Cookie jar: Symbol-keyed inbound values + pending writes. `[]`
+  # returns a nilable String (absent cookie -> nil); `to_set` exposes
+  # the pending writes for Set-Cookie serialization.
+  class CookieJar
+    def initialize: (?Hash[Symbol, String] inbound) -> void
+    def []: (Symbol key) -> String?
+    def []=: (Symbol key, String? value) -> String?
+    def permanent: () -> CookieJar
+    def delete: (Symbol key) -> String?
+    def to_set: () -> Hash[Symbol, String?]
+  end
+
+  # Base controller. Holds per-request state (params, session, flash,
+  # cookies) and response state (status, body, location). Subclasses
+  # define their actions and override process_action.
   class Base
     # `attr_accessor` produces getter+setter pairs for each name.
     # `params` is a String-keyed Hash whose values are recursive
@@ -24,6 +36,8 @@ module ActionController
     def session=: (ActionDispatch::Session) -> ActionDispatch::Session
     def flash: () -> ActionDispatch::Flash
     def flash=: (ActionDispatch::Flash) -> ActionDispatch::Flash
+    def cookies: () -> ActionController::CookieJar
+    def cookies=: (ActionController::CookieJar) -> ActionController::CookieJar
     def request_method: () -> String
     def request_method=: (String) -> String
     def request_path: () -> String

@@ -245,6 +245,13 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
     match recv {
         None => {
             if let Some((self_model, rel)) = &ctx.scope_body {
+                // Bare `all` inside a scope body IS the current relation —
+                // not `Model.all` (which would hit Base.all and return an
+                // Array, breaking the chain). Replace with the rel param.
+                if method.as_str() == "all" && args.is_empty() && block.is_none() {
+                    *expr = var_expr(span, rel);
+                    return Some(self_model.clone());
+                }
                 if ctx.scope_of(self_model, &method) {
                     let mut new_args = args;
                     new_args.push(var_expr(span, rel));

@@ -123,6 +123,10 @@ module Main
     # its own cookie (`flash_notice`, `flash_alert`) so the cookie
     # plumbing stays format-free.
     cookies = request[:cookies] || {}
+    # Expose the inbound cookies to the controller as a CookieJar so
+    # `cookies[:k]` reads (and `cookies[:k] = v` records writes, surfaced
+    # below as Set-Cookie).
+    controller.cookies = ActionController::CookieJar.new(cookies)
     # Load inbound flash through the constructor (NOT `flash[:k]=`) so the
     # Flash snapshots these as carried-in; `to_persisted` then sweeps the
     # ones merely displayed (show-once). See ActionDispatch::Flash.
@@ -162,6 +166,9 @@ module Main
     elsif cookies.key?(:flash_alert)
       out_cookies[:flash_alert] = nil
     end
+    # Cookies the action wrote (`cookies[:k] = v` / `cookies.permanent`)
+    # ride out alongside the flash cookies.
+    controller.cookies.to_set.each { |k, v| out_cookies[k] = v }
     is_redirect = controller.status >= 300 && controller.status < 400
     if is_redirect
       [controller.status,

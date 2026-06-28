@@ -43,8 +43,38 @@ pub(super) fn rewrite_render_to_views(expr: &Expr, module_name: Option<&str>, iv
         ExprNode::Send { recv: None, method, args, block, .. }
             if method.as_str() == "render" && !args.is_empty() =>
         {
-            let view_method = match &*args[0].node {
-                ExprNode::Lit { value: Literal::Sym { value } } => value.clone(),
+            // View name comes from `render :index` (a Symbol first arg) or
+            // `render action: "index"` / `render action: :index` (a kwarg
+            // hash). The kwarg form may also carry other options (status:,
+            // …); those leftover entries ride through as `action_hash_extra`.
+            let (view_method, action_hash_extra): (Symbol, Vec<Expr>) = match &*args[0].node {
+                ExprNode::Lit { value: Literal::Sym { value } } => (value.clone(), Vec::new()),
+                ExprNode::Hash { entries, kwargs: true } => {
+                    let mut name: Option<Symbol> = None;
+                    let mut rest: Vec<(Expr, Expr)> = Vec::new();
+                    for (k, v) in entries {
+                        let is_action = matches!(
+                            &*k.node,
+                            ExprNode::Lit { value: Literal::Sym { value } }
+                                if value.as_str() == "action"
+                        );
+                        if is_action {
+                            name = render_target_symbol(v);
+                        } else {
+                            rest.push((k.clone(), v.clone()));
+                        }
+                    }
+                    let Some(n) = name else { return None };
+                    let extra = if rest.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![Expr::new(
+                            args[0].span,
+                            ExprNode::Hash { entries: rest, kwargs: true },
+                        )]
+                    };
+                    (n, extra)
+                }
                 _ => return None,
             };
             // Peek at the trailing kwarg-Hash for a `format: :json`
@@ -92,6 +122,7 @@ pub(super) fn rewrite_render_to_views(expr: &Expr, module_name: Option<&str>, iv
                 },
             );
             let mut new_args = vec![view_call];
+            new_args.extend(action_hash_extra);
             let rest: Vec<Expr> = args
                 .iter()
                 .skip(1)
@@ -115,6 +146,16 @@ pub(super) fn rewrite_render_to_views(expr: &Expr, module_name: Option<&str>, iv
         }
         _ => None,
     })
+}
+
+/// The view name from a `render action:` value — accepts a Symbol
+/// (`action: :index`) or a String (`action: "index"`) literal.
+fn render_target_symbol(v: &Expr) -> Option<Symbol> {
+    match &*v.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(Symbol::from(value.as_str())),
+        _ => None,
+    }
 }
 
 /// True when render's args have a trailing kwarg-Hash whose `format:`
