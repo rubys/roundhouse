@@ -214,6 +214,30 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         return vec![accumulator_append_call(emit_yield(ya, ctx), ctx)];
     }
 
+    // `<%= expr if cond %>` — modifier-if (no else). Rails renders the
+    // expr only when cond is truthy, nothing otherwise. Emit a GUARDED
+    // append so the then-branch goes through the same render/helper/escape
+    // classifiers and a nil/false cond yields no output — instead of
+    // `html_escape(<If>)`, which both wrongly escapes html_safe render
+    // output and crashes on `html_escape(nil)`. Full if/else and ternaries
+    // (`a ? b : c`, non-nil else) fall through to the default escape path.
+    if let ExprNode::If { cond, then_branch, else_branch } = &*inner.node {
+        let no_else = matches!(&*else_branch.node, ExprNode::Lit { value: Literal::Nil })
+            || matches!(&*else_branch.node, ExprNode::Seq { exprs } if exprs.is_empty());
+        if no_else {
+            let then_stmts = emit_io_append(then_branch, ctx);
+            let guarded = Expr::new(
+                inner.span,
+                ExprNode::If {
+                    cond: rewrite_helpers_in_expr(cond, ctx),
+                    then_branch: seq(then_stmts),
+                    else_branch: Expr::new(inner.span, ExprNode::Lit { value: Literal::Nil }),
+                },
+            );
+            return vec![guarded];
+        }
+    }
+
     // form_with capture: `<%= form_with(opts) do |form| ...inner... %>`
     // — inline-expanded at lower time. Emits the opening `<form ...>`
     // tag, runtime CSRF + _method override helpers, a typed

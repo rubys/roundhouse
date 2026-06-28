@@ -1281,6 +1281,25 @@ fn emit_py_render_partial(
                 _ => format!("_buf += {partial_fn}(None)"),
             }
         }
+        // `render partial: "x/y", collection: c, as: :item` — best-effort
+        // mirror of the Collection form (the blog doesn't exercise this;
+        // refined when lobsters reaches the Python target).
+        RenderPartial::CollectionNamed { collection, partial, .. } => {
+            let (dir, base) = match partial.rsplit_once('/') {
+                Some((d, n)) => (d.to_string(), n.trim_start_matches('_').to_string()),
+                None => (
+                    ctx.resource_dir.clone(),
+                    partial.trim_start_matches('_').to_string(),
+                ),
+            };
+            let partial_fn = format!("render_{dir}_{base}");
+            match &*collection.node {
+                ExprNode::Var { name, .. } | ExprNode::Ivar { name } => {
+                    format!("_buf += \"\".join({partial_fn}(_r) for _r in {name})")
+                }
+                _ => "_buf += \"\"  # TODO ERB: render partial collection".to_string(),
+            }
+        }
     }
 }
 

@@ -77,6 +77,58 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             );
             Some(emit_partial_each(&assoc_recv, method, ctx))
         }
+        // `render partial: "stories/listdetail", collection: stories, as:
+        // :story` — iterate `collection`, calling the explicitly-named
+        // partial once per element with the element bound to the `as:`
+        // local. Like emit_partial_each but the partial module/method come
+        // from the explicit name, and the block var from `as:` (default:
+        // the partial's base name).
+        RenderPartial::CollectionNamed { collection, partial, as_name } => {
+            let (module_dir, base_name) = match partial.rsplit_once('/') {
+                Some((dir, name)) => (dir.to_string(), name.to_string()),
+                None => (ctx.resource_dir.clone(), (*partial).to_string()),
+            };
+            if module_dir.is_empty() {
+                return None;
+            }
+            let module_camel = camelize(&snake_case(&module_dir));
+            let method_sym = base_name.trim_start_matches('_').to_string();
+            let var_name = Symbol::from(
+                as_name
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| base_name.trim_start_matches('_').to_string()),
+            );
+
+            let render_call = send(
+                Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const {
+                        path: vec![Symbol::from("Views"), Symbol::from(module_camel)],
+                    },
+                )),
+                &method_sym,
+                vec![var_ref(var_name.clone())],
+                None,
+                true,
+            );
+            let inner = accumulator_append_call(render_call, ctx);
+            let block_lambda = Expr::new(
+                Span::synthetic(),
+                ExprNode::Lambda {
+                    params: vec![var_name],
+                    block_param: None,
+                    body: inner,
+                    block_style: BlockStyle::Brace,
+                },
+            );
+            Some(send(
+                Some((*collection).clone()),
+                "each",
+                Vec::new(),
+                Some(block_lambda),
+                false,
+            ))
+        }
     }
 }
 

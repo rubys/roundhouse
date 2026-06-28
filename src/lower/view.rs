@@ -78,6 +78,18 @@ pub enum RenderPartial<'a> {
     /// target ignores additional hash entries today; centralizing
     /// that quirk here keeps it documented.
     Named { partial: &'a str, arg: Option<&'a Expr> },
+    /// `render partial: "stories/listdetail", collection: stories, as:
+    /// :story` — the explicit-kwarg collection form: iterate `collection`,
+    /// calling the explicitly-named partial per element with the element
+    /// bound to the `as:` local (`as_name`; when absent the emitter
+    /// derives it from the partial's base name). Distinct from
+    /// `Collection` (bare `render coll`), which derives the partial name
+    /// from the collection's singular.
+    CollectionNamed {
+        collection: &'a Expr,
+        partial: &'a str,
+        as_name: Option<&'a str>,
+    },
 }
 
 /// Recognize a `render ...` call inside an ERB view body. Returns
@@ -117,6 +129,9 @@ pub fn classify_render_partial<'a>(
                     method: m.as_str(),
                 })
             }
+            // Explicit kwarg form: `render partial: "x/y", collection: c,
+            // as: :item` / `render partial: "x/y", item: rec`.
+            ExprNode::Hash { entries, .. } => classify_render_kwargs(entries),
             _ => None,
         },
         [a, b] => {
@@ -133,6 +148,61 @@ pub fn classify_render_partial<'a>(
             })
         }
         _ => None,
+    }
+}
+
+/// Classify the explicit-kwarg render forms from the trailing kwarg
+/// hash: `render partial: "x/y", collection: c, as: :item`
+/// (→ `CollectionNamed`) or `render partial: "x/y", item: rec`
+/// (→ `Named`, with the first non-`partial` entry as the arg). The
+/// `partial:` value must be a String literal (dynamic partial names
+/// aren't statically resolvable); returns `None` otherwise.
+fn classify_render_kwargs(entries: &[(Expr, Expr)]) -> Option<RenderPartial<'_>> {
+    let key_of = |k: &Expr| match &*k.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        _ => None,
+    };
+    let mut partial: Option<&str> = None;
+    let mut collection: Option<&Expr> = None;
+    let mut as_name: Option<&str> = None;
+    let mut first_local: Option<&Expr> = None;
+    for (k, v) in entries {
+        match key_of(k).as_deref() {
+            Some("partial") => {
+                let ExprNode::Lit { value: Literal::Str { value } } = &*v.node else {
+                    return None;
+                };
+                partial = Some(value.as_str());
+            }
+            Some("collection") => collection = Some(v),
+            Some("as") => {
+                if let ExprNode::Lit { value: Literal::Sym { value } } = &*v.node {
+                    as_name = Some(value.as_str());
+                }
+            }
+            // `locals: {…}` or a bare `name: rec` local — pass the value
+            // through as the single named-partial arg (Rails passes the
+            // record under its local name; positional binding handles it).
+            Some(_) => {
+                if first_local.is_none() {
+                    first_local = Some(v);
+                }
+            }
+            None => {}
+        }
+    }
+    let partial = partial?;
+    if let Some(collection) = collection {
+        Some(RenderPartial::CollectionNamed {
+            collection,
+            partial,
+            as_name,
+        })
+    } else {
+        Some(RenderPartial::Named {
+            partial,
+            arg: first_local,
+        })
     }
 }
 
