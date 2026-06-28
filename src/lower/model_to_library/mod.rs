@@ -111,13 +111,9 @@ fn lower_models_inner(
     // resolve correctly.
     let row_classes = self::row::synthesize_row_classes(models, schema);
 
-    // Scope registry across all models, for scope-chain normalization.
-    let scopes = crate::lower::scope_chain::build_scope_registry(models);
-    let models_set = crate::lower::scope_chain::model_set(models);
-
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
     for model in models {
-        let methods = build_methods(model, schema, params_specs, &scopes, &models_set);
+        let methods = build_methods(model, schema, params_specs);
         let table = schema.tables.get(&model.table.0);
         all_methods.push((methods, model.name.clone(), table, model));
     }
@@ -342,10 +338,7 @@ pub fn class_info_from_library_class(lc: &LibraryClass) -> crate::analyze::Class
 /// `initialize` lowerings. Models whose table isn't in the schema (rare;
 /// abstract or virtual) get only the non-schema-driven methods.
 pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryClass {
-    let single = std::slice::from_ref(model);
-    let scopes = crate::lower::scope_chain::build_scope_registry(single);
-    let models_set = crate::lower::scope_chain::model_set(single);
-    let mut methods = build_methods(model, schema, &Default::default(), &scopes, &models_set);
+    let mut methods = build_methods(model, schema, &Default::default());
     let table = schema.tables.get(&model.table.0);
     let class_info = build_class_info(model, &methods, table);
     let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::new();
@@ -436,8 +429,6 @@ fn build_methods(
     model: &Model,
     schema: &Schema,
     params_specs: &std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>>,
-    scopes: &crate::lower::scope_chain::ScopeRegistry,
-    models_set: &std::collections::HashSet<ClassId>,
 ) -> Vec<MethodDef> {
     // No-op outside an emit diagnostics scope, so the many direct
     // test callers of the lowering entries are unaffected.
@@ -464,7 +455,6 @@ fn build_methods(
     }
 
     push_validate_method(&mut methods, model);
-    push_scope_methods(&mut methods, model, scopes, models_set);
     push_association_methods(&mut methods, model);
     push_dependent_destroy(&mut methods, model);
     push_unknown_marker_methods(&mut methods, model);
@@ -491,7 +481,11 @@ fn build_methods(
 /// query calls (`where`/`order`/…) target `__rel`, and nested scope calls
 /// become `Model.scope(args, recv)`. The trailing relation parameter is
 /// what lets `Story.base(u).positive_ranked` chain without metaprogramming.
-fn push_scope_methods(
+/// Generate scope class methods for a model. Lives here (next to the other
+/// model synthesizers) but is invoked only from the Ruby emit seam — the
+/// scope methods call `ActiveRecord::Relation`, which only the CRuby/JRuby
+/// runtime provides, so other targets must NOT receive them.
+pub(crate) fn push_scope_methods(
     methods: &mut Vec<MethodDef>,
     model: &Model,
     scopes: &crate::lower::scope_chain::ScopeRegistry,

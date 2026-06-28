@@ -203,6 +203,20 @@ pub(super) fn emit_library_class_decl_with_synthesized(
         let names = crate::lower::scope_chain::all_scope_names(&scopes);
         let models = crate::lower::scope_chain::model_set(&app.models);
         let mut c = lc.clone();
+        // If this class is a model, synthesize its scope class methods here
+        // (Ruby-target only — they reference ActiveRecord::Relation, which
+        // other targets' runtimes don't have, so they can't live in the
+        // shared model lowering).
+        if let Some(model) = app.models.iter().find(|m| m.name == c.name) {
+            crate::lower::model_to_library::push_scope_methods(
+                &mut c.methods,
+                model,
+                &scopes,
+                &models,
+            );
+        }
+        // Normalize scope chains in every method body (call-site form);
+        // idempotent on the scope methods just synthesized.
         for m in &mut c.methods {
             if crate::lower::scope_chain::mentions_scope(&m.body, &names) {
                 crate::lower::scope_chain::rewrite_call_site(&mut m.body, &scopes, &models);
