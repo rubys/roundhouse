@@ -8,13 +8,18 @@ module ActionController
   # Cookie jar: Symbol-keyed inbound values + pending writes. `[]`
   # returns a nilable String (absent cookie -> nil); `to_set` exposes
   # the pending writes for Set-Cookie serialization.
+  # Keys are stored as Strings (Symbol lookups normalize via `to_s`) so
+  # the empty-hash ivars transpile with a stable key type on strict
+  # targets. `[]` returns a nilable String (absent cookie -> nil).
   class CookieJar
-    def initialize: (?Hash[Symbol, String] inbound) -> void
+    def initialize: () -> void
+    def load: (Hash[Symbol, String] values) -> Hash[Symbol, String]
+    def inbound: () -> Hash[String, String]
     def []: (Symbol key) -> String?
     def []=: (Symbol key, String? value) -> String?
     def permanent: () -> CookieJar
     def delete: (Symbol key) -> String?
-    def to_set: () -> Hash[Symbol, String?]
+    def to_set: () -> Hash[String, String?]
   end
 
   # Base controller. Holds per-request state (params, session, flash,

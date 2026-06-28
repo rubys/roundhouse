@@ -34,17 +34,36 @@ module ActionController
   # (the request parser symbolizes cookie names). No metaprogramming — the
   # jar is a plain pair of hashes.
   class CookieJar
-    def initialize(inbound = {})
-      @inbound = inbound
+    # No-arg constructor with empty ivars (pinned by the `inbound` /
+    # `to_set` getter return types — a defaulted `inbound = {}` param
+    # transpiles to a mistyped empty-hash literal on strict targets). The
+    # dispatcher seeds the inbound values via `load`.
+    def initialize
+      @inbound = {}
       @out = {}
     end
 
+    # Seed the inbound cookies (the dispatcher passes the request's cookie
+    # hash). Stored String-keyed: the empty-hash ivars then transpile with
+    # a consistent key type on strict targets (a Symbol-keyed empty hash
+    # restricts badly against the default `{}`), and Symbol lookups
+    # normalize via `to_s` below.
+    def load(values)
+      values.each { |name, value| @inbound[name.to_s] = value }
+    end
+
+    # Getter that pins `@inbound`'s element types for the body-typer.
+    def inbound
+      @inbound
+    end
+
     def [](key)
-      @out.key?(key) ? @out[key] : @inbound[key]
+      k = key.to_s
+      @out.key?(k) ? @out[k] : @inbound[k]
     end
 
     def []=(key, value)
-      @out[key] = value
+      @out[key.to_s] = value
     end
 
     # `cookies.permanent[:k] = v` — expiry not modeled; permanence is a
@@ -54,7 +73,7 @@ module ActionController
     end
 
     def delete(key)
-      @out[key] = nil
+      @out[key.to_s] = nil
     end
 
     # Pending writes, for the dispatcher's Set-Cookie serialization.
@@ -76,7 +95,7 @@ module ActionController
       @params  = {}
       @session = ActionDispatch::Session.new
       @flash   = ActionDispatch::Flash.new
-      @cookies = CookieJar.new
+      @cookies = ActionController::CookieJar.new
       @status  = 200
       @body    = ""
       @location = nil

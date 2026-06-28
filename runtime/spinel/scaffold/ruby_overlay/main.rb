@@ -123,10 +123,10 @@ module Main
     # its own cookie (`flash_notice`, `flash_alert`) so the cookie
     # plumbing stays format-free.
     cookies = request[:cookies] || {}
-    # Expose the inbound cookies to the controller as a CookieJar so
+    # Seed the controller's CookieJar with the inbound cookies so
     # `cookies[:k]` reads (and `cookies[:k] = v` records writes, surfaced
-    # below as Set-Cookie).
-    controller.cookies = ActionController::CookieJar.new(cookies)
+    # below as Set-Cookie). The jar itself is created in Base#initialize.
+    controller.cookies.load(cookies)
     # Load inbound flash through the constructor (NOT `flash[:k]=`) so the
     # Flash snapshots these as carried-in; `to_persisted` then sweeps the
     # ones merely displayed (show-once). See ActionDispatch::Flash.
