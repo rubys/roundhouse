@@ -244,9 +244,33 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         view.body.span,
         ExprNode::Lit { value: Literal::Nil },
     );
+    // View↔controller data contract. Partials and layouts take a single
+    // record/body arg supplied by the render/yield call site (a local, not
+    // an ivar), so they keep the convention-derived `arg_name`. ACTION
+    // views (index/show/…) instead take exactly the @ivars their template
+    // reads, in first-seen order — the controller passes `@<name>` for each
+    // (see controller_to_library's render rewrite). A multi-ivar view like
+    // home/index then receives all of @stories/@page/@show_more/…; a view
+    // that reads exactly its one resource ivar (the blog) gets the same
+    // signature the convention would have produced.
+    let is_partial = base.starts_with('_');
+    let is_layout = dir == "layouts";
+    let is_action_view = !is_partial && !is_layout && !dir.is_empty();
+
+    let primary_names: Vec<String> = if is_action_view {
+        view_read_ivars(&view.body)
+            .iter()
+            .map(|s| s.as_str().to_string())
+            .collect()
+    } else if !arg_name.is_empty() {
+        vec![arg_name.clone()]
+    } else {
+        Vec::new()
+    };
+
     let mut params: Vec<Param> = Vec::new();
-    if !arg_name.is_empty() {
-        params.push(Param::positional(Symbol::from(arg_name.clone())));
+    for n in &primary_names {
+        params.push(Param::positional(Symbol::from(n.as_str())));
     }
     for n in &extra_params {
         params.push(Param::with_default(
@@ -262,22 +286,25 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
     // as `Ty::Untyped` and emit-side dispatch falls through.
     //
     // Type rules:
-    //   - Index views (`articles/index`): main arg is `Array[Model]`
-    //     for the singularize-camelize-matches-known-model case.
-    //   - Show / edit / new / partial: main arg is the model itself.
+    //   - Action views: each read-ivar typed by name (plural known model
+    //     → Array[Model], singular → Model, else Untyped); see ivar_ty.
+    //   - Partial: arg is the model itself.
     //   - Layout: main arg is String (the rendered body HTML).
     //   - Extra params (notice, alert, …): String? (nullable).
-    let signature = build_view_signature(stem, dir, base.starts_with('_'), &arg_name, &extra_params, &known_models);
+    let signature = if is_action_view {
+        build_action_view_signature(&primary_names, &extra_params, &known_models)
+    } else {
+        build_view_signature(stem, dir, is_partial, &arg_name, &extra_params, &known_models)
+    };
 
-    let mut locals: Vec<String> = Vec::new();
-    if !arg_name.is_empty() {
-        locals.push(arg_name.clone());
-    }
+    let mut locals: Vec<String> = primary_names.clone();
     locals.extend(extra_params.iter().cloned());
 
     let ctx = ViewCtx {
         locals,
-        arg_name: arg_name.clone(),
+        // Only layouts consult arg_name (emit_yield → the `body` local);
+        // action views don't yield, so an empty name is fine for them.
+        arg_name: if is_action_view { String::new() } else { arg_name.clone() },
         resource_dir: dir.to_string(),
         accumulator: "io".to_string(),
         form_records: Vec::new(),
@@ -984,6 +1011,113 @@ pub(crate) fn build_view_signature(
         });
     }
 
+    Some(Ty::Fn {
+        params: sig_params,
+        block: None,
+        ret: Box::new(Ty::Str),
+        effects: crate::effect::EffectSet::default(),
+    })
+}
+
+/// Map `(view-module, action-stem) -> read-ivars` for the controller's
+/// render rewrite, so it passes `@<name>` for each ivar the rendered
+/// action view reads. Keyed to match `views_module_name(controller)`
+/// (which equals `camelize(snake_case(dir))`) plus the rendered action.
+/// Only HTML, non-partial, non-layout views participate.
+pub(crate) fn action_view_ivar_map(
+    views: &[crate::dialect::View],
+) -> std::collections::HashMap<(String, String), Vec<Symbol>> {
+    let mut out = std::collections::HashMap::new();
+    for v in views {
+        let (dir, base) = split_view_name(v.name.as_str());
+        if dir.is_empty() || dir == "layouts" || base.starts_with('_') {
+            continue;
+        }
+        if v.format.as_str() != "html" {
+            continue;
+        }
+        let module = camelize(&snake_case(dir));
+        out.insert((module, base.to_string()), view_read_ivars(&v.body));
+    }
+    out
+}
+
+/// The instance variables an action view READS, in first-seen order.
+/// This is the view↔controller contract: an action view's parameters are
+/// exactly these ivars and the controller passes `@<name>` for each, so a
+/// multi-ivar template (home/index reads @stories, @page, …) gets them
+/// all — not just one convention-named record. Computed on the ORIGINAL
+/// view body (before `rewrite_ivars_to_locals`) and by the controller
+/// render rewrite on the same body, so both sides agree on the list/order.
+pub(crate) fn view_read_ivars(body: &Expr) -> Vec<Symbol> {
+    let mut seen: std::collections::BTreeSet<Symbol> = Default::default();
+    let mut out: Vec<Symbol> = Vec::new();
+    collect_read_ivars(body, &mut seen, &mut out);
+    out
+}
+
+fn collect_read_ivars(
+    e: &Expr,
+    seen: &mut std::collections::BTreeSet<Symbol>,
+    out: &mut Vec<Symbol>,
+) {
+    if let ExprNode::Ivar { name } = &*e.node {
+        if seen.insert(name.clone()) {
+            out.push(name.clone());
+        }
+    }
+    e.node.for_each_child(&mut |c| collect_read_ivars(c, seen, out));
+}
+
+/// Type for a single read-ivar param by name: `@articles`/`@stories`
+/// (plural, singularize-camelizes to a known model) → `Array[Model]`;
+/// `@article`/`@story` (singular known model) → `Model`; anything else
+/// (`@page`, `@root_path`, …) → `Untyped`. Mirrors the convention typing
+/// `build_view_signature` applies to the single arg, but per-ivar.
+fn ivar_ty(name: &str, known_models: &[String]) -> crate::ty::Ty {
+    use crate::ty::Ty;
+    let cam = crate::naming::singularize_camelize(name);
+    if known_models.iter().any(|m| m == &cam) {
+        let model = Ty::Class {
+            id: crate::ident::ClassId(crate::ident::Symbol::from(cam.as_str())),
+            args: vec![],
+        };
+        if crate::naming::singularize(name) != name {
+            Ty::Array { elem: Box::new(model) }
+        } else {
+            model
+        }
+    } else {
+        Ty::Untyped
+    }
+}
+
+/// Signature for an action view whose params are its read-ivars (typed by
+/// `ivar_ty`) followed by the nullable extra params (notice/alert/…).
+fn build_action_view_signature(
+    primary_names: &[String],
+    extra_params: &[String],
+    known_models: &[String],
+) -> Option<crate::ty::Ty> {
+    use crate::ty::{Param as TyParam, ParamKind, Ty};
+    if primary_names.is_empty() && extra_params.is_empty() {
+        return None;
+    }
+    let mut sig_params: Vec<TyParam> = Vec::new();
+    for n in primary_names {
+        sig_params.push(TyParam {
+            name: crate::ident::Symbol::from(n.as_str()),
+            ty: ivar_ty(n, known_models),
+            kind: ParamKind::Required,
+        });
+    }
+    for n in extra_params {
+        sig_params.push(TyParam {
+            name: crate::ident::Symbol::from(n.as_str()),
+            ty: Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+            kind: ParamKind::Optional,
+        });
+    }
     Some(Ty::Fn {
         params: sig_params,
         block: None,

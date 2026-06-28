@@ -84,6 +84,10 @@ fn json_actions_for(
 
 use std::collections::BTreeMap;
 
+/// `(view-module, action-stem) -> read-ivars` for the render rewrite.
+/// Built once from the app's views; see `action_view_ivar_map`.
+type ViewIvarMap = std::collections::HashMap<(String, String), Vec<Symbol>>;
+
 /// Bulk entry point: lower every controller against a shared class
 /// registry so cross-controller / model / view dispatch types
 /// correctly. Builds methods for each controller, constructs a
@@ -178,6 +182,11 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     let params_specs = self::params::collect_specs(controllers);
     let params_lcs = self::params::synthesize_params_classes(&params_specs);
 
+    // The view↔controller ivar contract: each action view's read-ivars,
+    // so the render rewrite passes `@<name>` for each (matching the view's
+    // generated parameter list). See view_to_library::action_view_ivar_map.
+    let view_ivars = crate::lower::view_to_library::action_view_ivar_map(views);
+
     let mut all_methods: Vec<(Vec<MethodDef>, &Controller)> = Vec::new();
     for controller in controllers {
         let json_actions = json_actions_for(controller, views);
@@ -186,7 +195,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         // `None` → legacy: every public method is an action.
         let routed = routed_by_controller
             .map(|m| m.get(&controller.name).cloned().unwrap_or_default());
-        let methods = build_methods(controller, &params_specs, &json_actions, routed.as_ref());
+        let methods = build_methods(controller, &params_specs, &json_actions, routed.as_ref(), &view_ivars);
         all_methods.push((methods, controller));
     }
 
@@ -392,7 +401,10 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
 /// `lower_controllers_to_library_classes`.
 pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClass {
     let specs = self::params::collect_specs(std::slice::from_ref(controller));
-    let methods = build_methods(controller, &specs, &std::collections::HashSet::new(), None);
+    // No view list in this single-controller path → empty map; the render
+    // rewrite falls back to in-scope ivars (legacy behavior for tests).
+    let view_ivars: ViewIvarMap = std::collections::HashMap::new();
+    let methods = build_methods(controller, &specs, &std::collections::HashSet::new(), None, &view_ivars);
     LibraryClass {
         name: controller.name.clone(),
         is_module: false,
@@ -431,6 +443,7 @@ fn build_methods(
     params_specs: &BTreeMap<Symbol, ParamsSpec>,
     json_actions: &std::collections::HashSet<Symbol>,
     routed: Option<&std::collections::HashSet<Symbol>>,
+    view_ivars: &ViewIvarMap,
 ) -> Vec<MethodDef> {
     let mut methods: Vec<MethodDef> = Vec::new();
 
@@ -486,12 +499,12 @@ fn build_methods(
 
     for a in &publics_inlined {
         methods.push(action_to_method(
-            a, controller, &privs, /*is_public=*/ true, params_specs, json_actions,
+            a, controller, &privs, /*is_public=*/ true, params_specs, json_actions, view_ivars,
         ));
     }
     for a in &privs_kept {
         methods.push(action_to_method(
-            a, controller, &privs, /*is_public=*/ false, params_specs, json_actions,
+            a, controller, &privs, /*is_public=*/ false, params_specs, json_actions, view_ivars,
         ));
     }
     // Public methods no route reaches are helpers/filters, not actions:
@@ -500,7 +513,7 @@ fn build_methods(
     // the filter-chain work, not here.)
     for a in &helper_publics {
         methods.push(action_to_method(
-            a, controller, &privs, /*is_public=*/ false, params_specs, json_actions,
+            a, controller, &privs, /*is_public=*/ false, params_specs, json_actions, view_ivars,
         ));
     }
 
@@ -676,6 +689,7 @@ fn action_to_method(
     is_public: bool,
     params_specs: &BTreeMap<Symbol, ParamsSpec>,
     json_actions: &std::collections::HashSet<Symbol>,
+    view_ivars: &ViewIvarMap,
 ) -> MethodDef {
     let method_name = method_name_for_action(a.name.as_str());
     // Required positionals first, then optional positionals with their
@@ -699,6 +713,7 @@ fn action_to_method(
         is_public,
         params_specs,
         has_json_variant,
+        view_ivars,
     );
     // Action params type to Untyped for now — Rails action signatures
     // are conventionally `def show(id)` with all-string CGI inputs;
@@ -793,13 +808,14 @@ fn lower_action_body(
     is_public: bool,
     params_specs: &BTreeMap<Symbol, ParamsSpec>,
     has_json_variant: bool,
+    view_ivars: &ViewIvarMap,
 ) -> Expr {
     let unwrapped = unwrap_respond_to_with_format_dispatch(body);
     let with_render = if is_public {
         let synth = synthesize_implicit_render(&unwrapped, action_name, has_json_variant);
         let ivars = ivars_in_scope(controller, action_name, &synth, privs);
         let module_name = views_module_name(controller);
-        rewrite_render_to_views(&synth, module_name.as_deref(), &ivars)
+        rewrite_render_to_views(&synth, module_name.as_deref(), &ivars, view_ivars)
     } else {
         unwrapped
     };

@@ -33,7 +33,12 @@ use super::util::map_expr;
 // here are a follow-on lowerer's problem.
 // ---------------------------------------------------------------------------
 
-pub(super) fn rewrite_render_to_views(expr: &Expr, module_name: Option<&str>, ivars: &[Symbol]) -> Expr {
+pub(super) fn rewrite_render_to_views(
+    expr: &Expr,
+    module_name: Option<&str>,
+    ivars: &[Symbol],
+    view_ivars: &super::ViewIvarMap,
+) -> Expr {
     let Some(module) = module_name else {
         return expr.clone();
     };
@@ -77,6 +82,16 @@ pub(super) fn rewrite_render_to_views(expr: &Expr, module_name: Option<&str>, iv
                 }
                 _ => return None,
             };
+            // View-driven arg list: an action view's params are exactly the
+            // @ivars it reads, so pass `@<name>` for each (matching the
+            // generated view signature). Look up by the html action stem
+            // (before the `_json` rename below). Falls back to the
+            // controller's in-scope ivars when the view isn't in the map
+            // (json/jbuilder views, or a render with no matching template).
+            let resolved_ivars: Vec<Symbol> = view_ivars
+                .get(&(module_name_owned.clone(), view_method.as_str().to_string()))
+                .cloned()
+                .unwrap_or_else(|| ivars.clone());
             // Peek at the trailing kwarg-Hash for a `format: :json`
             // marker that the respond_to flattener planted. If
             // present, route to `<sym>_json` view and tag the outer
@@ -92,7 +107,7 @@ pub(super) fn rewrite_render_to_views(expr: &Expr, module_name: Option<&str>, iv
             } else {
                 (view_method, None)
             };
-            let mut view_args: Vec<Expr> = ivars
+            let mut view_args: Vec<Expr> = resolved_ivars
                 .iter()
                 .map(|n| ivar(n.as_str(), e.span))
                 .collect();
