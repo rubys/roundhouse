@@ -462,6 +462,7 @@ fn build_methods(
     push_dependent_destroy(&mut methods, model);
     push_unknown_marker_methods(&mut methods, model);
     push_attr_accessor_methods(&mut methods, model);
+    push_user_methods(&mut methods, model);
     push_dom_prefix_method(&mut methods, model);
     push_broadcasts_methods(&mut methods, model);
     push_block_callback_methods(&mut methods, model);
@@ -489,6 +490,28 @@ fn build_methods(
 /// model synthesizers) but is invoked only from the Ruby emit seam — the
 /// scope methods call `ActiveRecord::Relation`, which only the CRuby/JRuby
 /// runtime provides, so other targets must NOT receive them.
+/// User-defined `def` methods on the model (`def can_be_seen_by_user?(u)`,
+/// `def as_json`, …). These were dropped — `build_methods` synthesized
+/// schema/association/scope methods but never carried the model's own
+/// method bodies through. Emit them now; their bodies ride the same
+/// arel-rewrite + body-typer the synthesized methods do. Skips a name a
+/// synthesized method already defined (column/association/scope accessors
+/// win — the corpus doesn't redefine those, and this avoids duplicate
+/// definitions).
+fn push_user_methods(methods: &mut Vec<MethodDef>, model: &Model) {
+    use crate::dialect::ModelBodyItem;
+    for item in &model.body {
+        let ModelBodyItem::Method { method, .. } = item else { continue };
+        if methods
+            .iter()
+            .any(|m| m.name == method.name && m.receiver == method.receiver)
+        {
+            continue;
+        }
+        methods.push(method.clone());
+    }
+}
+
 pub(crate) fn push_scope_methods(
     methods: &mut Vec<MethodDef>,
     model: &Model,

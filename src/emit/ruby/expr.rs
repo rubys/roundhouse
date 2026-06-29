@@ -67,7 +67,10 @@ fn emit_node(n: &ExprNode) -> String {
             // synthesized lowerings expect, e.g. controller before-action
             // dispatch). Empty here means `Seq{[]}` or `Lit::Nil`, the two
             // shapes lowerings produce for "no-op."
-            let cond_s = emit_expr(cond);
+            // `emit_arg` parenthesizes a trailing-modifier condition
+            // (`if (x rescue false)`) so the modifier binds to the cond,
+            // not the whole `if`.
+            let cond_s = emit_arg(cond);
             let then_s = emit_expr(then_branch);
             let else_empty = is_empty_branch(else_branch);
             if else_empty
@@ -298,11 +301,11 @@ fn emit_array(elements: &[Expr], style: &crate::expr::ArrayStyle) -> String {
     use crate::expr::ArrayStyle;
     match style {
         ArrayStyle::Brackets => {
-            let parts: Vec<String> = elements.iter().map(emit_expr).collect();
+            let parts: Vec<String> = elements.iter().map(emit_arg).collect();
             format!("[{}]", parts.join(", "))
         }
         ArrayStyle::BracketsSpaced => {
-            let parts: Vec<String> = elements.iter().map(emit_expr).collect();
+            let parts: Vec<String> = elements.iter().map(emit_arg).collect();
             if parts.is_empty() {
                 "[]".to_string()
             } else {
@@ -403,22 +406,27 @@ fn is_simple_ident(s: &str) -> bool {
 /// (`x if c`) is a syntax error as a call argument — `foo(x if c)` — so
 /// wrap it in parens. Everything else passes through unchanged.
 fn emit_arg(e: &Expr) -> String {
-    if renders_as_modifier_if(e) {
+    if renders_as_trailing_modifier(e) {
         format!("({})", emit_expr(e))
     } else {
         emit_expr(e)
     }
 }
 
-/// Does `e` emit as a top-level modifier conditional (`then if cond`)?
-/// Mirrors the modifier-form condition in `emit_expr`'s `If` arm.
-fn renders_as_modifier_if(e: &Expr) -> bool {
-    if let ExprNode::If { then_branch, else_branch, .. } = &*e.node {
-        is_empty_branch(else_branch)
-            && !matches!(&*then_branch.node, ExprNode::Seq { .. })
-            && !emit_expr(then_branch).contains('\n')
-    } else {
-        false
+/// Does `e` emit with a trailing modifier (`x if cond` / `x rescue f`)?
+/// Such forms must be parenthesized anywhere but statement position
+/// (array elements, call args, hash values, conditions) — a bare
+/// `"a" if c, b` or `if x rescue f` mis-parses (the modifier swallows the
+/// rest of the construct).
+fn renders_as_trailing_modifier(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::If { then_branch, else_branch, .. } => {
+            is_empty_branch(else_branch)
+                && !matches!(&*then_branch.node, ExprNode::Seq { .. })
+                && !emit_expr(then_branch).contains('\n')
+        }
+        ExprNode::RescueModifier { .. } => true,
+        _ => false,
     }
 }
 
@@ -473,6 +481,10 @@ pub(super) fn emit_send_base(
     // setter sends so emit_send_base's setter arm picks it up.
     if matches!(recv, Some(r) if matches!(&*r.node, ExprNode::SelfRef))
         && !is_setter_method(m)
+        // A method whose name is a Ruby keyword (`self.class`, `self.then`)
+        // can't drop to the implicit form — bare `class` parses as the
+        // keyword. Keep the explicit `self.class` (falls to the Some(r) arm).
+        && !is_ruby_keyword(m)
     {
         if args_s.is_empty() {
             return method.to_string();
@@ -519,6 +531,20 @@ pub(super) fn emit_send_base(
             }
         }
     }
+}
+
+/// Ruby reserved words. A method whose name collides with one (the
+/// callable cases are `class` / `then`; the rest can't be implicit either)
+/// must keep an explicit receiver — a bare keyword doesn't parse as a call.
+fn is_ruby_keyword(m: &str) -> bool {
+    matches!(
+        m,
+        "__ENCODING__" | "__LINE__" | "__FILE__" | "BEGIN" | "END" | "alias" | "and" | "begin"
+            | "break" | "case" | "class" | "def" | "defined?" | "do" | "else" | "elsif" | "end"
+            | "ensure" | "false" | "for" | "if" | "in" | "module" | "next" | "nil" | "not" | "or"
+            | "redo" | "rescue" | "retry" | "return" | "self" | "super" | "then" | "true" | "undef"
+            | "unless" | "until" | "when" | "while" | "yield"
+    )
 }
 
 /// Ruby's binary infix operators, as method names. Excludes `[]` and
@@ -621,8 +647,28 @@ pub(super) fn emit_literal(l: &Literal) -> String {
         }
         Literal::Str { value } => format!("{value:?}"),
         Literal::Sym { value } => format!(":{value}"),
-        Literal::Regex { pattern, flags } => format!("/{pattern}/{flags}"),
+        // `pattern` is stored unescaped (the regex engine's view), so a
+        // literal `/` in it (e.g. `/page/\d+$`) must be re-escaped before
+        // wrapping in `/.../` delimiters, or it terminates the literal early
+        // and breaks parsing. Already-escaped `\/` is left alone.
+        Literal::Regex { pattern, flags } => {
+            format!("/{}/{flags}", escape_regex_delimiters(pattern))
+        }
     }
+}
+
+/// Escape unescaped `/` so the pattern can sit inside `/.../` delimiters.
+fn escape_regex_delimiters(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len() + 4);
+    let mut prev_backslash = false;
+    for c in pattern.chars() {
+        if c == '/' && !prev_backslash {
+            out.push('\\');
+        }
+        out.push(c);
+        prev_backslash = c == '\\' && !prev_backslash;
+    }
+    out
 }
 
 fn emit_lvalue(lv: &LValue) -> String {
