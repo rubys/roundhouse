@@ -264,7 +264,49 @@ fn emit_bool_op(
         (BoolOpKind::And, BoolOpSurface::Symbol) => "&&",
         (BoolOpKind::And, BoolOpSurface::Word) => "and",
     };
-    format!("{} {} {}", emit_expr(left), op_s, emit_expr(right))
+    format!(
+        "{} {} {}",
+        emit_bool_op_operand(left, op, surface),
+        op_s,
+        emit_bool_op_operand(right, op, surface),
+    )
+}
+
+/// Ruby boolean-operator precedence: `&&` binds tighter than `||`, and
+/// the word forms `and`/`or` are equal to each other and lower than both
+/// symbolic forms. Higher number = binds tighter.
+fn bool_op_prec(op: crate::expr::BoolOpKind, surface: crate::expr::BoolOpSurface) -> u8 {
+    use crate::expr::{BoolOpKind, BoolOpSurface};
+    match (op, surface) {
+        (BoolOpKind::And, BoolOpSurface::Symbol) => 3, // &&
+        (BoolOpKind::Or, BoolOpSurface::Symbol) => 2,  // ||
+        (_, BoolOpSurface::Word) => 1,                 // and / or (equal precedence)
+    }
+}
+
+/// Emit a `BoolOp` operand, wrapping a nested `BoolOp` child in parens
+/// when omitting them would re-associate the tree. The grouping is in the
+/// AST, not the surface text, so `And(user, Or(a, b))` must come out as
+/// `user && (a || b)` — without the parens Ruby's tighter-binding `&&`
+/// re-parses it as `(user && a) || b`, a different (and crash-prone)
+/// expression. Parens are added when the child binds looser than the
+/// parent, or when two equal-precedence word operators (`and`/`or`)
+/// differ. Same-operator chains (`a || b || c`) stay paren-free —
+/// boolean operators are truth-associative, so re-grouping is harmless.
+fn emit_bool_op_operand(
+    child: &Expr,
+    parent_op: crate::expr::BoolOpKind,
+    parent_surface: crate::expr::BoolOpSurface,
+) -> String {
+    let s = emit_expr(child);
+    if let ExprNode::BoolOp { op, surface, .. } = &*child.node {
+        let child_prec = bool_op_prec(*op, *surface);
+        let parent_prec = bool_op_prec(parent_op, parent_surface);
+        if child_prec < parent_prec || (child_prec == parent_prec && *op != parent_op) {
+            return format!("({s})");
+        }
+    }
+    s
 }
 
 fn emit_string_interp(parts: &[crate::expr::InterpPart]) -> String {
@@ -916,5 +958,57 @@ mod tests {
 
         let call = send(Some(send(None, "render", vec![lit_sym("x")])), "to_s", vec![]);
         assert_eq!(emit_expr(&call), "render(:x).to_s");
+    }
+
+    fn or_sym(left: Expr, right: Expr) -> Expr {
+        Expr::new(
+            Span::default(),
+            ExprNode::BoolOp {
+                op: crate::expr::BoolOpKind::Or,
+                surface: crate::expr::BoolOpSurface::Symbol,
+                left,
+                right,
+            },
+        )
+    }
+    fn and_sym(left: Expr, right: Expr) -> Expr {
+        Expr::new(
+            Span::default(),
+            ExprNode::BoolOp {
+                op: crate::expr::BoolOpKind::And,
+                surface: crate::expr::BoolOpSurface::Symbol,
+                left,
+                right,
+            },
+        )
+    }
+
+    #[test]
+    fn or_nested_under_and_is_parenthesized() {
+        // `user && (a || b)` — the AST grouping must survive emission.
+        // Without parens Ruby's tighter `&&` re-parses it as `(user && a)
+        // || b`, which is the lobsters `can_be_seen_by_user?` nil-crash:
+        // `user.id` runs even when `user` is nil. (Found re-running GET /.)
+        let inner = or_sym(send(None, "a", vec![]), send(None, "b", vec![]));
+        let expr = and_sym(send(None, "user", vec![]), inner);
+        assert_eq!(emit_expr(&expr), "user && (a || b)");
+    }
+
+    #[test]
+    fn and_nested_under_or_is_not_parenthesized() {
+        // `(a && b) || c` is the same tree Ruby parses from `a && b || c`
+        // (`&&` binds tighter), so no parens are needed — keeps the common
+        // `guard && val || default` shape paren-free.
+        let inner = and_sym(send(None, "a", vec![]), send(None, "b", vec![]));
+        let expr = or_sym(inner, send(None, "c", vec![]));
+        assert_eq!(emit_expr(&expr), "a && b || c");
+    }
+
+    #[test]
+    fn same_operator_chain_stays_paren_free() {
+        // `a || b || c` — boolean ops are truth-associative, so a same-op
+        // chain needs no parens regardless of how the tree nests.
+        let right_nested = or_sym(send(None, "a", vec![]), or_sym(send(None, "b", vec![]), send(None, "c", vec![])));
+        assert_eq!(emit_expr(&right_nested), "a || b || c");
     }
 }
