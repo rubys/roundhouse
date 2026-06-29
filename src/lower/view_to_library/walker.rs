@@ -376,8 +376,48 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     // `html_escape(ViewHelpers.content_for_get(:title) || "Real
     // Blog")` rather than carrying the raw `content_for` Send.
     let rewritten = rewrite_helpers_in_expr(inner, ctx);
-    let escaped = view_helpers_call("html_escape", vec![rewritten]);
+    let escaped = view_helpers_call("html_escape", vec![coerce_to_s(rewritten)]);
     vec![accumulator_append_call(escaped, ctx)]
+}
+
+/// Re-add the `.to_s` coercion that `unwrap_to_s` stripped, so the
+/// auto-escape `html_escape(...)` wrap always feeds a String. The ERB
+/// compiler wraps every `<%= expr %>` as `(expr).to_s`; we strip that
+/// up front so the render / yield / helper / modifier-if classifiers can
+/// pattern-match the bare inner expr, but the bare-interpolation default
+/// then has to put it back. `html_escape` is deliberately monomorphic
+/// `(String) -> String` (it calls `.gsub`; see ViewHelpers.html_escape),
+/// so a bare `<%= article.id %>` / `<%= comment.score %>` — an Integer —
+/// would otherwise crash. Rails likewise coerces with `to_s` before
+/// escaping, and `nil.to_s == ""` gives the empty-render Rails produces
+/// for a nil interpolation.
+///
+/// String literals are returned untouched so `view_helpers_call` can
+/// still constant-fold `html_escape("literal")`; coercing one would be a
+/// no-op (`String#to_s` is identity) that only defeats the fold.
+fn coerce_to_s(expr: Expr) -> Expr {
+    if matches!(&*expr.node, ExprNode::Lit { value: Literal::Str { .. } }) {
+        return expr;
+    }
+    // Already a `.to_s` send — the source wrote `<%= x.to_s %>` and
+    // `unwrap_to_s` peeled only the compiler's outer wrap, leaving the
+    // explicit one. `String#to_s` is identity, so don't double it.
+    if let ExprNode::Send { method, args, .. } = &*expr.node {
+        if method.as_str() == "to_s" && args.is_empty() {
+            return expr;
+        }
+    }
+    let span = expr.span;
+    Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(expr),
+            method: Symbol::from("to_s"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+    )
 }
 
 /// Recursively walk `expr` and rewrite any bare view-helper Send
@@ -470,6 +510,19 @@ mod tests {
     fn var(name: &str) -> Expr {
         Expr::new(Span::default(), ExprNode::Var { id: VarId(0), name: Symbol::from(name) })
     }
+    /// `recv.to_s` — a no-arg to_s send.
+    fn send_to_s(recv: Expr) -> Expr {
+        Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: Some(recv),
+                method: Symbol::from("to_s"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        )
+    }
     /// `_buf = _buf + arg` — the compiled-ERB append shape.
     fn buf_append(arg: Expr) -> Expr {
         let plus = Expr::new(
@@ -548,6 +601,89 @@ mod tests {
         assert!(emitted.contains("_cap"), "expected capture accumulator:\n{emitted}");
         assert!(emitted.contains("form_tag"), "form_tag call preserved:\n{emitted}");
         assert!(!emitted.contains("_buf"), "raw _buf must not survive:\n{emitted}");
+    }
+
+    #[test]
+    fn auto_escape_recoerces_with_to_s() {
+        // Compiled `<%= comment.score %>` is `_buf = _buf + (comment.score).to_s`.
+        // `unwrap_to_s` strips the `.to_s` so the classifiers see the bare
+        // `comment.score`; the auto-escape default must re-add it before the
+        // `html_escape` wrap, or the monomorphic `(String) -> String` helper
+        // crashes on an Integer score.
+        let score = Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: Some(var("comment")),
+                method: Symbol::from("score"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let to_s = Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: Some(score),
+                method: Symbol::from("to_s"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let stmts = walk_body(&buf_append(to_s), &test_ctx());
+        let emitted = stmts
+            .iter()
+            .map(crate::emit::ruby::emit_expr)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(emitted.contains("html_escape"), "auto-escape wrap present:\n{emitted}");
+        assert!(
+            emitted.contains("comment.score.to_s") || emitted.contains("(comment.score).to_s"),
+            "score must be coerced with .to_s before html_escape:\n{emitted}"
+        );
+    }
+
+    #[test]
+    fn auto_escape_explicit_to_s_is_not_doubled() {
+        // `<%= x.to_s %>` compiles to `_buf = _buf + (x.to_s).to_s`;
+        // `unwrap_to_s` strips one, and the auto-escape coercion must not
+        // re-add a second — `html_escape(x.to_s)`, not `x.to_s.to_s`.
+        let inner = send_to_s(var("x"));
+        let stmts = walk_body(&buf_append(send_to_s(inner)), &test_ctx());
+        let emitted = stmts
+            .iter()
+            .map(crate::emit::ruby::emit_expr)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(emitted.contains("html_escape(x.to_s)"), "expected single .to_s:\n{emitted}");
+        assert!(!emitted.contains("to_s.to_s"), "must not double .to_s:\n{emitted}");
+    }
+
+    #[test]
+    fn auto_escape_string_literal_stays_foldable() {
+        // A bare `<%= "hi" %>` must NOT pick up `.to_s` — `view_helpers_call`
+        // constant-folds `html_escape("literal")`, and coercing a String
+        // literal is a no-op that only defeats the fold.
+        let lit = Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: Some(str_lit("hi")),
+                method: Symbol::from("to_s"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let stmts = walk_body(&buf_append(lit), &test_ctx());
+        let emitted = stmts
+            .iter()
+            .map(crate::emit::ruby::emit_expr)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!emitted.contains("to_s"), "string literal must not be coerced:\n{emitted}");
     }
 }
 

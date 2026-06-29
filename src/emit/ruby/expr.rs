@@ -430,6 +430,38 @@ fn renders_as_trailing_modifier(e: &Expr) -> bool {
     }
 }
 
+/// Would `r`, emitted as a bare method-call receiver (`<r>.method`),
+/// mis-associate the trailing `.method`? Lower-precedence-than-`.`
+/// forms bind the `.method` to their tail rather than the whole
+/// expression: a boolean/infix operator (`a || b.to_s` parses as
+/// `a || (b.to_s)`), a command-style (paren-less, arg-bearing) send
+/// (`f.x :a, b.to_s`), a range (`1..5.to_s`), or a trailing modifier.
+/// Such receivers need wrapping parens. Postfix forms — a no-arg send
+/// (`a.b`), an index (`a[i]`), or a parenthesized call (`f(x)`) — parse
+/// correctly as receivers and don't. Exercised by the view auto-escape
+/// path, which wraps interpolated expressions in `html_escape(<expr>.to_s)`.
+fn recv_needs_parens(r: &Expr) -> bool {
+    match &*r.node {
+        ExprNode::BoolOp { .. } | ExprNode::Range { .. } | ExprNode::RescueModifier { .. } => true,
+        // Conditionals as a value (`<%= cond ? a : b %>`). A modifier-if
+        // (`x if c`) flat-out mis-parses as a receiver; a full `if/else`
+        // or `case/when` block parses (the `end` terminates it) but only
+        // because the emitter renders them multi-line — wrap defensively so
+        // the `.to_s` binds to the whole conditional regardless of form.
+        ExprNode::If { .. } | ExprNode::Case { .. } => true,
+        ExprNode::Send { method, args, parenthesized, .. } => {
+            let m = method.as_str();
+            // Index reads/writes emit as `recv[idx]` — a fine receiver.
+            if m == "[]" || m == "[]=" {
+                false
+            } else {
+                is_binary_operator(m) || (!parenthesized && !args.is_empty())
+            }
+        }
+        _ => false,
+    }
+}
+
 /// Emit the receiver/method/args portion of a Send without its block.
 /// Used by normal Ruby emission and by ERB template reconstruction.
 pub(super) fn emit_send_base(
@@ -522,6 +554,7 @@ pub(super) fn emit_send_base(
         }
         (Some(r), _) => {
             let recv_s = emit_expr(r);
+            let recv_s = if recv_needs_parens(r) { format!("({recv_s})") } else { recv_s };
             if args_s.is_empty() {
                 format!("{recv_s}.{method}")
             } else if parenthesized {
@@ -805,5 +838,83 @@ mod tests {
             ExprNode::Hash { entries: vec![(lit_sym("open"), val)], kwargs: false },
         );
         assert_eq!(emit_expr(&hash), r#"{ open: ("y" if cond?) }"#);
+    }
+
+    /// Paren-less command-style send (`recv.method arg, ...`).
+    fn cmd_send(recv: Option<Expr>, method: &str, args: Vec<Expr>) -> Expr {
+        Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv,
+                method: Symbol::from(method),
+                args,
+                block: None,
+                parenthesized: false,
+            },
+        )
+    }
+
+    #[test]
+    fn command_send_receiver_is_parenthesized() {
+        // `html_escape(f.password_field :p, size: 40)` re-coerces to
+        // `(f.password_field :p, size: 40).to_s` — without the parens the
+        // `.to_s` binds to the last arg (`size: 40.to_s`), silently dropping
+        // the outer coercion. Found re-emitting lobsters form views.
+        let inner = cmd_send(Some(send(None, "f", vec![])), "password_field", vec![lit_sym("p")]);
+        // `f` is itself a no-arg send (a local read); the command send is
+        // `f.password_field :p`.
+        let to_s = send(Some(inner), "to_s", vec![]);
+        assert_eq!(emit_expr(&to_s), "(f.password_field :p).to_s");
+    }
+
+    #[test]
+    fn bool_op_receiver_is_parenthesized() {
+        // `<%= content_for(:t) || "Real Blog" %>` auto-escapes to
+        // `html_escape((content_for_get(:t) || "Real Blog").to_s)`; without
+        // parens the `.to_s` binds to the `||` right operand.
+        let left = send(None, "content_for_get", vec![lit_sym("t")]);
+        let bool_op = Expr::new(
+            Span::default(),
+            ExprNode::BoolOp {
+                op: crate::expr::BoolOpKind::Or,
+                surface: crate::expr::BoolOpSurface::Symbol,
+                left,
+                right: lit_str("Real Blog"),
+            },
+        );
+        let to_s = send(Some(bool_op), "to_s", vec![]);
+        assert_eq!(emit_expr(&to_s), r#"(content_for_get(:t) || "Real Blog").to_s"#);
+    }
+
+    #[test]
+    fn if_else_value_receiver_is_parenthesized() {
+        // `<%= cond ? story.score : "~" %>` lowers to an If with a non-empty
+        // else and auto-escapes to `html_escape((if cond ... end).to_s)`.
+        // The `end` already terminates the block, but the wrap keeps the
+        // `.to_s` bound to the whole conditional independent of emit form.
+        let cond = send(None, "cond?", vec![]);
+        let if_else = Expr::new(
+            Span::default(),
+            ExprNode::If {
+                cond,
+                then_branch: send(Some(send(None, "story", vec![])), "score", vec![]),
+                else_branch: lit_str("~"),
+            },
+        );
+        let to_s = send(Some(if_else), "to_s", vec![]);
+        let out = emit_expr(&to_s);
+        assert!(out.starts_with("(if cond?"), "if/else receiver wrapped:\n{out}");
+        assert!(out.ends_with("end).to_s"), "to_s binds to whole conditional:\n{out}");
+    }
+
+    #[test]
+    fn plain_receiver_is_not_parenthesized() {
+        // The common case — `comment.score.to_s` — stays paren-free: a
+        // no-arg send and a parenthesized call both parse as receivers.
+        let score = send(Some(send(None, "comment", vec![])), "score", vec![]);
+        assert_eq!(emit_expr(&send(Some(score), "to_s", vec![])), "comment.score.to_s");
+
+        let call = send(Some(send(None, "render", vec![lit_sym("x")])), "to_s", vec![]);
+        assert_eq!(emit_expr(&call), "render(:x).to_s");
     }
 }

@@ -1294,9 +1294,12 @@ fn lowered_index_view_auto_escapes_bare_interpolation() {
     let src = find(&files, "app/views/articles/index.rb");
     // `<%= notice %>` is a bare interpolation (not a recognized
     // helper), so emission funnels through ViewHelpers.html_escape.
+    // The interpolated value is `.to_s`-coerced first — html_escape is
+    // monomorphic `(String) -> String`, so non-String/nil interpolations
+    // would otherwise crash (`nil.to_s == ""` matches Rails' empty render).
     assert!(
-        src.contains("ActionView::ViewHelpers.html_escape(notice)"),
-        "expected html_escape on bare `notice` interpolation; got:\n{src}",
+        src.contains("ActionView::ViewHelpers.html_escape(notice.to_s)"),
+        "expected html_escape on `.to_s`-coerced bare `notice` interpolation; got:\n{src}",
     );
 }
 
@@ -1662,8 +1665,8 @@ fn lowered_form_partial_errors_each_iterates_with_html_escape() {
     // After coalescing, the call typically lives inside a wider
     // `io << "<li>#{...}</li>"` Lit::Str/StringInterp.
     assert!(
-        src.contains("ActionView::ViewHelpers.html_escape(error)"),
-        "expected html_escape on bare `error` (full_message stripped); got:\n{src}",
+        src.contains("ActionView::ViewHelpers.html_escape(error.to_s)"),
+        "expected html_escape on `.to_s`-coerced bare `error` (full_message stripped); got:\n{src}",
     );
     assert!(
         !src.contains("error.full_message"),
@@ -1727,14 +1730,15 @@ fn lowered_comment_partial_nested_url_array_to_path_helper() {
 fn lowered_comment_partial_auto_escape_on_attrs() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/comments/_comment.rb");
-    // Bare-attr interpolations get html_escape on the way to io.
+    // Bare-attr interpolations get html_escape (on the `.to_s`-coerced
+    // value) on the way to io.
     assert!(
-        src.contains("ActionView::ViewHelpers.html_escape(comment.commenter)"),
-        "expected html_escape(comment.commenter); got:\n{src}",
+        src.contains("ActionView::ViewHelpers.html_escape(comment.commenter.to_s)"),
+        "expected html_escape(comment.commenter.to_s); got:\n{src}",
     );
     assert!(
-        src.contains("ActionView::ViewHelpers.html_escape(comment.body)"),
-        "expected html_escape(comment.body); got:\n{src}",
+        src.contains("ActionView::ViewHelpers.html_escape(comment.body.to_s)"),
+        "expected html_escape(comment.body.to_s); got:\n{src}",
     );
 }
 
@@ -1961,14 +1965,16 @@ fn lowered_layout_view_content_for_default_via_bool_op() {
     // left side is a bare `content_for(:title)` Send. The auto-
     // escape path's `rewrite_helpers_in_expr` recurses through the
     // BoolOp and rewrites the inner helper to its ViewHelpers
-    // form before the html_escape wrap is added.
+    // form before the html_escape wrap is added. The `.to_s`
+    // coercion wraps the whole BoolOp in parens — without them the
+    // `.to_s` would bind only to the `"Real Blog"` right operand.
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/layouts/application.rb");
     assert!(
         src.contains(
-            "ActionView::ViewHelpers.html_escape(ActionView::ViewHelpers.content_for_get(:title) || \"Real Blog\")"
+            "ActionView::ViewHelpers.html_escape((ActionView::ViewHelpers.content_for_get(:title) || \"Real Blog\").to_s)"
         ),
-        "expected nested helper rewrite under BoolOp + outer html_escape; got:\n{src}",
+        "expected nested helper rewrite under parenthesized BoolOp + .to_s + outer html_escape; got:\n{src}",
     );
     // Make sure the raw `content_for(:title)` Send did not survive.
     assert!(
