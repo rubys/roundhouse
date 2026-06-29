@@ -12,10 +12,10 @@
 //! it folds the block body into that method's Seq, preserving source
 //! order across sources.
 
-use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Model, ModelBodyItem};
+use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Model, ModelBodyItem, Param};
 use crate::effect::EffectSet;
-use crate::expr::{Expr, ExprNode, Literal};
-use crate::ident::Symbol;
+use crate::expr::{Expr, ExprNode, LValue, Literal};
+use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 use crate::ty::Ty;
 
@@ -68,6 +68,75 @@ fn is_abstract_class(model: &Model) -> bool {
         }
         false
     })
+}
+
+/// `attr_accessor :vote` / `attr_reader :x` / `attr_writer :y` on a model
+/// — virtual (non-column) attributes Rails backs with plain ivars. Lower
+/// each to a getter `def name; @name; end` and/or setter `def name=(value);
+/// @name = value; end`. No schema/RBS anchors the type, so they stay
+/// Untyped (fine for the dynamic targets; strict targets gain a typed
+/// virtual-attribute story when an app that uses them is brought up there).
+/// Skips any name a column/def/association already defined, and skips
+/// abstract base classes.
+pub(super) fn push_attr_accessor_methods(methods: &mut Vec<MethodDef>, model: &Model) {
+    if is_abstract_class(model) {
+        return;
+    }
+    for item in &model.body {
+        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
+            continue;
+        };
+        let (want_reader, want_writer) = match method.as_str() {
+            "attr_accessor" => (true, true),
+            "attr_reader" => (true, false),
+            "attr_writer" => (false, true),
+            _ => continue,
+        };
+        for arg in args {
+            let ExprNode::Lit { value: Literal::Sym { value: name } } = &*arg.node else {
+                continue;
+            };
+            let setter = Symbol::from(format!("{}=", name.as_str()));
+            if want_reader && !methods.iter().any(|m| m.name == *name) {
+                methods.push(MethodDef {
+                    name: name.clone(),
+                    receiver: MethodReceiver::Instance,
+                    params: Vec::new(),
+                    body: Expr::new(expr.span, ExprNode::Ivar { name: name.clone() }),
+                    signature: None,
+                    effects: EffectSet::default(),
+                    enclosing_class: Some(model.name.0.clone()),
+                    kind: AccessorKind::AttributeReader,
+                    is_async: false,
+                    mutates_self: false,
+                    block_param: None,
+                });
+            }
+            if want_writer && !methods.iter().any(|m| m.name == setter) {
+                let value = Symbol::from("value");
+                methods.push(MethodDef {
+                    name: setter,
+                    receiver: MethodReceiver::Instance,
+                    params: vec![Param::positional(value.clone())],
+                    body: Expr::new(
+                        expr.span,
+                        ExprNode::Assign {
+                            target: LValue::Ivar { name: name.clone() },
+                            value: Expr::new(expr.span, ExprNode::Var { id: VarId(0), name: value }),
+                        },
+                    ),
+                    signature: None,
+                    effects: EffectSet::default(),
+                    enclosing_class: Some(model.name.0.clone()),
+                    kind: AccessorKind::AttributeWriter,
+                    is_async: false,
+                    mutates_self: true,
+                    block_param: None,
+                });
+            }
+        }
+    }
 }
 
 /// `primary_abstract_class` marks a model as the abstract base of a Rails

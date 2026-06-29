@@ -38,6 +38,9 @@ pub(super) fn push_schema_methods(
     for col in &table.columns {
         methods.push(synth_attr_reader(owner, col));
         methods.push(synth_attr_writer(owner, col));
+        if let Some(pred) = synth_bool_predicate(owner, col) {
+            methods.push(pred);
+        }
     }
 
     // def self.table_name
@@ -269,6 +272,34 @@ fn send0(recv: Expr, method: &str) -> Expr {
             parenthesized: true,
         },
     )
+}
+
+/// Rails generates a `<column>?` predicate for every attribute; we emit
+/// it for Boolean columns (`is_deleted?` → `@is_deleted`), the common and
+/// well-defined case. For non-bool columns Rails' `?` means "present?",
+/// which isn't modeled yet, so those are skipped. The `?` suffix
+/// transpiles via each target's method-name mapping (same path as the
+/// runtime's `persisted?` / `valid?`).
+fn synth_bool_predicate(owner: &ClassId, col: &Column) -> Option<MethodDef> {
+    if !matches!(ty_of_column(&col.col_type), Ty::Bool) {
+        return None;
+    }
+    Some(MethodDef {
+        name: Symbol::from(format!("{}?", col.name.as_str())),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body: with_ty(
+            Expr::new(Span::synthetic(), ExprNode::Ivar { name: col.name.clone() }),
+            Ty::Bool,
+        ),
+        signature: Some(fn_sig(vec![], Ty::Bool)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    })
 }
 
 fn synth_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
