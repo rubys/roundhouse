@@ -499,6 +499,7 @@ mod tests {
             form_records: Vec::new(),
             nullable_locals: Default::default(),
             stylesheets: Vec::new(),
+            partial_ivars: Default::default(),
         }
     }
 

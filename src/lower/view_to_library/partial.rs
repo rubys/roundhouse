@@ -46,6 +46,8 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             let method_sym = base_name.trim_start_matches('_').to_string();
 
             let arg_expr = arg.cloned().unwrap_or_else(nil_lit);
+            let mut call_args = vec![arg_expr];
+            call_args.extend(partial_extra_args(ctx, &module_camel, &method_sym));
             let render_call = send(
                 Some(Expr::new(
                     Span::synthetic(),
@@ -54,7 +56,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                     },
                 )),
                 &method_sym,
-                vec![arg_expr],
+                call_args,
                 None,
                 true,
             );
@@ -99,6 +101,8 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                     .unwrap_or_else(|| base_name.trim_start_matches('_').to_string()),
             );
 
+            let mut call_args = vec![var_ref(var_name.clone())];
+            call_args.extend(partial_extra_args(ctx, &module_camel, &method_sym));
             let render_call = send(
                 Some(Expr::new(
                     Span::synthetic(),
@@ -107,7 +111,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                     },
                 )),
                 &method_sym,
-                vec![var_ref(var_name.clone())],
+                call_args,
                 None,
                 true,
             );
@@ -132,6 +136,27 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
     }
 }
 
+/// The threaded ivar args a rendered partial needs (its render-tree
+/// closure), looked up by `(module, method)`. These are the calling
+/// view's own locals (its closure ⊇ the partial's), passed positionally
+/// after the record arg to match the partial's generated signature.
+fn partial_extra_args(ctx: &ViewCtx, module: &str, method: &str) -> Vec<Expr> {
+    // The partial's record arg (singular of its dir) is passed separately
+    // and covers any same-named ivar, so exclude it from the threaded set —
+    // matching the dedup on the partial's def side (build_library_class).
+    let record_name = singularize(&snake_case(module));
+    ctx.partial_ivars
+        .get(&(module.to_string(), method.to_string()))
+        .map(|ivars| {
+            ivars
+                .iter()
+                .filter(|n| n.as_str() != record_name)
+                .map(|n| var_ref(n.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Common shape for collection / association partial renders:
 /// `<recv>.each { |x| <accumulator> << Views::<Plural>.<singular>(x) }`.
 /// `plural_name` is the resource name in plural form
@@ -143,15 +168,17 @@ fn emit_partial_each(recv: &Expr, plural_name: &str, ctx: &ViewCtx) -> Expr {
     let plural_camel = camelize(&snake_case(plural_name));
     let var_name = Symbol::from(singular.chars().next().unwrap_or('x').to_string());
 
+    let mut call_args = vec![var_ref(var_name.clone())];
+    call_args.extend(partial_extra_args(ctx, &plural_camel, &singular));
     let render_call = send(
         Some(Expr::new(
             Span::synthetic(),
             ExprNode::Const {
-                path: vec![Symbol::from("Views"), Symbol::from(plural_camel)],
+                path: vec![Symbol::from("Views"), Symbol::from(plural_camel.clone())],
             },
         )),
         &singular,
-        vec![var_ref(var_name.clone())],
+        call_args,
         None,
         true,
     );

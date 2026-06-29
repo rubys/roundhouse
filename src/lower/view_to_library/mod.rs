@@ -257,19 +257,48 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
     let is_layout = dir == "layouts";
     let is_action_view = !is_partial && !is_layout && !dir.is_empty();
 
-    let primary_names: Vec<String> = if is_action_view {
-        view_read_ivars(&view.body)
-            .iter()
-            .map(|s| s.as_str().to_string())
-            .collect()
-    } else if !arg_name.is_empty() {
-        vec![arg_name.clone()]
+    // Render-tree ivar closure: the ivars this view needs (its own reads ∪
+    // the ivars every partial it renders needs, transitively). Action views
+    // take exactly these as positional params; partials take their record
+    // arg PLUS these (threaded from the rendering view); the controller /
+    // render call sites pass the matching values. Layouts are body-only
+    // for now (their call site is main.rb, not yet threaded).
+    let closures = std::rc::Rc::new(view_ivar_closures(&app.views));
+    let closure_ivars: Vec<String> = view_key_of(view)
+        .and_then(|k| closures.get(&k).cloned())
+        .unwrap_or_default()
+        .iter()
+        .map(|s| s.as_str().to_string())
+        .collect();
+
+    // Typed primary params: (name, type, required). Extras (notice/alert/…)
+    // are appended afterward as nullable optionals.
+    let mut typed: Vec<(String, crate::ty::Ty)> = Vec::new();
+    if is_action_view {
+        for iv in &closure_ivars {
+            typed.push((iv.clone(), ivar_ty(iv, &known_models)));
+        }
     } else {
-        Vec::new()
-    };
+        // Partial/layout: record/body arg from the render/yield call site,
+        // then the threaded closure ivars.
+        if !arg_name.is_empty() {
+            typed.push((arg_name.clone(), record_arg_ty(dir, is_layout, &known_models)));
+        }
+        if !is_layout {
+            for iv in &closure_ivars {
+                // The record arg already covers a same-named ivar (a `_form`
+                // whose record is `category` and which reads `@category`) —
+                // don't emit a duplicate param. The call site excludes it too.
+                if iv == &arg_name {
+                    continue;
+                }
+                typed.push((iv.clone(), ivar_ty(iv, &known_models)));
+            }
+        }
+    }
 
     let mut params: Vec<Param> = Vec::new();
-    for n in &primary_names {
+    for (n, _) in &typed {
         params.push(Param::positional(Symbol::from(n.as_str())));
     }
     for n in &extra_params {
@@ -279,25 +308,13 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         ));
     }
 
-    // Build the method signature: typed param list so the body-typer
-    // (and downstream emitters' type-aware dispatch) can resolve
-    // `articles.empty?` to Array dispatch, `article.title` to a
-    // model-attribute access, etc. Without this, params come through
-    // as `Ty::Untyped` and emit-side dispatch falls through.
-    //
-    // Type rules:
-    //   - Action views: each read-ivar typed by name (plural known model
-    //     → Array[Model], singular → Model, else Untyped); see ivar_ty.
-    //   - Partial: arg is the model itself.
-    //   - Layout: main arg is String (the rendered body HTML).
-    //   - Extra params (notice, alert, …): String? (nullable).
-    let signature = if is_action_view {
-        build_action_view_signature(&primary_names, &extra_params, &known_models)
-    } else {
-        build_view_signature(stem, dir, is_partial, &arg_name, &extra_params, &known_models)
-    };
+    // Method signature: typed param list so the body-typer (and per-target
+    // type-aware dispatch) resolves `articles.empty?` to Array dispatch,
+    // `article.title` to a model attribute, etc. Primaries typed above;
+    // extras are nullable strings.
+    let signature = build_view_signature_from(&typed, &extra_params);
 
-    let mut locals: Vec<String> = primary_names.clone();
+    let mut locals: Vec<String> = typed.iter().map(|(n, _)| n.clone()).collect();
     locals.extend(extra_params.iter().cloned());
 
     let ctx = ViewCtx {
@@ -310,6 +327,7 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         form_records: Vec::new(),
         nullable_locals: extra_params.iter().cloned().collect(),
         stylesheets: app.stylesheets.clone(),
+        partial_ivars: closures.clone(),
     };
 
     let mut body_stmts: Vec<Expr> = Vec::new();
@@ -1038,6 +1056,11 @@ pub(crate) struct ViewArgs {
 pub(crate) fn action_view_ivar_map(
     views: &[crate::dialect::View],
 ) -> std::collections::HashMap<(String, String), ViewArgs> {
+    // The controller passes an action view its full render-tree ivar
+    // closure (its own reads ∪ its partials' needs), matching the view's
+    // generated params — so an ivar a deep partial reads (e.g. @user) is
+    // threaded even when the action view itself doesn't read it.
+    let closures = view_ivar_closures(views);
     let mut out = std::collections::HashMap::new();
     for v in views {
         let (dir, base) = split_view_name(v.name.as_str());
@@ -1048,10 +1071,15 @@ pub(crate) fn action_view_ivar_map(
             continue;
         }
         let module = camelize(&snake_case(dir));
+        let key = (module, base.to_string());
+        let ivars = closures
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| view_read_ivars(&v.body));
         out.insert(
-            (module, base.to_string()),
+            key,
             ViewArgs {
-                ivars: view_read_ivars(&v.body),
+                ivars,
                 uses_action_name: view_uses_bare_name(&v.body, "action_name"),
                 uses_controller_name: view_uses_bare_name(&v.body, "controller_name"),
             },
@@ -1085,6 +1113,123 @@ pub(crate) fn view_uses_bare_name(body: &Expr, name: &str) -> bool {
         found
     }
     walk(body, name)
+}
+
+/// A view's identity key for the render graph / closure map:
+/// `(module, stem)` matching `views_module_name(controller)` ==
+/// `camelize(snake_case(dir))` plus the rendered action/partial name.
+pub(crate) type ViewKey = (String, String);
+
+fn view_key_of(v: &View) -> Option<ViewKey> {
+    let (dir, base) = split_view_name(v.name.as_str());
+    if dir.is_empty() {
+        return None;
+    }
+    Some((camelize(&snake_case(dir)), base.trim_start_matches('_').to_string()))
+}
+
+/// Transitive instance-variable closure per view: the ivars a view NEEDS
+/// = the ivars its own template reads ∪ the ivars every partial it renders
+/// needs (recursively). This is the typed alternative to a dynamic
+/// assigns-bag — each needed ivar threads through as a typed positional
+/// param (view params + partial call-site args both read this map, so they
+/// agree). Dynamic partial names (`render partial: @x`) can't be resolved
+/// statically, so that subtree's needs aren't folded in (those renders are
+/// nil-guarded by the caller). Keyed for every html view (action +
+/// partial).
+pub(crate) fn view_ivar_closures(views: &[View]) -> std::collections::HashMap<ViewKey, Vec<Symbol>> {
+    use std::collections::{BTreeSet, HashMap};
+    let mut closure: HashMap<ViewKey, BTreeSet<Symbol>> = HashMap::new();
+    let mut edges: HashMap<ViewKey, Vec<ViewKey>> = HashMap::new();
+    for v in views {
+        if v.format.as_str() != "html" {
+            continue;
+        }
+        let Some(key) = view_key_of(v) else { continue };
+        let (dir, _) = split_view_name(v.name.as_str());
+        let reads: BTreeSet<Symbol> = view_read_ivars(&v.body).into_iter().collect();
+        closure.entry(key.clone()).or_default().extend(reads);
+        edges
+            .entry(key)
+            .or_default()
+            .extend(render_partial_keys(&v.body, dir));
+    }
+    // Fixpoint: propagate each partial's needs up to every view that
+    // renders it, until no set grows.
+    loop {
+        let mut changed = false;
+        let keys: Vec<ViewKey> = edges.keys().cloned().collect();
+        for key in keys {
+            let children = edges.get(&key).cloned().unwrap_or_default();
+            let mut add: BTreeSet<Symbol> = BTreeSet::new();
+            for child in &children {
+                if let Some(c) = closure.get(child) {
+                    add.extend(c.iter().cloned());
+                }
+            }
+            let entry = closure.entry(key).or_default();
+            for s in add {
+                if entry.insert(s) {
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    closure
+        .into_iter()
+        .map(|(k, set)| (k, set.into_iter().collect()))
+        .collect()
+}
+
+/// The partial views a body renders, as `ViewKey`s — for the render graph.
+/// Resolves the same render shapes `classify_render_partial` recognizes;
+/// unresolvable (dynamic) partial names are skipped.
+fn render_partial_keys(body: &Expr, dir: &str) -> Vec<ViewKey> {
+    let mut out = Vec::new();
+    collect_render_keys(body, dir, &mut out);
+    out
+}
+
+fn collect_render_keys(e: &Expr, dir: &str, out: &mut Vec<ViewKey>) {
+    if let ExprNode::Send { recv, method, args, block, .. } = &*e.node {
+        if let Some(rp) = crate::lower::view::classify_render_partial(
+            recv.as_ref(),
+            method.as_str(),
+            args,
+            block.as_ref(),
+            &|_| true,
+        ) {
+            if let Some(k) = render_partial_key(&rp, dir) {
+                out.push(k);
+            }
+        }
+    }
+    e.node.for_each_child(&mut |c| collect_render_keys(c, dir, out));
+}
+
+fn render_partial_key(rp: &crate::lower::view::RenderPartial<'_>, dir: &str) -> Option<ViewKey> {
+    use crate::lower::view::RenderPartial;
+    let named = |partial: &str| -> ViewKey {
+        match partial.rsplit_once('/') {
+            Some((d, n)) => (camelize(&snake_case(d)), n.trim_start_matches('_').to_string()),
+            None => (
+                camelize(&snake_case(dir)),
+                partial.trim_start_matches('_').to_string(),
+            ),
+        }
+    };
+    Some(match rp {
+        RenderPartial::Collection { name, .. } => (camelize(&snake_case(name)), singularize(name)),
+        RenderPartial::Association { method, .. } => {
+            (camelize(&snake_case(method)), singularize(method))
+        }
+        RenderPartial::Named { partial, .. } | RenderPartial::CollectionNamed { partial, .. } => {
+            named(partial)
+        }
+    })
 }
 
 /// The instance variables an action view READS, in first-seen order.
@@ -1137,22 +1282,41 @@ fn ivar_ty(name: &str, known_models: &[String]) -> crate::ty::Ty {
     }
 }
 
-/// Signature for an action view whose params are its read-ivars (typed by
-/// `ivar_ty`) followed by the nullable extra params (notice/alert/…).
-fn build_action_view_signature(
-    primary_names: &[String],
+/// Type of a partial/layout's record arg: a layout's `body` is the
+/// rendered-HTML String; a partial's record is the singular model for its
+/// directory (`stories/_listdetail` → `Story`), else Untyped.
+fn record_arg_ty(dir: &str, is_layout: bool, known_models: &[String]) -> crate::ty::Ty {
+    use crate::ty::Ty;
+    if is_layout {
+        return Ty::Str;
+    }
+    let model_class = crate::naming::singularize_camelize(dir);
+    if known_models.iter().any(|m| m == &model_class) {
+        Ty::Class {
+            id: crate::ident::ClassId(crate::ident::Symbol::from(model_class.as_str())),
+            args: vec![],
+        }
+    } else {
+        Ty::Untyped
+    }
+}
+
+/// Build a view method's `Ty::Fn` from its typed primary params (record
+/// arg and/or threaded ivars) followed by the nullable extra params
+/// (notice/alert/action_name/…).
+fn build_view_signature_from(
+    typed: &[(String, crate::ty::Ty)],
     extra_params: &[String],
-    known_models: &[String],
 ) -> Option<crate::ty::Ty> {
     use crate::ty::{Param as TyParam, ParamKind, Ty};
-    if primary_names.is_empty() && extra_params.is_empty() {
+    if typed.is_empty() && extra_params.is_empty() {
         return None;
     }
     let mut sig_params: Vec<TyParam> = Vec::new();
-    for n in primary_names {
+    for (n, t) in typed {
         sig_params.push(TyParam {
             name: crate::ident::Symbol::from(n.as_str()),
-            ty: ivar_ty(n, known_models),
+            ty: t.clone(),
             kind: ParamKind::Required,
         });
     }
@@ -1528,6 +1692,11 @@ pub(super) struct ViewCtx {
     /// ...)` expansion: a `:app` symbol arg fans out to one call per
     /// stylesheet, mirroring how Rails' Propshaft resolves `:app`.
     pub(super) stylesheets: Vec<String>,
+    /// Render-tree ivar closure (`view_ivar_closures`), shared across this
+    /// view's scopes. `emit_render_partial` looks up a rendered partial's
+    /// needed ivars here and passes them as call-site args (the caller's
+    /// own locals — its closure ⊇ the partial's, so it always has them).
+    pub(super) partial_ivars: std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Symbol>>>,
 }
 
 impl ViewCtx {
