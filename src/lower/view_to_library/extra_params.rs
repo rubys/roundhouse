@@ -22,6 +22,19 @@ use crate::expr::{Expr, ExprNode, InterpPart};
 /// view that doesn't reference flash; emit-side it's negligible.
 pub(super) fn collect_extra_params(body: &Expr, arg_name: &str) -> Vec<String> {
     let mut out: Vec<String> = vec!["notice".to_string(), "alert".to_string()];
+    // `action_name`/`controller_name` are controller context Rails exposes
+    // to views. Unlike flash, they're collected only when the view
+    // actually references them (kept right after notice/alert, in a fixed
+    // order, so the controller→view rewrite can pass the matching literals
+    // at known positions). The controller passes them only to views whose
+    // contract records the usage (see action_view_ivar_map) — so views
+    // that don't use them gain no extra params on any target.
+    if super::view_uses_bare_name(body, "action_name") {
+        out.push("action_name".to_string());
+    }
+    if super::view_uses_bare_name(body, "controller_name") {
+        out.push("controller_name".to_string());
+    }
     let mut bound: Vec<String> = Vec::new();
     if !arg_name.is_empty() {
         bound.push(arg_name.to_string());

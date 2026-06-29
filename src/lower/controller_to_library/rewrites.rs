@@ -38,12 +38,18 @@ pub(super) fn rewrite_render_to_views(
     module_name: Option<&str>,
     ivars: &[Symbol],
     view_ivars: &super::ViewIvarMap,
+    current_action: &str,
 ) -> Expr {
     let Some(module) = module_name else {
         return expr.clone();
     };
     let module_name_owned = module.to_string();
     let ivars = ivars.to_vec();
+    // Controller-context literals every view can read (see
+    // extra_params.rs): the current action name and the controller's
+    // resource name (`HomeController` → module "Home" → "home").
+    let current_action = current_action.to_string();
+    let controller_name = crate::naming::snake_case(&module_name_owned);
     map_expr(expr, &|e| match &*e.node {
         ExprNode::Send { recv: None, method, args, block, .. }
             if method.as_str() == "render" && !args.is_empty() =>
@@ -88,10 +94,16 @@ pub(super) fn rewrite_render_to_views(
             // (before the `_json` rename below). Falls back to the
             // controller's in-scope ivars when the view isn't in the map
             // (json/jbuilder views, or a render with no matching template).
-            let resolved_ivars: Vec<Symbol> = view_ivars
-                .get(&(module_name_owned.clone(), view_method.as_str().to_string()))
-                .cloned()
+            let contract =
+                view_ivars.get(&(module_name_owned.clone(), view_method.as_str().to_string()));
+            let resolved_ivars: Vec<Symbol> = contract
+                .map(|c| c.ivars.clone())
                 .unwrap_or_else(|| ivars.clone());
+            // Pass action_name/controller_name literals only to views whose
+            // contract records that they reference them (so views that don't
+            // get no extra args — no arity mismatch).
+            let pass_action_name = contract.map(|c| c.uses_action_name).unwrap_or(false);
+            let pass_controller_name = contract.map(|c| c.uses_controller_name).unwrap_or(false);
             // Peek at the trailing kwarg-Hash for a `format: :json`
             // marker that the respond_to flattener planted. If
             // present, route to `<sym>_json` view and tag the outer
@@ -125,6 +137,12 @@ pub(super) fn rewrite_render_to_views(
             if !json_format {
                 view_args.push(flash_lookup(e.span, "notice"));
                 view_args.push(flash_lookup(e.span, "alert"));
+                if pass_action_name {
+                    view_args.push(str_lit(e.span, &current_action));
+                }
+                if pass_controller_name {
+                    view_args.push(str_lit(e.span, &controller_name));
+                }
             }
             let view_call = Expr::new(
                 e.span,
@@ -161,6 +179,12 @@ pub(super) fn rewrite_render_to_views(
         }
         _ => None,
     })
+}
+
+/// A String-literal expression (for the action_name/controller_name
+/// view args passed from the controller).
+fn str_lit(span: Span, s: &str) -> Expr {
+    Expr::new(span, ExprNode::Lit { value: Literal::Str { value: s.to_string() } })
 }
 
 /// The view name from a `render action:` value — accepts a Symbol

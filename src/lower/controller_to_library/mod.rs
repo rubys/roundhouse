@@ -84,9 +84,10 @@ fn json_actions_for(
 
 use std::collections::BTreeMap;
 
-/// `(view-module, action-stem) -> read-ivars` for the render rewrite.
+/// `(view-module, action-stem) -> ViewArgs` for the render rewrite.
 /// Built once from the app's views; see `action_view_ivar_map`.
-type ViewIvarMap = std::collections::HashMap<(String, String), Vec<Symbol>>;
+type ViewIvarMap =
+    std::collections::HashMap<(String, String), crate::lower::view_to_library::ViewArgs>;
 
 /// Bulk entry point: lower every controller against a shared class
 /// registry so cross-controller / model / view dispatch types
@@ -815,7 +816,7 @@ fn lower_action_body(
         let synth = synthesize_implicit_render(&unwrapped, action_name, has_json_variant);
         let ivars = ivars_in_scope(controller, action_name, &synth, privs);
         let module_name = views_module_name(controller);
-        rewrite_render_to_views(&synth, module_name.as_deref(), &ivars, view_ivars)
+        rewrite_render_to_views(&synth, module_name.as_deref(), &ivars, view_ivars, action_name)
     } else {
         unwrapped
     };

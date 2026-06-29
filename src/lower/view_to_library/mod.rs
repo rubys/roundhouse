@@ -1019,14 +1019,25 @@ pub(crate) fn build_view_signature(
     })
 }
 
-/// Map `(view-module, action-stem) -> read-ivars` for the controller's
-/// render rewrite, so it passes `@<name>` for each ivar the rendered
-/// action view reads. Keyed to match `views_module_name(controller)`
-/// (which equals `camelize(snake_case(dir))`) plus the rendered action.
-/// Only HTML, non-partial, non-layout views participate.
+/// The argument contract an action view expects from its controller: the
+/// read-ivars it takes positionally, plus whether it references the
+/// `action_name`/`controller_name` controller-context helpers (which the
+/// controller then passes as literals — but ONLY to views that use them,
+/// so views/targets that don't gain no extra params).
+#[derive(Default)]
+pub(crate) struct ViewArgs {
+    pub ivars: Vec<Symbol>,
+    pub uses_action_name: bool,
+    pub uses_controller_name: bool,
+}
+
+/// Map `(view-module, action-stem) -> ViewArgs` for the controller's
+/// render rewrite. Keyed to match `views_module_name(controller)` (which
+/// equals `camelize(snake_case(dir))`) plus the rendered action. Only
+/// HTML, non-partial, non-layout views participate.
 pub(crate) fn action_view_ivar_map(
     views: &[crate::dialect::View],
-) -> std::collections::HashMap<(String, String), Vec<Symbol>> {
+) -> std::collections::HashMap<(String, String), ViewArgs> {
     let mut out = std::collections::HashMap::new();
     for v in views {
         let (dir, base) = split_view_name(v.name.as_str());
@@ -1037,9 +1048,43 @@ pub(crate) fn action_view_ivar_map(
             continue;
         }
         let module = camelize(&snake_case(dir));
-        out.insert((module, base.to_string()), view_read_ivars(&v.body));
+        out.insert(
+            (module, base.to_string()),
+            ViewArgs {
+                ivars: view_read_ivars(&v.body),
+                uses_action_name: view_uses_bare_name(&v.body, "action_name"),
+                uses_controller_name: view_uses_bare_name(&v.body, "controller_name"),
+            },
+        );
     }
     out
+}
+
+/// True when the view body references `name` as a bare identifier — a
+/// no-recv/no-arg Send (`action_name`) or a Var (`action_name` already
+/// lowered to a local). Used to surface controller-context helpers
+/// (action_name/controller_name) as view params only when actually used.
+pub(crate) fn view_uses_bare_name(body: &Expr, name: &str) -> bool {
+    fn walk(e: &Expr, name: &str) -> bool {
+        let hit = match &*e.node {
+            ExprNode::Var { name: n, .. } => n.as_str() == name,
+            ExprNode::Send { recv: None, method, args, block, .. } => {
+                method.as_str() == name && args.is_empty() && block.is_none()
+            }
+            _ => false,
+        };
+        if hit {
+            return true;
+        }
+        let mut found = false;
+        e.node.for_each_child(&mut |c| {
+            if !found {
+                found = walk(c, name);
+            }
+        });
+        found
+    }
+    walk(body, name)
 }
 
 /// The instance variables an action view READS, in first-seen order.
