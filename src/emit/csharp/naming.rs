@@ -53,10 +53,15 @@ pub fn type_name(qualified: &str) -> String {
 /// PascalCase, keyword-escaped. For C# member names (methods, properties,
 /// types): `created_at` → `CreatedAt`, `from_stmt` → `FromStmt`.
 ///
-/// A trailing `!` (bang method) gets a `Bang` suffix so `save!` becomes
-/// `SaveBang` and doesn't collide with `save` once punctuation is dropped —
-/// the same disambiguation the Kotlin/TS emitters do. Predicates (`?`) just
-/// drop the suffix.
+/// A trailing `!` (bang) gets a `Bang` suffix and a trailing `?`
+/// (predicate) gets a `Pred` suffix, so `save!`→`SaveBang` and
+/// `deleted_at?`→`DeletedAtPred` stay distinct from `Save`/`DeletedAt`
+/// once punctuation is dropped. Both affixes are applied unconditionally —
+/// the convention is uniform across generated and hand-written runtime
+/// code, so call sites reproduce the rename without per-method context.
+/// The `?` affix is mandatory because AR column predicates genuinely
+/// collide: a `deleted_at` reader and a `deleted_at?` predicate coexist
+/// on every column.
 pub fn pascal(raw: &str) -> String {
     cased(raw, true)
 }
@@ -69,6 +74,7 @@ pub fn camel(raw: &str) -> String {
 
 fn cased(raw: &str, upper_first: bool) -> String {
     let bang = raw.ends_with('!');
+    let pred = raw.ends_with('?');
     let trimmed = raw.trim_end_matches(['?', '!']);
     let leading_us = trimmed.len() - trimmed.trim_start_matches('_').len();
     let core = &trimmed[leading_us..];
@@ -98,11 +104,31 @@ fn cased(raw: &str, upper_first: bool) -> String {
         out = trimmed.to_string();
     } else if bang {
         out.push_str("Bang");
+    } else if pred {
+        out.push_str("Pred");
     }
 
     if is_csharp_keyword(&out) {
         format!("@{out}")
     } else {
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{camel, pascal};
+
+    /// Regression guard for the AR column-predicate collision: a column
+    /// reader (`deleted_at`) and its predicate (`deleted_at?`) must render
+    /// to DISTINCT C# names. `?`/`!` get `Pred`/`Bang` affixes. (C# method
+    /// names are camelCase today — see the idiomatic-PascalCase follow-up.)
+    #[test]
+    fn suffix_disambiguation_is_injective() {
+        assert_ne!(pascal("deleted_at"), pascal("deleted_at?"));
+        assert_ne!(camel("deleted_at"), camel("deleted_at?"));
+        assert_ne!(pascal("save"), pascal("save!"));
+        assert_eq!(pascal("deleted_at?"), "DeletedAtPred");
+        assert_eq!(camel("deleted_at?"), "deletedAtPred");
     }
 }

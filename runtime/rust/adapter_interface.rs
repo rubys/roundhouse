@@ -45,7 +45,7 @@ impl ActiveRecordAdapter for NotConfigured {
     fn count(&self, _t: String) -> i64 {
         panic!("ActiveRecord.adapter was not set before use")
     }
-    fn exists(&self, _t: String, _id: i64) -> bool {
+    fn exists_pred(&self, _t: String, _id: i64) -> bool {
         panic!("ActiveRecord.adapter was not set before use")
     }
     fn insert(&self, _t: String, _a: HashMap<String, Value>) -> i64 {
@@ -93,8 +93,8 @@ impl ActiveRecordAdapter for AdapterInterface {
     fn count(&self, t: String) -> i64 {
         self.0.count(t)
     }
-    fn exists(&self, t: String, id: i64) -> bool {
-        self.0.exists(t, id)
+    fn exists_pred(&self, t: String, id: i64) -> bool {
+        self.0.exists_pred(t, id)
     }
     fn insert(&self, t: String, a: HashMap<String, Value>) -> i64 {
         self.0.insert(t, a)

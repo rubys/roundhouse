@@ -38,7 +38,7 @@ pub trait ActiveRecordAdapter: Send + Sync {
     fn find(&self, table_name: String, id: i64) -> Option<Row>;
     fn r#where(&self, table_name: String, conditions: HashMap<String, Value>) -> Vec<Row>;
     fn count(&self, table_name: String) -> i64;
-    fn exists(&self, table_name: String, id: i64) -> bool;
+    fn exists_pred(&self, table_name: String, id: i64) -> bool;
     fn insert(&self, table_name: String, attributes: HashMap<String, Value>) -> i64;
     fn update(&self, table_name: String, id: i64, attributes: HashMap<String, Value>);
     fn delete(&self, table_name: String, id: i64);

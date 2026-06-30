@@ -71,7 +71,7 @@ enum Db {
         return c.nextId
     }
 
-    static func step(_ stmtId: Int) -> Bool {
+    static func stepPred(_ stmtId: Int) -> Bool {
         guard let stmt = conn().statements[stmtId] else { return false }
         return sqlite3_step(stmt) == SQLITE_ROW
     }

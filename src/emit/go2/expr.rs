@@ -1913,7 +1913,9 @@ pub(super) fn emit_send(
                 return super::library::sanitize(method);
             }
             if args_s.is_empty() {
-                go_m
+                // Bare reader position (no parens) → field-read form,
+                // suffix stripped (`persisted?` → `Persisted`).
+                go_field_ident(method)
             } else {
                 format!("{}({})", go_m, args_s.join(", "))
             }
@@ -1989,7 +1991,9 @@ pub(super) fn emit_send(
                 if is_known_class_method(method) {
                     return format!("{recv_s}.{go_m}()");
                 }
-                return format!("{recv_s}.{go_m}");
+                // Bare field read (no parens) → suffix-stripped field
+                // name so `record.persisted?` → `record.Persisted`.
+                return format!("{recv_s}.{}", go_field_ident(method));
             }
             format!("{}.{}({})", recv_s, go_m, args_s.join(", "))
         }
@@ -2122,21 +2126,36 @@ fn self_ref_expr(ctx: &EmitCtx) -> String {
 }
 
 /// Ruby method names with `?` / `!` suffixes don't translate to Go
-/// identifiers. Rewrite to `_p` / `_bang` form before passing
-/// through the standard pascalize path: `nil?` → `nil_p` → `NilP`,
+/// identifiers. Rewrite to `_pred` / `_bang` form before passing
+/// through the standard pascalize path: `nil?` → `nil_pred` → `NilPred`,
 /// `save!` → `save_bang` → `SaveBang`. Semantic translation
 /// (`nil?` → `== nil`, `is_a?(C)` → type assertion) is a separate
 /// widening; this only handles the identifier-shape side so emit
 /// produces parseable Go.
-fn go2_method_ident(ruby_name: &str) -> String {
-    // Mirror rust2's `sanitize_ident` (src/emit/rust2/expr/util.rs):
-    // `?` predicate suffix strips entirely (Go convention — bool-
-    // returning methods don't decorate the name); `!` maps to
-    // `_bang`. Aligning suffix behavior so hand-written adapter
-    // method names (`Exists`, `Insert`, `Truncate`) match the
-    // emitted call sites without per-method shims.
+/// Field-read form of a reader name: strips the `?` predicate suffix
+/// (Go struct fields never carry it) so a 0-arg field read of
+/// `persisted?` lands on the `Persisted` field, not the affixed
+/// `PersistedPred` method ident. Bare (no-paren) reader positions use
+/// this; method-CALL positions use `go2_method_ident`, which affixes
+/// `?` → `_pred` to disambiguate from a same-named reader/field.
+fn go_field_ident(ruby_name: &str) -> String {
     let stripped = ruby_name.strip_suffix('?').unwrap_or(ruby_name);
     let normalized = stripped.replace('!', "_bang");
+    go_method_name(&normalized)
+}
+
+fn go2_method_ident(ruby_name: &str) -> String {
+    // Mirror rust2's `sanitize_ident` (src/emit/rust2/expr/util.rs):
+    // `?` predicate suffix maps to `_pred`, `!` maps to `_bang`. The `?`
+    // affix (vs a bare strip) keeps a column predicate distinct from its
+    // same-named reader (`deleted_at?` → `DeletedAtPred` vs `deleted_at`
+    // → `DeletedAt`), applied unconditionally so def and call sites agree
+    // and hand-written adapter methods conform to the same convention.
+    let with_pred = match ruby_name.strip_suffix('?') {
+        Some(base) => format!("{base}_pred"),
+        None => ruby_name.to_string(),
+    };
+    let normalized = with_pred.replace('!', "_bang");
     go_method_name(&normalized)
 }
 
@@ -3476,5 +3495,26 @@ fn emit_return_at(ctx: &EmitCtx, e: &Expr, out: &mut String, depth: usize) {
                 out.push_str(&format!("return {v}\n"));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod predicate_naming_tests {
+    use super::{go2_method_ident, go_field_ident};
+
+    /// Regression guard for the AR column-predicate collision in Go, which
+    /// splits across two paths: method CALLS affix `?` → `_pred` (so
+    /// `exists?` → `ExistsPred` never collides with a same-named method),
+    /// while bare field READS strip `?` (so `deleted_at?` lands on the
+    /// `DeletedAt` struct field). Both invariants are load-bearing.
+    #[test]
+    fn call_path_affixes_field_path_strips() {
+        // Method-call path: predicate distinct from reader.
+        assert_ne!(go2_method_ident("exists"), go2_method_ident("exists?"));
+        assert_eq!(go2_method_ident("exists?"), "ExistsPred");
+        assert_eq!(go2_method_ident("save!"), "SaveBang");
+        // Field-read path: predicate resolves to the backing field.
+        assert_eq!(go_field_ident("deleted_at?"), go_field_ident("deleted_at"));
+        assert_eq!(go_field_ident("deleted_at?"), "DeletedAt");
     }
 }

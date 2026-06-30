@@ -510,8 +510,8 @@ fn synth_inherited_finders(t: &str, present: &HashSet<String>) -> String {
     );
     emit("count", "public new static long count() {\n    return _adapterCount();\n}\n".to_string());
     emit(
-        "exists",
-        "public new static bool exists(long id) {\n    return _adapterExistsById(id);\n}\n".to_string(),
+        "existsPred",
+        "public new static bool existsPred(long id) {\n    return _adapterExistsByIdPred(id);\n}\n".to_string(),
     );
     emit(
         "last",

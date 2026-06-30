@@ -793,13 +793,13 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                             self.validate();\n\
                             if !crate::errors_ext::validation_errors_is_empty() {{ return false; }}\n\
                             if self.id == 0 {{ self.id = self._adapter_insert();{after_create_commit} }}\n\
-                            else if Self::_adapter_exists_by_id(self.id) {{ self._adapter_update();{after_update_commit} }}\n\
+                            else if Self::_adapter_exists_by_id_pred(self.id) {{ self._adapter_update();{after_update_commit} }}\n\
                             else {{ let _ = self._adapter_insert();{after_create_commit} }}\n\
                             true\n\
                         }}\n\
                         pub fn destroy(&mut self) {{ {destroy_body} }}\n\
-                        pub fn exists(id: i64) -> bool {{ Self::_adapter_exists_by_id(id) }}\n\
-                        pub fn persisted(&self) -> bool {{ self.id != 0 }}\n\
+                        pub fn exists_pred(id: i64) -> bool {{ Self::_adapter_exists_by_id_pred(id) }}\n\
+                        pub fn persisted_pred(&self) -> bool {{ self.id != 0 }}\n\
                         pub fn find(id: i64) -> Self {{ Self::_adapter_find_by_id(id).expect(\"record not found\") }}\n\
                         pub fn count() -> i64 {{ Self::_adapter_count() }}\n\
                         pub fn all() -> Vec<{name}> {{ Self::_adapter_all() }}\n\

@@ -245,9 +245,9 @@ func Db_prepare(query string) int64 {
 
 // Db_step_p advances the cursor on a prepared statement, snapshotting
 // the next row. Returns false when exhausted or on an unknown id
-// (idempotent). The "_p" suffix is the go2 emitter's mapping of
+// (idempotent). The "_pred" suffix is the go2 emitter's mapping of
 // Ruby's `?` predicate-method marker.
-func Db_step_p(stmtID int64) bool {
+func Db_step_pred(stmtID int64) bool {
 	stmtMu.Lock()
 	defer stmtMu.Unlock()
 	entry, ok := statements[stmtID]

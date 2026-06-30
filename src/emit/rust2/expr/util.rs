@@ -253,7 +253,11 @@ pub(crate) fn coerce_to_value(value: &Expr, rhs: &str) -> String {
 /// Sanitize a Ruby identifier for Rust:
 /// * `foo!` → `foo_bang`. Preserves the distinction vs the non-bang
 ///   sibling (`def create` vs `def create!` both exist on AR::Base).
-/// * `foo?` (predicate) → `foo`.
+/// * `foo?` (predicate) → `foo_pred`. Preserves the distinction vs the
+///   same-named reader (every AR column has both a `deleted_at` reader
+///   and a `deleted_at?` predicate). Applied unconditionally, mirroring
+///   the `!` handling, so the rename reproduces at call sites and
+///   hand-written runtime methods conform to the same convention.
 /// * `foo=` (setter) → `set_foo`.
 /// * `[]` / `[]=` → `get_index` / `set_index`.
 /// * Reserved Rust keywords → `r#keyword` raw-identifier form.
@@ -280,7 +284,7 @@ pub(crate) fn sanitize_ident(name: &str) -> String {
     } else if let Some(base) = name.strip_suffix('=') {
         return format!("set_{base}");
     } else if let Some(base) = name.strip_suffix('?') {
-        base
+        return format!("{base}_pred");
     } else {
         name
     };
@@ -324,4 +328,20 @@ pub(crate) fn is_rust_keyword(name: &str) -> bool {
             | "override" | "priv" | "typeof" | "unsized" | "virtual"
             | "yield" | "try"
     )
+}
+
+#[cfg(test)]
+mod predicate_naming_tests {
+    use super::sanitize_ident;
+
+    /// Regression guard for the AR column-predicate collision: a column
+    /// reader (`deleted_at`) and its predicate (`deleted_at?`) must render
+    /// to DISTINCT Rust names. `?`/`!`/`=` get `_pred`/`_bang`/`set_`.
+    #[test]
+    fn suffix_disambiguation_is_injective() {
+        assert_ne!(sanitize_ident("deleted_at"), sanitize_ident("deleted_at?"));
+        assert_ne!(sanitize_ident("save"), sanitize_ident("save!"));
+        assert_eq!(sanitize_ident("deleted_at?"), "deleted_at_pred");
+        assert_eq!(sanitize_ident("save!"), "save_bang");
+    }
 }

@@ -74,7 +74,7 @@ public static class Db
         return handle;
     }
 
-    public static bool step(long stmt) => OpenReaders[stmt].reader.Read();
+    public static bool stepPred(long stmt) => OpenReaders[stmt].reader.Read();
 
     public static long columnInt(long stmt, long index)
     {

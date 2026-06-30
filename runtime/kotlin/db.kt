@@ -104,7 +104,7 @@ object Db {
     }
 
     // Advance the cursor; false (snapshot cleared) when exhausted.
-    fun step(stmtId: Long): Boolean {
+    fun stepPred(stmtId: Long): Boolean {
         val rs = tlStatements.get()[stmtId] ?: return false
         return rs.next()
     }

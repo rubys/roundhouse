@@ -36,7 +36,7 @@ type ActiveRecordAdapterInterface interface {
 	Find(tableName string, id int64) Row
 	Where(tableName string, conditions map[string]any) []Row
 	Count(tableName string) int64
-	Exists(tableName string, id int64) bool
+	ExistsPred(tableName string, id int64) bool
 	Insert(tableName string, attributes map[string]any) int64
 	Update(tableName string, id int64, attributes map[string]any)
 	Delete(tableName string, id int64)

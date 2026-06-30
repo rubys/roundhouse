@@ -205,6 +205,12 @@ pub fn emit_library_class_with_registry(
         // than a single matching Ivar read) keep emitting so behavior
         // isn't silently dropped.
         if matches!(m.receiver, MethodReceiver::Instance) && is_trivial_ivar_reader(m) {
+            // A trivial ivar-reader (incl. predicate `persisted?`) whose
+            // backing ivar is a struct field isn't emitted — the field
+            // IS the reader. Call sites read the field directly: the
+            // field-read path in expr.rs strips the `?` so
+            // `record.persisted?` → `record.Persisted`. Stem-strip here
+            // so `persisted?` matches the `persisted` field.
             let stem = m.name.as_str().trim_end_matches(['?', '!', '=']);
             if fields.iter().any(|f| f.ruby_name == stem) {
                 continue;
@@ -291,7 +297,7 @@ fn emit_ar_class_method_wrappers(name: &str) -> String {
     out.push_str(&format!("// bare-fn class methods, so wrap the per-model _adapter_*\n"));
     out.push_str(&format!("// primitives the lowerer already emitted.\n"));
     out.push_str(&format!(
-        "func {name}_exists_p(id int64) bool {{ return {name}__adapter_exists_by_id_p(id) }}\n"
+        "func {name}_exists_pred(id int64) bool {{ return {name}__adapter_exists_by_id_pred(id) }}\n"
     ));
     out.push_str(&format!(
         "func {name}_find(id int64) *{name} {{\n\tresult := {name}__adapter_find_by_id(id)\n\tif result == nil {{ panic(&RecordNotFoundError{{Message: fmt.Sprintf(\"Couldn't find {name} with id=%v\", id)}}) }}\n\treturn result\n}}\n"
@@ -832,7 +838,7 @@ pub(super) fn sanitize_method_name(name: &str) -> String {
     }
     let mapped = name
         .replace("=", "_eq")
-        .replace("?", "_p")
+        .replace("?", "_pred")
         .replace("!", "_bang");
     if mapped.is_empty() {
         "method".to_string()
@@ -843,7 +849,7 @@ pub(super) fn sanitize_method_name(name: &str) -> String {
 
 /// PascalCase variant for instance-method DEFINITIONS, mirroring
 /// `go2_method_ident` in expr.rs so call sites and method defs line
-/// up: `destroyed?` → `Destroyed`, `save!` → `SaveBang`, plain
+/// up: `destroyed?` → `DestroyedPred`, `save!` → `SaveBang`, plain
 /// `destroy` → `Destroy`. Operator-shape names route through
 /// `sanitize_method_name` (`[]` → `op_get`, lowercase) — the index/
 /// operator peepholes in expr.rs invoke these via Go index syntax,
@@ -858,11 +864,16 @@ fn pascalize_instance_method_name(name: &str) -> String {
     if !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '?' || c == '!' || c == '=') {
         return super::shared::go_method_name(&sanitize_method_name(name));
     }
-    // Mirror go2_method_ident: strip `?`, `!` → `_bang`, then
+    // Mirror go2_method_ident: `?` → `_pred`, `!` → `_bang`, then
     // pascalize via go_method_name (`_`-split, per-segment Pascal,
-    // `id` → `ID`).
-    let stripped = name.strip_suffix('?').unwrap_or(name);
-    let normalized = stripped.replace('!', "_bang");
+    // `id` → `ID`). The `?` affix (vs a bare strip) keeps a column
+    // predicate distinct from its same-named reader: `deleted_at?` →
+    // `DeletedAtPred` vs `deleted_at` → `DeletedAt`.
+    let with_pred = match name.strip_suffix('?') {
+        Some(base) => format!("{base}_pred"),
+        None => name.to_string(),
+    };
+    let normalized = with_pred.replace('!', "_bang");
     super::shared::go_method_name(&normalized)
 }
 
@@ -1461,4 +1472,20 @@ fn emit_module_singleton_method(class_name: &str, m: &MethodDef) -> String {
     }
     let body = render_body(&ctx, m);
     format!("func {class_name}_{method}({params}){ret} {{\n{optional_unpack}{body}}}\n")
+}
+
+#[cfg(test)]
+mod predicate_naming_tests {
+    use super::sanitize_method_name;
+
+    /// Regression guard: the bare-fn name path affixes `?` → `_pred` so a
+    /// predicate (`exists?`) never collides with a same-named reader
+    /// (`exists`). (The struct-field-read path in expr.rs intentionally
+    /// strips `?` to land on the backing field — see `go_field_ident`.)
+    #[test]
+    fn bare_fn_predicate_affixes() {
+        assert_ne!(sanitize_method_name("exists"), sanitize_method_name("exists?"));
+        assert_eq!(sanitize_method_name("exists?"), "exists_pred");
+        assert_eq!(sanitize_method_name("save!"), "save_bang");
+    }
 }

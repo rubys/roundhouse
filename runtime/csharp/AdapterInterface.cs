@@ -19,7 +19,7 @@ public abstract class AdapterInterface
     public abstract Dictionary<string, object?>? find(string tableName, long id);
     public abstract List<Dictionary<string, object?>> where(string tableName, Dictionary<string, object?> conditions);
     public abstract long count(string tableName);
-    public abstract bool exists(string tableName, long id);
+    public abstract bool existsPred(string tableName, long id);
     public abstract long insert(string tableName, Dictionary<string, object?> attributes);
     public abstract void update(string tableName, long id, Dictionary<string, object?> attributes);
     public abstract void delete(string tableName, long id);
@@ -39,7 +39,7 @@ public sealed class NullAdapter : AdapterInterface
     public override Dictionary<string, object?>? find(string tableName, long id) => throw Unwired();
     public override List<Dictionary<string, object?>> where(string tableName, Dictionary<string, object?> conditions) => throw Unwired();
     public override long count(string tableName) => throw Unwired();
-    public override bool exists(string tableName, long id) => throw Unwired();
+    public override bool existsPred(string tableName, long id) => throw Unwired();
     public override long insert(string tableName, Dictionary<string, object?> attributes) => throw Unwired();
     public override void update(string tableName, long id, Dictionary<string, object?> attributes) => throw Unwired();
     public override void delete(string tableName, long id) => throw Unwired();

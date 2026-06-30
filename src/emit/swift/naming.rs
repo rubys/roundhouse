@@ -87,12 +87,18 @@ pub fn type_name(qualified: &str) -> String {
 /// camelCase, keyword-escaped. `created_at` → `createdAt`, `from_stmt` →
 /// `fromStmt`, `step?` → `step`, `_adapter_insert` → `_adapterInsert`.
 ///
-/// A trailing `!` (bang method) gets a `Bang` suffix so `save!` becomes
-/// `saveBang` and doesn't collide with `save` once the punctuation is
-/// dropped — the same disambiguation Kotlin/TypeScript do. Predicates
-/// (`?`) just drop the suffix.
+/// A trailing `!` (bang) gets a `Bang` suffix and a trailing `?`
+/// (predicate) gets a `Pred` suffix, so `save!`→`saveBang` and
+/// `deleted_at?`→`deletedAtPred` stay distinct from `save`/`deletedAt`
+/// once the punctuation is dropped. Both affixes are applied
+/// unconditionally — the convention is uniform across generated and
+/// hand-written runtime code, so call sites reproduce the rename without
+/// per-method context. The `?` affix is mandatory because AR column
+/// predicates genuinely collide: a `deleted_at` reader and a
+/// `deleted_at?` predicate coexist on every column.
 pub fn camel(raw: &str) -> String {
     let bang = raw.ends_with('!');
+    let pred = raw.ends_with('?');
     let trimmed = raw.trim_end_matches(['?', '!']);
     let leading_us = trimmed.len() - trimmed.trim_start_matches('_').len();
     let core = &trimmed[leading_us..];
@@ -121,11 +127,29 @@ pub fn camel(raw: &str) -> String {
         out = trimmed.to_string();
     } else if bang {
         out.push_str("Bang");
+    } else if pred {
+        out.push_str("Pred");
     }
 
     if is_swift_keyword(&out) {
         format!("`{out}`")
     } else {
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::camel;
+
+    /// Regression guard for the AR column-predicate collision: a column
+    /// reader (`deleted_at`) and its predicate (`deleted_at?`) must render
+    /// to DISTINCT Swift names. `?`/`!` get `Pred`/`Bang` affixes.
+    #[test]
+    fn suffix_disambiguation_is_injective() {
+        assert_ne!(camel("deleted_at"), camel("deleted_at?"));
+        assert_ne!(camel("save"), camel("save!"));
+        assert_eq!(camel("deleted_at?"), "deletedAtPred");
+        assert_eq!(camel("save!"), "saveBang");
     }
 }

@@ -14,6 +14,6 @@ interface AdapterInterface {
     fun find(tableName: String, id: Long): MutableMap<String, Any?>?
     fun where(tableName: String, conditions: MutableMap<String, Any?>): MutableList<MutableMap<String, Any?>>
     fun count(tableName: String): Long
-    fun exists(tableName: String, id: Long): Boolean
+    fun existsPred(tableName: String, id: Long): Boolean
     fun truncate(tableName: String)
 }

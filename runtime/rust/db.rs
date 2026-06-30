@@ -296,7 +296,7 @@ impl Db {
     /// Advance the cursor. Snapshots the current row into the entry
     /// and returns true; clears the snapshot + returns false when
     /// exhausted. Idempotent on unknown stmt ids (returns false).
-    pub fn step(stmt_id: i64) -> bool {
+    pub fn step_pred(stmt_id: i64) -> bool {
         STATEMENTS.with(|s| {
             let mut map = s.borrow_mut();
             let Some(entry) = map.get_mut(&stmt_id) else { return false };
