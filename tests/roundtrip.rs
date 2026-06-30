@@ -119,6 +119,7 @@ fn tiny_blog_round_trips() {
         importmap: None,
         stylesheets: vec![],
         rbs_signatures: std::collections::HashMap::new(),
+        helper_method_index: std::collections::HashMap::new(),
         sources: vec![],
         root: String::new(),
     };

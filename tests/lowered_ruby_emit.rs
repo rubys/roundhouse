@@ -2037,3 +2037,76 @@ fn lowered_edit_view_dispatches_named_partial_and_record_link() {
         "expected constant-folded link text; got:\n{src}",
     );
 }
+
+// ── app/helpers resolution (Option A) ───────────────────────────
+
+fn ingest_tree(files: &[(&str, &str)]) -> roundhouse::App {
+    let tree = files
+        .iter()
+        .map(|(p, c)| (std::path::PathBuf::from(p), c.as_bytes().to_vec()))
+        .collect();
+    roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest tree")
+}
+
+#[test]
+fn app_helper_calls_resolve_to_module_functions() {
+    use roundhouse::ident::Symbol;
+    // A non-empty `app/helpers` method must emit as a module-function
+    // (`def self.shout`) AND a bare `shout(...)` call in a view must be
+    // rewritten to `ApplicationHelper.shout(...)`. Rails mixes helpers into
+    // the view *instance*, but the emitted view is a module function with no
+    // instance to dispatch the bare call on — so the call would otherwise
+    // raise NoMethodError (the lobsters `avatar_img` GET / blocker).
+    let app = ingest_tree(&[
+        ("db/schema.rb", "ActiveRecord::Schema.define(version: 1) do\nend\n"),
+        (
+            "app/helpers/application_helper.rb",
+            "module ApplicationHelper\n  def shout(s)\n    s.upcase\n  end\nend\n",
+        ),
+        ("app/views/articles/index.html.erb", "<p><%= shout(\"hi\") %></p>\n"),
+    ]);
+
+    // Registry populated from app/helpers.
+    assert!(
+        app.helper_method_index.contains_key(&Symbol::from("shout")),
+        "helper registry should record `shout`",
+    );
+
+    // Helper module emits as a module-function.
+    let helper_files = ruby::emit_library(&app);
+    let helper_src = find(&helper_files, "application_helper.rb");
+    assert!(
+        helper_src.contains("def self.shout"),
+        "helper method must emit as a module-function; got:\n{helper_src}",
+    );
+
+    // Bare helper call in the view resolves to the module.
+    let view_files = ruby::emit_lowered_views(&app);
+    let view_src = find(&view_files, "articles/index.rb");
+    assert!(
+        view_src.contains("ApplicationHelper.shout("),
+        "bare helper call must resolve to ApplicationHelper.shout; got:\n{view_src}",
+    );
+}
+
+#[test]
+fn empty_app_helper_module_is_a_no_op() {
+    // The blog ships empty helper modules (`module ApplicationHelper; end`).
+    // They contribute no registry entries, so helper lowering stays a strict
+    // no-op and a bare interpolation keeps its plain (un-namespaced) shape.
+    let app = ingest_tree(&[
+        ("db/schema.rb", "ActiveRecord::Schema.define(version: 1) do\nend\n"),
+        ("app/helpers/application_helper.rb", "module ApplicationHelper\nend\n"),
+        ("app/views/articles/index.html.erb", "<p><%= notice %></p>\n"),
+    ]);
+    assert!(
+        app.helper_method_index.is_empty(),
+        "empty helper module must add no registry entries",
+    );
+    let view_files = ruby::emit_lowered_views(&app);
+    let view_src = find(&view_files, "articles/index.rb");
+    assert!(
+        !view_src.contains("ApplicationHelper."),
+        "no helper namespacing should appear; got:\n{view_src}",
+    );
+}

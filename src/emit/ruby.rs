@@ -153,6 +153,10 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // Ruby-family scope lowering: synthesize model scope methods +
     // normalize scope chains before rendering (no-op for scope-free apps).
     library::apply_scope_lowering(&mut lcs, app);
+    // App-helper resolution: bare `avatar_img(...)` → `ApplicationHelper.
+    // avatar_img(...)` + helper modules become module-functions (no-op when
+    // the app ships no non-empty helpers).
+    library::apply_helper_lowering(&mut lcs, app);
 
     // Synthesized siblings need explicit `require_relative` even when
     // they live in the same directory as their referencer — nothing else
@@ -269,6 +273,7 @@ pub fn emit_lowered_routes(app: &App) -> EmittedFile {
 pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
     let mut lcs = lower_controllers_for_spinel(app);
     library::apply_scope_lowering(&mut lcs, app);
+    library::apply_helper_lowering(&mut lcs, app);
     emit_lowered_controllers_from_lcs(&lcs, app)
 }
 
@@ -368,7 +373,12 @@ pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
         .iter()
         .filter(|v| v.format.as_str() == "html")
         .flat_map(|v| {
-            let lc = crate::lower::lower_view_to_library_class(v, app);
+            let mut lc = crate::lower::lower_view_to_library_class(v, app);
+            // Resolve bare app-helper calls in the rendered body (e.g.
+            // `avatar_img(...)` → `ApplicationHelper.avatar_img(...)`). Views
+            // skip scope lowering (they don't open scope chains), but they do
+            // call helpers, so this pass runs here directly.
+            library::apply_helper_lowering(std::slice::from_mut(&mut lc), app);
             let out_path = view_output_path(v.name.as_str());
             library::emit_library_class_pair(&lc, app, out_path)
         })

@@ -59,6 +59,17 @@ pub struct App {
     /// Empty when the app ships no `sig/` directory.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub rbs_signatures: HashMap<ClassId, HashMap<Symbol, Ty>>,
+    /// App-helper method registry: maps each method name defined in an
+    /// `app/helpers/*.rb` module to the helper module (`ClassId`) that
+    /// defines it. Rails mixes all helper modules into every view, so a
+    /// bare `avatar_img(...)` in a template should resolve to the helper
+    /// that declares it. The ruby emit-path helper-lowering pass uses this
+    /// to (a) rewrite such bare calls to `<Module>.method(...)` and (b)
+    /// emit the helper modules as module-functions. Last-writer-wins on a
+    /// name collision (mirrors Rails include order). Empty when the app
+    /// ships no helpers or only empty helper modules (the blog).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub helper_method_index: HashMap<Symbol, ClassId>,
     /// Source files read during ingest, indexed by `Span.file`
     /// (`FileId(n)` → `sources[n - 1]`; `FileId(0)` is the synthetic
     /// sentinel). Carries the parsed text so diagnostics can resolve
@@ -113,6 +124,7 @@ impl App {
             importmap: None,
             stylesheets: Vec::new(),
             rbs_signatures: HashMap::new(),
+            helper_method_index: HashMap::new(),
             sources: Vec::new(),
             root: String::new(),
         }

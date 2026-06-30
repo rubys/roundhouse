@@ -129,7 +129,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // registered" (references stay unknown, same as before) rather than
     // aborting the whole app ingest. We never propagate; in survey mode the
     // error is still recorded for scope estimation.
-    for sub in ["extras", "lib", "app/helpers", "app/mailers"] {
+    for sub in ["extras", "lib", "app/mailers"] {
         let support_dir = dir.join(sub);
         if !vfs.is_dir(&support_dir) {
             continue;
@@ -143,6 +143,41 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 Err(err) => {
                     if survey::is_active() {
                         survey::record(&err);
+                    }
+                }
+            }
+        }
+    }
+
+    // `app/helpers/*.rb` — ingested as library classes like the support
+    // dirs above, but ALSO registered in `helper_method_index` so the
+    // ruby emit-path helper-lowering pass can resolve a bare `avatar_img(…)`
+    // in a template to `ApplicationHelper.avatar_img(…)`. Rails mixes every
+    // helper module into every view, so the index is the flat union of all
+    // helper method names → their defining module (last-writer-wins, as
+    // Rails' include order would resolve). Empty-module helpers (the blog's
+    // `module ApplicationHelper; end`) contribute nothing, keeping the
+    // registry — and every downstream consumer — a no-op for them.
+    let helpers_dir = dir.join("app/helpers");
+    if vfs.is_dir(&helpers_dir) {
+        if let Ok(entries) = read_rb_files(vfs, &helpers_dir) {
+            for entry in entries {
+                let Ok(source) = vfs.read(&entry) else { continue };
+                let path_str = entry.display().to_string();
+                match ingest_library_classes(&source, &path_str) {
+                    Ok(classes) => {
+                        for lc in &classes {
+                            for m in &lc.methods {
+                                app.helper_method_index
+                                    .insert(m.name.clone(), lc.name.clone());
+                            }
+                        }
+                        app.library_classes.extend(classes);
+                    }
+                    Err(err) => {
+                        if survey::is_active() {
+                            survey::record(&err);
+                        }
                     }
                 }
             }

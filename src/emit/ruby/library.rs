@@ -7,20 +7,21 @@
 //! resolution, so this emitter is shorter than the TS analog: no ivar
 //! field block, no import partition.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use super::super::EmittedFile;
 use crate::App;
-use crate::dialect::LibraryClass;
+use crate::dialect::{LibraryClass, MethodReceiver};
 use crate::expr::{Expr, ExprNode, InterpPart};
-use crate::ident::ClassId;
+use crate::ident::{ClassId, Symbol};
 use crate::naming::{singularize, snake_case};
 
 pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     let mut lcs: Vec<LibraryClass> = app.library_classes.clone();
     apply_scope_lowering(&mut lcs, app);
+    apply_helper_lowering(&mut lcs, app);
     lcs.iter()
         .flat_map(|lc| {
             let file_stem = snake_case(lc.name.0.as_str());
@@ -61,6 +62,68 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                 crate::lower::scope_chain::rewrite_call_site(&mut m.body, &scopes, &models);
             }
         }
+    }
+}
+
+/// Ruby-family pre-emit pass: resolve `app/helpers/*` references. Rails
+/// mixes every helper module into every view as instance methods, but the
+/// post-lowering IR emits views/controllers/helpers as module-functions
+/// (`Views::Stories.listdetail`, `ApplicationHelper.avatar_img`), so a bare
+/// `avatar_img(...)` rendered into a view body has no `self` to dispatch on
+/// and raises `NoMethodError`. This pass (a) flips each helper module's own
+/// methods to class methods so `ApplicationHelper.avatar_img` is a real
+/// call target, and (b) rewrites every bare call whose name the helper
+/// registry knows — in whatever LibraryClass bodies it's run over — into
+/// `<DefiningModule>.method(...)`. Lives on the Ruby emit path: helper
+/// modules are app-specific and the rewrite targets a CRuby call shape, so
+/// shared `lower/` stays target-agnostic (same rule as scope lowering). A
+/// strict no-op when the app has no non-empty helpers — the blog's helper
+/// modules are empty, so `helper_method_index` is empty.
+pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
+    if app.helper_method_index.is_empty() {
+        return;
+    }
+    let helper_modules: BTreeSet<ClassId> =
+        app.helper_method_index.values().cloned().collect();
+    for lc in lcs.iter_mut() {
+        let is_helper_module = helper_modules.contains(&lc.name);
+        for m in &mut lc.methods {
+            // A helper module's own methods become module-functions so the
+            // rewritten `Module.method` call has a real target — Rails mixed
+            // them into a view instance, but the emitted views are module
+            // functions with no instance to receive them.
+            if is_helper_module && m.receiver == MethodReceiver::Instance {
+                m.receiver = MethodReceiver::Class;
+            }
+            rewrite_helper_calls(&mut m.body, &app.helper_method_index);
+        }
+    }
+}
+
+/// Walk a method body and rewrite each bare `name(args)` Send whose name
+/// the helper registry knows into `<DefiningModule>.name(args)`. Only
+/// receiver-less Sends are touched: a call with an explicit receiver
+/// already resolves, and a bare identifier with no call shape is a local
+/// read (a `Var`), not a helper invocation. Recurses into children first so
+/// a helper call nested in another call's arguments is reached.
+fn rewrite_helper_calls(expr: &mut Expr, index: &HashMap<Symbol, ClassId>) {
+    expr.node.for_each_child_mut(&mut |c| rewrite_helper_calls(c, index));
+    let module = match &*expr.node {
+        ExprNode::Send { recv: None, method, .. } => index.get(method).cloned(),
+        _ => None,
+    };
+    if let Some(module) = module {
+        let span = expr.span;
+        let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
+        let ExprNode::Send { method, args, block, .. } = node else { unreachable!() };
+        let path: Vec<Symbol> = module.0.as_str().split("::").map(Symbol::from).collect();
+        *expr.node = ExprNode::Send {
+            recv: Some(Expr::new(span, ExprNode::Const { path })),
+            method,
+            args,
+            block,
+            parenthesized: true,
+        };
     }
 }
 
