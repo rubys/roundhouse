@@ -207,7 +207,7 @@ fn lower_models_inner(
             includes: Vec::new(),
             methods,
             origin: None,
-            constants: Vec::new(),
+            constants: collect_model_constants(model),
         });
     }
     // Type-check Row class method bodies too so the strict typing residual
@@ -364,8 +364,30 @@ pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryCl
         includes: Vec::new(),
         methods,
         origin: None,
-        constants: Vec::new(),
+        constants: collect_model_constants(model),
     }
+}
+
+/// Class-level `NAME = <expr>` constants declared in a model body (e.g.
+/// `User::NEW_USER_DAYS = 70`), so references resolve at emit. Mirrors the
+/// controller path's `collect_class_constants`. They reach the body as
+/// `ModelBodyItem::Unknown` Const-assigns (the DSL classifier doesn't claim
+/// them); single-segment paths only — qualified writes are something else.
+fn collect_model_constants(model: &Model) -> Vec<(Symbol, Expr)> {
+    let mut out = Vec::new();
+    for item in &model.body {
+        let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        if let ExprNode::Assign {
+            target: crate::expr::LValue::Const { path },
+            value,
+        } = &*expr.node
+        {
+            if let [name] = path.as_slice() {
+                out.push((name.clone(), value.clone()));
+            }
+        }
+    }
+    out
 }
 
 /// Untyped-body method synthesis — shared by the single-model and

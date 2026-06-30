@@ -2090,6 +2090,30 @@ fn app_helper_calls_resolve_to_module_functions() {
 }
 
 #[test]
+fn model_class_constants_are_captured() {
+    // A model-level `NAME = value` constant (e.g. `User::NEW_USER_DAYS = 70`)
+    // must be emitted so in-body references resolve — the DSL classifier
+    // drops it into `ModelBodyItem::Unknown`, and the controller path already
+    // captures its own constants; this mirrors that for models.
+    let app = ingest_tree(&[
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define(version: 1) do\n  create_table :users do |t|\n    t.string :username\n  end\nend\n",
+        ),
+        (
+            "app/models/user.rb",
+            "class User < ApplicationRecord\n  NEW_USER_DAYS = 70\nend\n",
+        ),
+    ]);
+    let files = ruby::emit_lowered_models(&app);
+    let src = find(&files, "user.rb");
+    assert!(
+        src.contains("NEW_USER_DAYS = 70"),
+        "model constant must be emitted; got:\n{src}",
+    );
+}
+
+#[test]
 fn column_query_predicates_match_rails_semantics() {
     // Rails defines `<col>?` on every column, with type-specific semantics
     // (ActiveRecord query_cast_attribute): boolean → the value's truthiness,
