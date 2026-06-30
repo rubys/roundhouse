@@ -2090,6 +2090,46 @@ fn app_helper_calls_resolve_to_module_functions() {
 }
 
 #[test]
+fn framework_asset_helpers_resolve_in_library_bodies() {
+    // `image_tag`/`image_path` called bare from a helper body, and the
+    // `ActionController::Base.helpers.image_path(...)` idiom from a model
+    // body, must resolve to `ActionView::ViewHelpers.*` — the view-template
+    // classifier never reaches helper/model bodies, so a bare framework
+    // helper there would otherwise dispatch to the enclosing module and
+    // raise (the lobsters `avatar_img`/`avatar_path` GET / chain).
+    let app = ingest_tree(&[
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define(version: 1) do\n  create_table :users do |t|\n    t.string :username\n  end\nend\n",
+        ),
+        (
+            "app/helpers/application_helper.rb",
+            "module ApplicationHelper\n  def avatar(u)\n    image_tag(u.avatar_path)\n  end\nend\n",
+        ),
+        (
+            "app/models/user.rb",
+            "class User < ApplicationRecord\n  def avatar_path\n    ActionController::Base.helpers.image_path(\"/x.png\", skip_pipeline: true)\n  end\nend\n",
+        ),
+    ]);
+    let helper_files = ruby::emit_library(&app);
+    let helper_src = find(&helper_files, "application_helper.rb");
+    assert!(
+        helper_src.contains("ActionView::ViewHelpers.image_tag("),
+        "bare image_tag must resolve to ViewHelpers; got:\n{helper_src}",
+    );
+    let model_files = ruby::emit_lowered_models(&app);
+    let model_src = find(&model_files, "user.rb");
+    assert!(
+        model_src.contains("ActionView::ViewHelpers.image_path("),
+        "Base.helpers.image_path must resolve to ViewHelpers; got:\n{model_src}",
+    );
+    assert!(
+        !model_src.contains(".helpers"),
+        "the `.helpers` chain must collapse away; got:\n{model_src}",
+    );
+}
+
+#[test]
 fn model_method_keeps_optional_default_param() {
     // A model `def avatar_path(size = 100)` must emit with its default — the
     // method ingester used to collect only required params, so the optional

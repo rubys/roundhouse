@@ -100,23 +100,68 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
     }
 }
 
-/// Walk a method body and rewrite each bare `name(args)` Send whose name
-/// the helper registry knows into `<DefiningModule>.name(args)`. Only
-/// receiver-less Sends are touched: a call with an explicit receiver
-/// already resolves, and a bare identifier with no call shape is a local
-/// read (a `Var`), not a helper invocation. Recurses into children first so
-/// a helper call nested in another call's arguments is reached.
+/// Framework view helpers callable from a helper/model body that the
+/// view-template classifier (which runs only on views) never reaches. They
+/// resolve to `ActionView::ViewHelpers.<name>`. Grown as GET / surfaces
+/// each one; asset helpers first (`avatar_img` → `image_tag` → `image_path`).
+fn is_framework_view_helper(name: &str) -> bool {
+    matches!(name, "image_tag" | "image_path")
+}
+
+/// `<Const ending in Base>.helpers` — the Rails idiom
+/// `ActionController::Base.helpers.image_path(...)` used to reach view
+/// helpers from a model. Collapses to the ViewHelpers module so the
+/// trailing call resolves as `ActionView::ViewHelpers.image_path(...)`.
+fn is_base_dot_helpers(node: &ExprNode) -> bool {
+    if let ExprNode::Send { recv: Some(r), method, args, block, .. } = node {
+        if method.as_str() == "helpers" && args.is_empty() && block.is_none() {
+            if let ExprNode::Const { path } = &*r.node {
+                return path.last().map(|s| s.as_str() == "Base").unwrap_or(false);
+            }
+        }
+    }
+    false
+}
+
+fn view_helpers_path() -> Vec<Symbol> {
+    vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")]
+}
+
+/// Walk a method body and rewrite helper calls so they resolve against the
+/// module-function surfaces. Three cases (children first, so nested calls
+/// and the `.helpers` receiver are rewritten before their parent):
+///   1. `<…Base>.helpers` → the `ActionView::ViewHelpers` constant.
+///   2. bare `name(args)` where `name` is an app helper → `<Module>.name(args)`.
+///   3. bare `name(args)` where `name` is a framework view helper →
+///      `ActionView::ViewHelpers.name(args)`.
+/// Only receiver-less Sends are rewritten in (2)/(3): a call with a receiver
+/// already resolves, and a bare identifier with no call shape is a local read.
 fn rewrite_helper_calls(expr: &mut Expr, index: &HashMap<Symbol, ClassId>) {
     expr.node.for_each_child_mut(&mut |c| rewrite_helper_calls(c, index));
-    let module = match &*expr.node {
-        ExprNode::Send { recv: None, method, .. } => index.get(method).cloned(),
+
+    // Case 1: collapse `<…Base>.helpers` to the ViewHelpers module constant.
+    if is_base_dot_helpers(&expr.node) {
+        *expr.node = ExprNode::Const { path: view_helpers_path() };
+        return;
+    }
+
+    // Cases 2/3: a bare call resolving to an app or framework helper module.
+    let path: Option<Vec<Symbol>> = match &*expr.node {
+        ExprNode::Send { recv: None, method, .. } => {
+            if let Some(module) = index.get(method) {
+                Some(module.0.as_str().split("::").map(Symbol::from).collect())
+            } else if is_framework_view_helper(method.as_str()) {
+                Some(view_helpers_path())
+            } else {
+                None
+            }
+        }
         _ => None,
     };
-    if let Some(module) = module {
+    if let Some(path) = path {
         let span = expr.span;
         let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
         let ExprNode::Send { method, args, block, .. } = node else { unreachable!() };
-        let path: Vec<Symbol> = module.0.as_str().split("::").map(Symbol::from).collect();
         *expr.node = ExprNode::Send {
             recv: Some(Expr::new(span, ExprNode::Const { path })),
             method,

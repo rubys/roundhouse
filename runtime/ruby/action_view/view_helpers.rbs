@@ -70,6 +70,11 @@ module ActionView
   
     # `name` is the asset stem (e.g., "application" → /assets/application.css).
     def self.stylesheet_link_tag: (String name, ?Hash[Symbol, untyped] opts) -> String
+
+    # Asset helpers. `source` is the image path/name; `skip_pipeline`
+    # (and absolute/protocol-relative sources) returns it verbatim.
+    def self.image_path: (String source, ?skip_pipeline: bool) -> String
+    def self.image_tag: (String source, ?Hash[Symbol, untyped] opts) -> String
   
     # `pins` is the importmap pin array — each entry a record with
     # fixed `:name` and `:path` fields. Record (not `Hash[Symbol,

@@ -206,6 +206,28 @@ module ActionView
       attrs = render_attrs({ rel: "stylesheet", href: href }.merge(opts.to_h))
       "<link#{attrs}>"
     end
+
+    # Asset path for an image source. `skip_pipeline: true` (and any
+    # already-absolute or protocol-relative source) returns the source
+    # verbatim — Rails bypasses the pipeline for those, and the lobsters
+    # benchmark (production, `config.assets.compile = false`, no manifest)
+    # has no digests to apply anyway, so the undigested `/assets/<name>`
+    # prefix below matches its Rails output. Fingerprinting belongs to an
+    # app that actually precompiles assets, not here.
+    def self.image_path(source, skip_pipeline: false)
+      return source if skip_pipeline
+      return source if source.start_with?("/")
+      return source if source.include?("://")
+      "/assets/#{source}"
+    end
+
+    # `<img>` tag for a source path + attribute opts. The source flows
+    # through `image_path` (verbatim for absolute/skip-pipeline avatars),
+    # then merges the caller's attrs (srcset/class/size/alt/...).
+    def self.image_tag(source, opts = {})
+      attrs = render_attrs({ src: image_path(source) }.merge(opts.to_h))
+      "<img#{attrs}>"
+    end
   
     # Emit the importmap script + per-pin modulepreload hints + a
     # module-script that imports the entry point. Mirrors Rails'
