@@ -13,16 +13,18 @@ use std::path::{Path, PathBuf};
 
 use super::super::EmittedFile;
 use crate::App;
-use crate::dialect::{LibraryClass, MethodReceiver};
-use crate::expr::{Expr, ExprNode, InterpPart};
-use crate::ident::{ClassId, Symbol};
+use crate::dialect::{AccessorKind, LibraryClass, MethodReceiver};
+use crate::expr::{Expr, ExprNode, InterpPart, LValue};
+use crate::ident::{ClassId, Symbol, VarId};
 use crate::naming::{singularize, snake_case};
+use crate::span::Span;
 
 pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     let mut lcs: Vec<LibraryClass> = app.library_classes.clone();
     apply_scope_lowering(&mut lcs, app);
     apply_helper_lowering(&mut lcs, app);
     apply_duration_lowering(&mut lcs);
+    apply_datetime_lowering(&mut lcs, app);
     lcs.iter()
         .flat_map(|lc| {
             let file_stem = snake_case(lc.name.0.as_str());
@@ -244,6 +246,151 @@ fn rewrite_durations(expr: &mut Expr) {
             parenthesized: true,
         };
     }
+}
+
+/// Ruby-family pre-emit pass: make Date/DateTime/Time-typed columns
+/// behave like real `Time` values in CRuby/JRuby, on top of the `time`
+/// stdlib (`require 'time'`, wired in `ruby_overlay/main.rb`). The IR
+/// keeps these columns `Ty::Str` end to end — `ty_of_column`'s documented
+/// decision: storage is ISO-8601 text and every target's column slot /
+/// serialization agrees on that — but every analyzer-approved *use* of a
+/// datetime column (`strftime`, comparisons, `.ago`) assumes `Time`
+/// semantics, so only the CRuby/JRuby in-memory representation needs to
+/// follow, at the accessor boundary. Lives on the Ruby emit path for the
+/// same reason as Duration: `Time` parsing/formatting doesn't transpile
+/// uniformly across targets, so the rewrite (and its `require 'time'`)
+/// stay off shared `lower/` and every other target's runtime.
+///
+/// Reader becomes `@col && Time.parse(@col)` — short-circuits a nullable
+/// column's `nil` without needing to know nullability. Writer becomes
+/// `@col = (value.respond_to?(:iso8601) ? value.iso8601 : value)` — every
+/// hydration path always assigns a raw String, so this is a no-op there,
+/// but it also normalizes a `Time` passed directly by app code (e.g.
+/// `self.something_at = Time.now`) back to text, so every write lands on
+/// the same on-disk format regardless of path. A strict no-op for apps
+/// with no Date/DateTime/Time columns (the blog).
+pub(crate) fn apply_datetime_lowering(lcs: &mut [LibraryClass], app: &App) {
+    for model in &app.models {
+        let Some(table) = app.schema.tables.get(&model.table.0) else {
+            continue;
+        };
+        let temporal: BTreeSet<Symbol> = table
+            .columns
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.col_type,
+                    crate::schema::ColumnType::Date
+                        | crate::schema::ColumnType::DateTime
+                        | crate::schema::ColumnType::Time
+                )
+            })
+            .map(|c| c.name.clone())
+            .collect();
+        if temporal.is_empty() {
+            continue;
+        }
+        let Some(lc) = lcs.iter_mut().find(|lc| lc.name == model.name) else {
+            continue;
+        };
+        for m in &mut lc.methods {
+            if m.receiver != MethodReceiver::Instance {
+                continue;
+            }
+            match m.kind {
+                AccessorKind::AttributeReader if temporal.contains(&m.name) => {
+                    m.body = temporal_reader_body(&m.name);
+                }
+                AccessorKind::AttributeWriter => {
+                    let col = Symbol::from(m.name.as_str().trim_end_matches('='));
+                    if temporal.contains(&col) {
+                        if let Some(param) = m.params.first() {
+                            m.body = temporal_writer_body(&col, &param.name);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn datetime_ivar(col: &Symbol) -> Expr {
+    Expr::new(Span::synthetic(), ExprNode::Ivar { name: col.clone() })
+}
+
+fn datetime_var(name: &Symbol) -> Expr {
+    Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: name.clone() })
+}
+
+/// `@col && Time.parse(@col)`.
+fn temporal_reader_body(col: &Symbol) -> Expr {
+    let parse_call = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Const { path: vec![Symbol::from("Time")] },
+            )),
+            method: Symbol::from("parse"),
+            args: vec![datetime_ivar(col)],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::BoolOp {
+            op: crate::expr::BoolOpKind::And,
+            surface: crate::expr::BoolOpSurface::Symbol,
+            left: datetime_ivar(col),
+            right: parse_call,
+        },
+    )
+}
+
+/// `@col = (value.respond_to?(:iso8601) ? value.iso8601 : value)`.
+fn temporal_writer_body(col: &Symbol, value_param: &Symbol) -> Expr {
+    let responds = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(datetime_var(value_param)),
+            method: Symbol::from("respond_to?"),
+            args: vec![Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit {
+                    value: crate::expr::Literal::Sym { value: Symbol::from("iso8601") },
+                },
+            )],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    let iso_call = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(datetime_var(value_param)),
+            method: Symbol::from("iso8601"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: true,
+        },
+    );
+    let normalized = Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: responds,
+            then_branch: iso_call,
+            else_branch: datetime_var(value_param),
+        },
+    );
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Ivar { name: col.clone() },
+            value: normalized,
+        },
+    )
 }
 
 /// Emit both the `.rb` file and its `.rbs` sidecar for a single

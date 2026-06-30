@@ -20,6 +20,9 @@
 #   alias /blog /path/to/main.rb    (nginx + fcgiwrap)
 
 require "stringio"
+# `Time.parse`/`Time#iso8601` — backs the datetime-column accessor
+# coercion the Ruby emitter synthesizes (`apply_datetime_lowering`).
+require "time"
 
 # SqliteAdapter is hoisted to top-level so the spinel-AOT compile
 # can statically resolve the `SqliteAdapter` constant referenced

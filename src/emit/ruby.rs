@@ -160,6 +160,9 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // ActiveSupport durations: `70.days` → `Duration.days(70)` (no-op for
     // duration-free apps).
     library::apply_duration_lowering(&mut lcs);
+    // Date/DateTime/Time column accessors coerce to/from real `Time`
+    // (no-op for apps with no temporal columns).
+    library::apply_datetime_lowering(&mut lcs, app);
 
     // Synthesized siblings need explicit `require_relative` even when
     // they live in the same directory as their referencer — nothing else
