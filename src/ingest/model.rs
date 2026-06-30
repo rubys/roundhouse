@@ -203,19 +203,31 @@ fn ingest_method(
         MethodReceiver::Instance
     };
 
-    // Collect required positional parameter names. Optional/keyword/
-    // rest params will need richer handling; required params alone
-    // cover setter methods (`def x=(v)`) and the common method shapes
-    // used by transpiled-shape models.
-    let params: Vec<Symbol> = match def.parameters() {
-        Some(pn) => pn
-            .requireds()
-            .iter()
-            .filter_map(|req| req.as_required_parameter_node())
-            .map(|rp| Symbol::from(constant_id_str(&rp.name())))
-            .collect(),
-        None => Vec::new(),
-    };
+    // Collect required positional params, then optional-with-default
+    // params (`def avatar_path(size = 100)`) carrying their default expr so
+    // the emitted method reproduces the arity — dropping the optional left
+    // `def avatar_path` with a body still reading `size`, an ArgumentError
+    // at every call site that passes one. Keyword/rest/block params are
+    // rarer on model methods and still fall through unrecorded.
+    let mut params: Vec<crate::dialect::Param> = Vec::new();
+    if let Some(pn) = def.parameters() {
+        for req in pn.requireds().iter() {
+            if let Some(rp) = req.as_required_parameter_node() {
+                params.push(crate::dialect::Param::positional(Symbol::from(
+                    constant_id_str(&rp.name()),
+                )));
+            }
+        }
+        for opt in pn.optionals().iter() {
+            if let Some(op) = opt.as_optional_parameter_node() {
+                let default = ingest_expr(&op.value(), file)?;
+                params.push(crate::dialect::Param::with_default(
+                    Symbol::from(constant_id_str(&op.name())),
+                    default,
+                ));
+            }
+        }
+    }
 
     let body = match def.body() {
         Some(b) => ingest_expr(&b, file)?,
@@ -225,7 +237,7 @@ fn ingest_method(
     Ok(MethodDef {
         name,
         receiver,
-        params: params.into_iter().map(crate::dialect::Param::positional).collect(),
+        params,
         body,
         signature: None,
         effects: EffectSet::pure(),

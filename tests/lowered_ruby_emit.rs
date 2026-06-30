@@ -2090,6 +2090,30 @@ fn app_helper_calls_resolve_to_module_functions() {
 }
 
 #[test]
+fn model_method_keeps_optional_default_param() {
+    // A model `def avatar_path(size = 100)` must emit with its default — the
+    // method ingester used to collect only required params, so the optional
+    // was dropped and `def avatar_path` was left with a body still reading
+    // `size`: an ArgumentError at every call that passes one (lobsters GET /).
+    let app = ingest_tree(&[
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define(version: 1) do\n  create_table :users do |t|\n    t.string :username\n  end\nend\n",
+        ),
+        (
+            "app/models/user.rb",
+            "class User < ApplicationRecord\n  def avatar_path(size = 100)\n    \"/avatars/#{username}-#{size}.png\"\n  end\nend\n",
+        ),
+    ]);
+    let files = ruby::emit_lowered_models(&app);
+    let src = find(&files, "user.rb");
+    assert!(
+        src.contains("def avatar_path(size = 100)"),
+        "model method must keep its optional default param; got:\n{src}",
+    );
+}
+
+#[test]
 fn empty_app_helper_module_is_a_no_op() {
     // The blog ships empty helper modules (`module ApplicationHelper; end`).
     // They contribute no registry entries, so helper lowering stays a strict
