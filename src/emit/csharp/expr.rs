@@ -14,9 +14,13 @@
 //!     (null-forgiving); string templates `"${x}"` → `$"{x}"`; `is X` casts
 //!     and collection/map literals take their C# spellings.
 //!
-//! Identifiers stay camelCase for now (members included) to keep the port
-//! close to the Kotlin template; a PascalCase idiom pass is deferred. Untyped
-//! edge nodes emit a `/* TODO kind */` marker rather than panicking.
+//! Member identifiers (methods + public properties) emit idiomatic PascalCase
+//! at both definitions and references via `naming::pascal`; locals, parameters,
+//! block params, and StringBuilder buffers stay camelCase (`naming::camel`).
+//! The internal classification maps remain keyed by `camel(rubyname)` — a
+//! canonical normalization, not emitted output — so the lookup/emit split lives
+//! at each site. Untyped edge nodes emit a `/* TODO kind */` marker rather than
+//! panicking.
 #![allow(dead_code)]
 
 use std::cell::RefCell;
@@ -26,7 +30,7 @@ use crate::expr::{
     Arm, BoolOpKind, Expr, ExprNode, InterpPart, IrHint, LValue, Literal, OpAssignOp, Pattern,
 };
 
-use super::naming::{camel, type_name};
+use super::naming::{camel, pascal, pascal_of_camel, type_name};
 use super::ty::csharp_ty;
 
 thread_local! {
@@ -137,11 +141,13 @@ fn map_exception_class(name: &str) -> String {
     }
 }
 
-/// The C# field name an `@ivar` reads/writes as — its camelCase name, or the
-/// collision-avoiding rename when one is registered.
+/// The C# member name an `@ivar` reads/writes as. A registered collision rename
+/// (`@errors` → `_errors`) keeps its private camelCase backing field; otherwise
+/// the ivar is an accessor-backed public property and emits PascalCase. The
+/// rename lookup is keyed by the canonical `camel` name.
 fn ivar_name(name: &str) -> String {
     let c = camel(name);
-    IVAR_RENAMES.with(|r| r.borrow().get(&c).cloned()).unwrap_or(c)
+    IVAR_RENAMES.with(|r| r.borrow().get(&c).cloned()).unwrap_or_else(|| pascal(name))
 }
 
 pub(super) fn set_object_tl_fields(names: HashSet<String>) {
@@ -162,18 +168,22 @@ fn nonnull_read(name: String) -> String {
 }
 
 fn read_prop_name(e: &Expr) -> Option<String> {
-    let name = match &*e.node {
-        ExprNode::Ivar { name } => camel(name.as_str()),
-        ExprNode::Var { name, .. } => camel(name.as_str()),
+    // `raw` keys the `is_instance_prop` lookup (which canonicalizes via `camel`);
+    // `emitted` is the identifier the corresponding read renders to — a property
+    // ivar/self-send emits PascalCase, a bare local stays camelCase — so a
+    // proven-non-null entry in `NONNULL_PROPS` matches its read site.
+    let (raw, emitted): (&str, String) = match &*e.node {
+        ExprNode::Ivar { name } => (name.as_str(), pascal(name.as_str())),
+        ExprNode::Var { name, .. } => (name.as_str(), camel(name.as_str())),
         ExprNode::Send { recv, method, args, .. }
             if args.is_empty()
                 && matches!(recv.as_ref().map(|r| &*r.node), None | Some(ExprNode::SelfRef)) =>
         {
-            camel(method.as_str())
+            (method.as_str(), pascal(method.as_str()))
         }
         _ => return None,
     };
-    is_instance_prop(&name).then_some(name)
+    is_instance_prop(raw).then_some(emitted)
 }
 
 fn nil_test_prop(e: &Expr) -> Option<String> {
@@ -407,6 +417,39 @@ pub(super) fn ancestor_props(class_name: &str) -> HashSet<String> {
         cur = parent;
     }
     out
+}
+
+/// A class-name `Const` in value position whose PascalCase spelling collides
+/// with an in-scope instance member is namespace-qualified (`Roundhouse.X`) so
+/// it binds to the type rather than the shadowing member. PascalCasing members
+/// reintroduces collisions camelCase kept apart — a `comment_params` method vs
+/// the synthesized `CommentParams` class, or an `@articles : List<Article>` ivar
+/// vs the `Articles` view module. C#'s "Color Color" rule already resolves the
+/// case where the colliding member is a *value* (field/property) of the
+/// identically-named type (an `@article : Article` ivar vs the `Article` type),
+/// so those stay bare; a method, or a value of a different type, must be
+/// qualified. The flat `Roundhouse` namespace makes the prefix unambiguous.
+fn qualify_colliding_const(emitted: String) -> String {
+    let cls = CURRENT_CLASS.with(|c| c.borrow().clone());
+    if cls.is_empty() {
+        return emitted;
+    }
+    let colliding: Vec<String> =
+        ancestor_members(&cls).into_iter().filter(|cm| pascal_of_camel(cm) == emitted).collect();
+    if colliding.is_empty() {
+        return emitted;
+    }
+    let all_color_color = colliding.iter().all(|cm| {
+        INSTANCE_PROP_TYPES
+            .with(|t| t.borrow().get(cm).map(csharp_ty))
+            .map(|cs| cs == emitted)
+            .unwrap_or(false)
+    });
+    if all_color_color {
+        emitted
+    } else {
+        format!("Roundhouse.{emitted}")
+    }
 }
 
 pub(super) fn set_current_class(name: &str) {
@@ -799,7 +842,7 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         }
         ExprNode::Const { path } => {
             let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
-            type_name(&joined)
+            qualify_colliding_const(type_name(&joined))
         }
         ExprNode::Hash { entries, .. } => emit_hash(entries, e),
         ExprNode::Array { elements, .. } => emit_array(elements, e),
@@ -1160,7 +1203,7 @@ fn emit_send(
                 && a2.is_empty()
                 && matches!(&*inner.node, ExprNode::SelfRef)
             {
-                return format!("{}({})", camel(method), args_s.join(", "));
+                return format!("{}({})", pascal(method), args_s.join(", "));
             }
         }
     }
@@ -1176,7 +1219,7 @@ fn emit_send(
                     );
                 }
                 (Some("JSON"), "generate") => {
-                    return format!("JsonBuilder.encodeValue({})", args_s[0]);
+                    return format!("JsonBuilder.EncodeValue({})", args_s[0]);
                 }
                 _ => {}
             }
@@ -1189,7 +1232,7 @@ fn emit_send(
         let is_method = method_params_for(recv, "new").is_some();
         if let Some(r) = recv {
             if is_method {
-                return format!("{}.{}({})", emit_expr(r), camel("new"), emit_call_args(recv, "new", args));
+                return format!("{}.{}({})", emit_expr(r), pascal("new"), emit_call_args(recv, "new", args));
             }
             return format!("new {}({})", emit_expr(r), args_s.join(", "));
         }
@@ -1220,11 +1263,11 @@ fn emit_send(
             if matches!(&*r.node, ExprNode::SelfRef) {
                 if let Some(ty) = instance_prop_scalar_ty(base) {
                     if !arg_already_ty(&args[0], &ty) {
-                        return format!("this.{} = {}", camel(base), emit_cast(&args[0], &ty));
+                        return format!("this.{} = {}", pascal(base), emit_cast(&args[0], &ty));
                     }
                 }
             }
-            return format!("{}.{} = {}", emit_expr(r), camel(base), args_s[0]);
+            return format!("{}.{} = {}", emit_expr(r), pascal(base), args_s[0]);
         }
     }
 
@@ -1391,25 +1434,28 @@ fn emit_send(
             _ => {}
         }
         if matches!(&*r.node, ExprNode::Const { .. }) {
-            if is_object_prop(&rs, method) {
-                return format!("{rs}.{}", camel(method));
+            // `rs` may carry a collision-avoiding `Roundhouse.` qualifier; the
+            // object-accessor registry is keyed by the bare type name.
+            let obj = rs.strip_prefix("Roundhouse.").unwrap_or(rs.as_str());
+            if is_object_prop(obj, method) {
+                return format!("{rs}.{}", pascal(method));
             }
-            return format!("{rs}.{}()", camel(method));
+            return format!("{rs}.{}()", pascal(method));
         }
         if matches!(&*r.node, ExprNode::SelfRef) {
             return if is_instance_prop(method) {
-                format!("{rs}.{}", camel(method))
+                format!("{rs}.{}", pascal(method))
             } else {
-                format!("{rs}.{}()", camel(method))
+                format!("{rs}.{}()", pascal(method))
             };
         }
         if let Some(cls) = receiver_class_name(r) {
             if is_instance_method_of(&cls, method) {
-                return format!("{rs}.{}()", camel(method));
+                return format!("{rs}.{}()", pascal(method));
             }
         }
         if !forces_parens(method) && !method.ends_with('?') && !method.ends_with('!') {
-            return format!("{rs}.{}", camel(method));
+            return format!("{rs}.{}", pascal(method));
         }
     }
 
@@ -1476,7 +1522,7 @@ fn emit_send(
         } else if method == "map" {
             "Select".to_string()
         } else {
-            camel(method)
+            pascal(method)
         };
         let lam = match &*b.node {
             ExprNode::Lambda { params, body, .. } => emit_lambda(params, body, recv_hash),
@@ -1497,7 +1543,7 @@ fn emit_send(
 
     // General call. A trailing `kwargs: true` hash splats into C# named
     // arguments when the callee is known to have matching params.
-    let name = camel(method);
+    let name = pascal(method);
     let call_args = emit_call_args(recv, method, args);
     match recv {
         Some(r) => format!("{}.{name}({call_args})", emit_expr(r)),
@@ -1769,7 +1815,7 @@ fn lvalue_ref(target: &LValue) -> String {
     match target {
         LValue::Var { name, .. } => camel(name.as_str()),
         LValue::Ivar { name } => format!("this.{}", ivar_name(name.as_str())),
-        LValue::Attr { recv, name } => format!("{}.{}", emit_expr(recv), camel(name.as_str())),
+        LValue::Attr { recv, name } => format!("{}.{}", emit_expr(recv), pascal(name.as_str())),
         LValue::Index { recv, index } => format!("{}[{}]", emit_expr(recv), emit_expr(index)),
         LValue::Const { path } => path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("."),
     }

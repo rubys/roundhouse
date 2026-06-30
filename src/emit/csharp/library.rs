@@ -13,8 +13,9 @@
 //!     statement of value-returning methods.
 //!
 //! Phase 2 covers the model subset (models + `<Model>Row`/`<Model>Params`
-//! siblings + the abstract `ApplicationRecord`). Identifiers stay camelCase
-//! (see `expr.rs`).
+//! siblings + the abstract `ApplicationRecord`). Method and public-property
+//! names emit idiomatic PascalCase (`naming::pascal`); the `camel`-keyed
+//! classification maps drive lookup only (see `expr.rs`).
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, HashSet};
@@ -30,7 +31,7 @@ use super::expr::{
     set_instance_prop_types, set_instance_props, set_ivar_renames, set_param_names,
     set_returns_unit,
 };
-use super::naming::{camel, type_name};
+use super::naming::{camel, pascal, pascal_of_camel, type_name};
 use super::ty::csharp_ty;
 
 /// The `using` + `namespace` header every emitted C# file carries.
@@ -255,7 +256,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         }
         out.push_str(&format!(
             "    {}\n",
-            render_member_full("public", n, ty, init_assigned.contains(n))
+            render_member_full("public", &pascal_of_camel(n), ty, init_assigned.contains(n))
         ));
     }
     // A body ivar whose name collides with a same-named instance method
@@ -275,7 +276,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         if !prop_types.contains_key(n) && !inherited_props.contains(n) {
             let (vis, field) = match ivar_renames.get(n) {
                 Some(renamed) => ("private", renamed.clone()),
-                None => ("public", n.clone()),
+                None => ("public", pascal_of_camel(n)),
             };
             match inferred_ivar_types.get(n) {
                 Some(ty) => {
@@ -362,10 +363,10 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
                 "throw new NotImplementedException(\"ActiveRecord::Base.schema_columns must be overridden\");".to_string(),
             )
         } else {
-            ("override", format!("return {class_name}.schemaColumnsList();"))
+            ("override", format!("return {class_name}.SchemaColumnsList();"))
         };
         out.push_str(&format!(
-            "    public {modifier} List<string> schemaColumns() {{ {body} }}\n\n"
+            "    public {modifier} List<string> SchemaColumns() {{ {body} }}\n\n"
         ));
     }
 
@@ -379,7 +380,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         && !lc.methods.iter().any(|m| m.name.as_str() == "name");
     if needs_name {
         out.push_str(&format!(
-            "    public static string name() {{\n        return {:?};\n    }}\n",
+            "    public static string Name() {{\n        return {:?};\n    }}\n",
             lc.name.0.as_str()
         ));
     }
@@ -425,19 +426,22 @@ fn emit_static_class(lc: &LibraryClass, class_name: &str) -> String {
     let accessor_props = class_accessor_props(&lc.methods);
     let mut out = format!("public static class {class_name} {{\n");
     for (n, ty) in &accessor_props {
+        // Public static accessor (e.g. `ActiveRecord.Adapter`) → PascalCase to
+        // match the references emitted at read sites; `n` stays the camel key.
+        let pn = pascal_of_camel(n);
         let cs = csharp_ty(ty);
         // The `ActiveRecord.adapter` global is never assigned for C# (models go
         // Db-direct). Default it to a throwing `NullAdapter` so it stays
         // non-null (the dead Base defaults that read it compile without
         // nullable-deref warnings, and throw if ever actually hit).
         if cs == "AdapterInterface" {
-            out.push_str(&format!("    public static {cs} {n} = new NullAdapter();\n"));
+            out.push_str(&format!("    public static {cs} {pn} = new NullAdapter();\n"));
             continue;
         }
         // Other class-type slots defaulting to null need a nullable type.
         let default = default_for(ty);
         let cs = if default == "null" && !cs.ends_with('?') { format!("{cs}?") } else { cs };
-        out.push_str(&format!("    public static {cs} {n} = {default};\n"));
+        out.push_str(&format!("    public static {cs} {pn} = {default};\n"));
     }
 
     // Module-level `@ivar` state (ViewHelpers' `@slots` content_for store) →
@@ -495,46 +499,49 @@ fn synth_inherited_finders(t: &str, present: &HashSet<String>) -> String {
         return String::new();
     }
     let mut out = String::new();
+    // `name` is the camel-keyed existence check (matched against `present`, the
+    // class's camelCase member names); the body renders PascalCase definitions
+    // and calls into the model's own PascalCase `_Adapter*` statics.
     let mut emit = |name: &str, body: String| {
         if !present.contains(name) {
             out.push_str(&indent_method(&body));
             out.push('\n');
         }
     };
-    emit("all", format!("public new static List<{t}> all() {{\n    return _adapterAll();\n}}\n"));
+    emit("all", format!("public new static List<{t}> All() {{\n    return _AdapterAll();\n}}\n"));
     emit(
         "find",
         format!(
-            "public new static {t} find(long id) {{\n    var result = _adapterFindById(id);\n    if (result == null) {{\n        throw new RecordNotFound($\"Couldn't find {t} with id={{id}}\");\n    }}\n    return result;\n}}\n"
+            "public new static {t} Find(long id) {{\n    var result = _AdapterFindById(id);\n    if (result == null) {{\n        throw new RecordNotFound($\"Couldn't find {t} with id={{id}}\");\n    }}\n    return result;\n}}\n"
         ),
     );
-    emit("count", "public new static long count() {\n    return _adapterCount();\n}\n".to_string());
+    emit("count", "public new static long Count() {\n    return _AdapterCount();\n}\n".to_string());
     emit(
         "existsPred",
-        "public new static bool existsPred(long id) {\n    return _adapterExistsByIdPred(id);\n}\n".to_string(),
+        "public new static bool ExistsPred(long id) {\n    return _AdapterExistsByIdPred(id);\n}\n".to_string(),
     );
     emit(
         "last",
         format!(
-            "public new static {t}? last() {{\n    var records = all();\n    return records.Count == 0 ? null : records[records.Count - 1];\n}}\n"
+            "public new static {t}? Last() {{\n    var records = All();\n    return records.Count == 0 ? null : records[records.Count - 1];\n}}\n"
         ),
     );
     emit(
         "destroyAll",
         format!(
-            "public new static List<{t}> destroyAll() {{\n    var records = all();\n    foreach (var it in records) {{ it.destroy(); }}\n    return records;\n}}\n"
+            "public new static List<{t}> DestroyAll() {{\n    var records = All();\n    foreach (var it in records) {{ it.Destroy(); }}\n    return records;\n}}\n"
         ),
     );
     emit(
         "create",
         format!(
-            "public new static {t} create(Dictionary<string, object?>? attrs = null) {{\n    attrs ??= new Dictionary<string, object?>();\n    var instance = new {t}(attrs);\n    instance.save();\n    return instance;\n}}\n"
+            "public new static {t} Create(Dictionary<string, object?>? attrs = null) {{\n    attrs ??= new Dictionary<string, object?>();\n    var instance = new {t}(attrs);\n    instance.Save();\n    return instance;\n}}\n"
         ),
     );
     emit(
         "createBang",
         format!(
-            "public new static {t} createBang(Dictionary<string, object?>? attrs = null) {{\n    attrs ??= new Dictionary<string, object?>();\n    var instance = new {t}(attrs);\n    if (!instance.save()) {{\n        throw new RecordInvalid(instance);\n    }}\n    return instance;\n}}\n"
+            "public new static {t} CreateBang(Dictionary<string, object?>? attrs = null) {{\n    attrs ??= new Dictionary<string, object?>();\n    var instance = new {t}(attrs);\n    if (!instance.Save()) {{\n        throw new RecordInvalid(instance);\n    }}\n    return instance;\n}}\n"
         ),
     );
     out
@@ -769,9 +776,9 @@ fn emit_method(m: &MethodDef, modifier: &str) -> String {
     // synthesized virtual instance `schemaColumns()` (C# forbids same-name
     // static + instance members), so the static is renamed.
     let name = if m.receiver == MethodReceiver::Class && m.name.as_str() == "schema_columns" {
-        "schemaColumnsList".to_string()
+        "SchemaColumnsList".to_string()
     } else {
-        camel(m.name.as_str())
+        pascal(m.name.as_str())
     };
     let (mut params, prelude) = render_params(m);
 

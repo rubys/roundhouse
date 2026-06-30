@@ -51,7 +51,7 @@ public static class Server
         Dictionary<string, Func<ActionControllerBase>> controllers,
         Func<string, string?, string?, string> layout)
     {
-        ViewHelpers.resetSlotsBang();
+        ViewHelpers.ResetSlotsBang();
 
         var reqMethod = ctx.Request.Method;
         var path = ctx.Request.Path.Value ?? "/";
@@ -97,8 +97,8 @@ public static class Server
             path = path.Substring(0, path.Length - 5);
         }
 
-        var match = Router.match(method, path, routes);
-        var factory = match != null && controllers.TryGetValue(match.controller, out var f) ? f : null;
+        var match = Router.Match(method, path, routes);
+        var factory = match != null && controllers.TryGetValue(match.Controller, out var f) ? f : null;
         if (match == null || factory == null)
         {
             ctx.Response.StatusCode = 404;
@@ -107,7 +107,7 @@ public static class Server
         }
 
         var prms = new Dictionary<string, object?>();
-        foreach (var kv in match.pathParams) prms[kv.Key] = kv.Value;
+        foreach (var kv in match.PathParams) prms[kv.Key] = kv.Value;
         foreach (var kv in ctx.Request.Query)
         {
             if (kv.Value.Count > 0) SetParam(prms, kv.Key, kv.Value[0] ?? "");
@@ -121,35 +121,35 @@ public static class Server
         }
 
         var controller = factory();
-        controller.@params = prms;
-        controller.requestFormat = format;
-        controller.requestMethod = method;
-        controller.requestPath = path;
+        controller.Params = prms;
+        controller.RequestFormat = format;
+        controller.RequestMethod = method;
+        controller.RequestPath = path;
         // Reload the flash carried from the previous request so views render it;
-        // the constructor snapshots it as *_was so toPersisted can drop it
+        // the constructor snapshots it as *_was so ToPersisted can drop it
         // after one display.
-        controller.flash = new Flash(ReadFlashCookie(ctx));
-        controller.session = new Session();
-        controller.processAction(match.action);
+        controller.Flash = new Flash(ReadFlashCookie(ctx));
+        controller.Session = new Session();
+        controller.ProcessAction(match.Action);
 
-        WriteFlashCookie(ctx, controller.flash.toPersisted());
+        WriteFlashCookie(ctx, controller.Flash.ToPersisted());
 
-        var code = (int)controller.status;
-        var location = controller.location;
+        var code = (int)controller.Status;
+        var location = controller.Location;
         ctx.Response.StatusCode = code;
         if (location != null)
         {
             ctx.Response.Headers["Location"] = location;
         }
-        else if (controller.requestFormat == "json")
+        else if (controller.RequestFormat == "json")
         {
             ctx.Response.ContentType = "application/json";
-            await ctx.Response.WriteAsync(controller.body);
+            await ctx.Response.WriteAsync(controller.Body);
         }
         else
         {
             ctx.Response.ContentType = "text/html; charset=utf-8";
-            await ctx.Response.WriteAsync(layout(controller.body, controller.flash.notice, controller.flash.alert));
+            await ctx.Response.WriteAsync(layout(controller.Body, controller.Flash.Notice, controller.Flash.Alert));
         }
     }
 

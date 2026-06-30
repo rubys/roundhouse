@@ -7,9 +7,9 @@ using Microsoft.Data.Sqlite;
 namespace Roundhouse;
 
 // The sqlite primitive layer the lowered model IR dispatches against
-// (`Db.prepare` / `Db.step` / `Db.columnInt` / `Db.columnText` /
-// `Db.escapeString` / `Db.escapeInt` / `Db.exec` / `Db.lastInsertRowid` /
-// `Db.finalize`). camelCase to match the emitter's rendering. Prepared-
+// (`Db.Prepare` / `Db.StepPred` / `Db.ColumnInt` / `Db.ColumnText` /
+// `Db.EscapeString` / `Db.EscapeInt` / `Db.Exec` / `Db.LastInsertRowid` /
+// `Db.Finalize`). PascalCase to match the emitter's rendering. Prepared-
 // statement handles are `long`s (the emitter renders integer literals with an
 // `L` suffix). The DB path comes from `BLOG_DB` / `DATABASE_PATH` (default
 // `storage/development.sqlite3`).
@@ -63,7 +63,7 @@ public static class Db
 
     // Prepare + execute a read query, returning a handle to its cursor (and the
     // rented connection + command it holds until `finalize`).
-    public static long prepare(string sql)
+    public static long Prepare(string sql)
     {
         var conn = Rent();
         var cmd = conn.CreateCommand();
@@ -74,15 +74,15 @@ public static class Db
         return handle;
     }
 
-    public static bool stepPred(long stmt) => OpenReaders[stmt].reader.Read();
+    public static bool StepPred(long stmt) => OpenReaders[stmt].reader.Read();
 
-    public static long columnInt(long stmt, long index)
+    public static long ColumnInt(long stmt, long index)
     {
         var r = OpenReaders[stmt].reader;
         return r.IsDBNull((int)index) ? 0L : Convert.ToInt64(r.GetValue((int)index));
     }
 
-    public static string columnText(long stmt, long index)
+    public static string ColumnText(long stmt, long index)
     {
         var r = OpenReaders[stmt].reader;
         return r.IsDBNull((int)index) ? "" : Convert.ToString(r.GetValue((int)index)) ?? "";
@@ -93,7 +93,7 @@ public static class Db
     // the command lets prepared statements pile up in native memory faster
     // than the GC finalizes the wrappers → unbounded RSS growth under load
     // that no managed GC heap limit can cap.
-    public static void finalize(long stmt)
+    public static void Finalize(long stmt)
     {
         if (OpenReaders.TryRemove(stmt, out var e))
         {
@@ -105,14 +105,14 @@ public static class Db
 
     private static SqliteConnection WriteConn() => _writeConn ??= Open();
 
-    public static void exec(string sql)
+    public static void Exec(string sql)
     {
         using var cmd = WriteConn().CreateCommand();
         cmd.CommandText = sql;
         cmd.ExecuteNonQuery();
     }
 
-    public static long lastInsertRowid()
+    public static long LastInsertRowid()
     {
         using var cmd = WriteConn().CreateCommand();
         cmd.CommandText = "SELECT last_insert_rowid()";
@@ -121,12 +121,12 @@ public static class Db
 
     // SQL-literal escaping for the inline-VALUES INSERT/UPDATE the lowered
     // `_adapter*` methods build.
-    public static string escapeString(string? value) =>
+    public static string EscapeString(string? value) =>
         "'" + (value ?? "").Replace("'", "''") + "'";
-    public static string escapeInt(long value) => value.ToString();
+    public static string EscapeInt(long value) => value.ToString();
 
     // Comma-joined ids for an `IN (...)` clause (the association preload).
     // Empty → `NULL` so `IN (NULL)` stays valid SQL and matches nothing.
-    public static string escapeIntList(List<long> ids) =>
+    public static string EscapeIntList(List<long> ids) =>
         ids.Count == 0 ? "NULL" : string.Join(", ", ids);
 }

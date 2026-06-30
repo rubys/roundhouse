@@ -15,15 +15,15 @@ namespace Roundhouse;
 // behavior. This abstract contract exists purely so those defaults type-check.
 public abstract class AdapterInterface
 {
-    public abstract List<Dictionary<string, object?>> all(string tableName);
-    public abstract Dictionary<string, object?>? find(string tableName, long id);
-    public abstract List<Dictionary<string, object?>> where(string tableName, Dictionary<string, object?> conditions);
-    public abstract long count(string tableName);
-    public abstract bool existsPred(string tableName, long id);
-    public abstract long insert(string tableName, Dictionary<string, object?> attributes);
-    public abstract void update(string tableName, long id, Dictionary<string, object?> attributes);
-    public abstract void delete(string tableName, long id);
-    public abstract void truncate(string tableName);
+    public abstract List<Dictionary<string, object?>> All(string tableName);
+    public abstract Dictionary<string, object?>? Find(string tableName, long id);
+    public abstract List<Dictionary<string, object?>> Where(string tableName, Dictionary<string, object?> conditions);
+    public abstract long Count(string tableName);
+    public abstract bool ExistsPred(string tableName, long id);
+    public abstract long Insert(string tableName, Dictionary<string, object?> attributes);
+    public abstract void Update(string tableName, long id, Dictionary<string, object?> attributes);
+    public abstract void Delete(string tableName, long id);
+    public abstract void Truncate(string tableName);
 }
 
 // The default `ActiveRecord.adapter` value: throws on every call. The
@@ -35,13 +35,13 @@ public sealed class NullAdapter : AdapterInterface
     private static System.NotSupportedException Unwired() =>
         new("ActiveRecord.adapter is not wired for the C# target (models are Db-direct)");
 
-    public override List<Dictionary<string, object?>> all(string tableName) => throw Unwired();
-    public override Dictionary<string, object?>? find(string tableName, long id) => throw Unwired();
-    public override List<Dictionary<string, object?>> where(string tableName, Dictionary<string, object?> conditions) => throw Unwired();
-    public override long count(string tableName) => throw Unwired();
-    public override bool existsPred(string tableName, long id) => throw Unwired();
-    public override long insert(string tableName, Dictionary<string, object?> attributes) => throw Unwired();
-    public override void update(string tableName, long id, Dictionary<string, object?> attributes) => throw Unwired();
-    public override void delete(string tableName, long id) => throw Unwired();
-    public override void truncate(string tableName) => throw Unwired();
+    public override List<Dictionary<string, object?>> All(string tableName) => throw Unwired();
+    public override Dictionary<string, object?>? Find(string tableName, long id) => throw Unwired();
+    public override List<Dictionary<string, object?>> Where(string tableName, Dictionary<string, object?> conditions) => throw Unwired();
+    public override long Count(string tableName) => throw Unwired();
+    public override bool ExistsPred(string tableName, long id) => throw Unwired();
+    public override long Insert(string tableName, Dictionary<string, object?> attributes) => throw Unwired();
+    public override void Update(string tableName, long id, Dictionary<string, object?> attributes) => throw Unwired();
+    public override void Delete(string tableName, long id) => throw Unwired();
+    public override void Truncate(string tableName) => throw Unwired();
 }

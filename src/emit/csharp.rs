@@ -184,7 +184,7 @@ fn emit_program(app: &App) -> EmittedFile {
     // has a layout (identity otherwise).
     let has_layout = app.views.iter().any(|v| v.name.as_str() == "layouts/application");
     let layout = if has_layout {
-        "(body, notice, alert) => Layouts.application(body, notice, alert)"
+        "(body, notice, alert) => Layouts.Application(body, notice, alert)"
     } else {
         "(body, notice, alert) => body"
     };

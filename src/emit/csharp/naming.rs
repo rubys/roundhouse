@@ -72,6 +72,27 @@ pub fn camel(raw: &str) -> String {
     cased(raw, false)
 }
 
+/// Re-case an already-`camel`-normalized member key to its `pascal` emit form.
+///
+/// The internal classification maps (`INSTANCE_PROPS`, `INSTANCE_PROP_TYPES`,
+/// the `prop_types`/`body_ivars` collections, …) are keyed by `camel(rubyname)`
+/// as a canonical normalization, but a *public property* must emit PascalCase.
+/// `camel` and `pascal` differ only in the leading segment's first letter (and
+/// the keyword `@`-escape, which `pascal` never needs — every C# reserved word
+/// is lowercase, so a capitalized name is never reserved), so re-casing a camel
+/// key is exact: strip a leading `@`, then upper-case the first letter after any
+/// preserved leading underscores. `pascal_of_camel(camel(x)) == pascal(x)`.
+pub fn pascal_of_camel(key: &str) -> String {
+    let core = key.strip_prefix('@').unwrap_or(key);
+    let lead = core.len() - core.trim_start_matches('_').len();
+    let (us, rest) = core.split_at(lead);
+    let mut chars = rest.chars();
+    match chars.next() {
+        Some(c) => format!("{us}{}{}", c.to_uppercase(), chars.as_str()),
+        None => core.to_string(),
+    }
+}
+
 fn cased(raw: &str, upper_first: bool) -> String {
     let bang = raw.ends_with('!');
     let pred = raw.ends_with('?');
@@ -117,12 +138,12 @@ fn cased(raw: &str, upper_first: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{camel, pascal};
+    use super::{camel, pascal, pascal_of_camel};
 
     /// Regression guard for the AR column-predicate collision: a column
     /// reader (`deleted_at`) and its predicate (`deleted_at?`) must render
-    /// to DISTINCT C# names. `?`/`!` get `Pred`/`Bang` affixes. (C# method
-    /// names are camelCase today — see the idiomatic-PascalCase follow-up.)
+    /// to DISTINCT C# names. `?`/`!` get `Pred`/`Bang` affixes. Member names
+    /// emit PascalCase; locals/params stay camelCase.
     #[test]
     fn suffix_disambiguation_is_injective() {
         assert_ne!(pascal("deleted_at"), pascal("deleted_at?"));
@@ -130,5 +151,25 @@ mod tests {
         assert_ne!(pascal("save"), pascal("save!"));
         assert_eq!(pascal("deleted_at?"), "DeletedAtPred");
         assert_eq!(camel("deleted_at?"), "deletedAtPred");
+    }
+
+    /// `pascal_of_camel` must reproduce `pascal` exactly when fed a `camel`
+    /// key, so a member emitted PascalCase from a camel registry key still
+    /// matches the references emitted with `pascal` from the raw Ruby name.
+    #[test]
+    fn pascal_of_camel_matches_pascal() {
+        for raw in [
+            "deleted_at",
+            "deleted_at?",
+            "save!",
+            "id",
+            "created_at",
+            "class",
+            "_adapter_all",
+            "schema_columns",
+            "exists?",
+        ] {
+            assert_eq!(pascal_of_camel(&camel(raw)), pascal(raw), "raw = {raw}");
+        }
     }
 }
