@@ -157,6 +157,9 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // avatar_img(...)` + helper modules become module-functions (no-op when
     // the app ships no non-empty helpers).
     library::apply_helper_lowering(&mut lcs, app);
+    // ActiveSupport durations: `70.days` → `Duration.days(70)` (no-op for
+    // duration-free apps).
+    library::apply_duration_lowering(&mut lcs);
 
     // Synthesized siblings need explicit `require_relative` even when
     // they live in the same directory as their referencer — nothing else
@@ -274,6 +277,7 @@ pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
     let mut lcs = lower_controllers_for_spinel(app);
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
+    library::apply_duration_lowering(&mut lcs);
     emit_lowered_controllers_from_lcs(&lcs, app)
 }
 
@@ -379,6 +383,7 @@ pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
             // skip scope lowering (they don't open scope chains), but they do
             // call helpers, so this pass runs here directly.
             library::apply_helper_lowering(std::slice::from_mut(&mut lc), app);
+            library::apply_duration_lowering(std::slice::from_mut(&mut lc));
             let out_path = view_output_path(v.name.as_str());
             library::emit_library_class_pair(&lc, app, out_path)
         })

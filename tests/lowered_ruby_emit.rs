@@ -2090,6 +2090,41 @@ fn app_helper_calls_resolve_to_module_functions() {
 }
 
 #[test]
+fn integer_durations_rewrite_to_duration_calls() {
+    // `Integer#days` doesn't exist (no built-in subclassing), so the Ruby
+    // emit path rewrites `<int>.days` → `ActiveSupport::Duration.days(<int>)`
+    // against the CRuby Duration overlay; `.ago` then rides the instance.
+    // A plural unit rewrites unconditionally (handles an untyped Int constant
+    // receiver), but a singular `day`/`hour`/`month`/`year` also names a Time
+    // component reader, so it rewrites only when the receiver is numeric —
+    // `created_at.day` (a datetime, lowered to Str) must be left alone.
+    let app = ingest_tree(&[
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define(version: 1) do\n  create_table :users do |t|\n    t.datetime :created_at\n  end\nend\n",
+        ),
+        (
+            "app/models/user.rb",
+            "class User < ApplicationRecord\n  WINDOW = 70\n  def recent?\n    created_at > 70.days.ago\n  end\n  def windowed?\n    created_at > WINDOW.days.ago\n  end\n  def created_day\n    created_at.day\n  end\nend\n",
+        ),
+    ]);
+    let files = ruby::emit_lowered_models(&app);
+    let src = find(&files, "user.rb");
+    assert!(
+        src.contains("ActiveSupport::Duration.days(70).ago"),
+        "numeric-literal duration rewrites; got:\n{src}",
+    );
+    assert!(
+        src.contains("ActiveSupport::Duration.days(WINDOW).ago"),
+        "plural duration rewrites even for an (untyped) constant receiver; got:\n{src}",
+    );
+    assert!(
+        !src.contains("Duration.day(created_at)"),
+        "a Time component reader (`created_at.day`) must NOT be rewritten; got:\n{src}",
+    );
+}
+
+#[test]
 fn model_class_constants_are_captured() {
     // A model-level `NAME = value` constant (e.g. `User::NEW_USER_DAYS = 70`)
     // must be emitted so in-body references resolve — the DSL classifier
