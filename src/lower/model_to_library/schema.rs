@@ -3,7 +3,7 @@
 
 use crate::dialect::{AccessorKind, Association, MethodDef, MethodReceiver, Model, Param};
 use crate::effect::EffectSet;
-use crate::expr::{ArrayStyle, Expr, ExprNode, LValue, Literal};
+use crate::expr::{ArrayStyle, BoolOpKind, BoolOpSurface, Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::naming::pluralize_snake;
 use crate::schema::{Column, Table};
@@ -38,9 +38,7 @@ pub(super) fn push_schema_methods(
     for col in &table.columns {
         methods.push(synth_attr_reader(owner, col));
         methods.push(synth_attr_writer(owner, col));
-        if let Some(pred) = synth_bool_predicate(owner, col) {
-            methods.push(pred);
-        }
+        methods.push(synth_column_predicate(owner, col));
     }
 
     // def self.table_name
@@ -274,24 +272,50 @@ fn send0(recv: Expr, method: &str) -> Expr {
     )
 }
 
-/// Rails generates a `<column>?` predicate for every attribute; we emit
-/// it for Boolean columns (`is_deleted?` → `@is_deleted`), the common and
-/// well-defined case. For non-bool columns Rails' `?` means "present?",
-/// which isn't modeled yet, so those are skipped. The `?` suffix
-/// transpiles via each target's method-name mapping (same path as the
-/// runtime's `persisted?` / `valid?`).
-fn synth_bool_predicate(owner: &ClassId, col: &Column) -> Option<MethodDef> {
-    if !matches!(ty_of_column(&col.col_type), Ty::Bool) {
-        return None;
-    }
-    Some(MethodDef {
+/// Rails generates a `<column>?` predicate for every attribute. A boolean
+/// column's predicate is the value's truthiness (`is_deleted?` →
+/// `@is_deleted`); every other column's is a presence check (`deleted_at?`
+/// → `!@deleted_at.nil?`). The `!nil?` form is exact for nil-vs-present and
+/// correct for both nullable and NOT NULL columns (a non-null `@col` is
+/// never nil, so the predicate is constant-true); the string-specific
+/// empty-is-also-blank nuance of Rails' `present?` isn't modeled (rare, and
+/// keeps the body trivially typed `Bool`).
+///
+/// Emitting `<col>?` for every column relies on each target's renderer
+/// disambiguating the `?` suffix from the same-named reader (`deleted_at`
+/// vs `deleted_at?`) — Ruby/Crystal/Elixir keep `?`, TS prepends `is_`,
+/// Python suffixes `_p`, and the strip targets (Kotlin/Swift/C#/Go/Rust)
+/// affix `Pred`/`_pred`. Before that was uniform this synthesizer fired for
+/// boolean columns only (and no fixture has one, so it was never exercised
+/// cross-target).
+fn synth_column_predicate(owner: &ClassId, col: &Column) -> MethodDef {
+    let col_ty = ty_of_column(&col.col_type);
+    let body = match &col_ty {
+        // Boolean: the value's truthiness (`when true then true; false/nil
+        // then false`).
+        Ty::Bool => col_ivar(col, Ty::Bool),
+        // Numeric: present AND non-zero (`!value.zero?`). `0` → false.
+        Ty::Int | Ty::Float => and_bool(
+            not_nil(col, &col_ty),
+            bool_send(col_ivar(col, col_ty.clone()), "!=", lit_int(0)),
+        ),
+        // String (and Date/DateTime/Time, which lower to `Ty::Str`):
+        // present AND non-empty (`!value.blank?`). `""` → false; a Time
+        // value is never `== ""`, so this reduces to presence for dates.
+        // (Whitespace-only-blank is not modeled — `.strip` would crash the
+        // datetime case, whose stored value is a Time, not a String.)
+        Ty::Str => and_bool(
+            not_nil(col, &col_ty),
+            bool_send(col_ivar(col, Ty::Str), "!=", lit_str(String::new())),
+        ),
+        // Everything else (binary, json, references): present (`!nil?`).
+        _ => not_nil(col, &col_ty),
+    };
+    MethodDef {
         name: Symbol::from(format!("{}?", col.name.as_str())),
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
-        body: with_ty(
-            Expr::new(Span::synthetic(), ExprNode::Ivar { name: col.name.clone() }),
-            Ty::Bool,
-        ),
+        body,
         signature: Some(fn_sig(vec![], Ty::Bool)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
@@ -299,7 +323,65 @@ fn synth_bool_predicate(owner: &ClassId, col: &Column) -> Option<MethodDef> {
         is_async: false,
         mutates_self: false,
         block_param: None,
-    })
+    }
+}
+
+/// A typed `@col` ivar read.
+fn col_ivar(col: &Column, ty: Ty) -> Expr {
+    with_ty(Expr::new(Span::synthetic(), ExprNode::Ivar { name: col.name.clone() }), ty)
+}
+
+/// `recv.<method>` with no arguments or block (e.g. `@col.nil?`, `cond.!`).
+fn no_arg_send(recv: Expr, method: &str) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(recv),
+            method: Symbol::from(method),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+    )
+}
+
+/// `!@col.nil?` — a typed presence test.
+fn not_nil(col: &Column, ty: &Ty) -> Expr {
+    let nil_q = with_ty(no_arg_send(col_ivar(col, ty.clone()), "nil?"), Ty::Bool);
+    with_ty(no_arg_send(nil_q, "!"), Ty::Bool)
+}
+
+/// `recv <op> arg` — a binary-operator Send typed `Bool` (used for `!=`).
+fn bool_send(recv: Expr, op: &str, arg: Expr) -> Expr {
+    with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(recv),
+                method: Symbol::from(op),
+                args: vec![arg],
+                block: None,
+                parenthesized: false,
+            },
+        ),
+        Ty::Bool,
+    )
+}
+
+/// `left && right`, typed `Bool`.
+fn and_bool(left: Expr, right: Expr) -> Expr {
+    with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::BoolOp {
+                op: BoolOpKind::And,
+                surface: BoolOpSurface::Symbol,
+                left,
+                right,
+            },
+        ),
+        Ty::Bool,
+    )
 }
 
 fn synth_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {

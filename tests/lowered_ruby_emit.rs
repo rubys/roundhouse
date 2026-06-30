@@ -2090,6 +2090,37 @@ fn app_helper_calls_resolve_to_module_functions() {
 }
 
 #[test]
+fn column_query_predicates_match_rails_semantics() {
+    // Rails defines `<col>?` on every column, with type-specific semantics
+    // (ActiveRecord query_cast_attribute): boolean → the value's truthiness,
+    // numeric → non-zero (`0` is false), string/date → present (`""`/nil is
+    // false). Date/DateTime lower to `Ty::Str`, so they share the string
+    // form — exact for them since a Time value is never `== ""`.
+    let app = ingest_tree(&[
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define(version: 1) do\n  create_table :widgets do |t|\n    t.string :name\n    t.integer :score\n    t.boolean :active\n    t.datetime :deleted_at\n  end\nend\n",
+        ),
+        ("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n"),
+    ]);
+    let files = ruby::emit_lowered_models(&app);
+    let src = find(&files, "widget.rb");
+    assert!(src.contains("def active?"), "boolean predicate present; got:\n{src}");
+    assert!(
+        src.contains("!(@score.nil?) && @score != 0"),
+        "numeric predicate is non-zero; got:\n{src}",
+    );
+    assert!(
+        src.contains("!(@name.nil?) && @name != \"\""),
+        "string predicate is present (non-empty); got:\n{src}",
+    );
+    assert!(
+        src.contains("!(@deleted_at.nil?) && @deleted_at != \"\""),
+        "datetime predicate (lowers to Str) is present; got:\n{src}",
+    );
+}
+
+#[test]
 fn framework_asset_helpers_resolve_in_library_bodies() {
     // `image_tag`/`image_path` called bare from a helper body, and the
     // `ActionController::Base.helpers.image_path(...)` idiom from a model
