@@ -145,11 +145,31 @@ pub(super) fn emit_send(
         // form_attrs is locally `HashMap<&str, String>` (from
         // `{action: …, method: "post"}.to_h`), render_attrs takes
         // `HashMap<String, serde_json::Value>`.
-        let coerced: Vec<String> = args
+        let mut coerced: Vec<String> = args
             .iter()
             .enumerate()
             .map(|(i, a)| coerce_arg_for_class_method(&effective_method, i, a))
             .collect();
+        // Trailing default-arg pad for sibling class-method calls that
+        // omit a param carrying a source-level default. Ruby
+        // `image_path(source)` relies on `def self.image_path(source,
+        // skip_pipeline: false)`, but rust2 emits `skip_pipeline` as a
+        // required positional — so the omitted arg must be filled with
+        // its Ty default (`false`). Mirrors the controller-shim pad
+        // below and the Const-recv branch's `param_tys` padding, which
+        // this self-call branch previously lacked (→ E0061).
+        // `current_class_method_param_tys` is keyed by method name and
+        // keeps Keyword params, so the trailing `skip_pipeline` slot is
+        // present; the range is empty (a no-op) when the caller already
+        // supplies every positional.
+        if let Some(param_tys) = current_class_method_param_tys(&effective_method) {
+            for i in coerced.len()..param_tys.len() {
+                match param_tys.get(i).and_then(synth_default_for_ty) {
+                    Some(d) => coerced.push(d),
+                    None => break,
+                }
+            }
+        }
         if coerced.is_empty() {
             return format!("Self::{rewritten_method}()");
         }
