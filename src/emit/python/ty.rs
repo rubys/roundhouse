@@ -10,6 +10,9 @@ pub fn python_ty(ty: &Ty) -> String {
         Ty::Float => "float".to_string(),
         Ty::Bool => "bool".to_string(),
         Ty::Str | Ty::Sym => "str".to_string(),
+        // Python has datetime, but the datetime seam isn't wired yet
+        // (Stage 2) — a Time surface is an honest not-supported gap.
+        Ty::Time => crate::emit::diagnostics::unsupported_time_ty("python"),
         Ty::Nil => "None".to_string(),
         Ty::Array { elem } => format!("list[{}]", python_ty(elem)),
         Ty::Hash { key, value } => format!("dict[{}, {}]", python_ty(key), python_ty(value)),

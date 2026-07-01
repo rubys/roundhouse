@@ -101,6 +101,12 @@ pub fn go_ty(ty: &Ty) -> String {
         Ty::Float => "float64".to_string(),
         Ty::Bool => "bool".to_string(),
         Ty::Str | Ty::Sym => "string".to_string(),
+        // Go has time.Time, but the datetime seam isn't wired yet
+        // (Stage 2) — a Time surface is an honest not-supported gap.
+        // (The legacy `Ty::Class{"Time"} => "string"` stand-in below is
+        // separate: it catches hand-written-rbs Time in the shared
+        // runtime, not the first-class `Ty::Time` column type.)
+        Ty::Time => crate::emit::diagnostics::unsupported_time_ty("go"),
         Ty::Nil => "struct{}".to_string(),
         Ty::Array { elem } => format!("[]{}", go_ty(elem)),
         Ty::Hash { key, value } => format!("map[{}]{}", go_ty(key), go_ty(value)),

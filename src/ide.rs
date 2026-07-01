@@ -179,6 +179,7 @@ pub fn render_ty(ty: &Ty) -> String {
         Ty::Bool => "bool".to_string(),
         Ty::Str => "String".to_string(),
         Ty::Sym => "Symbol".to_string(),
+        Ty::Time => "Time".to_string(),
         Ty::Nil => "nil".to_string(),
         Ty::Array { elem } => format!("Array[{}]", render_ty(elem)),
         Ty::Hash { key, value } => format!("Hash[{}, {}]", render_ty(key), render_ty(value)),

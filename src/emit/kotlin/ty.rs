@@ -21,6 +21,10 @@ pub fn kotlin_ty(t: &Ty) -> String {
         Ty::Float => "Double".to_string(),
         Ty::Bool => "Boolean".to_string(),
         Ty::Str => "String".to_string(),
+        // Kotlin has java.time.Instant, but the datetime seam isn't
+        // wired yet (Stage 2) — a Time surface is an honest not-
+        // supported gap.
+        Ty::Time => crate::emit::diagnostics::unsupported_time_ty("kotlin"),
         // No symbol type in Kotlin — route symbols to string keys, as
         // the TS/Crystal renderers do.
         Ty::Sym => "String".to_string(),

@@ -85,6 +85,27 @@ pub fn report_unsupported(
     StubStyle::for_target(target).render(&text)
 }
 
+/// A `Ty::Time` reached a target that has no native datetime
+/// representation wired yet. Push a structured `Unsupported` diagnostic
+/// (collected when inside a [`scope`]; a no-op otherwise, so callers
+/// outside emit — e.g. the LSP type display — are unaffected) and return
+/// a placeholder type name that does NOT compile in any target. That
+/// placeholder matters only on the direct-`emit()` test paths that
+/// bypass the CLI fail-policy: it turns the gap into a loud compiler
+/// error there too, instead of silently degrading to `string`/`interface{}`.
+/// On the CLI path the `Severity::Error` diagnostic fails the transpile
+/// before any file is written. Stage 2 wires each target's native
+/// datetime type and drops the call.
+pub fn unsupported_time_ty(target: &str) -> String {
+    push(Diagnostic::unsupported(
+        crate::span::Span::synthetic(),
+        Some(Symbol::from(target)),
+        "Time",
+        "no native datetime type wired for this target yet",
+    ));
+    "RoundhouseUnsupportedTime".to_string()
+}
+
 /// How a target spells "raise at runtime" — used to render the degrade
 /// stub. Each variant reproduces exactly the raise-equivalent that
 /// target's emitter already drops for `Expr.diagnostic` annotations, so

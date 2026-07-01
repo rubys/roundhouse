@@ -13,6 +13,23 @@ pub enum Ty {
     Bool,
     Str,
     Sym,
+
+    /// A temporal value — Ruby `Time` (Date / DateTime / time-of-day
+    /// columns fold in here too; its method surface is a superset of
+    /// everything the corpus calls on those, and a dedicated variant can
+    /// split them out later if a Date-only method ever surfaces).
+    ///
+    /// First-class, deliberately NOT `Ty::Str` or `Ty::Class{"Time"}`:
+    /// Time is language-specific like `Hash`, so each target maps it to
+    /// its native datetime type (Ruby `Time`, Go `time.Time`, …). A
+    /// target that hasn't wired a native representation yet must route
+    /// this to an `Unsupported` emit diagnostic rather than silently
+    /// degrading — adding the variant forces every exhaustive `match`
+    /// to make that choice explicit. Storage stays ISO-8601 TEXT in
+    /// every adapter; hydration/serialization happens at the target's
+    /// column seam.
+    Time,
+
     Nil,
 
     Array { elem: Box<Ty> },

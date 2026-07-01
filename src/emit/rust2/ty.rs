@@ -16,6 +16,9 @@ pub fn rust_ty(ty: &Ty) -> String {
         Ty::Bool => "bool".to_string(),
         Ty::Str => "String".to_string(),
         Ty::Sym => "String".to_string(),
+        // Rust has chrono/time, but the datetime seam isn't wired yet
+        // (Stage 2) — a Time surface is an honest not-supported gap.
+        Ty::Time => crate::emit::diagnostics::unsupported_time_ty("rust"),
         Ty::Nil => "()".to_string(),
         Ty::Array { elem } => format!("Vec<{}>", rust_ty(elem)),
         Ty::Hash { key, value } => format!(

@@ -189,6 +189,9 @@ pub fn ty_to_rbs(ty: &Ty) -> String {
         Ty::Bool => "bool".into(),
         Ty::Str => "String".into(),
         Ty::Sym => "Symbol".into(),
+        // Ruby has a native `Time`; datetime columns hydrate to it via
+        // apply_datetime_lowering.
+        Ty::Time => "Time".into(),
         Ty::Nil => "nil".into(),
         Ty::Array { elem } => format!("Array[{}]", ty_to_rbs(elem)),
         Ty::Hash { key, value } => format!("Hash[{}, {}]", ty_to_rbs(key), ty_to_rbs(value)),

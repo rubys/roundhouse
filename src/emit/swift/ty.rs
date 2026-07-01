@@ -20,6 +20,9 @@ pub fn swift_ty(t: &Ty) -> String {
         Ty::Float => "Double".to_string(),
         Ty::Bool => "Bool".to_string(),
         Ty::Str => "String".to_string(),
+        // Swift has Foundation.Date, but the datetime seam isn't wired
+        // yet (Stage 2) — a Time surface is an honest not-supported gap.
+        Ty::Time => crate::emit::diagnostics::unsupported_time_ty("swift"),
         // No symbol type in Swift — route symbols to string keys, as the
         // TS/Crystal/Kotlin renderers do.
         Ty::Sym => "String".to_string(),
