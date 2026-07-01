@@ -22,9 +22,11 @@ pub fn csharp_ty(t: &Ty) -> String {
         Ty::Float => "double".to_string(),
         Ty::Bool => "bool".to_string(),
         Ty::Str => "string".to_string(),
-        // C# has DateTimeOffset, but the datetime seam isn't wired yet
-        // (Stage 2) — a Time surface is an honest not-supported gap.
-        Ty::Time => crate::emit::diagnostics::unsupported_time_ty("csharp"),
+        // C# has a native `DateTimeOffset`. Temporal columns store ISO-8601
+        // text (a `string` backing field) and read back as a real
+        // `DateTimeOffset` via an explicit parsing getter — see the temporal
+        // branch in csharp/library.rs and `Roundhouse.RhDateTime.Parse`.
+        Ty::Time => "DateTimeOffset".to_string(),
         // No symbol type in C# — route symbols to string keys, as the
         // Kotlin/TS/Crystal renderers do.
         Ty::Sym => "string".to_string(),

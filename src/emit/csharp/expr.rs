@@ -93,10 +93,27 @@ thread_local! {
     /// property and method sharing a name — `base.rb`'s `@errors` + `errors`).
     /// The colliding ivar emits as a private renamed field.
     static IVAR_RENAMES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// Temporal (Date/DateTime/Time) columns of the current class: camelCased
+    /// column name → the `string` storage-backing field name. The column's
+    /// reader emits as a `DateTimeOffset?` computed getter (library.rs), so
+    /// every String-typed internal use — `@col` ivar reads/writes AND
+    /// `x.col = v` writer-sends — must retarget the backing field instead of
+    /// the getter-only property. See the temporal branch in library.rs.
+    static TEMPORAL_BACKINGS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
 
 pub(super) fn set_ivar_renames(m: HashMap<String, String>) {
     IVAR_RENAMES.with(|r| *r.borrow_mut() = m);
+}
+
+pub(super) fn set_temporal_backings(m: HashMap<String, String>) {
+    TEMPORAL_BACKINGS.with(|r| *r.borrow_mut() = m);
+}
+
+/// The `string` storage-backing field for a temporal column, keyed by its
+/// canonical `camel` name (`created_at` → `createdAt`).
+fn temporal_backing(camel_name: &str) -> Option<String> {
+    TEMPORAL_BACKINGS.with(|r| r.borrow().get(camel_name).cloned())
 }
 
 thread_local! {
@@ -147,6 +164,11 @@ fn map_exception_class(name: &str) -> String {
 /// rename lookup is keyed by the canonical `camel` name.
 fn ivar_name(name: &str) -> String {
     let c = camel(name);
+    // A temporal column's `@col` ivar reads/writes the `string` storage
+    // backing (the reader is a separate `DateTimeOffset?` getter).
+    if let Some(backing) = temporal_backing(&c) {
+        return backing;
+    }
     IVAR_RENAMES.with(|r| r.borrow().get(&c).cloned()).unwrap_or_else(|| pascal(name))
 }
 
@@ -1221,6 +1243,13 @@ fn emit_send(
                 (Some("JSON"), "generate") => {
                     return format!("JsonBuilder.EncodeValue({})", args_s[0]);
                 }
+                // Temporal reader intrinsic: `ActiveSupport.parse_db_time(s)`
+                // parses stored ISO-8601 text into a native `DateTimeOffset`.
+                // Nil-safe (`string?` → `DateTimeOffset?`), so the raw storage
+                // backing passes straight through (no null-forgiving).
+                (Some("ActiveSupport"), "parse_db_time") if args.len() == 1 => {
+                    return format!("Roundhouse.RhDateTime.Parse({})", args_s[0]);
+                }
                 _ => {}
             }
         }
@@ -1260,6 +1289,23 @@ fn emit_send(
     if let (Some(r), 1) = (recv, args.len()) {
         if method.ends_with('=') && !matches!(method, "==" | "!=" | "<=" | ">=") {
             let base = &method[..method.len() - 1];
+            // Temporal column writer: `x.created_at = v` stores ISO-8601 text
+            // in the `string` backing field, not the getter-only
+            // `DateTimeOffset?` property. Coerce the value to `string` (unless
+            // it's already a `Ty::Str` cast, which renders as a string).
+            if let Some(backing) = temporal_backing(&camel(base)) {
+                let rhs = if matches!(&*args[0].node, ExprNode::Cast { target_ty, .. } if matches!(target_ty, crate::ty::Ty::Str)) {
+                    args_s[0].clone()
+                } else {
+                    emit_cast(&args[0], &crate::ty::Ty::Str)
+                };
+                let target = if matches!(&*r.node, ExprNode::SelfRef) {
+                    format!("this.{backing}")
+                } else {
+                    format!("{}.{backing}", emit_expr(r))
+                };
+                return format!("{target} = {rhs}");
+            }
             if matches!(&*r.node, ExprNode::SelfRef) {
                 if let Some(ty) = instance_prop_scalar_ty(base) {
                     if !arg_already_ty(&args[0], &ty) {

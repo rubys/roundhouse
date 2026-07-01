@@ -23,6 +23,10 @@ const BROADCASTS_CS: &str = include_str!("../../../runtime/csharp/Broadcasts.cs"
 const CABLE_CS: &str = include_str!("../../../runtime/csharp/Cable.cs");
 const RH_RUNTIME_CS: &str = include_str!("../../../runtime/csharp/RhRuntime.cs");
 const SERVER_CS: &str = include_str!("../../../runtime/csharp/Server.cs");
+// Native-`DateTimeOffset` seam for temporal columns: `Roundhouse.RhDateTime.
+// Parse` (stored text → DateTimeOffset, the `parse_db_time` intrinsic target)
+// plus the `JsonBuilder.EncodeDatetime(DateTimeOffset?)` overload.
+const RH_DATETIME_CS: &str = include_str!("../../../runtime/csharp/RhDateTime.cs");
 
 /// The hand-written runtime primitives, emitted under `app/runtime/`.
 pub fn primitives() -> Vec<EmittedFile> {
@@ -34,6 +38,7 @@ pub fn primitives() -> Vec<EmittedFile> {
         ("app/runtime/Cable.cs", CABLE_CS),
         ("app/runtime/RhRuntime.cs", RH_RUNTIME_CS),
         ("app/runtime/Server.cs", SERVER_CS),
+        ("app/runtime/RhDateTime.cs", RH_DATETIME_CS),
     ];
     files
         .iter()
