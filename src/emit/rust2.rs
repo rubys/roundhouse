@@ -118,6 +118,11 @@ const RT_ADAPTER_INTERFACE_SOURCE: &str =
 const RT_HASH_EXT_SOURCE: &str = include_str!("../../runtime/rust/hash_ext.rs");
 const RT_DB_SOURCE: &str = include_str!("../../runtime/rust/db.rs");
 const RT_BROADCASTS_SOURCE: &str = include_str!("../../runtime/rust/broadcasts.rs");
+// Native-`chrono::DateTime<Utc>` seam for temporal columns:
+// `parse_db_time` (stored text → DateTime, the `parse_db_time`
+// intrinsic target) plus the `EncodeDatetime` trait that backs the
+// generic `JsonBuilder::encode_datetime`.
+const RT_RH_DATETIME_SOURCE: &str = include_str!("../../runtime/rust/rh_datetime.rs");
 // Phase 6 HTTP/server/cable runtime — hand-written, shared with the
 // legacy rust emitter. `server::start` mounts axum, applies schema,
 // installs middleware (layout-wrap, method-override), and serves
@@ -277,6 +282,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         ("src/hash_ext.rs", RT_HASH_EXT_SOURCE),
         ("src/db.rs", RT_DB_SOURCE),
         ("src/broadcasts.rs", RT_BROADCASTS_SOURCE),
+        ("src/rh_datetime.rs", RT_RH_DATETIME_SOURCE),
         ("src/http.rs", RT_HTTP_SOURCE),
         ("src/server.rs", RT_SERVER_SOURCE),
         ("src/cable.rs", RT_CABLE_SOURCE),
@@ -355,6 +361,20 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         // VIEW_IMPORTS; transpiled runtime units get it on demand.
         if content.contains("write!(") {
             content = format!("#[allow(unused_imports)]\nuse std::fmt::Write as _;\n{content}");
+        }
+        // Native-datetime seam: the transpiled `encode_datetime(s:
+        // Option<String>)` (from the shared `runtime/ruby/json_builder.rb`)
+        // only accepts pre-formatted stored text — but a temporal
+        // column's reader now yields `Option<chrono::DateTime<Utc>>`
+        // (Stage 2). Rust has no ad-hoc overloading, so replace the
+        // transpiled method with a generic delegator over the
+        // `EncodeDatetime` trait (in `runtime/rust/rh_datetime.rs`),
+        // which is implemented for BOTH `Option<String>` (preserving the
+        // shared micro→milli reformat) and `Option<DateTime<Utc>>`. Both
+        // existing call sites keep compiling unchanged — Rust infers `T`
+        // from the argument.
+        if unit.out_path.ends_with("json_builder.rs") {
+            content = replace_transpiled_encode_datetime(&content);
         }
         // Bare-fn compat shim for hand-written `runtime/rust/server.rs`,
         // which calls `view_helpers::set_yield(...)` / `get_yield()` /
@@ -1742,6 +1762,69 @@ fn emit_schema_sql_rs(app: &App) -> EmittedFile {
         path: PathBuf::from("src/schema_sql.rs"),
         content,
     }
+}
+
+/// Replace the transpiled `JsonBuilder::encode_datetime(s: Option<String>)`
+/// method (from the shared `runtime/ruby/json_builder.rb`) with a generic
+/// delegator over the `EncodeDatetime` trait — see the call site in
+/// `emit` for why (native-datetime Stage 2: Rust has no ad-hoc
+/// overloading, and a temporal reader now yields `Option<DateTime<Utc>>`).
+///
+/// Brace-matched (string-literal aware, so the `format!("\"{}T{}...Z\"")`
+/// braces don't confuse the scan) so it survives body edits to the shared
+/// Ruby source. On any parse miss it returns the content unchanged.
+fn replace_transpiled_encode_datetime(content: &str) -> String {
+    const SIG: &str = "pub fn encode_datetime(";
+    let Some(sig_pos) = content.find(SIG) else {
+        return content.to_string();
+    };
+    // Back up to the start of the (indented) method line.
+    let line_start = content[..sig_pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    // Opening brace of the method body.
+    let Some(brace_off) = content[sig_pos..].find('{') else {
+        return content.to_string();
+    };
+    let open = sig_pos + brace_off;
+    // Brace-match to the method's closing brace, skipping double-quoted
+    // string literals (with `\`-escape handling). Single quotes are left
+    // untracked — the transpiled json_builder carries lifetimes
+    // (`&'static`) but no char literals, and lifetimes have no closing
+    // quote to pair.
+    let bytes = content.as_bytes();
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut escaped = false;
+    let mut end = None;
+    let mut i = open;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\\' if in_str => escaped = true,
+            b'"' => in_str = !in_str,
+            b'{' if !in_str => depth += 1,
+            b'}' if !in_str => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let Some(end) = end else {
+        return content.to_string();
+    };
+    let replacement = "    pub fn encode_datetime<T: crate::rh_datetime::EncodeDatetime>(v: T) -> String {\n\
+        \x20       v.rh_encode_datetime()\n\
+        \x20   }";
+    format!("{}{}{}", &content[..line_start], replacement, &content[end + 1..])
 }
 
 /// Build `src/lib.rs` from the set of files emitted so far, declaring

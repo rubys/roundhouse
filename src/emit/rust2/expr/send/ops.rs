@@ -82,13 +82,15 @@ pub(super) fn try_stdlib_class_method(
             _ => {}
         }
     }
-    // `.utc()` on a `Ty::Class { Time }` recv is a no-op (already a
-    // chrono DateTime<Utc>). `.iso8601()` → `.to_rfc3339()`;
-    // `.strftime(fmt)` → `.format(fmt).to_string()`.
-    if matches!(
-        r.ty.as_ref().map(peel_nil),
-        Some(crate::ty::Ty::Class { id, .. }) if id.0.as_str() == "Time"
-    ) {
+    // `.utc()` on a Time-valued recv is a no-op (already a chrono
+    // DateTime<Utc>). `.iso8601()` → `.to_rfc3339()`; `.strftime(fmt)` →
+    // `.format(fmt).to_string()`. The receiver qualifies either by a
+    // `Ty::Class { Time }` type OR structurally as a `Time.now`-rooted
+    // chain — the synthesized `fill_timestamps` body builds
+    // `Time.now.utc.iso8601` with untyped intermediate sends, so the
+    // type check alone would miss it and leave `.utc()`/`.iso8601()`
+    // emitted verbatim (no such chrono methods).
+    if recv_is_time(r) {
         match (method, args.len()) {
             ("utc" | "to_time", 0) => return Some(emit_expr(r)),
             ("iso8601" | "rfc3339", 0) => return Some(format!("{}.to_rfc3339()", emit_expr(r))),
@@ -104,6 +106,34 @@ pub(super) fn try_stdlib_class_method(
         }
     }
     None
+}
+
+/// True when `e` is a Time-valued receiver for the `.utc`/`.iso8601`/…
+/// bridges: an explicit `Ty::Class { Time }` value, OR a structural
+/// `Time.now`-rooted chain (the synthesized `fill_timestamps` builds
+/// `Time.now.utc.iso8601` with untyped intermediate sends, which the
+/// type check alone would miss). `.utc` / `.to_time` links preserve
+/// Time-ness, so recurse through them.
+fn recv_is_time(e: &Expr) -> bool {
+    if matches!(
+        e.ty.as_ref().map(peel_nil),
+        Some(crate::ty::Ty::Class { id, .. }) if id.0.as_str() == "Time"
+    ) {
+        return true;
+    }
+    if let ExprNode::Send { recv: Some(r), method, args, .. } = &*e.node {
+        if args.is_empty() {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.last().map(|s| s.as_str()) == Some("Time") && method.as_str() == "now" {
+                    return true;
+                }
+            }
+            if matches!(method.as_str(), "utc" | "to_time") {
+                return recv_is_time(r);
+            }
+        }
+    }
+    false
 }
 
 /// Binary operators (==, !=, <, >, +, -, *, /) ingest as Send with

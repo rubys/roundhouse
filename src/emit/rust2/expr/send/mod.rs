@@ -60,6 +60,26 @@ pub(super) fn emit_send(
         }
         return super::util::sanitize_ident(method);
     }
+    // Temporal reader intrinsic: `ActiveSupport.parse_db_time(s)` parses
+    // stored ISO-8601 text into a native `chrono::DateTime<Utc>`. Maps to
+    // the hand-written rust datetime runtime helper, which is nil-safe
+    // (empty String → None) and returns `Option<DateTime<Utc>>`
+    // *directly* — so this matches the reader's `Option<...>` return type
+    // with no `Some(...)` wrap. The stored value is a `String` ivar, so
+    // the arg is borrowed (`&self.<col>`) to match the helper's `&str`.
+    if method == "parse_db_time" && args.len() == 1 {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                    let arg = match &*args[0].node {
+                        ExprNode::Ivar { name } => format!("&self.{}", name.as_str()),
+                        _ => format!("&({})", emit_expr(&args[0])),
+                    };
+                    return format!("crate::rh_datetime::parse_db_time({arg})");
+                }
+            }
+        }
+    }
     if let Some(s) = try_constructor_field_assign(recv, method, args) { return s; }
     if let Some(s) = try_stdlib_class_method(recv, method, args) { return s; }
     if let Some(s) = try_binary_operator(recv, method, args) { return s; }

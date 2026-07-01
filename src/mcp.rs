@@ -501,20 +501,31 @@ mod tests {
     }
 
     #[test]
-    fn wont_lower_rust_reports_time_gap_and_bad_target_is_an_error() {
+    fn wont_lower_surfaces_time_gap_for_unwired_target_and_bad_target_is_an_error() {
         // real-blog has Date/DateTime columns, which type as the first-
-        // class `Ty::Time`. Rust's native datetime seam isn't wired yet
-        // (Stage 1: honest not-supported until Stage 2), so `wont_lower`
-        // reports the gap rather than "lowers cleanly". A valid target
-        // with gaps is still a successful query (isError=false) — the
-        // gaps are the *answer*, not a tool failure. When rust's Time
-        // seam lands, this flips back to "lowers cleanly".
-        let ok = call(&server(), "wont_lower", json!({ "target": "rust" }));
-        assert_eq!(ok["result"]["isError"], false);
+        // class `Ty::Time`. Rust's native datetime seam landed (Stage 2:
+        // temporal columns store ISO-8601 text and read back as a real
+        // `chrono::DateTime<Utc>`), so `wont_lower` for rust now reports
+        // "lowers cleanly" — no Time gap.
+        let rust = call(&server(), "wont_lower", json!({ "target": "rust" }));
+        assert_eq!(rust["result"]["isError"], false);
         assert!(
-            text_of(&ok).contains("Time not supported (rust)"),
-            "expected the Ty::Time gap to surface, got: {}",
-            text_of(&ok)
+            text_of(&rust).contains("lowers cleanly"),
+            "rust's native datetime seam is wired; expected a clean lower, got: {}",
+            text_of(&rust)
+        );
+
+        // A target whose datetime seam ISN'T wired yet still surfaces the
+        // `Ty::Time` gap. A valid target with gaps is still a successful
+        // query (isError=false) — the gaps are the *answer*, not a tool
+        // failure. When python's Time seam lands, re-point this to another
+        // still-unwired target (or drop it once all targets are done).
+        let py = call(&server(), "wont_lower", json!({ "target": "python" }));
+        assert_eq!(py["result"]["isError"], false);
+        assert!(
+            text_of(&py).contains("Time not supported (python)"),
+            "expected the Ty::Time gap to surface for python, got: {}",
+            text_of(&py)
         );
 
         // An unknown/unsupported target is a genuine tool error.

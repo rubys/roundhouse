@@ -16,9 +16,12 @@ pub fn rust_ty(ty: &Ty) -> String {
         Ty::Bool => "bool".to_string(),
         Ty::Str => "String".to_string(),
         Ty::Sym => "String".to_string(),
-        // Rust has chrono/time, but the datetime seam isn't wired yet
-        // (Stage 2) — a Time surface is an honest not-supported gap.
-        Ty::Time => crate::emit::diagnostics::unsupported_time_ty("rust"),
+        // Rust has a native datetime via chrono (already a direct dep).
+        // Temporal (Date/DateTime/Time) columns store ISO-8601 text
+        // (String ivar) and read back as a real `chrono::DateTime<Utc>`
+        // via an explicit parsing getter (`crate::rh_datetime::
+        // parse_db_time`); `Union{Time, Nil}` renders `Option<...>`.
+        Ty::Time => "chrono::DateTime<chrono::Utc>".to_string(),
         Ty::Nil => "()".to_string(),
         Ty::Array { elem } => format!("Vec<{}>", rust_ty(elem)),
         Ty::Hash { key, value } => format!(

@@ -251,6 +251,22 @@ fn needs_function_tail_some_wrap(body: &crate::expr::Expr, return_ty: Option<&Ty
         ExprNode::Return { .. } => return false,
         _ => {}
     }
+    // Temporal-reader intrinsic: `ActiveSupport.parse_db_time(...)` maps
+    // (in `expr/send/mod.rs`) to `crate::rh_datetime::parse_db_time`,
+    // which ALREADY returns `Option<DateTime<Utc>>`. Never wrap it in
+    // `Some(...)` — the reader's `Option<...>` return type is satisfied
+    // directly. The upstream type passes (`block_refine` / `decide`) can
+    // re-stamp the tail's `.ty` off the synthesized `Union{Time, Nil}`,
+    // so key off the call shape rather than the (unreliable here) type.
+    if let ExprNode::Send { recv: Some(r), method, .. } = &*tail.node {
+        if method.as_str() == "parse_db_time" {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                    return false;
+                }
+            }
+        }
+    }
     let tail_is_option = matches!(
         tail.ty.as_ref(),
         Some(Ty::Union { variants }) if variants.iter().any(|v| matches!(v, Ty::Nil))
