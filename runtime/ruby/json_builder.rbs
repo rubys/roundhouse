@@ -1,5 +1,5 @@
 module JsonBuilder
   def self.encode_string: (String) -> String
   def self.encode_value: (untyped) -> String
-  def self.encode_datetime: (String | Time | nil) -> String
+  def self.encode_datetime: (String?) -> String
 end

@@ -78,14 +78,14 @@ module JsonBuilder
   # which is what real-blog produces.
   def self.encode_datetime(s)
     return "null" if s.nil?
-    # CRuby/JRuby model accessors return a real `Time` for Date/DateTime/
-    # Time columns (see `apply_datetime_lowering`); format it directly
-    # rather than falling into the text-parsing path below, whose
-    # `s.to_s` would be `Time#to_s`'s space-separated, whole-second
-    # form (no fractional digits) — silently losing precision instead
-    # of erroring. `getutc` (non-mutating) + `iso8601(3)` matches
-    # Rails' millisecond-precision JSON time format exactly.
-    return "\"#{s.getutc.iso8601(3)}\"" if s.is_a?(Time)
+    # A `Time` value never reaches this shared primitive: it takes the
+    # stored ISO-8601 TEXT form of a datetime column (the representation
+    # every non-Ruby target uses). CRuby/JRuby model accessors return a
+    # real `Time` (see `apply_datetime_lowering`), so the Ruby tree
+    # shadows this method with a Time-aware version in the CRuby overlay
+    # (`ruby_overlay/runtime/json_builder_time.rb`). Keeping `Time` out
+    # of this file is what lets it transpile cleanly to targets with no
+    # `Time` type.
     str = s.to_s
     return "\"#{encode_string(str)}\"" if str.length < 19
     date = str[0, 10]

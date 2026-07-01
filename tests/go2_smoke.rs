@@ -1511,19 +1511,16 @@ fn json_builder_v2_shape() {
         "String branch missing typed init:\n{text}",
     );
 
-    // `encode_datetime`'s param widened from `Union[Str, Nil]` to
-    // `Union[Str, Time, Nil]` (CRuby/JRuby model accessors now return a
-    // real `Time` for Date/DateTime/Time columns — see
-    // `apply_datetime_lowering`). A 3-way union no longer qualifies for
-    // the 2-way empty-as-nil convention in `go_ty_stub`, so it falls
-    // back to `interface{}` — same shape as `encode_value`'s `v` — and
-    // the nil-narrow is a real `if s == nil` (not `if s == ""`). Go has
-    // no `Time` class to type-assert against, so the `is_a?(Time)`
-    // branch doesn't translate meaningfully; that's fine, this file's
-    // transpiled Go output isn't what Go apps actually run (Go has its
-    // own hand-ported json_builder), this test only guards the
-    // established patterns above.
-    assert!(text.contains("if s == nil"), "encode_datetime missing nil early return:\n{text}");
+    // Union[Str, Nil] renders as Go `string` directly (empty-as-nil
+    // convention in go_ty_stub), so the nil-narrow doesn't need a
+    // `s.(string)` assertion — `s` is ALREADY a string, and the early-
+    // return shape collapses to `if s == ""`. (encode_datetime is
+    // `String?` in the shared runtime; the Time-aware form lives in the
+    // CRuby overlay and never transpiles here.)
+    assert!(
+        text.contains("if s == \"\""),
+        "encode_datetime missing empty-as-nil early return:\n{text}",
+    );
 }
 
 #[test]
