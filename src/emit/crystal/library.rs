@@ -240,6 +240,15 @@ fn render_class(lc: &LibraryClass) -> String {
     let mut properties: Vec<(String, String)> = Vec::new();
     let mut accessor_method_names: std::collections::HashSet<String> =
         std::collections::HashSet::new();
+    // Temporal-column accessors (reader returns `Time`) must NOT collapse
+    // into a `property` — the field stores ISO-8601 text (`String` ivar)
+    // while the reader parses it to a native `Time`. Both the reader
+    // (`def col : Time?`, parse body) and writer (`def col=(v : String)`,
+    // stored text) emit as explicit methods; the `@col : String?` storage
+    // ivar is declared from the writer's assignment. This set defers the
+    // writer decision (seen after its reader) to the reader's finding.
+    let mut temporal_accessor_names: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     // First pass: detect which ivars `initialize` directly assigns
     // (used both for ivar nilability AND property nilability —
     // Crystal's strict null check applies the same rule to both).
@@ -280,6 +289,13 @@ fn render_class(lc: &LibraryClass) -> String {
                 // form instead.
                 let mname = m.name.as_str();
                 if mname.ends_with('?') || mname.ends_with('!') {
+                    continue;
+                }
+                // Temporal reader: don't collapse to a `property`. Leave
+                // it (and its writer) to emit as explicit methods over the
+                // `String` storage ivar. See `temporal_accessor_names`.
+                if signature_ret_is_time(m.signature.as_ref()) {
+                    temporal_accessor_names.insert(mname.to_string());
                     continue;
                 }
                 // Skip inherited fields — re-declaring would conflict
@@ -342,6 +358,12 @@ fn render_class(lc: &LibraryClass) -> String {
                 // the reader was registered above, the property covers
                 // both. Drop the explicit method.
                 let base = m.name.as_str().trim_end_matches('=').to_string();
+                // Temporal writer stays explicit (its reader didn't
+                // collapse) — the property would couple it to `Time`, but
+                // storage is `String`.
+                if temporal_accessor_names.contains(&base) {
+                    continue;
+                }
                 accessor_method_names.insert(format!("{base}="));
             }
             _ => {}
@@ -627,6 +649,19 @@ fn default_value_for_crystal_ty(ty_s: &str) -> Option<String> {
 /// every-path-assigned ivars stay non-nilable. Conservative: doesn't
 /// recurse into conditional branches or method bodies, which matches
 /// Crystal's "directly initialized" rule.
+/// True when a method's return type is `Time` (or a `Time | Nil` union) —
+/// i.e. a synthesized temporal-column reader (see `synth_attr_reader`).
+fn signature_ret_is_time(sig: Option<&crate::ty::Ty>) -> bool {
+    fn is_time(t: &crate::ty::Ty) -> bool {
+        match t {
+            crate::ty::Ty::Time => true,
+            crate::ty::Ty::Union { variants } => variants.iter().any(is_time),
+            _ => false,
+        }
+    }
+    matches!(sig, Some(crate::ty::Ty::Fn { ret, .. }) if is_time(ret))
+}
+
 fn collect_initialize_assignments(
     e: &Expr,
     out: &mut std::collections::HashSet<String>,

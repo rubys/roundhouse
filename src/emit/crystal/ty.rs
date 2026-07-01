@@ -18,10 +18,11 @@ pub fn crystal_ty(t: &Ty) -> String {
         Ty::Bool => "Bool".to_string(),
         Ty::Str => "String".to_string(),
         Ty::Sym => "Symbol".to_string(),
-        // Crystal has a native `Time`, but the datetime seam (adapter
-        // hydration + serialization) isn't wired yet — Stage 2. Until
-        // then a Time surface is an honest not-supported gap.
-        Ty::Time => crate::emit::diagnostics::unsupported_time_ty("crystal"),
+        // Crystal has a native `Time`. Temporal columns store ISO-8601
+        // text (String ivar) and read back as a real `Time` via an
+        // explicit parsing getter — see the temporal branch in
+        // crystal/library.rs and `Roundhouse::DateTime.parse`.
+        Ty::Time => "Time".to_string(),
         Ty::Nil => "Nil".to_string(),
         Ty::Bottom => "NoReturn".to_string(),
         Ty::Array { elem } => format!("Array({})", crystal_ty(elem)),

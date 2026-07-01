@@ -368,6 +368,26 @@ fn emit_node(n: &ExprNode) -> String {
             {
                 return format!("# Crystal: {} (skipped — module load handled at file scope)", emit_send_base(recv.as_ref(), method, args, *parenthesized));
             }
+            // Temporal reader intrinsic: `ActiveSupport.parse_db_time(s)`
+            // parses stored ISO-8601 text into a native `Time`. Renders to
+            // the Crystal runtime helper (nil-safe: `String?` → `Time?`).
+            if method.as_str() == "parse_db_time" && args.len() == 1 {
+                if let Some(r) = recv {
+                    if let ExprNode::Const { path } = &*r.node {
+                        if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                            // Pass the raw storage ivar (`String?`) — parse
+                            // is nil-safe, so suppress the `.not_nil!`
+                            // narrowing `emit_expr` would add (it raises on
+                            // a NULL stored value instead of yielding nil).
+                            let arg = match &*args[0].node {
+                                ExprNode::Ivar { name } => format!("@{}", name.as_str()),
+                                _ => emit_expr(&args[0]),
+                            };
+                            return format!("Roundhouse::DateTime.parse({arg})");
+                        }
+                    }
+                }
+            }
             // Buffer-accumulate idiom: `io << x` (Ruby) where `io` is a
             // String-typed local appends in place. Crystal Strings are
             // immutable and don't define `<<`; rewrite to the

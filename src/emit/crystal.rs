@@ -62,6 +62,10 @@ dependencies:
 // ActiveRecord::Base, Router, ViewHelpers) lives in `runtime/ruby/`
 // and transpiles via `runtime_loader::crystal_units`.
 const CR_DB_SOURCE: &str = include_str!("../../runtime/crystal/db.cr");
+// Native-`Time` seam for temporal columns: `Roundhouse::DateTime.parse`
+// (stored text → Time, the `parse_db_time` intrinsic target) plus the
+// `JsonBuilder.encode_datetime(Time?)` overload.
+const CR_DATETIME_SOURCE: &str = include_str!("../../runtime/crystal/datetime.cr");
 const CR_HTTP_SOURCE: &str = include_str!("../../runtime/crystal/http.cr");
 const CR_PARAM_VALUE_SOURCE: &str = include_str!("../../runtime/crystal/param_value.cr");
 const CR_SERVER_SOURCE: &str = include_str!("../../runtime/crystal/server.cr");
@@ -125,6 +129,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     files.push(EmittedFile {
         path: PathBuf::from("src/db.cr"),
         content: CR_DB_SOURCE.to_string(),
+    });
+    files.push(EmittedFile {
+        path: PathBuf::from("src/datetime.cr"),
+        content: CR_DATETIME_SOURCE.to_string(),
     });
     files.push(EmittedFile {
         path: PathBuf::from("src/http.cr"),

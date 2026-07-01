@@ -394,7 +394,14 @@ fn synth_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
     // target that hasn't wired one yet surfaces the honest not-supported
     // gap on this reader's `Ty::Time` return type.
     let (body, ret_ty) = if is_temporal_col(col) {
-        (temporal_reader_body(col), Ty::Time)
+        // Nilable: a stored value can be absent (NULL / unset), so the
+        // parse short-circuits to nil. `Time?` is the honest static type
+        // and matches what a strict-null target infers from the nilable
+        // storage ivar.
+        (
+            temporal_reader_body(col),
+            Ty::Union { variants: vec![Ty::Time, Ty::Nil] },
+        )
     } else {
         let col_ty = ty_of_column(&col.col_type);
         (
@@ -431,16 +438,20 @@ fn is_temporal_col(col: &Column) -> bool {
     )
 }
 
-/// `@col && ActiveSupport.parse_db_time(@col)` — reader body for a
-/// temporal column. Short-circuits a nil/empty stored value without
-/// needing to know nullability; `parse_db_time` (rendered natively per
-/// target) treats a zone-less stored value as UTC. Typed `Ty::Time`.
+/// `ActiveSupport.parse_db_time(@col)` — reader body for a temporal
+/// column. `parse_db_time` is nil-safe (nil / empty stored value → nil)
+/// and reads a zone-less stored value as UTC, so no explicit `&&` guard
+/// is needed — this renders cleanly on strict-null targets, where a `@col
+/// && …` guard would force a nil-raising `.not_nil!`. Typed `Time | Nil`.
+/// Ruby's emit path overrides this with the guarded `@col && parse(@col)`
+/// form (`apply_datetime_lowering`), so this shape is what non-Ruby
+/// targets render; each maps `parse_db_time` to its native parse.
 fn temporal_reader_body(col: &Column) -> Expr {
-    let ivar = || with_ty(
+    let ivar = with_ty(
         Expr::new(Span::synthetic(), ExprNode::Ivar { name: col.name.clone() }),
         Ty::Str,
     );
-    let parse = with_ty(
+    with_ty(
         Expr::new(
             Span::synthetic(),
             ExprNode::Send {
@@ -449,24 +460,12 @@ fn temporal_reader_body(col: &Column) -> Expr {
                     ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
                 )),
                 method: Symbol::from("parse_db_time"),
-                args: vec![ivar()],
+                args: vec![ivar],
                 block: None,
                 parenthesized: true,
             },
         ),
-        Ty::Time,
-    );
-    with_ty(
-        Expr::new(
-            Span::synthetic(),
-            ExprNode::BoolOp {
-                op: BoolOpKind::And,
-                surface: BoolOpSurface::Symbol,
-                left: ivar(),
-                right: parse,
-            },
-        ),
-        Ty::Time,
+        Ty::Union { variants: vec![Ty::Time, Ty::Nil] },
     )
 }
 
