@@ -261,8 +261,11 @@ fn rewrite_durations(expr: &mut Expr) {
 /// uniformly across targets, so the rewrite (and its `require 'time'`)
 /// stay off shared `lower/` and every other target's runtime.
 ///
-/// Reader becomes `@col && Time.parse(@col)` — short-circuits a nullable
-/// column's `nil` without needing to know nullability. Writer becomes
+/// Reader becomes `@col && ActiveSupport.parse_db_time(@col)` — short-
+/// circuits a nullable column's `nil` without needing to know nullability;
+/// `parse_db_time` (not bare `Time.parse`) treats a zone-less column as
+/// UTC rather than the system's local zone (see
+/// `active_support_time_parsing.rb`). Writer becomes
 /// `@col = (value.respond_to?(:iso8601) ? value.iso8601 : value)` — every
 /// hydration path always assigns a raw String, so this is a no-op there,
 /// but it also normalizes a `Time` passed directly by app code (e.g.
@@ -323,16 +326,20 @@ fn datetime_var(name: &Symbol) -> Expr {
     Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: name.clone() })
 }
 
-/// `@col && Time.parse(@col)`.
+/// `@col && ActiveSupport.parse_db_time(@col)`.
 fn temporal_reader_body(col: &Symbol) -> Expr {
+    // `ActiveSupport.parse_db_time` (not bare `Time.parse`) — a stored
+    // column with no zone marker is always implicitly UTC (Rails/sqlite3
+    // convention), but `Time.parse` defaults an absent zone to the
+    // *system's local zone*. See `active_support_time_parsing.rb`.
     let parse_call = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
             recv: Some(Expr::new(
                 Span::synthetic(),
-                ExprNode::Const { path: vec![Symbol::from("Time")] },
+                ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
             )),
-            method: Symbol::from("parse"),
+            method: Symbol::from("parse_db_time"),
             args: vec![datetime_ivar(col)],
             block: None,
             parenthesized: true,
