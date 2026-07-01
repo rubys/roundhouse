@@ -12,6 +12,12 @@ pub fn ts_ty(ty: &Ty) -> String {
         Ty::Array { elem } => format!("{}[]", ts_ty(elem)),
         Ty::Hash { key, value } => format!("Record<{}, {}>", ts_ty(key), ts_ty(value)),
         Ty::Class { id, .. } => ts_class_ty(id),
+        // Honest not-supported gap until TS's datetime seam lands
+        // (Stage 2) — don't let Time fall through to `any`. (The
+        // `class_is_temporal` → "string" path in ts_class_ty is
+        // separate: it's for hand-written-rbs Time in the shared
+        // runtime, not the first-class `Ty::Time` column type.)
+        Ty::Time => crate::emit::diagnostics::unsupported_time_ty("typescript"),
         Ty::Untyped => "any".into(),
         Ty::Bottom => "never".into(),
         _ => "any".into(),

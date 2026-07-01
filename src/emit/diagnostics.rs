@@ -85,24 +85,32 @@ pub fn report_unsupported(
     StubStyle::for_target(target).render(&text)
 }
 
-/// A `Ty::Time` reached a target that has no native datetime
-/// representation wired yet. Push a structured `Unsupported` diagnostic
+/// Report that a `Ty::Time` reached a target with no native datetime
+/// representation wired yet. Pushes a structured `Unsupported` diagnostic
 /// (collected when inside a [`scope`]; a no-op otherwise, so callers
-/// outside emit — e.g. the LSP type display — are unaffected) and return
-/// a placeholder type name that does NOT compile in any target. That
-/// placeholder matters only on the direct-`emit()` test paths that
-/// bypass the CLI fail-policy: it turns the gap into a loud compiler
-/// error there too, instead of silently degrading to `string`/`interface{}`.
-/// On the CLI path the `Severity::Error` diagnostic fails the transpile
-/// before any file is written. Stage 2 wires each target's native
+/// outside emit — e.g. the LSP type display — are unaffected). On the CLI
+/// path the `Severity::Error` fails the transpile before any file is
+/// written. Use this at a semantic chokepoint that isn't a type position
+/// (e.g. Elixir's untyped structs never render a type, so its column-type
+/// registration reports here instead). Stage 2 wires each target's native
 /// datetime type and drops the call.
-pub fn unsupported_time_ty(target: &str) -> String {
+pub fn report_unsupported_time(target: &str) {
     push(Diagnostic::unsupported(
         crate::span::Span::synthetic(),
         Some(Symbol::from(target)),
         "Time",
         "no native datetime type wired for this target yet",
     ));
+}
+
+/// Type-position variant of [`report_unsupported_time`]: pushes the same
+/// diagnostic and returns a placeholder type name that does NOT compile
+/// in any target. The placeholder matters only on direct-`emit()` test
+/// paths that bypass the CLI fail-policy — it turns the gap into a loud
+/// compiler error there too, instead of silently degrading to
+/// `string`/`interface{}`/`any`.
+pub fn unsupported_time_ty(target: &str) -> String {
+    report_unsupported_time(target);
     "RoundhouseUnsupportedTime".to_string()
 }
 

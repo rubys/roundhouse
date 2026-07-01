@@ -1063,20 +1063,19 @@ pub(super) fn with_ty(mut e: Expr, ty: Ty) -> Expr {
 /// — duplicated here to avoid making that internal helper public for one
 /// caller. Keep them in sync; the mapping is small and stable.
 ///
-/// Date/DateTime/Time map to `Ty::Str` because the runtime stores them
-/// as ISO-8601 strings (`Time.now.utc.iso8601` in fill_timestamps);
-/// every target's column slot accepts strings. TS/Rust already render
-/// these as `string` via target-side `class_is_temporal` rewrites;
-/// committing the IR to `Ty::Str` lets Crystal join the convention
-/// without a target-side override and removes the type-system tension
-/// at `[]=`/`[]` cast sites.
+/// Date/DateTime/Time map to the first-class `Ty::Time`. Storage stays
+/// ISO-8601 TEXT (the DB column is TEXT; `column_read_method` reads
+/// `column_text`, same as a String), but the *type* is Time — so Ruby
+/// hydrates to a real `Time` at the accessor (`apply_datetime_lowering`)
+/// and a target with no native datetime type wired yet surfaces the
+/// honest not-supported gap via its `Ty::Time` ty-stringifier arm.
 pub fn ty_of_column(t: &ColumnType) -> Ty {
     match t {
         ColumnType::Integer | ColumnType::BigInt => Ty::Int,
         ColumnType::Float | ColumnType::Decimal { .. } => Ty::Float,
         ColumnType::String { .. } | ColumnType::Text => Ty::Str,
         ColumnType::Boolean => Ty::Bool,
-        ColumnType::Date | ColumnType::DateTime | ColumnType::Time => Ty::Str,
+        ColumnType::Date | ColumnType::DateTime | ColumnType::Time => Ty::Time,
         ColumnType::Binary => Ty::Str,
         ColumnType::Json => Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) },
         ColumnType::Reference { .. } => Ty::Int,

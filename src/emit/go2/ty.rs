@@ -20,6 +20,9 @@ pub fn go_ty_stub(ty: Option<&Ty>) -> String {
         Some(Ty::Float) => "float64".to_string(),
         Some(Ty::Bool) => "bool".to_string(),
         Some(Ty::Sym) => "string".to_string(),
+        // Honest not-supported gap until Go's datetime seam lands
+        // (Stage 2) — do NOT let Time fall through to `interface{}`.
+        Some(Ty::Time) => crate::emit::diagnostics::unsupported_time_ty("go"),
         Some(Ty::Hash { key, value }) => {
             format!(
                 "map[{}]{}",

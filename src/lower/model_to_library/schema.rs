@@ -299,13 +299,21 @@ fn synth_column_predicate(owner: &ClassId, col: &Column) -> MethodDef {
             not_nil(col, &col_ty),
             bool_send(col_ivar(col, col_ty.clone()), "!=", lit_int(0)),
         ),
-        // String (and Date/DateTime/Time, which lower to `Ty::Str`):
-        // present AND non-empty (`!value.blank?`). `""` → false; a Time
-        // value is never `== ""`, so this reduces to presence for dates.
-        // (Whitespace-only-blank is not modeled — `.strip` would crash the
-        // datetime case, whose stored value is a Time, not a String.)
+        // String: present AND non-empty (`!value.blank?`). `""` → false.
+        // (Whitespace-only-blank is not modeled.)
         Ty::Str => and_bool(
             not_nil(col, &col_ty),
+            bool_send(col_ivar(col, Ty::Str), "!=", lit_str(String::new())),
+        ),
+        // Date/DateTime/Time: Rails' `?` is presence — a NULL datetime is
+        // absent. The column hydrates as TEXT (`column_text` returns `""`
+        // for SQL NULL, never `nil`), so presence must test non-empty on
+        // the stored text, NOT just non-nil. Read the ivar as its stored
+        // `String` form; the logical `Ty::Time` only matters at the
+        // accessor. When a target's native datetime seam lands (Stage 2)
+        // this gets a Time-shaped presence check for that target.
+        Ty::Time => and_bool(
+            not_nil(col, &Ty::Str),
             bool_send(col_ivar(col, Ty::Str), "!=", lit_str(String::new())),
         ),
         // Everything else (binary, json, references): present (`!nil?`).

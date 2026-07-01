@@ -248,18 +248,17 @@ fn rewrite_durations(expr: &mut Expr) {
     }
 }
 
-/// Ruby-family pre-emit pass: make Date/DateTime/Time-typed columns
-/// behave like real `Time` values in CRuby/JRuby, on top of the `time`
-/// stdlib (`require 'time'`, wired in `ruby_overlay/main.rb`). The IR
-/// keeps these columns `Ty::Str` end to end — `ty_of_column`'s documented
-/// decision: storage is ISO-8601 text and every target's column slot /
-/// serialization agrees on that — but every analyzer-approved *use* of a
-/// datetime column (`strftime`, comparisons, `.ago`) assumes `Time`
-/// semantics, so only the CRuby/JRuby in-memory representation needs to
-/// follow, at the accessor boundary. Lives on the Ruby emit path for the
-/// same reason as Duration: `Time` parsing/formatting doesn't transpile
-/// uniformly across targets, so the rewrite (and its `require 'time'`)
-/// stay off shared `lower/` and every other target's runtime.
+/// Ruby-family pre-emit pass: make Date/DateTime/Time columns behave like
+/// real `Time` values in CRuby/JRuby, on top of the `time` stdlib
+/// (`require 'time'`, wired in `ruby_overlay/main.rb`). The columns type
+/// as `Ty::Time` in the IR, but storage stays ISO-8601 TEXT (the DB
+/// column is TEXT; `column_read_method` reads it as text, same as a
+/// String) — so this pass bridges the stored text to the `Time` the type
+/// promises, at the accessor boundary. Lives on the Ruby emit path for
+/// the same reason as Duration: `Time` parsing/formatting doesn't
+/// transpile uniformly across targets, so the rewrite (and its
+/// `require 'time'`) stay off shared `lower/`; a target without a native
+/// datetime type instead surfaces the honest not-supported gap.
 ///
 /// Reader becomes `@col && ActiveSupport.parse_db_time(@col)` — short-
 /// circuits a nullable column's `nil` without needing to know nullability;

@@ -501,12 +501,23 @@ mod tests {
     }
 
     #[test]
-    fn wont_lower_rust_is_clean_and_bad_target_is_an_error() {
-        // real-blog is a supported rust transpile (byte-matches Rails).
+    fn wont_lower_rust_reports_time_gap_and_bad_target_is_an_error() {
+        // real-blog has Date/DateTime columns, which type as the first-
+        // class `Ty::Time`. Rust's native datetime seam isn't wired yet
+        // (Stage 1: honest not-supported until Stage 2), so `wont_lower`
+        // reports the gap rather than "lowers cleanly". A valid target
+        // with gaps is still a successful query (isError=false) — the
+        // gaps are the *answer*, not a tool failure. When rust's Time
+        // seam lands, this flips back to "lowers cleanly".
         let ok = call(&server(), "wont_lower", json!({ "target": "rust" }));
         assert_eq!(ok["result"]["isError"], false);
-        assert!(text_of(&ok).contains("lowers cleanly"), "got: {}", text_of(&ok));
+        assert!(
+            text_of(&ok).contains("Time not supported (rust)"),
+            "expected the Ty::Time gap to surface, got: {}",
+            text_of(&ok)
+        );
 
+        // An unknown/unsupported target is a genuine tool error.
         let bad = call(&server(), "wont_lower", json!({ "target": "fortran" }));
         assert_eq!(bad["result"]["isError"], true);
     }

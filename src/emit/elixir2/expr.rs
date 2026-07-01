@@ -195,6 +195,15 @@ pub(super) fn register_field_names(class: &str, fields: &[String]) {
 /// Register a class's struct fields with their `Ty` (model + `<Model>Row`
 /// classes — column types from the schema).
 pub(super) fn register_field_types(class: &str, fields: &[(String, crate::ty::Ty)]) {
+    // Honest not-supported gap: Elixir structs are untyped, so a
+    // `Ty::Time` column never renders a type that would trip the
+    // ty-stringifier path the statically-typed targets use. This is the
+    // one Elixir site that sees every column's schema `Ty`, so report the
+    // gap here — same diagnostic, until Elixir's native DateTime seam
+    // lands (Stage 2).
+    if fields.iter().any(|(_, ty)| matches!(ty, crate::ty::Ty::Time)) {
+        crate::emit::diagnostics::report_unsupported_time("elixir");
+    }
     FIELD_TYPES.with(|f| {
         f.borrow_mut().insert(class.to_string(), fields.iter().cloned().collect());
     });

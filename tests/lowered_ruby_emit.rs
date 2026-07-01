@@ -2097,7 +2097,7 @@ fn integer_durations_rewrite_to_duration_calls() {
     // A plural unit rewrites unconditionally (handles an untyped Int constant
     // receiver), but a singular `day`/`hour`/`month`/`year` also names a Time
     // component reader, so it rewrites only when the receiver is numeric —
-    // `created_at.day` (a datetime, lowered to Str) must be left alone.
+    // `created_at.day` (a datetime, typed Ty::Time) must be left alone.
     let app = ingest_tree(&[
         (
             "db/schema.rb",
@@ -2152,9 +2152,10 @@ fn model_class_constants_are_captured() {
 fn column_query_predicates_match_rails_semantics() {
     // Rails defines `<col>?` on every column, with type-specific semantics
     // (ActiveRecord query_cast_attribute): boolean → the value's truthiness,
-    // numeric → non-zero (`0` is false), string/date → present (`""`/nil is
-    // false). Date/DateTime lower to `Ty::Str`, so they share the string
-    // form — exact for them since a Time value is never `== ""`.
+    // numeric → non-zero (`0` is false), string → present (`""`/nil is
+    // false). Date/DateTime type as `Ty::Time` but hydrate as TEXT
+    // (`column_text` returns `""` for NULL), so their `?` tests the stored
+    // text for presence — the same `!nil? && != ""` form as a String.
     let app = ingest_tree(&[
         (
             "db/schema.rb",
