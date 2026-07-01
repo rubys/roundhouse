@@ -543,6 +543,12 @@ impl<'a> BodyTyper<'a> {
             Some(Ty::Record { row }) => record_method(method, row, args),
             Some(Ty::Str) => str_method(method),
             Some(Ty::Sym) => sym_method(method),
+            // A `Ty::Time` value (datetime-column read, `Time.now`, etc.)
+            // dispatches through the same table the `Time` class constant
+            // uses. Unmodeled methods fall back to `unknown()` (an
+            // inference gap) rather than the parent-chain walk — `Time`
+            // has no user-defined ancestors in this corpus.
+            Some(Ty::Time) => time_method(method).unwrap_or_else(unknown),
             Some(Ty::Int) => int_method(method),
             Some(Ty::Float) => float_method(method),
             Some(Ty::Bool) => bool_method(method),
@@ -709,22 +715,19 @@ pub(super) fn range_method(method: &Symbol, elem: Option<&Ty>) -> Option<Ty> {
     Some(ty)
 }
 
-/// Methods on a `Time` value — modeled as `Ty::Class { id: "Time" }`
-/// (like `Range`), not a `Ty` variant. AR datetime columns now type as
-/// `Time` (see `ingest::model::ty_of_column`), so this is the surface a
-/// column read like `story.created_at.strftime(...)` dispatches
-/// against. Class and instance flatten onto the same `Class { Time }`,
-/// so the class-side constructors (`Time.now`) live here too. Date /
-/// DateTime columns also map to `Time` (its method surface is a
-/// superset for everything the corpus calls); a dedicated `date_method`
-/// can split them out if a Date-only method ever surfaces. Returns
-/// `None` for unmodeled methods so dispatch falls through to the
-/// parent-chain walk.
+/// Methods on a `Time` value — modeled as the first-class `Ty::Time`
+/// variant. AR datetime columns type as `Ty::Time` (see
+/// `ingest::model::ty_of_column`), so this is the surface a column read
+/// like `story.created_at.strftime(...)` dispatches against. The `Time`
+/// class constant (`Ty::Class{"Time"}`, the receiver of `Time.now`)
+/// flattens onto the same table, so the class-side constructors live
+/// here too. Date / DateTime columns also fold into `Ty::Time` (its
+/// method surface is a superset for everything the corpus calls); a
+/// dedicated `date_method` can split them out if a Date-only method ever
+/// surfaces. Returns `None` for unmodeled methods so dispatch falls
+/// through to the parent-chain walk.
 pub(super) fn time_method(method: &Symbol) -> Option<Ty> {
-    let time = || Ty::Class {
-        id: ClassId(Symbol::from("Time")),
-        args: vec![],
-    };
+    let time = || Ty::Time;
     let ty = match method.as_str() {
         // Constructors, coercions, and Time-returning transforms.
         "now" | "current" | "utc" | "local" | "at" | "today"

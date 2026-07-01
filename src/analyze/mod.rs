@@ -3988,19 +3988,17 @@ fn register_typed_store_decls(expr: &Expr, methods: &mut HashMap<Symbol, Ty>) {
 }
 
 /// A `typed_store` column type → its Roundhouse `Ty`. `any` is the
-/// untyped escape (`Ty::Untyped`); `datetime`/`time`/`date` map to the
-/// registered temporal classes. Anything unrecognized returns `None` and
+/// untyped escape (`Ty::Untyped`); `datetime`/`time`/`date` fold into the
+/// first-class `Ty::Time`. Anything unrecognized returns `None` and
 /// stays unregistered.
 fn typed_store_ty(type_method: &str) -> Option<Ty> {
-    let class = |name: &str| Ty::Class { id: ClassId(Symbol::from(name)), args: vec![] };
     Some(match type_method {
         "string" | "text" => Ty::Str,
         "boolean" => Ty::Bool,
         "integer" | "big_integer" => Ty::Int,
         "float" | "decimal" => Ty::Float,
         "any" => Ty::Untyped,
-        "datetime" | "time" => class("Time"),
-        "date" => class("Date"),
+        "datetime" | "time" | "date" => Ty::Time,
         _ => return None,
     })
 }
