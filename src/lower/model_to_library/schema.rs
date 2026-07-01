@@ -299,21 +299,13 @@ fn synth_column_predicate(owner: &ClassId, col: &Column) -> MethodDef {
             not_nil(col, &col_ty),
             bool_send(col_ivar(col, col_ty.clone()), "!=", lit_int(0)),
         ),
-        // String: present AND non-empty (`!value.blank?`). `""` → false.
-        // (Whitespace-only-blank is not modeled.)
+        // String (and Date/DateTime/Time, which store as text →
+        // `ty_of_column` Str): present AND non-empty (`!value.blank?`).
+        // `""` → false — correct for a NULL datetime too, since
+        // `column_text` hydrates SQL NULL as `""`, never `nil`. The `?`
+        // predicate reads the stored text, not the `Time` reader.
         Ty::Str => and_bool(
             not_nil(col, &col_ty),
-            bool_send(col_ivar(col, Ty::Str), "!=", lit_str(String::new())),
-        ),
-        // Date/DateTime/Time: Rails' `?` is presence — a NULL datetime is
-        // absent. The column hydrates as TEXT (`column_text` returns `""`
-        // for SQL NULL, never `nil`), so presence must test non-empty on
-        // the stored text, NOT just non-nil. Read the ivar as its stored
-        // `String` form; the logical `Ty::Time` only matters at the
-        // accessor. When a target's native datetime seam lands (Stage 2)
-        // this gets a Time-shaped presence check for that target.
-        Ty::Time => and_bool(
-            not_nil(col, &Ty::Str),
             bool_send(col_ivar(col, Ty::Str), "!=", lit_str(String::new())),
         ),
         // Everything else (binary, json, references): present (`!nil?`).
@@ -393,17 +385,32 @@ fn and_bool(left: Expr, right: Expr) -> Expr {
 }
 
 fn synth_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
-    let col_ty = ty_of_column(&col.col_type);
-    let body = with_ty(
-        Expr::new(Span::synthetic(), ExprNode::Ivar { name: col.name.clone() }),
-        col_ty.clone(),
-    );
+    // Temporal columns store ISO-8601 TEXT (`ty_of_column` → Str) but
+    // read back as a real `Time`: the reader parses the stored text so
+    // `record.created_at` is a native `Time` for callers / analyze /
+    // Rails-canonical JSON. This is the shared, all-target home of what
+    // used to be Ruby's emit-only `apply_datetime_lowering`. Each backend
+    // renders `parse_db_time` (a stored-text→Time intrinsic) natively; a
+    // target that hasn't wired one yet surfaces the honest not-supported
+    // gap on this reader's `Ty::Time` return type.
+    let (body, ret_ty) = if is_temporal_col(col) {
+        (temporal_reader_body(col), Ty::Time)
+    } else {
+        let col_ty = ty_of_column(&col.col_type);
+        (
+            with_ty(
+                Expr::new(Span::synthetic(), ExprNode::Ivar { name: col.name.clone() }),
+                col_ty.clone(),
+            ),
+            col_ty,
+        )
+    };
     MethodDef {
         name: col.name.clone(),
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
         body,
-        signature: Some(fn_sig(vec![], col_ty)),
+        signature: Some(fn_sig(vec![], ret_ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::AttributeReader,
@@ -411,6 +418,56 @@ fn synth_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
             mutates_self: false,
             block_param: None,
     }
+}
+
+/// True for a Date/DateTime/Time column — a stored-text column whose
+/// reader parses to a native `Time`.
+fn is_temporal_col(col: &Column) -> bool {
+    matches!(
+        col.col_type,
+        crate::schema::ColumnType::Date
+            | crate::schema::ColumnType::DateTime
+            | crate::schema::ColumnType::Time
+    )
+}
+
+/// `@col && ActiveSupport.parse_db_time(@col)` — reader body for a
+/// temporal column. Short-circuits a nil/empty stored value without
+/// needing to know nullability; `parse_db_time` (rendered natively per
+/// target) treats a zone-less stored value as UTC. Typed `Ty::Time`.
+fn temporal_reader_body(col: &Column) -> Expr {
+    let ivar = || with_ty(
+        Expr::new(Span::synthetic(), ExprNode::Ivar { name: col.name.clone() }),
+        Ty::Str,
+    );
+    let parse = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
+                )),
+                method: Symbol::from("parse_db_time"),
+                args: vec![ivar()],
+                block: None,
+                parenthesized: true,
+            },
+        ),
+        Ty::Time,
+    );
+    with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::BoolOp {
+                op: BoolOpKind::And,
+                surface: BoolOpSurface::Symbol,
+                left: ivar(),
+                right: parse,
+            },
+        ),
+        Ty::Time,
+    )
 }
 
 fn synth_attr_writer(owner: &ClassId, col: &Column) -> MethodDef {

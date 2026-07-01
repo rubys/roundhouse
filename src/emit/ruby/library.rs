@@ -24,6 +24,12 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     apply_scope_lowering(&mut lcs, app);
     apply_helper_lowering(&mut lcs, app);
     apply_duration_lowering(&mut lcs);
+    // Transpiled-shape classes carry hand-written accessors that
+    // `synth_attr_reader` never sees, so the datetime reader/writer
+    // rewrite still runs here for them (Ruby-only). Model-lowered classes
+    // get the reader from `synth_attr_reader` (shared, all targets); this
+    // re-applies the same reader idempotently and adds the Ruby writer
+    // normalize.
     apply_datetime_lowering(&mut lcs, app);
     lcs.iter()
         .flat_map(|lc| {
