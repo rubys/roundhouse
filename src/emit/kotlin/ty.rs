@@ -21,10 +21,13 @@ pub fn kotlin_ty(t: &Ty) -> String {
         Ty::Float => "Double".to_string(),
         Ty::Bool => "Boolean".to_string(),
         Ty::Str => "String".to_string(),
-        // Kotlin has java.time.Instant, but the datetime seam isn't
-        // wired yet (Stage 2) — a Time surface is an honest not-
-        // supported gap.
-        Ty::Time => crate::emit::diagnostics::unsupported_time_ty("kotlin"),
+        // Kotlin has `java.time.OffsetDateTime` (round-trips UTC, formats
+        // to `...Z`). Temporal columns store ISO-8601 text (a `String`
+        // backing field) and read back as a real `OffsetDateTime` via an
+        // explicit computed getter — see the temporal branch in
+        // kotlin/library.rs and `RhDateTime.parse`. Rendered fully-
+        // qualified so emitted files need no `import` line.
+        Ty::Time => "java.time.OffsetDateTime".to_string(),
         // No symbol type in Kotlin — route symbols to string keys, as
         // the TS/Crystal renderers do.
         Ty::Sym => "String".to_string(),

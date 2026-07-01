@@ -117,6 +117,36 @@ thread_local! {
     /// emitted as a `ThreadLocal`: reads become `name.get()`, whole-reassigns
     /// `name.set(…)`. Empty for instance classes (their ivars are per-object).
     static OBJECT_TL_FIELDS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// camelCased names of the current class's *temporal* (Date/DateTime/
+    /// Time) columns. Storage stays ISO-8601 text in a `String` backing
+    /// field (`<name>Raw`), while the public member `<name>` is a computed
+    /// getter that parses it to a native `OffsetDateTime` (see the temporal
+    /// branch in `library.rs`). So every INTERNAL reference to the column
+    /// (ivar read/write, `self.col=`/`instance.col=` setter sends) targets
+    /// the `String` backing — the `Time` lives only at the getter, which an
+    /// EXTERNAL `record.col` read reaches. Empty except while emitting a
+    /// model class that has a temporal column.
+    static TEMPORAL_STORAGE: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+/// Install the current class's temporal-column names (camelCased; see
+/// `TEMPORAL_STORAGE`). Cleared (set empty) before every non-temporal
+/// class emit.
+pub(super) fn set_temporal_storage(names: HashSet<String>) {
+    TEMPORAL_STORAGE.with(|t| *t.borrow_mut() = names);
+}
+
+/// True when `name` (camelCased) is a temporal column of the current class
+/// — its reference must target the `String` backing, not the `Time` getter.
+fn is_temporal_storage(name: &str) -> bool {
+    TEMPORAL_STORAGE.with(|t| t.borrow().contains(name))
+}
+
+/// The `String` storage backing name for a temporal column's camelCased
+/// name (`createdAt` → `createdAtRaw`). The `<name>` member itself is the
+/// native-`Time` computed getter.
+fn temporal_backing(camel_name: &str) -> String {
+    format!("{camel_name}Raw")
 }
 
 /// Install the current object's thread-local field names (see
@@ -801,6 +831,9 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
             let n = camel(name.as_str());
             if is_object_tl_field(&n) {
                 format!("{n}.get()")
+            } else if is_temporal_storage(&n) {
+                // Read the `String` storage backing, not the `Time` getter.
+                temporal_backing(&n)
             } else {
                 nonnull_read(n)
             }
@@ -1122,7 +1155,13 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
 fn lvalue_ref(target: &LValue) -> String {
     match target {
         LValue::Var { name, .. } => camel(name.as_str()),
-        LValue::Ivar { name } => format!("this.{}", camel(name.as_str())),
+        LValue::Ivar { name } => {
+            let n = camel(name.as_str());
+            // A temporal column's direct ivar write (`fill_timestamps`,
+            // `reload`, `[]=`) targets the `String` backing.
+            let n = if is_temporal_storage(&n) { temporal_backing(&n) } else { n };
+            format!("this.{n}")
+        }
         LValue::Attr { recv, name } => format!("{}.{}", emit_expr(recv), camel(name.as_str())),
         LValue::Index { recv, index } => format!("{}[{}]", emit_expr(recv), emit_expr(index)),
         LValue::Const { path } => path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("."),
@@ -1345,6 +1384,15 @@ fn emit_send(
                 (Some("JSON"), "generate") => {
                     return format!("JsonBuilder.encodeValue({})", args_s[0]);
                 }
+                // Temporal reader intrinsic: `ActiveSupport.parse_db_time(s)`
+                // parses stored ISO-8601 text into a native `OffsetDateTime`.
+                // Renders to the hand-written `RhDateTime.parse` (nil-safe:
+                // `String?` → `OffsetDateTime?`). The argument is the column's
+                // `String` storage backing (an ivar that `emit_node` already
+                // redirects to `<name>Raw`).
+                (Some("ActiveSupport"), "parse_db_time") if args.len() == 1 => {
+                    return format!("RhDateTime.parse({})", args_s[0]);
+                }
                 _ => {}
             }
         }
@@ -1388,6 +1436,26 @@ fn emit_send(
     if let (Some(r), 1) = (recv, args.len()) {
         if method.ends_with('=') && !matches!(method, "==" | "!=" | "<=" | ">=") {
             let base = &method[..method.len() - 1];
+            // Temporal column setter (`self.created_at=` in initialize /
+            // assign_from_row / update, `instance.created_at=` in the
+            // companion from_row/from_stmt): write the `String` backing, not
+            // the read-only `Time` getter. A `self` receiver's value may be
+            // an untyped `attrs[k]`/`row[k]` lookup → coerce to `String`; a
+            // local-receiver setter (`instance.`) already carries the Cast
+            // (from_row) or reads `column_text` (from_stmt), both `String`.
+            if is_temporal_storage(&camel(base)) {
+                let backing = temporal_backing(&camel(base));
+                if matches!(&*r.node, ExprNode::SelfRef) {
+                    if !arg_already_ty(&args[0], &crate::ty::Ty::Str) {
+                        return format!(
+                            "this.{backing} = {}",
+                            emit_cast(&args[0], &crate::ty::Ty::Str)
+                        );
+                    }
+                    return format!("this.{backing} = {}", args_s[0]);
+                }
+                return format!("{}.{backing} = {}", emit_expr(r), args_s[0]);
+            }
             // `self.<col> = <untyped>` (assign_from_row / initialize /
             // update read `row[k]`/`attrs[k]` as `Any?`) — coerce to the
             // column's scalar type. Only for a `self` receiver: `from_row`

@@ -39,6 +39,12 @@ const TIME_KT: &str = include_str!("../../../runtime/kotlin/time.kt");
 /// `Int`-typed column index internally.
 const DB_KT: &str = include_str!("../../../runtime/kotlin/db.kt");
 
+/// Native-`Time` seam for temporal columns: `RhDateTime.parse` (stored
+/// ISO-8601 text → `OffsetDateTime`, the `ActiveSupport.parse_db_time`
+/// intrinsic target) plus the `JsonBuilder.encodeDatetime(OffsetDateTime?)`
+/// overload (native datetime → Rails' canonical `...Z` millisecond JSON).
+const DATETIME_KT: &str = include_str!("../../../runtime/kotlin/datetime.kt");
+
 // The previous `ParamValue` sealed-union primitive was removed: the params
 // layer now holds untyped values as Kotlin's top type `Any?` (nested Hash →
 // `MutableMap<String, Any?>`, scalar → `String`), which is what
@@ -108,6 +114,10 @@ pub fn primitives() -> Vec<EmittedFile> {
         EmittedFile {
             path: PathBuf::from("src/main/kotlin/Db.kt"),
             content: DB_KT.to_string(),
+        },
+        EmittedFile {
+            path: PathBuf::from("src/main/kotlin/RhDateTime.kt"),
+            content: DATETIME_KT.to_string(),
         },
         EmittedFile {
             path: PathBuf::from("src/main/kotlin/AdapterInterface.kt"),

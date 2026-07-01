@@ -23,7 +23,7 @@ use crate::ty::Ty;
 use super::expr::{
     begin_method, emit_expr, hoisted_decls, register_method_params, set_current_class,
     set_instance_prop_types, set_instance_props, set_param_names, set_return_label,
-    set_returns_unit,
+    set_returns_unit, set_temporal_storage,
 };
 use super::naming::{camel, type_name};
 use super::ty::kotlin_ty;
@@ -158,6 +158,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     if lc.is_module {
         set_instance_prop_types(std::collections::HashMap::new());
         set_current_class("");
+        set_temporal_storage(HashSet::new());
         let accessor_props = class_accessor_props(&lc.methods);
         let mut out = format!("object {class_name} {{\n");
         for (n, ty) in &accessor_props {
@@ -188,12 +189,45 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     // registry left from a preceding object emit.
     super::expr::set_object_tl_fields(HashSet::new());
 
+    // Temporal (Date/DateTime/Time) columns decouple storage from the
+    // reader: the column keeps an ISO-8601 `String` backing field
+    // (`<name>Raw`) while the public member `<name>` is a computed getter
+    // that parses it to a native `OffsetDateTime` (via `RhDateTime.parse`).
+    // A plain `var` property would couple the field type to the reader's
+    // `Time` — Kotlin has one member per name — so these are pulled out of
+    // the accessor→`var` collapse and emitted explicitly below. Collect the
+    // camelCased names (+ the reader body to render into the getter) up
+    // front; the accessor loop then skips both the reader and its writer.
+    let mut temporal_names: HashSet<String> = HashSet::new();
+    let mut temporal_readers: Vec<(String, Ty, Expr)> = Vec::new();
+    for m in &lc.methods {
+        if m.kind == AccessorKind::AttributeReader && signature_ret_is_time(m.signature.as_ref()) {
+            let name = camel(m.name.as_str());
+            if temporal_names.insert(name.clone()) {
+                let ret = match m.signature.as_ref() {
+                    Some(Ty::Fn { ret, .. }) => (**ret).clone(),
+                    _ => Ty::Time,
+                };
+                temporal_readers.push((name, ret, m.body.clone()));
+            }
+        }
+    }
+    // Redirect every INTERNAL reference to a temporal column (ivar
+    // reads/writes, `self.col=`/`instance.col=` setter sends) onto its
+    // `String` backing while this class's bodies render. Cleared for the
+    // next class. Set before ANY body emits (getters, `init`, methods).
+    set_temporal_storage(temporal_names.clone());
+
     // 1. Accessor-derived properties (name → type), and the set of method
-    //    names to drop (the synthesized getters/setters).
+    //    names to drop (the synthesized getters/setters). Temporal readers
+    //    and their writers are skipped — handled as backing + getter below.
     let mut prop_types: BTreeMap<String, Ty> = BTreeMap::new();
     for m in &lc.methods {
         match m.kind {
             AccessorKind::AttributeReader => {
+                if temporal_names.contains(&camel(m.name.as_str())) {
+                    continue;
+                }
                 if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
                     prop_types
                         .entry(camel(m.name.as_str()))
@@ -205,6 +239,9 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
                     if let Some(p) = params.first() {
                         // writer name is `foo=`; strip the `=`.
                         let base = m.name.as_str().trim_end_matches('=');
+                        if temporal_names.contains(&camel(base)) {
+                            continue;
+                        }
                         prop_types.entry(camel(base)).or_insert_with(|| p.ty.clone());
                     }
                 }
@@ -308,7 +345,8 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     }
     let inferred_ivar_types = infer_body_ivar_types(&lc.methods);
     for n in body_ivars.keys() {
-        if !prop_types.contains_key(n) && !inherited_props.contains(n) {
+        if !prop_types.contains_key(n) && !inherited_props.contains(n) && !temporal_names.contains(n)
+        {
             let m = member_modifier(n);
             match inferred_ivar_types.get(n) {
                 Some(ty) => out.push_str(&format!("    {}\n", render_member(m, n, ty))),
@@ -316,7 +354,27 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
             }
         }
     }
-    if !prop_types.is_empty() || !body_ivars.is_empty() {
+    // Temporal columns: the `String` storage backing (`<name>Raw`, holding
+    // the ISO-8601 stored text) + the native-`Time` computed getter
+    // (`<name>`, parsing the backing). The internal uses target the backing
+    // (redirected in `expr.rs` via `TEMPORAL_STORAGE`); an external
+    // `record.<name>` read hits the getter. Deterministic order.
+    let mut temporal_sorted = temporal_readers.clone();
+    temporal_sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    for (n, ret, body) in &temporal_sorted {
+        let backing = format!("{n}Raw");
+        out.push_str(&format!("    {}var {backing}: String = \"\"\n", member_modifier(&backing)));
+        // The getter renders the reader body — `parse_db_time(@col)` →
+        // `RhDateTime.parse(<name>Raw)` (the ivar redirect + the
+        // `ActiveSupport.parse_db_time` mapping in `expr.rs`).
+        out.push_str(&format!(
+            "    {}val {n}: {} get() = {}\n",
+            member_modifier(n),
+            kotlin_ty(ret),
+            emit_expr(body),
+        ));
+    }
+    if !prop_types.is_empty() || !body_ivars.is_empty() || !temporal_readers.is_empty() {
         out.push('\n');
     }
 
@@ -1185,6 +1243,21 @@ fn render_member(modifier: &str, name: &str, ty: &Ty) -> String {
     } else {
         format!("{modifier}var {name}: {kt} = {def}")
     }
+}
+
+/// True when a method's return type is `Time` (or a `Time | Nil` union) —
+/// i.e. a synthesized temporal-column reader (`synth_attr_reader`). Its
+/// storage stays a `String` backing while the reader parses to a native
+/// `OffsetDateTime`; mirrors crystal's `signature_ret_is_time`.
+fn signature_ret_is_time(sig: Option<&Ty>) -> bool {
+    fn is_time(t: &Ty) -> bool {
+        match t {
+            Ty::Time => true,
+            Ty::Union { variants } => variants.iter().any(is_time),
+            _ => false,
+        }
+    }
+    matches!(sig, Some(Ty::Fn { ret, .. }) if is_time(ret))
 }
 
 /// Default initializer for a property type (Kotlin requires properties
