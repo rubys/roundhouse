@@ -501,32 +501,27 @@ mod tests {
     }
 
     #[test]
-    fn wont_lower_surfaces_time_gap_for_unwired_target_and_bad_target_is_an_error() {
+    fn wont_lower_lowers_datetime_cleanly_and_bad_target_is_an_error() {
         // real-blog has Date/DateTime columns, which type as the first-
-        // class `Ty::Time`. Rust's native datetime seam landed (Stage 2:
-        // temporal columns store ISO-8601 text and read back as a real
-        // `chrono::DateTime<Utc>`), so `wont_lower` for rust now reports
-        // "lowers cleanly" — no Time gap.
-        let rust = call(&server(), "wont_lower", json!({ "target": "rust" }));
-        assert_eq!(rust["result"]["isError"], false);
-        assert!(
-            text_of(&rust).contains("lowers cleanly"),
-            "rust's native datetime seam is wired; expected a clean lower, got: {}",
-            text_of(&rust)
-        );
-
-        // A target whose datetime seam ISN'T wired yet still surfaces the
-        // `Ty::Time` gap. A valid target with gaps is still a successful
-        // query (isError=false) — the gaps are the *answer*, not a tool
-        // failure. When python's Time seam lands, re-point this to another
-        // still-unwired target (or drop it once all targets are done).
-        let py = call(&server(), "wont_lower", json!({ "target": "python" }));
-        assert_eq!(py["result"]["isError"], false);
-        assert!(
-            text_of(&py).contains("Time not supported (python)"),
-            "expected the Ty::Time gap to surface for python, got: {}",
-            text_of(&py)
-        );
+        // class `Ty::Time`. The shared Stage-2 datetime foundation stores
+        // temporal columns as ISO-8601 TEXT and exposes them through a
+        // synthesized reader that parses to a native datetime — so `Ty::Time`
+        // never reaches a not-supported type position. With Python now
+        // wired (its reader emits a `datetime` `@property` over a `str`
+        // backing, rather than a `RoundhouseUnsupportedTime` field), every
+        // transpile target lowers real-blog cleanly. (When a target grows a
+        // NEW un-lowerable construct, re-point one of these to witness the
+        // gap; a valid target with gaps is still isError=false — the gaps
+        // are the *answer*, not a tool failure.)
+        for target in ["rust", "python", "go", "typescript"] {
+            let r = call(&server(), "wont_lower", json!({ "target": target }));
+            assert_eq!(r["result"]["isError"], false);
+            assert!(
+                text_of(&r).contains("lowers cleanly"),
+                "expected `{target}` to lower real-blog cleanly (datetime seam), got: {}",
+                text_of(&r)
+            );
+        }
 
         // An unknown/unsupported target is a genuine tool error.
         let bad = call(&server(), "wont_lower", json!({ "target": "fortran" }));

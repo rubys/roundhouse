@@ -104,6 +104,13 @@ pub fn emit_method(m: &MethodDef) -> String {
 
 const RUNTIME_SOURCE: &str = include_str!("../../runtime/python/runtime.py");
 const DB_SOURCE: &str = include_str!("../../runtime/python/db.py");
+/// Native-`datetime` seam for temporal columns: `Roundhouse.RhDateTime.
+/// parse` (stored ISO-8601 text -> datetime, the `parse_db_time` intrinsic
+/// target) plus a module-load patch that gives `json_builder.encode_datetime`
+/// a native-`datetime` dispatch (Rails' canonical `...Z` millisecond JSON).
+/// Ships as `app/rh_datetime.py`; imported by models.py when a temporal
+/// column's reader `@property` references `Roundhouse.RhDateTime`.
+const RH_DATETIME_SOURCE: &str = include_str!("../../runtime/python/rh_datetime.py");
 /// Python HTTP runtime — Phase 4d pass-2 shape. `ActionResponse`,
 /// `ActionContext`, and the Router match table live here; copied
 /// verbatim into generated projects as `app/http.py` when any
@@ -177,6 +184,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         files.push(EmittedFile {
             path: PathBuf::from("app/db.py"),
             content: DB_SOURCE.to_string(),
+        });
+        files.push(EmittedFile {
+            path: PathBuf::from("app/rh_datetime.py"),
+            content: RH_DATETIME_SOURCE.to_string(),
         });
         files.push(schema_sql::emit_schema_sql(app));
         files.push(EmittedFile {

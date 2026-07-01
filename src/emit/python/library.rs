@@ -61,6 +61,21 @@ fn accessor_field_ty(m: &MethodDef) -> Ty {
     }
 }
 
+/// True when a method's return type is `Ty::Time` (or a `Time | Nil`
+/// union) — i.e. a synthesized temporal-column reader (see
+/// `synth_attr_reader`). Gates the datetime storage/reader split (mirrors
+/// the Crystal/Swift/C# helper of the same name).
+fn signature_ret_is_time(sig: Option<&Ty>) -> bool {
+    fn is_time(t: &Ty) -> bool {
+        match t {
+            Ty::Time => true,
+            Ty::Union { variants } => variants.iter().any(is_time),
+            _ => false,
+        }
+    }
+    matches!(sig, Some(Ty::Fn { ret, .. }) if is_time(ret))
+}
+
 /// Render a method's parameter list and return type. Prefers the
 /// RBS-derived signature (populated by `parse_library_with_rbs`);
 /// falls back to bare, un-annotated names when a method carries none.
@@ -167,10 +182,31 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
         writeln!(out, "class {name}({}):", bases.join(", ")).unwrap();
     }
 
+    // Temporal (Date/DateTime/Time) columns — the datetime Stage-2
+    // storage/reader split. A reader whose return type is `Ty::Time`
+    // (`created_at`, from `synth_attr_reader`) must NOT collapse into a
+    // plain `datetime`-annotated attribute: storage is ISO-8601 TEXT while
+    // the reader yields a `datetime`. Python can't span both on one name,
+    // so the column keeps a `_<col>: str | None` backing (every internal
+    // ivar/writer use retargets there via `expr::TEMPORAL_BACKINGS`) and
+    // its reader emits as an explicit parsing `@property` below.
+    let temporal_set: std::collections::HashSet<String> = class
+        .methods
+        .iter()
+        .filter(|m| {
+            m.kind == AccessorKind::AttributeReader && signature_ret_is_time(m.signature.as_ref())
+        })
+        .map(|m| super::shared::py_method_name(m.name.as_str()))
+        .collect();
+    super::expr::set_temporal_backings(temporal_set.clone());
+
     // Accessor reader/writer methods collapse into class-level annotated
     // fields (deduped by attribute name, `notice=` and `notice` sharing
-    // one `notice` field). Everything else emits as a method.
+    // one `notice` field). Everything else emits as a method. A temporal
+    // column instead contributes a `_<col>: str | None` backing here and a
+    // `@property` reader/setter below.
     let mut fields: Vec<(String, Ty)> = Vec::new();
+    let mut temporal_props: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for m in class.methods.iter().filter(|m| is_accessor(m)) {
         // Legalize the attribute name for a Python identifier — a
@@ -178,6 +214,17 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
         // an invalid `abstract?` field. Strip the writer `=` first so
         // `notice`/`notice=` still share one field.
         let field = super::shared::py_method_name(m.name.as_str().trim_end_matches('='));
+        if temporal_set.contains(&field) {
+            // A temporal column: a `str | None` storage backing (`_<col>`)
+            // plus the `@property` (emitted below). Reader and writer of
+            // the same column share one backing (deduped by `_<col>`).
+            let backing = format!("_{field}");
+            if seen.insert(backing.clone()) {
+                fields.push((backing, Ty::Union { variants: vec![Ty::Str, Ty::Nil] }));
+                temporal_props.push(field);
+            }
+            continue;
+        }
         if seen.insert(field.clone()) {
             fields.push((field, accessor_field_ty(m)));
         }
@@ -191,8 +238,26 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     for (name, ty) in &fields {
         writeln!(out, "    {name}: {}", python_ty(ty)).unwrap();
     }
-    for (i, m) in methods.iter().enumerate() {
+    // Temporal READERS — an explicit `datetime.datetime | None` `@property`
+    // that parses the `_<col>` `str` backing, plus a `str`-storing setter.
+    // Decoupled from storage: `article.created_at` is a native `datetime`,
+    // the stored text stays portable ISO-8601. (`signature_ret_is_time`
+    // gated these out of the annotated-field pass above.)
+    for (i, col) in temporal_props.iter().enumerate() {
         if i > 0 || !fields.is_empty() {
+            out.push('\n');
+        }
+        writeln!(out, "    @property").unwrap();
+        writeln!(out, "    def {col}(self) -> datetime.datetime | None:").unwrap();
+        writeln!(out, "        return Roundhouse.RhDateTime.parse(self._{col})").unwrap();
+        out.push('\n');
+        writeln!(out, "    @{col}.setter").unwrap();
+        writeln!(out, "    def {col}(self, value: str | None) -> None:").unwrap();
+        writeln!(out, "        self._{col} = value").unwrap();
+    }
+    let had_members = !fields.is_empty() || !temporal_props.is_empty();
+    for (i, m) in methods.iter().enumerate() {
+        if i > 0 || had_members {
             out.push('\n');
         }
         out.push_str(&indent_py(&emit_class_method(m)));
@@ -205,6 +270,9 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
 /// Python functions. Used for `inflector.rb` / `json_builder.rb`, whose
 /// `def self.x` methods become module-level `def x`.
 pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
+    // Clear any temporal-column set a preceding model-class emit installed
+    // — a module's bodies read no model storage.
+    super::expr::set_temporal_backings(std::collections::HashSet::new());
     let mut out = String::new();
     for (i, m) in methods.iter().enumerate() {
         if i > 0 {

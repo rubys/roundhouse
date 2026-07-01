@@ -51,6 +51,10 @@ pub(super) fn emit_models(app: &App) -> EmittedFile {
             }
         }
     }
+    // Clear the datetime storage/reader-split set the last model class
+    // installed, so it can't leak into the subsequent controller/view/spec
+    // emit (whose `.col` reads must hit the `@property`, not a backing).
+    super::expr::set_temporal_backings(std::collections::HashSet::new());
 
     // Break the models<->views import cycle: reach the `Views` facade
     // through the views *module* (`views.Views.X`) rather than importing
@@ -79,6 +83,11 @@ pub(super) fn emit_models(app: &App) -> EmittedFile {
     // active_record_base used Time; per-model timestamp residualization
     // moved that usage into models.py too.
     want("datetime.", "import datetime");
+    // `Roundhouse.RhDateTime.parse` — a temporal column's reader `@property`
+    // parses its ISO-8601 `str` backing into a native `datetime`. Importing
+    // `rh_datetime` also installs its `JsonBuilder.encode_datetime`
+    // native-`datetime` dispatch (a module-load side effect).
+    want("Roundhouse.", "from app.rh_datetime import Roundhouse");
     want("(Base)", "from app.active_record_base import Base");
     want("Db.", "from app.db import Db");
     want("views.Views", "from app import views");
