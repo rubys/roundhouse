@@ -93,6 +93,7 @@ pub fn emit_function_module(
 pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
     super::expr::set_current_class("");
     super::expr::set_in_module(true);
+    super::expr::set_temporal_cols(std::collections::HashSet::new());
     let name = methods
         .first()
         .and_then(|m| m.enclosing_class.as_ref())
@@ -252,6 +253,9 @@ pub fn emit_test_class(
     super::expr::set_current_class(&class_name);
     super::expr::set_in_module(false);
     super::expr::set_error_class(false);
+    // Clear any temporal set left by an inner-class emit above — the test
+    // body reads model datetimes through the `Date?` getter, not storage.
+    super::expr::set_temporal_cols(std::collections::HashSet::new());
     super::expr::set_in_test_class(true);
     let ctx = ClassCtx { name: class_name.clone(), has_parent: false };
 
@@ -429,14 +433,24 @@ pub fn register_classes(lcs: &[LibraryClass]) {
 /// `Sources/App/app/models/<Name>.swift`.
 pub fn emit_class_file(lc: &LibraryClass) -> EmittedFile {
     let class_name = type_name(lc.name.0.as_str());
+    // `import Foundation` — a temporal column's reader is a computed
+    // `Date?` property (see the temporal branch in `emit_library_class`),
+    // and `Date` lives in Foundation. Harmless on the non-temporal model
+    // files (Row/Params) that don't reference it.
     EmittedFile {
         path: PathBuf::from(format!("Sources/App/app/models/{class_name}.swift")),
-        content: emit_library_class(lc),
+        content: format!("import Foundation\n\n{}", emit_library_class(lc)),
     }
 }
 
 pub fn emit_library_class(lc: &LibraryClass) -> String {
     let class_name = type_name(lc.name.0.as_str());
+
+    // Clear the datetime storage/reader-split set — populated below only
+    // for a model class that has temporal columns (module enums, Rows,
+    // and non-temporal classes keep the empty default so their `@col`
+    // reads/writes render unchanged).
+    super::expr::set_temporal_cols(std::collections::HashSet::new());
 
     // A Ruby module with class-level state/methods (`module ActiveRecord`
     // with `class << self; attr_accessor :adapter`) → a caseless enum of
@@ -475,12 +489,35 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     }
     super::expr::set_in_module(false);
 
+    // Datetime storage/reader split: a temporal column (its
+    // `AttributeReader` returns `Time`) does NOT collapse into a stored
+    // `Date` property — the field stores ISO-8601 TEXT (a `<col>Raw :
+    // String` backing) while the reader parses it to a native `Date`. The
+    // reader emits as an explicit computed property, its writer's storage
+    // stays `String`, and every internal `@col` reference retargets to the
+    // backing (via `expr::TEMPORAL_COLS`, set below).
+    let temporal_readers: Vec<&MethodDef> = lc
+        .methods
+        .iter()
+        .filter(|m| {
+            m.kind == AccessorKind::AttributeReader && signature_ret_is_time(m.signature.as_ref())
+        })
+        .collect();
+    let temporal_cols: std::collections::HashSet<String> =
+        temporal_readers.iter().map(|m| camel(m.name.as_str())).collect();
+    super::expr::set_temporal_cols(temporal_cols.clone());
+
     // 1. Accessor-derived properties (name → type), and the set of method
     //    names to drop (the synthesized getters/setters).
     let mut prop_types: BTreeMap<String, Ty> = BTreeMap::new();
     for m in &lc.methods {
         match m.kind {
             AccessorKind::AttributeReader => {
+                // A temporal reader emits as an explicit computed property
+                // (below), not a stored one — skip it here.
+                if temporal_cols.contains(&camel(m.name.as_str())) {
+                    continue;
+                }
                 if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
                     prop_types
                         .entry(camel(m.name.as_str()))
@@ -488,10 +525,15 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
                 }
             }
             AccessorKind::AttributeWriter => {
+                // Temporal writer targets the `String` backing, declared
+                // below — not a `Date` property.
+                let base = m.name.as_str().trim_end_matches('=');
+                if temporal_cols.contains(&camel(base)) {
+                    continue;
+                }
                 if let Some(Ty::Fn { params, .. }) = m.signature.as_ref() {
                     if let Some(p) = params.first() {
                         // writer name is `foo=`; strip the `=`.
-                        let base = m.name.as_str().trim_end_matches('=');
                         prop_types.entry(camel(base)).or_insert_with(|| p.ty.clone());
                     }
                 }
@@ -499,6 +541,10 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
             AccessorKind::Method => {}
         }
     }
+    // The `String` storage backing for each temporal column
+    // (`createdAtRaw : String`), sorted so the emit order is stable.
+    let mut temporal_backings: Vec<String> = temporal_cols.iter().cloned().collect();
+    temporal_backings.sort();
 
     // 2. Body-only ivars (e.g. `@comments_cache`) that have no accessor —
     //    typed from their assign sites when the lowerer stamped one,
@@ -530,12 +576,23 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     let mut all_props: std::collections::HashMap<String, Ty> =
         prop_types.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     for (n, info) in &body_ivars {
+        // A temporal column's `@col` collects here (the reader/writer/
+        // predicate bodies reference it), but its storage is the `<col>Raw`
+        // `String` backing, registered below — skip the `Date`-named slot.
+        if temporal_cols.contains(n) {
+            continue;
+        }
         let ty = pure_readers
             .get(n)
             .cloned()
             .or_else(|| info.ty.clone())
             .unwrap_or(Ty::Untyped);
         all_props.entry(n.clone()).or_insert(ty);
+    }
+    // The `String` backings — so the untyped-map → backing coercion
+    // (`self.createdAtRaw = (row["created_at"] as! String)`) fires.
+    for backing in &temporal_backings {
+        all_props.insert(format!("{backing}Raw"), Ty::Str);
     }
     super::expr::set_instance_prop_types(all_props);
     super::expr::set_current_class(&class_name);
@@ -590,6 +647,11 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
         if prop_types.contains_key(n) || super::expr::ancestor_has_prop(&class_name, n) {
             continue;
         }
+        // A temporal column's storage is the `<col>Raw String` backing
+        // (emitted below), not a `Date`-named stored ivar.
+        if temporal_cols.contains(n) {
+            continue;
+        }
         // A collapsed pure reader's declared return is the strongest
         // typing signal; assign-site stamps are the fallback.
         let best = pure_readers.get(n).cloned().or_else(|| info.ty.clone());
@@ -616,7 +678,39 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
             }
         }
     }
-    if !prop_types.is_empty() || !body_ivars.is_empty() {
+    // Temporal `String` storage backings (`var createdAtRaw: String = ""`)
+    // — the portable ISO-8601 text every internal `@col` reference reads
+    // and writes. Behaves exactly like a plain `String` column, just under
+    // the `<col>Raw` name so the reader can own the base name.
+    for backing in &temporal_backings {
+        let name = format!("{backing}Raw");
+        if super::expr::ancestor_has_prop(&class_name, &name) {
+            continue;
+        }
+        out.push_str(&format!("    var {name}: String = \"\"\n"));
+    }
+    if !prop_types.is_empty() || !body_ivars.is_empty() || !temporal_backings.is_empty() {
+        out.push('\n');
+    }
+
+    // Temporal READERS — an explicit computed `Date?` property that parses
+    // the `String` backing (`Roundhouse.RhDateTime.parse(createdAtRaw)`).
+    // Decoupled from storage: `article.createdAt` is a native `Date`, the
+    // stored text stays portable. (`signature_ret_is_time` gated these out
+    // of the stored-property passes above.)
+    for m in &temporal_readers {
+        let name = camel(m.name.as_str());
+        let ret = m_sig_ret(m).unwrap_or(Ty::Union { variants: vec![Ty::Time, Ty::Nil] });
+        let ret_str = swift_ty(&ret);
+        super::expr::begin_method(&m.body, true);
+        let mut inner = String::new();
+        for (hn, hst, hd) in super::expr::take_hoisted() {
+            inner.push_str(&format!("var {hn}: {hst} = {hd}\n"));
+        }
+        inner.push_str(&emit_body(&m.body, true, Some(&ret)));
+        out.push_str(&format!("    var {name}: {ret_str} {{\n{}\n    }}\n", indent4(&indent4(&inner))));
+    }
+    if !temporal_readers.is_empty() {
         out.push('\n');
     }
 
@@ -821,6 +915,21 @@ fn m_sig_ret(m: &MethodDef) -> Option<Ty> {
         Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
         _ => None,
     }
+}
+
+/// True when a method's return type is `Time` (or a `Time | Nil` union) —
+/// i.e. a synthesized temporal-column reader (see `synth_attr_reader`).
+/// Gates the datetime storage/reader split (mirrors Crystal's helper of
+/// the same name).
+fn signature_ret_is_time(sig: Option<&Ty>) -> bool {
+    fn is_time(t: &Ty) -> bool {
+        match t {
+            Ty::Time => true,
+            Ty::Union { variants } => variants.iter().any(is_time),
+            _ => false,
+        }
+    }
+    matches!(sig, Some(Ty::Fn { ret, .. }) if is_time(ret))
 }
 
 fn indent_method(s: &str) -> String {

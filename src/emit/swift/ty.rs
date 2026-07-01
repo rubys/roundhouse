@@ -20,9 +20,12 @@ pub fn swift_ty(t: &Ty) -> String {
         Ty::Float => "Double".to_string(),
         Ty::Bool => "Bool".to_string(),
         Ty::Str => "String".to_string(),
-        // Swift has Foundation.Date, but the datetime seam isn't wired
-        // yet (Stage 2) — a Time surface is an honest not-supported gap.
-        Ty::Time => crate::emit::diagnostics::unsupported_time_ty("swift"),
+        // Swift has Foundation's `Date`. Temporal columns store ISO-8601
+        // text (a `String` backing property) and read back as a real
+        // `Date` via an explicit computed property that parses the
+        // backing — see the temporal branch in swift/library.rs and
+        // `Roundhouse.RhDateTime.parse`.
+        Ty::Time => "Date".to_string(),
         // No symbol type in Swift — route symbols to string keys, as the
         // TS/Crystal/Kotlin renderers do.
         Ty::Sym => "String".to_string(),

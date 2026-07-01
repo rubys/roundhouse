@@ -28,6 +28,13 @@ const DB_SWIFT: &str = include_str!("../../../runtime/swift/db.swift");
 // Foundation caveat — no ISO8601DateFormatter divergence risk).
 const TIME_SWIFT: &str = include_str!("../../../runtime/swift/time.swift");
 
+// Native-`Date` seam for temporal columns: `Roundhouse.RhDateTime.parse`
+// (stored ISO-8601 text → Date, the `parse_db_time` intrinsic target)
+// plus the `JsonBuilder.encodeDatetime(Date?)` overload (native Date →
+// Rails' canonical `...Z` millisecond JSON form). The `String?` overload
+// stays in the transpiled JsonBuilder for the pre-formatted-text path.
+const DATETIME_SWIFT: &str = include_str!("../../../runtime/swift/datetime.swift");
+
 // Turbo Streams broadcast sink. The model after_*_commit callbacks pass
 // a {stream, target, html} bag; compose the <turbo-stream> wrapper and
 // fan it out to /cable subscribers via Cable. Mirrors Kotlin's
@@ -95,6 +102,10 @@ pub fn primitives() -> Vec<EmittedFile> {
         EmittedFile {
             path: PathBuf::from("Sources/App/runtime/Time.swift"),
             content: TIME_SWIFT.to_string(),
+        },
+        EmittedFile {
+            path: PathBuf::from("Sources/App/runtime/DateTime.swift"),
+            content: DATETIME_SWIFT.to_string(),
         },
         EmittedFile {
             path: PathBuf::from("Sources/App/runtime/Broadcasts.swift"),
