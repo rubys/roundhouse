@@ -42,11 +42,6 @@ require_relative "runtime/json"
 # `runtime/json.rb`'s `JSON.generate` shim: this module exposes
 # `JsonBuilder.encode_value` / `encode_string` for per-value encoding.
 require_relative "runtime/json_builder"
-# Time-aware `encode_datetime` shadow — temporal column accessors return a
-# real `Time` (apply_datetime_lowering), which the String-only shared
-# json_builder can't format to Rails' ms precision. Must follow the shared
-# require so it wins. See runtime/json_builder_time.rb.
-require_relative "runtime/json_builder_time"
 require_relative "runtime/importmap"
 require_relative "runtime/rails"
 require_relative "runtime/active_record"

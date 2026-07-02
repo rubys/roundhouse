@@ -1273,24 +1273,6 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         }
     }
 
-    // Time-aware `encode_datetime` overlay. A temporal (Date/DateTime/Time)
-    // column's accessor returns a real `Time` on the spinel tree too
-    // (`apply_datetime_lowering` runs in `src/emit/ruby.rs`), but the shared
-    // `json_builder.rb` copied above is deliberately `Time`-free (it also
-    // transpiles to targets that have no `Time` type). Reuse the CRuby/JRuby
-    // overlay so spinel formats the `Time` to Rails' millisecond-precision
-    // JSON (`getutc.iso8601(3)`) instead of falling through to `Time#to_s`,
-    // which drops sub-second precision (`"… +0000"` → `.000`). `scaffold/
-    // main.rb` requires it right after `runtime/json_builder` so it shadows
-    // the String-only definition.
-    {
-        let jbt =
-            Path::new("runtime/spinel/scaffold/ruby_overlay/runtime/json_builder_time.rb");
-        let content = fs::read_to_string(jbt)
-            .map_err(|e| format!("read {}: {e}", jbt.display()))?;
-        files.push(("runtime/json_builder_time.rb".to_string(), content));
-    }
-
     files.extend(sort_files(emit::ruby::emit_spinel(app)));
 
     let js = fixture.join("app/javascript");

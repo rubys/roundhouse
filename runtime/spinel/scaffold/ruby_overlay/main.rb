@@ -51,10 +51,6 @@ require_relative "runtime/json"
 # `runtime/json.rb`'s `JSON.generate` shim: this module exposes
 # `JsonBuilder.encode_value` / `encode_string` for per-value encoding.
 require_relative "runtime/json_builder"
-# CRuby/JRuby overlay: Time-aware `encode_datetime` (datetime accessors
-# return real `Time`). Must follow the shared json_builder require so it
-# shadows the String-only form. See runtime/json_builder_time.rb.
-require_relative "runtime/json_builder_time"
 require_relative "runtime/importmap"
 require_relative "runtime/rails"
 require_relative "runtime/active_support_duration"

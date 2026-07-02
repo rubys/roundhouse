@@ -342,13 +342,6 @@ fn walk_template(body: &Expr, ctx: &Ctx) -> Vec<Expr> {
                         &ctx.accumulator,
                         &format!("\"{}\":", attr.as_str()),
                     ));
-                    let value = send(
-                        Some((*obj).clone()),
-                        attr.as_str(),
-                        Vec::new(),
-                        None,
-                        false,
-                    );
                     // Route datetime / date columns through
                     // `JsonBuilder.encode_datetime` for Rails-canonical
                     // ISO 8601 output. Other columns (Integer, String,
@@ -360,6 +353,26 @@ fn walk_template(body: &Expr, ctx: &Ctx) -> Vec<Expr> {
                                 | Some(crate::schema::ColumnType::Date)
                                 | Some(crate::schema::ColumnType::Time)
                         );
+                    // A temporal column serializes from its `<col>_raw`
+                    // storage reader (the stored ISO-8601 text), NOT the
+                    // parsing `<col>` reader: `encode_datetime`'s
+                    // string→string reformat is exact (no float
+                    // sub-second hazards) and skips a native
+                    // parse→format round-trip per row. The native-Time
+                    // reader stays for field access and arithmetic;
+                    // JSON never needs the object.
+                    let reader = if use_datetime {
+                        format!("{}_raw", attr.as_str())
+                    } else {
+                        attr.as_str().to_string()
+                    };
+                    let value = send(
+                        Some((*obj).clone()),
+                        &reader,
+                        Vec::new(),
+                        None,
+                        false,
+                    );
                     let encoded = if use_datetime {
                         json_builder_call("encode_datetime", value)
                     } else {

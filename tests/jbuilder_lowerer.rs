@@ -67,13 +67,16 @@ fn article_partial_emits_extract_plus_url_pair() {
         "missing body encode: {body}"
     );
     // datetime columns route through `encode_datetime` for Rails-
-    // canonical ISO 8601 output.
+    // canonical ISO 8601 output — reading the `<col>_raw` storage
+    // String, not the parsing `<col>` reader: the string→string
+    // reformat is exact and skips a native Time parse→format
+    // round-trip per row.
     assert!(
-        body.contains("JsonBuilder.encode_datetime(article.created_at)"),
+        body.contains("JsonBuilder.encode_datetime(article.created_at_raw)"),
         "missing created_at datetime encode: {body}"
     );
     assert!(
-        body.contains("JsonBuilder.encode_datetime(article.updated_at)"),
+        body.contains("JsonBuilder.encode_datetime(article.updated_at_raw)"),
         "missing updated_at datetime encode: {body}"
     );
     // The trailing `json.url article_url(...)` becomes the "url" pair
