@@ -40,10 +40,20 @@ enum Roundhouse {
                     guard let whole = fmt.date(from: base) else { return nil }
                     // Fractional seconds after the dot, added as a
                     // TimeInterval (robust vs DateFormatter fractional
-                    // quirks): ".300213" → +0.300213s.
+                    // quirks): ".300213" → +0.300s.
+                    //
+                    // TRUNCATE to milliseconds (3 digits) here, matching how
+                    // Rails/`Time#iso8601(3)` and the compare harness reduce
+                    // sub-second precision. Foundation `Date` is a `Double`,
+                    // and the `encodeDatetime(Date)` serializer below rounds
+                    // to the nearest millisecond — so if we kept the full
+                    // microseconds, ".456789" would round UP to ".457" while
+                    // Rails truncates to ".456", a 1 ms mismatch on ~half of
+                    // all timestamps. Truncating the string first makes the
+                    // parsed `Date` hold a clean ms value that round-trips.
                     if s.count > 20,
                        s[s.index(s.startIndex, offsetBy: 19)] == "." {
-                        let digits = s.dropFirst(20).prefix(while: { $0.isNumber })
+                        let digits = s.dropFirst(20).prefix(while: { $0.isNumber }).prefix(3)
                         if let frac = Double("0." + digits) {
                             return whole.addingTimeInterval(frac)
                         }
