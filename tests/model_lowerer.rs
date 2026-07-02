@@ -71,10 +71,33 @@ fn article_lowers_with_schema_methods() {
     // Per-column accessors (excluding id — inherits from base).
     for col in ["title", "body", "created_at", "updated_at"] {
         assert!(names.contains(&col), "missing reader `{col}`: {names:?}");
+    }
+    // Plain columns keep the `<col>=` writer; temporal columns store
+    // under a `<col>_raw` String accessor pair instead (the public
+    // reader is a computed Time getter, and there is deliberately NO
+    // public `<col>=` writer — see `schema::col_storage_name`).
+    for col in ["title", "body"] {
         let writer = format!("{col}=");
         assert!(
             names.iter().any(|n| *n == writer.as_str()),
             "missing writer `{writer}`: {names:?}",
+        );
+    }
+    for col in ["created_at", "updated_at"] {
+        let raw_reader = format!("{col}_raw");
+        let raw_writer = format!("{col}_raw=");
+        let writer = format!("{col}=");
+        assert!(
+            names.iter().any(|n| *n == raw_reader.as_str()),
+            "missing storage reader `{raw_reader}`: {names:?}",
+        );
+        assert!(
+            names.iter().any(|n| *n == raw_writer.as_str()),
+            "missing storage writer `{raw_writer}`: {names:?}",
+        );
+        assert!(
+            !names.iter().any(|n| *n == writer.as_str()),
+            "temporal column must NOT synthesize a public `{writer}`: {names:?}",
         );
     }
     // id reader/writer ARE synthesized (per-class so target emitters
