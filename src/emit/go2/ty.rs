@@ -20,9 +20,10 @@ pub fn go_ty_stub(ty: Option<&Ty>) -> String {
         Some(Ty::Float) => "float64".to_string(),
         Some(Ty::Bool) => "bool".to_string(),
         Some(Ty::Sym) => "string".to_string(),
-        // Honest not-supported gap until Go's datetime seam lands
-        // (Stage 2) — do NOT let Time fall through to `interface{}`.
-        Some(Ty::Time) => crate::emit::diagnostics::unsupported_time_ty("go"),
+        // Native datetime seam: temporal readers return `time.Time`;
+        // the zero Time stands in for nil (same empty-as-absent
+        // convention as "" for nilable strings).
+        Some(Ty::Time) => "time.Time".to_string(),
         Some(Ty::Hash { key, value }) => {
             format!(
                 "map[{}]{}",
@@ -67,7 +68,7 @@ pub fn go_ty_stub(ty: Option<&Ty>) -> String {
             if non_nil.len() == 1 {
                 match non_nil[0] {
                     Ty::Hash { .. } | Ty::Array { .. } | Ty::Class { .. }
-                    | Ty::Str | Ty::Sym => go_ty_stub(Some(non_nil[0])),
+                    | Ty::Str | Ty::Sym | Ty::Time => go_ty_stub(Some(non_nil[0])),
                     _ => "interface{}".to_string(),
                 }
             } else {
@@ -104,12 +105,11 @@ pub fn go_ty(ty: &Ty) -> String {
         Ty::Float => "float64".to_string(),
         Ty::Bool => "bool".to_string(),
         Ty::Str | Ty::Sym => "string".to_string(),
-        // Go has time.Time, but the datetime seam isn't wired yet
-        // (Stage 2) — a Time surface is an honest not-supported gap.
+        // Native datetime seam: `time.Time`, zero value = absent.
         // (The legacy `Ty::Class{"Time"} => "string"` stand-in below is
         // separate: it catches hand-written-rbs Time in the shared
         // runtime, not the first-class `Ty::Time` column type.)
-        Ty::Time => crate::emit::diagnostics::unsupported_time_ty("go"),
+        Ty::Time => "time.Time".to_string(),
         Ty::Nil => "struct{}".to_string(),
         Ty::Array { elem } => format!("[]{}", go_ty(elem)),
         Ty::Hash { key, value } => format!("map[{}]{}", go_ty(key), go_ty(value)),

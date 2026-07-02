@@ -187,11 +187,23 @@ pub fn emit_library_class_with_registry(
 
     for m in &class.methods {
         // Skip attr_reader / attr_writer (now fields) and the
-        // initialize method (now NewClass).
-        if matches!(
-            m.kind,
-            AccessorKind::AttributeReader | AccessorKind::AttributeWriter
-        ) {
+        // initialize method (now NewClass). EXCEPTION: a temporal
+        // reader (`Ty::Time` return) has no field — `collect_fields`
+        // skipped it — and its body parses the `<col>_raw` storage
+        // field, so it emits as a real method
+        // (`func (self *Article) CreatedAt() time.Time`); call sites
+        // route to it via the temporal fall-through in `emit_send`.
+        let is_temporal_reader = m.kind == AccessorKind::AttributeReader
+            && matches!(
+                m.signature.as_ref(),
+                Some(Ty::Fn { ret, .. }) if ret.contains_time()
+            );
+        if !is_temporal_reader
+            && matches!(
+                m.kind,
+                AccessorKind::AttributeReader | AccessorKind::AttributeWriter
+            )
+        {
             continue;
         }
         if matches!(m.receiver, MethodReceiver::Instance) && m.name.as_str() == "initialize" {

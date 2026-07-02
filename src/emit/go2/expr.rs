@@ -1936,6 +1936,29 @@ pub(super) fn emit_send(
                     .map(|s| s.as_str())
                     .collect::<Vec<_>>()
                     .join("");
+                // Temporal-reader intrinsic: `ActiveSupport.parse_db_time(s)`
+                // parses stored ISO-8601 text into a native UTC `time.Time`
+                // — the hand-written `Rh_parse_db_time`
+                // (runtime/go/v2/rh_datetime.go), not a transpiled
+                // `ActiveSupport_*` function (no such unit exists).
+                if class_name == "ActiveSupport" && method == "parse_db_time" {
+                    return format!("Rh_parse_db_time({})", args_s.join(", "));
+                }
+                // `JsonBuilder.encode_datetime` with a native-`time.Time`
+                // argument (a temporal reader call) routes to the
+                // hand-written `_time` twin — Go has no overloading, so
+                // the pick happens here, keyed on the argument's stamped
+                // type. Stored-text (string) callers keep the transpiled
+                // string variant.
+                if class_name == "JsonBuilder"
+                    && method == "encode_datetime"
+                    && args.first().and_then(|a| a.ty.as_ref()).is_some_and(Ty::contains_time)
+                {
+                    return format!(
+                        "JsonBuilder_encode_datetime_time({})",
+                        args_s.join(", "),
+                    );
+                }
                 let method_sanitized = super::library::sanitize_method_name(method);
                 return format!(
                     "{class_name}_{method_sanitized}({})",
@@ -1993,16 +2016,14 @@ pub(super) fn emit_send(
                 }
                 // Temporal-reader read (`article.created_at`, stamped
                 // `Time | Nil`): the struct carries no `CreatedAt`
-                // member — the shared lowering split storage into the
-                // `<col>_raw` String field, and Go's native `time.Time`
-                // seam isn't wired yet. Surface the stored ISO-8601
-                // text by reading that field; JSON stays byte-correct
-                // via `JsonBuilder_encode_datetime`'s text reformat.
+                // field — the shared lowering split storage into the
+                // `<col>_raw` String field and the reader is a real
+                // method parsing it to a native `time.Time`
+                // (`library.rs` temporal-reader exception) — so the
+                // call MUST take parens (a bare `article.CreatedAt`
+                // would be a method-value reference).
                 if result_ty.is_some_and(Ty::contains_time) {
-                    return format!(
-                        "{recv_s}.{}",
-                        go_field_ident(&format!("{method}_raw"))
-                    );
+                    return format!("{recv_s}.{go_m}()");
                 }
                 // Bare field read (no parens) → suffix-stripped field
                 // name so `record.persisted?` → `record.Persisted`.

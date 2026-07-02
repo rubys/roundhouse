@@ -60,6 +60,8 @@ const RT_V2_FORM_PARAMS: &str =
     include_str!("../../runtime/go/v2/form_params.go");
 const RT_V2_SLOTS: &str =
     include_str!("../../runtime/go/v2/slots.go");
+const RT_V2_RH_DATETIME: &str =
+    include_str!("../../runtime/go/v2/rh_datetime.go");
 
 /// Append go2 transpiled runtime files to `files`. Phase 6 step 2
 /// (2026-05-24) flipped the env-var gate to unconditional: the v2
@@ -100,6 +102,10 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         // ActionView::ViewHelpers LibraryClass before
         // emit_library_class walks it).
         ("slots.go", RT_V2_SLOTS),
+        // Native-`time.Time` seam for temporal columns: parse helper
+        // (the `ActiveSupport.parse_db_time` intrinsic) + the
+        // `JsonBuilder_encode_datetime_time` native twin. Stdlib-only.
+        ("rh_datetime.go", RT_V2_RH_DATETIME),
     ] {
         out.push(EmittedFile {
             path: output_path(OutputKind::HandWrittenRuntime { name }).path,
@@ -1143,7 +1149,7 @@ fn scan_stdlib_imports(content: &str) -> Vec<&'static str> {
         (&["strconv."], "strconv"),
         (&["strings."], "strings"),
         (&["sync."], "sync"),
-        (&["time.Now(", "time.RFC3339"], "time"),
+        (&["time.Now(", "time.RFC3339", "time.Time"], "time"),
     ];
     let mut out = Vec::new();
     for (probes, name) in entries {
