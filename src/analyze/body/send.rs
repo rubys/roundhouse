@@ -346,6 +346,13 @@ impl<'a> BodyTyper<'a> {
                 if id.0.as_str() == "ActiveSupport" && method.as_str() == "parse_db_time" {
                     return Ty::Union { variants: vec![Ty::Time, Ty::Nil] };
                 }
+                // `ActiveSupport.db_now` — the write-side sibling:
+                // current UTC time in Rails' exact storage form
+                // ("YYYY-MM-DD HH:MM:SS.ffffff"). Same internal-intrinsic
+                // treatment; `fill_timestamps` stamps with it.
+                if id.0.as_str() == "ActiveSupport" && method.as_str() == "db_now" {
+                    return Ty::Str;
+                }
                 // Walk the parent chain so inherited methods resolve:
                 // `Article.last` looks up `last` on Article → Application
                 // Record → ActiveRecord::Base (where the RBS-declared

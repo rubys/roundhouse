@@ -57,6 +57,14 @@ require "inflector"
 begin
   require "spinel/db_cruby"
   require "spinel/sqlite_adapter"
+  # `ActiveSupport.db_now` / `parse_db_time` — the temporal intrinsics
+  # `fill_timestamps` and the synthesized column readers call. On the
+  # emitted CRuby/JRuby trees the ruby_overlay provides them; here the
+  # canonical overlay file is loaded directly (single source of truth).
+  # Inside this rescue on purpose: base_test (the only save-path
+  # consumer) already self-skips when the spinel/ subtree is absent.
+  require "time"
+  require "spinel/scaffold/ruby_overlay/runtime/active_support_time_parsing"
 rescue LoadError
   # sqlite3 gem absent OR spinel/ subtree not on load path. base_test
   # is the only consumer; it self-skips when Db is undefined.

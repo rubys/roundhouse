@@ -143,7 +143,11 @@ fn article_renders_residualized_fill_timestamps() {
     // `updated_at` on every save, `created_at` only on insert. The Ruby
     // emitter uses postfix-modifier form for the single-line `if`.
     assert!(src.contains("def fill_timestamps(creating)"), "{src}");
-    assert!(src.contains("now = Time.now.utc.iso8601"), "{src}");
+    // `ActiveSupport.db_now` — Rails' exact storage form
+    // ("YYYY-MM-DD HH:MM:SS.ffffff" UTC), not `Time.now.utc.iso8601`:
+    // stamps must byte-match what Rails writes so TEXT ordering stays
+    // correct in a shared database.
+    assert!(src.contains("now = ActiveSupport.db_now"), "{src}");
     // Timestamps are temporal columns — stamps land on the `<col>_raw`
     // storage ivar (the public reader parses it to Time).
     assert!(src.contains("@updated_at_raw = now"), "{src}");

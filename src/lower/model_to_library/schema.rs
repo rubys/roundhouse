@@ -165,7 +165,7 @@ pub(super) fn push_schema_methods(
         None => synth_update(owner, table),
     });
 
-    // def fill_timestamps(creating); now = Time.now.utc.iso8601; @updated_at = now; @created_at = now if creating; end
+    // def fill_timestamps(creating); now = ActiveSupport.db_now; @updated_at = now; @created_at = now if creating; end
     //
     // Residualizes `ActiveRecord::Base#fill_timestamps`, which probes the
     // schema at RUNTIME (`schema_columns.include?(:updated_at)`) on every
@@ -186,13 +186,24 @@ pub(super) fn push_schema_methods(
 /// the probes and emits only the live assignments:
 ///
 ///   def fill_timestamps(creating)
-///     now = Time.now.utc.iso8601
+///     now = ActiveSupport.db_now
 ///     @updated_at_raw = now
 ///     @created_at_raw = now if creating
 ///   end
 ///
 /// (Timestamps are temporal columns, so the stamps land on the
 /// `<col>_raw` storage ivar — see `col_storage_name`.)
+///
+/// `ActiveSupport.db_now` is the write-side temporal intrinsic
+/// (sibling of the read-side `parse_db_time`): current UTC time in
+/// Rails' exact storage form, `YYYY-MM-DD HH:MM:SS.ffffff` — space
+/// separator, zero-padded 6-digit fractional seconds, no zone marker.
+/// Matching Rails byte-for-byte keeps a column's TEXT values
+/// homogeneous when a roundhouse-emitted app writes into a
+/// Rails-created database, which is what keeps lexicographic
+/// (SQL TEXT) comparison and ORDER BY correct — the previous
+/// `Time.now.utc.iso8601` form ("…T…Z", whole seconds) sorted after
+/// every same-day Rails-form value and dropped sub-second precision.
 ///
 /// Returns `None` for a model with neither timestamp column — it keeps
 /// Base's generic version, whose two `include?` checks both return false
@@ -213,18 +224,29 @@ fn synth_fill_timestamps(owner: &ClassId, table: &Table) -> Option<MethodDef> {
     let creating = Symbol::from("creating");
     let now = Symbol::from("now");
 
-    // now = Time.now.utc.iso8601
-    let time_const = Expr::new(
-        Span::synthetic(),
-        ExprNode::Const { path: vec![Symbol::from("Time")] },
+    // now = ActiveSupport.db_now
+    let db_now = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
+                )),
+                method: Symbol::from("db_now"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        ),
+        Ty::Str,
     );
-    let iso = with_ty(send0(send0(send0(time_const, "now"), "utc"), "iso8601"), Ty::Str);
     let mut stmts = vec![with_ty(
         Expr::new(
             Span::synthetic(),
             ExprNode::Assign {
                 target: LValue::Var { id: VarId(0), name: now.clone() },
-                value: iso,
+                value: db_now,
             },
         ),
         Ty::Str,
@@ -276,21 +298,6 @@ fn synth_fill_timestamps(owner: &ClassId, table: &Table) -> Option<MethodDef> {
         mutates_self: false,
         block_param: None,
     })
-}
-
-/// `recv.method` — no-arg, parenthesized send, matching the call shape
-/// the other synthesizers in this module emit.
-fn send0(recv: Expr, method: &str) -> Expr {
-    Expr::new(
-        Span::synthetic(),
-        ExprNode::Send {
-            recv: Some(recv),
-            method: Symbol::from(method),
-            args: vec![],
-            block: None,
-            parenthesized: true,
-        },
-    )
 }
 
 /// Rails generates a `<column>?` predicate for every attribute. A boolean

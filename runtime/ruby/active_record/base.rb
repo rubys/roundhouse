@@ -363,7 +363,15 @@ module ActiveRecord
     # Fills `created_at` (on insert) and `updated_at` (always) when the
     # subclass declares those columns in `schema_columns`. Uses the
     # subclass's `[]=` to assign — no `instance_variable_set`. Mirrors
-    # the Rails ActiveRecord::Timestamp callback semantics (UTC ISO-8601).
+    # the Rails ActiveRecord::Timestamp callback semantics.
+    #
+    # `ActiveSupport.db_now` stamps Rails' exact storage form —
+    # "YYYY-MM-DD HH:MM:SS.ffffff", UTC, space separator, zero-padded
+    # 6-digit fractional seconds, no zone marker — so a column's TEXT
+    # values stay homogeneous (and lexicographically ordered) when a
+    # roundhouse-emitted app writes into a Rails-created database.
+    # Each target maps the intrinsic to its native clock+format helper;
+    # CRuby/JRuby resolve it in active_support_time_parsing.rb.
     #
     # `created_at` is stamped on every insert, unconditionally — we do
     # NOT read the column back and skip when already set. The earlier
@@ -387,7 +395,7 @@ module ActiveRecord
     # accept either shape, Rust gets the simpler one.
     def fill_timestamps(creating)
       cols = self.class.schema_columns
-      now = Time.now.utc.iso8601
+      now = ActiveSupport.db_now
       self[:updated_at] = now if cols.include?(:updated_at)
       self[:created_at] = now if creating && cols.include?(:created_at)
     end

@@ -388,6 +388,18 @@ fn emit_node(n: &ExprNode) -> String {
                     }
                 }
             }
+            // Temporal writer intrinsic: `ActiveSupport.db_now` — current
+            // UTC time in Rails' exact storage form ("YYYY-MM-DD
+            // HH:MM:SS.ffffff"). `fill_timestamps` stamps with it.
+            if method.as_str() == "db_now" && args.is_empty() {
+                if let Some(r) = recv {
+                    if let ExprNode::Const { path } = &*r.node {
+                        if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                            return "Roundhouse::DateTime.db_now".to_string();
+                        }
+                    }
+                }
+            }
             // Buffer-accumulate idiom: `io << x` (Ruby) where `io` is a
             // String-typed local appends in place. Crystal Strings are
             // immutable and don't define `<<`; rewrite to the

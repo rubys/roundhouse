@@ -39,6 +39,18 @@ module Roundhouse
         nil
       end
     end
+
+    # Write-side sibling of `parse`: current UTC time in Rails' exact
+    # storage form — "YYYY-MM-DD HH:MM:SS.ffffff", space separator,
+    # zero-padded 6-digit fractional seconds, no zone marker (implicitly
+    # UTC, byte-matching what Rails' sqlite3 adapter writes).
+    # `fill_timestamps` stamps with this (the `ActiveSupport.db_now`
+    # intrinsic maps here) so a column's TEXT values stay homogeneous —
+    # and lexicographically ordered — when a roundhouse-emitted app
+    # shares a database with a real Rails app.
+    def self.db_now : String
+      Time.utc.to_s("%F %H:%M:%S.%6N")
+    end
   end
 end
 
