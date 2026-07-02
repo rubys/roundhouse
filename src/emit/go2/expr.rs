@@ -1991,6 +1991,19 @@ pub(super) fn emit_send(
                 if is_known_class_method(method) {
                     return format!("{recv_s}.{go_m}()");
                 }
+                // Temporal-reader read (`article.created_at`, stamped
+                // `Time | Nil`): the struct carries no `CreatedAt`
+                // member — the shared lowering split storage into the
+                // `<col>_raw` String field, and Go's native `time.Time`
+                // seam isn't wired yet. Surface the stored ISO-8601
+                // text by reading that field; JSON stays byte-correct
+                // via `JsonBuilder_encode_datetime`'s text reformat.
+                if result_ty.is_some_and(Ty::contains_time) {
+                    return format!(
+                        "{recv_s}.{}",
+                        go_field_ident(&format!("{method}_raw"))
+                    );
+                }
                 // Bare field read (no parens) → suffix-stripped field
                 // name so `record.persisted?` → `record.Persisted`.
                 return format!("{recv_s}.{}", go_field_ident(method));

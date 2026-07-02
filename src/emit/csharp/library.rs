@@ -29,7 +29,7 @@ use crate::ty::Ty;
 use super::expr::{
     begin_method, emit_expr, emit_stmt, hoisted_decls, register_method_params, set_current_class,
     set_instance_prop_types, set_instance_props, set_ivar_renames, set_param_names,
-    set_returns_unit, set_temporal_backings,
+    set_returns_unit,
 };
 use super::naming::{camel, pascal, pascal_of_camel, type_name};
 use super::ty::csharp_ty;
@@ -145,7 +145,6 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
     super::expr::set_object_tl_fields(HashSet::new());
     set_instance_props(HashSet::new());
     set_ivar_renames(std::collections::HashMap::new());
-    set_temporal_backings(std::collections::HashMap::new());
     let name = methods
         .first()
         .and_then(|m| m.enclosing_class.as_ref())
@@ -180,26 +179,27 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
 
     // Temporal (Date/DateTime/Time) columns: a reader whose return type is
     // `DateTimeOffset` (`Ty::Time`). These must NOT collapse into an
-    // auto-property — C# couples a property's get/set to one type, but storage
-    // is ISO-8601 `string` while the reader yields a `DateTimeOffset?`. Each
-    // keeps a private `string` backing field (`_<camel>`) that every internal
-    // String use (ivar reads/writes + `x.col = v` writer-sends) retargets, and
-    // the reader emits as an explicit parsing getter. Keyed by `camel` name.
-    let temporal_cols: HashSet<String> = lc
+    // auto-property — C# couples a property's get/set to one type, but the
+    // reader's body parses the `<col>_raw` String storage (an ordinary
+    // accessor pair from the shared lowering, collapsing to a normal
+    // `CreatedAtRaw { get; set; }` auto-property) and yields
+    // `DateTimeOffset?`. The reader emits as an explicit computed getter
+    // rendering that body. Keyed by `camel` name.
+    let temporal_readers: Vec<&crate::dialect::MethodDef> = lc
         .methods
         .iter()
         .filter(|m| {
             m.kind == AccessorKind::AttributeReader && signature_ret_is_time(m.signature.as_ref())
         })
+        .collect();
+    let temporal_cols: HashSet<String> = temporal_readers
+        .iter()
         .map(|m| camel(m.name.as_str()))
         .collect();
-    let temporal_backings: std::collections::HashMap<String, String> =
-        temporal_cols.iter().map(|c| (c.clone(), format!("_{c}"))).collect();
-    set_temporal_backings(temporal_backings.clone());
 
-    // 1. Accessor-derived properties (name → type). Temporal columns are
-    // excluded — they emit a `string` backing + a `DateTimeOffset?` getter
-    // below instead of a `{ get; set; }` auto-property.
+    // 1. Accessor-derived properties (name → type). Temporal readers are
+    // excluded — they emit as explicit `DateTimeOffset?` getters below
+    // instead of a `{ get; set; }` auto-property.
     let mut prop_types: BTreeMap<String, Ty> = BTreeMap::new();
     for m in &lc.methods {
         match m.kind {
@@ -213,9 +213,6 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
             }
             AccessorKind::AttributeWriter => {
                 let base = m.name.as_str().trim_end_matches('=');
-                if temporal_cols.contains(&camel(base)) {
-                    continue;
-                }
                 if let Some(Ty::Fn { params, .. }) = m.signature.as_ref() {
                     if let Some(p) = params.first() {
                         prop_types.entry(camel(base)).or_insert_with(|| p.ty.clone());
@@ -304,11 +301,6 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
 
     let inferred_ivar_types = infer_body_ivar_types(&lc.methods);
     for n in body_ivars.keys() {
-        // A temporal column's `@col` ivar is its `string` backing field,
-        // emitted (with its getter) in the temporal block below.
-        if temporal_cols.contains(n) {
-            continue;
-        }
         if !prop_types.contains_key(n) && !inherited_props.contains(n) {
             let (vis, field) = match ivar_renames.get(n) {
                 Some(renamed) => ("private", renamed.clone()),
@@ -322,19 +314,23 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
             }
         }
     }
-    // Temporal columns: a `string` storage backing field (`_<camel> = ""`,
-    // the ISO-8601 text every internal use reads/writes) plus the explicit
-    // `DateTimeOffset?` reader getter that parses it. Decouples storage
-    // (`string`) from the reader type (`DateTimeOffset?`) — a C# auto-property
-    // can't span both. Emitted in stable (camel-sorted) order.
-    let mut temporal_sorted: Vec<&String> = temporal_cols.iter().collect();
-    temporal_sorted.sort();
-    for cam in &temporal_sorted {
-        let backing = &temporal_backings[*cam];
-        let getter = pascal_of_camel(cam);
-        out.push_str(&format!("    private string {backing} = \"\";\n"));
+    // Temporal columns: the explicit `DateTimeOffset?` reader getter,
+    // rendering the IR body (`parse_db_time(@<col>_raw)` →
+    // `Roundhouse.RhDateTime.Parse(CreatedAtRaw)`; the storage property
+    // itself collapsed with the ordinary accessors above). Emitted in
+    // stable (name-sorted) order.
+    let mut temporal_sorted = temporal_readers.clone();
+    temporal_sorted.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
+    for m in &temporal_sorted {
+        let getter = pascal_of_camel(&camel(m.name.as_str()));
+        let ret = match m.signature.as_ref() {
+            Some(Ty::Fn { ret, .. }) => (**ret).clone(),
+            _ => Ty::Time,
+        };
         out.push_str(&format!(
-            "    public DateTimeOffset? {getter} => Roundhouse.RhDateTime.Parse({backing});\n"
+            "    public {} {getter} => {};\n",
+            csharp_ty(&ret),
+            super::expr::emit_expr(&m.body),
         ));
     }
     if !prop_types.is_empty() || !body_ivars.is_empty() || !temporal_cols.is_empty() {
@@ -474,7 +470,6 @@ fn emit_static_class(lc: &LibraryClass, class_name: &str) -> String {
     super::expr::set_object_tl_fields(HashSet::new());
     set_instance_props(HashSet::new());
     set_ivar_renames(std::collections::HashMap::new());
-    set_temporal_backings(std::collections::HashMap::new());
     let accessor_props = class_accessor_props(&lc.methods);
     // `partial` so a hand-written C# runtime file can add native overloads to a
     // transpiled module (e.g. `JsonBuilder.EncodeDatetime(DateTimeOffset?)` in

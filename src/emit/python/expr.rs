@@ -49,46 +49,6 @@ pub(super) fn with_super_method<R>(method: &str, f: impl FnOnce() -> R) -> R {
 }
 
 thread_local! {
-    /// Temporal (Date/DateTime/Time) columns of the current model class —
-    /// the datetime Stage-2 storage/reader split. Storage stays ISO-8601
-    /// TEXT in a `_<col>: str` backing attribute; the reader `<col>` is a
-    /// `datetime.datetime | None` `@property` that parses it (see the
-    /// temporal branch in `library::emit_library_class`). So every internal
-    /// STORAGE reference — `@col` ivar reads/assigns AND `x.col = v`
-    /// writer-sends — retargets to `_<col>`, while an external `.col` READ
-    /// hits the `@property`. Holds the snake_case base names (`created_at`).
-    /// Set per model class (empty for non-temporal classes, Rows, modules,
-    /// controllers, views).
-    static TEMPORAL_BACKINGS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
-}
-
-/// Install the current model's temporal-column base names (snake_case) —
-/// the datetime storage/reader split. Empty for every non-temporal emit
-/// (models set their own; `emit_models` clears it after the model loop so
-/// it can't leak into controller/view emit).
-pub(super) fn set_temporal_backings(set: HashSet<String>) {
-    TEMPORAL_BACKINGS.with(|s| *s.borrow_mut() = set);
-}
-
-/// True when `name` is a temporal column of the current class — its
-/// storage lives in the `_<name>` backing (the `<name>` reader is a
-/// `datetime` `@property`).
-fn is_temporal_col(name: &str) -> bool {
-    TEMPORAL_BACKINGS.with(|s| s.borrow().contains(name))
-}
-
-/// Storage reference for an ivar/attr name: a temporal column stores its
-/// ISO-8601 text in a `_<name>` backing (the reader `<name>` is a
-/// `datetime` `@property`), so a STORAGE reference retargets to `_<name>`.
-fn storage_ref(name: &str) -> String {
-    if is_temporal_col(name) {
-        format!("_{name}")
-    } else {
-        name.to_string()
-    }
-}
-
-thread_local! {
     /// True while emitting a library *class*-method body, where a bare
     /// (receiverless) non-kernel call is an implicit-self call that the
     /// shared self-injection lowering left unresolved (it only covers
@@ -376,9 +336,7 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
             format!("{} = {}", super::shared::py_ident(name.as_str()), emit_expr(value))
         }
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-            // A temporal column's `@col` WRITE targets the `str` backing
-            // `_<col>` (the `datetime` `@property` is read-through).
-            format!("self.{} = {}", storage_ref(name.as_str()), emit_expr(value))
+            format!("self.{} = {}", name.as_str(), emit_expr(value))
         }
         // Compound assignment. Python's arithmetic/bitwise compound ops
         // are spelled identically to Ruby's (`+=`, `**=`, `<<=`, …), so
@@ -530,11 +488,9 @@ fn range_slice(begin: &Option<Expr>, end: &Option<Expr>, exclusive: bool) -> Str
 fn lvalue_str(t: &LValue) -> String {
     match t {
         LValue::Var { name, .. } => super::shared::py_ident(name.as_str()),
-        LValue::Ivar { name } => format!("self.{}", storage_ref(name.as_str())),
+        LValue::Ivar { name } => format!("self.{}", name.as_str()),
         LValue::Attr { recv, name } => {
-            // A temporal column's writer target (`x.col = …`) is its `str`
-            // backing `_<col>`, not the read-through `datetime` `@property`.
-            format!("{}.{}", emit_expr(recv), storage_ref(name.as_str()))
+            format!("{}.{}", emit_expr(recv), name.as_str())
         }
         LValue::Index { recv, index } => format!("{}[{}]", emit_expr(recv), emit_expr(index)),
         LValue::Const { path } => {
@@ -704,9 +660,7 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(".")
         }
         ExprNode::Var { name, .. } => super::shared::py_ident(name.as_str()),
-        // A temporal column's `@col` READ is a storage read → the `str`
-        // backing `_<col>`, not the `datetime` `@property` getter.
-        ExprNode::Ivar { name } => format!("self.{}", storage_ref(name.as_str())),
+        ExprNode::Ivar { name } => format!("self.{}", name.as_str()),
         ExprNode::SelfRef => SELF_REF.with(|c| c.get()).to_string(),
         // `recv.map { |x| EXPR }` / `.collect` → Python list comprehension
         // `[EXPR for x in recv]`. Expression-position iteration (the
@@ -873,19 +827,6 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
         }
     }
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
-    // Temporal column writer-send: `recv.created_at = v` stores ISO-8601
-    // text in the `_created_at` `str` backing (the reader is a `datetime`
-    // `@property`, read-only). The writer name arrives as `created_at=`;
-    // strip the `=` and retarget the backing. Guard against the
-    // comparison operators that also end in `=` (`==`/`!=`/`<=`/`>=`,
-    // handled elsewhere).
-    if let (Some(r), [_arg]) = (recv, args) {
-        if let Some(base) = method.strip_suffix('=') {
-            if !matches!(method, "==" | "!=" | "<=" | ">=") && is_temporal_col(base) {
-                return format!("{}._{base} = {}", emit_expr(r), args_s[0]);
-            }
-        }
-    }
     // Temporal reader intrinsic: `ActiveSupport.parse_db_time(s)` parses a
     // stored ISO-8601 `str` into a native `datetime`. Renders to the
     // Python runtime helper (nil-safe: `str | None` → `datetime | None`).

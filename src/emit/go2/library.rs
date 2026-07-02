@@ -358,17 +358,6 @@ fn collect_self_methods(
     std::rc::Rc::new(set)
 }
 
-/// True when a type is `Ty::Time` (or a union containing it) — a
-/// temporal-column reader return. Such columns keep their stored `string`
-/// form on the Go struct until a native `time.Time` seam is wired.
-fn ty_contains_time(t: &Ty) -> bool {
-    match t {
-        Ty::Time => true,
-        Ty::Union { variants } => variants.iter().any(ty_contains_time),
-        _ => false,
-    }
-}
-
 /// One Go struct field derived from a Ruby `attr_reader` / `attr_writer`.
 struct Field {
     /// PascalCase, Go-style field name (`Verb`, `PathParams`, `ID`).
@@ -401,22 +390,18 @@ fn collect_fields(methods: &[MethodDef]) -> Vec<Field> {
         let go_ty = match m.kind {
             AccessorKind::AttributeReader => {
                 if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
-                    // Temporal columns store ISO-8601 TEXT; the reader's
-                    // logical `Ty::Time` return would collapse this struct
-                    // field to `interface{}` (Go's native-datetime seam
-                    // isn't wired yet), which then fails the `string`
-                    // storage uses (`Db_escape_string(self.CreatedAt)`,
-                    // `JsonBuilder_encode_datetime(article.CreatedAt)`).
-                    // Keep the field as its stored `string` form — JSON
-                    // stays correct via `encode_datetime`'s text reformat.
-                    // Native `time.Time` for Go is a follow-up: it needs a
-                    // parse/format seam because Go reads `article.CreatedAt`
-                    // as a field, not a call-site-transparent accessor.
-                    if ty_contains_time(ret) {
-                        "string".to_string()
-                    } else {
-                        go_ty_stub(Some(ret))
+                    // Temporal reader (`Ty::Time` return): NO struct
+                    // field. Storage is the `<col>_raw` String accessor
+                    // pair from the shared lowering, which collapses to
+                    // an ordinary `CreatedAtRaw string` field here;
+                    // call-site reads of the Time-typed reader route to
+                    // that field (the temporal fall-through in
+                    // `expr::emit_send`) until Go's native `time.Time`
+                    // seam is wired.
+                    if ret.contains_time() {
+                        continue;
                     }
+                    go_ty_stub(Some(ret))
                 } else {
                     "interface{}".to_string()
                 }

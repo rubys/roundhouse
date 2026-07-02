@@ -84,6 +84,20 @@ pub enum Ty {
     Bottom,
 }
 
+impl Ty {
+    /// True when this type is `Time` or a union containing it — the
+    /// shape of a temporal-column reader's return (`Time | Nil`).
+    /// Emitters without a native datetime seam key their stored-text
+    /// fallback on this.
+    pub fn contains_time(&self) -> bool {
+        match self {
+            Ty::Time => true,
+            Ty::Union { variants } => variants.iter().any(Ty::contains_time),
+            _ => false,
+        }
+    }
+}
+
 /// A row-polymorphic record shape.
 /// `fields` are known; `rest` is the open-extension variable if this is a partial view.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

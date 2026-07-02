@@ -35,8 +35,24 @@ pub(super) fn push_schema_methods(
     // attr_accessor because the runtime mixes it in via `class << self`,
     // but that's a Spinel-runtime convention; the universal IR
     // declares per-class.
+    //
+    // Temporal (Date/DateTime/Time) columns split storage from access
+    // AT THE IR LEVEL: the stored ISO-8601 text lives in a `<col>_raw`
+    // String accessor pair (an ordinary field on every target), and the
+    // public `<col>` reader is a computed getter parsing that text into
+    // a native `Time`. Every synthesized internal reference (hydration,
+    // predicate, attributes, `[]`/`[]=`, fill_timestamps, `_adapter_*`)
+    // targets `<col>_raw` — so per-target emitters render what they see
+    // instead of each re-deriving a storage/accessor redirect. There is
+    // deliberately NO public `<col>=` writer: hydration writes stored
+    // text via `<col>_raw=`, and a Rails-parity Time-accepting writer
+    // (needing a `format_db_time` intrinsic) can be layered on when an
+    // app needs one.
     for col in &table.columns {
         methods.push(synth_attr_reader(owner, col));
+        if is_temporal_col(col) {
+            methods.push(synth_raw_reader(owner, col));
+        }
         methods.push(synth_attr_writer(owner, col));
         methods.push(synth_column_predicate(owner, col));
     }
@@ -145,7 +161,7 @@ pub(super) fn push_schema_methods(
     // exposed by any controller), falls back to the Hash-shaped variant
     // for backward compatibility.
     methods.push(match permitted_fields {
-        Some(fields) => synth_update_typed(owner, fields),
+        Some(fields) => synth_update_typed(owner, fields, table),
         None => synth_update(owner, table),
     });
 
@@ -171,9 +187,12 @@ pub(super) fn push_schema_methods(
 ///
 ///   def fill_timestamps(creating)
 ///     now = Time.now.utc.iso8601
-///     @updated_at = now
-///     @created_at = now if creating
+///     @updated_at_raw = now
+///     @created_at_raw = now if creating
 ///   end
+///
+/// (Timestamps are temporal columns, so the stamps land on the
+/// `<col>_raw` storage ivar — see `col_storage_name`.)
 ///
 /// Returns `None` for a model with neither timestamp column — it keeps
 /// Base's generic version, whose two `include?` checks both return false
@@ -184,10 +203,10 @@ pub(super) fn push_schema_methods(
 /// hand-written body already presents to the rust2 `str_color`
 /// ownership pass, so no new clone-insertion handling is needed.
 fn synth_fill_timestamps(owner: &ClassId, table: &Table) -> Option<MethodDef> {
-    let has_col = |n: &str| table.columns.iter().any(|c| c.name.as_str() == n);
-    let has_updated = has_col("updated_at");
-    let has_created = has_col("created_at");
-    if !has_updated && !has_created {
+    let find_col = |n: &str| table.columns.iter().find(|c| c.name.as_str() == n);
+    let updated_col = find_col("updated_at");
+    let created_col = find_col("created_at");
+    if updated_col.is_none() && created_col.is_none() {
         return None;
     }
 
@@ -211,13 +230,15 @@ fn synth_fill_timestamps(owner: &ClassId, table: &Table) -> Option<MethodDef> {
         Ty::Str,
     )];
 
-    // `@<col> = now` — an Assign returning the (String) timestamp value.
-    let assign_now = |col: &str| {
+    // `@<storage> = now` — an Assign returning the (String) timestamp
+    // value. Timestamps are temporal columns, so this lands on the
+    // `<col>_raw` storage ivar.
+    let assign_now = |col: &Column| {
         with_ty(
             Expr::new(
                 Span::synthetic(),
                 ExprNode::Assign {
-                    target: LValue::Ivar { name: Symbol::from(col) },
+                    target: LValue::Ivar { name: col_storage_name(col) },
                     value: with_ty(var_ref(now.clone()), Ty::Str),
                 },
             ),
@@ -225,18 +246,18 @@ fn synth_fill_timestamps(owner: &ClassId, table: &Table) -> Option<MethodDef> {
         )
     };
 
-    // @updated_at = now  (every save)
-    if has_updated {
-        stmts.push(assign_now("updated_at"));
+    // @updated_at_raw = now  (every save)
+    if let Some(col) = updated_col {
+        stmts.push(assign_now(col));
     }
 
-    // @created_at = now if creating  (insert only)
-    if has_created {
+    // @created_at_raw = now if creating  (insert only)
+    if let Some(col) = created_col {
         stmts.push(Expr::new(
             Span::synthetic(),
             ExprNode::If {
                 cond: with_ty(var_ref(creating.clone()), Ty::Bool),
-                then_branch: assign_now("created_at"),
+                then_branch: assign_now(col),
                 else_branch: nil_lit(),
             },
         ));
@@ -326,9 +347,43 @@ fn synth_column_predicate(owner: &ClassId, col: &Column) -> MethodDef {
     }
 }
 
-/// A typed `@col` ivar read.
+/// A typed storage-ivar read for a column (`@col`, or `@col_raw` for a
+/// temporal column — see `col_storage_name`).
 fn col_ivar(col: &Column, ty: Ty) -> Expr {
-    with_ty(Expr::new(Span::synthetic(), ExprNode::Ivar { name: col.name.clone() }), ty)
+    with_ty(
+        Expr::new(Span::synthetic(), ExprNode::Ivar { name: col_storage_name(col) }),
+        ty,
+    )
+}
+
+/// The ivar/field a column's value is STORED in. A temporal column
+/// stores its ISO-8601 text under `<col>_raw` (the public `<col>` reader
+/// is a computed getter parsing that text — see `synth_attr_reader`);
+/// every other column stores under its own name. All synthesized
+/// internal references go through this so the storage/accessor split is
+/// explicit in the IR rather than re-derived per target at emit time.
+pub fn col_storage_name(col: &Column) -> Symbol {
+    if is_temporal_col(col) {
+        Symbol::from(format!("{}_raw", col.name.as_str()))
+    } else {
+        col.name.clone()
+    }
+}
+
+/// The setter-method name synthesized internal writes dispatch to
+/// (`<col>=`, or `<col>_raw=` for a temporal column).
+fn col_storage_setter(col: &Column) -> Symbol {
+    Symbol::from(format!("{}=", col_storage_name(col).as_str()))
+}
+
+/// Storage setter for a field known only by name (permit lists). Falls
+/// back to `<field>=` when the name isn't a schema column (virtual
+/// attribute — `attr_accessor` writers keep their own name).
+fn field_storage_setter(table: &Table, field: &Symbol) -> Symbol {
+    match table.columns.iter().find(|c| c.name == *field) {
+        Some(col) => col_storage_setter(col),
+        None => Symbol::from(format!("{}=", field.as_str())),
+    }
 }
 
 /// `recv.<method>` with no arguments or block (e.g. `@col.nil?`, `cond.!`).
@@ -438,17 +493,16 @@ fn is_temporal_col(col: &Column) -> bool {
     )
 }
 
-/// `ActiveSupport.parse_db_time(@col)` — reader body for a temporal
+/// `ActiveSupport.parse_db_time(@col_raw)` — reader body for a temporal
 /// column. `parse_db_time` is nil-safe (nil / empty stored value → nil)
 /// and reads a zone-less stored value as UTC, so no explicit `&&` guard
-/// is needed — this renders cleanly on strict-null targets, where a `@col
-/// && …` guard would force a nil-raising `.not_nil!`. Typed `Time | Nil`.
-/// Ruby's emit path overrides this with the guarded `@col && parse(@col)`
-/// form (`apply_datetime_lowering`), so this shape is what non-Ruby
-/// targets render; each maps `parse_db_time` to its native parse.
+/// is needed — this renders cleanly on strict-null targets, where a
+/// guard would force a nil-raising `.not_nil!`. Typed `Time | Nil`.
+/// Every target (Ruby included) renders this same shape; each maps
+/// `parse_db_time` to its native parse.
 fn temporal_reader_body(col: &Column) -> Expr {
     let ivar = with_ty(
-        Expr::new(Span::synthetic(), ExprNode::Ivar { name: col.name.clone() }),
+        Expr::new(Span::synthetic(), ExprNode::Ivar { name: col_storage_name(col) }),
         Ty::Str,
     );
     with_ty(
@@ -469,8 +523,40 @@ fn temporal_reader_body(col: &Column) -> Expr {
     )
 }
 
+/// `<col>_raw` — the plain String reader over a temporal column's
+/// storage ivar. Together with its writer (`synth_attr_writer` names
+/// temporal writers `<col>_raw=`) this is an ordinary String accessor
+/// pair, so every target declares the backing field through its normal
+/// collapse path — no per-emitter storage redirect. It is also the
+/// uniform stored-text escape hatch (a target without a native `Time`
+/// seam can read/serialize the raw text honestly).
+fn synth_raw_reader(owner: &ClassId, col: &Column) -> MethodDef {
+    let name = col_storage_name(col);
+    let body = with_ty(
+        Expr::new(Span::synthetic(), ExprNode::Ivar { name: name.clone() }),
+        Ty::Str,
+    );
+    MethodDef {
+        name,
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        signature: Some(fn_sig(vec![], Ty::Str)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::AttributeReader,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    }
+}
+
 fn synth_attr_writer(owner: &ClassId, col: &Column) -> MethodDef {
     let value_param = Symbol::from("value");
+    // Writers always take the STORAGE type and write the storage ivar:
+    // `<col>=` / `@<col>` in general, `<col>_raw=` / `@<col>_raw` (Str)
+    // for a temporal column. Every synthesized hydration path assigns
+    // stored text, so this keeps the whole write side String-shaped.
     let col_ty = ty_of_column(&col.col_type);
     let rhs = with_ty(var_ref(value_param.clone()), col_ty.clone());
     // Assign expression evaluates to the RHS in Ruby; same in TS.
@@ -478,14 +564,14 @@ fn synth_attr_writer(owner: &ClassId, col: &Column) -> MethodDef {
         Expr::new(
             Span::synthetic(),
             ExprNode::Assign {
-                target: LValue::Ivar { name: col.name.clone() },
+                target: LValue::Ivar { name: col_storage_name(col) },
                 value: rhs,
             },
         ),
         col_ty.clone(),
     );
     MethodDef {
-        name: Symbol::from(format!("{}=", col.name.as_str())),
+        name: col_storage_setter(col),
         receiver: MethodReceiver::Instance,
         params: vec![Param::positional(value_param.clone())],
         body,
@@ -581,6 +667,7 @@ pub(super) fn push_from_params_method(
     methods: &mut Vec<MethodDef>,
     model: &crate::dialect::Model,
     fields: &[Symbol],
+    table: &Table,
 ) {
     let owner = &model.name;
     let p = Symbol::from("p");
@@ -626,7 +713,7 @@ pub(super) fn push_from_params_method(
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(var_ref(instance.clone())),
-                method: Symbol::from(format!("{}=", field.as_str())),
+                method: field_storage_setter(table, field),
                 args: vec![p_field],
                 block: None,
                 parenthesized: false,
@@ -716,7 +803,7 @@ fn synth_from_row(owner: &ClassId, table: &Table) -> MethodDef {
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(var_ref(instance.clone())),
-                method: Symbol::from(format!("{}=", col.name.as_str())),
+                method: col_storage_setter(col),
                 args: vec![cast_field],
                 block: None,
                 parenthesized: false,
@@ -790,12 +877,13 @@ fn synth_from_stmt(owner: &ClassId, table: &Table) -> MethodDef {
                 parenthesized: true,
             },
         );
-        // instance.<col>= = Db.column_*(stmt, i)
+        // instance.<col>= = Db.column_*(stmt, i)  (storage setter — a
+        // temporal column's stored text lands on `<col>_raw=`)
         stmts.push(Expr::new(
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(var_ref(instance.clone())),
-                method: Symbol::from(format!("{}=", col.name.as_str())),
+                method: col_storage_setter(col),
                 args: vec![read_call],
                 block: None,
                 parenthesized: false,
@@ -875,12 +963,13 @@ fn synth_assign_from_row(owner: &ClassId, table: &Table) -> MethodDef {
                 parenthesized: false,
             },
         );
-        // self.<col>= = row["<col>"]
+        // self.<col>= = row["<col>"]  (storage setter; adapter rows carry
+        // stored text under the COLUMN name, so the key stays `<col>`)
         stmts.push(Expr::new(
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
-                method: Symbol::from(format!("{}=", col.name.as_str())),
+                method: col_storage_setter(col),
                 args: vec![lookup],
                 block: None,
                 parenthesized: false,
@@ -957,7 +1046,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(self_ref()),
-                method: Symbol::from(format!("{}=", col.name.as_str())),
+                method: col_storage_setter(col),
                 args: vec![value],
                 block: None,
                 parenthesized: false,
@@ -1044,19 +1133,16 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
 }
 
 fn synth_attributes(owner: &ClassId, table: &Table) -> MethodDef {
+    // Keys are the PUBLIC column names; values read the storage ivar
+    // (`@col_raw` for temporal columns) — `attributes` carries the
+    // stored-text form, matching the adapter write funnel it feeds.
     let entries: Vec<(Expr, Expr)> = table
         .columns
         .iter()
         .filter(|c| c.name.as_str() != "id")
         .map(|c| {
             let col_ty = ty_of_column(&c.col_type);
-            (
-                lit_sym(c.name.clone()),
-                with_ty(
-                    Expr::new(Span::synthetic(), ExprNode::Ivar { name: c.name.clone() }),
-                    col_ty,
-                ),
-            )
+            (lit_sym(c.name.clone()), col_ivar(c, col_ty))
         })
         .collect();
 
@@ -1090,6 +1176,9 @@ fn synth_attributes(owner: &ClassId, table: &Table) -> MethodDef {
 fn synth_index_read(owner: &ClassId, table: &Table) -> MethodDef {
     let name = Symbol::from("name");
 
+    // Patterns match the PUBLIC column symbol; bodies read the storage
+    // ivar (`@col_raw` for temporal) — `record[:created_at]` yields the
+    // stored text, same as `attributes`.
     let arms: Vec<crate::expr::Arm> = table
         .columns
         .iter()
@@ -1098,7 +1187,10 @@ fn synth_index_read(owner: &ClassId, table: &Table) -> MethodDef {
                 value: Literal::Sym { value: c.name.clone() },
             },
             guard: None,
-            body: Expr::new(Span::synthetic(), ExprNode::Ivar { name: c.name.clone() }),
+            body: Expr::new(
+                Span::synthetic(),
+                ExprNode::Ivar { name: col_storage_name(c) },
+            ),
         })
         .collect();
 
@@ -1156,7 +1248,7 @@ fn synth_index_write(owner: &ClassId, table: &Table) -> MethodDef {
                 body: Expr::new(
                     Span::synthetic(),
                     ExprNode::Assign {
-                        target: LValue::Ivar { name: c.name.clone() },
+                        target: LValue::Ivar { name: col_storage_name(c) },
                         value: casted_value,
                     },
                 ),
@@ -1293,7 +1385,7 @@ fn column_union_ty(table: &Table) -> Ty {
 ///     (`record.update(title: "Renamed")` doesn't clobber body).
 ///
 /// Save, return Bool.
-fn synth_update_typed(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
+fn synth_update_typed(owner: &ClassId, fields: &[Symbol], table: &Table) -> MethodDef {
     let p = Symbol::from("p");
     let resource = Symbol::from(crate::naming::snake_case(owner.0.as_str()));
     let params_class_id = ClassId(Symbol::from(format!(
@@ -1327,7 +1419,7 @@ fn synth_update_typed(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(self_ref()),
-                method: Symbol::from(format!("{}=", field.as_str())),
+                method: field_storage_setter(table, field),
                 args: vec![p_field],
                 block: None,
                 parenthesized: false,
@@ -1397,7 +1489,7 @@ fn synth_update(owner: &ClassId, table: &Table) -> MethodDef {
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(self_ref()),
-                method: Symbol::from(format!("{}=", col.name.as_str())),
+                method: col_storage_setter(col),
                 args: vec![Expr::new(
                     Span::synthetic(),
                     ExprNode::Send {

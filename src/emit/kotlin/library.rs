@@ -23,7 +23,7 @@ use crate::ty::Ty;
 use super::expr::{
     begin_method, emit_expr, hoisted_decls, register_method_params, set_current_class,
     set_instance_prop_types, set_instance_props, set_param_names, set_return_label,
-    set_returns_unit, set_temporal_storage,
+    set_returns_unit,
 };
 use super::naming::{camel, type_name};
 use super::ty::kotlin_ty;
@@ -158,7 +158,6 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     if lc.is_module {
         set_instance_prop_types(std::collections::HashMap::new());
         set_current_class("");
-        set_temporal_storage(HashSet::new());
         let accessor_props = class_accessor_props(&lc.methods);
         let mut out = format!("object {class_name} {{\n");
         for (n, ty) in &accessor_props {
@@ -189,15 +188,15 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     // registry left from a preceding object emit.
     super::expr::set_object_tl_fields(HashSet::new());
 
-    // Temporal (Date/DateTime/Time) columns decouple storage from the
-    // reader: the column keeps an ISO-8601 `String` backing field
-    // (`<name>Raw`) while the public member `<name>` is a computed getter
-    // that parses it to a native `OffsetDateTime` (via `RhDateTime.parse`).
-    // A plain `var` property would couple the field type to the reader's
-    // `Time` — Kotlin has one member per name — so these are pulled out of
-    // the accessor→`var` collapse and emitted explicitly below. Collect the
-    // camelCased names (+ the reader body to render into the getter) up
-    // front; the accessor loop then skips both the reader and its writer.
+    // Temporal (Date/DateTime/Time) columns arrive from the shared
+    // lowering already split: storage is an ordinary `<col>_raw` String
+    // accessor pair (which collapses to a `var <col>Raw: String` property
+    // like any other column), and the public `<col>` reader is a computed
+    // body parsing that storage. A plain `var` property would couple the
+    // member type to the reader's `Time` and drop the parsing body —
+    // Kotlin has one member per name — so Time-returning readers are
+    // pulled out of the accessor→`var` collapse and emitted as explicit
+    // computed getters below.
     let mut temporal_names: HashSet<String> = HashSet::new();
     let mut temporal_readers: Vec<(String, Ty, Expr)> = Vec::new();
     for m in &lc.methods {
@@ -212,15 +211,10 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
             }
         }
     }
-    // Redirect every INTERNAL reference to a temporal column (ivar
-    // reads/writes, `self.col=`/`instance.col=` setter sends) onto its
-    // `String` backing while this class's bodies render. Cleared for the
-    // next class. Set before ANY body emits (getters, `init`, methods).
-    set_temporal_storage(temporal_names.clone());
 
     // 1. Accessor-derived properties (name → type), and the set of method
-    //    names to drop (the synthesized getters/setters). Temporal readers
-    //    and their writers are skipped — handled as backing + getter below.
+    //    names to drop (the synthesized getters/setters). Time-returning
+    //    readers are skipped — emitted as computed getters below.
     let mut prop_types: BTreeMap<String, Ty> = BTreeMap::new();
     for m in &lc.methods {
         match m.kind {
@@ -239,9 +233,6 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
                     if let Some(p) = params.first() {
                         // writer name is `foo=`; strip the `=`.
                         let base = m.name.as_str().trim_end_matches('=');
-                        if temporal_names.contains(&camel(base)) {
-                            continue;
-                        }
                         prop_types.entry(camel(base)).or_insert_with(|| p.ty.clone());
                     }
                 }
@@ -345,8 +336,7 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     }
     let inferred_ivar_types = infer_body_ivar_types(&lc.methods);
     for n in body_ivars.keys() {
-        if !prop_types.contains_key(n) && !inherited_props.contains(n) && !temporal_names.contains(n)
-        {
+        if !prop_types.contains_key(n) && !inherited_props.contains(n) {
             let m = member_modifier(n);
             match inferred_ivar_types.get(n) {
                 Some(ty) => out.push_str(&format!("    {}\n", render_member(m, n, ty))),
@@ -354,19 +344,14 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
             }
         }
     }
-    // Temporal columns: the `String` storage backing (`<name>Raw`, holding
-    // the ISO-8601 stored text) + the native-`Time` computed getter
-    // (`<name>`, parsing the backing). The internal uses target the backing
-    // (redirected in `expr.rs` via `TEMPORAL_STORAGE`); an external
-    // `record.<name>` read hits the getter. Deterministic order.
+    // Temporal columns: the native-`Time` computed getter (`<name>`,
+    // parsing the `<name>Raw` storage property that the raw accessor
+    // pair already collapsed to above). The getter renders the IR body —
+    // `parse_db_time(@<col>_raw)` → `RhDateTime.parse(<name>Raw)`.
+    // Deterministic order.
     let mut temporal_sorted = temporal_readers.clone();
     temporal_sorted.sort_by(|a, b| a.0.cmp(&b.0));
     for (n, ret, body) in &temporal_sorted {
-        let backing = format!("{n}Raw");
-        out.push_str(&format!("    {}var {backing}: String = \"\"\n", member_modifier(&backing)));
-        // The getter renders the reader body — `parse_db_time(@col)` →
-        // `RhDateTime.parse(<name>Raw)` (the ivar redirect + the
-        // `ActiveSupport.parse_db_time` mapping in `expr.rs`).
         out.push_str(&format!(
             "    {}val {n}: {} get() = {}\n",
             member_modifier(n),

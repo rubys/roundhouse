@@ -314,6 +314,19 @@ fn collect_struct_fields(methods: &[MethodDef]) -> Vec<String> {
         ) {
             continue;
         }
+        // A temporal reader (`Ty::Time` return) is a computed accessor,
+        // not storage — the `<col>_raw` String pair contributes the
+        // struct slot; a same-named slot here would be a dead member
+        // nothing writes. Reads route to the raw slot instead (see
+        // `expr::struct_field_read`) until a native DateTime seam lands.
+        if m.kind == AccessorKind::AttributeReader
+            && matches!(
+                m.signature.as_ref(),
+                Some(crate::ty::Ty::Fn { ret, .. }) if ret.contains_time()
+            )
+        {
+            continue;
+        }
         let field = m.name.as_str().trim_end_matches('=').to_string();
         if !out.contains(&field) {
             out.push(field);

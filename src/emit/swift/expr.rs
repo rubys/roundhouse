@@ -131,15 +131,6 @@ thread_local! {
     /// they're later populated (`map[k] = v`, `list << x`) — Kotlin's
     /// CONTAINER_TYPES scan.
     static CONTAINER_TYPES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
-    /// camelCased base names of the CURRENT model's temporal (Date/
-    /// DateTime/Time) columns — the datetime Stage-2 split. Storage stays
-    /// ISO-8601 TEXT in a `<col>Raw : String` backing property; the reader
-    /// `<col>` is a computed `Date?` that parses it. So every internal
-    /// STORAGE reference (`@col` reads/assigns and `x.col = v` writer
-    /// calls) retargets to `<col>Raw`, while a `.col` READ hits the Date
-    /// getter. Set per model class in `library::emit_library_class`
-    /// (empty for non-temporal classes, Rows, views, controllers).
-    static TEMPORAL_COLS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
 
 /// Reset cross-class emit state. Called once at `swift::emit` start.
@@ -470,24 +461,6 @@ fn is_known_instance_method(recv: &Expr, method: &str) -> bool {
 /// Called by `library::emit_library_class`.
 pub(super) fn set_instance_prop_types(map: HashMap<String, crate::ty::Ty>) {
     INSTANCE_PROP_TYPES.with(|m| *m.borrow_mut() = map);
-}
-
-/// Install the current model's temporal-column base names (camelCased) —
-/// the datetime storage/reader split. Empty for every non-temporal
-/// emit (cleared at the top of `emit_library_class` / `emit_test_class`).
-pub(super) fn set_temporal_cols(set: HashSet<String>) {
-    TEMPORAL_COLS.with(|s| *s.borrow_mut() = set);
-}
-
-/// Storage reference for a (camelCased) ivar/attr name: a temporal column
-/// stores its ISO-8601 text in a `<name>Raw` backing (the reader `<name>`
-/// is a computed `Date?`), so a STORAGE reference retargets to `<name>Raw`.
-fn storage_ref(camel_name: &str) -> String {
-    if TEMPORAL_COLS.with(|s| s.borrow().contains(camel_name)) {
-        format!("{camel_name}Raw")
-    } else {
-        camel_name.to_string()
-    }
 }
 
 /// Coerce a value assigned to a self-receiver property whose declared
@@ -1143,9 +1116,7 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
         // Instance variable → property reference; force-unwrapped when
         // the enclosing branch's nil-guard proved it non-nil.
         ExprNode::Ivar { name } => {
-            // A temporal column's `@col` READ is a storage read → the
-            // `String` backing `<col>Raw`, not the computed `Date?` getter.
-            let n = storage_ref(&camel(name.as_str()));
+            let n = camel(name.as_str());
             if NONNULL_PROPS.with(|s| s.borrow().contains(&n)) {
                 format!("{n}!")
             } else {
@@ -1990,9 +1961,7 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
         // (`init(_ verb: String)` assigning the `verb` property) — but
         // bare in module enums (static funcs have no `self`).
         LValue::Ivar { name } => {
-            // A temporal column's `@col` WRITE targets the `String`
-            // backing `<col>Raw` (the computed `Date?` getter is read-only).
-            let sn = storage_ref(&camel(name.as_str()));
+            let sn = camel(name.as_str());
             let val = coerce_for_prop(&sn, value, assign_value(value));
             if IN_MODULE.with(|f| *f.borrow()) {
                 format!("{sn} = {val}")
@@ -2001,10 +1970,7 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
             }
         }
         LValue::Attr { recv, name } => {
-            // Writer-method spelling of a temporal write (`x.col = v`) also
-            // targets the `String` backing — same rule as the `@col` ivar
-            // form. A `.col` READ is untouched (hits the `Date?` getter).
-            let sn = storage_ref(&camel(name.as_str()));
+            let sn = camel(name.as_str());
             let val = coerce_for_prop_assign(recv, &sn, value, assign_value(value));
             format!("{}.{sn} = {val}", emit_expr(recv))
         }
@@ -2258,10 +2224,7 @@ fn emit_send(
     if let (Some(r), 1) = (recv, args.len()) {
         if method.ends_with('=') && !matches!(method, "==" | "!=" | "<=" | ">=") {
             let base = &method[..method.len() - 1];
-            // A temporal column's writer-method call targets the `String`
-            // backing (`x.createdAtRaw = …`) — the `<col>` property is the
-            // read-only `Date?` getter.
-            let sn = storage_ref(&camel(base));
+            let sn = camel(base);
             let val = coerce_for_prop_assign(r, &sn, &args[0], args_s[0].clone());
             return format!("{}.{sn} = {}", emit_expr(r), val);
         }

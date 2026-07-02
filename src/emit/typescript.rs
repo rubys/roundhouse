@@ -1556,38 +1556,27 @@ pub(super) fn js_library_class(
     // declaration is type-only and the property is provided by
     // the parent or by runtime assignment. Without `declare`, a
     // re-declared parent property trips TS2612.
-    // Datetime storage/reader split (Stage 2): a temporal column
-    // (its `AttributeReader` returns `Ty::Time`, i.e. `Time | Nil`) does
-    // NOT collapse into a stored `Date` field — the field stores ISO-8601
-    // TEXT in a private `_<col>: string` backing, while the reader parses
-    // it to a native `Date` via an explicit `get <col>(): Date | null`.
-    // Every internal `@col` / `x.col = v` STORAGE reference retargets to
-    // the backing (via `expr::TEMPORAL_COLS`, set below); a `.col` READ
-    // is untouched and hits the getter.
+    // Datetime storage/reader split (done in the shared lowering): a
+    // temporal column's stored ISO-8601 text is an ordinary `<col>_raw`
+    // String accessor pair (collapsing to a `created_at_raw: string`
+    // stored field below like any other column), and its
+    // `AttributeReader` returns `Ty::Time` with a body parsing that
+    // storage. That reader must not collapse into a stored field — it
+    // emits as an explicit `get <col>(): Date | null` below so the
+    // parsing body survives.
     let is_temporal_reader = |m: &crate::dialect::MethodDef| -> bool {
         is_attr_reader(m) && signature_ret_is_time(m.signature.as_ref())
     };
-    let temporal_cols: std::collections::HashSet<String> = class
-        .methods
-        .iter()
-        .filter(|m| is_temporal_reader(m))
-        .map(|m| m.name.as_str().to_string())
-        .collect();
-    expr::set_temporal_cols(temporal_cols.clone());
 
     let mut fields: Vec<(String, String, bool, bool, crate::span::Span)> = Vec::new();
     let mut field_names_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for m in &class.methods {
         if is_attr_reader(m) {
-            // A temporal reader emits as a `Date` getter over a `_<col>`
-            // string backing (below), not a stored field — reserve both
-            // names and skip the normal stored-field path.
+            // A temporal reader emits as a `Date` getter (below), not a
+            // stored field — reserve the name and skip the stored-field
+            // path.
             if is_temporal_reader(m) {
-                let base = m.name.as_str().to_string();
-                let backing = format!("_{base}");
-                field_names_seen.insert(base);
-                field_names_seen.insert(backing.clone());
-                fields.push((backing, "string".to_string(), false, false, m.body.span));
+                field_names_seen.insert(m.name.as_str().to_string());
                 continue;
             }
             let ty = match m.signature.as_ref() {
@@ -1731,12 +1720,13 @@ pub(super) fn js_library_class(
     }
 
     // Temporal READERS — an explicit computed `get <col>(): Date | null`
-    // that parses the `_<col>` string backing
-    // (`RhDateTime.parse(this._<col>)`). Decoupled from storage:
-    // `article.created_at` is a native `Date`, the stored text stays
-    // portable. (`is_temporal_reader` gated these out of the stored-field
-    // passes above.) Reuse `js_class_member` for the body/return-type
-    // machinery, then flip the member kind to a getter.
+    // rendering the IR body (`parse_db_time(@<col>_raw)` →
+    // `RhDateTime.parse(this.created_at_raw)`). Decoupled from storage:
+    // `article.created_at` is a native `Date`, the stored text stays a
+    // portable `created_at_raw: string` field. (`is_temporal_reader`
+    // gated these out of the stored-field passes above.) Reuse
+    // `js_class_member` for the body/return-type machinery, then flip
+    // the member kind to a getter.
     for m in &class.methods {
         if is_temporal_reader(m) {
             let mut member = js_class_member(m, has_parent)?;
@@ -2314,12 +2304,6 @@ pub(super) fn js_library_function(
     func: &crate::dialect::LibraryFunction,
 ) -> Result<js_ast::JsDecl, String> {
     use js_ast::{JsDecl, JsParam, TsType};
-
-    // Free functions (views/jbuilder) have no temporal storage of their
-    // own — clear any set left active by a preceding model-class emit so
-    // a stale `@col`/writer retarget can't leak in. (Model datetimes are
-    // read here through the `Date` getter, which isn't retargeted.)
-    expr::set_temporal_cols(std::collections::HashSet::new());
 
     let (sig_param_tys, sig_param_optional, ret_ty): (Vec<Ty>, Vec<bool>, Ty) =
         match func.signature.as_ref() {

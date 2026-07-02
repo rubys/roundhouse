@@ -11,8 +11,14 @@
 # carries an explicit zone (e.g. `fill_timestamps`' `Time.now.utc.iso8601`,
 # which appends "Z") is left alone — that marker is authoritative and
 # must not be overridden.
+#
+# Nil-safe: a NULL / unset column hydrates as `nil` or `""` (the
+# adapter's `column_text` maps SQL NULL to `""`), and the synthesized
+# reader calls this unguarded — absent storage must yield `nil`, not an
+# ArgumentError out of `Time.parse("")`.
 module ActiveSupport
   def self.parse_db_time(str)
+    return nil if str.nil? || str.empty?
     str =~ /(Z|[+-]\d\d:?\d\d)\z/ ? Time.parse(str) : Time.parse("#{str} UTC")
   end
 end

@@ -22,6 +22,7 @@
 
 mod adapter_emit;
 mod schema;
+pub use schema::col_storage_name;
 mod validations;
 mod associations;
 mod broadcasts;
@@ -475,7 +476,7 @@ fn build_methods(
         // Skipped silently when the model isn't permitted by any
         // controller.
         if let Some(fields) = permitted_fields {
-            self::schema::push_from_params_method(&mut methods, model, fields);
+            self::schema::push_from_params_method(&mut methods, model, fields, table);
         }
     }
 
@@ -984,12 +985,20 @@ fn type_method_body(
     }
     // Seed ivar_bindings from schema columns so bare `@title` reads
     // resolve to the column type. Same source the synthesizers used
-    // for the fields themselves.
+    // for the fields themselves. MODEL classes store temporal columns
+    // under `@<col>_raw` (see `schema::col_storage_name`), so their
+    // bodies are seeded with storage names; Row classes keep plain
+    // column-named ivars (no storage/accessor split — they're the raw
+    // transport) and are distinguished by `model: None`.
     if matches!(method.receiver, MethodReceiver::Instance) {
         if let Some(t) = table {
             for col in &t.columns {
-                ctx.ivar_bindings
-                    .insert(col.name.clone(), ty_of_column(&col.col_type));
+                let ivar_name = if model.is_some() {
+                    self::schema::col_storage_name(col)
+                } else {
+                    col.name.clone()
+                };
+                ctx.ivar_bindings.insert(ivar_name, ty_of_column(&col.col_type));
             }
         }
         // has_many eager-load cache ivars (`@<assoc>_cache` /

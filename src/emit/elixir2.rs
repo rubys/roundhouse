@@ -98,11 +98,19 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     // functionalize passes, so the schema type is recorded here instead.
     for model in &app.models {
         if let Some(table) = app.schema.tables.get(&model.table.0) {
+            // MODEL struct slots use the STORAGE name (`created_at_raw`
+            // for a temporal column — the shared lowering's split); the
+            // Row class is the raw transport and keeps plain column
+            // names. `expr::struct_field_read` routes a temporal
+            // reader's public name onto the raw slot.
             let mut fields: Vec<(String, crate::ty::Ty)> = table
                 .columns
                 .iter()
                 .map(|c| {
-                    (c.name.to_string(), crate::lower::model_to_library::ty_of_column(&c.col_type))
+                    (
+                        crate::lower::model_to_library::col_storage_name(c).to_string(),
+                        crate::lower::model_to_library::ty_of_column(&c.col_type),
+                    )
                 })
                 .collect();
             // The AR `errors` collection is a list (not a schema column) —
@@ -114,7 +122,14 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             ));
             let name = model.name.0.as_str();
             expr::register_field_types(name, &fields);
-            expr::register_field_types(&format!("{name}Row"), &fields);
+            let row_fields: Vec<(String, crate::ty::Ty)> = table
+                .columns
+                .iter()
+                .map(|c| {
+                    (c.name.to_string(), crate::lower::model_to_library::ty_of_column(&c.col_type))
+                })
+                .collect();
+            expr::register_field_types(&format!("{name}Row"), &row_fields);
         }
     }
 

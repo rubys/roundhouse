@@ -254,29 +254,24 @@ fn rewrite_durations(expr: &mut Expr) {
     }
 }
 
-/// Ruby-family pre-emit pass: make Date/DateTime/Time columns behave like
-/// real `Time` values in CRuby/JRuby, on top of the `time` stdlib
-/// (`require 'time'`, wired in `ruby_overlay/main.rb`). The columns type
-/// as `Ty::Time` in the IR, but storage stays ISO-8601 TEXT (the DB
-/// column is TEXT; `column_read_method` reads it as text, same as a
-/// String) — so this pass bridges the stored text to the `Time` the type
-/// promises, at the accessor boundary. Lives on the Ruby emit path for
-/// the same reason as Duration: `Time` parsing/formatting doesn't
-/// transpile uniformly across targets, so the rewrite (and its
-/// `require 'time'`) stay off shared `lower/`; a target without a native
-/// datetime type instead surfaces the honest not-supported gap.
+/// Ruby-family pre-emit pass for TRANSPILED-SHAPE classes only: models
+/// whose accessors were hand-written in the source (`attr_accessor
+/// :created_at`) and so never passed through the shared model lowering.
+/// Schema-synthesized models don't need it — `schema::synth_attr_reader`
+/// already splits storage (`@<col>_raw`, String) from access (a reader
+/// parsing via `ActiveSupport.parse_db_time`), for every target.
 ///
-/// Reader becomes `@col && ActiveSupport.parse_db_time(@col)` — short-
-/// circuits a nullable column's `nil` without needing to know nullability;
-/// `parse_db_time` (not bare `Time.parse`) treats a zone-less column as
-/// UTC rather than the system's local zone (see
-/// `active_support_time_parsing.rb`). Writer becomes
-/// `@col = (value.respond_to?(:iso8601) ? value.iso8601 : value)` — every
-/// hydration path always assigns a raw String, so this is a no-op there,
-/// but it also normalizes a `Time` passed directly by app code (e.g.
-/// `self.something_at = Time.now`) back to text, so every write lands on
-/// the same on-disk format regardless of path. A strict no-op for apps
-/// with no Date/DateTime/Time columns (the blog).
+/// For the hand-written shape (storage under `@<col>` itself), the
+/// reader becomes `@col && ActiveSupport.parse_db_time(@col)` — short-
+/// circuits a nullable column's `nil` without needing to know
+/// nullability; `parse_db_time` (not bare `Time.parse`) treats a
+/// zone-less column as UTC rather than the system's local zone (see
+/// `active_support_time_parsing.rb`). The writer becomes
+/// `@col = (value.respond_to?(:iso8601) ? value.iso8601 : value)` —
+/// normalizing a `Time` passed by app code back to text so every write
+/// lands on the same on-disk format. A strict no-op for apps with no
+/// Date/DateTime/Time columns (the blog) and for schema-synthesized
+/// models (the plain-ivar-read gate below).
 pub(crate) fn apply_datetime_lowering(lcs: &mut [LibraryClass], app: &App) {
     for model in &app.models {
         let Some(table) = app.schema.tables.get(&model.table.0) else {
@@ -306,9 +301,24 @@ pub(crate) fn apply_datetime_lowering(lcs: &mut [LibraryClass], app: &App) {
                 continue;
             }
             match m.kind {
-                AccessorKind::AttributeReader if temporal.contains(&m.name) => {
+                // Only a PLAIN `@col`-read body — the hand-written
+                // `attr_reader` shape from transpiled fixtures. A
+                // schema-synthesized model's temporal reader already
+                // parses its `@<col>_raw` storage ivar (see
+                // `schema::synth_attr_reader`); overwriting it here
+                // would re-point the read at a nonexistent `@<col>`.
+                AccessorKind::AttributeReader
+                    if temporal.contains(&m.name)
+                        && is_plain_ivar_read(&m.body, &m.name) =>
+                {
                     m.body = temporal_reader_body(&m.name);
                 }
+                // Hand-written temporal writers only, same reasoning:
+                // synthesized models write storage via `<col>_raw=`
+                // (never named after a temporal column), so any
+                // `<col>=` writer matching the temporal set is the
+                // transpiled-fixture shape that needs the Time→text
+                // normalize.
                 AccessorKind::AttributeWriter => {
                     let col = Symbol::from(m.name.as_str().trim_end_matches('='));
                     if temporal.contains(&col) {
@@ -321,6 +331,12 @@ pub(crate) fn apply_datetime_lowering(lcs: &mut [LibraryClass], app: &App) {
             }
         }
     }
+}
+
+/// True when a reader body is exactly `@<name>` — the untouched
+/// hand-written `attr_reader` shape (vs a synthesized parsing body).
+fn is_plain_ivar_read(body: &Expr, name: &Symbol) -> bool {
+    matches!(&*body.node, ExprNode::Ivar { name: n } if n == name)
 }
 
 fn datetime_ivar(col: &Symbol) -> Expr {

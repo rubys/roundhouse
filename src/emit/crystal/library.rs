@@ -240,13 +240,12 @@ fn render_class(lc: &LibraryClass) -> String {
     let mut properties: Vec<(String, String)> = Vec::new();
     let mut accessor_method_names: std::collections::HashSet<String> =
         std::collections::HashSet::new();
-    // Temporal-column accessors (reader returns `Time`) must NOT collapse
-    // into a `property` — the field stores ISO-8601 text (`String` ivar)
-    // while the reader parses it to a native `Time`. Both the reader
-    // (`def col : Time?`, parse body) and writer (`def col=(v : String)`,
-    // stored text) emit as explicit methods; the `@col : String?` storage
-    // ivar is declared from the writer's assignment. This set defers the
-    // writer decision (seen after its reader) to the reader's finding.
+    // Temporal-column readers (return `Time`) must NOT collapse into a
+    // `property` — the parsing body would be lost. The reader emits as an
+    // explicit method (`def col : Time?`) over the `<col>_raw` String
+    // storage, which is an ordinary accessor pair from the shared
+    // lowering and collapses to `property created_at_raw : String` like
+    // any other column.
     let mut temporal_accessor_names: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     // First pass: detect which ivars `initialize` directly assigns
@@ -358,12 +357,6 @@ fn render_class(lc: &LibraryClass) -> String {
                 // the reader was registered above, the property covers
                 // both. Drop the explicit method.
                 let base = m.name.as_str().trim_end_matches('=').to_string();
-                // Temporal writer stays explicit (its reader didn't
-                // collapse) — the property would couple it to `Time`, but
-                // storage is `String`.
-                if temporal_accessor_names.contains(&base) {
-                    continue;
-                }
                 accessor_method_names.insert(format!("{base}="));
             }
             _ => {}

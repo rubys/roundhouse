@@ -144,8 +144,10 @@ fn article_renders_residualized_fill_timestamps() {
     // emitter uses postfix-modifier form for the single-line `if`.
     assert!(src.contains("def fill_timestamps(creating)"), "{src}");
     assert!(src.contains("now = Time.now.utc.iso8601"), "{src}");
-    assert!(src.contains("@updated_at = now"), "{src}");
-    assert!(src.contains("@created_at = now if creating"), "{src}");
+    // Timestamps are temporal columns — stamps land on the `<col>_raw`
+    // storage ivar (the public reader parses it to Time).
+    assert!(src.contains("@updated_at_raw = now"), "{src}");
+    assert!(src.contains("@created_at_raw = now if creating"), "{src}");
     // The runtime schema probe must be fully residualized away.
     assert!(
         !src.contains(".include?(:updated_at)") && !src.contains(".include?(:created_at)"),
@@ -2174,9 +2176,11 @@ fn column_query_predicates_match_rails_semantics() {
         src.contains("!(@name.nil?) && @name != \"\""),
         "string predicate is present (non-empty); got:\n{src}",
     );
+    // Temporal columns store under the `<col>_raw` ivar (IR-level
+    // storage/accessor split); the predicate reads the stored text.
     assert!(
-        src.contains("!(@deleted_at.nil?) && @deleted_at != \"\""),
-        "datetime predicate (lowers to Str) is present; got:\n{src}",
+        src.contains("!(@deleted_at_raw.nil?) && @deleted_at_raw != \"\""),
+        "datetime predicate reads the `_raw` storage text; got:\n{src}",
     );
 }
 

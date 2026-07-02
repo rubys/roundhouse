@@ -51,11 +51,6 @@ pub(super) fn emit_models(app: &App) -> EmittedFile {
             }
         }
     }
-    // Clear the datetime storage/reader-split set the last model class
-    // installed, so it can't leak into the subsequent controller/view/spec
-    // emit (whose `.col` reads must hit the `@property`, not a backing).
-    super::expr::set_temporal_backings(std::collections::HashSet::new());
-
     // Break the models<->views import cycle: reach the `Views` facade
     // through the views *module* (`views.Views.X`) rather than importing
     // the `Views` name. `from app.views import Views` binds a name that

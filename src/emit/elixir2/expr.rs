@@ -220,6 +220,23 @@ fn field_type(class_id: &str, field: &str) -> Option<crate::ty::Ty> {
     FIELD_TYPES.with(|f| f.borrow().get(class_id).and_then(|m| m.get(field).cloned()))
 }
 
+/// Field-read routing for a 0-arg send: the registered slot itself, or
+/// — for a temporal reader whose storage the shared lowering split into
+/// `<name>_raw` — that raw slot (stored ISO-8601 text; Elixir's native
+/// DateTime seam isn't wired yet, and JSON stays byte-correct via
+/// `encode_datetime`'s text reformat). `None` when neither is a slot
+/// (a real method).
+fn struct_field_read(class_id: &str, field: &str) -> Option<String> {
+    if is_struct_field(class_id, field) {
+        return Some(field.to_string());
+    }
+    let raw = format!("{field}_raw");
+    if is_struct_field(class_id, &raw) {
+        return Some(raw);
+    }
+    None
+}
+
 thread_local! {
     /// Method-param name → its `Ty`, keyed by the enclosing class name
     /// (e.g. `Views::Articles` → {"article": Class{Article}, "articles":
@@ -879,8 +896,8 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     // mutation_to_struct_return already bridges to `record.__field__`.)
     if recv.is_none() && args.is_empty() && is_record_threading_context() {
         let class = CURRENT_CLASS_NAME.with(|n| n.borrow().clone());
-        if is_struct_field(&class, method) {
-            return format!("record.{method}");
+        if let Some(field) = struct_field_read(&class, method) {
+            return format!("record.{field}");
         }
     }
 
@@ -1217,8 +1234,8 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         // reads, already bridged to `__field__` above.
         if args.is_empty() {
             let class = CURRENT_CLASS_NAME.with(|n| n.borrow().clone());
-            if is_struct_field(&class, method) {
-                return format!("record.{method}");
+            if let Some(field) = struct_field_read(&class, method) {
+                return format!("record.{field}");
             }
         }
         let fname = super::library::elixir_fn_name(method);
@@ -1444,8 +1461,10 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         if let Some(crate::ty::Ty::Class { id, .. }) = effective_recv_ty(r) {
             if !is_record_var(r) && !is_class_ref {
                 let r_s = emit_expr(r);
-                if args.is_empty() && is_struct_field(id.0.as_str(), method) {
-                    return format!("{r_s}.{method}");
+                if args.is_empty() {
+                    if let Some(field) = struct_field_read(id.0.as_str(), method) {
+                        return format!("{r_s}.{field}");
+                    }
                 }
                 let fname = super::library::elixir_fn_name(method);
                 return if args.is_empty() {

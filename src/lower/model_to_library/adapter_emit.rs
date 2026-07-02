@@ -137,6 +137,8 @@ fn synth_adapter_all(owner: &ClassId, table: &Table, schema: &Schema) -> MethodD
 /// reload comment for the underlying emit issue with
 /// `self.class.<async_method>`.
 fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
+    // SQL column names are the PUBLIC names; the value reads the STORAGE
+    // ivar (`@col_raw` for temporal — stored ISO-8601 text goes to disk).
     let assignments: Vec<Assignment> = table
         .columns
         .iter()
@@ -144,7 +146,7 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
         .map(|c| Assignment {
             column: c.name.clone(),
             value: Value::Runtime {
-                expr: ivar_ref(&c.name),
+                expr: ivar_ref(&super::schema::col_storage_name(c)),
                 ty: value_type_for_column(&c.col_type),
             },
         })
@@ -173,6 +175,7 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
 /// `def _adapter_update` — instance method; reads ivars + @id.
 /// See `synth_adapter_insert` for the receiver-rationale.
 fn synth_adapter_update(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
+    // Same storage-ivar convention as `synth_adapter_insert`.
     let assignments: Vec<Assignment> = table
         .columns
         .iter()
@@ -180,7 +183,7 @@ fn synth_adapter_update(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
         .map(|c| Assignment {
             column: c.name.clone(),
             value: Value::Runtime {
-                expr: ivar_ref(&c.name),
+                expr: ivar_ref(&super::schema::col_storage_name(c)),
                 ty: value_type_for_column(&c.col_type),
             },
         })
@@ -388,7 +391,7 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
         if_body.push(Expr::new(
             Span::synthetic(),
             ExprNode::Assign {
-                target: LValue::Ivar { name: col.name.clone() },
+                target: LValue::Ivar { name: super::schema::col_storage_name(col) },
                 value: read_call,
             },
         ));
