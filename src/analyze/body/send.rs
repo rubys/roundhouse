@@ -334,6 +334,18 @@ impl<'a> BodyTyper<'a> {
                         return ty;
                     }
                 }
+                // `ActiveSupport.parse_db_time(<stored text>)` — the
+                // synthesized temporal-column reader intrinsic (see
+                // `src/lower/model_to_library/schema.rs`). It parses
+                // ISO-8601 storage text into a native `Time` (nilable: a
+                // stored value can be absent). Not a real ActiveSupport
+                // method — an internal lowering intrinsic each backend
+                // renders natively (`parse_db_time` → `RhDateTime.parse`
+                // etc.) — so it's resolved here rather than via the class
+                // registry, which would leave it an unresolved `Ty::Var`.
+                if id.0.as_str() == "ActiveSupport" && method.as_str() == "parse_db_time" {
+                    return Ty::Union { variants: vec![Ty::Time, Ty::Nil] };
+                }
                 // Walk the parent chain so inherited methods resolve:
                 // `Article.last` looks up `last` on Article → Application
                 // Record → ActiveRecord::Base (where the RBS-declared
