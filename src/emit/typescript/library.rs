@@ -908,6 +908,22 @@ fn collect_imports_with_companions(
     let mut broadcasts_import: bool = false;
     let mut importmap_import: bool = false;
 
+    // Datetime Stage-2 seam: a model with a temporal column emits a
+    // `get <col>(): Date | null` whose body calls `RhDateTime.parse`
+    // (the `ActiveSupport.parse_db_time` intrinsic renders to it). The
+    // IR body carries only the `ActiveSupport` const, so this reference
+    // is invisible to the body walker above — surface the import from
+    // the presence of a temporal reader instead. `RhDateTime` ships in
+    // the hand-written `src/datetime.ts` runtime file.
+    let has_temporal_reader = |c: &LibraryClass| -> bool {
+        c.methods.iter().any(|m| {
+            matches!(m.kind, crate::dialect::AccessorKind::AttributeReader)
+                && super::signature_ret_is_time(m.signature.as_ref())
+        })
+    };
+    let datetime_import =
+        has_temporal_reader(lc) || companions.iter().any(has_temporal_reader);
+
     for r in refs {
         let r_str: &str = &r;
         if JUNTOS_EXPORTS.contains(&r_str) {
@@ -1139,6 +1155,12 @@ fn collect_imports_with_companions(
     if importmap_import {
         let import_path = relative_to_root(out_path, "app/importmap.js");
         out.push(named(vec!["Importmap".to_string()], import_path));
+    }
+    if datetime_import {
+        // `RhDateTime` — the native-`Date` parse helper for temporal
+        // columns, shipped hand-written at `src/datetime.ts`.
+        let import_path = relative_to_root(out_path, "src/datetime.js");
+        out.push(named(vec!["RhDateTime".to_string()], import_path));
     }
     out
 }

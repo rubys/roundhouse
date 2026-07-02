@@ -155,6 +155,45 @@ pub(crate) fn is_enclosing_param_name(name: &str) -> bool {
     })
 }
 
+// Temporal (Date/DateTime/Time) column storage split -------------------
+//
+// The datetime Stage-2 split: storage stays ISO-8601 TEXT in a
+// `_<col>: string` backing field, and the column's reader `<col>` is a
+// computed `get <col>(): Date | null` that parses the backing. So every
+// internal STORAGE reference — `@col` ivar reads/writes and `x.col = v`
+// writer-sends — retargets to the `_<col>` backing, while a `.col` READ
+// (a zero-arg Send on some receiver) is untouched and hits the `Date`
+// getter. Set per class in `js_library_class`; cleared for the
+// function-shaped emits (views/jbuilder) that read model datetimes
+// through the getter.
+
+std::thread_local! {
+    /// Ruby names of the current model's temporal columns (`created_at`,
+    /// `updated_at`, …). Empty for non-temporal classes, Rows, views,
+    /// controllers.
+    static TEMPORAL_COLS: std::cell::RefCell<HashSet<String>> =
+        std::cell::RefCell::new(HashSet::new());
+}
+
+/// Install the current class's temporal-column ruby names — the
+/// storage/reader split. Empty for every non-temporal emit.
+pub(super) fn set_temporal_cols(set: HashSet<String>) {
+    TEMPORAL_COLS.with(|cell| *cell.borrow_mut() = set);
+}
+
+/// Storage field name for an ivar/attr: a temporal column stores its
+/// ISO-8601 text in a `_<col>` backing (its base name is the `Date`
+/// getter), so a STORAGE reference retargets there. Non-temporal names
+/// pass through `ts_field_name` unchanged.
+fn storage_field_name(name: &str) -> String {
+    let field = ts_field_name(name);
+    if TEMPORAL_COLS.with(|cell| cell.borrow().contains(name)) {
+        format!("_{field}")
+    } else {
+        field
+    }
+}
+
 /// Receiver-aware filter at emit time. Mirrors
 /// `crate::analyze::async_color::recv_is_known_sync` — if the
 /// receiver's resolved type is one of the known-sync containers
@@ -398,7 +437,7 @@ fn js_body_with_state(
                     target: Js::member(
                         body.span,
                         Js::ident(body.span, "this"),
-                        ts_field_name(name.as_str()),
+                        storage_field_name(name.as_str()),
                     ),
                     op: "=",
                     value: js_expr(value),
@@ -758,7 +797,7 @@ pub(super) fn js_stmts_with_state(
                     target: Js::member(
                         e.span,
                         Js::ident(e.span, "this"),
-                        ts_field_name(name.as_str()),
+                        storage_field_name(name.as_str()),
                     ),
                     op: "=",
                     value: js_expr(value),
@@ -1107,7 +1146,7 @@ pub(super) fn js_expr(e: &Expr) -> Js {
         ExprNode::Ivar { name } => Js::member(
             e.span,
             Js::ident(e.span, "this"),
-            ts_field_name(name.as_str()),
+            storage_field_name(name.as_str()),
         ),
         ExprNode::Send { recv, method, args, block, parenthesized } => js_send_with_block(
             e.span,
@@ -1129,10 +1168,14 @@ pub(super) fn js_expr(e: &Expr) -> Js {
                 LValue::Ivar { name } => Js::member(
                     e.span,
                     Js::ident(e.span, "this"),
-                    ts_field_name(name.as_str()),
+                    storage_field_name(name.as_str()),
                 ),
                 LValue::Attr { recv, name } => {
-                    Js::member(e.span, js_expr(recv), name.as_str())
+                    // A temporal-column write (`x.created_at = v`) targets
+                    // the `_<col>` string backing (the base name is the
+                    // read-only `Date` getter); non-temporal names pass
+                    // through unchanged.
+                    Js::member(e.span, js_expr(recv), storage_field_name(name.as_str()))
                 }
                 LValue::Index { recv, index } => Js::index(e.span, js_expr(recv), js_expr(index)),
                 _ => return value_js,
@@ -1677,6 +1720,27 @@ fn js_send_inner(
     args: &[Expr],
     parenthesized: bool,
 ) -> Js {
+    // Temporal reader intrinsic: `ActiveSupport.parse_db_time(s)` parses
+    // stored ISO-8601 text into a native `Date` (nil-safe: `string | null`
+    // → `Date | null`). Maps to the hand-written `RhDateTime.parse`
+    // runtime helper (src/datetime.ts). The arg is the column's `string`
+    // storage backing (`@col` → `this._col`), reached through the normal
+    // ivar-read path. See the temporal branch in typescript.rs's
+    // `js_library_class`.
+    if method == "parse_db_time" && args.len() == 1 {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                    return Js::method_call(
+                        span,
+                        Js::ident(span, "RhDateTime"),
+                        "parse",
+                        vec![js_expr(&args[0])],
+                    );
+                }
+            }
+        }
+    }
     // Framework class-instance receivers route bracket access to
     // method dispatch (`.get(k)` / `.set(k, v)`). JS bracket access
     // on a class instance returns `undefined` for runtime keys
@@ -1845,10 +1909,13 @@ fn js_send_inner(
         && args.len() == 1
     {
         let attr = &method[..method.len() - 1];
+        // A temporal-column writer-send (`x.created_at = v`) targets the
+        // `_<col>` string backing (the base name is the read-only `Date`
+        // getter); `storage_field_name` is identity for non-temporal.
         return Js::new(
             span,
             JsExpr::Assign {
-                target: Js::member(span, js_expr(recv.unwrap()), ts_field_name(attr)),
+                target: Js::member(span, js_expr(recv.unwrap()), storage_field_name(attr)),
                 op: "=",
                 value: js_expr(&args[0]),
             },

@@ -12,14 +12,26 @@ pub fn ts_ty(ty: &Ty) -> String {
         Ty::Array { elem } => format!("{}[]", ts_ty(elem)),
         Ty::Hash { key, value } => format!("Record<{}, {}>", ts_ty(key), ts_ty(value)),
         Ty::Class { id, .. } => ts_class_ty(id),
-        // Honest not-supported gap until TS's datetime seam lands
-        // (Stage 2) — don't let Time fall through to `any`. (The
+        // TS has a native `Date`. Temporal columns store ISO-8601 text
+        // (a `_<col>: string` backing field) and read back as a real
+        // `Date` via a computed `get <col>(): Date | null` that parses
+        // the backing — see the temporal branch in typescript.rs's
+        // `js_library_class` and `RhDateTime.parse`. (The
         // `class_is_temporal` → "string" path in ts_class_ty is
         // separate: it's for hand-written-rbs Time in the shared
         // runtime, not the first-class `Ty::Time` column type.)
-        Ty::Time => crate::emit::diagnostics::unsupported_time_ty("typescript"),
+        Ty::Time => "Date".into(),
         Ty::Untyped => "any".into(),
         Ty::Bottom => "never".into(),
+        // A temporal reader's `Time | Nil` union → `Date | null`. Only
+        // Time-containing unions are rendered here (the datetime Stage-2
+        // reader return type); other unions still fall through to `any`
+        // (no general union rendering wired for TS yet).
+        Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Time)) => {
+            let mut parts: Vec<String> = variants.iter().map(ts_ty).collect();
+            parts.dedup();
+            parts.join(" | ")
+        }
         _ => "any".into(),
     }
 }

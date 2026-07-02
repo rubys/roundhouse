@@ -31,6 +31,11 @@ const DB_WORKER_SOURCE: &str = include_str!("../../runtime/typescript/db_worker.
 const SQLITE_WASM_ENGINE_SOURCE: &str =
     include_str!("../../runtime/typescript/sqlite_wasm_engine.ts");
 const BROADCASTS_SOURCE: &str = include_str!("../../runtime/typescript/broadcasts.ts");
+// Native-`Date` seam for temporal columns: `RhDateTime.parse` (stored
+// ISO-8601 text → Date, the `parse_db_time` intrinsic target). The
+// `JsonBuilder.encode_datetime` Date branch is injected into the
+// transpiled json_builder unit (see `patch_json_builder_datetime`).
+const DATETIME_SOURCE: &str = include_str!("../../runtime/typescript/datetime.ts");
 const DB_SOURCE: &str = include_str!("../../runtime/typescript/db.ts");
 const PARAM_VALUE_SOURCE: &str = include_str!("../../runtime/typescript/param_value.ts");
 const DB_LIBSQL_SOURCE: &str = include_str!("../../runtime/typescript/db-libsql.ts");
@@ -147,6 +152,27 @@ pub fn emit_with_profile(
     })
 }
 
+/// Inject a `Date` branch into the transpiled
+/// `JsonBuilder.encode_datetime`. The transpiled body (from
+/// `runtime/ruby/json_builder.rb`) handles the stored ISO-8601 STRING
+/// form; a temporal-column reader now yields a native `Date`, which the
+/// jbuilder views pass here. `Date.prototype.toISOString()` already
+/// produces Rails' canonical UTC millisecond `...Z` shape
+/// (`2026-05-15T21:14:56.300Z`), so the branch is a one-liner. Anchored on
+/// the `s`-named null guard (unique to `encode_datetime`; `encode_value`
+/// uses `v`). The transpiled param is `any`, so no signature widening is
+/// needed for a `Date` argument to type-check.
+fn patch_json_builder_datetime(content: String) -> String {
+    const ANCHOR: &str = "if (s == null) { return \"null\"; }";
+    const INJECT: &str = "if (s == null) { return \"null\"; }\n  if (s instanceof Date) { return `\"${s.toISOString()}\"`; }";
+    debug_assert!(
+        content.contains(ANCHOR),
+        "json_builder.ts encode_datetime null-guard anchor not found — \
+         the transpiled shape changed; update patch_json_builder_datetime",
+    );
+    content.replacen(ANCHOR, INJECT, 1)
+}
+
 /// Emit a TypeScript project for `app`. Every artifact (models,
 /// views, controllers, fixtures, tests, schema) flows through the
 /// universal walker. A single shared class registry is threaded
@@ -183,6 +209,11 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     files.push(EmittedFile {
         path: PathBuf::from("src/broadcasts.ts"),
         content: BROADCASTS_SOURCE.to_string(),
+    });
+    // Datetime seam — `RhDateTime.parse` for temporal-column getters.
+    files.push(EmittedFile {
+        path: PathBuf::from("src/datetime.ts"),
+        content: DATETIME_SOURCE.to_string(),
     });
     // Db primitive surface — profile-selected. Sync profiles get
     // the better-sqlite3 wrap (`db.ts`); async (libsql) profiles
@@ -721,9 +752,21 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     })
     .expect("runtime transpile failed (Ruby source error)");
     for unit in runtime_units {
+        // Datetime Stage-2: temporal-column readers yield a native `Date`,
+        // which the jbuilder views pass to `JsonBuilder.encode_datetime`.
+        // The transpiled function handles the stored-string path; inject a
+        // `Date` branch (→ Rails' canonical `...Z` millisecond form) so
+        // the native value serializes correctly. TS has no partial-class /
+        // overload-across-files mechanism (unlike the C#/Swift/Crystal
+        // seams), so this augments the transpiled unit in place.
+        let content = if unit.out_path == PathBuf::from("src/json_builder.ts") {
+            patch_json_builder_datetime(unit.content)
+        } else {
+            unit.content
+        };
         files.push(EmittedFile {
             path: unit.out_path,
-            content: unit.content,
+            content,
         });
     }
 
@@ -1513,10 +1556,40 @@ pub(super) fn js_library_class(
     // declaration is type-only and the property is provided by
     // the parent or by runtime assignment. Without `declare`, a
     // re-declared parent property trips TS2612.
+    // Datetime storage/reader split (Stage 2): a temporal column
+    // (its `AttributeReader` returns `Ty::Time`, i.e. `Time | Nil`) does
+    // NOT collapse into a stored `Date` field — the field stores ISO-8601
+    // TEXT in a private `_<col>: string` backing, while the reader parses
+    // it to a native `Date` via an explicit `get <col>(): Date | null`.
+    // Every internal `@col` / `x.col = v` STORAGE reference retargets to
+    // the backing (via `expr::TEMPORAL_COLS`, set below); a `.col` READ
+    // is untouched and hits the getter.
+    let is_temporal_reader = |m: &crate::dialect::MethodDef| -> bool {
+        is_attr_reader(m) && signature_ret_is_time(m.signature.as_ref())
+    };
+    let temporal_cols: std::collections::HashSet<String> = class
+        .methods
+        .iter()
+        .filter(|m| is_temporal_reader(m))
+        .map(|m| m.name.as_str().to_string())
+        .collect();
+    expr::set_temporal_cols(temporal_cols.clone());
+
     let mut fields: Vec<(String, String, bool, bool, crate::span::Span)> = Vec::new();
     let mut field_names_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for m in &class.methods {
         if is_attr_reader(m) {
+            // A temporal reader emits as a `Date` getter over a `_<col>`
+            // string backing (below), not a stored field — reserve both
+            // names and skip the normal stored-field path.
+            if is_temporal_reader(m) {
+                let base = m.name.as_str().to_string();
+                let backing = format!("_{base}");
+                field_names_seen.insert(base);
+                field_names_seen.insert(backing.clone());
+                fields.push((backing, "string".to_string(), false, false, m.body.span));
+                continue;
+            }
             let ty = match m.signature.as_ref() {
                 Some(Ty::Fn { ret, .. }) => ts_ty(ret),
                 _ => m.body.ty.as_ref().map(ts_ty).unwrap_or_else(|| "any".to_string()),
@@ -1657,6 +1730,24 @@ pub(super) fn js_library_class(
         wrote_fields = true;
     }
 
+    // Temporal READERS — an explicit computed `get <col>(): Date | null`
+    // that parses the `_<col>` string backing
+    // (`RhDateTime.parse(this._<col>)`). Decoupled from storage:
+    // `article.created_at` is a native `Date`, the stored text stays
+    // portable. (`is_temporal_reader` gated these out of the stored-field
+    // passes above.) Reuse `js_class_member` for the body/return-type
+    // machinery, then flip the member kind to a getter.
+    for m in &class.methods {
+        if is_temporal_reader(m) {
+            let mut member = js_class_member(m, has_parent)?;
+            if let js_ast::JsClassMember::Method { kind, .. } = &mut member {
+                *kind = js_ast::MethodKind::Get;
+            }
+            members.push(member);
+            wrote_fields = true;
+        }
+    }
+
     // `?`/`!` method-name suffixes get stripped on the way out
     // (`save!` → `save`, `valid?` → `valid`); when both forms exist
     // on the same class the sanitized names collide and TS rejects
@@ -1741,6 +1832,21 @@ pub(super) fn js_library_class(
         members,
         span: crate::span::Span::synthetic(),
     })
+}
+
+/// True when a method's signature return type is `Ty::Time` (or a
+/// `Time | Nil` union) — i.e. a synthesized temporal-column reader
+/// (see `synth_attr_reader`). Gates the datetime storage/reader split:
+/// a `_<col>: string` backing + a `get <col>(): Date | null` getter.
+pub(crate) fn signature_ret_is_time(sig: Option<&Ty>) -> bool {
+    fn is_time(t: &Ty) -> bool {
+        match t {
+            Ty::Time => true,
+            Ty::Union { variants } => variants.iter().any(is_time),
+            _ => false,
+        }
+    }
+    matches!(sig, Some(Ty::Fn { ret, .. }) if is_time(ret))
 }
 
 /// Emit the body of a `constructor` from an `initialize` method's
@@ -2208,6 +2314,12 @@ pub(super) fn js_library_function(
     func: &crate::dialect::LibraryFunction,
 ) -> Result<js_ast::JsDecl, String> {
     use js_ast::{JsDecl, JsParam, TsType};
+
+    // Free functions (views/jbuilder) have no temporal storage of their
+    // own — clear any set left active by a preceding model-class emit so
+    // a stale `@col`/writer retarget can't leak in. (Model datetimes are
+    // read here through the `Date` getter, which isn't retargeted.)
+    expr::set_temporal_cols(std::collections::HashSet::new());
 
     let (sig_param_tys, sig_param_optional, ret_ty): (Vec<Ty>, Vec<bool>, Ty) =
         match func.signature.as_ref() {
