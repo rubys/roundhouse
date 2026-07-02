@@ -69,13 +69,22 @@ fn emit_class_body(class: &LibraryClass, v2_name: &str) -> Result<String, String
         .methods
         .iter()
         .filter(|m| {
+            // Temporal readers ARE record-threaded functions (see the
+            // emission exception below); other accessors are struct
+            // slots, not functions.
+            let is_temporal_reader = m.kind == AccessorKind::AttributeReader
+                && matches!(
+                    m.signature.as_ref(),
+                    Some(crate::ty::Ty::Fn { ret, .. }) if ret.contains_time()
+                );
             !is_module_singleton
                 && matches!(m.receiver, MethodReceiver::Instance)
                 && m.name.as_str() != "initialize"
-                && !matches!(
-                    m.kind,
-                    AccessorKind::AttributeReader | AccessorKind::AttributeWriter
-                )
+                && (is_temporal_reader
+                    || !matches!(
+                        m.kind,
+                        AccessorKind::AttributeReader | AccessorKind::AttributeWriter
+                    ))
         })
         .map(|m| elixir_fn_name(m.name.as_str()))
         .collect();
@@ -125,11 +134,23 @@ fn emit_class_body(class: &LibraryClass, v2_name: &str) -> Result<String, String
     }
 
     for m in &class.methods {
-        if matches!(
-            m.kind,
-            AccessorKind::AttributeReader | AccessorKind::AttributeWriter
-        ) {
-            // Represented by struct fields; no accessor function.
+        // Accessors are represented by struct fields; no function.
+        // EXCEPTION: a temporal reader (`Ty::Time` return) has no slot —
+        // `collect_struct_fields` skipped it — and its body parses the
+        // `<col>_raw` storage slot, so it emits as a real function
+        // (`def created_at(record), do: RhDateTime.parse(record.created_at_raw)`);
+        // reads reach it through the normal method-dispatch routing.
+        let is_temporal_reader = m.kind == AccessorKind::AttributeReader
+            && matches!(
+                m.signature.as_ref(),
+                Some(crate::ty::Ty::Fn { ret, .. }) if ret.contains_time()
+            );
+        if !is_temporal_reader
+            && matches!(
+                m.kind,
+                AccessorKind::AttributeReader | AccessorKind::AttributeWriter
+            )
+        {
             continue;
         }
         // `initialize` → a `new/n` constructor returning a struct literal

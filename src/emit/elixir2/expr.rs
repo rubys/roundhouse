@@ -195,15 +195,6 @@ pub(super) fn register_field_names(class: &str, fields: &[String]) {
 /// Register a class's struct fields with their `Ty` (model + `<Model>Row`
 /// classes — column types from the schema).
 pub(super) fn register_field_types(class: &str, fields: &[(String, crate::ty::Ty)]) {
-    // Honest not-supported gap: Elixir structs are untyped, so a
-    // `Ty::Time` column never renders a type that would trip the
-    // ty-stringifier path the statically-typed targets use. This is the
-    // one Elixir site that sees every column's schema `Ty`, so report the
-    // gap here — same diagnostic, until Elixir's native DateTime seam
-    // lands (Stage 2).
-    if fields.iter().any(|(_, ty)| matches!(ty, crate::ty::Ty::Time)) {
-        crate::emit::diagnostics::report_unsupported_time("elixir");
-    }
     FIELD_TYPES.with(|f| {
         f.borrow_mut().insert(class.to_string(), fields.iter().cloned().collect());
     });
@@ -220,19 +211,14 @@ fn field_type(class_id: &str, field: &str) -> Option<crate::ty::Ty> {
     FIELD_TYPES.with(|f| f.borrow().get(class_id).and_then(|m| m.get(field).cloned()))
 }
 
-/// Field-read routing for a 0-arg send: the registered slot itself, or
-/// — for a temporal reader whose storage the shared lowering split into
-/// `<name>_raw` — that raw slot (stored ISO-8601 text; Elixir's native
-/// DateTime seam isn't wired yet, and JSON stays byte-correct via
-/// `encode_datetime`'s text reformat). `None` when neither is a slot
-/// (a real method).
+/// Field-read routing for a 0-arg send: `Some(slot)` when the name is a
+/// registered struct slot, else `None` (a real method — including a
+/// temporal reader like `created_at`, which is an emitted function over
+/// its `<name>_raw` storage slot and reaches callers through the normal
+/// method-dispatch routing).
 fn struct_field_read(class_id: &str, field: &str) -> Option<String> {
     if is_struct_field(class_id, field) {
         return Some(field.to_string());
-    }
-    let raw = format!("{field}_raw");
-    if is_struct_field(class_id, &raw) {
-        return Some(raw);
     }
     None
 }
@@ -1156,6 +1142,35 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
     if method == "to_h" && args.is_empty() {
         if let Some(r) = recv {
             return emit_expr(r);
+        }
+    }
+
+    // Temporal-reader intrinsic: `ActiveSupport.parse_db_time(s)` parses
+    // stored ISO-8601 text into a native UTC `%DateTime{}` — the
+    // hand-written `RhDateTime.parse` (runtime/elixir/v2/rh_datetime.ex),
+    // not a transpiled `ActiveSupport` module (no such unit exists).
+    if method == "parse_db_time" && args.len() == 1 {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                    return format!("RhDateTime.parse({})", emit_expr(&args[0]));
+                }
+            }
+        }
+    }
+    // `JsonBuilder.encode_datetime(x)` routes through the hand-written
+    // guard-clause wrapper: a native `%DateTime{}` (temporal reader
+    // value) formats to Rails' canonical millisecond JSON; stored text /
+    // nil delegate back to the transpiled String variant. Runtime
+    // dispatch — Elixir's idiomatic overloading — so no static arg-type
+    // pick is needed (body-typer stamps don't survive functionalize).
+    if method == "encode_datetime" && args.len() == 1 {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.last().map(|s| s.as_str()) == Some("JsonBuilder") {
+                    return format!("RhDateTime.encode_datetime({})", emit_expr(&args[0]));
+                }
+            }
         }
     }
 

@@ -101,8 +101,9 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             // MODEL struct slots use the STORAGE name (`created_at_raw`
             // for a temporal column — the shared lowering's split); the
             // Row class is the raw transport and keeps plain column
-            // names. `expr::struct_field_read` routes a temporal
-            // reader's public name onto the raw slot.
+            // names. A temporal reader's public name is NOT a slot — it
+            // resolves to the emitted parsing function
+            // (`Article.created_at/1` → native `%DateTime{}`).
             let mut fields: Vec<(String, crate::ty::Ty)> = table
                 .columns
                 .iter()
@@ -180,6 +181,18 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             content: unit.content.clone(),
         });
     }
+
+    // Native-`DateTime` seam for temporal columns: `RhDateTime.parse`
+    // (the `ActiveSupport.parse_db_time` intrinsic) + the guard-clause
+    // `RhDateTime.encode_datetime` every emitted
+    // `JsonBuilder.encode_datetime` call routes through (native
+    // %DateTime{} → Rails-canonical JSON; text/nil delegate to the
+    // transpiled String variant). Ships unconditionally alongside the
+    // transpiled json_builder it wraps.
+    out.push(EmittedFile {
+        path: output_path(OutputKind::HandWrittenRuntime { name: "rh_datetime.ex" }).path,
+        content: include_str!("../../runtime/elixir/v2/rh_datetime.ex").to_string(),
+    });
 
     // Model-support runtime: the portable prepared-cursor DB surface the
     // lowered model emit targets (`Db.prepare/step?/column_*/exec/…`),
