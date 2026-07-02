@@ -2145,6 +2145,21 @@ fn emit_send(
         }
     }
 
+    // Temporal writer intrinsic: `ActiveSupport.db_now` — current UTC time
+    // in Rails' exact storage form ("YYYY-MM-DD HH:MM:SS.ffffff").
+    // `fill_timestamps` stamps with it so a column's TEXT values stay
+    // homogeneous (and lexicographically ordered) when a roundhouse-emitted
+    // app shares a database with a real Rails app.
+    if method == "db_now" && args.is_empty() {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                    return "Roundhouse.RhDateTime.dbNow()".to_string();
+                }
+            }
+        }
+    }
+
     // Negation — `!x` arrives BOTH prefix (`Send{None, "!", [x]}`) and
     // postfix (`Send{Some(x), "!", []}`), the same two IR shapes the
     // Kotlin emitter reconciles.

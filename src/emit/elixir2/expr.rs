@@ -1158,6 +1158,23 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             }
         }
     }
+
+    // Temporal writer intrinsic: `ActiveSupport.db_now` — current UTC
+    // time in Rails' exact sqlite storage form ("YYYY-MM-DD
+    // HH:MM:SS.ffffff"). `fill_timestamps` stamps with it so a column's
+    // TEXT values stay homogeneous (and lexicographically ordered) when
+    // an emitted app shares a database with a real Rails app. Same
+    // hand-written runtime module as `parse_db_time` above.
+    if method == "db_now" && args.is_empty() {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                    return "RhDateTime.db_now()".to_string();
+                }
+            }
+        }
+    }
+
     // `JsonBuilder.encode_datetime(x)` routes through the hand-written
     // guard-clause wrapper: a native `%DateTime{}` (temporal reader
     // value) formats to Rails' canonical millisecond JSON; stored text /

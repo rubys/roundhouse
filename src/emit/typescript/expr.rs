@@ -1698,6 +1698,28 @@ fn js_send_inner(
             }
         }
     }
+    // Temporal writer intrinsic: `ActiveSupport.db_now` — current
+    // UTC time in Rails' exact storage form ("YYYY-MM-DD
+    // HH:MM:SS.ffffff"). `fill_timestamps` stamps with it so a
+    // column's TEXT values stay homogeneous — and lexicographically
+    // ordered — when a roundhouse-emitted app shares a database with
+    // a real Rails app. Maps to the hand-written `RhDateTime.dbNow`
+    // runtime helper (src/datetime.ts); the import rides the same
+    // temporal-reader gate as `parse` (see library.rs).
+    if method == "db_now" && args.is_empty() {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                    return Js::method_call(
+                        span,
+                        Js::ident(span, "RhDateTime"),
+                        "dbNow",
+                        Vec::new(),
+                    );
+                }
+            }
+        }
+    }
     // Framework class-instance receivers route bracket access to
     // method dispatch (`.get(k)` / `.set(k, v)`). JS bracket access
     // on a class instance returns `undefined` for runtime keys

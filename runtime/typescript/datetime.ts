@@ -45,4 +45,36 @@ export class RhDateTime {
     const d = new Date(candidate);
     return isNaN(d.getTime()) ? null : d;
   }
+
+  // Write-side sibling of `parse` — the `ActiveSupport.db_now` intrinsic.
+  // Current UTC time in Rails' exact sqlite storage form:
+  // "YYYY-MM-DD HH:MM:SS.ffffff" — space separator, zero-padded 6-digit
+  // fractional seconds (microseconds), no zone marker (implicitly UTC,
+  // byte-matching what Rails' sqlite3 adapter writes, e.g.
+  // "2026-07-02 21:33:40.675251"). `fill_timestamps` stamps with it so a
+  // column's TEXT values stay homogeneous — and lexicographically
+  // ordered — when a roundhouse-emitted app shares a database with a
+  // real Rails app. JS `Date` has millisecond resolution, so the last
+  // three digits are always "000"; the shape (exactly six fractional
+  // digits) is what matters.
+  static dbNow(): string {
+    const d = new Date();
+    const pad = (n: number, w: number) => String(n).padStart(w, "0");
+    return (
+      pad(d.getUTCFullYear(), 4) +
+      "-" +
+      pad(d.getUTCMonth() + 1, 2) +
+      "-" +
+      pad(d.getUTCDate(), 2) +
+      " " +
+      pad(d.getUTCHours(), 2) +
+      ":" +
+      pad(d.getUTCMinutes(), 2) +
+      ":" +
+      pad(d.getUTCSeconds(), 2) +
+      "." +
+      pad(d.getUTCMilliseconds(), 3) +
+      "000"
+    );
+  }
 }

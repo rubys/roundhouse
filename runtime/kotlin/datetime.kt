@@ -12,6 +12,7 @@
 
 package roundhouse
 
+import java.time.Instant
 import java.time.LocalDateTime
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
@@ -63,6 +64,20 @@ object RhDateTime {
             }
         }
     }
+
+    // Rails' exact sqlite storage form: space separator, zero-padded 6-digit
+    // fractional seconds (microseconds), no zone marker. Cached — a
+    // `DateTimeFormatter` is immutable and thread-safe.
+    private val DB_NOW_FORMAT: DateTimeFormatter =
+        DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS").withZone(ZoneOffset.UTC)
+
+    // Write-side sibling of `parse` — the `ActiveSupport.db_now` intrinsic.
+    // Current UTC time in Rails' exact storage form
+    // ("2026-07-02 21:33:40.675251"). `fill_timestamps` stamps with it so a
+    // column's TEXT values stay homogeneous — and lexicographically
+    // ordered — when a roundhouse-emitted app shares a database with a real
+    // Rails app.
+    fun dbNow(): String = DB_NOW_FORMAT.format(Instant.now())
 }
 
 // UTC, millisecond precision, `Z` suffix — Rails' canonical datetime JSON.

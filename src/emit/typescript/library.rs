@@ -915,6 +915,12 @@ fn collect_imports_with_companions(
     // is invisible to the body walker above — surface the import from
     // the presence of a temporal reader instead. `RhDateTime` ships in
     // the hand-written `src/datetime.ts` runtime file.
+    //
+    // The write-side sibling `ActiveSupport.db_now` (→ `RhDateTime.dbNow`,
+    // stamped by the synthesized `fill_timestamps`) rides the same gate:
+    // `fill_timestamps` is only synthesized for a model with a
+    // created_at/updated_at column, and timestamp columns are temporal,
+    // so such a model always carries a temporal reader too.
     let has_temporal_reader = |c: &LibraryClass| -> bool {
         c.methods.iter().any(|m| {
             matches!(m.kind, crate::dialect::AccessorKind::AttributeReader)

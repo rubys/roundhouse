@@ -6,7 +6,8 @@
 # target. The model's synthesized reader parses that text into a native
 # `datetime.datetime` via `Roundhouse.RhDateTime.parse` (see the temporal
 # branch in `src/emit/python/library.rs`, and `src/emit/python/expr.rs`,
-# which maps the `ActiveSupport.parse_db_time` intrinsic here).
+# which maps the `ActiveSupport.parse_db_time` intrinsic here). The
+# write-side sibling `ActiveSupport.db_now` maps to `db_now` below.
 #
 # JSON serialization then formats a `datetime` back to Rails' canonical
 # `...Z` millisecond form. Python has no overloading, so importing this
@@ -38,29 +39,32 @@ class Roundhouse:
             # read path.
             if s is None or s == "":
                 return None
-            utc = datetime.timezone.utc
-            # DB-dump form with fractional seconds.
+            # `fromisoformat` (C-accelerated) covers every form above in
+            # one call on Python >= 3.11 (the project pins 3.14): the
+            # space-separated DB-dump forms with or without fractional
+            # seconds, and RFC3339 with a trailing `Z`. A zone-less value
+            # is implicitly UTC.
             try:
-                dt = datetime.datetime.strptime(s, "%Y-%m-%d %H:%M:%S.%f")
-                return dt.replace(tzinfo=utc)
-            except (ValueError, TypeError):
-                pass
-            # DB-dump form without fractional seconds.
-            try:
-                dt = datetime.datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
-                return dt.replace(tzinfo=utc)
-            except (ValueError, TypeError):
-                pass
-            # RFC3339 / ISO-8601 fallback (a trailing `Z` is not accepted by
-            # `fromisoformat` before 3.11, so normalize it to `+00:00`).
-            try:
-                iso = s[:-1] + "+00:00" if s.endswith("Z") else s
-                dt = datetime.datetime.fromisoformat(iso)
+                dt = datetime.datetime.fromisoformat(s)
                 if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=utc)
+                    dt = dt.replace(tzinfo=datetime.timezone.utc)
                 return dt
             except (ValueError, TypeError):
                 return None
+
+        @staticmethod
+        def db_now() -> str:
+            # Current UTC time in Rails' exact sqlite storage form:
+            # "YYYY-MM-DD HH:MM:SS.ffffff" — space separator, zero-padded
+            # 6-digit fractional seconds (microseconds; `%f` is exactly
+            # that), no zone marker (e.g. "2026-07-02 21:33:40.675251").
+            # `fill_timestamps` stamps with it so a column's TEXT values
+            # stay homogeneous — and lexicographically ordered — when a
+            # roundhouse-emitted app shares a database with a real Rails
+            # app.
+            return datetime.datetime.now(datetime.timezone.utc).strftime(
+                "%Y-%m-%d %H:%M:%S.%f"
+            )
 
 
 def _encode_datetime_native(value: object) -> str:

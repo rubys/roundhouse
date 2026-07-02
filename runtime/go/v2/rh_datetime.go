@@ -25,10 +25,11 @@ import (
 // roundhouse ever stores:
 //
 //   - DB-dump / seed form — "2026-05-15 21:14:56.300213" (space
-//     separator, zone-less, up to microsecond precision, implicitly UTC).
-//   - RFC3339 form — "2026-05-15T21:14:56Z" (what `fill_timestamps`
-//     writes via `Time.now.utc.iso8601`, and API-supplied values); a
-//     zone-less "T" form reads as UTC.
+//     separator, zone-less, up to microsecond precision, implicitly
+//     UTC; also what `fill_timestamps` writes via Rh_db_now below).
+//   - RFC3339 form — "2026-05-15T21:14:56Z" (API-supplied values and
+//     rows written by pre-db_now builds); a zone-less "T" form reads
+//     as UTC.
 func Rh_parse_db_time(s string) time.Time {
 	str := strings.TrimSpace(s)
 	if str == "" {
@@ -51,6 +52,22 @@ func Rh_parse_db_time(s string) time.Time {
 		return t
 	}
 	return time.Time{}
+}
+
+// Write-side sibling of Rh_parse_db_time — the `ActiveSupport.db_now`
+// intrinsic (see the Const-receiver peephole in src/emit/go2/expr.rs).
+// Returns the current UTC time in Rails' exact sqlite storage form:
+//
+//	"YYYY-MM-DD HH:MM:SS.ffffff"
+//
+// — space separator, zero-padded 6-digit fractional seconds
+// (microseconds), no zone marker. E.g. "2026-07-02 21:33:40.675251".
+// `fill_timestamps` stamps with this so a column's TEXT values stay
+// homogeneous — and lexicographically ordered — when a
+// roundhouse-emitted app shares a database with a real Rails app.
+// Go's ".000000" verb zero-pads to exactly six fractional digits.
+func Rh_db_now() string {
+	return time.Now().UTC().Format("2006-01-02 15:04:05.000000")
 }
 
 // Native-`time.Time` twin of the transpiled `JsonBuilder_encode_datetime`

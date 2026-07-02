@@ -839,6 +839,19 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
             }
         }
     }
+    // Temporal writer intrinsic: `ActiveSupport.db_now` — current UTC
+    // time in Rails' exact storage form ("YYYY-MM-DD HH:MM:SS.ffffff").
+    // `fill_timestamps` stamps with it. (The `Roundhouse.` prefix rides
+    // the same content-scan import in model.rs as `parse` above.)
+    if method == "db_now" && args.is_empty() {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                    return "Roundhouse.RhDateTime.db_now()".to_string();
+                }
+            }
+        }
+    }
     // Ruby `X.new(args)` / implicit-self `new(args)` construct an
     // instance; Python calls the class directly. `Flash.new` → `Flash()`,
     // `new(attrs)` (implicit self in a class method) → `cls(attrs)`. A

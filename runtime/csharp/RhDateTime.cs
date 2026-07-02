@@ -45,6 +45,18 @@ public static class RhDateTime
         }
         return null;
     }
+
+    // Write-side sibling of `Parse` (the `ActiveSupport.db_now` intrinsic
+    // target): the current UTC time in Rails' exact sqlite storage form —
+    // "YYYY-MM-DD HH:MM:SS.ffffff" (space separator, zero-padded 6-digit
+    // fractional seconds, no zone marker), e.g. "2026-07-02 21:33:40.675251".
+    // `fill_timestamps` stamps with it so a column's TEXT values stay
+    // homogeneous — and lexicographically ordered — when a roundhouse-emitted
+    // app shares a database with a real Rails app.
+    public static string DbNow()
+    {
+        return DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture);
+    }
 }
 
 // `DateTimeOffset` overload of `EncodeDatetime`, added to the transpiled

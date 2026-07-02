@@ -1944,6 +1944,18 @@ pub(super) fn emit_send(
                 if class_name == "ActiveSupport" && method == "parse_db_time" {
                     return format!("Rh_parse_db_time({})", args_s.join(", "));
                 }
+                // Temporal writer intrinsic: `ActiveSupport.db_now` —
+                // current UTC time in Rails' exact storage form
+                // ("YYYY-MM-DD HH:MM:SS.ffffff"). `fill_timestamps`
+                // stamps with it so a column's TEXT values stay
+                // homogeneous — and lexicographically ordered — when a
+                // roundhouse-emitted app shares a database with a real
+                // Rails app. Maps to the hand-written `Rh_db_now`
+                // (runtime/go/v2/rh_datetime.go), the write-side
+                // sibling of `Rh_parse_db_time`.
+                if class_name == "ActiveSupport" && method == "db_now" && args_s.is_empty() {
+                    return "Rh_db_now()".to_string();
+                }
                 // `JsonBuilder.encode_datetime` with a native-`time.Time`
                 // argument (a temporal reader call) routes to the
                 // hand-written `_time` twin — Go has no overloading, so

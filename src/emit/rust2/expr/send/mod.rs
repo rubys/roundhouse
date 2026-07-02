@@ -80,6 +80,25 @@ pub(super) fn emit_send(
             }
         }
     }
+    // Temporal writer intrinsic: `ActiveSupport.db_now` — current UTC
+    // time in Rails' exact sqlite storage form ("YYYY-MM-DD
+    // HH:MM:SS.ffffff": space separator, zero-padded 6-digit fractional
+    // seconds, no zone marker). `fill_timestamps` stamps with it so a
+    // column's TEXT values stay homogeneous — and lexicographically
+    // ordered — when a roundhouse-emitted app shares a database with a
+    // real Rails app. The runtime helper returns an OWNED `String`, so
+    // the `str_color` ownership pass sees the same owned-expression
+    // shape as the previous `Time.now.utc.iso8601` chain and inserts
+    // clones for the two-site `now` local exactly as before.
+    if method == "db_now" && args.is_empty() {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                    return "crate::rh_datetime::db_now()".to_string();
+                }
+            }
+        }
+    }
     if let Some(s) = try_constructor_field_assign(recv, method, args) { return s; }
     if let Some(s) = try_stdlib_class_method(recv, method, args) { return s; }
     if let Some(s) = try_binary_operator(recv, method, args) { return s; }

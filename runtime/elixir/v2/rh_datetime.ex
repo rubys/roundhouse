@@ -50,6 +50,25 @@ defmodule RhDateTime do
 
   def parse(_), do: nil
 
+  # Write-side sibling of `parse` — the `ActiveSupport.db_now`
+  # intrinsic. Current UTC time in Rails' exact sqlite storage form:
+  # "YYYY-MM-DD HH:MM:SS.ffffff" — space separator, zero-padded 6-digit
+  # fractional seconds (microseconds), no zone marker (e.g.
+  # "2026-07-02 21:33:40.675251"). `fill_timestamps` stamps with it so
+  # a column's TEXT values stay homogeneous — and lexicographically
+  # ordered — when a roundhouse-emitted app shares a database with a
+  # real Rails app.
+  def db_now do
+    dt = DateTime.utc_now()
+    {us, _precision} = dt.microsecond
+
+    :io_lib.format(
+      "~4..0B-~2..0B-~2..0B ~2..0B:~2..0B:~2..0B.~6..0B",
+      [dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, us]
+    )
+    |> IO.iodata_to_binary()
+  end
+
   # UTC, millisecond precision, `Z` suffix — Rails' canonical datetime
   # JSON (`"2026-05-15T21:14:56.300Z"`). Sub-millisecond digits are
   # TRUNCATED (integer division), matching Rails and the compare

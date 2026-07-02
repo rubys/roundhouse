@@ -53,6 +53,22 @@ pub fn parse_db_time(s: &str) -> Option<DateTime<Utc>> {
     None
 }
 
+/// Write-side sibling of `parse_db_time` — the `ActiveSupport.db_now`
+/// intrinsic (see the mapping in `src/emit/rust2/expr/send/mod.rs`).
+/// Returns the current UTC time in Rails' exact sqlite storage form:
+///
+///   "YYYY-MM-DD HH:MM:SS.ffffff"
+///
+/// — space separator, zero-padded 6-digit fractional seconds
+/// (microseconds), no zone marker. E.g. `"2026-07-02 21:33:40.675251"`.
+/// `fill_timestamps` stamps with this so a column's TEXT values stay
+/// homogeneous — and lexicographically ordered — when a
+/// roundhouse-emitted app shares a database with a real Rails app.
+/// chrono's `%.6f` renders the fraction *including* the leading dot.
+pub fn db_now() -> String {
+    Utc::now().format("%Y-%m-%d %H:%M:%S%.6f").to_string()
+}
+
 /// Trait backing the generic `JsonBuilder::encode_datetime`. Formats a
 /// temporal value to Rails' canonical JSON shape (UTC, millisecond
 /// precision, `Z` suffix, quoted) or the literal `null`.

@@ -1354,6 +1354,15 @@ fn emit_send(
                 (Some("ActiveSupport"), "parse_db_time") if args.len() == 1 => {
                     return format!("RhDateTime.parse({})", args_s[0]);
                 }
+                // Temporal writer intrinsic: `ActiveSupport.db_now` — current
+                // UTC time in Rails' exact storage form ("YYYY-MM-DD
+                // HH:MM:SS.ffffff"). `fill_timestamps` stamps with it so a
+                // column's TEXT values stay homogeneous — and
+                // lexicographically ordered — when a roundhouse-emitted app
+                // shares a database with a real Rails app.
+                (Some("ActiveSupport"), "db_now") if args.is_empty() => {
+                    return "RhDateTime.dbNow()".to_string();
+                }
                 _ => {}
             }
         }
