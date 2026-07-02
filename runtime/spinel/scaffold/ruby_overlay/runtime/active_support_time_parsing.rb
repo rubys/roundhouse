@@ -16,6 +16,12 @@
 # adapter's `column_text` maps SQL NULL to `""`), and the synthesized
 # reader calls this unguarded — absent storage must yield `nil`, not an
 # ArgumentError out of `Time.parse("")`.
+# Stdlib `time` for `Time.parse`. Safe to require here: this file is
+# CRuby/JRuby-overlay-only (never part of the spinel AOT require walk),
+# and requiring it locally keeps every bootstrap that chains this file
+# (main.rb, or test_helper via runtime/db.rb) self-sufficient.
+require "time"
+
 module ActiveSupport
   def self.parse_db_time(str)
     return nil if str.nil? || str.empty?

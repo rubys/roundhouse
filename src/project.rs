@@ -950,9 +950,24 @@ fn ruby_runtime_files(
     let mut files = spinel_files(app, fixture)?;
 
     files.retain(|(p, _)| p != "runtime/db.rb");
-    for (path, _) in files.iter_mut() {
+    for (path, content) in files.iter_mut() {
         if path == "runtime/db_cruby.rb" {
             *path = "runtime/db.rb".to_string();
+            // The CRuby/JRuby trees resolve the temporal intrinsics
+            // (`ActiveSupport.db_now` in fill_timestamps,
+            // `parse_db_time` in temporal readers) via the overlay's
+            // ActiveSupport module. The server boot requires it from
+            // main.rb, but the emitted test bootstrap
+            // (test/test_helper.rb, shared verbatim with the spinel
+            // tree, which lacks the file — spinel#1661) does not.
+            // Chain it off db.rb — the one CRuby-only require every
+            // persistence-touching bootstrap already loads — at
+            // materialization time, since the source-tree relative
+            // path differs from the emitted-tree one.
+            content.insert_str(
+                0,
+                "require_relative \"active_support_time_parsing\"\n",
+            );
         }
     }
 
@@ -1149,7 +1164,13 @@ fn jruby_runtime_files(
     files.retain(|(p, _)| p != "runtime/db.rb" && p != "runtime/db_cruby.rb");
     let db_jruby = fs::read_to_string("runtime/spinel/db_jruby.rb")
         .map_err(|e| format!("read runtime/spinel/db_jruby.rb: {e}"))?;
-    files.push(("runtime/db.rb".to_string(), db_jruby));
+    // Chain the temporal-intrinsics module off db.rb, same as the
+    // CRuby swap above (the emitted test bootstrap doesn't require it;
+    // see ruby_runtime_files).
+    files.push((
+        "runtime/db.rb".to_string(),
+        format!("require_relative \"active_support_time_parsing\"\n{db_jruby}"),
+    ));
 
     // Gemfile gem swap: the committed scaffold Gemfile is MRI-only
     // (`gem "sqlite3"`, a C extension with no JRuby build), so its frozen

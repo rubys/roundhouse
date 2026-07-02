@@ -353,6 +353,12 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         imports: &[
             ("RecordNotFound, RecordInvalid", "./errors.js"),
             ("type AdapterInterface", "./juntos.js"),
+            // Generic `fill_timestamps` stamps via `RhDateTime.dbNow()`
+            // (the `ActiveSupport.db_now` intrinsic). Model files get
+            // this import from the temporal-reader gate in
+            // emit/typescript/library.rs; the transpiled Base has no
+            // temporal reader, so it's wired here.
+            ("RhDateTime", "./datetime.js"),
         ],
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
@@ -1905,6 +1911,12 @@ const PYTHON_RUNTIME: &[RuntimeEntry] = &[
         imports: &[
             ("RecordNotFound, RecordInvalid", "app.errors"),
             ("datetime", ""),
+            // Generic `fill_timestamps` stamps via
+            // `Roundhouse.RhDateTime.db_now()` (the `ActiveSupport.db_now`
+            // intrinsic). Model files get the import from model.rs's
+            // content scan; the transpiled Base is emitted here, so
+            // it's wired explicitly.
+            ("Roundhouse", "app.rh_datetime"),
         ],
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
