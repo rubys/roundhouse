@@ -73,12 +73,31 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 Some(block_node) => ingest_call_block(&block_node, file)?,
                 None => None,
             };
-            ExprNode::Send {
-                recv,
+            let send = ExprNode::Send {
+                recv: recv.clone(),
                 method: Symbol::from(method),
                 args,
                 block,
                 parenthesized,
+            };
+            // Safe navigation `a&.b(args)` — desugar to `a && a.b(args)`
+            // (the IR has no safe-send flag). nil receiver → the And
+            // yields nil without dispatching, matching `&.`; a plain
+            // Send would have silently DROPPED the guard and crashed on
+            // nil at runtime. Two documented divergences: the receiver
+            // expression evaluates twice (harmless for the ivar/local
+            // receivers real templates use), and a `false` receiver
+            // skips the call where Ruby's `&.` would dispatch (nil is
+            // the only value `&.` guards) — acceptable until a real
+            // call site cares, at which point Send grows a `safe` flag.
+            match (c.is_safe_navigation(), recv) {
+                (true, Some(r)) => ExprNode::BoolOp {
+                    op: crate::expr::BoolOpKind::And,
+                    surface: crate::expr::BoolOpSurface::Symbol,
+                    left: r,
+                    right: Expr::new(span, send),
+                },
+                _ => send,
             }
         }
         n if n.as_integer_node().is_some() => {
