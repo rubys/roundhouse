@@ -995,6 +995,15 @@ fn ruby_runtime_files(
     // yet vetted against the spinel AOT subset (that's the spinel phase).
     files.extend(sort_files(emit::ruby::emit_library(app)));
 
+    // Per-app Rails::Application reopen (config/application.rb) — the
+    // app's real config methods (`read_only?`, `name`, `domain`) so
+    // `Rails.application.<m>` dispatches to them instead of the empty
+    // runtime shim. Absent when the source app has none; the scaffold
+    // main.rb's conditional require tolerates that.
+    if let Some(f) = emit::ruby::emit_rails_application(app) {
+        files.push((f.path.to_string_lossy().into_owned(), f.content));
+    }
+
     // The source app's `app/javascript/` + `public/` static assets are
     // already folded in by `spinel_files` (both targets need them — the
     // spinel binary now serves `/assets/*` too). Nothing CRuby-specific

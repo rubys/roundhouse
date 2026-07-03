@@ -20,6 +20,9 @@ module ActionView
     def self.reset_slots!: () -> void
     def self.content_for_set: (Symbol slot, String value) -> void
     def self.content_for_get: (Symbol slot) -> String?
+
+    # `content_for?(:slot)` — has the slot been populated?
+    def self.content_for?: (Symbol slot) -> bool
     def self.get_slot: (Symbol slot) -> String
     def self.get_yield: () -> String
     def self.set_yield: (String content) -> void
@@ -64,6 +67,13 @@ module ActionView
     # hash (Symbol or String keys; values flatten through render_attrs).
     def self.link_to: (String text, String href, ?Hash[Symbol, untyped] opts) -> String
     def self.button_to: (String text, String href, ?Hash[Symbol, untyped] opts) -> String
+
+    # html_safe-text variant of link_to (label already escaped/marked
+    # safe by the caller — see the `link_to(raw(x), ...)` rewrite).
+    def self.link_to_raw: (String text, String href, ?Hash[Symbol, untyped] opts) -> String
+
+    # Rails' html_safe marker; identity here (no safe-buffer type).
+    def self.raw: (untyped value) -> String
   
     def self.csrf_meta_tags: () -> String
     def self.csp_meta_tag: () -> String
@@ -78,8 +88,9 @@ module ActionView
 
     # Generic element helper: `content_tag :span, text, title: "..."`.
     # `content` is untyped — call sites pass strings, but Rails accepts
-    # anything stringifiable and the body goes through `.to_s`.
-    def self.content_tag: (Symbol name, ?untyped content, ?Hash[Symbol, untyped] opts) -> String
+    # anything stringifiable and the body goes through `.to_s` (nil
+    # default renders "").
+    def self.content_tag: (Symbol name, ?untyped? content, ?Hash[Symbol, untyped] opts) -> String
   
     # `pins` is the importmap pin array — each entry a record with
     # fixed `:name` and `:path` fields. Record (not `Hash[Symbol,

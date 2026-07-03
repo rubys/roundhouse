@@ -280,20 +280,31 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         }
     } else {
         // Partial/layout: record/body arg from the render/yield call site,
-        // then the threaded closure ivars.
+        // then the threaded closure ivars. Layouts get the same closure
+        // threading as partials — their call site is the Ruby emit path's
+        // layout wrap (`apply_layout_lowering` rewrites each action's
+        // `render(Views::X.y(...))` to pass the controller's @ivars), so a
+        // layout reading @user/@title receives them like any partial. A
+        // layout with an empty closure (the blog) keeps its body-only
+        // signature, so the other targets' `Layouts.application(body)`
+        // dispatch call sites are arity-stable.
         if !arg_name.is_empty() {
             typed.push((arg_name.clone(), record_arg_ty(dir, is_layout, &known_models)));
         }
-        if !is_layout {
-            for iv in &closure_ivars {
-                // The record arg already covers a same-named ivar (a `_form`
-                // whose record is `category` and which reads `@category`) —
-                // don't emit a duplicate param. The call site excludes it too.
-                if iv == &arg_name {
-                    continue;
-                }
-                typed.push((iv.clone(), ivar_ty(iv, &known_models)));
+        for iv in &closure_ivars {
+            // The record arg already covers a same-named ivar (a `_form`
+            // whose record is `category` and which reads `@category`) —
+            // don't emit a duplicate param. The call site excludes it too.
+            if iv == &arg_name {
+                continue;
             }
+            typed.push((iv.clone(), ivar_ty(iv, &known_models)));
+        }
+        // Layouts render in the controller's view context, where `flash`
+        // is live — thread it as a param when the template reads it bare
+        // (`flash[f]`). The layout wrap passes `@flash`.
+        if is_layout && view_uses_bare_name(&rewritten, "flash") {
+            typed.push(("flash".to_string(), crate::ty::Ty::Untyped));
         }
     }
 
@@ -1126,6 +1137,74 @@ fn view_key_of(v: &View) -> Option<ViewKey> {
         return None;
     }
     Some((camelize(&snake_case(dir)), base.trim_start_matches('_').to_string()))
+}
+
+/// Ruby-emit-path layout wrap factory: the Expr for
+///
+/// ```ruby
+/// Views::Layouts.application(<inner>, @<ivar>…, @flash?, @flash[:notice], @flash[:alert])
+/// ```
+///
+/// mirroring the layout signature `build_library_class` constructs
+/// (body, closure ivars, flash-if-used, then the uniform notice/alert
+/// extras). None when the app has no `layouts/application` html view.
+/// Consumed by `emit::ruby::library::apply_layout_lowering`, which
+/// rewrites each action's `render(Views::X.y(...))` — the controller
+/// seam where the @ivars a layout reads are statically in scope. (The
+/// generic dispatch previously wrapped layouts body-only; a layout
+/// reading @user had no way to receive it there.)
+pub fn layout_wrap_expr(app: &crate::App, inner: Expr) -> Option<Expr> {
+    let key: ViewKey = ("Layouts".to_string(), "application".to_string());
+    let layout = app
+        .views
+        .iter()
+        .find(|v| v.format.as_str() == "html" && view_key_of(v).as_ref() == Some(&key))?;
+    let closures = view_ivar_closures(&app.views);
+    let ivars = closures.get(&key).cloned().unwrap_or_default();
+    let span = inner.span;
+    let ivar = |name: &Symbol| Expr::new(span, ExprNode::Ivar { name: name.clone() });
+    let flash_slot = |slot: &str| {
+        Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    span,
+                    ExprNode::Ivar { name: Symbol::from("flash") },
+                )),
+                method: Symbol::from("[]"),
+                args: vec![Expr::new(
+                    span,
+                    ExprNode::Lit { value: Literal::Sym { value: Symbol::from(slot) } },
+                )],
+                block: None,
+                parenthesized: true,
+            },
+        )
+    };
+    let mut args: Vec<Expr> = vec![inner];
+    for iv in &ivars {
+        args.push(ivar(iv));
+    }
+    if view_uses_bare_name(&layout.body, "flash") {
+        args.push(ivar(&Symbol::from("flash")));
+    }
+    args.push(flash_slot("notice"));
+    args.push(flash_slot("alert"));
+    Some(Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                span,
+                ExprNode::Const {
+                    path: vec![Symbol::from("Views"), Symbol::from("Layouts")],
+                },
+            )),
+            method: Symbol::from("application"),
+            args,
+            block: None,
+            parenthesized: true,
+        },
+    ))
 }
 
 /// Transitive instance-variable closure per view: the ivars a view NEEDS

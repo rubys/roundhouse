@@ -83,6 +83,17 @@ pub fn emit_library(app: &App) -> Vec<EmittedFile> {
     library::emit_library_class_decls(app)
 }
 
+/// Per-app `Rails::Application` reopen from the source
+/// config/application.rb (see `App.rails_application`) — emitted to
+/// `config/application.rb` so `Rails.application.read_only?` etc.
+/// dispatch to the app's real config methods. The scaffold main.rb
+/// requires it conditionally (same idiom as config/importmap.rb).
+pub fn emit_rails_application(app: &App) -> Option<EmittedFile> {
+    app.rails_application.as_ref().map(|lc| {
+        library::emit_library_class_decl(lc, app, PathBuf::from("config/application.rb"))
+    })
+}
+
 /// Lower each `app.models` entry through `model_to_library` and emit
 /// the resulting `LibraryClass` as a Ruby source file. The output is
 /// the universal post-lowering shape — explicit per-attr accessors,
@@ -281,6 +292,12 @@ pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
     library::apply_duration_lowering(&mut lcs);
+    // Layout wrap: `render(Views::X.y(...))` → `render(Views::Layouts.
+    // application(Views::X.y(...), @<ivar>…, @flash…))` so a layout
+    // reading controller ivars receives them. Pairs with the overlay
+    // main.rb shipping `controller.body` verbatim (no dispatch-side
+    // wrap). No-op when the app has no layouts/application view.
+    library::apply_layout_lowering(&mut lcs, app);
     emit_lowered_controllers_from_lcs(&lcs, app)
 }
 

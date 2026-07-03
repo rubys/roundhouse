@@ -48,6 +48,13 @@ module ActionView
       @slots.fetch(slot, nil)
     end
 
+    # Rails' `content_for?(:slot)` — has the slot been populated?
+    # (Layout conditionals: `<% if content_for? :subnav %>`.)
+    def self.content_for?(slot)
+      v = @slots.fetch(slot, nil)
+      !(v.nil? || v.empty?)
+    end
+
     def self.get_slot(slot)
       @slots[slot] || ""
     end
@@ -134,6 +141,23 @@ module ActionView
       # helper below that merges user opts into a default Hash.
       attrs = render_attrs({ href: href }.merge(opts.to_h))
       "<a#{attrs}>#{html_escape(text)}</a>"
+    end
+
+    # `link_to raw("Page 2 &gt;&gt;"), url` — the html_safe-text form.
+    # There's no safe-buffer type in the transpiled runtime, so the
+    # Ruby emit path rewrites `link_to(raw(x), ...)` to this variant,
+    # which skips the label escape Rails would skip for a safe buffer.
+    def self.link_to_raw(text, href, opts = {})
+      attrs = render_attrs({ href: href }.merge(opts.to_h))
+      "<a#{attrs}>#{text}</a>"
+    end
+
+    # Rails' `raw` marks a string html_safe; with no safe-buffer type
+    # the value passes through (escape-exemption is decided at the
+    # call-site rewrite layer — see `link_to_raw` and the emit-path
+    # html_escape unwrap). `to_s` matches Rails: `raw(nil)` renders "".
+    def self.raw(value)
+      value.to_s
     end
   
     def self.button_to(text, href, opts = {})
@@ -232,8 +256,11 @@ module ActionView
     # `content_tag :span, text, title: "..."` → `<span title="...">text</span>`.
     # Content is escaped (Rails escapes unless the caller passes an
     # html_safe buffer; lowered call sites pass plain strings). Attrs
-    # flow through `render_attrs` like the other tag helpers.
-    def self.content_tag(name, content = "", opts = {})
+    # flow through `render_attrs` like the other tag helpers. The
+    # content default is nil, NOT "" — `content` is untyped, which
+    # lands as C# `object`, and C# rejects any non-null default on a
+    # reference-typed parameter (CS1763); `to_s` maps nil → "".
+    def self.content_tag(name, content = nil, opts = {})
       n = name.to_s
       "<#{n}#{render_attrs(opts.to_h)}>#{html_escape(content.to_s)}</#{n}>"
     end

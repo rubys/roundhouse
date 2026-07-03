@@ -94,8 +94,24 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
     }
     let helper_modules: BTreeSet<ClassId> =
         app.helper_method_index.values().cloned().collect();
+    // Generated route-helper names (`active_path`, `story_path`, …) —
+    // bare calls to these in layout/helper bodies resolve to the
+    // generated `RouteHelpers` module. (The view walker rewrites route
+    // helpers in the URL positions it classifies; bare calls nested in
+    // unclassified expressions fall through to this pass.)
+    let route_helpers: std::collections::HashSet<Symbol> =
+        crate::lower::lower_routes_to_library_functions(app)
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
     for lc in lcs.iter_mut() {
         let is_helper_module = helper_modules.contains(&lc.name);
+        // Helper and view module functions have no controller context —
+        // a bare `request` read there resolves to the per-dispatch
+        // `ActionController::Current.request` (controllers keep their
+        // own `request` accessor and are left alone).
+        let rewrite_request =
+            is_helper_module || lc.name.0.as_str().starts_with("Views::");
         for m in &mut lc.methods {
             // A helper module's own methods become module-functions so the
             // rewritten `Module.method` call has a real target — Rails mixed
@@ -104,7 +120,12 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
             if is_helper_module && m.receiver == MethodReceiver::Instance {
                 m.receiver = MethodReceiver::Class;
             }
-            rewrite_helper_calls(&mut m.body, &app.helper_method_index);
+            rewrite_helper_calls(
+                &mut m.body,
+                &app.helper_method_index,
+                &route_helpers,
+                rewrite_request,
+            );
         }
     }
 }
@@ -125,7 +146,56 @@ fn is_framework_view_helper(name: &str) -> bool {
             | "content_tag"
             | "time_ago_in_words"
             | "distance_of_time_in_words"
+            | "raw"
+            | "link_to"
+            | "content_for?"
     )
+}
+
+/// Is this a call on `ActionView::ViewHelpers` (or a bare `ViewHelpers`
+/// const)? Shared by the post-rewrite transforms below.
+fn is_view_helpers_const(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Const { path }
+        if path.last().map(|s| s.as_str() == "ViewHelpers").unwrap_or(false))
+}
+
+/// Strip one trailing `.to_s` (the view walker's `coerce_to_s` wrap) so
+/// the safe-call check sees the helper call itself.
+fn strip_to_s(e: &Expr) -> &Expr {
+    if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node {
+        if method.as_str() == "to_s" && args.is_empty() {
+            return r;
+        }
+    }
+    e
+}
+
+/// Calls whose result Rails treats as an html_safe buffer: tag-producing
+/// framework helpers, `raw`, and app-helper module functions (which
+/// compose those). The view walker's default `html_escape(<call>.to_s)`
+/// wrap must NOT apply to these — escaping a safe buffer ships literal
+/// `&lt;img&gt;` markup. Plain-string helpers (truncate,
+/// time_ago_in_words) stay wrapped: their escape is Rails-correct.
+/// Treating every app-helper as safe is a simplification (Rails escapes
+/// an app helper that returns a plain string); the corpus' helpers all
+/// return tag-helper compositions, and per-method safety inference can
+/// refine this when a counterexample shows up.
+fn is_html_safe_call(e: &Expr, index: &HashMap<Symbol, ClassId>) -> bool {
+    let ExprNode::Send { recv: Some(r), method, .. } = &*e.node else {
+        return false;
+    };
+    let ExprNode::Const { path } = &*r.node else {
+        return false;
+    };
+    let joined =
+        path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+    if joined.ends_with("ViewHelpers") {
+        return matches!(
+            method.as_str(),
+            "raw" | "link_to" | "link_to_raw" | "button_to" | "image_tag" | "content_tag"
+        );
+    }
+    index.values().any(|cid| cid.0.as_str() == joined)
 }
 
 /// `<Const ending in Base>.helpers` — the Rails idiom
@@ -177,8 +247,42 @@ fn view_helpers_path() -> Vec<Symbol> {
 ///      `ActionView::ViewHelpers.name(args)`.
 /// Only receiver-less Sends are rewritten in (3)/(4): a call with a receiver
 /// already resolves, and a bare identifier with no call shape is a local read.
-fn rewrite_helper_calls(expr: &mut Expr, index: &HashMap<Symbol, ClassId>) {
-    expr.node.for_each_child_mut(&mut |c| rewrite_helper_calls(c, index));
+fn rewrite_helper_calls(
+    expr: &mut Expr,
+    index: &HashMap<Symbol, ClassId>,
+    route_helpers: &std::collections::HashSet<Symbol>,
+    rewrite_request: bool,
+) {
+    expr.node.for_each_child_mut(&mut |c| {
+        rewrite_helper_calls(c, index, route_helpers, rewrite_request)
+    });
+
+    // Bare `request` in a helper/view module body → the per-dispatch
+    // `ActionController::Current.request` (module functions have no
+    // controller to delegate to).
+    if rewrite_request {
+        if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
+            if method.as_str() == "request" && args.is_empty() {
+                let span = expr.span;
+                *expr.node = ExprNode::Send {
+                    recv: Some(Expr::new(
+                        span,
+                        ExprNode::Const {
+                            path: vec![
+                                Symbol::from("ActionController"),
+                                Symbol::from("Current"),
+                            ],
+                        },
+                    )),
+                    method: Symbol::from("request"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                };
+                return;
+            }
+        }
+    }
 
     // Case 1: collapse `<…Base>.helpers` to the ViewHelpers module constant.
     if is_base_dot_helpers(&expr.node) {
@@ -199,6 +303,8 @@ fn rewrite_helper_calls(expr: &mut Expr, index: &HashMap<Symbol, ClassId>) {
                 Some(module.0.as_str().split("::").map(Symbol::from).collect())
             } else if is_framework_view_helper(method.as_str()) {
                 Some(view_helpers_path())
+            } else if route_helpers.contains(method) {
+                Some(vec![Symbol::from("RouteHelpers")])
             } else {
                 None
             }
@@ -216,6 +322,123 @@ fn rewrite_helper_calls(expr: &mut Expr, index: &HashMap<Symbol, ClassId>) {
             block,
             parenthesized: true,
         };
+    }
+
+    // `link_to(raw(x), …)` → `link_to_raw(x, …)`: Rails skips the label
+    // escape for a safe buffer; with no safe-buffer type the exemption is
+    // decided here. Children were rewritten first (and the bare-call
+    // rewrite above may have just fired), so both calls are already in
+    // their ViewHelpers.* form.
+    if let ExprNode::Send { recv: Some(r), method, args, .. } = &mut *expr.node {
+        if method.as_str() == "link_to" && is_view_helpers_const(r) && !args.is_empty() {
+            let raw_inner = match &*args[0].node {
+                ExprNode::Send { recv: Some(r2), method: m2, args: a2, .. }
+                    if m2.as_str() == "raw"
+                        && a2.len() == 1
+                        && is_view_helpers_const(r2) =>
+                {
+                    Some(a2[0].clone())
+                }
+                _ => None,
+            };
+            if let Some(inner) = raw_inner {
+                *method = Symbol::from("link_to_raw");
+                args[0] = inner;
+            }
+        }
+    }
+
+    // Unwrap the view walker's default `html_escape(<call>.to_s)` when
+    // the call is html_safe (see is_html_safe_call) — Rails doesn't
+    // escape safe buffers, and escaping them ships literal &lt;img&gt;.
+    let unwrap: Option<Expr> = match &*expr.node {
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "html_escape"
+                && args.len() == 1
+                && is_view_helpers_const(r)
+                && is_html_safe_call(strip_to_s(&args[0]), index) =>
+        {
+            Some(args[0].clone())
+        }
+        _ => None,
+    };
+    if let Some(inner) = unwrap {
+        *expr = inner;
+    }
+}
+
+/// Ruby-emit-path pass: wrap each action's html render in the layout
+/// call — `render(Views::X.y(...))` → `render(Views::Layouts.application(
+/// Views::X.y(...), @<ivar>…, @flash…))`. Lives here (not the shared
+/// controller lowering) because the wrap shape and the CRuby dispatch
+/// contract move together: the overlay main.rb ships `controller.body`
+/// verbatim, while other targets' dispatchers still wrap body-only.
+/// The controller render seam is where a layout's ivar reads (@user,
+/// @title) are statically in scope — the generic dispatch had no way to
+/// pass them. Skipped renders: jbuilder json (`*_json` view call or a
+/// `content_type:` kwarg), non-view renders (`render html:`/`plain:` —
+/// Rails skips the layout for those too), and an already-wrapped
+/// Layouts call (idempotence). No-op when the app has no
+/// layouts/application view.
+pub(crate) fn apply_layout_lowering(lcs: &mut [LibraryClass], app: &App) {
+    // Cheap probe: no layouts/application view → nothing to wrap.
+    let probe = Expr::new(
+        crate::span::Span::synthetic(),
+        ExprNode::Lit { value: crate::expr::Literal::Nil },
+    );
+    if crate::lower::view_to_library::layout_wrap_expr(app, probe).is_none() {
+        return;
+    }
+    for lc in lcs.iter_mut() {
+        for m in &mut lc.methods {
+            rewrite_layout_wrap(&mut m.body, app);
+        }
+    }
+}
+
+fn rewrite_layout_wrap(expr: &mut Expr, app: &App) {
+    expr.node.for_each_child_mut(&mut |c| rewrite_layout_wrap(c, app));
+    // Post-lowering action bodies carry `render` as a SelfRef-receiver
+    // Send (`self.render(...)` shape); accept the bare form too.
+    let ExprNode::Send { recv, method, args, .. } = &mut *expr.node else {
+        return;
+    };
+    let self_recv = match recv {
+        None => true,
+        Some(r) => matches!(&*r.node, ExprNode::SelfRef),
+    };
+    if !self_recv || method.as_str() != "render" || args.is_empty() {
+        return;
+    }
+    // Trailing kwargs are fine (`status: :unprocessable_entity` renders
+    // WITH layout in Rails) — except the jbuilder branch's
+    // `content_type:`, which marks a non-html response.
+    let has_content_type = args.iter().skip(1).any(|a| match &*a.node {
+        ExprNode::Hash { entries, .. } => entries.iter().any(|(k, _)| {
+            matches!(&*k.node, ExprNode::Lit { value: crate::expr::Literal::Sym { value } }
+                if value.as_str() == "content_type")
+        }),
+        _ => false,
+    });
+    if has_content_type {
+        return;
+    }
+    let wrappable = match &*args[0].node {
+        ExprNode::Send { recv: Some(r), method: vm, .. } => {
+            !vm.as_str().ends_with("_json")
+                && matches!(&*r.node, ExprNode::Const { path }
+                    if path.len() == 2
+                        && path[0].as_str() == "Views"
+                        && path[1].as_str() != "Layouts")
+        }
+        _ => false,
+    };
+    if !wrappable {
+        return;
+    }
+    let inner = args[0].clone();
+    if let Some(wrapped) = crate::lower::view_to_library::layout_wrap_expr(app, inner) {
+        args[0] = wrapped;
     }
 }
 

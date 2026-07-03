@@ -176,6 +176,14 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut funcs: Vec<LibraryFunction> = Vec::new();
     for route in &flat {
+        // Unnamed dynamic routes (`get "/comments/page/:page"`, no `as:`)
+        // get no helper in Rails — their action-name fallback would
+        // shadow a real static route's helper under first-wins dedupe
+        // (`comments_path` for `/replies/comments/page/:page` hiding
+        // `/comments`).
+        if !route.named {
+            continue;
+        }
         let helper = format!("{}_path", route.as_name);
         if !seen.insert(helper.clone()) {
             continue;

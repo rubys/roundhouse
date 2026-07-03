@@ -33,6 +33,15 @@ pub struct FlatRoute {
     pub action: Symbol,
     pub as_name: String,
     pub path_params: Vec<String>,
+    /// Does this route have a REAL helper name — explicit `as:`,
+    /// resources-derived, root, or auto-derived from a fully-static
+    /// path? Unnamed dynamic routes carry a legacy action-name
+    /// fallback in `as_name` for consumers that key on it, but Rails
+    /// generates NO helper for them — the route-helper generator
+    /// skips `named: false` entries (an action-name fallback like
+    /// `comments` for `/replies/comments/page/:page` would otherwise
+    /// shadow the real `/comments` helper).
+    pub named: bool,
 }
 
 /// The seven standard Rails scaffold actions a `resources` block
@@ -66,6 +75,29 @@ pub fn flatten_routes(app: &App) -> Vec<FlatRoute> {
     out
 }
 
+/// Route-helper name for a fully-static path: segments joined with `_`
+/// (`/search` → `search`, `/comments/upvoted` → `comments_upvoted`).
+/// None when any segment is dynamic (`:id`, `*rest`) — Rails generates
+/// no helper for an unnamed dynamic route.
+fn static_path_name(path: &str) -> Option<String> {
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if segs.is_empty()
+        || segs
+            .iter()
+            .any(|s| s.starts_with(':') || s.starts_with('*') || s.starts_with('('))
+    {
+        return None;
+    }
+    let name = segs.join("_").replace('-', "_").replace('.', "_");
+    // The name becomes `def self.<name>_path` — a path like "/404"
+    // derives a name no target can declare. Fall back to the action
+    // name for those (matching the previous behavior).
+    if !name.chars().next().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false) {
+        return None;
+    }
+    Some(name)
+}
+
 fn collect_flat_routes(
     spec: &RouteSpec,
     out: &mut Vec<FlatRoute>,
@@ -75,16 +107,27 @@ fn collect_flat_routes(
         RouteSpec::Explicit { method, path, controller, action, as_name, .. } => {
             let (full_path, mut params) = nest_path(path, scope);
             extract_path_params(&full_path, &mut params);
+            // Rails auto-names a plain `get "/search" => "search#index"`
+            // route from its fully-static path (`search_path`).
+            // Dynamic-segment paths get no auto name in Rails; keep the
+            // legacy action-name fallback in `as_name` for consumers
+            // that key on it, but mark the route unnamed so the helper
+            // generator skips it.
+            let (derived_name, named) = match as_name.as_ref() {
+                Some(s) => (s.as_str().to_string(), true),
+                None => match static_path_name(&full_path) {
+                    Some(n) => (n, true),
+                    None => (action.as_str().to_string(), false),
+                },
+            };
             out.push(FlatRoute {
                 method: method.clone(),
                 path: full_path,
                 controller: controller.clone(),
                 action: action.clone(),
-                as_name: as_name
-                    .as_ref()
-                    .map(|s| s.as_str().to_string())
-                    .unwrap_or_else(|| action.as_str().to_string()),
+                as_name: derived_name,
                 path_params: params,
+                named,
             });
         }
         RouteSpec::Root { target } => {
@@ -107,6 +150,7 @@ fn collect_flat_routes(
                 action: Symbol::from(action_name),
                 as_name: "root".to_string(),
                 path_params: vec![],
+                named: true,
             });
         }
         RouteSpec::Resources { name, only, except, nested } => {
@@ -143,6 +187,7 @@ fn collect_flat_routes(
                     action: Symbol::from(action_name),
                     as_name,
                     path_params: params,
+                    named: true,
                 });
             }
             for child in nested {

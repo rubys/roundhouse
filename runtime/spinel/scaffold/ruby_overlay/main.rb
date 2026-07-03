@@ -67,6 +67,7 @@ require_relative "config/schema"
 require_relative "runtime/action_dispatch"
 require_relative "runtime/action_controller"
 require_relative "runtime/action_controller_cookies"
+require_relative "runtime/action_dispatch_request"
 require_relative "runtime/broadcasts"
 require_relative "runtime/cgi_io"
 require_relative "config/routes"
@@ -79,6 +80,14 @@ require_relative "config/routes"
 # fallback require above.
 begin
   require_relative "config/importmap"
+rescue LoadError
+end
+# Per-app Rails::Application reopen (generated from the source app's
+# config/application.rb) — real config methods (`read_only?`, `name`)
+# reached via `Rails.application`. Conditional like the importmap:
+# source apps without one fall back to the empty runtime shim class.
+begin
+  require_relative "config/application"
 rescue LoadError
 end
 require_relative "app/views"
@@ -151,6 +160,15 @@ module Main
     controller.request_method = request[:method]
     controller.request_path   = request[:path]
     controller.request_format = request_format
+    # The full request object (CRuby overlay class) — filters read
+    # `request.remote_ip` / `request.env` / `request[:format]`. `env.to_h`
+    # detaches a plain mutable Hash (callers write scratch keys the real
+    # ENV would reject); params delegation gets the same merged hash the
+    # controller sees.
+    controller.request = ActionDispatch::Request.new(env.to_h, merged)
+    # Same object, module-reachable — helpers are module functions with
+    # no controller context (see ActionController::Current).
+    ActionController::Current.request = controller.request
 
     begin
       controller.process_action(matched.action)
@@ -188,16 +206,18 @@ module Main
        %(<a href="#{controller.location}">Redirecting</a>),
        "text/html; charset=utf-8", controller.location, out_cookies]
     else
-      # JSON responses skip the html layout wrap and ship the controller
-      # body verbatim with the JSON Content-Type. Other formats ride the
-      # application layout. `controller.location` (set by `render …
+      # The controller body IS the full page: the Ruby emit path's
+      # `apply_layout_lowering` wraps each html action render in
+      # `Views::Layouts.application(...)` at the render call site —
+      # the only seam where the @ivars a layout reads (@user, @title)
+      # are statically in scope. JSON responses ship with their own
+      # Content-Type; `controller.location` (set by `render …
       # location: @article`) flows through as the Location header.
       if controller.request_format == :json
         [controller.status, controller.body,
          controller.content_type, controller.location, out_cookies]
       else
-        page = Views::Layouts.application(controller.body)
-        [controller.status, page,
+        [controller.status, controller.body,
          "text/html; charset=utf-8", controller.location, out_cookies]
       end
     end

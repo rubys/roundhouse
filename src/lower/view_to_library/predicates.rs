@@ -41,6 +41,11 @@ pub(super) fn rewrite_predicates(cond: &Expr, nullable: &std::collections::HashS
                     block: None,
                     ..
                 } if args.is_empty() => nullable.contains(method.as_str()),
+                // An index read (`flash[f]`, `params[:x]`) yields nil on a
+                // missing key — `flash[f].present?` must not become a bare
+                // `!flash[f].empty?` (nil crash where Rails says false).
+                ExprNode::Send { recv: Some(_), method, .. }
+                    if method.as_str() == "[]" => true,
                 _ => false,
             };
             match method.as_str() {
