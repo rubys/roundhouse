@@ -23,6 +23,10 @@ require "stringio"
 # `Time.parse`/`Time#iso8601` — backs the datetime-column accessor
 # coercion the Ruby emitter synthesizes (`apply_datetime_lowering`).
 require "time"
+# `CGI.escape`/`CGI.parse`/`CGI.unescape_html` — app code (lobsters
+# models/extras) reaches stdlib CGI directly; Rails gets it via
+# ActiveSupport, the CRuby tree gets it here.
+require "cgi"
 
 # SqliteAdapter is hoisted to top-level so the spinel-AOT compile
 # can statically resolve the `SqliteAdapter` constant referenced
@@ -55,6 +59,9 @@ require_relative "runtime/importmap"
 require_relative "runtime/rails"
 require_relative "runtime/active_support_duration"
 require_relative "runtime/active_support_time_parsing"
+require_relative "runtime/active_support_try"
+require_relative "runtime/active_support_core_ext"
+require_relative "runtime/action_view_date_helper"
 require_relative "runtime/active_record"
 require_relative "config/schema"
 require_relative "runtime/action_dispatch"
