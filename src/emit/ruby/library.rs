@@ -110,11 +110,22 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
 }
 
 /// Framework view helpers callable from a helper/model body that the
-/// view-template classifier (which runs only on views) never reaches. They
+/// view-template classifier (which runs only on views) never reaches —
+/// plus bare calls in view bodies the classifier has no kind for (it
+/// handles a fixed set; the rest fall through to this pass). They
 /// resolve to `ActionView::ViewHelpers.<name>`. Grown as GET / surfaces
-/// each one; asset helpers first (`avatar_img` → `image_tag` → `image_path`).
+/// each one: asset helpers (`avatar_img` → `image_tag` → `image_path`),
+/// then the date helpers + `content_tag` (`time_ago_in_words_label`
+/// calls both bare).
 fn is_framework_view_helper(name: &str) -> bool {
-    matches!(name, "image_tag" | "image_path")
+    matches!(
+        name,
+        "image_tag"
+            | "image_path"
+            | "content_tag"
+            | "time_ago_in_words"
+            | "distance_of_time_in_words"
+    )
 }
 
 /// `<Const ending in Base>.helpers` — the Rails idiom
@@ -132,18 +143,39 @@ fn is_base_dot_helpers(node: &ExprNode) -> bool {
     false
 }
 
+/// `Rails.application.routes.url_helpers` — the Rails idiom for reaching
+/// route helpers from a model body (`Story#short_id_path` does
+/// `...url_helpers.root_path + "s/#{short_id}"`). Collapses to the
+/// generated `RouteHelpers` module so the trailing `.root_path` resolves
+/// as `RouteHelpers.root_path`.
+fn is_rails_url_helpers(node: &ExprNode) -> bool {
+    let mut cur = node;
+    for step in ["url_helpers", "routes", "application"] {
+        let ExprNode::Send { recv: Some(r), method, args, block, .. } = cur else {
+            return false;
+        };
+        if method.as_str() != step || !args.is_empty() || block.is_some() {
+            return false;
+        }
+        cur = &r.node;
+    }
+    matches!(cur, ExprNode::Const { path }
+        if path.last().map(|s| s.as_str() == "Rails").unwrap_or(false))
+}
+
 fn view_helpers_path() -> Vec<Symbol> {
     vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")]
 }
 
 /// Walk a method body and rewrite helper calls so they resolve against the
-/// module-function surfaces. Three cases (children first, so nested calls
+/// module-function surfaces. Four cases (children first, so nested calls
 /// and the `.helpers` receiver are rewritten before their parent):
 ///   1. `<…Base>.helpers` → the `ActionView::ViewHelpers` constant.
-///   2. bare `name(args)` where `name` is an app helper → `<Module>.name(args)`.
-///   3. bare `name(args)` where `name` is a framework view helper →
+///   2. `Rails.application.routes.url_helpers` → the `RouteHelpers` constant.
+///   3. bare `name(args)` where `name` is an app helper → `<Module>.name(args)`.
+///   4. bare `name(args)` where `name` is a framework view helper →
 ///      `ActionView::ViewHelpers.name(args)`.
-/// Only receiver-less Sends are rewritten in (2)/(3): a call with a receiver
+/// Only receiver-less Sends are rewritten in (3)/(4): a call with a receiver
 /// already resolves, and a bare identifier with no call shape is a local read.
 fn rewrite_helper_calls(expr: &mut Expr, index: &HashMap<Symbol, ClassId>) {
     expr.node.for_each_child_mut(&mut |c| rewrite_helper_calls(c, index));
@@ -154,7 +186,13 @@ fn rewrite_helper_calls(expr: &mut Expr, index: &HashMap<Symbol, ClassId>) {
         return;
     }
 
-    // Cases 2/3: a bare call resolving to an app or framework helper module.
+    // Case 2: collapse `Rails.application.routes.url_helpers` to RouteHelpers.
+    if is_rails_url_helpers(&expr.node) {
+        *expr.node = ExprNode::Const { path: vec![Symbol::from("RouteHelpers")] };
+        return;
+    }
+
+    // Cases 3/4: a bare call resolving to an app or framework helper module.
     let path: Option<Vec<Symbol>> = match &*expr.node {
         ExprNode::Send { recv: None, method, .. } => {
             if let Some(module) = index.get(method) {

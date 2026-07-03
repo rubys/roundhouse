@@ -228,7 +228,16 @@ module ActionView
       attrs = render_attrs({ src: image_path(source) }.merge(opts.to_h))
       "<img#{attrs}>"
     end
-  
+
+    # `content_tag :span, text, title: "..."` → `<span title="...">text</span>`.
+    # Content is escaped (Rails escapes unless the caller passes an
+    # html_safe buffer; lowered call sites pass plain strings). Attrs
+    # flow through `render_attrs` like the other tag helpers.
+    def self.content_tag(name, content = "", opts = {})
+      n = name.to_s
+      "<#{n}#{render_attrs(opts.to_h)}>#{html_escape(content.to_s)}</#{n}>"
+    end
+
     # Emit the importmap script + per-pin modulepreload hints + a
     # module-script that imports the entry point. Mirrors Rails'
     # `javascript_importmap_tags` shape so the cross-target comparison

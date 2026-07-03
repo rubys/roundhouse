@@ -75,6 +75,11 @@ module ActionView
     # (and absolute/protocol-relative sources) returns it verbatim.
     def self.image_path: (String source, ?skip_pipeline: bool) -> String
     def self.image_tag: (String source, ?Hash[Symbol, untyped] opts) -> String
+
+    # Generic element helper: `content_tag :span, text, title: "..."`.
+    # `content` is untyped — call sites pass strings, but Rails accepts
+    # anything stringifiable and the body goes through `.to_s`.
+    def self.content_tag: (Symbol name, ?untyped content, ?Hash[Symbol, untyped] opts) -> String
   
     # `pins` is the importmap pin array — each entry a record with
     # fixed `:name` and `:path` fields. Record (not `Hash[Symbol,
