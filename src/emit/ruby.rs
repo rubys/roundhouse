@@ -292,11 +292,25 @@ pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
     library::apply_duration_lowering(&mut lcs);
-    // Layout wrap: `render(Views::X.y(...))` → `render(Views::Layouts.
-    // application(Views::X.y(...), @<ivar>…, @flash…))` so a layout
-    // reading controller ivars receives them. Pairs with the overlay
-    // main.rb shipping `controller.body` verbatim (no dispatch-side
-    // wrap). No-op when the app has no layouts/application view.
+    emit_lowered_controllers_from_lcs(&lcs, app)
+}
+
+/// CRuby/JRuby-tree variant: controllers with the layout wrap —
+/// `render(Views::X.y(...))` → `render(Views::Layouts.application(
+/// Views::X.y(...), @<ivar>…, @flash…))` — so a layout reading
+/// controller ivars receives them. Pairs with the ruby_overlay main.rb
+/// shipping `controller.body` verbatim. MUST NOT run on the plain
+/// spinel target: its dispatch still wraps body-only, and wrapping in
+/// both places renders the layout twice (the second pass reads
+/// already-consumed content_for slots — CI caught the double wrap as
+/// nil crashes in the spinel compare). The ruby/jruby project layers
+/// re-emit controllers through this and dedupe last-wins over the
+/// spinel-shape files.
+pub fn emit_lowered_controllers_with_layout(app: &App) -> Vec<EmittedFile> {
+    let mut lcs = lower_controllers_for_spinel(app);
+    library::apply_scope_lowering(&mut lcs, app);
+    library::apply_helper_lowering(&mut lcs, app);
+    library::apply_duration_lowering(&mut lcs);
     library::apply_layout_lowering(&mut lcs, app);
     emit_lowered_controllers_from_lcs(&lcs, app)
 }

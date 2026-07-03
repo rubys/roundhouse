@@ -50,9 +50,13 @@ module ActionView
 
     # Rails' `content_for?(:slot)` — has the slot been populated?
     # (Layout conditionals: `<% if content_for? :subnav %>`.)
+    # Composed from `get_slot` (missing slot → ""), NOT a local
+    # `fetch(slot, nil)` + nil-check: the nilable-local shape broke two
+    # strict transpiles (Swift didn't narrow `String?` across `||`;
+    # go2 mangled the slots read into an undefined identifier), while
+    # get_slot's `|| ""` idiom is already proven on every target.
     def self.content_for?(slot)
-      v = @slots.fetch(slot, nil)
-      !(v.nil? || v.empty?)
+      !get_slot(slot).empty?
     end
 
     def self.get_slot(slot)

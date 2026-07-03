@@ -1004,6 +1004,14 @@ fn ruby_runtime_files(
         files.push((f.path.to_string_lossy().into_owned(), f.content));
     }
 
+    // Controllers re-emitted WITH the layout wrap (dedupe last-wins
+    // supersedes the spinel-shape versions): this tree's main.rb ships
+    // `controller.body` verbatim, so the render call sites must apply
+    // the layout — the seam where the @ivars a layout reads are in
+    // scope. The plain spinel target keeps unwrapped controllers (its
+    // dispatch wraps body-only).
+    files.extend(sort_files(emit::ruby::emit_lowered_controllers_with_layout(app)));
+
     // The source app's `app/javascript/` + `public/` static assets are
     // already folded in by `spinel_files` (both targets need them — the
     // spinel binary now serves `/assets/*` too). Nothing CRuby-specific
@@ -1228,6 +1236,11 @@ fn jruby_runtime_files(
         "",
         &mut files,
     )?;
+
+    // Controllers with the layout wrap — same pairing as the CRuby
+    // tree: this main.rb ships `controller.body` verbatim (see
+    // ruby_runtime_files).
+    files.extend(sort_files(emit::ruby::emit_lowered_controllers_with_layout(app)));
 
     // The scaffold README → SPECIMEN rename already happened in `spinel_files`.
     Ok(dedupe_last_wins(files))
