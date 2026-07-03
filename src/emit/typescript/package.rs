@@ -23,7 +23,7 @@ pub(super) fn emit_package_json() -> EmittedFile {
         ("    \"@libsql/client\": \"^0.14.0\",", "")
     } else {
         (
-            "    \"better-sqlite3\": \"^11.5.0\",",
+            "    \"better-sqlite3\": \"^12.11.2\",",
             "    \"@types/better-sqlite3\": \"^7.6.0\",\n",
         )
     };
