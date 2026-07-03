@@ -75,6 +75,44 @@ pub(super) fn library_class_from_node(
     library_class_from_node_with_scope(class, &[], file)
 }
 
+/// `class << Rails.application ... end` — the site-wide-settings idiom
+/// in config/application.rb: config methods (`read_only?`, `name`,
+/// `domain`) defined on the application *instance's* singleton at the
+/// top level of the file, outside the Application class body. Returns
+/// the def'd methods with Instance receivers — callers reach them as
+/// `Rails.application.<m>`, so once the class is emitted as a
+/// `Rails::Application` reopen they're plain instance methods (the
+/// application object is a singleton, making instance-vs-singleton
+/// definition indistinguishable to callers). Empty when the file has
+/// no such block.
+pub fn ingest_rails_application_singleton_methods(
+    source: &[u8],
+    file: &str,
+) -> IngestResult<Vec<MethodDef>> {
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let owner = ClassId(Symbol::from("Rails::Application"));
+    let mut out: Vec<MethodDef> = Vec::new();
+    let Some(prog) = root.as_program_node() else {
+        return Ok(out);
+    };
+    for stmt in prog.statements().body().iter() {
+        let Some(sc) = stmt.as_singleton_class_node() else { continue };
+        let Some(call) = sc.expression().as_call_node() else { continue };
+        if constant_id_str(&call.name()) != "application" || call.arguments().is_some() {
+            continue;
+        }
+        let Some(recv) = call.receiver() else { continue };
+        let Some(path) = constant_path_of(&recv) else { continue };
+        if path.join("::") != "Rails" {
+            continue;
+        }
+        let (_includes, methods, _constants) = walk_decl_body(sc.body(), &owner, file, false)?;
+        out.extend(methods);
+    }
+    Ok(out)
+}
+
 /// Build a LibraryClass for a class declaration, prepending the
 /// enclosing module path (`scope`) to the class's own constant-path
 /// name. `module ActiveRecord; class Base` becomes `ClassId

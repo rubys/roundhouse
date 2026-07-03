@@ -20,7 +20,10 @@ use super::controller::ingest_controller;
 use super::expr::ingest_ruby_program;
 use super::fixture::ingest_fixture_file;
 use super::jbuilder::ingest_jbuilder;
-use super::library_class::{ClassKind, classify_class_file, ingest_library_classes};
+use super::library_class::{
+    ClassKind, classify_class_file, ingest_library_classes,
+    ingest_rails_application_singleton_methods,
+};
 use super::model::ingest_model;
 use super::routes::ingest_routes;
 use super::schema::{ingest_migration, ingest_schema};
@@ -181,6 +184,67 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                     }
                 }
             }
+        }
+    }
+
+    // `config/application.rb` — the app's `Rails::Application` subclass
+    // (`class Application < Rails::Application` inside the app module).
+    // Its instance methods are app config (`read_only?`, `name`,
+    // `domain`) reached at runtime as `Rails.application.<m>`. Reparent
+    // onto `Rails::Application` itself: the runtime shim memoizes
+    // `Rails::Application.new`, so a reopen makes the methods reachable
+    // regardless of require order, and the app namespace (never
+    // referenced at runtime) drops out. Same isolate-per-file tolerance
+    // as extras/lib — the file carries Bundler/railtie noise that must
+    // not abort ingest.
+    let app_config_path = dir.join("config/application.rb");
+    if let Ok(source) = vfs.read(&app_config_path) {
+        let file = app_config_path.display().to_string();
+        // Two capture points: methods in the Application class body, and
+        // the "site-wide settings" idiom — a top-level
+        // `class << Rails.application ... end` block whose defs are the
+        // real config surface (lobsters keeps read_only?/name/domain
+        // there, outside the class body).
+        let class_methods = match ingest_library_classes(&source, &file) {
+            Ok(classes) => classes
+                .into_iter()
+                .find(|lc| {
+                    lc.parent
+                        .as_ref()
+                        .map(|p| p.0.as_str() == "Rails::Application")
+                        .unwrap_or(false)
+                })
+                .map(|lc| lc.methods)
+                .unwrap_or_default(),
+            Err(err) => {
+                if survey::is_active() {
+                    survey::record(&err);
+                }
+                Vec::new()
+            }
+        };
+        let singleton_methods =
+            match ingest_rails_application_singleton_methods(&source, &file) {
+                Ok(methods) => methods,
+                Err(err) => {
+                    if survey::is_active() {
+                        survey::record(&err);
+                    }
+                    Vec::new()
+                }
+            };
+        let mut methods = class_methods;
+        methods.extend(singleton_methods);
+        if !methods.is_empty() {
+            app.rails_application = Some(crate::dialect::LibraryClass {
+                name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
+                is_module: false,
+                parent: None,
+                includes: Vec::new(),
+                methods,
+                origin: None,
+                constants: Vec::new(),
+            });
         }
     }
 

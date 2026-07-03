@@ -70,6 +70,18 @@ pub struct App {
     /// ships no helpers or only empty helper modules (the blog).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub helper_method_index: HashMap<Symbol, ClassId>,
+    /// The app's `Rails::Application` subclass from
+    /// `config/application.rb` (e.g. `Lobsters::Application`),
+    /// reparented at ingest onto `Rails::Application` itself. Its
+    /// instance methods are app config (`read_only?`, `name`, `domain`,
+    /// `ssl?`) reached at runtime via `Rails.application.<m>` — the
+    /// runtime shim memoizes `Rails::Application.new`, so emitting the
+    /// class as a reopen makes them reachable regardless of require
+    /// order (the app namespace is never referenced at runtime and
+    /// drops out). None when the app has no config/application.rb or
+    /// its class defines no methods.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rails_application: Option<LibraryClass>,
     /// Source files read during ingest, indexed by `Span.file`
     /// (`FileId(n)` → `sources[n - 1]`; `FileId(0)` is the synthetic
     /// sentinel). Carries the parsed text so diagnostics can resolve
@@ -125,6 +137,7 @@ impl App {
             stylesheets: Vec::new(),
             rbs_signatures: HashMap::new(),
             helper_method_index: HashMap::new(),
+            rails_application: None,
             sources: Vec::new(),
             root: String::new(),
         }
