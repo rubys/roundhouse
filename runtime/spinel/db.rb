@@ -207,6 +207,15 @@ class DbPool
   end
 end
 
+# Temporal intrinsics (`ActiveSupport.parse_db_time` in the synthesized
+# column readers, `db_now` in fill_timestamps) — chained off Db, the one
+# require every persistence-touching bootstrap (main.rb AND the emitted
+# test_helper) already loads. Mirrors the db_cruby/db_jruby chain the
+# CRuby/JRuby materialization inserts; before this file existed the
+# calls were unresolved and spinel's old silent gate nil'd them
+# (spinel#1661 — the strict gate in spinel 1356cb14 surfaced it).
+require_relative "active_support_time_parsing"
+
 module Db
   # Own connection pool (roundhouse#12). Was
   # ActiveRecord::ConnectionAdapters::ConnectionPool, but that generic

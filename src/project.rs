@@ -1271,6 +1271,18 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
 
     walk_dir_flat(Path::new("runtime/spinel"), &["rb"], "runtime/", &mut files)?;
 
+    // Temporal-intrinsics sidecar — the flat walk above picks only .rb,
+    // and spinel's strict unresolved-call gate needs `parse_db_time`'s
+    // `String?` param typed to compile the nil-guard narrow.
+    {
+        let rbs = fs::read_to_string("runtime/spinel/active_support_time_parsing.rbs")
+            .map_err(|e| format!("read runtime/spinel/active_support_time_parsing.rbs: {e}"))?;
+        files.push((
+            "sig/runtime/active_support_time_parsing.rbs".to_string(),
+            rbs,
+        ));
+    }
+
     // `db_jruby.rb` is the JRuby/JDBC Db backend — it uses Java interop
     // (`java_import`, `Java::`) that the CRuby and Spinel toolchains (and
     // the spinel-subset compliance gate) must never see. It is injected

@@ -11,7 +11,6 @@
 # Array as a settable holder.
 module Broadcasts
   LOG = []
-  TRANSPORTS = []
 
   # Type-seed stub: pins TRANSPORTS' element type so spinel can
   # dispatch `broadcast(stream, fragment)` correctly inside `record`.
@@ -26,6 +25,18 @@ module Broadcasts
       nil
     end
   end
+
+  # Seeded with an INSTANCE, not left empty: an always-empty literal
+  # gives spinel nothing to type the array from (`set_transport`'s
+  # param is caller-typed, and its only caller is CRuby's config.ru —
+  # outside the spinel compile graph), so every TRANSPORTS operation
+  # (`length`/`[]`/`clear`/`<<` and the `broadcast` dispatch) sat
+  # behind unresolved-call gate arms. The old gate silently no-op'd
+  # them; spinel 1356cb14's strict gate raises at first save
+  # (after_commit hook → record → TRANSPORTS.length). The stub
+  # broadcast is a nil no-op, so the seeded holder behaves identically
+  # to the empty one until a real transport replaces it.
+  TRANSPORTS = [SeedTransport.new]
 
   def self.reset_log!
     LOG.clear
@@ -62,10 +73,13 @@ module Broadcasts
   def self.record(action:, stream:, target:, html:)
     entry = { action: action, stream: stream, target: target, html: html }
     LOG << entry
-    if TRANSPORTS.length > 0
-      fragment = render_fragment(action: action, target: target, html: html)
-      TRANSPORTS[0].broadcast(stream, fragment)
-    end
+    # Unconditional dispatch — TRANSPORTS always holds exactly one
+    # transport (the no-op SeedTransport until an overlay replaces it),
+    # so there is no empty case to guard. Null-object shape: the seed
+    # absorbs test/CGI-one-shot broadcasts at the cost of composing the
+    # fragment string nobody ships.
+    fragment = render_fragment(action: action, target: target, html: html)
+    TRANSPORTS[0].broadcast(stream, fragment)
     nil
   end
 
@@ -80,15 +94,11 @@ module Broadcasts
     end
   end
 
-  # Module-load type-seed (positioned after `set_transport` def so
-  # the dispatch resolves at load time). The `set_transport` call
-  # pins TRANSPORTS' element type; the standalone `broadcast(…, …)`
-  # call pins SeedTransport#broadcast's param types (without it,
-  # spinel can't propagate from `TRANSPORTS[0].broadcast(stream,
-  # fragment)` in `record` back to the method's signature). Target
-  # overlays that wire a real transport via `set_transport(…)`
-  # overwrite this stub.
-  _seed_transport = SeedTransport.new
-  _seed_transport.broadcast("", "")
-  set_transport(_seed_transport)
+  # Module-load param-type pin: a direct `broadcast(String, String)`
+  # call so spinel types SeedTransport#broadcast's params (it doesn't
+  # propagate them back from the `TRANSPORTS[0].broadcast(stream,
+  # fragment)` dispatch in `record`). The holder itself is seeded at
+  # the constant (see TRANSPORTS above); overlays that wire a real
+  # transport replace it via `set_transport`.
+  TRANSPORTS[0].broadcast("", "")
 end

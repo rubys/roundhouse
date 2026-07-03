@@ -1,0 +1,7 @@
+# Signatures for the spinel-subset temporal intrinsics. `str` is the
+# raw TEXT column value the synthesized reader passes — nil/"" for
+# absent storage (the nil-guard narrows before the positional parse).
+module ActiveSupport
+  def self.parse_db_time: (String? str) -> Time?
+  def self.db_now: () -> String
+end

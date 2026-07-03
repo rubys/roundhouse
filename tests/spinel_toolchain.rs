@@ -126,6 +126,11 @@ fn generate_project(fixture: &Path, scratch: &Path) {
         "base64.rb",
         "json.rb",
         "importmap.rb",
+        // Temporal intrinsics (parse_db_time/db_now) — chained off db.rb.
+        // The .rbs rides along; reroute_runtime_rbs_to_sig moves it under
+        // sig/ where `spinel --rbs sig` reads it.
+        "active_support_time_parsing.rb",
+        "active_support_time_parsing.rbs",
     ] {
         std::fs::copy(
             runtime_spinel.join(entry),
