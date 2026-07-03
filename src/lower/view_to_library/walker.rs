@@ -553,6 +553,7 @@ mod tests {
             nullable_locals: Default::default(),
             stylesheets: Vec::new(),
             partial_ivars: Default::default(),
+            dyn_pools: Default::default(),
         }
     }
 

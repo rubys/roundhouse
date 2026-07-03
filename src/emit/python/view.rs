@@ -1300,6 +1300,12 @@ fn emit_py_render_partial(
                 _ => "_buf += \"\"  # TODO ERB: render partial collection".to_string(),
             }
         }
+        // `render partial: @dynamic` — the pooled case-dispatch is modeled
+        // on the Ruby emit path only (lobsters is CRuby-first); Python gets
+        // a stub until it reaches the target.
+        RenderPartial::DynamicNamed { .. } => {
+            "_buf += \"\"  # TODO ERB: render partial (dynamic name)".to_string()
+        }
     }
 }
 

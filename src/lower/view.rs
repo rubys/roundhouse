@@ -90,6 +90,14 @@ pub enum RenderPartial<'a> {
         partial: &'a str,
         as_name: Option<&'a str>,
     },
+    /// `render partial: @above` — the partial NAME is a runtime value
+    /// (an ivar/local), not a literal, so it can't be resolved to one
+    /// `Views::X.method` statically. `name` is the scrutinee expression
+    /// (the Var/Ivar) and `ivar` its bare name; the emitter turns this
+    /// into a `case`-dispatch over the pool of name-string literals that
+    /// controllers assign to `@<ivar>` (see `dynamic_partial_pools`),
+    /// each arm calling the resolved partial with its threaded closure.
+    DynamicNamed { name: &'a Expr, ivar: &'a str },
 }
 
 /// Recognize a `render ...` call inside an ERB view body. Returns
@@ -154,26 +162,32 @@ pub fn classify_render_partial<'a>(
 /// Classify the explicit-kwarg render forms from the trailing kwarg
 /// hash: `render partial: "x/y", collection: c, as: :item`
 /// (→ `CollectionNamed`) or `render partial: "x/y", item: rec`
-/// (→ `Named`, with the first non-`partial` entry as the arg). The
-/// `partial:` value must be a String literal (dynamic partial names
-/// aren't statically resolvable); returns `None` otherwise.
+/// (→ `Named`, with the first non-`partial` entry as the arg). A
+/// String-literal `partial:` gives `Named`/`CollectionNamed`; a bare
+/// ivar/local `partial:` (no `collection:`) gives `DynamicNamed` (pool
+/// dispatch); anything else returns `None`.
 fn classify_render_kwargs(entries: &[(Expr, Expr)]) -> Option<RenderPartial<'_>> {
     let key_of = |k: &Expr| match &*k.node {
         ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
         _ => None,
     };
     let mut partial: Option<&str> = None;
+    let mut dyn_partial: Option<(&Expr, &str)> = None;
     let mut collection: Option<&Expr> = None;
     let mut as_name: Option<&str> = None;
     let mut first_local: Option<&Expr> = None;
     for (k, v) in entries {
         match key_of(k).as_deref() {
-            Some("partial") => {
-                let ExprNode::Lit { value: Literal::Str { value } } = &*v.node else {
-                    return None;
-                };
-                partial = Some(value.as_str());
-            }
+            Some("partial") => match &*v.node {
+                ExprNode::Lit { value: Literal::Str { value } } => partial = Some(value.as_str()),
+                // `render partial: @above` / `render partial: some_local` —
+                // a runtime name. Captured for the DynamicNamed dispatch;
+                // resolved via the controller-assignment pool at emit time.
+                ExprNode::Var { name, .. } | ExprNode::Ivar { name } => {
+                    dyn_partial = Some((v, name.as_str()));
+                }
+                _ => return None,
+            },
             Some("collection") => collection = Some(v),
             Some("as") => {
                 if let ExprNode::Lit { value: Literal::Sym { value } } = &*v.node {
@@ -191,7 +205,18 @@ fn classify_render_kwargs(entries: &[(Expr, Expr)]) -> Option<RenderPartial<'_>>
             None => {}
         }
     }
-    let partial = partial?;
+    let partial = match partial {
+        Some(p) => p,
+        None => {
+            // No literal partial name. A bare dynamic name (`render partial:
+            // @above`, no `collection:`) resolves via the pool dispatch; a
+            // dynamic collection form isn't modeled yet.
+            return match (dyn_partial, collection) {
+                (Some((name, ivar)), None) => Some(RenderPartial::DynamicNamed { name, ivar }),
+                _ => None,
+            };
+        }
+    };
     if let Some(collection) = collection {
         Some(RenderPartial::CollectionNamed {
             collection,
@@ -905,5 +930,40 @@ mod tests {
         let k = classify_nested_form_child(&el).unwrap();
         assert_eq!(k, NestedFormChild::Local { name: "comment" });
         assert_eq!(k.prefix(), "comment");
+    }
+
+    fn hash(entries: Vec<(Expr, Expr)>) -> Expr {
+        Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: true })
+    }
+
+    #[test]
+    fn render_partial_dynamic_name_classifies_as_dynamic_named() {
+        // `render partial: above` — a runtime name (Var/Ivar).
+        let args = vec![hash(vec![(sym("partial"), var("above"))])];
+        let rp = classify_render_partial(None, "render", &args, None, &|_| true).unwrap();
+        match rp {
+            RenderPartial::DynamicNamed { ivar, .. } => assert_eq!(ivar, "above"),
+            other => panic!("expected DynamicNamed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_partial_literal_name_stays_named_not_dynamic() {
+        // `render partial: "stories/subnav"` — a literal name resolves
+        // statically; must NOT become the dynamic dispatch.
+        let args = vec![hash(vec![(sym("partial"), str_lit("stories/subnav"))])];
+        let rp = classify_render_partial(None, "render", &args, None, &|_| true).unwrap();
+        assert!(matches!(rp, RenderPartial::Named { partial: "stories/subnav", .. }));
+    }
+
+    #[test]
+    fn render_partial_dynamic_name_with_collection_is_unsupported() {
+        // A dynamic name paired with `collection:` isn't modeled — the pool
+        // dispatch only covers the bare `partial: @x` form.
+        let args = vec![hash(vec![
+            (sym("partial"), var("above")),
+            (sym("collection"), var("stories")),
+        ])];
+        assert!(classify_render_partial(None, "render", &args, None, &|_| true).is_none());
     }
 }

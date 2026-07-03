@@ -263,7 +263,8 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
     // arg PLUS these (threaded from the rendering view); the controller /
     // render call sites pass the matching values. Layouts are body-only
     // for now (their call site is main.rb, not yet threaded).
-    let closures = std::rc::Rc::new(view_ivar_closures(&app.views));
+    let closures = std::rc::Rc::new(view_ivar_closures(&app.views, &app.controllers));
+    let dyn_pools = std::rc::Rc::new(dynamic_partial_pools(&app.controllers));
     let closure_ivars: Vec<String> = view_key_of(view)
         .and_then(|k| closures.get(&k).cloned())
         .unwrap_or_default()
@@ -339,6 +340,7 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         nullable_locals: extra_params.iter().cloned().collect(),
         stylesheets: app.stylesheets.clone(),
         partial_ivars: closures.clone(),
+        dyn_pools: dyn_pools.clone(),
     };
 
     let mut body_stmts: Vec<Expr> = Vec::new();
@@ -1066,12 +1068,14 @@ pub(crate) struct ViewArgs {
 /// HTML, non-partial, non-layout views participate.
 pub(crate) fn action_view_ivar_map(
     views: &[crate::dialect::View],
+    controllers: &[crate::dialect::Controller],
 ) -> std::collections::HashMap<(String, String), ViewArgs> {
     // The controller passes an action view its full render-tree ivar
-    // closure (its own reads ∪ its partials' needs), matching the view's
-    // generated params — so an ivar a deep partial reads (e.g. @user) is
-    // threaded even when the action view itself doesn't read it.
-    let closures = view_ivar_closures(views);
+    // closure (its own reads ∪ its partials' needs, including dynamic-
+    // partial pools), matching the view's generated params — so an ivar a
+    // deep partial reads (e.g. @user) is threaded even when the action
+    // view itself doesn't read it.
+    let closures = view_ivar_closures(views, controllers);
     let mut out = std::collections::HashMap::new();
     for v in views {
         let (dir, base) = split_view_name(v.name.as_str());
@@ -1159,7 +1163,7 @@ pub fn layout_wrap_expr(app: &crate::App, inner: Expr) -> Option<Expr> {
         .views
         .iter()
         .find(|v| v.format.as_str() == "html" && view_key_of(v).as_ref() == Some(&key))?;
-    let closures = view_ivar_closures(&app.views);
+    let closures = view_ivar_closures(&app.views, &app.controllers);
     let ivars = closures.get(&key).cloned().unwrap_or_default();
     let span = inner.span;
     let ivar = |name: &Symbol| Expr::new(span, ExprNode::Ivar { name: name.clone() });
@@ -1216,8 +1220,12 @@ pub fn layout_wrap_expr(app: &crate::App, inner: Expr) -> Option<Expr> {
 /// statically, so that subtree's needs aren't folded in (those renders are
 /// nil-guarded by the caller). Keyed for every html view (action +
 /// partial).
-pub(crate) fn view_ivar_closures(views: &[View]) -> std::collections::HashMap<ViewKey, Vec<Symbol>> {
+pub(crate) fn view_ivar_closures(
+    views: &[View],
+    controllers: &[crate::dialect::Controller],
+) -> std::collections::HashMap<ViewKey, Vec<Symbol>> {
     use std::collections::{BTreeSet, HashMap};
+    let pools = dynamic_partial_pools(controllers);
     let mut closure: HashMap<ViewKey, BTreeSet<Symbol>> = HashMap::new();
     let mut edges: HashMap<ViewKey, Vec<ViewKey>> = HashMap::new();
     for v in views {
@@ -1228,10 +1236,12 @@ pub(crate) fn view_ivar_closures(views: &[View]) -> std::collections::HashMap<Vi
         let (dir, _) = split_view_name(v.name.as_str());
         let reads: BTreeSet<Symbol> = view_read_ivars(&v.body).into_iter().collect();
         closure.entry(key.clone()).or_default().extend(reads);
-        edges
-            .entry(key)
-            .or_default()
-            .extend(render_partial_keys(&v.body, dir));
+        let mut child_keys = render_partial_keys(&v.body, dir);
+        // A `render partial: @above` folds every pooled candidate partial's
+        // ivar needs into this view, so the dispatch's arms have their
+        // closure args threaded as params here.
+        child_keys.extend(dynamic_render_edges(&v.body, dir, &pools));
+        edges.entry(key).or_default().extend(child_keys);
     }
     // Fixpoint: propagate each partial's needs up to every view that
     // renders it, until no set grows.
@@ -1289,26 +1299,122 @@ fn collect_render_keys(e: &Expr, dir: &str, out: &mut Vec<ViewKey>) {
     e.node.for_each_child(&mut |c| collect_render_keys(c, dir, out));
 }
 
+/// Resolve a partial-name string to its `(module, method)` ViewKey.
+/// A slash form (`"stories/subnav"`) names an explicit module; a bare
+/// name (`"active"`) resolves relative to `dir` (the rendering view's
+/// directory) — matching Rails' relative-partial-path lookup.
+fn partial_name_to_key(name: &str, dir: &str) -> ViewKey {
+    match name.rsplit_once('/') {
+        Some((d, n)) => (camelize(&snake_case(d)), n.trim_start_matches('_').to_string()),
+        None => (
+            camelize(&snake_case(dir)),
+            name.trim_start_matches('_').to_string(),
+        ),
+    }
+}
+
 fn render_partial_key(rp: &crate::lower::view::RenderPartial<'_>, dir: &str) -> Option<ViewKey> {
     use crate::lower::view::RenderPartial;
-    let named = |partial: &str| -> ViewKey {
-        match partial.rsplit_once('/') {
-            Some((d, n)) => (camelize(&snake_case(d)), n.trim_start_matches('_').to_string()),
-            None => (
-                camelize(&snake_case(dir)),
-                partial.trim_start_matches('_').to_string(),
-            ),
-        }
-    };
     Some(match rp {
         RenderPartial::Collection { name, .. } => (camelize(&snake_case(name)), singularize(name)),
         RenderPartial::Association { method, .. } => {
             (camelize(&snake_case(method)), singularize(method))
         }
         RenderPartial::Named { partial, .. } | RenderPartial::CollectionNamed { partial, .. } => {
-            named(partial)
+            partial_name_to_key(partial, dir)
         }
+        // A dynamic name resolves to a POOL of keys, not one — folded into
+        // the render graph separately (see `dynamic_render_edges`).
+        RenderPartial::DynamicNamed { .. } => return None,
     })
+}
+
+/// The controller's convention view directory: the class name minus its
+/// `Controller` suffix, snake-cased (`HomeController` → `home`). Matches
+/// the `dir` component of that controller's view names and each view's
+/// `resource_dir`, so a dynamic-partial pool keyed by dir lines up with
+/// the rendering view.
+fn controller_view_dir(name: &ClassId) -> String {
+    let s = name.0.as_str();
+    snake_case(s.strip_suffix("Controller").unwrap_or(s))
+}
+
+/// For each `(view-dir, ivar)`, the partial-name string literals a
+/// controller assigns to `@<ivar>` — the pool a `render partial: @<ivar>`
+/// can resolve to at runtime. Collected from every action body's
+/// `@x = "literal"` writes. Only consulted when a view actually renders
+/// `@<ivar>` dynamically, so over-collection (every string ivar, not just
+/// the rendered ones) is inert. Empty for the blog (no such assignments →
+/// no dynamic-partial dispatch anywhere).
+pub(crate) fn dynamic_partial_pools(
+    controllers: &[crate::dialect::Controller],
+) -> std::collections::HashMap<(String, Symbol), Vec<String>> {
+    use std::collections::{BTreeSet, HashMap};
+    let mut acc: HashMap<(String, Symbol), BTreeSet<String>> = HashMap::new();
+    for c in controllers {
+        let dir = controller_view_dir(&c.name);
+        for action in c.actions() {
+            collect_ivar_str_assigns(&action.body, &dir, &mut acc);
+        }
+    }
+    acc.into_iter()
+        .map(|(k, v)| (k, v.into_iter().collect()))
+        .collect()
+}
+
+fn collect_ivar_str_assigns(
+    e: &Expr,
+    dir: &str,
+    acc: &mut std::collections::HashMap<(String, Symbol), std::collections::BTreeSet<String>>,
+) {
+    if let ExprNode::Assign { target: LValue::Ivar { name }, value } = &*e.node {
+        if let ExprNode::Lit { value: Literal::Str { value: s } } = &*value.node {
+            acc.entry((dir.to_string(), name.clone()))
+                .or_default()
+                .insert(s.as_str().to_string());
+        }
+    }
+    e.node.for_each_child(&mut |c| collect_ivar_str_assigns(c, dir, acc));
+}
+
+/// The render-graph edges a view's DYNAMIC partials contribute: for each
+/// `render partial: @<ivar>` in the body, every pooled name for
+/// `(dir, ivar)` resolves to a partial ViewKey. Lets the closure fixpoint
+/// fold each candidate partial's ivar needs into the rendering view.
+fn dynamic_render_edges(
+    body: &Expr,
+    dir: &str,
+    pools: &std::collections::HashMap<(String, Symbol), Vec<String>>,
+) -> Vec<ViewKey> {
+    let mut out = Vec::new();
+    collect_dynamic_edges(body, dir, pools, &mut out);
+    out
+}
+
+fn collect_dynamic_edges(
+    e: &Expr,
+    dir: &str,
+    pools: &std::collections::HashMap<(String, Symbol), Vec<String>>,
+    out: &mut Vec<ViewKey>,
+) {
+    if let ExprNode::Send { recv, method, args, block, .. } = &*e.node {
+        if let Some(crate::lower::view::RenderPartial::DynamicNamed { ivar, .. }) =
+            crate::lower::view::classify_render_partial(
+                recv.as_ref(),
+                method.as_str(),
+                args,
+                block.as_ref(),
+                &|_| true,
+            )
+        {
+            if let Some(names) = pools.get(&(dir.to_string(), Symbol::from(ivar))) {
+                for name in names {
+                    out.push(partial_name_to_key(name, dir));
+                }
+            }
+        }
+    }
+    e.node.for_each_child(&mut |c| collect_dynamic_edges(c, dir, pools, out));
 }
 
 /// The instance variables an action view READS, in first-seen order.
@@ -1776,6 +1882,13 @@ pub(super) struct ViewCtx {
     /// needed ivars here and passes them as call-site args (the caller's
     /// own locals — its closure ⊇ the partial's, so it always has them).
     pub(super) partial_ivars: std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Symbol>>>,
+    /// Dynamic-partial name pools, `(view-dir, ivar) -> [partial-name
+    /// literals]` (`dynamic_partial_pools`). `emit_render_partial` reads
+    /// this for a `render partial: @<ivar>` DynamicNamed dispatch: each
+    /// pooled name resolves to a `Views::X.method` arm. Empty for apps
+    /// without dynamic partials (the blog), so the dispatch never fires.
+    pub(super) dyn_pools:
+        std::rc::Rc<std::collections::HashMap<(String, Symbol), Vec<String>>>,
 }
 
 impl ViewCtx {

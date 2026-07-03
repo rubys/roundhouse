@@ -1,7 +1,7 @@
 //! Render-partial dispatch + yield handling — both are output-position
 //! dispatches from `emit_io_append`.
 
-use crate::expr::{BlockStyle, Expr, ExprNode, Literal};
+use crate::expr::{Arm, BlockStyle, Expr, ExprNode, Literal, Pattern};
 use crate::ident::Symbol;
 use crate::naming::{camelize, singularize, snake_case};
 use crate::span::Span;
@@ -131,6 +131,60 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                 Vec::new(),
                 Some(block_lambda),
                 false,
+            ))
+        }
+        // `render partial: @above` — the name is a runtime value. Emit a
+        // `case @above` whose arms are the pooled candidate partials (the
+        // string literals controllers assign to `@above`), each resolving
+        // to its `Views::<Module>.<method>` with a nil record arg and the
+        // threaded closure ivars. A name outside the pool matches no arm →
+        // renders nothing (Rails would raise; the pool covers every assigned
+        // value). Empty pool → None (leaves the original render unresolved).
+        RenderPartial::DynamicNamed { name, ivar } => {
+            let names = ctx
+                .dyn_pools
+                .get(&(ctx.resource_dir.clone(), Symbol::from(*ivar)))
+                .cloned()
+                .unwrap_or_default();
+            let mut arms: Vec<Arm> = Vec::new();
+            for pname in &names {
+                let (module_camel, method_sym) =
+                    super::partial_name_to_key(pname, &ctx.resource_dir);
+                if module_camel.is_empty() {
+                    continue;
+                }
+                // A name-only partial gets no record object: pass nil for the
+                // convention record arg, then its closure ivars (which the
+                // rendering view threads as params — see view_ivar_closures'
+                // dynamic edges).
+                let mut call_args = vec![nil_lit()];
+                call_args.extend(partial_extra_args(ctx, &module_camel, &method_sym));
+                let render_call = send(
+                    Some(Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Const {
+                            path: vec![Symbol::from("Views"), Symbol::from(module_camel)],
+                        },
+                    )),
+                    &method_sym,
+                    call_args,
+                    None,
+                    true,
+                );
+                arms.push(Arm {
+                    pattern: Pattern::Lit {
+                        value: Literal::Str { value: pname.clone() },
+                    },
+                    guard: None,
+                    body: accumulator_append_call(render_call, ctx),
+                });
+            }
+            if arms.is_empty() {
+                return None;
+            }
+            Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Case { scrutinee: (*name).clone(), arms },
             ))
         }
     }
