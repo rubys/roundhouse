@@ -299,12 +299,24 @@ fn emit_bool_op_operand(
     parent_surface: crate::expr::BoolOpSurface,
 ) -> String {
     let s = emit_expr(child);
-    if let ExprNode::BoolOp { op, surface, .. } = &*child.node {
-        let child_prec = bool_op_prec(*op, *surface);
-        let parent_prec = bool_op_prec(parent_op, parent_surface);
-        if child_prec < parent_prec || (child_prec == parent_prec && *op != parent_op) {
+    match &*child.node {
+        ExprNode::BoolOp { op, surface, .. } => {
+            let child_prec = bool_op_prec(*op, *surface);
+            let parent_prec = bool_op_prec(parent_op, parent_surface);
+            if child_prec < parent_prec || (child_prec == parent_prec && *op != parent_op) {
+                return format!("({s})");
+            }
+        }
+        // Assignment binds looser than any boolean operator, so an
+        // Assign operand must keep its parens: the guard idiom
+        // `a && (user = find) && user.active?` re-parses without them
+        // as `a && (user = (find && user.active?))` — evaluating
+        // `user.active?` before `user` is bound (nil crash), then
+        // binding `user` to a boolean.
+        ExprNode::Assign { .. } | ExprNode::OpAssign { .. } => {
             return format!("({s})");
         }
+        _ => {}
     }
     s
 }
