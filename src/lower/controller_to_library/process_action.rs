@@ -10,11 +10,28 @@ use crate::ty::Ty;
 
 use super::util::method_name_for_action;
 
+/// A statement in the synthesized before_action preamble — the filter
+/// chain that runs ahead of the case dispatch. `Call` invokes a filter
+/// method defined on this controller or an ancestor (`authenticate_user`
+/// on ApplicationController firing for every subclass action); `Block`
+/// inlines a block-form filter's body (`before_action { @page = page }`).
+/// `halt_check` appends `return if performed?` after the statement —
+/// Rails' halting semantics: a filter that renders or redirects skips
+/// the action. It's set only when the filter body can respond, so
+/// pure-assignment filters add no dispatch noise (and filter-free
+/// controllers emit byte-identical dispatchers).
+pub(super) enum PreambleStmt {
+    Call { filter: Filter, halt_check: bool },
+    Block { body: Expr, only: Vec<Symbol>, except: Vec<Symbol>, halt_check: bool },
+}
+
 /// Build the `process_action(action_name)` dispatcher:
 ///
 /// ```ruby
 /// def process_action(action_name)
-///   set_article if [:show, :edit, ...].include?(action_name)
+///   authenticate_user
+///   require_logged_in_user if [:hidden, :saved].include?(action_name)
+///   return if performed?
 ///   case action_name
 ///   when :index then index
 ///   when :new then new_action
@@ -22,15 +39,41 @@ use super::util::method_name_for_action;
 ///   end
 /// end
 /// ```
+///
+/// The preamble is the before_action chain (inherited filters first,
+/// then this controller's own, declaration order); same-controller
+/// filters whose targets are private methods are instead inlined into
+/// the action bodies upstream (`inline_before_filters`) and don't
+/// appear here.
 pub(super) fn synthesize_process_action(
-    filters: &[&Filter],
+    preamble: &[PreambleStmt],
     publics: &[Action],
     enclosing_class: Symbol,
 ) -> MethodDef {
     let mut stmts: Vec<Expr> = Vec::new();
 
-    for f in filters {
-        stmts.push(filter_dispatch_stmt(f));
+    for p in preamble {
+        let (stmt, halt_check) = match p {
+            PreambleStmt::Call { filter, halt_check } => {
+                (filter_dispatch_stmt(filter), *halt_check)
+            }
+            PreambleStmt::Block { body, only, except, halt_check } => {
+                let stmt = if only.is_empty() && except.is_empty() {
+                    body.clone()
+                } else {
+                    syn(ExprNode::If {
+                        cond: include_check(only, except),
+                        then_branch: body.clone(),
+                        else_branch: empty_seq(),
+                    })
+                };
+                (stmt, *halt_check)
+            }
+        };
+        stmts.push(stmt);
+        if halt_check {
+            stmts.push(halt_if_performed());
+        }
     }
 
     if !publics.is_empty() {
@@ -70,6 +113,25 @@ pub(super) fn synthesize_process_action(
             mutates_self: false,
             block_param: None,
     }
+}
+
+/// `return if performed?` — the halting check after a filter that can
+/// render or redirect.
+fn halt_if_performed() -> Expr {
+    let performed = syn(ExprNode::Send {
+        recv: None,
+        method: Symbol::from("performed?"),
+        args: vec![],
+        block: None,
+        parenthesized: false,
+    });
+    syn(ExprNode::If {
+        cond: performed,
+        then_branch: syn(ExprNode::Return {
+            value: syn(ExprNode::Lit { value: Literal::Nil }),
+        }),
+        else_branch: empty_seq(),
+    })
 }
 
 /// `set_X if [:a, :b, ...].include?(action_name)` — or unconditionally

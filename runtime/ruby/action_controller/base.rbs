@@ -40,6 +40,12 @@ module ActionController
     def location: () -> String?
     def content_type: () -> String
 
+    # True once render/redirect_to/head has produced a response — the
+    # halting check the synthesized before_action preamble runs after
+    # each filter that can render or redirect (Rails: a filter that
+    # responds halts the chain and skips the action).
+    def performed?: () -> bool
+
     def initialize: () -> void
 
     # Subclasses override; base raises NotImplementedError. The

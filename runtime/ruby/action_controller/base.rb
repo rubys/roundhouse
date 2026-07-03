@@ -52,6 +52,15 @@ module ActionController
       @location = nil
       @request_format = :html
       @content_type = "text/html; charset=utf-8"
+      @performed = false
+    end
+
+    # True once render/redirect_to/head has produced a response.
+    # The synthesized `process_action` filter preamble checks this
+    # after each before_action that can render or redirect — Rails'
+    # halting semantics: a filter that responds skips the action.
+    def performed?
+      @performed
     end
 
     # Subclasses override. Error message omits `self.class.name` —
@@ -73,6 +82,7 @@ module ActionController
     def render(body, status: :ok, content_type: nil, location: nil)
       @body   = body
       @status = resolve_status(status)
+      @performed = true
       @content_type = content_type unless content_type.nil?
       @location = location unless location.nil?
       nil
@@ -85,6 +95,7 @@ module ActionController
     def redirect_to(path, notice: nil, alert: nil, status: :found)
       @location = path
       @status   = resolve_status(status)
+      @performed = true
       @flash[:notice] = notice unless notice.nil?
       @flash[:alert]  = alert  unless alert.nil?
       nil
@@ -100,6 +111,7 @@ module ActionController
     def head(status, content_type: nil)
       @status = resolve_status(status)
       @body   = ""
+      @performed = true
       @content_type = content_type unless content_type.nil?
       nil
     end

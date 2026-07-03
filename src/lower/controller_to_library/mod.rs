@@ -41,7 +41,7 @@ use crate::lower::controller::body::{
 };
 
 use self::params::ParamsSpec;
-use self::process_action::synthesize_process_action;
+use self::process_action::{synthesize_process_action, PreambleStmt};
 use self::rewrites::{
     rewrite_assoc_through_parent_typed, rewrite_destroy_bang,
     rewrite_model_new_to_from_params, rewrite_params,
@@ -196,7 +196,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         // `None` → legacy: every public method is an action.
         let routed = routed_by_controller
             .map(|m| m.get(&controller.name).cloned().unwrap_or_default());
-        let methods = build_methods(controller, &params_specs, &json_actions, routed.as_ref(), &view_ivars);
+        let methods = build_methods(controller, controllers, &params_specs, &json_actions, routed.as_ref(), &view_ivars);
         all_methods.push((methods, controller));
     }
 
@@ -405,7 +405,14 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
     // No view list in this single-controller path → empty map; the render
     // rewrite falls back to in-scope ivars (legacy behavior for tests).
     let view_ivars: ViewIvarMap = std::collections::HashMap::new();
-    let methods = build_methods(controller, &specs, &std::collections::HashSet::new(), None, &view_ivars);
+    let methods = build_methods(
+        controller,
+        std::slice::from_ref(controller),
+        &specs,
+        &std::collections::HashSet::new(),
+        None,
+        &view_ivars,
+    );
     LibraryClass {
         name: controller.name.clone(),
         is_module: false,
@@ -441,6 +448,7 @@ fn collect_class_constants(controller: &Controller) -> Vec<(Symbol, Expr)> {
 
 fn build_methods(
     controller: &Controller,
+    all_controllers: &[Controller],
     params_specs: &BTreeMap<Symbol, ParamsSpec>,
     json_actions: &std::collections::HashSet<Symbol>,
     routed: Option<&std::collections::HashSet<Symbol>>,
@@ -487,12 +495,16 @@ fn build_methods(
         .collect();
 
     if !publics_inlined.is_empty() {
-        // Filter dispatch is removed from process_action since the
-        // filters are now inlined directly into the actions; emit
-        // an empty filter list so the dispatcher just routes by
-        // action_name.
+        // The before_action preamble: everything the body-inlining above
+        // can't reach — inherited filters (ApplicationController's
+        // `authenticate_user` firing for subclass actions), own filters
+        // whose targets are defined on an ancestor, and block-form
+        // filters. Same-controller private-target filters stay inlined
+        // (typing seeds the action bodies); a controller with none of the
+        // former gets an empty preamble and a byte-identical dispatcher.
+        let preamble = build_filter_preamble(controller, all_controllers, &privs);
         methods.push(synthesize_process_action(
-            &[],
+            &preamble,
             &publics_inlined,
             controller.name.0.clone(),
         ));
@@ -571,6 +583,191 @@ fn inline_before_filters(action: &Action, filters: &[&Filter], privs: &[Action])
     new_action
 }
 
+/// Assemble the before_action preamble for `controller`'s dispatcher —
+/// the filters `inline_before_filters` can't reach. Order matches Rails:
+/// ancestors' filters first (root-most ancestor first), then the
+/// controller's own, each set in declaration order. Covered here:
+///
+///   - inherited filters (declared on an ancestor — ApplicationController's
+///     `before_action :authenticate_user` firing for subclass actions);
+///   - own filters whose target method is defined on an ancestor
+///     (`before_action :require_logged_in_user, only: [...]` where the
+///     method lives on ApplicationController);
+///   - own block-form filters (`before_action { @page = page }`), read
+///     from the Unknown body item the ingester round-trips them as.
+///
+/// Own filters whose targets are this controller's private methods are
+/// excluded — those are inlined into the action bodies upstream (the
+/// body-typer seeds ivar types from them), so a controller with only
+/// those (the blog shape) gets an empty preamble and a byte-identical
+/// dispatcher. `skip_before_action` targets anywhere in the chain drop
+/// the matching filter. A filter naming a method that resolves nowhere
+/// in the chain (a framework built-in like `verify_authenticity_token`)
+/// is dropped, matching the previous silently-skipped behavior.
+fn build_filter_preamble(
+    controller: &Controller,
+    all_controllers: &[Controller],
+    own_privs: &[Action],
+) -> Vec<PreambleStmt> {
+    let chain = ancestor_chain(controller, all_controllers);
+
+    let skipped: std::collections::HashSet<Symbol> = chain
+        .iter()
+        .copied()
+        .chain(std::iter::once(controller))
+        .flat_map(|c| c.filters())
+        .filter(|f| matches!(f.kind, FilterKind::Skip))
+        .map(|f| f.target.clone())
+        .collect();
+
+    // Resolve a filter target's body — self first, then nearest ancestor
+    // (Ruby method resolution order) — so the halting check can be
+    // scoped to filters that can actually render/redirect.
+    let find_target = |name: &Symbol| -> Option<Action> {
+        let mut scopes: Vec<&Controller> = vec![controller];
+        scopes.extend(chain.iter().rev().copied());
+        for c in scopes {
+            let (pubs, privs) = split_public_private_actions(c);
+            if let Some(a) = privs.iter().chain(pubs.iter()).find(|a| &a.name == name) {
+                return Some(a.clone());
+            }
+        }
+        None
+    };
+
+    let mut preamble: Vec<PreambleStmt> = Vec::new();
+    let mut push_call = |f: &Filter, preamble: &mut Vec<PreambleStmt>| {
+        if skipped.contains(&f.target) {
+            return;
+        }
+        let Some(target) = find_target(&f.target) else {
+            return;
+        };
+        preamble.push(PreambleStmt::Call {
+            filter: f.clone(),
+            halt_check: can_respond(&target.body),
+        });
+    };
+
+    for anc in &chain {
+        for f in anc.filters().filter(|f| matches!(f.kind, FilterKind::Before)) {
+            push_call(f, &mut preamble);
+        }
+    }
+    let own_priv_targets: std::collections::HashSet<&Symbol> =
+        own_privs.iter().map(|a| &a.name).collect();
+    for item in &controller.body {
+        match item {
+            ControllerBodyItem::Filter { filter, .. }
+                if matches!(filter.kind, FilterKind::Before) =>
+            {
+                if own_priv_targets.contains(&filter.target) {
+                    continue; // inlined into action bodies upstream
+                }
+                push_call(filter, &mut preamble);
+            }
+            ControllerBodyItem::Unknown { expr, .. } => {
+                if let Some((body, only, except)) = block_form_filter(expr) {
+                    let halt_check = can_respond(&body);
+                    preamble.push(PreambleStmt::Block { body, only, except, halt_check });
+                }
+            }
+            _ => {}
+        }
+    }
+    preamble
+}
+
+/// Walk `parent` links root-first (`[ApplicationController]` for a
+/// typical leaf controller). A parent that isn't among the ingested
+/// controllers (ActionController::Base) ends the walk; the depth cap
+/// guards against parent cycles.
+fn ancestor_chain<'a>(controller: &Controller, all: &'a [Controller]) -> Vec<&'a Controller> {
+    let mut chain: Vec<&'a Controller> = Vec::new();
+    let mut cur = controller.parent.as_ref();
+    while let Some(pid) = cur {
+        if chain.len() >= 8 {
+            break;
+        }
+        let Some(p) = all.iter().find(|c| &c.name == pid) else { break };
+        chain.push(p);
+        cur = p.parent.as_ref();
+    }
+    chain.reverse();
+    chain
+}
+
+/// Does this filter body contain a respond-capable call (render /
+/// redirect_to / head / render_404)? Scopes the `return if performed?`
+/// halting check to filters that need it — pure-assignment filters
+/// (and every blog controller) add no dispatch noise.
+fn can_respond(body: &Expr) -> bool {
+    fn walk(e: &Expr, found: &mut bool) {
+        if *found {
+            return;
+        }
+        if let ExprNode::Send { method, .. } = &*e.node {
+            if matches!(method.as_str(), "render" | "redirect_to" | "head" | "render_404") {
+                *found = true;
+                return;
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, found));
+    }
+    let mut found = false;
+    walk(body, &mut found);
+    found
+}
+
+/// Recognize `before_action { ... }` (optionally with `only:`/`except:`)
+/// in an Unknown body item — the block form has no symbol target, so the
+/// ingester round-trips it verbatim instead of producing a `Filter`.
+/// Returns the block body plus the only/except scoping.
+fn block_form_filter(expr: &Expr) -> Option<(Expr, Vec<Symbol>, Vec<Symbol>)> {
+    let ExprNode::Send { recv: None, method, args, block: Some(b), .. } = &*expr.node else {
+        return None;
+    };
+    if method.as_str() != "before_action" {
+        return None;
+    }
+    let ExprNode::Lambda { body, .. } = &*b.node else {
+        return None;
+    };
+    let mut only: Vec<Symbol> = Vec::new();
+    let mut except: Vec<Symbol> = Vec::new();
+    for a in args {
+        let ExprNode::Hash { entries, .. } = &*a.node else { continue };
+        for (k, v) in entries {
+            let ExprNode::Lit { value: crate::expr::Literal::Sym { value: key } } = &*k.node
+            else {
+                continue;
+            };
+            match key.as_str() {
+                "only" => only = filter_symbol_list(v),
+                "except" => except = filter_symbol_list(v),
+                _ => {}
+            }
+        }
+    }
+    Some((body.clone(), only, except))
+}
+
+/// `[:a, :b]` / `:a` → the symbol names; anything else → empty.
+fn filter_symbol_list(e: &Expr) -> Vec<Symbol> {
+    use crate::expr::Literal;
+    match &*e.node {
+        ExprNode::Array { elements, .. } => elements
+            .iter()
+            .filter_map(|el| match &*el.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+                _ => None,
+            })
+            .collect(),
+        ExprNode::Lit { value: Literal::Sym { value } } => vec![value.clone()],
+        _ => Vec::new(),
+    }
+}
+
 /// ApplicationController baseline — methods every action body may
 /// reference via implicit-self dispatch. Signatures are loose
 /// (`Untyped` for kwargs, return Nil for terminal helpers); refining
@@ -630,6 +827,12 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
         .entry(Symbol::from("head"))
         .or_insert_with(|| fn_sig(vec![(Symbol::from("status"), Ty::Sym)], Ty::Nil));
     let _ = kw_rest_opts; // helper retained for future zero-positional kwargs callees
+
+    // `performed?` — the before_action preamble's halting check
+    // (`return if performed?` after a filter that can render/redirect).
+    info.instance_methods
+        .entry(Symbol::from("performed?"))
+        .or_insert_with(|| fn_sig(vec![], Ty::Bool));
 
     // Implicit-`params` — actions read `@params` (the lowerer rewrote
     // bare `params` → `@params`) which the typer should treat as a
