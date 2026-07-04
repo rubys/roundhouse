@@ -21,6 +21,26 @@ fn is_empty_branch(e: &Expr) -> bool {
         || matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
 }
 
+/// True when any node in this expression tree assigns a variable —
+/// `Assign`/`OpAssign`/`MultiAssign` at any depth. Used to keep an
+/// `if` whose condition binds locals in statement form (see the If
+/// arm in `emit_node`).
+fn contains_assign(e: &Expr) -> bool {
+    if matches!(
+        &*e.node,
+        ExprNode::Assign { .. } | ExprNode::OpAssign { .. } | ExprNode::MultiAssign { .. }
+    ) {
+        return true;
+    }
+    let mut found = false;
+    e.node.for_each_child(&mut |c| {
+        if !found && contains_assign(c) {
+            found = true;
+        }
+    });
+    found
+}
+
 fn emit_node(n: &ExprNode) -> String {
     match n {
         ExprNode::Lit { value } => emit_literal(value),
@@ -73,9 +93,17 @@ fn emit_node(n: &ExprNode) -> String {
             let cond_s = emit_arg(cond);
             let then_s = emit_expr(then_branch);
             let else_empty = is_empty_branch(else_branch);
+            // A condition that ASSIGNS a local read by the then-branch
+            // must keep statement form: Ruby decides local-vs-method at
+            // parse time by lexical position, so in `@user = user if
+            // (user = …)` the body's `user` sits before the assignment
+            // and parses as a method call (NameError at runtime).
+            // Statement form keeps the assignment lexically first.
+            // Conservative: any Assign in the cond forces statement form.
             if else_empty
                 && !matches!(&*then_branch.node, ExprNode::Seq { .. })
                 && !then_s.contains('\n')
+                && !contains_assign(cond)
             {
                 format!("{then_s} if {cond_s}")
             } else if else_empty {

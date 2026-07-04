@@ -312,7 +312,14 @@ fn article_emits_parent_runtime_and_view_requires() {
     //   - parent: ApplicationRecord (same dir)
     //   - Broadcasts (runtime module)
     //   - Views (per-app aggregator that loads every view module)
-    // Sibling `Comment` is autoloaded; no require for it.
+    //   - sibling `Comment` (referenced from method bodies). Same-dir
+    //     siblings are required explicitly — plain Ruby has no Rails
+    //     autoload, and a model referenced only from another model's
+    //     body (lobsters: story.rb → HiddenStory) is invisible to the
+    //     controller require chain that was once assumed to load it.
+    //     The article ↔ comment require cycle is benign: require_relative
+    //     returns early on a mid-load file, and model-to-model refs
+    //     resolve at request time.
     // The aggregator pattern (vs per-template requires) lets any
     // `Views::X.method` call resolve regardless of which template
     // file the method lives in — same as spinel-blog's hand-written
@@ -322,7 +329,7 @@ fn article_emits_parent_runtime_and_view_requires() {
     assert!(src.contains("require_relative \"application_record\""), "{src}");
     assert!(src.contains("require_relative \"../../runtime/broadcasts\""), "{src}");
     assert!(src.contains("require_relative \"../views\""), "{src}");
-    assert!(!src.contains("require_relative \"comment\""), "{src}");
+    assert!(src.contains("require_relative \"comment\""), "{src}");
 }
 
 #[test]

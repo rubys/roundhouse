@@ -410,6 +410,7 @@ fn controller_new_action_is_reserved_word_escaped() {
             leading_blank_line: false,
         }],
         layout: Default::default(),
+        sibling_classes: Vec::new(),
     });
     let files = typescript::emit(&app);
     let content = find(&files, "app/controllers/widgets_controller.ts");
@@ -488,6 +489,7 @@ fn custom_action_body_walks_through_sendkind_dispatch() {
             },
         ],
         layout: Default::default(),
+        sibling_classes: Vec::new(),
     });
     // Model is needed so classify_controller_send treats `Article.*`
     // as a known-model call.
@@ -607,6 +609,7 @@ fn walker_passes_last_bound_local_to_view_fn() {
             leading_blank_line: false,
         }],
         layout: Default::default(),
+        sibling_classes: Vec::new(),
     });
     let files = typescript::emit(&app);
     let content = find(&files, "app/controllers/articles_controller.ts");
@@ -714,6 +717,7 @@ fn custom_action_with_respond_to_flattens_to_html_branch() {
             leading_blank_line: false,
         }],
         layout: Default::default(),
+        sibling_classes: Vec::new(),
     });
     let files = typescript::emit(&app);
     let content = find(&files, "app/controllers/articles_controller.ts");
@@ -776,6 +780,7 @@ fn custom_action_without_terminal_gets_implicit_render() {
             leading_blank_line: false,
         }],
         layout: Default::default(),
+        sibling_classes: Vec::new(),
     });
     let files = typescript::emit(&app);
     let content = find(&files, "app/controllers/articles_controller.ts");

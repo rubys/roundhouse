@@ -603,6 +603,16 @@ pub struct Controller {
     /// union of actions that render through this controller.
     #[serde(default, skip_serializing_if = "LayoutDecl::is_inherit")]
     pub layout: LayoutDecl,
+    /// Empty-bodied top-level classes declared alongside the controller
+    /// in its source file, as (name, parent) pairs — lobsters'
+    /// `login_controller.rb` opens with `class LoginFailedError <
+    /// StandardError; end` and four siblings that the actions
+    /// raise/rescue. Only the empty-body shape is captured (a pure
+    /// declaration); a sibling with real methods stays dropped and
+    /// surfaces through diagnostics as before. The Ruby emit path
+    /// re-declares these ahead of the controller class.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sibling_classes: Vec<(Symbol, Symbol)>,
 }
 
 /// What `layout` was declared at the controller class level.

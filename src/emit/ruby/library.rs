@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use super::super::EmittedFile;
 use crate::App;
-use crate::dialect::{AccessorKind, LibraryClass, MethodReceiver};
+use crate::dialect::{AccessorKind, LibraryClass, MethodReceiver, Param};
 use crate::expr::{Expr, ExprNode, InterpPart, LValue};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::naming::{singularize, snake_case};
@@ -31,6 +31,9 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     // re-applies the same reader idempotently and adds the Ruby writer
     // normalize.
     apply_datetime_lowering(&mut lcs, app);
+    apply_secure_password_lowering(&mut lcs, app);
+    apply_typed_store_lowering(&mut lcs, app);
+    apply_boolean_lowering(&mut lcs, app);
     lcs.iter()
         .flat_map(|lc| {
             let file_stem = snake_case(lc.name.0.as_str());
@@ -901,8 +904,17 @@ pub(super) fn emit_library_class_decl_with_synthesized(
                 continue;
             }
         }
+        // Same-dir siblings are required too (not just cross-dir):
+        // a model referenced ONLY from another model's scope body
+        // (story.rb's `not_hidden_by` → HiddenStory) is invisible to
+        // the controller require chain that was assumed to load it —
+        // nothing else loads the file by request time. The require
+        // cycles this creates between models (story ↔ user) are
+        // benign: `require_relative` returns early on a file already
+        // mid-load, and model-to-model references live inside method
+        // bodies, resolved at request time when both classes exist.
         if let Some(anchor) = require_path_for_body_const(path, app, name) {
-            if anchor != self_anchor && !is_same_dir(&out_dir, &anchor) {
+            if anchor != self_anchor {
                 body_requires.insert(relpath(&out_dir, &anchor));
             }
         }
@@ -1251,4 +1263,566 @@ pub(super) fn walk_const_paths(e: &Expr, out: &mut BTreeSet<Vec<String>>) {
         // Leaves and uninteresting nodes pass through.
         _ => {}
     }
+}
+
+// ── has_secure_password lowering ─────────────────────────────────────
+
+/// Ruby-family pre-emit pass: synthesize the methods
+/// `has_secure_password` provides — `authenticate` (returning the
+/// record or `false`) plus the plaintext virtual-attribute accessors
+/// (`password`/`password=`/`password_confirmation`/…, or a custom
+/// attribute's spellings) — onto models that declare the marker.
+///
+/// Lives on the Ruby emit path because the bodies call the bcrypt gem
+/// (`BCrypt::Password`), which only the CRuby/JRuby tree loads (a
+/// guarded require in the overlay main.rb); shared `lower/` stays
+/// target-agnostic per the scope-lowering rule. The analyze layer
+/// already *types* this surface (`register_has_secure_password` in
+/// analyze/mod.rs); this pass supplies the runtime bodies that type
+/// registry promised. Strict no-op for marker-free apps (the blog).
+pub(crate) fn apply_secure_password_lowering(lcs: &mut [LibraryClass], app: &App) {
+    for model in &app.models {
+        let Some(attr) = secure_password_attr(&model.body) else {
+            continue;
+        };
+        let Some(lc) = lcs.iter_mut().find(|lc| lc.name == model.name) else {
+            continue;
+        };
+        let digest = Symbol::from(format!("{}_digest", attr.as_str()));
+        let confirmation = Symbol::from(format!("{}_confirmation", attr.as_str()));
+        // Rails names the authenticator after the attribute, except the
+        // default `password` which gets the bare `authenticate`.
+        let auth_name = if attr.as_str() == "password" {
+            Symbol::from("authenticate")
+        } else {
+            Symbol::from(format!("authenticate_{}", attr.as_str()))
+        };
+        push_instance_method_unless_defined(
+            lc,
+            auth_name,
+            vec![Param::positional(Symbol::from("unencrypted_password"))],
+            authenticate_body(&digest),
+            AccessorKind::Method,
+            false,
+        );
+        push_instance_method_unless_defined(
+            lc,
+            attr.clone(),
+            Vec::new(),
+            ivar_read(&attr),
+            AccessorKind::AttributeReader,
+            false,
+        );
+        push_instance_method_unless_defined(
+            lc,
+            Symbol::from(format!("{}=", attr.as_str())),
+            vec![Param::positional(Symbol::from("unencrypted_password"))],
+            plaintext_writer_body(&attr, &digest),
+            AccessorKind::Method,
+            true,
+        );
+        push_instance_method_unless_defined(
+            lc,
+            confirmation.clone(),
+            Vec::new(),
+            ivar_read(&confirmation),
+            AccessorKind::AttributeReader,
+            false,
+        );
+        push_instance_method_unless_defined(
+            lc,
+            Symbol::from(format!("{}=", confirmation.as_str())),
+            vec![Param::positional(Symbol::from("value"))],
+            plain_ivar_assign(&confirmation, "value"),
+            AccessorKind::AttributeWriter,
+            true,
+        );
+    }
+}
+
+/// The secure-password attribute name when the model body declares
+/// `has_secure_password` (first positional symbol, default
+/// `password`), else None. Mirrors analyze's registration scan.
+fn secure_password_attr(body: &[crate::dialect::ModelBodyItem]) -> Option<Symbol> {
+    for item in body {
+        let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else {
+            continue;
+        };
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else {
+            continue;
+        };
+        if method.as_str() != "has_secure_password" {
+            continue;
+        }
+        let attr = args
+            .iter()
+            .find_map(|a| match &*a.node {
+                ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => {
+                    Some(value.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| Symbol::from("password"));
+        return Some(attr);
+    }
+    None
+}
+
+fn push_instance_method_unless_defined(
+    lc: &mut LibraryClass,
+    name: Symbol,
+    params: Vec<Param>,
+    body: Expr,
+    kind: AccessorKind,
+    mutates_self: bool,
+) {
+    if lc
+        .methods
+        .iter()
+        .any(|m| m.receiver == MethodReceiver::Instance && m.name == name)
+    {
+        return;
+    }
+    lc.methods.push(crate::dialect::MethodDef {
+        name,
+        receiver: MethodReceiver::Instance,
+        params,
+        body,
+        signature: None,
+        effects: crate::effect::EffectSet::default(),
+        enclosing_class: Some(lc.name.0.clone()),
+        kind,
+        is_async: false,
+        mutates_self,
+        block_param: None,
+    });
+}
+
+fn sp_expr(node: ExprNode) -> Expr {
+    Expr::new(Span::synthetic(), node)
+}
+
+fn ivar_read(name: &Symbol) -> Expr {
+    sp_expr(ExprNode::Ivar { name: name.clone() })
+}
+
+fn plain_ivar_assign(name: &Symbol, param: &str) -> Expr {
+    sp_expr(ExprNode::Assign {
+        target: LValue::Ivar { name: name.clone() },
+        value: sp_expr(ExprNode::Var { id: VarId(0), name: Symbol::from(param) }),
+    })
+}
+
+/// `BCrypt::Password.new(@<digest>) == unencrypted_password ? self : false`.
+fn authenticate_body(digest: &Symbol) -> Expr {
+    let wrapped = sp_expr(ExprNode::Send {
+        recv: Some(sp_expr(ExprNode::Const {
+            path: vec![Symbol::from("BCrypt"), Symbol::from("Password")],
+        })),
+        method: Symbol::from("new"),
+        args: vec![ivar_read(digest)],
+        block: None,
+        parenthesized: true,
+    });
+    let cmp = sp_expr(ExprNode::Send {
+        recv: Some(wrapped),
+        method: Symbol::from("=="),
+        args: vec![sp_expr(ExprNode::Var {
+            id: VarId(0),
+            name: Symbol::from("unencrypted_password"),
+        })],
+        block: None,
+        parenthesized: false,
+    });
+    sp_expr(ExprNode::If {
+        cond: cmp,
+        then_branch: sp_expr(ExprNode::SelfRef),
+        else_branch: sp_expr(ExprNode::Lit {
+            value: crate::expr::Literal::Bool { value: false },
+        }),
+    })
+}
+
+/// The plaintext writer Rails' macro provides:
+///   `@<attr> = v; @<attr>_digest = BCrypt::Password.create(v).to_s unless v.nil?`
+/// (`.to_s` because BCrypt::Password subclasses String but the digest
+/// column stores plain text). Nil skips digest generation, mirroring
+/// Rails' blank-guard closely enough for the login/rehash paths.
+fn plaintext_writer_body(attr: &Symbol, digest: &Symbol) -> Expr {
+    let value_var = || {
+        sp_expr(ExprNode::Var { id: VarId(0), name: Symbol::from("unencrypted_password") })
+    };
+    let store_plain = sp_expr(ExprNode::Assign {
+        target: LValue::Ivar { name: attr.clone() },
+        value: value_var(),
+    });
+    let create = sp_expr(ExprNode::Send {
+        recv: Some(sp_expr(ExprNode::Const {
+            path: vec![Symbol::from("BCrypt"), Symbol::from("Password")],
+        })),
+        method: Symbol::from("create"),
+        args: vec![value_var()],
+        block: None,
+        parenthesized: true,
+    });
+    let digest_str = sp_expr(ExprNode::Send {
+        recv: Some(create),
+        method: Symbol::from("to_s"),
+        args: Vec::new(),
+        block: None,
+        parenthesized: false,
+    });
+    let guarded_digest = sp_expr(ExprNode::If {
+        cond: sp_expr(ExprNode::Send {
+            recv: Some(value_var()),
+            method: Symbol::from("nil?"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        }),
+        then_branch: sp_expr(ExprNode::Lit { value: crate::expr::Literal::Nil }),
+        else_branch: sp_expr(ExprNode::Assign {
+            target: LValue::Ivar { name: digest.clone() },
+            value: digest_str,
+        }),
+    });
+    sp_expr(ExprNode::Seq { exprs: vec![store_plain, guarded_digest] })
+}
+
+// ── request-params key normalization ─────────────────────────────────
+
+/// Ruby-family pre-emit pass: rewrite symbol-keyed request-params
+/// reads (`params[:email]`, `params.fetch(:page, …)`, `params.dig(
+/// :what, :stories)`) to string keys — on CONTROLLER classes only.
+/// The dispatch layer parses form/query/path params into a
+/// string-keyed Hash (the `Hash[String, ParamValue]` contract in
+/// base.rbs); verbatim controller bodies keep Rails' symbol spelling,
+/// which real Rails accepts (params are indifferent-access) but a
+/// plain Hash reads as nil — GET routes never noticed (absent params
+/// read as nil either way), POST /login did.
+///
+/// Restricted to controllers because `params`/`@params` in library
+/// classes can be ordinary caller-built symbol-keyed hashes —
+/// lobsters' `Pushover.push(user, params)` takes a literal hash
+/// argument, and StoryRepository's `@params` is `StoryRepository.new(
+/// user, exclude_tags: …)`'s keyword hash. Rewriting those would
+/// corrupt working reads.
+pub(crate) fn apply_params_key_lowering(lcs: &mut [LibraryClass], app: &App) {
+    for lc in lcs.iter_mut() {
+        if lc.origin.is_some() {
+            continue;
+        }
+        if !app.controllers.iter().any(|c| c.name == lc.name) {
+            continue;
+        }
+        for m in lc.methods.iter_mut() {
+            rewrite_params_sym_keys(&mut m.body);
+        }
+    }
+}
+
+fn rewrite_params_sym_keys(e: &mut Expr) {
+    e.node.for_each_child_mut(&mut rewrite_params_sym_keys);
+    match &mut *e.node {
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if is_request_params_recv(r) =>
+        {
+            match method.as_str() {
+                "[]" | "[]=" | "fetch" | "key?" | "has_key?" | "include?"
+                | "delete" => {
+                    if let Some(first) = args.first_mut() {
+                        sym_key_to_str(first);
+                    }
+                }
+                "dig" => {
+                    for a in args.iter_mut() {
+                        sym_key_to_str(a);
+                    }
+                }
+                _ => {}
+            }
+        }
+        ExprNode::Assign { target: LValue::Index { recv, index }, .. }
+        | ExprNode::OpAssign { target: LValue::Index { recv, index }, .. }
+            if is_request_params_recv(recv) =>
+        {
+            sym_key_to_str(index);
+        }
+        _ => {}
+    }
+}
+
+/// The request-params receiver shapes inside a lowered controller:
+/// `@params` (accessor already ivar-ized) or a bare `params` read.
+fn is_request_params_recv(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Ivar { name } => name.as_str() == "params",
+        ExprNode::Var { name, .. } => name.as_str() == "params",
+        ExprNode::Send { recv: None, method, args, .. } => {
+            args.is_empty() && method.as_str() == "params"
+        }
+        _ => false,
+    }
+}
+
+fn sym_key_to_str(e: &mut Expr) {
+    if let ExprNode::Lit { value: crate::expr::Literal::Sym { value } } = &*e.node {
+        let s = value.as_str().to_string();
+        e.node = Box::new(ExprNode::Lit {
+            value: crate::expr::Literal::Str { value: s },
+        });
+    }
+}
+
+// ── typed_store lowering ─────────────────────────────────────────────
+
+/// Ruby-family pre-emit pass: lower `typed_store :settings do |s|
+/// s.string :totp_secret … end` (the typed_store gem — virtual
+/// attributes YAML-serialized into a TEXT column) to per-attribute
+/// reader/writer methods routing through the overlay `TypedStore`
+/// module. Boolean attributes additionally get the Rails `<name>?`
+/// predicate spelling. Lives on the Ruby emit path (the bodies call a
+/// CRuby-overlay module); strict no-op for apps without the DSL.
+pub(crate) fn apply_typed_store_lowering(lcs: &mut [LibraryClass], app: &App) {
+    for model in &app.models {
+        let stores = typed_store_decls(&model.body);
+        if stores.is_empty() {
+            continue;
+        }
+        let Some(lc) = lcs.iter_mut().find(|lc| lc.name == model.name) else {
+            continue;
+        };
+        for (col, attrs) in &stores {
+            for a in attrs {
+                push_instance_method_unless_defined(
+                    lc,
+                    a.name.clone(),
+                    Vec::new(),
+                    typed_store_read_body(col, a),
+                    AccessorKind::Method,
+                    false,
+                );
+                if a.is_bool {
+                    push_instance_method_unless_defined(
+                        lc,
+                        Symbol::from(format!("{}?", a.name.as_str())),
+                        Vec::new(),
+                        typed_store_read_body(col, a),
+                        AccessorKind::Method,
+                        false,
+                    );
+                }
+                push_instance_method_unless_defined(
+                    lc,
+                    Symbol::from(format!("{}=", a.name.as_str())),
+                    vec![Param::positional(Symbol::from("value"))],
+                    typed_store_write_body(col, a),
+                    AccessorKind::Method,
+                    true,
+                );
+            }
+        }
+    }
+}
+
+struct TypedStoreAttr {
+    name: Symbol,
+    is_bool: bool,
+    default: Option<Expr>,
+}
+
+/// Parse every `typed_store :<col> do |s| … end` declaration in a
+/// model body into (column, attributes) pairs. Attribute lines are
+/// `s.<type> :name[, default: <lit>, …]` sends on the block param;
+/// anything else inside the block is ignored.
+fn typed_store_decls(
+    body: &[crate::dialect::ModelBodyItem],
+) -> Vec<(Symbol, Vec<TypedStoreAttr>)> {
+    let mut out = Vec::new();
+    for item in body {
+        let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else {
+            continue;
+        };
+        let ExprNode::Send { recv: None, method, args, block: Some(block), .. } =
+            &*expr.node
+        else {
+            continue;
+        };
+        if method.as_str() != "typed_store" {
+            continue;
+        }
+        let Some(col) = args.iter().find_map(|a| match &*a.node {
+            ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => {
+                Some(value.clone())
+            }
+            _ => None,
+        }) else {
+            continue;
+        };
+        let ExprNode::Lambda { params, body: block_body, .. } = &*block.node else {
+            continue;
+        };
+        let Some(block_var) = params.first() else { continue };
+        let stmts: Vec<&Expr> = match &*block_body.node {
+            ExprNode::Seq { exprs } => exprs.iter().collect(),
+            _ => vec![block_body],
+        };
+        let mut attrs = Vec::new();
+        for stmt in stmts {
+            let ExprNode::Send { recv: Some(r), method: ty_m, args: a_args, .. } =
+                &*stmt.node
+            else {
+                continue;
+            };
+            let recv_is_block_var = matches!(
+                &*r.node,
+                ExprNode::Var { name, .. } if name == block_var
+            );
+            if !recv_is_block_var {
+                continue;
+            }
+            let Some(name) = a_args.iter().find_map(|a| match &*a.node {
+                ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => {
+                    Some(value.clone())
+                }
+                _ => None,
+            }) else {
+                continue;
+            };
+            let default = a_args.iter().find_map(|a| match &*a.node {
+                ExprNode::Hash { entries, .. } => {
+                    entries.iter().find_map(|(k, v)| {
+                        let is_default_key = match &*k.node {
+                            ExprNode::Lit {
+                                value: crate::expr::Literal::Sym { value },
+                            } => value.as_str() == "default",
+                            ExprNode::Lit {
+                                value: crate::expr::Literal::Str { value },
+                            } => value == "default",
+                            _ => false,
+                        };
+                        if is_default_key { Some(v.clone()) } else { None }
+                    })
+                }
+                _ => None,
+            });
+            attrs.push(TypedStoreAttr {
+                name,
+                is_bool: ty_m.as_str() == "boolean",
+                default,
+            });
+        }
+        if !attrs.is_empty() {
+            out.push((col, attrs));
+        }
+    }
+    out
+}
+
+/// `TypedStore.read(@<col>, "<name>", <default|nil>)`.
+fn typed_store_read_body(col: &Symbol, a: &TypedStoreAttr) -> Expr {
+    let default = a.default.clone().unwrap_or_else(|| {
+        sp_expr(ExprNode::Lit { value: crate::expr::Literal::Nil })
+    });
+    sp_expr(ExprNode::Send {
+        recv: Some(sp_expr(ExprNode::Const { path: vec![Symbol::from("TypedStore")] })),
+        method: Symbol::from("read"),
+        args: vec![
+            ivar_read(col),
+            sp_expr(ExprNode::Lit {
+                value: crate::expr::Literal::Str { value: a.name.as_str().to_string() },
+            }),
+            default,
+        ],
+        block: None,
+        parenthesized: true,
+    })
+}
+
+/// `@<col> = TypedStore.write(@<col>, "<name>", value)`.
+fn typed_store_write_body(col: &Symbol, a: &TypedStoreAttr) -> Expr {
+    let write = sp_expr(ExprNode::Send {
+        recv: Some(sp_expr(ExprNode::Const { path: vec![Symbol::from("TypedStore")] })),
+        method: Symbol::from("write"),
+        args: vec![
+            ivar_read(col),
+            sp_expr(ExprNode::Lit {
+                value: crate::expr::Literal::Str { value: a.name.as_str().to_string() },
+            }),
+            sp_expr(ExprNode::Var { id: VarId(0), name: Symbol::from("value") }),
+        ],
+        block: None,
+        parenthesized: true,
+    });
+    sp_expr(ExprNode::Assign {
+        target: LValue::Ivar { name: col.clone() },
+        value: write,
+    })
+}
+
+// ── boolean-column cast lowering ─────────────────────────────────────
+
+/// Ruby-family pre-emit pass: boolean-column readers and `<col>?`
+/// predicates cast the stored value instead of returning it raw. The
+/// CRuby sqlite adapter hydrates boolean columns as the Integers
+/// SQLite stores (0/1) — and `0` is TRUTHY in Ruby, so a plain `@col`
+/// read makes every `user.is_admin?` guard pass for non-admins.
+/// Rewritten body: `@col == true || @col == 1` (handles both a
+/// DB-hydrated Integer and an app-assigned true/false; nil/0/false →
+/// false). Strict targets hydrate native booleans and keep the shared
+/// synthesized shape. Only plain `@col`-read bodies are rewritten
+/// (idempotent; custom bodies win).
+pub(crate) fn apply_boolean_lowering(lcs: &mut [LibraryClass], app: &App) {
+    for model in &app.models {
+        let Some(table) = app.schema.tables.get(&model.table.0) else {
+            continue;
+        };
+        let bool_cols: BTreeSet<Symbol> = table
+            .columns
+            .iter()
+            .filter(|c| matches!(c.col_type, crate::schema::ColumnType::Boolean))
+            .map(|c| c.name.clone())
+            .collect();
+        if bool_cols.is_empty() {
+            continue;
+        }
+        let Some(lc) = lcs.iter_mut().find(|lc| lc.name == model.name) else {
+            continue;
+        };
+        for m in &mut lc.methods {
+            if m.receiver != MethodReceiver::Instance {
+                continue;
+            }
+            let col = Symbol::from(m.name.as_str().trim_end_matches('?'));
+            if !bool_cols.contains(&col) {
+                continue;
+            }
+            if is_plain_ivar_read(&m.body, &col) {
+                m.body = boolean_cast_body(&col);
+            }
+        }
+    }
+}
+
+/// `@col == true || @col == 1`.
+fn boolean_cast_body(col: &Symbol) -> Expr {
+    let eq = |rhs: Expr| {
+        sp_expr(ExprNode::Send {
+            recv: Some(ivar_read(col)),
+            method: Symbol::from("=="),
+            args: vec![rhs],
+            block: None,
+            parenthesized: false,
+        })
+    };
+    sp_expr(ExprNode::BoolOp {
+        op: crate::expr::BoolOpKind::Or,
+        surface: Default::default(),
+        left: eq(sp_expr(ExprNode::Lit {
+            value: crate::expr::Literal::Bool { value: true },
+        })),
+        right: eq(sp_expr(ExprNode::Lit {
+            value: crate::expr::Literal::Int { value: 1 },
+        })),
+    })
 }

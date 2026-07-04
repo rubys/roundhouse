@@ -174,6 +174,15 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // Date/DateTime/Time column accessors coerce to/from real `Time`
     // (no-op for apps with no temporal columns).
     library::apply_datetime_lowering(&mut lcs, app);
+    // has_secure_password models gain `authenticate` + plaintext
+    // accessors backed by the bcrypt gem (no-op without the marker).
+    library::apply_secure_password_lowering(&mut lcs, app);
+    // typed_store columns gain their virtual-attribute accessors
+    // (no-op without the DSL).
+    library::apply_typed_store_lowering(&mut lcs, app);
+    // Boolean-column readers/predicates cast SQLite's 0/1 Integers
+    // (0 is truthy in Ruby).
+    library::apply_boolean_lowering(&mut lcs, app);
 
     // Synthesized siblings need explicit `require_relative` even when
     // they live in the same directory as their referencer — nothing else
@@ -292,6 +301,7 @@ pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
     library::apply_duration_lowering(&mut lcs);
+    library::apply_params_key_lowering(&mut lcs, app);
     emit_lowered_controllers_from_lcs(&lcs, app)
 }
 
@@ -312,6 +322,7 @@ pub fn emit_lowered_controllers_with_layout(app: &App) -> Vec<EmittedFile> {
     library::apply_helper_lowering(&mut lcs, app);
     library::apply_duration_lowering(&mut lcs);
     library::apply_layout_lowering(&mut lcs, app);
+    library::apply_params_key_lowering(&mut lcs, app);
     emit_lowered_controllers_from_lcs(&lcs, app)
 }
 
@@ -385,14 +396,59 @@ fn emit_lowered_controllers_from_lcs(
             } else {
                 PathBuf::from(format!("app/controllers/{file_stem}.rb"))
             };
-            library::emit_library_class_pair_with_synthesized(
+            let mut files = library::emit_library_class_pair_with_synthesized(
                 lc,
                 app,
                 out_path,
                 &synthesized,
-            )
+            );
+            // Sibling error-class declarations captured from the
+            // controller's source file (`class LoginFailedError <
+            // StandardError; end` before `class LoginController`) —
+            // re-declared ahead of the controller class so the
+            // actions' raise/rescue sites resolve.
+            if lc.origin.is_none() {
+                if let Some(ctrl) =
+                    app.controllers.iter().find(|c| c.name == lc.name)
+                {
+                    if !ctrl.sibling_classes.is_empty() {
+                        for f in files.iter_mut() {
+                            if f.path.extension().is_some_and(|e| e == "rb") {
+                                prepend_sibling_classes(
+                                    &mut f.content,
+                                    &ctrl.sibling_classes,
+                                    lc.name.0.as_str(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            files
         })
         .collect()
+}
+
+/// Insert `class <Name> < <Parent>; end` declaration lines directly
+/// above the controller's own `class` line (mirroring where the source
+/// file put them). No-op when the class line isn't found.
+fn prepend_sibling_classes(
+    content: &mut String,
+    siblings: &[(crate::ident::Symbol, crate::ident::Symbol)],
+    class_name: &str,
+) {
+    let marker = format!("class {class_name}");
+    let Some(pos) = content.find(&marker) else { return };
+    let mut decls = String::new();
+    for (name, parent) in siblings {
+        decls.push_str(&format!(
+            "class {} < {}; end\n",
+            name.as_str(),
+            parent.as_str()
+        ));
+    }
+    decls.push('\n');
+    content.insert_str(pos, &decls);
 }
 
 /// Lower each html-format `app.views` entry through `view_to_library`

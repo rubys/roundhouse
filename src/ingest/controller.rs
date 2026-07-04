@@ -31,15 +31,48 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
     // class as the controller and drops every real action (so its
     // view ivars never resolve). Fall back to the first class when no
     // name matches the convention.
-    let class = find_all_classes_with_scope(&root)
-        .into_iter()
-        .map(|(_, c)| c)
-        .find(|c| {
-            class_name_path(c)
-                .and_then(|p| p.last().cloned())
-                .is_some_and(|last| last.ends_with("Controller"))
-        })
-        .or_else(|| find_first_class(&root));
+    let all_classes = find_all_classes_with_scope(&root);
+    let chosen_idx = all_classes.iter().position(|(_, c)| {
+        class_name_path(c)
+            .and_then(|p| p.last().cloned())
+            .is_some_and(|last| last.ends_with("Controller"))
+    });
+    // Empty-bodied top-level siblings (`class LoginFailedError <
+    // StandardError; end` ahead of the controller class) are pure
+    // declarations the actions raise/rescue — carry them as (name,
+    // parent) pairs so emit can re-declare them. Captured only when a
+    // conventionally-named controller class was found (the fallback
+    // path below has no principled sibling/controller split), and only
+    // the empty-body + explicit-superclass shape; anything richer
+    // stays dropped as before.
+    let mut sibling_classes: Vec<(Symbol, Symbol)> = Vec::new();
+    if chosen_idx.is_some() {
+        for (i, (scope, c)) in all_classes.iter().enumerate() {
+            if Some(i) == chosen_idx || !scope.is_empty() {
+                continue;
+            }
+            let body_empty = c
+                .body()
+                .is_none_or(|b| flatten_statements(b).is_empty());
+            if !body_empty {
+                continue;
+            }
+            let Some(path) = class_name_path(c) else { continue };
+            let Some(parent_path) =
+                c.superclass().and_then(|n| constant_path_of(&n))
+            else {
+                continue;
+            };
+            sibling_classes.push((
+                Symbol::from(path.join("::")),
+                Symbol::from(parent_path.join("::")),
+            ));
+        }
+    }
+    let class = match chosen_idx {
+        Some(i) => all_classes.into_iter().nth(i).map(|(_, c)| c),
+        None => find_first_class(&root),
+    };
     let Some(class) = class else {
         return Ok(None);
     };
@@ -111,6 +144,7 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
         parent,
         body: body_items,
         layout,
+        sibling_classes,
     }))
 }
 

@@ -92,6 +92,7 @@ fn tiny_blog_round_trips() {
             leading_blank_line: false,
         }],
         layout: Default::default(),
+        sibling_classes: Vec::new(),
     };
 
     let routes = RouteTable {

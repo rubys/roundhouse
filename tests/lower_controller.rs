@@ -322,6 +322,7 @@ fn controller(
         parent: None,
         body: items,
         layout: Default::default(),
+        sibling_classes: Vec::new(),
     }
 }
 
