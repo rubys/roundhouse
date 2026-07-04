@@ -24,6 +24,7 @@ module ActionController
     def params=: (Hash[String, Roundhouse::ParamValue]) -> Hash[String, Roundhouse::ParamValue]
     def session: () -> ActionDispatch::Session
     def session=: (ActionDispatch::Session) -> ActionDispatch::Session
+    def reset_session: () -> ActionDispatch::Session
     def flash: () -> ActionDispatch::Flash
     def flash=: (ActionDispatch::Flash) -> ActionDispatch::Flash
     def request_method: () -> String

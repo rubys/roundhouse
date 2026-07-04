@@ -63,6 +63,16 @@ module ActionController
       @performed
     end
 
+    # Discard the current session (Rails' logout idiom). The dispatch
+    # layer persists whatever the session holds after the action; an
+    # empty replacement means the outbound session cookie is cleared
+    # (or, when a CSRF token is lazily re-added during render, that
+    # the next session starts fresh — matching Rails' new-session-id
+    # semantics closely enough for cookie-carried state).
+    def reset_session
+      @session = ActionDispatch::Session.new
+    end
+
     # Subclasses override. Error message omits `self.class.name` —
     # `.name`-style reflection forks across targets and the runtime
     # stack trace already identifies the receiver's class.

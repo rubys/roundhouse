@@ -76,6 +76,7 @@ module ActionView
     def self.raw: (untyped value) -> String
   
     def self.csrf_meta_tags: () -> String
+    def self.form_authenticity_token: () -> String
     def self.csp_meta_tag: () -> String
   
     # `name` is the asset stem (e.g., "application" → /assets/application.css).

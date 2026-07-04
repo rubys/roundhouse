@@ -98,6 +98,22 @@ module ActionController
   module Current
     class << self
       attr_accessor :request
+      # The dispatching controller, parked so module-function helpers
+      # can reach per-request session state. Held as the controller
+      # (not the session object) because `reset_session` swaps the
+      # controller's @session for a fresh instance mid-action — a
+      # parked session reference would go stale, and a CSRF token
+      # generated during the post-logout render would land in the
+      # discarded session instead of the one the dispatch persists.
+      attr_accessor :controller
+    end
+
+    # The current request's session, or nil outside a dispatch (unit
+    # tests construct view helpers without a controller; they get the
+    # shared runtime's empty-token behavior).
+    def self.session
+      c = Current.controller
+      c.nil? ? nil : c.session
     end
   end
 end

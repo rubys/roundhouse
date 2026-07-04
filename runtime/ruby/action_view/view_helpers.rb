@@ -196,11 +196,10 @@ module ActionView
                        ""
                      end
       # Rails appends a CSRF authenticity_token hidden input AFTER the
-      # button. The compare harness blanks the value via an existing
-      # AttributeRule, so emitting an empty value here is sufficient
-      # for parity. Keeps the element in the DOM tree at the same
+      # button; value via form_authenticity_token like the other csrf
+      # emitters. Keeps the element in the DOM tree at the same
       # position Rails puts it.
-      auth_token_input = %(<input type="hidden" name="authenticity_token" value="">)
+      auth_token_input = %(<input type="hidden" name="authenticity_token" value="#{form_authenticity_token}">)
       %(<form#{render_attrs(form_attrs)}>#{method_input}<button#{button_attrs}>#{html_escape(text)}</button>#{auth_token_input}</form>)
     end
   
@@ -218,7 +217,20 @@ module ActionView
     # `authenticity_token` value is the form-field name; the token value
     # is empty here because spinel-blog doesn't sign sessions.
     def self.csrf_meta_tags
-      %(<meta name="csrf-param" content="authenticity_token" />\n<meta name="csrf-token" content="" />)
+      %(<meta name="csrf-param" content="authenticity_token" />\n<meta name="csrf-token" content="#{form_authenticity_token}" />)
+    end
+
+    # The per-request CSRF token every csrf-emitting helper
+    # (csrf_meta_tags / csrf_token_hidden_input / button_to) reads.
+    # Empty in the shared runtime — targets without session-backed
+    # token generation render the same empty value they always have,
+    # and the compare harness blanks the attribute either way. The
+    # CRuby overlay overrides this with a session-backed lazy
+    # generator (runtime/action_controller_session.rb), which is how
+    # real tokens reach lobsters' login form without the shared
+    # runtime needing SecureRandom or a session on every target.
+    def self.form_authenticity_token
+      ""
     end
   
     # Empty in dev mode without a CSP nonce configured, mirroring Rails'
@@ -359,12 +371,13 @@ module ActionView
 
     # Rails injects an authenticity_token hidden input as the first
     # child of every form_with-rendered form (after the optional
-    # _method override). The compare harness blanks the value via an
-    # existing AttributeRule, so emitting an empty value is sufficient
-    # for parity. When real signing arrives, this is the one place to
-    # hook the signer.
+    # _method override). The value rides `form_authenticity_token` —
+    # empty on targets without a token generator (the compare harness
+    # blanks the attribute anyway), real on CRuby where the overlay
+    # supplies a session-backed token (the lobsters benchmark scrapes
+    # it off GET /login and POSTs it back).
     def self.csrf_token_hidden_input
-      %(<input type="hidden" name="authenticity_token" value="">)
+      %(<input type="hidden" name="authenticity_token" value="#{form_authenticity_token}">)
     end
 
     # Rails emits `<input type="hidden" name="_method" value="patch">`

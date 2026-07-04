@@ -68,6 +68,23 @@ require_relative "runtime/action_dispatch"
 require_relative "runtime/action_controller"
 require_relative "runtime/action_controller_cookies"
 require_relative "runtime/action_dispatch_request"
+require_relative "runtime/action_controller_session"
+require_relative "runtime/typed_store"
+require_relative "runtime/action_mailer"
+# App-code gem dependencies, guarded so apps that don't use them (the
+# blog) boot without the gems installed. Under Rails, Bundler
+# auto-requires these; the transpiled tree loads them here so app
+# classes that reach gem constants at LOAD time (lobsters'
+# html_encoder.rb runs `HTMLEntities.new` in its class body) or at
+# request time (bcrypt behind the synthesized User#authenticate, rotp
+# behind 2FA) resolve.
+["bcrypt", "htmlentities", "rotp"].each do |gem_name|
+  begin
+    require gem_name
+  rescue LoadError
+    nil
+  end
+end
 require_relative "runtime/broadcasts"
 require_relative "runtime/cgi_io"
 require_relative "config/routes"
@@ -139,12 +156,18 @@ module Main
     merged = matched.path_params.dup
     request[:params].each { |k, v| merged[k] = v }
     controller.params  = merged
-    controller.session = ActionDispatch::Session.new
 
     # Decode inbound flash from cookies. Each flash key carries via
     # its own cookie (`flash_notice`, `flash_alert`) so the cookie
     # plumbing stays format-free.
     cookies = request[:cookies] || {}
+    # Cookie-carried session: restore the whole session from the
+    # `_session` cookie (url-encoded k=v pairs; empty when absent or
+    # garbled — "logged out", never a 500). The raw inbound value is
+    # kept so the persist step below can skip Set-Cookie when the
+    # action left the session untouched.
+    session_in = cookies[:_session].to_s
+    controller.session = ActionDispatch::Session.from_cookie(session_in)
     # Expose the inbound cookies to the controller as a CookieJar so
     # `cookies[:k]` reads (and `cookies[:k] = v` records writes, surfaced
     # below as Set-Cookie). CookieJar is the CRuby-only overlay class.
@@ -169,6 +192,9 @@ module Main
     # Same object, module-reachable — helpers are module functions with
     # no controller context (see ActionController::Current).
     ActionController::Current.request = controller.request
+    # Park the controller too: the CSRF token generator (overlay
+    # form_authenticity_token) reads the live session through it.
+    ActionController::Current.controller = controller
 
     begin
       controller.process_action(matched.action)
@@ -200,6 +226,14 @@ module Main
     # Cookies the action wrote (`cookies[:k] = v` / `cookies.permanent`)
     # ride out alongside the flash cookies.
     controller.cookies.to_set.each { |k, v| out_cookies[k] = v }
+    # Session persistence: re-encode whatever the action (or a lazy
+    # CSRF token generation during render) left in the session, and
+    # Set-Cookie only on change. An emptied session (reset_session
+    # logout with no token re-added) clears the cookie.
+    session_out = controller.session.to_cookie
+    if session_out != session_in
+      out_cookies[:_session] = session_out.empty? ? nil : session_out
+    end
     is_redirect = controller.status >= 300 && controller.status < 400
     if is_redirect
       [controller.status,
