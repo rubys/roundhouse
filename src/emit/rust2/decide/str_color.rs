@@ -717,7 +717,9 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
             count += walk(cond, ParentExpect::None, ctx);
             let branch_expect = match tail_expect {
                 ParentExpect::Color(_) => tail_expect,
-                ParentExpect::None => unify_branches_expect(then_branch, else_branch),
+                ParentExpect::None => {
+                    unify_branches_expect(then_branch, else_branch, &ctx.owned_str_locals)
+                }
             };
             count += walk(then_branch, branch_expect, ctx);
             count += walk(else_branch, branch_expect, ctx);
@@ -868,40 +870,54 @@ fn is_known_str_send(e: &Expr) -> bool {
 }
 
 /// Unify two If-branch producer colors. If both branches are
-/// string-typed but produce different colors (e.g. then yields a
-/// literal, else yields a String from a Send), Rust rejects the
-/// resulting If as a type mismatch. Return the more-owned color as
-/// the expectation so coercions land on the literal side.
-fn unify_branches_expect(then_branch: &Expr, else_branch: &Expr) -> ParentExpect {
-    let then_likely_owned = branch_likely_owned(then_branch);
-    let else_likely_owned = branch_likely_owned(else_branch);
-    let then_has_literal = branch_has_string_literal(then_branch);
-    let else_has_literal = branch_has_string_literal(else_branch);
-    if (then_likely_owned && else_has_literal) || (else_likely_owned && then_has_literal) {
-        ParentExpect::Color(StrColor::Owned)
-    } else {
-        ParentExpect::None
+/// string-typed but produce different colors (e.g. then reads a
+/// `&str` param, else yields a String from a `format!()`), Rust
+/// rejects the resulting If as a type mismatch. Return `Owned` as the
+/// expectation whenever the colors disagree — the walk applies it to
+/// BOTH branches, so the borrow-family side gets `.to_string()`'d and
+/// the owned side passes through, and the arms always agree.
+///
+/// Same-color pairs (lit/lit, var/var, owned/owned) need nothing.
+/// Mixed borrow-family pairs (Static lit vs Borrowed var) would
+/// unify in Rust as-is, but still get `Owned`: the `Borrowed` guess
+/// for a bare Var is a Phase-1 approximation (a block param or a
+/// local bound outside a tracked `let` may really emit `String`),
+/// and over-owning is self-consistent while under-owning is a build
+/// failure.
+fn unify_branches_expect(
+    then_branch: &Expr,
+    else_branch: &Expr,
+    owned_str_locals: &std::collections::HashSet<Symbol>,
+) -> ParentExpect {
+    match (
+        branch_tail_color(then_branch, owned_str_locals),
+        branch_tail_color(else_branch, owned_str_locals),
+    ) {
+        (Some(t), Some(e)) if t != e => ParentExpect::Color(StrColor::Owned),
+        _ => ParentExpect::None,
     }
 }
 
-/// True when this branch's tail-position emit is likely String-shaped
-/// (Send, StringInterp, Ivar, or a Var/Send chain). Conservative —
-/// only inspects the immediate tail expression of a Seq, not deeper.
-fn branch_likely_owned(e: &Expr) -> bool {
-    matches!(
-        tail_expr(e).node.as_ref(),
-        ExprNode::Send { .. }
-            | ExprNode::StringInterp { .. }
-            | ExprNode::Ivar { .. }
-            | ExprNode::Var { .. }
-    )
-}
-
-fn branch_has_string_literal(e: &Expr) -> bool {
-    matches!(
-        tail_expr(e).node.as_ref(),
-        ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
-    )
+/// Producer color of this branch's tail-position expression, made
+/// ctx-aware the same way the walk's annotation step is: a Var read
+/// tracked in `owned_str_locals` produces `Owned`, not the static
+/// `Borrowed` guess. Sym literals emit as `&'static str` like Str
+/// literals but `producer_color` leaves them blank (they aren't
+/// string-typed in general positions), so cover them here where the
+/// If context guarantees a string-shaped slot. Conservative — only
+/// inspects the immediate tail expression of a Seq, not deeper.
+fn branch_tail_color(
+    e: &Expr,
+    owned_str_locals: &std::collections::HashSet<Symbol>,
+) -> Option<StrColor> {
+    let tail = tail_expr(e);
+    match tail.node.as_ref() {
+        ExprNode::Var { name, .. } if owned_str_locals.contains(name) => {
+            Some(StrColor::Owned)
+        }
+        ExprNode::Lit { value: Literal::Sym { .. } } => Some(StrColor::Static),
+        _ => producer_color(tail),
+    }
 }
 
 /// Peel a Seq down to its tail expression (the value the Seq
@@ -973,7 +989,7 @@ mod tests {
         AccessorKind, LibraryClass, LibraryClassOrigin, MethodDef, MethodReceiver, Param,
     };
     use crate::effect::EffectSet;
-    use crate::expr::{Expr, ExprNode, Literal, LValue};
+    use crate::expr::{Expr, ExprNode, InterpPart, Literal, LValue};
     use crate::ident::{ClassId, Symbol, VarId};
     use crate::span::Span;
     use crate::ty::{Param as TyParam, ParamKind, Ty};
@@ -1270,5 +1286,123 @@ mod tests {
             panic!("expected Return at top of body");
         };
         assert_eq!(value.decisions & (super::super::bits::STR_TO_OWNED | super::super::bits::STR_BORROW), 0);
+    }
+
+    // ----- If-branch color unification ------------------------------------
+
+    fn string_interp(suffix: &str, e: Expr) -> Expr {
+        let mut out = Expr::new(
+            Span::synthetic(),
+            ExprNode::StringInterp {
+                parts: vec![
+                    InterpPart::Expr { expr: e },
+                    InterpPart::Text { value: suffix.to_string() },
+                ],
+            },
+        );
+        out.ty = Some(Ty::Str);
+        out
+    }
+
+    fn let_local(name: &str, value: Expr) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Var { id: VarId(1), name: Symbol::from(name) },
+                value,
+            },
+        )
+    }
+
+    fn if_expr(then_branch: Expr, else_branch: Expr) -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: send("cond", vec![]),
+                then_branch,
+                else_branch,
+            },
+        )
+    }
+
+    /// The `javascript_path` shape: `name = cond ? source : "#{source}.js"`
+    /// with `source` a `&str` param. then-branch produces Borrowed,
+    /// else-branch produces Owned (`format!()`) — the unifier must
+    /// expect Owned on both so the param read gets `.to_string()`.
+    /// Without it rustc rejects the If with E0308 (`&str` vs `String`).
+    #[test]
+    fn if_branch_borrowed_var_vs_interp_gets_to_owned() {
+        let body = let_local(
+            "name",
+            if_expr(var("source"), string_interp(".js", var("source"))),
+        );
+        let mut m = method(
+            "path_to_javascript",
+            vec!["source"],
+            fn_sig(vec![("source", Ty::Str)], Ty::Str),
+            body,
+        );
+        let reg = build_registry(&[class("X", vec![m.clone()])], &[]);
+        color_method(&mut m, &reg);
+
+        let ExprNode::Assign { value, .. } = m.body.node.as_ref() else {
+            panic!("expected Assign at top of body");
+        };
+        let ExprNode::If { then_branch, else_branch, .. } = value.node.as_ref() else {
+            panic!("expected If RHS");
+        };
+        assert_eq!(
+            then_branch.decisions & super::super::bits::STR_TO_OWNED,
+            super::super::bits::STR_TO_OWNED,
+        );
+        assert_eq!(then_branch.decisions & super::super::bits::STR_BORROW, 0);
+        // The interp side already produces Owned — no coercion.
+        assert_eq!(
+            else_branch.decisions
+                & (super::super::bits::STR_TO_OWNED | super::super::bits::STR_BORROW),
+            0,
+        );
+    }
+
+    /// Same-color branches stay untouched: `m = cond ? "get" : "post"`
+    /// wants to keep its `&'static str` storage (see the
+    /// `owned_str_locals` gate comment in the Seq walker).
+    #[test]
+    fn if_branch_matching_literals_need_no_coercion() {
+        let body = let_local("form_method", if_expr(lit_str("get"), lit_str("post")));
+        let mut m = method("pick", vec![], fn_sig(vec![], Ty::Nil), body);
+        let reg = build_registry(&[class("X", vec![m.clone()])], &[]);
+        color_method(&mut m, &reg);
+
+        let ExprNode::Assign { value, .. } = m.body.node.as_ref() else {
+            panic!("expected Assign at top of body");
+        };
+        let ExprNode::If { then_branch, else_branch, .. } = value.node.as_ref() else {
+            panic!("expected If RHS");
+        };
+        let bits = super::super::bits::STR_TO_OWNED | super::super::bits::STR_BORROW;
+        assert_eq!(then_branch.decisions & bits, 0);
+        assert_eq!(else_branch.decisions & bits, 0);
+    }
+
+    /// The pre-fix rule survives: literal vs owned-producing Send
+    /// still unifies to Owned, landing `.to_string()` on the literal.
+    #[test]
+    fn if_branch_literal_vs_send_gets_to_owned() {
+        let body = let_local("label", if_expr(lit_str("anon"), send("full_name", vec![])));
+        let mut m = method("label_for", vec![], fn_sig(vec![], Ty::Nil), body);
+        let reg = build_registry(&[class("X", vec![m.clone()])], &[]);
+        color_method(&mut m, &reg);
+
+        let ExprNode::Assign { value, .. } = m.body.node.as_ref() else {
+            panic!("expected Assign at top of body");
+        };
+        let ExprNode::If { then_branch, .. } = value.node.as_ref() else {
+            panic!("expected If RHS");
+        };
+        assert_eq!(
+            then_branch.decisions & super::super::bits::STR_TO_OWNED,
+            super::super::bits::STR_TO_OWNED,
+        );
     }
 }
