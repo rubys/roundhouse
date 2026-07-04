@@ -85,6 +85,8 @@ module ActionView
     # (and absolute/protocol-relative sources) returns it verbatim.
     def self.image_path: (String source, ?skip_pipeline: bool) -> String
     def self.image_tag: (String source, ?Hash[Symbol, untyped] opts) -> String
+    def self.path_to_javascript: (String source, ?skip_pipeline: bool) -> String
+    def self.javascript_path: (String source, ?skip_pipeline: bool) -> String
 
     # Generic element helper: `content_tag :span, text, title: "..."`.
     # `content` is untyped — call sites pass strings, but Rails accepts

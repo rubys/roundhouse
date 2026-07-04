@@ -143,6 +143,8 @@ fn is_framework_view_helper(name: &str) -> bool {
         name,
         "image_tag"
             | "image_path"
+            | "path_to_javascript"
+            | "javascript_path"
             | "content_tag"
             | "time_ago_in_words"
             | "distance_of_time_in_words"

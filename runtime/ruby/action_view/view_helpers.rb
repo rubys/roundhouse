@@ -249,6 +249,23 @@ module ActionView
       "/assets/#{source}"
     end
 
+    # `path_to_javascript "application"` → the asset path for a JS source.
+    # Rails appends the `.js` extension when the source carries none, then
+    # prefixes the asset path (undigested here, per the `image_path` note —
+    # lobsters has no manifest). Absolute paths and URLs pass verbatim.
+    # `javascript_path` is the same helper under its non-`path_to_` name.
+    def self.path_to_javascript(source, skip_pipeline: false)
+      return source if skip_pipeline
+      return source if source.start_with?("/")
+      return source if source.include?("://")
+      name = source.include?(".") ? source : "#{source}.js"
+      "/assets/#{name}"
+    end
+
+    def self.javascript_path(source, skip_pipeline: false)
+      path_to_javascript(source, skip_pipeline: skip_pipeline)
+    end
+
     # `<img>` tag for a source path + attribute opts. The source flows
     # through `image_path` (verbatim for absolute/skip-pipeline avatars),
     # then merges the caller's attrs (srcset/class/size/alt/...).
