@@ -1125,6 +1125,24 @@ fn emit_worker_app_ts(app: &App, has_seeds: bool) -> EmittedFile {
             "import {{ {class_name} }} from \"./app/controllers/{stem}.js\";\n"
         ));
     }
+    // Model imports feed the `globalThis.app` debug handle below, not
+    // the dispatcher — controllers already reach models through their
+    // own imports, so ES-module dedup makes these free.
+    let debug_models: Vec<&str> = app
+        .models
+        .iter()
+        .map(|m| m.name.0.as_str())
+        .filter(|n| *n != "ApplicationRecord")
+        .collect();
+    if !debug_models.is_empty() {
+        s.push_str("import { Db } from \"./src/db.js\";\n");
+        for class_name in &debug_models {
+            let stem = crate::naming::snake_case(class_name);
+            s.push_str(&format!(
+                "import {{ {class_name} }} from \"./app/models/{stem}.js\";\n"
+            ));
+        }
+    }
     s.push('\n');
     s.push_str("await startApplication({\n");
     if app.schema.tables.is_empty() {
@@ -1157,6 +1175,20 @@ fn emit_worker_app_ts(app: &App, has_seeds: bool) -> EmittedFile {
         s.push_str("  controllers: {},\n");
     }
     s.push_str("});\n");
+    // Console affordance: the app's model classes + Db adapter on the
+    // worker's global scope, reachable from the worker's DevTools
+    // console (chrome://inspect/#workers). The bundle is otherwise
+    // pure ES modules with nothing in scope; assigned after
+    // startApplication so the database is ready by the time anything
+    // can call in. `await app.Article._adapter_all()`, or `.save()` a
+    // new record and watch the Turbo Stream broadcast hit every tab.
+    if !debug_models.is_empty() {
+        s.push('\n');
+        s.push_str(&format!(
+            "(globalThis as any).app = {{ {}, Db }};\n",
+            debug_models.join(", ")
+        ));
+    }
     EmittedFile {
         path: PathBuf::from("worker.ts"),
         content: s,

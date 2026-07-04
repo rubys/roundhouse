@@ -173,6 +173,12 @@ fn worker_profile_emits_three_entry_points() {
         worker.content.contains("./src/server.js"),
         "worker.ts should import startApplication from ./src/server.js",
     );
+    assert!(
+        worker.content.contains("(globalThis as any).app = { Article, Comment, Db }"),
+        "worker.ts should expose the model classes + Db as a console \
+         debug handle (the bundle is pure ES modules otherwise): {}",
+        worker.content,
+    );
 
     // src/db_worker.ts already covered by Stage B test above.
 }
