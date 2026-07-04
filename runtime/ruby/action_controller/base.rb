@@ -69,8 +69,15 @@ module ActionController
     # (or, when a CSRF token is lazily re-added during render, that
     # the next session starts fresh — matching Rails' new-session-id
     # semantics closely enough for cookie-carried state).
+    #
+    # The trailing `@session` read is load-bearing: assignment is not
+    # a value expression on the strict targets (kotlin/swift/C#/rust
+    # all reject a `-> Session` body ending in an assignment), so the
+    # return must be an explicit read. Same rule as the CookieJar
+    # cascade — mutation methods with non-void returns.
     def reset_session
       @session = ActionDispatch::Session.new
+      @session
     end
 
     # Subclasses override. Error message omits `self.class.name` —
