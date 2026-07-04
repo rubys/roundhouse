@@ -18,21 +18,24 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::dialect::{Model, ModelBodyItem};
-use crate::expr::{Expr, ExprNode};
+use crate::dialect::{Model, ModelBodyItem, Param};
+use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
 
-/// model class id -> set of its scope names.
-pub type ScopeRegistry = HashMap<ClassId, HashSet<Symbol>>;
+/// model class id -> (scope name -> the scope's user params, in order).
+/// The params are the lambda's own parameters (NOT the synthesized trailing
+/// `__rel`); the rewriter reads them to pad omitted leading args so a
+/// threaded relation lands in the `__rel` slot (see `thread_rel`).
+pub type ScopeRegistry = HashMap<ClassId, HashMap<Symbol, Vec<Param>>>;
 
-/// Build `model -> {scope names}` from the app's models.
+/// Build `model -> {scope name -> params}` from the app's models.
 pub fn build_scope_registry(models: &[Model]) -> ScopeRegistry {
     let mut reg: ScopeRegistry = HashMap::new();
     for m in models {
-        let set = reg.entry(m.name.clone()).or_default();
+        let map = reg.entry(m.name.clone()).or_default();
         for item in &m.body {
             if let ModelBodyItem::Scope { scope, .. } = item {
-                set.insert(scope.name.clone());
+                map.insert(scope.name.clone(), scope.params.clone());
             }
         }
     }
@@ -54,7 +57,7 @@ pub fn any_scopes(scopes: &ScopeRegistry) -> bool {
 /// Union of every scope name across all models — a cheap pre-filter so a
 /// body that names no scope is left completely untouched.
 pub fn all_scope_names(scopes: &ScopeRegistry) -> HashSet<Symbol> {
-    scopes.values().flatten().cloned().collect()
+    scopes.values().flat_map(|m| m.keys().cloned()).collect()
 }
 
 /// True if `expr` (or a descendant) calls a method whose name is a scope.
@@ -113,7 +116,12 @@ pub struct Ctx<'a> {
 
 impl Ctx<'_> {
     fn scope_of(&self, model: &ClassId, method: &Symbol) -> bool {
-        self.scopes.get(model).is_some_and(|s| s.contains(method))
+        self.scopes.get(model).is_some_and(|s| s.contains_key(method))
+    }
+    /// The scope's own (user) params, so the rewriter can pad omitted
+    /// leading args when threading the relation.
+    fn scope_params(&self, model: &ClassId, method: &Symbol) -> Option<&Vec<Param>> {
+        self.scopes.get(model).and_then(|s| s.get(method))
     }
     /// A copy of self with no scope-body relation (for args / blocks /
     /// non-receiver subtrees, which root at their own constants).
@@ -124,6 +132,28 @@ impl Ctx<'_> {
 
 fn syn(span: crate::span::Span, node: ExprNode) -> Expr {
     Expr::new(span, node)
+}
+
+/// Append the threaded relation to a scope call's args so it lands in the
+/// synthesized trailing `__rel` slot. A scope with leading OPTIONAL params
+/// (`hottest(user = nil, exclude_tags = nil)`) called with fewer args than
+/// it declares — e.g. bare `hottest` in `front_page` — would otherwise bind
+/// the relation to the FIRST param. Pad the skipped leading params with
+/// their own defaults (Ruby's behavior for the omitted call) before pushing
+/// the relation, so `hottest` → `Story.hottest(nil, nil, __rel)` not
+/// `Story.hottest(__rel)`. `leading` is the scope's user params (no `__rel`).
+fn thread_rel(mut args: Vec<Expr>, rel: Expr, leading: Option<&Vec<Param>>, span: crate::span::Span) -> Vec<Expr> {
+    if let Some(params) = leading {
+        for p in params.iter().skip(args.len()) {
+            let filler = p
+                .default
+                .clone()
+                .unwrap_or_else(|| syn(span, ExprNode::Lit { value: Literal::Nil }));
+            args.push(filler);
+        }
+    }
+    args.push(rel);
+    args
 }
 
 fn const_expr(span: crate::span::Span, model: &ClassId) -> Expr {
@@ -253,8 +283,8 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     return Some(self_model.clone());
                 }
                 if ctx.scope_of(self_model, &method) {
-                    let mut new_args = args;
-                    new_args.push(var_expr(span, rel));
+                    let leading = ctx.scope_params(self_model, &method);
+                    let new_args = thread_rel(args, var_expr(span, rel), leading, span);
                     *expr = put(span, Some(const_expr(span, self_model)), method, new_args, block, true);
                     return Some(self_model.clone());
                 }
@@ -295,8 +325,8 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
 
             if let Some(mr) = r_model {
                 if ctx.scope_of(&mr, &method) {
-                    let mut new_args = args;
-                    new_args.push(r);
+                    let leading = ctx.scope_params(&mr, &method);
+                    let new_args = thread_rel(args, r, leading, span);
                     *expr = put(span, Some(const_expr(span, &mr)), method, new_args, block, true);
                     return Some(mr);
                 }
@@ -337,4 +367,67 @@ pub fn rewrite_call_site(expr: &mut Expr, scopes: &ScopeRegistry, models: &HashS
     let ctx = Ctx { scopes, models, scope_body: None };
     let mut locals = Locals::new();
     rewrite(expr, &ctx, &mut locals);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::span::Span;
+
+    fn span() -> Span {
+        Span::synthetic()
+    }
+    fn int_lit(n: i64) -> Expr {
+        Expr::new(span(), ExprNode::Lit { value: Literal::Int { value: n } })
+    }
+    fn rel_marker() -> Expr {
+        Expr::new(span(), ExprNode::Var { id: VarId(0), name: Symbol::from("__rel") })
+    }
+    fn is_nil(e: &Expr) -> bool {
+        matches!(&*e.node, ExprNode::Lit { value: Literal::Nil })
+    }
+    fn is_rel(e: &Expr) -> bool {
+        matches!(&*e.node, ExprNode::Var { name, .. } if name.as_str() == "__rel")
+    }
+
+    #[test]
+    fn thread_rel_pads_omitted_optional_leading_params() {
+        // `hottest(user = nil, exclude_tags = nil)` called bare → the rel
+        // must land in the 3rd (__rel) slot, with the two optionals padded.
+        let leading = vec![
+            Param::with_default(Symbol::from("user"), Expr::new(span(), ExprNode::Lit { value: Literal::Nil })),
+            Param::with_default(Symbol::from("exclude_tags"), Expr::new(span(), ExprNode::Lit { value: Literal::Nil })),
+        ];
+        let out = thread_rel(vec![], rel_marker(), Some(&leading), span());
+        assert_eq!(out.len(), 3);
+        assert!(is_nil(&out[0]) && is_nil(&out[1]) && is_rel(&out[2]));
+    }
+
+    #[test]
+    fn thread_rel_pads_with_the_params_own_default() {
+        // `low_scoring(max = 5)` bare → pad max with its default `5`, not nil.
+        let leading = vec![Param::with_default(Symbol::from("max"), int_lit(5))];
+        let out = thread_rel(vec![], rel_marker(), Some(&leading), span());
+        assert_eq!(out.len(), 2);
+        assert!(matches!(&*out[0].node, ExprNode::Lit { value: Literal::Int { value: 5 } }));
+        assert!(is_rel(&out[1]));
+    }
+
+    #[test]
+    fn thread_rel_no_padding_when_all_supplied() {
+        // `base(user)` — one required param supplied → just append the rel.
+        let leading = vec![Param::positional(Symbol::from("user"))];
+        let supplied = Expr::new(span(), ExprNode::Var { id: VarId(1), name: Symbol::from("user") });
+        let out = thread_rel(vec![supplied], rel_marker(), Some(&leading), span());
+        assert_eq!(out.len(), 2);
+        assert!(is_rel(&out[1]));
+    }
+
+    #[test]
+    fn thread_rel_scopeless_just_appends() {
+        // A scope with no user params (`positive_ranked`) → append only.
+        let out = thread_rel(vec![], rel_marker(), Some(&vec![]), span());
+        assert_eq!(out.len(), 1);
+        assert!(is_rel(&out[0]));
+    }
 }
