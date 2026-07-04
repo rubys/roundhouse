@@ -227,6 +227,15 @@ fn worker_profile_emits_vite_config_with_three_inputs() {
         vite.content.contains("manifestMetaInjection"),
         "vite.config.ts should include the manifest-meta-injection plugin",
     );
+    assert!(
+        vite.content.contains("sourcemap: true"),
+        "vite.config.ts should enable build.sourcemap",
+    );
+    assert!(
+        vite.content.contains("rubySourceMaps"),
+        "vite.config.ts should include the ruby-sourcemap chaining plugin \
+         (rollup does not read sourceMappingURL comments off disk)",
+    );
 }
 
 #[test]
