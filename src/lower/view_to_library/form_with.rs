@@ -228,20 +228,44 @@ fn simplify_opts_value(k: &Expr, v: &Expr) -> Expr {
 /// singular name as `model_name`, and a nested-collection path
 /// helper as `action` (method is :post since `Class.new` is never
 /// persisted).
+/// Resolve a `url:` value to a callable action expression. A bare route
+/// helper (`login_path` — a no-receiver `*_path`/`*_url` Send) becomes
+/// `RouteHelpers.login_path(args)`; anything else (a String literal, an
+/// already-qualified call) passes through unchanged.
+fn route_helperize(url: Expr, route_helpers: &impl Fn() -> Expr) -> Expr {
+    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*url.node {
+        let m = method.as_str();
+        if m.ends_with("_path") || m.ends_with("_url") {
+            return send(Some(route_helpers()), m, args.clone(), None, true);
+        }
+    }
+    url
+}
+
 fn classify_form_with_components(
     args: &[Expr],
     ctx: &ViewCtx,
 ) -> Option<FormWithComponents> {
     let mut model_expr: Option<Expr> = None;
+    let mut url_expr: Option<Expr> = None;
     let mut opts_entries: Vec<(Expr, Expr)> = Vec::new();
 
     for arg in args {
         if let ExprNode::Hash { entries, .. } = &*arg.node {
             for (k, v) in entries {
                 if let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node {
-                    if key.as_str() == "model" {
-                        model_expr = Some(v.clone());
-                        continue;
+                    match key.as_str() {
+                        "model" => {
+                            model_expr = Some(v.clone());
+                            continue;
+                        }
+                        // `scope:`/`method:` also steer form_with; `url:` is
+                        // the non-resource action target — kept out of opts.
+                        "url" => {
+                            url_expr = Some(v.clone());
+                            continue;
+                        }
+                        _ => {}
                     }
                 }
                 opts_entries.push((k.clone(), v.clone()));
@@ -249,13 +273,30 @@ fn classify_form_with_components(
         }
     }
 
-    let model = model_expr?;
-
     let route_helpers = || {
         Expr::new(
             Span::synthetic(),
             ExprNode::Const { path: vec![Symbol::from("RouteHelpers")] },
         )
+    };
+
+    // `form_with url: login_path do |form|` — a non-resource form. No model
+    // prefix (fields name bare), action is the given URL (a bare route
+    // helper resolves to `RouteHelpers.<x>`), method POST (form_with's
+    // default). The record placeholder is nil — non-model fields read no
+    // attributes (`field_value_read` returns nil for an empty model_name).
+    let model = match model_expr {
+        Some(m) => m,
+        None => {
+            let url = url_expr?;
+            return Some(FormWithComponents {
+                model: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+                model_name: String::new(),
+                action: route_helperize(url, &route_helpers),
+                method: lit_sym(Symbol::from("post")),
+                opts_entries,
+            });
+        }
     };
 
     if let Some((nested_model, nested_name, nested_action)) =

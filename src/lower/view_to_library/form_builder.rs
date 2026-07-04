@@ -63,7 +63,79 @@ pub(super) fn emit_form_builder_inline(
             binding,
             ctx,
         ),
+        FormBuilderMethod::PasswordField => emit_password_field(
+            positional.first().copied(),
+            opts.as_slice(),
+            binding,
+            ctx,
+        ),
+        FormBuilderMethod::HiddenField => emit_hidden_field(
+            positional.first().copied(),
+            opts.as_slice(),
+            binding,
+            ctx,
+        ),
     }
+}
+
+/// `<input type="password" name="..." id="..."<opts>>` — inline expansion
+/// of `form.password_field :field [, opts]`. Rails omits the `value=` attr
+/// for password fields (it never echoes a password back), so — unlike
+/// `text_field` — no `optional_value_attr` is emitted; a caller-supplied
+/// `value:` opt still flows through `append_attr_parts`.
+fn emit_password_field(
+    field: Option<&Expr>,
+    opts: &[(Expr, Expr)],
+    binding: &FormBuilderBinding,
+    ctx: &ViewCtx,
+) -> Vec<Expr> {
+    let Some(field_sym) = field_symbol(field) else {
+        return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+    };
+    let mut parts: Vec<InterpPart> = Vec::new();
+    parts.push(InterpPart::Text {
+        value: format!(
+            "<input type=\"password\"{}",
+            name_id_attrs(&binding.model_name, field_sym.as_str())
+        ),
+    });
+    append_attr_parts(&mut parts, opts);
+    parts.push(InterpPart::Text { value: ">".to_string() });
+    vec![accumulator_append_call(string_interp(parts), ctx)]
+}
+
+/// `<input type="hidden" name="..." id="..."<value><opts>>` — inline
+/// expansion of `form.hidden_field :field [, opts]`. The value comes from
+/// an explicit `value:` opt when present (`hidden_field :referer, value:
+/// @referer`), otherwise the record's attribute (resource forms) or nil
+/// (non-resource) via `optional_value_attr`.
+fn emit_hidden_field(
+    field: Option<&Expr>,
+    opts: &[(Expr, Expr)],
+    binding: &FormBuilderBinding,
+    ctx: &ViewCtx,
+) -> Vec<Expr> {
+    let Some(field_sym) = field_symbol(field) else {
+        return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+    };
+    let mut parts: Vec<InterpPart> = Vec::new();
+    parts.push(InterpPart::Text {
+        value: format!(
+            "<input type=\"hidden\"{}",
+            name_id_attrs(&binding.model_name, field_sym.as_str())
+        ),
+    });
+    if !opts_have_value(opts) {
+        parts.push(InterpPart::Expr {
+            expr: view_helpers_call(
+                "optional_value_attr",
+                vec![field_value_read(binding, field_sym.clone())],
+            ),
+        });
+    }
+    append_attr_parts(&mut parts, opts);
+    parts.push(InterpPart::Text { value: ">".to_string() });
+    vec![accumulator_append_call(string_interp(parts), ctx)]
 }
 
 /// Split `args` into positional Exprs and trailing opts entries.
@@ -87,6 +159,48 @@ fn split_args(args: &[Expr]) -> (Vec<&Expr>, Vec<(Expr, Expr)>) {
     (positional, opts)
 }
 
+/// The ` name="..." id="..."` fragment for a form field. A resource form
+/// nests the field under the model prefix (`user[email]` / `user_email`);
+/// a non-resource form (`form_with url:` — empty `model_name`) names the
+/// field bare (`email` / `email`), matching Rails' non-model form output.
+fn name_id_attrs(model_name: &str, field: &str) -> String {
+    if model_name.is_empty() {
+        format!(" name=\"{field}\" id=\"{field}\"")
+    } else {
+        format!(" name=\"{model_name}[{field}]\" id=\"{model_name}_{field}\"")
+    }
+}
+
+/// The `<label for="...">` open fragment, prefixed for resource forms and
+/// bare for non-resource forms (see `name_id_attrs`).
+fn label_for_attr(model_name: &str, field: &str) -> String {
+    if model_name.is_empty() {
+        format!("<label for=\"{field}\"")
+    } else {
+        format!("<label for=\"{model_name}_{field}\"")
+    }
+}
+
+/// The value expression a field reads: the record's attribute for a
+/// resource form, or `nil` for a non-resource form (no record to read —
+/// `optional_value_attr(nil)` then omits the `value=` attr, matching Rails
+/// rendering an empty non-model field).
+fn field_value_read(binding: &FormBuilderBinding, field: Symbol) -> Expr {
+    if binding.model_name.is_empty() {
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil })
+    } else {
+        record_field_read(binding, field)
+    }
+}
+
+/// True when `opts` carries an explicit `value:` — a `hidden_field` with a
+/// caller-supplied value uses it instead of reading the record attribute.
+fn opts_have_value(opts: &[(Expr, Expr)]) -> bool {
+    opts.iter().any(|(k, _)| {
+        matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "value")
+    })
+}
+
 /// `<label for="<model_name>_<field>"<opts>><CapField></label>` —
 /// inline expansion of `form.label :field [, opts]`. The field name
 /// is statically known (a Symbol literal); the capitalized form
@@ -107,10 +221,7 @@ fn emit_label(
     let cap = capitalize_ascii(field_sym.as_str());
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text {
-        value: format!(
-            "<label for=\"{model_name}_{field}\"",
-            field = field_sym.as_str()
-        ),
+        value: label_for_attr(model_name, field_sym.as_str()),
     });
     append_attr_parts(&mut parts, opts);
     parts.push(InterpPart::Text {
@@ -136,12 +247,10 @@ fn emit_text_field(
     };
     let model_name = &binding.model_name;
     let field_str = field_sym.as_str();
-    let value_read = record_field_read(binding, field_sym.clone());
+    let value_read = field_value_read(binding, field_sym.clone());
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text {
-        value: format!(
-            "<input type=\"text\" name=\"{model_name}[{field_str}]\" id=\"{model_name}_{field_str}\""
-        ),
+        value: format!("<input type=\"text\"{}", name_id_attrs(model_name, field_str)),
     });
     parts.push(InterpPart::Expr {
         expr: view_helpers_call("optional_value_attr", vec![value_read]),
@@ -170,12 +279,10 @@ fn emit_text_area(
     };
     let model_name = &binding.model_name;
     let field_str = field_sym.as_str();
-    let value_read = record_field_read(binding, field_sym.clone());
+    let value_read = field_value_read(binding, field_sym.clone());
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text {
-        value: format!(
-            "<textarea name=\"{model_name}[{field_str}]\" id=\"{model_name}_{field_str}\""
-        ),
+        value: format!("<textarea{}", name_id_attrs(model_name, field_str)),
     });
     append_attr_parts(&mut parts, opts);
     parts.push(InterpPart::Text {

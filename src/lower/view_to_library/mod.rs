@@ -329,6 +329,21 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
     let mut locals: Vec<String> = typed.iter().map(|(n, _)| n.clone()).collect();
     locals.extend(extra_params.iter().cloned());
 
+    // Nullable-for-predicates: the `nil`-default extras (notice/alert) PLUS
+    // any Untyped param. `present?`/`blank?` are defined to handle nil
+    // (Rails: `nil.present?` == false), so an Untyped ivar the controller
+    // may leave nil (`@referer ||= request.referer`) must get the nil-safe
+    // `!x.nil? && !x.empty?` form, not a bare `!x.empty?` that crashes on
+    // nil. Blog-neutral: its present?/any? receivers are all Array-typed
+    // collections or already-nullable — never bare Untyped params.
+    let mut nullable: std::collections::HashSet<String> =
+        extra_params.iter().cloned().collect();
+    for (n, ty) in &typed {
+        if matches!(ty, crate::ty::Ty::Untyped) {
+            nullable.insert(n.clone());
+        }
+    }
+
     let ctx = ViewCtx {
         locals,
         // Only layouts consult arg_name (emit_yield → the `body` local);
@@ -337,7 +352,7 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         resource_dir: dir.to_string(),
         accumulator: "io".to_string(),
         form_records: Vec::new(),
-        nullable_locals: extra_params.iter().cloned().collect(),
+        nullable_locals: nullable,
         stylesheets: app.stylesheets.clone(),
         partial_ivars: closures.clone(),
         dyn_pools: dyn_pools.clone(),

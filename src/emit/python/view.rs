@@ -1197,6 +1197,16 @@ fn emit_py_form_builder_call(
             };
             Some(format!("{recv}.submit({opts})"))
         }
+        // Non-resource fields — modeled on the Ruby emit path; Python gets a
+        // best-effort call until lobsters reaches the target.
+        PasswordField => {
+            let field = field?;
+            Some(format!("{recv}.password_field({field:?}, {opts})"))
+        }
+        HiddenField => {
+            let field = field?;
+            Some(format!("{recv}.hidden_field({field:?}, {opts})"))
+        }
     }
 }
 

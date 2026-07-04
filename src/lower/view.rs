@@ -331,6 +331,8 @@ pub enum FormBuilderMethod {
     TextField,
     TextArea,
     Submit,
+    PasswordField,
+    HiddenField,
 }
 
 /// Map a Ruby form method name to the lowered method kind. Rails
@@ -341,6 +343,8 @@ pub fn classify_form_builder_method(method: &str) -> Option<FormBuilderMethod> {
         "text_field" => Some(FormBuilderMethod::TextField),
         "text_area" | "textarea" => Some(FormBuilderMethod::TextArea),
         "submit" => Some(FormBuilderMethod::Submit),
+        "password_field" => Some(FormBuilderMethod::PasswordField),
+        "hidden_field" => Some(FormBuilderMethod::HiddenField),
         _ => None,
     }
 }
