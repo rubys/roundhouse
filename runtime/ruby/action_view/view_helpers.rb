@@ -262,8 +262,16 @@ module ActionView
       "/assets/#{name}"
     end
 
+    # Alias of `path_to_javascript`. Inlined rather than delegating, so no
+    # keyword argument is forwarded — a `skip_pipeline: skip_pipeline` call
+    # transpiles to a positional `Map` on strict targets (kotlin/swift),
+    # which mismatches the `Boolean` parameter.
     def self.javascript_path(source, skip_pipeline: false)
-      path_to_javascript(source, skip_pipeline: skip_pipeline)
+      return source if skip_pipeline
+      return source if source.start_with?("/")
+      return source if source.include?("://")
+      name = source.include?(".") ? source : "#{source}.js"
+      "/assets/#{name}"
     end
 
     # `<img>` tag for a source path + attribute opts. The source flows
