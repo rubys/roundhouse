@@ -21,6 +21,20 @@ class Object
   def present?
     !blank?
   end
+
+  # `presence` (core_ext/object/blank.rb): the receiver when present,
+  # else nil — the `url.presence || fallback` idiom.
+  def presence
+    present? ? self : nil
+  end
+
+  # `to_param` (core_ext/object/to_param): the URL-segment form of a
+  # value, `to_s` by default. Models with a custom `to_param` (lobsters'
+  # Domain routes on its name) override this; generated route helpers
+  # call it on every segment arg.
+  def to_param
+    to_s
+  end
 end
 
 class String

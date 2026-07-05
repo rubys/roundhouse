@@ -54,5 +54,43 @@ module ActiveSupport
     def to_i = @seconds.to_i
     def to_f = @seconds.to_f
     def seconds = @seconds
+
+    # Numeric comparison protocol: `Time.current - created_at <=
+    # 14.days` has a Float receiver, and Ruby's numeric `<=>` resolves
+    # an unknown operand through its `coerce` — pair the duration up as
+    # its seconds value (AS Duration is coercible the same way).
+    def coerce(other)
+      [other, @seconds]
+    end
+  end
+end
+
+# ActiveSupport patches `Time#<=>` (compare_with_coercion) so a non-Time
+# operand routes through `to_datetime <=> other`; for a bare Duration that
+# resolves to comparing the astronomical julian day NUMBER against the
+# duration's bare seconds VALUE (pinned empirically against activesupport
+# 8.1: `Time.at(0) <= 2440587.seconds` → false, `<= 2440589.seconds` →
+# true — flip exactly at ajd == seconds). Dimensionally meaningless, but
+# lobsters ships `created_at <= 1.hour` (story.rb `send_referrer?`, a
+# dormant `.ago`-less bug) and on Rails it evaluates — always false for
+# realistic timestamps — instead of raising. Mirror the arithmetic so the
+# benchmark sees identical behavior. 210_866_760_000 = 2440587.5 * 86400
+# (unix epoch's ajd, in seconds).
+class Time
+  # `Time.current` — AS's zone-aware now. The bench runs zoneless
+  # (config.time_zone default UTC, TZ-naive comparisons throughout), so
+  # plain `now` is the same instant.
+  def self.current
+    now
+  end
+
+  alias_method :roundhouse_compare_without_duration, :<=>
+  def <=>(other)
+    if other.is_a?(ActiveSupport::Duration)
+      ajd = (to_r + 210_866_760_000r) / 86_400r
+      ajd <=> other.seconds
+    else
+      roundhouse_compare_without_duration(other)
+    end
   end
 end

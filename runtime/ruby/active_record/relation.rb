@@ -95,8 +95,14 @@ module ActiveRecord
       self
     end
 
-    def select(spec)
-      @select_sql = spec.to_s
+    # `select(:id, :username, "raw AS x")` — Symbols qualify against this
+    # relation's table (as Rails renders them); raw strings ride verbatim.
+    def select(*specs)
+      cols = []
+      specs.each do |spec|
+        cols << (spec.is_a?(Symbol) ? "#{@table}.#{spec}" : spec.to_s)
+      end
+      @select_sql = cols.join(", ")
       self
     end
 
@@ -134,6 +140,15 @@ module ActiveRecord
       @wheres
     end
 
+    # `rel.arel` — the relation reified as its SELECT text, for the
+    # `.arel.exists` correlated-subquery idiom
+    # (`where.not(HiddenStory.….arel.exists)`). Captures the SQL at the
+    # call: later chain mutations don't flow into it (matches lowered
+    # usage, where `.arel` ends its chain).
+    def arel
+      Arel::SelectManager.new(to_sql)
+    end
+
     def none
       @wheres << "(1 = 0)"
       self
@@ -150,8 +165,24 @@ module ActiveRecord
       to_a.each { |x| yield x }
     end
 
+    # `find_each` — Rails batches in groups of 1000; the result set sizes
+    # this runtime serves make plain iteration the same observable
+    # behavior (ordering aside, which our callers don't rely on).
+    def find_each
+      to_a.each { |x| yield x }
+    end
+
     def map
       to_a.map { |x| yield x }
+    end
+
+    # `inject(initial) { |acc, x| ... }` — the accumulator form the
+    # corpus uses (vote-hash batchers). The no-initial and Symbol forms
+    # aren't modeled; callers pass an explicit seed.
+    def inject(initial)
+      acc = initial
+      to_a.each { |x| acc = yield(acc, x) }
+      acc
     end
 
     def first
@@ -257,13 +288,18 @@ module ActiveRecord
       parts.join(" AND ")
     end
 
+    # Unqualified columns are qualified with this relation's own table
+    # (as Rails does for hash conditions) so a condition survives `merge`
+    # into a JOINed query where the bare name would be ambiguous —
+    # `hidden_stories.user_id`, not `user_id`, after `joins(:hidings)`.
     def column_predicate(col, val)
+      qcol = col.include?(".") ? col : "#{@table}.#{col}"
       if val.is_a?(Array)
-        "#{col} IN (#{escape_list(val)})"
+        "#{qcol} IN (#{escape_list(val)})"
       elsif val.nil?
-        "#{col} IS NULL"
+        "#{qcol} IS NULL"
       else
-        "#{col} = #{ActiveRecord.adapter.escape_value(val)}"
+        "#{qcol} = #{ActiveRecord.adapter.escape_value(val)}"
       end
     end
 

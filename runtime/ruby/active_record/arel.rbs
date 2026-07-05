@@ -1,0 +1,13 @@
+module Arel
+  def self.sql: (String fragment) -> String
+
+  class SelectManager
+    @sql: String
+
+    def initialize: (String sql) -> void
+
+    def to_sql: () -> String
+
+    def exists: () -> String
+  end
+end

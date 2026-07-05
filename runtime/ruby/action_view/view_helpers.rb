@@ -247,6 +247,32 @@ module ActionView
       "<link#{attrs}>"
     end
 
+    # `number_with_precision(4.5678, precision: 2)` → "4.57". The
+    # rounding-only subset the corpus uses (users/show karma display);
+    # delimiter/separator options aren't modeled. Spelled as arithmetic
+    # + zero-padding (not Kernel#format, which the runtime body-typer
+    # can't resolve); trailing zeros match Rails ("28.6" → "28.60").
+    def self.number_with_precision(value, precision: 3)
+      scale = 10**precision
+      rounded = (value.to_f * scale).round.to_f / scale
+      parts = rounded.to_s.split(".")
+      return parts[0] if parts.length == 1
+      frac = parts[1]
+      (precision - frac.length).times { frac = "#{frac}0" }
+      "#{parts[0]}.#{frac}"
+    end
+
+    # `<script src>` include for a JS source. The source resolves through
+    # the same undigested `/assets/<name>.js` convention as
+    # `javascript_path` (see the `image_path` note on why no digests);
+    # absolute paths and URLs pass verbatim.
+    def self.javascript_include_tag(source, opts = {})
+      name = source.include?(".") ? source : "#{source}.js"
+      src = name.start_with?("/") || name.include?("://") ? name : "/assets/#{name}"
+      attrs = render_attrs({ src: src }.merge(opts.to_h))
+      "<script#{attrs}></script>"
+    end
+
     # Asset path for an image source. `skip_pipeline: true` (and any
     # already-absolute or protocol-relative source) returns the source
     # verbatim — Rails bypasses the pipeline for those, and the lobsters
