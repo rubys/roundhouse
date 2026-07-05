@@ -2670,3 +2670,99 @@ end
         );
     }
 }
+
+#[test]
+fn concern_included_do_filters_seed_ivars_across_includers() {
+    // The AccountOwnedConcern shape: a module under app/controllers/
+    // concerns/ declares `before_action :set_widget` inside `included do`
+    // and defines the target method itself. Rails runs both as if written
+    // in the including controller — the ivar the concern method assigns
+    // must seed the controller's actions and their views.
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/concerns/widget_owned_concern.rb",
+            r#"module WidgetOwnedConcern
+  extend ActiveSupport::Concern
+
+  included do
+    before_action :set_widget, if: :widget_required?
+  end
+
+  private
+
+  def widget_required?
+    true
+  end
+
+  def set_widget
+    @widget = Widget.find(params[:id])
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/widgets_controller.rb",
+            r#"class WidgetsController < ApplicationController
+  include WidgetOwnedConcern
+
+  def show
+  end
+end
+"#,
+        ),
+        (
+            "app/models/widget.rb",
+            "class Widget < ApplicationRecord\nend\n",
+        ),
+        ("app/views/widgets/show.html.erb", "<p><%= @widget %></p>\n"),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema[7.1].define(version: 1) do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#,
+        ),
+    ]);
+
+    // The concern module registered (nested dir, module file in the
+    // controllers tree) and its included-do filter was captured.
+    assert!(
+        app.library_classes.iter().any(|lc| lc.name.0.as_str() == "WidgetOwnedConcern"),
+        "concern module registers as a library class"
+    );
+    let filters = app
+        .concern_filters
+        .get(&roundhouse::ClassId(Symbol::from("WidgetOwnedConcern")))
+        .expect("included-do filters captured");
+    assert!(filters.iter().any(|f| f.target.as_str() == "set_widget"));
+
+    // The payoff: @widget resolves in the action/view fed by the
+    // concern's filter + method, so no ivar_unresolved fires for it.
+    let unresolved = ivar_unresolved_names(&app);
+    assert!(
+        !unresolved.iter().any(|n| n == "widget"),
+        "@widget (seeded via the concern's before_action) should resolve; \
+         unresolved = {unresolved:?}"
+    );
+
+    // And the type is the model, visible from the view read.
+    let view = app
+        .views
+        .iter()
+        .find(|v| v.name.as_str() == "widgets/show")
+        .expect("widgets/show view");
+    let mut reads = Vec::new();
+    collect_ivar_reads(&view.body, &mut reads);
+    assert!(
+        reads.iter().any(|(n, ty)| n.as_str() == "widget"
+            && matches!(ty, Some(Ty::Class { id, .. }) if id.0.as_str() == "Widget")),
+        "@widget should read as Widget in the view; got {:?}",
+        reads.iter().filter(|(n, _)| n.as_str() == "widget").collect::<Vec<_>>()
+    );
+}

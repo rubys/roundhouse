@@ -242,6 +242,21 @@ fn walk_decl_body<'pr>(
         if let Some(call) = stmt.as_call_node() {
             if call.receiver().is_none() {
                 let kw = constant_id_str(&call.name());
+                // `class_methods do … end` — ActiveSupport::Concern's
+                // class-side block: its defs become class methods of
+                // every includer (`Account.find_local!`). Capture them
+                // as Class-receiver methods of the module; the
+                // registry's concern fold copies them onto includers.
+                if kw == "class_methods" {
+                    if let Some(block) = call.block().and_then(|blk| blk.as_block_node()) {
+                        let (inner_includes, inner_methods, inner_constants) =
+                            walk_decl_body(block.body(), owner, file, true)?;
+                        includes.extend(inner_includes);
+                        methods.extend(inner_methods);
+                        constants.extend(inner_constants);
+                        continue;
+                    }
+                }
                 match kw {
                     "include" => {
                         if let Some(args) = call.arguments() {
@@ -528,4 +543,48 @@ pub fn classify_class_file(source: &[u8]) -> Option<ClassKind> {
 pub enum ClassKind {
     Model,
     LibraryClass,
+}
+
+/// Filters declared inside a concern module's `included do` block:
+/// `module AccountOwnedConcern … included do before_action :set_account,
+/// … end end` → `(AccountOwnedConcern, [Filter(set_account), …])`.
+/// Rails evaluates that block in each including class, so these filters
+/// belong to every includer — analyze consumes the returned pairs (via
+/// `App::concern_filters`) to extend each including controller's filter
+/// chain. Modules without an `included do`, and `included do` statements
+/// that aren't filter calls, contribute nothing here (the module's
+/// method defs are captured separately by [`ingest_library_classes`]).
+pub fn ingest_concern_filters(
+    source: &[u8],
+    _file: &str,
+) -> Vec<(ClassId, Vec<crate::dialect::Filter>)> {
+    let result = parse(source);
+    let root = result.node();
+    let mut out = Vec::new();
+    for (scope, module) in find_all_modules_with_scope(&root) {
+        let Some(name_path) = module_name_path(&module) else { continue };
+        let mut full_path: Vec<String> = scope.clone();
+        full_path.extend(name_path);
+        let id = ClassId(Symbol::from(full_path.join("::")));
+
+        let Some(body) = module.body() else { continue };
+        let mut filters = Vec::new();
+        for stmt in flatten_statements(body) {
+            let Some(call) = stmt.as_call_node() else { continue };
+            if call.receiver().is_some() || constant_id_str(&call.name()) != "included" {
+                continue;
+            }
+            let Some(block) = call.block().and_then(|b| b.as_block_node()) else { continue };
+            let Some(block_body) = block.body() else { continue };
+            for inner in flatten_statements(block_body) {
+                if let Some(fs) = super::controller::parse_filter_call(&inner) {
+                    filters.extend(fs);
+                }
+            }
+        }
+        if !filters.is_empty() {
+            out.push((id, filters));
+        }
+    }
+    out
 }

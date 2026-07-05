@@ -116,6 +116,15 @@ fn expand_bare_const(
     classes: &HashMap<ClassId, ClassInfo>,
 ) -> Option<Symbol> {
     let target = name.as_str();
+    // A class registered under exactly this bare name wins outright —
+    // `Account` in app code means the Account model, not the nested
+    // `Mastodon::CLI::Maintenance::Account` stub a lib/ script happens
+    // to declare. (Ruby resolves toward the outer scope too.) Before
+    // the recursive app walk, nested same-named classes were rarely
+    // ingested, so this case never fired; now it's the common one.
+    if classes.contains_key(&ClassId(name.clone())) {
+        return None;
+    }
     let suffix = format!("::{target}");
     let mut found: Option<&str> = None;
     for key in classes.keys() {

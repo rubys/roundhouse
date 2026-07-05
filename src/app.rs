@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::dialect::{Controller, Fixture, LibraryClass, Model, RouteTable, TestModule, View};
+use crate::dialect::{
+    Controller, Filter, Fixture, LibraryClass, Model, RouteTable, TestModule, View,
+};
 use crate::expr::Expr;
 use crate::ident::{ClassId, Symbol};
 use crate::schema::Schema;
@@ -82,6 +84,15 @@ pub struct App {
     /// its class defines no methods.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rails_application: Option<LibraryClass>,
+    /// Filters declared inside a concern module's `included do` block
+    /// (`AccountOwnedConcern` → its `before_action :set_account, …`
+    /// lines), keyed by the module. Rails runs these as if written in
+    /// each including class; analyze extends every includer's filter
+    /// chain from this map so concern-seeded ivars (`@account`) resolve
+    /// in actions and views. Populated by the concern-module arms of
+    /// the app walk; empty for apps without concerns.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub concern_filters: HashMap<ClassId, Vec<Filter>>,
     /// View name (`articles/show`, `articles/_form`, `layouts/application`)
     /// → controllers whose actions feed that view, recorded by analyze
     /// while it harvests the action→view ivar channel (explicit `render`
@@ -151,6 +162,7 @@ impl App {
             rbs_signatures: HashMap::new(),
             helper_method_index: HashMap::new(),
             rails_application: None,
+            concern_filters: HashMap::new(),
             view_feeders: HashMap::new(),
             sources: Vec::new(),
             root: String::new(),

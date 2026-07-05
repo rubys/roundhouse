@@ -69,18 +69,30 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
             ));
         }
     }
-    let class = match chosen_idx {
-        Some(i) => all_classes.into_iter().nth(i).map(|(_, c)| c),
-        None => find_first_class(&root),
+    // Keep the enclosing module scope with the chosen class:
+    // `module Admin; class StatusesController` must ingest as
+    // `Admin::StatusesController`, not collide with the top-level
+    // `StatusesController` (which merges two controllers' actions and
+    // poisons both metas' ivar seeding).
+    let (scope, class) = match chosen_idx {
+        Some(i) => {
+            let (s, c) = all_classes.into_iter().nth(i).expect("chosen index in range");
+            (s, Some(c))
+        }
+        None => match all_classes.into_iter().next() {
+            Some((s, c)) => (s, Some(c)),
+            None => (Vec::new(), find_first_class(&root)),
+        },
     };
     let Some(class) = class else {
         return Ok(None);
     };
 
-    let name_path = class_name_path(&class).ok_or_else(|| IngestError::Unsupported {
+    let mut name_path = scope;
+    name_path.extend(class_name_path(&class).ok_or_else(|| IngestError::Unsupported {
         file: file.into(),
         message: "controller class name must be a simple constant or path".into(),
-    })?;
+    })?);
 
     let parent = class.superclass().and_then(|n| {
         constant_path_of(&n).map(|p| ClassId(Symbol::from(p.join("::"))))
@@ -320,7 +332,7 @@ fn ingest_controller_body_item(
 /// target — notably the block form `before_action { ... }`, which has no
 /// named method to reference. Those fall through to `Unknown`, round-trip
 /// verbatim, and have their ivars harvested directly during analyze.
-fn parse_filter_call(stmt: &Node<'_>) -> Option<Vec<crate::dialect::Filter>> {
+pub(super) fn parse_filter_call(stmt: &Node<'_>) -> Option<Vec<crate::dialect::Filter>> {
     use crate::dialect::{Filter, FilterKind};
 
     let call = stmt.as_call_node()?;

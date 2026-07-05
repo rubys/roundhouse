@@ -224,6 +224,17 @@ fn body_has_direct_method_decl(body: Option<Node<'_>>) -> bool {
                 if matches!(kw, "attr_reader" | "attr_writer" | "attr_accessor") {
                     return true;
                 }
+                // ActiveSupport::Concern's `class_methods do … end`: its
+                // defs become class methods of every includer. A concern
+                // whose *only* defs live in that block (Mastodon's
+                // Account::FinderConcern) is very much worth surfacing.
+                if kw == "class_methods" {
+                    if let Some(block) = call.block().and_then(|b| b.as_block_node()) {
+                        if body_has_direct_method_decl(block.body()) {
+                            return true;
+                        }
+                    }
+                }
             }
         }
         if let Some(sc) = stmt.as_singleton_class_node() {

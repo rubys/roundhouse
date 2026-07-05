@@ -21,7 +21,7 @@ use super::expr::ingest_ruby_program;
 use super::fixture::ingest_fixture_file;
 use super::jbuilder::ingest_jbuilder;
 use super::library_class::{
-    ClassKind, classify_class_file, ingest_library_classes,
+    ClassKind, classify_class_file, ingest_concern_filters, ingest_library_classes,
     ingest_rails_application_singleton_methods,
 };
 use super::model::ingest_model;
@@ -105,6 +105,11 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         unwrap_or_record(ingest_library_classes(&source, &path_str))?
                     {
                         app.library_classes.extend(classes);
+                        // Concern modules (app/models/concerns/…) also
+                        // carry `included do` filter declarations that
+                        // belong to every includer.
+                        app.concern_filters
+                            .extend(ingest_concern_filters(&source, &path_str));
                     }
                 }
             }
@@ -252,11 +257,27 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     if vfs.is_dir(&controllers_dir) {
         for entry in read_rb_files(vfs, &controllers_dir)? {
             let source = vfs.read(&entry)?;
+            let path_str = entry.display().to_string();
             if let Some(maybe_controller) =
-                unwrap_or_record(ingest_controller(&source, &entry.display().to_string()))?
+                unwrap_or_record(ingest_controller(&source, &path_str))?
             {
                 if let Some(controller) = maybe_controller {
                     app.controllers.push(controller);
+                } else {
+                    // No class in the file — a module: a concern under
+                    // app/controllers/concerns/ (`AccountOwnedConcern`)
+                    // or a mixin like `Authorization`. Ingest as a
+                    // library class so its methods register and
+                    // `include X` dispatch (ClassInfo.includes) can
+                    // resolve into it, and capture its `included do`
+                    // filter declarations for every includer's chain.
+                    if let Some(classes) =
+                        unwrap_or_record(ingest_library_classes(&source, &path_str))?
+                    {
+                        app.library_classes.extend(classes);
+                        app.concern_filters
+                            .extend(ingest_concern_filters(&source, &path_str));
+                    }
                 }
             }
         }
@@ -694,12 +715,29 @@ fn walk_jbuilder<V: Vfs + ?Sized>(
     Ok(())
 }
 
+/// Every `.rb` file under `dir`, recursively, sorted for determinism.
+/// Recursion matters on real apps: Rails autoloads nested directories
+/// (`app/controllers/admin/…`, `app/models/concerns/…`), and a flat
+/// listing silently ignored them — on Mastodon that dropped 306 of 337
+/// controller files (admin/, api/, settings/, concerns/) with no gap
+/// recorded anywhere. The textbook silent gap; never again.
 fn read_rb_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<PathBuf>> {
-    let mut out: Vec<PathBuf> = vfs
-        .read_dir(dir)?
-        .into_iter()
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("rb"))
-        .collect();
+    fn collect<V: Vfs + ?Sized>(
+        vfs: &V,
+        dir: &Path,
+        out: &mut Vec<PathBuf>,
+    ) -> IngestResult<()> {
+        for entry in vfs.read_dir(dir)? {
+            if vfs.is_dir(&entry) {
+                collect(vfs, &entry, out)?;
+            } else if entry.extension().and_then(|e| e.to_str()) == Some("rb") {
+                out.push(entry);
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    collect(vfs, dir, &mut out)?;
     out.sort();
     Ok(out)
 }

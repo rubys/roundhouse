@@ -63,6 +63,12 @@ pub struct Analyzer {
     /// in a different backend (Postgres, IndexedDB, D1, …) once
     /// those adapters land in Phase 2.
     adapter: Box<dyn DatabaseAdapter>,
+    /// Method names the concern fold copied onto each includer
+    /// (instance-side, class-side), per class. Distinguishes "the
+    /// includer's own/catalog entry" (never overwritten by the fold)
+    /// from "a copy the fold wrote last iteration" (overwritten so each
+    /// fixpoint round's refinement of the module's returns propagates).
+    concern_folded: HashMap<ClassId, (BTreeSet<Symbol>, BTreeSet<Symbol>)>,
 }
 
 
@@ -349,6 +355,15 @@ impl Analyzer {
                 let writer = Symbol::from(format!("{}=", name.as_str()));
                 cls.instance_methods.insert(name, ty.clone());
                 cls.instance_methods.entry(writer).or_insert(ty);
+            }
+
+            // `include Account::FinderConcern` etc. — record the mixins
+            // so the concern fold (harvest_returns_to_registry) can copy
+            // the module's instance and `class_methods do` surfaces onto
+            // this model.
+            let includes = model_includes(model);
+            if !includes.is_empty() {
+                cls.includes = includes;
             }
 
             classes.insert(model.name.clone(), cls);
@@ -1276,7 +1291,12 @@ impl Analyzer {
             }
         }
 
-        Self { classes, inferred_params: HashMap::new(), adapter }
+        Self {
+            classes,
+            inferred_params: HashMap::new(),
+            adapter,
+            concern_folded: HashMap::new(),
+        }
     }
 
     /// Build a body-typer borrowing this analyzer's dispatch tables.
@@ -1484,6 +1504,26 @@ impl Analyzer {
             .map(|c| (c.name.clone(), c.parent.clone()))
             .collect();
 
+        // Concern-module metadata for the mixed-in expansion inside
+        // Phase A: each module's method defs (cloned so their bodies can
+        // be typed against each includer's own self) and its `include`s
+        // (concerns include concerns; the expansion chases the closure).
+        // Filters captured from `included do` blocks ride on
+        // `App::concern_filters`.
+        let module_methods: HashMap<ClassId, Vec<crate::dialect::MethodDef>> = app
+            .library_classes
+            .iter()
+            .filter(|lc| lc.is_module)
+            .map(|lc| (lc.name.clone(), lc.methods.clone()))
+            .collect();
+        let module_includes: HashMap<ClassId, Vec<ClassId>> = app
+            .library_classes
+            .iter()
+            .filter(|lc| lc.is_module)
+            .map(|lc| (lc.name.clone(), lc.includes.clone()))
+            .collect();
+        let concern_filters_map = app.concern_filters.clone();
+
         // ── Phase A: type Unknown body items + every action body
         // ── once per controller, with no parent inheritance.
         for controller in &mut app.controllers {
@@ -1576,6 +1616,56 @@ impl Analyzer {
             for (target, ivars, filter) in block_filters {
                 action_bindings.insert(target, ivars);
                 before_filters.push(filter);
+            }
+
+            // Mixed-in concerns: Rails evaluates a module's `included do`
+            // in the including class and defines the module's methods on
+            // it. Mirror both halves — extend this controller's seeding
+            // filters with each included module's captured declarations,
+            // and type each module method body against *this* controller's
+            // self (matching Rails: the body runs with the controller as
+            // `self`) so its ivar assignments (`@account = …` in
+            // AccountOwnedConcern#set_account) land in the bindings table
+            // the filter seeding consults. Includes close transitively
+            // (concerns include concerns); the controller's own
+            // definitions win on a name clash.
+            let mut mixed_in: Vec<ClassId> = controller_includes(controller);
+            let mut seen_modules: BTreeSet<ClassId> = mixed_in.iter().cloned().collect();
+            let mut qi = 0;
+            while qi < mixed_in.len() {
+                let m = mixed_in[qi].clone();
+                qi += 1;
+                if let Some(nested) = module_includes.get(&m) {
+                    for n in nested {
+                        if seen_modules.insert(n.clone()) {
+                            mixed_in.push(n.clone());
+                        }
+                    }
+                }
+            }
+            for module_id in &mixed_in {
+                if let Some(fs) = concern_filters_map.get(module_id) {
+                    before_filters.extend(
+                        fs.iter()
+                            .filter(|f| {
+                                matches!(f.kind, FilterKind::Before | FilterKind::Around)
+                            })
+                            .cloned(),
+                    );
+                }
+                let Some(methods) = module_methods.get(module_id) else { continue };
+                for method in methods {
+                    if action_bindings.contains_key(&method.name) {
+                        continue;
+                    }
+                    let mut body = method.body.clone();
+                    self.body_typer().analyze_expr(&mut body, &ctx);
+                    let mut ivars = HashMap::new();
+                    extract_ivar_assignments(&body, &mut ivars);
+                    if !ivars.is_empty() {
+                        action_bindings.insert(method.name.clone(), ivars);
+                    }
+                }
             }
 
             let layout = controller.layout.clone();
@@ -1686,62 +1776,102 @@ impl Analyzer {
             // only trade an `ivar_unresolved` for a `send_dispatch`
             // on the (unreachable) nil case. `Var`/`Bottom` carry no
             // usable shape and are dropped.
-            let controller_wide: HashMap<Symbol, Ty> = {
-                let mut env: HashMap<Symbol, Ty> = HashMap::new();
-                for ivars in chained_bindings.values() {
+            // Two seeding sweeps: a filter method's own binding may
+            // depend on an ivar *another* filter seeds — Mastodon's
+            // `set_status` reads the concern-seeded `@account` — and
+            // Pass A harvested every binding before any seed existed,
+            // leaving such dependent bindings `Var`. After the first
+            // re-analysis retypes the bodies with the first-round seed,
+            // re-harvest the bindings and seed once more. One extra
+            // sweep resolves one filter→filter dependency hop; deeper
+            // chains stay unresolved until a real fixpoint earns its
+            // cost.
+            for sweep in 0..2 {
+                let controller_wide: HashMap<Symbol, Ty> = {
+                    let mut env: HashMap<Symbol, Ty> = HashMap::new();
+                    for ivars in chained_bindings.values() {
+                        for (k, v) in ivars {
+                            if matches!(v, Ty::Var { .. } | Ty::Bottom) {
+                                continue;
+                            }
+                            let merged = match env.remove(k) {
+                                Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
+                                None => v.clone(),
+                            };
+                            env.insert(k.clone(), merged);
+                        }
+                    }
+                    env.into_iter()
+                        .map(|(k, v)| (k, strip_nil(v)))
+                        .collect()
+                };
+
+                // Pass B: re-analyze every method with the controller-wide
+                // base seed plus any before_action-specific overlay. Every
+                // method (routed action or private helper) is re-analyzed
+                // so cross-method ivar reads resolve.
+                if !controller_wide.is_empty() || !chained_filters.is_empty() {
+                    for action in controller.actions_mut() {
+                        let mut seed = controller_wide.clone();
+                        // Overlay the action's precise before_action seed:
+                        // for an action that actually runs the filter, the
+                        // filter's exact binding (including any Nil arm the
+                        // action narrows itself) wins over the stripped base.
+                        for (k, v) in
+                            merged_before_seed(&chained_filters, &action.name, &chained_bindings)
+                        {
+                            seed.insert(k, v);
+                        }
+                        if seed.is_empty() {
+                            continue;
+                        }
+                        let base_ctx = Ctx {
+                            self_ty: Some(meta.self_ty.clone()),
+                            ivar_bindings: seed,
+                            local_bindings: HashMap::new(),
+                            constants: meta.class_constants.clone(),
+                            annotate_self_dispatch: false, in_view: false,
+                        };
+                        // Seed helper-method params from the inferred-params
+                        // table too, so `period(query)`'s body resolves on
+                        // the re-analysis pass (matches Pass A).
+                        let inner_ctx = self.seed_action_params(
+                            &base_ctx,
+                            &ctrl_name,
+                            &action.name,
+                            &action.params,
+                        );
+                        self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
+                        action.effects = self.collect_effects(&mut action.body, &inner_ctx);
+                    }
+                }
+
+                if sweep == 1 {
+                    break;
+                }
+                // Re-harvest bindings from the retyped bodies; only a
+                // refinement (a previously Var/absent binding now
+                // carrying shape) triggers the second sweep.
+                let mut refined = false;
+                for action in controller.actions() {
+                    let mut ivars: HashMap<Symbol, Ty> = HashMap::new();
+                    extract_ivar_assignments(&action.body, &mut ivars);
                     for (k, v) in ivars {
                         if matches!(v, Ty::Var { .. } | Ty::Bottom) {
                             continue;
                         }
-                        let merged = match env.remove(k) {
-                            Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
-                            None => v.clone(),
-                        };
-                        env.insert(k.clone(), merged);
+                        let entry = chained_bindings.entry(action.name.clone()).or_default();
+                        let stale = entry
+                            .get(&k)
+                            .is_none_or(|t| matches!(t, Ty::Var { .. } | Ty::Bottom));
+                        if stale {
+                            entry.insert(k, v);
+                            refined = true;
+                        }
                     }
                 }
-                env.into_iter()
-                    .map(|(k, v)| (k, strip_nil(v)))
-                    .collect()
-            };
-
-            // Pass B: re-analyze every method with the controller-wide
-            // base seed plus any before_action-specific overlay. Every
-            // method (routed action or private helper) is re-analyzed
-            // so cross-method ivar reads resolve.
-            if !controller_wide.is_empty() || !chained_filters.is_empty() {
-                for action in controller.actions_mut() {
-                    let mut seed = controller_wide.clone();
-                    // Overlay the action's precise before_action seed:
-                    // for an action that actually runs the filter, the
-                    // filter's exact binding (including any Nil arm the
-                    // action narrows itself) wins over the stripped base.
-                    for (k, v) in
-                        merged_before_seed(&chained_filters, &action.name, &chained_bindings)
-                    {
-                        seed.insert(k, v);
-                    }
-                    if seed.is_empty() {
-                        continue;
-                    }
-                    let base_ctx = Ctx {
-                        self_ty: Some(meta.self_ty.clone()),
-                        ivar_bindings: seed,
-                        local_bindings: HashMap::new(),
-                        constants: meta.class_constants.clone(),
-                        annotate_self_dispatch: false, in_view: false,
-                    };
-                    // Seed helper-method params from the inferred-params
-                    // table too, so `period(query)`'s body resolves on
-                    // the re-analysis pass (matches Pass A).
-                    let inner_ctx = self.seed_action_params(
-                        &base_ctx,
-                        &ctrl_name,
-                        &action.name,
-                        &action.params,
-                    );
-                    self.body_typer().analyze_expr(&mut action.body, &inner_ctx);
-                    action.effects = self.collect_effects(&mut action.body, &inner_ctx);
+                if !refined {
+                    break;
                 }
             }
 
@@ -2412,6 +2542,84 @@ impl Analyzer {
                 let target =
                     &mut self.classes.entry(class_id.clone()).or_default().instance_methods;
                 Self::insert_inferred_return(target, &action.name, body_ty);
+            }
+        }
+
+        self.fold_concern_surfaces(app);
+    }
+
+    /// Concern fold: `include SomeConcern` makes the module's instance
+    /// methods — and, via ActiveSupport::Concern's `class_methods do`,
+    /// its class-side defs — callable on the includer
+    /// (`Account.find_local!`). Copy both surfaces onto each includer,
+    /// chasing module→module includes transitively. Runs at the end of
+    /// every harvest so each fixpoint round's refinement of the module's
+    /// returns propagates; `concern_folded` remembers which keys the
+    /// fold wrote so refinements overwrite prior *copies* but never the
+    /// includer's own or catalog entries. Folding into the registry
+    /// (rather than chasing includes at dispatch time) means every
+    /// consumer — dispatch, `ide::members_of`, completion — sees the
+    /// mixed-in surface identically.
+    fn fold_concern_surfaces(&mut self, app: &App) {
+        type Surface = (HashMap<Symbol, Ty>, HashMap<Symbol, Ty>, Vec<ClassId>);
+        let module_surfaces: HashMap<ClassId, Surface> = app
+            .library_classes
+            .iter()
+            .filter(|lc| lc.is_module)
+            .filter_map(|lc| {
+                let cls = self.classes.get(&lc.name)?;
+                Some((
+                    lc.name.clone(),
+                    (
+                        cls.instance_methods.clone(),
+                        cls.class_methods.clone(),
+                        cls.includes.clone(),
+                    ),
+                ))
+            })
+            .collect();
+        if module_surfaces.is_empty() {
+            return;
+        }
+
+        let targets: Vec<(ClassId, Vec<ClassId>)> = self
+            .classes
+            .iter()
+            .filter(|(_, c)| !c.includes.is_empty())
+            .map(|(id, c)| (id.clone(), c.includes.clone()))
+            .collect();
+        for (id, includes) in targets {
+            // Transitive closure over module includes.
+            let mut queue = includes;
+            let mut seen: BTreeSet<ClassId> = queue.iter().cloned().collect();
+            let mut qi = 0;
+            while qi < queue.len() {
+                let m = queue[qi].clone();
+                qi += 1;
+                let Some((inst, class_side, nested)) = module_surfaces.get(&m) else {
+                    continue;
+                };
+                for n in nested {
+                    if seen.insert(n.clone()) {
+                        queue.push(n.clone());
+                    }
+                }
+                let folded = self.concern_folded.entry(id.clone()).or_default();
+                let cls = self.classes.entry(id.clone()).or_default();
+                for (name, ty) in inst {
+                    if cls.instance_methods.contains_key(name) && !folded.0.contains(name) {
+                        continue; // own/catalog entry wins
+                    }
+                    cls.instance_methods.insert(name.clone(), ty.clone());
+                    folded.0.insert(name.clone());
+                }
+                for (name, ty) in class_side {
+                    if cls.class_methods.contains_key(name) && !folded.1.contains(name) {
+                        continue;
+                    }
+                    cls.class_methods.insert(name.clone(), ty.clone());
+                    folded.1.insert(name.clone());
+                }
             }
         }
     }
@@ -3505,6 +3713,27 @@ pub(crate) fn extract_controller_const_assignments(
 /// body items). Each becomes a `ClassId` whose registered instance
 /// methods dispatch will consult for the controller. `include` with a
 /// non-constant argument (rare metaprogramming) is skipped.
+/// The model-side twin of [`controller_includes`]: modules a model mixes
+/// in via top-level `include X` calls (round-tripped as `Unknown` body
+/// items).
+fn model_includes(model: &crate::dialect::Model) -> Vec<ClassId> {
+    let mut out = Vec::new();
+    for item in &model.body {
+        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
+        if method.as_str() != "include" {
+            continue;
+        }
+        for arg in args {
+            if let ExprNode::Const { path } = &*arg.node {
+                let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+                out.push(ClassId(Symbol::from(joined)));
+            }
+        }
+    }
+    out
+}
+
 fn controller_includes(controller: &Controller) -> Vec<ClassId> {
     let mut out = Vec::new();
     for item in &controller.body {

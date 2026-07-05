@@ -31,14 +31,24 @@ pub fn ingest_model(
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
     let root = result.node();
-    let Some(class) = find_first_class(&root) else {
+    // Scope-aware: a model declared as `module Admin; class Report`
+    // must ingest as `Admin::Report` (the compound `class Admin::Report`
+    // spelling already carries its path). Falls back to the scopeless
+    // finder for shapes the scoped walk doesn't cover.
+    let (scope, class) = match super::util::find_all_classes_with_scope(&root).into_iter().next()
+    {
+        Some((s, c)) => (s, Some(c)),
+        None => (Vec::new(), find_first_class(&root)),
+    };
+    let Some(class) = class else {
         return Ok(None);
     };
 
-    let name_path = class_name_path(&class).ok_or_else(|| IngestError::Unsupported {
+    let mut name_path = scope;
+    name_path.extend(class_name_path(&class).ok_or_else(|| IngestError::Unsupported {
         file: file.into(),
         message: "model class name must be a simple constant or path".into(),
-    })?;
+    })?);
     let class_name = Symbol::from(name_path.join("::"));
     let owner = ClassId(class_name.clone());
     let table_name = pluralize_snake(class_name.as_str());
