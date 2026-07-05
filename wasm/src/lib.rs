@@ -125,6 +125,11 @@ fn transpile_inner(json_in: &str) -> String {
             let severity = match d.severity {
                 Severity::Error => "error",
                 Severity::Warning => "warning",
+                // Gap-attributed coverage notes (analyze::attribution).
+                // The playground/studio ingest strict (no survey mode),
+                // so these don't occur there today; mapped for
+                // completeness against a future survey-mode wiring.
+                Severity::Info => "info",
             };
             let code = d.code();
             Some(DiagnosticOut {
