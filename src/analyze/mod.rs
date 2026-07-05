@@ -1285,6 +1285,16 @@ impl Analyzer {
         BodyTyper::new(&self.classes)
     }
 
+    /// The per-class member registry — schema columns, catalog-sourced
+    /// AR surface, associations, scopes, and user-defined methods with
+    /// their inferred returns (post-fixpoint when read after
+    /// [`Self::analyze`]). This is the same table dispatch resolves
+    /// against, exposed read-only so IDE consumers ([`crate::ide`]
+    /// completion) can *enumerate* what dispatch can *resolve*.
+    pub fn class_registry(&self) -> &HashMap<ClassId, ClassInfo> {
+        &self.classes
+    }
+
     /// Walk the app, annotating every expression's `ty` field, then
     /// populating the owning construct's `effects` by visiting the typed tree.
     ///

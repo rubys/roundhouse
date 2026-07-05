@@ -18,8 +18,11 @@
 //! code units, not bytes or Unicode scalars), so multi-byte and astral
 //! characters land where the editor expects.
 
+use std::collections::{HashMap, HashSet};
+
+use crate::analyze::ClassInfo;
 use crate::app::App;
-use crate::dialect::{ControllerBodyItem, ModelBodyItem};
+use crate::dialect::{AccessorKind, ControllerBodyItem, ModelBodyItem};
 use crate::expr::{Expr, ExprNode, LValue};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::span::{FileId, SourceFile, Span};
@@ -193,6 +196,158 @@ pub fn nil_verdict(ty: Option<&Ty>) -> Option<bool> {
         return None;
     }
     Some(false)
+}
+
+// ── Member enumeration (completion substrate) ────────────────────────
+//
+// Dispatch resolves one name against a receiver's class; completion
+// needs the inverse — every name the receiver responds to. The sources
+// are the analyzer's class registry (the same table dispatch consults:
+// schema columns, catalog-sourced AR surface, associations, scopes,
+// user methods with inferred returns) re-classified against the App's
+// model metadata so a completion item can say *what kind* of member it
+// is (a column is a field, an association jumps to another model, a
+// scope chains). Deliberately not covered: the built-in scalar surface
+// (String/Array/Hash/Time methods), which lives in `send.rs` match
+// arms rather than enumerable tables — commodity completions other
+// tools already provide; the differentiated ones are the Rails ones.
+
+/// What kind of member a completion item is, for editor `kind` mapping
+/// and ranking. Classification is best-effort from model metadata;
+/// registry entries with no richer story are `Method`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemberKind {
+    /// A schema column (or `attr_accessor` virtual attribute).
+    Column,
+    /// An association reader/writer (`belongs_to`, `has_many`, …).
+    Association,
+    /// A named scope (class-side, chains as a relation).
+    Scope,
+    /// An attr_reader/attr_writer-shaped accessor.
+    Accessor,
+    /// Everything else callable.
+    Method,
+}
+
+/// One name a receiver responds to, with its inferred type.
+#[derive(Clone, Debug)]
+pub struct Member {
+    pub name: Symbol,
+    pub kind: MemberKind,
+    /// Return/attribute type when the registry knows one. `None` for
+    /// registered-but-untyped entries.
+    pub ty: Option<Ty>,
+    /// Human-facing rendering of `ty` (RBS-flavoured, like hover).
+    pub display: String,
+}
+
+/// Which side of the class the receiver is: `user.` completes instance
+/// members, `User.` completes class members (scopes, finders). The
+/// type system flattens both onto `Ty::Class { id }`, so the caller
+/// decides syntactically — a constant receiver is the class object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemberSide {
+    Instance,
+    Class,
+}
+
+/// Every member `class_id` responds to on `side`, walking `include`s
+/// and the parent chain (nearest definition wins on a name collision,
+/// mirroring dispatch). Output is name-sorted for stable presentation;
+/// writer twins (`title=`) sort adjacent to their readers.
+pub fn members_of(
+    app: &App,
+    registry: &HashMap<ClassId, ClassInfo>,
+    class_id: &ClassId,
+    side: MemberSide,
+) -> Vec<Member> {
+    let mut out: HashMap<Symbol, Member> = HashMap::new();
+    // Own class first, then includes, then up the parent chain (BFS via
+    // pop_front so includes are consulted before the parent, mirroring
+    // dispatch) — insert-if-absent makes the nearest definition win.
+    let mut queue: std::collections::VecDeque<&ClassId> = std::collections::VecDeque::new();
+    queue.push_back(class_id);
+    let mut visited: HashSet<&ClassId> = HashSet::new();
+    while let Some(id) = queue.pop_front() {
+        if !visited.insert(id) {
+            continue;
+        }
+        let Some(cls) = registry.get(id) else { continue };
+
+        // Model metadata for kind classification: association and scope
+        // names, so registry entries that came from those declarations
+        // present as what they are.
+        let model = app.models.iter().find(|m| &m.name == id);
+        let assoc_names: HashSet<&str> = model
+            .map(|m| {
+                m.associations()
+                    .map(|a| match a {
+                        crate::dialect::Association::BelongsTo { name, .. }
+                        | crate::dialect::Association::HasMany { name, .. }
+                        | crate::dialect::Association::HasOne { name, .. }
+                        | crate::dialect::Association::HasAndBelongsToMany { name, .. } => {
+                            name.as_str()
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let scope_names: HashSet<&str> = model
+            .map(|m| m.scopes().map(|s| s.name.as_str()).collect())
+            .unwrap_or_default();
+
+        let mut add = |name: &Symbol, ty: Option<&Ty>, kind: MemberKind| {
+            out.entry(name.clone()).or_insert_with(|| Member {
+                name: name.clone(),
+                kind,
+                ty: ty.cloned(),
+                display: ty.map(render_ty).unwrap_or_else(|| "untyped".to_string()),
+            });
+        };
+
+        match side {
+            MemberSide::Instance => {
+                // Schema columns / attr_accessor state, reader + writer.
+                for (name, ty) in &cls.attributes.fields {
+                    add(name, Some(ty), MemberKind::Column);
+                    add(&Symbol::from(format!("{}=", name.as_str())), Some(ty), MemberKind::Column);
+                }
+                for (name, ty) in &cls.instance_methods {
+                    let base = name.as_str().strip_suffix('=').unwrap_or(name.as_str());
+                    let kind = if assoc_names.contains(base) {
+                        MemberKind::Association
+                    } else {
+                        match cls.instance_method_kinds.get(name) {
+                            Some(AccessorKind::Method) | None => MemberKind::Method,
+                            Some(_) => MemberKind::Accessor,
+                        }
+                    };
+                    add(name, Some(ty), kind);
+                }
+            }
+            MemberSide::Class => {
+                for (name, ty) in &cls.class_methods {
+                    let kind = if scope_names.contains(name.as_str()) {
+                        MemberKind::Scope
+                    } else {
+                        MemberKind::Method
+                    };
+                    add(name, Some(ty), kind);
+                }
+            }
+        }
+
+        for inc in &cls.includes {
+            queue.push_back(inc);
+        }
+        if let Some(parent) = &cls.parent {
+            queue.push_back(parent);
+        }
+    }
+
+    let mut members: Vec<Member> = out.into_values().collect();
+    members.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
+    members
 }
 
 /// Render a [`Ty`] as a short, RBS-flavoured string for hover/inlay/MCP
@@ -673,6 +828,40 @@ mod tests {
         assert!(!can_be_nil(&class("Article")));
         assert!(!can_be_nil(&Ty::Var { var: TyVar(0) }));
         assert!(!can_be_nil(&Ty::Untyped));
+    }
+
+    #[test]
+    fn members_of_enumerates_columns_associations_and_finders() {
+        let app = real_blog();
+        let mut analyzer = Analyzer::new(&app);
+        // Registry refinement (user-method returns) needs the fixpoint;
+        // re-run analyze on a scratch copy so `app` stays borrowable.
+        let mut typed = app.clone();
+        analyzer.analyze(&mut typed);
+        let registry = analyzer.class_registry();
+        let article = ClassId(Symbol::from("Article"));
+
+        let instance = members_of(&typed, registry, &article, MemberSide::Instance);
+        let find = |name: &str| instance.iter().find(|m| m.name.as_str() == name);
+        let title = find("title").expect("schema column `title`");
+        assert_eq!(title.kind, MemberKind::Column);
+        assert_eq!(title.display, "String");
+        assert!(find("title=").is_some(), "writer twin for the column");
+        let comments = find("comments").expect("has_many :comments");
+        assert_eq!(comments.kind, MemberKind::Association);
+        assert_eq!(comments.display, "Array[Comment]");
+        // Catalog-sourced AR instance surface rides along.
+        assert!(find("save").is_some(), "AR catalog instance method");
+
+        let class_side = members_of(&typed, registry, &article, MemberSide::Class);
+        let findc = |name: &str| class_side.iter().find(|m| m.name.as_str() == name);
+        let find_by = findc("find_by").expect("AR finder");
+        assert_eq!(find_by.display, "Article?", "find_by is Self-or-nil");
+        let create = findc("create").expect("AR create");
+        assert_eq!(create.display, "Article");
+        // Class side must not leak instance members and vice versa.
+        assert!(findc("title").is_none(), "columns are instance-side");
+        assert!(find("find_by").is_none(), "finders are class-side");
     }
 
     #[test]

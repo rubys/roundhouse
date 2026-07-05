@@ -25,6 +25,10 @@ ruby-rbs = "0.3"
 # keeps the analysis engine sync). Host-only; the wasm build excludes it.
 lsp-server = "0.7.9"
 lsp-types = "0.97"
+# The channel crate lsp-server's Connection.sender is built on — a
+# direct dep only so the LSP's background analysis worker can name the
+# sender type it clones. Keep version-compatible with lsp-server's.
+crossbeam-channel = "0.5"
 
 [build-dependencies]
 # (none yet)
