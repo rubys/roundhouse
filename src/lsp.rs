@@ -226,16 +226,19 @@ impl Server {
         // has some) with a placeholder + recorded gap instead of aborting
         // the whole ingest. Without it, one exotic node anywhere leaves the
         // editor inert — no hovers, no diagnostics — on any app past the
-        // demo fixture. The recovered gaps aren't published as squiggles
-        // (they have no resolvable span); the win is a working `App`.
+        // demo fixture. The gaps themselves aren't published as squiggles
+        // (they have no resolvable span), but they drive attribution:
+        // diagnostics that are shadows of a gap downgrade to Info and
+        // render as hints, not accusations on the user's code.
         crate::ingest::survey::activate();
         let (result, mut parse_diags) =
             crate::ingest::prism::scope(|| ingest_app_with_vfs(&vfs, &self.root));
-        let _gaps = crate::ingest::survey::drain();
+        let gaps = crate::ingest::survey::drain();
         match result {
             Ok(mut app) => {
                 Analyzer::new(&app).analyze(&mut app);
                 let mut diags = diagnose(&app);
+                crate::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &gaps);
                 diags.append(&mut parse_diags);
                 self.app = Some(app);
                 diags
@@ -439,6 +442,9 @@ fn map_severity(sev: Severity) -> DiagnosticSeverity {
     match sev {
         Severity::Error => DiagnosticSeverity::ERROR,
         Severity::Warning => DiagnosticSeverity::WARNING,
+        // Gap-attributed coverage notes: faint dots, not squiggles — the
+        // finding is about roundhouse's coverage, not the user's code.
+        Severity::Info => DiagnosticSeverity::HINT,
     }
 }
 

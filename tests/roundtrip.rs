@@ -122,6 +122,7 @@ fn tiny_blog_round_trips() {
         rbs_signatures: std::collections::HashMap::new(),
         helper_method_index: std::collections::HashMap::new(),
         rails_application: None,
+        view_feeders: std::collections::HashMap::new(),
         sources: vec![],
         root: String::new(),
     };

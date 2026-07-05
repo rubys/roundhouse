@@ -25,6 +25,7 @@
 
 mod body;
 pub mod async_color;
+pub mod attribution;
 pub mod block_refine;
 pub mod mutates_self;
 
@@ -1419,6 +1420,13 @@ impl Analyzer {
         // this map so `@article.title` in `articles/show.html.erb` types
         // against the `@article` bound in `ArticlesController#show`.
         let mut action_ivars_by_view: HashMap<Symbol, HashMap<Symbol, Ty>> = HashMap::new();
+        // Sibling record of the same channel, persisted onto
+        // `App::view_feeders`: which controllers feed each view. Filled
+        // wherever ivars flow view-ward (action targets below, effective
+        // layouts, then closed over renderer→partial edges) so a view-side
+        // diagnostic can be traced to the controller that seeded — or
+        // failed to seed — its context.
+        let mut view_feeders: HashMap<Symbol, BTreeSet<ClassId>> = HashMap::new();
 
         // Content-partial channel: the `render partial: @above` idiom.
         // `dynamic_render_ivars` is the set of ivars any view renders
@@ -1771,6 +1779,10 @@ impl Analyzer {
                     }
                 }
                 if let Some(layout_name) = &effective_layout {
+                    view_feeders
+                        .entry(layout_name.clone())
+                        .or_default()
+                        .insert(ctrl_name.clone());
                     let layout_map = layout_ivars_by_view
                         .entry(layout_name.clone())
                         .or_default();
@@ -1843,6 +1855,7 @@ impl Analyzer {
                 view_targets.sort();
                 view_targets.dedup();
                 for view_name in view_targets {
+                    view_feeders.entry(view_name.clone()).or_default().insert(ctrl_name.clone());
                     let entry = action_ivars_by_view.entry(view_name).or_default();
                     for (k, v) in &ivars {
                         let noise = |t: &Ty| matches!(t, Ty::Var { .. } | Ty::Untyped);
@@ -2161,6 +2174,35 @@ impl Analyzer {
                 break;
             }
         }
+
+        // Close `view_feeders` over the same renderer→partial edges: a
+        // partial is fed by whoever feeds its renderers, transitively
+        // (same depth-capped fixpoint shape as the ivar propagation
+        // above). Runs after the ivar fixpoint so it sees the full edge
+        // set; runs regardless of ivar emptiness because feeders matter
+        // even when a renderer contributed no typed ivars.
+        for _ in 0..16 {
+            let mut changed = false;
+            for (renderer, partials) in &render_edges {
+                let Some(feeders) = view_feeders.get(renderer).cloned() else { continue };
+                if feeders.is_empty() {
+                    continue;
+                }
+                for partial in partials {
+                    let entry = view_feeders.entry(partial.clone()).or_default();
+                    let before = entry.len();
+                    entry.extend(feeders.iter().cloned());
+                    changed |= entry.len() != before;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        app.view_feeders = view_feeders
+            .into_iter()
+            .map(|(view, feeders)| (view, feeders.into_iter().collect()))
+            .collect();
 
         // Phase 3b: partials. Seed local_bindings from the render-site map
         // and ivar_bindings from the propagated controller context, then

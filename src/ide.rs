@@ -160,12 +160,39 @@ fn describe(expr: &Expr) -> TypeAt {
 /// Whether a value of this type can be `nil`: the type is `nil`, or a
 /// union with a `nil` arm (transitively). Unknown / untyped / gradual
 /// positions return `false` — we only claim nilability we can prove.
+/// Consumers answering the *question* "can this be nil?" should prefer
+/// [`nil_verdict`], which distinguishes a proven "no" from "can't tell".
 pub fn can_be_nil(ty: &Ty) -> bool {
     match ty {
         Ty::Nil => true,
         Ty::Union { variants } => variants.iter().any(can_be_nil),
         _ => false,
     }
+}
+
+/// Three-valued nilability: `Some(true)` when the type provably admits
+/// nil, `Some(false)` when it provably cannot, `None` when the inference
+/// has nothing to stand on — the position is untyped, an unresolved
+/// inference variable, or a union with such an arm (an `untyped` arm
+/// could be nil at runtime; claiming "cannot be nil" there would be an
+/// overclaim). A union that *also* carries a proven `nil` arm stays
+/// `Some(true)` — nil is possible regardless of what the unknown arm is.
+pub fn nil_verdict(ty: Option<&Ty>) -> Option<bool> {
+    fn unknown_arm(ty: &Ty) -> bool {
+        match ty {
+            Ty::Untyped | Ty::Var { .. } => true,
+            Ty::Union { variants } => variants.iter().any(unknown_arm),
+            _ => false,
+        }
+    }
+    let ty = ty?;
+    if can_be_nil(ty) {
+        return Some(true);
+    }
+    if unknown_arm(ty) {
+        return None;
+    }
+    Some(false)
 }
 
 /// Render a [`Ty`] as a short, RBS-flavoured string for hover/inlay/MCP
@@ -646,6 +673,33 @@ mod tests {
         assert!(!can_be_nil(&class("Article")));
         assert!(!can_be_nil(&Ty::Var { var: TyVar(0) }));
         assert!(!can_be_nil(&Ty::Untyped));
+    }
+
+    #[test]
+    fn nil_verdict_is_three_valued() {
+        // Provable yes.
+        assert_eq!(nil_verdict(Some(&Ty::Nil)), Some(true));
+        assert_eq!(
+            nil_verdict(Some(&Ty::Union { variants: vec![class("Article"), Ty::Nil] })),
+            Some(true)
+        );
+        // Provable no.
+        assert_eq!(nil_verdict(Some(&class("Article"))), Some(false));
+        assert_eq!(nil_verdict(Some(&Ty::Int)), Some(false));
+        // Can't tell: untyped, unresolved var, unions carrying either,
+        // and positions the analyzer never typed at all.
+        assert_eq!(nil_verdict(Some(&Ty::Untyped)), None);
+        assert_eq!(nil_verdict(Some(&Ty::Var { var: TyVar(0) })), None);
+        assert_eq!(
+            nil_verdict(Some(&Ty::Union { variants: vec![Ty::Untyped, Ty::Str] })),
+            None
+        );
+        assert_eq!(nil_verdict(None), None);
+        // An unknown arm doesn't retract a proven nil arm.
+        assert_eq!(
+            nil_verdict(Some(&Ty::Union { variants: vec![Ty::Untyped, Ty::Nil] })),
+            Some(true)
+        );
     }
 
     #[test]

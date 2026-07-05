@@ -180,8 +180,18 @@ impl Server {
         let (app, _, _) = self.analyze()?;
         let (path, pos) = position_args(args)?;
         match ide::type_at_position(&app, &path, pos) {
-            Some(info) if info.nilable => Ok(format!("Yes — type is `{}`, which admits nil.", info.display)),
-            Some(info) => Ok(format!("No — type is `{}`, which cannot be nil.", info.display)),
+            // Three-valued on purpose: an untyped/unresolved position is
+            // an honest "can't tell", not a "no" — answering "cannot be
+            // nil" off an `untyped` would be an overclaim an agent might
+            // act on.
+            Some(info) => Ok(match ide::nil_verdict(info.ty.as_ref()) {
+                Some(true) => format!("Yes — type is `{}`, which admits nil.", info.display),
+                Some(false) => format!("No — type is `{}`, which cannot be nil.", info.display),
+                None => format!(
+                    "Unknown — type is `{}`; roundhouse cannot tell whether this can be nil.",
+                    info.display
+                ),
+            }),
             None => Ok(format!("No typed expression at {path}.")),
         }
     }
@@ -222,6 +232,11 @@ impl Server {
         let path_filter = args.get("path").and_then(|v| v.as_str());
         let (app, parse_diags, gaps) = self.analyze()?;
         let mut diags = diagnose(&app);
+        // Diagnostics shadowing a recorded ingest gap become `note[...]`
+        // lines naming the gap — an agent reading this output must be able
+        // to tell "your code has a problem" from "roundhouse didn't
+        // analyze the construct responsible".
+        crate::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &gaps);
         diags.extend(parse_diags);
 
         let rendered: Vec<String> = diags

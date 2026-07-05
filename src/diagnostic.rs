@@ -40,6 +40,14 @@ pub struct Diagnostic {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
+    /// Tool-coverage note, not a defect in the user's code. Produced
+    /// only by post-hoc reclassification (`analyze::attribution`): a
+    /// diagnostic whose root cause traces to an ingest gap — a
+    /// construct roundhouse skipped, not an error the author made —
+    /// is downgraded here so consumers (LSP, check summaries) can
+    /// render it as coverage information instead of an accusation.
+    /// Never a construction-time default and never gates exit codes.
+    Info,
     Warning,
     Error,
 }
@@ -211,6 +219,7 @@ impl fmt::Display for Diagnostic {
     /// are the user's grep targets until real spans land.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let prefix = match self.severity {
+            Severity::Info => "note",
             Severity::Warning => "warning",
             Severity::Error => "error",
         };

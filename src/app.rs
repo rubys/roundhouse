@@ -82,6 +82,19 @@ pub struct App {
     /// its class defines no methods.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rails_application: Option<LibraryClass>,
+    /// View name (`articles/show`, `articles/_form`, `layouts/application`)
+    /// → controllers whose actions feed that view, recorded by analyze
+    /// while it harvests the action→view ivar channel (explicit `render`
+    /// targets and the implicit action-name convention), the effective-
+    /// layout resolution, and the renderer→partial edges (a partial's
+    /// feeders are the transitive union of its renderers'). This is the
+    /// same linkage the ivar seeding used — persisted so consumers can
+    /// trace a view-side symptom back to the controller responsible:
+    /// diagnostic gap-attribution (an unresolved `@ivar` in a view whose
+    /// feeder had an ingest gap is a coverage note, not a user error)
+    /// and, later, controller↔view navigation. Sorted for determinism.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub view_feeders: HashMap<Symbol, Vec<ClassId>>,
     /// Source files read during ingest, indexed by `Span.file`
     /// (`FileId(n)` → `sources[n - 1]`; `FileId(0)` is the synthetic
     /// sentinel). Carries the parsed text so diagnostics can resolve
@@ -138,6 +151,7 @@ impl App {
             rbs_signatures: HashMap::new(),
             helper_method_index: HashMap::new(),
             rails_application: None,
+            view_feeders: HashMap::new(),
             sources: Vec::new(),
             root: String::new(),
         }

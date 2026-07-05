@@ -90,10 +90,16 @@ fn main() -> ExitCode {
         }
     };
     Analyzer::new(&app).analyze(&mut app);
-    let diags = diagnose(&app);
+    let mut diags = diagnose(&app);
+    // Survey mode: diagnostics that trace back to a recorded ingest gap
+    // are the tool's coverage problem, not the app's — downgrade them to
+    // notes with the root cause attached so the error count below means
+    // "findings", not "shadows of the gaps listed at the end".
+    roundhouse::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &survey_errors);
 
     let errors = diags.iter().filter(|d| d.severity == Severity::Error).count();
     let warnings = diags.iter().filter(|d| d.severity == Severity::Warning).count();
+    let notes = diags.iter().filter(|d| d.severity == Severity::Info).count();
     let parse_errors = parse_diags.iter().filter(|d| d.severity == Severity::Error).count();
 
     let mut had_output = false;
@@ -117,11 +123,12 @@ fn main() -> ExitCode {
         eprintln!();
     }
     eprintln!(
-        "roundhouse-check: {} — {} parse error(s), {} error(s), {} warning(s), {} survey gap(s)",
+        "roundhouse-check: {} — {} parse error(s), {} error(s), {} warning(s), {} gap-attributed note(s), {} survey gap(s)",
         fixture,
         parse_errors,
         errors,
         warnings,
+        notes,
         survey_errors.len(),
     );
 
