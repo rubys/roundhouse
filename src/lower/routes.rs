@@ -117,7 +117,17 @@ fn collect_flat_routes(
                 Some(s) => (s.as_str().to_string(), true),
                 None => match static_path_name(&full_path) {
                     Some(n) => (n, true),
-                    None => (action.as_str().to_string(), false),
+                    // A static child path nested under a resource scope
+                    // (`get "suggest"` inside `resources :stories`) is
+                    // auto-named `<singular-parent>_<child>` by Rails
+                    // (`story_suggest_path(story_id)`) even though the
+                    // full path carries the dynamic `:story_id`.
+                    None => match scope.and_then(|(parent, _)| {
+                        static_path_name(path).map(|child| format!("{parent}_{child}"))
+                    }) {
+                        Some(n) => (n, true),
+                        None => (action.as_str().to_string(), false),
+                    },
                 },
             };
             out.push(FlatRoute {

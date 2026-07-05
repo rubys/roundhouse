@@ -194,7 +194,7 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
     let stem = base.trim_start_matches('_');
 
     let module_id = view_module_id(dir);
-    let method_name = Symbol::from(stem);
+    let method_name = crate::lower::view::view_method_name(stem);
 
     let known_models: Vec<String> =
         app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
@@ -353,6 +353,7 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         accumulator: "io".to_string(),
         form_records: Vec::new(),
         nullable_locals: nullable,
+        reference_reads: std::rc::Rc::new(reference_reader_names(app)),
         stylesheets: app.stylesheets.clone(),
         partial_ivars: closures.clone(),
         dyn_pools: dyn_pools.clone(),
@@ -1887,6 +1888,12 @@ pub(super) struct ViewCtx {
     /// rewrite to the nil-safe form `!recv.nil? && !recv.empty?` so
     /// the body doesn't NoMethodError when callers omit the kwarg.
     pub(super) nullable_locals: std::collections::HashSet<String>,
+    /// Record-reference reader names — every `belongs_to`/`has_one`
+    /// association name across the app's models. `rewrite_predicates`
+    /// consults this (plus the `_id` suffix) to lower `present?`/`blank?`
+    /// on a reference read to the nil test instead of the `empty?` form
+    /// (`story.domain.present?` → `!story.domain.nil?`).
+    pub(super) reference_reads: std::rc::Rc<std::collections::HashSet<String>>,
     /// Stylesheet logical names ingested from `app/assets/stylesheets/`
     /// + `app/assets/builds/`. Used by the `stylesheet_link_tag(:app,
     /// ...)` expansion: a `:app` symbol arg fans out to one call per
@@ -1904,6 +1911,26 @@ pub(super) struct ViewCtx {
     /// without dynamic partials (the blog), so the dispatch never fires.
     pub(super) dyn_pools:
         std::rc::Rc<std::collections::HashMap<(String, Symbol), Vec<String>>>,
+}
+
+/// Every `belongs_to`/`has_one` association name across the app's models
+/// — the single-record readers whose result is a record or nil (see
+/// `ViewCtx::reference_reads`). has_many names stay out: collections keep
+/// the `empty?`-based predicate forms.
+fn reference_reader_names(app: &App) -> std::collections::HashSet<String> {
+    use crate::dialect::Association;
+    let mut out = std::collections::HashSet::new();
+    for m in &app.models {
+        for a in m.associations() {
+            match a {
+                Association::BelongsTo { name, .. } | Association::HasOne { name, .. } => {
+                    out.insert(name.as_str().to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+    out
 }
 
 impl ViewCtx {

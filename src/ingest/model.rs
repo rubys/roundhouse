@@ -452,6 +452,7 @@ fn parse_association(
     let mut class_name: Option<String> = None;
     let mut foreign_key: Option<String> = None;
     let mut through: Option<String> = None;
+    let mut source: Option<String> = None;
     let mut dependent: Option<Dependent> = None;
     let mut optional: Option<bool> = None;
     let mut join_table: Option<String> = None;
@@ -468,6 +469,7 @@ fn parse_association(
                     foreign_key = string_value(&value).or_else(|| symbol_value(&value))
                 }
                 "through" => through = symbol_value(&value),
+                "source" => source = symbol_value(&value),
                 "dependent" => {
                     dependent = symbol_value(&value).and_then(|s| dependent_from_sym(&s))
                 }
@@ -483,8 +485,14 @@ fn parse_association(
     match method {
         "has_many" => Some(Association::HasMany {
             name: name.clone(),
+            // `source:` names the association on the `through:` model
+            // that supplies the rows (`has_many :upvoted_stories,
+            // through: :votes, source: :story` → Story, not the
+            // assoc-name-derived "UpvotedStory" phantom). class_name
+            // still wins when both are given, per Rails.
             target: class_name
                 .map(|s| ClassId(Symbol::from(s.as_str())))
+                .or_else(|| source.map(|s| ClassId(Symbol::from(camelize(s.as_str())))))
                 .unwrap_or_else(|| ClassId(Symbol::from(singularize_camelize(name_str.as_str())))),
             foreign_key: foreign_key
                 .map(|s| Symbol::from(s.as_str()))

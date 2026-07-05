@@ -18,9 +18,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::dialect::{Model, ModelBodyItem, Param};
-use crate::expr::{Expr, ExprNode, Literal};
+use crate::dialect::{Association, Model, ModelBodyItem, Param};
+use crate::expr::{BoolOpKind, BoolOpSurface, Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
+use crate::naming::pluralize_snake;
 
 /// model class id -> (scope name -> the scope's user params, in order).
 /// The params are the lambda's own parameters (NOT the synthesized trailing
@@ -46,6 +47,66 @@ pub fn build_scope_registry(models: &[Model]) -> ScopeRegistry {
 /// as a class-level scope call vs. an arbitrary constant).
 pub fn model_set(models: &[Model]) -> HashSet<ClassId> {
     models.iter().map(|m| m.name.clone()).collect()
+}
+
+/// Per-model association facts the chain rewriter consumes once a chain's
+/// model is known: `joins(:assoc)` expands to its JOIN SQL, and a
+/// `belongs_to`-named hash key in `where`/`not` rewrites to the foreign-key
+/// column (the runtime Relation sees only columns and SQL — the compiler is
+/// where association knowledge lives).
+#[derive(Default)]
+pub struct AssocRegistry {
+    /// (model, association name) -> `"<target_table> ON <cond>"`; the
+    /// rewrite prefixes `INNER JOIN` / `LEFT OUTER JOIN` by call. Direct
+    /// `belongs_to`/`has_many`/`has_one` only — `:through` and habtm are
+    /// absent, so their `joins(:sym)` is left untouched (visible at
+    /// runtime rather than silently mis-joined).
+    join_tails: HashMap<(ClassId, Symbol), String>,
+    /// (model, belongs_to name) -> foreign-key column, for
+    /// `where(user: user)` -> `where(user_id: user && user.id)`.
+    belongs_to_fk: HashMap<(ClassId, Symbol), Symbol>,
+}
+
+impl AssocRegistry {
+    fn join_tail(&self, model: &ClassId, assoc: &Symbol) -> Option<&String> {
+        self.join_tails.get(&(model.clone(), assoc.clone()))
+    }
+    fn belongs_to_fk(&self, model: &ClassId, assoc: &Symbol) -> Option<&Symbol> {
+        self.belongs_to_fk.get(&(model.clone(), assoc.clone()))
+    }
+}
+
+/// Build the association registry. Table names use the same
+/// `pluralize_snake` the synthesized `table_name` methods use, so the
+/// generated SQL and the runtime agree by construction.
+pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
+    let mut reg = AssocRegistry::default();
+    for m in models {
+        let own = pluralize_snake(m.name.0.as_str());
+        for a in m.associations() {
+            match a {
+                Association::BelongsTo { name, target, foreign_key, .. } => {
+                    let t = pluralize_snake(target.0.as_str());
+                    reg.join_tails.insert(
+                        (m.name.clone(), name.clone()),
+                        format!("{t} ON {t}.id = {own}.{foreign_key}"),
+                    );
+                    reg.belongs_to_fk
+                        .insert((m.name.clone(), name.clone()), foreign_key.clone());
+                }
+                Association::HasMany { name, target, foreign_key, through: None, .. }
+                | Association::HasOne { name, target, foreign_key, .. } => {
+                    let t = pluralize_snake(target.0.as_str());
+                    reg.join_tails.insert(
+                        (m.name.clone(), name.clone()),
+                        format!("{t} ON {t}.{foreign_key} = {own}.id"),
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    reg
 }
 
 /// True when any model declares a scope (the whole pass is a no-op
@@ -76,6 +137,61 @@ pub fn mentions_scope(expr: &Expr, names: &HashSet<Symbol>) -> bool {
         e.node.for_each_child(&mut |c| walk(c, names, found));
     }
     walk(expr, names, &mut found);
+    found
+}
+
+/// True if `expr` (or a descendant) starts a query chain directly on a
+/// known model constant (`Vote.where(...)`, `Story.all`). Scope-free
+/// bodies can still hold such chains — the arel inline pass refuses a
+/// where-hash whose value isn't statically scalar (an Array means `IN`,
+/// nil means `IS NULL`, only runtime knows), so those chains reach emit
+/// as plain sends and must be seeded with a Relation to run.
+pub fn mentions_model_chain_start(expr: &Expr, models: &HashSet<ClassId>) -> bool {
+    let mut found = false;
+    fn walk(e: &Expr, models: &HashSet<ClassId>, found: &mut bool) {
+        if *found {
+            return;
+        }
+        if let ExprNode::Send { recv: Some(r), method, .. } = &*e.node {
+            if (is_relation_chain_method(method.as_str()) || method.as_str() == "all")
+                && const_model(r, models).is_some()
+            {
+                *found = true;
+                return;
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, models, found));
+    }
+    walk(expr, models, &mut found);
+    found
+}
+
+/// True if `expr` (or a descendant) calls a relation chain method with no
+/// receiver (or on explicit `self` — same thing spelled out) — the
+/// implicit-self query root a model's own class method uses
+/// (`self.where(key: key)` in `Keystore.value_for`). Only meaningful for
+/// bodies rewritten with `class_self` set.
+pub fn mentions_bare_chain_start(expr: &Expr) -> bool {
+    let mut found = false;
+    fn walk(e: &Expr, found: &mut bool) {
+        if *found {
+            return;
+        }
+        if let ExprNode::Send { recv, method, .. } = &*e.node {
+            let self_rooted = match recv {
+                None => true,
+                Some(r) => matches!(&*r.node, ExprNode::SelfRef),
+            };
+            if self_rooted
+                && (is_relation_chain_method(method.as_str()) || method.as_str() == "all")
+            {
+                *found = true;
+                return;
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, found));
+    }
+    walk(expr, &mut found);
     found
 }
 
@@ -111,7 +227,14 @@ fn is_relation_chain_method(name: &str) -> bool {
 pub struct Ctx<'a> {
     pub scopes: &'a ScopeRegistry,
     pub models: &'a HashSet<ClassId>,
+    pub assocs: &'a AssocRegistry,
     pub scope_body: Option<(ClassId, Symbol)>,
+    /// `Some(model)` when rewriting a model's own CLASS method (a
+    /// user-written `def self.x`): a bare `where(...)`/`all` there is an
+    /// implicit-self query root (`Keystore.value_for`'s `where(key:
+    /// key).limit(1)`), so it seeds `Relation.new(Model)` — like a scope
+    /// body, but with no `__rel` parameter to thread.
+    pub class_self: Option<ClassId>,
 }
 
 impl Ctx<'_> {
@@ -126,7 +249,13 @@ impl Ctx<'_> {
     /// A copy of self with no scope-body relation (for args / blocks /
     /// non-receiver subtrees, which root at their own constants).
     fn at_callsite(&self) -> Ctx<'_> {
-        Ctx { scopes: self.scopes, models: self.models, scope_body: None }
+        Ctx {
+            scopes: self.scopes,
+            models: self.models,
+            assocs: self.assocs,
+            scope_body: None,
+            class_self: self.class_self.clone(),
+        }
     }
 }
 
@@ -181,6 +310,71 @@ fn relation_new(span: crate::span::Span, model: &ClassId) -> Expr {
             parenthesized: true,
         },
     )
+}
+
+/// In-place argument rewrites for a relation chain method once the chain's
+/// model is known:
+///
+///   joins(:hidings)      -> joins("INNER JOIN hidden_stories ON …")
+///   where(user: user)    -> where(user_id: user && user.id)
+///   not(user: user)      -> likewise (the `where.not` lowering)
+///
+/// Unknown association names (and `:through`) are left untouched. A hash
+/// key renames whenever it names a `belongs_to`; its VALUE is narrowed to
+/// `v && v.id` only for plain reads (Var/Ivar — evaluating twice is free);
+/// literals ride as-is, so `where(user: nil)` stays `user_id IS NULL`, and
+/// call-expression values are left alone rather than double-evaluated.
+fn lower_relation_args(model: &ClassId, method: &Symbol, args: &mut [Expr], ctx: &Ctx) {
+    match method.as_str() {
+        "joins" | "left_outer_joins" => {
+            let kind = if method.as_str() == "joins" { "INNER JOIN" } else { "LEFT OUTER JOIN" };
+            for a in args {
+                let ExprNode::Lit { value: Literal::Sym { value } } = &*a.node else { continue };
+                if let Some(tail) = ctx.assocs.join_tail(model, value) {
+                    *a.node = ExprNode::Lit { value: Literal::Str { value: format!("{kind} {tail}") } };
+                }
+            }
+        }
+        "where" | "not" | "find_by" => {
+            for a in args.iter_mut() {
+                let span = a.span;
+                let ExprNode::Hash { entries, .. } = &mut *a.node else { continue };
+                for (k, v) in entries.iter_mut() {
+                    let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
+                        continue;
+                    };
+                    let Some(fk) = ctx.assocs.belongs_to_fk(model, key) else { continue };
+                    *k.node = ExprNode::Lit { value: Literal::Sym { value: fk.clone() } };
+                    if matches!(&*v.node, ExprNode::Var { .. } | ExprNode::Ivar { .. }) {
+                        let val = std::mem::replace(
+                            v,
+                            syn(span, ExprNode::Lit { value: Literal::Nil }),
+                        );
+                        let id_read = syn(
+                            span,
+                            ExprNode::Send {
+                                recv: Some(val.clone()),
+                                method: Symbol::from("id"),
+                                args: vec![],
+                                block: None,
+                                parenthesized: false,
+                            },
+                        );
+                        *v = syn(
+                            span,
+                            ExprNode::BoolOp {
+                                op: BoolOpKind::And,
+                                surface: BoolOpSurface::Symbol,
+                                left: val,
+                                right: id_read,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// If `expr` is a bare `Const([M])` for a known model, return that model.
@@ -257,6 +451,29 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
         unreachable!()
     };
 
+    // `self.where(...)` in a scope body / model class method is the same
+    // implicit-self query root as bare `where(...)` — Ruby just makes the
+    // receiver visible. Normalize to the receiver-less form so the None
+    // arm's rooting logic serves both spellings (`Keystore.value_for`'s
+    // `self.where(key: key)` seeds exactly like `where(key: key)`).
+    let recv = match recv {
+        Some(r) if matches!(&*r.node, ExprNode::SelfRef) => {
+            let self_model =
+                ctx.scope_body.as_ref().map(|(m, _)| m).or(ctx.class_self.as_ref());
+            match self_model {
+                Some(m)
+                    if is_relation_chain_method(method.as_str())
+                        || method.as_str() == "all"
+                        || ctx.scope_of(m, &method) =>
+                {
+                    None
+                }
+                _ => Some(r),
+            }
+        }
+        other => other,
+    };
+
     // Args + block are independent subtrees: they root at their own
     // constants (drop the scope-body relation), but may still read outer
     // locals.
@@ -289,8 +506,30 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     return Some(self_model.clone());
                 }
                 if is_relation_chain_method(method.as_str()) {
+                    lower_relation_args(self_model, &method, &mut args, ctx);
                     *expr = put(span, Some(var_expr(span, rel)), method, args, block, parenthesized);
                     return Some(self_model.clone());
+                }
+            }
+            if let Some(self_model) = ctx.class_self.clone() {
+                // Implicit-self query root in a model's own class method:
+                // `all` IS a fresh relation; a bare scope call is the
+                // class-level form; a bare chain method seeds a new
+                // relation (there's no `__rel` param here to thread).
+                if method.as_str() == "all" && args.is_empty() && block.is_none() {
+                    *expr = relation_new(span, &self_model);
+                    return Some(self_model);
+                }
+                if ctx.scope_of(&self_model, &method) {
+                    *expr =
+                        put(span, Some(const_expr(span, &self_model)), method, args, block, true);
+                    return Some(self_model);
+                }
+                if is_relation_chain_method(method.as_str()) {
+                    lower_relation_args(&self_model, &method, &mut args, ctx);
+                    let seed = relation_new(span, &self_model);
+                    *expr = put(span, Some(seed), method, args, block, parenthesized);
+                    return Some(self_model);
                 }
             }
             *expr = put(span, None, method, args, block, parenthesized);
@@ -308,6 +547,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     if method.as_str() == "all" {
                         *expr = seed;
                     } else {
+                        lower_relation_args(&m, &method, &mut args, ctx);
                         *expr = put(span, Some(seed), method, args, block, parenthesized);
                     }
                     return Some(m);
@@ -331,6 +571,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     return Some(mr);
                 }
                 if is_relation_chain_method(method.as_str()) {
+                    lower_relation_args(&mr, &method, &mut args, ctx);
                     *expr = put(span, Some(r), method, args, block, parenthesized);
                     return Some(mr);
                 }
@@ -351,11 +592,14 @@ pub fn rewrite_scope_body(
     rel_param: &Symbol,
     scopes: &ScopeRegistry,
     models: &HashSet<ClassId>,
+    assocs: &AssocRegistry,
 ) {
     let ctx = Ctx {
         scopes,
         models,
+        assocs,
         scope_body: Some((self_model.clone(), rel_param.clone())),
+        class_self: None,
     };
     let mut locals = Locals::new();
     rewrite(body, &ctx, &mut locals);
@@ -363,8 +607,16 @@ pub fn rewrite_scope_body(
 
 /// Rewrite a non-scope-body expression (controller action, library-class
 /// method, model instance method): scope chains root at a model constant.
-pub fn rewrite_call_site(expr: &mut Expr, scopes: &ScopeRegistry, models: &HashSet<ClassId>) {
-    let ctx = Ctx { scopes, models, scope_body: None };
+/// `class_self` carries the model when the body is that model's own
+/// class method, so bare implicit-self roots (`where(key: key)`) seed.
+pub fn rewrite_call_site(
+    expr: &mut Expr,
+    scopes: &ScopeRegistry,
+    models: &HashSet<ClassId>,
+    assocs: &AssocRegistry,
+    class_self: Option<&ClassId>,
+) {
+    let ctx = Ctx { scopes, models, assocs, scope_body: None, class_self: class_self.cloned() };
     let mut locals = Locals::new();
     rewrite(expr, &ctx, &mut locals);
 }
@@ -429,5 +681,151 @@ mod tests {
         let out = thread_rel(vec![], rel_marker(), Some(&vec![]), span());
         assert_eq!(out.len(), 1);
         assert!(is_rel(&out[0]));
+    }
+
+    // ---- lower_relation_args ----------------------------------------
+
+    fn story() -> ClassId {
+        ClassId(Symbol::from("Story"))
+    }
+
+    /// Story: has_many :hidings (HiddenStory, fk story_id);
+    /// HiddenStory: belongs_to :user (fk user_id).
+    fn assoc_fixture() -> AssocRegistry {
+        let mut reg = AssocRegistry::default();
+        reg.join_tails.insert(
+            (story(), Symbol::from("hidings")),
+            "hidden_stories ON hidden_stories.story_id = stories.id".to_string(),
+        );
+        reg.belongs_to_fk.insert(
+            (ClassId(Symbol::from("HiddenStory")), Symbol::from("user")),
+            Symbol::from("user_id"),
+        );
+        reg
+    }
+
+    fn ctx_with<'a>(
+        scopes: &'a ScopeRegistry,
+        models: &'a HashSet<ClassId>,
+        assocs: &'a AssocRegistry,
+    ) -> Ctx<'a> {
+        Ctx { scopes, models, assocs, scope_body: None, class_self: None }
+    }
+
+    fn sym_lit(s: &str) -> Expr {
+        Expr::new(span(), ExprNode::Lit { value: Literal::Sym { value: Symbol::from(s) } })
+    }
+
+    #[test]
+    fn joins_sym_expands_to_join_sql() {
+        let (scopes, models, assocs) = (ScopeRegistry::new(), HashSet::new(), assoc_fixture());
+        let ctx = ctx_with(&scopes, &models, &assocs);
+        let mut args = vec![sym_lit("hidings")];
+        lower_relation_args(&story(), &Symbol::from("joins"), &mut args, &ctx);
+        let ExprNode::Lit { value: Literal::Str { value } } = &*args[0].node else {
+            panic!("expected Str, got {:?}", args[0].node)
+        };
+        assert_eq!(value, "INNER JOIN hidden_stories ON hidden_stories.story_id = stories.id");
+    }
+
+    #[test]
+    fn left_outer_joins_uses_left_outer_prefix() {
+        let (scopes, models, assocs) = (ScopeRegistry::new(), HashSet::new(), assoc_fixture());
+        let ctx = ctx_with(&scopes, &models, &assocs);
+        let mut args = vec![sym_lit("hidings")];
+        lower_relation_args(&story(), &Symbol::from("left_outer_joins"), &mut args, &ctx);
+        let ExprNode::Lit { value: Literal::Str { value } } = &*args[0].node else {
+            panic!("expected Str")
+        };
+        assert!(value.starts_with("LEFT OUTER JOIN hidden_stories ON "));
+    }
+
+    #[test]
+    fn joins_unknown_assoc_left_untouched() {
+        let (scopes, models, assocs) = (ScopeRegistry::new(), HashSet::new(), assoc_fixture());
+        let ctx = ctx_with(&scopes, &models, &assocs);
+        let mut args = vec![sym_lit("taggings")];
+        lower_relation_args(&story(), &Symbol::from("joins"), &mut args, &ctx);
+        assert!(matches!(
+            &*args[0].node,
+            ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "taggings"
+        ));
+    }
+
+    #[test]
+    fn where_belongs_to_key_renames_and_narrows_var_to_id() {
+        // HiddenStory scope `by`: where(user: user) → where(user_id: user && user.id)
+        let (scopes, models, assocs) = (ScopeRegistry::new(), HashSet::new(), assoc_fixture());
+        let ctx = ctx_with(&scopes, &models, &assocs);
+        let user_var = Expr::new(span(), ExprNode::Var { id: VarId(1), name: Symbol::from("user") });
+        let mut args = vec![Expr::new(
+            span(),
+            ExprNode::Hash { entries: vec![(sym_lit("user"), user_var)], kwargs: true },
+        )];
+        lower_relation_args(
+            &ClassId(Symbol::from("HiddenStory")),
+            &Symbol::from("where"),
+            &mut args,
+            &ctx,
+        );
+        let ExprNode::Hash { entries, .. } = &*args[0].node else { panic!("expected Hash") };
+        let (k, v) = &entries[0];
+        assert!(matches!(
+            &*k.node,
+            ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "user_id"
+        ));
+        let ExprNode::BoolOp { op: BoolOpKind::And, left, right, .. } = &*v.node else {
+            panic!("expected `user && user.id`, got {:?}", v.node)
+        };
+        assert!(matches!(&*left.node, ExprNode::Var { name, .. } if name.as_str() == "user"));
+        assert!(matches!(
+            &*right.node,
+            ExprNode::Send { method, .. } if method.as_str() == "id"
+        ));
+    }
+
+    #[test]
+    fn where_belongs_to_key_with_nil_value_renames_only() {
+        // where(user: nil) → where(user_id: nil) — `user_id IS NULL`.
+        let (scopes, models, assocs) = (ScopeRegistry::new(), HashSet::new(), assoc_fixture());
+        let ctx = ctx_with(&scopes, &models, &assocs);
+        let nil = Expr::new(span(), ExprNode::Lit { value: Literal::Nil });
+        let mut args = vec![Expr::new(
+            span(),
+            ExprNode::Hash { entries: vec![(sym_lit("user"), nil)], kwargs: true },
+        )];
+        lower_relation_args(
+            &ClassId(Symbol::from("HiddenStory")),
+            &Symbol::from("where"),
+            &mut args,
+            &ctx,
+        );
+        let ExprNode::Hash { entries, .. } = &*args[0].node else { panic!("expected Hash") };
+        let (k, v) = &entries[0];
+        assert!(matches!(
+            &*k.node,
+            ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "user_id"
+        ));
+        assert!(is_nil(v));
+    }
+
+    #[test]
+    fn where_non_assoc_key_untouched() {
+        // where(id: x) on Story — `id` is no association; nothing changes.
+        let (scopes, models, assocs) = (ScopeRegistry::new(), HashSet::new(), assoc_fixture());
+        let ctx = ctx_with(&scopes, &models, &assocs);
+        let x = Expr::new(span(), ExprNode::Var { id: VarId(1), name: Symbol::from("x") });
+        let mut args = vec![Expr::new(
+            span(),
+            ExprNode::Hash { entries: vec![(sym_lit("id"), x)], kwargs: true },
+        )];
+        lower_relation_args(&story(), &Symbol::from("where"), &mut args, &ctx);
+        let ExprNode::Hash { entries, .. } = &*args[0].node else { panic!("expected Hash") };
+        let (k, v) = &entries[0];
+        assert!(matches!(
+            &*k.node,
+            ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "id"
+        ));
+        assert!(matches!(&*v.node, ExprNode::Var { .. }));
     }
 }

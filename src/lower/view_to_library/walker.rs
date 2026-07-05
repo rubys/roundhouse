@@ -109,7 +109,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             vec![Expr::new(
                 Span::synthetic(),
                 ExprNode::If {
-                    cond: rewrite_predicates(cond, &ctx.nullable_locals),
+                    cond: rewrite_predicates(cond, &ctx.nullable_locals, &ctx.reference_reads),
                     then_branch: then_body,
                     else_branch: else_body,
                 },
@@ -551,6 +551,7 @@ mod tests {
             accumulator: "io".to_string(),
             form_records: Vec::new(),
             nullable_locals: Default::default(),
+            reference_reads: Default::default(),
             stylesheets: Vec::new(),
             partial_ivars: Default::default(),
             dyn_pools: Default::default(),

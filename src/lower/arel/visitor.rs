@@ -506,6 +506,12 @@ fn push_where_segments(segments: &mut Vec<Expr>, preds: Option<&Predicate>, _tab
 
 fn push_predicate_segments(segments: &mut Vec<Expr>, pred: &Predicate) {
     match pred {
+        // SQL equality never matches NULL (`col = NULL` is three-valued
+        // unknown, i.e. no rows); a literal-nil condition is the IS NULL
+        // form, as Rails renders it.
+        Predicate::Eq(col, Value::LiteralNull) => {
+            segments.push(lit_str(format!("{} IS NULL", col.column.as_str())));
+        }
         Predicate::Eq(col, val) => {
             segments.push(lit_str(format!("{} = ", col.column.as_str())));
             push_value_segment(segments, val);

@@ -392,7 +392,7 @@ fn predicates_from_kwargs(
             .find(|c| c.name.as_str() == col_name.as_str())?;
         let pred = Predicate::Eq(
             super::ir::ColRef { table: table_ref.clone(), column: col_name },
-            value_from_expr(v, &col.col_type),
+            value_from_expr(v, &col.col_type)?,
         );
         acc = Some(match acc {
             None => pred,
@@ -413,19 +413,26 @@ fn key_as_column_symbol(key: &Expr) -> Option<Symbol> {
 }
 
 /// Map a value expression to an Arel `Value`. Literal exprs become
-/// `Literal*` variants (baked into SQL); any other expression
-/// becomes `Runtime { expr, ty }` with `ty` inferred from the
-/// schema column's declared type.
-fn value_from_expr(expr: &Expr, col_type: &ColumnType) -> Value {
+/// `Literal*` variants (baked into SQL); an ivar read becomes
+/// `Runtime { expr, ty }` with `ty` inferred from the schema column's
+/// declared type (a model's `@col` ivars are column-typed scalars —
+/// the association-reader pattern this inline exists for). Anything
+/// else — a method-param `Var`, a call — returns `None`: its runtime
+/// value can be an Array (`IN`), nil (`IS NULL`), or a scalar, and
+/// Rails decides per-value at runtime, so the whole chain refuses
+/// static inlining and falls back to the runtime query path (the
+/// Relation on the Ruby target), which dispatches correctly.
+fn value_from_expr(expr: &Expr, col_type: &ColumnType) -> Option<Value> {
     match expr.node.as_ref() {
-        ExprNode::Lit { value: Literal::Int { value } } => Value::LiteralInt(*value),
-        ExprNode::Lit { value: Literal::Str { value } } => Value::LiteralStr(value.clone()),
-        ExprNode::Lit { value: Literal::Bool { value } } => Value::LiteralBool(*value),
-        ExprNode::Lit { value: Literal::Nil } => Value::LiteralNull,
-        _ => Value::Runtime {
+        ExprNode::Lit { value: Literal::Int { value } } => Some(Value::LiteralInt(*value)),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(Value::LiteralStr(value.clone())),
+        ExprNode::Lit { value: Literal::Bool { value } } => Some(Value::LiteralBool(*value)),
+        ExprNode::Lit { value: Literal::Nil } => Some(Value::LiteralNull),
+        ExprNode::Ivar { .. } => Some(Value::Runtime {
             expr: expr.clone(),
             ty: value_type_for(col_type),
-        },
+        }),
+        _ => None,
     }
 }
 

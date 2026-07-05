@@ -58,23 +58,208 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     }
     let names = crate::lower::scope_chain::all_scope_names(&scopes);
     let models = crate::lower::scope_chain::model_set(&app.models);
+    let assocs = crate::lower::scope_chain::build_assoc_registry(&app.models);
     for lc in lcs.iter_mut() {
         // Models gain their scope class methods (already chain-normalized).
+        let is_model = app.models.iter().any(|m| m.name == lc.name);
         if let Some(model) = app.models.iter().find(|m| m.name == lc.name) {
             crate::lower::model_to_library::push_scope_methods(
                 &mut lc.methods,
                 model,
                 &scopes,
                 &models,
+                &assocs,
             );
         }
         // Every method body: normalize scope chains (call-site form).
+        // Scope-free bodies still need the rewrite when they start a
+        // query chain on a model constant — the arel inline pass bails
+        // on dynamic-value where-hashes, and those chains only run
+        // against a seeded Relation. A model's own CLASS methods
+        // additionally seed bare implicit-self roots (`where(key: key)`
+        // in `Keystore.value_for`), signalled via `class_self`.
         for m in &mut lc.methods {
-            if crate::lower::scope_chain::mentions_scope(&m.body, &names) {
-                crate::lower::scope_chain::rewrite_call_site(&mut m.body, &scopes, &models);
+            let class_self = (is_model && m.receiver == MethodReceiver::Class)
+                .then(|| lc.name.clone());
+            if crate::lower::scope_chain::mentions_scope(&m.body, &names)
+                || crate::lower::scope_chain::mentions_model_chain_start(&m.body, &models)
+                || (class_self.is_some()
+                    && crate::lower::scope_chain::mentions_bare_chain_start(&m.body))
+            {
+                crate::lower::scope_chain::rewrite_call_site(
+                    &mut m.body,
+                    &scopes,
+                    &models,
+                    &assocs,
+                    class_self.as_ref(),
+                );
             }
         }
     }
+}
+
+/// Ruby-family pre-emit pass: correct `has_many :through` readers. The
+/// shared lowering synthesizes EVERY has_many reader as a direct
+/// foreign-key query (`Tag.where(story_id: @id)`) — wrong for `through:`,
+/// where the foreign key lives on the join table. Rebuild those readers
+/// as a Relation join through the intermediate:
+///
+///   def tags
+///     return @tags_cache if @tags_loaded
+///     ActiveRecord::Relation.new(Tag)
+///       .joins("INNER JOIN taggings ON taggings.tag_id = tags.id")
+///       .where("taggings.story_id = ?", @id)
+///   end
+///
+/// The through-model's `belongs_to` whose target matches the assoc's
+/// target supplies the source foreign key (works for `source:` renames —
+/// `upvoted_stories, through: :votes, source: :story` finds
+/// `Vote.belongs_to :story`). Unresolvable shapes (through-of-through,
+/// missing models) are left on the shared reader rather than guessed.
+/// KNOWN GAP: association scope-lambdas (`-> { order(...) }`, the
+/// upvoted vote-conditions) are dropped at ingest, so row order/filter
+/// can diverge from Rails until the lambda lands in the IR.
+pub(crate) fn apply_through_assoc_lowering(lcs: &mut [LibraryClass], app: &App) {
+    use crate::dialect::Association;
+    use crate::naming::pluralize_snake;
+
+    for lc in lcs.iter_mut() {
+        let Some(model) = app.models.iter().find(|m| m.name == lc.name) else { continue };
+        for assoc in model.associations() {
+            let Association::HasMany { name, target, through: Some(thr_name), .. } = assoc
+            else {
+                continue;
+            };
+            // The through association on the owner (`:votes`, `:taggings`).
+            let Some(Association::HasMany {
+                target: thr_target, foreign_key: thr_fk, ..
+            }) = model.associations().find(
+                |a| matches!(a, Association::HasMany { name, .. } if name == thr_name),
+            )
+            else {
+                continue;
+            };
+            // The source belongs_to on the through model (`Vote.belongs_to
+            // :story`) — matched by target class, so `source:` renames
+            // resolve without a name convention.
+            let Some(thr_model) = app.models.iter().find(|m| &m.name == thr_target) else {
+                continue;
+            };
+            let Some(Association::BelongsTo { foreign_key: src_fk, .. }) =
+                thr_model.associations().find(|a| {
+                    matches!(a, Association::BelongsTo { target: t, .. } if t == target)
+                })
+            else {
+                continue;
+            };
+
+            let thr_table = pluralize_snake(thr_target.0.as_str());
+            let target_table = pluralize_snake(target.0.as_str());
+            let join_sql = format!(
+                "INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.id"
+            );
+            let where_sql = format!("{thr_table}.{thr_fk} = ?");
+
+            let Some(m) =
+                lc.methods.iter_mut().find(|m| {
+                    m.name == *name && m.receiver == crate::dialect::MethodReceiver::Instance
+                })
+            else {
+                continue;
+            };
+            m.body = through_reader_body(name, target, &join_sql, &where_sql);
+        }
+    }
+}
+
+/// `return @<name>_cache if @<name>_loaded` + the joined Relation chain
+/// (see `apply_through_assoc_lowering`). Guard shape mirrors the shared
+/// `synth_has_many_reader` so `_preload_<name>` keeps working.
+fn through_reader_body(
+    name: &Symbol,
+    target: &ClassId,
+    join_sql: &str,
+    where_sql: &str,
+) -> Expr {
+    let span = Span::synthetic;
+    let guard = Expr::new(
+        span(),
+        ExprNode::If {
+            cond: Expr::new(
+                span(),
+                ExprNode::Ivar { name: Symbol::from(format!("{}_loaded", name.as_str())) },
+            ),
+            then_branch: Expr::new(
+                span(),
+                ExprNode::Return {
+                    value: Expr::new(
+                        span(),
+                        ExprNode::Ivar {
+                            name: Symbol::from(format!("{}_cache", name.as_str())),
+                        },
+                    ),
+                },
+            ),
+            else_branch: Expr::new(span(), ExprNode::Lit { value: crate::expr::Literal::Nil }),
+        },
+    );
+
+    let target_const = Expr::new(
+        span(),
+        ExprNode::Const {
+            path: target.0.as_str().split("::").map(Symbol::from).collect(),
+        },
+    );
+    let seed = Expr::new(
+        span(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                span(),
+                ExprNode::Const {
+                    path: vec![Symbol::from("ActiveRecord"), Symbol::from("Relation")],
+                },
+            )),
+            method: Symbol::from("new"),
+            args: vec![target_const],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    let joined = Expr::new(
+        span(),
+        ExprNode::Send {
+            recv: Some(seed),
+            method: Symbol::from("joins"),
+            args: vec![Expr::new(
+                span(),
+                ExprNode::Lit {
+                    value: crate::expr::Literal::Str { value: join_sql.to_string() },
+                },
+            )],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    let chain = Expr::new(
+        span(),
+        ExprNode::Send {
+            recv: Some(joined),
+            method: Symbol::from("where"),
+            args: vec![
+                Expr::new(
+                    span(),
+                    ExprNode::Lit {
+                        value: crate::expr::Literal::Str { value: where_sql.to_string() },
+                    },
+                ),
+                Expr::new(span(), ExprNode::Ivar { name: Symbol::from("id") }),
+            ],
+            block: None,
+            parenthesized: true,
+        },
+    );
+
+    Expr::new(span(), ExprNode::Seq { exprs: vec![guard, chain] })
 }
 
 /// Ruby-family pre-emit pass: resolve `app/helpers/*` references. Rails
@@ -148,6 +333,8 @@ fn is_framework_view_helper(name: &str) -> bool {
             | "image_path"
             | "path_to_javascript"
             | "javascript_path"
+            | "javascript_include_tag"
+            | "number_with_precision"
             | "content_tag"
             | "time_ago_in_words"
             | "distance_of_time_in_words"
@@ -198,6 +385,7 @@ fn is_html_safe_call(e: &Expr, index: &HashMap<Symbol, ClassId>) -> bool {
         return matches!(
             method.as_str(),
             "raw" | "link_to" | "link_to_raw" | "button_to" | "image_tag" | "content_tag"
+                | "javascript_include_tag"
         );
     }
     index.values().any(|cid| cid.0.as_str() == joined)
@@ -327,6 +515,60 @@ fn rewrite_helper_calls(
             block,
             parenthesized: true,
         };
+    }
+
+    // `RouteHelpers.<x>_path(format: :rss)` → `RouteHelpers.<x>_path +
+    // ".rss"`. Rails path helpers accept `format:` whether or not the
+    // route spells `(.:format)`; the IR has no keyword params, so the
+    // suffix moves to the call site — arity-independent, and helpers
+    // without a format slot stay format-capable.
+    let format_suffix = match &*expr.node {
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str().ends_with("_path")
+                && matches!(&*r.node, ExprNode::Const { path }
+                    if path.last().map(|s| s.as_str() == "RouteHelpers").unwrap_or(false)) =>
+        {
+            match args.last().map(|a| &*a.node) {
+                Some(ExprNode::Hash { entries, kwargs: true }) if entries.len() == 1 => {
+                    match &*entries[0].0.node {
+                        ExprNode::Lit { value: crate::expr::Literal::Sym { value } }
+                            if value.as_str() == "format" =>
+                        {
+                            Some(entries[0].1.clone())
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    if let Some(fmt) = format_suffix {
+        let span = expr.span;
+        let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
+        let ExprNode::Send { recv, method, mut args, block, parenthesized } = node else {
+            unreachable!()
+        };
+        args.pop();
+        let call = Expr::new(span, ExprNode::Send { recv, method, args, block, parenthesized });
+        let suffix = Expr::new(
+            span,
+            ExprNode::StringInterp {
+                parts: vec![
+                    crate::expr::InterpPart::Text { value: ".".to_string() },
+                    crate::expr::InterpPart::Expr { expr: fmt },
+                ],
+            },
+        );
+        *expr.node = ExprNode::Send {
+            recv: Some(call),
+            method: Symbol::from("+"),
+            args: vec![suffix],
+            block: None,
+            parenthesized: false,
+        };
+        return;
     }
 
     // `link_to(raw(x), …)` → `link_to_raw(x, …)`: Rails skips the label

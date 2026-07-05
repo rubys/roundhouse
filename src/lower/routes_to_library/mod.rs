@@ -198,17 +198,69 @@ fn build_helper_function(
     helper_name: &str,
     route: &FlatRoute,
 ) -> LibraryFunction {
-    let params: Vec<Param> = route
+    // A trailing `(.:format)` is Rails' OPTIONAL format suffix, not a
+    // path segment: the helper takes `format = nil` last and appends
+    // `.<format>` only when given (`domain_path(d)` → "/domains/d",
+    // `comments_path(:rss)` → "/comments.rss"). Without this the
+    // literal parens land in the URL and `format` is demanded of every
+    // caller.
+    let has_format = route.path.ends_with("(.:format)");
+    let path = route.path.strip_suffix("(.:format)").unwrap_or(&route.path);
+    let seg_params: Vec<String> = route
         .path_params
+        .iter()
+        .filter(|p| !(has_format && p.as_str() == "format"))
+        .cloned()
+        .collect();
+
+    let mut params: Vec<Param> = seg_params
         .iter()
         .map(|p| Param::positional(Symbol::from(p.clone())))
         .collect();
-    let sig_params: Vec<(Symbol, Ty)> = route
-        .path_params
+    let mut sig_params: Vec<(Symbol, Ty)> = seg_params
         .iter()
         .map(|p| (Symbol::from(p.clone()), param_ty(p)))
         .collect();
-    let body = build_path_expr(&route.path, &route.path_params);
+    let mut body = build_path_expr(path, &seg_params);
+    if has_format {
+        let format_sym = Symbol::from("format");
+        params.push(Param::with_default(
+            format_sym.clone(),
+            Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Nil }),
+        ));
+        sig_params.push((
+            format_sym.clone(),
+            Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+        ));
+        // <path> + (format ? ".#{format}" : "")
+        let dot_format = Expr::new(
+            Span::synthetic(),
+            ExprNode::StringInterp {
+                parts: vec![
+                    InterpPart::Text { value: ".".to_string() },
+                    InterpPart::Expr { expr: var_ref("format") },
+                ],
+            },
+        );
+        let suffix = Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: var_ref("format"),
+                then_branch: dot_format,
+                else_branch: lit_str(String::new()),
+            },
+        );
+        body = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(body),
+                method: Symbol::from("+"),
+                args: vec![suffix],
+                block: None,
+                parenthesized: false,
+            },
+        );
+    }
     LibraryFunction {
         module_path: module_path.to_vec(),
         name: Symbol::from(helper_name),

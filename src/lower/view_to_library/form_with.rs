@@ -314,6 +314,36 @@ fn classify_form_with_components(
     let plural = ctx.resource_dir.as_str();
     let singular = singularize(plural);
 
+    // `form_with model: @edit_user, url: settings_path` — an explicit
+    // `url:` beside `model:` overrides the resource-convention action
+    // (Rails consults url first; lobsters' settings form has no
+    // `setting_path` route for the convention to name). Fields still
+    // name under the model. Method: an explicit `method:` opt wins,
+    // else form_with's POST default.
+    if let Some(url) = url_expr {
+        // `method:` steers the form verb — pull it OUT of opts_entries
+        // (left in, it renders as a literal `method="..."` attribute on
+        // top of the builder's own) and use it as the method component;
+        // default POST like the url-only branch.
+        let is_method_key = |k: &Expr| {
+            matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+                if value.as_str() == "method")
+        };
+        let method = opts_entries
+            .iter()
+            .find(|(k, _)| is_method_key(k))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| lit_sym(Symbol::from("post")));
+        opts_entries.retain(|(k, _)| !is_method_key(k));
+        return Some(FormWithComponents {
+            model,
+            model_name: singular,
+            action: route_helperize(url, &route_helpers),
+            method,
+            opts_entries,
+        });
+    }
+
     // record.persisted?
     let persisted = send(Some(model.clone()), "persisted?", Vec::new(), None, false);
 

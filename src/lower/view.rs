@@ -335,6 +335,18 @@ pub enum FormBuilderMethod {
     HiddenField,
 }
 
+/// Method name for a view template stem. A digit-leading stem
+/// (`about/404.html.erb`) can't name a Ruby/most-target method — prefix
+/// `_` (`Views::About._404`). Def site (view_to_library) and render
+/// call site (controller rewrites) share this so they can't drift.
+pub fn view_method_name(stem: &str) -> crate::ident::Symbol {
+    if stem.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        crate::ident::Symbol::from(format!("_{stem}"))
+    } else {
+        crate::ident::Symbol::from(stem)
+    }
+}
+
 /// Map a Ruby form method name to the lowered method kind. Rails
 /// accepts both `text_area` and `textarea` as aliases; fold them.
 pub fn classify_form_builder_method(method: &str) -> Option<FormBuilderMethod> {

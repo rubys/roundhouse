@@ -144,6 +144,9 @@ pub(super) fn rewrite_render_to_views(
                     view_args.push(str_lit(e.span, &controller_name));
                 }
             }
+            // Digit-leading stems (`about/404`) carry a `_` prefix on the
+            // method — must match the def-site naming in view_to_library.
+            let view_method = crate::lower::view::view_method_name(view_method.as_str());
             let view_call = Expr::new(
                 e.span,
                 ExprNode::Send {

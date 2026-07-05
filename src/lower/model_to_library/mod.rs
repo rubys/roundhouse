@@ -540,6 +540,7 @@ pub(crate) fn push_scope_methods(
     model: &Model,
     scopes: &crate::lower::scope_chain::ScopeRegistry,
     models_set: &std::collections::HashSet<ClassId>,
+    assocs: &crate::lower::scope_chain::AssocRegistry,
 ) {
     use crate::dialect::{AccessorKind, ModelBodyItem, Param};
     let rel_param = Symbol::from("__rel");
@@ -555,6 +556,7 @@ pub(crate) fn push_scope_methods(
             &rel_param,
             scopes,
             models_set,
+            assocs,
         );
 
         methods.push(MethodDef {

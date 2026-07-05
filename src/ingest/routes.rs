@@ -32,7 +32,7 @@ pub fn ingest_routes(source: &[u8], file: &str) -> IngestResult<RouteTable> {
     };
 
     let entries = match block.body() {
-        Some(body) => ingest_route_body(body, file)?,
+        Some(body) => ingest_route_body(body, file, None)?,
         None => Vec::new(),
     };
 
@@ -43,7 +43,14 @@ pub fn ingest_routes(source: &[u8], file: &str) -> IngestResult<RouteTable> {
 /// nested `resources :x do ... end` block) and collect their `RouteSpec`
 /// entries. Recognized forms: verb shortcuts, `root "c#a"`, and
 /// `resources :name`.
-fn ingest_route_body(body: Node<'_>, file: &str) -> IngestResult<Vec<RouteSpec>> {
+/// `parent` carries the enclosing `resources :<name>` (its plural name)
+/// so bare-verb member/nested shortcuts (`get "suggest"` with no `to:`)
+/// can infer their controller; `None` at the top level.
+fn ingest_route_body(
+    body: Node<'_>,
+    file: &str,
+    parent: Option<&str>,
+) -> IngestResult<Vec<RouteSpec>> {
     let mut entries = Vec::new();
     for stmt in flatten_statements(body) {
         let Some(call) = stmt.as_call_node() else { continue };
@@ -77,14 +84,14 @@ fn ingest_route_body(body: Node<'_>, file: &str) -> IngestResult<Vec<RouteSpec>>
             if let Some(block_node) = call.block() {
                 if let Some(block) = block_node.as_block_node() {
                     if let Some(inner_body) = block.body() {
-                        entries.extend(ingest_route_body(inner_body, file)?);
+                        entries.extend(ingest_route_body(inner_body, file, parent)?);
                     }
                 }
             }
             continue;
         }
 
-        if let Some(spec) = ingest_route_call(&call, &method, file)? {
+        if let Some(spec) = ingest_route_call(&call, &method, file, parent)? {
             entries.push(spec);
         }
     }
@@ -95,13 +102,14 @@ fn ingest_route_call(
     call: &ruby_prism::CallNode<'_>,
     method: &str,
     file: &str,
+    parent: Option<&str>,
 ) -> IngestResult<Option<RouteSpec>> {
     // Verb shortcuts (`get "/p", to: "c#a"` and the hashrocket form
     // `get "/p" => "c#a"`). `ingest_explicit_route` returns Ok(None)
     // for shapes it intentionally drops (today: `to: redirect(...)`
     // helpers — not bench-critical, not modeled in `RouteSpec`).
     if let Some(http) = http_method_from(method) {
-        return ingest_explicit_route(call, http, file);
+        return ingest_explicit_route(call, http, file, parent);
     }
     match method {
         "root" => ingest_root_route(call).map(Some),
@@ -134,6 +142,7 @@ fn ingest_explicit_route(
     call: &ruby_prism::CallNode<'_>,
     method: HttpMethod,
     file: &str,
+    parent: Option<&str>,
 ) -> IngestResult<Option<RouteSpec>> {
     let Some(args_node) = call.arguments() else {
         return Err(IngestError::Unsupported {
@@ -145,6 +154,7 @@ fn ingest_explicit_route(
     let mut to: Option<String> = None;
     let mut to_is_unsupported = false;
     let mut as_name: Option<Symbol> = None;
+    let mut action_kwarg: Option<String> = None;
     let mut constraints: IndexMap<Symbol, String> = IndexMap::new();
 
     for arg in args_node.arguments().iter() {
@@ -207,6 +217,12 @@ fn ingest_explicit_route(
                             .map(Symbol::from)
                             .or_else(|| string_value(value).map(Symbol::from));
                     }
+                    // `post "suggest", :action => "submit_suggestions"` —
+                    // the action override for a resource-scoped shortcut.
+                    "action" => {
+                        action_kwarg =
+                            string_value(value).or_else(|| symbol_value(value));
+                    }
                     // `via: :all` (HTTP-method override) and similar
                     // method-shaping options aren't modeled today; the
                     // route still resolves to the outer verb. Other
@@ -233,21 +249,27 @@ fn ingest_explicit_route(
     let (controller, action) = match to.as_deref().and_then(|s| s.split_once('#')) {
         Some((c, a)) => (c.to_string(), a.to_string()),
         None => {
-            // No `to:` and no hashrocket target. Real-world shapes
-            // landing here in lobsters:
-            //   - `post "upvote"` inside `resources :stories do` —
-            //     resource-scoped member action, controller inferred
-            //     from parent resources block.
-            //   - `post "suggest", :action => "submit_suggestions"` —
-            //     explicit `:action` kwarg, controller still inferred.
-            //   - `get "/path"` with no target at all (rare typo).
-            // The first two are bench-irrelevant (lobsters' bench is
-            // GET-only) and properly modeling them needs resource
-            // context threaded through ingest. The third is a real
-            // bug but indistinguishable from the others here. Drop
-            // silently for Phase 1; revisit if a fixture needs the
-            // resource-scoped member action shape.
-            return Ok(None);
+            // No `to:` and no hashrocket target — a resource-scoped
+            // shortcut (`get "suggest"` / `post "suggest", :action =>
+            // "submit_suggestions"` inside `resources :stories do`).
+            // Controller comes from the enclosing resources block; the
+            // action is the `:action` kwarg, else the path stem. The
+            // flattener nests the path under `/:<parent>_id` and names
+            // the helper `<singular>_<stem>` (`story_suggest_path`).
+            // Outside a resources block there's nothing to infer from
+            // (a rare typo shape) — keep the silent drop.
+            let Some(parent) = parent else {
+                return Ok(None);
+            };
+            let Some(p) = path.as_deref() else {
+                return Ok(None);
+            };
+            let stem = p.trim_matches('/').to_string();
+            if stem.is_empty() || stem.contains('/') || stem.contains(':') {
+                return Ok(None);
+            }
+            path = Some(format!("/{stem}"));
+            (parent.to_string(), action_kwarg.unwrap_or(stem))
         }
     };
 
@@ -335,7 +357,7 @@ fn ingest_resources_route(
     let nested = match call.block() {
         Some(block_node) => match block_node.as_block_node() {
             Some(block) => match block.body() {
-                Some(body) => ingest_route_body(body, file)?,
+                Some(body) => ingest_route_body(body, file, Some(name_str.as_str()))?,
                 None => Vec::new(),
             },
             None => Vec::new(),
