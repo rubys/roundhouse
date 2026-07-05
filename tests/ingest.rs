@@ -808,3 +808,94 @@ fn survey_mode_recovers_from_unsupported_construct_and_records_skipped_views() {
         "unsupported backtick command should be recorded as a gap"
     );
 }
+
+/// The spelled-out `lambda { |x| … }` scope form (Mastodon's multi-line
+/// scopes) must ingest identically to the arrow form `->(x) { … }`.
+#[test]
+fn spelled_lambda_scope_ingests_like_arrow_form() {
+    use roundhouse::ingest::ingest_app_from_tree;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    let files: &[(&str, &str)] = &[(
+        "app/models/widget.rb",
+        concat!(
+            "class Widget < ApplicationRecord\n",
+            "  scope :arrow, ->(limit) { where(id: limit) }\n",
+            "  scope :spelled, lambda { |limit| where(id: limit) }\n",
+            "  scope :spelled_proc, proc { where(active: true) }\n",
+            "end\n",
+        ),
+    )];
+    let tree: HashMap<PathBuf, Vec<u8>> = files
+        .iter()
+        .map(|(p, c)| (PathBuf::from(*p), c.as_bytes().to_vec()))
+        .collect();
+
+    let app = ingest_app_from_tree(tree).expect("spelled lambda scopes ingest strict");
+    let widget = &app.models[0];
+    let scopes: Vec<&str> = widget.scopes().map(|s| s.name.as_str()).collect();
+    assert_eq!(scopes, vec!["arrow", "spelled", "spelled_proc"]);
+    let spelled = widget.scopes().find(|s| s.name.as_str() == "spelled").unwrap();
+    assert_eq!(spelled.params.len(), 1, "block params carry over: |limit|");
+    assert_eq!(spelled.params[0].name.as_str(), "limit");
+}
+
+/// Survey mode recovers at body-item granularity: one unsupported item
+/// (a scope whose body isn't a lambda in any spelling) records a gap and
+/// is skipped, while the rest of the class — and the class itself —
+/// survives. Before this, a single such item silently dropped the whole
+/// model (Mastodon lost `Status` this way). Strict mode still aborts.
+#[test]
+fn survey_mode_keeps_the_class_when_one_body_item_is_unsupported() {
+    use roundhouse::ingest::{ingest_app_from_tree, survey, IngestError};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    let files: &[(&str, &str)] = &[(
+        "app/models/widget.rb",
+        concat!(
+            "class Widget < ApplicationRecord\n",
+            "  has_many :parts\n",
+            "  scope :broken, :not_a_lambda\n",
+            "  scope :fine, -> { where(active: true) }\n",
+            "end\n",
+        ),
+    )];
+    let tree = || -> HashMap<PathBuf, Vec<u8>> {
+        files
+            .iter()
+            .map(|(p, c)| (PathBuf::from(*p), c.as_bytes().to_vec()))
+            .collect()
+    };
+
+    // Strict mode: the unsupported scope body aborts ingest.
+    assert!(ingest_app_from_tree(tree()).is_err(), "strict ingest aborts");
+
+    // Survey mode: the class survives with its other items; the gap is
+    // recorded against the failing item only.
+    survey::activate();
+    let result = ingest_app_from_tree(tree());
+    let gaps = survey::drain();
+    let app = result.expect("survey-mode ingest recovers");
+    let widget = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "Widget")
+        .expect("the model registers despite the unsupported item");
+    assert!(
+        widget.scopes().any(|s| s.name.as_str() == "fine"),
+        "items after the unsupported one survive"
+    );
+    assert!(
+        widget.associations().count() == 1,
+        "items before the unsupported one survive"
+    );
+    assert!(
+        gaps.iter().any(|g| matches!(
+            g,
+            IngestError::Unsupported { message, .. } if message.contains("scope :broken")
+        )),
+        "the failing item is recorded as a gap"
+    );
+}

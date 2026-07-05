@@ -132,7 +132,18 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
                 prev_end = Some(stmt.location().end_offset());
                 continue;
             }
-            let mut item = ingest_controller_body_item(&stmt, file, leading)?;
+            // Survey mode: an unsupported item costs itself, not the whole
+            // controller — record the gap and keep walking (same gate as
+            // the model walk; see ingest/model.rs). Strict mode aborts.
+            let mut item = match ingest_controller_body_item(&stmt, file, leading) {
+                Ok(item) => item,
+                Err(err) if super::survey::is_active() => {
+                    super::survey::record(&err);
+                    prev_end = Some(stmt.location().end_offset());
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
             item.set_leading_blank_line(leading_blank);
             body_items.push(item);
             prev_end = Some(stmt.location().end_offset());

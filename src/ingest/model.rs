@@ -68,7 +68,22 @@ pub fn ingest_model(
             let leading_blank = prev_end
                 .map(|pe| source_has_blank_line(source, pe, leading_area_start))
                 .unwrap_or(false);
-            let mut item = ingest_model_body_item(&stmt, &owner, file, leading)?;
+            // Survey mode: an unsupported *item* (an exotic scope form, a
+            // DSL shape the classifier rejects) costs itself, not the
+            // whole class — record the gap and keep walking, mirroring
+            // the expr-level recovery inside `ingest_expr`. Before this
+            // gate, one such item silently dropped the entire model
+            // (Mastodon lost `Status` to a single spelled-out scope
+            // lambda). Strict mode still aborts.
+            let mut item = match ingest_model_body_item(&stmt, &owner, file, leading) {
+                Ok(item) => item,
+                Err(err) if super::survey::is_active() => {
+                    super::survey::record(&err);
+                    prev_end = Some(stmt.location().end_offset());
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
             item.set_leading_blank_line(leading_blank);
             body.push(item);
             prev_end = Some(stmt.location().end_offset());
@@ -301,10 +316,20 @@ fn parse_scope(
     let name = Symbol::from(name_str.as_str());
 
     let Some(body_node) = iter.next() else { return Ok(None) };
-    let Some(lambda) = body_node.as_lambda_node() else {
+    // A scope body is a lambda in one of two spellings: the arrow form
+    // `->(x) { ... }` (a LambdaNode) or the spelled-out `lambda { |x| … }`
+    // / `proc { |x| … }` (a receiverless CallNode whose block carries the
+    // same parameters + body — Mastodon's multi-line scopes use this).
+    let (param_node, lambda_body) = if let Some(lambda) = body_node.as_lambda_node() {
+        (lambda.parameters(), lambda.body())
+    } else if let Some((params, body)) = spelled_lambda_parts(&body_node) {
+        (params, body)
+    } else {
         return Err(IngestError::Unsupported {
             file: file.into(),
-            message: format!("scope :{name} body must be a lambda (`-> {{ ... }}`)"),
+            message: format!(
+                "scope :{name} body must be a lambda (`-> {{ ... }}` or `lambda {{ ... }}`)"
+            ),
         });
     };
 
@@ -314,8 +339,7 @@ fn parse_scope(
     // parameter. Block/keyword/splat scope params are rare on real models
     // and fall through unrecorded.
     let mut params: Vec<crate::dialect::Param> = Vec::new();
-    if let Some(pn) = lambda
-        .parameters()
+    if let Some(pn) = param_node
         .and_then(|p| p.as_block_parameters_node().and_then(|bpn| bpn.parameters()))
     {
         for req in pn.requireds().iter() {
@@ -336,12 +360,31 @@ fn parse_scope(
         }
     }
 
-    let body = match lambda.body() {
+    let body = match lambda_body {
         Some(b) => ingest_expr(&b, file)?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };
 
     Ok(Some(Scope { name, params, body }))
+}
+
+/// `lambda { |x| … }` / `proc { |x| … }` — a receiverless call whose
+/// braces-block carries the parameters and body. Returns the same
+/// `(parameters, body)` pair a `LambdaNode` exposes so `parse_scope`
+/// treats both spellings identically. `None` for anything else
+/// (including block-pass `lambda(&blk)`, which has no BlockNode).
+fn spelled_lambda_parts<'a>(
+    node: &Node<'a>,
+) -> Option<(Option<Node<'a>>, Option<Node<'a>>)> {
+    let call = node.as_call_node()?;
+    if call.receiver().is_some() {
+        return None;
+    }
+    if !matches!(constant_id_str(&call.name()), "lambda" | "proc") {
+        return None;
+    }
+    let block = call.block()?.as_block_node()?;
+    Some((block.parameters(), block.body()))
 }
 
 fn parse_validates(call: &ruby_prism::CallNode<'_>) -> Vec<crate::dialect::Validation> {
