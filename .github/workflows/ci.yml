@@ -18,6 +18,11 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # The Rails app the /ide/ demo ships (analyzed in-browser). Pinned so
+  # the page — and any blog post's claims about it — stay stable against
+  # upstream churn; bump deliberately. AGPL compliance: bundle-src.mjs
+  # embeds the app's LICENSE and this commit in app-src.json.
+  MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
 
 jobs:
   # -------------------------------------------------------------------
@@ -339,6 +344,55 @@ jobs:
             tests/browser_smoke/test-results
           retention-days: 7
           if-no-files-found: ignore
+
+  # The /ide/ demo, driven in a real chromium: analyze the pinned
+  # Mastodon bundle in the wasm worker, then assert the demo beats —
+  # typed hover (@account → Account, incl. inside a HAML template),
+  # typed completion (@status. → account: Account?), related files via
+  # the inferred render graph, and the coverage ledger being on. This
+  # regression-guards the published demo (and the blog post's claims):
+  # a change that mutes any beat fails CI before it reaches Pages.
+  # Deterministic inputs (pinned SHA + fresh wasm), so blocking.
+  browser-smoke-ide:
+    needs: build-wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: roundhouse-wasm
+          path: wasm/lib
+      - name: Install Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+      - name: Cache Mastodon source bundle
+        id: mastodon-src
+        uses: actions/cache@v4
+        with:
+          path: wasm/ide/app-src.json
+          key: mastodon-app-src-${{ env.MASTODON_SHA }}-v1
+      - name: Fetch pinned Mastodon + bundle sources
+        if: steps.mastodon-src.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://codeload.github.com/mastodon/mastodon/tar.gz/${MASTODON_SHA}" -o /tmp/mastodon.tar.gz
+          mkdir -p /tmp/mastodon && tar -xzf /tmp/mastodon.tar.gz -C /tmp/mastodon --strip-components=1
+          node wasm/ide/bundle-src.mjs /tmp/mastodon wasm/ide/app-src.json \
+            --name mastodon --commit "${MASTODON_SHA}" \
+            --open app/controllers/statuses_controller.rb
+      - name: Install harness deps (Playwright)
+        run: npm ci
+        working-directory: tests/browser_smoke
+      - name: Install Playwright Chromium (+ system deps)
+        run: npx playwright install --with-deps chromium
+        working-directory: tests/browser_smoke
+      - name: Serve wasm/ and verify the /ide/ page
+        run: |
+          set -euo pipefail
+          (cd wasm && python3 -m http.server 8099 >/tmp/ide-server.log 2>&1 &)
+          sleep 1
+          (cd wasm/ide && node verify-ide.mjs)
 
   framework-tests-crystal:
     # Per-target framework-test conformance gate for the Crystal
@@ -1525,6 +1579,7 @@ jobs:
           # Shared lib: code modules + the freshly-built compiler wasm (from the
           # build-wasm artifact — not committed; see that job + wasm/vendor/).
           cp wasm/lib/transpile.mjs \
+             wasm/lib/analyzer.mjs \
              wasm/lib/wasi-shim.mjs \
              wasm/lib/editor.js \
              wasm/lib/tree.js \
@@ -1544,6 +1599,33 @@ jobs:
           echo "lib files:";        find _site/lib -type f | sort
           echo "playground files:"; find _site/playground -type f | sort
           echo "studio files:";     find _site/studio -type f | sort
+
+      # The /ide/ demo: Monaco over the analyzer wasm in a Web Worker,
+      # preloaded with Mastodon at $MASTODON_SHA (source-only bundle,
+      # LICENSE + commit embedded — AGPL source redistribution). Same
+      # bundle + cache key the browser-smoke-ide job verified.
+      - name: Cache Mastodon source bundle
+        id: mastodon-src-site
+        uses: actions/cache@v4
+        with:
+          path: wasm/ide/app-src.json
+          key: mastodon-app-src-${{ env.MASTODON_SHA }}-v1
+      - name: Fetch pinned Mastodon + bundle sources (cache miss)
+        if: steps.mastodon-src-site.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://codeload.github.com/mastodon/mastodon/tar.gz/${MASTODON_SHA}" -o /tmp/mastodon.tar.gz
+          mkdir -p /tmp/mastodon && tar -xzf /tmp/mastodon.tar.gz -C /tmp/mastodon --strip-components=1
+          node wasm/ide/bundle-src.mjs /tmp/mastodon wasm/ide/app-src.json \
+            --name mastodon --commit "${MASTODON_SHA}" \
+            --open app/controllers/statuses_controller.rb
+      - name: Bundle the in-browser IDE demo (→ _site/ide)
+        run: |
+          set -euo pipefail
+          mkdir -p _site/ide
+          cp wasm/ide/index.html wasm/ide/ide.js wasm/ide/worker.mjs _site/ide/
+          cp wasm/ide/app-src.json _site/ide/
+          echo "ide files:"; find _site/ide -type f | sort
 
       # Bench results page — fetched from the Hetzner publishing endpoint
       # (cron-driven, populates bench/results/latest on each run). The

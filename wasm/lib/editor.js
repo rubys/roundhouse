@@ -16,7 +16,9 @@ const LOAD_TIMEOUT_MS = 8000;
 // callers must share a single AMD-loader injection (a second loader.js
 // re-declares `_amdLoaderGlobal` and throws).
 let monacoPromise = null;
-function loadMonaco() {
+// Exported for surfaces (the /ide/ page) that build their own editor
+// wiring but must share the single AMD-loader injection.
+export function loadMonaco() {
   if (monacoPromise) return monacoPromise;
   monacoPromise = new Promise((resolve, reject) => {
     if (window.monaco) return resolve(window.monaco);
