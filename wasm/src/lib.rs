@@ -111,11 +111,6 @@ fn transpile_inner(json_in: &str) -> String {
 
     let mut analyzer = Analyzer::new(&app);
     analyzer.analyze(&mut app);
-    // Keep the member tables: transpile stashes the same last-good
-    // snapshot the query surface answers from (see below), so the
-    // playground/studio get completion as a free byproduct of the
-    // analysis they already run per edit.
-    let registry = analyzer.class_registry().clone();
 
     // Surface analyzer diagnostics, resolved to source positions. Synthetic
     // spans (no source site) are dropped — there's nowhere to put a marker.
@@ -219,8 +214,9 @@ fn transpile_inner(json_in: &str) -> String {
         serde_json::to_string(&out).unwrap_or_else(|e| error_json(&format!("serialize: {e}")));
     // Refresh the query snapshot last — every borrow of `app` above has
     // ended, and `complete`/`type_at` now answer against exactly the
-    // analysis this transpile ran.
-    LAST_GOOD.with(|l| *l.borrow_mut() = Some(Analysis { app, registry }));
+    // analysis this transpile ran. Transpile ingests strictly, so
+    // there are no survey gaps to carry.
+    LAST_GOOD.with(|l| *l.borrow_mut() = Some(Analysis { app, analyzer, gaps: Vec::new() }));
     json
 }
 
@@ -246,7 +242,12 @@ use std::cell::RefCell;
 
 struct Analysis {
     app: roundhouse::App,
-    registry: HashMap<roundhouse::ClassId, roundhouse::analyze::ClassInfo>,
+    /// The whole analyzer (registry + call-site-inferred params), kept
+    /// so traceroute's gap footer can pre-fill candidate signatures.
+    analyzer: Analyzer,
+    /// Survey-recovered ingest gaps from the same pass — the footer's
+    /// tool-coverage attribution input.
+    gaps: Vec<roundhouse::ingest::IngestError>,
 }
 
 thread_local! {
@@ -298,7 +299,6 @@ fn analyze_app_inner(json_in: &str) -> String {
     };
     let mut analyzer = Analyzer::new(&app);
     analyzer.analyze(&mut app);
-    let registry = analyzer.class_registry().clone();
 
     let mut diags = diagnose(&app);
     roundhouse::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &gaps);
@@ -345,13 +345,13 @@ fn analyze_app_inner(json_in: &str) -> String {
 
     let files: Vec<String> = app.sources.iter().map(|s| s.path.clone()).collect();
     let mut classes: Vec<String> =
-        registry.keys().map(|c| c.0.as_str().to_string()).collect();
+        analyzer.class_registry().keys().map(|c| c.0.as_str().to_string()).collect();
     classes.sort();
 
     let out = AnalyzeOutput { diagnostics, gaps: gaps_out, files, classes };
     let json =
         serde_json::to_string(&out).unwrap_or_else(|e| error_json(&format!("serialize: {e}")));
-    LAST_GOOD.with(|l| *l.borrow_mut() = Some(Analysis { app, registry }));
+    LAST_GOOD.with(|l| *l.borrow_mut() = Some(Analysis { app, analyzer, gaps }));
     json
 }
 
@@ -410,7 +410,7 @@ fn complete_inner(json_in: &str) -> String {
         };
         let pos = roundhouse::ide::Position { line: input.line, character: input.character };
         let offset = roundhouse::ide::position_to_offset(&input.text, pos) as usize;
-        let cands = roundhouse::ide::complete_at(&a.app, &a.registry, &input.path, &input.text, offset)
+        let cands = roundhouse::ide::complete_at(&a.app, a.analyzer.class_registry(), &input.path, &input.text, offset)
             .unwrap_or_default();
         let out: Vec<CandidateOut> = cands
             .into_iter()
@@ -540,6 +540,75 @@ fn related_files_inner(json_in: &str) -> String {
 pub unsafe extern "C" fn related_files(input_ptr: *const u8, input_len: u32) -> u64 {
     let input = unsafe { std::slice::from_raw_parts(input_ptr, input_len as usize) };
     pack(related_files_inner(std::str::from_utf8(input).unwrap_or("{}")))
+}
+
+
+// ── Traceroute (#63): the request chain + gap footer ─────────────────
+
+#[derive(Deserialize)]
+struct TracerouteInput {
+    query: String,
+}
+
+fn traceroute_inner(json_in: &str) -> String {
+    let input: TracerouteInput = match serde_json::from_str(json_in) {
+        Ok(v) => v,
+        Err(e) => return error_json(&format!("invalid input JSON: {e}")),
+    };
+    LAST_GOOD.with(|l| {
+        let borrow = l.borrow();
+        let Some(a) = borrow.as_ref() else {
+            return error_json("no analysis yet — call analyze_app first");
+        };
+        let Some(trace) = roundhouse::ide::traceroute(&a.app, &input.query) else {
+            return error_json(&format!(
+                "no trace for `{}` — not a known route or Controller#action",
+                input.query
+            ));
+        };
+        let report =
+            roundhouse::ide::trace_gap_report(&a.app, &trace, &a.gaps, Some(&a.analyzer));
+        // The identical wire shape the MCP tool returns — one query
+        // layer, one format, N skins.
+        serde_json::to_string(&roundhouse::ide::trace_json(&trace, &report))
+            .unwrap_or_else(|e| error_json(&format!("serialize: {e}")))
+    })
+}
+
+/// The full static request flow for `{"query": "Controller#action" |
+/// "[VERB ]/path"}` — hops, coverage triple, priced gap footer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn traceroute(input_ptr: *const u8, input_len: u32) -> u64 {
+    let input = unsafe { std::slice::from_raw_parts(input_ptr, input_len as usize) };
+    pack(traceroute_inner(std::str::from_utf8(input).unwrap_or("{}")))
+}
+
+#[derive(Serialize)]
+struct TraceTargetOut {
+    label: String,
+    query: String,
+    controller: String,
+}
+
+fn trace_targets_inner() -> String {
+    LAST_GOOD.with(|l| {
+        let borrow = l.borrow();
+        let Some(a) = borrow.as_ref() else {
+            return error_json("no analysis yet — call analyze_app first");
+        };
+        let out: Vec<TraceTargetOut> = roundhouse::ide::trace_targets(&a.app)
+            .into_iter()
+            .map(|t| TraceTargetOut { label: t.label, query: t.query, controller: t.controller })
+            .collect();
+        serde_json::to_string(&out).unwrap_or_else(|e| error_json(&format!("serialize: {e}")))
+    })
+}
+
+/// Everything traceroute can trace (routes + unrouted view-rendering
+/// actions), for the trace picker. Input is ignored.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn trace_targets(_input_ptr: *const u8, _input_len: u32) -> u64 {
+    pack(trace_targets_inner())
 }
 
 // ── C ABI exports ────────────────────────────────────────────────────

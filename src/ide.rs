@@ -1655,6 +1655,59 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
     })
 }
 
+
+/// One traceable entry point, for pickers: every concrete route plus
+/// every controller action whose convention template exists (real apps
+/// route through DSL our routes ingest doesn't fully model — Mastodon's
+/// `/@:username` — so route entries alone under-list what traces).
+/// `query` is the canonical `Controller#action` form [`traceroute`]
+/// accepts; `label` is the human line (route form when known).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraceTarget {
+    pub label: String,
+    pub query: String,
+    pub controller: String,
+}
+
+/// Enumerate everything [`traceroute`] can trace, deduped by query,
+/// routes first (in table order) then unrouted view-rendering actions.
+pub fn trace_targets(app: &App) -> Vec<TraceTarget> {
+    let mut out: Vec<TraceTarget> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for r in crate::lower::routes::flatten_routes(app) {
+        let query = format!("{}#{}", r.controller.0.as_str(), r.action.as_str());
+        if !seen.insert(query.clone()) {
+            continue;
+        }
+        out.push(TraceTarget {
+            label: format!("{} {} → {query}", verb_str(&r.method), r.path),
+            query,
+            controller: r.controller.0.as_str().to_string(),
+        });
+    }
+    let view_names: HashSet<&Symbol> = app.views.iter().map(|v| &v.name).collect();
+    for c in &app.controllers {
+        for a in c.actions() {
+            let Some(view) = crate::analyze::view_name_for_action(&c.name, a) else {
+                continue;
+            };
+            if !view_names.contains(&view) {
+                continue; // private helpers and non-rendering methods
+            }
+            let query = format!("{}#{}", c.name.0.as_str(), a.name.as_str());
+            if !seen.insert(query.clone()) {
+                continue;
+            }
+            out.push(TraceTarget {
+                label: query.clone(),
+                query,
+                controller: c.name.0.as_str().to_string(),
+            });
+        }
+    }
+    out
+}
+
 fn parse_verb(s: &str) -> Option<crate::dialect::HttpMethod> {
     use crate::dialect::HttpMethod::*;
     Some(match s.to_ascii_uppercase().as_str() {
@@ -2103,6 +2156,142 @@ fn method_def_param_names(
         }
     }
     None
+}
+
+use serde_json::json;
+
+/// Render a trace + its gap report as the structured JSON the #63
+/// design sketches: `route` / `hops` / `coverage` / `gaps`. Optional
+/// and empty fields are omitted, and hop order is the chain order.
+/// `pub` because the wasm /ide/ skin serializes the identical shape —
+/// one query layer, one wire format, N skins.
+pub fn trace_json(trace: &Trace, report: &TraceGapReport) -> serde_json::Value {
+    let hops: Vec<serde_json::Value> = trace.hops.iter().map(hop_json).collect();
+    let gaps: Vec<serde_json::Value> = report
+        .gaps
+        .iter()
+        .map(|g| {
+            let mut o = json!({
+                "kind": match g.kind {
+                    TraceGapKind::UntypedBoundary => "untyped_boundary",
+                    TraceGapKind::IngestGap => "ingest_gap",
+                },
+                "boundary": g.boundary,
+                "blocked_hops": g.blocked_hops,
+                "detail": g.detail,
+            });
+            if let Some(c) = &g.candidate_rbs {
+                let m = o.as_object_mut().unwrap();
+                m.insert("candidate_rbs".into(), json!(c));
+                m.insert("accept".into(), json!("write the signature to sig/<file>.rbs — it is read back on the next analysis"));
+            }
+            o
+        })
+        .collect();
+    json!({
+        "route": trace.route,
+        "controller": trace.controller,
+        "action": trace.action,
+        "hops": hops,
+        "coverage": {
+            "resolved_hops": report.resolved_hops,
+            "total_hops": report.total_hops,
+            "complete": report.complete(),
+        },
+        "gaps": gaps,
+    })
+}
+
+fn hop_json(hop: &TraceHop) -> serde_json::Value {
+    use TraceHop::*;
+    fn set(o: &mut serde_json::Value, key: &str, v: serde_json::Value) {
+        o.as_object_mut().unwrap().insert(key.into(), v);
+    }
+    fn set_loc(o: &mut serde_json::Value, file: &Option<String>, line: Option<u32>) {
+        if let Some(f) = file {
+            set(o, "file", json!(f));
+            if let Some(l) = line {
+                set(o, "line", json!(l));
+            }
+        }
+    }
+    fn assigns_json(assigns: &[(String, String)]) -> serde_json::Value {
+        let mut m = serde_json::Map::new();
+        for (k, v) in assigns {
+            m.insert(k.clone(), json!(v));
+        }
+        serde_json::Value::Object(m)
+    }
+    match hop {
+        Route { method, path, params } => {
+            let mut o = json!({ "kind": "route", "method": method, "path": path });
+            if !params.is_empty() {
+                set(&mut o, "binds", json!(params));
+            }
+            o
+        }
+        Filter(f) => {
+            let mut o = json!({
+                "kind": "filter",
+                "filter_kind": f.filter_kind,
+                "name": f.name,
+                "defined_in": f.defined_in,
+                "applies": f.applies,
+                "resolved": f.resolved,
+            });
+            if f.included_via != f.defined_in {
+                set(&mut o, "included_via", json!(f.included_via));
+            }
+            set_loc(&mut o, &f.file, f.line);
+            if let Some(c) = &f.condition {
+                set(&mut o, "condition", json!(c));
+            }
+            if !f.only.is_empty() {
+                set(&mut o, "only", json!(f.only));
+            }
+            if !f.except.is_empty() {
+                set(&mut o, "except", json!(f.except));
+            }
+            if let Some(sk) = &f.skipped_by {
+                set(&mut o, "skipped_by", json!(sk));
+            }
+            if !f.assigns.is_empty() {
+                set(&mut o, "assigns", assigns_json(&f.assigns));
+            }
+            if !f.effects.is_empty() {
+                set(&mut o, "effects", json!(f.effects));
+            }
+            o
+        }
+        Action { name, controller, file, line, formats, assigns, effects } => {
+            let mut o = json!({ "kind": "action", "name": name, "controller": controller });
+            set_loc(&mut o, file, *line);
+            if !formats.is_empty() {
+                set(&mut o, "formats", json!(formats));
+            }
+            if !assigns.is_empty() {
+                set(&mut o, "assigns", assigns_json(assigns));
+            }
+            if !effects.is_empty() {
+                set(&mut o, "effects", json!(effects));
+            }
+            o
+        }
+        Response { detail } => json!({ "kind": "response", "detail": detail }),
+        View { name, file, partials } => {
+            let mut o = json!({ "kind": "view", "name": name });
+            set_loc(&mut o, file, None);
+            if !partials.is_empty() {
+                set(&mut o, "partials", json!(partials));
+            }
+            o
+        }
+        Layout { name, file } => {
+            let mut o = json!({ "kind": "layout", "name": name });
+            set_loc(&mut o, file, None);
+            o
+        }
+    }
 }
 
 #[cfg(test)]

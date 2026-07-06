@@ -36,6 +36,10 @@ self.onmessage = async (e) => {
       result = analyzer.typeAt(args.path, args.line, args.character);
     } else if (op === "related") {
       result = analyzer.relatedFiles(args.path);
+    } else if (op === "traceroute") {
+      result = analyzer.traceroute(args.query);
+    } else if (op === "traceTargets") {
+      result = analyzer.traceTargets();
     } else {
       throw new Error(`unknown op: ${op}`);
     }

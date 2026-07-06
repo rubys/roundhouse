@@ -8,7 +8,9 @@
 //   3. completion: typing `@status.` yields typed candidates
 //      (account → Account?).
 //   4. related files: the controller relates to views + concerns.
-//   5. coverage: gaps list is non-empty (the ledger is on).
+//   5. traceroute: the request chain pins into the panel with the
+//      coverage footer (grouped hops, gap report).
+//   6. coverage: gaps list is non-empty (the ledger is on).
 //
 // Serve the PARENT (wasm/) as the web root (the page imports ../lib/):
 //   python3 -m http.server 8099    # run from wasm/
@@ -79,7 +81,29 @@ if (MASTODON) {
     kinds.has("view") && kinds.has("concern"),
     (rel || []).slice(0, 5).map((r) => `${r.kind}:${r.label}`).join(", "));
 
-  // 5. open a HAML view and confirm hover works inside the template.
+  // 5. traceroute: the request chain + gap footer land in the panel.
+  const tr = await page.evaluate(async () => {
+    await window.__ide.runTrace("StatusesController#show");
+    const t = window.__ide.trace;
+    return t && {
+      route: t.route,
+      hops: t.hops.length,
+      coverage: t.coverage,
+      gapKinds: t.gaps.map((g) => g.kind),
+      panelOpen: document.getElementById("trace").classList.contains("open"),
+      groupCount: document.querySelectorAll("#trace .tgroup").length,
+      footText: document.getElementById("traceFoot").textContent,
+    };
+  });
+  check("traceroute chains the request",
+    tr && tr.hops > 10 && tr.coverage.total_hops > 10 &&
+      tr.coverage.resolved_hops >= tr.coverage.total_hops - 2,
+    tr && `${tr.hops} hops, ${tr.coverage.resolved_hops}/${tr.coverage.total_hops} resolved`);
+  check("trace panel renders grouped hops + footer",
+    tr && tr.panelOpen && tr.groupCount >= 3 && /gap|complete/.test(tr.footText),
+    tr && `${tr.groupCount} groups, foot: ${tr.footText.slice(0, 60)}`);
+
+  // 6. open a HAML view and confirm hover works inside the template.
   const hamlType = await page.evaluate(async () => {
     const haml = "app/views/statuses/show.html.haml";
     const text = window.__ide.srcMap[haml];

@@ -54,6 +54,17 @@ export async function loadAnalyzer(wasmBytes, wasiOpts = {}) {
     relatedFiles(path) {
       return call("related_files", { path });
     },
+    // "Controller#action" or "[VERB ]/path" → the full request chain
+    // (hops + coverage + gap footer), the same JSON the MCP tool
+    // returns. {error} when the query names nothing known.
+    traceroute(query) {
+      return call("traceroute", { query });
+    },
+    // Everything traceroute can trace (routes + unrouted
+    // view-rendering actions), for pickers.
+    traceTargets() {
+      return call("trace_targets", {});
+    },
   };
 }
 

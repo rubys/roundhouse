@@ -43,6 +43,61 @@
     #tree button.active { background: #094771; color: #fff; }
     #tree .tw { display: inline-block; width: 1em; color: #888; }
     #editorWrap { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    /* ── trace panel (right column; hidden until a trace is pinned) ── */
+    #trace {
+      width: 400px; flex: none; display: none; flex-direction: column;
+      background: #252526; border-left: 1px solid #333; min-height: 0;
+    }
+    #trace.open { display: flex; }
+    #traceHead {
+      flex: none; display: flex; align-items: baseline; gap: 8px;
+      padding: 6px 10px; border-bottom: 1px solid #333;
+      font-family: ui-monospace, monospace; font-size: 12px; color: #e8e8e8;
+    }
+    #traceHead .route { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #traceHead button {
+      background: none; border: none; color: #888; cursor: pointer; font: inherit;
+    }
+    #traceHead button:hover { color: #fff; }
+    #traceHops { flex: 1; overflow: auto; padding: 4px 0; font-family: ui-monospace, monospace; font-size: 12px; }
+    .thop, .tgroup {
+      display: block; width: 100%; text-align: left; background: none; border: none;
+      color: #ccc; font: inherit; cursor: pointer; padding: 2px 10px; border-radius: 0;
+    }
+    .thop:hover, .tgroup:hover { background: #2e2e30; }
+    .thop.current { background: #094771; color: #fff; }
+    .thop .kind, .tgroup .kind {
+      display: inline-block; min-width: 52px; color: #888; font-size: 11px;
+    }
+    .thop .src, .tgroup .src { color: #7a7a7a; font-size: 11px; margin-left: 6px; }
+    .thop .meta { color: #9a8a5a; font-size: 11px; margin-left: 6px; }
+    .thop .assign, .tgroup .assign { color: #6a9955; font-size: 11px; margin-left: 6px; }
+    .thop .fx { color: #c586c0; font-size: 11px; margin-left: 4px; }
+    .thop.off { color: #666; }
+    .thop.off .name { text-decoration: line-through; }
+    .thop.unresolved .name::after { content: " ⋯"; color: #d7ba7d; }
+    .tgroup .tw { display: inline-block; width: 1em; color: #888; }
+    .tgroup .badge { color: #d7ba7d; font-size: 11px; margin-left: 6px; }
+    .tgroup .count { color: #888; font-size: 11px; margin-left: 6px; }
+    .tsub { padding-left: 14px; }
+    #traceFoot {
+      flex: none; border-top: 1px solid #333; padding: 6px 10px; max-height: 40%;
+      overflow: auto; font-family: ui-monospace, monospace; font-size: 11.5px;
+    }
+    #traceFoot .complete { color: #6a9955; }
+    #traceFoot .summary { color: #d7ba7d; margin-bottom: 4px; }
+    #traceFoot .gap { margin: 4px 0; color: #bbb; }
+    #traceFoot .gap .tag { color: #888; margin-right: 6px; }
+    #traceFoot .gap.ours { color: #8a8a8a; }
+    #traceFoot pre {
+      margin: 3px 0 2px; padding: 4px 6px; background: #1e1e1e; border-radius: 4px;
+      overflow-x: auto; color: #9cdcfe;
+    }
+    #traceFoot button {
+      background: #333; color: #ccc; border: 1px solid #444; border-radius: 3px;
+      padding: 1px 8px; font: inherit; font-size: 11px; cursor: pointer;
+    }
+    #traceFoot button:hover { background: #3c3c3c; }
     #editorHead {
       flex: none; padding: 4px 12px; background: #2d2d30; color: #bbb;
       border-bottom: 1px solid #333; font-family: ui-monospace, monospace; font-size: 12px;
@@ -75,6 +130,7 @@
     <span class="sub">whole-program Rails inference, in your browser — nothing runs on a server</span>
     <button id="btnOpen" title="⌘P">open…</button>
     <button id="btnRelated" title="⌘⇧R">related</button>
+    <button id="btnTrace" title="⌘⇧T">trace</button>
     <button id="btnGaps">coverage</button>
     <span id="status">booting…</span>
     <span id="counts"></span>
@@ -85,6 +141,14 @@
       <div id="editorHead">—</div>
       <div id="editor"></div>
     </section>
+    <aside id="trace">
+      <div id="traceHead">
+        <span class="route" id="traceRoute"></span>
+        <button id="traceClose" title="close">×</button>
+      </div>
+      <div id="traceHops"></div>
+      <div id="traceFoot"></div>
+    </aside>
   </main>
   <div id="picker">
     <input id="pickerInput" placeholder="file…" />

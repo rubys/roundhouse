@@ -304,7 +304,7 @@ impl Server {
             ));
         };
         let report = ide::trace_gap_report(&app, &trace, &gaps, Some(&analyzer));
-        serde_json::to_string_pretty(&trace_json(&trace, &report)).map_err(|e| e.to_string())
+        serde_json::to_string_pretty(&ide::trace_json(&trace, &report)).map_err(|e| e.to_string())
     }
 
     fn tool_wont_lower(&self, args: &Value) -> Result<String, String> {
@@ -365,139 +365,6 @@ fn err(id: Value, code: i64, message: String) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
-
-/// Render a trace + its gap report as the structured JSON the #63
-/// design sketches: `route` / `hops` / `coverage` / `gaps`. Optional
-/// and empty fields are omitted, and hop order is the chain order —
-/// the same record the /ide/ panel renders.
-fn trace_json(trace: &ide::Trace, report: &ide::TraceGapReport) -> Value {
-    let hops: Vec<Value> = trace.hops.iter().map(hop_json).collect();
-    let gaps: Vec<Value> = report
-        .gaps
-        .iter()
-        .map(|g| {
-            let mut o = json!({
-                "kind": match g.kind {
-                    ide::TraceGapKind::UntypedBoundary => "untyped_boundary",
-                    ide::TraceGapKind::IngestGap => "ingest_gap",
-                },
-                "boundary": g.boundary,
-                "blocked_hops": g.blocked_hops,
-                "detail": g.detail,
-            });
-            if let Some(c) = &g.candidate_rbs {
-                let m = o.as_object_mut().unwrap();
-                m.insert("candidate_rbs".into(), json!(c));
-                m.insert("accept".into(), json!("write the signature to sig/<file>.rbs — it is read back on the next analysis"));
-            }
-            o
-        })
-        .collect();
-    json!({
-        "route": trace.route,
-        "controller": trace.controller,
-        "action": trace.action,
-        "hops": hops,
-        "coverage": {
-            "resolved_hops": report.resolved_hops,
-            "total_hops": report.total_hops,
-            "complete": report.complete(),
-        },
-        "gaps": gaps,
-    })
-}
-
-fn hop_json(hop: &ide::TraceHop) -> Value {
-    use ide::TraceHop::*;
-    fn set(o: &mut Value, key: &str, v: Value) {
-        o.as_object_mut().unwrap().insert(key.into(), v);
-    }
-    fn set_loc(o: &mut Value, file: &Option<String>, line: Option<u32>) {
-        if let Some(f) = file {
-            set(o, "file", json!(f));
-            if let Some(l) = line {
-                set(o, "line", json!(l));
-            }
-        }
-    }
-    fn assigns_json(assigns: &[(String, String)]) -> Value {
-        let mut m = serde_json::Map::new();
-        for (k, v) in assigns {
-            m.insert(k.clone(), json!(v));
-        }
-        Value::Object(m)
-    }
-    match hop {
-        Route { method, path, params } => {
-            let mut o = json!({ "kind": "route", "method": method, "path": path });
-            if !params.is_empty() {
-                set(&mut o, "binds", json!(params));
-            }
-            o
-        }
-        Filter(f) => {
-            let mut o = json!({
-                "kind": "filter",
-                "filter_kind": f.filter_kind,
-                "name": f.name,
-                "defined_in": f.defined_in,
-                "applies": f.applies,
-                "resolved": f.resolved,
-            });
-            if f.included_via != f.defined_in {
-                set(&mut o, "included_via", json!(f.included_via));
-            }
-            set_loc(&mut o, &f.file, f.line);
-            if let Some(c) = &f.condition {
-                set(&mut o, "condition", json!(c));
-            }
-            if !f.only.is_empty() {
-                set(&mut o, "only", json!(f.only));
-            }
-            if !f.except.is_empty() {
-                set(&mut o, "except", json!(f.except));
-            }
-            if let Some(sk) = &f.skipped_by {
-                set(&mut o, "skipped_by", json!(sk));
-            }
-            if !f.assigns.is_empty() {
-                set(&mut o, "assigns", assigns_json(&f.assigns));
-            }
-            if !f.effects.is_empty() {
-                set(&mut o, "effects", json!(f.effects));
-            }
-            o
-        }
-        Action { name, controller, file, line, formats, assigns, effects } => {
-            let mut o = json!({ "kind": "action", "name": name, "controller": controller });
-            set_loc(&mut o, file, *line);
-            if !formats.is_empty() {
-                set(&mut o, "formats", json!(formats));
-            }
-            if !assigns.is_empty() {
-                set(&mut o, "assigns", assigns_json(assigns));
-            }
-            if !effects.is_empty() {
-                set(&mut o, "effects", json!(effects));
-            }
-            o
-        }
-        Response { detail } => json!({ "kind": "response", "detail": detail }),
-        View { name, file, partials } => {
-            let mut o = json!({ "kind": "view", "name": name });
-            set_loc(&mut o, file, None);
-            if !partials.is_empty() {
-                set(&mut o, "partials", json!(partials));
-            }
-            o
-        }
-        Layout { name, file } => {
-            let mut o = json!({ "kind": "layout", "name": name });
-            set_loc(&mut o, file, None);
-            o
-        }
-    }
-}
 
 fn tools_list() -> Value {
     let position_schema = json!({
