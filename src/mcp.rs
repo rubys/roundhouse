@@ -129,6 +129,7 @@ impl Server {
             "can_be_nil" => self.tool_can_be_nil(&args),
             "references" => self.tool_references(&args),
             "diagnostics" => self.tool_diagnostics(&args),
+            "traceroute" => self.tool_traceroute(&args),
             "wont_lower" => self.tool_wont_lower(&args),
             other => Err(format!("unknown tool: {other}")),
         };
@@ -152,18 +153,19 @@ impl Server {
     /// making the server useless on any app larger than the demo fixture.
     /// Returns the recovered gaps so `diagnostics` can report the coverage
     /// hole rather than implying a clean bill of health.
-    fn analyze(&self) -> Result<(App, Vec<Diagnostic>, Vec<IngestError>), String> {
+    fn analyze(&self) -> Result<(App, Vec<Diagnostic>, Vec<IngestError>, Analyzer), String> {
         survey::activate();
         let (result, parse_diags) =
             crate::ingest::prism::scope(|| ingest_app(&self.root));
         let gaps = survey::drain();
         let mut app = result.map_err(|e| format!("ingest failed: {e}"))?;
-        Analyzer::new(&app).analyze(&mut app);
-        Ok((app, parse_diags, gaps))
+        let mut analyzer = Analyzer::new(&app);
+        analyzer.analyze(&mut app);
+        Ok((app, parse_diags, gaps, analyzer))
     }
 
     fn tool_type_at(&self, args: &Value) -> Result<String, String> {
-        let (app, _, _) = self.analyze()?;
+        let (app, _, _, _) = self.analyze()?;
         let (path, pos) = position_args(args)?;
         match ide::type_at_position(&app, &path, pos) {
             Some(info) => Ok(format!(
@@ -177,7 +179,7 @@ impl Server {
     }
 
     fn tool_can_be_nil(&self, args: &Value) -> Result<String, String> {
-        let (app, _, _) = self.analyze()?;
+        let (app, _, _, _) = self.analyze()?;
         let (path, pos) = position_args(args)?;
         match ide::type_at_position(&app, &path, pos) {
             // Three-valued on purpose: an untyped/unresolved position is
@@ -197,7 +199,7 @@ impl Server {
     }
 
     fn tool_references(&self, args: &Value) -> Result<String, String> {
-        let (app, _, _) = self.analyze()?;
+        let (app, _, _, _) = self.analyze()?;
         let (path, pos) = position_args(args)?;
         let file = ide::file_id(&app, &path).ok_or_else(|| format!("unknown file: {path}"))?;
         let src = ide::source(&app, file).ok_or("no source for file")?;
@@ -230,7 +232,7 @@ impl Server {
 
     fn tool_diagnostics(&self, args: &Value) -> Result<String, String> {
         let path_filter = args.get("path").and_then(|v| v.as_str());
-        let (app, parse_diags, gaps) = self.analyze()?;
+        let (app, parse_diags, gaps, _) = self.analyze()?;
         let mut diags = diagnose(&app);
         // Diagnostics shadowing a recorded ingest gap become `note[...]`
         // lines naming the gap — an agent reading this output must be able
@@ -285,6 +287,26 @@ impl Server {
         }
     }
 
+
+    /// The request chain + coverage footer as structured JSON — the
+    /// machine twin of the /ide/ trace panel (#63). One
+    /// `ide::traceroute` + `ide::trace_gap_report` call rendered with
+    /// empty fields omitted so an agent reads exactly what's there.
+    fn tool_traceroute(&self, args: &Value) -> Result<String, String> {
+        let query = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .ok_or("missing `query` — pass \"Controller#action\" or \"[VERB ]/path\"")?;
+        let (app, _, gaps, analyzer) = self.analyze()?;
+        let Some(trace) = ide::traceroute(&app, query) else {
+            return Ok(format!(
+                "No trace for `{query}` — not a known route or Controller#action."
+            ));
+        };
+        let report = ide::trace_gap_report(&app, &trace, &gaps, Some(&analyzer));
+        serde_json::to_string_pretty(&trace_json(&trace, &report)).map_err(|e| e.to_string())
+    }
+
     fn tool_wont_lower(&self, args: &Value) -> Result<String, String> {
         let target_str = args.get("target").and_then(|v| v.as_str()).ok_or("missing `target`")?;
         let target = BuildTarget::from_str(target_str)
@@ -292,7 +314,7 @@ impl Server {
             .ok_or_else(|| {
                 format!("unknown transpile target `{target_str}`; valid: {}", transpile_target_names())
             })?;
-        let (app, _, _) = self.analyze()?;
+        let (app, _, _, _) = self.analyze()?;
 
         // Run lower+emit for the target inside the emit-diagnostic scope so
         // every unsupported-construct gap is collected (issue #28's sink).
@@ -343,6 +365,140 @@ fn err(id: Value, code: i64, message: String) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
+
+/// Render a trace + its gap report as the structured JSON the #63
+/// design sketches: `route` / `hops` / `coverage` / `gaps`. Optional
+/// and empty fields are omitted, and hop order is the chain order —
+/// the same record the /ide/ panel renders.
+fn trace_json(trace: &ide::Trace, report: &ide::TraceGapReport) -> Value {
+    let hops: Vec<Value> = trace.hops.iter().map(hop_json).collect();
+    let gaps: Vec<Value> = report
+        .gaps
+        .iter()
+        .map(|g| {
+            let mut o = json!({
+                "kind": match g.kind {
+                    ide::TraceGapKind::UntypedBoundary => "untyped_boundary",
+                    ide::TraceGapKind::IngestGap => "ingest_gap",
+                },
+                "boundary": g.boundary,
+                "blocked_hops": g.blocked_hops,
+                "detail": g.detail,
+            });
+            if let Some(c) = &g.candidate_rbs {
+                let m = o.as_object_mut().unwrap();
+                m.insert("candidate_rbs".into(), json!(c));
+                m.insert("accept".into(), json!("write the signature to sig/<file>.rbs — it is read back on the next analysis"));
+            }
+            o
+        })
+        .collect();
+    json!({
+        "route": trace.route,
+        "controller": trace.controller,
+        "action": trace.action,
+        "hops": hops,
+        "coverage": {
+            "resolved_hops": report.resolved_hops,
+            "total_hops": report.total_hops,
+            "complete": report.complete(),
+        },
+        "gaps": gaps,
+    })
+}
+
+fn hop_json(hop: &ide::TraceHop) -> Value {
+    use ide::TraceHop::*;
+    fn set(o: &mut Value, key: &str, v: Value) {
+        o.as_object_mut().unwrap().insert(key.into(), v);
+    }
+    fn set_loc(o: &mut Value, file: &Option<String>, line: Option<u32>) {
+        if let Some(f) = file {
+            set(o, "file", json!(f));
+            if let Some(l) = line {
+                set(o, "line", json!(l));
+            }
+        }
+    }
+    fn assigns_json(assigns: &[(String, String)]) -> Value {
+        let mut m = serde_json::Map::new();
+        for (k, v) in assigns {
+            m.insert(k.clone(), json!(v));
+        }
+        Value::Object(m)
+    }
+    match hop {
+        Route { method, path, params } => {
+            let mut o = json!({ "kind": "route", "method": method, "path": path });
+            if !params.is_empty() {
+                set(&mut o, "binds", json!(params));
+            }
+            o
+        }
+        Filter(f) => {
+            let mut o = json!({
+                "kind": "filter",
+                "filter_kind": f.filter_kind,
+                "name": f.name,
+                "defined_in": f.defined_in,
+                "applies": f.applies,
+                "resolved": f.resolved,
+            });
+            if f.included_via != f.defined_in {
+                set(&mut o, "included_via", json!(f.included_via));
+            }
+            set_loc(&mut o, &f.file, f.line);
+            if let Some(c) = &f.condition {
+                set(&mut o, "condition", json!(c));
+            }
+            if !f.only.is_empty() {
+                set(&mut o, "only", json!(f.only));
+            }
+            if !f.except.is_empty() {
+                set(&mut o, "except", json!(f.except));
+            }
+            if let Some(sk) = &f.skipped_by {
+                set(&mut o, "skipped_by", json!(sk));
+            }
+            if !f.assigns.is_empty() {
+                set(&mut o, "assigns", assigns_json(&f.assigns));
+            }
+            if !f.effects.is_empty() {
+                set(&mut o, "effects", json!(f.effects));
+            }
+            o
+        }
+        Action { name, controller, file, line, formats, assigns, effects } => {
+            let mut o = json!({ "kind": "action", "name": name, "controller": controller });
+            set_loc(&mut o, file, *line);
+            if !formats.is_empty() {
+                set(&mut o, "formats", json!(formats));
+            }
+            if !assigns.is_empty() {
+                set(&mut o, "assigns", assigns_json(assigns));
+            }
+            if !effects.is_empty() {
+                set(&mut o, "effects", json!(effects));
+            }
+            o
+        }
+        Response { detail } => json!({ "kind": "response", "detail": detail }),
+        View { name, file, partials } => {
+            let mut o = json!({ "kind": "view", "name": name });
+            set_loc(&mut o, file, None);
+            if !partials.is_empty() {
+                set(&mut o, "partials", json!(partials));
+            }
+            o
+        }
+        Layout { name, file } => {
+            let mut o = json!({ "kind": "layout", "name": name });
+            set_loc(&mut o, file, None);
+            o
+        }
+    }
+}
+
 fn tools_list() -> Value {
     let position_schema = json!({
         "type": "object",
@@ -378,6 +534,17 @@ fn tools_list() -> Value {
                     "properties": {
                         "path": { "type": "string", "description": "Optional: limit to this file." }
                     }
+                },
+            },
+            {
+                "name": "traceroute",
+                "description": "The full static request flow for a route or Controller#action, as JSON: ordered hops (route match; every before/around/after filter with its defining class or concern, only:/except:/if: gating, skip application, typed ivar assigns, DB effects, file:line; the action; the view with its partials; the layout) plus a coverage report — how many hops resolved and what blocks the rest, split between untyped gem/framework boundaries (with an inferred candidate RBS signature to accept when available) and roundhouse's own ingest gaps. Statically derived; no app boot.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "\"Controller#action\" (StatusesController#show) or \"[VERB ]/path\" (GET /articles/:id)." }
+                    },
+                    "required": ["query"]
                 },
             },
             {
@@ -427,6 +594,39 @@ mod tests {
         assert!(resp["result"]["capabilities"]["tools"].is_object());
     }
 
+
+    #[test]
+    fn traceroute_returns_the_structured_chain_with_coverage() {
+        let resp = call(
+            &server(),
+            "traceroute",
+            json!({ "query": "ArticlesController#edit" }),
+        );
+        let text = text_of(&resp);
+        let v: Value = serde_json::from_str(&text).expect("tool returns JSON");
+        assert_eq!(v["route"], "GET /articles/:id/edit → ArticlesController#edit");
+        let hops = v["hops"].as_array().expect("hops array");
+        assert_eq!(hops[0]["kind"], "route");
+        let filter = hops
+            .iter()
+            .find(|h| h["kind"] == "filter" && h["name"] == "set_article")
+            .expect("set_article hop");
+        assert_eq!(filter["applies"], true);
+        assert_eq!(filter["resolved"], true);
+        assert_eq!(filter["assigns"]["@article"], "Article");
+        assert!(hops.iter().any(|h| h["kind"] == "view" && h["name"] == "articles/edit"));
+        assert!(hops.iter().any(|h| h["kind"] == "layout"));
+        // real-blog resolves clean: the coverage triple is the positive claim.
+        assert_eq!(v["coverage"]["complete"], true);
+        assert_eq!(v["gaps"].as_array().map(|g| g.len()), Some(0));
+    }
+
+    #[test]
+    fn traceroute_misses_politely() {
+        let resp = call(&server(), "traceroute", json!({ "query": "NopeController#zap" }));
+        assert!(text_of(&resp).starts_with("No trace for"));
+    }
+
     #[test]
     fn tools_list_advertises_every_tool() {
         let msg = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
@@ -437,7 +637,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        for tool in ["type_at", "can_be_nil", "references", "diagnostics", "wont_lower"] {
+        for tool in ["type_at", "can_be_nil", "references", "diagnostics", "traceroute", "wont_lower"] {
             assert!(names.contains(&tool), "missing tool {tool}");
         }
     }
