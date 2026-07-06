@@ -201,6 +201,9 @@ fn diagnostic_signature(d: &roundhouse::analyze::Diagnostic) -> (String, String)
             ),
         ),
         DiagnosticKind::Parse { message } => ("Parse".into(), message.clone()),
+        DiagnosticKind::MissingPreload { association, .. } => {
+            ("MissingPreload".into(), format!(":{}", association.as_str()))
+        }
     }
 }
 
