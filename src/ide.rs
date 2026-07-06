@@ -1368,6 +1368,11 @@ pub struct FilterHop {
     pub included_via: String,
     pub file: Option<String>,
     pub line: Option<u32>,
+    /// Whether the target method's body is in the IR. `false` marks a
+    /// dispatch boundary — gem/framework-defined (Devise's
+    /// `authenticate_user!`) or lost to an ingest gap; the gap footer
+    /// ([`trace_gap_report`]) attributes which.
+    pub resolved: bool,
     /// Guard as written: `if: :account_required?` /
     /// `unless: :limited_federation_mode?` (both, comma-joined, when
     /// both present). Runtime predicates the static chain can't
@@ -1445,6 +1450,55 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
         }
     }
 
+    // Lookup surface for filter targets: a filter declared in one
+    // class routinely names a method defined in another (a child
+    // declares `before_action :require_login`, ApplicationController
+    // defines it; a concern's `included do` names a method another
+    // concern provides). Search the declaring class first, then every
+    // class on the chain, then the ancestor walk with each ancestor's
+    // own includes.
+    let target_search: Vec<ClassId> = {
+        let mut out: Vec<ClassId> = Vec::new();
+        let mut push = |id: &ClassId, out: &mut Vec<ClassId>| {
+            if !out.contains(id) {
+                out.push(id.clone());
+            }
+        };
+        for rf in &resolution.filter_chain {
+            push(&rf.defined_in, &mut out);
+            push(&rf.included_via, &mut out);
+        }
+        let mut cur = Some(controller);
+        let mut guard = 0;
+        while let Some(c) = cur {
+            push(&c.name, &mut out);
+            for inc in crate::analyze::controller_includes(c) {
+                push(&inc, &mut out);
+            }
+            guard += 1;
+            if guard > 32 {
+                break;
+            }
+            cur = parent_of(app, c);
+        }
+        // Close over concern-includes-concern (SignatureAuthentication
+        // includes SignatureVerification, which defines the method a
+        // controller's filter names) — mirror analyze's mixed_in
+        // closure.
+        let mut qi = 0;
+        while qi < out.len() {
+            let m = out[qi].clone();
+            qi += 1;
+            let Some(lc) = app.library_classes.iter().find(|lc| lc.name == m) else {
+                continue;
+            };
+            for inc in &lc.includes {
+                push(inc, &mut out);
+            }
+        }
+        out
+    };
+
     for rf in &resolution.filter_chain {
         use crate::dialect::FilterKind;
         let kind = match rf.filter.kind {
@@ -1458,7 +1512,16 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
         let skipped_by = (matches!(rf.filter.kind, FilterKind::Before) && gated_in)
             .then(|| skips.get(&rf.filter.target).cloned())
             .flatten();
-        let (file, line) = method_location(app, &rf.defined_in, &rf.filter.target);
+        let target_body = method_body(app, &rf.defined_in, &rf.filter.target).or_else(|| {
+            target_search
+                .iter()
+                .find_map(|c| method_body(app, c, &rf.filter.target))
+        });
+        let resolved = target_body.is_some();
+        let (file, line) = match target_body {
+            Some(body) => expr_location(app, body),
+            None => (None, None),
+        };
         let condition = match (&rf.filter.if_cond, &rf.filter.unless_cond) {
             (None, None) => None,
             (i, u) => Some(
@@ -1479,6 +1542,7 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
             included_via: rf.included_via.0.as_str().to_string(),
             file,
             line,
+            resolved,
             condition,
             only: rf.filter.only.iter().map(|s| s.as_str().to_string()).collect(),
             except: rf.filter.except.iter().map(|s| s.as_str().to_string()).collect(),
@@ -1642,46 +1706,51 @@ fn find_action<'a>(
         if guard > 32 {
             return None;
         }
-        let parent = current.parent.as_ref()?;
-        let next = find_controller(app, parent).or_else(|| {
-            if parent.0.as_str().contains("::") {
-                return None;
-            }
-            let mut segs: Vec<&str> = current.name.0.as_str().split("::").collect();
-            segs.pop();
-            while !segs.is_empty() {
-                let candidate =
-                    ClassId(Symbol::from(format!("{}::{}", segs.join("::"), parent.0.as_str())));
-                if let Some(c) = find_controller(app, &candidate) {
-                    return Some(c);
-                }
-                segs.pop();
-            }
-            None
-        })?;
-        current = next;
+        current = parent_of(app, current)?;
     }
 }
 
-/// Resolve `class_id#method` to its source file + 1-based line, via
-/// the method body's first real span. Checks controllers first (all
-/// method defs are `Action` items), then concern/library modules.
-fn method_location(
-    app: &App,
-    class_id: &ClassId,
-    method: &Symbol,
-) -> (Option<String>, Option<u32>) {
+/// The parent controller, resolving single-segment parents against the
+/// child's namespace (mirrors analyze's lexical resolution).
+fn parent_of<'a>(
+    app: &'a App,
+    controller: &'a crate::dialect::Controller,
+) -> Option<&'a crate::dialect::Controller> {
+    let parent = controller.parent.as_ref()?;
+    find_controller(app, parent).or_else(|| {
+        if parent.0.as_str().contains("::") {
+            return None;
+        }
+        let mut segs: Vec<&str> = controller.name.0.as_str().split("::").collect();
+        segs.pop();
+        while !segs.is_empty() {
+            let candidate =
+                ClassId(Symbol::from(format!("{}::{}", segs.join("::"), parent.0.as_str())));
+            if let Some(c) = find_controller(app, &candidate) {
+                return Some(c);
+            }
+            segs.pop();
+        }
+        None
+    })
+}
+
+/// The IR body of `class_id#method`, if ingested — controllers keep
+/// every method def as an `Action` item; concern/library modules as
+/// `MethodDef`s. `None` is the dispatch-boundary signal the gap
+/// footer attributes.
+fn method_body<'a>(app: &'a App, class_id: &ClassId, method: &Symbol) -> Option<&'a Expr> {
     if let Some(c) = find_controller(app, class_id) {
         if let Some(a) = c.actions().find(|a| &a.name == method) {
-            return expr_location(app, &a.body);
+            return Some(&a.body);
         }
     }
     if let Some(lc) = app.library_classes.iter().find(|lc| &lc.name == class_id) {
         if let Some(m) = lc.methods.iter().find(|m| &m.name == method) {
-            return expr_location(app, &m.body);
+            return Some(&m.body);
         }
     }
-    (None, None)
+    None
 }
 
 fn expr_location(app: &App, body: &Expr) -> (Option<String>, Option<u32>) {
@@ -1738,6 +1807,302 @@ fn render_effect(e: &crate::effect::Effect) -> String {
         Log => "Log".to_string(),
         Var { .. } => "?".to_string(),
     }
+}
+
+// ── Trace gap footer (#63): priced, attributed, pre-filled ───────────
+//
+// The honesty layer over a [`Trace`]: which hops the analysis could
+// not see through, split by whose problem each one is. Two kinds,
+// deliberately kept visually separable by consumers:
+//
+//   - `UntypedBoundary` — user-actionable: a dispatch boundary an RBS
+//     sidecar pins (gem/framework methods like Devise's
+//     `authenticate_user!`, or app methods whose types went soft).
+//     When the analyzer holds an inferred signature, it rides along
+//     pre-filled (`candidate_rbs`) — accepting it is one file write.
+//   - `IngestGap` — tool coverage, not the user's code: the boundary
+//     traces to a construct our ingest recorded as unsupported.
+//
+// An empty report with all hops resolved is itself the product claim
+// ("trace complete — all N hops resolved"): the skins render it
+// affirmatively so "nothing to report" is distinguishable from
+// "couldn't look".
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TraceGapKind {
+    /// User-actionable: an RBS signature closes it.
+    UntypedBoundary,
+    /// Ours: an ingest gap swallowed the definition. Never phrased as
+    /// a user ask.
+    IngestGap,
+}
+
+#[derive(Clone, Debug)]
+pub struct TraceGap {
+    pub kind: TraceGapKind,
+    /// What went soft: `Class#method` for boundaries, a source path
+    /// for ingest gaps.
+    pub boundary: String,
+    /// One human sentence (the footer line).
+    pub detail: String,
+    /// How many of this trace's applicable hops the gap blocks — the
+    /// price tag that sorts the footer.
+    pub blocked_hops: usize,
+    /// Pre-filled inferred signature (RBS `def` line) when the
+    /// analyzer knows one — the accept action. `None` when nothing
+    /// honest can be offered (an unresolved gem method the analyzer
+    /// never saw).
+    pub candidate_rbs: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TraceGapReport {
+    /// Leverage-sorted: user-actionable boundaries first (by hops
+    /// blocked), then tool-coverage entries.
+    pub gaps: Vec<TraceGap>,
+    /// Applicable hops (running filters + the action) whose bodies
+    /// the analysis saw.
+    pub resolved_hops: usize,
+    pub total_hops: usize,
+}
+
+impl TraceGapReport {
+    /// The positive completeness claim: every applicable hop resolved
+    /// and nothing in the footer.
+    pub fn complete(&self) -> bool {
+        self.gaps.is_empty() && self.resolved_hops == self.total_hops
+    }
+}
+
+/// Build the gap footer for `trace`. `ingest_gaps` is the survey
+/// collector's output for this app (empty in strict-mode runs — the
+/// same contract as [`crate::analyze::attribution`]); `analyzer`, when
+/// provided, supplies inferred candidate signatures for the
+/// pre-filled accept action.
+pub fn trace_gap_report(
+    app: &App,
+    trace: &Trace,
+    ingest_gaps: &[crate::ingest::IngestError],
+    analyzer: Option<&crate::analyze::Analyzer>,
+) -> TraceGapReport {
+    use crate::ingest::IngestError;
+    // Gap file → recorded messages (deduped). IngestError paths carry
+    // the same ingest-root prefix as `App::sources`, so exact match
+    // with a suffix fallback (mirrors `file_id`) is enough.
+    let mut gap_files: Vec<(String, Vec<String>)> = Vec::new();
+    for e in ingest_gaps {
+        let file = match e {
+            IngestError::Parse { file, .. } | IngestError::Unsupported { file, .. } => file,
+            IngestError::Io(_) => continue,
+        };
+        if file.is_empty() {
+            continue; // no source to attribute to
+        }
+        // Bucketed message (pointer-bearing node dumps truncated), so
+        // footer lines group and dedupe the way the survey report does.
+        let message = crate::ingest::survey::bucket_key(e);
+        match gap_files.iter_mut().find(|(f, _)| f == file) {
+            Some((_, msgs)) => {
+                if !msgs.contains(&message) {
+                    msgs.push(message);
+                }
+            }
+            None => gap_files.push((file.clone(), vec![message])),
+        }
+    }
+    // Suffix match only at a path-component boundary — a bare
+    // `ends_with` lets short/empty paths swallow everything.
+    let paths_match = |a: &str, b: &str| {
+        if a.is_empty() || b.is_empty() {
+            return false;
+        }
+        if a == b {
+            return true;
+        }
+        let (long, short) = if a.len() >= b.len() { (a, b) } else { (b, a) };
+        long.ends_with(short) && long.as_bytes()[long.len() - short.len() - 1] == b'/'
+    };
+    let gap_messages_for = |path: &str| -> Option<&Vec<String>> {
+        gap_files.iter().find(|(f, _)| paths_match(f, path)).map(|(_, m)| m)
+    };
+    let class_files = class_file_index(app);
+    let class_path_of = |name: &str| -> Option<String> {
+        class_files
+            .get(&ClassId(Symbol::from(name)))
+            .and_then(|f| source(app, *f).map(|s| s.path.clone()))
+    };
+
+    let mut resolved_hops = 0usize;
+    let mut total_hops = 0usize;
+    // (defined_in, method) → hops blocked, insertion-ordered.
+    let mut boundaries: Vec<((String, String), usize)> = Vec::new();
+    // Files applicable hops run through, for the ingest-gap sweep.
+    let mut hop_files: Vec<(String, usize)> = Vec::new();
+    let mut touch_file = |files: &mut Vec<(String, usize)>, f: &Option<String>| {
+        let Some(f) = f else { return };
+        match files.iter_mut().find(|(p, _)| p == f) {
+            Some((_, n)) => *n += 1,
+            None => files.push((f.clone(), 1)),
+        }
+    };
+
+    for hop in &trace.hops {
+        match hop {
+            TraceHop::Filter(f) if f.applies => {
+                total_hops += 1;
+                touch_file(&mut hop_files, &f.file);
+                if f.resolved {
+                    resolved_hops += 1;
+                } else {
+                    let key = (f.defined_in.clone(), f.name.clone());
+                    match boundaries.iter_mut().find(|(k, _)| *k == key) {
+                        Some((_, n)) => *n += 1,
+                        None => boundaries.push((key, 1)),
+                    }
+                }
+            }
+            TraceHop::Action { file, .. } => {
+                // A bodiless routed action (template-only) is
+                // legitimate Rails, not a boundary.
+                total_hops += 1;
+                resolved_hops += 1;
+                touch_file(&mut hop_files, file);
+            }
+            TraceHop::View { file, .. } => touch_file(&mut hop_files, file),
+            _ => {}
+        }
+    }
+
+    let mut user_gaps: Vec<TraceGap> = Vec::new();
+    let mut tool_gaps: Vec<TraceGap> = Vec::new();
+
+    for ((class, method), blocked) in boundaries {
+        let boundary = format!("{class}#{method}");
+        // Attribution: if the defining class's file recorded an ingest
+        // gap, the definition likely exists but didn't survive ingest
+        // — ours, not a user ask.
+        let class_gap = class_path_of(&class).and_then(|p| {
+            gap_messages_for(&p).map(|msgs| (p, msgs.first().cloned().unwrap_or_default()))
+        });
+        if let Some((path, msg)) = class_gap {
+            tool_gaps.push(TraceGap {
+                kind: TraceGapKind::IngestGap,
+                boundary,
+                detail: format!(
+                    "target lost to an ingest gap in {path} ({msg}) — tool coverage, not your code"
+                ),
+                blocked_hops: blocked,
+                candidate_rbs: None,
+            });
+            continue;
+        }
+        let candidate = analyzer.and_then(|a| {
+            candidate_signature(app, a, &ClassId(Symbol::from(class.as_str())), &Symbol::from(method.as_str()))
+        });
+        let detail = match &candidate {
+            Some(_) => format!(
+                "{boundary} — body not in the IR; inferred signature below, accept: write sig/"
+            ),
+            None => format!(
+                "{boundary} — gem/framework-defined; an RBS sidecar for it would let the chain type through"
+            ),
+        };
+        user_gaps.push(TraceGap {
+            kind: TraceGapKind::UntypedBoundary,
+            boundary,
+            detail,
+            blocked_hops: blocked,
+            candidate_rbs: candidate,
+        });
+    }
+
+    // Ingest gaps on files this trace's hops run through: coverage
+    // notes even when the hop itself resolved (the placeholder may
+    // have swallowed a sibling method the chain depends on).
+    for (path, hops) in &hop_files {
+        let Some(msgs) = gap_messages_for(path) else { continue };
+        for msg in msgs {
+            tool_gaps.push(TraceGap {
+                kind: TraceGapKind::IngestGap,
+                boundary: path.clone(),
+                detail: format!("{msg} — tool coverage, not your code"),
+                blocked_hops: *hops,
+                candidate_rbs: None,
+            });
+        }
+    }
+
+    user_gaps.sort_by(|a, b| b.blocked_hops.cmp(&a.blocked_hops));
+    tool_gaps.sort_by(|a, b| b.blocked_hops.cmp(&a.blocked_hops));
+    let mut gaps = user_gaps;
+    gaps.extend(tool_gaps);
+    TraceGapReport { gaps, resolved_hops, total_hops }
+}
+
+/// The inferred candidate signature for `class_id#method`, printed as
+/// an RBS `def` line — the pre-fill behind the gap footer's accept
+/// action. Sources, in order: a full `Ty::Fn` already in the dispatch
+/// registry (an RBS overlay or an extraction-shaped entry) prints
+/// directly; a bare inferred return type is combined with the IR
+/// def's param names and the call-site-unified param types. `None`
+/// when the registry knows nothing non-`untyped` — fabricating an
+/// arity would burn the trust the accept loop depends on.
+pub fn candidate_signature(
+    app: &App,
+    analyzer: &crate::analyze::Analyzer,
+    class_id: &ClassId,
+    method: &Symbol,
+) -> Option<String> {
+    let info = analyzer.class_registry().get(class_id)?;
+    let known = info
+        .instance_methods
+        .get(method)
+        .or_else(|| info.class_methods.get(method))?;
+    if matches!(known, Ty::Fn { .. }) {
+        return crate::rbs::print_method_signature(method.as_str(), known);
+    }
+    if matches!(known, Ty::Var { .. } | Ty::Untyped) {
+        return None; // a `-> untyped` candidate prices nothing
+    }
+    let param_names = method_def_param_names(app, class_id, method)?;
+    let inferred = analyzer.inferred_param_types(class_id, method);
+    let params: Vec<crate::ty::Param> = param_names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| crate::ty::Param {
+            name: name.clone(),
+            ty: inferred.and_then(|ts| ts.get(i)).cloned().unwrap_or(Ty::Untyped),
+            kind: crate::ty::ParamKind::Required,
+        })
+        .collect();
+    let fn_ty = Ty::Fn {
+        params,
+        block: None,
+        ret: Box::new(known.clone()),
+        effects: crate::effect::EffectSet::pure(),
+    };
+    crate::rbs::print_method_signature(method.as_str(), &fn_ty)
+}
+
+/// Declared parameter names of `class_id#method` from the IR def —
+/// controllers (Action.params rows) then library/concern modules
+/// (MethodDef params). `None` when the def isn't in the IR.
+fn method_def_param_names(
+    app: &App,
+    class_id: &ClassId,
+    method: &Symbol,
+) -> Option<Vec<Symbol>> {
+    if let Some(c) = find_controller(app, class_id) {
+        if let Some(a) = c.actions().find(|a| &a.name == method) {
+            return Some(a.params.fields.keys().cloned().collect());
+        }
+    }
+    if let Some(lc) = app.library_classes.iter().find(|lc| &lc.name == class_id) {
+        if let Some(m) = lc.methods.iter().find(|m| &m.name == method) {
+            return Some(m.params.iter().map(|p| p.name.clone()).collect());
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -2200,6 +2565,128 @@ mod tests {
             h,
             TraceHop::Layout { name, .. } if name == "layouts/application"
         )));
+    }
+
+
+    fn tree_app(files: &[(&str, &str)]) -> App {
+        let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = files
+            .iter()
+            .map(|(p, c)| (std::path::PathBuf::from(p), c.as_bytes().to_vec()))
+            .collect();
+        let (ir, _) =
+            crate::ingest::prism::scope(|| crate::ingest::ingest_app_from_tree(tree));
+        let mut app = ir.expect("tree ingest");
+        Analyzer::new(&app).analyze(&mut app);
+        app
+    }
+
+    #[test]
+    fn gap_report_complete_when_every_hop_resolves() {
+        let app = real_blog();
+        let trace = traceroute(&app, "ArticlesController#show").expect("trace");
+        let report = trace_gap_report(&app, &trace, &[], None);
+        assert!(report.complete(), "gaps = {:?}", report.gaps);
+        assert!(report.total_hops >= 2, "filter + action at minimum");
+        assert_eq!(report.resolved_hops, report.total_hops);
+    }
+
+    #[test]
+    fn gap_report_prices_unresolved_gem_boundary() {
+        let app = tree_app(&[
+            (
+                "app/controllers/application_controller.rb",
+                "class ApplicationController < ActionController::Base\n  before_action :authenticate_user!\nend\n",
+            ),
+            (
+                "app/controllers/widgets_controller.rb",
+                "class WidgetsController < ApplicationController\n  def index\n  end\nend\n",
+            ),
+            ("app/views/widgets/index.html.erb", "<p>hi</p>\n"),
+            (
+                "db/schema.rb",
+                "ActiveRecord::Schema[7.1].define(version: 1) do\nend\n",
+            ),
+        ]);
+        let trace = traceroute(&app, "WidgetsController#index").expect("trace");
+        // The hop itself is marked unresolved…
+        let hop = trace
+            .hops
+            .iter()
+            .find_map(|h| match h {
+                TraceHop::Filter(f) if f.name == "authenticate_user!" => Some(f),
+                _ => None,
+            })
+            .expect("hop present");
+        assert!(hop.applies && !hop.resolved);
+
+        // …and the footer prices it as a user-actionable boundary
+        // (no ingest gap recorded for that file → not ours).
+        let report = trace_gap_report(&app, &trace, &[], None);
+        assert!(!report.complete());
+        let gap = report
+            .gaps
+            .iter()
+            .find(|g| g.boundary == "ApplicationController#authenticate_user!")
+            .expect("boundary entry");
+        assert_eq!(gap.kind, TraceGapKind::UntypedBoundary);
+        assert_eq!(gap.blocked_hops, 1);
+        assert!(gap.candidate_rbs.is_none(), "nothing inferred for a gem method");
+        assert_eq!(report.resolved_hops, report.total_hops - 1);
+    }
+
+    #[test]
+    fn gap_report_attributes_ingest_gap_files_as_tool_coverage() {
+        let app = real_blog();
+        let trace = traceroute(&app, "ArticlesController#show").expect("trace");
+        // Synthesize a recorded gap in a file the trace runs through.
+        let gap = crate::ingest::IngestError::Unsupported {
+            file: "fixtures/real-blog/app/controllers/articles_controller.rb".to_string(),
+            message: "unsupported expression node: FooNode".to_string(),
+        };
+        let report = trace_gap_report(&app, &trace, &[gap], None);
+        let entry = report
+            .gaps
+            .iter()
+            .find(|g| g.kind == TraceGapKind::IngestGap)
+            .expect("tool-coverage entry");
+        assert!(entry.boundary.ends_with("articles_controller.rb"));
+        assert!(entry.detail.contains("tool coverage, not your code"));
+    }
+
+    #[test]
+    fn candidate_signature_synthesizes_from_inferred_types() {
+        let app = tree_app(&[
+            (
+                "app/controllers/application_controller.rb",
+                "class ApplicationController < ActionController::Base\nend\n",
+            ),
+            (
+                "app/models/price_calculator.rb",
+                "class PriceCalculator\n  def total(count)\n    count * 3\n  end\nend\n",
+            ),
+            (
+                "app/controllers/widgets_controller.rb",
+                "class WidgetsController < ApplicationController\n  def index\n    @price = PriceCalculator.new.total(4)\n  end\nend\n",
+            ),
+            ("app/views/widgets/index.html.erb", "<p><%= @price %></p>\n"),
+            (
+                "db/schema.rb",
+                "ActiveRecord::Schema[7.1].define(version: 1) do\nend\n",
+            ),
+        ]);
+        let analyzer = {
+            let mut a = Analyzer::new(&app);
+            let mut scratch = app.clone();
+            a.analyze(&mut scratch);
+            a
+        };
+        let sig = candidate_signature(
+            &app,
+            &analyzer,
+            &ClassId(Symbol::from("PriceCalculator")),
+            &Symbol::from("total"),
+        );
+        assert_eq!(sig.as_deref(), Some("def total: (Integer count) -> Integer"));
     }
 
     #[test]

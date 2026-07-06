@@ -720,6 +720,195 @@ fn type_node_kind(node: &Node<'_>) -> &'static str {
     }
 }
 
+// ── Printing: `Ty` → RBS (the emit direction) ────────────────────────
+//
+// The parse direction above turns user-authored `sig/**/*.rbs` into
+// `Ty`; this half turns an *inferred* `Ty` back into RBS text — the
+// "accept" action behind the gap footers (#63/#64): the tool shows a
+// priced gap with the candidate signature pre-filled, and accepting
+// writes a sidecar that `parse_app_signatures` reads back on the next
+// run. The invariant that matters is round-trip: everything printed
+// here must re-parse to the same `Ty` through the functions above.
+// Shapes the parser can't express (`Ty::Fn` in value position,
+// records with a `rest` row, `Bottom`) print as `untyped` — a
+// degraded-but-valid signature beats an unparseable one.
+//
+// Known asymmetry: `Ty::Time` prints as `Time`, which re-parses as
+// `Ty::Class{Time}` — the parse direction has no special case for it.
+// Harmless today (dispatch treats them alike) but not a fixed point.
+
+/// Render one type in RBS syntax.
+pub fn print_ty(ty: &Ty) -> String {
+    match ty {
+        Ty::Int => "Integer".to_string(),
+        Ty::Float => "Float".to_string(),
+        Ty::Bool => "bool".to_string(),
+        Ty::Str => "String".to_string(),
+        Ty::Sym => "Symbol".to_string(),
+        Ty::Time => "Time".to_string(),
+        Ty::Nil => "nil".to_string(),
+        Ty::Array { elem } => format!("Array[{}]", print_ty(elem)),
+        Ty::Hash { key, value } => {
+            format!("Hash[{}, {}]", print_ty(key), print_ty(value))
+        }
+        Ty::Tuple { elems } => format!(
+            "[{}]",
+            elems.iter().map(print_ty).collect::<Vec<_>>().join(", ")
+        ),
+        Ty::Record { row } => {
+            if row.rest.is_some() {
+                return "untyped".to_string();
+            }
+            let fields: Vec<String> = row
+                .fields
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k.as_str(), print_ty(v)))
+                .collect();
+            format!("{{ {} }}", fields.join(", "))
+        }
+        Ty::Union { variants } => {
+            // `T | nil` prints as the idiomatic `T?`; a wider union
+            // keeps its explicit arms. The optional shorthand needs
+            // parens around a non-simple inner type.
+            let (nil, rest): (Vec<&Ty>, Vec<&Ty>) =
+                variants.iter().partition(|v| matches!(v, Ty::Nil));
+            if !nil.is_empty() && rest.len() == 1 {
+                let inner = print_ty(rest[0]);
+                return if matches!(rest[0], Ty::Union { .. }) {
+                    format!("({inner})?")
+                } else {
+                    format!("{inner}?")
+                };
+            }
+            variants.iter().map(print_ty).collect::<Vec<_>>().join(" | ")
+        }
+        Ty::Class { id, args } => {
+            if args.is_empty() {
+                id.0.as_str().to_string()
+            } else {
+                format!(
+                    "{}[{}]",
+                    id.0.as_str(),
+                    args.iter().map(print_ty).collect::<Vec<_>>().join(", ")
+                )
+            }
+        }
+        // Value-position function types would need RBS proc syntax,
+        // which the parse direction rejects — degrade.
+        Ty::Fn { .. } => "untyped".to_string(),
+        Ty::Var { .. } | Ty::Untyped => "untyped".to_string(),
+        _ => "untyped".to_string(),
+    }
+}
+
+/// [`print_ty`], parenthesized when the top-level shape is a
+/// multi-arm union — RBS method-type positions (params, return)
+/// don't accept a bare `A | B`. (The `T?` shorthand never needs
+/// this.) Over-wrapping something already bracketed is harmless;
+/// a parenthesized type is still a type.
+fn print_ty_grouped(ty: &Ty) -> String {
+    let s = print_ty(ty);
+    if s.contains(" | ") { format!("({s})") } else { s }
+}
+
+/// Render a method signature line: `def find: (String id) -> Account?`.
+/// `None` when `fn_ty` isn't a `Ty::Fn` — there is nothing honest to
+/// print for a bare value type without fabricating an arity.
+pub fn print_method_signature(name: &str, fn_ty: &Ty) -> Option<String> {
+    let Ty::Fn { params, block, ret, .. } = fn_ty else { return None };
+    // RBS parameter-list order: required, optional, *rest, keywords,
+    // **rest-keywords. Params arrive in that order from the parse
+    // direction; re-bucket here so synthesized Fns print canonically
+    // regardless of construction order.
+    let mut parts: Vec<String> = Vec::new();
+    let named = |p: &Param| {
+        let n = p.name.as_str();
+        if n.is_empty() { String::new() } else { format!(" {n}") }
+    };
+    for p in params.iter().filter(|p| matches!(p.kind, ParamKind::Required)) {
+        parts.push(format!("{}{}", print_ty_grouped(&p.ty), named(p)));
+    }
+    for p in params.iter().filter(|p| matches!(p.kind, ParamKind::Optional)) {
+        parts.push(format!("?{}{}", print_ty_grouped(&p.ty), named(p)));
+    }
+    for p in params.iter().filter(|p| matches!(p.kind, ParamKind::Rest)) {
+        // The stored Ty is the collected `Array[E]`; RBS declares the
+        // element type (mirror of the parse direction's wrap).
+        let elem = match &p.ty {
+            Ty::Array { elem } => print_ty(elem),
+            other => print_ty(other),
+        };
+        parts.push(format!("*{}{}", elem, named(p)));
+    }
+    for required in [true, false] {
+        for p in params
+            .iter()
+            .filter(|p| matches!(p.kind, ParamKind::Keyword { required: r } if r == required))
+        {
+            let mark = if required { "" } else { "?" };
+            parts.push(format!("{mark}{}: {}", p.name.as_str(), print_ty_grouped(&p.ty)));
+        }
+    }
+    for p in params.iter().filter(|p| matches!(p.kind, ParamKind::KeywordRest)) {
+        // Stored as the collected `Hash[Symbol, V]`; RBS declares V.
+        let value = match &p.ty {
+            Ty::Hash { value, .. } => print_ty(value),
+            other => print_ty(other),
+        };
+        parts.push(format!("**{}{}", value, named(p)));
+    }
+    let block_part = match block.as_deref() {
+        Some(Ty::Fn { params: bp, ret: br, .. }) => {
+            let inner: Vec<String> = bp.iter().map(|p| print_ty_grouped(&p.ty)).collect();
+            format!(" {{ ({}) -> {} }}", inner.join(", "), print_ty_grouped(br))
+        }
+        Some(_) => return None, // non-Fn block type isn't expressible
+        None => String::new(),
+    };
+    Some(format!(
+        "def {name}: ({}){block_part} -> {}",
+        parts.join(", "),
+        print_ty_grouped(ret)
+    ))
+}
+
+/// Render a complete sidecar file for one class or module —
+/// namespaced names nest (`Admin::AccountsController` → `module Admin`
+/// wrapping `class AccountsController`), matching how
+/// `parse_app_signatures` re-qualifies on the way back in. Methods
+/// whose types aren't `Ty::Fn` are skipped; `None` when nothing
+/// printable remains.
+pub fn print_sidecar(
+    class_name: &str,
+    is_module: bool,
+    methods: &[(Symbol, Ty)],
+) -> Option<String> {
+    let sigs: Vec<String> = methods
+        .iter()
+        .filter_map(|(name, ty)| print_method_signature(name.as_str(), ty))
+        .collect();
+    if sigs.is_empty() {
+        return None;
+    }
+    let segments: Vec<&str> = class_name.split("::").collect();
+    let (outer, leaf) = segments.split_at(segments.len() - 1);
+    let mut out = String::new();
+    for (depth, module) in outer.iter().enumerate() {
+        out.push_str(&format!("{}module {}\n", "  ".repeat(depth), module));
+    }
+    let depth = outer.len();
+    let kw = if is_module { "module" } else { "class" };
+    out.push_str(&format!("{}{kw} {}\n", "  ".repeat(depth), leaf[0]));
+    for sig in &sigs {
+        out.push_str(&format!("{}{}\n", "  ".repeat(depth + 1), sig));
+    }
+    out.push_str(&format!("{}end\n", "  ".repeat(depth)));
+    for depth in (0..outer.len()).rev() {
+        out.push_str(&format!("{}end\n", "  ".repeat(depth)));
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1249,5 +1438,94 @@ end
 ";
         let out = parse_app_includes(src).expect("parses");
         assert!(out.is_empty());
+    }
+
+    // ── printer round-trips ──────────────────────────────────────────
+
+    fn fn_ty(params: Vec<Param>, ret: Ty) -> Ty {
+        Ty::Fn { params, block: None, ret: Box::new(ret), effects: EffectSet::pure() }
+    }
+
+    fn req(name: &str, ty: Ty) -> Param {
+        Param { name: Symbol::from(name), ty, kind: ParamKind::Required }
+    }
+
+    #[test]
+    fn print_ty_covers_the_parseable_surface() {
+        assert_eq!(print_ty(&Ty::Int), "Integer");
+        assert_eq!(print_ty(&Ty::Bool), "bool");
+        let account = Ty::Class { id: ClassId(Symbol::from("Account")), args: vec![] };
+        assert_eq!(
+            print_ty(&Ty::Union { variants: vec![account.clone(), Ty::Nil] }),
+            "Account?"
+        );
+        assert_eq!(
+            print_ty(&Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) }),
+            "Hash[Symbol, String]"
+        );
+        // Out-of-subset shapes degrade to valid RBS, never to garbage.
+        assert_eq!(print_ty(&fn_ty(vec![], Ty::Int)), "untyped");
+        assert_eq!(print_ty(&Ty::Var { var: crate::ident::TyVar(3) }), "untyped");
+    }
+
+    #[test]
+    fn printed_sidecar_round_trips_through_the_parser() {
+        let account = Ty::Class { id: ClassId(Symbol::from("Account")), args: vec![] };
+        let methods = vec![
+            (
+                Symbol::from("find"),
+                fn_ty(
+                    vec![req("id", Ty::Str)],
+                    Ty::Union { variants: vec![account.clone(), Ty::Nil] },
+                ),
+            ),
+            (
+                Symbol::from("names"),
+                fn_ty(vec![], Ty::Array { elem: Box::new(Ty::Str) }),
+            ),
+            (
+                Symbol::from("lookup"),
+                fn_ty(
+                    vec![
+                        req("key", Ty::Sym),
+                        Param {
+                            name: Symbol::from("strict"),
+                            ty: Ty::Bool,
+                            kind: ParamKind::Keyword { required: false },
+                        },
+                    ],
+                    Ty::Union { variants: vec![Ty::Int, Ty::Str] },
+                ),
+            ),
+        ];
+        let printed = print_sidecar("AccountFinder", false, &methods).expect("printable");
+        let parsed = parse_app_signatures(&printed).expect("printed sidecar must parse");
+        let table = parsed
+            .get(&ClassId(Symbol::from("AccountFinder")))
+            .expect("class present");
+        for (name, ty) in &methods {
+            assert_eq!(table.get(name), Some(ty), "round-trip for {}", name.as_str());
+        }
+    }
+
+    #[test]
+    fn printed_namespaced_module_sidecar_round_trips() {
+        let methods = vec![(
+            Symbol::from("current_scope"),
+            fn_ty(vec![], Ty::Class { id: ClassId(Symbol::from("Account")), args: vec![] }),
+        )];
+        let printed =
+            print_sidecar("Admin::ScopeHelper", true, &methods).expect("printable");
+        assert!(printed.starts_with("module Admin\n"), "printed:\n{printed}");
+        let parsed = parse_app_signatures(&printed).expect("parses");
+        let table = parsed
+            .get(&ClassId(Symbol::from("Admin::ScopeHelper")))
+            .expect("qualified key");
+        assert!(table.contains_key(&Symbol::from("current_scope")));
+    }
+
+    #[test]
+    fn print_method_signature_refuses_bare_value_types() {
+        assert_eq!(print_method_signature("title", &Ty::Str), None);
     }
 }

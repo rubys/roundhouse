@@ -1521,6 +1521,16 @@ impl Analyzer {
         &self.classes
     }
 
+    /// Parameter types unified from call sites for `class#method`
+    /// (post-fixpoint when read after [`Self::analyze`]), positionally
+    /// aligned with the method's declared params. `None` when no call
+    /// site contributed. Read-only companion to [`Self::class_registry`]
+    /// for consumers assembling full candidate signatures (the gap
+    /// footers' pre-filled RBS).
+    pub fn inferred_param_types(&self, class: &ClassId, method: &Symbol) -> Option<&[Ty]> {
+        self.inferred_params.get(&(class.clone(), method.clone())).map(|v| v.as_slice())
+    }
+
     /// Walk the app, annotating every expression's `ty` field, then
     /// populating the owning construct's `effects` by visiting the typed tree.
     ///
