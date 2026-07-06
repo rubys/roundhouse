@@ -1169,6 +1169,53 @@ impl Analyzer {
         app_ctrl.class_methods.insert(Symbol::from("request"), Ty::Untyped);
         app_ctrl.class_methods.insert(Symbol::from("response"), Ty::Untyped);
         app_ctrl.class_methods.insert(Symbol::from("logger"), Ty::Untyped);
+        // Devise scope helpers. A model declaring the `devise` DSL
+        // (`class User; devise :registerable, …`) makes Devise generate
+        // `current_user` / `user_signed_in?` / `authenticate_user!` on
+        // every controller — the app's own declaration is the fact
+        // source, no convention guessing. `current_<scope>` is nilable
+        // (no signed-in user); the session object is opaque. Without
+        // this, `current_user` bottoms out unresolved and cascades into
+        // every `@account = current_account`-style controller ivar
+        // (343 sites in Mastodon).
+        for model in &app.models {
+            let declares_devise = model.body.iter().any(|item| {
+                let ModelBodyItem::Unknown { expr, .. } = item else { return false };
+                matches!(
+                    &*expr.node,
+                    ExprNode::Send { recv: None, method, .. } if method.as_str() == "devise"
+                )
+            });
+            if !declares_devise {
+                continue;
+            }
+            let scope = crate::naming::snake_case(
+                model.name.0.as_str().rsplit("::").next().unwrap_or(""),
+            );
+            let model_ty = Ty::Class { id: model.name.clone(), args: vec![] };
+            app_ctrl.class_methods.insert(
+                Symbol::from(format!("current_{scope}").as_str()),
+                Ty::Union { variants: vec![model_ty, Ty::Nil] },
+            );
+            app_ctrl.class_methods.insert(
+                Symbol::from(format!("{scope}_signed_in?").as_str()),
+                Ty::Bool,
+            );
+            app_ctrl.class_methods.insert(
+                Symbol::from(format!("authenticate_{scope}!").as_str()),
+                Ty::Nil,
+            );
+            app_ctrl.class_methods.insert(
+                Symbol::from(format!("{scope}_session").as_str()),
+                Ty::Untyped,
+            );
+            for m in ["sign_in", "sign_out", "bypass_sign_in"] {
+                app_ctrl
+                    .class_methods
+                    .entry(Symbol::from(m))
+                    .or_insert(Ty::Untyped);
+            }
+        }
         classes.insert(ClassId(Symbol::from("ApplicationController")), app_ctrl);
 
         // User-authored RBS sidecars. Signatures discovered under
@@ -1309,6 +1356,58 @@ impl Analyzer {
             classes
                 .entry(ClassId(Symbol::from("ActionMailer::MessageDelivery")))
                 .or_insert(delivery_cls);
+        }
+
+        // Sidekiq workers: `include Sidekiq::Worker` grants the
+        // class-side enqueue surface — the app defines an instance
+        // `def perform(…)` but *calls* `FooWorker.perform_async(…)` /
+        // `perform_in(delay, …)` / `perform_at(time, …)`, all of which
+        // return the job id String (invariably discarded). Same shape
+        // as the mailer pass above: identify workers by walking the
+        // parent chain (Mastodon subclasses base workers, e.g.
+        // `UpdateDistributionWorker < RawDistributionWorker`) checking
+        // each level's `include` list, then register the enqueue
+        // methods. `entry().or_insert` so a real `def self.` wins.
+        {
+            let lc_of: HashMap<&ClassId, &crate::dialect::LibraryClass> = app
+                .library_classes
+                .iter()
+                .map(|lc| (&lc.name, lc))
+                .collect();
+            let is_worker = |start: &ClassId| -> bool {
+                let mut cur = Some(start);
+                let mut depth = 0usize;
+                while let Some(id) = cur {
+                    let Some(lc) = lc_of.get(id) else { break };
+                    if lc
+                        .includes
+                        .iter()
+                        .any(|inc| inc.0.as_str() == "Sidekiq::Worker")
+                    {
+                        return true;
+                    }
+                    depth += 1;
+                    if depth > 32 {
+                        break;
+                    }
+                    cur = lc.parent.as_ref();
+                }
+                false
+            };
+            for lc in &app.library_classes {
+                if !is_worker(&lc.name) {
+                    continue;
+                }
+                let cls = classes.entry(lc.name.clone()).or_default();
+                if cls.parent.is_none() {
+                    cls.parent = lc.parent.clone();
+                }
+                for m in ["perform_async", "perform_in", "perform_at"] {
+                    cls.class_methods
+                        .entry(Symbol::from(m))
+                        .or_insert(Ty::Str);
+                }
+            }
         }
 
         // Controllers: register each as a known class so self-method
@@ -2193,6 +2292,44 @@ impl Analyzer {
         // ivar discovery handles `def initialize(x); @x = x; end`
         // shapes where reads in subsequent methods (`@x.foo`) resolve
         // against the type written in initialize.
+        // Mailer→view ivar channel: a mailer action's `@resource = …`
+        // bindings seed its template the same way a controller action's
+        // do (`UserMailer#welcome` renders `user_mailer/welcome.html.*`
+        // — Rails' implicit template lookup, no render call in source).
+        // Identify mailers by parent chain up front; the harvest itself
+        // rides the library-class typing loop below, after each method
+        // body has been typed once.
+        let mailer_names: std::collections::HashSet<ClassId> = {
+            let parent_of: HashMap<&ClassId, Option<&ClassId>> = app
+                .library_classes
+                .iter()
+                .map(|lc| (&lc.name, lc.parent.as_ref()))
+                .collect();
+            app.library_classes
+                .iter()
+                .filter(|lc| {
+                    let mut cur = Some(&lc.name);
+                    let mut depth = 0usize;
+                    while let Some(id) = cur {
+                        // `Devise::Mailer` is itself an ActionMailer
+                        // subclass living in the gem — app mailers that
+                        // extend it (Mastodon's UserMailer) dead-end
+                        // there, so accept it as a terminal too.
+                        if matches!(id.0.as_str(), "ActionMailer::Base" | "Devise::Mailer") {
+                            return true;
+                        }
+                        depth += 1;
+                        if depth > 32 {
+                            break;
+                        }
+                        cur = parent_of.get(id).copied().flatten();
+                    }
+                    false
+                })
+                .map(|lc| lc.name.clone())
+                .collect()
+        };
+
         for lc in &mut app.library_classes {
             let class_ctx = Ctx {
                 self_ty: Some(Ty::Class { id: lc.name.clone(), args: vec![] }),
@@ -2210,6 +2347,46 @@ impl Analyzer {
             let mut flow_ivars: HashMap<Symbol, Ty> = HashMap::new();
             for method in &lc.methods {
                 extract_ivar_assignments(&method.body, &mut flow_ivars);
+            }
+
+            if mailer_names.contains(&lc_name) {
+                let prefix = lc_name
+                    .0
+                    .as_str()
+                    .split("::")
+                    .map(crate::naming::snake_case)
+                    .collect::<Vec<_>>()
+                    .join("/");
+                for method in &lc.methods {
+                    if method.receiver != crate::dialect::MethodReceiver::Instance
+                        || method.kind != crate::dialect::AccessorKind::Method
+                        || method.name.as_str() == "initialize"
+                    {
+                        continue;
+                    }
+                    let mut ivars: HashMap<Symbol, Ty> = HashMap::new();
+                    extract_ivar_assignments(&method.body, &mut ivars);
+                    // Back-fill from the class-wide flow set, nil-widened:
+                    // mailers set shared ivars in `before_action` filters
+                    // (`set_instance` → `@instance`), which the ingest
+                    // doesn't attribute per-action. The action's own
+                    // precise bindings win; class-wide ones arrive as
+                    // `T | Nil` since we can't prove the filter ran.
+                    for (name, ty) in &flow_ivars {
+                        ivars.entry(name.clone()).or_insert_with(|| Ty::Union {
+                            variants: vec![ty.clone(), Ty::Nil],
+                        });
+                    }
+                    if ivars.is_empty() {
+                        continue;
+                    }
+                    action_ivars_by_view
+                        .entry(Symbol::from(
+                            format!("{prefix}/{}", method.name.as_str()).as_str(),
+                        ))
+                        .or_default()
+                        .extend(ivars);
+                }
             }
 
             if !flow_ivars.is_empty() {
@@ -3647,14 +3824,21 @@ fn resolve_partial_path(name: &str, current_view: &Symbol) -> String {
 }
 
 /// Convert a controller class name into the view-path prefix.
-/// `ArticlesController` → `articles`. Strip the `Controller` suffix, then
-/// snake_case what remains. Namespaced controllers (`Admin::UsersController`)
-/// are handled by the current snake_case rule producing `admin::users`; when
-/// a fixture forces namespaced views, we'll fix the rule to emit `/` instead.
+/// `ArticlesController` → `articles`; namespaced controllers map each
+/// module segment to a path segment (`Admin::UsersController` →
+/// `admin/users`), matching Rails' template lookup. Strip the
+/// `Controller` suffix, then snake_case per segment. Before the
+/// per-segment split, `Admin::…` produced `admin::users` — no view is
+/// ever named that, so namespaced controllers seeded nothing and every
+/// ivar in their views went unresolved (131 Mastodon view files).
 fn controller_view_prefix(class_id: &ClassId) -> String {
     let name = class_id.0.as_str();
     let stripped = name.strip_suffix("Controller").unwrap_or(name);
-    crate::naming::snake_case(stripped)
+    stripped
+        .split("::")
+        .map(crate::naming::snake_case)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Determine which view path an action's RenderTarget names — `None` if

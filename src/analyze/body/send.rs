@@ -811,9 +811,19 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
             "where" | "order" | "limit" | "offset" | "includes" | "preload"
             | "joins" | "left_outer_joins" | "distinct" | "group" | "having"
             | "references" | "eager_load" | "readonly" | "reorder"
-            | "rewhere" | "merge" | "extending" | "unscope"
-            | "not" | "or" | "and" | "none" | "load" | "reload" | "reselect" => {
+            | "rewhere" | "merge" | "merge!" | "extending" | "unscope"
+            | "not" | "or" | "and" | "none" | "load" | "reload" | "reselect"
+            // Kaminari's pagination chain — same builder shape.
+            | "page" | "per" | "padding" | "without_count" => {
                 return Ty::Array { elem: Box::new(elem.clone()) };
+            }
+            // `async_count` returns an ActiveRecord::Promise whose
+            // `.value` blocks and yields the count (see GEM_CATALOG).
+            "async_count" => {
+                return Ty::Class {
+                    id: crate::ident::ClassId(Symbol::from("ActiveRecord::Promise")),
+                    args: vec![],
+                };
             }
             // `relation.model` is the element model class. With a union
             // element it's ambiguous, so fall back to the gradual
@@ -1092,10 +1102,15 @@ pub(super) fn hash_method(
         // `without` drop or keep named keys; `select`/`filter`/`reject`/
         // `compact` filter by a block/value. ActiveSupport adds
         // `except`/`without`; Ruby 3.0+ has `except` natively.
+        // ActiveSupport's default-filling merges (`with_defaults` is an
+        // alias of `reverse_merge`) and ActionController::Parameters'
+        // `to_unsafe_h` (the unfiltered hash) also keep the shape.
         "except" | "except!" | "slice" | "slice!" | "without"
         | "select" | "filter" | "reject" | "compact" | "compact!"
         | "select!" | "filter!" | "reject!" | "keep_if" | "delete_if"
-        | "merge!" | "update" => Ty::Hash {
+        | "merge!" | "update" | "with_defaults" | "with_defaults!"
+        | "reverse_merge" | "reverse_merge!" | "deep_merge" | "deep_merge!"
+        | "to_unsafe_h" => Ty::Hash {
             key: Box::new(key.clone()),
             value: Box::new(value.clone()),
         },

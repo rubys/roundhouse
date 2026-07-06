@@ -42,6 +42,7 @@ pub enum GemTy {
     Int,
     Bool,
     Float,
+    Sym,
     /// Gradual escape: the gem returns an object we don't model
     /// structurally. Dispatch resolves and the choice propagates.
     Untyped,
@@ -59,6 +60,7 @@ impl GemTy {
             GemTy::Int => Ty::Int,
             GemTy::Bool => Ty::Bool,
             GemTy::Float => Ty::Float,
+            GemTy::Sym => Ty::Sym,
             GemTy::Untyped => Ty::Untyped,
             GemTy::Instance(path) => Ty::Class {
                 id: ClassId(Symbol::from(path)),
@@ -85,6 +87,38 @@ pub struct GemClass {
 /// The catalog. One entry per gem class/module; add a gem by adding a
 /// row.
 pub const GEM_CATALOG: &[GemClass] = &[
+    // I18n — Rails' translation module, called as a bare singleton
+    // (`I18n.t('admin.…')`) everywhere outside views (in views the
+    // `t` helper delegates here). `t`/`l` return the translated /
+    // localized string; the locale accessors return the locale
+    // Symbol. Mastodon alone has 110+ `I18n.t` controller call sites.
+    GemClass {
+        name: "I18n",
+        class_methods: &[
+            ("t", GemTy::Str),
+            ("t!", GemTy::Str),
+            ("translate", GemTy::Str),
+            ("l", GemTy::Str),
+            ("localize", GemTy::Str),
+            ("locale", GemTy::Sym),
+            ("default_locale", GemTy::Sym),
+            // `with_locale` returns its block's value — opaque here.
+            ("with_locale", GemTy::Untyped),
+            ("available_locales", GemTy::Untyped),
+            ("exists?", GemTy::Bool),
+        ],
+        instance_methods: &[],
+    },
+    // ActiveRecord::Promise — the handle returned by the async query
+    // surface (`relation.async_count`, `async_sum`, …; see
+    // `array_method`'s relation branch). `value` blocks until the
+    // background query resolves; its type depends on the originating
+    // call, so gradual.
+    GemClass {
+        name: "ActiveRecord::Promise",
+        class_methods: &[],
+        instance_methods: &[("value", GemTy::Untyped), ("pending?", GemTy::Bool)],
+    },
     // Arel — ActiveRecord's low-level SQL AST builder. `sql` wraps a
     // raw fragment, `star` is the `*` projection node; both produce
     // opaque AST consumed by where/order/select, so gradual.

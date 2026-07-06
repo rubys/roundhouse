@@ -255,6 +255,55 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         // record itself (not `Self | Nil` like `find_by`).
         return_kind: Some(ReturnKind::SelfType),
     },
+    // `find_or_initialize_by` reads, and on a miss builds an unsaved
+    // instance in memory — a SELECT with no write either way.
+    CatalogedMethod {
+        name: "find_or_initialize_by",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Terminal,
+        return_kind: Some(ReturnKind::SelfType),
+    },
+    // `find_or_create_by(!)` reads, and on a miss INSERTs — classify by
+    // the stronger effect. Both forms return the record (the bang form
+    // raises on validation failure; the plain form returns the invalid
+    // unsaved record, still Self-typed).
+    CatalogedMethod {
+        name: "find_or_create_by",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbWrite,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::SelfType),
+    },
+    CatalogedMethod {
+        name: "find_or_create_by!",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbWrite,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::SelfType),
+    },
+    // Kaminari's pagination entry point (`Model.page(n)`). Not core AR,
+    // but it shares the relation-builder shape and is called on every
+    // model class, so the AR catalog is its mechanical home (the
+    // gem catalog keys on concrete class names and can't say "every
+    // model"). The Array<Model> receiver form lives in `array_method`'s
+    // relation branch alongside `per`/`padding`/`without_count`.
+    CatalogedMethod {
+        name: "page",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Builder,
+        return_kind: Some(ReturnKind::ArrayOfSelf),
+    },
+    // Async query surface — returns an ActiveRecord::Promise handle
+    // (cataloged in GEM_CATALOG) whose `.value` yields the count.
+    CatalogedMethod {
+        name: "async_count",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Terminal,
+        return_kind: Some(ReturnKind::ClassRef("ActiveRecord::Promise")),
+    },
     CatalogedMethod {
         name: "first",
         receiver: ReceiverContext::Class,
@@ -522,6 +571,22 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         // `Model.update_counters(id, counter: n)` — atomic counter
         // bump; returns the affected-row count.
         name: "update_counters",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbWrite,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::Int),
+    },
+    // `Model.increment_counter(:counter, id)` / `decrement_counter` —
+    // sugar over `update_counters`; same shape.
+    CatalogedMethod {
+        name: "increment_counter",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbWrite,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::Int),
+    },
+    CatalogedMethod {
+        name: "decrement_counter",
         receiver: ReceiverContext::Class,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,

@@ -143,8 +143,23 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // `app/lib` is Rails-autoloaded app code (Mastodon keeps ~100
     // service/lib classes there — ActivityPub::TagManager etc.);
     // without it every `SomeService.instance.method` chain dispatches
-    // into nothing.
-    for sub in ["extras", "lib", "app/lib", "app/mailers"] {
+    // into nothing. The service-object layer (services/workers/
+    // serializers/policies/validators/presenters) is the same deal at
+    // larger scale: Mastodon keeps ~450 plain-Ruby classes across those
+    // six dirs, and every `FooService.new.call(…)` in a controller
+    // dispatches into nothing until they register.
+    for sub in [
+        "extras",
+        "lib",
+        "app/lib",
+        "app/mailers",
+        "app/services",
+        "app/workers",
+        "app/serializers",
+        "app/policies",
+        "app/validators",
+        "app/presenters",
+    ] {
         let support_dir = dir.join(sub);
         if !vfs.is_dir(&support_dir) {
             continue;

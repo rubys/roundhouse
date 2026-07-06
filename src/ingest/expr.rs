@@ -189,6 +189,32 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         n if n.as_defined_node().is_some() => {
             let d = n.as_defined_node().unwrap();
             let inner = d.value();
+            // `defined?(@ivar)` — the memoization-guard idiom
+            // (`return @x if defined?(@x)`), all over Mastodon's
+            // ApplicationController. Lift the ivar read into the same
+            // marker Send; the analyzer types `defined?` as `Str?` and
+            // the ivar's type comes from its assignments, so the guard
+            // costs nothing. (Class-body ivars aren't partial locals,
+            // so the view-lowerer's Var-based rewrite never sees this
+            // shape.)
+            if let Some(iv) = inner.as_instance_variable_read_node() {
+                let raw = constant_id_str(&iv.name());
+                let name = raw.strip_prefix('@').unwrap_or(raw);
+                let ivar = Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Ivar { name: Symbol::from(name) },
+                );
+                return Ok(Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: None,
+                        method: Symbol::from("defined?"),
+                        args: vec![ivar],
+                        block: None,
+                        parenthesized: true,
+                    },
+                ));
+            }
             let name: Option<String> = if let Some(c) = inner.as_call_node() {
                 let bareword = c.receiver().is_none()
                     && c.arguments().is_none()
