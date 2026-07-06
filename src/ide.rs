@@ -1292,6 +1292,454 @@ fn subtree_contains(body: &Expr, file: FileId, offset: u32) -> bool {
     found
 }
 
+// ── Traceroute (#63): the full request flow as one query ─────────────
+//
+// Composes edges the analyzer already persisted — `RouteTable` (via
+// `flatten_routes`), `App::controller_resolutions` (chained filters
+// with provenance + effective layout), action `RenderTarget`s, and
+// `render_edges` — into the ordered causal chain one request
+// traverses. One query, two skins: the MCP `traceroute` tool
+// serializes it, the /ide/ trace panel renders it. Everything here is
+// composition; the resolution work happened in `run_typing_passes`.
+
+/// A complete trace for one `Controller#action` entry point.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Trace {
+    /// Display line: `GET /articles/:id → ArticlesController#show`
+    /// (just `Controller#action` when no route matched — actions
+    /// reachable only via `render`/mailers still trace).
+    pub route: String,
+    pub controller: String,
+    pub action: String,
+    /// Hops in request order: route → filters (chain order, gated-out
+    /// entries included with `applies: false`) → action → view (or
+    /// non-template response) → layout.
+    pub hops: Vec<TraceHop>,
+}
+
+/// One hop of the chain. Filter payload is broken out as
+/// [`FilterHop`] — it carries most of the fields and the skins treat
+/// it as a unit.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TraceHop {
+    /// The matched route entry: verb, path pattern, and the params the
+    /// path binds.
+    Route { method: String, path: String, params: Vec<String> },
+    Filter(FilterHop),
+    /// The action body. `formats` comes from the explicit
+    /// `RenderTarget` or, for convention renders, from the ingested
+    /// templates matching the view name.
+    Action {
+        name: String,
+        controller: String,
+        file: Option<String>,
+        line: Option<u32>,
+        formats: Vec<String>,
+        /// Ivars the action body itself assigns (filter contributions
+        /// live on their own hops), rendered `("@article", "Article")`,
+        /// sorted by name.
+        assigns: Vec<(String, String)>,
+        effects: Vec<String>,
+    },
+    /// Non-template terminal — redirect / JSON / head.
+    Response { detail: String },
+    /// The template the action feeds, plus every partial it renders
+    /// transitively (deduped, discovery order).
+    View { name: String, file: Option<String>, partials: Vec<String> },
+    /// The effective layout wrapping the response.
+    Layout { name: String, file: Option<String> },
+}
+
+/// One filter hop, in chain position. `applies` reflects this action:
+/// `only:`/`except:` gating plus `skip_before_action` entries that
+/// target it. Gated-out hops are kept (the panel's "N filters don't
+/// run for this action" needs them); `skipped_by` distinguishes an
+/// explicit skip (names the class that declared it) from plain
+/// gating (`None`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FilterHop {
+    pub name: String,
+    /// `"before"` / `"around"` / `"after"`.
+    pub filter_kind: &'static str,
+    /// Class or concern module that declared the filter.
+    pub defined_in: String,
+    /// Chain segment that carried it in (the includer for concern
+    /// filters). Equals `defined_in` for directly-declared filters.
+    pub included_via: String,
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    /// Guard as written: `if: :account_required?` /
+    /// `unless: :limited_federation_mode?` (both, comma-joined, when
+    /// both present). Runtime predicates the static chain can't
+    /// evaluate — carried verbatim.
+    pub condition: Option<String>,
+    pub only: Vec<String>,
+    pub except: Vec<String>,
+    pub applies: bool,
+    pub skipped_by: Option<String>,
+    /// Typed ivars the target assigns, `("@account", "Account")`,
+    /// sorted by name.
+    pub assigns: Vec<(String, String)>,
+    pub effects: Vec<String>,
+}
+
+/// Trace the request flow for `query`: either `Controller#action`
+/// (`StatusesController#show`) or a route (`GET /articles/:id`, verb
+/// optional — the path is matched against the route table's patterns).
+/// `None` when the query names no known controller/action/route.
+pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
+    let q = query.trim();
+    let routes = crate::lower::routes::flatten_routes(app);
+
+    // Resolve the entry point to (controller, action, matched route).
+    let (controller_id, action_name, matched) = if let Some((c, a)) = q.split_once('#') {
+        let cid = ClassId(Symbol::from(c.trim()));
+        let act = Symbol::from(a.trim());
+        let m = routes.iter().find(|r| r.controller == cid && r.action == act);
+        (cid, act, m)
+    } else {
+        let (verb, path) = match q.split_once(' ') {
+            Some((v, p)) if parse_verb(v).is_some() => (parse_verb(v), p.trim()),
+            _ => (None, q),
+        };
+        let m = routes.iter().find(|r| {
+            r.path == path && verb.as_ref().is_none_or(|v| &r.method == v)
+        })?;
+        (m.controller.clone(), m.action.clone(), Some(m))
+    };
+
+    // The controller must at least be known; a missing resolution
+    // (analyze not run) degrades to an empty chain rather than a miss.
+    let controller = find_controller(app, &controller_id)?;
+    let resolution = app.controller_resolutions.get(&controller_id).cloned().unwrap_or_default();
+
+    let route_line = match matched {
+        Some(r) => format!(
+            "{} {} → {}#{}",
+            verb_str(&r.method),
+            r.path,
+            controller_id.0.as_str(),
+            action_name.as_str()
+        ),
+        None => format!("{}#{}", controller_id.0.as_str(), action_name.as_str()),
+    };
+
+    let mut hops: Vec<TraceHop> = Vec::new();
+    if let Some(r) = matched {
+        hops.push(TraceHop::Route {
+            method: verb_str(&r.method).to_string(),
+            path: r.path.clone(),
+            params: r.path_params.clone(),
+        });
+    }
+
+    // Applicable `skip_before_action` declarations, target → declarer.
+    // Rails' skip gating is itself `only:`/`except:`-scoped, so apply
+    // per-action here rather than at persist time.
+    let mut skips: HashMap<Symbol, ClassId> = HashMap::new();
+    for rf in &resolution.filter_chain {
+        if matches!(rf.filter.kind, crate::dialect::FilterKind::Skip)
+            && crate::analyze::before_filter_applies(&rf.filter, &action_name)
+        {
+            skips.insert(rf.filter.target.clone(), rf.defined_in.clone());
+        }
+    }
+
+    for rf in &resolution.filter_chain {
+        use crate::dialect::FilterKind;
+        let kind = match rf.filter.kind {
+            FilterKind::Before => "before",
+            FilterKind::Around => "around",
+            FilterKind::After => "after",
+            FilterKind::Skip => continue, // annotates the hop it removes
+        };
+        let gated_in = crate::analyze::before_filter_applies(&rf.filter, &action_name);
+        // `skip_before_action` removes before callbacks only.
+        let skipped_by = (matches!(rf.filter.kind, FilterKind::Before) && gated_in)
+            .then(|| skips.get(&rf.filter.target).cloned())
+            .flatten();
+        let (file, line) = method_location(app, &rf.defined_in, &rf.filter.target);
+        let condition = match (&rf.filter.if_cond, &rf.filter.unless_cond) {
+            (None, None) => None,
+            (i, u) => Some(
+                [
+                    i.as_ref().map(|s| format!("if: :{}", s.as_str())),
+                    u.as_ref().map(|s| format!("unless: :{}", s.as_str())),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(", "),
+            ),
+        };
+        hops.push(TraceHop::Filter(FilterHop {
+            name: rf.filter.target.as_str().to_string(),
+            filter_kind: kind,
+            defined_in: rf.defined_in.0.as_str().to_string(),
+            included_via: rf.included_via.0.as_str().to_string(),
+            file,
+            line,
+            condition,
+            only: rf.filter.only.iter().map(|s| s.as_str().to_string()).collect(),
+            except: rf.filter.except.iter().map(|s| s.as_str().to_string()).collect(),
+            applies: gated_in && skipped_by.is_none(),
+            skipped_by: skipped_by.map(|c| c.0.as_str().to_string()),
+            assigns: render_assigns(&rf.assigns),
+            effects: rf.effects.effects.iter().map(render_effect).collect(),
+        }));
+    }
+
+    // The action: defined on the queried controller or inherited.
+    let action_def = find_action(app, controller, &action_name);
+    let view_name = action_def
+        .and_then(|(_, a)| crate::analyze::view_name_for_action(&controller_id, a));
+    {
+        let (file, line, effects, assigns) = match action_def {
+            Some((_, a)) => {
+                let (f, l) = expr_location(app, &a.body);
+                let mut ivars: HashMap<Symbol, Ty> = HashMap::new();
+                crate::analyze::extract_ivar_assignments(&a.body, &mut ivars);
+                (
+                    f,
+                    l,
+                    a.effects.effects.iter().map(render_effect).collect(),
+                    render_assigns(&ivars),
+                )
+            }
+            // Routed but bodiless (template-only action): Rails still
+            // renders the convention template.
+            None => (None, None, Vec::new(), Vec::new()),
+        };
+        let formats: Vec<String> = match action_def.map(|(_, a)| &a.renders) {
+            Some(crate::dialect::RenderTarget::Template { formats, .. })
+                if !formats.is_empty() =>
+            {
+                formats.iter().map(|s| s.as_str().to_string()).collect()
+            }
+            _ => match &view_name {
+                Some(v) => {
+                    let mut f: Vec<String> = app
+                        .views
+                        .iter()
+                        .filter(|w| &w.name == v)
+                        .map(|w| w.format.as_str().to_string())
+                        .collect();
+                    f.sort();
+                    f.dedup();
+                    f
+                }
+                None => Vec::new(),
+            },
+        };
+        hops.push(TraceHop::Action {
+            name: action_name.as_str().to_string(),
+            controller: controller_id.0.as_str().to_string(),
+            file,
+            line,
+            formats,
+            assigns,
+            effects,
+        });
+    }
+
+    // The response: a template (with its transitive partials) or a
+    // non-template terminal.
+    match &view_name {
+        Some(v) => {
+            let mut partials: Vec<String> = Vec::new();
+            let mut queue: Vec<Symbol> = vec![v.clone()];
+            let mut seen: HashSet<Symbol> = queue.iter().cloned().collect();
+            while let Some(next) = queue.pop() {
+                for p in app.render_edges.get(&next).into_iter().flatten() {
+                    if seen.insert(p.clone()) {
+                        partials.push(p.as_str().to_string());
+                        queue.push(p.clone());
+                    }
+                }
+            }
+            hops.push(TraceHop::View {
+                name: v.as_str().to_string(),
+                file: view_location(app, v),
+                partials,
+            });
+            if let Some(layout) = &resolution.layout {
+                hops.push(TraceHop::Layout {
+                    name: layout.as_str().to_string(),
+                    file: view_location(app, layout),
+                });
+            }
+        }
+        None => {
+            if let Some((_, a)) = action_def {
+                use crate::dialect::RenderTarget;
+                let detail = match &a.renders {
+                    RenderTarget::Redirect { .. } => "redirect".to_string(),
+                    RenderTarget::Json { .. } => "render json".to_string(),
+                    RenderTarget::Head { status } => format!("head {status}"),
+                    _ => "no template".to_string(),
+                };
+                hops.push(TraceHop::Response { detail });
+            }
+        }
+    }
+
+    Some(Trace {
+        route: route_line,
+        controller: controller_id.0.as_str().to_string(),
+        action: action_name.as_str().to_string(),
+        hops,
+    })
+}
+
+fn parse_verb(s: &str) -> Option<crate::dialect::HttpMethod> {
+    use crate::dialect::HttpMethod::*;
+    Some(match s.to_ascii_uppercase().as_str() {
+        "GET" => Get,
+        "POST" => Post,
+        "PUT" => Put,
+        "PATCH" => Patch,
+        "DELETE" => Delete,
+        "HEAD" => Head,
+        "OPTIONS" => Options,
+        _ => return None,
+    })
+}
+
+fn verb_str(m: &crate::dialect::HttpMethod) -> &'static str {
+    use crate::dialect::HttpMethod::*;
+    match m {
+        Get => "GET",
+        Post => "POST",
+        Put => "PUT",
+        Patch => "PATCH",
+        Delete => "DELETE",
+        Head => "HEAD",
+        Options => "OPTIONS",
+        Any => "ANY",
+    }
+}
+
+fn find_controller<'a>(app: &'a App, id: &ClassId) -> Option<&'a crate::dialect::Controller> {
+    app.controllers.iter().find(|c| &c.name == id)
+}
+
+/// The action's defining controller, walking the parent chain
+/// (nearest-first) for inherited actions. Single-segment parents are
+/// qualified against the child's namespace, mirroring analyze's
+/// lexical resolution.
+fn find_action<'a>(
+    app: &'a App,
+    controller: &'a crate::dialect::Controller,
+    action: &Symbol,
+) -> Option<(&'a ClassId, &'a crate::dialect::Action)> {
+    let mut current = controller;
+    let mut guard = 0;
+    loop {
+        if let Some(a) = current.actions().find(|a| &a.name == action) {
+            return Some((&current.name, a));
+        }
+        guard += 1;
+        if guard > 32 {
+            return None;
+        }
+        let parent = current.parent.as_ref()?;
+        let next = find_controller(app, parent).or_else(|| {
+            if parent.0.as_str().contains("::") {
+                return None;
+            }
+            let mut segs: Vec<&str> = current.name.0.as_str().split("::").collect();
+            segs.pop();
+            while !segs.is_empty() {
+                let candidate =
+                    ClassId(Symbol::from(format!("{}::{}", segs.join("::"), parent.0.as_str())));
+                if let Some(c) = find_controller(app, &candidate) {
+                    return Some(c);
+                }
+                segs.pop();
+            }
+            None
+        })?;
+        current = next;
+    }
+}
+
+/// Resolve `class_id#method` to its source file + 1-based line, via
+/// the method body's first real span. Checks controllers first (all
+/// method defs are `Action` items), then concern/library modules.
+fn method_location(
+    app: &App,
+    class_id: &ClassId,
+    method: &Symbol,
+) -> (Option<String>, Option<u32>) {
+    if let Some(c) = find_controller(app, class_id) {
+        if let Some(a) = c.actions().find(|a| &a.name == method) {
+            return expr_location(app, &a.body);
+        }
+    }
+    if let Some(lc) = app.library_classes.iter().find(|lc| &lc.name == class_id) {
+        if let Some(m) = lc.methods.iter().find(|m| &m.name == method) {
+            return expr_location(app, &m.body);
+        }
+    }
+    (None, None)
+}
+
+fn expr_location(app: &App, body: &Expr) -> (Option<String>, Option<u32>) {
+    let Some(span) = first_expr_span(body) else { return (None, None) };
+    let Some(src) = source(app, span.file) else { return (None, None) };
+    (Some(src.path.clone()), Some(src.line_col(span.start).0))
+}
+
+/// First non-synthetic span in a subtree (the sibling of
+/// [`first_expr_file`], for consumers that need the offset too).
+fn first_expr_span(e: &Expr) -> Option<Span> {
+    if !e.span.is_synthetic() {
+        return Some(e.span);
+    }
+    let mut found = None;
+    e.node.for_each_child(&mut |c| {
+        if found.is_none() {
+            found = first_expr_span(c);
+        }
+    });
+    found
+}
+
+fn view_location(app: &App, name: &Symbol) -> Option<String> {
+    app.views
+        .iter()
+        .find(|v| &v.name == name)
+        .and_then(|v| first_expr_file(&v.body))
+        .and_then(|f| source(app, f).map(|s| s.path.clone()))
+}
+
+fn render_assigns(assigns: &HashMap<Symbol, Ty>) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = assigns
+        .iter()
+        .map(|(k, v)| (format!("@{}", k.as_str()), render_ty(v)))
+        .collect();
+    out.sort();
+    out
+}
+
+fn render_effect(e: &crate::effect::Effect) -> String {
+    use crate::effect::Effect::*;
+    match e {
+        Io => "Io".to_string(),
+        DbRead { table } => format!("DbRead({})", table.0.as_str()),
+        DbWrite { table } => format!("DbWrite({})", table.0.as_str()),
+        Time => "Time".to_string(),
+        Random => "Random".to_string(),
+        Raises { class } => format!("Raises({})", class.0.as_str()),
+        Net { host } => match host {
+            Some(h) => format!("Net({h})"),
+            None => "Net".to_string(),
+        },
+        Log => "Log".to_string(),
+        Var { .. } => "?".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1677,4 +2125,106 @@ mod tests {
         }
         assert!(saw_class, "real-blog inference should yield at least one class-typed position");
     }
+
+    #[test]
+    fn traceroute_composes_route_filters_action_view_layout() {
+        let app = real_blog();
+        let trace = traceroute(&app, "ArticlesController#edit").expect("trace");
+        assert_eq!(trace.route, "GET /articles/:id/edit → ArticlesController#edit");
+
+        // Route hop binds :id.
+        assert!(matches!(
+            &trace.hops[0],
+            TraceHop::Route { method, params, .. }
+                if method == "GET" && params == &vec!["id".to_string()]
+        ));
+
+        // set_article applies to show (only: gating), assigns @article.
+        let set_article = trace
+            .hops
+            .iter()
+            .find_map(|h| match h {
+                TraceHop::Filter(f) if f.name == "set_article" => Some(f),
+                _ => None,
+            })
+            .expect("set_article hop");
+        assert!(set_article.applies);
+        assert_eq!(set_article.defined_in, "ArticlesController");
+        assert_eq!(set_article.included_via, "ArticlesController");
+        assert!(set_article.file.as_deref().is_some_and(|f| f.ends_with("articles_controller.rb")));
+        assert!(
+            set_article.assigns.iter().any(|(k, v)| k == "@article" && v == "Article"),
+            "assigns = {:?}",
+            set_article.assigns
+        );
+        assert!(
+            set_article.effects.iter().any(|e| e.starts_with("DbRead")),
+            "Article.find → DbRead; effects = {:?}",
+            set_article.effects
+        );
+
+        // Action, view (with the _article partial via render @article),
+        // and the convention layout, in that order after the filters.
+        let kinds: Vec<&str> = trace
+            .hops
+            .iter()
+            .map(|h| match h {
+                TraceHop::Route { .. } => "route",
+                TraceHop::Filter(_) => "filter",
+                TraceHop::Action { .. } => "action",
+                TraceHop::Response { .. } => "response",
+                TraceHop::View { .. } => "view",
+                TraceHop::Layout { .. } => "layout",
+            })
+            .collect();
+        assert_eq!(kinds.first(), Some(&"route"));
+        assert!(kinds.ends_with(&["action", "view", "layout"]), "kinds = {kinds:?}");
+
+        let view = trace
+            .hops
+            .iter()
+            .find_map(|h| match h {
+                TraceHop::View { name, partials, .. } => Some((name, partials)),
+                _ => None,
+            })
+            .expect("view hop");
+        assert_eq!(view.0, "articles/edit");
+        // edit renders the shared `_form` partial (string-form render —
+        // record/collection renders don't produce render_edges yet).
+        assert!(
+            view.1.iter().any(|p| p == "articles/_form"),
+            "partials = {:?}",
+            view.1
+        );
+        assert!(trace.hops.iter().any(|h| matches!(
+            h,
+            TraceHop::Layout { name, .. } if name == "layouts/application"
+        )));
+    }
+
+    #[test]
+    fn traceroute_marks_gated_out_filters_and_resolves_routes() {
+        let app = real_blog();
+        // index is not in set_article's only: list → hop kept, applies=false.
+        let trace = traceroute(&app, "ArticlesController#index").expect("trace");
+        let set_article = trace
+            .hops
+            .iter()
+            .find_map(|h| match h {
+                TraceHop::Filter(f) if f.name == "set_article" => Some(f),
+                _ => None,
+            })
+            .expect("gated-out hop still present");
+        assert!(!set_article.applies);
+        assert!(set_article.skipped_by.is_none(), "gating is not a skip");
+
+        // Route-form query resolves to the same chain.
+        let by_route = traceroute(&app, "GET /articles/:id").expect("route query");
+        assert_eq!(by_route.controller, "ArticlesController");
+        assert_eq!(by_route.action, "show");
+
+        // Unknown query → None.
+        assert!(traceroute(&app, "NopeController#zap").is_none());
+    }
 }
+

@@ -2948,6 +2948,12 @@ end
     assert_eq!(by_target("set_widget").defined_in.0.as_str(), "WidgetOwnedConcern");
     assert_eq!(by_target("set_note").defined_in.0.as_str(), "WidgetsController");
 
+    // included_via records the chain segment that carried the filter in:
+    // the ancestor for inherited hops, the includer for concern hops.
+    assert_eq!(by_target("set_locale").included_via.0.as_str(), "ApplicationController");
+    assert_eq!(by_target("set_widget").included_via.0.as_str(), "WidgetsController");
+    assert_eq!(by_target("set_note").included_via.0.as_str(), "WidgetsController");
+
     // The symbol-form `if:` guard survives ingest onto the chain.
     assert_eq!(
         by_target("set_widget").filter.if_cond.as_ref().map(|s| s.as_str()),

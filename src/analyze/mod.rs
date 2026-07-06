@@ -1961,7 +1961,7 @@ impl Analyzer {
                 }
                 parent.clone()
             };
-            let mut ancestors: Vec<&ControllerMeta> = Vec::new();
+            let mut ancestors: Vec<(ClassId, &ControllerMeta)> = Vec::new();
             let mut current = ctrl_name.clone();
             let mut walk = controller.parent.clone();
             let mut visited: BTreeSet<ClassId> = BTreeSet::new();
@@ -1973,7 +1973,7 @@ impl Analyzer {
                     break;
                 }
                 let Some(parent_meta) = meta_by_name.get(&parent_id) else { break };
-                ancestors.push(parent_meta);
+                ancestors.push((parent_id.clone(), parent_meta));
                 walk = parent_link_by_name.get(&parent_id).cloned().flatten();
                 current = parent_id;
             }
@@ -1981,16 +1981,28 @@ impl Analyzer {
             // Build chained filters: ancestors first (oldest → newest),
             // then self. Rails: `before_action` callbacks fire in
             // registration order, with parent's running before child's.
-            let mut chained_filters: Vec<(Filter, ClassId)> = Vec::new();
-            for ancestor in ancestors.iter().rev() {
-                chained_filters.extend(ancestor.sourced_filters.iter().cloned());
+            // Each entry carries (declaration, defined_in, included_via)
+            // — the segment owner is the ancestor (or self) whose class
+            // body put the filter in the chain.
+            let mut chained_filters: Vec<(Filter, ClassId, ClassId)> = Vec::new();
+            for (aid, ancestor) in ancestors.iter().rev() {
+                chained_filters.extend(
+                    ancestor
+                        .sourced_filters
+                        .iter()
+                        .map(|(f, d)| (f.clone(), d.clone(), aid.clone())),
+                );
             }
-            chained_filters.extend(meta.sourced_filters.iter().cloned());
+            chained_filters.extend(
+                meta.sourced_filters
+                    .iter()
+                    .map(|(f, d)| (f.clone(), d.clone(), ctrl_name.clone())),
+            );
 
             // Build chained action_bindings: nearest parent's
             // overlay last so closer-defined targets win.
             let mut chained_bindings: HashMap<Symbol, HashMap<Symbol, Ty>> = HashMap::new();
-            for ancestor in ancestors.iter().rev() {
+            for (_, ancestor) in ancestors.iter().rev() {
                 for (name, ivars) in &ancestor.action_bindings {
                     chained_bindings.insert(name.clone(), ivars.clone());
                 }
@@ -2136,7 +2148,7 @@ impl Analyzer {
                 let mut iter = ancestors.iter();
                 while matches!(decl, LayoutDecl::Inherit) {
                     match iter.next() {
-                        Some(a) => decl = &a.layout,
+                        Some((_, a)) => decl = &a.layout,
                         None => break,
                     }
                 }
@@ -2160,7 +2172,7 @@ impl Analyzer {
             // neither.
             {
                 let mut chained_effects: HashMap<Symbol, EffectSet> = HashMap::new();
-                for ancestor in ancestors.iter().rev() {
+                for (_, ancestor) in ancestors.iter().rev() {
                     for (name, eff) in &ancestor.action_effects {
                         chained_effects.insert(name.clone(), eff.clone());
                     }
@@ -2177,7 +2189,7 @@ impl Analyzer {
                 let noise = |t: &Ty| matches!(t, Ty::Var { .. } | Ty::Bottom);
                 let filter_chain: Vec<crate::app::ResolvedFilter> = chained_filters
                     .iter()
-                    .map(|(filter, defined_in)| {
+                    .map(|(filter, defined_in, included_via)| {
                         let runs = !matches!(filter.kind, FilterKind::Skip);
                         let assigns: HashMap<Symbol, Ty> = if runs {
                             chained_bindings
@@ -2201,6 +2213,7 @@ impl Analyzer {
                         crate::app::ResolvedFilter {
                             filter: filter.clone(),
                             defined_in: defined_in.clone(),
+                            included_via: included_via.clone(),
                             assigns,
                             effects,
                         }
@@ -2225,7 +2238,7 @@ impl Analyzer {
             for action in controller.actions() {
                 let mut ivars: HashMap<Symbol, Ty> = HashMap::new();
                 extract_ivar_assignments(&action.body, &mut ivars);
-                for (filter, _) in &chained_filters {
+                for (filter, _, _) in &chained_filters {
                     if matches!(filter.kind, FilterKind::Before | FilterKind::Around)
                         && before_filter_applies(filter, &action.name)
                     {
@@ -2344,7 +2357,7 @@ impl Analyzer {
                     controller.actions().map(|a| a.name.clone()).collect();
                 let prefix = controller_view_prefix(&ctrl_name);
                 let mut seen_inherited: BTreeSet<Symbol> = BTreeSet::new();
-                for ancestor in &ancestors {
+                for (_, ancestor) in &ancestors {
                     for (name, binds) in &ancestor.action_bindings {
                         if own_names.contains(name) || !seen_inherited.insert(name.clone()) {
                             continue;
@@ -2359,7 +2372,7 @@ impl Analyzer {
                         // rule as the own-actions loop: action bindings
                         // win over filter contributions).
                         let mut ivars = binds.clone();
-                        for (filter, _) in &chained_filters {
+                        for (filter, _, _) in &chained_filters {
                             if matches!(filter.kind, FilterKind::Before | FilterKind::Around)
                                 && before_filter_applies(filter, name)
                             {
@@ -3580,7 +3593,7 @@ impl Analyzer {
 /// - `only: [...]` limits to the listed actions
 /// - `except: [...]` excludes the listed actions
 /// - both empty → applies to all actions on the controller
-fn before_filter_applies(filter: &Filter, action_name: &Symbol) -> bool {
+pub(crate) fn before_filter_applies(filter: &Filter, action_name: &Symbol) -> bool {
     if !filter.only.is_empty() {
         return filter.only.contains(action_name);
     }
@@ -3598,12 +3611,12 @@ fn before_filter_applies(filter: &Filter, action_name: &Symbol) -> bool {
 /// kinds (for `App::controller_resolutions`); only Before/Around run
 /// ahead of the action and contribute ivars here.
 fn merged_before_seed(
-    chained_filters: &[(Filter, ClassId)],
+    chained_filters: &[(Filter, ClassId, ClassId)],
     action_name: &Symbol,
     action_bindings: &HashMap<Symbol, HashMap<Symbol, Ty>>,
 ) -> HashMap<Symbol, Ty> {
     let mut seed: HashMap<Symbol, Ty> = HashMap::new();
-    for (filter, _) in chained_filters {
+    for (filter, _, _) in chained_filters {
         if !matches!(filter.kind, FilterKind::Before | FilterKind::Around) {
             continue;
         }
@@ -4173,7 +4186,7 @@ fn resolve_partial_path(name: &str, current_view: &Symbol) -> String {
 /// per-segment split, `Admin::…` produced `admin::users` — no view is
 /// ever named that, so namespaced controllers seeded nothing and every
 /// ivar in their views went unresolved (131 Mastodon view files).
-fn controller_view_prefix(class_id: &ClassId) -> String {
+pub(crate) fn controller_view_prefix(class_id: &ClassId) -> String {
     let name = class_id.0.as_str();
     let stripped = name.strip_suffix("Controller").unwrap_or(name);
     stripped
@@ -4185,7 +4198,7 @@ fn controller_view_prefix(class_id: &ClassId) -> String {
 
 /// Determine which view path an action's RenderTarget names — `None` if
 /// the action doesn't render a template (redirect, JSON, head).
-fn view_name_for_action(controller: &ClassId, action: &Action) -> Option<Symbol> {
+pub(crate) fn view_name_for_action(controller: &ClassId, action: &Action) -> Option<Symbol> {
     let prefix = controller_view_prefix(controller);
     match &action.renders {
         RenderTarget::Inferred => {

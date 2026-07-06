@@ -188,6 +188,15 @@ pub struct ResolvedFilter {
     /// trace hop's "defined in AccountOwnedConcern", distinct from the
     /// controller whose chain it landed in.
     pub defined_in: ClassId,
+    /// Chain segment that carried the filter in: the controller (or
+    /// ancestor) whose class body — an `include` line for concern
+    /// filters, the declaration itself otherwise — put this entry in
+    /// the chain. Equals `defined_in` for directly-declared filters;
+    /// for concern filters it's the includer (`set_locale`: defined_in
+    /// `Localized`, included_via `ApplicationController`). Lets
+    /// consumers group contiguous runs under two-level headers without
+    /// reconstructing segment boundaries from order.
+    pub included_via: ClassId,
     /// Ivars the target method's body assigns, with inferred types
     /// (`@account` → `Account`). Empty for `Skip` entries and for
     /// targets analyze couldn't see (e.g. framework-defined).
