@@ -47,8 +47,9 @@ fn find_nested_parent_in(
             for child in nested {
                 if let RouteSpec::Resources { name: child_name, .. } = child {
                     if child_name.as_str() == child_plural {
-                        let parent_singular =
-                            naming::singularize_camelize(name.as_str()).to_lowercase();
+                        // Snake-preserving singular — matches the
+                        // flattener's `:parent_id` param naming.
+                        let parent_singular = naming::singularize(name.as_str());
                         return Some(NestedParent {
                             singular: parent_singular,
                             plural: name.as_str().to_string(),
@@ -57,6 +58,14 @@ fn find_nested_parent_in(
                 }
             }
             if let Some(p) = find_nested_parent_in(nested, child_plural) {
+                return Some(p);
+            }
+        }
+        // Namespace/scope wrappers are transparent to resource
+        // nesting — the parent relation lives between the Resources
+        // entries themselves.
+        if let RouteSpec::Scope { entries, .. } = entry {
+            if let Some(p) = find_nested_parent_in(entries, child_plural) {
                 return Some(p);
             }
         }

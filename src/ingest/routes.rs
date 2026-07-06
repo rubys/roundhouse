@@ -1,6 +1,16 @@
 //! `config/routes.rb` — parse the `Rails.application.routes.draw do … end`
 //! DSL into a `RouteTable`. Recognizes verb shortcuts (`get`/`post`/…),
-//! `root`, and `resources` (with nested blocks and `only:` / `except:`).
+//! `root`, `resources`/`resource`, `namespace`/`scope`, and
+//! `draw(:name)` inclusion of `config/routes/<name>.rb` split files.
+//!
+//! Recovery discipline: in survey mode an unsupported DSL construct
+//! (`mount`, `use_doorkeeper`, `devise_for`, …) records a gap and drops
+//! that one entry — the rest of the table still flattens. In strict
+//! mode it still fails loud so the fixture that introduces a new form
+//! forces a recognizer. Not-modeled ≠ absent: a dropped entry is a
+//! ledger line, never a silently empty route table.
+
+use std::collections::HashMap;
 
 use indexmap::IndexMap;
 use ruby_prism::Node;
@@ -16,6 +26,18 @@ use super::util::{
 use super::{IngestError, IngestResult};
 
 pub fn ingest_routes(source: &[u8], file: &str) -> IngestResult<RouteTable> {
+    ingest_routes_with_draws(source, file, &HashMap::new())
+}
+
+/// `draws` maps a `draw(:name)` symbol to the split file Rails loads
+/// into the same DSL context (`config/routes/<name>.rb`): name →
+/// (source, path). The app ingester reads the directory; tests pass
+/// maps directly.
+pub fn ingest_routes_with_draws(
+    source: &[u8],
+    file: &str,
+    draws: &HashMap<String, (Vec<u8>, String)>,
+) -> IngestResult<RouteTable> {
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
     let root = result.node();
@@ -32,7 +54,7 @@ pub fn ingest_routes(source: &[u8], file: &str) -> IngestResult<RouteTable> {
     };
 
     let entries = match block.body() {
-        Some(body) => ingest_route_body(body, file, None)?,
+        Some(body) => ingest_route_body(body, file, None, draws)?,
         None => Vec::new(),
     };
 
@@ -41,8 +63,8 @@ pub fn ingest_routes(source: &[u8], file: &str) -> IngestResult<RouteTable> {
 
 /// Walk the statements inside a `routes.draw do ... end` block (or a
 /// nested `resources :x do ... end` block) and collect their `RouteSpec`
-/// entries. Recognized forms: verb shortcuts, `root "c#a"`, and
-/// `resources :name`.
+/// entries. Recognized forms: verb shortcuts, `root "c#a"`,
+/// `resources`/`resource`, `namespace`/`scope`, and `draw(:name)`.
 /// `parent` carries the enclosing `resources :<name>` (its plural name)
 /// so bare-verb member/nested shortcuts (`get "suggest"` with no `to:`)
 /// can infer their controller; `None` at the top level.
@@ -50,9 +72,19 @@ fn ingest_route_body(
     body: Node<'_>,
     file: &str,
     parent: Option<&str>,
+    draws: &HashMap<String, (Vec<u8>, String)>,
+) -> IngestResult<Vec<RouteSpec>> {
+    ingest_route_stmts(flatten_statements(body).into_iter(), file, parent, draws)
+}
+
+fn ingest_route_stmts<'pr>(
+    stmts: impl Iterator<Item = Node<'pr>>,
+    file: &str,
+    parent: Option<&str>,
+    draws: &HashMap<String, (Vec<u8>, String)>,
 ) -> IngestResult<Vec<RouteSpec>> {
     let mut entries = Vec::new();
-    for stmt in flatten_statements(body) {
+    for stmt in stmts {
         let Some(call) = stmt.as_call_node() else { continue };
         if call.receiver().is_some() {
             // `Rails.application.routes.draw` gets re-found as a nested
@@ -75,24 +107,25 @@ fn ingest_route_body(
         //     shortcuts that we drop anyway (see
         //     ingest_explicit_route's bare-action handling), so
         //     flattening loses no signal here.
-        //
-        // `scope` and `namespace` are NOT in this set — they prepend
-        // path segments to the nested routes, so flattening would
-        // produce wrong paths. They'll surface as Unsupported until
-        // a fixture forces a proper implementation.
         if matches!(method.as_str(), "constraints" | "member" | "collection") {
             if let Some(block_node) = call.block() {
                 if let Some(block) = block_node.as_block_node() {
                     if let Some(inner_body) = block.body() {
-                        entries.extend(ingest_route_body(inner_body, file, parent)?);
+                        entries.extend(ingest_route_body(inner_body, file, parent, draws)?);
                     }
                 }
             }
             continue;
         }
 
-        if let Some(spec) = ingest_route_call(&call, &method, file, parent)? {
-            entries.push(spec);
+        // Per-entry recovery: one `mount`/`use_doorkeeper` must not
+        // zero the whole table. Survey mode records the gap and keeps
+        // walking; strict mode still fails loud.
+        match ingest_route_call(&call, &method, file, parent, draws) {
+            Ok(Some(spec)) => entries.push(spec),
+            Ok(None) => {}
+            Err(err) if super::survey::is_active() => super::survey::record(&err),
+            Err(err) => return Err(err),
         }
     }
     Ok(entries)
@@ -103,6 +136,7 @@ fn ingest_route_call(
     method: &str,
     file: &str,
     parent: Option<&str>,
+    draws: &HashMap<String, (Vec<u8>, String)>,
 ) -> IngestResult<Option<RouteSpec>> {
     // Verb shortcuts (`get "/p", to: "c#a"` and the hashrocket form
     // `get "/p" => "c#a"`). `ingest_explicit_route` returns Ok(None)
@@ -113,10 +147,16 @@ fn ingest_route_call(
     }
     match method {
         "root" => ingest_root_route(call).map(Some),
-        "resources" => ingest_resources_route(call, file).map(Some),
-        // Unknown DSL — `resource` (singular), `namespace`, `scope`,
-        // `concern`, `mount`, etc. land here. Fail loud so the fixture
-        // that introduces them forces a recognizer.
+        "resources" => ingest_resources_route(call, file, draws, false).map(Some),
+        "resource" => ingest_resources_route(call, file, draws, true).map(Some),
+        "namespace" => ingest_namespace_route(call, file, draws).map(Some),
+        "scope" => ingest_scope_route(call, file, draws).map(Some),
+        "draw" => ingest_draw_route(call, file, draws),
+        // Unknown DSL — `concern`, `mount`, `devise_for`,
+        // `use_doorkeeper`, `authenticate`, etc. land here. Strict
+        // ingest fails loud so the fixture that introduces them forces
+        // a recognizer; survey callers get a per-entry ledger line
+        // (see ingest_route_stmts).
         _ => Err(IngestError::Unsupported {
             file: file.into(),
             message: format!("unsupported routes DSL: `{method}`"),
@@ -136,6 +176,137 @@ fn http_method_from(name: &str) -> Option<HttpMethod> {
         "match" => HttpMethod::Any,
         _ => return None,
     })
+}
+
+/// First positional symbol-or-string argument (`namespace :admin`,
+/// `scope "v2"`, `draw(:api)`).
+fn first_name_arg(call: &ruby_prism::CallNode<'_>) -> Option<String> {
+    let args = call.arguments()?;
+    for arg in args.arguments().iter() {
+        if let Some(s) = symbol_value(&arg) {
+            return Some(s);
+        }
+        if let Some(s) = string_value(&arg) {
+            return Some(s);
+        }
+        // Keyword hash → options-only call (`scope module: :web`).
+        if arg.as_keyword_hash_node().is_some() {
+            return None;
+        }
+    }
+    None
+}
+
+fn block_entries(
+    call: &ruby_prism::CallNode<'_>,
+    file: &str,
+    parent: Option<&str>,
+    draws: &HashMap<String, (Vec<u8>, String)>,
+) -> IngestResult<Vec<RouteSpec>> {
+    match call.block() {
+        Some(block_node) => match block_node.as_block_node() {
+            Some(block) => match block.body() {
+                Some(body) => ingest_route_body(body, file, parent, draws),
+                None => Ok(Vec::new()),
+            },
+            None => Ok(Vec::new()),
+        },
+        None => Ok(Vec::new()),
+    }
+}
+
+/// `namespace :admin do … end` — `scope` with path, controller module,
+/// and helper prefix all set to the name. Resets the enclosing
+/// `resources` inference context (Rails does not infer member
+/// controllers across a namespace boundary).
+fn ingest_namespace_route(
+    call: &ruby_prism::CallNode<'_>,
+    file: &str,
+    draws: &HashMap<String, (Vec<u8>, String)>,
+) -> IngestResult<RouteSpec> {
+    let Some(name) = first_name_arg(call) else {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "namespace without a name".into(),
+        });
+    };
+    let entries = block_entries(call, file, None, draws)?;
+    Ok(RouteSpec::Scope {
+        path: Some(name.clone()),
+        module: Some(name.clone()),
+        as_prefix: Some(name),
+        entries,
+    })
+}
+
+/// `scope <path> [, path:, module:, as:] do … end` — each facet
+/// independent. A positional symbol/string is the path segment
+/// (`scope :v1_alpha, as: :v1_alpha, module: :v1`).
+fn ingest_scope_route(
+    call: &ruby_prism::CallNode<'_>,
+    file: &str,
+    draws: &HashMap<String, (Vec<u8>, String)>,
+) -> IngestResult<RouteSpec> {
+    let mut path = first_name_arg(call);
+    let mut module: Option<String> = None;
+    let mut as_prefix: Option<String> = None;
+    if let Some(args) = call.arguments() {
+        for arg in args.arguments().iter() {
+            let Some(kh) = arg.as_keyword_hash_node() else { continue };
+            for el in kh.elements().iter() {
+                let Some(assoc) = el.as_assoc_node() else { continue };
+                let Some(key) = symbol_value(&assoc.key()) else { continue };
+                let value = assoc.value();
+                let val = symbol_value(&value).or_else(|| string_value(&value));
+                match key.as_str() {
+                    "path" => path = val.or(path),
+                    "module" => module = val,
+                    "as" => as_prefix = val,
+                    // `defaults:`, `constraints:`, `format:` shape the
+                    // request, not the (path, controller, action)
+                    // triple this table models.
+                    _ => {}
+                }
+            }
+        }
+    }
+    let entries = block_entries(call, file, None, draws)?;
+    Ok(RouteSpec::Scope { path, module, as_prefix, entries })
+}
+
+/// `draw(:admin)` — Rails loads `config/routes/admin.rb` into the same
+/// DSL context. The split file's top-level statements are route DSL
+/// directly (no `routes.draw` wrapper). Included entries ride a
+/// facet-less Scope so the flattener composes them transparently.
+fn ingest_draw_route(
+    call: &ruby_prism::CallNode<'_>,
+    file: &str,
+    draws: &HashMap<String, (Vec<u8>, String)>,
+) -> IngestResult<Option<RouteSpec>> {
+    let Some(name) = first_name_arg(call) else {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "draw without a route-file name".into(),
+        });
+    };
+    let Some((source, path)) = draws.get(&name) else {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: format!("draw(:{name}) — config/routes/{name}.rb not found"),
+        });
+    };
+    super::sources::register(path, &String::from_utf8_lossy(source));
+    let result = super::prism::parse(source, path);
+    let root = result.node();
+    let Some(program) = root.as_program_node() else {
+        return Err(IngestError::Parse {
+            file: path.clone(),
+            message: "route file is not a program".into(),
+        });
+    };
+    let entries =
+        ingest_route_stmts(program.statements().body().iter(), path, None, draws)?;
+    Ok(Some(RouteSpec::Scope { path: None, module: None, as_prefix: None, entries }))
 }
 
 fn ingest_explicit_route(
@@ -317,6 +488,8 @@ fn ingest_root_route(call: &ruby_prism::CallNode<'_>) -> IngestResult<RouteSpec>
 fn ingest_resources_route(
     call: &ruby_prism::CallNode<'_>,
     file: &str,
+    draws: &HashMap<String, (Vec<u8>, String)>,
+    singular: bool,
 ) -> IngestResult<RouteSpec> {
     let Some(args_node) = call.arguments() else {
         return Err(IngestError::Unsupported {
@@ -354,22 +527,18 @@ fn ingest_resources_route(
         }
     }
 
-    let nested = match call.block() {
-        Some(block_node) => match block_node.as_block_node() {
-            Some(block) => match block.body() {
-                Some(body) => ingest_route_body(body, file, Some(name_str.as_str()))?,
-                None => Vec::new(),
-            },
-            None => Vec::new(),
-        },
-        None => Vec::new(),
-    };
+    let nested = block_entries(call, file, Some(name_str.as_str()), draws)?;
 
-    Ok(RouteSpec::Resources { name, only, except, nested })
+    Ok(RouteSpec::Resources { name, only, except, nested, singular })
 }
 
+/// `"c"` / `"admin/c"` → `CController` / `Admin::CController`.
 fn controller_class_name(short: &str) -> String {
-    let mut s = camelize(short);
+    let mut s = short
+        .split('/')
+        .map(camelize)
+        .collect::<Vec<_>>()
+        .join("::");
     s.push_str("Controller");
     s
 }

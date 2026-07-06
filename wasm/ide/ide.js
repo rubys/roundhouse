@@ -518,13 +518,15 @@ async function showTracePicker() {
     ? [...targets.filter((t) => snakePath(t.controller) === active),
        ...targets.filter((t) => snakePath(t.controller) !== active)]
     : targets;
+  // The list renders 40 rows at a time (type to filter) — say how
+  // many targets sit behind the window so the cut is never silent.
   showPicker(
     ordered.map((t) => ({
       label: t.label,
       search: `${t.label} ${t.query}`,
       run: () => runTrace(t.query),
     })),
-    "trace a route or Controller#action…",
+    `trace a route or Controller#action… (${targets.length} targets)`,
   );
 }
 

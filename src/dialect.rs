@@ -846,7 +846,10 @@ pub enum RouteSpec {
     /// `only` and `except` are empty-on-default (an empty `only` means
     /// "all seven standard actions," matching Rails' behavior). Nested
     /// blocks hold any entries declared inside the `do ... end`, typically
-    /// further `resources` calls.
+    /// further `resources` calls. `singular` marks `resource :name`:
+    /// no `index`, no `:id` path segment, but the controller is still
+    /// the *plural* class (Rails' `resource :profile` →
+    /// `ProfilesController`).
     Resources {
         name: Symbol,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -855,6 +858,23 @@ pub enum RouteSpec {
         except: Vec<Symbol>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         nested: Vec<RouteSpec>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        singular: bool,
+    },
+    /// `namespace :admin do … end` / `scope … do … end` — a routing
+    /// scope wrapping nested entries. `namespace :x` is `scope` with
+    /// all three facets set to `x`; `scope module: :web` sets only
+    /// `module`. Composition happens in the flattener: `path`
+    /// prepends a URL segment, `module` prefixes the controller class
+    /// namespace, `as_prefix` prefixes route-helper names.
+    Scope {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        module: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_prefix: Option<String>,
+        entries: Vec<RouteSpec>,
     },
 }
 

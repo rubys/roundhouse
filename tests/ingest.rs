@@ -267,6 +267,122 @@ fn ingests_routes_file() {
 }
 
 #[test]
+fn ingests_namespaced_and_split_routes() {
+    use roundhouse::lower::routes::flatten_routes;
+
+    // namespace / scope / singular resource / draw(:name) — the
+    // Mastodon-class routing surface (#63 follow-up). The split file
+    // is standard DSL at top level, loaded by `draw(:admin)`.
+    let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = [
+        (
+            "config/routes.rb",
+            r#"Rails.application.routes.draw do
+  root "home#index"
+  get "health", to: "health#show"
+  scope module: :web do
+    get "/embed", to: "home#embed", as: :embed
+  end
+  namespace :api do
+    namespace :v1 do
+      resources :statuses, only: [:show]
+    end
+  end
+  draw(:admin)
+end
+"#,
+        ),
+        (
+            "config/routes/admin.rb",
+            r#"namespace :admin do
+  get "/dashboard", to: "dashboard#index"
+  resources :domain_allows, only: [:new, :create]
+  resource :profile, only: [:show, :update]
+end
+"#,
+        ),
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema[7.1].define(version: 1) do\nend\n",
+        ),
+    ]
+    .into_iter()
+    .map(|(p, c)| (std::path::PathBuf::from(p), c.as_bytes().to_vec()))
+    .collect();
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("ingest tree");
+    let flat = flatten_routes(&app);
+
+    let find = |path: &str, action: &str| {
+        flat.iter()
+            .find(|r| r.path == path && r.action.as_str() == action)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no route {path} #{action}; have {:?}",
+                    flat.iter().map(|r| (&r.path, r.action.as_str())).collect::<Vec<_>>()
+                )
+            })
+    };
+
+    // Path without a leading slash still roots.
+    assert_eq!(find("/health", "show").controller.0.as_str(), "HealthController");
+
+    // `scope module:` qualifies the controller but not the path.
+    let embed = find("/embed", "embed");
+    assert_eq!(embed.controller.0.as_str(), "Web::HomeController");
+    assert_eq!(embed.as_name, "embed");
+
+    // Two nested namespaces compose path, module, and helper prefix.
+    let status = find("/api/v1/statuses/:id", "show");
+    assert_eq!(status.controller.0.as_str(), "Api::V1::StatusesController");
+    assert_eq!(status.as_name, "api_v1_status");
+
+    // draw(:admin) splices the split file; namespace facets apply.
+    let dash = find("/admin/dashboard", "index");
+    assert_eq!(dash.controller.0.as_str(), "Admin::DashboardController");
+    assert_eq!(dash.as_name, "admin_dashboard");
+    let new_allow = find("/admin/domain_allows/new", "new");
+    assert_eq!(new_allow.controller.0.as_str(), "Admin::DomainAllowsController");
+    assert_eq!(new_allow.as_name, "new_admin_domain_allow");
+
+    // Singular resource: no :id segment, plural controller.
+    let profile = find("/admin/profile", "show");
+    assert_eq!(profile.controller.0.as_str(), "Admin::ProfilesController");
+    assert_eq!(profile.as_name, "admin_profile");
+    assert!(
+        !flat.iter().any(|r| r.path.starts_with("/admin/profile/:")),
+        "singular resource must not take an :id segment"
+    );
+}
+
+#[test]
+fn routes_recover_per_entry_under_survey() {
+    // One `mount` (unsupported DSL) must not zero the table: survey
+    // mode records the gap and keeps the sibling routes; strict mode
+    // still fails loud so fixtures force recognizers.
+    let source = br#"Rails.application.routes.draw do
+  mount Sidekiq::Web, at: "sidekiq"
+  get "/posts", to: "posts#index"
+end
+"#;
+
+    let strict = roundhouse::ingest::prism::scope(|| {
+        roundhouse::ingest::ingest_routes(source, "config/routes.rb")
+    });
+    assert!(strict.0.is_err(), "strict ingest fails loud on `mount`");
+
+    roundhouse::ingest::survey::activate();
+    let (result, _) = roundhouse::ingest::prism::scope(|| {
+        roundhouse::ingest::ingest_routes(source, "config/routes.rb")
+    });
+    let gaps = roundhouse::ingest::survey::drain();
+    let table = result.expect("survey ingest recovers");
+    assert_eq!(table.entries.len(), 1, "the good route survives");
+    assert!(
+        gaps.iter().any(|g| format!("{g:?}").contains("mount")),
+        "the mount gap is recorded, not silently dropped: {gaps:?}"
+    );
+}
+
+#[test]
 fn ingested_app_is_self_consistent() {
     use roundhouse::RouteSpec;
 

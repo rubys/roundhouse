@@ -61,6 +61,11 @@ fn collect_controller_refs_py(spec: &RouteSpec, out: &mut Vec<String>) {
                 collect_controller_refs_py(child, out);
             }
         }
+        RouteSpec::Scope { entries, .. } => {
+            for entry in entries {
+                collect_controller_refs_py(entry, out);
+            }
+        }
     }
 }
 
@@ -91,7 +96,7 @@ fn emit_py_route_spec(out: &mut String, spec: &RouteSpec) {
                 .unwrap_or_else(|| (target.clone(), "index".to_string()));
             writeln!(out, "Router.root({controller}, {action:?})").unwrap();
         }
-        RouteSpec::Resources { name, only, except: _, nested } => {
+        RouteSpec::Resources { name, only, except: _, nested, .. } => {
             let controller = controller_class_name(name.as_str());
             let mut opts: Vec<String> = Vec::new();
             if !only.is_empty() {
@@ -129,11 +134,20 @@ fn emit_py_route_spec(out: &mut String, spec: &RouteSpec) {
                 .unwrap();
             }
         }
+        // Namespaced routes aren't modeled by the Python router DSL
+        // yet — emit the nested entries un-prefixed so the referenced
+        // controllers stay reachable. A python fixture with `namespace`
+        // will force real prefix support here.
+        RouteSpec::Scope { entries, .. } => {
+            for entry in entries {
+                emit_py_route_spec(out, entry);
+            }
+        }
     }
 }
 
 fn py_nested_spec_entry(spec: &RouteSpec) -> Option<String> {
-    let RouteSpec::Resources { name, only, except: _, nested: _ } = spec else {
+    let RouteSpec::Resources { name, only, .. } = spec else {
         return None;
     };
     let controller = controller_class_name(name.as_str());

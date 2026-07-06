@@ -5,9 +5,10 @@
 //   node bundle-src.mjs ~/git/mastodon [out.json] [--name mastodon] [--open app/controllers/statuses_controller.rb]
 //
 // Ships only the text the analyzer ingests (.rb + template files under
-// the app dirs, plus db/schema.rb and config/routes.rb). When bundling
-// a third-party app, include its LICENSE and record the commit — the
-// output embeds both when discoverable.
+// the app dirs, plus db/schema.rb, config/routes.rb, and the
+// config/routes/ draw(:name) split files). When bundling a third-party
+// app, include its LICENSE and record the commit — the output embeds
+// both when discoverable.
 
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { execSync } from "node:child_process";
@@ -37,7 +38,7 @@ async function walk(dir, rootDir) {
     }
   }
 }
-for (const sub of ["app", "extras", "lib"]) await walk(join(root, sub), root);
+for (const sub of ["app", "extras", "lib", "config/routes"]) await walk(join(root, sub), root);
 for (const single of ["db/schema.rb", "config/routes.rb"]) {
   try { src[single] = await readFile(join(root, single), "utf8"); } catch {}
 }

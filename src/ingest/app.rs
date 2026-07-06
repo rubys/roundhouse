@@ -25,7 +25,7 @@ use super::library_class::{
     ingest_library_classes, ingest_rails_application_singleton_methods,
 };
 use super::model::ingest_model;
-use super::routes::ingest_routes;
+use super::routes::ingest_routes_with_draws;
 use super::schema::{ingest_migration, ingest_schema};
 use super::test::ingest_test_file;
 use super::view::{ViewEngine, ingest_template};
@@ -310,9 +310,26 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     let routes_path = dir.join("config/routes.rb");
     if vfs.exists(&routes_path) {
         let source = vfs.read(&routes_path)?;
-        if let Some(routes) =
-            unwrap_or_record(ingest_routes(&source, &routes_path.display().to_string()))?
-        {
+        // `draw(:name)` split files — Rails loads
+        // `config/routes/<name>.rb` into the same DSL context, and
+        // Mastodon-class apps keep most of their route table there.
+        let mut draw_files: HashMap<String, (Vec<u8>, String)> = HashMap::new();
+        let routes_dir = dir.join("config/routes");
+        if vfs.is_dir(&routes_dir) {
+            for entry in read_rb_files(vfs, &routes_dir)? {
+                let Some(stem) = entry.file_stem().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let split_source = vfs.read(&entry)?;
+                draw_files
+                    .insert(stem.to_string(), (split_source, entry.display().to_string()));
+            }
+        }
+        if let Some(routes) = unwrap_or_record(ingest_routes_with_draws(
+            &source,
+            &routes_path.display().to_string(),
+            &draw_files,
+        ))? {
             app.routes = routes;
         }
     }

@@ -371,7 +371,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: wasm/ide/app-src.json
-          key: mastodon-app-src-${{ env.MASTODON_SHA }}-v1
+          key: mastodon-app-src-${{ env.MASTODON_SHA }}-v2
       - name: Fetch pinned Mastodon + bundle sources
         if: steps.mastodon-src.outputs.cache-hit != 'true'
         run: |
@@ -1609,7 +1609,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: wasm/ide/app-src.json
-          key: mastodon-app-src-${{ env.MASTODON_SHA }}-v1
+          key: mastodon-app-src-${{ env.MASTODON_SHA }}-v2
       - name: Fetch pinned Mastodon + bundle sources (cache miss)
         if: steps.mastodon-src-site.outputs.cache-hit != 'true'
         run: |
