@@ -1920,10 +1920,39 @@ impl Analyzer {
             // until hitting a class not registered as a Controller —
             // that's the boundary with framework-supplied parents
             // (e.g., `ActionController::Base`).
+            //
+            // Parents are recorded as written in source, so the nested
+            // declaration style (`module Admin; class AccountsController
+            // < BaseController`) records the unqualified `BaseController`
+            // while the table keys `Admin::BaseController`. Resolve with
+            // Ruby's lexical rule — qualify a single-segment parent
+            // against the child's enclosing namespaces, innermost first,
+            // falling back to top level. Without this the whole ancestor
+            // walk (inherited filters AND inherited actions) silently
+            // no-ops for every nested-style controller.
+            let resolve_parent = |child: &ClassId, parent: &ClassId| -> ClassId {
+                if meta_by_name.contains_key(parent) || parent.0.as_str().contains("::") {
+                    return parent.clone();
+                }
+                let mut segs: Vec<&str> = child.0.as_str().split("::").collect();
+                segs.pop(); // drop the class itself, keep enclosing modules
+                while !segs.is_empty() {
+                    let candidate = ClassId(Symbol::from(
+                        format!("{}::{}", segs.join("::"), parent.0.as_str()).as_str(),
+                    ));
+                    if meta_by_name.contains_key(&candidate) {
+                        return candidate;
+                    }
+                    segs.pop();
+                }
+                parent.clone()
+            };
             let mut ancestors: Vec<&ControllerMeta> = Vec::new();
+            let mut current = ctrl_name.clone();
             let mut walk = controller.parent.clone();
             let mut visited: BTreeSet<ClassId> = BTreeSet::new();
             while let Some(parent_id) = walk {
+                let parent_id = resolve_parent(&current, &parent_id);
                 if !visited.insert(parent_id.clone()) {
                     // Defensive: cycles shouldn't exist in real Rails
                     // inheritance, but guard against pathological ingests.
@@ -1932,6 +1961,7 @@ impl Analyzer {
                 let Some(parent_meta) = meta_by_name.get(&parent_id) else { break };
                 ancestors.push(parent_meta);
                 walk = parent_link_by_name.get(&parent_id).cloned().flatten();
+                current = parent_id;
             }
 
             // Build chained filters: ancestors first (oldest → newest),
@@ -2213,6 +2243,65 @@ impl Analyzer {
                             None => v.clone(),
                         };
                         entry.insert(k.clone(), merged);
+                    }
+                }
+            }
+
+            // Inherited actions: a subclass that defines no `show` of
+            // its own still renders `<child_prefix>/show` through the
+            // parent-defined action — Admin::Settings::DiscoveryController
+            // renders admin/settings/discovery/show from
+            // Admin::SettingsController#show. The own-actions loop above
+            // keys views by the defining controller only, so
+            // ancestor-defined actions seeded nothing under the child's
+            // prefix. Walk ancestors nearest-first (Ruby MRO); the
+            // existing-view gate keeps private-helper bindings (which
+            // share the bindings table) from minting phantom entries.
+            {
+                let own_names: BTreeSet<Symbol> =
+                    controller.actions().map(|a| a.name.clone()).collect();
+                let prefix = controller_view_prefix(&ctrl_name);
+                let mut seen_inherited: BTreeSet<Symbol> = BTreeSet::new();
+                for ancestor in &ancestors {
+                    for (name, binds) in &ancestor.action_bindings {
+                        if own_names.contains(name) || !seen_inherited.insert(name.clone()) {
+                            continue;
+                        }
+                        let view_name =
+                            Symbol::from(format!("{prefix}/{}", name.as_str()).as_str());
+                        if !existing_view_names.contains(&view_name) {
+                            continue;
+                        }
+                        // The child's full filter chain applies when the
+                        // inherited action runs in the child (same merge
+                        // rule as the own-actions loop: action bindings
+                        // win over filter contributions).
+                        let mut ivars = binds.clone();
+                        for filter in &chained_filters {
+                            if before_filter_applies(filter, name) {
+                                if let Some(fivars) = chained_bindings.get(&filter.target) {
+                                    for (k, v) in fivars {
+                                        ivars.entry(k.clone()).or_insert_with(|| v.clone());
+                                    }
+                                }
+                            }
+                        }
+                        view_feeders
+                            .entry(view_name.clone())
+                            .or_default()
+                            .insert(ctrl_name.clone());
+                        let entry = action_ivars_by_view.entry(view_name).or_default();
+                        for (k, v) in &ivars {
+                            let noise = |t: &Ty| matches!(t, Ty::Var { .. } | Ty::Untyped);
+                            let merged = match entry.remove(k) {
+                                Some(prev) if noise(&prev) => v.clone(),
+                                Some(prev) if noise(v) => prev,
+                                Some(prev) if prev == *v => prev,
+                                Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
+                                None => v.clone(),
+                            };
+                            entry.insert(k.clone(), merged);
+                        }
                     }
                 }
             }
@@ -3808,9 +3897,15 @@ fn interpret_render_call(
     }
 
     // Hash form: `render partial: "name", locals: { k: v }` — first arg is a Hash.
+    // The collection form rides the same hash: `render partial: "status",
+    // collection: @statuses[, as: :status]` binds an implicit local named
+    // after the partial's basename (or the `as:` override), typed as the
+    // collection's element, plus Rails' `<name>_counter` index local.
     if let ExprNode::Hash { entries, .. } = &*first.node {
         let mut partial_name: Option<String> = None;
         let mut locals: HashMap<Symbol, Ty> = HashMap::new();
+        let mut collection_ty: Option<Ty> = None;
+        let mut as_name: Option<Symbol> = None;
         for (k, v) in entries {
             let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
                 continue;
@@ -3834,10 +3929,34 @@ fn interpret_render_call(
                         }
                     }
                 }
+                "collection" => {
+                    collection_ty = v.ty.clone();
+                }
+                "as" => {
+                    if let ExprNode::Lit { value: Literal::Sym { value } } = &*v.node {
+                        as_name = Some(value.clone());
+                    }
+                }
                 _ => {}
             }
         }
         if let Some(name) = partial_name {
+            if let Some(coll) = collection_ty {
+                let elem_ty = match coll {
+                    Ty::Array { elem } => *elem,
+                    // Unknown/gradual collection still binds the local —
+                    // gradual element beats an unresolved bare name.
+                    _ => Ty::Untyped,
+                };
+                let local = as_name.unwrap_or_else(|| {
+                    let base = name.rsplit('/').next().unwrap_or(&name);
+                    Symbol::from(base.trim_start_matches('_'))
+                });
+                locals
+                    .entry(Symbol::from(format!("{}_counter", local.as_str()).as_str()))
+                    .or_insert(Ty::Int);
+                locals.entry(local).or_insert(elem_ty);
+            }
             let partial = resolve_partial_path(&name, current_view);
             return Some((Symbol::from(partial.as_str()), locals));
         }
