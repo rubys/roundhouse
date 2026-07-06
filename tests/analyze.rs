@@ -3067,3 +3067,117 @@ end
     assert_eq!(skip.defined_in.0.as_str(), "PublicController");
     assert!(skip.assigns.is_empty() && skip.effects.is_pure());
 }
+
+fn missing_preload_diags(app: &roundhouse::App) -> Vec<(String, String)> {
+    diagnose(app)
+        .into_iter()
+        .filter(|d| matches!(d.kind, DiagnosticKind::MissingPreload { .. }))
+        .map(|d| {
+            let file = app
+                .sources
+                .get((d.span.file.0 as usize).saturating_sub(1))
+                .map(|s| s.path.clone())
+                .unwrap_or_default();
+            (file, d.message)
+        })
+        .collect()
+}
+
+fn preload_fixture(controller_body: &str, view: &str) -> roundhouse::App {
+    app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/articles_controller.rb",
+            &format!(
+                "class ArticlesController < ApplicationController\n{controller_body}\nend\n"
+            ),
+        ),
+        (
+            "app/models/article.rb",
+            r#"class Article < ApplicationRecord
+  has_many :comments
+  scope :with_comments, -> { includes(:comments) }
+end
+"#,
+        ),
+        ("app/models/comment.rb", "class Comment < ApplicationRecord\n  belongs_to :article\nend\n"),
+        ("app/views/articles/index.html.erb", view),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema[7.1].define(version: 1) do
+  create_table "articles", force: :cascade do |t|
+    t.string "title"
+  end
+  create_table "comments", force: :cascade do |t|
+    t.integer "article_id"
+    t.text "body"
+  end
+end
+"#,
+        ),
+    ])
+}
+
+#[test]
+fn missing_preload_fires_same_procedure_and_cross_procedure() {
+    // Query without includes; iteration reads the association both in
+    // the action (same procedure) and in the template (the ivar
+    // channel — where most real N+1s live).
+    let app = preload_fixture(
+        r#"  def index
+    @articles = Article.order(:title)
+    @articles.each { |a| a.comments }
+  end"#,
+        "<% @articles.each do |a| %><%= a.comments.size %><% end %>\n",
+    );
+    let diags = missing_preload_diags(&app);
+    assert!(
+        diags.iter().any(|(f, m)| f.ends_with("articles_controller.rb")
+            && m.contains(":comments")
+            && m.contains(".includes(:comments)")),
+        "same-procedure finding expected; got {diags:?}"
+    );
+    let view_hit = diags
+        .iter()
+        .find(|(f, _)| f.ends_with("index.html.erb"))
+        .expect("cross-procedure finding in the template");
+    assert!(
+        view_hit.1.contains("articles_controller.rb"),
+        "message names the query site; got {}",
+        view_hit.1
+    );
+}
+
+#[test]
+fn missing_preload_stays_silent_when_preloaded_or_opaque() {
+    // includes() on the chain → clean.
+    let app = preload_fixture(
+        r#"  def index
+    @articles = Article.includes(:comments).order(:title)
+  end"#,
+        "<% @articles.each do |a| %><%= a.comments.size %><% end %>\n",
+    );
+    assert_eq!(missing_preload_diags(&app), vec![], "preloaded chain is clean");
+
+    // A scope whose body includes() also satisfies the read.
+    let app = preload_fixture(
+        r#"  def index
+    @articles = Article.with_comments
+  end"#,
+        "<% @articles.each do |a| %><%= a.comments.size %><% end %>\n",
+    );
+    assert_eq!(missing_preload_diags(&app), vec![], "scope-provided preload is clean");
+
+    // An unrecognized chain link makes the query opaque: no claim,
+    // no finding (not-modeled ≠ absent).
+    let app = preload_fixture(
+        r#"  def index
+    @articles = Article.some_custom_query
+  end"#,
+        "<% @articles.each do |a| %><%= a.comments.size %><% end %>\n",
+    );
+    assert_eq!(missing_preload_diags(&app), vec![], "opaque chain stays silent");
+}

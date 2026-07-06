@@ -65,6 +65,7 @@ impl Diagnostic {
             DiagnosticKind::GradualUntyped { .. } => "gradual_untyped",
             DiagnosticKind::UnresolvedType { .. } => "unresolved_type",
             DiagnosticKind::Unsupported { .. } => "unsupported",
+            DiagnosticKind::MissingPreload { .. } => "missing_preload",
             DiagnosticKind::Parse { .. } => "parse",
         }
     }
@@ -77,6 +78,7 @@ impl Diagnostic {
         match kind {
             DiagnosticKind::GradualUntyped { .. } => Severity::Warning,
             DiagnosticKind::UnresolvedType { .. } => Severity::Warning,
+            DiagnosticKind::MissingPreload { .. } => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -178,6 +180,9 @@ impl Diagnostic {
             }
             DiagnosticKind::Unsupported { target, construct, .. } => {
                 Self::unsupported_text(target.as_ref(), construct)
+            }
+            DiagnosticKind::MissingPreload { association, .. } => {
+                format!("query does not preload :{}", association.as_str())
             }
             DiagnosticKind::Parse { message } => format!("syntax error: {message}"),
         }
@@ -418,6 +423,15 @@ pub enum DiagnosticKind {
         construct: Symbol,
         detail: String,
     },
+    /// Iterating a typed relation reads a member association the
+    /// originating query didn't `includes`/`preload`/`eager_load` —
+    /// the static N+1 finding (`analyze::preload`, roundhouse#64).
+    /// Anchored at the association-read site; `query_span` names the
+    /// query it should be fixed at (the P0 both-spans provenance
+    /// pattern, pointed at performance). Always Warning — the finding
+    /// is technically-true-but-tunable (small collections, caching),
+    /// never a correctness claim.
+    MissingPreload { association: Symbol, query_span: Span },
     /// Ruby source Prism itself couldn't parse — a genuine syntax error
     /// in the input, distinct from `Unsupported` (valid Ruby the tool
     /// can't compile *yet*). Prism is error-recovering, so ingest still

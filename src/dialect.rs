@@ -276,6 +276,17 @@ pub enum Association {
     },
 }
 
+impl Association {
+    pub fn name(&self) -> &Symbol {
+        match self {
+            Association::BelongsTo { name, .. }
+            | Association::HasMany { name, .. }
+            | Association::HasOne { name, .. }
+            | Association::HasAndBelongsToMany { name, .. } => name,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Dependent {

@@ -26,10 +26,12 @@
 mod body;
 pub mod async_color;
 pub mod attribution;
+pub mod preload;
 pub mod block_refine;
 pub mod mutates_self;
 
 pub use body::{BodyTyper, ClassInfo, Ctx};
+pub use preload::{missing_preload_report, PreloadCoverage};
 pub(crate) use body::union_of;
 
 use std::collections::{BTreeSet, HashMap};
@@ -4960,6 +4962,11 @@ pub fn diagnose(app: &App) -> Vec<Diagnostic> {
         diagnose_expr(seeds, &mut out);
     }
 
+    // Static N+1 pass (#64): missing-preload warnings over the typed
+    // query chains, same-procedure and through the controller→view
+    // ivar channel.
+    out.extend(preload::missing_preload_findings(app));
+
     // Collapse diagnostics that render to the same place with the same
     // text — same start position, same kind, same message. Method chains
     // whose links share a (not-yet-precise) start each emit there, so
@@ -5053,10 +5060,14 @@ fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
                 }
                 m
             }
-            // Parse diagnostics are produced by the ingest parse wrapper,
-            // never carried as an `Expr.diagnostic` annotation; handled
+            // Parse diagnostics come from the ingest parse wrapper and
+            // MissingPreload from the post-walk preload pass — neither
+            // is carried as an `Expr.diagnostic` annotation; handled
             // defensively so the match stays exhaustive.
             DiagnosticKind::Parse { message } => format!("syntax error: {message}"),
+            DiagnosticKind::MissingPreload { association, .. } => {
+                format!("query does not preload :{}", association.as_str())
+            }
         };
         out.push(Diagnostic {
             span: expr.span,
