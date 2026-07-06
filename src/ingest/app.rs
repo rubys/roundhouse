@@ -140,7 +140,11 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // registered" (references stay unknown, same as before) rather than
     // aborting the whole app ingest. We never propagate; in survey mode the
     // error is still recorded for scope estimation.
-    for sub in ["extras", "lib", "app/mailers"] {
+    // `app/lib` is Rails-autoloaded app code (Mastodon keeps ~100
+    // service/lib classes there — ActivityPub::TagManager etc.);
+    // without it every `SomeService.instance.method` chain dispatches
+    // into nothing.
+    for sub in ["extras", "lib", "app/lib", "app/mailers"] {
         let support_dir = dir.join(sub);
         if !vfs.is_dir(&support_dir) {
             continue;

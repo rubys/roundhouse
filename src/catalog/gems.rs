@@ -93,6 +93,27 @@ pub const GEM_CATALOG: &[GemClass] = &[
         class_methods: &[("sql", GemTy::Untyped), ("star", GemTy::Untyped)],
         instance_methods: &[],
     },
+    // Addressable — RFC-conformant URI parsing (Mastodon's URL
+    // handling). `parse`/`heuristic_parse` produce a URI instance;
+    // the read surface is string-shaped.
+    GemClass {
+        name: "Addressable::URI",
+        class_methods: &[
+            ("parse", GemTy::Instance("Addressable::URI")),
+            ("heuristic_parse", GemTy::Instance("Addressable::URI")),
+        ],
+        instance_methods: &[
+            ("to_s", GemTy::Str),
+            ("host", GemTy::Str),
+            ("path", GemTy::Str),
+            ("scheme", GemTy::Str),
+            // `normalize` returns a normalized copy — chains keep the type.
+            ("normalize", GemTy::Instance("Addressable::URI")),
+            // `query`/`fragment` are nil on absence — gradual floor.
+            ("query", GemTy::Untyped),
+            ("normalized_host", GemTy::Untyped),
+        ],
+    },
     // ROTP — TOTP/HOTP one-time passwords (the 2FA surface).
     GemClass {
         name: "ROTP::TOTP",

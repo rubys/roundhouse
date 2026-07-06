@@ -1197,6 +1197,18 @@ impl Analyzer {
             // any class that includes it; record them so dispatch can
             // chase nested mixins.
             cls.includes = lc.includes.clone();
+            // `include Singleton` provides `.instance` returning the
+            // singleton — the one stdlib mixin worth special-casing:
+            // service objects use it pervasively
+            // (`ActivityPub::TagManager.instance.uri_for(...)`) and the
+            // module itself is stdlib, never ingested, so the concern
+            // fold can't supply it.
+            if lc.includes.iter().any(|i| i.0.as_str() == "Singleton") {
+                cls.class_methods.entry(Symbol::from("instance")).or_insert(Ty::Class {
+                    id: lc.name.clone(),
+                    args: vec![],
+                });
+            }
             // Carry the superclass link so inheritance dispatch walks it.
             // Crucial for classes extending an *unmodeled* gem parent
             // (`TimeSeries < SVG::Graph::TimeSeries`): the walk reaches the

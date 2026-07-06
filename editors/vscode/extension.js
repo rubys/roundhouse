@@ -18,7 +18,22 @@ function activate(context) {
     'roundhouse',
     'Roundhouse LSP',
     { command: server, args: [] },
-    { documentSelector: [{ scheme: 'file', language: 'ruby' }] }
+    {
+      // Templates too: the analyzer's view spans point into the
+      // template files, so hover/completion/diagnostics work inside
+      // ERB and HAML buffers exactly as in Ruby ones. `erb`/`haml`
+      // are contributed by the common Ruby/HAML extensions; the
+      // pattern selectors catch the files when no such extension has
+      // claimed a language id.
+      documentSelector: [
+        { scheme: 'file', language: 'ruby' },
+        { scheme: 'file', language: 'erb' },
+        { scheme: 'file', language: 'haml' },
+        { scheme: 'file', pattern: '**/*.html.erb' },
+        { scheme: 'file', pattern: '**/*.html.haml' },
+        { scheme: 'file', pattern: '**/*.json.jbuilder' },
+      ],
+    }
   );
   return client.start();
 }

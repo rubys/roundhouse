@@ -5,7 +5,12 @@
   "version": "0.0.1",
   "private": true,
   "engines": { "vscode": "^1.82.0" },
-  "activationEvents": ["onLanguage:ruby"],
+  "activationEvents": [
+    "onLanguage:ruby",
+    "onLanguage:erb",
+    "onLanguage:haml",
+    "workspaceContains:config/routes.rb"
+  ],
   "main": "./extension.js",
   "dependencies": {
     "vscode-languageclient": "^9.0.1"
