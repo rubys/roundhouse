@@ -588,3 +588,80 @@ pub fn ingest_concern_filters(
     }
     out
 }
+
+/// Model DSL declared inside a concern module's `included do` block —
+/// `Account::Associations` holds `has_many :statuses` etc. — captured
+/// as classified [`crate::dialect::ModelBodyItem`]s per module. Rails
+/// evaluates the block in each including model's class body, so these
+/// items belong to every includer; analyze registers them (via
+/// `App::concern_model_items`) exactly like the model's own
+/// declarations. Only the DSL shapes (associations, scopes,
+/// validations, callbacks) are kept — arbitrary statements stay with
+/// the module. `with_options … do` wrappers are descended (their
+/// kwargs refine defaults — `dependent:`, `inverse_of:` — that don't
+/// affect the association's type); an item the classifier rejects is
+/// survey-recorded and skipped so one exotic line doesn't cost the
+/// rest of the block.
+pub fn ingest_concern_model_items(
+    source: &[u8],
+    file: &str,
+) -> Vec<(ClassId, Vec<crate::dialect::ModelBodyItem>)> {
+    use crate::dialect::ModelBodyItem;
+
+    fn walk_dsl_stmts<'pr>(body: ruby_prism::Node<'pr>, out: &mut Vec<ruby_prism::Node<'pr>>) {
+        for stmt in flatten_statements(body) {
+            if let Some(call) = stmt.as_call_node() {
+                if call.receiver().is_none()
+                    && constant_id_str(&call.name()) == "with_options"
+                {
+                    if let Some(block) = call.block().and_then(|b| b.as_block_node()) {
+                        if let Some(inner) = block.body() {
+                            walk_dsl_stmts(inner, out);
+                        }
+                        continue;
+                    }
+                }
+            }
+            out.push(stmt);
+        }
+    }
+
+    let result = parse(source);
+    let root = result.node();
+    let mut out = Vec::new();
+    for (scope, module) in find_all_modules_with_scope(&root) {
+        let Some(name_path) = module_name_path(&module) else { continue };
+        let mut full_path: Vec<String> = scope.clone();
+        full_path.extend(name_path);
+        let id = ClassId(Symbol::from(full_path.join("::")));
+
+        let Some(body) = module.body() else { continue };
+        let mut items: Vec<ModelBodyItem> = Vec::new();
+        for stmt in flatten_statements(body) {
+            let Some(call) = stmt.as_call_node() else { continue };
+            if call.receiver().is_some() || constant_id_str(&call.name()) != "included" {
+                continue;
+            }
+            let Some(block) = call.block().and_then(|b| b.as_block_node()) else { continue };
+            let Some(block_body) = block.body() else { continue };
+            let mut stmts = Vec::new();
+            walk_dsl_stmts(block_body, &mut stmts);
+            for inner in stmts {
+                match super::model::ingest_model_body_item(&inner, &id, file, Vec::new()) {
+                    Ok(
+                        item @ (ModelBodyItem::Association { .. }
+                        | ModelBodyItem::Scope { .. }
+                        | ModelBodyItem::Validation { .. }
+                        | ModelBodyItem::Callback { .. }),
+                    ) => items.push(item),
+                    Ok(_) => {}
+                    Err(err) => super::survey::record(&err),
+                }
+            }
+        }
+        if !items.is_empty() {
+            out.push((id, items));
+        }
+    }
+    out
+}

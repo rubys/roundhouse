@@ -122,7 +122,7 @@ pub fn ingest_model(
 /// Classify one class-body statement into its `ModelBodyItem` variant.
 /// `leading_comments` is attached regardless of variant so every item
 /// keeps its inline docs.
-fn ingest_model_body_item(
+pub(super) fn ingest_model_body_item(
     stmt: &Node<'_>,
     owner: &ClassId,
     file: &str,

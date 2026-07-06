@@ -2766,3 +2766,88 @@ end
         reads.iter().filter(|(n, _)| n.as_str() == "widget").collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn model_concern_included_do_dsl_registers_on_the_includer() {
+    // The Account::Associations shape: a model concern declares
+    // associations (inside `with_options` wrappers) and scopes in its
+    // `included do`. Rails evaluates the block in the including model's
+    // class body — the association must dispatch on instances
+    // (`@widget.parts` → Array[Part]) and the scope on the class
+    // (`Widget.recent` → relation) as if declared inline.
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/models/concerns/widget_parts_concern.rb",
+            r#"module WidgetPartsConcern
+  extend ActiveSupport::Concern
+
+  included do
+    with_options dependent: :destroy do
+      has_many :parts
+    end
+    scope :recent, -> { order(id: :desc) }
+  end
+end
+"#,
+        ),
+        (
+            "app/models/widget.rb",
+            "class Widget < ApplicationRecord\n  include WidgetPartsConcern\nend\n",
+        ),
+        (
+            "app/models/part.rb",
+            "class Part < ApplicationRecord\nend\n",
+        ),
+        (
+            "app/controllers/widgets_controller.rb",
+            r#"class WidgetsController < ApplicationController
+  def show
+    @widget = Widget.recent.first
+    @parts = @widget.parts
+  end
+end
+"#,
+        ),
+        ("app/views/widgets/show.html.erb", "<p><%= @parts %></p>\n"),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema[7.1].define(version: 1) do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+  create_table "parts", force: :cascade do |t|
+    t.integer "widget_id"
+  end
+end
+"#,
+        ),
+    ]);
+
+    // Captured at ingest, keyed by the concern module.
+    let items = app
+        .concern_model_items
+        .get(&roundhouse::ClassId(Symbol::from("WidgetPartsConcern")))
+        .expect("included-do model DSL captured");
+    assert_eq!(items.len(), 2, "has_many (through with_options) + scope");
+
+    // The payoff: the chain through scope and association types.
+    let view = app
+        .views
+        .iter()
+        .find(|v| v.name.as_str() == "widgets/show")
+        .expect("widgets/show view");
+    let mut reads = Vec::new();
+    collect_ivar_reads(&view.body, &mut reads);
+    assert!(
+        reads.iter().any(|(n, ty)| n.as_str() == "parts"
+            && matches!(ty, Some(Ty::Array { elem })
+                if matches!(&**elem, Ty::Class { id, .. } if id.0.as_str() == "Part"))),
+        "@parts (via concern-declared scope + association) should read as \
+         Array[Part]; got {:?}",
+        reads.iter().filter(|(n, _)| n.as_str() == "parts").collect::<Vec<_>>()
+    );
+}

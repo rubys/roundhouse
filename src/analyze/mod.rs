@@ -87,6 +87,15 @@ impl Analyzer {
     pub fn with_adapter(app: &App, adapter: Box<dyn DatabaseAdapter>) -> Self {
         let mut classes: HashMap<ClassId, ClassInfo> = HashMap::new();
 
+        // Module → its own `include`s, for chasing concern-of-concern
+        // chains when registering concern-declared model DSL below.
+        let module_include_map: HashMap<&ClassId, &Vec<ClassId>> = app
+            .library_classes
+            .iter()
+            .filter(|lc| lc.is_module)
+            .map(|lc| (&lc.name, &lc.includes))
+            .collect();
+
         for model in &app.models {
             let self_ty = Ty::Class { id: model.name.clone(), args: vec![] };
             let array_of_self =
@@ -332,36 +341,59 @@ impl Analyzer {
             // collection. The writer was previously absent, so
             // `comment.story = s` / `tag.category = c` failed dispatch.
             for assoc in model.associations() {
-                use crate::dialect::Association;
-                let (name, ty) = match assoc {
-                    Association::BelongsTo { name, target, .. }
-                    | Association::HasOne { name, target, .. } => (
-                        name.clone(),
-                        Ty::Union {
-                            variants: vec![
-                                Ty::Class { id: target.clone(), args: vec![] },
-                                Ty::Nil,
-                            ],
-                        },
-                    ),
-                    Association::HasMany { name, target, .. }
-                    | Association::HasAndBelongsToMany { name, target, .. } => (
-                        name.clone(),
-                        Ty::Array {
-                            elem: Box::new(Ty::Class { id: target.clone(), args: vec![] }),
-                        },
-                    ),
-                };
+                let (name, ty) = association_member_ty(assoc);
                 let writer = Symbol::from(format!("{}=", name.as_str()));
                 cls.instance_methods.insert(name, ty.clone());
                 cls.instance_methods.entry(writer).or_insert(ty);
+            }
+
+            // Concern-declared model DSL: associations and scopes a
+            // mixed-in module's `included do` contributes
+            // (Account::Associations' `has_many :statuses`). Registered
+            // exactly like the model's own declarations — typed readers
+            // + writers for associations, relation-returning class
+            // methods for scopes — with the model's own entries winning
+            // on a name clash. Includes close transitively (concerns
+            // include concerns).
+            let includes = model_includes(model);
+            {
+                let mut queue: Vec<ClassId> = includes.clone();
+                let mut seen: BTreeSet<ClassId> = queue.iter().cloned().collect();
+                let mut qi = 0;
+                while qi < queue.len() {
+                    let m = queue[qi].clone();
+                    qi += 1;
+                    if let Some(nested) = module_include_map.get(&m) {
+                        for n in nested.iter() {
+                            if seen.insert(n.clone()) {
+                                queue.push(n.clone());
+                            }
+                        }
+                    }
+                    let Some(items) = app.concern_model_items.get(&m) else { continue };
+                    for item in items {
+                        match item {
+                            ModelBodyItem::Association { assoc, .. } => {
+                                let (name, ty) = association_member_ty(assoc);
+                                let writer = Symbol::from(format!("{}=", name.as_str()));
+                                cls.instance_methods.entry(name).or_insert(ty.clone());
+                                cls.instance_methods.entry(writer).or_insert(ty);
+                            }
+                            ModelBodyItem::Scope { scope, .. } => {
+                                cls.class_methods
+                                    .entry(scope.name.clone())
+                                    .or_insert(array_of_self.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
 
             // `include Account::FinderConcern` etc. — record the mixins
             // so the concern fold (harvest_returns_to_registry) can copy
             // the module's instance and `class_methods do` surfaces onto
             // this model.
-            let includes = model_includes(model);
             if !includes.is_empty() {
                 cls.includes = includes;
             }
@@ -3713,6 +3745,30 @@ pub(crate) fn extract_controller_const_assignments(
 /// body items). Each becomes a `ClassId` whose registered instance
 /// methods dispatch will consult for the controller. `include` with a
 /// non-constant argument (rare metaprogramming) is skipped.
+/// Reader type for an association, derived from cardinality:
+/// `belongs_to`/`has_one` → `Target?` (nil before assignment / on a
+/// missing optional), `has_many`/HABTM → `Array[Target]` (the
+/// chainable relation stand-in). The writer twin (`name=`) accepts the
+/// same shape. Shared by the model's own declarations and by
+/// concern-`included do` declarations so both register identically.
+fn association_member_ty(assoc: &crate::dialect::Association) -> (Symbol, Ty) {
+    use crate::dialect::Association;
+    match assoc {
+        Association::BelongsTo { name, target, .. }
+        | Association::HasOne { name, target, .. } => (
+            name.clone(),
+            Ty::Union {
+                variants: vec![Ty::Class { id: target.clone(), args: vec![] }, Ty::Nil],
+            },
+        ),
+        Association::HasMany { name, target, .. }
+        | Association::HasAndBelongsToMany { name, target, .. } => (
+            name.clone(),
+            Ty::Array { elem: Box::new(Ty::Class { id: target.clone(), args: vec![] }) },
+        ),
+    }
+}
+
 /// The model-side twin of [`controller_includes`]: modules a model mixes
 /// in via top-level `include X` calls (round-tripped as `Unknown` body
 /// items).

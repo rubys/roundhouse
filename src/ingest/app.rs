@@ -21,8 +21,8 @@ use super::expr::ingest_ruby_program;
 use super::fixture::ingest_fixture_file;
 use super::jbuilder::ingest_jbuilder;
 use super::library_class::{
-    ClassKind, classify_class_file, ingest_concern_filters, ingest_library_classes,
-    ingest_rails_application_singleton_methods,
+    ClassKind, classify_class_file, ingest_concern_filters, ingest_concern_model_items,
+    ingest_library_classes, ingest_rails_application_singleton_methods,
 };
 use super::model::ingest_model;
 use super::routes::ingest_routes;
@@ -106,10 +106,13 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                     {
                         app.library_classes.extend(classes);
                         // Concern modules (app/models/concerns/…) also
-                        // carry `included do` filter declarations that
-                        // belong to every includer.
+                        // carry `included do` declarations that belong
+                        // to every includer: filters (controller-side)
+                        // and model DSL (associations/scopes).
                         app.concern_filters
                             .extend(ingest_concern_filters(&source, &path_str));
+                        app.concern_model_items
+                            .extend(ingest_concern_model_items(&source, &path_str));
                     }
                 }
             }
@@ -277,6 +280,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         app.library_classes.extend(classes);
                         app.concern_filters
                             .extend(ingest_concern_filters(&source, &path_str));
+                        app.concern_model_items
+                            .extend(ingest_concern_model_items(&source, &path_str));
                     }
                 }
             }

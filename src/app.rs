@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::dialect::{
-    Controller, Filter, Fixture, LibraryClass, Model, RouteTable, TestModule, View,
+    Controller, Filter, Fixture, LibraryClass, Model, ModelBodyItem, RouteTable, TestModule,
+    View,
 };
 use crate::expr::Expr;
 use crate::ident::{ClassId, Symbol};
@@ -93,6 +94,19 @@ pub struct App {
     /// the app walk; empty for apps without concerns.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub concern_filters: HashMap<ClassId, Vec<Filter>>,
+    /// Model DSL declared inside a concern module's `included do`
+    /// (`Account::Associations` → its `has_many :statuses` etc.),
+    /// keyed by the module and classified as the same
+    /// [`ModelBodyItem`]s a model body carries. Rails evaluates the
+    /// block in each including model; analyze registers these items
+    /// on every includer (associations as typed readers/writers,
+    /// scopes as relation-returning class methods) so dispatch and
+    /// completion see the mixed-in surface. Registry-level only for
+    /// now — the items are deliberately NOT spliced into `Model.body`,
+    /// keeping source round-trip exact; a transpile-grade splice (with
+    /// item provenance) can follow when emission needs it.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub concern_model_items: HashMap<ClassId, Vec<ModelBodyItem>>,
     /// View name (`articles/show`, `articles/_form`, `layouts/application`)
     /// → controllers whose actions feed that view, recorded by analyze
     /// while it harvests the action→view ivar channel (explicit `render`
@@ -163,6 +177,7 @@ impl App {
             helper_method_index: HashMap::new(),
             rails_application: None,
             concern_filters: HashMap::new(),
+            concern_model_items: HashMap::new(),
             view_feeders: HashMap::new(),
             sources: Vec::new(),
             root: String::new(),

@@ -205,7 +205,27 @@ fn collect_modules<'pr, F: FnMut(&[String], ruby_prism::ModuleNode<'pr>)>(
 }
 
 fn module_has_direct_def(m: &ruby_prism::ModuleNode<'_>) -> bool {
-    body_has_direct_method_decl(m.body())
+    body_has_direct_method_decl(m.body()) || body_has_included_block(m.body())
+}
+
+/// An `included do … end` block marks an ActiveSupport::Concern whose
+/// whole value may be the DSL it injects into includers (Mastodon's
+/// `Paginable`: one scope, zero defs). Such a module must surface even
+/// with no direct methods, so the concern capture (filters, model DSL)
+/// has a module to key on.
+fn body_has_included_block(body: Option<Node<'_>>) -> bool {
+    let Some(body) = body else { return false };
+    for stmt in flatten_statements(body) {
+        if let Some(call) = stmt.as_call_node() {
+            if call.receiver().is_none()
+                && constant_id_str(&call.name()) == "included"
+                && call.block().is_some_and(|b| b.as_block_node().is_some())
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Whether the body has anything that lowers to a method on the
