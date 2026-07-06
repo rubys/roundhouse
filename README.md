@@ -117,6 +117,26 @@ fetch <target>` downloads pre-transpiled archives).
 Prerequisites and the architecture of what gets generated:
 [`runtime/spinel/scaffold/README.md`](runtime/spinel/scaffold/README.md).
 
+**Analyze your own app.** Point the checker at any Rails checkout to
+see what the analyzer can type today — no annotations, no `bundle
+install`, no booting, no database:
+
+```sh
+cargo run --release --bin roundhouse-check -- --continue /path/to/your/rails/app
+```
+
+`--continue` is the mode you want on a real app: constructs the
+ingester doesn't recognize yet are recorded and skipped instead of
+aborting, and a deduplicated punch list of them is printed at the end.
+Read the output accordingly — `error`/`warning` diagnostics are sites
+the analyzer understood but couldn't type (or typed gradually), while
+the punch list and any gap-attributed notes are roundhouse's own
+coverage gaps, not problems in your app. Expect a real app to produce
+plenty of both today: the numbers are the project's honest to-do list,
+and they drop week over week. (Without `--continue`, ingest is strict
+and exits on the first unrecognized construct — the right mode for
+fixtures the analyzer is expected to fully cover.)
+
 ## Workflow runner (`bin/rh`)
 
 `bin/rh` is the single entry point for every workflow below. Ruby is

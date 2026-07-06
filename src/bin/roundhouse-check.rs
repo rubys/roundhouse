@@ -75,6 +75,16 @@ fn main() -> ExitCode {
         Ok(app) => app,
         Err(err) => {
             eprintln!("roundhouse-check: ingest failed: {err}");
+            if !continue_on_error {
+                // First contact with a real app almost always trips a
+                // construct the ingester doesn't cover yet; strict mode
+                // (the fixture-oriented default) aborts on the first one.
+                // Point the user at survey mode instead of dead-ending.
+                eprintln!(
+                    "roundhouse-check: hint: re-run with --continue to record \
+                     unsupported constructs as a punch list and keep going"
+                );
+            }
             // Surface any syntax errors first — a malformed file is
             // usually the root cause of the construct ingest then choked
             // on. Sources aren't populated on this path, so message-only.
