@@ -354,6 +354,8 @@ pub(super) fn parse_filter_call(stmt: &Node<'_>) -> Option<Vec<crate::dialect::F
     let mut except: Vec<Symbol> = Vec::new();
     let mut only_style = crate::expr::ArrayStyle::default();
     let mut except_style = crate::expr::ArrayStyle::default();
+    let mut if_cond: Option<Symbol> = None;
+    let mut unless_cond: Option<Symbol> = None;
 
     for arg in args.arguments().iter() {
         if let Some(sym) = symbol_value(&arg) {
@@ -374,6 +376,10 @@ pub(super) fn parse_filter_call(stmt: &Node<'_>) -> Option<Vec<crate::dialect::F
                     except = symbol_list_value(&value);
                     except_style = symbol_list_style(&value);
                 }
+                // Symbol-form guards only (`if: :account_required?`);
+                // lambda/proc guards have no static name to carry.
+                "if" => if_cond = symbol_value(&value).map(|s| Symbol::from(s.as_str())),
+                "unless" => unless_cond = symbol_value(&value).map(|s| Symbol::from(s.as_str())),
                 _ => {}
             }
         }
@@ -393,6 +399,8 @@ pub(super) fn parse_filter_call(stmt: &Node<'_>) -> Option<Vec<crate::dialect::F
                 except: except.clone(),
                 only_style,
                 except_style,
+                if_cond: if_cond.clone(),
+                unless_cond: unless_cond.clone(),
             })
             .collect(),
     )

@@ -126,6 +126,7 @@ fn tiny_blog_round_trips() {
         concern_model_items: std::collections::HashMap::new(),
         render_edges: std::collections::HashMap::new(),
         view_feeders: std::collections::HashMap::new(),
+        controller_resolutions: std::collections::HashMap::new(),
         sources: vec![],
         root: String::new(),
     };

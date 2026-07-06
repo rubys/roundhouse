@@ -44,7 +44,7 @@ pub mod ty;
 pub mod vfs;
 
 pub use adapter::{ArMethodKind, DatabaseAdapter, SqliteAdapter, SqliteAsyncAdapter};
-pub use app::App;
+pub use app::{App, ControllerResolution, ResolvedFilter};
 pub use profile::{Database, DeploymentProfile, HttpShim, ProfileError, Target};
 pub use dialect::{
     Action, Association, Callback, CallbackHook, Comment, Controller, ControllerBodyItem,

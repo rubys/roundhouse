@@ -1663,6 +1663,13 @@ impl Analyzer {
         // diagnostic can be traced to the controller that seeded — or
         // failed to seed — its context.
         let mut view_feeders: HashMap<Symbol, BTreeSet<ClassId>> = HashMap::new();
+        // Persisted onto `App::controller_resolutions`: the chained
+        // filter list (with provenance) + effective layout that Phase B
+        // resolves per controller — the same data the ivar seeding
+        // consumes, kept instead of discarded so trace/attribution
+        // consumers don't re-derive the ancestor walk.
+        let mut controller_resolutions: HashMap<ClassId, crate::app::ControllerResolution> =
+            HashMap::new();
 
         // Content-partial channel: the `render partial: @above` idiom.
         // `dynamic_render_ivars` is the set of ivars any view renders
@@ -1695,8 +1702,17 @@ impl Analyzer {
         // using the captured metadata.
         struct ControllerMeta {
             self_ty: Ty,
-            before_filters: Vec<Filter>,
+            /// This controller's own segment of the filter chain in
+            /// registration order, each entry tagged with the class or
+            /// concern module that declared it. All kinds — the seeding
+            /// paths read only Before/Around; the persisted
+            /// `App::controller_resolutions` chain keeps After/Skip.
+            sourced_filters: Vec<(Filter, ClassId)>,
             action_bindings: HashMap<Symbol, HashMap<Symbol, Ty>>,
+            /// Per-method effect sets (own actions + concern methods
+            /// typed against this controller's self), for the persisted
+            /// chain's per-hop effects.
+            action_effects: HashMap<Symbol, EffectSet>,
             class_constants: HashMap<Symbol, Ty>,
             layout: LayoutDecl,
         }
@@ -1773,24 +1789,18 @@ impl Analyzer {
                 annotate_self_dispatch: false, in_view: false,
             };
 
-            // Snapshot the seeding filters declared on this controller
-            // (not yet including parent's — that's Phase B). `before_action`
-            // runs before the action; `around_action` assigns its ivars
-            // before `yield` (the canonical `@story = Story.find(..); yield`
-            // shape), so both contribute ivars the action and its view see.
-            // `after_action` runs after rendering, so it's excluded.
-            let mut before_filters: Vec<Filter> = controller
-                .filters()
-                .filter(|f| matches!(f.kind, FilterKind::Before | FilterKind::Around))
-                .cloned()
-                .collect();
-
-            // Block-form filters (`before_action { @page = page }`) name no
-            // method, so they're kept as `Unknown` for round-trip and don't
-            // appear in `filters()`. Synthesize a filter + bindings for each
-            // so their ivars seed actions and views like a named filter. The
-            // block bodies were already typed by the Phase 0 pass above.
-            let block_filters = harvest_block_filters(controller);
+            // Snapshot this controller's own segment of the filter chain
+            // (not yet including parent's — that's Phase B), provenance-
+            // tagged and concern-spliced in class-body order. All kinds
+            // ride along for the persisted chain; the seeding paths below
+            // read only Before/Around — `before_action` runs before the
+            // action and `around_action` assigns its ivars before `yield`
+            // (the canonical `@story = Story.find(..); yield` shape), so
+            // both contribute ivars the action and its view see, while
+            // `after_action` runs after rendering. Block-form filters'
+            // bodies were already typed by the Phase 0 pass above.
+            let (sourced_filters, block_filter_bindings) =
+                build_sourced_filter_chain(controller, &concern_filters_map, &module_includes);
 
             // Pass A: analyze every action body once. Helper-method
             // params (`period(query)`) are seeded from the inferred-
@@ -1819,16 +1829,15 @@ impl Analyzer {
 
             // Register each block filter's synthetic target so the seeding
             // lookups (`merged_before_seed`, the view-ivar build) resolve it.
-            for (target, ivars, filter) in block_filters {
+            for (target, ivars) in block_filter_bindings {
                 action_bindings.insert(target, ivars);
-                before_filters.push(filter);
             }
 
             // Mixed-in concerns: Rails evaluates a module's `included do`
             // in the including class and defines the module's methods on
-            // it. Mirror both halves — extend this controller's seeding
-            // filters with each included module's captured declarations,
-            // and type each module method body against *this* controller's
+            // it. The `included do` filters were already spliced into
+            // `sourced_filters` at their `include` site above; here we
+            // type each module method body against *this* controller's
             // self (matching Rails: the body runs with the controller as
             // `self`) so its ivar assignments (`@account = …` in
             // AccountOwnedConcern#set_account) land in the bindings table
@@ -1849,16 +1858,8 @@ impl Analyzer {
                     }
                 }
             }
+            let mut concern_effects: HashMap<Symbol, EffectSet> = HashMap::new();
             for module_id in &mixed_in {
-                if let Some(fs) = concern_filters_map.get(module_id) {
-                    before_filters.extend(
-                        fs.iter()
-                            .filter(|f| {
-                                matches!(f.kind, FilterKind::Before | FilterKind::Around)
-                            })
-                            .cloned(),
-                    );
-                }
                 let Some(methods) = module_methods.get(module_id) else { continue };
                 for method in methods {
                     if action_bindings.contains_key(&method.name) {
@@ -1871,7 +1872,19 @@ impl Analyzer {
                     if !ivars.is_empty() {
                         action_bindings.insert(method.name.clone(), ivars);
                     }
+                    let effects = self.collect_effects(&mut body, &ctx);
+                    if !effects.is_pure() {
+                        concern_effects.entry(method.name.clone()).or_insert(effects);
+                    }
                 }
+            }
+
+            // Per-method effect snapshot for the persisted chain: own
+            // methods (typed by Pass A) overwrite concern methods —
+            // a shadowed module method never runs.
+            let mut action_effects = concern_effects;
+            for action in controller.actions() {
+                action_effects.insert(action.name.clone(), action.effects.clone());
             }
 
             let layout = controller.layout.clone();
@@ -1879,8 +1892,9 @@ impl Analyzer {
                 controller.name.clone(),
                 ControllerMeta {
                     self_ty,
-                    before_filters,
+                    sourced_filters,
                     action_bindings,
+                    action_effects,
                     class_constants,
                     layout,
                 },
@@ -1967,11 +1981,11 @@ impl Analyzer {
             // Build chained filters: ancestors first (oldest → newest),
             // then self. Rails: `before_action` callbacks fire in
             // registration order, with parent's running before child's.
-            let mut chained_filters: Vec<Filter> = Vec::new();
+            let mut chained_filters: Vec<(Filter, ClassId)> = Vec::new();
             for ancestor in ancestors.iter().rev() {
-                chained_filters.extend(ancestor.before_filters.iter().cloned());
+                chained_filters.extend(ancestor.sourced_filters.iter().cloned());
             }
-            chained_filters.extend(meta.before_filters.iter().cloned());
+            chained_filters.extend(meta.sourced_filters.iter().cloned());
 
             // Build chained action_bindings: nearest parent's
             // overlay last so closer-defined targets win.
@@ -2135,6 +2149,72 @@ impl Analyzer {
                 }
             };
 
+            // Persist what this walk just resolved — the chained filter
+            // list with provenance and the effective layout — instead of
+            // discarding it: `ide::traceroute` and gap attribution
+            // compose over `App::controller_resolutions` rather than
+            // re-deriving the ancestor walk. `assigns`/`effects` resolve
+            // each filter target against the chained tables (nearest
+            // definition wins; bindings are post-sweep). Skip entries
+            // name a filter to remove, not code that runs, so they carry
+            // neither.
+            {
+                let mut chained_effects: HashMap<Symbol, EffectSet> = HashMap::new();
+                for ancestor in ancestors.iter().rev() {
+                    for (name, eff) in &ancestor.action_effects {
+                        chained_effects.insert(name.clone(), eff.clone());
+                    }
+                }
+                for (name, eff) in &meta.action_effects {
+                    chained_effects.insert(name.clone(), eff.clone());
+                }
+                // Own methods were re-analyzed by the sweeps above —
+                // prefer their refreshed effect sets over the Phase A
+                // snapshot in `meta`.
+                for action in controller.actions() {
+                    chained_effects.insert(action.name.clone(), action.effects.clone());
+                }
+                let noise = |t: &Ty| matches!(t, Ty::Var { .. } | Ty::Bottom);
+                let filter_chain: Vec<crate::app::ResolvedFilter> = chained_filters
+                    .iter()
+                    .map(|(filter, defined_in)| {
+                        let runs = !matches!(filter.kind, FilterKind::Skip);
+                        let assigns: HashMap<Symbol, Ty> = if runs {
+                            chained_bindings
+                                .get(&filter.target)
+                                .map(|ivars| {
+                                    ivars
+                                        .iter()
+                                        .filter(|(_, v)| !noise(v))
+                                        .map(|(k, v)| (k.clone(), v.clone()))
+                                        .collect()
+                                })
+                                .unwrap_or_default()
+                        } else {
+                            HashMap::new()
+                        };
+                        let effects = if runs {
+                            chained_effects.get(&filter.target).cloned().unwrap_or_default()
+                        } else {
+                            EffectSet::default()
+                        };
+                        crate::app::ResolvedFilter {
+                            filter: filter.clone(),
+                            defined_in: defined_in.clone(),
+                            assigns,
+                            effects,
+                        }
+                    })
+                    .collect();
+                controller_resolutions.insert(
+                    ctrl_name.clone(),
+                    crate::app::ControllerResolution {
+                        filter_chain,
+                        layout: effective_layout.clone(),
+                    },
+                );
+            }
+
             // Build the per-view ivar map. Each view gets the action's
             // own assignments *plus* any before_action contribution
             // (which isn't syntactically present in the action body) —
@@ -2145,8 +2225,10 @@ impl Analyzer {
             for action in controller.actions() {
                 let mut ivars: HashMap<Symbol, Ty> = HashMap::new();
                 extract_ivar_assignments(&action.body, &mut ivars);
-                for filter in &chained_filters {
-                    if before_filter_applies(filter, &action.name) {
+                for (filter, _) in &chained_filters {
+                    if matches!(filter.kind, FilterKind::Before | FilterKind::Around)
+                        && before_filter_applies(filter, &action.name)
+                    {
                         if let Some(fivars) = chained_bindings.get(&filter.target) {
                             for (k, v) in fivars {
                                 ivars.entry(k.clone()).or_insert_with(|| v.clone());
@@ -2277,8 +2359,10 @@ impl Analyzer {
                         // rule as the own-actions loop: action bindings
                         // win over filter contributions).
                         let mut ivars = binds.clone();
-                        for filter in &chained_filters {
-                            if before_filter_applies(filter, name) {
+                        for (filter, _) in &chained_filters {
+                            if matches!(filter.kind, FilterKind::Before | FilterKind::Around)
+                                && before_filter_applies(filter, name)
+                            {
                                 if let Some(fivars) = chained_bindings.get(&filter.target) {
                                     for (k, v) in fivars {
                                         ivars.entry(k.clone()).or_insert_with(|| v.clone());
@@ -2719,6 +2803,7 @@ impl Analyzer {
         // Persist the raw renderer→partial edges too — the un-closed
         // half of the render graph, for view↔partial navigation.
         app.render_edges = render_edges.clone();
+        app.controller_resolutions = controller_resolutions;
 
         // Phase 3b: partials. Seed local_bindings from the render-site map
         // and ivar_bindings from the propagated controller context, then
@@ -3505,18 +3590,23 @@ fn before_filter_applies(filter: &Filter, action_name: &Symbol) -> bool {
     true
 }
 
-/// Merge ivar bindings from every before_action that applies to this action,
-/// looking up each filter's `target` in the pre-computed per-action bindings
-/// table. Later filters overwrite earlier ones on conflicting keys —
-/// matches Rails' "last-registered wins" when the same ivar is set by
-/// multiple callbacks.
+/// Merge ivar bindings from every before/around filter that applies to
+/// this action, looking up each filter's `target` in the pre-computed
+/// per-action bindings table. Later filters overwrite earlier ones on
+/// conflicting keys — matches Rails' "last-registered wins" when the
+/// same ivar is set by multiple callbacks. The chain carries all filter
+/// kinds (for `App::controller_resolutions`); only Before/Around run
+/// ahead of the action and contribute ivars here.
 fn merged_before_seed(
-    before_filters: &[Filter],
+    chained_filters: &[(Filter, ClassId)],
     action_name: &Symbol,
     action_bindings: &HashMap<Symbol, HashMap<Symbol, Ty>>,
 ) -> HashMap<Symbol, Ty> {
     let mut seed: HashMap<Symbol, Ty> = HashMap::new();
-    for filter in before_filters {
+    for (filter, _) in chained_filters {
+        if !matches!(filter.kind, FilterKind::Before | FilterKind::Around) {
+            continue;
+        }
         if before_filter_applies(filter, action_name) {
             if let Some(fivars) = action_bindings.get(&filter.target) {
                 for (k, v) in fivars {
@@ -3528,59 +3618,129 @@ fn merged_before_seed(
     seed
 }
 
-/// Harvest the ivar assignments of block-form filters
-/// (`before_action { @page = page }`). A block filter names no method, so
-/// it survives ingest as an `Unknown` body item (preserving round-trip)
-/// rather than a `Filter`; the named-symbol seeding path therefore never
-/// sees it. Here we pull the ivars its body assigns — already typed by the
-/// Phase 0 `Unknown`-item pass — and synthesize a `Filter` whose target
-/// keys those bindings, so the existing before/around seeding machinery
-/// flows them into the guarded actions and their views exactly like a
-/// named filter.
+/// Build one controller's own segment of the resolved filter chain,
+/// provenance-tagged (each entry carries the class or concern module
+/// that declared it) and in Rails registration order: the class body is
+/// walked top-to-bottom, so `before_action` lines land where written
+/// and a concern's `included do` filters splice in at the `include`
+/// site (Rails runs the block at include time). Concern includes close
+/// transitively, dependencies first — ActiveSupport::Concern includes a
+/// concern's own dependencies before running its `included` block —
+/// and dedupe across the walk (Ruby `include` is idempotent). All
+/// filter kinds are kept: the seeding paths read only Before/Around,
+/// but the persisted `App::controller_resolutions` chain wants
+/// After/Skip entries too.
 ///
-/// Returns `(synthetic_target, harvested_ivars, synthetic_filter)` per
-/// block filter. The synthetic target is a sentinel name that can't
-/// collide with a real method (so it never resolves a view). `only:` /
-/// `except:` scoping on a block filter is not modelled — the form is rare
-/// and a missing guard only over-seeds an unread ivar — so a block filter
-/// is treated as applying to every action.
-fn harvest_block_filters(controller: &Controller) -> Vec<(Symbol, HashMap<Symbol, Ty>, Filter)> {
-    let mut out = Vec::new();
-    for (idx, item) in controller.body.iter().enumerate() {
-        let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
-        let ExprNode::Send { recv: None, method, block: Some(block), .. } = &*expr.node else {
-            continue;
-        };
-        let kind = match method.as_str() {
-            "before_action" => FilterKind::Before,
-            "around_action" => FilterKind::Around,
-            _ => continue,
-        };
-        // The attached block is a Lambda whose body is the filter code.
-        let body = match &*block.node {
-            ExprNode::Lambda { body, .. } => body,
-            _ => block,
-        };
-        let mut ivars: HashMap<Symbol, Ty> = HashMap::new();
-        extract_ivar_assignments(body, &mut ivars);
-        if ivars.is_empty() {
-            continue;
+/// Block-form filters (`before_action { @page = page }`) name no
+/// method, so they survive ingest as `Unknown` body items (preserving
+/// round-trip) rather than `Filter`s. Each is synthesized in place with
+/// a sentinel target that can't collide with a real method (so it never
+/// resolves a view); the second return value carries its harvested ivar
+/// bindings — the bodies were already typed by the Phase 0
+/// `Unknown`-item pass — for registration alongside real targets.
+/// `only:`/`except:` scoping on a block filter is not modelled — the
+/// form is rare and a missing guard only over-seeds an unread ivar.
+fn build_sourced_filter_chain(
+    controller: &Controller,
+    concern_filters: &HashMap<ClassId, Vec<Filter>>,
+    module_includes: &HashMap<ClassId, Vec<ClassId>>,
+) -> (Vec<(Filter, ClassId)>, Vec<(Symbol, HashMap<Symbol, Ty>)>) {
+    fn splice_concern(
+        module_id: &ClassId,
+        concern_filters: &HashMap<ClassId, Vec<Filter>>,
+        module_includes: &HashMap<ClassId, Vec<ClassId>>,
+        spliced: &mut BTreeSet<ClassId>,
+        chain: &mut Vec<(Filter, ClassId)>,
+    ) {
+        if !spliced.insert(module_id.clone()) {
+            return;
         }
-        let target = Symbol::from(format!("__{}_block_{idx}__", method.as_str()));
-        out.push((
-            target.clone(),
-            ivars,
-            Filter {
-                kind,
-                target,
-                only: Vec::new(),
-                except: Vec::new(),
-                only_style: crate::expr::ArrayStyle::default(),
-                except_style: crate::expr::ArrayStyle::default(),
-            },
-        ));
+        if let Some(nested) = module_includes.get(module_id) {
+            for n in nested {
+                splice_concern(n, concern_filters, module_includes, spliced, chain);
+            }
+        }
+        if let Some(fs) = concern_filters.get(module_id) {
+            chain.extend(fs.iter().map(|f| (f.clone(), module_id.clone())));
+        }
     }
-    out
+
+    let own_id = controller.name.clone();
+    let mut chain: Vec<(Filter, ClassId)> = Vec::new();
+    let mut block_bindings: Vec<(Symbol, HashMap<Symbol, Ty>)> = Vec::new();
+    let mut spliced: BTreeSet<ClassId> = BTreeSet::new();
+
+    for (idx, item) in controller.body.iter().enumerate() {
+        match item {
+            ControllerBodyItem::Filter { filter, .. } => {
+                chain.push((filter.clone(), own_id.clone()));
+            }
+            ControllerBodyItem::Unknown { expr, .. } => {
+                let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node
+                else {
+                    continue;
+                };
+                match method.as_str() {
+                    "include" => {
+                        for arg in args {
+                            if let ExprNode::Const { path } = &*arg.node {
+                                let joined = path
+                                    .iter()
+                                    .map(|s| s.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("::");
+                                splice_concern(
+                                    &ClassId(Symbol::from(joined)),
+                                    concern_filters,
+                                    module_includes,
+                                    &mut spliced,
+                                    &mut chain,
+                                );
+                            }
+                        }
+                    }
+                    "before_action" | "around_action" => {
+                        let Some(block) = block else { continue };
+                        let kind = if method.as_str() == "before_action" {
+                            FilterKind::Before
+                        } else {
+                            FilterKind::Around
+                        };
+                        // The attached block is a Lambda whose body is
+                        // the filter code.
+                        let body = match &*block.node {
+                            ExprNode::Lambda { body, .. } => body,
+                            _ => block,
+                        };
+                        let mut ivars: HashMap<Symbol, Ty> = HashMap::new();
+                        extract_ivar_assignments(body, &mut ivars);
+                        if ivars.is_empty() {
+                            continue;
+                        }
+                        let target =
+                            Symbol::from(format!("__{}_block_{idx}__", method.as_str()));
+                        chain.push((
+                            Filter {
+                                kind,
+                                target: target.clone(),
+                                only: Vec::new(),
+                                except: Vec::new(),
+                                only_style: crate::expr::ArrayStyle::default(),
+                                except_style: crate::expr::ArrayStyle::default(),
+                                if_cond: None,
+                                unless_cond: None,
+                            },
+                            own_id.clone(),
+                        ));
+                        block_bindings.push((target, ivars));
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    (chain, block_bindings)
 }
 
 /// Unify a stored param type with a freshly observed argument type.

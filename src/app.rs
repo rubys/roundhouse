@@ -135,6 +135,14 @@ pub struct App {
     /// built by hand in tests.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sources: Vec<crate::span::SourceFile>,
+    /// Per-controller resolved request machinery, computed once by
+    /// analyze's parent-chain walk and persisted (the self-describing-IR
+    /// move: `run_typing_passes` already built these to seed ivars, and
+    /// used to discard them). Keyed by controller class. Consumers —
+    /// `ide::traceroute`, the MCP tool, gap attribution — compose over
+    /// this instead of re-deriving inheritance + concern splicing.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub controller_resolutions: HashMap<ClassId, ControllerResolution>,
     /// App directory as passed to ingest (`fixtures/real-blog`), `""`
     /// for in-memory trees (map VFS, wasm). `sources` paths keep this
     /// prefix so diagnostics print compiler-cwd-relative (clickable)
@@ -142,6 +150,53 @@ pub struct App {
     /// `sources` entries must not differ by ingest mode) strip it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub root: String,
+}
+
+/// One controller's resolved request machinery: the full filter chain
+/// as Rails would execute it (inheritance + concern splicing applied)
+/// and the effective layout. Per-controller, not per-action — the
+/// chain keeps each filter's `only:`/`except:` gating and any `skip_*`
+/// entries, so the per-action view is a cheap filter over this record
+/// (apply the gates, drop targets named by an applicable Skip) rather
+/// than a duplicated copy per action.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct ControllerResolution {
+    /// Filters in Rails execution order: ancestors' first (oldest
+    /// ancestor's declarations first), then this controller's own body
+    /// order with concern-contributed filters spliced at their
+    /// `include` site. Includes `After` and `Skip` kinds — consumers
+    /// pick the subset they care about.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filter_chain: Vec<ResolvedFilter>,
+    /// Effective layout view name (`layouts/application`), resolved by
+    /// walking the inheritance chain; `None` records an explicit
+    /// `layout false`. Convention default applies, so this may name a
+    /// layout view the app doesn't ship — Rails would render bare.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<Symbol>,
+}
+
+/// One hop of a resolved filter chain: the declaration plus the
+/// provenance and typed consequences analyze already knew when it
+/// seeded ivars through this filter.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedFilter {
+    /// The declaration as written (kind, target method, `only:`/
+    /// `except:` gating, symbol-form `if:`/`unless:` guards).
+    pub filter: crate::dialect::Filter,
+    /// Class or concern module whose body declared this filter — the
+    /// trace hop's "defined in AccountOwnedConcern", distinct from the
+    /// controller whose chain it landed in.
+    pub defined_in: ClassId,
+    /// Ivars the target method's body assigns, with inferred types
+    /// (`@account` → `Account`). Empty for `Skip` entries and for
+    /// targets analyze couldn't see (e.g. framework-defined).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub assigns: HashMap<Symbol, Ty>,
+    /// The target method's effect set (`DbRead`…), so a trace doubles
+    /// as a static query profile without re-finding the method body.
+    #[serde(default, skip_serializing_if = "crate::effect::EffectSet::is_pure")]
+    pub effects: crate::effect::EffectSet,
 }
 
 /// A Rails-style importmap: one `<name>` → `<path>` entry per
@@ -187,6 +242,7 @@ impl App {
             concern_model_items: HashMap::new(),
             render_edges: HashMap::new(),
             view_feeders: HashMap::new(),
+            controller_resolutions: HashMap::new(),
             sources: Vec::new(),
             root: String::new(),
         }

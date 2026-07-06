@@ -749,6 +749,17 @@ pub struct Filter {
     /// `except` is non-empty.
     #[serde(default)]
     pub except_style: crate::expr::ArrayStyle,
+    /// Symbol-form `if:` guard (`before_action :set_account, if:
+    /// :account_required?` → `account_required?`). The condition is a
+    /// runtime predicate the static chain can't evaluate, so analyze
+    /// seeds the filter's ivars regardless — it's carried for
+    /// consumers that present the chain (traceroute hops show the
+    /// guard verbatim). Lambda/proc conditions are not captured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub if_cond: Option<Symbol>,
+    /// Symbol-form `unless:` guard. Same carriage rules as `if_cond`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unless_cond: Option<Symbol>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

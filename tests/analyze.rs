@@ -2851,3 +2851,213 @@ end
         reads.iter().filter(|(n, _)| n.as_str() == "parts").collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn controller_resolutions_persist_chain_provenance_conditions_and_layout() {
+    // The #63 phase-1 contract: run_typing_passes already resolves the
+    // full per-controller filter chain (inheritance + concern splicing)
+    // and the effective layout to seed ivars — assert it persists them
+    // on App::controller_resolutions instead of discarding.
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            r#"class ApplicationController < ActionController::Base
+  before_action :set_locale
+
+  private
+
+  def set_locale
+    @locale = "en"
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/concerns/widget_owned_concern.rb",
+            r#"module WidgetOwnedConcern
+  extend ActiveSupport::Concern
+
+  included do
+    before_action :set_widget, if: :widget_required?
+  end
+
+  private
+
+  def widget_required?
+    true
+  end
+
+  def set_widget
+    @widget = Widget.find(params[:id])
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/widgets_controller.rb",
+            r#"class WidgetsController < ApplicationController
+  include WidgetOwnedConcern
+
+  before_action :set_note, only: [:show]
+
+  def show
+  end
+
+  private
+
+  def set_note
+    @note = "hi"
+  end
+end
+"#,
+        ),
+        ("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n"),
+        ("app/views/widgets/show.html.erb", "<p><%= @widget %></p>\n"),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema[7.1].define(version: 1) do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#,
+        ),
+    ]);
+
+    let res = app
+        .controller_resolutions
+        .get(&ClassId(Symbol::from("WidgetsController")))
+        .expect("WidgetsController resolution persisted");
+
+    // Chain in Rails execution order: ancestor's filter first, then the
+    // concern's (spliced at the `include` site, which precedes the
+    // controller's own before_action line), then the controller's own.
+    let targets: Vec<&str> =
+        res.filter_chain.iter().map(|rf| rf.filter.target.as_str()).collect();
+    assert_eq!(
+        targets,
+        vec!["set_locale", "set_widget", "set_note"],
+        "chain order = ancestors, concern-at-include, own"
+    );
+
+    // Provenance names the *defining* class/module, not the chain owner.
+    let by_target = |t: &str| {
+        res.filter_chain.iter().find(|rf| rf.filter.target.as_str() == t).unwrap()
+    };
+    assert_eq!(by_target("set_locale").defined_in.0.as_str(), "ApplicationController");
+    assert_eq!(by_target("set_widget").defined_in.0.as_str(), "WidgetOwnedConcern");
+    assert_eq!(by_target("set_note").defined_in.0.as_str(), "WidgetsController");
+
+    // The symbol-form `if:` guard survives ingest onto the chain.
+    assert_eq!(
+        by_target("set_widget").filter.if_cond.as_ref().map(|s| s.as_str()),
+        Some("widget_required?"),
+        "if: :widget_required? captured"
+    );
+
+    // Typed consequences ride each hop: the concern filter's assigns
+    // carry @widget : Widget, and its body's DbRead is on the hop.
+    let set_widget = by_target("set_widget");
+    assert!(
+        matches!(
+            set_widget.assigns.get(&Symbol::from("widget")),
+            Some(Ty::Class { id, .. }) if id.0.as_str() == "Widget"
+        ),
+        "set_widget assigns @widget : Widget; got {:?}",
+        set_widget.assigns
+    );
+    assert!(
+        set_widget.effects.effects.iter().any(|e| matches!(e, Effect::DbRead { .. })),
+        "Widget.find in the filter body surfaces as DbRead; got {:?}",
+        set_widget.effects
+    );
+
+    // `only:` gating is preserved for per-action resolution.
+    assert_eq!(
+        by_target("set_note").filter.only.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+        vec!["show"]
+    );
+
+    // Convention default layout, resolved through the chain.
+    assert_eq!(res.layout.as_ref().map(|s| s.as_str()), Some("layouts/application"));
+}
+
+#[test]
+fn controller_resolutions_layout_inheritance_and_skip_entries() {
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            r#"class ApplicationController < ActionController::Base
+  layout "admin"
+  before_action :require_login
+
+  private
+
+  def require_login
+    @user = "u"
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/public_controller.rb",
+            r#"class PublicController < ApplicationController
+  layout false
+  skip_before_action :require_login
+
+  def index
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/pages_controller.rb",
+            r#"class PagesController < ApplicationController
+  def index
+  end
+end
+"#,
+        ),
+        ("app/views/public/index.html.erb", "<p>hi</p>\n"),
+        ("app/views/pages/index.html.erb", "<p>hi</p>\n"),
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema[7.1].define(version: 1) do\nend\n",
+        ),
+    ]);
+
+    // Explicit `layout "admin"` resolves and inherits down the chain;
+    // explicit `layout false` records as None.
+    let pages = app
+        .controller_resolutions
+        .get(&ClassId(Symbol::from("PagesController")))
+        .expect("PagesController resolution");
+    assert_eq!(pages.layout.as_ref().map(|s| s.as_str()), Some("layouts/admin"));
+    let public = app
+        .controller_resolutions
+        .get(&ClassId(Symbol::from("PublicController")))
+        .expect("PublicController resolution");
+    assert_eq!(public.layout, None, "layout false → None");
+
+    // The Skip entry is retained in the chain (per-action consumers
+    // apply it), carrying no assigns/effects of its own, while the
+    // ancestor's Before entry it targets is still present.
+    use roundhouse::FilterKind;
+    let kinds: Vec<(&str, &FilterKind)> = public
+        .filter_chain
+        .iter()
+        .map(|rf| (rf.filter.target.as_str(), &rf.filter.kind))
+        .collect();
+    assert!(
+        kinds.iter().any(|(t, k)| *t == "require_login" && matches!(k, FilterKind::Before)),
+        "inherited Before entry present; chain = {kinds:?}"
+    );
+    let skip = public
+        .filter_chain
+        .iter()
+        .find(|rf| matches!(rf.filter.kind, FilterKind::Skip))
+        .expect("Skip entry retained in chain");
+    assert_eq!(skip.filter.target.as_str(), "require_login");
+    assert_eq!(skip.defined_in.0.as_str(), "PublicController");
+    assert!(skip.assigns.is_empty() && skip.effects.is_pure());
+}
