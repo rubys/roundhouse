@@ -375,20 +375,10 @@ impl Server {
         Some(GotoDefinitionResponse::Scalar(location_of(app, span)?))
     }
 
-    // ── Completion ────────────────────────────────────────────────────
-    //
-    // Answers from the last-good analysis and the *current* buffer: the
-    // receiver expression almost always predates the keystroke that
-    // triggered the request (`user` existed before its `.` was typed),
-    // so typing it against the stale snapshot is correct in practice,
-    // and the client filters items against the live prefix as the user
-    // keeps typing. Three shapes:
-    //   `recv.…`         → members of the receiver's inferred class
-    //                      (instance side for values, class side for
-    //                      constants — scopes, finders)
-    //   `@…`             → ivars observed in this file, with types
-    //   `find_by(…`/`where(…` → the receiver model's columns as kwargs
-
+    /// Completion: thin protocol skin over [`ide::complete_at`] — the
+    /// shared transport-free core (the wasm/browser skin maps the same
+    /// candidates to Monaco items). Answers from the last-good snapshot
+    /// and the *current* overlay buffer.
     fn completion(&self, params: CompletionParams) -> Option<Vec<CompletionItem>> {
         let analysis = self.current()?;
         let tdp = params.text_document_position;
@@ -396,104 +386,9 @@ impl Server {
         let text = self.overlay.get(&canonical(&path))?.as_str();
         let path_str = path.to_str()?;
         let cursor = ide::position_to_offset(text, lsp_to_ide(tdp.position)) as usize;
-        let cursor = cursor.min(text.len());
-
-        let start = word_start(text, cursor);
-        let word = &text[start..cursor];
-        if word.starts_with('@') {
-            return self.ivar_items(&analysis.app, path_str);
-        }
-        let before = text.as_bytes().get(start.checked_sub(1)?)?;
-        match before {
-            b'.' => self.member_items(&analysis, path_str, text, start - 1),
-            b'(' | b',' | b' ' => self.kwarg_items(&analysis, path_str, text, start),
-            _ => None,
-        }
-    }
-
-    /// Members of the receiver ending just before the `.` at `dot`.
-    fn member_items(
-        &self,
-        analysis: &Analysis,
-        path: &str,
-        text: &str,
-        dot: usize,
-    ) -> Option<Vec<CompletionItem>> {
-        let (class_id, side) = receiver_class(analysis, path, text, dot)?;
-        let members = ide::members_of(&analysis.app, &analysis.registry, &class_id, side);
-        if members.is_empty() {
-            return None;
-        }
-        Some(members.iter().map(member_item).collect())
-    }
-
-    /// Ivars observed anywhere in this file, with their inferred types.
-    /// Works in controllers and — because template spans point into the
-    /// template file — in ERB/HAML views, where the ivar set *is* the
-    /// controller's contribution.
-    fn ivar_items(&self, app: &App, path: &str) -> Option<Vec<CompletionItem>> {
-        let seen = file_ivars(app, path);
-        if seen.is_empty() {
-            return None;
-        }
-        let mut items: Vec<CompletionItem> = seen
-            .into_iter()
-            .map(|(name, ty)| {
-                let display =
-                    ty.as_ref().map(ide::render_ty).unwrap_or_else(|| "untyped".to_string());
-                CompletionItem {
-                    label: format!("@{}", name.as_str()),
-                    kind: Some(CompletionItemKind::VARIABLE),
-                    detail: Some(display.clone()),
-                    label_details: Some(CompletionItemLabelDetails {
-                        detail: None,
-                        description: Some(display),
-                    }),
-                    ..Default::default()
-                }
-            })
-            .collect();
-        items.sort_by(|a, b| a.label.cmp(&b.label));
-        Some(items)
-    }
-
-    /// Column kwargs inside a `find_by(`/`where(` argument list: resolve
-    /// the call's receiver to a model class and offer its columns as
-    /// `name:` items with their types.
-    fn kwarg_items(
-        &self,
-        analysis: &Analysis,
-        path: &str,
-        text: &str,
-        upto: usize,
-    ) -> Option<Vec<CompletionItem>> {
-        let dot = kwarg_call_dot(text, upto)?;
-        // Whichever side the receiver resolved on (`User.find_by(` is the
-        // class object), the kwargs are the model's columns — enumerate
-        // the instance side of the resolved class.
-        let (class_id, _) = receiver_class(analysis, path, text, dot)?;
-        let members = ide::members_of(
-            &analysis.app,
-            &analysis.registry,
-            &class_id,
-            ide::MemberSide::Instance,
-        );
-        let items: Vec<CompletionItem> = members
-            .iter()
-            .filter(|m| m.kind == ide::MemberKind::Column && !m.name.as_str().ends_with('='))
-            .map(|m| CompletionItem {
-                label: format!("{}:", m.name.as_str()),
-                kind: Some(CompletionItemKind::FIELD),
-                detail: Some(m.display.clone()),
-                label_details: Some(CompletionItemLabelDetails {
-                    detail: None,
-                    description: Some(m.display.clone()),
-                }),
-                insert_text: Some(format!("{}: ", m.name.as_str())),
-                ..Default::default()
-            })
-            .collect();
-        if items.is_empty() { None } else { Some(items) }
+        let candidates =
+            ide::complete_at(&analysis.app, &analysis.registry, path_str, text, cursor)?;
+        Some(candidates.iter().map(candidate_item).collect())
     }
 
     fn respond<T: serde::Serialize>(&self, id: RequestId, result: &T) -> LspResult<()> {
@@ -662,170 +557,28 @@ fn location_of(app: &App, span: Span) -> Option<Location> {
     Some(Location { uri: path_to_uri(Path::new(&src.path))?, range: span_to_range(&src.text, span) })
 }
 
-// ── Completion text scanning ─────────────────────────────────────────
-
-/// Bytes that extend the word being completed: Ruby identifier chars,
-/// the ivar sigil, `?`/`!` method suffixes, and `:` so qualified
-/// constants (`Admin::Report`) scan as one token.
-fn is_word_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'@' | b'?' | b'!' | b':')
-}
-
-/// Start offset of the word containing/preceding `cursor`.
-fn word_start(text: &str, cursor: usize) -> usize {
-    let bytes = text.as_bytes();
-    let mut i = cursor.min(bytes.len());
-    while i > 0 && is_word_byte(bytes[i - 1]) {
-        i -= 1;
-    }
-    i
-}
-
-/// Resolve the receiver expression ending just before the `.` at `dot`
-/// to a class and which side of it the member lookup should use.
-///
-/// Primary path: ask the last-good analysis for the type at the
-/// receiver's final character — the tightest covering node is the
-/// receiver itself (a `Var` read, or the full `Send` chain for
-/// `a.b.first.`), and its syntactic kind distinguishes the class
-/// object (`Const` → class side: scopes, finders) from a value
-/// (instance side: columns, associations). Falls back to a textual
-/// constant lookup for a class name typed since the last pass.
-fn receiver_class(
-    analysis: &Analysis,
-    path: &str,
-    text: &str,
-    dot: usize,
-) -> Option<(ClassId, ide::MemberSide)> {
-    if dot == 0 {
-        return None;
-    }
-    let pos = ide::offset_to_position(text, (dot - 1) as u32);
-    if let Some(info) = ide::type_at_position(&analysis.app, path, pos) {
-        if let Some(id) = info.ty.as_ref().and_then(root_class) {
-            let side = if info.node_kind == "Const" {
-                ide::MemberSide::Class
-            } else {
-                ide::MemberSide::Instance
-            };
-            return Some((id, side));
-        }
-    }
-    // Textual fallbacks for receivers at positions the stale snapshot
-    // can't type (a freshly typed line): a constant receiver resolves
-    // by registry name; an ivar receiver resolves by the type the same
-    // ivar has elsewhere in this file.
-    let start = word_start(text, dot);
-    let token = &text[start..dot];
-    if token.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
-        let id = ClassId(Symbol::from(token));
-        if analysis.registry.contains_key(&id) {
-            return Some((id, ide::MemberSide::Class));
-        }
-    }
-    if let Some(name) = token.strip_prefix('@') {
-        let ivars = file_ivars(&analysis.app, path);
-        let ty = ivars.get(&Symbol::from(name)).and_then(|t| t.as_ref())?;
-        return root_class(ty).map(|id| (id, ide::MemberSide::Instance));
-    }
-    None
-}
-
-/// Every ivar observed in `path`'s analyzed exprs, with the first
-/// resolved type seen for each (reads and assignment values both
-/// contribute). The substrate for `@` completion and for typing an
-/// ivar receiver on a line the stale snapshot hasn't seen.
-fn file_ivars(app: &App, path: &str) -> HashMap<Symbol, Option<Ty>> {
-    let mut seen: HashMap<Symbol, Option<Ty>> = HashMap::new();
-    let Some(file) = ide::file_id(app, path) else { return seen };
-    ide::nodes_in_range(app, file, 0, u32::MAX, &mut |e| {
-        match &*e.node {
-            ExprNode::Ivar { name } => {
-                let slot = seen.entry(name.clone()).or_insert(None);
-                if slot.is_none() {
-                    *slot = e.ty.clone();
-                }
-            }
-            ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-                let slot = seen.entry(name.clone()).or_insert(None);
-                if slot.is_none() {
-                    *slot = value.ty.clone();
-                }
-            }
-            _ => {}
-        }
-    });
-    seen
-}
-
-/// The root class of a receiver type: `Article` itself, or the class
-/// arm of a nilable union (`Article?` completes as `Article` — the
-/// user gets members while the nil-safety diagnostics separately flag
-/// the unguarded call).
-fn root_class(ty: &Ty) -> Option<ClassId> {
-    match ty {
-        Ty::Class { id, .. } => Some(id.clone()),
-        Ty::Union { variants } => variants.iter().find_map(root_class),
-        _ => None,
-    }
-}
-
-/// For a cursor inside a call's argument list, the offset of the `.`
-/// linking the receiver to a kwarg-completable method (`find_by`,
-/// `find_by!`, `where`). Scans left for the innermost unbalanced `(`,
-/// then requires `recv.method(` immediately before it.
-fn kwarg_call_dot(text: &str, upto: usize) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let mut depth = 0usize;
-    let mut open = None;
-    for i in (0..upto.min(bytes.len())).rev() {
-        match bytes[i] {
-            b')' => depth += 1,
-            b'(' if depth == 0 => {
-                open = Some(i);
-                break;
-            }
-            b'(' => depth -= 1,
-            _ => {}
-        }
-    }
-    let open = open?;
-    let mstart = word_start(text, open);
-    let method = &text[mstart..open];
-    if !matches!(method, "find_by" | "find_by!" | "where") {
-        return None;
-    }
-    let dot = mstart.checked_sub(1)?;
-    (bytes[dot] == b'.').then_some(dot)
-}
-
-/// A completion item for one enumerated member. `sort_text` ranks the
-/// Rails-shaped members (columns, associations, scopes) above the
-/// generic framework/method surface so `user.` leads with `email`,
-/// `posts` — the differentiated answers — not `becomes!`.
-fn member_item(m: &ide::Member) -> CompletionItem {
-    use ide::MemberKind;
-    let kind = match m.kind {
-        MemberKind::Column => CompletionItemKind::FIELD,
-        MemberKind::Association => CompletionItemKind::PROPERTY,
-        MemberKind::Scope => CompletionItemKind::FUNCTION,
-        MemberKind::Accessor => CompletionItemKind::PROPERTY,
-        MemberKind::Method => CompletionItemKind::METHOD,
-    };
-    let rank = match m.kind {
-        MemberKind::Column | MemberKind::Association | MemberKind::Scope => '0',
-        MemberKind::Accessor => '1',
-        MemberKind::Method => '2',
+/// Map a transport-free completion candidate to an LSP item. Kind and
+/// sort_text mirror what the browser skin renders in Monaco, so the
+/// two surfaces rank identically.
+fn candidate_item(c: &ide::CompletionCandidate) -> CompletionItem {
+    use ide::CandidateKind;
+    let kind = match c.kind {
+        CandidateKind::Column | CandidateKind::Kwarg => CompletionItemKind::FIELD,
+        CandidateKind::Association | CandidateKind::Accessor => CompletionItemKind::PROPERTY,
+        CandidateKind::Scope => CompletionItemKind::FUNCTION,
+        CandidateKind::Method => CompletionItemKind::METHOD,
+        CandidateKind::Ivar => CompletionItemKind::VARIABLE,
     };
     CompletionItem {
-        label: m.name.as_str().to_string(),
+        label: c.label.clone(),
         kind: Some(kind),
-        detail: Some(m.display.clone()),
+        detail: Some(c.detail.clone()),
         label_details: Some(CompletionItemLabelDetails {
             detail: None,
-            description: Some(m.display.clone()),
+            description: Some(c.detail.clone()),
         }),
-        sort_text: Some(format!("{rank}{}", m.name.as_str())),
+        sort_text: Some(format!("{}{}", c.rank, c.label)),
+        insert_text: c.insert_text.clone(),
         ..Default::default()
     }
 }
@@ -1043,27 +796,27 @@ mod tests {
     fn kwarg_call_dot_finds_the_enclosing_call() {
         // Cursor after `(`: resolves to the dot before find_by.
         let t = "x = Article.find_by(";
-        assert_eq!(kwarg_call_dot(t, t.len()), Some(t.find(".find_by").unwrap()));
+        assert_eq!(ide::kwarg_call_dot(t, t.len()), Some(t.find(".find_by").unwrap()));
         // Later argument position, past a nested balanced call.
         let t = "Article.where(foo(1), ";
-        assert_eq!(kwarg_call_dot(t, t.len()), Some(t.find(".where").unwrap()));
+        assert_eq!(ide::kwarg_call_dot(t, t.len()), Some(t.find(".where").unwrap()));
         // Non-kwarg method: no completion context.
         let t = "Article.destroy(";
-        assert_eq!(kwarg_call_dot(t, t.len()), None);
+        assert_eq!(ide::kwarg_call_dot(t, t.len()), None);
         // No receiver dot: bare where( is not resolvable.
         let t = "where(";
-        assert_eq!(kwarg_call_dot(t, t.len()), None);
+        assert_eq!(ide::kwarg_call_dot(t, t.len()), None);
     }
 
     #[test]
     fn word_start_scans_idents_ivars_and_qualified_constants() {
         let t = "x = @art";
-        assert_eq!(word_start(t, t.len()), 4);
+        assert_eq!(ide::word_start(t, t.len()), 4);
         let t = "Admin::Repo";
-        assert_eq!(word_start(t, t.len()), 0);
+        assert_eq!(ide::word_start(t, t.len()), 0);
         let t = "user.po";
-        assert_eq!(word_start(t, t.len()), 5);
-        assert_eq!(word_start(t, 5), 5, "empty word right after the dot");
+        assert_eq!(ide::word_start(t, t.len()), 5);
+        assert_eq!(ide::word_start(t, 5), 5, "empty word right after the dot");
     }
 
     /// Drive one completion round: full-sync the buffer to `text`, then

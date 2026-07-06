@@ -2387,6 +2387,9 @@ impl Analyzer {
             .into_iter()
             .map(|(view, feeders)| (view, feeders.into_iter().collect()))
             .collect();
+        // Persist the raw renderer→partial edges too — the un-closed
+        // half of the render graph, for view↔partial navigation.
+        app.render_edges = render_edges.clone();
 
         // Phase 3b: partials. Seed local_bindings from the render-site map
         // and ivar_bindings from the propagated controller context, then
@@ -3784,7 +3787,7 @@ fn association_member_ty(assoc: &crate::dialect::Association) -> (Symbol, Ty) {
 /// The model-side twin of [`controller_includes`]: modules a model mixes
 /// in via top-level `include X` calls (round-tripped as `Unknown` body
 /// items).
-fn model_includes(model: &crate::dialect::Model) -> Vec<ClassId> {
+pub(crate) fn model_includes(model: &crate::dialect::Model) -> Vec<ClassId> {
     let mut out = Vec::new();
     for item in &model.body {
         let ModelBodyItem::Unknown { expr, .. } = item else { continue };
@@ -3802,7 +3805,7 @@ fn model_includes(model: &crate::dialect::Model) -> Vec<ClassId> {
     out
 }
 
-fn controller_includes(controller: &Controller) -> Vec<ClassId> {
+pub(crate) fn controller_includes(controller: &Controller) -> Vec<ClassId> {
     let mut out = Vec::new();
     for item in &controller.body {
         let ControllerBodyItem::Unknown { expr, .. } = item else { continue };

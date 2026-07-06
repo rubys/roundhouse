@@ -107,6 +107,13 @@ pub struct App {
     /// item provenance) can follow when emission needs it.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub concern_model_items: HashMap<ClassId, Vec<ModelBodyItem>>,
+    /// Renderer view → the partial views it renders (`articles/show` →
+    /// [`articles/_form`]), harvested from actual render sites as views
+    /// are analyzed. The other half of the render graph that
+    /// `view_feeders` closes over — persisted for related-file
+    /// navigation (view ↔ its partials, partial ↔ its renderers).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub render_edges: HashMap<Symbol, Vec<Symbol>>,
     /// View name (`articles/show`, `articles/_form`, `layouts/application`)
     /// → controllers whose actions feed that view, recorded by analyze
     /// while it harvests the action→view ivar channel (explicit `render`
@@ -178,6 +185,7 @@ impl App {
             rails_application: None,
             concern_filters: HashMap::new(),
             concern_model_items: HashMap::new(),
+            render_edges: HashMap::new(),
             view_feeders: HashMap::new(),
             sources: Vec::new(),
             root: String::new(),

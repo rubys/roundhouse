@@ -219,6 +219,317 @@ fn error_json(msg: &str) -> String {
     .unwrap_or_else(|_| String::from(r#"{"error":"unserializable error"}"#))
 }
 
+// ── Analysis-only entry (the IDE skin) ───────────────────────────────
+//
+// The /ide/ page doesn't emit code; it queries. `analyze` ingests in
+// *survey mode* (real apps always have constructs the subset doesn't
+// model — the gaps drive note-severity attribution, exactly like the
+// LSP/MCP skins), runs the whole-app analysis, publishes the marker
+// list, and stashes the typed App + class registry in a thread-local
+// as the **last-good snapshot** that `complete` (and future queries)
+// answer from. Wasm is single-threaded, so the thread-local is the
+// whole story — no locks, no worker plumbing on this side.
+
+use std::cell::RefCell;
+
+struct Analysis {
+    app: roundhouse::App,
+    registry: HashMap<roundhouse::ClassId, roundhouse::analyze::ClassInfo>,
+}
+
+thread_local! {
+    static LAST_GOOD: RefCell<Option<Analysis>> = const { RefCell::new(None) };
+}
+
+#[derive(Deserialize)]
+struct AnalyzeInput {
+    src: HashMap<String, String>,
+}
+
+#[derive(Serialize)]
+struct AnalyzeOutput {
+    /// Marker-ready diagnostics (notes carry severity "info").
+    diagnostics: Vec<DiagnosticOut>,
+    /// Recovered ingest gaps (file + message) — the coverage ledger.
+    gaps: Vec<GapOut>,
+    /// Ingested source files (path list, for pickers).
+    files: Vec<String>,
+    /// Registered classes (models/controllers/concerns/lib), for
+    /// go-to-class search.
+    classes: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct GapOut {
+    file: String,
+    message: String,
+}
+
+fn analyze_app_inner(json_in: &str) -> String {
+    let input: AnalyzeInput = match serde_json::from_str(json_in) {
+        Ok(v) => v,
+        Err(e) => return error_json(&format!("invalid input JSON: {e}")),
+    };
+    let tree: HashMap<PathBuf, Vec<u8>> = input
+        .src
+        .into_iter()
+        .map(|(k, v)| (PathBuf::from(k), v.into_bytes()))
+        .collect();
+
+    roundhouse::ingest::survey::activate();
+    let (result, parse_diags) =
+        roundhouse::ingest::prism::scope(|| ingest_app_from_tree(tree));
+    let gaps = roundhouse::ingest::survey::drain();
+    let mut app = match result {
+        Ok(app) => app,
+        Err(e) => return error_json(&format!("ingest: {e}")),
+    };
+    let mut analyzer = Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+    let registry = analyzer.class_registry().clone();
+
+    let mut diags = diagnose(&app);
+    roundhouse::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &gaps);
+    diags.extend(parse_diags);
+
+    let diagnostics: Vec<DiagnosticOut> = diags
+        .into_iter()
+        .filter_map(|d| {
+            if d.span.is_synthetic() {
+                return None;
+            }
+            let sf = app.sources.get((d.span.file.0 as usize).checked_sub(1)?)?;
+            let (start_line, start_col) = sf.line_col(d.span.start);
+            let (end_line, end_col) = sf.line_col(d.span.end);
+            let severity = match d.severity {
+                Severity::Error => "error",
+                Severity::Warning => "warning",
+                Severity::Info => "info",
+            };
+            Some(DiagnosticOut {
+                path: sf.path.clone(),
+                start_line,
+                start_col,
+                end_line,
+                end_col,
+                severity,
+                code: d.code(),
+                message: d.message,
+            })
+        })
+        .collect();
+
+    let gaps_out: Vec<GapOut> = gaps
+        .iter()
+        .filter_map(|g| match g {
+            roundhouse::ingest::IngestError::Unsupported { file, message }
+            | roundhouse::ingest::IngestError::Parse { file, message } => Some(GapOut {
+                file: file.clone(),
+                message: message.clone(),
+            }),
+            _ => None,
+        })
+        .collect();
+
+    let files: Vec<String> = app.sources.iter().map(|s| s.path.clone()).collect();
+    let mut classes: Vec<String> =
+        registry.keys().map(|c| c.0.as_str().to_string()).collect();
+    classes.sort();
+
+    let out = AnalyzeOutput { diagnostics, gaps: gaps_out, files, classes };
+    let json =
+        serde_json::to_string(&out).unwrap_or_else(|e| error_json(&format!("serialize: {e}")));
+    LAST_GOOD.with(|l| *l.borrow_mut() = Some(Analysis { app, registry }));
+    json
+}
+
+/// Pack a String into the (ptr,len) u64 protocol shared with `transpile`.
+fn pack(result: String) -> u64 {
+    let bytes = result.into_bytes();
+    let len = bytes.len() as u64;
+    let mut boxed = bytes.into_boxed_slice();
+    let ptr = boxed.as_mut_ptr() as u64;
+    std::mem::forget(boxed);
+    (ptr & 0xFFFF_FFFF) | (len << 32)
+}
+
+/// Analysis-only entry: same memory protocol as `transpile`, input
+/// `{"src": {...}}`, output `AnalyzeOutput` (or `{"error": ...}`).
+/// Side effect: refreshes the last-good snapshot queries answer from.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn analyze_app(input_ptr: *const u8, input_len: u32) -> u64 {
+    let input = unsafe { std::slice::from_raw_parts(input_ptr, input_len as usize) };
+    let json_in = std::str::from_utf8(input).unwrap_or("{}");
+    pack(analyze_app_inner(json_in))
+}
+
+// ── Queries over the last-good snapshot ──────────────────────────────
+
+#[derive(Deserialize)]
+struct CompleteInput {
+    path: String,
+    /// The *current* buffer text — ahead of the analyzed snapshot by
+    /// the keystroke(s) that triggered the request, same contract as
+    /// the LSP skin.
+    text: String,
+    line: u32,
+    character: u32,
+}
+
+#[derive(Serialize)]
+struct CandidateOut {
+    label: String,
+    kind: &'static str,
+    detail: String,
+    sort_text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    insert_text: Option<String>,
+}
+
+fn complete_inner(json_in: &str) -> String {
+    let input: CompleteInput = match serde_json::from_str(json_in) {
+        Ok(v) => v,
+        Err(e) => return error_json(&format!("invalid input JSON: {e}")),
+    };
+    LAST_GOOD.with(|l| {
+        let borrow = l.borrow();
+        let Some(a) = borrow.as_ref() else {
+            return error_json("no analysis yet — call analyze_app first");
+        };
+        let pos = roundhouse::ide::Position { line: input.line, character: input.character };
+        let offset = roundhouse::ide::position_to_offset(&input.text, pos) as usize;
+        let cands = roundhouse::ide::complete_at(&a.app, &a.registry, &input.path, &input.text, offset)
+            .unwrap_or_default();
+        let out: Vec<CandidateOut> = cands
+            .into_iter()
+            .map(|c| CandidateOut {
+                sort_text: format!("{}{}", c.rank, c.label),
+                kind: match c.kind {
+                    roundhouse::ide::CandidateKind::Column => "column",
+                    roundhouse::ide::CandidateKind::Association => "association",
+                    roundhouse::ide::CandidateKind::Scope => "scope",
+                    roundhouse::ide::CandidateKind::Accessor => "accessor",
+                    roundhouse::ide::CandidateKind::Method => "method",
+                    roundhouse::ide::CandidateKind::Ivar => "ivar",
+                    roundhouse::ide::CandidateKind::Kwarg => "kwarg",
+                },
+                label: c.label,
+                detail: c.detail,
+                insert_text: c.insert_text,
+            })
+            .collect();
+        serde_json::to_string(&out).unwrap_or_else(|e| error_json(&format!("serialize: {e}")))
+    })
+}
+
+/// Completion against the last-good snapshot + the passed current
+/// buffer. Input `{"path", "text", "line", "character"}` (0-based,
+/// UTF-16 character — Monaco/LSP convention), output a candidate array.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn complete(input_ptr: *const u8, input_len: u32) -> u64 {
+    let input = unsafe { std::slice::from_raw_parts(input_ptr, input_len as usize) };
+    pack(complete_inner(std::str::from_utf8(input).unwrap_or("{}")))
+}
+
+#[derive(Deserialize)]
+struct PositionInput {
+    path: String,
+    line: u32,
+    character: u32,
+}
+
+#[derive(Serialize)]
+struct TypeAtOut {
+    display: String,
+    nilable: bool,
+    node_kind: &'static str,
+}
+
+fn type_at_inner(json_in: &str) -> String {
+    let input: PositionInput = match serde_json::from_str(json_in) {
+        Ok(v) => v,
+        Err(e) => return error_json(&format!("invalid input JSON: {e}")),
+    };
+    LAST_GOOD.with(|l| {
+        let borrow = l.borrow();
+        let Some(a) = borrow.as_ref() else {
+            return error_json("no analysis yet — call analyze_app first");
+        };
+        let pos = roundhouse::ide::Position { line: input.line, character: input.character };
+        match roundhouse::ide::type_at_position(&a.app, &input.path, pos) {
+            Some(info) => serde_json::to_string(&TypeAtOut {
+                display: info.display,
+                nilable: info.nilable,
+                node_kind: info.node_kind,
+            })
+            .unwrap_or_else(|e| error_json(&format!("serialize: {e}"))),
+            None => "null".to_string(),
+        }
+    })
+}
+
+/// Hover: inferred type at a position in the *analyzed* text (the
+/// snapshot's own source — positions drift at most one edit, exactly
+/// like the LSP's hover). Output `{"display","nilable","node_kind"}`
+/// or `null`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn type_at(input_ptr: *const u8, input_len: u32) -> u64 {
+    let input = unsafe { std::slice::from_raw_parts(input_ptr, input_len as usize) };
+    pack(type_at_inner(std::str::from_utf8(input).unwrap_or("{}")))
+}
+
+#[derive(Deserialize)]
+struct RelatedInput {
+    path: String,
+}
+
+#[derive(Serialize)]
+struct RelatedOut {
+    kind: &'static str,
+    label: String,
+    path: String,
+}
+
+fn related_files_inner(json_in: &str) -> String {
+    let input: RelatedInput = match serde_json::from_str(json_in) {
+        Ok(v) => v,
+        Err(e) => return error_json(&format!("invalid input JSON: {e}")),
+    };
+    LAST_GOOD.with(|l| {
+        let borrow = l.borrow();
+        let Some(a) = borrow.as_ref() else {
+            return error_json("no analysis yet — call analyze_app first");
+        };
+        let rel = roundhouse::ide::related_files(&a.app, &input.path);
+        let out: Vec<RelatedOut> = rel
+            .into_iter()
+            .map(|r| RelatedOut {
+                kind: match r.kind {
+                    roundhouse::ide::RelatedKind::View => "view",
+                    roundhouse::ide::RelatedKind::Partial => "partial",
+                    roundhouse::ide::RelatedKind::Renderer => "renderer",
+                    roundhouse::ide::RelatedKind::Controller => "controller",
+                    roundhouse::ide::RelatedKind::Concern => "concern",
+                    roundhouse::ide::RelatedKind::Includer => "includer",
+                    roundhouse::ide::RelatedKind::Model => "model",
+                },
+                label: r.label,
+                path: r.path,
+            })
+            .collect();
+        serde_json::to_string(&out).unwrap_or_else(|e| error_json(&format!("serialize: {e}")))
+    })
+}
+
+/// Rails-aware related files for a path, from the inferred render
+/// graph + include edges. Input `{"path"}`, output an array of
+/// `{"kind","label","path"}`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn related_files(input_ptr: *const u8, input_len: u32) -> u64 {
+    let input = unsafe { std::slice::from_raw_parts(input_ptr, input_len as usize) };
+    pack(related_files_inner(std::str::from_utf8(input).unwrap_or("{}")))
+}
+
 // ── C ABI exports ────────────────────────────────────────────────────
 
 /// Allocate a buffer of the given size in wasm linear memory and return

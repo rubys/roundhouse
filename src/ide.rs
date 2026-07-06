@@ -350,6 +350,526 @@ pub fn members_of(
     members
 }
 
+// ── Related files (Rails-aware navigation) ───────────────────────────
+//
+// RubyMine's "Related Symbol" jump, but driven by the inferred render
+// graph and include edges instead of naming conventions: a controller
+// relates to the views its actions *actually* feed (`App::view_feeders`),
+// a view to the partials it *actually* renders (`App::render_edges`),
+// a concern to the classes that include it. Convention appears only
+// where no analyzed edge exists (controller ↔ model pairing).
+
+/// What relates the file to the queried one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelatedKind {
+    /// A view this controller's actions feed.
+    View,
+    /// A partial this view renders.
+    Partial,
+    /// A view that renders this partial.
+    Renderer,
+    /// A controller feeding this view.
+    Controller,
+    /// A concern this class includes.
+    Concern,
+    /// A class including this concern.
+    Includer,
+    /// The conventional model twin of this controller (or vice versa).
+    Model,
+}
+
+#[derive(Clone, Debug)]
+pub struct RelatedFile {
+    pub kind: RelatedKind,
+    /// Display name (view name, class name).
+    pub label: String,
+    /// Source path, as ingested (resolves via [`file_id`]).
+    pub path: String,
+}
+
+/// Files related to `path` through analyzed edges. Empty when the file
+/// isn't a controller/model/view/concern the analysis knows.
+pub fn related_files(app: &App, path: &str) -> Vec<RelatedFile> {
+    let Some(file) = file_id(app, path) else { return Vec::new() };
+    let mut out: Vec<RelatedFile> = Vec::new();
+
+    let src_path = |f: FileId| source(app, f).map(|s| s.path.clone());
+    let view_file = |name: &Symbol| {
+        app.views
+            .iter()
+            .find(|v| &v.name == name)
+            .and_then(|v| first_expr_file(&v.body))
+            .and_then(src_path)
+    };
+    let class_files: HashMap<ClassId, FileId> = class_file_index(app);
+    let class_path = |id: &ClassId| class_files.get(id).copied().and_then(src_path);
+
+    // Controller?
+    if let Some(c) = app
+        .controllers
+        .iter()
+        .find(|c| class_files.get(&c.name) == Some(&file))
+    {
+        for (view, feeders) in &app.view_feeders {
+            if feeders.contains(&c.name) && !view.as_str().starts_with("layouts/") {
+                if let Some(p) = view_file(view) {
+                    out.push(RelatedFile {
+                        kind: RelatedKind::View,
+                        label: view.as_str().to_string(),
+                        path: p,
+                    });
+                }
+            }
+        }
+        for inc in crate::analyze::controller_includes(c) {
+            if let Some(p) = class_path(&inc) {
+                out.push(RelatedFile {
+                    kind: RelatedKind::Concern,
+                    label: inc.0.as_str().to_string(),
+                    path: p,
+                });
+            }
+        }
+        // Conventional model twin: StatusesController → Status.
+        let base = c.name.0.as_str().rsplit("::").next().unwrap_or("");
+        if let Some(plural) = base.strip_suffix("Controller") {
+            let singular = crate::naming::singularize_camelize(plural);
+            let id = ClassId(Symbol::from(singular));
+            if app.models.iter().any(|m| m.name == id) {
+                if let Some(p) = class_path(&id) {
+                    out.push(RelatedFile {
+                        kind: RelatedKind::Model,
+                        label: id.0.as_str().to_string(),
+                        path: p,
+                    });
+                }
+            }
+        }
+    }
+
+    // Model?
+    if let Some(m) = app.models.iter().find(|m| class_files.get(&m.name) == Some(&file)) {
+        for inc in crate::analyze::model_includes(m) {
+            if let Some(p) = class_path(&inc) {
+                out.push(RelatedFile {
+                    kind: RelatedKind::Concern,
+                    label: inc.0.as_str().to_string(),
+                    path: p,
+                });
+            }
+        }
+        let plural = crate::naming::pluralize_snake(m.name.0.as_str());
+        for c in &app.controllers {
+            let base = c.name.0.as_str().rsplit("::").next().unwrap_or("");
+            if base
+                .strip_suffix("Controller")
+                .is_some_and(|b| crate::naming::pluralize_snake(b) == plural)
+            {
+                if let Some(p) = class_path(&c.name) {
+                    out.push(RelatedFile {
+                        kind: RelatedKind::Controller,
+                        label: c.name.0.as_str().to_string(),
+                        path: p,
+                    });
+                }
+            }
+        }
+    }
+
+    // View?
+    if let Some(v) = app.views.iter().find(|v| first_expr_file(&v.body) == Some(file)) {
+        if let Some(feeders) = app.view_feeders.get(&v.name) {
+            for f in feeders {
+                if let Some(p) = class_path(f) {
+                    out.push(RelatedFile {
+                        kind: RelatedKind::Controller,
+                        label: f.0.as_str().to_string(),
+                        path: p,
+                    });
+                }
+            }
+        }
+        if let Some(partials) = app.render_edges.get(&v.name) {
+            for partial in partials {
+                if let Some(p) = view_file(partial) {
+                    out.push(RelatedFile {
+                        kind: RelatedKind::Partial,
+                        label: partial.as_str().to_string(),
+                        path: p,
+                    });
+                }
+            }
+        }
+        for (renderer, partials) in &app.render_edges {
+            if partials.contains(&v.name) {
+                if let Some(p) = view_file(renderer) {
+                    out.push(RelatedFile {
+                        kind: RelatedKind::Renderer,
+                        label: renderer.as_str().to_string(),
+                        path: p,
+                    });
+                }
+            }
+        }
+    }
+
+    // Concern module? (a library-class module defined in this file)
+    for lc in &app.library_classes {
+        if !lc.is_module || class_files.get(&lc.name) != Some(&file) {
+            continue;
+        }
+        for c in &app.controllers {
+            if crate::analyze::controller_includes(c).contains(&lc.name) {
+                if let Some(p) = class_path(&c.name) {
+                    out.push(RelatedFile {
+                        kind: RelatedKind::Includer,
+                        label: c.name.0.as_str().to_string(),
+                        path: p,
+                    });
+                }
+            }
+        }
+        for m in &app.models {
+            if crate::analyze::model_includes(m).contains(&lc.name) {
+                if let Some(p) = class_path(&m.name) {
+                    out.push(RelatedFile {
+                        kind: RelatedKind::Includer,
+                        label: m.name.0.as_str().to_string(),
+                        path: p,
+                    });
+                }
+            }
+        }
+    }
+
+    out.sort_by(|a, b| (a.kind as u8, a.label.as_str()).cmp(&(b.kind as u8, b.label.as_str())));
+    out.dedup_by(|a, b| a.kind == b.kind && a.label == b.label);
+    out
+}
+
+/// Defining file per class: models carry a span; controllers, library
+/// classes, and everything else resolve through their first
+/// real-spanned body expression.
+fn class_file_index(app: &App) -> HashMap<ClassId, FileId> {
+    let mut out = HashMap::new();
+    for m in &app.models {
+        if !m.span.is_synthetic() {
+            out.insert(m.name.clone(), m.span.file);
+        }
+    }
+    for c in &app.controllers {
+        if let Some(f) = c.actions().find_map(|a| first_expr_file(&a.body)) {
+            out.insert(c.name.clone(), f);
+        }
+    }
+    for lc in &app.library_classes {
+        if let Some(f) = lc.methods.iter().find_map(|m| first_expr_file(&m.body)) {
+            out.entry(lc.name.clone()).or_insert(f);
+        }
+    }
+    out
+}
+
+/// First non-synthetic file a subtree touches.
+fn first_expr_file(e: &Expr) -> Option<FileId> {
+    if !e.span.is_synthetic() {
+        return Some(e.span.file);
+    }
+    let mut found = None;
+    e.node.for_each_child(&mut |c| {
+        if found.is_none() {
+            found = first_expr_file(c);
+        }
+    });
+    found
+}
+
+// ── Completion (transport-free core) ─────────────────────────────────
+//
+// The full completion pipeline, shared by every skin: the LSP handler
+// maps candidates to `lsp_types::CompletionItem`, the wasm/browser
+// skin to Monaco items. Answers from a *last-good* analysis plus the
+// *current* buffer text: the receiver expression almost always
+// predates the keystroke that triggered the request (`user` existed
+// before its `.` was typed), so typing it against the stale snapshot
+// is correct in practice, and the client filters against the live
+// prefix. Three shapes:
+//   `recv.…`              → members of the receiver's inferred class
+//                           (instance side for values, class side for
+//                           constants — scopes, finders)
+//   `@…`                  → ivars observed in this file, with types
+//   `find_by(…`/`where(…` → the receiver model's columns as kwargs
+
+/// What a completion candidate is, for editor `kind` mapping and
+/// ranking. A superset of [`MemberKind`] (adds the non-member shapes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CandidateKind {
+    Column,
+    Association,
+    Scope,
+    Accessor,
+    Method,
+    Ivar,
+    Kwarg,
+}
+
+/// One completion candidate, protocol-free. `detail` is the rendered
+/// type (hover-style); `rank` orders the Rails-shaped members above
+/// the generic framework surface ('0' leads); `insert_text` is `None`
+/// when the label inserts verbatim.
+#[derive(Clone, Debug)]
+pub struct CompletionCandidate {
+    pub label: String,
+    pub kind: CandidateKind,
+    pub detail: String,
+    pub rank: char,
+    pub insert_text: Option<String>,
+}
+
+/// Complete at `cursor` (byte offset into `text`, the *current* buffer
+/// for `path`), against a last-good analysis. `None` when the position
+/// isn't a completion context.
+pub fn complete_at(
+    app: &App,
+    registry: &HashMap<ClassId, ClassInfo>,
+    path: &str,
+    text: &str,
+    cursor: usize,
+) -> Option<Vec<CompletionCandidate>> {
+    let cursor = cursor.min(text.len());
+    let start = word_start(text, cursor);
+    let word = &text[start..cursor];
+    if word.starts_with('@') {
+        return ivar_candidates(app, path);
+    }
+    let before = *text.as_bytes().get(start.checked_sub(1)?)?;
+    match before {
+        b'.' => member_candidates(app, registry, path, text, start - 1),
+        b'(' | b',' | b' ' => kwarg_candidates(app, registry, path, text, start),
+        _ => None,
+    }
+}
+
+fn member_candidates(
+    app: &App,
+    registry: &HashMap<ClassId, ClassInfo>,
+    path: &str,
+    text: &str,
+    dot: usize,
+) -> Option<Vec<CompletionCandidate>> {
+    let (class_id, side) = receiver_class(app, registry, path, text, dot)?;
+    let members = members_of(app, registry, &class_id, side);
+    if members.is_empty() {
+        return None;
+    }
+    Some(members.iter().map(member_candidate).collect())
+}
+
+fn ivar_candidates(app: &App, path: &str) -> Option<Vec<CompletionCandidate>> {
+    let seen = file_ivars(app, path);
+    if seen.is_empty() {
+        return None;
+    }
+    let mut items: Vec<CompletionCandidate> = seen
+        .into_iter()
+        .map(|(name, ty)| {
+            let display = ty.as_ref().map(render_ty).unwrap_or_else(|| "untyped".to_string());
+            CompletionCandidate {
+                label: format!("@{}", name.as_str()),
+                kind: CandidateKind::Ivar,
+                detail: display,
+                rank: '0',
+                insert_text: None,
+            }
+        })
+        .collect();
+    items.sort_by(|a, b| a.label.cmp(&b.label));
+    Some(items)
+}
+
+fn kwarg_candidates(
+    app: &App,
+    registry: &HashMap<ClassId, ClassInfo>,
+    path: &str,
+    text: &str,
+    upto: usize,
+) -> Option<Vec<CompletionCandidate>> {
+    let dot = kwarg_call_dot(text, upto)?;
+    // Whichever side the receiver resolved on (`User.find_by(` is the
+    // class object), the kwargs are the model's columns — enumerate
+    // the instance side of the resolved class.
+    let (class_id, _) = receiver_class(app, registry, path, text, dot)?;
+    let members = members_of(app, registry, &class_id, MemberSide::Instance);
+    let items: Vec<CompletionCandidate> = members
+        .iter()
+        .filter(|m| m.kind == MemberKind::Column && !m.name.as_str().ends_with('='))
+        .map(|m| CompletionCandidate {
+            label: format!("{}:", m.name.as_str()),
+            kind: CandidateKind::Kwarg,
+            detail: m.display.clone(),
+            rank: '0',
+            insert_text: Some(format!("{}: ", m.name.as_str())),
+        })
+        .collect();
+    if items.is_empty() { None } else { Some(items) }
+}
+
+fn member_candidate(m: &Member) -> CompletionCandidate {
+    let kind = match m.kind {
+        MemberKind::Column => CandidateKind::Column,
+        MemberKind::Association => CandidateKind::Association,
+        MemberKind::Scope => CandidateKind::Scope,
+        MemberKind::Accessor => CandidateKind::Accessor,
+        MemberKind::Method => CandidateKind::Method,
+    };
+    let rank = match m.kind {
+        MemberKind::Column | MemberKind::Association | MemberKind::Scope => '0',
+        MemberKind::Accessor => '1',
+        MemberKind::Method => '2',
+    };
+    CompletionCandidate {
+        label: m.name.as_str().to_string(),
+        kind,
+        detail: m.display.clone(),
+        rank,
+        insert_text: None,
+    }
+}
+
+/// Bytes that extend the word being completed: Ruby identifier chars,
+/// the ivar sigil, `?`/`!` method suffixes, and `:` so qualified
+/// constants (`Admin::Report`) scan as one token.
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'@' | b'?' | b'!' | b':')
+}
+
+/// Start offset of the word containing/preceding `cursor`.
+pub fn word_start(text: &str, cursor: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut i = cursor.min(bytes.len());
+    while i > 0 && is_word_byte(bytes[i - 1]) {
+        i -= 1;
+    }
+    i
+}
+
+/// Resolve the receiver expression ending just before the `.` at `dot`
+/// to a class and which side of it the member lookup should use.
+///
+/// Primary path: ask the last-good analysis for the type at the
+/// receiver's final character — the tightest covering node is the
+/// receiver itself (a `Var` read, or the full `Send` chain for
+/// `a.b.first.`), and its syntactic kind distinguishes the class
+/// object (`Const` → class side: scopes, finders) from a value
+/// (instance side: columns, associations). Falls back textually for
+/// receivers on lines the stale snapshot hasn't seen: a constant
+/// resolves by registry name, an ivar by the type the same ivar has
+/// elsewhere in this file.
+pub fn receiver_class(
+    app: &App,
+    registry: &HashMap<ClassId, ClassInfo>,
+    path: &str,
+    text: &str,
+    dot: usize,
+) -> Option<(ClassId, MemberSide)> {
+    if dot == 0 {
+        return None;
+    }
+    let pos = offset_to_position(text, (dot - 1) as u32);
+    if let Some(info) = type_at_position(app, path, pos) {
+        if let Some(id) = info.ty.as_ref().and_then(root_class) {
+            let side = if info.node_kind == "Const" {
+                MemberSide::Class
+            } else {
+                MemberSide::Instance
+            };
+            return Some((id, side));
+        }
+    }
+    let start = word_start(text, dot);
+    let token = &text[start..dot];
+    if token.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+        let id = ClassId(Symbol::from(token));
+        if registry.contains_key(&id) {
+            return Some((id, MemberSide::Class));
+        }
+    }
+    if let Some(name) = token.strip_prefix('@') {
+        let ivars = file_ivars(app, path);
+        let ty = ivars.get(&Symbol::from(name)).and_then(|t| t.as_ref())?;
+        return root_class(ty).map(|id| (id, MemberSide::Instance));
+    }
+    None
+}
+
+/// The root class of a receiver type: `Article` itself, or the class
+/// arm of a nilable union (`Article?` completes as `Article` — the
+/// user gets members while the nil-safety diagnostics separately flag
+/// the unguarded call).
+pub fn root_class(ty: &Ty) -> Option<ClassId> {
+    match ty {
+        Ty::Class { id, .. } => Some(id.clone()),
+        Ty::Union { variants } => variants.iter().find_map(root_class),
+        _ => None,
+    }
+}
+
+/// Every ivar observed in `path`'s analyzed exprs, with the first
+/// resolved type seen for each (reads and assignment values both
+/// contribute). The substrate for `@` completion and for typing an
+/// ivar receiver on a line the stale snapshot hasn't seen.
+pub fn file_ivars(app: &App, path: &str) -> HashMap<Symbol, Option<Ty>> {
+    let mut seen: HashMap<Symbol, Option<Ty>> = HashMap::new();
+    let Some(file) = file_id(app, path) else { return seen };
+    nodes_in_range(app, file, 0, u32::MAX, &mut |e| {
+        match &*e.node {
+            ExprNode::Ivar { name } => {
+                let slot = seen.entry(name.clone()).or_insert(None);
+                if slot.is_none() {
+                    *slot = e.ty.clone();
+                }
+            }
+            ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+                let slot = seen.entry(name.clone()).or_insert(None);
+                if slot.is_none() {
+                    *slot = value.ty.clone();
+                }
+            }
+            _ => {}
+        }
+    });
+    seen
+}
+
+/// For a cursor inside a call's argument list, the offset of the `.`
+/// linking the receiver to a kwarg-completable method (`find_by`,
+/// `find_by!`, `where`). Scans left for the innermost unbalanced `(`,
+/// then requires `recv.method(` immediately before it.
+pub fn kwarg_call_dot(text: &str, upto: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    let mut open = None;
+    for i in (0..upto.min(bytes.len())).rev() {
+        match bytes[i] {
+            b')' => depth += 1,
+            b'(' if depth == 0 => {
+                open = Some(i);
+                break;
+            }
+            b'(' => depth -= 1,
+            _ => {}
+        }
+    }
+    let open = open?;
+    let mstart = word_start(text, open);
+    let method = &text[mstart..open];
+    if !matches!(method, "find_by" | "find_by!" | "where") {
+        return None;
+    }
+    let dot = mstart.checked_sub(1)?;
+    (bytes[dot] == b'.').then_some(dot)
+}
+
 /// Render a [`Ty`] as a short, RBS-flavoured string for hover/inlay/MCP
 /// output. Ruby developers read `Integer`/`String`/`Article?`, not the
 /// IR's `Int`/`Str`/`Union`, so this is the consumer-facing projection —
@@ -862,6 +1382,83 @@ mod tests {
         // Class side must not leak instance members and vice versa.
         assert!(findc("title").is_none(), "columns are instance-side");
         assert!(find("find_by").is_none(), "finders are class-side");
+    }
+
+    #[test]
+    fn complete_at_offers_members_kwargs_and_ivars() {
+        let app = real_blog();
+        let mut analyzer = Analyzer::new(&app);
+        let mut typed = app.clone();
+        analyzer.analyze(&mut typed);
+        let registry = analyzer.class_registry();
+        let path = "fixtures/real-blog/app/controllers/articles_controller.rb";
+        let text = source(&typed, file_id(&typed, path).unwrap()).unwrap().text.clone();
+
+        // Constant receiver typed on a fresh line → class side.
+        let edited = format!("{text}\nArticle.");
+        let cands =
+            complete_at(&typed, registry, path, &edited, edited.len()).expect("members");
+        let find_by = cands.iter().find(|c| c.label == "find_by").expect("find_by");
+        assert_eq!(find_by.detail, "Article?");
+        assert!(cands.iter().all(|c| c.label != "title"), "columns are instance-side");
+
+        // Kwargs inside find_by(.
+        let edited = format!("{text}\nArticle.find_by(");
+        let cands = complete_at(&typed, registry, path, &edited, edited.len()).expect("kwargs");
+        let title = cands.iter().find(|c| c.label == "title:").expect("column kwarg");
+        assert_eq!(title.kind, CandidateKind::Kwarg);
+        assert_eq!(title.insert_text.as_deref(), Some("title: "));
+
+        // Ivar receiver via the file-ivar fallback → instance side.
+        let edited = format!("{text}\n@article.");
+        let cands = complete_at(&typed, registry, path, &edited, edited.len()).expect("ivars");
+        assert!(cands.iter().any(|c| c.label == "comments"));
+
+        // `@` prefix lists the file's ivars.
+        let edited = format!("{text}\n@art");
+        let cands = complete_at(&typed, registry, path, &edited, edited.len()).expect("@");
+        assert!(cands.iter().any(|c| c.label == "@article" && c.kind == CandidateKind::Ivar));
+    }
+
+    #[test]
+    fn related_files_walks_the_render_graph() {
+        let app = real_blog();
+        let mut typed = app.clone();
+        Analyzer::new(&app).analyze(&mut typed);
+
+        let rel = related_files(&typed, "fixtures/real-blog/app/controllers/articles_controller.rb");
+        assert!(
+            rel.iter().any(|r| r.kind == RelatedKind::View && r.label == "articles/show"),
+            "controller relates to the views it feeds; got {:?}",
+            rel.iter().map(|r| (&r.label, r.kind)).collect::<Vec<_>>()
+        );
+        assert!(
+            rel.iter().any(|r| r.kind == RelatedKind::Model && r.label == "Article"),
+            "controller relates to its conventional model"
+        );
+
+        // A view relates back to its feeding controller and its partials
+        // (`articles/new` statically renders the `_form` partial).
+        let new_view = rel.iter().find(|r| r.label == "articles/new").unwrap();
+        let rel = related_files(&typed, &new_view.path);
+        assert!(rel
+            .iter()
+            .any(|r| r.kind == RelatedKind::Controller && r.label == "ArticlesController"));
+        assert!(
+            rel.iter()
+                .any(|r| r.kind == RelatedKind::Partial && r.label == "articles/_form"),
+            "articles/new renders _form; got {:?}",
+            rel.iter().map(|r| (&r.label, r.kind)).collect::<Vec<_>>()
+        );
+
+        // And the partial knows its renderers.
+        let form = rel.iter().find(|r| r.label == "articles/_form").unwrap();
+        let rel = related_files(&typed, &form.path);
+        assert!(
+            rel.iter().any(|r| r.kind == RelatedKind::Renderer && r.label == "articles/new"),
+            "partial relates to its renderers; got {:?}",
+            rel.iter().map(|r| (&r.label, r.kind)).collect::<Vec<_>>()
+        );
     }
 
     #[test]
