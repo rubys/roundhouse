@@ -9,7 +9,8 @@
 //      (account → Account?).
 //   4. related files: the controller relates to views + concerns.
 //   5. traceroute: the request chain pins into the panel with the
-//      coverage footer (grouped hops, gap report).
+//      coverage footer (grouped hops, gap report), and N+1 findings
+//      annotate the hop containing the access site (#63 phase 5).
 //   6. coverage: gaps list is non-empty (the ledger is on).
 //
 // Serve the PARENT (wasm/) as the web root (the page imports ../lib/):
@@ -102,6 +103,22 @@ if (MASTODON) {
   check("trace panel renders grouped hops + footer",
     tr && tr.panelOpen && tr.groupCount >= 3 && /gap|complete/.test(tr.footText),
     tr && `${tr.groupCount} groups, foot: ${tr.footText.slice(0, 60)}`);
+
+  // 5b. N+1 hop annotation (#63 phase 5): the admin collections trace
+  // carries the missing_preload finding on its view hop and the panel
+  // renders the badge.
+  const np = await page.evaluate(async () => {
+    await window.__ide.runTrace("Admin::CollectionsController#show");
+    const t = window.__ide.trace;
+    const viewHop = t?.hops.find((h) => h.kind === "view");
+    return t && {
+      findings: (viewHop?.n_plus_one || []).map((f) => f.association),
+      badges: document.querySelectorAll("#trace .nplus").length,
+    };
+  });
+  check("N+1 finding annotates the view hop",
+    np && np.findings.includes("account") && np.badges >= 1,
+    np && `findings: [${np.findings}], ${np.badges} badge(s)`);
 
   // 6. open a HAML view and confirm hover works inside the template.
   const hamlType = await page.evaluate(async () => {

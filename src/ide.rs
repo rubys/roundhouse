@@ -1340,14 +1340,40 @@ pub enum TraceHop {
         /// sorted by name.
         assigns: Vec<(String, String)>,
         effects: Vec<String>,
+        n_plus_one: Vec<PreloadFinding>,
     },
     /// Non-template terminal — redirect / JSON / head.
     Response { detail: String },
     /// The template the action feeds, plus every partial it renders
-    /// transitively (deduped, discovery order).
-    View { name: String, file: Option<String>, partials: Vec<String> },
+    /// transitively (deduped, discovery order). `n_plus_one` covers the
+    /// template *and* its partials — the finding's own `file` says
+    /// which.
+    View {
+        name: String,
+        file: Option<String>,
+        partials: Vec<String>,
+        n_plus_one: Vec<PreloadFinding>,
+    },
     /// The effective layout wrapping the response.
-    Layout { name: String, file: Option<String> },
+    Layout { name: String, file: Option<String>, n_plus_one: Vec<PreloadFinding> },
+}
+
+/// One missing-preload finding (#64's static N+1 pass) attached to the
+/// trace hop whose body or template contains the access site — #63
+/// phase 5's hop annotation. The finding record is shared with the
+/// diagnostics skin (same pass, same message), so the trace and the
+/// report never disagree.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreloadFinding {
+    /// The association the iteration reads without a preload.
+    pub association: String,
+    /// Access site (a partial's file when the read is inside one).
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    /// Query origin as `path:line` — where the `.includes` belongs.
+    pub query_site: Option<String>,
+    /// The full diagnostic message (both sites + the one-line fix).
+    pub message: String,
 }
 
 /// One filter hop, in chain position. `applies` reflects this action:
@@ -1386,6 +1412,10 @@ pub struct FilterHop {
     /// sorted by name.
     pub assigns: Vec<(String, String)>,
     pub effects: Vec<String>,
+    /// Missing-preload findings whose access site is inside this
+    /// filter's target body (annotated only when the hop applies —
+    /// a gated-out filter does no work on this request).
+    pub n_plus_one: Vec<PreloadFinding>,
 }
 
 /// Trace the request flow for `query`: either `Controller#action`
@@ -1417,6 +1447,12 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
     // (analyze not run) degrades to an empty chain rather than a miss.
     let controller = find_controller(app, &controller_id)?;
     let resolution = app.controller_resolutions.get(&controller_id).cloned().unwrap_or_default();
+
+    // #63 phase 5: #64's missing-preload findings annotate the hop
+    // whose body/template contains the access site. The pass is
+    // app-wide (the controller→view ivar channel needs every feeder),
+    // so run it once per trace and attach by span containment.
+    let preload_diags = crate::analyze::missing_preload_report(app).0;
 
     let route_line = match matched {
         Some(r) => format!(
@@ -1535,6 +1571,11 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
                 .join(", "),
             ),
         };
+        let applies = gated_in && skipped_by.is_none();
+        let n_plus_one = match (applies, target_body) {
+            (true, Some(body)) => preloads_in_body(app, &preload_diags, body),
+            _ => Vec::new(),
+        };
         hops.push(TraceHop::Filter(FilterHop {
             name: rf.filter.target.as_str().to_string(),
             filter_kind: kind,
@@ -1546,10 +1587,11 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
             condition,
             only: rf.filter.only.iter().map(|s| s.as_str().to_string()).collect(),
             except: rf.filter.except.iter().map(|s| s.as_str().to_string()).collect(),
-            applies: gated_in && skipped_by.is_none(),
+            applies,
             skipped_by: skipped_by.map(|c| c.0.as_str().to_string()),
             assigns: render_assigns(&rf.assigns),
             effects: rf.effects.effects.iter().map(render_effect).collect(),
+            n_plus_one,
         }));
     }
 
@@ -1595,6 +1637,10 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
                 None => Vec::new(),
             },
         };
+        let n_plus_one = match action_def {
+            Some((_, a)) => preloads_in_body(app, &preload_diags, &a.body),
+            None => Vec::new(),
+        };
         hops.push(TraceHop::Action {
             name: action_name.as_str().to_string(),
             controller: controller_id.0.as_str().to_string(),
@@ -1603,6 +1649,7 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
             formats,
             assigns,
             effects,
+            n_plus_one,
         });
     }
 
@@ -1621,15 +1668,26 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
                     }
                 }
             }
+            // Findings in the template or any of its partials annotate
+            // the view hop; `seen` holds the view plus every partial.
+            let view_files: Vec<String> =
+                seen.iter().filter_map(|s| view_location(app, s)).collect();
             hops.push(TraceHop::View {
                 name: v.as_str().to_string(),
                 file: view_location(app, v),
                 partials,
+                n_plus_one: preloads_in_files(app, &preload_diags, &view_files),
             });
             if let Some(layout) = &resolution.layout {
+                let file = view_location(app, layout);
+                let n_plus_one = match &file {
+                    Some(f) => preloads_in_files(app, &preload_diags, std::slice::from_ref(f)),
+                    None => Vec::new(),
+                };
                 hops.push(TraceHop::Layout {
                     name: layout.as_str().to_string(),
-                    file: view_location(app, layout),
+                    file,
+                    n_plus_one,
                 });
             }
         }
@@ -1804,6 +1862,56 @@ fn method_body<'a>(app: &'a App, class_id: &ClassId, method: &Symbol) -> Option<
         }
     }
     None
+}
+
+/// Missing-preload findings whose access site is inside `body`.
+fn preloads_in_body(
+    app: &App,
+    diags: &[crate::diagnostic::Diagnostic],
+    body: &Expr,
+) -> Vec<PreloadFinding> {
+    diags
+        .iter()
+        .filter(|d| subtree_contains(body, d.span.file, d.span.start))
+        .map(|d| preload_finding(app, d))
+        .collect()
+}
+
+/// Missing-preload findings whose access site lands in one of `files`
+/// (template hops match by file — one template per file).
+fn preloads_in_files(
+    app: &App,
+    diags: &[crate::diagnostic::Diagnostic],
+    files: &[String],
+) -> Vec<PreloadFinding> {
+    diags
+        .iter()
+        .filter(|d| source(app, d.span.file).is_some_and(|s| files.iter().any(|f| f == &s.path)))
+        .map(|d| preload_finding(app, d))
+        .collect()
+}
+
+fn preload_finding(app: &App, d: &crate::diagnostic::Diagnostic) -> PreloadFinding {
+    let (association, query_site) = match &d.kind {
+        crate::diagnostic::DiagnosticKind::MissingPreload { association, query_span } => {
+            (association.as_str().to_string(), span_site(app, *query_span))
+        }
+        _ => (String::new(), None),
+    };
+    let (file, line) = match source(app, d.span.file) {
+        Some(src) => (Some(src.path.clone()), Some(src.line_col(d.span.start).0)),
+        None => (None, None),
+    };
+    PreloadFinding { association, file, line, query_site, message: d.message.clone() }
+}
+
+/// `path:line` for a non-synthetic span.
+fn span_site(app: &App, span: Span) -> Option<String> {
+    if span.is_synthetic() {
+        return None;
+    }
+    let src = source(app, span.file)?;
+    Some(format!("{}:{}", src.path, src.line_col(span.start).0))
 }
 
 fn expr_location(app: &App, body: &Expr) -> (Option<String>, Option<u32>) {
@@ -2222,6 +2330,29 @@ fn hop_json(hop: &TraceHop) -> serde_json::Value {
         }
         serde_json::Value::Object(m)
     }
+    fn set_n_plus_one(o: &mut serde_json::Value, findings: &[PreloadFinding]) {
+        if findings.is_empty() {
+            return;
+        }
+        let arr: Vec<serde_json::Value> = findings
+            .iter()
+            .map(|f| {
+                let mut e = json!({ "association": f.association, "message": f.message });
+                let m = e.as_object_mut().unwrap();
+                if let Some(file) = &f.file {
+                    m.insert("file".into(), json!(file));
+                    if let Some(l) = f.line {
+                        m.insert("line".into(), json!(l));
+                    }
+                }
+                if let Some(q) = &f.query_site {
+                    m.insert("query_site".into(), json!(q));
+                }
+                e
+            })
+            .collect();
+        set(o, "n_plus_one", json!(arr));
+    }
     match hop {
         Route { method, path, params } => {
             let mut o = json!({ "kind": "route", "method": method, "path": path });
@@ -2261,9 +2392,10 @@ fn hop_json(hop: &TraceHop) -> serde_json::Value {
             if !f.effects.is_empty() {
                 set(&mut o, "effects", json!(f.effects));
             }
+            set_n_plus_one(&mut o, &f.n_plus_one);
             o
         }
-        Action { name, controller, file, line, formats, assigns, effects } => {
+        Action { name, controller, file, line, formats, assigns, effects, n_plus_one } => {
             let mut o = json!({ "kind": "action", "name": name, "controller": controller });
             set_loc(&mut o, file, *line);
             if !formats.is_empty() {
@@ -2275,20 +2407,23 @@ fn hop_json(hop: &TraceHop) -> serde_json::Value {
             if !effects.is_empty() {
                 set(&mut o, "effects", json!(effects));
             }
+            set_n_plus_one(&mut o, n_plus_one);
             o
         }
         Response { detail } => json!({ "kind": "response", "detail": detail }),
-        View { name, file, partials } => {
+        View { name, file, partials, n_plus_one } => {
             let mut o = json!({ "kind": "view", "name": name });
             set_loc(&mut o, file, None);
             if !partials.is_empty() {
                 set(&mut o, "partials", json!(partials));
             }
+            set_n_plus_one(&mut o, n_plus_one);
             o
         }
-        Layout { name, file } => {
+        Layout { name, file, n_plus_one } => {
             let mut o = json!({ "kind": "layout", "name": name });
             set_loc(&mut o, file, None);
+            set_n_plus_one(&mut o, n_plus_one);
             o
         }
     }
@@ -2876,6 +3011,128 @@ mod tests {
             &Symbol::from("total"),
         );
         assert_eq!(sig.as_deref(), Some("def total: (Integer count) -> Integer"));
+    }
+
+    #[test]
+    fn traceroute_annotates_hops_with_missing_preload_findings() {
+        // #63 phase 5: one un-preloaded chain iterated in a filter, an
+        // action, and the template — the finding lands on each hop
+        // whose body/template contains the access site.
+        let app = tree_app(&[
+            (
+                "app/controllers/application_controller.rb",
+                "class ApplicationController < ActionController::Base\nend\n",
+            ),
+            (
+                "app/controllers/articles_controller.rb",
+                r#"class ArticlesController < ApplicationController
+  before_action :audit_articles
+
+  def index
+    @articles = Article.order(:title)
+    @articles.each { |a| a.comments }
+  end
+
+  def audit_articles
+    Article.order(:title).each { |a| a.comments }
+  end
+end
+"#,
+            ),
+            (
+                "app/models/article.rb",
+                "class Article < ApplicationRecord\n  has_many :comments\nend\n",
+            ),
+            (
+                "app/models/comment.rb",
+                "class Comment < ApplicationRecord\n  belongs_to :article\nend\n",
+            ),
+            (
+                "app/views/articles/index.html.erb",
+                "<% @articles.each do |a| %><%= a.comments.size %><% end %>\n",
+            ),
+            (
+                "db/schema.rb",
+                r#"ActiveRecord::Schema[7.1].define(version: 1) do
+  create_table "articles", force: :cascade do |t|
+    t.string "title"
+  end
+  create_table "comments", force: :cascade do |t|
+    t.integer "article_id"
+    t.text "body"
+  end
+end
+"#,
+            ),
+        ]);
+        let trace = traceroute(&app, "ArticlesController#index").expect("trace");
+
+        let filter = trace
+            .hops
+            .iter()
+            .find_map(|h| match h {
+                TraceHop::Filter(f) if f.name == "audit_articles" => Some(f),
+                _ => None,
+            })
+            .expect("audit_articles hop");
+        assert_eq!(filter.n_plus_one.len(), 1, "filter-body finding: {:?}", filter.n_plus_one);
+        assert_eq!(filter.n_plus_one[0].association, "comments");
+
+        let action = trace
+            .hops
+            .iter()
+            .find_map(|h| match h {
+                TraceHop::Action { n_plus_one, .. } => Some(n_plus_one),
+                _ => None,
+            })
+            .expect("action hop");
+        assert_eq!(action.len(), 1, "action-body finding: {action:?}");
+        assert!(action[0].file.as_deref().is_some_and(|f| f.ends_with("articles_controller.rb")));
+
+        let view = trace
+            .hops
+            .iter()
+            .find_map(|h| match h {
+                TraceHop::View { n_plus_one, .. } => Some(n_plus_one),
+                _ => None,
+            })
+            .expect("view hop");
+        assert_eq!(view.len(), 1, "template finding via the ivar channel: {view:?}");
+        assert!(view[0].file.as_deref().is_some_and(|f| f.ends_with("index.html.erb")));
+        assert!(
+            view[0].query_site.as_deref().is_some_and(|q| q.contains("articles_controller.rb")),
+            "query site names the controller; got {:?}",
+            view[0].query_site
+        );
+
+        // The wire shape carries the annotation; clean hops omit it.
+        let report = trace_gap_report(&app, &trace, &[], None);
+        let v = trace_json(&trace, &report);
+        let hops = v["hops"].as_array().expect("hops");
+        let jf = hops
+            .iter()
+            .find(|h| h["kind"] == "filter" && h["name"] == "audit_articles")
+            .expect("filter hop json");
+        assert_eq!(jf["n_plus_one"][0]["association"], "comments");
+        assert!(jf["n_plus_one"][0]["query_site"].as_str().is_some());
+        let jv = hops.iter().find(|h| h["kind"] == "view").expect("view hop json");
+        assert!(jv["n_plus_one"].is_array());
+    }
+
+    #[test]
+    fn traceroute_hops_stay_clean_when_the_chain_preloads() {
+        let app = real_blog();
+        let trace = traceroute(&app, "ArticlesController#index").expect("trace");
+        for hop in &trace.hops {
+            let (kind, n) = match hop {
+                TraceHop::Filter(f) => ("filter", &f.n_plus_one),
+                TraceHop::Action { n_plus_one, .. } => ("action", n_plus_one),
+                TraceHop::View { n_plus_one, .. } => ("view", n_plus_one),
+                TraceHop::Layout { n_plus_one, .. } => ("layout", n_plus_one),
+                _ => continue,
+            };
+            assert!(n.is_empty(), "unexpected N+1 on {kind} hop: {n:?}");
+        }
     }
 
     #[test]

@@ -4941,6 +4941,13 @@ fn symbol_arg(expr: &Expr) -> Option<&Symbol> {
 /// - Sends whose receiver itself is unknown. The root cause is upstream;
 ///   reporting both duplicates signal.
 pub fn diagnose(app: &App) -> Vec<Diagnostic> {
+    diagnose_with_coverage(app).0
+}
+
+/// [`diagnose`] plus the missing-preload coverage triple, for report
+/// skins that state the denominator (#64: "0 findings" must be
+/// distinguishable from "couldn't check").
+pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     let mut out = Vec::new();
     for controller in &app.controllers {
         for action in controller.actions() {
@@ -4965,7 +4972,8 @@ pub fn diagnose(app: &App) -> Vec<Diagnostic> {
     // Static N+1 pass (#64): missing-preload warnings over the typed
     // query chains, same-procedure and through the controller→view
     // ivar channel.
-    out.extend(preload::missing_preload_findings(app));
+    let (preload_diags, coverage) = preload::missing_preload_report(app);
+    out.extend(preload_diags);
 
     // Collapse diagnostics that render to the same place with the same
     // text — same start position, same kind, same message. Method chains
@@ -4979,7 +4987,7 @@ pub fn diagnose(app: &App) -> Vec<Diagnostic> {
     // distinct starts, they survive on their own again.
     let mut seen = std::collections::HashSet::new();
     out.retain(|d| seen.insert((d.span.file, d.span.start, d.code(), d.message.clone())));
-    out
+    (out, coverage)
 }
 
 /// A type is "unknown" if it's `None` or `Ty::Var(n)` (a placeholder the

@@ -24,7 +24,7 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use crate::analyze::{diagnose, Analyzer};
+use crate::analyze::{diagnose_with_coverage, Analyzer};
 use crate::app::App;
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::ide;
@@ -233,7 +233,7 @@ impl Server {
     fn tool_diagnostics(&self, args: &Value) -> Result<String, String> {
         let path_filter = args.get("path").and_then(|v| v.as_str());
         let (app, parse_diags, gaps, _) = self.analyze()?;
-        let mut diags = diagnose(&app);
+        let (mut diags, preload_cov) = diagnose_with_coverage(&app);
         // Diagnostics shadowing a recorded ingest gap become `note[...]`
         // lines naming the gap — an agent reading this output must be able
         // to tell "your code has a problem" from "roundhouse didn't
@@ -281,10 +281,22 @@ impl Server {
         }
 
         if sections.is_empty() {
-            Ok("No diagnostics — the app type-checks clean.".to_string())
-        } else {
-            Ok(sections.join("\n\n"))
+            sections.push("No diagnostics — the app type-checks clean.".to_string());
         }
+
+        // The missing_preload denominator (#64): a clean N+1 report is
+        // only actionable with its coverage stated — "0 findings" must
+        // be distinguishable from "couldn't check". Always app-wide;
+        // the path filter above narrows the findings list, not the
+        // claim.
+        sections.push(format!(
+            "missing_preload coverage (app-wide): checked {} query chain(s), \
+             {} finding(s), {} chain(s) unverifiable (opaque to the static \
+             chain harvest — no claim made)",
+            preload_cov.known_chains, preload_cov.findings, preload_cov.opaque_chains,
+        ));
+
+        Ok(sections.join("\n\n"))
     }
 
 
@@ -395,7 +407,7 @@ fn tools_list() -> Value {
             },
             {
                 "name": "diagnostics",
-                "description": "Type/analysis problems across the app (unresolved ivars, failed method dispatch, incompatible operators, syntax errors). Optionally filter to one file.",
+                "description": "Type/analysis problems across the app (unresolved ivars, failed method dispatch, incompatible operators, syntax errors, static N+1 missing-preload warnings). Ends with the missing_preload coverage triple (checked / findings / unverifiable) so a clean N+1 report states its denominator. Optionally filter to one file.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -405,7 +417,7 @@ fn tools_list() -> Value {
             },
             {
                 "name": "traceroute",
-                "description": "The full static request flow for a route or Controller#action, as JSON: ordered hops (route match; every before/around/after filter with its defining class or concern, only:/except:/if: gating, skip application, typed ivar assigns, DB effects, file:line; the action; the view with its partials; the layout) plus a coverage report — how many hops resolved and what blocks the rest, split between untyped gem/framework boundaries (with an inferred candidate RBS signature to accept when available) and roundhouse's own ingest gaps. Statically derived; no app boot.",
+                "description": "The full static request flow for a route or Controller#action, as JSON: ordered hops (route match; every before/around/after filter with its defining class or concern, only:/except:/if: gating, skip application, typed ivar assigns, DB effects, file:line; the action; the view with its partials; the layout), static N+1 findings annotated on the hop whose body or template contains the un-preloaded association read (`n_plus_one`), plus a coverage report — how many hops resolved and what blocks the rest, split between untyped gem/framework boundaries (with an inferred candidate RBS signature to accept when available) and roundhouse's own ingest gaps. Statically derived; no app boot.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -565,6 +577,22 @@ mod tests {
         let resp = call(&server(), "diagnostics", json!({}));
         let text = text_of(&resp);
         assert!(!text.contains("error["), "real-blog should report no errors, got: {text}");
+    }
+
+    #[test]
+    fn diagnostics_reports_the_missing_preload_coverage_triple() {
+        // #64: the denominator is part of the claim — the coverage
+        // line must be present even when there are zero findings, so
+        // "0 findings" is distinguishable from "couldn't check".
+        let text = text_of(&call(&server(), "diagnostics", json!({})));
+        assert!(
+            text.contains("missing_preload coverage (app-wide): checked "),
+            "coverage triple missing, got: {text}"
+        );
+        assert!(
+            text.contains("unverifiable"),
+            "triple states the unverifiable bucket, got: {text}"
+        );
     }
 
     #[test]

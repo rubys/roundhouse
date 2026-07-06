@@ -1580,8 +1580,20 @@ fn ingest_call_block(node: &Node<'_>, file: &str) -> IngestResult<Option<Expr>> 
             if expr.as_symbol_node().is_some() {
                 let method_name = symbol_value(&expr).unwrap_or_default();
                 let param_name = Symbol::from("x");
+                // Anchor the desugared call (and the lambda) at the
+                // `:sym` token: diagnostics inside the expansion (e.g.
+                // missing_preload's access site) then render a real
+                // file:line and span-containment consumers (traceroute
+                // hop annotations) can place them. The `x` param stays
+                // synthetic — it has no source text.
+                let loc = expr.location();
+                let sym_span = Span {
+                    file: super::sources::file_id(file),
+                    start: loc.start_offset() as u32,
+                    end: loc.end_offset() as u32,
+                };
                 let body = Expr::new(
-                    Span::synthetic(),
+                    sym_span,
                     ExprNode::Send {
                         recv: Some(Expr::new(
                             Span::synthetic(),
@@ -1600,7 +1612,7 @@ fn ingest_call_block(node: &Node<'_>, file: &str) -> IngestResult<Option<Expr>> 
                     },
                 );
                 return Ok(Some(Expr::new(
-                    Span::synthetic(),
+                    sym_span,
                     ExprNode::Lambda {
                         params: vec![param_name],
                         block_param: None,

@@ -334,6 +334,17 @@ function hopRow(hop) {
   for (const [k, v] of Object.entries(hop.assigns || {})) {
     el.appendChild(span("assign", `${k} : ${v}`));
   }
+  // #63 phase 5: N+1 findings on the hop containing the access site.
+  // The badge jumps to the read (which may be a partial, not the hop's
+  // own file); the tooltip carries the full finding with the fix.
+  for (const f of hop.n_plus_one || []) {
+    const b = span("nplus", `N+1 :${f.association}`);
+    b.title = f.message;
+    if (f.file) {
+      b.onclick = (e) => { e.stopPropagation(); goTo(f.file, f.line || null); };
+    }
+    el.appendChild(b);
+  }
   if ((hop.effects || []).some((e) => e.startsWith("Db"))) {
     const fx = span("fx", "⛁");
     fx.title = (hop.effects || []).join(", ");
@@ -392,8 +403,9 @@ function renderTrace() {
     const off = item.hops.filter((h) => h.applies === false).length;
     const soft = item.hops.some((h) => h.applies !== false && h.resolved === false);
     const skipped = item.hops.some((h) => h.skipped_by);
+    const nplus = item.hops.some((h) => (h.n_plus_one || []).length);
     // Own-controller runs and anything demanding attention start open.
-    const forced = soft || skipped;
+    const forced = soft || skipped || nplus;
     const key = `${gi}:${item.defined_in}`;
     const expanded = forced || openGroups.has(key) || item.defined_in === trace.controller;
 
@@ -415,6 +427,7 @@ function renderTrace() {
     }
     if (off) head.appendChild(span("badge", `${off} don't run`));
     if (soft) head.appendChild(span("badge", "⋯ unresolved"));
+    if (nplus) head.appendChild(span("nplus", "N+1"));
     head.onclick = () => {
       openGroups.has(key) ? openGroups.delete(key) : openGroups.add(key);
       renderTrace();

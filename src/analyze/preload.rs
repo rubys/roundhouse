@@ -131,15 +131,12 @@ pub struct PreloadCoverage {
     pub findings: usize,
 }
 
-/// Entry point, called from [`super::diagnose`]. Emits one Warning
-/// per (iteration site, association) with both spans on the finding:
-/// anchored at the access site, naming the query site in the message.
-pub(super) fn missing_preload_findings(app: &App) -> Vec<Diagnostic> {
-    missing_preload_report(app).0
-}
-
-/// Findings plus the coverage counts, for report skins that state the
-/// denominator.
+/// Entry point — called from [`super::diagnose_with_coverage`] (the
+/// findings ride the diagnostics ledger, the coverage triple rides the
+/// report skins) and from `ide::traceroute` (findings annotate the hop
+/// containing the access site). Emits one Warning per (iteration site,
+/// association) with both spans on the finding: anchored at the access
+/// site, naming the query site in the message.
 pub fn missing_preload_report(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     let index = ModelIndex::build(app);
     let mut out = Vec::new();
