@@ -15,7 +15,8 @@
     <p class="blurb">
       Roundhouse ingests a Ruby on Rails application into a typed intermediate
       representation and emits equivalent projects in C#, Crystal, Elixir, Go,
-      Kotlin, Python, Rust, Swift, and TypeScript. The current fixture is a
+      Kotlin, Python, Rust, Swift, and TypeScript — plus a Ruby round-trip
+      that runs under CRuby, JRuby, or Spinel. The current fixture is a
       Rails-guides "real blog" derivative.
     </p>
 
@@ -28,6 +29,40 @@
       <a href="bench/">Benchmark results</a>
       <a href="https://github.com/rubys/roundhouse">GitHub</a>
     </nav>
+
+    <section class="overview">
+      <p>
+        The emitted projects compile clean and pass their tests. Correctness
+        is a conformance oracle: the same URL fetched from Rails and from
+        each target must produce the same response — enforced by emitted
+        unit tests, a differential compare gate against live Rails, and
+        end-to-end browser tests.
+      </p>
+      <p>
+        No annotations are involved: <code>has_many :comments</code> is a
+        type declaration, and whole-program inference recovers the types
+        Rails' conventions already imply. That inference is a product in its
+        own right — an LSP server, an MCP server, and the
+        <a href="ide/">in-browser IDE</a> answer <em>what's the type here,
+        can this be nil?</em> on unannotated Rails apps, with no app boot
+        and no database: queries answer in milliseconds, and a whole-app
+        pass over Mastodon takes about two seconds, in a browser tab.
+      </p>
+      <p>
+        It's also the performance story: every decision that can't differ
+        between requests is made once, at transpile time. The emitted Ruby
+        serves ~10× the requests of stock Rails on the same CRuby+YJIT,
+        ~74× under JRuby, and the compiled targets go further — ratios from
+        a CPU-bound microbenchmark; caveats in the posts below.
+      </p>
+      <ul class="reading">
+        <li><a href="https://intertwingly.net/blog/2026/06/27/Conformance-vs-Comprehension.html">Conformance vs Comprehension</a> — the project and its oracle</li>
+        <li><a href="https://intertwingly.net/blog/2026/06/25/Live-Types-for-Rails.html">Live Types for Rails</a> — the inference as a live type checker</li>
+        <li><a href="https://intertwingly.net/blog/2026/07/06/An-IDE-You-Dont-Install.html">An IDE You Don't Install</a> — Mastodon analyzed in a browser tab</li>
+        <li><a href="https://intertwingly.net/blog/2026/06/11/The-Ruby-JRuby-Was-Built-to-Run.html">The Ruby JRuby Was Built to Run</a> — the 2×2 performance experiment</li>
+        <li><a href="https://intertwingly.net/blog/2026/05/25/Numbers-Without-Conclusions.html">Numbers Without Conclusions</a> — benchmark methodology and honest caveats</li>
+      </ul>
+    </section>
 
     <p class="footnote">
       Successor to <a href="https://github.com/rubys/railcar">railcar</a>.

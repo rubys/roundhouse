@@ -97,6 +97,37 @@ body.landing {
   border-color: var(--accent);
 }
 
+.overview {
+  text-align: left;
+  color: var(--text);
+  font-size: 0.9rem;
+  line-height: 1.55;
+  margin-bottom: 2rem;
+}
+
+.overview p {
+  margin-bottom: 0.9rem;
+}
+
+.overview code {
+  font-size: 0.85em;
+}
+
+.reading {
+  list-style: none;
+  padding: 0;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+.reading li {
+  margin-bottom: 0.35rem;
+}
+
+.reading a {
+  color: var(--accent);
+}
+
 .footnote {
   color: var(--text-dim);
   font-size: 0.8rem;

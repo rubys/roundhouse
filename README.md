@@ -24,6 +24,80 @@ at the center, analyzed and dispatched to one of N target tracks.
 successful Rails apps off CRuby, and the option value of preserving
 the choice — see [WHY.md](WHY.md).*
 
+## Overview
+
+The emitted projects compile clean and pass their tests. The way we
+know they're correct is a conformance oracle: the same URL fetched from
+Rails and from each target must produce the same response, checked
+three ways — emitted unit tests against fixed expected values, a
+differential compare gate against live Rails (DOM-node-for-DOM-node
+for HTML, value-for-value for JSON), and end-to-end browser tests for
+the dynamic behavior a static diff can't reach.
+
+No type annotations are involved anywhere. Rails was already typed:
+`has_many :comments` is a type declaration, and the framework's
+conventions carry implicit type information that was simply never
+written down. Roundhouse recovers it by whole-program inference —
+which class an association returns, which columns a model has and what
+they deserialize to, whether a `find_by` came back nil — statically,
+from unmodified source, without booting the app or touching a
+database.
+
+That inference is a product in its own right, not just the compiler's
+enabler. The same engine that emits Rust answers an editor's or an
+agent's questions — *what's the type here? can this be nil?* — through
+an LSP server, an MCP server, and an
+[in-browser IDE](https://rubys.github.io/roundhouse/ide/): no
+annotations, no app boot, no database, no warm server to babysit. A
+whole-application pass over Mastodon — 1,173 files, all 337
+controllers, HAML views included — takes about 1.5 seconds natively
+and 2.3 seconds compiled to WebAssembly, which is how the IDE analyzes
+Mastodon in a browser tab; individual queries like typed completion
+answer in a couple of milliseconds from the last completed pass.
+Static,
+deep, and annotation-free is a cell of the Ruby tooling space nobody
+else occupies: ruby-lsp is static but stops at names; ruby-lsp-rails
+and Tidewave are deep but need a running app; Sorbet and Steep are
+static and deep but you pay for it in annotations.
+
+The performance story is partial evaluation. Rails is, operationally,
+an interpreter for your application — routes, associations,
+validations, and templates are data it consults on every request.
+Every decision whose answer cannot differ between requests, Roundhouse
+makes once at transpile time; only the per-request residue survives to
+runtime. On the benchmark fixture, serving the HTML index on a fixed
+Linux x86 server (July 2026 round):
+
+| configuration | req/sec |
+|---|--:|
+| Rails on CRuby+YJIT | 326 |
+| Rails on JRuby | 1,066 |
+| Roundhouse emit on CRuby+YJIT | 3,292 |
+| Roundhouse emit on JRuby | 24,172 |
+
+Two effects compose there: stripping Rails' interpretive layers is
+worth an order of magnitude on the same interpreter — same Ruby, same
+YJIT, ~10× — and the static, monomorphic Ruby that remains is the
+input the JVM JIT was built for, worth a further ~7× where stock
+Rails gains ~3×. End to end that's ~74×, and the compiled
+targets go further still: the Kotlin emit roughly doubles
+emitted-Ruby-on-JRuby on the JSON endpoint, and the Rust binary serves
+the same app in under 20 MB of memory where Rails holds ~320 MB. These
+are ratios from a CPU-bound microbenchmark of a small fixture — real
+workloads are I/O-bound to varying degrees, and the absolute numbers
+shift between rounds as performance gates land. The live numbers,
+per-run data, and environment capture are at
+[bench](https://rubys.github.io/roundhouse/bench/), and the caveats
+are spelled out honestly in the posts below.
+
+The long-form versions of this overview:
+
+- [Conformance vs Comprehension](https://intertwingly.net/blog/2026/06/27/Conformance-vs-Comprehension.html) — the project, and the conformance-oracle methodology behind it
+- [Live Types for Rails](https://intertwingly.net/blog/2026/06/25/Live-Types-for-Rails.html) — the inference as a live type checker: LSP, MCP, and the competitive landscape
+- [An IDE You Don't Install](https://intertwingly.net/blog/2026/07/06/An-IDE-You-Dont-Install.html) — Mastodon analyzed in a browser tab, and a correction to the Live-Types timing numbers
+- [The Ruby JRuby Was Built to Run](https://intertwingly.net/blog/2026/06/11/The-Ruby-JRuby-Was-Built-to-Run.html) — the 2×2 experiment the table above is the current round of
+- [Numbers Without Conclusions](https://intertwingly.net/blog/2026/05/25/Numbers-Without-Conclusions.html) — full benchmark methodology, and what the numbers are and aren't evidence of
+
 ## Pipeline
 
 ```
