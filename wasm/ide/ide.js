@@ -15,7 +15,7 @@
 // previous snapshot meanwhile — stale-by-one-edit, the standard
 // fast-language-server trade.
 
-import { loadMonaco } from "../lib/editor.js";
+import { loadMonaco, registerTypedCompletion } from "../lib/editor.js";
 import { buildTree, allDirPaths, renderTree } from "../lib/tree.js";
 
 const els = {
@@ -284,44 +284,12 @@ async function boot() {
     },
   });
 
-  // Completion: the shared ide::complete_at core, via the worker.
-  const kindMap = () => ({
-    column: monaco.languages.CompletionItemKind.Field,
-    kwarg: monaco.languages.CompletionItemKind.Field,
-    association: monaco.languages.CompletionItemKind.Property,
-    accessor: monaco.languages.CompletionItemKind.Property,
-    scope: monaco.languages.CompletionItemKind.Function,
-    method: monaco.languages.CompletionItemKind.Method,
-    ivar: monaco.languages.CompletionItemKind.Variable,
-  });
-  monaco.languages.registerCompletionItemProvider(["ruby", "html"], {
-    triggerCharacters: [".", "@", "(", ",", " "],
-    async provideCompletionItems(model, position) {
-      const path = modelPath.get(model);
-      if (!path) return { suggestions: [] };
-      const cands = await rpc("complete", {
-        path,
-        text: model.getValue(),
-        line: position.lineNumber - 1,
-        character: position.column - 1,
-      });
-      if (!Array.isArray(cands)) return { suggestions: [] };
-      const kinds = kindMap();
-      const word = model.getWordUntilPosition(position);
-      const range = new monaco.Range(
-        position.lineNumber, word.startColumn, position.lineNumber, word.endColumn,
-      );
-      return {
-        suggestions: cands.map((c) => ({
-          label: { label: c.label, description: c.detail },
-          kind: kinds[c.kind] ?? kinds.method,
-          detail: c.detail,
-          sortText: c.sort_text,
-          insertText: c.insert_text || c.label,
-          range,
-        })),
-      };
-    },
+  // Completion: the shared provider (lib/editor.js) over the worker's
+  // last-good snapshot; the model resolves which file is being completed.
+  registerTypedCompletion(monaco, ["ruby", "html"], async (text, line, character, model) => {
+    const path = modelPath.get(model);
+    if (!path) return [];
+    return rpc("complete", { path, text, line, character });
   });
 
   status("loading sources…");

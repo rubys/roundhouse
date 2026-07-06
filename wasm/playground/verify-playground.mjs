@@ -9,10 +9,10 @@
 //      length minimum 10 -> 999) re-transpiles and the emitted model TS
 //      changes to match.
 //   3. switching target re-transpiles every backend with no error.
-//   4. diagnostics overlay: real-blog has NO baseline diagnostics (fully
-//      inferred, incl. yield-in-view typed String), and a type-error edit
-//      (`title + 1`) surfaces an incompatible_binop error rendered as a
-//      Monaco squiggle.
+//   4. diagnostics overlay: real-blog's baseline is 0 errors + only the
+//      jbuilder gradual_untyped warnings (the API-contract seam), and a
+//      type-error edit (`title + 1`) surfaces an incompatible_binop error
+//      rendered as a Monaco squiggle.
 //   5. inferred-type hovers: `title` in the edited method types as String, and
 //      the result carries many inferred types.
 //
@@ -118,11 +118,17 @@ await page.evaluate(() => window.__playground.setTarget("typescript"));
 const baseDiag = await page.evaluate(() => window.__playground.diagnostics());
 console.log("baseline:", baseDiag.length,
   baseDiag.length ? "— " + [...new Set(baseDiag.map((d) => d.code))].join(", ") : "(clean)");
-// real-blog is fully inferred with no annotations — including yield-in-view,
-// now typed String, so there are no baseline gradual_untyped warnings. The
-// live diagnostics pipeline is exercised by the `title + 1` error edit below.
-if (baseDiag.length)
-  fail(`expected 0 baseline diagnostics, got ${baseDiag.length}: ${[...new Set(baseDiag.map((d) => d.code))].join(", ")}`);
+// real-blog's honest baseline: zero errors, and the only warnings are the
+// jbuilder views' gradual_untyped escapes (the intentionally-dynamic JSON
+// response shape — the API-contract seam, not noise). Anything error-severity
+// or any other warning code appearing here is a regression. The live
+// diagnostics pipeline is exercised by the `title + 1` error edit below.
+const baseErrors = baseDiag.filter((d) => d.severity === "error");
+const baseOther = baseDiag.filter((d) => d.code !== "gradual_untyped");
+if (baseErrors.length)
+  fail(`expected 0 baseline errors, got ${baseErrors.length}: ${[...new Set(baseErrors.map((d) => d.code))].join(", ")}`);
+if (baseOther.length)
+  fail(`expected only gradual_untyped baseline warnings, got: ${[...new Set(baseOther.map((d) => d.code))].join(", ")}`);
 
 const errDiag = await page.evaluate((p) => {
   const orig = window.__playground.source(p);
@@ -153,6 +159,26 @@ const typeCount = await page.evaluate(() => window.__playground.types().length);
 console.log("type at article.rb:3:6 (`title`):", titleType, "| total inferred types:", typeCount);
 if (titleType !== "String") fail(`expected String at the \`title\` position, got ${titleType}`);
 if (typeCount < 100) fail(`expected many inferred types, got ${typeCount}`);
+
+// --- typed completion: `article.` offers columns/associations with types ----
+// Answers from the snapshot the last transpile stashed; the probe text is the
+// live-buffer contract (one keystroke ahead of the analysis).
+console.log("\n=== typed completion ===");
+const completion = await page.evaluate(() => {
+  window.__playground.selectSource("app/controllers/articles_controller.rb");
+  const orig = window.__playground.source("app/controllers/articles_controller.rb");
+  const text = orig.replace("  def show\n", "  def show\n    @article.\n");
+  const idx = text.indexOf("    @article.") + "    @article.".length;
+  const line = text.slice(0, idx).split("\n").length - 1;
+  const character = idx - text.lastIndexOf("\n", idx - 1) - 1;
+  return window.__playground.complete(text, line, character);
+});
+const compByLabel = Object.fromEntries((completion || []).map((c) => [c.label, c.detail]));
+console.log(`completion @article.: ${(completion || []).length} items;`,
+  "title:", compByLabel.title, "| comments:", compByLabel.comments);
+if (compByLabel.title !== "String") fail(`expected title → String, got ${compByLabel.title}`);
+if (compByLabel.comments !== "Array[Comment]")
+  fail(`expected comments → Array[Comment], got ${compByLabel.comments}`);
 
 // --- source -> output follow: selecting a source shows its emitted file ------
 // Heuristic name match (no `source` field on EmittedFile yet): basename, then

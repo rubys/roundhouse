@@ -271,7 +271,15 @@ async function boot() {
   renderSources();
   setStatus("loading editor…");
   [editor, outputView] = await Promise.all([
-    createEditor(els.editorHost, { onChange: onEditorChange }),
+    createEditor(els.editorHost, {
+      onChange: onEditorChange,
+      // Typed completion from the last transpile's analysis snapshot
+      // (the wasm side stashes one on every transpile). `text` is the
+      // live buffer — one keystroke ahead of that snapshot, which is
+      // exactly the contract ide::complete_at is built for.
+      complete: (text, line, character) =>
+        currentPath ? compiler.complete(currentPath, text, line, character) : [],
+    }),
     createOutputView(els.outputHost),
   ]);
 
@@ -315,6 +323,11 @@ async function boot() {
     },
     source: (path) => srcMap[path],
     sourceCount: () => sourceFiles().length,
+    // Typed completion at a 0-based (line, character) against `text` as the
+    // current buffer for the open file — drives the completion assertion in
+    // the verifier without simulating editor keystrokes.
+    complete: (text, line, character) =>
+      compiler.complete(currentPath, text, line, character),
   };
 }
 

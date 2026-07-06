@@ -109,7 +109,13 @@ fn transpile_inner(json_in: &str) -> String {
         Err(e) => return error_json(&format!("ingest: {e}")),
     };
 
-    Analyzer::new(&app).analyze(&mut app);
+    let mut analyzer = Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+    // Keep the member tables: transpile stashes the same last-good
+    // snapshot the query surface answers from (see below), so the
+    // playground/studio get completion as a free byproduct of the
+    // analysis they already run per edit.
+    let registry = analyzer.class_registry().clone();
 
     // Surface analyzer diagnostics, resolved to source positions. Synthetic
     // spans (no source site) are dropped — there's nowhere to put a marker.
@@ -209,7 +215,13 @@ fn transpile_inner(json_in: &str) -> String {
         inferred_types,
     };
 
-    serde_json::to_string(&out).unwrap_or_else(|e| error_json(&format!("serialize: {e}")))
+    let json =
+        serde_json::to_string(&out).unwrap_or_else(|e| error_json(&format!("serialize: {e}")));
+    // Refresh the query snapshot last — every borrow of `app` above has
+    // ended, and `complete`/`type_at` now answer against exactly the
+    // analysis this transpile ran.
+    LAST_GOOD.with(|l| *l.borrow_mut() = Some(Analysis { app, registry }));
+    json
 }
 
 fn error_json(msg: &str) -> String {

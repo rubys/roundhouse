@@ -12,7 +12,11 @@
 import { makeWasi } from "./wasi-shim.mjs";
 
 // wasmBytes: ArrayBuffer | Uint8Array of roundhouse_wasm.wasm.
-// Returns { transpile(language, srcMap) } where srcMap is { path: content }.
+// Returns { transpile(language, srcMap), complete(...), typeAt(...) } where
+// srcMap is { path: content }. The query methods answer from the last-good
+// snapshot the wasm side stashes on every transpile — same instance, same
+// analysis, so a page that transpiles-as-you-type gets typed completion as
+// a free byproduct.
 export async function loadCompiler(wasmBytes, wasiOpts = {}) {
   const memoryRef = { value: null };
   const wasi = makeWasi(memoryRef, wasiOpts);
@@ -25,6 +29,20 @@ export async function loadCompiler(wasmBytes, wasiOpts = {}) {
   const { rh_alloc, rh_dealloc, transpile, memory } = instance.exports;
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
+
+  // Shared packed-u64 call plumbing for the query exports.
+  function call(fnName, obj) {
+    const bytes = encoder.encode(JSON.stringify(obj));
+    const ptr = rh_alloc(bytes.length);
+    new Uint8Array(memory.buffer, ptr, bytes.length).set(bytes);
+    const packed = instance.exports[fnName](ptr, bytes.length);
+    const outPtr = Number(packed & 0xffffffffn);
+    const outLen = Number(packed >> 32n);
+    const out = decoder.decode(new Uint8Array(memory.buffer, outPtr, outLen).slice());
+    rh_dealloc(ptr, bytes.length);
+    rh_dealloc(outPtr, outLen);
+    return JSON.parse(out);
+  }
 
   return {
     // opts.profile (typescript only): "worker" | "node-async" | "node-sync".
@@ -48,6 +66,17 @@ export async function loadCompiler(wasmBytes, wasiOpts = {}) {
       rh_dealloc(outPtr, outLen);
 
       return JSON.parse(output);
+    },
+    // Typed completion at a 0-based line/UTF-16 character in `text` (the
+    // CURRENT buffer — may be one edit ahead of the last transpile).
+    // Returns [{label, kind, detail, sort_text, insert_text?}] or {error}
+    // before the first transpile.
+    complete(path, text, line, character) {
+      return call("complete", { path, text, line, character });
+    },
+    // Inferred type at a position in the last-analyzed text; null off-node.
+    typeAt(path, line, character) {
+      return call("type_at", { path, line, character });
     },
   };
 }

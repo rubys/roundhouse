@@ -77,9 +77,55 @@ function silenceWorkerLanguageServices(monaco) {
   langs.typescript?.javascriptDefaults?.setModeConfiguration?.(off);
 }
 
+// Typed completion, shared by every surface (playground, studio, /ide/):
+// register a Monaco completion provider that calls `complete(text, line0,
+// ch0)` — the page closes over its own notion of "current file" — and maps
+// the analyzer's candidates (label/kind/detail/sort_text/insert_text, the
+// `ide::complete_at` contract) to Monaco items. Registered once per page;
+// kinds and ranking match the LSP so all surfaces rank identically.
+export function registerTypedCompletion(monaco, languages, complete) {
+  const kinds = {
+    column: monaco.languages.CompletionItemKind.Field,
+    kwarg: monaco.languages.CompletionItemKind.Field,
+    association: monaco.languages.CompletionItemKind.Property,
+    accessor: monaco.languages.CompletionItemKind.Property,
+    scope: monaco.languages.CompletionItemKind.Function,
+    method: monaco.languages.CompletionItemKind.Method,
+    ivar: monaco.languages.CompletionItemKind.Variable,
+  };
+  monaco.languages.registerCompletionItemProvider(languages, {
+    triggerCharacters: [".", "@", "(", ",", " "],
+    async provideCompletionItems(model, position) {
+      // `model` rides along for multi-model pages (the /ide/) that key
+      // file identity off it; single-editor pages close over their own
+      // current-file state and ignore it.
+      const cands = await complete(
+        model.getValue(), position.lineNumber - 1, position.column - 1, model,
+      );
+      if (!Array.isArray(cands)) return { suggestions: [] };
+      const word = model.getWordUntilPosition(position);
+      const range = new monaco.Range(
+        position.lineNumber, word.startColumn, position.lineNumber, word.endColumn,
+      );
+      return {
+        suggestions: cands.map((c) => ({
+          label: { label: c.label, description: c.detail },
+          kind: kinds[c.kind] ?? kinds.method,
+          detail: c.detail,
+          sortText: c.sort_text,
+          insertText: c.insert_text || c.label,
+          range,
+        })),
+      };
+    },
+  });
+}
+
 // container: the DOM element to mount into. onChange(text): fired on user edits
-// only (programmatic setValue does NOT fire it).
-export async function createEditor(container, { onChange }) {
+// only (programmatic setValue does NOT fire it). complete(text, line0, ch0):
+// when provided, wires typed completion (see registerTypedCompletion) for the
+// ruby/html languages this editor hosts.
+export async function createEditor(container, { onChange, complete }) {
   try {
     const monaco = await loadMonaco();
     const ed = monaco.editor.create(container, {
@@ -111,6 +157,8 @@ export async function createEditor(container, { onChange }) {
         };
       },
     });
+
+    if (complete) registerTypedCompletion(monaco, ["ruby", "html"], complete);
 
     return {
       kind: "monaco",

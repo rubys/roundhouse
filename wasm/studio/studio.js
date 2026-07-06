@@ -507,7 +507,13 @@ async function boot() {
   // Editor, esbuild, and the SW app-host load in parallel; each degrades
   // independently (offline / strict CSP / no SW) without failing the boot.
   const [ed, bnd, host] = await Promise.all([
-    createEditor(els.editorHost, { onChange: onEditorChange }),
+    createEditor(els.editorHost, {
+      onChange: onEditorChange,
+      // Typed completion from the last build's analysis snapshot (the
+      // wasm side stashes one on every transpile — see lib/transpile.mjs).
+      complete: (text, line, character) =>
+        currentPath ? compiler.complete(currentPath, text, line, character) : [],
+    }),
     loadBundler().catch((e) => { console.warn("[studio] bundler unavailable:", e.message); return null; }),
     createAppHost(els.appFrame, { swUrl, scope: appScope }).catch((e) => { console.warn("[studio] app host unavailable:", e.message); return null; }),
   ]);
