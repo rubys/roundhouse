@@ -852,6 +852,14 @@ impl Analyzer {
             // dates
             "time_ago_in_words", "distance_of_time_in_words",
             "distance_of_time_in_words_to_now",
+            // i18n — the view-side translate/localize helpers (delegate
+            // to I18n; lazy-lookup `t(".key")` included). Str like the
+            // rest of the SafeBuffer-rendering surface.
+            "t", "translate", "l", "localize",
+            // Our own HAML lowering's dynamic-attribute helper
+            // (`%div{opengraph_tags}` → `render_attrs(…)`, see
+            // src/haml.rs) — renders an attribute string.
+            "render_attrs",
             // dom / rendering / capture
             "dom_id", "dom_class", "render", "render_to_string", "capture",
             "content_for", "provide", "escape_javascript", "j",
@@ -916,6 +924,42 @@ impl Analyzer {
                 .entry(Symbol::from(name.as_str()))
                 .or_insert(Ty::Str);
         }
+        // Kaminari's view-side paginator renders to a SafeBuffer string,
+        // like the tag helpers above.
+        action_view
+            .instance_methods
+            .entry(Symbol::from("paginate"))
+            .or_insert(Ty::Str);
+        // `params` is exposed to templates too (same strong-params
+        // surface the controller context declares).
+        action_view.instance_methods.insert(
+            Symbol::from("params"),
+            Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Str) },
+        );
+        // SimpleForm's form builder — same shape as `form_with` but the
+        // yielded builder (`f.input`, `f.association`, …) is a SimpleForm
+        // class we don't model structurally, so the block param is the
+        // gradual escape: `f.input :name` flows through instead of
+        // bottoming out unresolved.
+        for m in ["simple_form_for", "simple_fields_for"] {
+            action_view
+                .instance_methods
+                .entry(Symbol::from(m))
+                .or_insert_with(|| block_fn(&Ty::Untyped, Ty::Str));
+        }
+        // Helper-fold: Rails mixes EVERY module under app/helpers into
+        // every view (`helpers :all` default). Declaring them as
+        // `include`s of the view context lets `fold_concern_surfaces`
+        // copy each helper's typed surface onto `ActionView::Base` at
+        // every harvest round — so a bare `material_symbol(…)` in a
+        // template resolves exactly like a concern method on a model,
+        // refining as the fixpoint types helper bodies. Hardcoded
+        // framework entries above win over a same-named app helper
+        // (own-entry-wins in the fold); acceptable, both are Str-shaped
+        // in practice.
+        let helper_modules: BTreeSet<ClassId> =
+            app.helper_method_index.values().cloned().collect();
+        action_view.includes.extend(helper_modules);
         classes.insert(ClassId(Symbol::from("ActionView::Base")), action_view);
 
         // The FlashHash returned by `flash`. Values are messages (Str); `now`
@@ -1129,6 +1173,10 @@ impl Analyzer {
         app_ctrl.class_methods.insert(Symbol::from("render"), Ty::Nil);
         app_ctrl.class_methods.insert(Symbol::from("redirect_to"), Ty::Nil);
         app_ctrl.class_methods.insert(Symbol::from("head"), Ty::Nil);
+        // HTTP cache-control declarations (`expires_in 3.minutes,
+        // public: true`) — side-effecting header writes.
+        app_ctrl.class_methods.insert(Symbol::from("expires_in"), Ty::Nil);
+        app_ctrl.class_methods.insert(Symbol::from("expires_now"), Ty::Nil);
         // `flash` (FlashHash) and the current action/controller names are
         // available on the controller via implicit self, same as in views.
         app_ctrl.class_methods.insert(
@@ -1195,7 +1243,7 @@ impl Analyzer {
             let model_ty = Ty::Class { id: model.name.clone(), args: vec![] };
             app_ctrl.class_methods.insert(
                 Symbol::from(format!("current_{scope}").as_str()),
-                Ty::Union { variants: vec![model_ty, Ty::Nil] },
+                Ty::Union { variants: vec![model_ty.clone(), Ty::Nil] },
             );
             app_ctrl.class_methods.insert(
                 Symbol::from(format!("{scope}_signed_in?").as_str()),
@@ -1214,6 +1262,21 @@ impl Analyzer {
                     .class_methods
                     .entry(Symbol::from(m))
                     .or_insert(Ty::Untyped);
+            }
+            // Devise marks `current_<scope>` / `<scope>_signed_in?` as
+            // `helper_method`, so templates see them too — register on
+            // the view context (inserted into `classes` above).
+            if let Some(view_cls) =
+                classes.get_mut(&ClassId(Symbol::from("ActionView::Base")))
+            {
+                view_cls.instance_methods.insert(
+                    Symbol::from(format!("current_{scope}").as_str()),
+                    Ty::Union { variants: vec![model_ty, Ty::Nil] },
+                );
+                view_cls.instance_methods.insert(
+                    Symbol::from(format!("{scope}_signed_in?").as_str()),
+                    Ty::Bool,
+                );
             }
         }
         classes.insert(ClassId(Symbol::from("ApplicationController")), app_ctrl);
