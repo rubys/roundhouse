@@ -106,7 +106,7 @@ module Tep
       def self.send_frame(fd, opcode, payload)
         frame = Tep::WebSocket::Frame.new(true, opcode, payload)
         bytes = frame.encode_unmasked
-        Sock.sphttp_write_bytes(fd, bytes, bytes.length)
+        Sock.sphttp_write_bytes(fd, bytes, bytes.bytesize)
       end
 
       # Close payload: 2-byte big-endian code + UTF-8 reason. Per
@@ -118,8 +118,8 @@ module Tep
         end
         out = Tep::WebSocket::Frame.byte_to_chr((code >> 8) & 0xff) +
               Tep::WebSocket::Frame.byte_to_chr(code & 0xff)
-        if reason.length > 123
-          out + reason[0, 123]
+        if reason.bytesize > 123
+          out + reason.byteslice(0, 123)
         else
           out + reason
         end

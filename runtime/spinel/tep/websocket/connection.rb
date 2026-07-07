@@ -59,7 +59,7 @@ module Tep
           end
 
           chunk = Sock.sp_net_recv_some(@fd, 65536)
-          if chunk.length == 0
+          if chunk.bytesize == 0
             # EOF / peer gone: dispatch close without sending one back.
             Connection.dispatch_close(@driver, Tep::WebSocket::CLOSE_GOING_AWAY, "")
             return 0
@@ -68,7 +68,12 @@ module Tep
 
           # Parse + dispatch every complete frame the buffer now holds.
           while true
-            r = Tep::WebSocket::Frame.parse_from_buf(inbuf, 0, inbuf.length)
+            # bytesize, not length: inbuf is masked binary, and char-count
+            # arithmetic under-reports avail (complete frames report "need")
+            # and truncates the carried tail after a parse (stream
+            # misalignment) whenever XOR'd bytes form multi-byte UTF-8
+            # sequences — mask-dependent, so it flakes per connection.
+            r = Tep::WebSocket::Frame.parse_from_buf(inbuf, 0, inbuf.bytesize)
             if r.outcome == "need"
               break
             end
@@ -77,11 +82,11 @@ module Tep
               return 0
             end
             Connection.dispatch_frame(@driver, r.frame)
-            if r.consumed >= inbuf.length
+            if r.consumed >= inbuf.bytesize
               inbuf = ""
               break
             end
-            inbuf = inbuf.byteslice(r.consumed, inbuf.length - r.consumed)
+            inbuf = inbuf.byteslice(r.consumed, inbuf.bytesize - r.consumed)
           end
         end
         0
@@ -103,10 +108,13 @@ module Tep
         elsif op == Tep::WebSocket::OPCODE_CLOSE
           code = 0
           reason = ""
-          if frame.payload.length >= 2
-            code = (frame.payload[0].ord << 8) | frame.payload[1].ord
-            if frame.payload.length > 2
-              reason = frame.payload[2, frame.payload.length - 2]
+          # bytesize/getbyte/byteslice: the close payload is binary (2-byte
+          # code + UTF-8 reason); char indexing misreads the code when the
+          # reason opens with a multi-byte character.
+          if frame.payload.bytesize >= 2
+            code = (frame.payload.getbyte(0) << 8) | frame.payload.getbyte(1)
+            if frame.payload.bytesize > 2
+              reason = frame.payload.byteslice(2, frame.payload.bytesize - 2)
             end
           end
           # Echo the close back (§5.5.1) then dispatch.

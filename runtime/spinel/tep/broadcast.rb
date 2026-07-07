@@ -82,6 +82,28 @@ module Tep
       0
     end
 
+    # Drop the subscriptions matching BOTH topic and fd. Returns the
+    # count dropped. The multiplexed-connection shape (one WS fd,
+    # several topics — e.g. Mastodon streaming's subscribe/unsubscribe
+    # frames) needs this: an unsubscribe frame drops one topic while
+    # the fd stays connected, so neither unsubscribe(sub_id) (ids
+    # shift) nor unsubscribe_fd (drops everything) fits.
+    def self.unsubscribe_topic_fd(topic, fd)
+      subs = Tep::APP.broadcast_subs
+      dropped = 0
+      i = subs.length - 1
+      while i >= 0
+        if subs[i].fd == fd
+          if subs[i].topic == topic
+            subs.delete_at(i)
+            dropped += 1
+          end
+        end
+        i -= 1
+      end
+      dropped
+    end
+
     # Drop every subscription whose fd matches. Returns the count
     # dropped. Used by WS on-close to clean up everything a closing
     # connection had subscribed to. Back-to-front so delete_at

@@ -48,7 +48,10 @@ module Tep
         b0 = (@fin ? 0x80 : 0x00) | (@opcode & 0x0f)
         head << b0
 
-        plen = @payload.length
+        # bytesize, not length: the wire header advertises BYTES; a char
+        # count under-reports for any multi-byte payload and desyncs the
+        # peer's parser (same class as the #1500 sendfile fix).
+        plen = @payload.bytesize
         if plen <= 125
           head << plen
         elsif plen <= 65535
