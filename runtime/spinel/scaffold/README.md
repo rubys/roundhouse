@@ -131,6 +131,19 @@ current upstream spinel health — see
 [Spinel compatibility](#spinel-compatibility) for the live blocker
 list before proceeding. The CRuby (`rake`) targets are unaffected.
 
+The **spinel-target archive** additionally ships as a **spin
+package** (spinel's project tool): `spin.toml` at the root,
+`bin/blog.rb` as the compile root (`spin build` → `build/bin/blog`),
+spinel-lane tests flattened to `test/*.rb` with `.expected`
+snapshots (`spin test`), and `.rbs` emitted as file-adjacent
+sidecars instead of a `sig/` tree (the Makefile's bare-spinel
+recipes use `--rbs .` there). Until spin feeds sidecars itself
+(matz/spinel#1788), seed the analyzer explicitly:
+`spinel_rbs_extract . > build/rbs.seed && SPINEL_RBS_SEED=$PWD/build/rbs.seed spin test`.
+Non-spinel-lane tests move to `test/cruby/` in that archive. The
+ruby/jruby archives keep the layout described above; the reshaping
+lives in roundhouse's `src/project.rs` (`spin_shape`).
+
 ## Architecture
 
 ```

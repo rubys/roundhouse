@@ -174,34 +174,45 @@ pub fn target_readme(target: BuildTarget) -> String {
              download the input that Roundhouse transpiles. (The Regenerate \
              command below re-walks the fixture into this archive.)\n"
         }
-        // Spinel AOT: assets ship prebuilt (like jruby — `make assets`
-        // needs MRI), so Build is just the native compile. Test is the
-        // scaffold Makefile's `spinel-test` target (each emitted test
-        // file compiles to its own binary, run in turn). The comprehensive
-        // scaffold doc ships as SPECIMEN.md (scaffold_readme_to_specimen).
+        // Spinel AOT: the tree is a spin package (spin.toml + bin/ +
+        // test/*.rb with .expected snapshots — see `spin_shape`), so
+        // Build/Test use spinel's own project tool. Assets ship prebuilt
+        // (like jruby — `make assets` needs MRI). The Test block's
+        // explicit seed step bridges matz/spinel#1788 (spin doesn't feed
+        // .rbs sidecars yet); drop it for plain `spin test` when that
+        // closes. The comprehensive scaffold doc ships as SPECIMEN.md
+        // (scaffold_readme_to_specimen).
         BuildTarget::Spinel => {
             "This tree is the Rails-shape-without-metaprogramming \
-             specimen, compiled ahead-of-time to a native binary by the \
+             specimen, packaged as a [spin](https://github.com/matz/spinel/blob/master/docs/spin.md) \
+             project and compiled ahead-of-time to a native binary by the \
              [Spinel](https://github.com/matz/spinel) Ruby VM — see \
              `SPECIMEN.md` for the full architecture document (layout, \
              runtime, ruleset, limitations). Static assets ship prebuilt \
              in `static/assets/` (the Makefile's `make assets` step needs \
              the MRI toolchain; the binary sendfiles them at `/assets/*`).\n\n\
              ## Prerequisites\n\
-             - [spinel](https://github.com/matz/spinel) on PATH — the AOT Ruby compiler\n\
+             - [spinel](https://github.com/matz/spinel) — `spinel`, `spin`, and \
+             `spinel_rbs_extract` on PATH (the repo's `bin/` after `make`)\n\
              - A C toolchain + SQLite headers (`libsqlite3-dev`) — the binary links `-lsqlite3`\n\
              - Node.js 18+ — for the End-to-end suite\n\n\
              ## Build\n\
              ```sh\n\
-             make build\n\
+             spin build\n\
              ```\n\n\
              ## Run\n\
              ```sh\n\
-             ./build/blog\n\
+             ./build/bin/blog\n\
              ```\n\n\
              ## Test\n\
+             Each `test/*.rb` compiles to its own binary and diffs against \
+             its `.expected` snapshot. The seed step feeds the `.rbs` \
+             sidecars to the analyzer — spin does not do that itself yet \
+             ([matz/spinel#1788](https://github.com/matz/spinel/issues/1788)); \
+             once it does, this is plain `spin test`:\n\
              ```sh\n\
-             make spinel-test\n\
+             mkdir -p build && spinel_rbs_extract . > build/rbs.seed\n\
+             SPINEL_RBS_SEED=$PWD/build/rbs.seed spin test\n\
              ```\n"
         }
         // ruby/jruby Test sections run the same five driver files as
@@ -552,7 +563,7 @@ pub fn target_files(
 ) -> Result<Vec<(String, String)>, String> {
     let files = match target {
         BuildTarget::Blog => blog_files(fixture),
-        BuildTarget::Spinel => spinel_files(app, fixture),
+        BuildTarget::Spinel => spinel_files(app, fixture).and_then(spin_shape),
         BuildTarget::Ruby => ruby_runtime_files(app, fixture),
         BuildTarget::Jruby => jruby_runtime_files(app, fixture),
         BuildTarget::Crystal => Ok(sort_files(emit::crystal::emit(app))),
@@ -695,11 +706,11 @@ fn ensure_e2e(
             "WEB_CONCURRENCY=0 jruby -S bundle exec puma -C config/puma.rb",
             "storage/development.sqlite3",
         ),
-        // The AOT binary (built by the README's `make build`) defaults to
+        // The AOT binary (built by the README's `spin build`) defaults to
         // storage/development.sqlite3 when BLOG_DB is unset, and reads PORT
         // (default 3000, which the playwright config expects). Serves
         // /assets/* from the prebuilt static/assets/.
-        BuildTarget::Spinel => ("./build/blog", "storage/development.sqlite3"),
+        BuildTarget::Spinel => ("./build/bin/blog", "storage/development.sqlite3"),
         _ => unreachable!("ships_e2e gates the match"),
     };
 
@@ -1349,6 +1360,323 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     Ok(files)
 }
 
+/// Reshape the assembled spinel tree into a spin package — spinel's
+/// project tool (upstream `docs/spin.md`, landed 2026-07-05). Only
+/// `BuildTarget::Spinel` routes through here; ruby/jruby consume the
+/// raw `spinel_files` shape (subdir tests, `sig/` tree) unchanged.
+///
+/// Moves, in order:
+///
+/// 1. `sig/<p>.rbs` → `<p>.rbs` — spin's convention is file-adjacent
+///    sidecars ("everything participates by extension"), not a sig/
+///    tree. The Makefile's bare-spinel recipes switch to `--rbs .`.
+/// 2. Spinel-lane tests — subclasses of `TestBase` or
+///    `ActionDispatch::IntegrationTest` — flatten from
+///    `test/{models,controllers}/` to `test/<name>.rb`: spin treats
+///    exactly the top-level `test/*.rb` files as test programs, no
+///    recursion. (`test/query_count_test.rb` is carved out — below.)
+/// 3. Top-level tests *outside* the lane (Minitest::Test shapes the
+///    archive's TestBase helper never autoruns — compiled, they are
+///    do-nothing binaries whose empty output vacuously matches an
+///    empty snapshot) move to `test/cruby/`, which spin ignores. The
+///    ruby/jruby archives remain their live lane.
+/// 4. Relocated files get their requires rewritten for the new
+///    location: bare `require "x"` (Makefile `-I` style) resolves
+///    against test/, runtime/, app/, and the root to a
+///    `require_relative`; unresolved names (stdlib) stay bare. spin
+///    compiles with the require gate on, so a bare name that is not a
+///    package root or dependency is a hard compile error.
+/// 5. Every lane test gets a `.expected` snapshot — the emitted
+///    runner's `<Class>: <N> tests passed` footer (src/emit/ruby.rs),
+///    re-derived from the class line and `def test_` count. A snapshot
+///    skips spin's no-snapshot CRuby diff lane, which cannot load this
+///    tree (runtime/db.rb is spinel-FFI) — the same pattern the
+///    published spinel-redis/spinel-pg packages use.
+/// 6. `spin.toml` and `bin/blog.rb` (compile root; main.rb boots
+///    unconditionally on require) land, and the Makefile's spinel
+///    recipes are re-pointed at the sidecar layout with the
+///    SPINEL_TESTS list regenerated from the actual lane. Patches are
+///    exact-match — a scaffold edit that invalidates one fails the
+///    emit loudly instead of desyncing silently.
+///
+/// Until spin feeds sidecars itself (matz/spinel#1788), `spin test`
+/// needs the analyzer seeded explicitly; the generated README's Test
+/// block bridges with `spinel_rbs_extract` + `SPINEL_RBS_SEED`
+/// (analyze.c reads the env var unconditionally).
+///
+/// query_count_test carve-out: pre-existing spinel C error on
+/// `Db.query_log` (`sp_StrArray*` vs `sp_RbVal`; survives full RBS
+/// seeding) — the test was never in the Makefile's SPINEL_TESTS lane
+/// either. It ships in `test/cruby/` until that gap closes.
+fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, String> {
+    use std::collections::HashSet;
+
+    // 1. sig/ tree → file-adjacent sidecars.
+    let mut files: Vec<(String, String)> = files
+        .into_iter()
+        .map(|(p, c)| match p.strip_prefix("sig/") {
+            Some(rest) => (rest.to_string(), c),
+            None => (p, c),
+        })
+        .collect();
+
+    // Require-resolution universe (post-sidecar move; .rb only).
+    let rb_paths: HashSet<String> = files
+        .iter()
+        .filter(|(p, _)| p.ends_with(".rb"))
+        .map(|(p, _)| p.clone())
+        .collect();
+
+    // 2./3./4. Relocate test programs; rewrite requires of anything moved.
+    let mut lane: Vec<(String, String, usize)> = Vec::new(); // (path, class, n)
+    let mut renames: Vec<(String, String)> = Vec::new(); // old .rb → new .rb
+    for entry in files.iter_mut() {
+        if !entry.0.starts_with("test/") || !entry.0.ends_with("_test.rb") {
+            continue;
+        }
+        let base = entry.0.rsplit('/').next().unwrap().to_string();
+        let top_level = entry.0 == format!("test/{base}");
+        let in_lane = (entry.1.contains("< TestBase")
+            || entry.1.contains("< ActionDispatch::IntegrationTest"))
+            && entry.0 != "test/query_count_test.rb";
+        let new_path = if in_lane {
+            format!("test/{base}")
+        } else if top_level {
+            format!("test/cruby/{base}")
+        } else {
+            continue; // subdir non-lane tests stay put (invisible to spin)
+        };
+        if new_path != entry.0 {
+            let old_dir = entry.0.rsplit_once('/').unwrap().0.to_string();
+            let new_dir = new_path.rsplit_once('/').unwrap().0.to_string();
+            let rewritten = rewrite_requires_for_move(&entry.1, &old_dir, &new_dir, &rb_paths);
+            renames.push((entry.0.clone(), new_path.clone()));
+            entry.0 = new_path.clone();
+            entry.1 = rewritten;
+        }
+        if in_lane {
+            let (class, n) = test_class_and_count(&entry.1, &new_path)?;
+            lane.push((new_path, class, n));
+        }
+    }
+
+    // A moved test's own `.rbs` sidecar travels with it (spin's
+    // convention is file-adjacent; the seed extractor finds it either
+    // way, but an upstream sidecar-discovery fix will look beside the
+    // file — matz/spinel#1788).
+    for entry in files.iter_mut() {
+        if let Some(stem) = entry.0.strip_suffix(".rbs") {
+            let old_rb = format!("{stem}.rb");
+            if let Some((_, new_rb)) = renames.iter().find(|(o, _)| *o == old_rb) {
+                entry.0 = format!("{}.rbs", new_rb.trim_end_matches(".rb"));
+            }
+        }
+    }
+
+    // Relocations can only collide by construction error — fail loudly.
+    {
+        let mut seen = HashSet::new();
+        for (p, _) in &files {
+            if !seen.insert(p.as_str()) {
+                return Err(format!("spin_shape: path collision after reshaping: {p}"));
+            }
+        }
+    }
+
+    // 5. Snapshots.
+    lane.sort_by(|a, b| a.0.cmp(&b.0));
+    for (path, class, n) in &lane {
+        files.push((format!("{path}.expected"), format!("{class}: {n} tests passed\n")));
+    }
+    // test_helper.rb sits at test/ top level (shared layout with the
+    // ruby/jruby trees), so spin runs it as a test program too. An
+    // empty snapshot records the truth — it loads everything and
+    // prints nothing — and turns it into a standalone compile gate
+    // rather than a CRuby-lane failure (the no-snapshot lane can't
+    // load the spinel-FFI runtime/db.rb).
+    if files.iter().any(|(p, _)| p == "test/test_helper.rb") {
+        files.push(("test/test_helper.rb.expected".to_string(), String::new()));
+    }
+
+    // 6. Package manifest + compile root.
+    files.push((
+        "spin.toml".to_string(),
+        "# spin manifest — generated by Roundhouse (spinel target).\n\
+         # An application needs no [package] identity. Dependencies go here:\n\
+         #   [dependencies]\n\
+         #   name = { path = \"../spinel-name\" }\n"
+            .to_string(),
+    ));
+    files.push((
+        "bin/blog.rb".to_string(),
+        "# spin compile root: `spin build` → build/bin/blog; `spin run`.\n\
+         # The application lives in main.rb (see SPECIMEN.md) — it boots\n\
+         # the server unconditionally on require; this file exists because\n\
+         # spin's unit of build is bin/<name>.rb.\n\
+         require_relative \"../main\"\n"
+            .to_string(),
+    ));
+
+    // Makefile re-pointing (exact-match patches; see doc comment).
+    let spinel_tests = if lane.is_empty() {
+        "SPINEL_TESTS :=".to_string()
+    } else {
+        let stems: Vec<String> = lane
+            .iter()
+            .map(|(p, _, _)| p.trim_end_matches(".rb").to_string())
+            .collect();
+        format!("SPINEL_TESTS := \\\n\t{}", stems.join(" \\\n\t"))
+    };
+    let patches: [(&str, &str); 4] = [
+        (
+            "RBS_SRC  := $(shell find sig -type f -name '*.rbs' 2>/dev/null)",
+            "RBS_SRC  := $(shell find . -type f -name '*.rbs' 2>/dev/null)",
+        ),
+        (
+            "RBS_FLAG := $(if $(wildcard sig),--rbs sig)",
+            "RBS_FLAG := --rbs .",
+        ),
+        (
+            "\t$(SPINEL) --rbs sig $< -o $@",
+            "\t$(SPINEL) $(RBS_FLAG) $< -o $@",
+        ),
+        (
+            "SPINEL_TESTS := \\\n\ttest/models/article_test \\\n\ttest/models/comment_test \\\n\ttest/controllers/articles_controller_test \\\n\ttest/controllers/comments_controller_test",
+            "", // placeholder — replaced below with the computed list
+        ),
+    ];
+    let makefile = files
+        .iter_mut()
+        .find(|(p, _)| p == "Makefile")
+        .ok_or("spin_shape: no Makefile in the spinel file set")?;
+    for (i, (from, to)) in patches.iter().enumerate() {
+        let to: &str = if i == patches.len() - 1 {
+            &spinel_tests
+        } else {
+            to
+        };
+        if !makefile.1.contains(from) {
+            return Err(format!(
+                "spin_shape: Makefile patch pattern not found (scaffold Makefile \
+                 changed?): {:?}",
+                &from[..from.len().min(60)]
+            ));
+        }
+        makefile.1 = makefile.1.replacen(from, to, 1);
+    }
+
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(files)
+}
+
+/// The `class <Name> < TestBase` / `< ActionDispatch::IntegrationTest`
+/// line (exactly one per lane test) plus the `def test_*` count —
+/// enough to synthesize the runner's `<Class>: <N> tests passed`
+/// footer (src/emit/ruby.rs prints it with no singular special-case).
+fn test_class_and_count(content: &str, path: &str) -> Result<(String, usize), String> {
+    let mut class: Option<String> = None;
+    for line in content.lines() {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix("class ") {
+            if rest.contains("< TestBase") || rest.contains("< ActionDispatch::IntegrationTest") {
+                let name = rest.split_whitespace().next().unwrap_or_default().to_string();
+                if class.replace(name).is_some() {
+                    return Err(format!(
+                        "spin_shape: {path}: multiple test classes in one file — \
+                         snapshot synthesis assumes one"
+                    ));
+                }
+            }
+        }
+    }
+    let class = class.ok_or_else(|| format!("spin_shape: {path}: no test class found"))?;
+    let n = content.matches("def test_").count();
+    if n == 0 {
+        return Err(format!(
+            "spin_shape: {path}: no test methods — would be a vacuous test program"
+        ));
+    }
+    Ok((class, n))
+}
+
+/// Rewrite the requires of a file moving `old_dir` → `new_dir` inside
+/// the virtual file set. `require_relative` targets are re-based;
+/// bare `require "x"` (which the Makefile lanes resolved with `-I`
+/// flags spin does not pass) becomes `require_relative` when `x.rb`
+/// exists under test/, runtime/, app/, or the root. Anything else
+/// (stdlib) is left bare for the require gate to judge. Lines with
+/// trailing comments or non-literal arguments pass through untouched.
+fn rewrite_requires_for_move(
+    content: &str,
+    old_dir: &str,
+    new_dir: &str,
+    rb_paths: &std::collections::HashSet<String>,
+) -> String {
+    let mut out = String::with_capacity(content.len());
+    for line in content.lines() {
+        let t = line.trim_start();
+        let indent = &line[..line.len() - t.len()];
+        let rewritten = if let Some(rest) = t.strip_prefix("require_relative \"") {
+            rest.strip_suffix('"').map(|target| {
+                let canon = vpath_normalize(&format!("{old_dir}/{target}"));
+                format!("{indent}require_relative \"{}\"", vpath_rel(new_dir, &canon))
+            })
+        } else if let Some(rest) = t.strip_prefix("require \"") {
+            rest.strip_suffix('"').and_then(|target| {
+                ["test", "runtime", "app", ""].iter().find_map(|root| {
+                    let cand = if root.is_empty() {
+                        format!("{target}.rb")
+                    } else {
+                        format!("{root}/{target}.rb")
+                    };
+                    rb_paths.contains(&cand).then(|| {
+                        let canon = cand.trim_end_matches(".rb");
+                        format!("{indent}require_relative \"{}\"", vpath_rel(new_dir, canon))
+                    })
+                })
+            })
+        } else {
+            None
+        };
+        out.push_str(rewritten.as_deref().unwrap_or(line));
+        out.push('\n');
+    }
+    out
+}
+
+/// Normalize a set-relative path: fold `.` and `..` components.
+fn vpath_normalize(p: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for c in p.split('/') {
+        match c {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    parts.join("/")
+}
+
+/// Relative path from directory `from_dir` ("" = set root) to `to` —
+/// the string `require_relative` needs from a file in `from_dir`.
+fn vpath_rel(from_dir: &str, to: &str) -> String {
+    let from: Vec<&str> = if from_dir.is_empty() {
+        Vec::new()
+    } else {
+        from_dir.split('/').collect()
+    };
+    let to_parts: Vec<&str> = to.split('/').collect();
+    let mut i = 0;
+    while i < from.len() && i + 1 < to_parts.len() && from[i] == to_parts[i] {
+        i += 1;
+    }
+    let mut rel: Vec<String> = vec!["..".to_string(); from.len() - i];
+    rel.extend(to_parts[i..].iter().map(|s| s.to_string()));
+    rel.join("/")
+}
+
 /// Canonical path of the language-agnostic SQL seed. Single source of
 /// truth — spinel/ruby/jruby ship it via the scaffold walk, every other
 /// target gets it injected by `ensure_seed_sql`.
@@ -1744,5 +2072,116 @@ mod tests {
         let seeds: Vec<_> = out.iter().filter(|(p, _)| p == "db/seed.sql").collect();
         assert_eq!(seeds.len(), 1, "no duplicate db/seed.sql");
         assert_eq!(seeds[0].1, "-- already here", "existing content preserved");
+    }
+
+    #[test]
+    fn vpath_relative_paths() {
+        assert_eq!(vpath_normalize("test/models/../test_helper"), "test/test_helper");
+        assert_eq!(vpath_rel("test", "test/test_helper"), "test_helper");
+        assert_eq!(vpath_rel("test", "app/models/article"), "../app/models/article");
+        assert_eq!(vpath_rel("test/cruby", "runtime/broadcasts"), "../../runtime/broadcasts");
+        assert_eq!(vpath_rel("", "main"), "main");
+    }
+
+    #[test]
+    fn move_rewrites_bare_and_relative_requires() {
+        let rb_paths: std::collections::HashSet<String> = [
+            "app/models/article.rb",
+            "test/fixtures/articles.rb",
+            "test/test_helper.rb",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let src = "require_relative \"../test_helper\"\n\
+                   require \"models/article\"\n\
+                   require \"fixtures/articles\"\n\
+                   require \"stringio\"\n";
+        let out = rewrite_requires_for_move(src, "test/models", "test", &rb_paths);
+        assert_eq!(
+            out,
+            "require_relative \"test_helper\"\n\
+             require_relative \"../app/models/article\"\n\
+             require_relative \"fixtures/articles\"\n\
+             require \"stringio\"\n"
+        );
+    }
+
+    /// The full reshaping on a synthetic miniature of the spinel set:
+    /// sidecar move, lane flattening + snapshot, Minitest quarantine,
+    /// query_count carve-out, package files, Makefile patches.
+    #[test]
+    fn spin_shape_reshapes_the_tree() {
+        let makefile = "RBS_SRC  := $(shell find sig -type f -name '*.rbs' 2>/dev/null)\n\
+             RBS_FLAG := $(if $(wildcard sig),--rbs sig)\n\
+             $(BUILD)/test/%: test/%.rb $(RUBY_SRC)\n\
+             \t$(SPINEL) --rbs sig $< -o $@\n\
+             SPINEL_TESTS := \\\n\
+             \ttest/models/article_test \\\n\
+             \ttest/models/comment_test \\\n\
+             \ttest/controllers/articles_controller_test \\\n\
+             \ttest/controllers/comments_controller_test\n";
+        let files = vec![
+            ("Makefile".to_string(), makefile.to_string()),
+            ("app/models/article.rb".to_string(), "class Article\nend\n".to_string()),
+            ("main.rb".to_string(), "Main.run\n".to_string()),
+            ("sig/app/models/article.rbs".to_string(), "class Article\nend\n".to_string()),
+            (
+                "sig/test/models/article_test.rbs".to_string(),
+                "class ArticleTest\nend\n".to_string(),
+            ),
+            ("test/test_helper.rb".to_string(), "class TestBase\nend\n".to_string()),
+            (
+                "test/models/article_test.rb".to_string(),
+                "require_relative \"../test_helper\"\n\
+                 require \"models/article\"\n\
+                 class ArticleTest < TestBase\n  def test_a\n  end\n  def test_b\n  end\nend\n"
+                    .to_string(),
+            ),
+            (
+                "test/broadcasts_test.rb".to_string(),
+                "require_relative \"test_helper\"\n\
+                 class BroadcastsTest < Minitest::Test\n  def test_x\n  end\nend\n"
+                    .to_string(),
+            ),
+            (
+                "test/query_count_test.rb".to_string(),
+                "class QueryCountTest < ActionDispatch::IntegrationTest\n  def test_q\n  end\nend\n"
+                    .to_string(),
+            ),
+        ];
+        let out = spin_shape(files).unwrap();
+        let paths: Vec<&str> = out.iter().map(|(p, _)| p.as_str()).collect();
+        let get = |p: &str| &out.iter().find(|(q, _)| q == p).unwrap().1;
+
+        // Sidecar moved out of sig/; a moved test's sidecar follows it.
+        assert!(paths.contains(&"app/models/article.rbs"));
+        assert!(paths.contains(&"test/article_test.rbs"));
+        assert!(!paths.iter().any(|p| p.starts_with("sig/")));
+
+        // Lane test flattened, requires re-based, snapshot synthesized.
+        assert!(paths.contains(&"test/article_test.rb"));
+        let flat = get("test/article_test.rb");
+        assert!(flat.contains("require_relative \"test_helper\""));
+        assert!(flat.contains("require_relative \"../app/models/article\""));
+        assert_eq!(get("test/article_test.rb.expected"), "ArticleTest: 2 tests passed\n");
+
+        // Minitest shape + the query_count carve-out are quarantined,
+        // with no snapshots (they are not spin test programs).
+        assert!(paths.contains(&"test/cruby/broadcasts_test.rb"));
+        assert!(paths.contains(&"test/cruby/query_count_test.rb"));
+        assert!(!paths.iter().any(|p| p.contains("cruby") && p.ends_with(".expected")));
+        assert!(get("test/cruby/broadcasts_test.rb").contains("require_relative \"../test_helper\""));
+
+        // Package files present.
+        assert!(get("spin.toml").contains("[dependencies]"));
+        assert!(get("bin/blog.rb").contains("require_relative \"../main\""));
+
+        // Makefile re-pointed at the sidecar layout + actual lane list.
+        let mk = get("Makefile");
+        assert!(mk.contains("RBS_FLAG := --rbs ."));
+        assert!(mk.contains("$(SPINEL) $(RBS_FLAG) $< -o $@"));
+        assert!(mk.contains("SPINEL_TESTS := \\\n\ttest/article_test\n"));
+        assert!(!mk.contains("test/models/article_test"));
     }
 }

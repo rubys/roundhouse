@@ -150,9 +150,14 @@ jobs:
         # (toolchain-spinel / compare-spinel); without it, --rbs is silently
         # a no-op and the seeded path goes untested. `cp -L` dereferences the
         # symlink to copy the real binary.
+        # `spin` (spinel's project tool, a native binary spinel compiles
+        # from tools/spin.rb) ships too: the spinel archive is a spin
+        # package and smoke-spinel's README blocks drive `spin build` /
+        # `spin test`. spin locates the compiler as its PATH sibling.
         run: |
           mkdir spinel-dist
           cp -L spinel-src/spinel               spinel-dist/spinel
+          cp    spinel-src/bin/spin             spinel-dist/spin
           cp    spinel-src/build/spinel_rbs_extract spinel-dist/
           cp -R spinel-src/lib                  spinel-dist/lib
       - name: Upload spinel toolchain
@@ -527,7 +532,7 @@ jobs:
           path: spinel-dist
       - name: Stage spinel binaries
         run: |
-          chmod +x spinel-dist/spinel spinel-dist/spinel_rbs_extract
+          chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: cargo test --test framework_tests_spinel -- --ignored
         run: cargo test --test framework_tests_spinel -- --ignored --nocapture
@@ -609,7 +614,7 @@ jobs:
           path: spinel-dist
       - name: Stage spinel binaries
         run: |
-          chmod +x spinel-dist/spinel spinel-dist/spinel_rbs_extract
+          chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: Install libsqlite3-dev
         run: sudo apt-get update -qq && sudo apt-get install -y libsqlite3-dev
@@ -1061,7 +1066,7 @@ jobs:
           path: spinel-dist
       - name: Stage spinel binaries
         run: |
-          chmod +x spinel-dist/spinel spinel-dist/spinel_rbs_extract
+          chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: Install libsqlite3-dev
         run: sudo apt-get update -qq && sudo apt-get install -y libsqlite3-dev
@@ -1425,7 +1430,7 @@ jobs:
           path: spinel-dist
       - name: Stage spinel binaries
         run: |
-          chmod +x spinel-dist/spinel spinel-dist/spinel_rbs_extract
+          chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: Install libsqlite3-dev
         run: sudo apt-get update -qq && sudo apt-get install -y libsqlite3-dev
