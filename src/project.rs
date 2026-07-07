@@ -1407,7 +1407,8 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
 /// query_count_test carve-out: pre-existing spinel C error on
 /// `Db.query_log` (`sp_StrArray*` vs `sp_RbVal`; survives full RBS
 /// seeding) — the test was never in the Makefile's SPINEL_TESTS lane
-/// either. It ships in `test/cruby/` until that gap closes.
+/// either. Filed as matz/spinel#1793; it ships in `test/cruby/` until
+/// that closes.
 fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, String> {
     use std::collections::HashSet;
 

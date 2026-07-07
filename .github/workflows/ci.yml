@@ -512,9 +512,12 @@ jobs:
   #       String)`, the annotation the issue's own repro confirms makes
   #       spinel box. So (b) no longer needs the spinel fix and no longer
   #       appears in the log.
-  # continue-on-error stays ON despite the local pass: (a)/(b) are
-  # roundhouse-side workarounds for open spinel bugs, not upstream fixes,
-  # so the gate is still advisory until #1275 lands and CI confirms green.
+  # #1275 and #1255 have since closed upstream (2026-07 audit); (a)'s
+  # direct ivar write is idiomatic-ctor Ruby and (b)'s sidecar is typed
+  # surface we want anyway, so neither is reverted. continue-on-error
+  # stays ON for the same structural reason as toolchain-spinel below:
+  # every spinel job tracks matz/spinel master UNPINNED, so it surfaces
+  # regressions without letting upstream churn gate unrelated work.
   # `ar_base` is disabled in-test (b453fcf) pending real-sqlite
   # rewiring of the test_helper.
   framework-tests-spinel:

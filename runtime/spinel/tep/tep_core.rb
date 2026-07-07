@@ -3,9 +3,7 @@ module Tep
 
   def self.str_hash
     # Missing-key reads must return "" — the tep readers assume it (parser.rb
-    # cookie handling, request.rb Connection/Content-Type, etc.). Needs
-    # matz/spinel#1680: an empty hash returned from a method currently infers
-    # as `void` and fails to compile; smoke-spinel stays red until that lands.
+    # cookie handling, request.rb Connection/Content-Type, etc.).
     Hash.new("")
   end
 
