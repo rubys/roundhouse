@@ -58,9 +58,13 @@ pub fn model_set(models: &[Model]) -> HashSet<ClassId> {
 pub struct AssocRegistry {
     /// (model, association name) -> `"<target_table> ON <cond>"`; the
     /// rewrite prefixes `INNER JOIN` / `LEFT OUTER JOIN` by call. Direct
-    /// `belongs_to`/`has_many`/`has_one` only — `:through` and habtm are
-    /// absent, so their `joins(:sym)` is left untouched (visible at
-    /// runtime rather than silently mis-joined).
+    /// `belongs_to`/`has_many`/`has_one`, plus resolvable `has_many
+    /// :through` — a through tail carries its own second `INNER JOIN`, so
+    /// a `left_outer_joins(:through_assoc)` would outer-join only the
+    /// first hop (no such call exists in the exercised apps; revisit if
+    /// one appears). Habtm and unresolvable through shapes stay absent,
+    /// so their `joins(:sym)` is left untouched (visible at runtime
+    /// rather than silently mis-joined).
     join_tails: HashMap<(ClassId, Symbol), String>,
     /// (model, belongs_to name) -> foreign-key column, for
     /// `where(user: user)` -> `where(user_id: user && user.id)`.
@@ -100,6 +104,41 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     reg.join_tails.insert(
                         (m.name.clone(), name.clone()),
                         format!("{t} ON {t}.{foreign_key} = {own}.id"),
+                    );
+                }
+                // `has_many :through`: two hops, owner-side direction
+                // (`Tag.joins(:stories)` → JOIN taggings ON tag_id, JOIN
+                // stories ON story_id). Same fk resolution as the
+                // through-reader lowering: the through association names
+                // the join model; its `belongs_to` matching the assoc's
+                // target class supplies the source fk (survives `source:`
+                // renames, which ingest folds into `target`).
+                Association::HasMany { name, target, through: Some(thr_name), .. } => {
+                    let Some(Association::HasMany { target: thr_target, foreign_key: thr_fk, .. }) =
+                        m.associations().find(|a| {
+                            matches!(a, Association::HasMany { name, .. } if name == thr_name)
+                        })
+                    else {
+                        continue;
+                    };
+                    let Some(thr_model) = models.iter().find(|tm| &tm.name == thr_target) else {
+                        continue;
+                    };
+                    let Some(Association::BelongsTo { foreign_key: src_fk, .. }) =
+                        thr_model.associations().find(|a| {
+                            matches!(a, Association::BelongsTo { target: t, .. } if t == target)
+                        })
+                    else {
+                        continue;
+                    };
+                    let thr_table = pluralize_snake(thr_target.0.as_str());
+                    let target_table = pluralize_snake(target.0.as_str());
+                    reg.join_tails.insert(
+                        (m.name.clone(), name.clone()),
+                        format!(
+                            "{thr_table} ON {thr_table}.{thr_fk} = {own}.id \
+                             INNER JOIN {target_table} ON {target_table}.id = {thr_table}.{src_fk}"
+                        ),
                     );
                 }
                 _ => {}
@@ -827,5 +866,71 @@ mod tests {
             ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "id"
         ));
         assert!(matches!(&*v.node, ExprNode::Var { .. }));
+    }
+
+    // ---- build_assoc_registry: has_many :through ----------------------
+
+    fn ingest(src: &str, path: &str) -> crate::dialect::Model {
+        crate::ingest::ingest_model(src.as_bytes(), path, &crate::schema::Schema::default())
+            .expect("ingest")
+            .expect("model")
+    }
+
+    #[test]
+    fn registry_resolves_has_many_through_join_tails() {
+        // Tag.joins(:stories) — owner-side two-hop tail through taggings.
+        let tag = ingest(
+            "class Tag < ApplicationRecord\n  has_many :taggings\n  has_many :stories, through: :taggings\nend\n",
+            "app/models/tag.rb",
+        );
+        let tagging = ingest(
+            "class Tagging < ApplicationRecord\n  belongs_to :tag\n  belongs_to :story\nend\n",
+            "app/models/tagging.rb",
+        );
+        let reg = build_assoc_registry(&[tag, tagging]);
+        assert_eq!(
+            reg.join_tail(&ClassId(Symbol::from("Tag")), &Symbol::from("stories")),
+            Some(
+                &"taggings ON taggings.tag_id = tags.id \
+                   INNER JOIN stories ON stories.id = taggings.story_id"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn registry_through_source_rename_resolves_by_target_class() {
+        // `has_many :upvoted_stories, through: :votes, source: :story` —
+        // ingest folds `source:` into the target class (Story); the through
+        // model's `belongs_to :story` supplies the source fk.
+        let user = ingest(
+            "class User < ApplicationRecord\n  has_many :votes\n  has_many :upvoted_stories, through: :votes, source: :story\nend\n",
+            "app/models/user.rb",
+        );
+        let vote = ingest(
+            "class Vote < ApplicationRecord\n  belongs_to :user\n  belongs_to :story\nend\n",
+            "app/models/vote.rb",
+        );
+        let reg = build_assoc_registry(&[user, vote]);
+        assert_eq!(
+            reg.join_tail(&ClassId(Symbol::from("User")), &Symbol::from("upvoted_stories")),
+            Some(
+                &"votes ON votes.user_id = users.id \
+                   INNER JOIN stories ON stories.id = votes.story_id"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn registry_skips_unresolvable_through() {
+        // Through model absent from the set → no tail; joins(:stories)
+        // stays a visible runtime symbol, not a guessed JOIN.
+        let tag = ingest(
+            "class Tag < ApplicationRecord\n  has_many :taggings\n  has_many :stories, through: :taggings\nend\n",
+            "app/models/tag.rb",
+        );
+        let reg = build_assoc_registry(&[tag]);
+        assert!(reg.join_tail(&ClassId(Symbol::from("Tag")), &Symbol::from("stories")).is_none());
     }
 }
