@@ -221,6 +221,23 @@ fn walk_decl_body<'pr>(
             constants.push((name, value));
             continue;
         }
+        // `@@X = nil` class-body initializer. The corpus pairs these with
+        // `cattr_accessor` (extras/keybase, github, twitter) — class-var
+        // reads in class-method bodies normalize to class-level ivars
+        // (see below), and an unset class-level ivar already reads nil,
+        // so the nil form drops as semantically exact. A non-nil
+        // initializer would be silently lost; refuse it loudly until one
+        // exists.
+        if let Some(cvw) = stmt.as_class_variable_write_node() {
+            let value = ingest_expr(&cvw.value(), file)?;
+            if !matches!(&*value.node, ExprNode::Lit { value: crate::expr::Literal::Nil }) {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: "class-variable initializer with non-nil value".into(),
+                });
+            }
+            continue;
+        }
         if let Some(def) = stmt.as_def_node() {
             let mut m = ingest_library_method(&def, owner, file)?;
             if force_class_receiver || module_function_active {
@@ -327,7 +344,43 @@ fn walk_decl_body<'pr>(
         // surface as separate entries via the plural API.
     }
 
+    // Class-variable reads/writes in CLASS-receiver bodies normalize to
+    // class-level ivars — the storage `cattr_accessor`'s synthesized
+    // accessors use — so `@@DOMAIN.present?` in `def self.enabled?` and
+    // `Keybase.DOMAIN=` agree (verbatim `@@X` in the emitted class method
+    // is a NameError when unassigned; class-level `@X` reads nil).
+    // Instance-method bodies are left alone: `@X` there would be
+    // instance storage, a different variable — a verbatim `@@X` failing
+    // loudly at runtime beats silently splitting the storage.
+    for m in &mut methods {
+        if m.receiver == MethodReceiver::Class {
+            normalize_classvars_to_ivars(&mut m.body);
+        }
+    }
+
     Ok((includes, methods, constants))
+}
+
+/// Rewrite `@@X` (ingested as a sigil-verbatim `Var`) to `Ivar { X }`,
+/// both in read position and as an `Assign` target.
+fn normalize_classvars_to_ivars(e: &mut Expr) {
+    match &mut *e.node {
+        ExprNode::Var { name, .. } if name.as_str().starts_with("@@") => {
+            let bare = Symbol::from(&name.as_str()[2..]);
+            *e.node = ExprNode::Ivar { name: bare };
+        }
+        ExprNode::Assign { target: LValue::Var { name, .. }, .. }
+            if name.as_str().starts_with("@@") =>
+        {
+            let bare = Symbol::from(&name.as_str()[2..]);
+            let ExprNode::Assign { target, value } = &mut *e.node else { unreachable!() };
+            *target = LValue::Ivar { name: bare };
+            normalize_classvars_to_ivars(value);
+        }
+        _ => {
+            e.node.for_each_child_mut(&mut |c| normalize_classvars_to_ivars(c));
+        }
+    }
 }
 
 /// Synthesize `def <name>; @<name>; end` (instance receiver) or

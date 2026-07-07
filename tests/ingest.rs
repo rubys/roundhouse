@@ -1015,3 +1015,82 @@ fn survey_mode_keeps_the_class_when_one_body_item_is_unsupported() {
         "the failing item is recorded as a gap"
     );
 }
+
+#[test]
+fn cattr_classvar_bodies_normalize_to_class_ivars() {
+    use roundhouse::ingest::ingest_library_classes;
+    use roundhouse::{Expr, ExprNode};
+
+    // The extras/keybase.rb shape: cattr_accessor storage and verbatim
+    // `@@X` reads must agree (class-level ivar), and the `@@X = nil`
+    // body initializer drops as semantically exact.
+    let src = br#"class Keybase
+  cattr_accessor :DOMAIN
+
+  @@DOMAIN = nil
+
+  def self.enabled?
+    @@DOMAIN.present?
+  end
+end
+"#;
+    let classes = ingest_library_classes(src, "extras/keybase.rb").expect("ingest");
+    let kb = &classes[0];
+
+    fn has_classvar(e: &Expr) -> bool {
+        let mut found = false;
+        fn walk(e: &Expr, found: &mut bool) {
+            if let ExprNode::Var { name, .. } = &*e.node {
+                if name.as_str().starts_with("@@") {
+                    *found = true;
+                }
+            }
+            e.node.for_each_child(&mut |c| walk(c, found));
+        }
+        walk(e, &mut found);
+        found
+    }
+    fn reads_ivar(e: &Expr, ivar: &str) -> bool {
+        let mut found = false;
+        fn walk(e: &Expr, ivar: &str, found: &mut bool) {
+            if let ExprNode::Ivar { name } = &*e.node {
+                if name.as_str() == ivar {
+                    *found = true;
+                }
+            }
+            e.node.for_each_child(&mut |c| walk(c, ivar, found));
+        }
+        walk(e, ivar, &mut found);
+        found
+    }
+
+    let enabled = kb
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "enabled?")
+        .expect("enabled? ingested");
+    assert!(
+        !has_classvar(&enabled.body) && reads_ivar(&enabled.body, "DOMAIN"),
+        "class-method @@DOMAIN read should normalize to the @DOMAIN class ivar"
+    );
+    // The cattr_accessor reader uses the same storage.
+    let reader = kb
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "DOMAIN")
+        .expect("cattr reader synthesized");
+    assert!(reads_ivar(&reader.body, "DOMAIN"), "accessor reads @DOMAIN");
+}
+
+#[test]
+fn non_nil_classvar_initializer_is_refused() {
+    use roundhouse::ingest::ingest_library_classes;
+
+    // A non-nil `@@X = <expr>` initializer can't be dropped silently —
+    // strict ingest refuses it (survey mode records the gap per-item).
+    let src = b"class Twitter\n  @@TIMEOUT = 30\nend\n";
+    assert!(
+        ingest_library_classes(src, "extras/twitter.rb").is_err(),
+        "non-nil class-variable initializer must not be silently dropped"
+    );
+}
