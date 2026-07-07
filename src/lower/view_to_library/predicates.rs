@@ -16,7 +16,10 @@ use super::send;
 /// sides; other shapes pass through unchanged.
 ///
 /// When `recv` is a known-nullable local (a view's extra_param with a
-/// `nil` default), the nil-safe form is generated instead:
+/// `nil` default) — or a nilable-scalar reader through a record
+/// (`nilable_reads`: typed_store attributes with no default, which read
+/// nil when unset; `showing_user.github_username.present?`) — the
+/// nil-safe form is generated instead:
 ///   `notice.present?`  →  `!notice.nil? && !notice.empty?`
 ///   `notice.empty?`    →  `notice.nil? || notice.empty?`
 /// matching spinel-blog's hand-written guards. Without the nil check
@@ -37,6 +40,7 @@ pub(super) fn rewrite_predicates(
     cond: &Expr,
     nullable: &std::collections::HashSet<String>,
     refs: &std::collections::HashSet<String>,
+    nilable_reads: &std::collections::HashSet<String>,
 ) -> Expr {
     let new_node = match &*cond.node {
         ExprNode::Send {
@@ -46,7 +50,7 @@ pub(super) fn rewrite_predicates(
             block: None,
             ..
         } if args.is_empty() => {
-            let rewritten_recv = rewrite_predicates(r, nullable, refs);
+            let rewritten_recv = rewrite_predicates(r, nullable, refs, nilable_reads);
             // Bareword references (Rails flash helpers like `notice`) are
             // parsed as `Send { recv: None, method: <name>, args: [] }`
             // until something binds them as Vars; accept either shape.
@@ -64,6 +68,14 @@ pub(super) fn rewrite_predicates(
                 // `!flash[f].empty?` (nil crash where Rails says false).
                 ExprNode::Send { recv: Some(_), method, .. }
                     if method.as_str() == "[]" => true,
+                // A nilable-scalar reader through a record — a
+                // typed_store attribute with no default reads nil when
+                // unset, so its emptiness predicates need the guard.
+                ExprNode::Send { recv: Some(_), method, args, block: None, .. }
+                    if args.is_empty() =>
+                {
+                    nilable_reads.contains(method.as_str())
+                }
                 _ => false,
             };
             // Record-reference read: an association-reader name or a
@@ -159,14 +171,14 @@ pub(super) fn rewrite_predicates(
         ExprNode::BoolOp { op, surface, left, right } => ExprNode::BoolOp {
             op: *op,
             surface: *surface,
-            left: rewrite_predicates(left, nullable, refs),
-            right: rewrite_predicates(right, nullable, refs),
+            left: rewrite_predicates(left, nullable, refs, nilable_reads),
+            right: rewrite_predicates(right, nullable, refs, nilable_reads),
         },
         ExprNode::Send { recv, method, args, block, parenthesized } => ExprNode::Send {
-            recv: recv.as_ref().map(|r| rewrite_predicates(r, nullable, refs)),
+            recv: recv.as_ref().map(|r| rewrite_predicates(r, nullable, refs, nilable_reads)),
             method: method.clone(),
-            args: args.iter().map(|a| rewrite_predicates(a, nullable, refs)).collect(),
-            block: block.as_ref().map(|b| rewrite_predicates(b, nullable, refs)),
+            args: args.iter().map(|a| rewrite_predicates(a, nullable, refs, nilable_reads)).collect(),
+            block: block.as_ref().map(|b| rewrite_predicates(b, nullable, refs, nilable_reads)),
             parenthesized: *parenthesized,
         },
         other => other.clone(),

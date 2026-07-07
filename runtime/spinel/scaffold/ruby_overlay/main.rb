@@ -27,6 +27,9 @@ require "time"
 # models/extras) reaches stdlib CGI directly; Rails gets it via
 # ActiveSupport, the CRuby tree gets it here.
 require "cgi"
+# stdlib ERB for app code that escapes explicitly (`ERB::Util.html_escape`
+# in lobsters' Hat#to_html_label) — the util module, not the templating.
+require "erb"
 
 # SqliteAdapter is hoisted to top-level so the spinel-AOT compile
 # can statically resolve the `SqliteAdapter` constant referenced
@@ -63,6 +66,7 @@ require_relative "runtime/active_support_try"
 require_relative "runtime/active_support_core_ext"
 require_relative "runtime/action_view_date_helper"
 require_relative "runtime/action_view_number_helper"
+require_relative "runtime/action_view_capture_helper"
 require_relative "runtime/active_record"
 require_relative "runtime/active_record_bang"
 require_relative "runtime/active_record_arel"

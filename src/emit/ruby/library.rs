@@ -341,6 +341,8 @@ fn is_framework_view_helper(name: &str) -> bool {
             | "raw"
             | "link_to"
             | "content_for?"
+            | "capture"
+            | "concat"
     )
 }
 
@@ -507,7 +509,30 @@ fn rewrite_helper_calls(
     if let Some(path) = path {
         let span = expr.span;
         let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
-        let ExprNode::Send { method, args, block, .. } = node else { unreachable!() };
+        let ExprNode::Send { method, mut args, block, .. } = node else { unreachable!() };
+        // `link_to(37, url)` — Rails stringifies the text arg; the runtime
+        // link_to is deliberately monomorphic (String text), so coercion
+        // belongs here at the call boundary. Literal strings stay bare.
+        if matches!(method.as_str(), "link_to" | "link_to_raw") {
+            if let Some(text) = args.first_mut() {
+                if !matches!(
+                    &*text.node,
+                    ExprNode::Lit { value: crate::expr::Literal::Str { .. } }
+                ) {
+                    let inner = std::mem::replace(
+                        &mut *text.node,
+                        ExprNode::Seq { exprs: vec![] },
+                    );
+                    *text.node = ExprNode::Send {
+                        recv: Some(Expr::new(text.span, inner)),
+                        method: Symbol::from("to_s"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    };
+                }
+            }
+        }
         *expr.node = ExprNode::Send {
             recv: Some(Expr::new(span, ExprNode::Const { path })),
             method,
@@ -1826,6 +1851,7 @@ fn sym_key_to_str(e: &mut Expr) {
 /// predicate spelling. Lives on the Ruby emit path (the bodies call a
 /// CRuby-overlay module); strict no-op for apps without the DSL.
 pub(crate) fn apply_typed_store_lowering(lcs: &mut [LibraryClass], app: &App) {
+    use crate::lower::typed_store::typed_store_decls;
     for model in &app.models {
         let stores = typed_store_decls(&model.body);
         if stores.is_empty() {
@@ -1867,101 +1893,9 @@ pub(crate) fn apply_typed_store_lowering(lcs: &mut [LibraryClass], app: &App) {
     }
 }
 
-struct TypedStoreAttr {
-    name: Symbol,
-    is_bool: bool,
-    default: Option<Expr>,
-}
-
-/// Parse every `typed_store :<col> do |s| … end` declaration in a
-/// model body into (column, attributes) pairs. Attribute lines are
-/// `s.<type> :name[, default: <lit>, …]` sends on the block param;
-/// anything else inside the block is ignored.
-fn typed_store_decls(
-    body: &[crate::dialect::ModelBodyItem],
-) -> Vec<(Symbol, Vec<TypedStoreAttr>)> {
-    let mut out = Vec::new();
-    for item in body {
-        let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else {
-            continue;
-        };
-        let ExprNode::Send { recv: None, method, args, block: Some(block), .. } =
-            &*expr.node
-        else {
-            continue;
-        };
-        if method.as_str() != "typed_store" {
-            continue;
-        }
-        let Some(col) = args.iter().find_map(|a| match &*a.node {
-            ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => {
-                Some(value.clone())
-            }
-            _ => None,
-        }) else {
-            continue;
-        };
-        let ExprNode::Lambda { params, body: block_body, .. } = &*block.node else {
-            continue;
-        };
-        let Some(block_var) = params.first() else { continue };
-        let stmts: Vec<&Expr> = match &*block_body.node {
-            ExprNode::Seq { exprs } => exprs.iter().collect(),
-            _ => vec![block_body],
-        };
-        let mut attrs = Vec::new();
-        for stmt in stmts {
-            let ExprNode::Send { recv: Some(r), method: ty_m, args: a_args, .. } =
-                &*stmt.node
-            else {
-                continue;
-            };
-            let recv_is_block_var = matches!(
-                &*r.node,
-                ExprNode::Var { name, .. } if name == block_var
-            );
-            if !recv_is_block_var {
-                continue;
-            }
-            let Some(name) = a_args.iter().find_map(|a| match &*a.node {
-                ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => {
-                    Some(value.clone())
-                }
-                _ => None,
-            }) else {
-                continue;
-            };
-            let default = a_args.iter().find_map(|a| match &*a.node {
-                ExprNode::Hash { entries, .. } => {
-                    entries.iter().find_map(|(k, v)| {
-                        let is_default_key = match &*k.node {
-                            ExprNode::Lit {
-                                value: crate::expr::Literal::Sym { value },
-                            } => value.as_str() == "default",
-                            ExprNode::Lit {
-                                value: crate::expr::Literal::Str { value },
-                            } => value == "default",
-                            _ => false,
-                        };
-                        if is_default_key { Some(v.clone()) } else { None }
-                    })
-                }
-                _ => None,
-            });
-            attrs.push(TypedStoreAttr {
-                name,
-                is_bool: ty_m.as_str() == "boolean",
-                default,
-            });
-        }
-        if !attrs.is_empty() {
-            out.push((col, attrs));
-        }
-    }
-    out
-}
-
 /// `TypedStore.read(@<col>, "<name>", <default|nil>)`.
+use crate::lower::typed_store::TypedStoreAttr;
+
 fn typed_store_read_body(col: &Symbol, a: &TypedStoreAttr) -> Expr {
     let default = a.default.clone().unwrap_or_else(|| {
         sp_expr(ExprNode::Lit { value: crate::expr::Literal::Nil })

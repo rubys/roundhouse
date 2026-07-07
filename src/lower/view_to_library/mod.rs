@@ -354,6 +354,7 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         form_records: Vec::new(),
         nullable_locals: nullable,
         reference_reads: std::rc::Rc::new(reference_reader_names(app)),
+        nilable_scalar_reads: std::rc::Rc::new(nilable_scalar_reader_names(app)),
         stylesheets: app.stylesheets.clone(),
         partial_ivars: closures.clone(),
         dyn_pools: dyn_pools.clone(),
@@ -1894,6 +1895,11 @@ pub(super) struct ViewCtx {
     /// on a reference read to the nil test instead of the `empty?` form
     /// (`story.domain.present?` → `!story.domain.nil?`).
     pub(super) reference_reads: std::rc::Rc<std::collections::HashSet<String>>,
+    /// Nilable-scalar reader names through a record: typed_store
+    /// attributes with no default (nil when unset). Emptiness
+    /// predicates on these get the nil-safe forms (see
+    /// `rewrite_predicates`). Empty for apps without the DSL.
+    pub(super) nilable_scalar_reads: std::rc::Rc<std::collections::HashSet<String>>,
     /// Stylesheet logical names ingested from `app/assets/stylesheets/`
     /// + `app/assets/builds/`. Used by the `stylesheet_link_tag(:app,
     /// ...)` expansion: a `:app` symbol arg fans out to one call per
@@ -1917,6 +1923,24 @@ pub(super) struct ViewCtx {
 /// — the single-record readers whose result is a record or nil (see
 /// `ViewCtx::reference_reads`). has_many names stay out: collections keep
 /// the `empty?`-based predicate forms.
+/// Non-bool `typed_store` attribute names with no default across the
+/// app's models — readers that yield nil when the attribute is unset.
+/// Bool attributes stay out (their read sites are truthiness tests,
+/// and the synthesized `<name>?` predicate handles the Rails form).
+fn nilable_scalar_reader_names(app: &App) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for m in &app.models {
+        for (_col, attrs) in crate::lower::typed_store::typed_store_decls(&m.body) {
+            for a in attrs {
+                if !a.is_bool && a.nilable() {
+                    out.insert(a.name.as_str().to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 fn reference_reader_names(app: &App) -> std::collections::HashSet<String> {
     use crate::dialect::Association;
     let mut out = std::collections::HashSet::new();

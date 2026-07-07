@@ -43,6 +43,20 @@ class String
     empty? || match?(/\A[[:space:]]*\z/)
   end
 
+  # `html_safe` — identity in this string world. There is no SafeBuffer:
+  # escaping is decided positionally (the view walker escapes bare
+  # interpolations and leaves tag-producing/helper calls raw), so a
+  # string an app marks safe is simply itself. `html_safe?` answers true
+  # for the same reason — by the time a string is asked, positional
+  # escaping has already happened.
+  def html_safe
+    self
+  end
+
+  def html_safe?
+    true
+  end
+
   # `'story'.pluralize(count)` — singular when count == 1, else the
   # plural form. Every corpus call site passes a count; the inflection
   # applies to the string's tail, matching AS ("#{n} story".pluralize(n)

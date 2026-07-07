@@ -109,7 +109,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             vec![Expr::new(
                 Span::synthetic(),
                 ExprNode::If {
-                    cond: rewrite_predicates(cond, &ctx.nullable_locals, &ctx.reference_reads),
+                    cond: rewrite_predicates(cond, &ctx.nullable_locals, &ctx.reference_reads, &ctx.nilable_scalar_reads),
                     then_branch: then_body,
                     else_branch: else_body,
                 },
@@ -369,6 +369,19 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     // `io << ViewHelpers.html_escape(article.title)`. This matches
     // Rails's default behavior on `<%= %>` outside of helper output.
     //
+    // `<%= h(x) %>` — ERB's escape alias asks for exactly what the
+    // default already does; unwrap it so the auto-escape applies once
+    // rather than twice (nested `h` is handled — and double-escapes,
+    // as in Rails — inside rewrite_helpers_in_expr).
+    let mut inner = inner;
+    while let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
+        if method.as_str() == "h" && args.len() == 1 {
+            inner = &args[0];
+        } else {
+            break;
+        }
+    }
+    //
     // Before wrapping, recurse through the expression and rewrite
     // any nested helper Sends to their ViewHelpers.* form so shapes
     // like `<%= content_for(:title) || "Real Blog" %>` (a BoolOp
@@ -445,6 +458,21 @@ fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
                     call.inherit_span(e.span);
                     return call;
                 }
+            }
+            // ERB's `h` alias, in a nested/statement position: an explicit
+            // escape call. (Nested `h` inside an escaped interpolation
+            // double-escapes — as it does in Rails, where interpolating a
+            // safe string into a plain one drops safety and the outer
+            // `<%= %>` escapes again.) The top-level `<%= h(x) %>` shape
+            // never reaches here — the append path unwraps it so the
+            // default auto-escape applies exactly once.
+            if method.as_str() == "h" && args.len() == 1 {
+                let mut call = view_helpers_call(
+                    "html_escape",
+                    vec![coerce_to_s(rewrite_helpers_in_expr(&args[0], ctx))],
+                );
+                call.inherit_span(e.span);
+                return call;
             }
             ExprNode::Send {
                 recv: None,
@@ -552,6 +580,7 @@ mod tests {
             form_records: Vec::new(),
             nullable_locals: Default::default(),
             reference_reads: Default::default(),
+            nilable_scalar_reads: Default::default(),
             stylesheets: Vec::new(),
             partial_ivars: Default::default(),
             dyn_pools: Default::default(),
