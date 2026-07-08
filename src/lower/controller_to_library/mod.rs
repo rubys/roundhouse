@@ -636,7 +636,7 @@ fn build_filter_preamble(
     };
 
     let mut preamble: Vec<PreambleStmt> = Vec::new();
-    let mut push_call = |f: &Filter, preamble: &mut Vec<PreambleStmt>| {
+    let push_call = |f: &Filter, preamble: &mut Vec<PreambleStmt>| {
         if skipped.contains(&f.target) {
             return;
         }

@@ -19,7 +19,7 @@ use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
 use crate::ty::Ty;
 
-use super::{fn_sig, lit_float, lit_int, lit_sym, seq};
+use super::{fn_sig, seq};
 
 pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) {
     let mut stmts: Vec<Expr> = Vec::new();
@@ -93,19 +93,6 @@ fn validation_rule_to_calls(attr: &Symbol, rule: &ValidationRule, attr_ty: Optio
             Vec::new()
         }
     }
-}
-
-fn helper_call(name: &str, args: Vec<Expr>) -> Expr {
-    Expr::new(
-        Span::synthetic(),
-        ExprNode::Send {
-            recv: None,
-            method: Symbol::from(name),
-            args,
-            block: None,
-            parenthesized: true,
-        },
-    )
 }
 
 /// Inline `belongs_to` presence check (Rails 5+ default — every

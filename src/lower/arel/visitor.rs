@@ -20,7 +20,7 @@ use crate::span::Span;
 use crate::ty::Ty;
 
 use super::ir::{
-    ArelOp, Assignment, ColumnSpec, Delete, Insert, Predicate, PreloadDirective, Select, Update,
+    ArelOp, ColumnSpec, Delete, Insert, Predicate, PreloadDirective, Select, Update,
     Value, ValueType,
 };
 

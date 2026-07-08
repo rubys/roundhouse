@@ -7,7 +7,7 @@
 use indexmap::IndexMap;
 use roundhouse::{
     Action, App, ClassId, Column, ColumnType, Controller, Effect, EffectSet, Expr, ExprNode,
-    HttpMethod, Literal, Model, RenderTarget, Route, RouteTable, Row, Schema, Symbol, Table,
+    HttpMethod, Literal, Model, RenderTarget, RouteTable, Row, Schema, Symbol, Table,
     TableRef, Ty,
 };
 use roundhouse::span::Span;

@@ -6,7 +6,7 @@ use roundhouse::dialect::{Association, CallbackHook, Dependent, ValidationRule};
 use roundhouse::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
 use roundhouse::ingest::ingest_app;
 use roundhouse::schema::ColumnType;
-use roundhouse::{HttpMethod, RenderTarget};
+use roundhouse::HttpMethod;
 
 fn fixture_path() -> &'static Path {
     Path::new("fixtures/tiny-blog")

@@ -705,13 +705,6 @@ fn emit_node(n: &ExprNode) -> String {
     }
 }
 
-/// In Crystal, `rescue ex` requires an exception class type when a
-/// binding name is used (`rescue ex : Exception`). Helper to render
-/// the type clause; falls back to `Exception` when none was named.
-fn cs_or_exception(_rc: &crate::expr::RescueClause) -> String {
-    "Exception".to_string()
-}
-
 fn emit_bool_op(
     op: crate::expr::BoolOpKind,
     _surface: crate::expr::BoolOpSurface,

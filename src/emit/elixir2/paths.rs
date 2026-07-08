@@ -23,6 +23,9 @@ pub(crate) enum OutputKind<'a> {
     /// A transpiled per-controller app module (`<Name>Controller`),
     /// produced from the lowered controller `LibraryClass`. Filename is
     /// the snake-cased module name (`articles_controller.ex`).
+    // Constructed by the gated Phase C controller-emit path (elixir2
+    // app-shell), which is not yet committed on main.
+    #[allow(dead_code)]
     Controller { file_name: &'a str },
 
     /// The generated route table (`RoutesTable`) — a list of

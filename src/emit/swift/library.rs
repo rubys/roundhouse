@@ -1284,6 +1284,3 @@ fn try_default_for(ty: &Ty) -> Option<String> {
     })
 }
 
-fn default_for(ty: &Ty) -> String {
-    try_default_for(ty).unwrap_or_else(|| "nil".to_string())
-}

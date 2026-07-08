@@ -870,19 +870,6 @@ fn columns_for_arg(
     out
 }
 
-fn assign_var(name: &str, value: Expr) -> Expr {
-    Expr::new(
-        Span::synthetic(),
-        ExprNode::Assign {
-            target: LValue::Var {
-                id: VarId(0),
-                name: Symbol::from(name),
-            },
-            value,
-        },
-    )
-}
-
 fn const_path(path: &[Symbol]) -> Expr {
     Expr::new(
         Span::synthetic(),
@@ -916,15 +903,6 @@ fn lit_str(s: String) -> Expr {
         Span::synthetic(),
         ExprNode::Lit {
             value: Literal::Str { value: s },
-        },
-    )
-}
-
-fn lit_int(n: i64) -> Expr {
-    Expr::new(
-        Span::synthetic(),
-        ExprNode::Lit {
-            value: Literal::Int { value: n },
         },
     )
 }

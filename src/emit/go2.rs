@@ -1006,18 +1006,6 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
     }
 }
 
-/// Replace the leading `package app` declaration with `package v2`
-/// and inject `import` declarations for stdlib packages the body
-/// references (`cmp`, `fmt`, `regexp`, `slices`, `strings`, `time`).
-/// Go is strict about unused imports so detection is by substring
-/// presence, not always-on.
-/// `Views::Articles` → `ViewsArticles`. Same logic as
-/// `library.rs::sanitize_type_name`, repeated here so the stub-emit
-/// path doesn't need to reach into library internals for a one-liner.
-fn sanitize_module_name(name: &str) -> String {
-    name.replace("::", "")
-}
-
 /// Bundle a flat list of `LibraryFunction`s (e.g. route helpers,
 /// importmap entries) into a module-flavored `LibraryClass` so the
 /// shared `library::emit_library_class_with_registry` pipeline can

@@ -19,7 +19,7 @@ use crate::ident::{ClassId, Symbol};
 use crate::lower::fixtures::{
     LoweredFixture, LoweredFixtureRecord, LoweredFixtureSet, LoweredFixtureValue,
 };
-use crate::lower::typing::{fn_sig, lit_int, lit_str, lit_sym, with_ty};
+use crate::lower::typing::{fn_sig, lit_int, lit_str, with_ty};
 use crate::naming::camelize;
 use crate::span::Span;
 use crate::ty::Ty;

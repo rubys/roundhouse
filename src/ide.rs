@@ -1495,7 +1495,7 @@ pub fn traceroute(app: &App, query: &str) -> Option<Trace> {
     // own includes.
     let target_search: Vec<ClassId> = {
         let mut out: Vec<ClassId> = Vec::new();
-        let mut push = |id: &ClassId, out: &mut Vec<ClassId>| {
+        let push = |id: &ClassId, out: &mut Vec<ClassId>| {
             if !out.contains(id) {
                 out.push(id.clone());
             }
@@ -2099,7 +2099,7 @@ pub fn trace_gap_report(
     let mut boundaries: Vec<((String, String), usize)> = Vec::new();
     // Files applicable hops run through, for the ingest-gap sweep.
     let mut hop_files: Vec<(String, usize)> = Vec::new();
-    let mut touch_file = |files: &mut Vec<(String, usize)>, f: &Option<String>| {
+    let touch_file = |files: &mut Vec<(String, usize)>, f: &Option<String>| {
         let Some(f) = f else { return };
         match files.iter_mut().find(|(p, _)| p == f) {
             Some((_, n)) => *n += 1,

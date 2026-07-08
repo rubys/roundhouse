@@ -420,16 +420,8 @@ fn collect_async_method_names(classes: &[LibraryClass]) -> HashSet<Symbol> {
     out
 }
 
-/// Returns true if `expr` (or any subexpression) contains a
-/// `Send` whose method name is in `async_names` AND whose
-/// receiver isn't a known-sync type. Walks every Expr-bearing
-/// variant of `ExprNode`. Lambda bodies are traversed as part of
-/// the enclosing method.
-fn body_calls_async(expr: &Expr, async_names: &HashSet<Symbol>) -> bool {
-    body_calls_async_with_params(expr, async_names, &HashSet::new())
-}
-
-/// Variant that takes the enclosing method's parameter names.
+/// Walks every Expr-bearing variant of `ExprNode`, taking the
+/// enclosing method's parameter names.
 /// Bare `Send { recv: None, method }` whose method matches one of
 /// the parameter names is treated as a Var read (Ruby's
 /// implicit-self resolves to the local), not a method dispatch —
@@ -1261,7 +1253,7 @@ mod tests {
                             synth_send("from_row", None, vec![]),
                         ),
                         {
-                            let mut m = synth_method_with_body(
+                            let m = synth_method_with_body(
                                 "from_row",
                                 synth_send("count", None, vec![]),
                             );

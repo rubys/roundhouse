@@ -43,7 +43,7 @@
 use std::collections::BTreeMap;
 
 use crate::dialect::{
-    AccessorKind, Action, Controller, LibraryClass, LibraryClassOrigin, MethodDef,
+    AccessorKind, Controller, LibraryClass, LibraryClassOrigin, MethodDef,
     MethodReceiver, Param,
 };
 use crate::effect::EffectSet;

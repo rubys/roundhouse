@@ -481,5 +481,5 @@ pub mod nil_to_zero_for_string_fields {
     }
 
     // Re-exported by parent for tests / pipeline.
-    pub(super) const _: fn(&Symbol) = |_| ();
+     const _: fn(&Symbol) = |_| ();
 }

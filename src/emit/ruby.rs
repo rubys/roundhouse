@@ -925,7 +925,7 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
 /// emits its own require headers, and the companion's headers would
 /// either duplicate or land in the wrong order.
 fn strip_require_headers(content: &str) -> String {
-    let mut lines = content.lines();
+    let lines = content.lines();
     let mut body_start = 0usize;
     let mut idx = 0usize;
     for line in content.lines() {

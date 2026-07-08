@@ -120,10 +120,6 @@ impl CallableRegistry {
         self.methods.get(name)
     }
 
-    pub fn sig_for_function(&self, name: &Symbol) -> Option<&CallableSig> {
-        self.functions.get(name)
-    }
-
     /// Class-scoped method lookup. Returns the sig for `class::method`
     /// when both are registered. Used by the Send walker when the
     /// receiver is a `Const` (class reference) — disambiguates same-
@@ -296,27 +292,6 @@ pub fn color_classes(classes: &mut [LibraryClass], registry: &CallableRegistry) 
     annotated
 }
 
-/// Same as `color_classes` but for a free-function (LibraryFunction)
-/// slice.
-pub fn color_functions(
-    functions: &mut [LibraryFunction],
-    registry: &CallableRegistry,
-) -> usize {
-    let mut annotated = 0;
-    for func in functions.iter_mut() {
-        let return_color = registry
-            .sig_for_function(&func.name)
-            .and_then(|s| s.return_str_color);
-        let mut ctx = WalkCtx {
-        registry,
-        return_color,
-        owned_str_locals: std::collections::HashSet::new(),
-        owned_init_vars: std::collections::HashSet::new(),
-    };
-        annotated += walk(&mut func.body, ParentExpect::None, &mut ctx);
-    }
-    annotated
-}
 
 /// Annotate a single method body. Returns the number of expressions
 /// that received a coercion (0 if every site already agreed).

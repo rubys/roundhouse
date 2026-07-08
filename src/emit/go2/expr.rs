@@ -107,6 +107,8 @@ pub(super) struct EmitCtx {
     /// the emit prepends the target package and registers the import.
     /// Phase 1 invariant: every file is `"v2"`. Defaults to `"v2"` in
     /// `EmitCtx::none()` so existing call sites stay correct.
+    // Read by the not-yet-landed Phase 4.2 cross-package-reference emit.
+    #[allow(dead_code)]
     pub current_pkg: &'static str,
 }
 

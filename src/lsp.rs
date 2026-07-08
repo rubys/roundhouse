@@ -59,7 +59,7 @@ use crate::app::App;
 use crate::diagnostic::{Diagnostic as RhDiagnostic, DiagnosticKind};
 use crate::expr::{Expr, ExprNode, LValue};
 use crate::ide;
-use crate::ident::{ClassId, Symbol};
+use crate::ident::ClassId;
 use crate::ingest::ingest_app_with_vfs;
 use crate::span::Span;
 use crate::ty::Ty;

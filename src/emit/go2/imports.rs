@@ -49,7 +49,8 @@ impl FileImports {
         self.paths.iter().map(String::as_str)
     }
 
-    /// True iff no imports have been registered.
+    /// True iff no imports have been registered. (Test-only for now.)
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.paths.is_empty()
     }

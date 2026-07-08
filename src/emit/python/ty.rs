@@ -48,20 +48,6 @@ pub fn python_ty(ty: &Ty) -> String {
     }
 }
 
-pub(super) fn python_default(ty: &Ty) -> String {
-    match ty {
-        Ty::Int => "0".to_string(),
-        Ty::Float => "0.0".to_string(),
-        Ty::Bool => "False".to_string(),
-        Ty::Str | Ty::Sym => "\"\"".to_string(),
-        Ty::Nil => "None".to_string(),
-        Ty::Array { .. } => "[]".to_string(),
-        Ty::Hash { .. } => "{}".to_string(),
-        Ty::Class { id, .. } if id.0.as_str() == "Time" => "\"\"".to_string(),
-        _ => "None".to_string(),
-    }
-}
-
 pub(super) fn py_literal_for(value: &str, ty: &Ty) -> String {
     match ty {
         Ty::Str | Ty::Sym => format!("{value:?}"),

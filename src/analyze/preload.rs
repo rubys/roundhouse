@@ -328,7 +328,7 @@ fn chain_model(expr: &Expr, index: &ModelIndex) -> Option<ClassId> {
 /// Preloads contributed by a scope body (`scope :with_account, -> {
 /// includes(:account) }`). The body is a chain over implicit self;
 /// `None` when it passes through anything unrecognized.
-fn harvest_scope_body(body: &Expr, index: &ModelIndex, depth: u32) -> Option<BTreeSet<Symbol>> {
+fn harvest_scope_body(body: &Expr, _index: &ModelIndex, depth: u32) -> Option<BTreeSet<Symbol>> {
     if depth > 6 {
         return None;
     }

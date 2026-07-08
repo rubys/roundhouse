@@ -101,17 +101,6 @@ pub(super) fn py_string_literal(s: &str) -> String {
     out
 }
 
-/// Build a comma-separated Python parameter list, prepending the
-/// receiver (`self` or `cls`) when present. Empty trailing args collapse.
-pub(super) fn first_param(receiver: &str, params: &[crate::dialect::Param]) -> String {
-    let mut out = String::from(receiver);
-    for p in params {
-        out.push_str(", ");
-        out.push_str(p.name.as_str());
-    }
-    out
-}
-
 pub(super) fn test_name_snake_py(desc: &str) -> String {
     let mut s: String = desc
         .chars()

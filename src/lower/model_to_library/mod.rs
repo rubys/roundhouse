@@ -1048,13 +1048,6 @@ pub(super) fn lit_int(value: i64) -> Expr {
     )
 }
 
-pub(super) fn lit_float(value: f64) -> Expr {
-    with_ty(
-        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Float { value } }),
-        Ty::Float,
-    )
-}
-
 pub(super) fn nil_lit() -> Expr {
     with_ty(
         Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),

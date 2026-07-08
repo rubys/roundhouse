@@ -4,7 +4,6 @@
 //! controller-action walker.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
 
 use crate::expr::{Expr, ExprNode, IrHint, LValue, Literal, OpAssignOp};
 use crate::ty::Ty;

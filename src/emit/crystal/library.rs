@@ -14,9 +14,8 @@
 //! `src/views/articles/index.cr`). Module/class headers nest naturally
 //! when the class name carries `::` segments (`Views::Articles`).
 
-use std::collections::BTreeSet;
 use std::fmt::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::super::EmittedFile;
 use super::method::emit_method as emit_method_impl;
@@ -24,7 +23,6 @@ use crate::App;
 use crate::dialect::{LibraryClass, LibraryFunction, MethodDef};
 use crate::expr::{Expr, ExprNode, InterpPart};
 use crate::ident::ClassId;
-use crate::naming::snake_case;
 
 /// Emit a synthesized `LibraryClass{is_module:true}` from a list of
 /// `LibraryFunction`s sharing a `module_path`. Mirrors Spinel's

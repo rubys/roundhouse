@@ -4,7 +4,7 @@
 //! (Lit, Var, Send `==`, StringInterp, If). Extended file-by-file
 //! through Phase 2 as each runtime file forces new IR shapes.
 
-use crate::expr::{Expr, ExprNode, InterpPart, IrHint, LValue};
+use crate::expr::{Expr, ExprNode, InterpPart, LValue};
 
 mod assign;
 mod control;

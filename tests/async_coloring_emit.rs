@@ -119,7 +119,7 @@ fn dump_propagation_marks_real_blog() {
         &params_specs_simple,
     );
 
-    let mut view_lower_extras: Vec<(roundhouse::ident::ClassId, roundhouse::analyze::ClassInfo)> =
+    let view_lower_extras: Vec<(roundhouse::ident::ClassId, roundhouse::analyze::ClassInfo)> =
         model_registry.clone().into_iter().collect();
     let mut view_lcs = roundhouse::lower::lower_views_to_library_classes(
         &app.views,

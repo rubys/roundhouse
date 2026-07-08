@@ -15,7 +15,7 @@
 //! Called from the `If` arm in the body-typer's `compute` match.
 
 use crate::expr::{BoolOpKind, Expr, ExprNode, Literal};
-use crate::ident::{ClassId, Symbol, TyVar};
+use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 
 use super::Ctx;

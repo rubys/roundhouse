@@ -16,7 +16,7 @@ use crate::App;
 use crate::dialect::{AccessorKind, LibraryClass, MethodReceiver, Param};
 use crate::expr::{Expr, ExprNode, InterpPart, LValue};
 use crate::ident::{ClassId, Symbol, VarId};
-use crate::naming::{singularize, snake_case};
+use crate::naming::snake_case;
 use crate::span::Span;
 
 pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
@@ -1377,20 +1377,6 @@ fn require_path_for_body_const(
         "RouteHelpers" => Some("app/route_helpers".to_string()),
         _ => None,
     }
-}
-
-/// True when `to_anchor` lives in `from_dir`. Used to drop body-ref
-/// requires for same-dir siblings — Ruby's `require_relative` for a
-/// bare-name target works, but the load order isn't guaranteed when
-/// the file just lazily references the sibling at call time. Same-
-/// dir body refs are skipped (loader picks them up); cross-dir refs
-/// emit an explicit require.
-fn is_same_dir(from_dir: &Path, to_anchor: &str) -> bool {
-    let to_dir: String = to_anchor
-        .rsplit_once('/')
-        .map(|(d, _)| d.to_string())
-        .unwrap_or_default();
-    from_dir.to_str().unwrap_or("") == to_dir
 }
 
 /// Compute a `require_relative`-style relative path from `from_dir` to

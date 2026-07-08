@@ -432,7 +432,6 @@ fn try_string_builder(e: &Expr) -> Option<String> {
             ExprNode::Var { name, .. } => Some(format!("IO.iodata_to_binary({name})")),
             _ => None,
         },
-        _ => None,
     }
 }
 
@@ -1781,7 +1780,7 @@ fn block_accumulators(body: &Expr, params: &[crate::ident::Symbol]) -> Vec<Strin
 /// accumulators), descending into `if` branches, `Seq`s, and nested
 /// accumulating block-calls. See [`block_accumulators`].
 fn collect_block_rebinds(s: &Expr, params: &[crate::ident::Symbol], out: &mut Vec<String>) {
-    let mut add = |name: &str, out: &mut Vec<String>| {
+    let add = |name: &str, out: &mut Vec<String>| {
         if !params.iter().any(|p| p.as_str() == name) && !out.iter().any(|a| a == name) {
             out.push(name.to_string());
         }
@@ -2550,8 +2549,8 @@ mod tests {
 
     #[test]
     fn method_on_typed_local_dispatches_via_struct() {
-        use crate::dialect::{LibraryClass, MethodDef, MethodReceiver, Param, AccessorKind};
-        use crate::effect::EffectSet;
+        
+        
         use crate::ident::ClassId;
         fn sym(s: &str) -> Symbol { Symbol::from(s) }
         fn syn(node: ExprNode) -> Expr { Expr::new(crate::span::Span::synthetic(), node) }
