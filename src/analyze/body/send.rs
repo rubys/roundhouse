@@ -15,7 +15,7 @@ use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 
-use super::{BodyTyper, Ctx, union_many, unknown};
+use super::{BodyTyper, Ctx, union_many, union_of, unknown};
 
 impl<'a> BodyTyper<'a> {
     /// Build the Ctx used to analyze a block passed to `recv.method(...) { |p1, p2| ... }`.
@@ -880,10 +880,11 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
             // `find_by` / `take` on a relation return Element | Nil
             // (same as a class call). Already covered by AR_CATALOG
             // for class receivers; cover the Array<Model> shape here.
+            // union_of, not a literal Union: elem may itself be a
+            // union (`Array<Story|Comment>` from a polymorphic
+            // relation) and must flatten, not nest.
             "find_by" | "take" => {
-                return Ty::Union {
-                    variants: vec![elem.clone(), Ty::Nil],
-                };
+                return union_of(elem.clone(), Ty::Nil);
             }
             // `find_each` / `find_in_batches` yield the elem but
             // return the receiver-relation for chaining.
@@ -1042,10 +1043,17 @@ pub(super) fn record_method(
                     }
                 }
             }
-            // Unknown key → union of all field types + Nil.
-            let mut variants: Vec<Ty> = row.fields.values().cloned().collect();
-            variants.push(Ty::Nil);
-            Ty::Union { variants }
+            // Unknown key → union of all field types + Nil. Folded
+            // through union_many so duplicate field types collapse
+            // (two Str columns must not yield `Str | Str | Nil`) and
+            // union-typed fields flatten instead of nesting.
+            let variants: Vec<Ty> = row
+                .fields
+                .values()
+                .cloned()
+                .chain(std::iter::once(Ty::Nil))
+                .collect();
+            union_many(variants)
         }
         "length" | "size" | "count" => Ty::Int,
         "empty?" | "any?" => Ty::Bool,

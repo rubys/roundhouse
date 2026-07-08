@@ -1141,9 +1141,18 @@ pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
     // breaks binop classification (`Int > (Int | Int)`) and, when an
     // ivar like `@page` accumulates across many actions into the
     // layout-ivar union, nests dozens of levels deep.
+    //
+    // The result is CANONICAL: at most one Hash and one Array spine
+    // (merged pointwise, so the structural join above also fires when
+    // a container arrives wrapped in a Union), variants in a fixed
+    // sort order. Canonical form is what makes `union_of` commutative
+    // and associative under derived `==` — fixpoint convergence checks
+    // and iteration order both depend on that; the lattice-law tests
+    // in this file's test module enforce it.
     let mut variants = Vec::new();
     push_union_variants(a, &mut variants);
     push_union_variants(b, &mut variants);
+    canonicalize_variants(&mut variants);
     match variants.len() {
         0 => Ty::Bottom,
         1 => variants.into_iter().next().unwrap(),
@@ -1153,7 +1162,10 @@ pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
 
 /// Append `t`'s constituent variants to `out`, flattening nested
 /// `Union`s and skipping any variant already present (structural
-/// equality) so the result carries each distinct type once.
+/// equality) so the result carries each distinct type once. A `Hash`
+/// or `Array` merges pointwise into an existing same-spine variant
+/// instead of appending, keeping the union to one spine per container
+/// kind regardless of the order joins arrive in.
 fn push_union_variants(t: Ty, out: &mut Vec<Ty>) {
     match t {
         Ty::Union { variants } => {
@@ -1161,12 +1173,40 @@ fn push_union_variants(t: Ty, out: &mut Vec<Ty>) {
                 push_union_variants(v, out);
             }
         }
+        Ty::Hash { key, value } => {
+            for existing in out.iter_mut() {
+                if let Ty::Hash { key: k0, value: v0 } = existing {
+                    *k0 = Box::new(union_of((**k0).clone(), *key));
+                    *v0 = Box::new(union_of((**v0).clone(), *value));
+                    return;
+                }
+            }
+            out.push(Ty::Hash { key, value });
+        }
+        Ty::Array { elem } => {
+            for existing in out.iter_mut() {
+                if let Ty::Array { elem: e0 } = existing {
+                    *e0 = Box::new(union_of((**e0).clone(), *elem));
+                    return;
+                }
+            }
+            out.push(Ty::Array { elem });
+        }
         other => {
             if !out.contains(&other) {
                 out.push(other);
             }
         }
     }
+}
+
+/// Sort a flattened variant list into the canonical order: `Nil` last
+/// (so nilable unions keep reading `T | Nil`), everything else by its
+/// structural Debug rendering — an arbitrary but total and stable key.
+/// Two unions built from the same variants in any join order compare
+/// equal under derived `==` only because of this.
+fn canonicalize_variants(variants: &mut [Ty]) {
+    variants.sort_by_cached_key(|v| (matches!(v, Ty::Nil), format!("{v:?}")));
 }
 
 pub(super) fn union_many(tys: Vec<Ty>) -> Ty {
@@ -1904,5 +1944,150 @@ mod tests {
         typer.analyze_expr(&mut expr, &Ctx::default());
 
         assert!(expr.diagnostic.is_none());
+    }
+
+    // ── union_of lattice laws ────────────────────────────────────────
+    //
+    // `union_of` is THE type join: every fixpoint pass folds observed
+    // types through it, and fixpoint convergence checks compare joins
+    // with derived `==`. For that comparison to be semantic — and for
+    // join results to be independent of the order call sites happen to
+    // be visited in — the join must be commutative, associative, and
+    // produce one canonical form per set of variants. These tests
+    // enumerate a bounded universe of Ty shapes (chosen to cover every
+    // special case inside union_of: Bottom filtering, container-spine
+    // merging, nested-union flattening, dedup) and check the laws over
+    // every pair and triple exhaustively.
+
+    fn law_universe() -> Vec<Ty> {
+        let class = |name: &str| Ty::Class {
+            id: ClassId(Symbol::from(name)),
+            args: vec![],
+        };
+        let arr = |elem: Ty| Ty::Array { elem: Box::new(elem) };
+        let hash = |k: Ty, v: Ty| Ty::Hash {
+            key: Box::new(k),
+            value: Box::new(v),
+        };
+        vec![
+            Ty::Int,
+            Ty::Str,
+            Ty::Time,
+            Ty::Nil,
+            Ty::Untyped,
+            Ty::Bottom,
+            Ty::Var { var: TyVar(7) },
+            class("Story"),
+            class("User"),
+            arr(Ty::Int),
+            arr(Ty::Str),
+            arr(Ty::Var { var: TyVar(3) }),
+            hash(Ty::Str, Ty::Int),
+            hash(Ty::Sym, Ty::Str),
+            hash(
+                Ty::Var { var: TyVar(1) },
+                Ty::Var { var: TyVar(2) },
+            ),
+            Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+            Ty::Union { variants: vec![Ty::Int, Ty::Str] },
+            Ty::Union {
+                variants: vec![hash(Ty::Str, Ty::Int), Ty::Nil],
+            },
+        ]
+    }
+
+    #[test]
+    fn union_of_bottom_is_identity() {
+        for t in law_universe() {
+            assert_eq!(union_of(Ty::Bottom, t.clone()), t, "Bottom ⊔ {t:?}");
+            assert_eq!(union_of(t.clone(), Ty::Bottom), t, "{t:?} ⊔ Bottom");
+        }
+    }
+
+    #[test]
+    fn union_of_is_idempotent() {
+        for t in law_universe() {
+            assert_eq!(union_of(t.clone(), t.clone()), t, "{t:?} ⊔ itself");
+        }
+    }
+
+    #[test]
+    fn union_of_is_commutative() {
+        for a in law_universe() {
+            for b in law_universe() {
+                assert_eq!(
+                    union_of(a.clone(), b.clone()),
+                    union_of(b.clone(), a.clone()),
+                    "{a:?} ⊔ {b:?} must equal {b:?} ⊔ {a:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn union_of_is_associative() {
+        let universe = law_universe();
+        for a in &universe {
+            for b in &universe {
+                for c in &universe {
+                    assert_eq!(
+                        union_of(union_of(a.clone(), b.clone()), c.clone()),
+                        union_of(a.clone(), union_of(b.clone(), c.clone())),
+                        "({a:?} ⊔ {b:?}) ⊔ {c:?} must equal {a:?} ⊔ ({b:?} ⊔ {c:?})",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn union_of_absorbs_existing_variants() {
+        // a ⊔ b then re-joining either operand must be a no-op —
+        // this is what lets the fixpoint detect convergence.
+        for a in law_universe() {
+            for b in law_universe() {
+                let joined = union_of(a.clone(), b.clone());
+                assert_eq!(
+                    union_of(joined.clone(), a.clone()),
+                    joined,
+                    "({a:?} ⊔ {b:?}) ⊔ {a:?} must absorb",
+                );
+                assert_eq!(
+                    union_of(joined.clone(), b.clone()),
+                    joined,
+                    "({a:?} ⊔ {b:?}) ⊔ {b:?} must absorb",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn union_of_merges_container_spines_through_unions() {
+        // Regression pin for the associativity break: the Hash/Hash
+        // structural join must fire even when one side arrives wrapped
+        // in a Union (the `(H₁ ⊔ Nil) ⊔ H₂` association order). A flat
+        // union carrying two Hash spines forces every consumer to fan
+        // out per variant — union_of's own doc names that shape as the
+        // harmful one.
+        let h1 = Ty::Hash {
+            key: Box::new(Ty::Str),
+            value: Box::new(Ty::Int),
+        };
+        let h2 = Ty::Hash {
+            key: Box::new(Ty::Sym),
+            value: Box::new(Ty::Str),
+        };
+        let via_nil_first = union_of(union_of(h1.clone(), Ty::Nil), h2.clone());
+        let via_hashes_first = union_of(union_of(h1.clone(), h2.clone()), Ty::Nil);
+        assert_eq!(via_nil_first, via_hashes_first);
+
+        let spines = match &via_nil_first {
+            Ty::Union { variants } => variants
+                .iter()
+                .filter(|v| matches!(v, Ty::Hash { .. }))
+                .count(),
+            other => panic!("expected a union, got {other:?}"),
+        };
+        assert_eq!(spines, 1, "hash spines must merge, got {via_nil_first:?}");
     }
 }

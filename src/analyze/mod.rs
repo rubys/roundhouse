@@ -2469,11 +2469,11 @@ impl Analyzer {
                 // Ivar reads may observe nil before the first write;
                 // union with Nil reflects that. The column's declared
                 // type from schema covers the post-initialization case.
+                // union_of so an already-nilable column type dedups
+                // instead of nesting.
                 class_ivars.insert(
                     name.clone(),
-                    Ty::Union {
-                        variants: vec![ty.clone(), Ty::Nil],
-                    },
+                    crate::analyze::body::union_of(ty.clone(), Ty::Nil),
                 );
             }
             // `attr_accessor :edit_user_id` virtual attributes: real
@@ -2550,7 +2550,7 @@ impl Analyzer {
                 // the read can be nil before the first assignment.
                 let mut reseeded = class_ivars;
                 for (name, ty) in flow_ivars {
-                    let union_ty = Ty::Union { variants: vec![ty, Ty::Nil] };
+                    let union_ty = crate::analyze::body::union_of(ty, Ty::Nil);
                     reseeded.insert(name, union_ty);
                 }
                 let reseeded_ctx = Ctx {
@@ -2664,8 +2664,8 @@ impl Analyzer {
                     // precise bindings win; class-wide ones arrive as
                     // `T | Nil` since we can't prove the filter ran.
                     for (name, ty) in &flow_ivars {
-                        ivars.entry(name.clone()).or_insert_with(|| Ty::Union {
-                            variants: vec![ty.clone(), Ty::Nil],
+                        ivars.entry(name.clone()).or_insert_with(|| {
+                            crate::analyze::body::union_of(ty.clone(), Ty::Nil)
                         });
                     }
                     if ivars.is_empty() {
@@ -2683,7 +2683,7 @@ impl Analyzer {
             if !flow_ivars.is_empty() {
                 let mut reseeded: HashMap<Symbol, Ty> = HashMap::new();
                 for (name, ty) in flow_ivars {
-                    reseeded.insert(name, Ty::Union { variants: vec![ty, Ty::Nil] });
+                    reseeded.insert(name, crate::analyze::body::union_of(ty, Ty::Nil));
                 }
                 let reseeded_ctx = Ctx {
                     self_ty: Some(Ty::Class { id: lc_name.clone(), args: vec![] }),
@@ -4724,27 +4724,9 @@ fn widen_hash_ivar_value(out: &mut HashMap<Symbol, Ty>, name: &Symbol, incoming:
     };
     let value = if matches!(**value, Ty::Var { .. }) {
         Box::new(incoming.clone())
-    } else if **value == *incoming {
-        value.clone()
     } else {
-        let mut variants: Vec<Ty> = match value.as_ref() {
-            Ty::Union { variants } => variants.clone(),
-            other => vec![other.clone()],
-        };
-        let incoming_variants: Vec<Ty> = match incoming {
-            Ty::Union { variants } => variants.clone(),
-            other => vec![other.clone()],
-        };
-        for v in incoming_variants {
-            if !variants.contains(&v) {
-                variants.push(v);
-            }
-        }
-        if variants.len() == 1 {
-            Box::new(variants.into_iter().next().unwrap())
-        } else {
-            Box::new(Ty::Union { variants })
-        }
+        // The general widening is exactly the canonical type join.
+        Box::new(crate::analyze::body::union_of((**value).clone(), incoming.clone()))
     };
     out.insert(name.clone(), Ty::Hash { key, value });
 }
