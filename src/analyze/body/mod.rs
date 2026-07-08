@@ -777,6 +777,32 @@ impl<'a> BodyTyper<'a> {
                             }
                         }
                     }
+                    // A conditional/loop whose CONDITION assigns a local
+                    // (`if !(story = find) || story.gone?`, `while (line =
+                    // gets)`) binds that local for the statements that
+                    // FOLLOW the construct: the condition always
+                    // evaluates, so the assignment ran regardless of which
+                    // branch/iteration executed. The If/While handlers
+                    // thread these into their own branches only — without
+                    // this the pervasive find-or-return guard idiom leaves
+                    // the local `Var` for every later read (and its
+                    // `.build`/attribute cascade). Threaded BEFORE the
+                    // diverging-then narrowing below so that block can
+                    // further tighten the now-bound local to non-nil on
+                    // the fall-through path. A Var/Bottom RHS is skipped so
+                    // a good prior binding isn't clobbered.
+                    if let ExprNode::If { cond, .. } | ExprNode::While { cond, .. } =
+                        &*e.node
+                    {
+                        let mut cond_assigns: HashMap<Symbol, Ty> = HashMap::new();
+                        collect_var_assignments_into(cond, &mut cond_assigns);
+                        for (name, ty) in cond_assigns {
+                            if matches!(ty, Ty::Var { .. } | Ty::Bottom) {
+                                continue;
+                            }
+                            local_ctx.local_bindings.insert(name, ty);
+                        }
+                    }
                     // Diverging-then narrowing: `raise X if m.nil?` —
                     // when the then-branch always diverges (Bottom),
                     // control proceeds only via the else, so the
