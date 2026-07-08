@@ -126,6 +126,7 @@ module ActiveRecord
     def self._adapter_truncate: () -> void
     def _adapter_reload: () -> Base?
     def self.find_by: (Hash[Symbol, untyped] conditions) -> Base?
+    def self.find_by!: (Hash[Symbol, untyped] conditions) -> Base
     def self.where: (Hash[Symbol, untyped] conditions) -> Array[Base]
     def self.count: () -> Integer
     def self.exists?: (Integer id) -> bool

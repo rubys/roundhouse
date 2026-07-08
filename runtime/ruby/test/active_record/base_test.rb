@@ -174,6 +174,29 @@ class BaseTest < Minitest::Test
     assert_nil miss
   end
 
+  def test_find_by_bang_returns_match_or_raises
+    a = Item.new; a.title = "A"; a.save()
+
+    found = Item.find_by!(title: "A")
+    assert_equal a.id, found.id
+
+    assert_raises(ActiveRecord::RecordNotFound) { Item.find_by!(title: "Nope") }
+  end
+
+  def test_first_bang_returns_row_or_raises
+    # `Base.where` returns an Array; the lowered models drive a Relation
+    # (what `Model.where(...).first!` hits in a real app), so build one
+    # directly to exercise Relation#first!.
+    a = Item.new; a.title = "A"; a.save()
+
+    found = ActiveRecord::Relation.new(Item).where(title: "A").first!
+    assert_equal a.id, found.id
+
+    assert_raises(ActiveRecord::RecordNotFound) do
+      ActiveRecord::Relation.new(Item).where(title: "Nope").first!
+    end
+  end
+
   def test_where_filters_to_matching_rows
     a = Item.new; a.title = "A"; a.save()
     b = Item.new; b.title = "B"; b.save()

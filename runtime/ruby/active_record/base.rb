@@ -213,6 +213,14 @@ module ActiveRecord
       instantiate(rows[0])
     end
 
+    # `find_by!` — `find_by` that raises `RecordNotFound` (→ 404) instead
+    # of returning nil on no match.
+    def self.find_by!(conditions)
+      result = find_by(conditions)
+      raise RecordNotFound, "Couldn't find #{name}" if result.nil?
+      result
+    end
+
     def self.where(conditions)
       # See `find_by` above for the `.to_h` rationale.
       ActiveRecord.adapter.where(table_name, conditions.to_h).map { |row| instantiate(row) }

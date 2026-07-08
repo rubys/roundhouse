@@ -191,6 +191,14 @@ module ActiveRecord
       rows.length == 0 ? nil : rows[0]
     end
 
+    # `first!` — like `first`, but raises `RecordNotFound` (→ 404 in the
+    # dispatch layer) instead of returning nil when the relation is empty.
+    def first!
+      record = first
+      raise RecordNotFound, "Couldn't find record in #{@table}" if record.nil?
+      record
+    end
+
     def last
       rows = to_a
       rows.length == 0 ? nil : rows[rows.length - 1]
@@ -244,6 +252,13 @@ module ActiveRecord
     def find_by(conditions)
       add_condition(conditions, [], false)
       first
+    end
+
+    # `find_by!` — `find_by` that raises `RecordNotFound` on no match.
+    def find_by!(conditions)
+      record = find_by(conditions)
+      raise RecordNotFound, "Couldn't find record in #{@table}" if record.nil?
+      record
     end
 
     # ---- SQL composition --------------------------------------------

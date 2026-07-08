@@ -32,6 +32,7 @@ module ActiveRecord
     def map: () { (untyped) -> untyped } -> Array[untyped]
     def inject: (untyped initial) { (untyped, untyped) -> untyped } -> untyped
     def first: () -> untyped
+    def first!: () -> untyped
     def last: () -> untyped
     def count: () -> Integer
     def empty?: () -> bool
@@ -43,6 +44,7 @@ module ActiveRecord
     def ids: () -> Array[Integer]
     def find: (Integer id) -> untyped
     def find_by: (untyped conditions) -> untyped
+    def find_by!: (untyped conditions) -> untyped
 
     def to_sql: () -> String
     def count_sql: () -> String
