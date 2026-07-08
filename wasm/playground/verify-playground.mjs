@@ -215,6 +215,32 @@ if (rbOut !== "app/models/article.rb") fail(`expected app/models/article.rb, got
 await page.evaluate(() => { window.__playground.setTarget("typescript"); window.__playground.selectSource("app/models/article.rb"); });
 await page.screenshot({ path: "playground.png" });
 
+// --- app picker (only when a manifest ships >1 app) -------------------------
+// Switching apps re-seeds srcMap and re-transpiles. blog is clean; lobsters
+// runs the full transpile partially and surfaces the honest diagnostics
+// ledger (its ingest is accepted where Mastodon's strict-mode gaps are not,
+// which is why the playground offers lobsters but not Mastodon). Skipped for
+// a single-app (no apps.json) deployment.
+const appNames = await page.evaluate(() => window.__playground.apps().map((a) => a.name));
+if (appNames.length >= 2 && appNames.includes("lobsters")) {
+  console.log("\n=== app picker ===");
+  await page.evaluate(() => window.__playground.setApp("lobsters"));
+  await page.waitForFunction(() => window.__playground.source("app/models/story.rb") != null, { timeout: 60000 });
+  const lob = await page.evaluate(() => {
+    const out = window.__playground.output();
+    return { sources: window.__playground.sourceCount(), emitted: (out.files || []).length, error: out.error || null, diags: (out.diagnostics || []).length };
+  });
+  console.log(`lobsters: ${lob.sources} sources -> ${lob.emitted} emitted, ${lob.diags} diagnostics`);
+  if (lob.error) fail(`lobsters transpile errored: ${lob.error}`);
+  if (!(lob.sources > 30 && lob.emitted > 30)) fail(`lobsters re-seed/transpile too small: ${lob.sources}/${lob.emitted}`);
+  if (!(lob.diags > 100)) fail(`lobsters diagnostics ledger unexpectedly sparse: ${lob.diags}`);
+  await page.evaluate(() => window.__playground.setApp("blog"));
+  await page.waitForFunction(() => window.__playground.source("app/models/article.rb") != null, { timeout: 30000 });
+  const backErrs = await page.evaluate(() => (window.__playground.output().diagnostics || []).filter((d) => d.severity === "error").length);
+  if (backErrs !== 0) fail(`round-trip back to blog not clean: ${backErrs} errors`);
+  console.log("app switch: lobsters <-> blog verified");
+}
+
 const noise = /monaco|web worker|cdn\.jsdelivr|loader\.js/i;
 const realErrors = logs.filter((l) => /pageerror|\[error\]/.test(l) && !noise.test(l));
 if (realErrors.length) {

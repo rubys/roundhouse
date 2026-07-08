@@ -24,6 +24,8 @@ import { buildTree, allDirPaths, renderTree } from "../lib/tree.js";
 const els = {
   status: document.getElementById("status"),
   counts: document.getElementById("counts"),
+  app: document.getElementById("app"),
+  appLabel: document.getElementById("appLabel"),
   tree: document.getElementById("tree"),
   editor: document.getElementById("editor"),
   editorHead: document.getElementById("editorHead"),
@@ -61,6 +63,7 @@ const modelPath = new Map(); // model → path
 let activePath = null;
 const openDirs = new Set(["app", "app/models", "app/controllers", "app/views"]);
 const mru = [];
+let apps = [];               // app-picker manifest entries ({name,label,src})
 
 function status(text) { els.status.textContent = text; }
 
@@ -531,6 +534,48 @@ async function showTracePicker() {
 }
 
 // ── Boot ─────────────────────────────────────────────────────────────
+// ── App bundles ──────────────────────────────────────────────────────
+// Each app is a source-only bundle from bundle-src.mjs. analyze_app is
+// stateless (it re-ingests the whole tree every call), so switching apps
+// is just: swap srcMap, drop the outgoing app's editor state, reanalyze.
+async function loadBundle(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`${resp.status}`);
+  return resp.json();
+}
+
+async function loadApp(entry) {
+  status(`loading ${entry.label || entry.name}…`);
+  let bundle;
+  try {
+    bundle = await loadBundle(new URL(`./${entry.src}`, import.meta.url));
+  } catch (e) {
+    status(`could not load ${entry.src} (${e.message}) — generate it with bundle-src.mjs`);
+    return;
+  }
+  // Tear down the outgoing app: MRU, pinned trace, and the stale analysis
+  // snapshot all belong to the app we're leaving. The outgoing models stay
+  // attached until the new file's model replaces the active one — disposing
+  // the editor's live model out from under it upsets Monaco's listeners.
+  closeTrace();
+  hidePicker();
+  const stale = [...models.values()];
+  models.clear();
+  modelPath.clear();
+  mru.length = 0;
+  activePath = null;
+  analysis = null;
+  els.counts.textContent = "";
+
+  srcMap = bundle.src;
+  document.title = `roundhouse ide — ${bundle.name || "rails app"}`;
+  redrawTree();
+  await reanalyze();
+  const first = bundle.open || Object.keys(srcMap).find((p) => p.includes("controller")) || Object.keys(srcMap)[0];
+  if (first) openFile(first);
+  for (const m of stale) m.dispose(); // safe now: the editor holds a fresh model
+}
+
 async function boot() {
   status("loading editor…");
   monaco = await loadMonaco();
@@ -566,24 +611,35 @@ async function boot() {
     return rpc("complete", { path, text, line, character });
   });
 
-  status("loading sources…");
-  const resp = await fetch("./app-src.json");
-  if (!resp.ok) {
-    status("no app-src.json — generate one with: node bundle-src.mjs <rails-app-root>");
-    return;
-  }
-  const bundle = await resp.json();
-  srcMap = bundle.src;
-  document.title = `roundhouse ide — ${bundle.name || "rails app"}`;
-  redrawTree();
-
   status("loading analyzer…");
   await rpc("init", { wasmUrl: new URL("../lib/roundhouse_wasm.wasm", import.meta.url).href });
-  await reanalyze();
 
-  // Open a sensible first file.
-  const first = bundle.open || Object.keys(srcMap).find((p) => p.includes("controller")) || Object.keys(srcMap)[0];
-  if (first) openFile(first);
+  // App picker. apps.json lists the shipped Rails app bundles (each `src`
+  // is a bundle-src.mjs output). Absent — plain local dev with a single
+  // hand-bundled app-src.json — falls back to that lone Mastodon bundle
+  // with the selector hidden, preserving the pre-picker behavior (and the
+  // verify-ide harness, which drives that default).
+  let manifest = null;
+  try { manifest = await loadBundle(new URL("./apps.json", import.meta.url)); } catch { /* single-app dev */ }
+  if (manifest && manifest.apps && manifest.apps.length) {
+    apps = manifest.apps;
+    for (const a of apps) {
+      const opt = document.createElement("option");
+      opt.value = a.name;
+      opt.textContent = a.label || a.name;
+      els.app.appendChild(opt);
+    }
+    const def = (manifest.default && apps.find((a) => a.name === manifest.default)) || apps[0];
+    els.app.value = def.name;
+    els.app.onchange = () => {
+      const a = apps.find((x) => x.name === els.app.value);
+      if (a) loadApp(a);
+    };
+    await loadApp(def);
+  } else {
+    els.appLabel.style.display = els.app.style.display = "none";
+    await loadApp({ name: "app", src: "app-src.json" });
+  }
 }
 
 document.addEventListener("keydown", (e) => {
@@ -621,10 +677,12 @@ window.__ide = {
   rpc,
   openFile,
   runTrace,
+  loadApp,
   get analysis() { return analysis; },
   get activePath() { return activePath; },
   get srcMap() { return srcMap; },
   get trace() { return trace; },
+  get apps() { return apps; },
   reanalyze,
 };
 

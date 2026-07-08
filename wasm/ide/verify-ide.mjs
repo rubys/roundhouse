@@ -134,6 +134,31 @@ if (MASTODON) {
     JSON.stringify(hamlType));
 }
 
+// 7. App picker (only when a manifest ships >1 app): switching apps
+// re-ingests from scratch — a fresh tree, non-empty analysis, the app's
+// own files present. Skipped for a single-app (no apps.json) deployment.
+const appNames = await page.evaluate(() => (window.__ide.apps || []).map((a) => a.name));
+if (appNames.length >= 2) {
+  async function switchTo(name, expectFile) {
+    await page.evaluate((n) => window.__ide.loadApp(window.__ide.apps.find((a) => a.name === n)), name);
+    await page.waitForFunction(
+      (f) => window.__ide.analysis && (f in window.__ide.srcMap),
+      expectFile, { timeout: 120_000 });
+    return page.evaluate(() => ({
+      files: window.__ide.analysis.files.length,
+      title: document.title,
+    }));
+  }
+  check("app manifest lists blog + lobsters + mastodon",
+    ["blog", "lobsters", "mastodon"].every((n) => appNames.includes(n)), appNames.join(","));
+  const blog = await switchTo("blog", "app/models/article.rb");
+  check("switch → blog re-ingests", blog.files > 5 && /blog/.test(blog.title), `${blog.files} files`);
+  const lob = await switchTo("lobsters", "app/models/story.rb");
+  check("switch → lobsters re-ingests", lob.files > 30 && /lobsters/.test(lob.title), `${lob.files} files`);
+  const mast = await switchTo("mastodon", "app/controllers/statuses_controller.rb");
+  check("switch → mastodon re-ingests (round-trip)", mast.files > 100 && /mastodon/.test(mast.title), `${mast.files} files`);
+}
+
 await browser.close();
 if (failures) {
   console.error(`${failures} check(s) failed`);

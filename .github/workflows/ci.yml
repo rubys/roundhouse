@@ -18,11 +18,15 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # The Rails app the /ide/ demo ships (analyzed in-browser). Pinned so
-  # the page — and any blog post's claims about it — stay stable against
-  # upstream churn; bump deliberately. AGPL compliance: bundle-src.mjs
-  # embeds the app's LICENSE and this commit in app-src.json.
+  # The Rails apps the /ide/ + /playground/ demos ship (in-browser). Pinned
+  # so the page — and any blog post's claims about it — stay stable against
+  # upstream churn; bump deliberately. Each bundle embeds the app's LICENSE
+  # and its commit (bundle-src.mjs). Mastodon (AGPL) analyzes on /ide/ only:
+  # its strict-mode ingest gaps (alias, class<<self) hard-fail the full
+  # transpile path, so /playground/ ships blog + lobsters. Lobsters is the
+  # ruby-bench benchmark copy (MIT).
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
+  RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
 
 jobs:
   # -------------------------------------------------------------------
@@ -359,7 +363,7 @@ jobs:
   # a change that mutes any beat fails CI before it reaches Pages.
   # Deterministic inputs (pinned SHA + fresh wasm), so blocking.
   browser-smoke-ide:
-    needs: build-wasm
+    needs: [build-wasm, generate-fixture]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -367,6 +371,11 @@ jobs:
         with:
           name: roundhouse-wasm
           path: wasm/lib
+      - uses: actions/download-artifact@v8
+        with:
+          name: real-blog-fixture
+      - name: Extract fixture
+        run: tar -xzf real-blog.tar.gz
       - name: Install Node
         uses: actions/setup-node@v5
         with:
@@ -386,6 +395,31 @@ jobs:
           node wasm/ide/bundle-src.mjs /tmp/mastodon wasm/ide/app-src.json \
             --name mastodon --commit "${MASTODON_SHA}" \
             --open app/controllers/statuses_controller.rb
+      # The other two picker apps, so verify-ide.mjs can exercise the app
+      # switch (blog + lobsters + mastodon). Mirrors the build-site assembly.
+      - name: Cache lobsters source bundle
+        id: lobsters-src
+        uses: actions/cache@v4
+        with:
+          path: /tmp/app-lobsters.json
+          key: lobsters-app-src-${{ env.RUBY_BENCH_SHA }}-v1
+      - name: Fetch pinned ruby-bench + bundle lobsters (cache miss)
+        if: steps.lobsters-src.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://codeload.github.com/ruby/ruby-bench/tar.gz/${RUBY_BENCH_SHA}" -o /tmp/ruby-bench.tar.gz
+          mkdir -p /tmp/lobsters
+          tar -xzf /tmp/ruby-bench.tar.gz -C /tmp/lobsters --strip-components=3 "ruby-bench-${RUBY_BENCH_SHA}/benchmarks/lobsters"
+          node wasm/ide/bundle-src.mjs /tmp/lobsters /tmp/app-lobsters.json \
+            --name lobsters --commit "${RUBY_BENCH_SHA}" \
+            --open app/controllers/stories_controller.rb
+      - name: Assemble picker bundles + manifest
+        run: |
+          set -euo pipefail
+          node wasm/ide/bundle-src.mjs fixtures/real-blog wasm/ide/app-blog.json \
+            --name blog --open app/controllers/articles_controller.rb
+          cp /tmp/app-lobsters.json wasm/ide/app-lobsters.json
+          printf '%s\n' '{"default":"mastodon","apps":[{"name":"blog","label":"Rails blog","src":"app-blog.json"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json"},{"name":"mastodon","label":"Mastodon","src":"app-src.json"}]}' > wasm/ide/apps.json
       - name: Install harness deps (Playwright)
         run: npm ci
         working-directory: tests/browser_smoke
@@ -1634,6 +1668,45 @@ jobs:
           cp wasm/ide/index.html wasm/ide/ide.js wasm/ide/worker.mjs _site/ide/
           cp wasm/ide/app-src.json _site/ide/
           echo "ide files:"; find _site/ide -type f | sort
+
+      # App-picker bundles + manifests. Both surfaces gained an app selector;
+      # each fetches an apps.json listing the shipped source bundles and swaps
+      # them in-place (analyze/transpile are stateless per call). Mastodon is
+      # /ide/-only — its strict-mode ingest gaps (alias, class<<self) hard-fail
+      # the /playground/'s full-transpile path, whereas /ide/'s analysis is
+      # gap-tolerant. Lobsters (ruby-bench, MIT) ships to both; the blog ships
+      # to /ide/ as a source bundle (the playground reuses lib/fixture.json).
+      - name: Cache lobsters source bundle
+        id: lobsters-src-site
+        uses: actions/cache@v4
+        with:
+          path: /tmp/app-lobsters.json
+          key: lobsters-app-src-${{ env.RUBY_BENCH_SHA }}-v1
+      - name: Fetch pinned ruby-bench + bundle lobsters (cache miss)
+        if: steps.lobsters-src-site.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://codeload.github.com/ruby/ruby-bench/tar.gz/${RUBY_BENCH_SHA}" -o /tmp/ruby-bench.tar.gz
+          mkdir -p /tmp/lobsters
+          tar -xzf /tmp/ruby-bench.tar.gz -C /tmp/lobsters --strip-components=3 "ruby-bench-${RUBY_BENCH_SHA}/benchmarks/lobsters"
+          node wasm/ide/bundle-src.mjs /tmp/lobsters /tmp/app-lobsters.json \
+            --name lobsters --commit "${RUBY_BENCH_SHA}" \
+            --open app/controllers/stories_controller.rb
+      - name: Assemble app-picker bundles + manifests (→ _site/lib, _site/ide)
+        run: |
+          set -euo pipefail
+          # Blog source bundle for /ide/ (the playground reuses lib/fixture.json).
+          node wasm/ide/bundle-src.mjs fixtures/real-blog /tmp/app-blog.json \
+            --name blog --open app/controllers/articles_controller.rb
+          cp /tmp/app-lobsters.json _site/lib/app-lobsters.json
+          cp /tmp/app-lobsters.json _site/ide/app-lobsters.json
+          cp /tmp/app-blog.json     _site/ide/app-blog.json
+          # Playground manifest: blog (clean) + lobsters (partial → honest ledger).
+          printf '%s\n' '{"default":"blog","apps":[{"name":"blog","label":"Rails blog","src":"fixture.json","open":"app/models/article.rb"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json","open":"app/models/story.rb"}]}' > _site/lib/apps.json
+          # IDE manifest: all three (analysis is gap-tolerant; Mastodon default).
+          printf '%s\n' '{"default":"mastodon","apps":[{"name":"blog","label":"Rails blog","src":"app-blog.json"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json"},{"name":"mastodon","label":"Mastodon","src":"app-src.json"}]}' > _site/ide/apps.json
+          echo "lib app bundles:"; ls -1 _site/lib/*.json | sort
+          echo "ide app bundles:"; ls -1 _site/ide/*.json | sort
 
       # Bench results page — fetched from the Hetzner publishing endpoint
       # (cron-driven, populates bench/results/latest on each run). The

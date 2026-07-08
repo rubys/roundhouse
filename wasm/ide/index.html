@@ -24,6 +24,11 @@
       padding: 3px 10px; font: inherit; cursor: pointer;
     }
     header button:hover { background: #3c3c3c; }
+    header select {
+      background: #333; color: #ccc; border: 1px solid #444; border-radius: 4px;
+      padding: 3px 6px; font: inherit; cursor: pointer;
+    }
+    header label { color: #888; }
     #counts { margin-left: auto; color: #888; }
     #status { color: #6a9955; min-width: 200px; }
     main { flex: 1; display: flex; min-height: 0; }
@@ -132,6 +137,8 @@
   <header>
     <h1>roundhouse ide</h1>
     <span class="sub">whole-program Rails inference, in your browser — nothing runs on a server</span>
+    <label id="appLabel" for="app">app</label>
+    <select id="app" title="switch Rails app"></select>
     <button id="btnOpen" title="⌘P">open…</button>
     <button id="btnRelated" title="⌘⇧R">related</button>
     <button id="btnTrace" title="⌘⇧T">trace</button>

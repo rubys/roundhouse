@@ -35,6 +35,8 @@ const DEFAULT_TARGET = "ruby"; // Ruby is the initial target (most on-message: R
 
 const els = {
   target: document.getElementById("target"),
+  app: document.getElementById("app"),
+  appLabel: document.getElementById("appLabel"),
   status: document.getElementById("status"),
   srcfiles: document.getElementById("srcfiles"),
   editorHost: document.getElementById("editorHost"),
@@ -46,6 +48,7 @@ const els = {
 };
 
 let compiler = null;
+let apps = [];              // app-picker manifest entries ({name,label,src})
 let editor = null;
 let outputView = null;      // read-only Monaco (or <pre>) showing the emitted file
 let srcMap = null;          // { path: content } — the live, editable input
@@ -246,6 +249,42 @@ function showOutput(i) {
   if (!els.outfileMenu.hidden) renderOutTree(); // keep the open popover's highlight in sync
 }
 
+// ---- app bundles ---------------------------------------------------------
+// apps.json (in ../lib/) lists the shipped apps; each `src` is either a flat
+// {path:content} fixture (the blog seed) or a bundle-src.mjs output (which
+// nests the map under `.src`). Swapping apps re-seeds srcMap and re-transpiles
+// — the compiler is stateless per call. Only apps whose ingest the compiler
+// accepts belong here (Mastodon's strict-mode ingest hard-fails, so it lives
+// on /ide/, whose analysis path is gap-tolerant).
+async function loadApp(entry) {
+  setStatus(`loading ${entry.label || entry.name}…`);
+  let json;
+  try {
+    json = await fetch(new URL(`../lib/${entry.src}`, import.meta.url)).then((r) => {
+      if (!r.ok) throw new Error(r.status);
+      return r.json();
+    });
+  } catch (e) {
+    setStatus(`could not load ${entry.src}: ${e.message}`, "err");
+    return;
+  }
+  srcMap = json && typeof json.src === "object" && json.src ? json.src : json;
+  // Reset per-app view state; renderSources re-expands app/ for the new tree.
+  openDirs = null;
+  currentPath = null;
+  currentOutIndex = 0;
+  currentOutPath = null;
+  outClosedDirs = new Set();
+  lastOutput = null;
+  lastDiagnostics = [];
+  lastTypes = [];
+  renderSources();
+  const first = (entry.open && srcMap[entry.open] != null) ? entry.open
+    : (srcMap[DEFAULT_FILE] != null ? DEFAULT_FILE : sourceFiles()[0]);
+  selectFile(first);
+  transpile();
+}
+
 // ---- boot ----------------------------------------------------------------
 
 async function boot() {
@@ -257,18 +296,12 @@ async function boot() {
   }
   els.target.value = DEFAULT_TARGET;
 
-  setStatus("loading wasm + fixture…");
-  const [loaded, fixture] = await Promise.all([
-    loadDefaultCompiler({
-      onStdout: (s) => console.log("[wasm]", s),
-      onStderr: (s) => console.warn("[wasm]", s),
-    }),
-    loadFixture(),
-  ]);
-  compiler = loaded;
-  srcMap = fixture;
+  setStatus("loading wasm…");
+  compiler = await loadDefaultCompiler({
+    onStdout: (s) => console.log("[wasm]", s),
+    onStderr: (s) => console.warn("[wasm]", s),
+  });
 
-  renderSources();
   setStatus("loading editor…");
   [editor, outputView] = await Promise.all([
     createEditor(els.editorHost, {
@@ -283,8 +316,6 @@ async function boot() {
     createOutputView(els.outputHost),
   ]);
 
-  const first = srcMap[DEFAULT_FILE] != null ? DEFAULT_FILE : sourceFiles()[0];
-  selectFile(first);
   els.target.onchange = transpile;
   els.outfileBtn.onclick = () => els.outfileMenu.hidden ? openOutMenu() : closeOutMenu();
   // Click outside the picker closes the popover (clicks inside it — the button
@@ -292,12 +323,46 @@ async function boot() {
   document.addEventListener("click", (e) => {
     if (!els.outfileMenu.hidden && !els.picker.contains(e.target)) closeOutMenu();
   });
-  transpile();
+
+  // App picker. apps.json lists the shipped app bundles; absent (local dev
+  // with only the lib fixture) → the lone blog fixture, selector hidden,
+  // preserving the pre-picker behavior + the verify-playground harness.
+  let manifest = null;
+  try {
+    manifest = await fetch(new URL("../lib/apps.json", import.meta.url)).then((r) => (r.ok ? r.json() : null));
+  } catch { /* single-app dev */ }
+  if (manifest && manifest.apps && manifest.apps.length) {
+    apps = manifest.apps;
+    for (const a of apps) {
+      const opt = document.createElement("option");
+      opt.value = a.name;
+      opt.textContent = a.label || a.name;
+      els.app.appendChild(opt);
+    }
+    const def = (manifest.default && apps.find((a) => a.name === manifest.default)) || apps[0];
+    els.app.value = def.name;
+    els.app.onchange = () => {
+      const a = apps.find((x) => x.name === els.app.value);
+      if (a) loadApp(a);
+    };
+    await loadApp(def);
+  } else {
+    els.appLabel.style.display = els.app.style.display = "none";
+    await loadApp({ name: "blog", src: "fixture.json" });
+  }
 
   // Programmatic hooks for the Playwright verifier — editor-widget agnostic.
   window.__playground = {
     ready: true,
     editorKind: editor.kind,
+    apps: () => apps,
+    async setApp(name) {
+      const a = apps.find((x) => x.name === name);
+      if (!a) return false;
+      els.app.value = name;
+      await loadApp(a);
+      return true;
+    },
     setTarget(t) { els.target.value = t; transpile(); },
     selectSource: (path) => selectFile(path),
     editFile(path, content) {

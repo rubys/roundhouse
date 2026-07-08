@@ -1,2 +1,8 @@
 /target
+# App bundles + their manifest are build artifacts (CI generates them from
+# pinned upstreams; see bundle-src.mjs and the build-site job). Absent the
+# manifest, /ide/ falls back to the lone app-src.json.
 ide/app-src.json
+ide/app-blog.json
+ide/app-lobsters.json
+ide/apps.json
