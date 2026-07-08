@@ -874,7 +874,12 @@ fn materialize_inherited(model: &mut crate::dialect::LibraryClass, base: &[crate
     let defined: std::collections::HashSet<String> =
         model.methods.iter().map(|m| m.name.as_str().to_string()).collect();
     let owner = model.name.0.clone();
-    let skip = ["initialize", "find_by", "where"];
+    // `find_by`/`where` are dropped because Elixir rewrites their call
+    // sites to Ecto/Repo rather than defining the method; `find_by!`'s
+    // body calls `find_by`, so it must be dropped alongside it (an Elixir
+    // target that actually consumes `find_by!` would rewrite its call
+    // sites to `Repo.get_by!`, same as `find_by` → `get_by`).
+    let skip = ["initialize", "find_by", "find_by!", "where"];
     let mut inherited: Vec<crate::dialect::MethodDef> = base
         .iter()
         .filter(|m| !skip.contains(&m.name.as_str()) && !defined.contains(m.name.as_str()))
