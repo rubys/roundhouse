@@ -68,7 +68,15 @@ pub fn classify_add<'a>(lhs: &'a Expr, rhs: &'a Expr) -> AddCase<'a> {
         (Ty::Int, Ty::Int) | (Ty::Float, Ty::Float) => AddCase::Numeric,
         (Ty::Int, Ty::Float) | (Ty::Float, Ty::Int) => AddCase::NumericPromote,
         (Ty::Str, Ty::Str) => AddCase::StringConcat,
-        (Ty::Array { elem: l }, Ty::Array { elem: r }) if l == r => {
+        // `Array + Array` is *always* valid Ruby — it concatenates
+        // regardless of element types, yielding `Array<lhs_elem |
+        // rhs_elem>`. Do not require matching element types: a
+        // heterogeneous concat (`Story.select(:id)… + [self.id]`) is
+        // real code, not an error. `elem` is a representative (lhs's);
+        // every emitter consumes `ArrayConcat { .. }` ignoring it, and
+        // the expression's true (union-element) result type is computed
+        // by the body typer, not here.
+        (Ty::Array { elem: l }, Ty::Array { .. }) => {
             AddCase::ArrayConcat { elem: l.as_ref() }
         }
         _ => AddCase::Incompatible,
@@ -161,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn array_plus_array_different_elem_is_incompatible() {
+    fn array_plus_array_different_elem_is_concat() {
         let l = var_with(
             "a",
             Ty::Array { elem: Box::new(Ty::Int) },
@@ -170,10 +178,11 @@ mod tests {
             "b",
             Ty::Array { elem: Box::new(Ty::Str) },
         );
-        // Mismatched element types — Ruby would allow this (producing
-        // Array<Int|Str>) but our dispatch doesn't handle it yet, so
-        // treat as Incompatible to keep emission honest.
-        assert!(matches!(classify_add(&l, &r), AddCase::Incompatible));
+        // Mismatched element types are still a valid Ruby concat
+        // (producing Array<Int|Str>) — not `Incompatible`. Every target
+        // emits its concat idiom; `nil.join`-style raises come from the
+        // receiver, never from `Array#+`.
+        assert!(matches!(classify_add(&l, &r), AddCase::ArrayConcat { .. }));
     }
 
     #[test]

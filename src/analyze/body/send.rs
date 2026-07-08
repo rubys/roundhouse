@@ -556,6 +556,28 @@ impl<'a> BodyTyper<'a> {
                         };
                     }
                 }
+                // `Array#[]` / `slice` return a *sub-array* (`Array<elem>
+                // | Nil`) when indexed by a `Range` or a `(start, length)`
+                // pair, but a single *element* (`elem | Nil`) for a lone
+                // integer. `array_method` sees only the method name, so
+                // disambiguate here from the argument shape — otherwise
+                // `comment.split[0..10].join(' ')` mistypes the slice as
+                // `Str | Nil` and `.join` fails to dispatch.
+                if matches!(method.as_str(), "[]" | "slice") {
+                    let range_index = args.len() == 1
+                        && matches!(
+                            args[0].ty.as_ref(),
+                            Some(Ty::Class { id, .. }) if id.0.as_str() == "Range"
+                        );
+                    if range_index || args.len() == 2 {
+                        return Ty::Union {
+                            variants: vec![
+                                Ty::Array { elem: Box::new(elem.clone()) },
+                                Ty::Nil,
+                            ],
+                        };
+                    }
+                }
                 array_method(method, elem, block_ret)
             }
             Some(Ty::Hash { key, value }) => hash_method(method, key, value, block_ret),
@@ -593,7 +615,18 @@ impl<'a> BodyTyper<'a> {
                         resolved.push(r);
                     }
                 }
+                // An un-inferred `Var` arm makes the union gradual the
+                // same way an `Untyped` arm (handled above) does: when it
+                // is the *only* non-Nil arm, no concrete dispatch can run,
+                // but the receiver could still be anything (an Array with
+                // `join`, a comment with `id`, …). Absorbing to `Untyped`
+                // when nothing concrete resolved is the honest answer — a
+                // gradual escape (warning), not a "no known method" error.
+                // A union of concrete arms that all lack the method
+                // (`Str | Nil` with `join`) still errors, as it should.
+                let has_var = variants.iter().any(|v| matches!(v, Ty::Var { .. }));
                 match resolved.len() {
+                    0 if has_var => Ty::Untyped,
                     0 => unknown(),
                     1 => resolved.into_iter().next().unwrap(),
                     _ => union_many(resolved),

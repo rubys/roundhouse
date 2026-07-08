@@ -40,6 +40,13 @@ pub enum SubCase<'a> {
     Unknown,
 }
 
+/// A temporal operand for `-`: the first-class `Ty::Time` (bare or in a
+/// `Time | Nil` union, the shape of a nullable datetime-column reader) or
+/// a legacy `Class { Time }` (`Time.now` and friends).
+fn is_time_operand(ty: &Ty) -> bool {
+    ty.contains_time() || matches!(ty, Ty::Class { id, .. } if id.0.as_str() == "Time")
+}
+
 pub fn classify_sub<'a>(lhs: &'a Expr, rhs: &'a Expr) -> SubCase<'a> {
     let lhs_ty = lhs.ty.as_ref();
     let rhs_ty = rhs.ty.as_ref();
@@ -63,11 +70,11 @@ pub fn classify_sub<'a>(lhs: &'a Expr, rhs: &'a Expr) -> SubCase<'a> {
         // `Time - Time → Float` (elapsed seconds). Both are valid Ruby,
         // so this is *not* `Incompatible` — fall through to native infix
         // (`Unknown`), the same gradual treatment `time_method` gives
-        // `-` (→ `Untyped`). A concrete `Class { Time }` reaches here via
-        // datetime columns and `Time.now`/`Time.current`/`Time.at`.
-        (Ty::Class { id, .. }, _) | (_, Ty::Class { id, .. })
-            if id.0.as_str() == "Time" =>
-        {
+        // `-` (→ `Untyped`). Temporal operands reach here two ways: the
+        // first-class `Ty::Time` variant (datetime columns hydrate to it,
+        // possibly as a `Time | Nil` union) and a legacy concrete
+        // `Class { Time }` (`Time.now`/`Time.current`/`Time.at`).
+        _ if is_time_operand(lhs_ty) || is_time_operand(rhs_ty) => {
             SubCase::Unknown
         }
         _ => SubCase::Incompatible,
@@ -181,6 +188,20 @@ mod tests {
         let i = var_typed("c", Ty::Int);
         assert!(matches!(classify_sub(&l, &i), SubCase::Unknown));
         assert!(matches!(classify_sub(&i, &l), SubCase::Unknown));
+    }
+
+    #[test]
+    fn first_class_time_variant_minus_is_not_incompatible() {
+        // Datetime columns hydrate to the first-class `Ty::Time` variant
+        // (not `Class { Time }`); `updated_at - created_at` must not flag
+        // as `Incompatible`. Also covers the nullable `Time | Nil` reader.
+        let l = var_typed("a", Ty::Time);
+        let r = var_typed("b", Ty::Time);
+        assert!(matches!(classify_sub(&l, &r), SubCase::Unknown));
+        let nilable = || Ty::Union { variants: vec![Ty::Time, Ty::Nil] };
+        let ln = var_typed("a", nilable());
+        let rn = var_typed("b", nilable());
+        assert!(matches!(classify_sub(&ln, &rn), SubCase::Unknown));
     }
 
     #[test]
