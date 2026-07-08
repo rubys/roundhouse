@@ -177,11 +177,10 @@ pub fn target_readme(target: BuildTarget) -> String {
         // Spinel AOT: the tree is a spin package (spin.toml + bin/ +
         // test/*.rb with .expected snapshots — see `spin_shape`), so
         // Build/Test use spinel's own project tool. Assets ship prebuilt
-        // (like jruby — `make assets` needs MRI). The Test block's
-        // explicit seed step bridges matz/spinel#1788 (spin doesn't feed
-        // .rbs sidecars yet); drop it for plain `spin test` when that
-        // closes. The comprehensive scaffold doc ships as SPECIMEN.md
-        // (scaffold_readme_to_specimen).
+        // (like jruby — `make assets` needs MRI). `spin test` feeds the
+        // .rbs sidecars to the compiler itself (matz/spinel#1788), so no
+        // explicit seed step is needed. The comprehensive scaffold doc
+        // ships as SPECIMEN.md (scaffold_readme_to_specimen).
         BuildTarget::Spinel => {
             "This tree is the Rails-shape-without-metaprogramming \
              specimen, packaged as a [spin](https://github.com/matz/spinel/blob/master/docs/spin.md) \
@@ -192,8 +191,8 @@ pub fn target_readme(target: BuildTarget) -> String {
              in `static/assets/` (the Makefile's `make assets` step needs \
              the MRI toolchain; the binary sendfiles them at `/assets/*`).\n\n\
              ## Prerequisites\n\
-             - [spinel](https://github.com/matz/spinel) — `spinel`, `spin`, and \
-             `spinel_rbs_extract` on PATH (the repo's `bin/` after `make`)\n\
+             - [spinel](https://github.com/matz/spinel) — `spinel` and \
+             `spin` on PATH (the repo's `bin/` after `make`)\n\
              - A C toolchain + SQLite headers (`libsqlite3-dev`) — the binary links `-lsqlite3`\n\
              - Node.js 18+ — for the End-to-end suite\n\n\
              ## Build\n\
@@ -206,13 +205,10 @@ pub fn target_readme(target: BuildTarget) -> String {
              ```\n\n\
              ## Test\n\
              Each `test/*.rb` compiles to its own binary and diffs against \
-             its `.expected` snapshot. The seed step feeds the `.rbs` \
-             sidecars to the analyzer — spin does not do that itself yet \
-             ([matz/spinel#1788](https://github.com/matz/spinel/issues/1788)); \
-             once it does, this is plain `spin test`:\n\
+             its `.expected` snapshot. `spin test` feeds the `.rbs` \
+             sidecars to the compiler itself, so no seeding is needed:\n\
              ```sh\n\
-             mkdir -p build && spinel_rbs_extract . > build/rbs.seed\n\
-             SPINEL_RBS_SEED=$PWD/build/rbs.seed spin test\n\
+             spin test\n\
              ```\n"
         }
         // ruby/jruby Test sections run the same five driver files as
@@ -1399,16 +1395,18 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
 ///    exact-match — a scaffold edit that invalidates one fails the
 ///    emit loudly instead of desyncing silently.
 ///
-/// Until spin feeds sidecars itself (matz/spinel#1788), `spin test`
-/// needs the analyzer seeded explicitly; the generated README's Test
-/// block bridges with `spinel_rbs_extract` + `SPINEL_RBS_SEED`
-/// (analyze.c reads the env var unconditionally).
+/// `spin test` feeds the `.rbs` sidecars to the compiler itself
+/// (matz/spinel#1788), so the emitted tree compiles as a plain spin
+/// package with no explicit analyzer seeding.
 ///
-/// query_count_test carve-out: pre-existing spinel C error on
-/// `Db.query_log` (`sp_StrArray*` vs `sp_RbVal`; survives full RBS
-/// seeding) — the test was never in the Makefile's SPINEL_TESTS lane
-/// either. Filed as matz/spinel#1793; it ships in `test/cruby/` until
-/// that closes.
+/// query_count_test carve-out: the original #1793 compile miscompile
+/// (`Db.query_log` civ slot `sp_StrArray*` vs `sp_RbVal`) is fixed
+/// upstream — the test now compiles — but its `Db.capture_sql` pattern
+/// still can't run green: the class-ivar-backed array's element type
+/// infers as `poly`, so the `q =~ /…/` in the test hits
+/// `undefined method '=~' for poly`; pinning `capture_sql -> Array[String]`
+/// via RBS instead segfaults at runtime. A residual civ-array codegen
+/// gap, distinct from #1793. It ships in `test/cruby/` until that closes.
 fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, String> {
     use std::collections::HashSet;
 
@@ -1461,10 +1459,9 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         }
     }
 
-    // A moved test's own `.rbs` sidecar travels with it (spin's
-    // convention is file-adjacent; the seed extractor finds it either
-    // way, but an upstream sidecar-discovery fix will look beside the
-    // file — matz/spinel#1788).
+    // A moved test's own `.rbs` sidecar travels with it: spin's
+    // convention is file-adjacent, and `spin test` feeds it via `--rbs`
+    // from beside the file (matz/spinel#1788).
     for entry in files.iter_mut() {
         if let Some(stem) = entry.0.strip_suffix(".rbs") {
             let old_rb = format!("{stem}.rb");

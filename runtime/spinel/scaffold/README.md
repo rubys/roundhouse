@@ -137,10 +137,9 @@ package** (spinel's project tool): `spin.toml` at the root,
 spinel-lane tests flattened to `test/*.rb` with `.expected`
 snapshots (`spin test`), and `.rbs` emitted as file-adjacent
 sidecars instead of a `sig/` tree (the Makefile's bare-spinel
-recipes use `--rbs .` there). Until spin feeds sidecars itself
-(matz/spinel#1788), seed the analyzer explicitly:
-`spinel_rbs_extract . > build/rbs.seed && SPINEL_RBS_SEED=$PWD/build/rbs.seed spin test`.
-Non-spinel-lane tests move to `test/cruby/` in that archive. The
+recipes use `--rbs .` there). `spin test` feeds those sidecars to
+the compiler itself (matz/spinel#1788), so no explicit seeding is
+needed. Non-spinel-lane tests move to `test/cruby/` in that archive. The
 ruby/jruby archives keep the layout described above; the reshaping
 lives in roundhouse's `src/project.rs` (`spin_shape`).
 
