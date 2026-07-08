@@ -2261,6 +2261,36 @@ impl Analyzer {
                         }
                     }
                 }
+                // Ivars written by same-controller helper methods this
+                // action explicitly *calls* (`def standing; flag_warning;
+                // end`). Ruby shares instance variables across the call,
+                // but the write lives in the callee's body — invisible to
+                // `extract_ivar_assignments` on the action, and not gated
+                // by any `before_action` (that path is folded just above).
+                // The callee's own bindings are already in
+                // `chained_bindings` (its action/filter/parent snapshot,
+                // resolved by the sweeps above), so fold them in for every
+                // implicit-self call the action makes — the same
+                // contribution a before_action to that method would give,
+                // triggered by the call site instead. One level deep: a
+                // helper that itself calls another ivar-writing helper is
+                // not chased (the direct-call case is what recurs). Own
+                // and before_action assignments already present win.
+                let mut sites: Vec<(ClassId, Symbol, Vec<Ty>)> = Vec::new();
+                self.collect_send_sites(&action.body, Some(&ctrl_name), &mut sites);
+                for (class_id, method, _) in &sites {
+                    if *class_id != ctrl_name {
+                        continue;
+                    }
+                    if let Some(hivars) = chained_bindings.get(method) {
+                        for (k, v) in hivars {
+                            if matches!(v, Ty::Var { .. } | Ty::Bottom) {
+                                continue;
+                            }
+                            ivars.entry(k.clone()).or_insert_with(|| v.clone());
+                        }
+                    }
+                }
                 if let Some(layout_name) = &effective_layout {
                     view_feeders
                         .entry(layout_name.clone())
