@@ -4641,6 +4641,22 @@ pub(crate) fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty
         }
         ExprNode::Lambda { body, .. } => extract_ivar_assignments(body, out),
         ExprNode::Return { value } => extract_ivar_assignments(value, out),
+        // Any other assignment target (local var, constant, attribute) that
+        // wasn't matched by the ivar/index arms above. We record no ivar for
+        // the target itself, but the RHS can still assign ivars inside a
+        // block — `content = Rails.cache.fetch(k) { @newest = ...;
+        // @users_by_parent = ... }` (lobsters' `UsersController#tree`).
+        // Without descending here, those ivars are invisible to the
+        // controller→view channel and read as `ivar_unresolved` in the view.
+        ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => {
+            extract_ivar_assignments(value, out);
+        }
+        // `let x = <expr with block> in body` — same reasoning as the local
+        // assignment above; walk both the bound value and the body.
+        ExprNode::Let { value, body, .. } => {
+            extract_ivar_assignments(value, out);
+            extract_ivar_assignments(body, out);
+        }
         _ => {}
     }
 }
