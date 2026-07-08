@@ -282,6 +282,25 @@ where
             };
             ExprNode::Assign { target: new_target, value: map_expr(value, f) }
         }
+        ExprNode::OpAssign { target, op, value } => {
+            // Mirror `Assign`: a compound assignment (`x ||= …`, `h[k] += …`)
+            // has a rewritable target and RHS. Without this arm it fell to
+            // the leaf default and the entire RHS was skipped — so e.g.
+            // `@story ||= Story.where(short_id: params[:id])…` never had its
+            // `params` ivar-ized (or its `render`/`redirect_to` rewritten).
+            let new_target = match target {
+                LValue::Attr { recv, name } => LValue::Attr {
+                    recv: map_expr(recv, f),
+                    name: name.clone(),
+                },
+                LValue::Index { recv, index } => LValue::Index {
+                    recv: map_expr(recv, f),
+                    index: map_expr(index, f),
+                },
+                other => other.clone(),
+            };
+            ExprNode::OpAssign { target: new_target, op: *op, value: map_expr(value, f) }
+        }
         ExprNode::Array { elements, style } => ExprNode::Array {
             elements: elements.iter().map(|e| map_expr(e, f)).collect(),
             style: *style,
