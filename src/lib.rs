@@ -50,7 +50,8 @@ pub use dialect::{
     Action, Association, Callback, CallbackHook, Comment, Controller, ControllerBodyItem,
     Dependent, Filter, FilterKind, HttpMethod, LayoutDecl, MethodDef, MethodReceiver, Model,
     ModelBodyItem,
-    RenderTarget, Route, RouteSpec, RouteTable, Scope, Validation, ValidationRule, View,
+    RenderTarget, ResourceScope, Route, RouteSpec, RouteTable, Scope, Validation, ValidationRule,
+    View,
 };
 pub use effect::{Effect, EffectSet};
 pub use expr::{Arm, BlockStyle, Expr, ExprNode, LValue, Literal, Pattern};

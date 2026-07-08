@@ -16,7 +16,7 @@
 //! Python: `articles_path`, Rust: `articles_path(i64)`, etc.).
 
 use crate::App;
-use crate::dialect::{HttpMethod, RouteSpec};
+use crate::dialect::{HttpMethod, ResourceScope, RouteSpec};
 use crate::ident::{ClassId, Symbol};
 use crate::naming;
 
@@ -137,8 +137,8 @@ fn singular_resource_actions() -> &'static [(&'static str, HttpMethod, &'static 
 
 fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
     match spec {
-        RouteSpec::Explicit { method, path, controller, action, as_name, .. } => {
-            let (nested, mut params) = nest_path(path, ctx.parent_pair());
+        RouteSpec::Explicit { method, path, controller, action, as_name, scope, .. } => {
+            let (nested, mut params) = nest_path(path, ctx.parent_pair(), *scope);
             let full_path = prefix_path(&ctx.ns_path, &nested);
             extract_path_params(&full_path, &mut params);
             // Rails auto-names a plain `get "/search" => "search#index"`
@@ -243,7 +243,8 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     continue;
                 }
                 let path = format!("{resource_path}{suffix}");
-                let (nested_path, mut params) = nest_path(&path, ctx.parent_pair());
+                let (nested_path, mut params) =
+                    nest_path(&path, ctx.parent_pair(), ResourceScope::Nested);
                 let full_path = prefix_path(&ctx.ns_path, &nested_path);
                 if suffix.contains(":id") && !params.iter().any(|p| p == "id") {
                     params.push("id".to_string());
@@ -330,15 +331,51 @@ fn qualify_controller(module_prefix: &str, controller: &ClassId) -> ClassId {
 /// Prepend a scope's `/<parent>/:parent_id` prefix to a child path.
 /// Returns the full path and the list of path-param names in
 /// declaration order (parent first).
-fn nest_path(path: &str, scope: Option<(&str, &str)>) -> (String, Vec<String>) {
-    match scope {
-        Some((parent, parent_plural)) => {
-            let full = format!("/{parent_plural}/:{parent}_id{path}");
-            let params = vec![format!("{parent}_id")];
-            (full, params)
+fn nest_path(
+    path: &str,
+    scope: Option<(&str, &str)>,
+    rscope: ResourceScope,
+) -> (String, Vec<String>) {
+    let Some((parent, parent_plural)) = scope else {
+        return (path.to_string(), vec![]);
+    };
+    match rscope {
+        // `member do get "reply" end` → `/comments/:id/reply` (`:id`, the
+        // record's own key — what a controller's `find` reads as
+        // `params[:id]`). An already-structured path inside `member`
+        // (`get "/comments/:id" => …`, a leading-slash absolute route) is
+        // used verbatim, matching Rails' escape from the nesting.
+        ResourceScope::Member => {
+            if is_bare_child_segment(path) {
+                (format!("/{parent_plural}/:id{path}"), vec!["id".to_string()])
+            } else {
+                (path.to_string(), vec![])
+            }
         }
-        None => (path.to_string(), vec![]),
+        // `collection do get "search" end` → `/photos/search` (no id).
+        ResourceScope::Collection => {
+            if is_bare_child_segment(path) {
+                (format!("/{parent_plural}{path}"), vec![])
+            } else {
+                (path.to_string(), vec![])
+            }
+        }
+        // Bare verb declared directly in the block, or a nested resource's
+        // own actions: Rails nests under the parent's `/:<singular>_id`.
+        ResourceScope::Nested => {
+            let full = format!("/{parent_plural}/:{parent}_id{path}");
+            (full, vec![format!("{parent}_id")])
+        }
     }
+}
+
+/// A single bare path segment like `/reply` (from a `get "reply"`
+/// shortcut) — no interior `/` and no `:param`. Such a member/collection
+/// child is nested under the parent; a structured path (`/comments/:id`)
+/// is an absolute override used as-is.
+fn is_bare_child_segment(path: &str) -> bool {
+    let trimmed = path.trim_matches('/');
+    !trimmed.is_empty() && !trimmed.contains('/') && !trimmed.contains(':')
 }
 
 /// Walk a Rails-shape path (`/posts/:id/edit`,

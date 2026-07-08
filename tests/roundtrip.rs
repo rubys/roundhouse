@@ -103,6 +103,7 @@ fn tiny_blog_round_trips() {
             action: Symbol::from("index"),
             as_name: Some(Symbol::from("posts")),
             constraints: IndexMap::new(),
+            scope: roundhouse::ResourceScope::Nested,
         }],
     };
 

@@ -820,6 +820,32 @@ pub struct RouteTable {
     pub entries: Vec<RouteSpec>,
 }
 
+/// How a custom route nested inside a `resources` block attaches to the
+/// parent resource — the Rails member/collection/child distinction, which
+/// decides the id segment the flattener prepends.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceScope {
+    /// A bare verb declared directly in the `resources` block (Rails
+    /// nests it under the parent's `/:<singular>_id`, e.g.
+    /// `post "upvote"` in `resources :stories` → `/stories/:story_id/upvote`),
+    /// or any non-member/collection route. The conservative default.
+    #[default]
+    Nested,
+    /// Declared inside `member do … end` — acts on one record, nested
+    /// under the resource's own `/:id` (`/comments/:id/reply`).
+    Member,
+    /// Declared inside `collection do … end` — acts on the whole
+    /// collection, no id segment (`/photos/search`).
+    Collection,
+}
+
+impl ResourceScope {
+    pub fn is_nested(&self) -> bool {
+        matches!(self, ResourceScope::Nested)
+    }
+}
+
 /// Surface forms of a routes.rb entry. Preserves source structure so
 /// `resources :articles do ... end` round-trips byte-for-byte; a downstream
 /// target emitter that needs concrete routes expands via [`RouteSpec::expand`].
@@ -838,6 +864,12 @@ pub enum RouteSpec {
         as_name: Option<Symbol>,
         #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
         constraints: IndexMap<Symbol, String>,
+        /// How this route nests under an enclosing `resources` block.
+        /// Set when the route is declared inside a `member do`/
+        /// `collection do` wrapper; `Nested` (the default) covers a bare
+        /// verb declared directly in the block and any other case.
+        #[serde(default, skip_serializing_if = "ResourceScope::is_nested")]
+        scope: ResourceScope,
     },
     /// `root "controller#action"` — shorthand for `GET /` routed to the
     /// given target, with `:root` as the generated name.

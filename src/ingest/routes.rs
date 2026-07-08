@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use indexmap::IndexMap;
 use ruby_prism::Node;
 
-use crate::dialect::{HttpMethod, RouteSpec, RouteTable};
+use crate::dialect::{HttpMethod, ResourceScope, RouteSpec, RouteTable};
 use crate::naming::camelize;
 use crate::{ClassId, Symbol};
 
@@ -101,17 +101,32 @@ fn ingest_route_stmts<'pr>(
         //     param matching; the route still resolves to the same
         //     controller#action.
         //   - `member do …` / `collection do …` (Rails resource-
-        //     scoping wrappers) — they affect the path prefix
-        //     (`/resource/:id/...` vs `/resource/...`), but the
-        //     routes inside lobsters are all bare-string action
-        //     shortcuts that we drop anyway (see
-        //     ingest_explicit_route's bare-action handling), so
-        //     flattening loses no signal here.
+        //     scoping wrappers) — these DO change the id segment the
+        //     flattener prepends (`/resource/:id/reply` for member,
+        //     `/resource/search` for collection, vs the bare-verb
+        //     default `/resource/:resource_id/…`), so we tag each
+        //     flattened child with its `ResourceScope` and let the
+        //     flattener build the right path. `find_comment` reading
+        //     `params[:id]` depends on the member routes carrying `:id`.
         if matches!(method.as_str(), "constraints" | "member" | "collection") {
             if let Some(block_node) = call.block() {
                 if let Some(block) = block_node.as_block_node() {
                     if let Some(inner_body) = block.body() {
-                        entries.extend(ingest_route_body(inner_body, file, parent, draws)?);
+                        let mut inner =
+                            ingest_route_body(inner_body, file, parent, draws)?;
+                        let scope = match method.as_str() {
+                            "member" => Some(ResourceScope::Member),
+                            "collection" => Some(ResourceScope::Collection),
+                            _ => None, // constraints: no scope change
+                        };
+                        if let Some(scope) = scope {
+                            for entry in &mut inner {
+                                if let RouteSpec::Explicit { scope: s, .. } = entry {
+                                    *s = scope;
+                                }
+                            }
+                        }
+                        entries.extend(inner);
                     }
                 }
             }
@@ -451,6 +466,9 @@ fn ingest_explicit_route(
         action: Symbol::from(action),
         as_name,
         constraints,
+        // Default; a `member do`/`collection do` wrapper (handled in
+        // `ingest_route_body`) overwrites this on the returned entry.
+        scope: ResourceScope::Nested,
     }))
 }
 
