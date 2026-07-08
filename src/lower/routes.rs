@@ -138,19 +138,25 @@ fn singular_resource_actions() -> &'static [(&'static str, HttpMethod, &'static 
 fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
     match spec {
         RouteSpec::Explicit { method, path, controller, action, as_name, scope, .. } => {
-            let (nested, mut params) = nest_path(path, ctx.parent_pair(), *scope);
+            let (nested, base_params) = nest_path(path, ctx.parent_pair(), *scope);
             let full_path = prefix_path(&ctx.ns_path, &nested);
-            extract_path_params(&full_path, &mut params);
+            // Rails optional `(…)` segments (`get "/s/:id/(:title)"`) match
+            // whether or not the segment is present; expand them into
+            // concrete routes (`/s/:id/:title` and `/s/:id`) so the
+            // segment-count router matches both. Paths with no optional
+            // group yield a single unchanged entry.
+            let variants = expand_optional_paths(&full_path);
             // Rails auto-names a plain `get "/search" => "search#index"`
             // route from its fully-static path (`search_path` —
             // namespace segments included: `/api/oembed` →
             // `api_oembed`). Dynamic-segment paths get no auto name in
             // Rails; keep the legacy action-name fallback in `as_name`
             // for consumers that key on it, but mark the route unnamed
-            // so the helper generator skips it.
+            // so the helper generator skips it. Name derives from the
+            // canonical (first, longest) variant.
             let (derived_name, named) = match as_name.as_ref() {
                 Some(s) => (format!("{}{}", ctx.name_prefix, s.as_str()), true),
-                None => match static_path_name(&full_path) {
+                None => match static_path_name(&variants[0]) {
                     Some(n) => (n, true),
                     // A static child path nested under a resource scope
                     // (`get "suggest"` inside `resources :stories`) is
@@ -166,15 +172,22 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     },
                 },
             };
-            out.push(FlatRoute {
-                method: method.clone(),
-                path: full_path,
-                controller: qualify_controller(&ctx.module_prefix, controller),
-                action: action.clone(),
-                as_name: derived_name,
-                path_params: params,
-                named,
-            });
+            // Only the canonical variant carries the helper name; the
+            // shorter alternates would otherwise register a duplicate
+            // helper for the same controller#action.
+            for (i, vpath) in variants.into_iter().enumerate() {
+                let mut params = base_params.clone();
+                extract_path_params(&vpath, &mut params);
+                out.push(FlatRoute {
+                    method: method.clone(),
+                    path: vpath,
+                    controller: qualify_controller(&ctx.module_prefix, controller),
+                    action: action.clone(),
+                    as_name: derived_name.clone(),
+                    path_params: params,
+                    named: named && i == 0,
+                });
+            }
         }
         RouteSpec::Root { target } => {
             let (controller_name, action_name) = target
@@ -378,6 +391,39 @@ fn is_bare_child_segment(path: &str) -> bool {
     !trimmed.is_empty() && !trimmed.contains('/') && !trimmed.contains(':')
 }
 
+/// Expand a Rails path with optional `(…)` groups into the concrete
+/// paths it can match. `/s/:id/(:title)` → `["/s/:id/:title", "/s/:id"]`
+/// (canonical/longest first). An inline optional format suffix
+/// (`/domains/:id(.:format)`) can't be matched by the slash-segment
+/// router, so only the base path is kept. Paths with no group return
+/// themselves unchanged.
+fn expand_optional_paths(path: &str) -> Vec<String> {
+    let Some(open) = path.find('(') else {
+        return vec![path.to_string()];
+    };
+    let Some(close_rel) = path[open..].find(')') else {
+        // Unbalanced parens — strip the stray `(` defensively.
+        return vec![path.replace('(', "")];
+    };
+    let close = open + close_rel;
+    let before = &path[..open];
+    let inside = &path[open + 1..close];
+    let after = &path[close + 1..];
+    let without = {
+        let joined = format!("{before}{after}").replace("//", "/");
+        let trimmed = joined.trim_end_matches('/');
+        if trimmed.is_empty() { "/".to_string() } else { trimmed.to_string() }
+    };
+    let mut out = Vec::new();
+    // Inline optional format suffix (`(.:format)`) — a dotted segment the
+    // slash-splitting router can't capture; drop it, keep only the base.
+    if !inside.starts_with('.') {
+        out.extend(expand_optional_paths(&format!("{before}{inside}{after}")));
+    }
+    out.extend(expand_optional_paths(&without));
+    out
+}
+
 /// Walk a Rails-shape path (`/posts/:id/edit`,
 /// `/articles/:article_id/comments`) and append any `:param`
 /// segment names not already in `params`.
@@ -428,5 +474,77 @@ fn resource_as_name(
         "new" => format!("new_{ns_prefix}{parent_prefix}{singular_low}"),
         "edit" => format!("edit_{ns_prefix}{parent_prefix}{singular_low}"),
         _ => format!("{ns_prefix}{parent_prefix}{singular_low}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn member_route_nests_under_id() {
+        // `member do get "reply" end` in `resources :comments` — the
+        // record's own key, so `find_comment` reads `params[:id]`.
+        let (path, params) =
+            nest_path("/reply", Some(("comment", "comments")), ResourceScope::Member);
+        assert_eq!(path, "/comments/:id/reply");
+        assert_eq!(params, vec!["id".to_string()]);
+    }
+
+    #[test]
+    fn member_route_absolute_path_used_verbatim() {
+        // `get "/comments/:id" => …` inside a member block escapes nesting.
+        let (path, params) = nest_path(
+            "/comments/:id",
+            Some(("comment", "comments")),
+            ResourceScope::Member,
+        );
+        assert_eq!(path, "/comments/:id");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn collection_route_has_no_id_segment() {
+        let (path, params) =
+            nest_path("/search", Some(("photo", "photos")), ResourceScope::Collection);
+        assert_eq!(path, "/photos/search");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn bare_verb_in_resources_keeps_parent_id() {
+        // `post "upvote"` directly in `resources :stories` → `:story_id`.
+        let (path, params) =
+            nest_path("/upvote", Some(("story", "stories")), ResourceScope::Nested);
+        assert_eq!(path, "/stories/:story_id/upvote");
+        assert_eq!(params, vec!["story_id".to_string()]);
+    }
+
+    #[test]
+    fn top_level_route_is_unnested() {
+        let (path, params) = nest_path("/login", None, ResourceScope::Nested);
+        assert_eq!(path, "/login");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn optional_trailing_segment_expands_both_ways() {
+        assert_eq!(
+            expand_optional_paths("/s/:id/(:title)"),
+            vec!["/s/:id/:title".to_string(), "/s/:id".to_string()]
+        );
+    }
+
+    #[test]
+    fn inline_optional_format_is_dropped() {
+        assert_eq!(
+            expand_optional_paths("/domains/:id(.:format)"),
+            vec!["/domains/:id".to_string()]
+        );
+    }
+
+    #[test]
+    fn path_without_optional_group_is_unchanged() {
+        assert_eq!(expand_optional_paths("/s/:id"), vec!["/s/:id".to_string()]);
     }
 }
