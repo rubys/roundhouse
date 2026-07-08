@@ -1742,90 +1742,13 @@ fn plaintext_writer_body(attr: &Symbol, digest: &Symbol) -> Expr {
     sp_expr(ExprNode::Seq { exprs: vec![store_plain, guarded_digest] })
 }
 
-// ── request-params key normalization ─────────────────────────────────
-
-/// Ruby-family pre-emit pass: rewrite symbol-keyed request-params
-/// reads (`params[:email]`, `params.fetch(:page, …)`, `params.dig(
-/// :what, :stories)`) to string keys — on CONTROLLER classes only.
-/// The dispatch layer parses form/query/path params into a
-/// string-keyed Hash (the `Hash[String, ParamValue]` contract in
-/// base.rbs); verbatim controller bodies keep Rails' symbol spelling,
-/// which real Rails accepts (params are indifferent-access) but a
-/// plain Hash reads as nil — GET routes never noticed (absent params
-/// read as nil either way), POST /login did.
-///
-/// Restricted to controllers because `params`/`@params` in library
-/// classes can be ordinary caller-built symbol-keyed hashes —
-/// lobsters' `Pushover.push(user, params)` takes a literal hash
-/// argument, and StoryRepository's `@params` is `StoryRepository.new(
-/// user, exclude_tags: …)`'s keyword hash. Rewriting those would
-/// corrupt working reads.
-pub(crate) fn apply_params_key_lowering(lcs: &mut [LibraryClass], app: &App) {
-    for lc in lcs.iter_mut() {
-        if lc.origin.is_some() {
-            continue;
-        }
-        if !app.controllers.iter().any(|c| c.name == lc.name) {
-            continue;
-        }
-        for m in lc.methods.iter_mut() {
-            rewrite_params_sym_keys(&mut m.body);
-        }
-    }
-}
-
-fn rewrite_params_sym_keys(e: &mut Expr) {
-    e.node.for_each_child_mut(&mut rewrite_params_sym_keys);
-    match &mut *e.node {
-        ExprNode::Send { recv: Some(r), method, args, .. }
-            if is_request_params_recv(r) =>
-        {
-            match method.as_str() {
-                "[]" | "[]=" | "fetch" | "key?" | "has_key?" | "include?"
-                | "delete" => {
-                    if let Some(first) = args.first_mut() {
-                        sym_key_to_str(first);
-                    }
-                }
-                "dig" => {
-                    for a in args.iter_mut() {
-                        sym_key_to_str(a);
-                    }
-                }
-                _ => {}
-            }
-        }
-        ExprNode::Assign { target: LValue::Index { recv, index }, .. }
-        | ExprNode::OpAssign { target: LValue::Index { recv, index }, .. }
-            if is_request_params_recv(recv) =>
-        {
-            sym_key_to_str(index);
-        }
-        _ => {}
-    }
-}
-
-/// The request-params receiver shapes inside a lowered controller:
-/// `@params` (accessor already ivar-ized) or a bare `params` read.
-fn is_request_params_recv(e: &Expr) -> bool {
-    match &*e.node {
-        ExprNode::Ivar { name } => name.as_str() == "params",
-        ExprNode::Var { name, .. } => name.as_str() == "params",
-        ExprNode::Send { recv: None, method, args, .. } => {
-            args.is_empty() && method.as_str() == "params"
-        }
-        _ => false,
-    }
-}
-
-fn sym_key_to_str(e: &mut Expr) {
-    if let ExprNode::Lit { value: crate::expr::Literal::Sym { value } } = &*e.node {
-        let s = value.as_str().to_string();
-        e.node = Box::new(ExprNode::Lit {
-            value: crate::expr::Literal::Str { value: s },
-        });
-    }
-}
+// Request-params key normalization moved to the Ruby expr emitter's
+// type-directed index hook (`emit::ruby::expr`): a symbol/dynamic key on
+// a statically string-keyed hash (`Hash[String, _]`) is coerced to a
+// string at the single `[]` emit chokepoint. That gates on the receiver
+// *type* rather than a `params` name heuristic, so it covers views and
+// helpers (params flows there too) and never touches a genuine
+// symbol-keyed `Hash[Symbol, _]` like `StoryRepository#@params`.
 
 // ── typed_store lowering ─────────────────────────────────────────────
 

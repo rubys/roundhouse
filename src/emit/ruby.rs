@@ -305,7 +305,6 @@ pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
     library::apply_duration_lowering(&mut lcs);
-    library::apply_params_key_lowering(&mut lcs, app);
     emit_lowered_controllers_from_lcs(&lcs, app)
 }
 
@@ -326,7 +325,6 @@ pub fn emit_lowered_controllers_with_layout(app: &App) -> Vec<EmittedFile> {
     library::apply_helper_lowering(&mut lcs, app);
     library::apply_duration_lowering(&mut lcs);
     library::apply_layout_lowering(&mut lcs, app);
-    library::apply_params_key_lowering(&mut lcs, app);
     emit_lowered_controllers_from_lcs(&lcs, app)
 }
 

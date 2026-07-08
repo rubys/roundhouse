@@ -6,6 +6,7 @@
 
 use crate::expr::{Arm, Expr, ExprNode, LValue, Literal, Pattern};
 use crate::ident::Symbol;
+use crate::ty::Ty;
 
 use super::shared::indent_lines;
 
@@ -544,6 +545,79 @@ fn recv_needs_parens(r: &Expr) -> bool {
     }
 }
 
+/// Does `recv` carry a statically-known **string-keyed** hash type
+/// (`Hash[String, _]`)? Ruby and Crystal are the only targets with a
+/// Symbol distinct from String, so a symbol used to index such a hash is
+/// (idiomatically — Rails' indifferent-access params being the canonical
+/// case) meant as its *string* key; the six symbol-less targets already
+/// collapse `:sym` to a string and need no help. A genuinely symbol-keyed
+/// hash (`Hash[Symbol, _]`, e.g. a keyword-arg hash like
+/// `StoryRepository#@params`) has a different type and is left alone, as
+/// is any `untyped`/unknown receiver — we coerce on positive evidence
+/// only.
+///
+/// This is the type-directed emit hook (the `[]` analog of the shared
+/// `classify_add`/`_sub`/`_cmp` operator dispatch) where a future
+/// indifferent-access *effect/color* would be consulted in place of the
+/// raw type: the emit site stays put, only the predicate swaps.
+fn is_string_keyed_hash(recv: &Expr) -> bool {
+    matches!(recv.ty.as_ref(), Some(Ty::Hash { key, .. }) if matches!(key.as_ref(), Ty::Str))
+}
+
+/// Coerce a key indexing a string-keyed hash: a symbol literal `:id` →
+/// `"id"`, an already-string key unchanged, and any dynamic key wrapped
+/// with `.to_s`. Safe on a `Hash[String, _]` — the key is a string, so
+/// `.to_s` is a no-op on a string and repairs a symbol.
+fn coerce_str_key(key: &Expr) -> String {
+    match &*key.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => format!("{:?}", value.as_str()),
+        ExprNode::Lit { value: Literal::Str { .. } } => emit_expr(key),
+        _ => {
+            let k = emit_expr(key);
+            if recv_needs_parens(key) { format!("({k}).to_s") } else { format!("{k}.to_s") }
+        }
+    }
+}
+
+/// Coerce only an unambiguous `:sym` literal key to a string, leaving
+/// every other shape (string, integer, dynamic) untouched. Used for the
+/// nested-walking forms (`dig`, `fetch`) where positions past the first
+/// index a nested value whose key type we don't know here.
+fn coerce_str_sym_key(key: &Expr) -> String {
+    match &*key.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => format!("{:?}", value.as_str()),
+        _ => emit_arg(key),
+    }
+}
+
+/// Emit an index/lookup on a string-keyed hash (`is_string_keyed_hash`
+/// already established) with its key(s) coerced to strings, or `None`
+/// for a method that isn't a keyed access — falling through to normal
+/// emission. Symbol keys never match a string-keyed hash, so they're
+/// normalized here at the single emit chokepoint (covering the dynamic
+/// `h[x]` → `h[x.to_s]` case a literal-only pre-pass could not).
+fn emit_str_hash_access(recv: &Expr, method: &str, args: &[Expr]) -> Option<String> {
+    let recv_s = emit_expr(recv);
+    match method {
+        "[]" if args.len() == 1 => Some(format!("{recv_s}[{}]", coerce_str_key(&args[0]))),
+        "[]=" if args.len() == 2 => Some(format!(
+            "{recv_s}[{}] = {}",
+            coerce_str_key(&args[0]),
+            emit_arg(&args[1])
+        )),
+        "fetch" | "key?" | "has_key?" | "include?" | "delete" if !args.is_empty() => {
+            let mut parts = vec![coerce_str_sym_key(&args[0])];
+            parts.extend(args[1..].iter().map(emit_arg));
+            Some(format!("{recv_s}.{method}({})", parts.join(", ")))
+        }
+        "dig" if !args.is_empty() => {
+            let parts: Vec<String> = args.iter().map(coerce_str_sym_key).collect();
+            Some(format!("{recv_s}.dig({})", parts.join(", ")))
+        }
+        _ => None,
+    }
+}
+
 /// Emit the receiver/method/args portion of a Send without its block.
 /// Used by normal Ruby emission and by ERB template reconstruction.
 pub(super) fn emit_send_base(
@@ -554,6 +628,17 @@ pub(super) fn emit_send_base(
 ) -> String {
     let args_s: Vec<String> = args.iter().map(emit_arg).collect();
     let m = method.as_str();
+    // Indexing a statically string-keyed hash (`Hash[String, _]`, e.g.
+    // request `params`) with a Ruby symbol/dynamic key: coerce the key to
+    // a string here, the single emit chokepoint, so no `h[:sym]` survives
+    // to hit the hash as a never-matching symbol key (a silent nil read).
+    if let Some(r) = recv {
+        if is_string_keyed_hash(r) {
+            if let Some(s) = emit_str_hash_access(r, m, args) {
+                return s;
+            }
+        }
+    }
     // Index-read (`recv[idx]`) and index-write (`recv[idx] = value`)
     // Sends round-trip to bracket-syntax regardless of receiver shape
     // — handled before the SelfRef-implicit shortcut, which would
@@ -791,7 +876,16 @@ fn emit_lvalue(lv: &LValue) -> String {
         LValue::Var { name, .. } => name.to_string(),
         LValue::Ivar { name } => format!("@{name}"),
         LValue::Attr { recv, name } => format!("{}.{name}", emit_expr(recv)),
-        LValue::Index { recv, index } => format!("{}[{}]", emit_expr(recv), emit_expr(index)),
+        LValue::Index { recv, index } => {
+            // Index-write target (`h[:x] = …`): coerce the key when writing
+            // to a string-keyed hash, same as the read path above.
+            let key = if is_string_keyed_hash(recv) {
+                coerce_str_key(index)
+            } else {
+                emit_expr(index)
+            };
+            format!("{}[{}]", emit_expr(recv), key)
+        }
         LValue::Const { path } => path.iter().map(|s| s.as_str().to_string()).collect::<Vec<_>>().join("::"),
     }
 }
