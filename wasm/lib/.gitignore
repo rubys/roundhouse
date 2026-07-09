@@ -7,3 +7,4 @@ roundhouse_wasm.wasm
 # Absent the manifest, /playground/ falls back to the committed blog fixture.
 apps.json
 app-lobsters.json
+app-mastodon.json

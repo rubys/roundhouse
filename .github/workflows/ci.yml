@@ -420,18 +420,27 @@ jobs:
             --name blog --open app/controllers/articles_controller.rb
           cp /tmp/app-lobsters.json wasm/ide/app-lobsters.json
           printf '%s\n' '{"default":"mastodon","apps":[{"name":"blog","label":"Rails blog","src":"app-blog.json"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json"},{"name":"mastodon","label":"Mastodon","src":"app-src.json"}]}' > wasm/ide/apps.json
+          # Playground picker (lib/): lobsters + mastodon alongside the committed
+          # blog fixture, so verify-playground exercises the app switch + the
+          # off-thread Mastodon transpile.
+          cp /tmp/app-lobsters.json wasm/lib/app-lobsters.json
+          cp wasm/ide/app-src.json  wasm/lib/app-mastodon.json
+          printf '%s\n' '{"default":"blog","apps":[{"name":"blog","label":"Rails blog","src":"fixture.json","open":"app/models/article.rb"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json","open":"app/models/story.rb"},{"name":"mastodon","label":"Mastodon","src":"app-mastodon.json","open":"app/models/status.rb"}]}' > wasm/lib/apps.json
       - name: Install harness deps (Playwright)
         run: npm ci
         working-directory: tests/browser_smoke
       - name: Install Playwright Chromium (+ system deps)
         run: npx playwright install --with-deps chromium
         working-directory: tests/browser_smoke
-      - name: Serve wasm/ and verify the /ide/ page
+      - name: Serve wasm/ and verify the /ide/ + /playground/ pages
         run: |
           set -euo pipefail
           (cd wasm && python3 -m http.server 8099 >/tmp/ide-server.log 2>&1 &)
           sleep 1
           (cd wasm/ide && node verify-ide.mjs)
+          # Same shared worker/client, exercised through the emit surface incl.
+          # the off-thread Mastodon transpile.
+          (cd wasm/playground && node verify-playground.mjs)
 
   framework-tests-crystal:
     # Per-target framework-test conformance gate for the Crystal
@@ -1622,6 +1631,9 @@ jobs:
           # build-wasm artifact — not committed; see that job + wasm/vendor/).
           cp wasm/lib/transpile.mjs \
              wasm/lib/analyzer.mjs \
+             wasm/lib/engine.mjs \
+             wasm/lib/worker.mjs \
+             wasm/lib/wasm-client.mjs \
              wasm/lib/wasi-shim.mjs \
              wasm/lib/editor.js \
              wasm/lib/tree.js \
@@ -1665,7 +1677,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p _site/ide
-          cp wasm/ide/index.html wasm/ide/ide.js wasm/ide/worker.mjs _site/ide/
+          cp wasm/ide/index.html wasm/ide/ide.js _site/ide/
           cp wasm/ide/app-src.json _site/ide/
           echo "ide files:"; find _site/ide -type f | sort
 
@@ -1701,8 +1713,13 @@ jobs:
           cp /tmp/app-lobsters.json _site/lib/app-lobsters.json
           cp /tmp/app-lobsters.json _site/ide/app-lobsters.json
           cp /tmp/app-blog.json     _site/ide/app-blog.json
-          # Playground manifest: blog (clean) + lobsters (partial → honest ledger).
-          printf '%s\n' '{"default":"blog","apps":[{"name":"blog","label":"Rails blog","src":"fixture.json","open":"app/models/article.rb"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json","open":"app/models/story.rb"}]}' > _site/lib/apps.json
+          # Mastodon ships to BOTH now: /ide/ analyzes it, and /playground/
+          # transpiles it off the main thread (partial output + gap diagnostics —
+          # the emit runs in the shared worker, so the multi-second pass never
+          # freezes the tab; see wasm/lib/wasm-client.mjs).
+          cp wasm/ide/app-src.json  _site/lib/app-mastodon.json
+          # Playground manifest: blog (clean) + lobsters + mastodon (both partial → honest ledger).
+          printf '%s\n' '{"default":"blog","apps":[{"name":"blog","label":"Rails blog","src":"fixture.json","open":"app/models/article.rb"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json","open":"app/models/story.rb"},{"name":"mastodon","label":"Mastodon","src":"app-mastodon.json","open":"app/models/status.rb"}]}' > _site/lib/apps.json
           # IDE manifest: all three (analysis is gap-tolerant; Mastodon default).
           printf '%s\n' '{"default":"mastodon","apps":[{"name":"blog","label":"Rails blog","src":"app-blog.json"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json"},{"name":"mastodon","label":"Mastodon","src":"app-src.json"}]}' > _site/ide/apps.json
           echo "lib app bundles:"; ls -1 _site/lib/*.json | sort

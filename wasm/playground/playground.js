@@ -13,7 +13,7 @@
 //   python3 -m http.server 8099   # run from wasm/
 //   open http://localhost:8099/playground/
 
-import { loadDefaultCompiler, loadFixture } from "../lib/transpile.mjs";
+import { createClient } from "../lib/wasm-client.mjs";
 import { createEditor, createOutputView } from "../lib/editor.js";
 import { allDirPaths, renderTree } from "../lib/tree.js";
 
@@ -47,8 +47,9 @@ const els = {
   outputHost: document.getElementById("outputHost"),
 };
 
-let compiler = null;
+let client = null;         // shared off-thread compiler client (lib/wasm-client)
 let apps = [];              // app-picker manifest entries ({name,label,src})
+let transpileSeq = 0;      // guards against a stale async transpile overwriting a newer one
 let editor = null;
 let outputView = null;      // read-only Monaco (or <pre>) showing the emitted file
 let srcMap = null;          // { path: content } — the live, editable input
@@ -117,17 +118,26 @@ function onEditorChange(value) {
   debounceTimer = setTimeout(transpile, DEBOUNCE_MS);
 }
 
-function transpile() {
+// Transpile runs off the main thread (lib/wasm-client), so a big app (Mastodon
+// is multi-second) leaves the editor responsive. It's async: a `seq` guard
+// drops a result that a newer edit has already superseded, and a worker
+// timeout/crash comes back as an { error } we render like any other.
+async function transpile() {
   const lang = els.target.value;
+  const seq = ++transpileSeq;
   const t0 = performance.now();
+  setStatus("transpiling…");
+  let result;
   try {
-    lastOutput = compiler.transpile(lang, srcMap);
+    result = await client.transpile(lang, srcMap);
   } catch (e) {
-    lastOutput = { error: `transpile threw: ${e.message}` };
+    result = { error: `transpile failed: ${e.message}` };
   }
-  lastDiagnostics = (lastOutput && lastOutput.diagnostics) || [];
-  lastTypes = (lastOutput && lastOutput.inferred_types) || [];
-  renderOutput(lastOutput, performance.now() - t0);
+  if (seq !== transpileSeq) return; // a newer transpile is already in flight
+  lastOutput = result;
+  lastDiagnostics = (result && result.diagnostics) || [];
+  lastTypes = (result && result.inferred_types) || [];
+  renderOutput(result, performance.now() - t0);
   renderMarkers();
   renderTypes();
 }
@@ -253,9 +263,9 @@ function showOutput(i) {
 // apps.json (in ../lib/) lists the shipped apps; each `src` is either a flat
 // {path:content} fixture (the blog seed) or a bundle-src.mjs output (which
 // nests the map under `.src`). Swapping apps re-seeds srcMap and re-transpiles
-// — the compiler is stateless per call. Only apps whose ingest the compiler
-// accepts belong here (Mastodon's strict-mode ingest hard-fails, so it lives
-// on /ide/, whose analysis path is gap-tolerant).
+// — the compiler is stateless per call. Ingest is survey-tolerant, so even
+// Mastodon transpiles (partially, with a gap-note diagnostic on each unmodeled
+// construct); the multi-second pass runs in the worker, so the UI stays live.
 async function loadApp(entry) {
   setStatus(`loading ${entry.label || entry.name}…`);
   let json;
@@ -282,7 +292,7 @@ async function loadApp(entry) {
   const first = (entry.open && srcMap[entry.open] != null) ? entry.open
     : (srcMap[DEFAULT_FILE] != null ? DEFAULT_FILE : sourceFiles()[0]);
   selectFile(first);
-  transpile();
+  await transpile();
 }
 
 // ---- boot ----------------------------------------------------------------
@@ -297,10 +307,16 @@ async function boot() {
   els.target.value = DEFAULT_TARGET;
 
   setStatus("loading wasm…");
-  compiler = await loadDefaultCompiler({
-    onStdout: (s) => console.log("[wasm]", s),
-    onStderr: (s) => console.warn("[wasm]", s),
+  // The compiler wasm runs in the shared worker (lib/worker.mjs) behind a
+  // watchdog: transpile never blocks the UI, and a hang/trap on a big app
+  // restarts the worker instead of freezing the tab.
+  client = createClient({
+    workerUrl: new URL("../lib/worker.mjs", import.meta.url),
+    wasmUrl: new URL("../lib/roundhouse_wasm.wasm", import.meta.url).href,
+    timeoutMs: 30000,
+    onRestart: (reason) => setStatus(`compiler restarted — ${reason}`, "err"),
   });
+  await client.ready();
 
   setStatus("loading editor…");
   [editor, outputView] = await Promise.all([
@@ -309,9 +325,10 @@ async function boot() {
       // Typed completion from the last transpile's analysis snapshot
       // (the wasm side stashes one on every transpile). `text` is the
       // live buffer — one keystroke ahead of that snapshot, which is
-      // exactly the contract ide::complete_at is built for.
+      // exactly the contract ide::complete_at is built for. Async now
+      // (the round-trips through the worker); Monaco awaits it.
       complete: (text, line, character) =>
-        currentPath ? compiler.complete(currentPath, text, line, character) : [],
+        currentPath ? client.complete(currentPath, text, line, character) : [],
     }),
     createOutputView(els.outputHost),
   ]);
@@ -363,12 +380,14 @@ async function boot() {
       await loadApp(a);
       return true;
     },
-    setTarget(t) { els.target.value = t; transpile(); },
+    // Mutating hooks return the transpile promise so the verifier can await
+    // the (now off-thread) re-transpile before reading output()/diagnostics().
+    setTarget(t) { els.target.value = t; return transpile(); },
     selectSource: (path) => selectFile(path),
     editFile(path, content) {
       srcMap[path] = content;
       if (path === currentPath) editor.setValue(content, langForPath(path));
-      transpile();
+      return transpile();
     },
     output: () => lastOutput,
     // The emitted file currently shown in the output pane (path), for asserting
@@ -392,7 +411,7 @@ async function boot() {
     // current buffer for the open file — drives the completion assertion in
     // the verifier without simulating editor keystrokes.
     complete: (text, line, character) =>
-      compiler.complete(currentPath, text, line, character),
+      client.complete(currentPath, text, line, character),
   };
 }
 

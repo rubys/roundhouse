@@ -153,10 +153,30 @@ pub(super) fn register_object_prop(key: String) {
     });
 }
 
-/// Register a class's parent for ancestor walks.
+/// Register a class's parent for ancestor walks. Rejects an edge that
+/// would make the parent chain cyclic: a class can't be its own ancestor
+/// in valid Ruby, but a survey-degraded app (a nil-substituted or skipped
+/// superclass) can present one, and every `while let Some(c) = cur`
+/// ancestor walk below would then spin forever. Keeping CLASS_PARENTS
+/// acyclic by construction makes all of them terminate; well-formed apps
+/// never hit the guard, so their emission is unchanged.
 pub(super) fn register_class_parent(class: String, parent: String) {
+    if class == parent {
+        return;
+    }
     CLASS_PARENTS.with(|m| {
-        m.borrow_mut().insert(class, parent);
+        let mut m = m.borrow_mut();
+        // Would `class` already be reachable from `parent`? Walk up from
+        // `parent` over the existing (acyclic-by-invariant) edges; if we
+        // reach `class`, this edge would close a cycle — drop it.
+        let mut cur = Some(parent.clone());
+        while let Some(c) = cur {
+            if c == class {
+                return;
+            }
+            cur = m.get(&c).cloned();
+        }
+        m.insert(class, parent);
     });
 }
 

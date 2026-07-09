@@ -104,7 +104,17 @@ fn transpile_inner(json_in: &str) -> String {
         .map(|(k, v)| (PathBuf::from(k), v.into_bytes()))
         .collect();
 
-    let mut app = match ingest_app_from_tree(tree) {
+    // Survey mode: real apps (Lobsters, Mastodon) always reach for constructs
+    // the subset doesn't model yet. Rather than abort at the first one, ingest
+    // past it (a Nil-substituted placeholder, or a skipped file) and record
+    // each as a gap. The emitted project is then the honest work-in-progress,
+    // and every gap surfaces as a coverage-note diagnostic on its source line —
+    // the same "show the gap, don't hide the app" bar the /ide/ skin uses.
+    roundhouse::ingest::survey::activate();
+    let (result, parse_diags) =
+        roundhouse::ingest::prism::scope(|| ingest_app_from_tree(tree));
+    let gaps = roundhouse::ingest::survey::drain();
+    let mut app = match result {
         Ok(app) => app,
         Err(e) => return error_json(&format!("ingest: {e}")),
     };
@@ -112,9 +122,13 @@ fn transpile_inner(json_in: &str) -> String {
     let mut analyzer = Analyzer::new(&app);
     analyzer.analyze(&mut app);
 
-    // Surface analyzer diagnostics, resolved to source positions. Synthetic
-    // spans (no source site) are dropped — there's nowhere to put a marker.
-    let diagnostics: Vec<DiagnosticOut> = diagnose(&app)
+    // Analyzer diagnostics + gap-attributed coverage notes (Info severity),
+    // resolved to source positions. Synthetic spans (no source site) are
+    // dropped — there's nowhere to put a marker.
+    let mut diags = diagnose(&app);
+    roundhouse::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &gaps);
+    diags.extend(parse_diags);
+    let diagnostics: Vec<DiagnosticOut> = diags
         .into_iter()
         .filter_map(|d| {
             if d.span.is_synthetic() {
@@ -126,10 +140,6 @@ fn transpile_inner(json_in: &str) -> String {
             let severity = match d.severity {
                 Severity::Error => "error",
                 Severity::Warning => "warning",
-                // Gap-attributed coverage notes (analyze::attribution).
-                // The playground/studio ingest strict (no survey mode),
-                // so these don't occur there today; mapped for
-                // completeness against a future survey-mode wiring.
                 Severity::Info => "info",
             };
             let code = d.code();
@@ -214,9 +224,8 @@ fn transpile_inner(json_in: &str) -> String {
         serde_json::to_string(&out).unwrap_or_else(|e| error_json(&format!("serialize: {e}")));
     // Refresh the query snapshot last — every borrow of `app` above has
     // ended, and `complete`/`type_at` now answer against exactly the
-    // analysis this transpile ran. Transpile ingests strictly, so
-    // there are no survey gaps to carry.
-    LAST_GOOD.with(|l| *l.borrow_mut() = Some(Analysis { app, analyzer, gaps: Vec::new() }));
+    // analysis this transpile ran, carrying the same survey gaps.
+    LAST_GOOD.with(|l| *l.borrow_mut() = Some(Analysis { app, analyzer, gaps }));
     json
 }
 

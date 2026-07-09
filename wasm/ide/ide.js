@@ -20,6 +20,7 @@
 
 import { loadMonaco, registerTypedCompletion } from "../lib/editor.js";
 import { buildTree, allDirPaths, renderTree } from "../lib/tree.js";
+import { createClient } from "../lib/wasm-client.mjs";
 
 const els = {
   status: document.getElementById("status"),
@@ -35,23 +36,17 @@ const els = {
 };
 
 // ── Worker RPC ───────────────────────────────────────────────────────
-const worker = new Worker(new URL("./worker.mjs", import.meta.url), { type: "module" });
-let nextId = 1;
-const pending = new Map();
-worker.onmessage = (e) => {
-  const { id, result, error } = e.data;
-  const p = pending.get(id);
-  if (!p) return;
-  pending.delete(id);
-  error ? p.reject(new Error(error)) : p.resolve(result);
-};
-function rpc(op, args) {
-  return new Promise((resolve, reject) => {
-    const id = nextId++;
-    pending.set(id, { resolve, reject });
-    worker.postMessage({ id, op, args });
-  });
-}
+// The analyzer wasm runs in the shared compiler worker (lib/worker.mjs) behind
+// a watchdog client, so a whole-app pass never blocks the UI and a hang/trap
+// restarts the worker instead of freezing the tab. `rpc` is the thin op bridge
+// the rest of this file speaks.
+const client = createClient({
+  workerUrl: new URL("../lib/worker.mjs", import.meta.url),
+  wasmUrl: new URL("../lib/roundhouse_wasm.wasm", import.meta.url).href,
+  timeoutMs: 30000,
+  onRestart: (reason) => status(`compiler restarted — ${reason}`),
+});
+const rpc = (op, args) => client.call(op, args);
 
 // ── State ────────────────────────────────────────────────────────────
 let srcMap = {};             // path → current text (the edit overlay)
@@ -612,7 +607,7 @@ async function boot() {
   });
 
   status("loading analyzer…");
-  await rpc("init", { wasmUrl: new URL("../lib/roundhouse_wasm.wasm", import.meta.url).href });
+  await client.ready();
 
   // App picker. apps.json lists the shipped Rails app bundles (each `src`
   // is a bundle-src.mjs output). Absent — plain local dev with a single

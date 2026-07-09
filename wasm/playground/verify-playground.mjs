@@ -78,11 +78,11 @@ const before = modelPath(initial);
 if (!before) fail("no emitted app/models/article.ts in initial output");
 
 // --- edit: change a validation the transpiler reflects, expect output to move
-const edited = await page.evaluate((p) => {
+const edited = await page.evaluate(async (p) => {
   const orig = window.__playground.source(p);
   const next = orig.replace("length: { minimum: 10 }", "length: { minimum: 999 }");
   if (next === orig) return { error: "edit precondition failed: validation string not found in source" };
-  window.__playground.editFile(p, next);
+  await window.__playground.editFile(p, next);
   return window.__playground.output();
 }, MODEL);
 
@@ -102,8 +102,8 @@ if (edited.error) {
 // --- target sweep: every backend re-transpiles cleanly ----------------------
 console.log("\n=== target sweep (live re-transpile) ===");
 for (const t of ["typescript", "go", "rust", "python", "elixir", "crystal", "kotlin", "swift", "csharp", "ruby"]) {
-  const out = await page.evaluate((target) => {
-    window.__playground.setTarget(target);
+  const out = await page.evaluate(async (target) => {
+    await window.__playground.setTarget(target);
     return window.__playground.output();
   }, t);
   const count = out.files?.length ?? 0;
@@ -130,11 +130,11 @@ if (baseErrors.length)
 if (baseOther.length)
   fail(`expected only gradual_untyped baseline warnings, got: ${[...new Set(baseOther.map((d) => d.code))].join(", ")}`);
 
-const errDiag = await page.evaluate((p) => {
+const errDiag = await page.evaluate(async (p) => {
   const orig = window.__playground.source(p);
   const next = orig.replace("class Article < ApplicationRecord\n",
     "class Article < ApplicationRecord\n  def bad\n    title + 1\n  end\n\n");
-  window.__playground.editFile(p, next);
+  await window.__playground.editFile(p, next);
   return window.__playground.diagnostics();
 }, MODEL);
 const typeErr = errDiag.find((d) =>
@@ -212,7 +212,7 @@ const rbOut = await page.evaluate(() => window.__playground.displayedOutput());
 console.log("ruby: select app/models/article.rb ->", rbOut);
 if (rbOut !== "app/models/article.rb") fail(`expected app/models/article.rb, got ${rbOut}`);
 
-await page.evaluate(() => { window.__playground.setTarget("typescript"); window.__playground.selectSource("app/models/article.rb"); });
+await page.evaluate(async () => { await window.__playground.setTarget("typescript"); window.__playground.selectSource("app/models/article.rb"); });
 await page.screenshot({ path: "playground.png" });
 
 // --- app picker (only when a manifest ships >1 app) -------------------------
@@ -234,14 +234,46 @@ if (appNames.length >= 2 && appNames.includes("lobsters")) {
   if (lob.error) fail(`lobsters transpile errored: ${lob.error}`);
   if (!(lob.sources > 30 && lob.emitted > 30)) fail(`lobsters re-seed/transpile too small: ${lob.sources}/${lob.emitted}`);
   if (!(lob.diags > 100)) fail(`lobsters diagnostics ledger unexpectedly sparse: ${lob.diags}`);
+  // Mastodon is the off-thread stress case: a multi-second transpile that only
+  // works because the wasm runs in the worker (the main thread would freeze
+  // otherwise). Assert the UI stays responsive WHILE it runs, then that partial
+  // output + gap-note diagnostics land.
+  if (appNames.includes("mastodon")) {
+    const started = Date.now();
+    const done = page.evaluate(() => window.__playground.setApp("mastodon"));
+    let worst = 0;
+    while (Date.now() - started < 2500) {
+      const t0 = Date.now();
+      await page.evaluate(() => performance.now()); // must return promptly if the main thread is free
+      worst = Math.max(worst, Date.now() - t0);
+    }
+    if (worst >= 750) fail(`main thread blocked during mastodon transpile: worst round-trip ${worst}ms`);
+    await done;
+    const mast = await page.evaluate(() => {
+      const out = window.__playground.output();
+      return { files: (out.files || []).length, error: out.error || null,
+        notes: (out.diagnostics || []).filter((d) => d.severity === "info").length };
+    });
+    console.log(`mastodon: ${mast.files} files, ${mast.notes} gap-notes, worst UI round-trip ${worst}ms during transpile`);
+    if (mast.error) fail(`mastodon transpile errored: ${mast.error}`);
+    if (!(mast.files > 100)) fail(`mastodon emitted too little: ${mast.files} files`);
+    if (!(mast.notes > 100)) fail(`mastodon gap-note ledger unexpectedly sparse: ${mast.notes}`);
+  }
+
   await page.evaluate(() => window.__playground.setApp("blog"));
   await page.waitForFunction(() => window.__playground.source("app/models/article.rb") != null, { timeout: 30000 });
   const backErrs = await page.evaluate(() => (window.__playground.output().diagnostics || []).filter((d) => d.severity === "error").length);
   if (backErrs !== 0) fail(`round-trip back to blog not clean: ${backErrs} errors`);
-  console.log("app switch: lobsters <-> blog verified");
+  console.log("app switch: lobsters · mastodon · blog verified");
 }
 
-const noise = /monaco|web worker|cdn\.jsdelivr|loader\.js/i;
+// Monaco's Monarch tokenizer occasionally logs "trying to pop an empty stack"
+// when a model is disposed mid-background-tokenization (both views swap a fresh
+// model per file — the documented workaround — but the async transpile timing
+// can still race the tokenizer). It's a Monaco-internal, cosmetic warning with
+// no functional effect (every assertion above passes through it), so it joins
+// the Monaco/loader noise already filtered here.
+const noise = /monaco|web worker|cdn\.jsdelivr|loader\.js|pop an empty stack/i;
 const realErrors = logs.filter((l) => /pageerror|\[error\]/.test(l) && !noise.test(l));
 if (realErrors.length) {
   console.log("\n=== console errors ===");

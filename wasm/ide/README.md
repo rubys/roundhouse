@@ -53,9 +53,10 @@ Any Rails app works as the bundle; the published site ships Mastodon at
 the SHA pinned in `.github/workflows/ci.yml` (`MASTODON_SHA`), plus the
 Lobsters benchmark app (`RUBY_BENCH_SHA`) and the blog fixture, with each
 app's LICENSE and commit embedded in its bundle (Mastodon's AGPL source
-redistribution, the compliant kind). Mastodon is IDE-only: its strict-mode
-ingest gaps hard-fail the `/playground/` full-transpile path, whereas the
-analyzer here is gap-tolerant.
+redistribution, the compliant kind). All three run on `/playground/` too:
+its transpile ingests in the same survey-tolerant mode this analyzer uses,
+and runs in the shared worker (`../lib/wasm-client.mjs`) so a multi-second
+Mastodon pass doesn't freeze the tab.
 
 ## Verifying
 

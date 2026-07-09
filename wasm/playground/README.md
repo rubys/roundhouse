@@ -45,13 +45,15 @@ cd playground && node verify-playground.mjs
 ## What works
 
 - Source tree seeded from real-blog (`.rb` / `.erb`), click to edit.
-- **App selector** — switch the seed app in place. The published page offers
-  the blog (clean) and the Lobsters benchmark app (a full transpile that
-  emits partially and surfaces the honest diagnostics ledger). Driven by an
-  optional `../lib/apps.json` manifest; absent it, the lone blog fixture loads
-  and the selector hides. Mastodon is *not* offered here — its strict-mode
-  ingest gaps hard-fail the full-transpile path (it lives on `/ide/`, whose
-  analysis is gap-tolerant).
+- **App selector** — switch the seed app in place: the blog (clean), the
+  Lobsters benchmark app, and Mastodon — each a full transpile that emits
+  partially and surfaces the honest diagnostics ledger (ingest is
+  survey-tolerant: an unmodeled construct becomes a gap-note diagnostic, not
+  an abort). Driven by an optional `../lib/apps.json` manifest; absent it, the
+  lone blog fixture loads and the selector hides. The transpile runs in the
+  shared worker (`../lib/wasm-client.mjs`), so even Mastodon's multi-second
+  pass leaves the editor responsive — and a hang/trap restarts the worker
+  instead of freezing the tab.
 - Edit → 250 ms debounce → `transpile(target, srcMap)` → output tree + code.
 - Target dropdown over the six wasm-wired backends
   (`typescript|go|rust|python|elixir|crystal`); switching re-transpiles live.
