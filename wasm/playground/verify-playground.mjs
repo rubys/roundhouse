@@ -262,6 +262,18 @@ if (appNames.length >= 2 && appNames.includes("lobsters")) {
     if (!(mast.notes > 100)) fail(`mastodon gap-note ledger unexpectedly sparse: ${mast.notes}`);
   }
 
+  // Deep-link: switching via the picker syncs ?app= into the address bar, and
+  // a fresh load with ?app= boots straight into that app (falls back on junk).
+  await page.evaluate(() => window.__playground.setApp("lobsters"));
+  if (!/[?&]app=lobsters/.test(page.url())) fail(`picker switch did not sync URL: ${page.url()}`);
+  await page.goto(PAGE_URL + "?app=lobsters", { waitUntil: "load" });
+  await page.waitForFunction(() => window.__playground?.ready, { timeout: 30000 });
+  const booted = await page.evaluate(() => document.getElementById("app").value);
+  if (booted !== "lobsters") fail(`?app=lobsters did not boot lobsters, got ${booted}`);
+  console.log("deep-link: ?app= boots the named app + picker syncs the URL");
+
+  await page.goto(PAGE_URL + "?app=nope", { waitUntil: "load" });
+  await page.waitForFunction(() => window.__playground?.ready, { timeout: 30000 });
   await page.evaluate(() => window.__playground.setApp("blog"));
   await page.waitForFunction(() => window.__playground.source("app/models/article.rb") != null, { timeout: 30000 });
   const backErrs = await page.evaluate(() => (window.__playground.output().diagnostics || []).filter((d) => d.severity === "error").length);

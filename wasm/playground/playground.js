@@ -266,6 +266,14 @@ function showOutput(i) {
 // — the compiler is stateless per call. Ingest is survey-tolerant, so even
 // Mastodon transpiles (partially, with a gap-note diagnostic on each unmodeled
 // construct); the multi-second pass runs in the worker, so the UI stays live.
+// Keep ?app= in the address bar in step with the picker, so the URL is a
+// shareable deep-link (playground/?app=lobsters) — updated in place, no reload.
+function syncAppUrl(name) {
+  const u = new URL(location.href);
+  u.searchParams.set("app", name);
+  history.replaceState(null, "", u);
+}
+
 async function loadApp(entry) {
   setStatus(`loading ${entry.label || entry.name}…`);
   let json;
@@ -356,11 +364,16 @@ async function boot() {
       opt.textContent = a.label || a.name;
       els.app.appendChild(opt);
     }
-    const def = (manifest.default && apps.find((a) => a.name === manifest.default)) || apps[0];
+    // Deep-link: ?app=<name> wins over the manifest default (falls back to it,
+    // then to the first app, if the param is absent or unknown).
+    const want = new URLSearchParams(location.search).get("app");
+    const def = (want && apps.find((a) => a.name === want))
+      || (manifest.default && apps.find((a) => a.name === manifest.default))
+      || apps[0];
     els.app.value = def.name;
     els.app.onchange = () => {
       const a = apps.find((x) => x.name === els.app.value);
-      if (a) loadApp(a);
+      if (a) { syncAppUrl(a.name); loadApp(a); }
     };
     await loadApp(def);
   } else {
@@ -377,6 +390,7 @@ async function boot() {
       const a = apps.find((x) => x.name === name);
       if (!a) return false;
       els.app.value = name;
+      syncAppUrl(name);
       await loadApp(a);
       return true;
     },

@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Roundhouse — Mastodon (the moonshot)</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body class="doc app-mastodon">
+  <header>
+    <h1><a href="../">Roundhouse</a></h1>
+    <p class="tagline">Mastodon — the moonshot, analyzed in a browser tab</p>
+  </header>
+
+  <main class="doc-main">
+    <p class="lead">
+      <a href="https://github.com/mastodon/mastodon">Mastodon</a> is one of the
+      largest, most complex Rails applications in the wild. It's the target that
+      says how far this goes: if Roundhouse can carry Mastodon, it can carry
+      real Rails at scale. Whole-app type analysis runs in about two seconds —
+      in a browser tab, with no app boot and no database.
+    </p>
+
+    <p class="status-line">
+      Status: <strong>work in progress</strong> — the moonshot is "Mastodon on
+      Spinel" by end of 2026. It doesn't run yet; what works today is deep
+      analysis and partial transpilation, with the gaps shown, not hidden.
+    </p>
+
+    <div class="cta-row">
+      <a class="primary" href="../ide/?app=mastodon">Explore its types (IDE)</a>
+      <a href="../playground/?app=mastodon">Transpile it (Playground)</a>
+    </div>
+
+    <h2>Why Mastodon</h2>
+    <p>
+      It is the hard case, chosen on purpose. Hundreds of models and
+      controllers, concerns layered on concerns, service objects, heavy use of
+      scopes and associations, HAML templates — the accumulated complexity of a
+      real, long-lived product. Ambition needs a ceiling you can actually reach
+      for, and this is it: the whole point of a Rails-is-the-specification
+      transpiler is to run the Rails apps people actually built.
+    </p>
+
+    <h2>What works today</h2>
+    <p>
+      Open it in the <a href="../ide/?app=mastodon">IDE</a>: it ingests the
+      whole application and answers <em>what's the type here, can this be
+      nil?</em> across the codebase — hover types, completion, go-to, request
+      traceroute, N+1 hints — in milliseconds, all client-side. No annotations:
+      <code>has_many</code> is a type declaration, and whole-program inference
+      recovers the types Rails' conventions already imply.
+    </p>
+    <p>
+      Open it in the <a href="../playground/?app=mastodon">Playground</a>: it
+      transpiles to any target, emitting what it can and leaving a diagnostic on
+      every construct not yet modeled. The multi-second pass runs off the main
+      thread, so the tab stays responsive while thousands of files move through
+      the compiler. This is the honest ledger at its largest scale — the same
+      bar the blog meets perfectly, made visible on the hardest app.
+    </p>
+
+    <h2>Further reading</h2>
+    <ul class="reading">
+      <li><a href="https://intertwingly.net/blog/2026/07/06/An-IDE-You-Dont-Install.html">An IDE You Don't Install</a> — Mastodon analyzed in a browser tab</li>
+      <li><a href="https://intertwingly.net/blog/2026/06/25/Live-Types-for-Rails.html">Live Types for Rails</a> — the inference as a live type checker</li>
+    </ul>
+    <p class="note" style="margin-top:1rem;">
+      Source: <a href="https://github.com/mastodon/mastodon"><code>mastodon/mastodon</code></a>,
+      pinned to a fixed commit. Mastodon is AGPL-licensed; each shipped bundle
+      embeds its LICENSE and commit — the compliant kind of source
+      redistribution.
+    </p>
+  </main>
+
+  <footer>
+    <a href="../">Home</a>
+    <a href="blog.html">Blog</a>
+    <a href="lobsters.html">Lobsters</a>
+    <a href="https://github.com/rubys/roundhouse">GitHub</a>
+  </footer>
+</body>
+</html>

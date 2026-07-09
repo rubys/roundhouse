@@ -157,6 +157,12 @@ if (appNames.length >= 2) {
   check("switch → lobsters re-ingests", lob.files > 30 && /lobsters/.test(lob.title), `${lob.files} files`);
   const mast = await switchTo("mastodon", "app/controllers/statuses_controller.rb");
   check("switch → mastodon re-ingests (round-trip)", mast.files > 100 && /mastodon/.test(mast.title), `${mast.files} files`);
+
+  // Deep-link: a fresh load with ?app= boots straight into that app.
+  await page.goto(`${BASE}?app=blog`);
+  await page.waitForFunction(() => window.__ide?.analysis, null, { timeout: 120_000 });
+  const booted = await page.evaluate(() => document.getElementById("app").value);
+  check("?app=blog boots straight into blog", booted === "blog", booted);
 }
 
 await browser.close();

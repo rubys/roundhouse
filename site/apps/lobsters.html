@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Roundhouse — Lobsters (the real-app proving lane)</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body class="doc app-lobsters">
+  <header>
+    <h1><a href="../">Roundhouse</a></h1>
+    <p class="tagline">Lobsters — a real production app, as the proving lane</p>
+  </header>
+
+  <main class="doc-main">
+    <p class="lead">
+      <a href="https://lobste.rs">Lobsters</a> is a real, community-run Rails
+      application — the link-aggregation site, not a scaffold. It's Roundhouse's
+      proving lane: a substantial, un-contrived codebase that pushes ingestion
+      and inference past the tidy shape of the reference blog.
+    </p>
+
+    <p class="status-line">
+      Status: <strong>work in progress</strong> — most of it transpiles; the
+      constructs not yet modeled surface as diagnostics you can read live,
+      rather than as a hard stop.
+    </p>
+
+    <div class="cta-row">
+      <a class="primary" href="../ide/?app=lobsters">Explore its types (IDE)</a>
+      <a href="../playground/?app=lobsters">Transpile it (Playground)</a>
+      <a href="../bench/">Benchmark results</a>
+    </div>
+
+    <h2>Why Lobsters</h2>
+    <p>
+      A transpiler that only handles a generated blog hasn't proven much. Real
+      apps carry accumulated idiom: hand-rolled scopes, concerns, callbacks,
+      view helpers, and query patterns that no scaffold produces. Lobsters is
+      large enough to expose those, small enough to reason about whole — the
+      right size to drive Roundhouse's coverage toward real-world Rails and
+      keep an honest ledger of what's left.
+    </p>
+    <p>
+      It's also a <em>known</em> quantity in the Ruby world. The Ruby core team
+      turned Lobsters into a representative benchmark for YJIT precisely because
+      it stresses a real Rails request the way a microbenchmark can't — see
+      <a href="https://railsatscale.com/2023-08-25-we-turned-lobsters-into-a-rails-benchmark-for-yjit/">We
+      turned Lobsters into a Rails benchmark for YJIT</a>. Roundhouse ingests it
+      from that same benchmark, pinned to a fixed
+      <a href="https://github.com/ruby/ruby-bench/tree/main/benchmarks/lobsters"><code>ruby/ruby-bench</code></a>
+      commit, so what you see here tracks a well-understood reference workload.
+    </p>
+
+    <h2>The honest ledger</h2>
+    <p>
+      Open it in the <a href="../ide/?app=lobsters">IDE</a> and every unmodeled
+      construct is a diagnostic on the exact line — the coverage gap made
+      legible. Open it in the <a href="../playground/?app=lobsters">Playground</a>
+      and it transpiles to any target, emitting what it can and annotating what
+      it can't. This is the same bar the blog meets perfectly and Mastodon is
+      climbing toward: show the work in progress with the gap described, don't
+      pretend the gap isn't there.
+    </p>
+
+    <h2>Further reading</h2>
+    <ul class="reading">
+      <li><a href="https://railsatscale.com/2023-08-25-we-turned-lobsters-into-a-rails-benchmark-for-yjit/">We turned Lobsters into a Rails benchmark for YJIT</a> — why Lobsters is the reference real-app workload</li>
+      <li><a href="https://intertwingly.net/blog/2026/06/11/The-Ruby-JRuby-Was-Built-to-Run.html">The Ruby JRuby Was Built to Run</a> — the 2×2 performance experiment</li>
+      <li><a href="https://intertwingly.net/blog/2026/05/25/Numbers-Without-Conclusions.html">Numbers Without Conclusions</a> — benchmark methodology and honest caveats</li>
+    </ul>
+    <p class="note" style="margin-top:1rem;">
+      Source: <a href="https://github.com/ruby/ruby-bench/tree/main/benchmarks/lobsters"><code>ruby/ruby-bench</code></a>
+      (upstream: <a href="https://github.com/lobsters/lobsters"><code>lobsters/lobsters</code></a>).
+    </p>
+  </main>
+
+  <footer>
+    <a href="../">Home</a>
+    <a href="blog.html">Blog</a>
+    <a href="mastodon.html">Mastodon</a>
+    <a href="https://github.com/rubys/roundhouse">GitHub</a>
+  </footer>
+</body>
+</html>

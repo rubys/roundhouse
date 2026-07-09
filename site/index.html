@@ -16,20 +16,43 @@
       Roundhouse ingests a Ruby on Rails application into a typed intermediate
       representation and emits equivalent projects in C#, Crystal, Elixir, Go,
       Kotlin, Python, Rust, Swift, and TypeScript — plus a Ruby round-trip
-      that runs under CRuby, JRuby, or Spinel. The playground and IDE run
-      against real apps you can switch between in-page — a Rails-guides "real
-      blog", the Lobsters benchmark app, and Mastodon — transpiled or analyzed
-      live in your browser, with a diagnostic on every construct not yet
-      modeled.
+      that runs under CRuby, JRuby, or Spinel. Three real apps demonstrate it,
+      each proving something different:
     </p>
 
+    <div class="app-cards">
+      <a class="app-card blog" href="apps/blog.html">
+        <h2>Blog</h2>
+        <div class="role">Correctness</div>
+        <p>The reference app, small enough to support fully. It's the
+          conformance oracle: every target compiles clean, passes its tests,
+          and matches live Rails.</p>
+        <span class="go">Reference app →</span>
+      </a>
+      <a class="app-card lobsters" href="apps/lobsters.html">
+        <h2>Lobsters</h2>
+        <div class="role">Real-world coverage</div>
+        <p>A real production app — and Ruby's own YJIT benchmark. The proving
+          lane: most of it transpiles, and the gaps show up as live
+          diagnostics.</p>
+        <span class="go">Proving lane →</span>
+      </a>
+      <a class="app-card mastodon" href="apps/mastodon.html">
+        <h2>Mastodon</h2>
+        <div class="role">Scale</div>
+        <p>The moonshot — one of the largest Rails apps, its whole-app types
+          analyzed in ~2s in a browser tab. Work in progress, with the gaps
+          shown.</p>
+        <span class="go">The moonshot →</span>
+      </a>
+    </div>
+
     <nav class="landing-nav">
-      <a href="demo/">The demo blog</a>
-      <a href="playground/">Playground (blog · Lobsters · Mastodon)</a>
-      <a href="studio/">Studio (edit it live)</a>
-      <a href="ide/">IDE (blog · Lobsters · Mastodon, typed)</a>
-      <a href="browse/">Browse generated output</a>
-      <a href="bench/">Benchmark results</a>
+      <a href="playground/">Playground</a>
+      <a href="ide/">IDE</a>
+      <a href="studio/">Studio</a>
+      <a href="browse/">Browse output</a>
+      <a href="bench/">Benchmarks</a>
       <a href="https://github.com/rubys/roundhouse">GitHub</a>
     </nav>
 

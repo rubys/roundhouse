@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Roundhouse — Blog (the reference app)</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body class="doc app-blog">
+  <header>
+    <h1><a href="../">Roundhouse</a></h1>
+    <p class="tagline">Blog — the reference application</p>
+  </header>
+
+  <main class="doc-main">
+    <p class="lead">
+      A blog is the quintessential Rails demo, and it's where Roundhouse
+      proves it is <em>correct</em>. Small enough to support completely,
+      broad enough to touch the framework features that make a transpiler
+      interesting — this is the app every target is built and tested against.
+    </p>
+
+    <p class="status-line">
+      Status: <strong>fully supported</strong> on all targets — compiles
+      clean and passes its tests everywhere.
+    </p>
+
+    <div class="cta-row">
+      <a class="primary" href="../blog/">▶ Run it live</a>
+      <a href="../playground/?app=blog">Transpile it (Playground)</a>
+      <a href="../ide/?app=blog">Explore its types (IDE)</a>
+      <a href="../studio/">Edit it live (Studio)</a>
+      <a href="../browse/">Browse emitted output</a>
+    </div>
+
+    <h2>Why the blog</h2>
+    <p>
+      It is deliberately in scope. The <code>real-blog</code> fixture is not
+      hand-written to be easy to transpile — it is <em>generated</em> from
+      <code>rails new</code> + <code>rails generate scaffold</code> and then
+      edited into a coherent app, so it is recognizably what a Rails developer
+      would produce. It exercises associations, validations, nested routes,
+      strong parameters (<code>params.expect</code>), ERB partials and
+      collection rendering, JBuilder, Turbo Streams, and Action Cable over a
+      real WebSocket.
+    </p>
+
+    <h2>Why it's the oracle</h2>
+    <p>
+      Because the blog is fully supported, it can define what "correct" means
+      for every other app. The same URL fetched from Rails and from a
+      Roundhouse target must produce the same response — enforced three ways:
+      Minitest model/controller tests emitted <em>alongside</em> the app and
+      run in each target language; a differential compare gate that diffs each
+      target's DOM against live Rails; and Playwright end-to-end specs for the
+      dynamic behavior (Turbo Stream inserts, Action Cable broadcasts,
+      validation re-renders). Those <code>compare-*</code> jobs gate the deploy
+      — drift from Rails fails the build before it can ship.
+    </p>
+
+    <h2>Go deeper</h2>
+    <p>
+      <a href="../demo/">How the fixture is built and tested</a> — the
+      generator script, the modernized Rails stack, and the full conformance
+      harness · <a href="../playground/?app=blog">edit the Ruby and watch any
+      target update live</a> · <a href="../browse/">read the generated output</a>
+      for every language · <a href="../create-blog">download the generator</a>.
+    </p>
+
+    <ul class="reading" style="margin-top:1.5rem;">
+      <li><a href="https://intertwingly.net/blog/2026/06/27/Conformance-vs-Comprehension.html">Conformance vs Comprehension</a> — the project and its oracle</li>
+    </ul>
+  </main>
+
+  <footer>
+    <a href="../">Home</a>
+    <a href="lobsters.html">Lobsters</a>
+    <a href="mastodon.html">Mastodon</a>
+    <a href="https://github.com/rubys/roundhouse">GitHub</a>
+  </footer>
+</body>
+</html>

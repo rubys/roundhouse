@@ -43,8 +43,17 @@ body.landing {
 }
 
 .landing-main {
-  max-width: 38rem;
+  max-width: 46rem;
   text-align: center;
+}
+
+/* Keep prose readable even though the hub is wide enough for a 3-up card row. */
+.landing-main .blurb,
+.landing-main .overview,
+.landing-main .reading {
+  max-width: 40rem;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .logo {
@@ -463,4 +472,103 @@ footer a:hover {
   color: var(--text-dim);
   display: inline-block;
   margin-top: 0.5rem;
+}
+
+/* --------- App picker cards (landing hub) --------- */
+
+.app-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12.5rem, 1fr));
+  gap: 0.9rem;
+  text-align: left;
+  margin-bottom: 1.9rem;
+}
+
+.app-card {
+  display: block;
+  padding: 1rem 1.1rem 1.1rem;
+  background: var(--bg-light);
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--card-accent, var(--accent));
+  border-radius: 0.5rem;
+  text-decoration: none;
+  color: var(--text);
+  transition: background 0.15s, transform 0.15s, border-color 0.15s;
+}
+
+.app-card:hover { background: var(--bg-lighter); transform: translateY(-2px); }
+.app-card.blog     { --card-accent: var(--accent-ruby); }
+.app-card.lobsters { --card-accent: var(--accent-rust); }
+.app-card.mastodon { --card-accent: var(--accent-crystal); }
+
+.app-card h2 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--card-accent, var(--accent));
+  margin-bottom: 0.2rem;
+}
+
+.app-card .role {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  margin-bottom: 0.55rem;
+}
+
+.app-card p {
+  font-size: 0.82rem;
+  color: var(--text);
+  line-height: 1.45;
+  margin: 0;
+}
+
+.app-card .go {
+  display: inline-block;
+  margin-top: 0.7rem;
+  font-size: 0.8rem;
+  color: var(--card-accent, var(--accent));
+}
+
+/* --------- Per-app case-study pages (site/apps/) --------- */
+
+body.app-blog     { --card-accent: var(--accent-ruby); }
+body.app-lobsters { --card-accent: var(--accent-rust); }
+body.app-mastodon { --card-accent: var(--accent-crystal); }
+
+body.doc header h1 a,
+body.doc .doc-main h2 { color: var(--card-accent, var(--accent)); }
+
+.status-line {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  border-left: 3px solid var(--card-accent, var(--accent));
+  padding: 0.2rem 0 0.2rem 0.85rem;
+  margin: 0 0 1.4rem;
+}
+
+.cta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin: 1.4rem 0 1.9rem;
+}
+
+.cta-row a {
+  display: inline-block;
+  padding: 0.5rem 0.95rem;
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+  color: var(--text);
+  text-decoration: none;
+  font-size: 0.85rem;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.cta-row a:hover { background: var(--bg-light); border-color: var(--card-accent, var(--accent)); }
+
+.cta-row a.primary {
+  border-color: var(--card-accent, var(--accent));
+  color: var(--card-accent, var(--accent));
+  font-weight: 600;
 }

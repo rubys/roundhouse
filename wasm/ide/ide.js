@@ -539,6 +539,14 @@ async function loadBundle(url) {
   return resp.json();
 }
 
+// Keep ?app= in the address bar in step with the picker, so the URL is a
+// shareable deep-link (ide/?app=mastodon) — updated in place, no reload.
+function syncAppUrl(name) {
+  const u = new URL(location.href);
+  u.searchParams.set("app", name);
+  history.replaceState(null, "", u);
+}
+
 async function loadApp(entry) {
   status(`loading ${entry.label || entry.name}…`);
   let bundle;
@@ -624,11 +632,16 @@ async function boot() {
       opt.textContent = a.label || a.name;
       els.app.appendChild(opt);
     }
-    const def = (manifest.default && apps.find((a) => a.name === manifest.default)) || apps[0];
+    // Deep-link: ?app=<name> wins over the manifest default (falls back to it,
+    // then to the first app, if the param is absent or unknown).
+    const want = new URLSearchParams(location.search).get("app");
+    const def = (want && apps.find((a) => a.name === want))
+      || (manifest.default && apps.find((a) => a.name === manifest.default))
+      || apps[0];
     els.app.value = def.name;
     els.app.onchange = () => {
       const a = apps.find((x) => x.name === els.app.value);
-      if (a) loadApp(a);
+      if (a) { syncAppUrl(a.name); loadApp(a); }
     };
     await loadApp(def);
   } else {
