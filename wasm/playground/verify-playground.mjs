@@ -26,10 +26,12 @@
 //   node verify-playground.mjs     # (run from wasm/playground/)
 
 import { createRequire } from "node:module";
-const require = createRequire("/Users/rubys/git/roundhouse/tests/browser_smoke/");
+// Borrow Playwright from the browser_smoke harness (repo-relative, so it
+// resolves on any checkout / CI runner — not just a local macOS path).
+const require = createRequire(new URL("../../tests/browser_smoke/", import.meta.url).pathname);
 const { chromium } = require("playwright");
 
-const URL = "http://localhost:8099/playground/index.html";
+const PAGE_URL = "http://localhost:8099/playground/index.html";
 const MODEL = "app/models/article.rb";
 
 const browser = await chromium.launch();
@@ -41,7 +43,7 @@ page.on("pageerror", (e) => logs.push(`[pageerror] ${e.message}`));
 let failed = false;
 const fail = (msg) => { console.error(`FAIL: ${msg}`); failed = true; };
 
-await page.goto(URL, { waitUntil: "load" });
+await page.goto(PAGE_URL, { waitUntil: "load" });
 await page.waitForSelector("#status.ok", { timeout: 30000 });
 await page.waitForFunction(() => window.__playground && window.__playground.ready, { timeout: 30000 });
 
