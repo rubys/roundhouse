@@ -1370,7 +1370,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
 ///    `ActionDispatch::IntegrationTest` — flatten from
 ///    `test/{models,controllers}/` to `test/<name>.rb`: spin treats
 ///    exactly the top-level `test/*.rb` files as test programs, no
-///    recursion. (`test/query_count_test.rb` is carved out — below.)
+///    recursion.
 /// 3. Top-level tests *outside* the lane (Minitest::Test shapes the
 ///    archive's TestBase helper never autoruns — compiled, they are
 ///    do-nothing binaries whose empty output vacuously matches an
@@ -1399,14 +1399,14 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
 /// (matz/spinel#1788), so the emitted tree compiles as a plain spin
 /// package with no explicit analyzer seeding.
 ///
-/// query_count_test carve-out: the original #1793 compile miscompile
-/// (`Db.query_log` civ slot `sp_StrArray*` vs `sp_RbVal`) is fixed
-/// upstream — the test now compiles — but its `Db.capture_sql` pattern
-/// still can't run green: the class-ivar-backed array's element type
-/// infers as `poly`, so the `q =~ /…/` in the test hits
-/// `undefined method '=~' for poly`; pinning `capture_sql -> Array[String]`
-/// via RBS instead segfaults at runtime. A residual civ-array codegen
-/// gap, distinct from #1793. It ships in `test/cruby/` until that closes.
+/// `query_count_test.rb` rides the normal lane (it subclasses
+/// `ActionDispatch::IntegrationTest`). It was previously carved to
+/// `test/cruby/` for the civ-array codegen gap #1819/#1827 — its
+/// `Db.capture_sql -> Array[String]` pin (the class-ivar-backed
+/// `@query_log` array) either inferred `poly` (`=~` on poly raised) or,
+/// once pinned, was rejected/segfaulted. matz's #1827 fix (spinel
+/// 70581d31) honors the typed-array return pin by unboxing at the
+/// boundary, so the test now compiles + runs green in the lane.
 fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, String> {
     use std::collections::HashSet;
 
@@ -1435,9 +1435,8 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         }
         let base = entry.0.rsplit('/').next().unwrap().to_string();
         let top_level = entry.0 == format!("test/{base}");
-        let in_lane = (entry.1.contains("< TestBase")
-            || entry.1.contains("< ActionDispatch::IntegrationTest"))
-            && entry.0 != "test/query_count_test.rb";
+        let in_lane = entry.1.contains("< TestBase")
+            || entry.1.contains("< ActionDispatch::IntegrationTest");
         let new_path = if in_lane {
             format!("test/{base}")
         } else if top_level {
@@ -2107,7 +2106,7 @@ mod tests {
 
     /// The full reshaping on a synthetic miniature of the spinel set:
     /// sidecar move, lane flattening + snapshot, Minitest quarantine,
-    /// query_count carve-out, package files, Makefile patches.
+    /// package files, Makefile patches.
     #[test]
     fn spin_shape_reshapes_the_tree() {
         let makefile = "RBS_SRC  := $(shell find sig -type f -name '*.rbs' 2>/dev/null)\n\
@@ -2164,12 +2163,17 @@ mod tests {
         assert!(flat.contains("require_relative \"../app/models/article\""));
         assert_eq!(get("test/article_test.rb.expected"), "ArticleTest: 2 tests passed\n");
 
-        // Minitest shape + the query_count carve-out are quarantined,
-        // with no snapshots (they are not spin test programs).
+        // Minitest shapes are quarantined to test/cruby/, with no
+        // snapshots (they are not spin test programs).
         assert!(paths.contains(&"test/cruby/broadcasts_test.rb"));
-        assert!(paths.contains(&"test/cruby/query_count_test.rb"));
         assert!(!paths.iter().any(|p| p.contains("cruby") && p.ends_with(".expected")));
         assert!(get("test/cruby/broadcasts_test.rb").contains("require_relative \"../test_helper\""));
+
+        // query_count rides the normal lane (ActionDispatch::IntegrationTest):
+        // flattened, snapshotted, not quarantined. #1819/#1827 fixed upstream.
+        assert!(paths.contains(&"test/query_count_test.rb"));
+        assert!(!paths.contains(&"test/cruby/query_count_test.rb"));
+        assert_eq!(get("test/query_count_test.rb.expected"), "QueryCountTest: 1 tests passed\n");
 
         // Package files present.
         assert!(get("spin.toml").contains("[dependencies]"));
@@ -2179,7 +2183,7 @@ mod tests {
         let mk = get("Makefile");
         assert!(mk.contains("RBS_FLAG := --rbs ."));
         assert!(mk.contains("$(SPINEL) $(RBS_FLAG) $< -o $@"));
-        assert!(mk.contains("SPINEL_TESTS := \\\n\ttest/article_test\n"));
+        assert!(mk.contains("SPINEL_TESTS := \\\n\ttest/article_test \\\n\ttest/query_count_test\n"));
         assert!(!mk.contains("test/models/article_test"));
     }
 }
