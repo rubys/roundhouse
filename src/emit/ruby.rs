@@ -168,6 +168,9 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // Relation join through the intermediate table (no-op when no
     // through-assoc resolves).
     library::apply_through_assoc_lowering(&mut lcs, app);
+    // belongs_to writers: `comment.story = obj` stores the foreign key
+    // (no-op for models whose writers are all hand-defined).
+    library::apply_belongs_to_writer_lowering(&mut lcs, app);
     // App-helper resolution: bare `avatar_img(...)` → `ApplicationHelper.
     // avatar_img(...)` + helper modules become module-functions (no-op when
     // the app ships no non-empty helpers).
