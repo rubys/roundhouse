@@ -478,42 +478,52 @@ footer a:hover {
 
 .app-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(12.5rem, 1fr));
-  gap: 0.9rem;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 1.5rem;
   text-align: left;
-  margin-bottom: 1.9rem;
+  margin: 2.5rem 0;
 }
 
 .app-card {
   display: block;
-  padding: 1rem 1.1rem 1.1rem;
+  padding: 1.2rem 1.3rem 1.3rem;
+  /* Tint the card with its app's colour so each section reads clearly on the
+     dark page; the plain fill is the fallback where color-mix is unsupported. */
   background: var(--bg-light);
+  background: color-mix(in srgb, var(--card-accent, var(--accent)) 14%, var(--bg-light));
   border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--card-accent, var(--accent)) 45%, var(--border));
   border-top: 3px solid var(--card-accent, var(--accent));
   border-radius: 0.5rem;
   text-decoration: none;
   color: var(--text);
-  transition: background 0.15s, transform 0.15s, border-color 0.15s;
+  transition: background 0.15s, transform 0.15s, border-color 0.15s, box-shadow 0.15s;
 }
 
-.app-card:hover { background: var(--bg-lighter); transform: translateY(-2px); }
+.app-card:hover {
+  background: color-mix(in srgb, var(--card-accent, var(--accent)) 24%, var(--bg-light));
+  border-color: var(--card-accent, var(--accent));
+  transform: translateY(-3px);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+}
 .app-card.blog     { --card-accent: var(--accent-ruby); }
 .app-card.lobsters { --card-accent: var(--accent-rust); }
 .app-card.mastodon { --card-accent: var(--accent-crystal); }
 
 .app-card h2 {
-  font-size: 1.05rem;
+  font-size: 1.1rem;
   font-weight: 600;
   color: var(--card-accent, var(--accent));
-  margin-bottom: 0.2rem;
+  margin-bottom: 0.25rem;
 }
 
 .app-card .role {
   font-size: 0.68rem;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-dim);
-  margin-bottom: 0.55rem;
+  letter-spacing: 0.06em;
+  color: var(--card-accent, var(--accent));
+  margin-bottom: 0.6rem;
 }
 
 .app-card p {
