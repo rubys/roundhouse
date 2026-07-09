@@ -84,8 +84,8 @@ require_relative "runtime/action_mailer"
 # classes that reach gem constants at LOAD time (lobsters'
 # html_encoder.rb runs `HTMLEntities.new` in its class body) or at
 # request time (bcrypt behind the synthesized User#authenticate, rotp
-# behind 2FA) resolve.
-["bcrypt", "htmlentities", "rotp"].each do |gem_name|
+# behind 2FA, markly+nokogiri behind Markdowner.to_html) resolve.
+["bcrypt", "htmlentities", "rotp", "markly", "nokogiri"].each do |gem_name|
   begin
     require gem_name
   rescue LoadError
