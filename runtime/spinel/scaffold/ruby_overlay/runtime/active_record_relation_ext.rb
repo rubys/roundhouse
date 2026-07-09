@@ -1,0 +1,34 @@
+# CRuby-only ActiveRecord::Relation extensions: `+` and record-valued
+# IN lists.
+#
+# Lives on the CRuby overlay, not shared runtime/ruby/active_record/
+# relation.rb: `+` takes an untyped operand and answers Array[untyped],
+# and the IN-list coercion dispatches on is_a?(ActiveRecord::Base) —
+# both exactly the shapes the typed shared runtime refuses (see the
+# monomorphic-API rule). When lobsters comes up on another target, that
+# target grows its own variant.
+module ActiveRecord
+  class Relation
+    # Rails' Relation#+ delegates to to_a: `Story.select(:id).where(…) +
+    # [self.id]` (lobsters Story#merged_comments) concatenates the
+    # hydrated rows with the extra elements.
+    def +(other)
+      to_a + other.to_a
+    end
+
+    private
+
+    # Rails casts an ActiveRecord object used as a condition value to its
+    # id (`where(story_id: [<Story rows>, 7])` → `IN (3, 5, 7)`). The
+    # shared escape_list feeds values straight to the adapter, which only
+    # knows scalars — so the record→id cast happens here, on the overlay.
+    def escape_list(vals)
+      out = []
+      vals.each do |v|
+        v = v.id if v.is_a?(ActiveRecord::Base)
+        out << ActiveRecord.adapter.escape_value(v)
+      end
+      out.join(", ")
+    end
+  end
+end
