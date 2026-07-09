@@ -745,6 +745,43 @@ fn rewrite_layout_wrap(expr: &mut Expr, app: &App) {
     if !self_recv || method.as_str() != "render" || args.is_empty() {
         return;
     }
+    // Extract-and-strip any `layout:` kwarg first: the shared lowering
+    // keeps it as the wrap marker for body renders (`render html: X,
+    // layout: "application"`), and the runtime `render(body, status:,
+    // content_type:, location:)` doesn't accept it, so it must never
+    // survive to the call.
+    let mut layout_kwarg: Option<Expr> = None;
+    for a in args.iter_mut().skip(1) {
+        if let ExprNode::Hash { entries, .. } = &mut *a.node {
+            entries.retain(|(k, v)| {
+                let is_layout = matches!(
+                    &*k.node,
+                    ExprNode::Lit { value: crate::expr::Literal::Sym { value } }
+                        if value.as_str() == "layout"
+                );
+                if is_layout {
+                    layout_kwarg = Some(v.clone());
+                }
+                !is_layout
+            });
+        }
+    }
+    args.retain(|a| !matches!(&*a.node, ExprNode::Hash { entries, .. } if entries.is_empty()));
+    if args.is_empty() {
+        return;
+    }
+    // An explicit `layout: "application"` / `layout: true` wraps a body
+    // render (non-Views literal html) the way Rails does. Other layout
+    // names are left unwrapped — honest residue, only `application`
+    // exists as an emitted layout.
+    let layout_requested = layout_kwarg.as_ref().is_some_and(|v| match &*v.node {
+        ExprNode::Lit { value: crate::expr::Literal::Str { value } } => value == "application",
+        ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => {
+            value.as_str() == "application"
+        }
+        ExprNode::Lit { value: crate::expr::Literal::Bool { value } } => *value,
+        _ => false,
+    });
     // Trailing kwargs are fine (`status: :unprocessable_entity` renders
     // WITH layout in Rails) — except the jbuilder branch's
     // `content_type:`, which marks a non-html response.
@@ -766,7 +803,7 @@ fn rewrite_layout_wrap(expr: &mut Expr, app: &App) {
                         && path[0].as_str() == "Views"
                         && path[1].as_str() != "Layouts")
         }
-        _ => false,
+        _ => layout_requested,
     };
     if !wrappable {
         return;

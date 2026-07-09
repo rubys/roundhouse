@@ -62,18 +62,70 @@ pub(super) fn rewrite_render_to_views(
                 ExprNode::Lit { value: Literal::Sym { value } } => (value.clone(), Vec::new()),
                 ExprNode::Hash { entries, kwargs: true } => {
                     let mut name: Option<Symbol> = None;
+                    let mut body: Option<(Expr, bool)> = None; // (expr, is_plain)
                     let mut rest: Vec<(Expr, Expr)> = Vec::new();
                     for (k, v) in entries {
-                        let is_action = matches!(
-                            &*k.node,
-                            ExprNode::Lit { value: Literal::Sym { value } }
-                                if value.as_str() == "action"
-                        );
-                        if is_action {
-                            name = render_target_symbol(v);
-                        } else {
-                            rest.push((k.clone(), v.clone()));
+                        let key = match &*k.node {
+                            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str(),
+                            _ => "",
+                        };
+                        match key {
+                            "action" => name = render_target_symbol(v),
+                            // `render html:` / `render plain:` — a body
+                            // expression, not a template name. Normalized
+                            // below to the positional-body form the runtime
+                            // render takes.
+                            "html" => body = Some((v.clone(), false)),
+                            "plain" => body = Some((v.clone(), true)),
+                            _ => rest.push((k.clone(), v.clone())),
                         }
+                    }
+                    if name.is_none() {
+                        // Non-template render: `render html: X, layout:
+                        // "application"` → `render(X, layout: …)` (the
+                        // Ruby emit layout pass honors + strips `layout:`);
+                        // `render plain: X, status: N` → `render(X,
+                        // status: N, content_type: "text/plain")`. A
+                        // `layout: false` entry is dropped (no layout is
+                        // already the runtime default for a body render).
+                        let Some((body_expr, is_plain)) = body else { return None };
+                        rest.retain(|(k, v)| {
+                            let is_layout_false = matches!(
+                                &*k.node,
+                                ExprNode::Lit { value: Literal::Sym { value } }
+                                    if value.as_str() == "layout"
+                            ) && matches!(
+                                &*v.node,
+                                ExprNode::Lit { value: Literal::Bool { value: false } }
+                            );
+                            !is_layout_false
+                        });
+                        let mut new_args = vec![body_expr];
+                        if !rest.is_empty() {
+                            new_args.push(Expr::new(
+                                args[0].span,
+                                ExprNode::Hash { entries: rest, kwargs: true },
+                            ));
+                        }
+                        if is_plain {
+                            merge_or_append_kwarg(
+                                &mut new_args,
+                                "content_type",
+                                "text/plain",
+                                e.span,
+                            );
+                        }
+                        new_args.extend(args.iter().skip(1).cloned());
+                        return Some(Expr::new(
+                            e.span,
+                            ExprNode::Send {
+                                recv: None,
+                                method: Symbol::from("render"),
+                                args: new_args,
+                                block: block.clone(),
+                                parenthesized: true,
+                            },
+                        ));
                     }
                     let Some(n) = name else { return None };
                     let extra = if rest.is_empty() {
@@ -96,6 +148,37 @@ pub(super) fn rewrite_render_to_views(
             // (json/jbuilder views, or a render with no matching template).
             let contract =
                 view_ivars.get(&(module_name_owned.clone(), view_method.as_str().to_string()));
+            // Peek ahead for the jbuilder marker (also computed below):
+            // json renders resolve to `<stem>_json` view methods that are
+            // deliberately absent from the html-view contract map, so a
+            // lookup miss is normal for them.
+            let is_json = render_kwargs_have_format(args, "json");
+            // A non-json render whose target isn't among the emitted
+            // action views means the template doesn't exist in the source
+            // tree. Rails raises ActionView::MissingTemplate there — and
+            // lobsters' about/privacy actions rescue it as their NORMAL
+            // path (hardcoded-fallback pages). Emitting the Views call
+            // anyway would be a NoMethodError no rescue catches.
+            if contract.is_none() && !is_json {
+                return Some(Expr::new(
+                    e.span,
+                    ExprNode::Raise {
+                        value: Expr::new(
+                            e.span,
+                            ExprNode::Send {
+                                recv: Some(const_path(
+                                    &["ActionView", "MissingTemplate"],
+                                    e.span,
+                                )),
+                                method: Symbol::from("new"),
+                                args: vec![str_lit(e.span, view_method.as_str())],
+                                block: None,
+                                parenthesized: true,
+                            },
+                        ),
+                    },
+                ));
+            }
             let resolved_ivars: Vec<Symbol> = contract
                 .map(|c| c.ivars.clone())
                 .unwrap_or_else(|| ivars.clone());

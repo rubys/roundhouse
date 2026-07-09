@@ -530,7 +530,61 @@ pub fn synthesize_implicit_render(body: &Expr, action_name: &str, has_json_varia
     } else {
         render
     };
+    // A body with SOME response terminal that isn't guaranteed at top
+    // level (a render inside begin/rescue, or behind a condition the
+    // detector can't prove) may already have responded by the time the
+    // synthesized default runs — Rails' own default-render check is
+    // `performed?`, not syntax. Guard the synthesized render the same
+    // way. Bodies with no terminal at all (the common case — every
+    // conventional index/show) keep the bare unguarded shape.
+    let terminal = if contains_terminal(body) {
+        Expr::new(
+            body.span,
+            ExprNode::If {
+                cond: Expr::new(
+                    body.span,
+                    ExprNode::Send {
+                        recv: None,
+                        method: Symbol::from("performed?"),
+                        args: Vec::new(),
+                        block: None,
+                        parenthesized: false,
+                    },
+                ),
+                then_branch: Expr::new(body.span, ExprNode::Lit { value: Literal::Nil }),
+                else_branch: terminal,
+            },
+        )
+    } else {
+        terminal
+    };
     append_statement(body, terminal)
+}
+
+/// True when a response terminal (`render` / `redirect_to` / `head` /
+/// `respond_to`-with-block) appears ANYWHERE in the body — the signal
+/// that the synthesized default render needs a `performed?` guard (see
+/// `synthesize_implicit_render`). Deliberately broader than
+/// `has_toplevel_terminal`: that one proves a response always happens;
+/// this one detects that a response MIGHT already have happened.
+fn contains_terminal(body: &Expr) -> bool {
+    fn walk(e: &Expr, found: &mut bool) {
+        if *found {
+            return;
+        }
+        if let ExprNode::Send { recv: None, method, block, .. } = &*e.node {
+            if matches!(method.as_str(), "render" | "redirect_to" | "head")
+                || (method.as_str() == "respond_to" && block.is_some())
+            {
+                *found = true;
+                return;
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, found));
+    }
+    let mut found = false;
+    walk(body, &mut found);
+    found
 }
 
 /// True when `body` is guaranteed to hit a response-terminal
