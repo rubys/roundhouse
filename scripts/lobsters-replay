@@ -1,0 +1,244 @@
+#!/usr/bin/env ruby
+# scripts/lobsters-replay — drive an emitted lobsters app through the
+# ruby-bench benchmark route set, in-process, and report per-route parity.
+#
+# Runs from INSIDE the emitted tree (cwd = the transpiled app dir) and
+# drives Main.run_rack directly — never one-shot CGI (roundhouse#61:
+# per-request processes can't carry an in-memory DB or a warm heap, and
+# that's the shape the real benchmark measures).
+#
+# The route set mirrors ruby-bench/benchmarks/lobsters/route_generator.rb:
+# one representative visit per distinct route shape, ALL logged in (the
+# benchmark authenticates first and asserts HTTP 200 on every visit).
+# Status alone lies — a 200 with a near-empty body is a failure in
+# disguise — so bodies are size-checked and reported.
+#
+# Usage (normally via scripts/bench-lobsters):
+#   cd build/transpiled-lobsters-ruby && \
+#     ruby ../../scripts/lobsters-replay --json OUT.json --md OUT.md [--time N]
+#
+#   --json PATH   write machine-readable summary
+#   --md PATH     write markdown summary
+#   --time N      after the parity pass, run N timed iterations of the
+#                 full route sequence and report ms/iter. A dev trend
+#                 line only — NOT the ruby-bench metric (that replays the
+#                 frozen 114-visit RNG sequence; see the P6 plan) — and
+#                 marked partial while any route still fails.
+#   --db PATH     benchmark DB (default storage/bench.sqlite3)
+#   --quiet       suppress per-route progress lines
+#
+# Exit code = number of failing routes (0 = full parity).
+#
+# Gems the emitted tree needs at runtime: sqlite3, bcrypt (hard),
+# htmlentities, rotp (guarded requires in main.rb).
+
+require "stringio"
+require "json"
+
+opts = { db: "storage/bench.sqlite3" }
+args = ARGV.dup
+until args.empty?
+  case (a = args.shift)
+  when "--json"  then opts[:json]  = args.shift
+  when "--md"    then opts[:md]    = args.shift
+  when "--time"  then opts[:time]  = Integer(args.shift)
+  when "--db"    then opts[:db]    = args.shift
+  when "--quiet" then opts[:quiet] = true
+  else abort "lobsters-replay: unknown arg #{a}"
+  end
+end
+
+ENV["BLOG_DB"] ||= File.expand_path(opts[:db], Dir.pwd)
+ENV["REMOTE_ADDR"] ||= "127.0.0.1"
+abort "lobsters-replay: no DB at #{ENV['BLOG_DB']} (stage it first)" unless File.exist?(ENV["BLOG_DB"])
+
+require File.expand_path("main", Dir.pwd)
+Main.configure_default_adapter!
+
+# ── benchmark identity + route ids ───────────────────────────────────
+# The login identity is fixed by the benchmark (route_generator.rb logs
+# in as this user before every run). Story/comment ids are sampled from
+# the DB so the replay survives a benchmark-DB refresh; lowest-id
+# non-deleted rows keep the choice deterministic.
+BENCH_EMAIL    = "wiegand.michell@mertz-vonrueden.test"
+BENCH_PASSWORD = "ji3W36xR"
+BENCH_USERNAME = "michell_wiegand"
+
+require "sqlite3"
+ids_db  = SQLite3::Database.new(ENV["BLOG_DB"], readonly: true)
+STORY   = ids_db.get_first_value("SELECT short_id FROM stories  WHERE is_deleted = 0 ORDER BY id LIMIT 1") || "enr7ye"
+COMMENT = ids_db.get_first_value("SELECT short_id FROM comments WHERE is_deleted = 0 ORDER BY id LIMIT 1") || "6srqij"
+ids_db.close
+
+ROUTES = [
+  "/u",
+  "/active", "/newest", "/recent", "/hottest",
+  "/rss", "/privacy", "/about", "/settings",
+  "/top?length=1d", "/top?length=1w", "/top?length=1y",
+  "/hidden", "/saved", "/upvoted/stories",
+  "/comments", "/upvoted/comments", "/threads", "/comments/#{COMMENT}/reply",
+  "/threads/#{BENCH_USERNAME}", "/u/#{BENCH_USERNAME}",
+  "/replies", "/replies/comments", "/replies/stories", "/replies/unread",
+  "/s/#{STORY}",
+].freeze
+
+# A 200 whose body is this small is almost certainly a hollow render —
+# flag it so it can't masquerade as parity.
+THIN_BYTES = 200
+
+# ── request plumbing ─────────────────────────────────────────────────
+$jar = {}
+
+def cookie_header = $jar.map { |k, v| "#{k}=#{v}" }.join("; ")
+
+def absorb_cookies(headers)
+  sc = headers["set-cookie"] || headers["Set-Cookie"]
+  return unless sc
+  Array(sc).each do |line|
+    pair = line.split(";", 2).first.to_s
+    k, v = pair.split("=", 2)
+    $jar[k.strip] = v.to_s if k
+  end
+end
+
+def req(method, path, body: nil)
+  p, q = path.include?("?") ? path.split("?", 2) : [path, ""]
+  env = {
+    "REQUEST_METHOD" => method,
+    "PATH_INFO"      => p,
+    "QUERY_STRING"   => q,
+    "HTTP_COOKIE"    => cookie_header,
+    "REMOTE_ADDR"    => "127.0.0.1",
+  }
+  if body
+    env["CONTENT_TYPE"]   = "application/x-www-form-urlencoded"
+    env["CONTENT_LENGTH"] = body.bytesize.to_s
+    env["rack.input"]     = StringIO.new(body)
+  end
+  status, headers, chunks = Main.run_rack(env)
+  absorb_cookies(headers)
+  [status, headers, chunks.join]
+rescue => e
+  [:EXC, e, "#{e.class}: #{e.message}\n#{e.backtrace.first(8).join("\n")}"]
+end
+
+def enc(s) = s.to_s.gsub(/[^a-zA-Z0-9_.\-]/) { |c| "%%%02X" % c.ord }
+
+def now_ms = Process.clock_gettime(Process::CLOCK_MONOTONIC) * 1000.0
+
+# ── login handshake ──────────────────────────────────────────────────
+# GET /login, scrape the CSRF token exactly the way the benchmark does
+# (value="…" — an EMPTY token crashes the benchmark's scrape), POST the
+# credentials, require a 302 + session cookie.
+def do_login!
+  st, _h, body = req("GET", "/login")
+  return "GET /login -> #{st} (expected 200)" unless st == 200
+  line  = body.lines.find { |l| l.include?("authenticity_token") && l.include?("value") }
+  token = line && line[/value="([^"]+)"/, 1]
+  return "no non-empty authenticity_token in /login" unless token && !token.empty?
+  form = "email=#{enc(BENCH_EMAIL)}&password=#{enc(BENCH_PASSWORD)}&authenticity_token=#{enc(token)}"
+  st, _h, _body = req("POST", "/login", body: form)
+  return "POST /login -> #{st} (expected 302)" unless st == 302
+  nil
+end
+
+summary = {
+  "generated_at" => Time.now.utc.iso8601,
+  "db"           => ENV["BLOG_DB"],
+  "story_id"     => STORY,
+  "comment_id"   => COMMENT,
+}
+
+if (err = do_login!)
+  summary.merge!("login_failed" => err, "pass" => 0, "total" => ROUTES.size)
+  File.write(opts[:json], JSON.pretty_generate(summary)) if opts[:json]
+  File.write(opts[:md], "# Lobsters route parity\n\n**LOGIN FAILED:** #{err}\n") if opts[:md]
+  abort "lobsters-replay: login failed: #{err}"
+end
+
+# ── route replay ─────────────────────────────────────────────────────
+results = ROUTES.map do |route|
+  t0 = now_ms
+  st, _h, body = req("GET", route)
+  ms = now_ms - t0
+  exc = st == :EXC
+  bytes = exc ? 0 : body.to_s.bytesize
+  ok  = st == 200
+  r = {
+    "route"  => route,
+    "status" => exc ? "EXC" : st,
+    "bytes"  => bytes,
+    "ms"     => ms.round(2),
+    "ok"     => ok,
+    "thin"   => ok && bytes < THIN_BYTES,
+  }
+  r["error"] = body.lines.first(4).join.strip if exc
+  r["error"] = body.to_s[0, 300] if !ok && !exc
+  unless opts[:quiet]
+    flag = r["thin"] ? "  <-- THIN" : ""
+    printf "%-28s -> %-4s %8s  %6.1fms%s\n", route, r["status"], exc ? "-" : bytes, ms, flag
+  end
+  r
+end
+
+fails = results.reject { |r| r["ok"] }
+summary.merge!(
+  "total"  => ROUTES.size,
+  "pass"   => ROUTES.size - fails.size,
+  "thin"   => results.count { |r| r["thin"] },
+  "routes" => results,
+)
+
+# ── optional timed iterations ────────────────────────────────────────
+if opts[:time] && opts[:time] > 0
+  iters = Array.new(opts[:time]) do
+    t0 = now_ms
+    ROUTES.each { |r| req("GET", r) }
+    now_ms - t0
+  end
+  sorted = iters.sort
+  mid = sorted.size / 2
+  median = sorted.size.odd? ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2.0
+  summary["timing"] = {
+    "iterations"        => opts[:time],
+    "routes_per_iter"   => ROUTES.size,
+    "ms_per_iter_median"=> median.round(2),
+    "ms_per_iter_min"   => sorted.first.round(2),
+    "ms_per_iter_max"   => sorted.last.round(2),
+    # Partial = failing routes short-circuit cheaply; not comparable
+    # to a full-parity run, let alone to Rails.
+    "partial"           => !fails.empty?,
+  }
+end
+
+# ── outputs ──────────────────────────────────────────────────────────
+File.write(opts[:json], JSON.pretty_generate(summary)) if opts[:json]
+
+if opts[:md]
+  md = +"# Lobsters route parity\n\n"
+  md << "_#{summary['pass']}/#{summary['total']} routes return 200"
+  md << " (#{summary['thin']} thin)" if summary["thin"] > 0
+  md << " — #{summary['generated_at']}_\n\n"
+  md << "| route | status | bytes | ms |\n|-------|-------:|------:|---:|\n"
+  results.each do |r|
+    status = r["ok"] ? r["status"].to_s : "**#{r['status']}**"
+    thin = r["thin"] ? " THIN" : ""
+    md << "| `#{r['route']}` | #{status}#{thin} | #{r['bytes']} | #{r['ms']} |\n"
+  end
+  if fails.any?
+    md << "\n## Failures\n\n"
+    fails.each do |r|
+      md << "### `#{r['route']}` → #{r['status']}\n\n```\n#{r['error']}\n```\n\n"
+    end
+  end
+  if (t = summary["timing"])
+    md << "\n## Timing#{t['partial'] ? ' (PARTIAL — failing routes short-circuit)' : ''}\n\n"
+    md << "#{t['ms_per_iter_median']} ms/iter median over #{t['iterations']} iterations "
+    md << "(min #{t['ms_per_iter_min']}, max #{t['ms_per_iter_max']})\n"
+  end
+  File.write(opts[:md], md)
+end
+
+puts "\n#{summary['pass']}/#{summary['total']} routes returned 200" \
+     "#{summary['thin'] > 0 ? " (#{summary['thin']} thin)" : ''}"
+exit [fails.size, 100].min

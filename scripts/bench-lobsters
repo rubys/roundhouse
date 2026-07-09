@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# scripts/bench-lobsters — emit lobsters and replay the benchmark route set.
+#
+# The lobsters lane of the nightly bench: where scripts/bench measures
+# blog throughput, this script measures how much of the ruby-bench
+# lobsters benchmark the roundhouse emit can serve. Until every route
+# returns 200 the headline metric IS the parity count (16/26, 17/26, …);
+# once parity lands, --time N adds a ms/iter trend line, and the full
+# frozen-sequence comparison vs Rails takes over (P6).
+#
+# Usage:  scripts/bench-lobsters [options]
+#
+#   --src DIR       lobsters source checkout
+#                   (default $LOBSTERS_SRC, else ~/git/ruby-bench/benchmarks/lobsters)
+#   --skip-emit     reuse the existing build tree (fast replay iteration)
+#   --time N        run N timed iterations after the parity pass
+#   --out DIR       results dir (default bench/results/lobsters/<timestamp>)
+#
+# Output:
+#   bench/results/lobsters/<timestamp>/summary.json   # per-route parity + timing
+#   bench/results/lobsters/<timestamp>/summary.md     # rendered table + failures
+#   bench/results/lobsters/<timestamp>/emit.log       # transpile diagnostics
+#   bench/results/lobsters/latest                     # symlink to newest run
+#
+# Exit code = number of failing routes, so it doubles as a dev gate;
+# nightly wrappers that want blog results regardless should `|| true`.
+#
+# Dev loop after a compiler change:
+#   scripts/bench-lobsters              # re-emit + replay
+#   scripts/bench-lobsters --skip-emit  # replay only
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SRC="${LOBSTERS_SRC:-$HOME/git/ruby-bench/benchmarks/lobsters}"
+OUT_TREE="$REPO_ROOT/build/transpiled-lobsters-ruby"
+OUT_DIR=""
+SKIP_EMIT=0
+TIME_ITERS=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --src)       SRC="$2"; shift 2 ;;
+        --skip-emit) SKIP_EMIT=1; shift ;;
+        --time)      TIME_ITERS="$2"; shift 2 ;;
+        --out)       OUT_DIR="$2"; shift 2 ;;
+        -h|--help)   sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *)           echo "unknown flag: $1" >&2; exit 2 ;;
+    esac
+done
+
+step() { printf '\033[36m→\033[0m %s\n' "$*"; }
+ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
+fail() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; }
+
+[[ -d "$SRC" ]] || { fail "lobsters source not found at $SRC (clone ruby-bench or pass --src)"; exit 2; }
+[[ -f "$SRC/db/production.sqlite3" ]] || { fail "no benchmark DB at $SRC/db/production.sqlite3"; exit 2; }
+
+TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+[[ -z "$OUT_DIR" ]] && OUT_DIR="$REPO_ROOT/bench/results/lobsters/$TIMESTAMP"
+mkdir -p "$OUT_DIR"
+
+# ── emit ─────────────────────────────────────────────────────────────
+if (( SKIP_EMIT == 0 )) || [[ ! -f "$OUT_TREE/main.rb" ]]; then
+    step "transpiling lobsters (--target ruby --allow-unsupported)"
+    # cargo run rebuilds the compiler when sources changed, so the dev
+    # loop never replays against a stale binary. Survey-mode warnings
+    # are the expected torrent — keep them in emit.log, not the console.
+    if ! (cd "$REPO_ROOT" && cargo run --quiet --bin roundhouse -- \
+            --target ruby "$SRC" -o "$OUT_TREE" --allow-unsupported \
+            >"$OUT_DIR/emit.log" 2>&1); then
+        fail "emit failed; last lines of $OUT_DIR/emit.log:"
+        tail -20 "$OUT_DIR/emit.log" >&2
+        exit 1
+    fi
+    ok "emitted to $OUT_TREE ($(grep -c 'warning' "$OUT_DIR/emit.log" || true) warnings in emit.log)"
+fi
+
+# ── stage DB ─────────────────────────────────────────────────────────
+# Fresh copy every run: the replay logs in and writes session state, and
+# stale WAL/SHM artifacts from a crashed run would skew the next one.
+step "staging benchmark DB"
+DB="$OUT_TREE/storage/bench.sqlite3"
+mkdir -p "$(dirname "$DB")"
+rm -f "$DB" "$DB-wal" "$DB-shm"
+sqlite3 "$SRC/db/production.sqlite3" ".backup $DB"
+
+# ── provenance ───────────────────────────────────────────────────────
+ruby -rjson -e 'puts JSON.pretty_generate({
+  generated_at: Time.now.utc.strftime("%FT%TZ"),
+  command: ARGV[0], src: ARGV[1],
+  roundhouse_commit: `git -C #{ARGV[2]} rev-parse HEAD`.strip,
+  ruby: RUBY_DESCRIPTION,
+})' "scripts/bench-lobsters $*" "$SRC" "$REPO_ROOT" > "$OUT_DIR/env.json" || true
+
+# ── replay ───────────────────────────────────────────────────────────
+step "replaying benchmark routes (in-process Main.run_rack)"
+REPLAY_ARGS=(--json "$OUT_DIR/summary.json" --md "$OUT_DIR/summary.md")
+(( TIME_ITERS > 0 )) && REPLAY_ARGS+=(--time "$TIME_ITERS")
+
+status=0
+(cd "$OUT_TREE" && ruby "$REPO_ROOT/scripts/lobsters-replay" "${REPLAY_ARGS[@]}") || status=$?
+
+ln -sfn "$(basename "$OUT_DIR")" "$REPO_ROOT/bench/results/lobsters/latest" 2>/dev/null || true
+ok "summary written to $OUT_DIR/summary.md"
+exit "$status"
