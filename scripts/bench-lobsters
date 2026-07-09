@@ -22,6 +22,10 @@
 #   bench/results/lobsters/<timestamp>/emit.log       # transpile diagnostics
 #   bench/results/lobsters/latest                     # symlink to newest run
 #
+# When a previous run exists, the console output ends with a comparison
+# against it: pass-count delta, regressed/fixed routes, and changed
+# failure signatures — so a nightly cron log doubles as the alarm.
+#
 # Exit code = number of failing routes, so it doubles as a dev gate;
 # nightly wrappers that want blog results regardless should `|| true`.
 #
@@ -93,6 +97,17 @@ ruby -rjson -e 'puts JSON.pretty_generate({
   ruby: RUBY_DESCRIPTION,
 })' "scripts/bench-lobsters $*" "$SRC" "$REPO_ROOT" > "$OUT_DIR/env.json" || true
 
+# ── runtime gems ─────────────────────────────────────────────────────
+# The replay runs under the system/mise ruby, not a bundle. A Ruby bump
+# empties the per-version gem dir (same hazard scripts/bench self-heals
+# around), so check-then-install rather than assume.
+for g in sqlite3 bcrypt htmlentities rotp; do
+    if ! gem list -i "^${g}$" >/dev/null 2>&1; then
+        step "installing gem $g"
+        gem install --no-document "$g" >/dev/null
+    fi
+done
+
 # ── replay ───────────────────────────────────────────────────────────
 step "replaying benchmark routes (in-process Main.run_rack)"
 REPLAY_ARGS=(--json "$OUT_DIR/summary.json" --md "$OUT_DIR/summary.md")
@@ -100,6 +115,34 @@ REPLAY_ARGS=(--json "$OUT_DIR/summary.json" --md "$OUT_DIR/summary.md")
 
 status=0
 (cd "$OUT_TREE" && ruby "$REPO_ROOT/scripts/lobsters-replay" "${REPLAY_ARGS[@]}") || status=$?
+
+# ── compare against the previous run ─────────────────────────────────
+# Resolve `latest` BEFORE repointing it. Regressions print loudly so a
+# `>> bench.log` cron capture is greppable (PARITY REGRESSION).
+PREV_LINK="$REPO_ROOT/bench/results/lobsters/latest"
+if [[ -f "$PREV_LINK/summary.json" && -f "$OUT_DIR/summary.json" ]]; then
+    PREV_NAME="$(readlink "$PREV_LINK" 2>/dev/null || echo previous)"
+    ruby -rjson -e '
+      prev_name, prev_path, cur_path = ARGV
+      prev = JSON.parse(File.read(prev_path))
+      cur  = JSON.parse(File.read(cur_path))
+      by_route = ->(s) { (s["routes"] || []).to_h { |r| [r["route"], r] } }
+      p_routes, c_routes = by_route.(prev), by_route.(cur)
+      puts "vs #{prev_name}: #{prev["pass"]}/#{prev["total"]} -> #{cur["pass"]}/#{cur["total"]}"
+      c_routes.each do |route, c|
+        p = p_routes[route] or next
+        if p["ok"] && !c["ok"]
+          puts "  PARITY REGRESSION: #{route} #{p["status"]} -> #{c["status"]}"
+        elsif !p["ok"] && c["ok"]
+          puts "  fixed: #{route} #{p["status"]} -> 200"
+        elsif !c["ok"]
+          pe = p["error"].to_s.lines.first.to_s.strip
+          ce = c["error"].to_s.lines.first.to_s.strip
+          puts "  signature changed: #{route}\n    was: #{pe}\n    now: #{ce}" if pe != ce
+        end
+      end
+    ' "$PREV_NAME" "$PREV_LINK/summary.json" "$OUT_DIR/summary.json" || true
+fi
 
 ln -sfn "$(basename "$OUT_DIR")" "$REPO_ROOT/bench/results/lobsters/latest" 2>/dev/null || true
 ok "summary written to $OUT_DIR/summary.md"
