@@ -156,7 +156,7 @@ pub fn lower_controllers_with_arel_views_and_assocs(
     assocs: &[crate::lower::model_associations::AssociationEdge],
 ) -> Vec<LibraryClass> {
     lower_controllers_with_arel_views_assocs_and_routes(
-        controllers, extras, schema, views, assocs, None,
+        controllers, extras, schema, views, &[], assocs, None,
     )
 }
 
@@ -175,6 +175,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     extras: Vec<(ClassId, crate::analyze::ClassInfo)>,
     schema: Option<&crate::schema::Schema>,
     views: &[crate::dialect::View],
+    library_classes: &[crate::dialect::LibraryClass],
     assocs: &[crate::lower::model_associations::AssociationEdge],
     routed_by_controller: Option<
         &std::collections::HashMap<ClassId, std::collections::HashSet<Symbol>>,
@@ -194,7 +195,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // Controller-side partial renders (`render partial: "commentbox",
     // locals: {…}`) bind against the partial's def-site parameter order.
     let partials: PartialMap =
-        crate::lower::view_to_library::partial_call_contracts(views, controllers);
+        crate::lower::view_to_library::partial_call_contracts(views, controllers, library_classes);
 
     let mut all_methods: Vec<(Vec<MethodDef>, &Controller)> = Vec::new();
     for controller in controllers {

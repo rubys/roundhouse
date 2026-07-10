@@ -1207,6 +1207,10 @@ fn emit_py_form_builder_call(
             let field = field?;
             Some(format!("{recv}.hidden_field({field:?}, {opts})"))
         }
+        // New Ruby-emit-path builder methods (check_box/select/…) —
+        // best-effort None until lobsters reaches the Python target
+        // (the caller falls back to its TODO path).
+        _ => None,
     }
 }
 

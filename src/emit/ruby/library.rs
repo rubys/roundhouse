@@ -22,6 +22,7 @@ use crate::span::Span;
 pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     let mut lcs: Vec<LibraryClass> = app.library_classes.clone();
     apply_scope_lowering(&mut lcs, app);
+    apply_library_partial_render_lowering(&mut lcs, app);
     apply_helper_lowering(&mut lcs, app);
     apply_duration_lowering(&mut lcs);
     // Transpiled-shape classes carry hand-written accessors that
@@ -41,6 +42,106 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
             emit_library_class_pair(lc, app, out_path)
         })
         .collect()
+}
+
+/// Ruby-family pre-emit pass: `render partial:` in a LIBRARY-CLASS body
+/// (lobsters' ApplicationHelper#link_post renders a partial from a
+/// helper). A helper's render RETURNS the string, so the rewrite is the
+/// bare `Views::<Mod>.<stem>(record, closure…, extras…)` call — locals
+/// bind by name against the partial's contract, everything else nil
+/// (a module body has no controller ivars to thread). Slashed partial
+/// names only; a bare name has no module context here.
+pub(crate) fn apply_library_partial_render_lowering(lcs: &mut [LibraryClass], app: &App) {
+    use crate::expr::Literal;
+    let contracts = crate::lower::view_to_library::partial_call_contracts(
+        &app.views,
+        &app.controllers,
+        &app.library_classes,
+    );
+    if contracts.is_empty() {
+        return;
+    }
+    for lc in lcs.iter_mut() {
+        for m in &mut lc.methods {
+            rewrite_library_partial_render(&mut m.body, &contracts);
+        }
+    }
+}
+
+fn rewrite_library_partial_render(
+    expr: &mut Expr,
+    contracts: &std::collections::HashMap<
+        (String, String),
+        crate::lower::view_to_library::PartialCallContract,
+    >,
+) {
+    use crate::expr::Literal;
+    expr.node
+        .for_each_child_mut(&mut |c| rewrite_library_partial_render(c, contracts));
+    let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { return };
+    if method.as_str() != "render" && method.as_str() != "render_to_string" {
+        return;
+    }
+    let Some(first) = args.first() else { return };
+    let ExprNode::Hash { entries, kwargs: true } = &*first.node else { return };
+    let mut partial: Option<String> = None;
+    let mut locals: Vec<(Symbol, Expr)> = Vec::new();
+    for (k, v) in entries {
+        let key = match &*k.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str(),
+            _ => "",
+        };
+        match key {
+            "partial" => {
+                if let ExprNode::Lit { value: Literal::Str { value } } = &*v.node {
+                    partial = Some(value.clone());
+                }
+            }
+            "locals" => {
+                if let ExprNode::Hash { entries: le, .. } = &*v.node {
+                    for (lk, lv) in le {
+                        if let ExprNode::Lit { value: Literal::Sym { value } } = &*lk.node {
+                            locals.push((value.clone(), lv.clone()));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(pname) = partial else { return };
+    let Some((dir, base)) = pname.rsplit_once('/') else { return };
+    let module_camel = crate::naming::camelize(&crate::naming::snake_case(dir));
+    let stem = base.trim_start_matches('_').to_string();
+    let Some(contract) = contracts.get(&(module_camel.clone(), stem.clone())) else { return };
+    let span = expr.span;
+    let nil = || sp_expr(ExprNode::Lit { value: Literal::Nil });
+    let lookup = |name: &str| -> Option<Expr> {
+        locals.iter().find(|(k, _)| k.as_str() == name).map(|(_, v)| v.clone())
+    };
+    let mut view_args: Vec<Expr> = Vec::new();
+    view_args.push(lookup(&contract.record).unwrap_or_else(nil));
+    for n in &contract.closure {
+        view_args.push(lookup(n).unwrap_or_else(nil));
+    }
+    let bound: Vec<Option<Expr>> = contract.extras.iter().map(|n| lookup(n)).collect();
+    if let Some(last) = bound.iter().rposition(|b| b.is_some()) {
+        for b in bound.into_iter().take(last + 1) {
+            view_args.push(b.unwrap_or_else(nil));
+        }
+    }
+    *expr = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(sp_expr(ExprNode::Const {
+                path: vec![Symbol::from("Views"), Symbol::from(module_camel)],
+            })),
+            method: crate::lower::view::view_method_name(&stem),
+            args: view_args,
+            block: None,
+            parenthesized: true,
+        },
+    );
 }
 
 /// Ruby-family pre-emit pass: synthesize each model's scope class methods
@@ -441,6 +542,10 @@ fn is_framework_view_helper(name: &str) -> bool {
             | "javascript_include_tag"
             | "number_with_precision"
             | "number_with_delimiter"
+            | "label_tag"
+            | "url_for"
+            | "submit_tag"
+            | "form_tag"
             | "content_tag"
             | "time_ago_in_words"
             | "distance_of_time_in_words"

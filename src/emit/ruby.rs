@@ -377,6 +377,7 @@ fn lower_controllers_for_spinel(app: &App) -> Vec<LibraryClass> {
         model_extras,
         Some(&app.schema),
         &app.views,
+        &app.library_classes,
         &assocs,
         Some(&routed),
     )

@@ -353,6 +353,12 @@ pub enum FormBuilderMethod {
     Submit,
     PasswordField,
     HiddenField,
+    CheckBox,
+    RadioButton,
+    Select,
+    Button,
+    UrlField,
+    EmailField,
 }
 
 /// Method name for a view template stem. A digit-leading stem
@@ -377,6 +383,12 @@ pub fn classify_form_builder_method(method: &str) -> Option<FormBuilderMethod> {
         "submit" => Some(FormBuilderMethod::Submit),
         "password_field" => Some(FormBuilderMethod::PasswordField),
         "hidden_field" => Some(FormBuilderMethod::HiddenField),
+        "check_box" | "checkbox" => Some(FormBuilderMethod::CheckBox),
+        "radio_button" => Some(FormBuilderMethod::RadioButton),
+        "select" => Some(FormBuilderMethod::Select),
+        "button" => Some(FormBuilderMethod::Button),
+        "url_field" => Some(FormBuilderMethod::UrlField),
+        "email_field" => Some(FormBuilderMethod::EmailField),
         _ => None,
     }
 }

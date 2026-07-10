@@ -272,6 +272,26 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         .map(|s| s.as_str().to_string())
         .collect();
 
+    // A partial's locals are its interface: every `locals:` key any call
+    // site passes becomes a trailing nil-default param (sorted; see
+    // render_locals_keys). Names the signature already carries (record,
+    // closure ivars, flash/defined? extras) are skipped.
+    let mut extra_params = extra_params;
+    if is_partial {
+        let keys_map =
+            render_locals_keys(&app.views, &app.controllers, &app.library_classes);
+        if let Some(keys) = view_key_of(view).and_then(|k| keys_map.get(&k).cloned()) {
+            for k in keys {
+                if k != arg_name
+                    && !closure_ivars.contains(&k)
+                    && !extra_params.contains(&k)
+                {
+                    extra_params.push(k);
+                }
+            }
+        }
+    }
+
     // Typed primary params: (name, type, required). Extras (notice/alert/…)
     // are appended afterward as nullable optionals.
     let mut typed: Vec<(String, crate::ty::Ty)> = Vec::new();
@@ -1084,6 +1104,93 @@ pub(crate) struct ViewArgs {
 /// render rewrite. Keyed to match `views_module_name(controller)` (which
 /// equals `camelize(snake_case(dir))`) plus the rendered action. Only
 /// HTML, non-partial, non-layout views participate.
+/// Union of `locals:` key names per partial, across every render call
+/// site in the app (views, controller actions, library-class bodies —
+/// lobsters' ApplicationHelper#link_post renders from a helper).
+/// Rails' contract is that a partial's locals are exactly what callers
+/// pass; these names become the partial's trailing nil-default params.
+/// Values are SORTED so every producer (def site, view-side emit map,
+/// controller-side contract map) agrees on positions even when one of
+/// them sees fewer call sites.
+pub(crate) fn render_locals_keys(
+    views: &[View],
+    controllers: &[crate::dialect::Controller],
+    library_classes: &[crate::dialect::LibraryClass],
+) -> std::collections::HashMap<(String, String), Vec<String>> {
+    use std::collections::{BTreeSet, HashMap};
+    let mut acc: HashMap<(String, String), BTreeSet<String>> = HashMap::new();
+
+    fn scan(e: &Expr, own_dir: Option<&str>, acc: &mut std::collections::HashMap<(String, String), std::collections::BTreeSet<String>>) {
+        if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
+            if (method.as_str() == "render" || method.as_str() == "render_to_string")
+                && !args.is_empty()
+            {
+                if let ExprNode::Hash { entries, kwargs: true } = &*args[0].node {
+                    let mut partial: Option<String> = None;
+                    let mut keys: Vec<String> = Vec::new();
+                    for (k, v) in entries {
+                        let key = match &*k.node {
+                            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str(),
+                            _ => "",
+                        };
+                        match key {
+                            "partial" => {
+                                if let ExprNode::Lit { value: Literal::Str { value } } = &*v.node {
+                                    partial = Some(value.clone());
+                                }
+                            }
+                            "locals" => {
+                                if let ExprNode::Hash { entries: le, .. } = &*v.node {
+                                    for (lk, _) in le {
+                                        if let ExprNode::Lit {
+                                            value: Literal::Sym { value },
+                                        } = &*lk.node
+                                        {
+                                            keys.push(value.as_str().to_string());
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let Some(p) = partial {
+                        let resolved = match p.rsplit_once('/') {
+                            Some((d, n)) => Some((d.to_string(), n.to_string())),
+                            None => own_dir.map(|d| (d.to_string(), p.clone())),
+                        };
+                        if let Some((d, n)) = resolved {
+                            let key = (
+                                camelize(&snake_case(&d)),
+                                n.trim_start_matches('_').to_string(),
+                            );
+                            acc.entry(key).or_default().extend(keys);
+                        }
+                    }
+                }
+            }
+        }
+        e.node.for_each_child(&mut |c| scan(c, own_dir, acc));
+    }
+
+    for v in views {
+        let (dir, _) = split_view_name(v.name.as_str());
+        let own = (!dir.is_empty()).then_some(dir);
+        scan(&v.body, own, &mut acc);
+    }
+    for c in controllers {
+        for a in c.actions() {
+            scan(&a.body, None, &mut acc);
+        }
+    }
+    for lc in library_classes {
+        for m in &lc.methods {
+            scan(&m.body, None, &mut acc);
+        }
+    }
+    acc.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect()
+}
+
 /// Per-PARTIAL call contract for CONTROLLER-side partial renders
 /// (`render partial: "commentbox", locals: {comment: c}` inside an
 /// action). Mirrors the partial def-site parameter order exactly:
@@ -1102,8 +1209,10 @@ pub struct PartialCallContract {
 pub(crate) fn partial_call_contracts(
     views: &[View],
     controllers: &[crate::dialect::Controller],
+    library_classes: &[crate::dialect::LibraryClass],
 ) -> std::collections::HashMap<(String, String), PartialCallContract> {
     let closures = view_ivar_closures(views, controllers);
+    let keys_map = render_locals_keys(views, controllers, library_classes);
     let mut out = std::collections::HashMap::new();
     for view in views {
         let (dir, base) = split_view_name(view.name.as_str());
@@ -1114,7 +1223,7 @@ pub(crate) fn partial_call_contracts(
         let record = singularize(dir);
         let rewritten = rewrite_ivars_to_locals(&view.body);
         let rewritten = crate::lower::erb_trim::trim_view(&rewritten);
-        let extras = collect_extra_params(&rewritten, &record);
+        let mut extras = collect_extra_params(&rewritten, &record);
         let key = (camelize(&snake_case(dir)), stem.to_string());
         let closure: Vec<String> = closures
             .get(&key)
@@ -1125,6 +1234,13 @@ pub(crate) fn partial_call_contracts(
                     .collect()
             })
             .unwrap_or_default();
+        if let Some(keys) = keys_map.get(&key) {
+            for k in keys {
+                if k != &record && !closure.contains(k) && !extras.contains(k) {
+                    extras.push(k.clone());
+                }
+            }
+        }
         out.insert(key, PartialCallContract { record, closure, extras });
     }
     out
@@ -1210,6 +1326,8 @@ pub(super) fn partial_extras_map(
 ) -> std::collections::HashMap<(String, String), Vec<String>> {
     let known_models: Vec<String> =
         app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
+    let closures = view_ivar_closures(&app.views, &app.controllers);
+    let keys_map = render_locals_keys(&app.views, &app.controllers, &app.library_classes);
     let mut out: std::collections::HashMap<(String, String), Vec<String>> =
         std::collections::HashMap::new();
     for view in &app.views {
@@ -1221,8 +1339,21 @@ pub(super) fn partial_extras_map(
         let arg_name = infer_view_arg(stem, dir, true, &known_models);
         let rewritten = rewrite_ivars_to_locals(&view.body);
         let rewritten = crate::lower::erb_trim::trim_view(&rewritten);
-        let extras = collect_extra_params(&rewritten, &arg_name);
-        out.insert((camelize(&snake_case(dir)), stem.to_string()), extras);
+        let mut extras = collect_extra_params(&rewritten, &arg_name);
+        let key = (camelize(&snake_case(dir)), stem.to_string());
+        // locals-key params — mirrors the def site's append exactly.
+        let closure: Vec<String> = closures
+            .get(&key)
+            .map(|ivs| ivs.iter().map(|s| s.as_str().to_string()).collect())
+            .unwrap_or_default();
+        if let Some(keys) = keys_map.get(&key) {
+            for k in keys {
+                if k != &arg_name && !closure.contains(k) && !extras.contains(k) {
+                    extras.push(k.clone());
+                }
+            }
+        }
+        out.insert(key, extras);
     }
     out
 }

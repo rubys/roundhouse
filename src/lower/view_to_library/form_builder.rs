@@ -42,9 +42,13 @@ pub(super) fn emit_form_builder_inline(
 ) -> Vec<Expr> {
     let (positional, opts) = split_args(args);
     match kind {
-        FormBuilderMethod::Label => {
-            emit_label(positional.first().copied(), opts.as_slice(), binding, ctx)
-        }
+        FormBuilderMethod::Label => emit_label(
+            positional.first().copied(),
+            positional.get(1).copied(),
+            opts.as_slice(),
+            binding,
+            ctx,
+        ),
         FormBuilderMethod::TextField => emit_text_field(
             positional.first().copied(),
             opts.as_slice(),
@@ -75,7 +79,216 @@ pub(super) fn emit_form_builder_inline(
             binding,
             ctx,
         ),
+        FormBuilderMethod::CheckBox => emit_check_box(
+            positional.first().copied(),
+            opts.as_slice(),
+            binding,
+            ctx,
+        ),
+        FormBuilderMethod::RadioButton => emit_radio_button(
+            positional.first().copied(),
+            positional.get(1).copied(),
+            opts.as_slice(),
+            binding,
+            ctx,
+        ),
+        FormBuilderMethod::Select => emit_select(
+            positional.first().copied(),
+            positional.get(1).copied(),
+            opts.as_slice(),
+            binding,
+            ctx,
+        ),
+        FormBuilderMethod::Button => {
+            emit_button(positional.first().copied(), opts.as_slice(), ctx)
+        }
+        FormBuilderMethod::UrlField => emit_typed_input_field(
+            "url",
+            positional.first().copied(),
+            opts.as_slice(),
+            binding,
+            ctx,
+        ),
+        FormBuilderMethod::EmailField => emit_typed_input_field(
+            "email",
+            positional.first().copied(),
+            opts.as_slice(),
+            binding,
+            ctx,
+        ),
     }
+}
+
+/// `<input name="user[f]" type="hidden" value="0" autocomplete="off">
+/// <input type="checkbox" value="1" name="user[f]" id="user_f"[ checked]>`
+/// — Rails' check_box pair (the hidden shadow makes an unchecked box
+/// POST "0"). The checked attr is value-dependent, so it goes through
+/// the runtime `checked_box_attr` (CRuby overlay; truthy-and-not-zero).
+fn emit_check_box(
+    field: Option<&Expr>,
+    opts: &[(Expr, Expr)],
+    binding: &FormBuilderBinding,
+    ctx: &ViewCtx,
+) -> Vec<Expr> {
+    let Some(field_sym) = field_symbol(field) else {
+        return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+    };
+    let model_name = &binding.model_name;
+    let field_str = field_sym.as_str();
+    let value_read = field_value_read(binding, field_sym.clone());
+    let mut parts: Vec<InterpPart> = Vec::new();
+    parts.push(InterpPart::Text {
+        value: format!(
+            "<input name=\"{mn}[{f}]\" type=\"hidden\" value=\"0\" autocomplete=\"off\"><input type=\"checkbox\" value=\"1\"{nid}",
+            mn = model_name,
+            f = field_str,
+            nid = name_id_attrs(model_name, field_str),
+        ),
+    });
+    parts.push(InterpPart::Expr {
+        expr: view_helpers_call("checked_box_attr", vec![value_read]),
+    });
+    append_attr_parts(&mut parts, opts);
+    parts.push(InterpPart::Text { value: ">".to_string() });
+    vec![accumulator_append_call(string_interp(parts), ctx)]
+}
+
+/// `<input type="radio" value="V"[ checked] name="user[f]" id="user_f_v">`
+/// — checked when the record's value stringifies equal to V (Rails'
+/// comparison); goes through the runtime `radio_checked_attr`.
+fn emit_radio_button(
+    field: Option<&Expr>,
+    value: Option<&Expr>,
+    opts: &[(Expr, Expr)],
+    binding: &FormBuilderBinding,
+    ctx: &ViewCtx,
+) -> Vec<Expr> {
+    let (Some(field_sym), Some(value)) = (field_symbol(field), value) else {
+        return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+    };
+    let model_name = &binding.model_name;
+    let field_str = field_sym.as_str();
+    let value_read = field_value_read(binding, field_sym.clone());
+    let mut parts: Vec<InterpPart> = Vec::new();
+    parts.push(InterpPart::Text { value: "<input type=\"radio\" value=\"".to_string() });
+    parts.push(InterpPart::Expr {
+        expr: view_helpers_call("html_escape", vec![to_s(value.clone())]),
+    });
+    parts.push(InterpPart::Text { value: "\"".to_string() });
+    parts.push(InterpPart::Expr {
+        expr: view_helpers_call("radio_checked_attr", vec![value_read, value.clone()]),
+    });
+    parts.push(InterpPart::Text {
+        value: format!(" name=\"{model_name}[{field_str}]\" id=\"{model_name}_{field_str}_"),
+    });
+    parts.push(InterpPart::Expr {
+        expr: view_helpers_call("html_escape", vec![to_s(value.clone())]),
+    });
+    parts.push(InterpPart::Text { value: "\"".to_string() });
+    append_attr_parts(&mut parts, opts);
+    parts.push(InterpPart::Text { value: ">".to_string() });
+    vec![accumulator_append_call(string_interp(parts), ctx)]
+}
+
+/// `<select name="user[f]" id="user_f"<opts>><options></select>` —
+/// the choices expression (`[["No e-mails", 0], …]`) and the record's
+/// current value go to the runtime `select_options_for`, which builds
+/// the `<option>` list with the matching one selected.
+fn emit_select(
+    field: Option<&Expr>,
+    choices: Option<&Expr>,
+    opts: &[(Expr, Expr)],
+    binding: &FormBuilderBinding,
+    ctx: &ViewCtx,
+) -> Vec<Expr> {
+    let (Some(field_sym), Some(choices)) = (field_symbol(field), choices) else {
+        return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+    };
+    let model_name = &binding.model_name;
+    let field_str = field_sym.as_str();
+    let value_read = field_value_read(binding, field_sym.clone());
+    let mut parts: Vec<InterpPart> = Vec::new();
+    parts.push(InterpPart::Text {
+        value: format!("<select{}", name_id_attrs(model_name, field_str)),
+    });
+    append_attr_parts(&mut parts, opts);
+    parts.push(InterpPart::Text { value: ">".to_string() });
+    parts.push(InterpPart::Expr {
+        expr: view_helpers_call("select_options_for", vec![choices.clone(), value_read]),
+    });
+    parts.push(InterpPart::Text { value: "</select>".to_string() });
+    vec![accumulator_append_call(string_interp(parts), ctx)]
+}
+
+/// `<button name="button" type="submit"<opts>>TEXT</button>` — the
+/// default type yields to a caller-supplied `type:` opt.
+fn emit_button(
+    text: Option<&Expr>,
+    opts: &[(Expr, Expr)],
+    ctx: &ViewCtx,
+) -> Vec<Expr> {
+    let has_type = opts.iter().any(|(k, _)| {
+        matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+            if value.as_str() == "type")
+    });
+    let mut parts: Vec<InterpPart> = Vec::new();
+    parts.push(InterpPart::Text {
+        value: if has_type {
+            "<button name=\"button\"".to_string()
+        } else {
+            "<button name=\"button\" type=\"submit\"".to_string()
+        },
+    });
+    append_attr_parts(&mut parts, opts);
+    parts.push(InterpPart::Text { value: ">".to_string() });
+    if let Some(t) = text {
+        parts.push(InterpPart::Expr {
+            expr: view_helpers_call("html_escape", vec![to_s(t.clone())]),
+        });
+    }
+    parts.push(InterpPart::Text { value: "</button>".to_string() });
+    vec![accumulator_append_call(string_interp(parts), ctx)]
+}
+
+/// `<input type="<ty>" …>` — the text_field shape with a different
+/// `type` (url_field / email_field).
+fn emit_typed_input_field(
+    ty: &str,
+    field: Option<&Expr>,
+    opts: &[(Expr, Expr)],
+    binding: &FormBuilderBinding,
+    ctx: &ViewCtx,
+) -> Vec<Expr> {
+    let Some(field_sym) = field_symbol(field) else {
+        return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+    };
+    let model_name = &binding.model_name;
+    let field_str = field_sym.as_str();
+    let value_read = field_value_read(binding, field_sym.clone());
+    let mut parts: Vec<InterpPart> = Vec::new();
+    parts.push(InterpPart::Text {
+        value: format!("<input type=\"{ty}\"{}", name_id_attrs(model_name, field_str)),
+    });
+    parts.push(InterpPart::Expr {
+        expr: view_helpers_call("optional_value_attr", vec![value_read]),
+    });
+    append_attr_parts(&mut parts, opts);
+    parts.push(InterpPart::Text { value: ">".to_string() });
+    vec![accumulator_append_call(string_interp(parts), ctx)]
+}
+
+/// `<expr>.to_s` — the coercion the escape helpers expect.
+fn to_s(e: Expr) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(e),
+            method: Symbol::from("to_s"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    )
 }
 
 /// `<input type="password" name="..." id="..."<opts>>` — inline expansion
@@ -210,6 +423,7 @@ fn opts_have_value(opts: &[(Expr, Expr)]) -> bool {
 /// merged `{ for: … }.merge(opts)` hash.
 fn emit_label(
     field: Option<&Expr>,
+    text: Option<&Expr>,
     opts: &[(Expr, Expr)],
     binding: &FormBuilderBinding,
     ctx: &ViewCtx,
@@ -218,15 +432,29 @@ fn emit_label(
         return vec![accumulator_append_call(lit_str(String::new()), ctx)];
     };
     let model_name = &binding.model_name;
-    let cap = capitalize_ascii(field_sym.as_str());
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text {
         value: label_for_attr(model_name, field_sym.as_str()),
     });
     append_attr_parts(&mut parts, opts);
-    parts.push(InterpPart::Text {
-        value: format!(">{cap}</label>"),
-    });
+    parts.push(InterpPart::Text { value: ">".to_string() });
+    // Explicit text positional (`f.label :username, "Username:"`) wins
+    // over the humanized field name; a literal folds into the text run,
+    // anything else escapes at runtime.
+    match text {
+        Some(t) => match &*t.node {
+            ExprNode::Lit { value: Literal::Str { value } } => {
+                parts.push(InterpPart::Text { value: value.clone() });
+            }
+            _ => parts.push(InterpPart::Expr {
+                expr: view_helpers_call("html_escape", vec![to_s(t.clone())]),
+            }),
+        },
+        None => parts.push(InterpPart::Text {
+            value: capitalize_ascii(field_sym.as_str()),
+        }),
+    }
+    parts.push(InterpPart::Text { value: "</label>".to_string() });
     vec![accumulator_append_call(string_interp(parts), ctx)]
 }
 

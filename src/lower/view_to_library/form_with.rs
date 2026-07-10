@@ -140,10 +140,14 @@ pub(super) fn emit_form_with_inline(
     inner_ctx.form_records.push(FormBuilderBinding {
         form_param: form_param_str.to_string(),
         model_name: comps.model_name.clone(),
-        record_var,
+        record_var: record_var.clone(),
         form_method_var,
     });
-    out.extend(walk_body(body, &inner_ctx));
+    // `f.object` is the one FormBuilder method used in EXPRESSION
+    // position (`errors_for f.object`) — substitute the record local
+    // before the walk so downstream classifiers see a plain Var.
+    let body = rewrite_form_object_reads(body, form_param_str, &record_var);
+    out.extend(walk_body(&body, &inner_ctx));
 
     // 5. Close `</form>`.
     out.push(accumulator_append_call(
@@ -319,11 +323,24 @@ fn classify_form_with_components(
         Some(m) => m,
         None => {
             let url = url_expr?;
+            // Same `method:` extraction the url+model branch does — left
+            // in opts it renders as a second literal `method="..."` attr
+            // (and a Symbol value crashes html_escape).
+            let is_method_key = |k: &Expr| {
+                matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+                    if value.as_str() == "method")
+            };
+            let method = opts_entries
+                .iter()
+                .find(|(k, _)| is_method_key(k))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| lit_sym(Symbol::from("post")));
+            opts_entries.retain(|(k, _)| !is_method_key(k));
             return Some(FormWithComponents {
                 model: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
                 model_name: String::new(),
                 action: route_helperize(url, &route_helpers),
-                method: lit_sym(Symbol::from("post")),
+                method,
                 opts_entries,
             });
         }
@@ -629,4 +646,31 @@ fn find_kwarg_local_name(args: &[Expr]) -> Option<String> {
         }
     }
     None
+}
+
+
+/// Replace `<form_param>.object` reads with the record local
+/// (`f.object` → `f_record`). Runs over the form block body before the
+/// walk; every other `f.<method>` stays for the macro-inline dispatch.
+fn rewrite_form_object_reads(body: &Expr, form_param: &str, record_var: &Symbol) -> Expr {
+    fn walk(e: &Expr, form_param: &str, record_var: &Symbol) -> Expr {
+        if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node {
+            if method.as_str() == "object" && args.is_empty() {
+                if let ExprNode::Var { name, .. } = &*r.node {
+                    if name.as_str() == form_param {
+                        return Expr::new(
+                            e.span,
+                            ExprNode::Var { id: crate::ident::VarId(0), name: record_var.clone() },
+                        );
+                    }
+                }
+            }
+        }
+        let mut out = e.clone();
+        out.node.for_each_child_mut(&mut |c| {
+            *c = walk(c, form_param, record_var);
+        });
+        out
+    }
+    walk(body, form_param, record_var)
 }
