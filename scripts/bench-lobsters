@@ -56,6 +56,10 @@ SKIP_EMIT=0
 TIME_ITERS=0
 MEMORY=0
 VS_RAILS=0
+# Snapshot before the parse loop shifts everything away — the
+# provenance step reads this (a bare `$*` there always recorded an
+# arg-less command; caught on the first published Hetzner run).
+ORIG_ARGS="$*"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -112,7 +116,7 @@ ruby -rjson -e 'puts JSON.pretty_generate({
   command: ARGV[0], src: ARGV[1],
   roundhouse_commit: `git -C #{ARGV[2]} rev-parse HEAD`.strip,
   ruby: RUBY_DESCRIPTION,
-})' "scripts/bench-lobsters $*" "$SRC" "$REPO_ROOT" > "$OUT_DIR/env.json" || true
+})' "scripts/bench-lobsters $ORIG_ARGS" "$SRC" "$REPO_ROOT" > "$OUT_DIR/env.json" || true
 
 # ── runtime gems ─────────────────────────────────────────────────────
 # The replay runs under the system/mise ruby, not a bundle. A Ruby bump
