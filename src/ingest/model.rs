@@ -145,7 +145,7 @@ pub(super) fn ingest_model_body_item(
             });
         }
         let method = constant_id_str(&call.name()).to_string();
-        if let Some(assoc) = parse_association(&call, owner, &method) {
+        if let Some(assoc) = parse_association(&call, owner, &method, file) {
             return Ok(ModelBodyItem::Association { assoc, leading_blank_line: false, leading_comments, span });
         }
         if method == "validates" {
@@ -510,6 +510,7 @@ fn parse_association(
     call: &ruby_prism::CallNode<'_>,
     owner: &ClassId,
     method: &str,
+    file: &str,
 ) -> Option<crate::dialect::Association> {
     use super::util::{bool_value, string_value};
     use crate::dialect::{Association, Dependent};
@@ -528,8 +529,28 @@ fn parse_association(
     let mut dependent: Option<Dependent> = None;
     let mut optional: Option<bool> = None;
     let mut join_table: Option<String> = None;
+    let mut scope: Option<crate::expr::Expr> = None;
 
     for arg in iter {
+        // Positional lambda between name and kwargs — the association
+        // scope (`has_many :x, -> { where(...) }, through: :y`).
+        // Recorded as its raw body Expr; the reader synthesis grafts it
+        // onto the relation seed. Param-taking lambdas (rare
+        // owner-dependent scopes) are skipped — they need the owner
+        // threaded and no exercised corpus does this yet.
+        if let Some(lambda) = arg.as_lambda_node() {
+            if scope.is_none() {
+                let param_free = lambda
+                    .parameters()
+                    .and_then(|p| p.as_block_parameters_node().and_then(|b| b.parameters()))
+                    .map(|pn| pn.requireds().iter().next().is_none())
+                    .unwrap_or(true);
+                if param_free {
+                    scope = lambda.body().and_then(|b| ingest_expr(&b, file).ok());
+                }
+            }
+            continue;
+        }
         let Some(kh) = arg.as_keyword_hash_node() else { continue };
         for el in kh.elements().iter() {
             let Some(assoc) = el.as_assoc_node() else { continue };
@@ -571,6 +592,7 @@ fn parse_association(
                 .unwrap_or_else(|| Symbol::from(format!("{owner_snake}_id"))),
             through: through.map(|s| Symbol::from(s.as_str())),
             dependent: dependent.unwrap_or_default(),
+            scope,
         }),
         "has_one" => Some(Association::HasOne {
             name: name.clone(),

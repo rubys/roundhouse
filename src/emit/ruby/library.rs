@@ -271,7 +271,9 @@ pub(crate) fn apply_through_assoc_lowering(lcs: &mut [LibraryClass], app: &App) 
     for lc in lcs.iter_mut() {
         let Some(model) = app.models.iter().find(|m| m.name == lc.name) else { continue };
         for assoc in model.associations() {
-            let Association::HasMany { name, target, through: Some(thr_name), .. } = assoc
+            let Association::HasMany {
+                name, target, through: Some(thr_name), scope: assoc_scope, ..
+            } = assoc
             else {
                 continue;
             };
@@ -312,7 +314,7 @@ pub(crate) fn apply_through_assoc_lowering(lcs: &mut [LibraryClass], app: &App) 
             else {
                 continue;
             };
-            m.body = through_reader_body(name, target, &join_sql, &where_sql);
+            m.body = through_reader_body(name, target, &join_sql, &where_sql, assoc_scope);
         }
     }
 }
@@ -388,6 +390,7 @@ fn through_reader_body(
     target: &ClassId,
     join_sql: &str,
     where_sql: &str,
+    assoc_scope: &Option<Expr>,
 ) -> Expr {
     let span = Span::synthetic;
     let guard = Expr::new(
@@ -467,7 +470,50 @@ fn through_reader_body(
         },
     );
 
+    // Association scope lambda (`-> { where('votes.vote' => 1)... }`) —
+    // graft its receiver-less chain onto the seeded relation so the
+    // reader filters the way Rails does (without it /upvoted served
+    // every joined row).
+    let chain = match assoc_scope {
+        Some(scope_body) => graft_chain_root(scope_body, chain),
+        None => chain,
+    };
+
     Expr::new(span(), ExprNode::Seq { exprs: vec![guard, chain] })
+}
+
+/// Replace the receiver-less root of a `where(...).order(...)` chain
+/// with `seed`, turning an association-scope lambda body into a call
+/// chain on the seeded relation. Non-chain shapes (a Seq, a literal)
+/// return the seed untouched — better an unfiltered relation than a
+/// mis-grafted one.
+fn graft_chain_root(chain: &Expr, seed: Expr) -> Expr {
+    match &*chain.node {
+        ExprNode::Send { recv: Some(r), method, args, block, parenthesized } => {
+            let new_recv = graft_chain_root(r, seed);
+            Expr::new(
+                chain.span,
+                ExprNode::Send {
+                    recv: Some(new_recv),
+                    method: method.clone(),
+                    args: args.clone(),
+                    block: block.clone(),
+                    parenthesized: *parenthesized,
+                },
+            )
+        }
+        ExprNode::Send { recv: None, method, args, block, parenthesized } => Expr::new(
+            chain.span,
+            ExprNode::Send {
+                recv: Some(seed),
+                method: method.clone(),
+                args: args.clone(),
+                block: block.clone(),
+                parenthesized: *parenthesized,
+            },
+        ),
+        _ => seed,
+    }
 }
 
 /// Ruby-family pre-emit pass: resolve `app/helpers/*` references. Rails

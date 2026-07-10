@@ -262,6 +262,13 @@ pub enum Association {
         foreign_key: Symbol,
         through: Option<Symbol>,
         dependent: Dependent,
+        /// Association scope lambda body (`has_many :upvoted_stories,
+        /// -> { where('votes.vote' => 1) ... }`) — a receiver-less
+        /// `where`/`order` chain evaluated against the association's
+        /// relation. Recorded so reader synthesis can graft it onto the
+        /// seed; None for the unscoped common case.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<Expr>,
     },
     HasOne {
         name: Symbol,
