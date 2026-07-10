@@ -1870,6 +1870,20 @@ fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
                 })
                 .collect(),
         },
+        // Template-level `<% while subtree %>` bodies (lobsters' users
+        // tree) and `<% x ||= … %>` statements read ivars too — without
+        // these arms an `@ivar` inside survives to the emitted module,
+        // where no ivar exists.
+        ExprNode::While { cond, body, until_form } => ExprNode::While {
+            cond: rewrite_ivars_to_locals(cond),
+            body: rewrite_ivars_to_locals(body),
+            until_form: *until_form,
+        },
+        ExprNode::OpAssign { target, op, value } => ExprNode::OpAssign {
+            target: rewrite_lvalue(target),
+            op: *op,
+            value: rewrite_ivars_to_locals(value),
+        },
         other => other.clone(),
     };
     Expr::new(expr.span, new_node)

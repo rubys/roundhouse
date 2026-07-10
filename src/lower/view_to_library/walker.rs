@@ -169,6 +169,30 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             }
             vec![todo_io_append("unknown stmt")]
         }
+        // `<% while cond %>…<% end %>` at the template level —
+        // lobsters' users/tree.html.erb walks the invitation tree with
+        // an explicit stack (`while subtree`, `ancestors << subtree`,
+        // `subtree = ancestors.pop`). Recurse on the body so inner
+        // `_buf` appends land on the outer io; cond rides the same
+        // predicate rewriting an If cond gets.
+        ExprNode::While { cond, body, until_form } => {
+            let inner = walk_body(body, ctx);
+            let inner_body =
+                if inner.len() == 1 { inner.into_iter().next().unwrap() } else { seq(inner) };
+            vec![Expr::new(
+                Span::synthetic(),
+                ExprNode::While {
+                    cond: rewrite_predicates(
+                        cond,
+                        &ctx.nullable_locals,
+                        &ctx.reference_reads,
+                        &ctx.nilable_scalar_reads,
+                    ),
+                    body: inner_body,
+                    until_form: *until_form,
+                },
+            )]
+        }
         // Block-form `<% coll.each do |x| %>...<% end %>` at the
         // template level (rare — usually the each is inside a `<%= %>`
         // wrapper for collection partial render). When it shows up, we
@@ -224,6 +248,13 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 },
             )]
         }
+        // A receiver'd, blockless call in statement position (`<%
+        // ancestors << subtree %>`) — a side-effecting mutation whose
+        // value is discarded. Pass it through verbatim: template
+        // OUTPUT always arrives `_buf`-shaped, so anything here is
+        // genuinely a statement (the prior TODO-append swallowed the
+        // side effect and broke stack-walking templates).
+        ExprNode::Send { recv: Some(_), block: None, .. } => vec![stmt.clone()],
         _ => vec![todo_io_append("unknown stmt")],
     }
 }

@@ -349,6 +349,21 @@ module Db
     end
   end
 
+  # Raw typed column read — the gem-backed shims (db_cruby/db_jruby)
+  # return the driver's native value (Integer/Float/String/nil). The
+  # FFI shim keeps the text representation until per-column
+  # `sqlite3_column_type` dispatch is wired; NULL at least maps to nil
+  # (not "") so nil-keyed grouping and truthiness behave. Same
+  # copy-out as column_text (the buffer dies at the next step).
+  def self.column_value(stmt, i)
+    s = SQL.sqlite3_column_text(stmt, i)
+    if s.nil?
+      nil
+    else
+      s + ""
+    end
+  end
+
   def self.column_count(stmt)
     SQL.sqlite3_column_count(stmt)
   end

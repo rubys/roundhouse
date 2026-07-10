@@ -213,6 +213,15 @@ module Db
     v.nil? ? "" : v.to_s
   end
 
+  # Raw typed column read (see db_cruby.rb): JDBC getObject gives the
+  # driver's native value — Integer/Long for INTEGER affinity, Double
+  # for REAL, String for TEXT, nil for NULL. Normalize java.lang
+  # numerics via to_i/to_f pass-through is unnecessary — JRuby coerces
+  # them to Ruby Integer/Float on comparison and arithmetic.
+  def self.column_value(stmt, i)
+    stmt.rs.get_object(i + 1)
+  end
+
   # Read column metadata from the ResultSet (valid once the query has run
   # but before the first row is fetched). Universally supported across
   # JDBC drivers — unlike PreparedStatement.getMetaData(), whose

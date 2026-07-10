@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use super::super::EmittedFile;
 use crate::App;
 use crate::dialect::{AccessorKind, LibraryClass, MethodReceiver, Param};
-use crate::expr::{Expr, ExprNode, InterpPart, LValue};
+use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::naming::snake_case;
 use crate::span::Span;
@@ -35,6 +35,8 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     apply_secure_password_lowering(&mut lcs, app);
     apply_typed_store_lowering(&mut lcs, app);
     apply_boolean_lowering(&mut lcs, app);
+    apply_hydration_nil_lowering(&mut lcs, app);
+    apply_nilsafe_empty_lowering(&mut lcs);
     lcs.iter()
         .flat_map(|lc| {
             let file_stem = snake_case(lc.name.0.as_str());
@@ -953,16 +955,23 @@ fn rewrite_layout_wrap(expr: &mut Expr, app: &App) {
     if has_content_type {
         return;
     }
-    let wrappable = match &*args[0].node {
-        ExprNode::Send { recv: Some(r), method: vm, .. } => {
-            !vm.as_str().ends_with("_json")
-                && matches!(&*r.node, ExprNode::Const { path }
-                    if path.len() == 2
-                        && path[0].as_str() == "Views"
-                        && path[1].as_str() != "Layouts")
-        }
-        _ => layout_requested,
-    };
+    // An explicit `layout: "application"`/`true` wraps WHATEVER the
+    // body is — `render html: content.html_safe, layout:
+    // "application"` (lobsters /u serves a cached tree string) has a
+    // Send body that isn't a Views call, and the Views-shape test
+    // alone wrongly skipped it. Without an explicit request, only a
+    // non-layout non-json Views call wraps (the implicit html render).
+    let wrappable = layout_requested
+        || match &*args[0].node {
+            ExprNode::Send { recv: Some(r), method: vm, .. } => {
+                !vm.as_str().ends_with("_json")
+                    && matches!(&*r.node, ExprNode::Const { path }
+                        if path.len() == 2
+                            && path[0].as_str() == "Views"
+                            && path[1].as_str() != "Layouts")
+            }
+            _ => false,
+        };
     if !wrappable {
         return;
     }
@@ -1122,6 +1131,198 @@ pub(crate) fn apply_datetime_lowering(lcs: &mut [LibraryClass], app: &App) {
             }
         }
     }
+}
+
+/// Ruby-family pre-emit pass: SQL NULL survives hydration as real nil.
+///
+/// The shared `<Model>Row.from_raw` synthesis coerces every scalar slot
+/// (`(row["col"] || 0).to_i`, `(row["col"]).to_s`) so strict targets get
+/// non-nilable fields — but on the Ruby tree that turns NULL into 0/""
+/// and breaks Rails semantics: `group_by(&:invited_by_user_id)[nil]`
+/// finds no root users (the /u tree renders empty), `banned_at?` is
+/// true for everyone. For NULLABLE, non-primary-key columns, rewrite
+/// the slot assign to `row["col"].nil? ? nil : <original coercion>`.
+///
+/// The fk 0-sentinel convention stays (belongs_to writers store 0 for
+/// nil); readers' `@fk == 0` guards are WIDENED to `@fk.nil? || @fk ==
+/// 0` so both representations mean "no parent". CRuby-only by
+/// placement: strict targets keep the defaulted non-nilable slots
+/// until the nullable-column typing workstream lands.
+pub(crate) fn apply_hydration_nil_lowering(lcs: &mut [LibraryClass], app: &App) {
+    for model in &app.models {
+        let Some(table) = app.schema.tables.get(&model.table.0) else {
+            continue;
+        };
+        let nullable: BTreeSet<Symbol> = table
+            .columns
+            .iter()
+            .filter(|c| c.nullable && !c.primary_key && c.name.as_str() != "id")
+            .map(|c| c.name.clone())
+            .collect();
+        if nullable.is_empty() {
+            continue;
+        }
+        let row_id = ClassId(Symbol::from(format!("{}Row", model.name.0.as_str())));
+        if let Some(row_lc) = lcs.iter_mut().find(|lc| lc.name == row_id) {
+            for m in &mut row_lc.methods {
+                if m.name.as_str() == "from_raw" {
+                    nil_guard_from_raw_slots(&mut m.body, &nullable);
+                }
+            }
+        }
+        let nullable_fks: BTreeSet<Symbol> = nullable
+            .iter()
+            .filter(|n| n.as_str().ends_with("_id"))
+            .cloned()
+            .collect();
+        if nullable_fks.is_empty() {
+            continue;
+        }
+        if let Some(lc) = lcs.iter_mut().find(|lc| lc.name == model.name) {
+            for m in &mut lc.methods {
+                widen_fk_zero_guards(&mut m.body, &nullable_fks);
+            }
+        }
+    }
+}
+
+/// Inside a `from_raw` body, rewrite `instance.<col> = <coercion>` for
+/// nullable cols to `instance.<col> = (row["col"].nil? ? nil :
+/// <coercion-sans-|| default>)`. The lookup is a pure Hash read, so the
+/// duplicated evaluation in the guard is safe.
+fn nil_guard_from_raw_slots(body: &mut Expr, nullable: &BTreeSet<Symbol>) {
+    let ExprNode::Seq { exprs } = &mut *body.node else { return };
+    for stmt in exprs.iter_mut() {
+        let ExprNode::Send { method, args, .. } = &mut *stmt.node else { continue };
+        let Some(col) = method.as_str().strip_suffix('=') else { continue };
+        if !nullable.contains(&Symbol::from(col)) {
+            continue;
+        }
+        let Some(value) = args.first_mut() else { continue };
+        // Only Cast-wrapped scalars coerce; raw slots (bools) already
+        // carry nil through.
+        let ExprNode::Cast { value: inner, target_ty } = &*value.node else { continue };
+        // Strip a `|| <default>` fallback (the id-shaped-column form) so
+        // NULL isn't defaulted before the coercion sees it.
+        let lookup = match &*inner.node {
+            ExprNode::BoolOp { left, right, .. }
+                if matches!(&*right.node, ExprNode::Lit { .. }) =>
+            {
+                left.clone()
+            }
+            _ => inner.clone(),
+        };
+        let nil_check = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(lookup.clone()),
+                method: Symbol::from("nil?"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let guarded = Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: nil_check,
+                then_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+                else_branch: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Cast { value: lookup, target_ty: target_ty.clone() },
+                ),
+            },
+        );
+        *value = guarded;
+    }
+}
+
+/// `@<fk> == 0` → `@<fk>.nil? || @<fk> == 0` for nullable fks, walking
+/// the whole method body (belongs_to reader guards, app-code sentinel
+/// checks alike).
+fn widen_fk_zero_guards(expr: &mut Expr, fks: &BTreeSet<Symbol>) {
+    expr.node.for_each_child_mut(&mut |c| widen_fk_zero_guards(c, fks));
+    let is_sentinel_eq = match &*expr.node {
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if method.as_str() == "==" && args.len() == 1 =>
+        {
+            matches!(&*r.node, ExprNode::Ivar { name } if fks.contains(name))
+                && matches!(
+                    &*args[0].node,
+                    ExprNode::Lit { value: Literal::Int { value: 0 } }
+                )
+        }
+        _ => false,
+    };
+    if !is_sentinel_eq {
+        return;
+    }
+    let ExprNode::Send { recv: Some(r), .. } = &*expr.node else { return };
+    let nil_check = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(r.clone()),
+            method: Symbol::from("nil?"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let original = expr.clone();
+    *expr = Expr::new(
+        expr.span,
+        ExprNode::BoolOp {
+            op: crate::expr::BoolOpKind::Or,
+            surface: crate::expr::BoolOpSurface::Symbol,
+            left: nil_check,
+            right: original,
+        },
+    );
+}
+
+/// Ruby-family pre-emit pass, companion to
+/// `apply_hydration_nil_lowering`: once nullable columns hydrate to
+/// real nil, the `.empty?` forms the predicate lowering synthesized
+/// from `present?`/`blank?` (which assumed never-nil reads) crash.
+/// Rewrite `<recv>.empty?` → `(<recv> || "").empty?` — single
+/// evaluation, transparent for arrays/strings that are never nil, and
+/// nil reads get Rails' blank-when-nil semantics. Only the
+/// zero-arg `empty?` shape is touched.
+pub(crate) fn apply_nilsafe_empty_lowering(lcs: &mut [LibraryClass]) {
+    for lc in lcs.iter_mut() {
+        for m in &mut lc.methods {
+            rewrite_empty_nilsafe(&mut m.body);
+        }
+    }
+}
+
+fn rewrite_empty_nilsafe(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut |c| rewrite_empty_nilsafe(c));
+    let ExprNode::Send { recv: Some(r), method, args, .. } = &mut *expr.node else {
+        return;
+    };
+    if method.as_str() != "empty?" || !args.is_empty() {
+        return;
+    }
+    // Idempotence: an already-guarded `(x || "").empty?` keeps its shape.
+    if matches!(&*r.node, ExprNode::BoolOp { right, .. }
+        if matches!(&*right.node, ExprNode::Lit { value: Literal::Str { value } } if value.is_empty()))
+    {
+        return;
+    }
+    let guarded = Expr::new(
+        r.span,
+        ExprNode::BoolOp {
+            op: crate::expr::BoolOpKind::Or,
+            surface: crate::expr::BoolOpSurface::Symbol,
+            left: r.clone(),
+            right: Expr::new(
+                r.span,
+                ExprNode::Lit { value: Literal::Str { value: String::new() } },
+            ),
+        },
+    );
+    *r = guarded;
 }
 
 /// True when a reader body is exactly `@<name>` — the untouched

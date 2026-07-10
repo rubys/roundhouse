@@ -181,6 +181,17 @@ module Db
     v.nil? ? "" : v.to_s
   end
 
+  # Raw typed column read: the value exactly as the sqlite3 gem
+  # returns it — Integer for INTEGER affinity, Float for REAL, String
+  # for TEXT, and crucially nil for NULL (column_text collapses NULL
+  # to "", which breaks Rails semantics like `group_by(&:fk)[nil]`
+  # and integer-column truthiness). Whole-row hydration
+  # (SqliteAdapter.select_rows) reads through this so model attributes
+  # carry real types, matching what ActiveRecord hands the app.
+  def self.column_value(stmt_id, i)
+    @rows[stmt_id][:row][i]
+  end
+
   def self.column_count(stmt_id)
     @rows[stmt_id][:stmt].columns.length
   end

@@ -77,11 +77,13 @@ module SqliteAdapter
   end
 
   # Internal helpers — walk a prepared statement and build a row hash
-  # keyed by column name. Values are read as text uniformly; numeric
-  # coercion is the caller's responsibility (the per-model
-  # assign_from_row chains a String-keyed Hash through typed slot
-  # writes, where the model layer owns the type). Each row is its own
-  # Hash so the caller gets a stable copy after `finalize`.
+  # keyed by column name. Values read through `Db.column_value` — the
+  # driver's NATIVE types (Integer/Float/String, nil for NULL), which
+  # is what ActiveRecord hands the app: `group_by(&:fk)[nil]` finds
+  # root rows, integer columns compare as integers. (The FFI Db shim
+  # still returns text values, nil-for-NULL aside — see db.rb.) Each
+  # row is its own Hash so the caller gets a stable copy after
+  # `finalize`.
   def self.select_rows(sql)
     stmt = Db.prepare(sql)
     rows = []
@@ -90,7 +92,7 @@ module SqliteAdapter
       row = {}
       i = 0
       while i < ncols
-        row[Db.column_name(stmt, i)] = Db.column_text(stmt, i)
+        row[Db.column_name(stmt, i)] = Db.column_value(stmt, i)
         i += 1
       end
       rows << row

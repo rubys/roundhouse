@@ -271,11 +271,27 @@ fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
     if !value_is_poly {
         return inner;
     }
+    // NIL-SAFE coercion for pure reads (Var/Ivar — no double-eval
+    // hazard): `nil.to_i` is 0 and `nil.to_s` is "", which destroys
+    // SQL NULL on the typed-slot hydration path (`self[:col]=`) —
+    // `group_by(&:fk)[nil]` finds no roots, `banned_at?` is true for
+    // everyone. Rails keeps nil nil; so do we. Ternary + `.nil?`
+    // rather than `&.` — the spinel AOT consumer of this emit has no
+    // proven safe-nav support. Effectful operands keep the plain
+    // coercion (legacy behavior) rather than risk double evaluation.
+    let pure_read = matches!(&*value.node, ExprNode::Var { .. } | ExprNode::Ivar { .. });
+    let coerce = |m: &str| {
+        if pure_read {
+            format!("({inner}).nil? ? nil : ({inner}).{m}")
+        } else {
+            format!("({inner}).{m}")
+        }
+    };
     match target_ty {
-        Ty::Str => format!("({inner}).to_s"),
-        Ty::Sym => format!("({inner}).to_sym"),
-        Ty::Int => format!("({inner}).to_i"),
-        Ty::Float => format!("({inner}).to_f"),
+        Ty::Str => coerce("to_s"),
+        Ty::Sym => coerce("to_sym"),
+        Ty::Int => coerce("to_i"),
+        Ty::Float => coerce("to_f"),
         _ => inner,
     }
 }

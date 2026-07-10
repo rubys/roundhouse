@@ -1325,9 +1325,12 @@ fn lowered_index_view_rewrites_present_to_negated_empty() {
     // `notice.empty?.!`.
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/index.rb");
+    // The Ruby path additionally guards the receiver (`(notice ||
+    // "").empty?`) — nullable columns hydrate to real nil there
+    // (apply_nilsafe_empty_lowering).
     assert!(
-        src.contains("! notice.empty?"),
-        "expected `! notice.empty?`; got:\n{src}",
+        src.contains("! (notice || \"\").empty?"),
+        "expected `! (notice || \"\").empty?`; got:\n{src}",
     );
     assert!(
         !src.contains("notice.present?"),
@@ -1338,10 +1341,11 @@ fn lowered_index_view_rewrites_present_to_negated_empty() {
         "unary-! should not render as method-call form; got:\n{src}",
     );
     // Same rewrite applies to `@articles.any?` (after ivar rewrite to
-    // `articles.any?`) — the `<% if @articles.any? %>` branch.
+    // `articles.any?`) — the `<% if @articles.any? %>` branch, with
+    // the same nil-safe receiver guard.
     assert!(
-        src.contains("! articles.empty?"),
-        "expected `! articles.empty?` rewrite of `@articles.any?`; got:\n{src}",
+        src.contains("! (articles || \"\").empty?"),
+        "expected `! (articles || \"\").empty?` rewrite of `@articles.any?`; got:\n{src}",
     );
 }
 
@@ -1594,10 +1598,11 @@ fn lowered_form_partial_form_with_inline_expansion() {
 fn lowered_form_partial_errors_predicate_rewrite() {
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/_form.rb");
-    // `<% if article.errors.any? %>` → `if ! article.errors.empty?`
-    // (predicate-cond rewrite applied through the receiver chain).
+    // `<% if article.errors.any? %>` → `if ! (article.errors ||
+    // "").empty?` (predicate-cond rewrite through the receiver chain,
+    // plus the Ruby path's nil-safe receiver guard).
     assert!(
-        src.contains("if ! article.errors.empty?"),
+        src.contains("if ! (article.errors || \"\").empty?"),
         "expected predicate-rewrite on errors.any?; got:\n{src}",
     );
     assert!(

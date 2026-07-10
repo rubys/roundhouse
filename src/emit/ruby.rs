@@ -196,6 +196,12 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // Boolean-column readers/predicates cast SQLite's 0/1 Integers
     // (0 is truthy in Ruby).
     library::apply_boolean_lowering(&mut lcs, app);
+    // NULL fidelity: nullable columns hydrate to nil (not 0/"") and fk
+    // 0-sentinel guards widen to accept nil (no-op for schemas with no
+    // nullable columns); synthesized `.empty?` predicate forms in
+    // model bodies tolerate the nil.
+    library::apply_hydration_nil_lowering(&mut lcs, app);
+    library::apply_nilsafe_empty_lowering(&mut lcs);
 
     // Synthesized siblings need explicit `require_relative` even when
     // they live in the same directory as their referencer — nothing else
@@ -314,6 +320,7 @@ pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
     library::apply_duration_lowering(&mut lcs);
+    library::apply_nilsafe_empty_lowering(&mut lcs);
     emit_lowered_controllers_from_lcs(&lcs, app)
 }
 
@@ -333,6 +340,7 @@ pub fn emit_lowered_controllers_with_layout(app: &App) -> Vec<EmittedFile> {
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
     library::apply_duration_lowering(&mut lcs);
+    library::apply_nilsafe_empty_lowering(&mut lcs);
     library::apply_layout_lowering(&mut lcs, app);
     emit_lowered_controllers_from_lcs(&lcs, app)
 }
@@ -496,6 +504,9 @@ pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
     library::apply_duration_lowering(&mut lcs);
+    // Nullable columns hydrate to nil on the Ruby tree — synthesized
+    // `.empty?` predicate forms in view bodies must tolerate it.
+    library::apply_nilsafe_empty_lowering(&mut lcs);
     html_views
         .iter()
         .zip(lcs.iter())
