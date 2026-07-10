@@ -45,6 +45,18 @@ module ActiveSupport
 
   def self.parse_db_time(str)
     return nil if str.nil? || str.empty?
+    # Fast path for the sqlite3 adapter's own storage form — bare
+    # "YYYY-MM-DD HH:MM:SS[.ffffff]", no zone marker, implicitly UTC —
+    # which is what every hydrated column carries. `Time.parse`'s
+    # `Date._parse` regex machinery dominates timestamp-heavy renders
+    # (≈9% of /comments wall); a fixed-format `Time.utc` extraction is
+    # the same instant at a fraction of the cost, matching what Rails'
+    # own adapter does. `Time.parse` stays the fallback for the rare
+    # zone-carrying string (API-supplied, or a pre-`db_now` build's "Z").
+    if (m = /\A(\d{4})-(\d\d)-(\d\d)[ T](\d\d):(\d\d):(\d\d)(?:\.(\d+))?\z/.match(str))
+      usec = m[7] ? "#{m[7]}000000"[0, 6].to_i : 0
+      return Time.utc(m[1].to_i, m[2].to_i, m[3].to_i, m[4].to_i, m[5].to_i, m[6].to_i, usec).getlocal
+    end
     t = str =~ /(Z|[+-]\d\d:?\d\d)\z/ ? Time.parse(str) : Time.parse("#{str} UTC")
     # Present in the app's zone, exactly as ActiveRecord returns
     # TimeWithZone values in Time.zone: main.rb pins ENV["TZ"] to the
