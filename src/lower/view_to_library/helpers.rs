@@ -277,6 +277,25 @@ fn hash_entries(opts: Option<&Expr>) -> Vec<(Expr, Expr)> {
 /// to `RouteHelpers.<singular>_path(name.id)`. Nested arrays defer
 /// to a later slice (form_with's nested-resource fixture forces them).
 fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
+    // Association-reader record URL (`link_to text,
+    // showing_user.invited_by_user`) — Rails resolves the record
+    // polymorphically through its named route. The reader's target
+    // model comes from `reference_targets`; the record rides WHOLE
+    // into the route helper (not `.id`) so a custom `to_param`
+    // (lobsters' User#to_param = username) shapes the segment exactly
+    // as Rails does. Without this arm the call fell back to the
+    // runtime `link_to`, which interpolated the record as
+    // `#<User:0x…>` into href.
+    if let ExprNode::Send { recv: Some(_), method, args, block: None, .. } = &*url.node {
+        if args.is_empty() {
+            if let Some(target) = ctx.reference_targets.get(method.as_str()) {
+                return Some(route_helpers_call(
+                    &format!("{target}_path"),
+                    vec![url.clone()],
+                ));
+            }
+        }
+    }
     let is_local = |n: &str| ctx.is_local(n);
     let kind = classify_view_url_arg(url, &is_local)?;
     match kind {

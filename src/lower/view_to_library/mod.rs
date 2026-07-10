@@ -202,6 +202,7 @@ pub struct ViewLowerCtx<'a> {
     partial_extras: std::rc::Rc<std::collections::HashMap<(String, String), Vec<String>>>,
     locals_keys: std::collections::HashMap<(String, String), Vec<String>>,
     reference_reads: std::rc::Rc<std::collections::HashSet<String>>,
+    reference_targets: std::rc::Rc<std::collections::HashMap<String, String>>,
     nilable_scalar_reads: std::rc::Rc<std::collections::HashSet<String>>,
 }
 
@@ -219,6 +220,7 @@ impl<'a> ViewLowerCtx<'a> {
             partial_extras: std::rc::Rc::new(partial_extras_map(app)),
             locals_keys: render_locals_keys(&app.views, &app.controllers, &app.library_classes),
             reference_reads: std::rc::Rc::new(reference_reader_names(app)),
+            reference_targets: std::rc::Rc::new(reference_target_names(app)),
             nilable_scalar_reads: std::rc::Rc::new(nilable_scalar_reader_names(app)),
         }
     }
@@ -420,6 +422,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         form_records: Vec::new(),
         nullable_locals: nullable,
         reference_reads: lx.reference_reads.clone(),
+        reference_targets: lx.reference_targets.clone(),
         nilable_scalar_reads: lx.nilable_scalar_reads.clone(),
         stylesheets: app.stylesheets.clone(),
         partial_ivars: closures.clone(),
@@ -2161,6 +2164,12 @@ pub(super) struct ViewCtx {
     /// on a reference read to the nil test instead of the `empty?` form
     /// (`story.domain.present?` → `!story.domain.nil?`).
     pub(super) reference_reads: std::rc::Rc<std::collections::HashSet<String>>,
+    /// Single-record association reader name → target-model snake
+    /// singular (`reference_target_names`). `emit_url_arg` resolves a
+    /// `link_to text, story.user` URL argument polymorphically to
+    /// `RouteHelpers.user_path(story.user)` through this.
+    pub(super) reference_targets:
+        std::rc::Rc<std::collections::HashMap<String, String>>,
     /// Nilable-scalar reader names through a record: typed_store
     /// attributes with no default (nil when unset). Emptiness
     /// predicates on these get the nil-safe forms (see
@@ -2225,6 +2234,43 @@ fn reference_reader_names(app: &App) -> std::collections::HashSet<String> {
                 _ => {}
             }
         }
+    }
+    out
+}
+
+/// Single-record association reader name → target-model snake singular
+/// (`invited_by_user` → `user`), across the app's models. Consumed by
+/// `emit_url_arg`: a `link_to text, story.user`-style URL argument
+/// resolves polymorphically to `RouteHelpers.user_path(story.user)` —
+/// the record rides whole so the route helper's `to_param` picks up a
+/// custom implementation (lobsters' User#to_param is `username`).
+/// A name two models point at DIFFERENT targets is dropped as
+/// ambiguous rather than guessed.
+fn reference_target_names(app: &App) -> std::collections::HashMap<String, String> {
+    use crate::dialect::Association;
+    let mut out = std::collections::HashMap::new();
+    let mut ambiguous = std::collections::HashSet::new();
+    for m in &app.models {
+        for a in m.associations() {
+            let (name, target) = match a {
+                Association::BelongsTo { name, target, .. }
+                | Association::HasOne { name, target, .. } => (name, target),
+                _ => continue,
+            };
+            let key = name.as_str().to_string();
+            let val = crate::naming::snake_case(target.0.as_str());
+            match out.get(&key) {
+                Some(existing) if existing != &val => {
+                    ambiguous.insert(key);
+                }
+                _ => {
+                    out.insert(key, val);
+                }
+            }
+        }
+    }
+    for k in ambiguous {
+        out.remove(&k);
     }
     out
 }
