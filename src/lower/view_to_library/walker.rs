@@ -82,6 +82,44 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         // Epilogue `_buf` read — drop; the explicit trailing `io` is
         // appended once at method-body construction.
         ExprNode::Var { name, .. } if name.as_str() == "_buf" => Vec::new(),
+        // Template-local `||=` (`<% is_unread ||= false %>`) — same
+        // statement treatment as plain assignment; Ruby's `x ||= v`
+        // defines the local when unset.
+        ExprNode::OpAssign { target: LValue::Var { name, id }, op, value } => {
+            vec![Expr::new(
+                stmt.span,
+                ExprNode::OpAssign {
+                    target: LValue::Var { name: name.clone(), id: *id },
+                    op: op.clone(),
+                    value: rewrite_predicates(
+                        value,
+                        &ctx.nullable_locals,
+                        &ctx.reference_reads,
+                        &ctx.nilable_scalar_reads,
+                    ),
+                },
+            )]
+        }
+        // Template-local assignment (`<% flagged = comment.current_vote
+        // && … %>`) — a real statement, not output; later
+        // interpolations read the local by name. The value gets the
+        // same predicate rewriting a condition does (`<% x =
+        // list.any? %>`). Was silently swallowed by the catch-all
+        // TODO append, leaving every read a NameError.
+        ExprNode::Assign { target: LValue::Var { name, id }, value } => {
+            vec![Expr::new(
+                stmt.span,
+                ExprNode::Assign {
+                    target: LValue::Var { name: name.clone(), id: *id },
+                    value: rewrite_predicates(
+                        value,
+                        &ctx.nullable_locals,
+                        &ctx.reference_reads,
+                        &ctx.nilable_scalar_reads,
+                    ),
+                },
+            )]
+        }
         // Conditional branching at the template level. Cond goes
         // through `rewrite_predicates` so Rails-style `.present?` /
         // `.any?` / `.none?` / `.blank?` collapse to the
