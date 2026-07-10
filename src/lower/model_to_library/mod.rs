@@ -577,7 +577,7 @@ pub(crate) fn push_scope_methods(
 
 /// `ActiveRecord::Relation.new(self)` — the default relation a scope class
 /// method starts from when called on the class rather than chained.
-fn relation_new_self() -> Expr {
+pub(crate) fn relation_new_self() -> Expr {
     Expr::new(
         Span::synthetic(),
         ExprNode::Send {

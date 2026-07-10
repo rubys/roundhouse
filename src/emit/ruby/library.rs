@@ -71,6 +71,40 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                 &assocs,
             );
         }
+        // User-written class methods the registry admitted as
+        // relation-taking (`def self.arrange_for_user` with bare
+        // `order(...)` roots) get the same treatment push_scope_methods
+        // gives declared scopes: a trailing `__rel =
+        // ActiveRecord::Relation.new(self)` param, and their bare chain
+        // roots threaded through it. Skip-if-last-param-is-__rel makes
+        // this idempotent AND distinguishes user methods from the
+        // already-synthesized scope methods.
+        if is_model {
+            let rel_param = Symbol::from("__rel");
+            let registered: Vec<Symbol> = scopes
+                .get(&lc.name)
+                .map(|m| m.keys().cloned().collect())
+                .unwrap_or_default();
+            for m in &mut lc.methods {
+                if m.receiver == MethodReceiver::Class
+                    && registered.contains(&m.name)
+                    && m.params.last().map(|p| p.as_str()) != Some("__rel")
+                {
+                    m.params.push(crate::dialect::Param::with_default(
+                        rel_param.clone(),
+                        crate::lower::model_to_library::relation_new_self(),
+                    ));
+                    crate::lower::scope_chain::rewrite_scope_body(
+                        &mut m.body,
+                        &lc.name,
+                        &rel_param,
+                        &scopes,
+                        &models,
+                        &assocs,
+                    );
+                }
+            }
+        }
         // Every method body: normalize scope chains (call-site form).
         // Scope-free bodies still need the rewrite when they start a
         // query chain on a model constant — the arel inline pass bails

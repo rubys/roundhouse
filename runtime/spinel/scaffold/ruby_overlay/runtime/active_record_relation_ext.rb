@@ -16,6 +16,13 @@ module ActiveRecord
       to_a + other.to_a
     end
 
+    # Enumerable terminal Rails relations answer via to_a delegation;
+    # lobsters' Comment.arrange_for_user groups its ordered relation by
+    # parent id.
+    def group_by(&block)
+      to_a.group_by(&block)
+    end
+
     private
 
     # Rails casts an ActiveRecord object used as a condition value to its

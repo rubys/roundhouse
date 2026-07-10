@@ -30,13 +30,33 @@ use crate::naming::pluralize_snake;
 pub type ScopeRegistry = HashMap<ClassId, HashMap<Symbol, Vec<Param>>>;
 
 /// Build `model -> {scope name -> params}` from the app's models.
+///
+/// Alongside declared scopes, a user-written CLASS method whose body
+/// starts a bare relation chain (`def self.arrange_for_user(user)` with
+/// bare `order(...)`) registers too: in Rails such a method called on a
+/// relation runs with that relation as its implicit scope, so it takes
+/// the same call-site threading a scope does. The Ruby emit seam appends
+/// its `__rel` parameter and threads its body (`apply_scope_lowering`);
+/// entry here is what makes call sites `recv.arrange_for_user(u)` become
+/// `Comment.arrange_for_user(u, recv)`.
 pub fn build_scope_registry(models: &[Model]) -> ScopeRegistry {
     let mut reg: ScopeRegistry = HashMap::new();
     for m in models {
         let map = reg.entry(m.name.clone()).or_default();
         for item in &m.body {
-            if let ModelBodyItem::Scope { scope, .. } = item {
-                map.insert(scope.name.clone(), scope.params.clone());
+            match item {
+                ModelBodyItem::Scope { scope, .. } => {
+                    map.insert(scope.name.clone(), scope.params.clone());
+                }
+                ModelBodyItem::Method { method, .. }
+                    if method.receiver == crate::dialect::MethodReceiver::Class
+                        && mentions_bare_chain_start(&method.body) =>
+                {
+                    // Declared scopes win on a name collision.
+                    map.entry(method.name.clone())
+                        .or_insert_with(|| method.params.clone());
+                }
+                _ => {}
             }
         }
     }
