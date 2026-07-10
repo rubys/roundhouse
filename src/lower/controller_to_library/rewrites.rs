@@ -430,7 +430,12 @@ pub(super) fn rewrite_assoc_through_parent_typed(
             "find" => AssocKind::Find,
             _ => return None,
         };
-        if outer_args.len() != 1 {
+        // `find` needs its id arg; `build` may be bare (`@story.comments.
+        // build` — new child for a form, FK pre-filled, no attributes).
+        let max_args = 1;
+        if outer_args.len() > max_args
+            || (outer_args.is_empty() && !matches!(kind, AssocKind::Build))
+        {
             return None;
         }
         let ExprNode::Send {
@@ -453,6 +458,9 @@ pub(super) fn rewrite_assoc_through_parent_typed(
         let fk = format!("{}_id", parent_name.as_str());
         Some(match kind {
             AssocKind::Build => {
+                if outer_args.is_empty() {
+                    return Some(expand_build_bare(&model_class, &fk, parent_name, lhs, e.span));
+                }
                 if let Some(resource) = match_params_helper(&outer_args[0], &helper_names) {
                     if params_specs.contains_key(&resource) {
                         return Some(expand_build_typed(
@@ -554,6 +562,59 @@ pub(super) fn expand_build_typed(
         },
     );
 
+    Expr::new(span, ExprNode::Seq { exprs: vec![lhs_assign, fk_setter] })
+}
+
+/// Zero-arg build expansion (`@comment = @story.comments.build`):
+///
+/// ```ruby
+/// @<lhs> = <Class>.new
+/// @<lhs>.<fk> = @<parent>.id
+/// ```
+///
+/// No attributes to absorb — just the bare constructor and the parent
+/// linkage through the model's foreign-key writer.
+fn expand_build_bare(
+    model_class: &str,
+    fk: &str,
+    parent: &Symbol,
+    lhs: &Symbol,
+    span: Span,
+) -> Expr {
+    let new_call = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(const_path(&[model_class], span)),
+            method: Symbol::from("new"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let lhs_assign = Expr::new(
+        span,
+        ExprNode::Assign { target: LValue::Ivar { name: lhs.clone() }, value: new_call },
+    );
+    let parent_id = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(ivar(parent.as_str(), span)),
+            method: Symbol::from("id"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let fk_setter = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(ivar(lhs.as_str(), span)),
+            method: Symbol::from(format!("{fk}=")),
+            args: vec![parent_id],
+            block: None,
+            parenthesized: false,
+        },
+    );
     Expr::new(span, ExprNode::Seq { exprs: vec![lhs_assign, fk_setter] })
 }
 

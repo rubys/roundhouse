@@ -93,4 +93,13 @@ class Time
       roundhouse_compare_without_duration(other)
     end
   end
+
+  # AS's readable comparators (`story.created_at.after?(cutoff)`).
+  def after?(other)
+    self > other
+  end
+
+  def before?(other)
+    self < other
+  end
 end
