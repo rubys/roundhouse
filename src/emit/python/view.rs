@@ -183,10 +183,11 @@ fn emit_jbuilder_view_functions(app: &App) -> (Vec<String>, Vec<(String, String,
     if !has_json {
         return (Vec::new(), Vec::new());
     }
+    let vctx = crate::lower::ViewLowerCtx::new(app);
     let preliminary_views: Vec<crate::dialect::LibraryClass> = app
         .views
         .iter()
-        .map(|v| crate::lower::lower_view_to_library_class(v, app))
+        .map(|v| vctx.lower(v))
         .collect();
     let view_extras = crate::lower::extras_from_lcs(&preliminary_views);
     let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);

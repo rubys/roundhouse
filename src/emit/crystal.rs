@@ -200,10 +200,11 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             .map(|(r, s)| (r.clone(), s.fields.clone()))
             .collect();
 
+    let vctx = crate::lower::ViewLowerCtx::new(app);
     let preliminary_views: Vec<crate::dialect::LibraryClass> = app
         .views
         .iter()
-        .map(|v| crate::lower::lower_view_to_library_class(v, app))
+        .map(|v| vctx.lower(v))
         .collect();
     let view_extras = crate::lower::extras_from_lcs(&preliminary_views);
 

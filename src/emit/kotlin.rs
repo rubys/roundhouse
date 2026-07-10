@@ -65,10 +65,11 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // as crystal/dump_ir: a preliminary view pass seeds the class-info
     // registry, then models lower to LibraryClasses (including synthesized
     // `<Model>Row` siblings).
+    let vctx = crate::lower::ViewLowerCtx::new(app);
     let preliminary_views: Vec<crate::dialect::LibraryClass> = app
         .views
         .iter()
-        .map(|v| crate::lower::lower_view_to_library_class(v, app))
+        .map(|v| vctx.lower(v))
         .collect();
     let view_extras = crate::lower::extras_from_lcs(&preliminary_views);
     // Permitted-params specs (resource → fields) collected from the

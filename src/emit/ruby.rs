@@ -475,23 +475,33 @@ fn prepend_sibling_classes(
 /// template named `<base>_json.rb` to avoid colliding with the html
 /// sibling. Both files reopen the same `Views::<Plural>` module.
 pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
-    app.views
+    // Lower every view through ONE per-app context, then run the
+    // Ruby-family passes over the whole group at once — per-view pass
+    // application rebuilt the scope/assoc/helper registries for every
+    // template, which is quadratic in app size (the mastodon playground
+    // transpile blew its budget on it).
+    let vctx = crate::lower::ViewLowerCtx::new(app);
+    let html_views: Vec<&crate::dialect::View> = app
+        .views
         .iter()
         .filter(|v| v.format.as_str() == "html")
-        .flat_map(|v| {
-            let mut lc = crate::lower::lower_view_to_library_class(v, app);
-            // Normalize scope chains opened in the template itself —
-            // lobsters' _listdetail runs `story.merged_stories.not_deleted.
-            // includes(...)` — then resolve bare app-helper calls
-            // (`avatar_img(...)` → `ApplicationHelper.avatar_img(...)`).
-            // Scope lowering is a strict no-op for scope-free apps (the
-            // blog), and a view LC is never a model, so only the call-site
-            // rewrite arm runs.
-            library::apply_scope_lowering(std::slice::from_mut(&mut lc), app);
-            library::apply_helper_lowering(std::slice::from_mut(&mut lc), app);
-            library::apply_duration_lowering(std::slice::from_mut(&mut lc));
+        .collect();
+    let mut lcs: Vec<LibraryClass> = html_views.iter().map(|v| vctx.lower(v)).collect();
+    // Normalize scope chains opened in the template itself — lobsters'
+    // _listdetail runs `story.merged_stories.not_deleted.includes(...)`
+    // — then resolve bare app-helper calls (`avatar_img(...)` →
+    // `ApplicationHelper.avatar_img(...)`). Scope lowering is a strict
+    // no-op for scope-free apps (the blog), and a view LC is never a
+    // model, so only the call-site rewrite arm runs.
+    library::apply_scope_lowering(&mut lcs, app);
+    library::apply_helper_lowering(&mut lcs, app);
+    library::apply_duration_lowering(&mut lcs);
+    html_views
+        .iter()
+        .zip(lcs.iter())
+        .flat_map(|(v, lc)| {
             let out_path = view_output_path(v.name.as_str());
-            library::emit_library_class_pair(&lc, app, out_path)
+            library::emit_library_class_pair(lc, app, out_path)
         })
         .collect()
 }

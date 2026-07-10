@@ -66,10 +66,11 @@ pub fn lower_views_to_library_classes(
     // Only ERB (html-format) views go through this path. Jbuilder
     // (json-format) views are lowered by `jbuilder_to_library`,
     // which produces `<name>_json` methods on the same view module.
+    let vctx = ViewLowerCtx::new(app);
     let mut lcs: Vec<LibraryClass> = views
         .iter()
         .filter(|v| v.format.as_str() == "html")
-        .map(|v| build_library_class(v, app, /*type_body=*/ false))
+        .map(|v| vctx.lower_untyped(v))
         .collect();
 
     // Merge: caller extras + framework runtime stubs + view modules
@@ -185,20 +186,66 @@ pub fn flatten_lcs_to_functions(
 /// `app` is consulted only for known model names (so view args can be
 /// typed implicitly downstream) and for FK resolution; the lowering is
 /// otherwise pure.
-pub fn lower_view_to_library_class(view: &View, app: &App) -> LibraryClass {
-    build_library_class(view, app, /*type_body=*/ true)
+/// Whole-app inputs the per-view lowering consumes — render-tree
+/// closures, dynamic-partial pools, partial contracts, locals-key
+/// unions, model-derived read sets. Building each of these walks the
+/// entire app, so recomputing them per view made view lowering
+/// quadratic (the mastodon playground transpile blew its 30s budget).
+/// Construct ONCE per app and lower every view through it; the
+/// single-view `lower_view_to_library_class` wrapper stays for
+/// one-off callers (dump_ir, tests).
+pub struct ViewLowerCtx<'a> {
+    app: &'a App,
+    known_models: Vec<String>,
+    closures: std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Symbol>>>,
+    dyn_pools: std::rc::Rc<std::collections::HashMap<(String, Symbol), Vec<String>>>,
+    partial_extras: std::rc::Rc<std::collections::HashMap<(String, String), Vec<String>>>,
+    locals_keys: std::collections::HashMap<(String, String), Vec<String>>,
+    reference_reads: std::rc::Rc<std::collections::HashSet<String>>,
+    nilable_scalar_reads: std::rc::Rc<std::collections::HashSet<String>>,
 }
 
-fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass {
+impl<'a> ViewLowerCtx<'a> {
+    pub fn new(app: &'a App) -> Self {
+        Self {
+            app,
+            known_models: app
+                .models
+                .iter()
+                .map(|m| m.name.0.as_str().to_string())
+                .collect(),
+            closures: std::rc::Rc::new(view_ivar_closures(&app.views, &app.controllers)),
+            dyn_pools: std::rc::Rc::new(dynamic_partial_pools(&app.controllers)),
+            partial_extras: std::rc::Rc::new(partial_extras_map(app)),
+            locals_keys: render_locals_keys(&app.views, &app.controllers, &app.library_classes),
+            reference_reads: std::rc::Rc::new(reference_reader_names(app)),
+            nilable_scalar_reads: std::rc::Rc::new(nilable_scalar_reader_names(app)),
+        }
+    }
+
+    pub fn lower(&self, view: &View) -> LibraryClass {
+        build_library_class(view, self, /*type_body=*/ true)
+    }
+
+    pub(crate) fn lower_untyped(&self, view: &View) -> LibraryClass {
+        build_library_class(view, self, /*type_body=*/ false)
+    }
+}
+
+pub fn lower_view_to_library_class(view: &View, app: &App) -> LibraryClass {
+    ViewLowerCtx::new(app).lower(view)
+}
+
+fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> LibraryClass {
+    let app = lx.app;
     let (dir, base) = split_view_name(view.name.as_str());
     let stem = base.trim_start_matches('_');
 
     let module_id = view_module_id(dir);
     let method_name = crate::lower::view::view_method_name(stem);
 
-    let known_models: Vec<String> =
-        app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
-    let arg_name = infer_view_arg(stem, dir, base.starts_with('_'), &known_models);
+    let known_models: &[String] = &lx.known_models;
+    let arg_name = infer_view_arg(stem, dir, base.starts_with('_'), known_models);
 
     // Rewrite `@ivar` → bare `ivar` everywhere so the inferred arg name
     // (and any extra params we surface) read as plain locals in the
@@ -263,8 +310,8 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
     // arg PLUS these (threaded from the rendering view); the controller /
     // render call sites pass the matching values. Layouts are body-only
     // for now (their call site is main.rb, not yet threaded).
-    let closures = std::rc::Rc::new(view_ivar_closures(&app.views, &app.controllers));
-    let dyn_pools = std::rc::Rc::new(dynamic_partial_pools(&app.controllers));
+    let closures = lx.closures.clone();
+    let dyn_pools = lx.dyn_pools.clone();
     let closure_ivars: Vec<String> = view_key_of(view)
         .and_then(|k| closures.get(&k).cloned())
         .unwrap_or_default()
@@ -278,8 +325,7 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
     // closure ivars, flash/defined? extras) are skipped.
     let mut extra_params = extra_params;
     if is_partial {
-        let keys_map =
-            render_locals_keys(&app.views, &app.controllers, &app.library_classes);
+        let keys_map = &lx.locals_keys;
         if let Some(keys) = view_key_of(view).and_then(|k| keys_map.get(&k).cloned()) {
             for k in keys {
                 if k != arg_name
@@ -373,12 +419,12 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         accumulator: "io".to_string(),
         form_records: Vec::new(),
         nullable_locals: nullable,
-        reference_reads: std::rc::Rc::new(reference_reader_names(app)),
-        nilable_scalar_reads: std::rc::Rc::new(nilable_scalar_reader_names(app)),
+        reference_reads: lx.reference_reads.clone(),
+        nilable_scalar_reads: lx.nilable_scalar_reads.clone(),
         stylesheets: app.stylesheets.clone(),
         partial_ivars: closures.clone(),
         dyn_pools: dyn_pools.clone(),
-        partial_extras: std::rc::Rc::new(partial_extras_map(app)),
+        partial_extras: lx.partial_extras.clone(),
     };
 
     let mut body_stmts: Vec<Expr> = Vec::new();

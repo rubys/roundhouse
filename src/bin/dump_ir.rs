@@ -346,10 +346,11 @@ fn print_usage() {
 // ── Pipeline (mirrors tests/model_lowerer.rs::lowered_real_blog_typing_residual) ─
 
 fn lower_all(app: &roundhouse::App) -> Vec<LibraryClass> {
+    let vctx = roundhouse::lower::ViewLowerCtx::new(app);
     let preliminary_views: Vec<LibraryClass> = app
         .views
         .iter()
-        .map(|v| lower_view_to_library_class(v, app))
+        .map(|v| vctx.lower(v))
         .collect();
     let view_extras = build_class_info_extras(&preliminary_views);
     let (model_lcs, model_registry) =
