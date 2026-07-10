@@ -1,4 +1,4 @@
-# CRuby-only ActiveRecord::Base raising variants: `find_by!`.
+# CRuby-only ActiveRecord::Base extensions: `find_by!` + record equality.
 #
 # Lives on the CRuby overlay, not shared runtime/ruby/active_record/base.rb:
 # the shared Base transpiles method-by-method into every target's model
@@ -12,6 +12,22 @@ module ActiveRecord
       result = find_by(conditions)
       raise RecordNotFound, "Couldn't find #{name}" if result.nil?
       result
+    end
+
+    # Rails record equality: same class + same persisted id (AR core's
+    # `==`). Without it, `@showing_user != @user` compares OBJECT
+    # IDENTITY — two hydrations of the same row are never equal, so
+    # users/show rendered its own-profile "Send a Message" subnav for
+    # everyone. `eql?`/`hash` follow AR core so Hash/Set membership
+    # agrees with `==`.
+    def ==(other)
+      super ||
+        (other.instance_of?(self.class) && !id.nil? && other.id == id)
+    end
+    alias eql? ==
+
+    def hash
+      id.nil? ? super : [self.class, id].hash
     end
   end
 end

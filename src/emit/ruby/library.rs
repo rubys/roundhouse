@@ -647,7 +647,7 @@ fn is_html_safe_call(e: &Expr, index: &HashMap<Symbol, ClassId>) -> bool {
         return matches!(
             method.as_str(),
             "raw" | "link_to" | "link_to_raw" | "button_to" | "image_tag" | "content_tag"
-                | "javascript_include_tag"
+                | "javascript_include_tag" | "label_tag" | "submit_tag" | "form_tag"
         );
     }
     index.values().any(|cid| cid.0.as_str() == joined)

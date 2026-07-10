@@ -57,7 +57,12 @@ module ActionView
         attrs << " #{k}=\"#{html_escape(v.to_s)}\"" unless v.nil?
       end
       body = block_given? ? yield.to_s : ""
-      "<form action=\"#{html_escape(url_for(url))}\" accept-charset=\"UTF-8\" method=\"post\"#{attrs}>#{body}</form>"
+      # Rails' form_tag embeds the CSRF hidden input for non-GET forms
+      # (this helper always emits method="post"); without it the
+      # logout/expire-cache forms diverge from the Rails render and
+      # their POSTs would fail verification.
+      "<form action=\"#{html_escape(url_for(url))}\" accept-charset=\"UTF-8\" method=\"post\"#{attrs}>" \
+        "#{csrf_token_hidden_input}#{body}</form>"
     end
 
     # `<option value="0">No e-mails</option>…` from `[[label, value],

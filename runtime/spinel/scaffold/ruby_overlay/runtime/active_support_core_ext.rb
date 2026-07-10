@@ -37,24 +37,48 @@ class Object
   end
 end
 
+# A string an app has explicitly marked html-safe (`raw(...)`,
+# `.html_safe`) — the overlay's ActiveSupport::SafeBuffer equivalent.
+# The only behavior it adds is `html_safe?` returning true, which the
+# overlay's escape-aware `html_escape` honors (see
+# action_view_safe_buffer.rb). Escaping is still decided positionally
+# at emit time wherever the walker can see the producer; SafeString
+# carries safety across the value boundaries it can't — a `raw()`
+# label threaded through an app helper's parameter into `link_to`, or
+# a model method that ends in `.html_safe` (lobsters' Hat#to_html_label).
+class SafeString < String
+  def html_safe?
+    true
+  end
+
+  def html_safe
+    self
+  end
+
+  # String#to_s on a subclass returns a plain String copy; safety must
+  # survive the `.to_s` coercions the emit sprinkles on helper args.
+  def to_s
+    self
+  end
+end
+
 class String
   # AS specializes String#blank? to treat whitespace-only as blank.
   def blank?
     empty? || match?(/\A[[:space:]]*\z/)
   end
 
-  # `html_safe` — identity in this string world. There is no SafeBuffer:
-  # escaping is decided positionally (the view walker escapes bare
-  # interpolations and leaves tag-producing/helper calls raw), so a
-  # string an app marks safe is simply itself. `html_safe?` answers true
-  # for the same reason — by the time a string is asked, positional
-  # escaping has already happened.
+  # `html_safe` promotes to the marked type; plain strings answer
+  # `html_safe?` false so the escape-aware `html_escape` escapes them.
+  # (Both were identity/true in the earlier positional-only world —
+  # nothing consumed `html_safe?` then; the SafeString-aware
+  # html_escape override is its first consumer.)
   def html_safe
-    self
+    SafeString.new(self)
   end
 
   def html_safe?
-    true
+    false
   end
 
   # `'story'.pluralize(count)` — singular when count == 1, else the
