@@ -538,7 +538,12 @@ fn recv_needs_parens(r: &Expr) -> bool {
             if m == "[]" || m == "[]=" {
                 false
             } else {
-                is_binary_operator(m) || (!parenthesized && !args.is_empty())
+                // Unary `!` emits prefix (`!(user)`); a following call
+                // binds tighter than `!`, so `!(user).to_s` re-parses as
+                // `!(user.to_s)` — the whole negation needs the wrap.
+                m == "!"
+                    || is_binary_operator(m)
+                    || (!parenthesized && !args.is_empty())
             }
         }
         _ => false,
@@ -702,10 +707,29 @@ pub(super) fn emit_send_base(
         // Binary operator methods (`@x == 0`, `a + b`) round-trip as
         // infix syntax — Ruby parses them as `Send` with method names
         // like `==`, `+`, etc., but emitting `recv.== 0` is technically
-        // valid yet ugly enough to be a bug. Single-arg only; chained
-        // patterns parenthesize naturally via `Send.parenthesized`.
+        // valid yet ugly enough to be a bug. Single-arg only.
+        //
+        // Operands that are THEMSELVES binary-op Sends re-parse by
+        // Ruby's precedence, not the AST's grouping — `(a - b) / 60`
+        // flattened to `a - b / 60` rebinds the division (the exact
+        // lobsters commentbox bug; same class as the BoolOp
+        // parenthesization fix). Parenthesize a receiver whose op binds
+        // looser than the current one, and an ARGUMENT whose op binds
+        // looser OR equal (left-associativity: `a - (b - c)` needs the
+        // parens even at equal precedence).
         (Some(r), op) if is_binary_operator(op) && args_s.len() == 1 => {
-            format!("{} {op} {}", emit_expr(r), args_s[0])
+            let prec = binop_prec(op);
+            let lhs = if binop_of(r).is_some_and(|o| binop_prec(o) < prec) {
+                format!("({})", emit_expr(r))
+            } else {
+                emit_expr(r)
+            };
+            let rhs = if binop_of(&args[0]).is_some_and(|o| binop_prec(o) <= prec) {
+                format!("({})", args_s[0])
+            } else {
+                args_s[0].clone()
+            };
+            format!("{lhs} {op} {rhs}")
         }
         // Setter calls (`self.id = value`). Method names ending in `=`
         // that aren't on the operator list are attribute setters; the
@@ -749,6 +773,37 @@ fn is_ruby_keyword(m: &str) -> bool {
             | "redo" | "rescue" | "retry" | "return" | "self" | "super" | "then" | "true" | "undef"
             | "unless" | "until" | "when" | "while" | "yield"
     )
+}
+
+/// The top-level binary operator of an expression, when it is an
+/// unparenthesized infix Send — the shape whose emitted text re-parses
+/// by precedence rather than AST grouping.
+fn binop_of(e: &Expr) -> Option<&str> {
+    match &*e.node {
+        ExprNode::Send { recv: Some(_), method, args, .. }
+            if is_binary_operator(method.as_str()) && args.len() == 1 =>
+        {
+            Some(method.as_str())
+        }
+        _ => None,
+    }
+}
+
+/// Ruby operator precedence for the infix set `is_binary_operator`
+/// covers (higher binds tighter). Comparisons/equality sit below
+/// arithmetic; `**` above `*`.
+fn binop_prec(op: &str) -> u8 {
+    match op {
+        "**" => 90,
+        "*" | "/" | "%" => 80,
+        "+" | "-" => 70,
+        "<<" | ">>" => 60,
+        "&" => 55,
+        "|" | "^" => 50,
+        ">" | ">=" | "<" | "<=" => 40,
+        "==" | "!=" | "<=>" | "=~" | "===" => 30,
+        _ => 20,
+    }
 }
 
 /// Ruby's binary infix operators, as method names. Excludes `[]` and

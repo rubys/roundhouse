@@ -12,6 +12,18 @@
 # `apply_helper_lowering`'s framework-helper rewrite.
 module ActionView
   module ViewHelpers
+    # `number_with_delimiter(12345)` -> "12,345" (default delimiter).
+    def self.number_with_delimiter(value, delimiter: ",")
+      int, frac = value.to_s.split(".")
+      out = +""
+      int.chars.reverse.each_with_index do |c, i|
+        out << delimiter if i > 0 && (i % 3).zero? && c != "-"
+        out << c
+      end
+      grouped = out.reverse
+      frac ? "#{grouped}.#{frac}" : grouped
+    end
+
     def self.number_with_precision(value, precision: 3)
       format("%.#{precision}f", value.to_f)
     end

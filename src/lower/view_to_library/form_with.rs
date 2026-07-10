@@ -239,6 +239,36 @@ fn route_helperize(url: Expr, route_helpers: &impl Fn() -> Expr) -> Expr {
             return send(Some(route_helpers()), m, args.clone(), None, true);
         }
     }
+    // A bare local/ivar `url:` is Rails' polymorphic-record form
+    // (`form_with url: comment` → POST /comments or PATCH
+    // /comments/:id). Route through the runtime's url_for, which
+    // passes strings unchanged and resolves records via their class
+    // table + persistence. Literals (string paths) stay verbatim.
+    let is_bareword = matches!(
+        &*url.node,
+        ExprNode::Send { recv: None, args, block: None, .. } if args.is_empty()
+    );
+    if is_bareword || matches!(&*url.node, ExprNode::Var { .. } | ExprNode::Ivar { .. }) {
+        let span = url.span;
+        return Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    span,
+                    ExprNode::Const {
+                        path: vec![
+                            crate::ident::Symbol::from("ActionView"),
+                            crate::ident::Symbol::from("ViewHelpers"),
+                        ],
+                    },
+                )),
+                method: crate::ident::Symbol::from("url_for"),
+                args: vec![url],
+                block: None,
+                parenthesized: true,
+            },
+        );
+    }
     url
 }
 

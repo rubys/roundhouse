@@ -440,6 +440,7 @@ fn is_framework_view_helper(name: &str) -> bool {
             | "javascript_path"
             | "javascript_include_tag"
             | "number_with_precision"
+            | "number_with_delimiter"
             | "content_tag"
             | "time_ago_in_words"
             | "distance_of_time_in_words"
@@ -810,6 +811,15 @@ fn rewrite_layout_wrap(expr: &mut Expr, app: &App) {
     }
     args.retain(|a| !matches!(&*a.node, ExprNode::Hash { entries, .. } if entries.is_empty()));
     if args.is_empty() {
+        return;
+    }
+    // An explicit `layout: false` VETOES the wrap outright — the
+    // controller-side partial-render rewrite plants it (Rails renders
+    // partials without a layout), and a user's `render …, layout:
+    // false` means the same thing.
+    if layout_kwarg.as_ref().is_some_and(|v| {
+        matches!(&*v.node, ExprNode::Lit { value: crate::expr::Literal::Bool { value: false } })
+    }) {
         return;
     }
     // An explicit `layout: "application"` / `layout: true` wraps a body

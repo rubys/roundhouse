@@ -94,6 +94,20 @@ class Time
     end
   end
 
+  # Time ± Duration → Time (AS arithmetic; the commentbox preview
+  # window does `Time.current - 90.seconds`).
+  alias_method :roundhouse_minus_without_duration, :-
+  def -(other)
+    other = other.seconds if other.is_a?(ActiveSupport::Duration)
+    roundhouse_minus_without_duration(other)
+  end
+
+  alias_method :roundhouse_plus_without_duration, :+
+  def +(other)
+    other = other.seconds if other.is_a?(ActiveSupport::Duration)
+    roundhouse_plus_without_duration(other)
+  end
+
   # AS's readable comparators (`story.created_at.after?(cutoff)`).
   def after?(other)
     self > other

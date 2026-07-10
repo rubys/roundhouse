@@ -1084,6 +1084,52 @@ pub(crate) struct ViewArgs {
 /// render rewrite. Keyed to match `views_module_name(controller)` (which
 /// equals `camelize(snake_case(dir))`) plus the rendered action. Only
 /// HTML, non-partial, non-layout views participate.
+/// Per-PARTIAL call contract for CONTROLLER-side partial renders
+/// (`render partial: "commentbox", locals: {comment: c}` inside an
+/// action). Mirrors the partial def-site parameter order exactly:
+/// record (singular of the partial's dir), then the render-tree closure
+/// ivars (minus a record-named one), then the trailing nil-default
+/// extras. The controller rewrite passes the locals value for the
+/// record, `@<name>` for each closure ivar (a same-named local wins),
+/// and locals-or-nil for extras.
+#[derive(Clone, Debug)]
+pub struct PartialCallContract {
+    pub record: String,
+    pub closure: Vec<String>,
+    pub extras: Vec<String>,
+}
+
+pub(crate) fn partial_call_contracts(
+    views: &[View],
+    controllers: &[crate::dialect::Controller],
+) -> std::collections::HashMap<(String, String), PartialCallContract> {
+    let closures = view_ivar_closures(views, controllers);
+    let mut out = std::collections::HashMap::new();
+    for view in views {
+        let (dir, base) = split_view_name(view.name.as_str());
+        if dir.is_empty() || !base.starts_with('_') {
+            continue;
+        }
+        let stem = base.trim_start_matches('_');
+        let record = singularize(dir);
+        let rewritten = rewrite_ivars_to_locals(&view.body);
+        let rewritten = crate::lower::erb_trim::trim_view(&rewritten);
+        let extras = collect_extra_params(&rewritten, &record);
+        let key = (camelize(&snake_case(dir)), stem.to_string());
+        let closure: Vec<String> = closures
+            .get(&key)
+            .map(|ivs| {
+                ivs.iter()
+                    .map(|s| s.as_str().to_string())
+                    .filter(|n| n != &record)
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.insert(key, PartialCallContract { record, closure, extras });
+    }
+    out
+}
+
 pub(crate) fn action_view_ivar_map(
     views: &[crate::dialect::View],
     controllers: &[crate::dialect::Controller],

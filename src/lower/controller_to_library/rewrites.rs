@@ -38,6 +38,7 @@ pub(super) fn rewrite_render_to_views(
     module_name: Option<&str>,
     ivars: &[Symbol],
     view_ivars: &super::ViewIvarMap,
+    partials: &super::PartialMap,
     current_action: &str,
 ) -> Expr {
     let Some(module) = module_name else {
@@ -52,8 +53,134 @@ pub(super) fn rewrite_render_to_views(
     let controller_name = crate::naming::snake_case(&module_name_owned);
     map_expr(expr, &|e| match &*e.node {
         ExprNode::Send { recv: None, method, args, block, .. }
-            if method.as_str() == "render" && !args.is_empty() =>
+            if (method.as_str() == "render" || method.as_str() == "render_to_string")
+                && !args.is_empty() =>
         {
+            // `render_to_string` renders the same view surface but
+            // RETURNS the string (no response, no layout) — the rewrite
+            // produces the bare `Views::X.y(...)` call, which IS a
+            // string. Trailing options (`layout: false`) are dropped.
+            let to_string = method.as_str() == "render_to_string";
+            // Controller-side partial render: `render partial:
+            // "commentbox", layout: false, content_type: …, locals:
+            // {comment: c}` (lobsters' reply). Bind against the
+            // partial's def-site contract: record by the partial's
+            // record-arg convention, closure ivars as `@<name>` (a
+            // same-named local wins), extras from locals (nil-filled,
+            // trailing-trimmed). `layout:` drops (Rails renders
+            // partials without one); other kwargs (content_type:,
+            // status:) ride the render.
+            if let ExprNode::Hash { entries, kwargs: true } = &*args[0].node {
+                let mut partial_name: Option<String> = None;
+                let mut locals_entries: Vec<(Symbol, Expr)> = Vec::new();
+                let mut rest: Vec<(Expr, Expr)> = Vec::new();
+                let mut saw_partial_key = false;
+                for (k, v) in entries {
+                    let key = match &*k.node {
+                        ExprNode::Lit { value: Literal::Sym { value } } => value.as_str(),
+                        _ => "",
+                    };
+                    match key {
+                        "partial" => {
+                            saw_partial_key = true;
+                            if let ExprNode::Lit { value: Literal::Str { value } } = &*v.node {
+                                partial_name = Some(value.clone());
+                            }
+                        }
+                        "locals" => {
+                            if let ExprNode::Hash { entries: le, .. } = &*v.node {
+                                for (lk, lv) in le {
+                                    if let ExprNode::Lit {
+                                        value: Literal::Sym { value },
+                                    } = &*lk.node
+                                    {
+                                        locals_entries.push((value.clone(), lv.clone()));
+                                    }
+                                }
+                            }
+                        }
+                        "layout" => {}
+                        _ => rest.push((k.clone(), v.clone())),
+                    }
+                }
+                if let Some(pname) = partial_name {
+                    let module = module_name?;
+                    let (module_dir, base_name) = match pname.rsplit_once('/') {
+                        Some((d, n)) => {
+                            (crate::naming::camelize(&crate::naming::snake_case(d)), n.to_string())
+                        }
+                        None => (module.to_string(), pname.clone()),
+                    };
+                    let stem = base_name.trim_start_matches('_').to_string();
+                    let contract = partials.get(&(module_dir.clone(), stem.clone()))?;
+                    let lookup = |name: &str| -> Option<Expr> {
+                        locals_entries
+                            .iter()
+                            .find(|(k, _)| k.as_str() == name)
+                            .map(|(_, v)| v.clone())
+                    };
+                    let mut view_args: Vec<Expr> = Vec::new();
+                    view_args.push(lookup(&contract.record).unwrap_or_else(|| nil_expr(e.span)));
+                    for n in &contract.closure {
+                        view_args.push(lookup(n).unwrap_or_else(|| ivar(n.as_str(), e.span)));
+                    }
+                    let bound: Vec<Option<Expr>> =
+                        contract.extras.iter().map(|n| lookup(n)).collect();
+                    if let Some(last) = bound.iter().rposition(|b| b.is_some()) {
+                        for b in bound.into_iter().take(last + 1) {
+                            view_args.push(b.unwrap_or_else(|| nil_expr(e.span)));
+                        }
+                    }
+                    let view_call = Expr::new(
+                        e.span,
+                        ExprNode::Send {
+                            recv: Some(const_path(&["Views", &module_dir], e.span)),
+                            method: crate::lower::view::view_method_name(&stem),
+                            args: view_args,
+                            block: None,
+                            parenthesized: true,
+                        },
+                    );
+                    if to_string {
+                        return Some(view_call);
+                    }
+                    let mut new_args = vec![view_call];
+                    // Rails renders partials WITHOUT the layout; keep an
+                    // explicit `layout: false` marker for the Ruby emit
+                    // layout pass to honor-and-strip.
+                    rest.push((
+                        Expr::new(
+                            e.span,
+                            ExprNode::Lit {
+                                value: Literal::Sym { value: Symbol::from("layout") },
+                            },
+                        ),
+                        Expr::new(
+                            e.span,
+                            ExprNode::Lit { value: Literal::Bool { value: false } },
+                        ),
+                    ));
+                    new_args.push(Expr::new(
+                        args[0].span,
+                        ExprNode::Hash { entries: rest, kwargs: true },
+                    ));
+                    return Some(Expr::new(
+                        e.span,
+                        ExprNode::Send {
+                            recv: None,
+                            method: Symbol::from("render"),
+                            args: new_args,
+                            block: block.clone(),
+                            parenthesized: true,
+                        },
+                    ));
+                }
+                // A dynamic partial name (`render partial: @x`) at the
+                // CONTROLLER seam isn't modeled — leave untouched.
+                if saw_partial_key {
+                    return None;
+                }
+            }
             // View name comes from `render :index` (a Symbol first arg) or
             // `render action: "index"` / `render action: :index` (a kwarg
             // hash). The kwarg form may also carry other options (status:,
@@ -240,6 +367,11 @@ pub(super) fn rewrite_render_to_views(
                     parenthesized: true,
                 },
             );
+            if to_string {
+                // `render_to_string action: "tree"` — the view call IS
+                // the string; response options don't apply.
+                return Some(view_call);
+            }
             let mut new_args = vec![view_call];
             new_args.extend(action_hash_extra);
             let rest: Vec<Expr> = args
@@ -1371,6 +1503,10 @@ fn params_require_permit(resource: Symbol, fields: Vec<Symbol>, span: Span) -> E
             parenthesized: true,
         },
     )
+}
+
+fn nil_expr(span: Span) -> Expr {
+    Expr::new(span, ExprNode::Lit { value: Literal::Nil })
 }
 
 fn ivar(name: &str, span: Span) -> Expr {

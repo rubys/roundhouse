@@ -86,6 +86,10 @@ use std::collections::BTreeMap;
 
 /// `(view-module, action-stem) -> ViewArgs` for the render rewrite.
 /// Built once from the app's views; see `action_view_ivar_map`.
+type PartialMap = std::collections::HashMap<
+    (String, String),
+    crate::lower::view_to_library::PartialCallContract,
+>;
 type ViewIvarMap =
     std::collections::HashMap<(String, String), crate::lower::view_to_library::ViewArgs>;
 
@@ -187,6 +191,10 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     // so the render rewrite passes `@<name>` for each (matching the view's
     // generated parameter list). See view_to_library::action_view_ivar_map.
     let view_ivars = crate::lower::view_to_library::action_view_ivar_map(views, controllers);
+    // Controller-side partial renders (`render partial: "commentbox",
+    // locals: {…}`) bind against the partial's def-site parameter order.
+    let partials: PartialMap =
+        crate::lower::view_to_library::partial_call_contracts(views, controllers);
 
     let mut all_methods: Vec<(Vec<MethodDef>, &Controller)> = Vec::new();
     for controller in controllers {
@@ -196,7 +204,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         // `None` → legacy: every public method is an action.
         let routed = routed_by_controller
             .map(|m| m.get(&controller.name).cloned().unwrap_or_default());
-        let methods = build_methods(controller, controllers, &params_specs, &json_actions, routed.as_ref(), &view_ivars);
+        let methods = build_methods(controller, controllers, &params_specs, &json_actions, routed.as_ref(), &view_ivars, &partials);
         all_methods.push((methods, controller));
     }
 
@@ -405,6 +413,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
     // No view list in this single-controller path → empty map; the render
     // rewrite falls back to in-scope ivars (legacy behavior for tests).
     let view_ivars: ViewIvarMap = std::collections::HashMap::new();
+    let partials: PartialMap = std::collections::HashMap::new();
     let methods = build_methods(
         controller,
         std::slice::from_ref(controller),
@@ -412,6 +421,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         &std::collections::HashSet::new(),
         None,
         &view_ivars,
+        &partials,
     );
     LibraryClass {
         name: controller.name.clone(),
@@ -453,6 +463,7 @@ fn build_methods(
     json_actions: &std::collections::HashSet<Symbol>,
     routed: Option<&std::collections::HashSet<Symbol>>,
     view_ivars: &ViewIvarMap,
+    partials: &PartialMap,
 ) -> Vec<MethodDef> {
     let mut methods: Vec<MethodDef> = Vec::new();
 
@@ -513,11 +524,13 @@ fn build_methods(
     for a in &publics_inlined {
         methods.push(action_to_method(
             a, controller, &privs, /*is_public=*/ true, params_specs, json_actions, view_ivars,
+            partials,
         ));
     }
     for a in &privs_kept {
         methods.push(action_to_method(
             a, controller, &privs, /*is_public=*/ false, params_specs, json_actions, view_ivars,
+            partials,
         ));
     }
     // Public methods no route reaches are helpers/filters, not actions:
@@ -527,6 +540,7 @@ fn build_methods(
     for a in &helper_publics {
         methods.push(action_to_method(
             a, controller, &privs, /*is_public=*/ false, params_specs, json_actions, view_ivars,
+            partials,
         ));
     }
 
@@ -894,6 +908,7 @@ fn action_to_method(
     params_specs: &BTreeMap<Symbol, ParamsSpec>,
     json_actions: &std::collections::HashSet<Symbol>,
     view_ivars: &ViewIvarMap,
+    partials: &PartialMap,
 ) -> MethodDef {
     let method_name = method_name_for_action(a.name.as_str());
     // Required positionals first, then optional positionals with their
@@ -918,6 +933,7 @@ fn action_to_method(
         params_specs,
         has_json_variant,
         view_ivars,
+        partials,
     );
     // Action params type to Untyped for now — Rails action signatures
     // are conventionally `def show(id)` with all-string CGI inputs;
@@ -1013,13 +1029,21 @@ fn lower_action_body(
     params_specs: &BTreeMap<Symbol, ParamsSpec>,
     has_json_variant: bool,
     view_ivars: &ViewIvarMap,
+    partials: &PartialMap,
 ) -> Expr {
     let unwrapped = unwrap_respond_to_with_format_dispatch(body);
     let with_render = if is_public {
         let synth = synthesize_implicit_render(&unwrapped, action_name, has_json_variant);
         let ivars = ivars_in_scope(controller, action_name, &synth, privs);
         let module_name = views_module_name(controller);
-        rewrite_render_to_views(&synth, module_name.as_deref(), &ivars, view_ivars, action_name)
+        rewrite_render_to_views(
+            &synth,
+            module_name.as_deref(),
+            &ivars,
+            view_ivars,
+            partials,
+            action_name,
+        )
     } else {
         unwrapped
     };
