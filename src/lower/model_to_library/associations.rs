@@ -25,7 +25,10 @@ pub(super) fn push_association_methods(methods: &mut Vec<MethodDef>, model: &Mod
             Association::BelongsTo { name, target, foreign_key, .. } => {
                 methods.push(synth_belongs_to_reader(owner, name, target, foreign_key));
             }
-            // has_one and HABTM land when a fixture demands them.
+            Association::HasOne { name, target, foreign_key, .. } => {
+                methods.push(synth_has_one_reader(owner, name, target, foreign_key));
+            }
+            // HABTM lands when a fixture demands it.
             _ => {}
         }
         // Every method this declaration synthesized attributes to the
@@ -127,6 +130,67 @@ fn synth_has_many_reader(
         is_async: false,
             mutates_self: false,
             block_param: None,
+    }
+}
+
+/// has_one reader — the has_many query narrowed to one row:
+/// `def moderation; Moderation.where(comment_id: @id).first; end`
+/// (lobsters `Comment has_one :moderation`, read by gone_text). No
+/// preload cache — has_one reads are rare enough that the lazy query
+/// is the whole story until an includes() fixture demands more.
+fn synth_has_one_reader(
+    owner: &ClassId,
+    name: &Symbol,
+    target: &ClassId,
+    foreign_key: &Symbol,
+) -> MethodDef {
+    let where_args = vec![Expr::new(
+        Span::synthetic(),
+        ExprNode::Hash {
+            entries: vec![(
+                lit_sym(foreign_key.clone()),
+                Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("id") }),
+            )],
+            kwargs: true,
+        },
+    )];
+    let query = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(class_const(target)),
+            method: Symbol::from("where"),
+            args: where_args,
+            block: None,
+            parenthesized: true,
+        },
+    );
+    let first = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(query),
+            method: Symbol::from("first"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    MethodDef {
+        name: name.clone(),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body: first,
+        signature: Some(fn_sig(
+            vec![],
+            Ty::Union {
+                variants: vec![Ty::Class { id: target.clone(), args: vec![] }, Ty::Nil],
+            },
+        )),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
     }
 }
 
