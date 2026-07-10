@@ -1,0 +1,500 @@
+#!/usr/bin/env ruby
+# scripts/lobsters-report — render a lobsters bench run to self-contained HTML.
+#
+# The lobsters counterpart to scripts/bench-report: where that renders the
+# blog throughput matrix, this renders one scripts/bench-lobsters run —
+# route parity, the frozen 114-visit sequence timing, and the
+# roundhouse-vs-Rails comparison — into a single static page.
+#
+# Usage:
+#   scripts/lobsters-report [PATH] [OUT.html]
+#
+#   PATH defaults to bench/results/lobsters/latest. It may be either the
+#   run directory or the summary.json inside it. OUT defaults to
+#   index.html alongside summary.json, so the page publishes next to the
+#   raw artifacts already served at roundbench.showcase.party/lobsters/.
+#
+# Pure stdlib; inline SVG charts; no JS, no CDN. Open the file directly,
+# archive it, or serve it statically — the chart artifacts outlive any
+# chart library's CDN. Degrades gracefully: a parity-only run (no
+# rails.json / sequence_timing, as before P6 landed) still renders, just
+# without the timing and comparison sections.
+
+require 'json'
+require 'time'
+
+arg = ARGV[0] || File.join(__dir__, '..', 'bench', 'results', 'lobsters', 'latest')
+arg = File.expand_path(arg)
+run_path = File.directory?(arg) ? arg : File.dirname(arg)
+input    = File.directory?(arg) ? File.join(arg, 'summary.json') : arg
+File.exist?(input) or abort "no summary.json at #{input}"
+out = ARGV[1] || File.join(run_path, 'index.html')
+
+summary = JSON.parse(File.read(input))
+
+# Siblings written alongside summary.json by scripts/bench-lobsters. All
+# optional — the comparison and stability sections only render when their
+# data is present.
+def sibling(dir, name)
+  path = File.join(dir, name)
+  File.exist?(path) ? JSON.parse(File.read(path)) : nil
+rescue JSON::ParserError
+  nil
+end
+
+rails = sibling(run_path, 'rails.json')
+env   = sibling(run_path, 'env.json')
+
+routes   = summary['routes'] || []
+timing   = summary['sequence_timing']
+run_dir  = File.basename(run_path)
+
+# ── formatting ───────────────────────────────────────────────────────
+
+def fmt_int(n)  ; n.to_i.to_s.reverse.scan(/\d{1,3}/).join(',').reverse ; end
+def fmt_dec(n, p = 1) ; format("%.#{p}f", n.to_f) ; end
+def esc(s) ; s.to_s.gsub('&', '&amp;').gsub('<', '&lt;').gsub('>', '&gt;') ; end
+
+def kv_table(rows)
+  out = +"<table>\n<tbody>\n"
+  rows.each do |k, v|
+    next if v.nil? || v.to_s.empty?
+    out << "<tr><th>#{k}</th><td>#{v}</td></tr>\n"
+  end
+  out << "</tbody></table>\n"
+end
+
+# ── SVG primitives (shared shape with scripts/bench-report) ───────────
+
+def svg_open(w, h)
+  %(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 #{w} #{h}" ) +
+  %(width="#{w}" height="#{h}" font-family="-apple-system,system-ui,sans-serif" font-size="12">)
+end
+def svg_close ; '</svg>' ; end
+
+def t(x, y, s, anchor: 'start', size: 12, weight: nil, fill: '#222')
+  a = %(text-anchor="#{anchor}" font-size="#{size}" fill="#{fill}")
+  a << %( font-weight="#{weight}") if weight
+  %(<text x="#{x}" y="#{y}" #{a}>#{esc(s)}</text>)
+end
+def r(x, y, w, h, fill:, stroke: nil)
+  s = stroke ? %( stroke="#{stroke}") : ''
+  %(<rect x="#{x}" y="#{y}" width="#{w}" height="#{h}" fill="#{fill}"#{s}/>)
+end
+def l(x1, y1, x2, y2, stroke: '#ddd', sw: 1, dash: nil)
+  d = dash ? %( stroke-dasharray="#{dash}") : ''
+  %(<line x1="#{x1}" y1="#{y1}" x2="#{x2}" y2="#{y2}" stroke="#{stroke}" stroke-width="#{sw}"#{d}/>)
+end
+
+COLOR_RH    = '#7d4cdb'   # roundhouse (matches spinel/violet family in bench-report)
+COLOR_RAILS = '#cc342d'   # Rails (ruby red)
+COLOR_OK    = '#2e7d32'
+COLOR_FAIL  = '#c0392b'
+
+# ── vs-Rails comparison: horizontal ms/iter bars, lower is better ─────
+#
+# Bars are linear (not log) — the whole point is the visible size ratio,
+# and both stacks sit within one decade. A min–max whisker rides each bar
+# so the median isn't mistaken for a point estimate.
+
+def compare_bars(rows)
+  width    = 760
+  left_pad = 90
+  right    = 110
+  plot_w   = width - left_pad - right
+  row_h    = 34
+  gap      = 14
+  top      = 14
+  height   = top + (row_h + gap) * rows.size + 24
+
+  max_v = rows.map { |r| r[:max] || r[:median] }.max.to_f * 1.12
+  max_v = 1.0 unless max_v.finite? && max_v > 0
+
+  buf = +svg_open(width, height)
+  rows.each_with_index do |row, i|
+    y  = top + i * (row_h + gap)
+    bw = (row[:median].to_f / max_v * plot_w).round
+    buf << t(left_pad - 8, y + row_h * 0.62, row[:label], anchor: 'end', weight: 'bold')
+    buf << r(left_pad, y, [bw, 1].max, row_h, fill: row[:color])
+    buf << t(left_pad + [bw, 1].max + 8, y + row_h * 0.62,
+             "#{fmt_dec(row[:median], 1)} ms", fill: '#222', weight: 'bold')
+    # min–max whisker across the bar's vertical mid-line
+    if row[:min] && row[:max]
+      ymid = y + row_h / 2.0
+      x1 = left_pad + (row[:min].to_f / max_v * plot_w)
+      x2 = left_pad + (row[:max].to_f / max_v * plot_w)
+      buf << l(x1, ymid, x2, ymid, stroke: '#00000055', sw: 1)
+      [x1, x2].each { |x| buf << l(x, ymid - 5, x, ymid + 5, stroke: '#00000055', sw: 1) }
+    end
+    if row[:iters]
+      buf << t(left_pad + 8, y + row_h * 0.62 + 13, "n=#{row[:iters]}", fill: '#ffffffcc', size: 10)
+    end
+  end
+  buf << svg_close
+  buf
+end
+
+# ── frozen-sequence stability: one column per timed iteration ─────────
+#
+# Columns are scaled within a tight band around the observed spread (not
+# from zero) so run-to-run jitter is legible; the dashed line marks the
+# median. This is the "is the number stable?" chart.
+
+def iter_columns(iter_ms, median:, min:, max:)
+  return '' if iter_ms.nil? || iter_ms.empty?
+  width    = 760
+  left_pad = 44
+  right    = 12
+  plot_w   = width - left_pad - right
+  top      = 14
+  plot_h   = 150
+  bot      = 24
+  height   = top + plot_h + bot
+
+  lo = min * 0.985
+  hi = max * 1.015
+  span = (hi - lo)
+  span = 1.0 unless span.finite? && span > 0
+  colw = plot_w.to_f / iter_ms.size
+  bw   = [colw - 2, 1].max
+
+  buf = +svg_open(width, height)
+  # y ticks: min / median / max
+  [[min, '#888'], [median, COLOR_RH], [max, '#888']].each do |v, c|
+    yy = top + plot_h - (v - lo) / span * plot_h
+    dash = (v == median) ? '4 3' : nil
+    buf << l(left_pad, yy, width - right, yy, stroke: (v == median ? COLOR_RH : '#eee'), dash: dash)
+    buf << t(left_pad - 6, yy + 4, fmt_dec(v, 0), anchor: 'end', fill: c, size: 10)
+  end
+  iter_ms.each_with_index do |v, i|
+    x  = left_pad + i * colw
+    bh = (v - lo) / span * plot_h
+    bh = 1 if bh < 1
+    yy = top + plot_h - bh
+    buf << r(x + (colw - bw) / 2, yy, bw, bh, fill: '#7d4cdb99')
+  end
+  buf << t(left_pad, top + plot_h + 16, "iteration 1", fill: '#999', size: 10)
+  buf << t(width - right, top + plot_h + 16, "iteration #{iter_ms.size}", anchor: 'end', fill: '#999', size: 10)
+  buf << svg_close
+  buf
+end
+
+# ── per-endpoint rails vs roundhouse: paired log-scaled bars ─────────
+#
+# Two bars per endpoint (rails red, roundhouse violet), rows sorted by
+# Rails ms descending so the endpoints that dominate the sequence sit on
+# top. Log scale because endpoint latencies span 0.1–30+ ms.
+
+def paired_hbar(rows)
+  vals = rows.flat_map { |r| [r[:rails], r[:rh]] }.compact.select { |v| v > 0 }
+  return '' if vals.empty?
+  min_dec = [Math.log10(vals.min).floor, 0].min
+  max_dec = [Math.log10(vals.max).ceil, min_dec + 1].max
+
+  width    = 760
+  left_pad = 190
+  right    = 70
+  plot_w   = width - left_pad - right
+  barh     = 8
+  inner    = 2
+  gap      = 9
+  group_h  = barh * 2 + inner + gap
+  top      = 22
+  bot      = 26
+  height   = top + group_h * rows.size + bot
+
+  buf = +svg_open(width, height)
+  # legend
+  buf << r(left_pad, 6, 12, 10, fill: COLOR_RAILS)
+  buf << t(left_pad + 16, 15, 'rails', fill: '#333', size: 11)
+  buf << r(left_pad + 70, 6, 12, 10, fill: COLOR_RH)
+  buf << t(left_pad + 86, 15, 'roundhouse', fill: '#333', size: 11)
+
+  (min_dec..max_dec).each do |d|
+    x = left_pad + (d - min_dec).to_f / (max_dec - min_dec) * plot_w
+    buf << l(x, top, x, height - bot, stroke: '#eee')
+    buf << t(x, height - bot + 14, fmt_int(10 ** d), anchor: 'middle', fill: '#888', size: 10)
+  end
+  buf << t(width - 2, height - bot + 14, 'ms', anchor: 'end', fill: '#aaa', size: 10)
+
+  scale = ->(v) do
+    lv = Math.log10([v, 10.0 ** min_dec].max)
+    [((lv - min_dec) / (max_dec - min_dec) * plot_w).round, 1].max
+  end
+
+  rows.each_with_index do |row, i|
+    y = top + i * group_h
+    buf << t(left_pad - 6, y + barh + 1, row[:key], anchor: 'end', size: 10, fill: '#333')
+    if row[:rails]
+      buf << r(left_pad, y, scale.call(row[:rails]), barh, fill: COLOR_RAILS)
+    end
+    if row[:rh]
+      buf << r(left_pad, y + barh + inner, scale.call(row[:rh]), barh, fill: COLOR_RH)
+    end
+    if row[:ratio]
+      buf << t(width - right + 4, y + barh + 1, "#{fmt_dec(row[:ratio], 1)}×",
+               fill: (row[:ratio] >= 1 ? COLOR_OK : COLOR_FAIL), size: 10, weight: 'bold')
+    end
+  end
+  buf << svg_close
+  buf
+end
+
+# ── per-route latency: log-scaled horizontal bars ────────────────────
+#
+# Route timings span two-plus decades (sub-ms static pages up to /u), so
+# a log scale is the only honest fit. Decades are derived from the data
+# and allowed below 1 ms.
+
+def route_hbar(routes, metric:, unit:, fmt:)
+  vals = routes.map { |c| c[metric].to_f }.reject { |v| v <= 0 }
+  return '' if vals.empty?
+  min_dec = [Math.log10(vals.min).floor, 3].min
+  max_dec = [Math.log10(vals.max).ceil, min_dec + 1].max
+
+  width    = 760
+  left_pad = 190
+  right    = 90
+  plot_w   = width - left_pad - right
+  row_h    = 16
+  gap      = 3
+  top      = 8
+  bot      = 26
+  height   = top + (row_h + gap) * routes.size + bot
+
+  buf = +svg_open(width, height)
+  (min_dec..max_dec).each do |d|
+    x = left_pad + (d - min_dec).to_f / (max_dec - min_dec) * plot_w
+    buf << l(x, top, x, height - bot, stroke: '#eee')
+    buf << t(x, height - bot + 14, fmt_int(10 ** d), anchor: 'middle', fill: '#888', size: 10)
+  end
+  buf << t(width - 2, height - bot + 14, unit, anchor: 'end', fill: '#aaa', size: 10)
+
+  routes.sort_by { |c| -c[metric].to_f }.each_with_index do |c, i|
+    y = top + i * (row_h + gap)
+    v = c[metric].to_f
+    lv = Math.log10([v, 10.0 ** min_dec].max)
+    bar = ((lv - min_dec) / (max_dec - min_dec) * plot_w).round
+    bar = [bar, 1].max
+    fill = c['ok'] == false ? COLOR_FAIL : COLOR_RH
+    buf << t(left_pad - 6, y + row_h * 0.8, c['route'], anchor: 'end', size: 10, fill: '#333')
+    buf << r(left_pad, y, bar, row_h, fill: fill)
+    buf << t(left_pad + bar + 5, y + row_h * 0.8, fmt.call(v), fill: '#444', size: 10)
+  end
+  buf << svg_close
+  buf
+end
+
+# ── page ─────────────────────────────────────────────────────────────
+
+pass  = summary['pass']  || routes.count { |r| r['ok'] }
+total = summary['total'] || routes.size
+thin  = summary['thin']  || routes.count { |r| r['thin'] }
+all_pass = pass == total && total > 0
+
+speedup = nil
+if rails && timing && rails['ms_per_iter_median'].to_f > 0 && timing['ms_per_iter_median'].to_f > 0
+  speedup = rails['ms_per_iter_median'].to_f / timing['ms_per_iter_median'].to_f
+end
+
+# Sections are numbered in render order but the timing/comparison ones
+# only appear when their data is present, so hand out numbers as we go.
+@section = 0
+def section_no ; @section += 1 ; end
+
+styles = <<~CSS
+  body { font-family: -apple-system, system-ui, sans-serif; color: #222;
+         max-width: 880px; margin: 2em auto; padding: 0 1em; line-height: 1.5; }
+  h1 { font-size: 1.6em; margin-bottom: 0.2em; }
+  h2 { font-size: 1.2em; margin-top: 2em; border-bottom: 1px solid #ddd;
+       padding-bottom: 0.2em; }
+  h3 { font-size: 1.0em; color: #555; margin: 1.4em 0 0.4em; }
+  .meta { color: #666; font-size: 0.9em; margin-bottom: 1em; }
+  .methodology { background: #f7f7f7; border-left: 3px solid #ccc;
+                 padding: 0.6em 1em; font-size: 0.92em; }
+  .methodology code { background: #ececec; padding: 0.05em 0.3em;
+                      border-radius: 3px; font-size: 0.9em; }
+  .caveat { color: #777; font-size: 0.9em; font-style: italic; }
+  .badges { margin: 0.8em 0 0.4em; }
+  .badge { display: inline-block; padding: 0.25em 0.7em; border-radius: 999px;
+           font-size: 0.9em; font-weight: 600; margin-right: 0.5em; }
+  .badge.pass { background: #e7f4e8; color: #2e7d32; }
+  .badge.fail { background: #fdecea; color: #c0392b; }
+  .badge.speed { background: #efe9fb; color: #5b32b0; }
+  table { border-collapse: collapse; font-size: 0.88em; margin: 0.4em 0; }
+  th, td { padding: 4px 10px; border-bottom: 1px solid #eee; }
+  th { text-align: left; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.ok  { color: #2e7d32; font-weight: 600; }
+  td.no  { color: #c0392b; font-weight: 600; }
+  details summary { cursor: pointer; color: #555; padding: 0.4em 0; }
+  svg { display: block; margin: 0.4em auto; max-width: 100%; }
+CSS
+
+html = +"<!doctype html>\n<html lang=en>\n<head>\n<meta charset=utf-8>\n"
+html << %(<meta name="viewport" content="width=device-width, initial-scale=1">\n)
+html << "<title>Lobsters bench — #{run_dir}</title>\n<style>#{styles}</style>\n</head>\n<body>\n"
+
+html << "<h1>Lobsters benchmark results</h1>\n"
+prov = ''
+prov << " · #{summary['generated_at']}" if summary['generated_at']
+if env && env['roundhouse_commit']
+  prov << %( · <code>#{env['roundhouse_commit'][0, 12]}</code>)
+end
+html << %(<div class="meta">Run <code>#{run_dir}</code>#{prov}</div>\n)
+
+html << %(<div class="badges">)
+html << %(<span class="badge #{all_pass ? 'pass' : 'fail'}">#{pass}/#{total} routes return 200</span>)
+html << %(<span class="badge fail">#{thin} thin</span>) if thin.to_i > 0
+if speedup
+  html << %(<span class="badge speed">#{fmt_dec(speedup, 2)}× faster than Rails</span>)
+end
+html << "</div>\n"
+
+# Sibling artifacts published alongside this page.
+artifacts = %w[summary.json summary.md rails.json sequence.json env.json emit.log]
+  .select { |f| File.exist?(File.join(run_path, f)) }
+unless artifacts.empty?
+  html << %(<div class="meta">Artifacts: #{artifacts.map { |f| %(<a href="#{f}"><code>#{f}</code></a>) }.join(' · ')}</div>\n)
+end
+
+# ── methodology ──────────────────────────────────────────────────────
+
+vpi   = timing&.dig('visits_per_iter') || rails&.dig('visits_per_iter')
+db    = summary['db']
+memnote = summary['memory'] ? 'an in-memory SQLite seeded at boot' : 'a file-backed SQLite'
+html << <<~METHOD
+  <div class="methodology">
+    <strong>Methodology.</strong> The route table replays each distinct lobsters route once against the Roundhouse emit and records status, response bytes, and single-shot latency. #{vpi ? "The stability and comparison numbers replay a <strong>frozen #{vpi}-visit sequence</strong> (versioned at <code>bench/lobsters/frozen-sequence.json</code>) so every run — and the Rails baseline — walks the identical path." : ''} Both stacks serve from #{memnote}#{db ? " (<code>#{esc(db)}</code>)" : ''}, the shape the ruby-bench lobsters benchmark runs. Median of the timed iterations is reported.
+    <p class="caveat">This measures one specific reference app (the ruby-bench lobsters fixture), not arbitrary Rails workloads. The Rails baseline runs the <em>real</em> Rails lobsters over the same sequence; the roundhouse cell serves the same routes from the Roundhouse-emitted framework.</p>
+  </div>
+METHOD
+
+# ── Section: vs Rails ────────────────────────────────────────────────
+
+if rails && timing
+  html << "<h2>#{section_no}. Roundhouse vs Rails</h2>\n"
+  html << %(<p>Milliseconds per iteration of the frozen #{vpi}-visit sequence — <strong>lower is better</strong>. The whisker spans each stack's min–max across its timed iterations.</p>\n)
+  html << compare_bars([
+    { label: "rails #{rails['rails']}", color: COLOR_RAILS,
+      median: rails['ms_per_iter_median'], min: rails['ms_per_iter_min'],
+      max: rails['ms_per_iter_max'], iters: rails['iterations'] },
+    { label: 'roundhouse', color: COLOR_RH,
+      median: timing['ms_per_iter_median'], min: timing['ms_per_iter_min'],
+      max: timing['ms_per_iter_max'], iters: timing['iterations'] },
+  ])
+  if speedup
+    html << %(<p><strong>#{fmt_dec(speedup, 2)}× faster than Rails</strong> — )
+    html << %(#{fmt_dec(timing['ms_per_iter_median'], 1)} ms/iter vs Rails' #{fmt_dec(rails['ms_per_iter_median'], 1)} ms/iter.</p>\n)
+  end
+end
+
+# ── Section: per-endpoint breakdown ──────────────────────────────────
+
+rh_pr = timing && timing['per_route']
+rl_pr = rails && rails['per_route']
+if rh_pr && rl_pr && !rh_pr.empty?
+  shared = rh_pr.keys.select { |k| rl_pr.key?(k) }
+  rh_iters = timing['iterations'].to_i
+  breakdown = shared.map do |k|
+    rl = rl_pr[k]['ms_median'].to_f
+    rh = rh_pr[k]['ms_median'].to_f
+    { key: k, rails: rl, rh: rh,
+      ratio: rh > 0 ? rl / rh : nil,
+      per_iter: rh_iters > 0 ? (rh_pr[k]['n'].to_f / rh_iters).round : nil }
+  end.sort_by { |r| -r[:rails] }
+
+  html << "<h2>#{section_no}. Per-endpoint breakdown</h2>\n"
+  html << <<~P
+    <p>Where the overall #{speedup ? "#{fmt_dec(speedup, 2)}× " : ''}win comes from — each endpoint's median latency over every timed visit of the frozen sequence, Rails vs roundhouse. Bars are log-scaled; the <strong>ratio</strong> at the right is Rails ÷ roundhouse (green = roundhouse faster).</p>
+    <p class="caveat">A diagnostic breakdown, not a re-derivation: per-endpoint medians don't sum to the sequence median (GC and ordering don't decompose linearly), and the sub-millisecond rows sit near clock resolution — trust the ranking, not the third decimal.</p>
+  P
+  html << paired_hbar(breakdown)
+
+  html << "<details>\n<summary>Per-endpoint table (#{breakdown.size} endpoints)</summary>\n"
+  html << "<table>\n<thead><tr><th>endpoint</th><th>rails ms</th><th>roundhouse ms</th><th>ratio</th><th>visits/iter</th></tr></thead>\n<tbody>\n"
+  breakdown.each do |b|
+    rcls = b[:ratio].nil? ? '' : (b[:ratio] >= 1 ? 'ok' : 'no')
+    html << "<tr>"
+    html << %(<td><code>#{esc(b[:key])}</code></td>)
+    html << %(<td class="num">#{fmt_dec(b[:rails], 2)}</td>)
+    html << %(<td class="num">#{fmt_dec(b[:rh], 2)}</td>)
+    html << %(<td class="num #{rcls}">#{b[:ratio] ? "#{fmt_dec(b[:ratio], 2)}×" : '—'}</td>)
+    html << %(<td class="num">#{b[:per_iter]}</td>)
+    html << "</tr>\n"
+  end
+  html << "</tbody></table>\n</details>\n"
+end
+
+# ── Section: frozen-sequence stability ───────────────────────────────
+
+if timing && timing['iter_ms']
+  n = timing['iter_ms'].size
+  html << "<h2>#{section_no}. Frozen-sequence stability</h2>\n"
+  caption = "#{fmt_dec(timing['ms_per_iter_median'], 1)} ms/iter median over #{n} iterations " \
+            "(min #{fmt_dec(timing['ms_per_iter_min'], 1)}, max #{fmt_dec(timing['ms_per_iter_max'], 1)}, " \
+            "#{timing['warmup']} warmup). Each column is one timed iteration; the dashed line is the median."
+  html << "<p>#{caption}</p>\n"
+  if timing['failed_visits'].to_i > 0
+    html << %(<p class="caveat">#{timing['failed_visits']} visit(s) failed during timing#{timing['partial'] ? ' — partial run' : ''}.</p>\n)
+  end
+  html << iter_columns(timing['iter_ms'],
+                       median: timing['ms_per_iter_median'],
+                       min: timing['ms_per_iter_min'],
+                       max: timing['ms_per_iter_max'])
+end
+
+# ── Section: route parity ────────────────────────────────────────────
+
+html << "<h2>#{section_no}. Route parity (#{pass}/#{total})</h2>\n"
+html << %(<p>Every distinct benchmark route, replayed once. Bars are log-scaled single-shot latency; #{all_pass ? 'all routes return 200' : 'red bars are non-200 routes'}.</p>\n)
+html << route_hbar(routes, metric: 'ms', unit: 'ms', fmt: ->(v) { "#{fmt_dec(v, 1)} ms" })
+
+html << "<details open>\n<summary>Per-route table (#{routes.size} routes)</summary>\n"
+html << "<table>\n<thead><tr><th>route</th><th>status</th><th>bytes</th><th>ms</th></tr></thead>\n<tbody>\n"
+routes.each do |c|
+  status_cls = c['ok'] == false ? 'no' : 'ok'
+  html << "<tr>"
+  html << %(<td><code>#{esc(c['route'])}</code>#{c['thin'] ? ' <span class="no">(thin)</span>' : ''}</td>)
+  html << %(<td class="num #{status_cls}">#{c['status']}</td>)
+  html << %(<td class="num">#{fmt_int(c['bytes'])}</td>)
+  html << %(<td class="num">#{fmt_dec(c['ms'], 2)}</td>)
+  html << "</tr>\n"
+end
+html << "</tbody></table>\n</details>\n"
+
+# ── environment appendix ─────────────────────────────────────────────
+
+html << %(<details id="environment">\n<summary>Environment</summary>\n)
+html << "<h3>Run</h3>\n"
+html << kv_table([
+  ['command',    env&.dig('command') && "<code>#{esc(env['command'])}</code>"],
+  ['source',     env&.dig('src') && "<code>#{esc(env['src'])}</code>"],
+  ['commit',     env&.dig('roundhouse_commit') && "<code>#{env['roundhouse_commit']}</code>"],
+  ['captured',   env&.dig('generated_at') || summary['generated_at']],
+  ['database',   db && "<code>#{esc(db)}</code>"],
+  ['seed',       summary['seed']],
+  ['story / comment', [summary['story_id'], summary['comment_id']].compact.join(' / ')],
+])
+html << "<h3>Stacks</h3>\n"
+html << kv_table([
+  ['roundhouse ruby', env&.dig('ruby') && "<code>#{esc(env['ruby'])}</code>"],
+  ['rails ruby',      rails&.dig('ruby') && "<code>#{esc(rails['ruby'])}</code>"],
+  ['rails',           rails&.dig('rails')],
+])
+if timing || rails
+  html << "<h3>Sequence</h3>\n"
+  html << kv_table([
+    ['visits/iter',       vpi],
+    ['warmup',            timing&.dig('warmup') || rails&.dig('warmup')],
+    ['roundhouse iters',  timing&.dig('iterations')],
+    ['rails iters',       rails&.dig('iterations')],
+  ])
+end
+html << "</details>\n"
+
+html << %(<hr><p class="meta">Generated #{Time.now.utc.iso8601} from <code>#{File.basename(input)}</code>.</p>\n)
+html << "</body>\n</html>\n"
+
+File.write(out, html)
+$stderr.puts "wrote #{out} (#{html.bytesize} bytes)"

@@ -171,6 +171,36 @@ def enc(s) = s.to_s.gsub(/[^a-zA-Z0-9_.\-]/) { |c| "%%%02X" % c.ord }
 
 def now_ms = Process.clock_gettime(Process::CLOCK_MONOTONIC) * 1000.0
 
+# Bucket a concrete visit path under its route template so per-route
+# samples aggregate across the sequence's parameterized visits — every
+# /s/<short_id> lands under /s/:story_id. Ordered most-specific first;
+# static routes (including the distinct /top?length=… variants) key by
+# their full path. Mirrors ruby-bench route_generator.rb ROUTE_GROUPS.
+# Keep in sync with scripts/lobsters-rails-replay (the Rails side).
+ROUTE_TEMPLATES = [
+  [%r{\A/comments/[^/]+/reply\z}, "/comments/:comment_id/reply"],
+  [%r{\A/threads/[^/]+\z},        "/threads/:username"],
+  [%r{\A/u/[^/]+\z},              "/u/:username"],
+  [%r{\A/s/[^/]+\z},              "/s/:story_id"],
+].freeze
+
+def route_template(path)
+  base = path.split("?", 2).first
+  ROUTE_TEMPLATES.each { |re, tmpl| return tmpl if base.match?(re) }
+  path
+end
+
+# samples: { template => [ms, …] } -> { template => {ms_median, n, …} }.
+def summarize_samples(by_route)
+  by_route.sort.to_h.transform_values do |arr|
+    s = arr.sort
+    m = s.size / 2
+    med = s.size.odd? ? s[m] : (s[m - 1] + s[m]) / 2.0
+    { "ms_median" => med.round(3), "ms_min" => s.first.round(3),
+      "ms_max" => s.last.round(3), "n" => s.size }
+  end
+end
+
 # ── login handshake ──────────────────────────────────────────────────
 # GET /login, scrape the CSRF token exactly the way the benchmark does
 # (value="…" — an EMPTY token crashes the benchmark's scrape), POST the
@@ -266,15 +296,25 @@ if opts[:sequence]
   min_iters   = (opts[:time] && opts[:time] > 0) ? opts[:time] : 10
   min_time_ms = (opts[:min_time] || 10) * 1000.0
 
-  run_seq = -> { visits.each { |v| req(v["method"], v["path"]) } }
+  # When `timings` is passed (timed iterations only) each visit is clocked
+  # and bucketed by template; the outer per-iter clock is untouched, so
+  # ms_per_iter keeps its exact old meaning. Mirrors lobsters-rails-replay.
+  run_seq = ->(timings = nil) do
+    visits.each do |v|
+      t0 = timings ? now_ms : nil
+      req(v["method"], v["path"])
+      (timings[route_template(v["path"])] ||= []) << (now_ms - t0) if timings
+    end
+  end
 
   # Verification counted as work, not warmup — start the warmups fresh.
   warmup.times { run_seq.call }
   iters = []
   total = 0.0
+  per_route = {}
   until iters.size >= min_iters && total >= min_time_ms
     t0 = now_ms
-    run_seq.call
+    run_seq.call(per_route)
     ms = now_ms - t0
     iters << ms
     total += ms
@@ -291,6 +331,9 @@ if opts[:sequence]
     "ms_per_iter_min"    => sorted.first.round(2),
     "ms_per_iter_max"    => sorted.last.round(2),
     "iter_ms"            => iters.map { |x| x.round(2) },
+    # Per-template median across every timed visit — a diagnostic
+    # breakdown; per-route medians do NOT sum to ms_per_iter_median.
+    "per_route"          => summarize_samples(per_route),
     "failed_visits"      => seq_fails.size,
     "partial"            => !seq_fails.empty?,
   }
