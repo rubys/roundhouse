@@ -81,6 +81,11 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
         for m in &mut lc.methods {
             let class_self = (is_model && m.receiver == MethodReceiver::Class)
                 .then(|| lc.name.clone());
+            // A model's own INSTANCE methods know their self model too —
+            // `self.<has_many>.<scope>` there seeds a Relation from the
+            // association's foreign key (recent_threads' comment chain).
+            let instance_self = (is_model && m.receiver == MethodReceiver::Instance)
+                .then(|| lc.name.clone());
             if crate::lower::scope_chain::mentions_scope(&m.body, &names)
                 || crate::lower::scope_chain::mentions_model_chain_start(&m.body, &models)
                 || (class_self.is_some()
@@ -92,6 +97,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                     &models,
                     &assocs,
                     class_self.as_ref(),
+                    instance_self.as_ref(),
                 );
             }
         }

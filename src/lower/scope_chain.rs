@@ -69,6 +69,12 @@ pub struct AssocRegistry {
     /// (model, belongs_to name) -> foreign-key column, for
     /// `where(user: user)` -> `where(user_id: user && user.id)`.
     belongs_to_fk: HashMap<(ClassId, Symbol), Symbol>,
+    /// (model, has_many name) -> (target model, foreign-key column), for
+    /// scope-on-self-association chains (`self.comments.accessible_to_user`
+    /// seeds `Relation.new(Comment).where(user_id: @id)`). Direct
+    /// has_many only — a `:through` receiver would need the join seed,
+    /// left untouched until an app exercises it.
+    has_many_fk: HashMap<(ClassId, Symbol), (ClassId, Symbol)>,
 }
 
 impl AssocRegistry {
@@ -77,6 +83,9 @@ impl AssocRegistry {
     }
     fn belongs_to_fk(&self, model: &ClassId, assoc: &Symbol) -> Option<&Symbol> {
         self.belongs_to_fk.get(&(model.clone(), assoc.clone()))
+    }
+    fn has_many_fk(&self, model: &ClassId, assoc: &Symbol) -> Option<&(ClassId, Symbol)> {
+        self.has_many_fk.get(&(model.clone(), assoc.clone()))
     }
 }
 
@@ -98,8 +107,18 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     reg.belongs_to_fk
                         .insert((m.name.clone(), name.clone()), foreign_key.clone());
                 }
-                Association::HasMany { name, target, foreign_key, through: None, .. }
-                | Association::HasOne { name, target, foreign_key, .. } => {
+                Association::HasMany { name, target, foreign_key, through: None, .. } => {
+                    let t = pluralize_snake(target.0.as_str());
+                    reg.join_tails.insert(
+                        (m.name.clone(), name.clone()),
+                        format!("{t} ON {t}.{foreign_key} = {own}.id"),
+                    );
+                    reg.has_many_fk.insert(
+                        (m.name.clone(), name.clone()),
+                        (target.clone(), foreign_key.clone()),
+                    );
+                }
+                Association::HasOne { name, target, foreign_key, .. } => {
                     let t = pluralize_snake(target.0.as_str());
                     reg.join_tails.insert(
                         (m.name.clone(), name.clone()),
@@ -274,6 +293,13 @@ pub struct Ctx<'a> {
     /// key).limit(1)`), so it seeds `Relation.new(Model)` — like a scope
     /// body, but with no `__rel` parameter to thread.
     pub class_self: Option<ClassId>,
+    /// `Some(model)` when rewriting a model's own INSTANCE method:
+    /// `self.<has_many>` there is an association read whose target model
+    /// is known, so a scope following it can seed a Relation from the
+    /// association's foreign key (`recent_threads`' `self.comments.
+    /// accessible_to_user(u)`). Unlike `class_self`, bare sends are NOT
+    /// query roots (no implicit scoping on an instance).
+    pub instance_self: Option<ClassId>,
 }
 
 impl Ctx<'_> {
@@ -294,6 +320,7 @@ impl Ctx<'_> {
             assocs: self.assocs,
             scope_body: None,
             class_self: self.class_self.clone(),
+            instance_self: self.instance_self.clone(),
         }
     }
 }
@@ -595,6 +622,63 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 return None;
             }
 
+            // Scope-on-self-association: `self.<has_many>.<scope>(args)`.
+            // The assoc reader returns the arel-inlined Array, and a scope
+            // needs a Relation — seed one from the association's foreign
+            // key and thread it. Fires only when a registered scope
+            // FOLLOWS the read, so plain reader iteration keeps the Array
+            // (and the reader's preload cache).
+            if let Some(self_model) = ctx.instance_self.clone() {
+                if let ExprNode::Send { recv: Some(ir), method: aname, args: aargs, .. } =
+                    &*r.node
+                {
+                    if matches!(&*ir.node, ExprNode::SelfRef) && aargs.is_empty() {
+                        if let Some((target, fk)) =
+                            ctx.assocs.has_many_fk(&self_model, aname).cloned()
+                        {
+                            if ctx.scope_of(&target, &method) {
+                                let fk_hash = syn(
+                                    span,
+                                    ExprNode::Hash {
+                                        entries: vec![(
+                                            syn(
+                                                span,
+                                                ExprNode::Lit {
+                                                    value: Literal::Sym { value: fk },
+                                                },
+                                            ),
+                                            syn(span, ExprNode::Ivar { name: Symbol::from("id") }),
+                                        )],
+                                        kwargs: true,
+                                    },
+                                );
+                                let seed = syn(
+                                    span,
+                                    ExprNode::Send {
+                                        recv: Some(relation_new(span, &target)),
+                                        method: Symbol::from("where"),
+                                        args: vec![fk_hash],
+                                        block: None,
+                                        parenthesized: true,
+                                    },
+                                );
+                                let leading = ctx.scope_params(&target, &method);
+                                let new_args = thread_rel(args, seed, leading, span);
+                                *expr = put(
+                                    span,
+                                    Some(const_expr(span, &target)),
+                                    method,
+                                    new_args,
+                                    block,
+                                    true,
+                                );
+                                return Some(target);
+                            }
+                        }
+                    }
+                }
+            }
+
             // Receiver model: a local var holding a relation, else the
             // (rewritten) receiver chain's model.
             let r_model = match &*r.node {
@@ -639,6 +723,7 @@ pub fn rewrite_scope_body(
         assocs,
         scope_body: Some((self_model.clone(), rel_param.clone())),
         class_self: None,
+        instance_self: None,
     };
     let mut locals = Locals::new();
     rewrite(body, &ctx, &mut locals);
@@ -654,8 +739,16 @@ pub fn rewrite_call_site(
     models: &HashSet<ClassId>,
     assocs: &AssocRegistry,
     class_self: Option<&ClassId>,
+    instance_self: Option<&ClassId>,
 ) {
-    let ctx = Ctx { scopes, models, assocs, scope_body: None, class_self: class_self.cloned() };
+    let ctx = Ctx {
+        scopes,
+        models,
+        assocs,
+        scope_body: None,
+        class_self: class_self.cloned(),
+        instance_self: instance_self.cloned(),
+    };
     let mut locals = Locals::new();
     rewrite(expr, &ctx, &mut locals);
 }
@@ -748,7 +841,7 @@ mod tests {
         models: &'a HashSet<ClassId>,
         assocs: &'a AssocRegistry,
     ) -> Ctx<'a> {
-        Ctx { scopes, models, assocs, scope_body: None, class_self: None }
+        Ctx { scopes, models, assocs, scope_body: None, class_self: None, instance_self: None }
     }
 
     fn sym_lit(s: &str) -> Expr {
