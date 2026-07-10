@@ -60,6 +60,9 @@ require_relative "runtime/json"
 require_relative "runtime/json_builder"
 require_relative "runtime/importmap"
 require_relative "runtime/rails"
+# Real in-mem cache store behind Rails.cache (CRuby-only; the shared
+# runtime's Cache is a recompute-every-fetch no-op).
+require_relative "runtime/rails_cache"
 require_relative "runtime/rails_application_routes"
 require_relative "runtime/active_support_duration"
 require_relative "runtime/active_support_time_parsing"
