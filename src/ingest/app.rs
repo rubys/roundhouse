@@ -197,6 +197,36 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 match ingest_library_classes(&source, &path_str) {
                     Ok(classes) => {
                         for lc in &classes {
+                            // Rails resolves a helper's `include`d
+                            // modules into the same view surface —
+                            // lobsters' ApplicationHelper includes
+                            // TimeAgoInWords (lib/), whose
+                            // time_ago_in_words SHADOWS the framework
+                            // helper of the same name. Register the
+                            // included module's methods under ITS id
+                            // (the registry consult precedes the
+                            // framework fallback in
+                            // rewrite_helper_calls, preserving Rails'
+                            // shadowing; index membership also puts
+                            // the module in apply_helper_lowering's
+                            // instance→module-function flip set).
+                            // Include-target methods first so the
+                            // helper's own defs win their names.
+                            // lib/extras are ingested before helpers,
+                            // so targets are already registered.
+                            for inc in &lc.includes {
+                                let Some(target) = app
+                                    .library_classes
+                                    .iter()
+                                    .find(|c| c.name == *inc)
+                                else {
+                                    continue;
+                                };
+                                for m in &target.methods {
+                                    app.helper_method_index
+                                        .insert(m.name.clone(), target.name.clone());
+                                }
+                            }
                             for m in &lc.methods {
                                 app.helper_method_index
                                     .insert(m.name.clone(), lc.name.clone());
