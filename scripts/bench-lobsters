@@ -117,8 +117,10 @@ ruby -rjson -e 'puts JSON.pretty_generate({
 # ── runtime gems ─────────────────────────────────────────────────────
 # The replay runs under the system/mise ruby, not a bundle. A Ruby bump
 # empties the per-version gem dir (same hazard scripts/bench self-heals
-# around), so check-then-install rather than assume.
-for g in sqlite3 bcrypt htmlentities rotp; do
+# around), so check-then-install rather than assume. markly + nokogiri
+# back Markdowner (guarded requires in the overlay: boot survives
+# without them but /u/:username fails), so a fresh box needs them too.
+for g in sqlite3 bcrypt htmlentities rotp markly nokogiri; do
     if ! gem list -i "^${g}$" >/dev/null 2>&1; then
         step "installing gem $g"
         gem install --no-document "$g" >/dev/null
