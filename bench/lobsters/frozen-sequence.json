@@ -1,0 +1,461 @@
+{
+  "seed": "0x1be52551fc152997",
+  "visits": [
+    {
+      "method": "GET",
+      "path": "/active"
+    },
+    {
+      "method": "GET",
+      "path": "/upvoted/stories"
+    },
+    {
+      "method": "GET",
+      "path": "/u"
+    },
+    {
+      "method": "GET",
+      "path": "/u/friesen_roland_prof"
+    },
+    {
+      "method": "GET",
+      "path": "/saved"
+    },
+    {
+      "method": "GET",
+      "path": "/comments/t92v9j/reply"
+    },
+    {
+      "method": "GET",
+      "path": "/upvoted/comments"
+    },
+    {
+      "method": "GET",
+      "path": "/hidden"
+    },
+    {
+      "method": "GET",
+      "path": "/top?length=1d"
+    },
+    {
+      "method": "GET",
+      "path": "/settings"
+    },
+    {
+      "method": "GET",
+      "path": "/comments/nlooxr/reply"
+    },
+    {
+      "method": "GET",
+      "path": "/u"
+    },
+    {
+      "method": "GET",
+      "path": "/s/jzmchd"
+    },
+    {
+      "method": "GET",
+      "path": "/newest"
+    },
+    {
+      "method": "GET",
+      "path": "/recent"
+    },
+    {
+      "method": "GET",
+      "path": "/recent"
+    },
+    {
+      "method": "GET",
+      "path": "/s/3hkyxy"
+    },
+    {
+      "method": "GET",
+      "path": "/hidden"
+    },
+    {
+      "method": "GET",
+      "path": "/comments/nmcf5d/reply"
+    },
+    {
+      "method": "GET",
+      "path": "/threads"
+    },
+    {
+      "method": "GET",
+      "path": "/comments"
+    },
+    {
+      "method": "GET",
+      "path": "/u/willie_schinner"
+    },
+    {
+      "method": "GET",
+      "path": "/newest"
+    },
+    {
+      "method": "GET",
+      "path": "/upvoted/stories"
+    },
+    {
+      "method": "GET",
+      "path": "/comments"
+    },
+    {
+      "method": "GET",
+      "path": "/threads/irving_sr_littel"
+    },
+    {
+      "method": "GET",
+      "path": "/s/afhfqa"
+    },
+    {
+      "method": "GET",
+      "path": "/replies/unread"
+    },
+    {
+      "method": "GET",
+      "path": "/saved"
+    },
+    {
+      "method": "GET",
+      "path": "/about"
+    },
+    {
+      "method": "GET",
+      "path": "/u"
+    },
+    {
+      "method": "GET",
+      "path": "/replies/comments"
+    },
+    {
+      "method": "GET",
+      "path": "/u"
+    },
+    {
+      "method": "GET",
+      "path": "/top?length=1d"
+    },
+    {
+      "method": "GET",
+      "path": "/top?length=1y"
+    },
+    {
+      "method": "GET",
+      "path": "/u"
+    },
+    {
+      "method": "GET",
+      "path": "/top?length=1d"
+    },
+    {
+      "method": "GET",
+      "path": "/s/z918wz"
+    },
+    {
+      "method": "GET",
+      "path": "/s/6qzedf"
+    },
+    {
+      "method": "GET",
+      "path": "/top?length=1y"
+    },
+    {
+      "method": "GET",
+      "path": "/s/ft0ini"
+    },
+    {
+      "method": "GET",
+      "path": "/s/hs0egv"
+    },
+    {
+      "method": "GET",
+      "path": "/u"
+    },
+    {
+      "method": "GET",
+      "path": "/replies/unread"
+    },
+    {
+      "method": "GET",
+      "path": "/replies"
+    },
+    {
+      "method": "GET",
+      "path": "/s/5hm2wi"
+    },
+    {
+      "method": "GET",
+      "path": "/threads/beier_coy_ii"
+    },
+    {
+      "method": "GET",
+      "path": "/replies/unread"
+    },
+    {
+      "method": "GET",
+      "path": "/replies/comments"
+    },
+    {
+      "method": "GET",
+      "path": "/saved"
+    },
+    {
+      "method": "GET",
+      "path": "/u/roberts_rolland"
+    },
+    {
+      "method": "GET",
+      "path": "/rss"
+    },
+    {
+      "method": "GET",
+      "path": "/comments/3wh99c/reply"
+    },
+    {
+      "method": "GET",
+      "path": "/threads"
+    },
+    {
+      "method": "GET",
+      "path": "/hottest"
+    },
+    {
+      "method": "GET",
+      "path": "/saved"
+    },
+    {
+      "method": "GET",
+      "path": "/top?length=1w"
+    },
+    {
+      "method": "GET",
+      "path": "/s/erqeru"
+    },
+    {
+      "method": "GET",
+      "path": "/s/mtg7uz"
+    },
+    {
+      "method": "GET",
+      "path": "/u"
+    },
+    {
+      "method": "GET",
+      "path": "/replies/comments"
+    },
+    {
+      "method": "GET",
+      "path": "/u/wehner_milford"
+    },
+    {
+      "method": "GET",
+      "path": "/upvoted/stories"
+    },
+    {
+      "method": "GET",
+      "path": "/replies/stories"
+    },
+    {
+      "method": "GET",
+      "path": "/u/jacobi_luigi"
+    },
+    {
+      "method": "GET",
+      "path": "/replies/unread"
+    },
+    {
+      "method": "GET",
+      "path": "/s/qpvb1w"
+    },
+    {
+      "method": "GET",
+      "path": "/replies/unread"
+    },
+    {
+      "method": "GET",
+      "path": "/upvoted/stories"
+    },
+    {
+      "method": "GET",
+      "path": "/rss"
+    },
+    {
+      "method": "GET",
+      "path": "/s/gyeb9i"
+    },
+    {
+      "method": "GET",
+      "path": "/settings"
+    },
+    {
+      "method": "GET",
+      "path": "/hidden"
+    },
+    {
+      "method": "GET",
+      "path": "/u"
+    },
+    {
+      "method": "GET",
+      "path": "/u"
+    },
+    {
+      "method": "GET",
+      "path": "/upvoted/comments"
+    },
+    {
+      "method": "GET",
+      "path": "/u"
+    },
+    {
+      "method": "GET",
+      "path": "/u"
+    },
+    {
+      "method": "GET",
+      "path": "/replies"
+    },
+    {
+      "method": "GET",
+      "path": "/saved"
+    },
+    {
+      "method": "GET",
+      "path": "/replies/stories"
+    },
+    {
+      "method": "GET",
+      "path": "/comments/5vqbya/reply"
+    },
+    {
+      "method": "GET",
+      "path": "/top?length=1d"
+    },
+    {
+      "method": "GET",
+      "path": "/s/6roxjr"
+    },
+    {
+      "method": "GET",
+      "path": "/settings"
+    },
+    {
+      "method": "GET",
+      "path": "/replies/unread"
+    },
+    {
+      "method": "GET",
+      "path": "/active"
+    },
+    {
+      "method": "GET",
+      "path": "/u"
+    },
+    {
+      "method": "GET",
+      "path": "/newest"
+    },
+    {
+      "method": "GET",
+      "path": "/upvoted/stories"
+    },
+    {
+      "method": "GET",
+      "path": "/comments"
+    },
+    {
+      "method": "GET",
+      "path": "/active"
+    },
+    {
+      "method": "GET",
+      "path": "/rss"
+    },
+    {
+      "method": "GET",
+      "path": "/replies/unread"
+    },
+    {
+      "method": "GET",
+      "path": "/u"
+    },
+    {
+      "method": "GET",
+      "path": "/s/ynpjrk"
+    },
+    {
+      "method": "GET",
+      "path": "/hidden"
+    },
+    {
+      "method": "GET",
+      "path": "/comments"
+    },
+    {
+      "method": "GET",
+      "path": "/newest"
+    },
+    {
+      "method": "GET",
+      "path": "/threads"
+    },
+    {
+      "method": "GET",
+      "path": "/top?length=1w"
+    },
+    {
+      "method": "GET",
+      "path": "/hottest"
+    },
+    {
+      "method": "GET",
+      "path": "/replies"
+    },
+    {
+      "method": "GET",
+      "path": "/active"
+    },
+    {
+      "method": "GET",
+      "path": "/upvoted/stories"
+    },
+    {
+      "method": "GET",
+      "path": "/active"
+    },
+    {
+      "method": "GET",
+      "path": "/u"
+    },
+    {
+      "method": "GET",
+      "path": "/s/hnozyu"
+    },
+    {
+      "method": "GET",
+      "path": "/rss"
+    },
+    {
+      "method": "GET",
+      "path": "/upvoted/comments"
+    },
+    {
+      "method": "GET",
+      "path": "/u/kieth_wyman"
+    },
+    {
+      "method": "GET",
+      "path": "/newest"
+    },
+    {
+      "method": "GET",
+      "path": "/active"
+    },
+    {
+      "method": "GET",
+      "path": "/u"
+    }
+  ]
+}

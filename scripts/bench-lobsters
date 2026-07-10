@@ -18,6 +18,15 @@
 #                   ruby-bench benchmark runs; the file-backed default
 #                   remains for bisection against older runs
 #   --time N        run N timed iterations after the parity pass
+#   --vs-rails      P6 comparison: boot the REAL Rails lobsters (needs the
+#                   ruby-bench checkout's bundle), dump + time the frozen
+#                   114-visit sequence there, then replay the SAME sequence
+#                   against the emit (implies --memory — both stacks must
+#                   run the benchmark's in-mem DB shape) and report
+#                   roundhouse-vs-Rails ms/iter. The frozen sequence is
+#                   versioned at bench/lobsters/frozen-sequence.json; a
+#                   regeneration that differs means the ruby-bench DB or
+#                   generator changed — investigate before comparing.
 #   --out DIR       results dir (default bench/results/lobsters/<timestamp>)
 #
 # Output:
@@ -46,12 +55,14 @@ OUT_DIR=""
 SKIP_EMIT=0
 TIME_ITERS=0
 MEMORY=0
+VS_RAILS=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --src)       SRC="$2"; shift 2 ;;
         --skip-emit) SKIP_EMIT=1; shift ;;
         --memory)    MEMORY=1; shift ;;
+        --vs-rails)  VS_RAILS=1; MEMORY=1; shift ;;
         --time)      TIME_ITERS="$2"; shift 2 ;;
         --out)       OUT_DIR="$2"; shift 2 ;;
         -h|--help)   sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
@@ -114,11 +125,31 @@ for g in sqlite3 bcrypt htmlentities rotp; do
     fi
 done
 
+# ── Rails side (P6 comparison) ───────────────────────────────────────
+FROZEN_SEQ="$REPO_ROOT/bench/lobsters/frozen-sequence.json"
+if (( VS_RAILS == 1 )); then
+    step "timing real Rails on the frozen sequence (boot + 15 warmup + >=10 iters; several minutes)"
+    ruby "$REPO_ROOT/scripts/lobsters-rails-replay" \
+        --src "$SRC" \
+        --seq-out "$OUT_DIR/sequence.json" \
+        --json "$OUT_DIR/rails.json"
+    if [[ -f "$FROZEN_SEQ" ]]; then
+        if ! diff -q "$FROZEN_SEQ" "$OUT_DIR/sequence.json" >/dev/null; then
+            fail "regenerated sequence DIFFERS from $FROZEN_SEQ — ruby-bench DB/generator changed; comparison vs older runs is invalid"
+        fi
+    else
+        mkdir -p "$(dirname "$FROZEN_SEQ")"
+        cp "$OUT_DIR/sequence.json" "$FROZEN_SEQ"
+        ok "froze sequence at $FROZEN_SEQ (commit it)"
+    fi
+fi
+
 # ── replay ───────────────────────────────────────────────────────────
 step "replaying benchmark routes (in-process Main.run_rack)"
 REPLAY_ARGS=(--json "$OUT_DIR/summary.json" --md "$OUT_DIR/summary.md")
 (( TIME_ITERS > 0 )) && REPLAY_ARGS+=(--time "$TIME_ITERS")
 (( MEMORY == 1 ))    && REPLAY_ARGS+=(--memory)
+(( VS_RAILS == 1 ))  && REPLAY_ARGS+=(--sequence "$OUT_DIR/sequence.json")
 
 status=0
 (cd "$OUT_TREE" && ruby "$REPO_ROOT/scripts/lobsters-replay" "${REPLAY_ARGS[@]}") || status=$?
@@ -149,6 +180,27 @@ if [[ -f "$PREV_LINK/summary.json" && -f "$OUT_DIR/summary.json" ]]; then
         end
       end
     ' "$PREV_NAME" "$PREV_LINK/summary.json" "$OUT_DIR/summary.json" || true
+fi
+
+# ── roundhouse vs Rails ──────────────────────────────────────────────
+if (( VS_RAILS == 1 )) && [[ -f "$OUT_DIR/rails.json" && -f "$OUT_DIR/summary.json" ]]; then
+    ruby -rjson -e '
+      rails   = JSON.parse(File.read(ARGV[0]))
+      ours    = JSON.parse(File.read(ARGV[1]))["sequence_timing"]
+      abort "no sequence_timing in summary.json" unless ours
+      r, o = rails["ms_per_iter_median"], ours["ms_per_iter_median"]
+      ratio = (r / o).round(2)
+      partial = ours["partial"] ? " [PARTIAL — #{ours["failed_visits"]} failing visits]" : ""
+      puts "", "== roundhouse vs Rails (frozen #{rails["visits_per_iter"]}-visit sequence) =="
+      puts "  rails:      #{r} ms/iter (#{rails["iterations"]} iters, #{rails["ruby"][/ruby [^ ]+/]}, rails #{rails["rails"]})"
+      puts "  roundhouse: #{o} ms/iter (#{ours["iterations"]} iters)#{partial}"
+      puts "  ratio:      #{ratio}x #{r > o ? "faster" : "SLOWER"} than Rails"
+      md = "\n## roundhouse vs Rails\n\n| stack | ms/iter median | iters |\n|-------|---:|---:|\n" \
+           "| rails #{rails["rails"]} | #{r} | #{rails["iterations"]} |\n" \
+           "| roundhouse#{partial} | #{o} | #{ours["iterations"]} |\n\n" \
+           "**#{ratio}x #{r > o ? "faster" : "slower"} than Rails**\n"
+      File.write(ARGV[2], md, mode: "a")
+    ' "$OUT_DIR/rails.json" "$OUT_DIR/summary.json" "$OUT_DIR/summary.md" || true
 fi
 
 ln -sfn "$(basename "$OUT_DIR")" "$REPO_ROOT/bench/results/lobsters/latest" 2>/dev/null || true

@@ -1,0 +1,139 @@
+#!/usr/bin/env ruby
+# scripts/lobsters-rails-replay — the Rails half of the P6 comparison.
+#
+# Boots the REAL ruby-bench lobsters app the way its benchmark.rb does
+# (RAILS_ENV=production, file DB copied into :memory: via SQLite3::Backup),
+# generates the benchmark's frozen route sequence (RouteGenerator, RNG seed
+# 0x1be52551fc152997 — 114 authenticated GET visits), then replays it with
+# the ruby-bench timing rule:
+#
+#   WARMUP_ITRS full-sequence iterations, discarded, then keep iterating
+#   until >= MIN_BENCH_ITRS timed iterations AND >= MIN_BENCH_TIME seconds
+#   of timed wall clock. Metric = ms per full-sequence iteration.
+#
+# scripts/lobsters-replay --sequence replays the SAME frozen JSON with the
+# SAME rule against the roundhouse emit; keep the two loops in sync.
+#
+# Usage:
+#   scripts/lobsters-rails-replay [--src DIR] [--seq-out PATH] [--json PATH]
+#                                 [--warmup N] [--min-iters N] [--min-time S]
+#
+#   --src DIR      lobsters checkout (default $LOBSTERS_SRC, else
+#                  ~/git/ruby-bench/benchmarks/lobsters)
+#   --seq-out PATH write the frozen sequence as JSON (visits: method/path)
+#   --json PATH    write timing summary JSON
+#
+# Self-bootstraps into the lobsters bundle: re-execs itself under
+# `bundle exec` from the --src directory, so it can be run from anywhere.
+
+require "json"
+
+opts = { src: ENV["LOBSTERS_SRC"] || File.expand_path("~/git/ruby-bench/benchmarks/lobsters"),
+         warmup: 15, min_iters: 10, min_time: 10 }
+args = ARGV.dup
+until args.empty?
+  case (a = args.shift)
+  when "--src"       then opts[:src]       = File.expand_path(args.shift)
+  when "--seq-out"   then opts[:seq_out]   = File.expand_path(args.shift)
+  when "--json"      then opts[:json]      = File.expand_path(args.shift)
+  when "--warmup"    then opts[:warmup]    = Integer(args.shift)
+  when "--min-iters" then opts[:min_iters] = Integer(args.shift)
+  when "--min-time"  then opts[:min_time]  = Integer(args.shift)
+  else abort "lobsters-rails-replay: unknown arg #{a}"
+  end
+end
+
+unless ENV["LOBSTERS_RAILS_REPLAY_BOOTSTRAPPED"]
+  ENV["LOBSTERS_RAILS_REPLAY_BOOTSTRAPPED"] = "1"
+  ENV["RAILS_ENV"] = "production"
+  ENV["DISABLE_DATABASE_ENVIRONMENT_CHECK"] = "1"
+  me = File.expand_path(__FILE__) # resolve BEFORE chdir
+  Dir.chdir(opts[:src])
+  # Re-exec under the lobsters bundle with normalized (absolute) args.
+  argv = ["--src", opts[:src], "--warmup", opts[:warmup].to_s,
+          "--min-iters", opts[:min_iters].to_s, "--min-time", opts[:min_time].to_s]
+  argv += ["--seq-out", opts[:seq_out]] if opts[:seq_out]
+  argv += ["--json", opts[:json]] if opts[:json]
+  exec("bundle", "exec", "ruby", me, *argv)
+end
+
+# ── boot (mirrors benchmark.rb) ──────────────────────────────────────
+$stderr.puts "booting Rails lobsters (production, in-mem DB)..."
+require_relative File.join(opts[:src], "config/environment")
+require_relative File.join(opts[:src], "route_generator")
+
+mem_db  = ActiveRecord::Base.connection.raw_connection
+file_db = SQLite3::Database.new(File.join(opts[:src], "db/production.sqlite3"))
+b = SQLite3::Backup.new(mem_db, "main", file_db, "main")
+b.step(-1)
+b.finish
+file_db.close
+
+app = Rails.application
+generator = RouteGenerator.new(app)
+routes = generator.routes # generates the frozen sequence; logs in as a side effect
+$stderr.puts "frozen sequence: #{routes.size} visits"
+
+if opts[:seq_out]
+  seq = routes.map do |env|
+    path = env["PATH_INFO"]
+    path += "?#{env['QUERY_STRING']}" unless env["QUERY_STRING"].to_s.empty?
+    { "method" => env["REQUEST_METHOD"], "path" => path }
+  end
+  File.write(opts[:seq_out], JSON.pretty_generate(
+    "seed" => "0x1be52551fc152997", "visits" => seq
+  ))
+  $stderr.puts "sequence written to #{opts[:seq_out]}"
+end
+
+# ── replay loop (benchmark.rb's inner block, verbatim semantics) ─────
+def run_sequence!(generator, routes)
+  routes.each_with_index do |env, idx|
+    path = env["PATH_INFO"]
+    resp = generator.visit(env)
+    unless resp.first == 200
+      raise "HTTP #{resp.first} != 200 for visit #{idx}/#{routes.size} #{path.inspect}"
+    end
+    resp.last.close if resp.last.respond_to?(:close)
+  end
+end
+
+def now_ms = Process.clock_gettime(Process::CLOCK_MONOTONIC) * 1000.0
+
+$stderr.puts "warmup x#{opts[:warmup]}..."
+opts[:warmup].times { run_sequence!(generator, routes) }
+
+$stderr.puts "timing (>= #{opts[:min_iters]} iters and >= #{opts[:min_time]}s)..."
+iters = []
+total = 0.0
+until iters.size >= opts[:min_iters] && total >= opts[:min_time] * 1000.0
+  t0 = now_ms
+  run_sequence!(generator, routes)
+  ms = now_ms - t0
+  iters << ms
+  total += ms
+end
+
+sorted = iters.sort
+mid = sorted.size / 2
+median = sorted.size.odd? ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2.0
+
+summary = {
+  "stack"              => "rails",
+  "generated_at"       => Time.now.utc.iso8601,
+  "ruby"               => RUBY_DESCRIPTION,
+  "rails"              => Rails::VERSION::STRING,
+  "visits_per_iter"    => routes.size,
+  "warmup"             => opts[:warmup],
+  "iterations"         => iters.size,
+  "ms_per_iter_median" => median.round(2),
+  "ms_per_iter_min"    => sorted.first.round(2),
+  "ms_per_iter_max"    => sorted.last.round(2),
+  "iter_ms"            => iters.map { |x| x.round(2) },
+}
+File.write(opts[:json], JSON.pretty_generate(summary)) if opts[:json]
+puts "rails: #{median.round(2)} ms/iter median over #{iters.size} iterations " \
+     "(min #{sorted.first.round(2)}, max #{sorted.last.round(2)})"
+
+# benchmark.rb's disk-hygiene: production.log grows on every request.
+File.unlink(File.join(opts[:src], "log/production.log")) rescue nil

@@ -22,8 +22,18 @@
 #   --time N      after the parity pass, run N timed iterations of the
 #                 full route sequence and report ms/iter. A dev trend
 #                 line only — NOT the ruby-bench metric (that replays the
-#                 frozen 114-visit RNG sequence; see the P6 plan) — and
+#                 frozen 114-visit RNG sequence via --sequence) — and
 #                 marked partial while any route still fails.
+#   --sequence F  P6 mode: after the parity pass, replay the frozen
+#                 114-visit sequence in F (scripts/lobsters-rails-replay
+#                 --seq-out dumps it) under the ruby-bench timing rule:
+#                 --warmup N iterations discarded (default 15), then
+#                 iterate until >= --time N iters (default 10) AND
+#                 >= --min-time S seconds (default 10). Keep the loop in
+#                 sync with scripts/lobsters-rails-replay — the numbers
+#                 are only comparable if both sides do identical work.
+#   --warmup N    warmup iterations for --sequence (default 15)
+#   --min-time S  minimum timed seconds for --sequence (default 10)
 #   --db PATH     benchmark DB (default storage/bench.sqlite3)
 #   --memory      serve from an in-memory SQLite seeded from --db at
 #                 boot via SQLite3::Backup — the exact shape the real
@@ -51,6 +61,9 @@ until args.empty?
   when "--time"  then opts[:time]  = Integer(args.shift)
   when "--db"    then opts[:db]    = args.shift
   when "--memory" then opts[:memory] = true
+  when "--sequence" then opts[:sequence] = args.shift
+  when "--warmup"   then opts[:warmup]   = Integer(args.shift)
+  when "--min-time" then opts[:min_time] = Integer(args.shift)
   when "--quiet" then opts[:quiet] = true
   else abort "lobsters-replay: unknown arg #{a}"
   end
@@ -219,8 +232,65 @@ summary.merge!(
   "routes" => results,
 )
 
+# ── P6: frozen-sequence replay (ruby-bench timing rule) ──────────────
+if opts[:sequence]
+  visits = JSON.parse(File.read(opts[:sequence]))["visits"]
+  puts "\nreplaying frozen sequence (#{visits.size} visits)" unless opts[:quiet]
+
+  # Verification pass: every visit must be 200 (the benchmark raises on
+  # anything else). Collect failures instead of raising so the report
+  # shows ALL of them; any failure marks the timing partial.
+  seq_fails = []
+  visits.each_with_index do |v, idx|
+    st, _h, body = req(v["method"], v["path"])
+    next if st == 200
+    seq_fails << { "idx" => idx, "method" => v["method"], "path" => v["path"],
+                   "status" => st == :EXC ? "EXC" : st,
+                   "error"  => body.to_s.lines.first(3).join.strip[0, 300] }
+  end
+  if seq_fails.any? && !opts[:quiet]
+    puts "SEQUENCE FAILURES (#{seq_fails.size}/#{visits.size} visits):"
+    seq_fails.first(10).each { |f| puts "  #{f['path']} -> #{f['status']}" }
+  end
+
+  warmup      = opts[:warmup]   || 15
+  min_iters   = (opts[:time] && opts[:time] > 0) ? opts[:time] : 10
+  min_time_ms = (opts[:min_time] || 10) * 1000.0
+
+  run_seq = -> { visits.each { |v| req(v["method"], v["path"]) } }
+
+  # Verification counted as work, not warmup — start the warmups fresh.
+  warmup.times { run_seq.call }
+  iters = []
+  total = 0.0
+  until iters.size >= min_iters && total >= min_time_ms
+    t0 = now_ms
+    run_seq.call
+    ms = now_ms - t0
+    iters << ms
+    total += ms
+  end
+  sorted = iters.sort
+  mid = sorted.size / 2
+  median = sorted.size.odd? ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2.0
+  summary["sequence_timing"] = {
+    "sequence"           => opts[:sequence],
+    "visits_per_iter"    => visits.size,
+    "warmup"             => warmup,
+    "iterations"         => iters.size,
+    "ms_per_iter_median" => median.round(2),
+    "ms_per_iter_min"    => sorted.first.round(2),
+    "ms_per_iter_max"    => sorted.last.round(2),
+    "iter_ms"            => iters.map { |x| x.round(2) },
+    "failed_visits"      => seq_fails.size,
+    "partial"            => !seq_fails.empty?,
+  }
+  summary["sequence_failures"] = seq_fails unless seq_fails.empty?
+  puts "sequence: #{median.round(2)} ms/iter median over #{iters.size} iterations" \
+       "#{seq_fails.any? ? " (PARTIAL: #{seq_fails.size} failing visits)" : ''}"
+
 # ── optional timed iterations ────────────────────────────────────────
-if opts[:time] && opts[:time] > 0
+elsif opts[:time] && opts[:time] > 0
   iters = Array.new(opts[:time]) do
     t0 = now_ms
     ROUTES.each { |r| req("GET", r) }
@@ -265,6 +335,15 @@ if opts[:md]
     md << "\n## Timing#{t['partial'] ? ' (PARTIAL — failing routes short-circuit)' : ''}\n\n"
     md << "#{t['ms_per_iter_median']} ms/iter median over #{t['iterations']} iterations "
     md << "(min #{t['ms_per_iter_min']}, max #{t['ms_per_iter_max']})\n"
+  end
+  if (t = summary["sequence_timing"])
+    md << "\n## Frozen-sequence timing#{t['partial'] ? " (PARTIAL — #{t['failed_visits']} failing visits)" : ''}\n\n"
+    md << "#{t['ms_per_iter_median']} ms/iter median over #{t['iterations']} iterations "
+    md << "of #{t['visits_per_iter']} visits (min #{t['ms_per_iter_min']}, max #{t['ms_per_iter_max']}, "
+    md << "warmup #{t['warmup']})\n"
+    (summary["sequence_failures"] || []).each do |f|
+      md << "- FAIL `#{f['path']}` -> #{f['status']}: `#{f['error']}`\n"
+    end
   end
   File.write(opts[:md], md)
 end
