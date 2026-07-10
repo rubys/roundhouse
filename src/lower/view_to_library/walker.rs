@@ -584,6 +584,7 @@ mod tests {
             stylesheets: Vec::new(),
             partial_ivars: Default::default(),
             dyn_pools: Default::default(),
+            partial_extras: Default::default(),
         }
     }
 

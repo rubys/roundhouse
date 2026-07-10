@@ -34,7 +34,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
         // module. The arg is the first hash entry's value (Rails
         // convention; additional hash entries get dropped today —
         // matches existing classifier policy).
-        RenderPartial::Named { partial, arg } => {
+        RenderPartial::Named { partial, arg, locals } => {
             let (module_dir, base_name) = match partial.rsplit_once('/') {
                 Some((dir, name)) => (dir.to_string(), name.to_string()),
                 None => (ctx.resource_dir.clone(), (*partial).to_string()),
@@ -45,9 +45,48 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             let module_camel = camelize(&snake_case(&module_dir));
             let method_sym = base_name.trim_start_matches('_').to_string();
 
-            let arg_expr = arg.cloned().unwrap_or_else(nil_lit);
+            // An explicit `locals:` hash binds by NAME: the entry matching
+            // the partial's record-arg convention (singular of its dir)
+            // becomes the record; remaining entries land at their matching
+            // trailing extra-param positions (nil-filled gaps). Without
+            // `locals:`, the single bare `name: rec` value stays the record
+            // (historical behavior).
+            let lookup_local = |name: &str| -> Option<Expr> {
+                locals.and_then(|entries| {
+                    entries.iter().find_map(|(k, v)| match &*k.node {
+                        ExprNode::Lit { value: Literal::Sym { value } }
+                            if value.as_str() == name =>
+                        {
+                            Some(v.clone())
+                        }
+                        _ => None,
+                    })
+                })
+            };
+            let record_name = singularize(&snake_case(&module_camel));
+            let arg_expr = if locals.is_some() {
+                lookup_local(&record_name).unwrap_or_else(nil_lit)
+            } else {
+                arg.cloned().unwrap_or_else(nil_lit)
+            };
             let mut call_args = vec![arg_expr];
             call_args.extend(partial_extra_args(ctx, &module_camel, &method_sym));
+            if locals.is_some() {
+                if let Some(extras) = ctx
+                    .partial_extras
+                    .get(&(module_camel.clone(), method_sym.clone()))
+                {
+                    // Only emit up to the LAST extra actually provided —
+                    // wholly-absent tails keep the short call.
+                    let bound: Vec<Option<Expr>> =
+                        extras.iter().map(|e| lookup_local(e)).collect();
+                    if let Some(last) = bound.iter().rposition(|b| b.is_some()) {
+                        for b in bound.into_iter().take(last + 1) {
+                            call_args.push(b.unwrap_or_else(nil_lit));
+                        }
+                    }
+                }
+            }
             let render_call = send(
                 Some(Expr::new(
                     Span::synthetic(),

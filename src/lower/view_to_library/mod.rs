@@ -358,6 +358,7 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         stylesheets: app.stylesheets.clone(),
         partial_ivars: closures.clone(),
         dyn_pools: dyn_pools.clone(),
+        partial_extras: std::rc::Rc::new(partial_extras_map(app)),
     };
 
     let mut body_stmts: Vec<Expr> = Vec::new();
@@ -1152,6 +1153,34 @@ pub(crate) fn view_uses_bare_name(body: &Expr, name: &str) -> bool {
 /// `camelize(snake_case(dir))` plus the rendered action/partial name.
 pub(crate) type ViewKey = (String, String);
 
+/// Per-PARTIAL extras list ((module, method) → collect_extra_params
+/// output), so a render call site carrying an explicit `locals:` hash
+/// can bind values to the partial's trailing extra params positionally.
+/// Mirrors the def-site computation in build_library_class exactly —
+/// same ivar rewrite, same trim, same collector — so the orders can't
+/// drift.
+pub(super) fn partial_extras_map(
+    app: &App,
+) -> std::collections::HashMap<(String, String), Vec<String>> {
+    let known_models: Vec<String> =
+        app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
+    let mut out: std::collections::HashMap<(String, String), Vec<String>> =
+        std::collections::HashMap::new();
+    for view in &app.views {
+        let (dir, base) = split_view_name(view.name.as_str());
+        if dir.is_empty() || !base.starts_with('_') {
+            continue;
+        }
+        let stem = base.trim_start_matches('_');
+        let arg_name = infer_view_arg(stem, dir, true, &known_models);
+        let rewritten = rewrite_ivars_to_locals(&view.body);
+        let rewritten = crate::lower::erb_trim::trim_view(&rewritten);
+        let extras = collect_extra_params(&rewritten, &arg_name);
+        out.insert((camelize(&snake_case(dir)), stem.to_string()), extras);
+    }
+    out
+}
+
 fn view_key_of(v: &View) -> Option<ViewKey> {
     let (dir, base) = split_view_name(v.name.as_str());
     if dir.is_empty() {
@@ -1917,6 +1946,12 @@ pub(super) struct ViewCtx {
     /// without dynamic partials (the blog), so the dispatch never fires.
     pub(super) dyn_pools:
         std::rc::Rc<std::collections::HashMap<(String, Symbol), Vec<String>>>,
+    /// Per-partial extras list (`partial_extras_map`): the trailing
+    /// nil-default params (notice/alert/defined?-marked locals) in def
+    /// order. `emit_render_partial` binds an explicit `locals:` hash's
+    /// values to these positions.
+    pub(super) partial_extras:
+        std::rc::Rc<std::collections::HashMap<(String, String), Vec<String>>>,
 }
 
 /// Every `belongs_to`/`has_one` association name across the app's models

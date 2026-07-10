@@ -74,10 +74,18 @@ pub enum RenderPartial<'a> {
     /// a receiver Var/Ivar, calling a partial per element.
     Association { receiver: &'a Expr, method: &'a str },
     /// `render "posts/post", post: @post` — call a named partial
-    /// with the first hash entry's value as its argument. Every
-    /// target ignores additional hash entries today; centralizing
-    /// that quirk here keeps it documented.
-    Named { partial: &'a str, arg: Option<&'a Expr> },
+    /// with the first hash entry's value as its argument. When the
+    /// kwarg form carries an explicit `locals:` hash (`render partial:
+    /// "stories/listdetail", locals: { story: @story, single_story:
+    /// true }`), its entries ride in `locals` so the emitter can bind
+    /// the record by name and thread the remaining locals into the
+    /// partial's extra params; targets without that support ignore it
+    /// (the historical drop-extra-entries quirk).
+    Named {
+        partial: &'a str,
+        arg: Option<&'a Expr>,
+        locals: Option<&'a [(Expr, Expr)]>,
+    },
     /// `render partial: "stories/listdetail", collection: stories, as:
     /// :story` — the explicit-kwarg collection form: iterate `collection`,
     /// calling the explicitly-named partial per element with the element
@@ -153,6 +161,7 @@ pub fn classify_render_partial<'a>(
             Some(RenderPartial::Named {
                 partial: partial.as_str(),
                 arg,
+                locals: None,
             })
         }
         _ => None,
@@ -176,6 +185,7 @@ fn classify_render_kwargs(entries: &[(Expr, Expr)]) -> Option<RenderPartial<'_>>
     let mut collection: Option<&Expr> = None;
     let mut as_name: Option<&str> = None;
     let mut first_local: Option<&Expr> = None;
+    let mut locals_entries: Option<&[(Expr, Expr)]> = None;
     for (k, v) in entries {
         match key_of(k).as_deref() {
             Some("partial") => match &*v.node {
@@ -194,9 +204,18 @@ fn classify_render_kwargs(entries: &[(Expr, Expr)]) -> Option<RenderPartial<'_>>
                     as_name = Some(value.as_str());
                 }
             }
-            // `locals: {…}` or a bare `name: rec` local — pass the value
-            // through as the single named-partial arg (Rails passes the
-            // record under its local name; positional binding handles it).
+            // An explicit `locals: {…}` hash — keep the entries so the
+            // emitter can bind record + extra locals by name.
+            Some("locals") => {
+                if let ExprNode::Hash { entries, .. } = &*v.node {
+                    locals_entries = Some(entries);
+                } else if first_local.is_none() {
+                    first_local = Some(v);
+                }
+            }
+            // A bare `name: rec` local — pass the value through as the
+            // single named-partial arg (Rails passes the record under its
+            // local name; positional binding handles it).
             Some(_) => {
                 if first_local.is_none() {
                     first_local = Some(v);
@@ -227,6 +246,7 @@ fn classify_render_kwargs(entries: &[(Expr, Expr)]) -> Option<RenderPartial<'_>>
         Some(RenderPartial::Named {
             partial,
             arg: first_local,
+            locals: locals_entries,
         })
     }
 }

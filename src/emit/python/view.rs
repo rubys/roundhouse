@@ -1277,7 +1277,7 @@ fn emit_py_render_partial(
                 "_buf += \"\".join({partial_fn}(_c) for _c in {parent_name}.{method}())"
             )
         }
-        RenderPartial::Named { partial, arg } => {
+        RenderPartial::Named { partial, arg, .. } => {
             let partial_fn = format!(
                 "render_{}_{}",
                 ctx.resource_dir,
