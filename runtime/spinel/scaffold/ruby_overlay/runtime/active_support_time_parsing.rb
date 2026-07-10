@@ -23,9 +23,35 @@
 require "time"
 
 module ActiveSupport
+  # Rails zone name → IANA identifier (the ActiveSupport::TimeZone::
+  # MAPPING subset corpora have needed; extend as apps demand). Names
+  # not listed pass through unchanged — a valid IANA string works
+  # as-is in TZ. Consumed by main.rb's boot-time ENV["TZ"] pin.
+  RAILS_TZ_TO_IANA = {
+    "UTC" => "UTC",
+    "Eastern Time (US & Canada)" => "America/New_York",
+    "Central Time (US & Canada)" => "America/Chicago",
+    "Mountain Time (US & Canada)" => "America/Denver",
+    "Pacific Time (US & Canada)" => "America/Los_Angeles",
+    "Arizona" => "America/Phoenix",
+    "Hawaii" => "Pacific/Honolulu",
+    "Alaska" => "America/Anchorage",
+    "London" => "Europe/London",
+    "Paris" => "Europe/Paris",
+    "Berlin" => "Europe/Berlin",
+    "Tokyo" => "Asia/Tokyo",
+    "Sydney" => "Australia/Sydney",
+  }.freeze
+
   def self.parse_db_time(str)
     return nil if str.nil? || str.empty?
-    str =~ /(Z|[+-]\d\d:?\d\d)\z/ ? Time.parse(str) : Time.parse("#{str} UTC")
+    t = str =~ /(Z|[+-]\d\d:?\d\d)\z/ ? Time.parse(str) : Time.parse("#{str} UTC")
+    # Present in the app's zone, exactly as ActiveRecord returns
+    # TimeWithZone values in Time.zone: main.rb pins ENV["TZ"] to the
+    # app's config.time_zone (default UTC — Rails' default — so
+    # rendered offsets never follow the HOST's zone). Instants are
+    # unchanged; only strftime/iso8601 presentation moves.
+    t.getlocal
   end
 
   # Write-side sibling of `parse_db_time`: current UTC time in Rails'

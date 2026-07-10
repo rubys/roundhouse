@@ -262,6 +262,20 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             };
         let mut methods = class_methods;
         methods.extend(singleton_methods);
+        // `config.time_zone = "..."` — the one config-DSL assignment
+        // the render layer is required to honor: Rails presents every
+        // AR temporal value in this zone (lobsters runs Central).
+        // Synthesized as a `config_time_zone` method on the
+        // Application reopen; the CRuby overlay maps it to an IANA TZ
+        // at boot (main.rb pins ENV["TZ"]). Every other config.* line
+        // remains railtie noise ingest deliberately does not model.
+        if let Some(zone) = extract_config_time_zone(&source) {
+            if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
+                "def config_time_zone\n  {zone:?}\nend\n"
+            )) {
+                methods.append(&mut synth);
+            }
+        }
         if !methods.is_empty() {
             app.rails_application = Some(crate::dialect::LibraryClass {
                 name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
@@ -795,4 +809,38 @@ fn read_rb_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<PathB
     collect(vfs, dir, &mut out)?;
     out.sort();
     Ok(out)
+}
+
+/// Extract the string value of a `config.time_zone = "..."` assignment
+/// from config/application.rb. A textual line scan, not a parse: the
+/// file is railtie soup ingest deliberately does not model, and this
+/// one assignment is load-bearing for render parity (Rails presents
+/// every ActiveRecord temporal value in this zone). Commented lines —
+/// the `rails new` template ships `# config.time_zone = …` — don't
+/// match.
+fn extract_config_time_zone(source: &[u8]) -> Option<String> {
+    let source = String::from_utf8_lossy(source);
+    for line in source.lines() {
+        let t = line.trim_start();
+        if t.starts_with('#') {
+            continue;
+        }
+        let Some(rest) = t.strip_prefix("config.time_zone") else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let quote = rest.chars().next()?;
+        if quote != '"' && quote != '\'' {
+            return None;
+        }
+        let inner = &rest[1..];
+        if let Some(end) = inner.find(quote) {
+            return Some(inner[..end].to_string());
+        }
+    }
+    None
 }

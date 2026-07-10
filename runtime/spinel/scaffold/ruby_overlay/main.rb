@@ -129,6 +129,18 @@ begin
   require_relative "config/application"
 rescue LoadError
 end
+# Pin the process zone to the app's config.time_zone (ingest
+# synthesizes `config_time_zone` from the one config-DSL line the
+# render layer must honor; absent → "UTC", Rails' default). Rails
+# presents every AR temporal value in this zone REGARDLESS of the
+# host's zone — parse_db_time hydrates UTC then `.getlocal` lands
+# here, so strftime/iso8601/pubDate offsets match Rails on any host.
+tz_name = if Rails.application.respond_to?(:config_time_zone)
+  Rails.application.config_time_zone
+else
+  "UTC"
+end
+ENV["TZ"] = ActiveSupport::RAILS_TZ_TO_IANA.fetch(tz_name, tz_name)
 require_relative "app/views"
 
 module Main
