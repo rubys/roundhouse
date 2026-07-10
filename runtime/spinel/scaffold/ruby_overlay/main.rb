@@ -160,6 +160,18 @@ module Main
   # ActionView`/`include ActionDispatch` + bare names) so spinel-AOT's
   # constant resolver sees the references without walking included-
   # module namespaces — a path it doesn't currently follow.
+
+  # The composed dispatch table, built once. `Routes.table` is an
+  # emitted def that CONSTRUCTS every Route object on each call —
+  # rebuilding ~200 of them per request (~23k allocations per bench
+  # iteration) is pure GC pressure for boot-time constants. At today's
+  # baseline the ms/iter delta is inside run noise; this is allocation
+  # hygiene, not a measured win. (Benign race under Puma threads: both
+  # winners compute the same array.)
+  def self.route_table
+    @route_table ||= [Routes.root] + Routes.table
+  end
+
   def self.dispatch_core(env, stdin)
     # Rails wraps every request in the AR query cache: identical
     # SELECTs within one request replay the first result; any write
@@ -195,7 +207,7 @@ module Main
     # legibility (it's the only literal-pattern entry); the dispatch
     # composes them here so Router.match stays a flat-table walk.
     matched = ActionDispatch::Router.match(request[:method], request_path,
-                           [Routes.root] + Routes.table)
+                           route_table)
     if matched.nil?
       return [404, "<h1>404 Not Found</h1>", "text/html; charset=utf-8", nil, {}]
     end

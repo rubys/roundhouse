@@ -25,7 +25,15 @@ module ActionView
   module ViewHelpers
     def self.html_escape(s)
       return s if s.html_safe?
-      s.gsub(HTML_ESCAPE_PATTERN, HTML_ESCAPES)
+      # CGI.escapeHTML is the C-accelerated escape — same five entities,
+      # byte-identical output incl. &#39; for apostrophe (verified
+      # against HTML_ESCAPES, and against the 26-route parity dumps).
+      # Rails' own ERB::Util.html_escape rides this same C path; the
+      # pure-Ruby gsub form profiled as a visible String#gsub band,
+      # though at today's ~137ms/iter baseline the delta is inside
+      # run-to-run noise — this is the strictly-better form, not a
+      # measured win.
+      CGI.escapeHTML(s)
     end
 
     # `raw(x)` marks — it must return a SafeString (the shared default
