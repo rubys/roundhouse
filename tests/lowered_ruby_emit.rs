@@ -359,7 +359,7 @@ fn comment_broadcasts_compose_with_block_form_callback() {
         .split("def ").next().unwrap();
     assert!(
         create_block.contains("Broadcasts.append")
-            && create_block.contains("parent = article")
+            && create_block.contains("parent = self.article")
             && create_block.contains("Broadcasts.replace(stream: \"articles\""),
         "expected composed body; got:\n{create_block}",
     );
@@ -367,7 +367,7 @@ fn comment_broadcasts_compose_with_block_form_callback() {
     // BEFORE the rewritten parent-cascade — composition order matches
     // source-order semantics.
     let pos_append = create_block.find("Broadcasts.append").unwrap();
-    let pos_parent = create_block.find("parent = article").unwrap();
+    let pos_parent = create_block.find("parent = self.article").unwrap();
     assert!(pos_append < pos_parent, "{create_block}");
 }
 
@@ -387,7 +387,7 @@ fn comment_block_callbacks_render_as_methods() {
     assert!(src.contains("def after_destroy_commit"), "{src}");
     // Rewrite produced the spinel-shape sequence; original `rescue nil`
     // wrapper is dropped (the explicit `return if parent.nil?` covers it).
-    assert!(src.contains("parent = article"), "{src}");
+    assert!(src.contains("parent = self.article"), "{src}");
     assert!(src.contains("return if parent.nil?"), "{src}");
     assert!(
         src.contains("Broadcasts.replace(stream: \"articles\", target: \"article_#{parent.id}\", html: Views::Articles.article(parent))"),
@@ -1048,11 +1048,11 @@ fn controllers_params_helper_use_sites_call_typed_factory() {
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     assert!(
-        src.contains("Article.from_params(article_params)"),
+        src.contains("Article.from_params(self.article_params)"),
         "expected `Article.from_params(article_params)`; got:\n{src}",
     );
     assert!(
-        src.contains("@article.update(article_params)"),
+        src.contains("@article.update(self.article_params)"),
         "expected `update(article_params)` (typed); got:\n{src}",
     );
     // Legacy forms must not appear.
@@ -1125,7 +1125,7 @@ fn comments_create_expands_assoc_build_to_typed_factory_with_fk() {
     let files = lowered_real_blog_controllers();
     let src = find(&files, "comments_controller.rb");
     assert!(
-        src.contains("@comment = Comment.from_params(comment_params)"),
+        src.contains("@comment = Comment.from_params(self.comment_params)"),
         "expected typed-factory in build; got:\n{src}",
     );
     assert!(

@@ -252,6 +252,25 @@ fn ingest_method(
                 ));
             }
         }
+        // Keyword params (`def recent_threads(amount, for_user: nil)`),
+        // required (`k:`) and optional (`k: default`) alike. Dropping
+        // them left `def recent_threads(amount)` with a body reading
+        // `for_user` — an ArgumentError at every kwarg call site.
+        // Rest/block params still fall through unrecorded.
+        for kw in pn.keywords().iter() {
+            if let Some(okw) = kw.as_optional_keyword_parameter_node() {
+                let default = ingest_expr(&okw.value(), file)?;
+                params.push(crate::dialect::Param::keyword(
+                    Symbol::from(constant_id_str(&okw.name())),
+                    Some(default),
+                ));
+            } else if let Some(rkw) = kw.as_required_keyword_parameter_node() {
+                params.push(crate::dialect::Param::keyword(
+                    Symbol::from(constant_id_str(&rkw.name())),
+                    None,
+                ));
+            }
+        }
     }
 
     let body = match def.body() {

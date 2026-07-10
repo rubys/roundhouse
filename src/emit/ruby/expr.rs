@@ -684,10 +684,14 @@ pub(super) fn emit_send_base(
         // can't drop to the implicit form — bare `class` parses as the
         // keyword. Keep the explicit `self.class` (falls to the Some(r) arm).
         && !is_ruby_keyword(m)
+        // A ZERO-ARG bare name is the one form Ruby resolves lexically:
+        // after `comments = self.comments.x`, a bare `comments` on the
+        // RHS is the just-declared (nil) local, not the method. Args or
+        // parens always parse as a call, so those forms still elide;
+        // zero-arg reads keep the explicit `self.` (unconditionally
+        // safe — since Ruby 2.7 explicit self reaches private methods).
+        && !args_s.is_empty()
     {
-        if args_s.is_empty() {
-            return method.to_string();
-        }
         if parenthesized {
             return format!("{method}({})", args_s.join(", "));
         }

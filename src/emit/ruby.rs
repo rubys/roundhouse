@@ -45,9 +45,15 @@ pub fn emit_method(m: &MethodDef) -> String {
     let mut ps: Vec<String> = m
         .params
         .iter()
-        .map(|p| match &p.default {
-            Some(default) => format!("{} = {}", p.name.as_str(), expr::emit_expr(default)),
-            None => p.name.as_str().to_string(),
+        .map(|p| match (&p.default, p.keyword) {
+            (Some(default), false) => {
+                format!("{} = {}", p.name.as_str(), expr::emit_expr(default))
+            }
+            (Some(default), true) => {
+                format!("{}: {}", p.name.as_str(), expr::emit_expr(default))
+            }
+            (None, true) => format!("{}:", p.name.as_str()),
+            (None, false) => p.name.as_str().to_string(),
         })
         .collect();
     // The captured block param (`&block`) closes the list — methods that

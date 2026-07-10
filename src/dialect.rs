@@ -354,24 +354,35 @@ pub enum CallbackHook {
     AfterRollback,
 }
 
-/// A formal parameter on a `MethodDef`. Carries the parameter name and an
-/// optional default expression. Today only positional-with-default is
-/// represented; keyword variants are tracked as a future gap (see
-/// `project_lowered_ir_gaps_for_runnability`).
+/// A formal parameter on a `MethodDef`. Carries the parameter name, an
+/// optional default expression, and whether it binds by keyword
+/// (`def f(amount, for_user: nil)`). Rest/block variants are still a
+/// future gap (see `project_lowered_ir_gaps_for_runnability`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Param {
     pub name: Symbol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<Expr>,
+    /// Keyword parameter — the Ruby emitter renders `name: default` /
+    /// `name:` and call sites bind it by name via a kwargs hash.
+    /// Emitters without a keyword concept render it as a trailing
+    /// positional-with-default (an approximation; correct only until a
+    /// transpiled call site on such a target passes keywords).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keyword: bool,
 }
 
 impl Param {
     pub fn positional(name: Symbol) -> Self {
-        Self { name, default: None }
+        Self { name, default: None, keyword: false }
     }
 
     pub fn with_default(name: Symbol, default: Expr) -> Self {
-        Self { name, default: Some(default) }
+        Self { name, default: Some(default), keyword: false }
+    }
+
+    pub fn keyword(name: Symbol, default: Option<Expr>) -> Self {
+        Self { name, default, keyword: true }
     }
 
     pub fn as_str(&self) -> &str {
