@@ -88,11 +88,20 @@ module SqliteAdapter
     stmt = Db.prepare(sql)
     rows = []
     ncols = Db.column_count(stmt)
+    # Column names can't change between rows — resolve them once, not
+    # rows×cols times (each column_name is a shim call, and hydrating
+    # a 1000-row result was paying 24,000 of them).
+    names = []
+    i = 0
+    while i < ncols
+      names.push(Db.column_name(stmt, i))
+      i += 1
+    end
     while Db.step?(stmt)
       row = {}
       i = 0
       while i < ncols
-        row[Db.column_name(stmt, i)] = Db.column_value(stmt, i)
+        row[names[i]] = Db.column_value(stmt, i)
         i += 1
       end
       rows << row
