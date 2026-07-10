@@ -272,17 +272,25 @@ module ActiveRecord
 
     # `Article.last` — highest-id row, or nil when the table is empty.
     # Real-blog tests use it after a create-action redirect:
-    # `assert_redirected_to article_url(Article.last)`. Resolves to a
-    # single `ORDER BY <pk> DESC LIMIT 1` row through the relation, the
-    # way Rails does — NOT a full-table `all` + `[-1]`, which hydrated
-    # every row (catastrophic on large tables: lobsters' /u cache key is
-    # `User.last.id` over 10k+ users, run once per request). Routing
-    # through `Relation#last` also retires the old `records[-1]`
-    # empty/negative-index cross-target gaps (Crystal `Array#last`
-    # raising, Rust `records[(-1_i64) as usize]`) — `first` returns nil
-    # on empty for every target.
+    # `assert_redirected_to article_url(Article.last)`. A single
+    # `ORDER BY <pk> DESC LIMIT 1` fetch, the way Rails does — NOT a
+    # full-table `all` + `[-1]`, which hydrated every row (catastrophic
+    # on large tables: lobsters' /u cache key is `User.last.id` over
+    # 10k+ users, run once per request — 66% of a warm /u by stackprof).
+    #
+    # Built on the same `adapter.<query> -> instantiate(row)` shape as
+    # `_adapter_all` (proven on every target; `select_rows` is the typed
+    # adapter interface the blog's ordered relations already exercise),
+    # bounded to one row. Deliberately NOT `Relation.new(self)`:
+    # referencing `Relation` from inside `Base` fails to resolve on the
+    # strict emitters (Kotlin) and mis-binds the class `self` on spinel.
+    # The `length == 0` guard (not `records[-1]`) sidesteps the Crystal
+    # `Array#last`-on-empty raise and the Rust negative-index panic.
     def self.last
-      ActiveRecord::Relation.new(self).last
+      rows = ActiveRecord.adapter.select_rows(
+        "SELECT #{table_name}.* FROM #{table_name} ORDER BY #{table_name}.id DESC LIMIT 1"
+      )
+      rows.length == 0 ? nil : instantiate(rows[0])
     end
 
     # ---- Instance lifecycle ------------------------------------------
