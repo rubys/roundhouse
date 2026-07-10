@@ -330,7 +330,7 @@ pub fn classify_view_helper<'a>(
 
 /// Pull out a `:sym` or `"str"` literal's value as a `&str`. Used
 /// by the `content_for` slot-name extraction.
-fn extract_sym_or_str(e: &Expr) -> Option<&str> {
+pub(crate) fn extract_sym_or_str(e: &Expr) -> Option<&str> {
     match &*e.node {
         ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str()),
         ExprNode::Lit { value: Literal::Str { value } } => Some(value.as_str()),

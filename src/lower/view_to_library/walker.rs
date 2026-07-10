@@ -7,7 +7,8 @@ use crate::ident::Symbol;
 use crate::span::Span;
 
 use crate::lower::view::{
-    classify_form_builder_method, classify_render_partial, classify_view_helper, ViewHelperKind,
+    classify_form_builder_method, classify_render_partial, classify_view_helper,
+    extract_sym_or_str, ViewHelperKind,
 };
 
 use super::form_builder::emit_form_builder_inline;
@@ -17,7 +18,7 @@ use super::partial::{emit_render_partial, emit_yield};
 use super::predicates::rewrite_predicates;
 use super::{
     accumulator_append_call, accumulator_result_ref, assign_accumulator_string_new, lit_sym,
-    nil_lit, seq, todo_io_append, view_helpers_call, ViewCtx,
+    nil_lit, seq, todo_io_append, var_ref, view_helpers_call, ViewCtx,
 };
 
 /// Walk a compiled-ERB body (`Seq` of `_buf = …` statements + control-
@@ -153,6 +154,33 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 },
             )]
         }
+        // Block-form `<% content_for :subnav do %> … <% end %>` —
+        // slot capture (lobsters' subnav pattern: pages and partials
+        // deposit nav markup, the layout gates on `content_for? :subnav`
+        // and splices via `yield :subnav`). Render the block body into
+        // its own accumulator and register it in the slot store; the
+        // statement itself contributes no template output. The
+        // accumulator name carries the slot so nested captures of
+        // different slots can't shadow each other.
+        ExprNode::Send { recv: None, method, args, block: Some(block), .. }
+            if method.as_str() == "content_for" && args.len() == 1 =>
+        {
+            let Some(slot) = extract_sym_or_str(&args[0]) else {
+                return vec![todo_io_append("dynamic content_for slot")];
+            };
+            let ExprNode::Lambda { body, .. } = &*block.node else {
+                return vec![todo_io_append("content_for block shape")];
+            };
+            let cap = format!("_cf_{slot}");
+            let cap_ctx = ViewCtx { accumulator: cap.clone(), ..ctx.clone() };
+            let mut out = vec![assign_accumulator_string_new(&cap)];
+            out.extend(walk_body(body, &cap_ctx));
+            out.push(view_helpers_call(
+                "content_for_set",
+                vec![lit_sym(Symbol::from(slot)), var_ref(Symbol::from(cap.as_str()))],
+            ));
+            out
+        }
         // Statement-form view-helper calls. Today: `<% content_for
         // :title, "Articles" %>` lowers to `ViewHelpers.content_for_set
         // (:title, "Articles")` — a bare call, not appended to `io`.
@@ -166,6 +194,22 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                     "content_for_set",
                     vec![lit_sym(Symbol::from(slot)), body.clone()],
                 )];
+            }
+            // Statement-position render (`<% render partial:
+            // 'stories/subnav' %>` — no `=`): Rails evaluates the
+            // partial for its side effects (content_for deposits) and
+            // DISCARDS the returned markup. Route the append into a
+            // throwaway accumulator so the call still happens but
+            // nothing lands on the page.
+            let is_local = |n: &str| ctx.is_local(n);
+            if let Some(rp) =
+                classify_render_partial(None, method.as_str(), args, None, &is_local)
+            {
+                let disc = "_discard";
+                let disc_ctx = ViewCtx { accumulator: disc.to_string(), ..ctx.clone() };
+                if let Some(stmt) = emit_render_partial(&rp, &disc_ctx) {
+                    return vec![assign_accumulator_string_new(disc), stmt];
+                }
             }
             vec![todo_io_append("unknown stmt")]
         }
