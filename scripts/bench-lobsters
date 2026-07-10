@@ -13,6 +13,10 @@
 #   --src DIR       lobsters source checkout
 #                   (default $LOBSTERS_SRC, else ~/git/ruby-bench/benchmarks/lobsters)
 #   --skip-emit     reuse the existing build tree (fast replay iteration)
+#   --memory        serve from an in-memory SQLite seeded from the staged
+#                   DB at boot (SQLite3::Backup) — the shape the real
+#                   ruby-bench benchmark runs; the file-backed default
+#                   remains for bisection against older runs
 #   --time N        run N timed iterations after the parity pass
 #   --out DIR       results dir (default bench/results/lobsters/<timestamp>)
 #
@@ -41,11 +45,13 @@ OUT_TREE="$REPO_ROOT/build/transpiled-lobsters-ruby"
 OUT_DIR=""
 SKIP_EMIT=0
 TIME_ITERS=0
+MEMORY=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --src)       SRC="$2"; shift 2 ;;
         --skip-emit) SKIP_EMIT=1; shift ;;
+        --memory)    MEMORY=1; shift ;;
         --time)      TIME_ITERS="$2"; shift 2 ;;
         --out)       OUT_DIR="$2"; shift 2 ;;
         -h|--help)   sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
@@ -112,6 +118,7 @@ done
 step "replaying benchmark routes (in-process Main.run_rack)"
 REPLAY_ARGS=(--json "$OUT_DIR/summary.json" --md "$OUT_DIR/summary.md")
 (( TIME_ITERS > 0 )) && REPLAY_ARGS+=(--time "$TIME_ITERS")
+(( MEMORY == 1 ))    && REPLAY_ARGS+=(--memory)
 
 status=0
 (cd "$OUT_TREE" && ruby "$REPO_ROOT/scripts/lobsters-replay" "${REPLAY_ARGS[@]}") || status=$?

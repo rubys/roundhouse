@@ -25,6 +25,13 @@
 #                 frozen 114-visit RNG sequence; see the P6 plan) — and
 #                 marked partial while any route still fails.
 #   --db PATH     benchmark DB (default storage/bench.sqlite3)
+#   --memory      serve from an in-memory SQLite seeded from --db at
+#                 boot via SQLite3::Backup — the exact shape the real
+#                 benchmark runs (benchmark.rb copies production.sqlite3
+#                 into :memory: on every boot). Uses a shared-cache URI
+#                 (file:…?mode=memory&cache=shared) because Db.configure
+#                 opens a POOL of connections: plain ":memory:" would
+#                 give each pool handle its own empty database.
 #   --quiet       suppress per-route progress lines
 #
 # Exit code = number of failing routes (0 = full parity).
@@ -43,17 +50,39 @@ until args.empty?
   when "--md"    then opts[:md]    = args.shift
   when "--time"  then opts[:time]  = Integer(args.shift)
   when "--db"    then opts[:db]    = args.shift
+  when "--memory" then opts[:memory] = true
   when "--quiet" then opts[:quiet] = true
   else abort "lobsters-replay: unknown arg #{a}"
   end
 end
 
-ENV["BLOG_DB"] ||= File.expand_path(opts[:db], Dir.pwd)
+DB_FILE = File.expand_path(opts[:db], Dir.pwd)
+abort "lobsters-replay: no DB at #{DB_FILE} (stage it first)" unless File.exist?(DB_FILE)
+
+# Shared-cache named in-mem DB: one database shared by every connection
+# in this process (the pool's handles + the seeding connection below),
+# alive as long as any of them stays open — the pool does.
+MEM_URI = "file:lobsters_bench?mode=memory&cache=shared"
+
+ENV["BLOG_DB"] ||= opts[:memory] ? MEM_URI : DB_FILE
 ENV["REMOTE_ADDR"] ||= "127.0.0.1"
-abort "lobsters-replay: no DB at #{ENV['BLOG_DB']} (stage it first)" unless File.exist?(ENV["BLOG_DB"])
 
 require File.expand_path("main", Dir.pwd)
 Main.configure_default_adapter!
+
+if opts[:memory]
+  # Seed the in-mem DB the way benchmark.rb does: page-level Backup from
+  # the file DB. This REPLACES the whole destination database, so the
+  # empty tables Schema DDL just created are simply superseded.
+  require "sqlite3"
+  mem  = SQLite3::Database.new(MEM_URI)
+  file = SQLite3::Database.new(DB_FILE, readonly: true)
+  bk = SQLite3::Backup.new(mem, "main", file, "main")
+  bk.step(-1)
+  bk.finish
+  file.close
+  mem.close
+end
 
 # ── benchmark identity + route ids ───────────────────────────────────
 # The login identity is fixed by the benchmark (route_generator.rb logs
@@ -65,7 +94,7 @@ BENCH_PASSWORD = "ji3W36xR"
 BENCH_USERNAME = "michell_wiegand"
 
 require "sqlite3"
-ids_db  = SQLite3::Database.new(ENV["BLOG_DB"], readonly: true)
+ids_db  = SQLite3::Database.new(DB_FILE, readonly: true)
 STORY   = ids_db.get_first_value("SELECT short_id FROM stories  WHERE is_deleted = 0 ORDER BY id LIMIT 1") || "enr7ye"
 COMMENT = ids_db.get_first_value("SELECT short_id FROM comments WHERE is_deleted = 0 ORDER BY id LIMIT 1") || "6srqij"
 ids_db.close
@@ -145,6 +174,7 @@ end
 summary = {
   "generated_at" => Time.now.utc.iso8601,
   "db"           => ENV["BLOG_DB"],
+  "memory"       => !!opts[:memory],
   "story_id"     => STORY,
   "comment_id"   => COMMENT,
 }
