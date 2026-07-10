@@ -88,6 +88,20 @@ module ActiveRecord
       ActiveRecord.adapter.all(table_name).map { |row| instantiate(row) }
     end
 
+    # Default `_adapter_last` for hand-written subclasses / Base-level
+    # tests — the original `all` + `[-1]`, correct everywhere and cheap
+    # on the small tables those models carry. Uses `all` (not
+    # `select_rows`) because the per-target `AdapterInterface` implements
+    # `all`/`find`/`count` but not raw `select_rows`. Lowerer-emitted
+    # Level-3 models OVERRIDE this with a `Db.prepare("... ORDER BY <pk>
+    # DESC LIMIT 1")` single-hydrate (synth_adapter_last), so real apps
+    # get one row — lobsters' /u no longer loads 10k users for its
+    # `User.last.id` cache key.
+    def self._adapter_last
+      records = all
+      records.empty? ? nil : records[-1]
+    end
+
     # _adapter_insert / _adapter_update / _adapter_delete are
     # instance methods (not class methods) so Base#save / Base#destroy
     # call them via implicit-self dispatch — bypassing the
@@ -270,19 +284,14 @@ module ActiveRecord
       instance
     end
 
-    # `Article.last` — highest-id row, or nil when the table is
-    # empty. Real-blog tests use it after a create-action redirect:
-    # `assert_redirected_to article_url(Article.last)`. Implemented
-    # via `all` rather than an adapter primitive so every adapter
-    # gets it for free. Explicit empty?-ternary because Crystal's
-    # `Array#last` raises on empty (Ruby returns nil), and `records[-1]`
-    # avoids Rust's negative-indexing-panic in the empty-case dead
-    # branch. The Rust emit of this method still has a residual gap
-    # (`records[-1]` emits as `records[(-1_i64) as usize]` which is
-    # also wrong) — flagged for a future Vec.last() bridge.
+    # `Article.last` — highest-id row, or nil when the table is empty.
+    # Real-blog tests use it after a create-action redirect:
+    # `assert_redirected_to article_url(Article.last)`. Delegates to
+    # `_adapter_last` (ORDER BY <pk> DESC LIMIT 1, one row) rather than
+    # `all` + `[-1]`, which materialized the whole table — lobsters' /u
+    # cache key is `User.last.id` over 10k+ users, run per request.
     def self.last
-      records = all
-      records.empty? ? nil : records[-1]
+      _adapter_last
     end
 
     # ---- Instance lifecycle ------------------------------------------

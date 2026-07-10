@@ -321,7 +321,7 @@ fn emit_ar_class_method_wrappers(name: &str) -> String {
         "func {name}_count() int64 {{ return {name}__adapter_count() }}\n"
     ));
     out.push_str(&format!(
-        "func {name}_last() *{name} {{\n\trecords := {name}__adapter_all()\n\tif len(records) == 0 {{ return nil }}\n\treturn records[len(records)-1]\n}}\n"
+        "func {name}_last() *{name} {{ return {name}__adapter_last() }}\n"
     ));
     out.push_str(&format!(
         "func {name}_destroy_all() []*{name} {{\n\trecords := {name}__adapter_all()\n\tfor _, r := range records {{ r.Destroy() }}\n\treturn records\n}}\n"

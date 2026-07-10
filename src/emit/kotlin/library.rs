@@ -626,7 +626,7 @@ fn synth_inherited_finders(t: &str, present: &HashSet<String>) -> String {
     emit(
         "last",
         format!(
-            "fun last(): {t}? {{\n    val records = all()\n    return if (records.isEmpty()) null else records[records.size - 1]\n}}\n"
+            "fun last(): {t}? {{\n    return _adapterLast()\n}}\n"
         ),
     );
     emit(

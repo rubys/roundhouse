@@ -37,8 +37,8 @@ use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol, TableRef, VarId};
 use crate::lower::arel::{
-    ArelOp, ArelVisitor, Assignment, ColRef, ColumnSpec, Delete, Insert, LimitSpec, Predicate,
-    Select, SqliteVisitor, Update, Value, ValueType,
+    ArelOp, ArelVisitor, Assignment, ColRef, ColumnSpec, Delete, Direction, Insert, LimitSpec,
+    Order, Predicate, Select, SqliteVisitor, Update, Value, ValueType,
 };
 use crate::schema::{Schema, Table};
 use crate::span::Span;
@@ -54,6 +54,7 @@ pub(super) fn push_adapter_methods(
 ) {
     methods.push(synth_adapter_find_by_id(owner, table, schema));
     methods.push(synth_adapter_all(owner, table, schema));
+    methods.push(synth_adapter_last(owner, table, schema));
     methods.push(synth_adapter_insert(owner, table, schema));
     methods.push(synth_adapter_update(owner, table, schema));
     methods.push(synth_adapter_delete(owner, table, schema));
@@ -126,6 +127,47 @@ fn synth_adapter_all(owner: &ClassId, table: &Table, schema: &Schema) -> MethodD
         is_async: false,
             mutates_self: false,
             block_param: None,
+    }
+}
+
+/// `def self._adapter_last` — `SELECT <cols> FROM <table> ORDER BY
+/// <table>.id DESC LIMIT 1`, a single nilable hydrate. Mirrors Rails'
+/// `Model.last` (one row) instead of the old `_adapter_all().last()`
+/// full-table scan; goes through the same `Db.prepare`/`from_stmt` path
+/// as `_adapter_find_by_id`, so it works for every app (the raw
+/// `ActiveRecord.adapter` is not wired under the Level-3 architecture).
+fn synth_adapter_last(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    let nilable_owner = Ty::Union { variants: vec![owner_ty, Ty::Nil] };
+
+    let op = ArelOp::Select(Select {
+        table: TableRef(table.name.clone()),
+        columns: ColumnSpec::All,
+        conditions: None,
+        orders: vec![Order {
+            column: ColRef {
+                table: TableRef(table.name.clone()),
+                column: Symbol::from("id"),
+            },
+            direction: Direction::Desc,
+        }],
+        limit: Some(LimitSpec(1)),
+        joins: vec![],
+        preloads: vec![],
+    });
+
+    MethodDef {
+        name: Symbol::from("_adapter_last"),
+        receiver: MethodReceiver::Class,
+        params: vec![],
+        body: SqliteVisitor.visit(&op, schema, owner),
+        signature: Some(fn_sig(vec![], nilable_owner)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
     }
 }
 

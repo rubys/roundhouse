@@ -573,7 +573,7 @@ fn synth_inherited_finders(t: &str, present: &HashSet<String>) -> String {
     emit(
         "last",
         format!(
-            "public new static {t}? Last() {{\n    var records = All();\n    return records.Count == 0 ? null : records[records.Count - 1];\n}}\n"
+            "public new static {t}? Last() {{\n    return _AdapterLast();\n}}\n"
         ),
     );
     emit(

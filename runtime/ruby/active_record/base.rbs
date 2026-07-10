@@ -122,6 +122,7 @@ module ActiveRecord
     # framework-internal; not part of the public AR API.
     def self._adapter_find_by_id: (Integer id) -> Base?
     def self._adapter_all: () -> Array[Base]
+    def self._adapter_last: () -> Base?
     def _adapter_insert: () -> Integer
     def _adapter_update: () -> void
     def _adapter_delete: () -> void
