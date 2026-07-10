@@ -204,17 +204,7 @@ module ActiveRecord
       record
     end
 
-    # `last` — Rails reverses the order and takes ONE row, not a full
-    # materialize + `[-1]`. The unordered case (the hot one — `Model.last`
-    # routes here) becomes `ORDER BY <pk> DESC LIMIT 1` via `first`. An
-    # explicit order would need per-term reversal; those call sites are
-    # paginated/small, so they keep the materialize fallback rather than
-    # risk mis-reversing a compound order.
     def last
-      if @orders.length == 0
-        @orders << order_term("#{@table}.id DESC")
-        return first
-      end
       rows = to_a
       rows.length == 0 ? nil : rows[rows.length - 1]
     end
