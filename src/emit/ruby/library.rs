@@ -59,6 +59,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     let names = crate::lower::scope_chain::all_scope_names(&scopes);
     let models = crate::lower::scope_chain::model_set(&app.models);
     let assocs = crate::lower::scope_chain::build_assoc_registry(&app.models);
+    let user_returns = crate::lower::scope_chain::build_user_method_returns(&app.models);
     for lc in lcs.iter_mut() {
         // Models gain their scope class methods (already chain-normalized).
         let is_model = app.models.iter().any(|m| m.name == lc.name);
@@ -132,6 +133,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                     &assocs,
                     class_self.as_ref(),
                     instance_self.as_ref(),
+                    &user_returns,
                 );
             }
         }

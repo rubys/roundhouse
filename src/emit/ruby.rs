@@ -479,10 +479,14 @@ pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
         .filter(|v| v.format.as_str() == "html")
         .flat_map(|v| {
             let mut lc = crate::lower::lower_view_to_library_class(v, app);
-            // Resolve bare app-helper calls in the rendered body (e.g.
-            // `avatar_img(...)` → `ApplicationHelper.avatar_img(...)`). Views
-            // skip scope lowering (they don't open scope chains), but they do
-            // call helpers, so this pass runs here directly.
+            // Normalize scope chains opened in the template itself —
+            // lobsters' _listdetail runs `story.merged_stories.not_deleted.
+            // includes(...)` — then resolve bare app-helper calls
+            // (`avatar_img(...)` → `ApplicationHelper.avatar_img(...)`).
+            // Scope lowering is a strict no-op for scope-free apps (the
+            // blog), and a view LC is never a model, so only the call-site
+            // rewrite arm runs.
+            library::apply_scope_lowering(std::slice::from_mut(&mut lc), app);
             library::apply_helper_lowering(std::slice::from_mut(&mut lc), app);
             library::apply_duration_lowering(std::slice::from_mut(&mut lc));
             let out_path = view_output_path(v.name.as_str());

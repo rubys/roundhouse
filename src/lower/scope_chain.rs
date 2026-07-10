@@ -69,6 +69,89 @@ pub fn model_set(models: &[Model]) -> HashSet<ClassId> {
     models.iter().map(|m| m.name.clone()).collect()
 }
 
+/// method name -> the model its relation chain returns, for user-written
+/// INSTANCE methods whose body tail is a query chain rooted at a model
+/// constant (`Story#merged_comments` ends in `Comment.where(...)` →
+/// `Comment`). Keyed by NAME because the receiver's class is usually
+/// unknowable at the call site (`@story.merged_comments` — an untyped
+/// ivar): a name that resolves to different targets on different models
+/// maps to `None` and is never tracked. Consulted only when a registered
+/// scope follows, so a collision with a non-model method of the same
+/// name is inert unless that call ALSO chains into a known scope.
+pub type UserMethodReturns = HashMap<Symbol, Option<ClassId>>;
+
+pub fn build_user_method_returns(models: &[Model]) -> UserMethodReturns {
+    let model_ids: HashSet<ClassId> = models.iter().map(|m| m.name.clone()).collect();
+    let mut reg: UserMethodReturns = HashMap::new();
+    for m in models {
+        for item in &m.body {
+            let ModelBodyItem::Method { method, .. } = item else { continue };
+            if method.receiver != crate::dialect::MethodReceiver::Instance {
+                continue;
+            }
+            let Some(target) = relation_return_model(&method.body, &model_ids) else {
+                continue;
+            };
+            reg.entry(method.name.clone())
+                .and_modify(|t| {
+                    if t.as_ref() != Some(&target) {
+                        *t = None;
+                    }
+                })
+                .or_insert(Some(target));
+        }
+    }
+    reg
+}
+
+/// The model whose relation `expr` evaluates to, when that is statically
+/// evident: the tail expression is a chain of relation-preserving hops
+/// (`where`/`order`/`includes`/… or further sends we can't classify are
+/// REJECTED) rooted at `Const(Model)` or `ActiveRecord::Relation.new(
+/// Model)`. Conservative: anything else — branches, terminals like
+/// `count`/`pluck`, unknown hops — returns None.
+fn relation_return_model(expr: &Expr, models: &HashSet<ClassId>) -> Option<ClassId> {
+    let tail = match &*expr.node {
+        ExprNode::Seq { exprs } => exprs.last()?,
+        _ => expr,
+    };
+    let mut e = tail;
+    loop {
+        match &*e.node {
+            ExprNode::Send { recv: Some(r), method, .. } => {
+                // `Relation.new(Model)` root.
+                if method.as_str() == "new" {
+                    if let ExprNode::Const { path } = &*r.node {
+                        if path.len() == 2
+                            && path[0].as_str() == "ActiveRecord"
+                            && path[1].as_str() == "Relation"
+                        {
+                            if let ExprNode::Send { args, .. } = &*e.node {
+                                if let Some(a) = args.first() {
+                                    return const_model(a, models);
+                                }
+                            }
+                        }
+                    }
+                    return None;
+                }
+                // A hop must preserve the relation. `where`-family and
+                // the chain methods qualify; on the ROOT constant, any
+                // method could be a scope — accept it there (checked
+                // when we reach the Const).
+                if let Some(m) = const_model(r, models) {
+                    return Some(m);
+                }
+                if !is_relation_chain_method(method.as_str()) {
+                    return None;
+                }
+                e = r;
+            }
+            _ => return None,
+        }
+    }
+}
+
 /// Per-model association facts the chain rewriter consumes once a chain's
 /// model is known: `joins(:assoc)` expands to its JOIN SQL, and a
 /// `belongs_to`-named hash key in `where`/`not` rewrites to the foreign-key
@@ -95,6 +178,13 @@ pub struct AssocRegistry {
     /// has_many only — a `:through` receiver would need the join seed,
     /// left untouched until an app exercises it.
     has_many_fk: HashMap<(ClassId, Symbol), (ClassId, Symbol)>,
+    /// has_many name -> (target model, foreign-key column) when the name
+    /// is UNIQUE across all models (`merged_stories` → Story), `None`
+    /// when ambiguous (`comments` lives on both Story and User). Lets
+    /// `@story.merged_stories.<scope|chain|terminal>` seed a Relation
+    /// even though the receiver's class is statically unknown; ambiguous
+    /// names are never tracked.
+    has_many_by_name: HashMap<Symbol, Option<(ClassId, Symbol)>>,
 }
 
 impl AssocRegistry {
@@ -106,6 +196,9 @@ impl AssocRegistry {
     }
     fn has_many_fk(&self, model: &ClassId, assoc: &Symbol) -> Option<&(ClassId, Symbol)> {
         self.has_many_fk.get(&(model.clone(), assoc.clone()))
+    }
+    fn has_many_by_name(&self, assoc: &Symbol) -> Option<&(ClassId, Symbol)> {
+        self.has_many_by_name.get(assoc).and_then(|o| o.as_ref())
     }
 }
 
@@ -137,6 +230,15 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                         (m.name.clone(), name.clone()),
                         (target.clone(), foreign_key.clone()),
                     );
+                    let entry = (target.clone(), foreign_key.clone());
+                    reg.has_many_by_name
+                        .entry(name.clone())
+                        .and_modify(|t| {
+                            if t.as_ref() != Some(&entry) {
+                                *t = None;
+                            }
+                        })
+                        .or_insert(Some(entry));
                 }
                 Association::HasOne { name, target, foreign_key, .. } => {
                     let t = pluralize_snake(target.0.as_str());
@@ -313,6 +415,9 @@ pub struct Ctx<'a> {
     /// key).limit(1)`), so it seeds `Relation.new(Model)` — like a scope
     /// body, but with no `__rel` parameter to thread.
     pub class_self: Option<ClassId>,
+    /// Name-keyed relation return types of user instance methods (see
+    /// `build_user_method_returns`).
+    pub user_returns: &'a UserMethodReturns,
     /// `Some(model)` when rewriting a model's own INSTANCE method:
     /// `self.<has_many>` there is an association read whose target model
     /// is known, so a scope following it can seed a Relation from the
@@ -341,6 +446,7 @@ impl Ctx<'_> {
             scope_body: None,
             class_self: self.class_self.clone(),
             instance_self: self.instance_self.clone(),
+            user_returns: self.user_returns,
         }
     }
 }
@@ -369,6 +475,41 @@ fn thread_rel(mut args: Vec<Expr>, rel: Expr, leading: Option<&Vec<Param>>, span
     }
     args.push(rel);
     args
+}
+
+/// Relation TERMINALS our runtime implements — a seeded association
+/// chain may end in one (`@story.merged_stories.ids`). Deliberately
+/// excludes `each`/`map`/iteration: plain reader traversal stays on the
+/// Array (and the preload cache).
+fn is_relation_terminal(name: &str) -> bool {
+    matches!(
+        name,
+        "ids" | "pluck" | "count" | "first" | "last" | "exists?" | "any?" | "empty?" | "size"
+            | "length"
+    )
+}
+
+/// Name-keyed association resolution for the seed arm: `(target, fk,
+/// <owner>.id)` when `aname` is a unique has_many across models.
+fn assoc_owner_seed(
+    ctx: &Ctx,
+    aname: &Symbol,
+    owner: &Expr,
+    span: crate::span::Span,
+) -> Option<(ClassId, Symbol, Expr)> {
+    ctx.assocs.has_many_by_name(aname).cloned().map(|(target, fk)| {
+        let owner_id = syn(
+            span,
+            ExprNode::Send {
+                recv: Some(owner.clone()),
+                method: Symbol::from("id"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        (target, fk, owner_id)
+    })
 }
 
 fn const_expr(span: crate::span::Span, model: &ClassId) -> Expr {
@@ -642,46 +783,73 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 return None;
             }
 
-            // Scope-on-self-association: `self.<has_many>.<scope>(args)`.
-            // The assoc reader returns the arel-inlined Array, and a scope
-            // needs a Relation — seed one from the association's foreign
-            // key and thread it. Fires only when a registered scope
-            // FOLLOWS the read, so plain reader iteration keeps the Array
-            // (and the reader's preload cache).
-            if let Some(self_model) = ctx.instance_self.clone() {
-                if let ExprNode::Send { recv: Some(ir), method: aname, args: aargs, .. } =
-                    &*r.node
-                {
-                    if matches!(&*ir.node, ExprNode::SelfRef) && aargs.is_empty() {
-                        if let Some((target, fk)) =
-                            ctx.assocs.has_many_fk(&self_model, aname).cloned()
+            // Scope/chain/terminal on an association read: `self.<has_many>.
+            // <scope>(args)` or `@story.<has_many>.ids`. The assoc reader
+            // returns the arel-inlined Array, and relation surface needs a
+            // Relation — seed one from the association's foreign key
+            // (`Relation.new(Target).where(fk: <owner>.id)`). Owner forms:
+            // SelfRef (assoc resolved on the enclosing model via
+            // instance_self) or Ivar/Var (assoc resolved by NAME when unique
+            // across models; Ivar/Var only — a Send owner would re-evaluate
+            // in the seed). Fires only when relation surface FOLLOWS the
+            // read: registered scopes thread the seed, chain methods and
+            // terminals ride it as receiver. Plain iteration (`each`/`map`)
+            // keeps the Array and the reader's preload cache.
+            if let ExprNode::Send { recv: Some(ir), method: aname, args: aargs, .. } = &*r.node {
+                if aargs.is_empty() {
+                    // (target, fk, owner-id expression)
+                    let resolved: Option<(ClassId, Symbol, Expr)> = match &*ir.node {
+                        ExprNode::SelfRef => ctx.instance_self.clone().and_then(|self_model| {
+                            ctx.assocs.has_many_fk(&self_model, aname).cloned().map(
+                                |(target, fk)| {
+                                    (target, fk, syn(span, ExprNode::Ivar { name: Symbol::from("id") }))
+                                },
+                            )
+                        }),
+                        // Var/Ivar, plus the zero-arg receiver-less
+                        // bareword a template local parses as (prism can't
+                        // prove `story` is a local inside an ERB-ingested
+                        // body, so it arrives as a Send). All three read
+                        // once in the seed — no re-evaluation hazard.
+                        ExprNode::Ivar { .. } | ExprNode::Var { .. } => {
+                            assoc_owner_seed(ctx, aname, ir, span)
+                        }
+                        ExprNode::Send { recv: None, args: oargs, block: None, .. }
+                            if oargs.is_empty() =>
                         {
-                            if ctx.scope_of(&target, &method) {
-                                let fk_hash = syn(
-                                    span,
-                                    ExprNode::Hash {
-                                        entries: vec![(
-                                            syn(
-                                                span,
-                                                ExprNode::Lit {
-                                                    value: Literal::Sym { value: fk },
-                                                },
-                                            ),
-                                            syn(span, ExprNode::Ivar { name: Symbol::from("id") }),
-                                        )],
-                                        kwargs: true,
-                                    },
-                                );
-                                let seed = syn(
-                                    span,
-                                    ExprNode::Send {
-                                        recv: Some(relation_new(span, &target)),
-                                        method: Symbol::from("where"),
-                                        args: vec![fk_hash],
-                                        block: None,
-                                        parenthesized: true,
-                                    },
-                                );
+                            assoc_owner_seed(ctx, aname, ir, span)
+                        }
+                        _ => None,
+                    };
+                    if let Some((target, fk, owner_id)) = resolved {
+                        let is_scope = ctx.scope_of(&target, &method);
+                        let is_chain = is_relation_chain_method(method.as_str());
+                        let is_term = is_relation_terminal(method.as_str());
+                        if is_scope || is_chain || is_term {
+                            let fk_hash = syn(
+                                span,
+                                ExprNode::Hash {
+                                    entries: vec![(
+                                        syn(
+                                            span,
+                                            ExprNode::Lit { value: Literal::Sym { value: fk } },
+                                        ),
+                                        owner_id,
+                                    )],
+                                    kwargs: true,
+                                },
+                            );
+                            let seed = syn(
+                                span,
+                                ExprNode::Send {
+                                    recv: Some(relation_new(span, &target)),
+                                    method: Symbol::from("where"),
+                                    args: vec![fk_hash],
+                                    block: None,
+                                    parenthesized: true,
+                                },
+                            );
+                            if is_scope {
                                 let leading = ctx.scope_params(&target, &method);
                                 let new_args = thread_rel(args, seed, leading, span);
                                 *expr = put(
@@ -694,17 +862,30 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                                 );
                                 return Some(target);
                             }
+                            // Chain method or terminal: stays on the seeded
+                            // receiver. Chains keep the model; terminals end it.
+                            let keeps_model = is_chain;
+                            *expr = put(span, Some(seed), method, args, block, parenthesized);
+                            return keeps_model.then_some(target);
                         }
                     }
                 }
             }
 
             // Receiver model: a local var holding a relation, else the
-            // (rewritten) receiver chain's model.
+            // (rewritten) receiver chain's model, else a user instance
+            // method with a registered (unique) relation return type
+            // (`@story.merged_comments` → Comment).
             let r_model = match &*r.node {
                 ExprNode::Var { name, .. } => locals.get(name).cloned(),
                 _ => rewrite(&mut r, ctx, locals),
             };
+            let r_model = r_model.or_else(|| match &*r.node {
+                ExprNode::Send { method: rname, .. } => {
+                    ctx.user_returns.get(rname).cloned().flatten()
+                }
+                _ => None,
+            });
 
             if let Some(mr) = r_model {
                 if ctx.scope_of(&mr, &method) {
@@ -737,6 +918,9 @@ pub fn rewrite_scope_body(
     models: &HashSet<ClassId>,
     assocs: &AssocRegistry,
 ) {
+    // Scope bodies don't consult user-method return types (none
+    // exercised there yet) — conservative empty registry.
+    let empty_returns = UserMethodReturns::new();
     let ctx = Ctx {
         scopes,
         models,
@@ -744,6 +928,7 @@ pub fn rewrite_scope_body(
         scope_body: Some((self_model.clone(), rel_param.clone())),
         class_self: None,
         instance_self: None,
+        user_returns: &empty_returns,
     };
     let mut locals = Locals::new();
     rewrite(body, &ctx, &mut locals);
@@ -760,6 +945,7 @@ pub fn rewrite_call_site(
     assocs: &AssocRegistry,
     class_self: Option<&ClassId>,
     instance_self: Option<&ClassId>,
+    user_returns: &UserMethodReturns,
 ) {
     let ctx = Ctx {
         scopes,
@@ -768,6 +954,7 @@ pub fn rewrite_call_site(
         scope_body: None,
         class_self: class_self.cloned(),
         instance_self: instance_self.cloned(),
+        user_returns,
     };
     let mut locals = Locals::new();
     rewrite(expr, &ctx, &mut locals);
@@ -856,12 +1043,25 @@ mod tests {
         reg
     }
 
+    fn empty_returns() -> &'static UserMethodReturns {
+        static EMPTY: std::sync::OnceLock<UserMethodReturns> = std::sync::OnceLock::new();
+        EMPTY.get_or_init(UserMethodReturns::new)
+    }
+
     fn ctx_with<'a>(
         scopes: &'a ScopeRegistry,
         models: &'a HashSet<ClassId>,
         assocs: &'a AssocRegistry,
     ) -> Ctx<'a> {
-        Ctx { scopes, models, assocs, scope_body: None, class_self: None, instance_self: None }
+        Ctx {
+            scopes,
+            models,
+            assocs,
+            scope_body: None,
+            class_self: None,
+            instance_self: None,
+            user_returns: empty_returns(),
+        }
     }
 
     fn sym_lit(s: &str) -> Expr {
@@ -987,6 +1187,53 @@ mod tests {
         crate::ingest::ingest_model(src.as_bytes(), path, &crate::schema::Schema::default())
             .expect("ingest")
             .expect("model")
+    }
+
+    #[test]
+    fn var_assoc_read_scope_chain_seeds_relation() {
+        // story.merged_stories.not_deleted → Story.not_deleted(
+        //   Relation.new(Story).where(merged_story_id: story.id))
+        let story = ingest(
+            "class Story < ApplicationRecord\n  has_many :merged_stories, class_name: \"Story\", foreign_key: \"merged_story_id\"\n  scope :not_deleted, -> { where(is_deleted: false) }\nend\n",
+            "app/models/story.rb",
+        );
+        let models_v = vec![story];
+        let scopes = build_scope_registry(&models_v);
+        let models = model_set(&models_v);
+        let assocs = build_assoc_registry(&models_v);
+        let var_story =
+            Expr::new(span(), ExprNode::Var { id: VarId(0), name: Symbol::from("story") });
+        let assoc_read = Expr::new(
+            span(),
+            ExprNode::Send {
+                recv: Some(var_story),
+                method: Symbol::from("merged_stories"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let mut expr = Expr::new(
+            span(),
+            ExprNode::Send {
+                recv: Some(assoc_read),
+                method: Symbol::from("not_deleted"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        rewrite_call_site(&mut expr, &scopes, &models, &assocs, None, None, empty_returns());
+        let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node else {
+            panic!("expected Send, got {:?}", expr.node);
+        };
+        assert_eq!(method.as_str(), "not_deleted");
+        assert!(
+            matches!(&*r.node, ExprNode::Const { path } if path.last().unwrap().as_str() == "Story"),
+            "receiver should be Story const, got {:?}",
+            r.node
+        );
+        assert_eq!(args.len(), 1, "threaded seed arg expected: {:?}", args);
     }
 
     #[test]
