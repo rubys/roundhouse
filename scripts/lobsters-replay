@@ -34,6 +34,8 @@
 #                 are only comparable if both sides do identical work.
 #   --warmup N    warmup iterations for --sequence (default 15)
 #   --min-time S  minimum timed seconds for --sequence (default 10)
+#   --dump DIR    write each parity-pass response body to DIR (P7
+#                 content-diff input; filename = route with / -> _)
 #   --db PATH     benchmark DB (default storage/bench.sqlite3)
 #   --memory      serve from an in-memory SQLite seeded from --db at
 #                 boot via SQLite3::Backup — the exact shape the real
@@ -64,6 +66,7 @@ until args.empty?
   when "--sequence" then opts[:sequence] = args.shift
   when "--warmup"   then opts[:warmup]   = Integer(args.shift)
   when "--min-time" then opts[:min_time] = Integer(args.shift)
+  when "--dump"  then opts[:dump]  = args.shift
   when "--quiet" then opts[:quiet] = true
   else abort "lobsters-replay: unknown arg #{a}"
   end
@@ -200,10 +203,16 @@ if (err = do_login!)
 end
 
 # ── route replay ─────────────────────────────────────────────────────
+require "fileutils"
+FileUtils.mkdir_p(opts[:dump]) if opts[:dump]
+
 results = ROUTES.map do |route|
   t0 = now_ms
   st, _h, body = req("GET", route)
   ms = now_ms - t0
+  if opts[:dump] && st != :EXC
+    File.write(File.join(opts[:dump], route.delete_prefix("/").gsub(/[^\w.-]/, "_")), body.to_s)
+  end
   exc = st == :EXC
   bytes = exc ? 0 : body.to_s.bytesize
   ok  = st == 200
