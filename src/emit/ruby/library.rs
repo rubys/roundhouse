@@ -2479,3 +2479,428 @@ fn boolean_cast_body(col: &Symbol) -> Expr {
         })),
     })
 }
+
+// ─── Runtime-Relation eager loading (issue #27 follow-up) ──────────────
+//
+// The static arel path already lowers `includes(:assoc)` into inline
+// preload statements, but chains that reach the runtime
+// `ActiveRecord::Relation` (scope chains, association relations) only
+// RECORDED their `includes(...)` specs — `to_a` never executed them, so
+// every association read was a lazy per-row query (the lobsters 2x
+// query-count gap vs Rails, ~985 excess queries per benchmark pass:
+// belongs_to singles ~870, has_many/through ~295).
+//
+// This pass synthesizes, per model, the statically-dispatched preload
+// machinery `Relation#to_a` calls (`@model.preload_associations(records,
+// @includes)` — Base supplies a no-op default):
+//
+//   def self.preload_associations(records, specs)   # spec walker
+//   def self._preload_dispatch(records, name, nested)  # case-dispatch
+//   def self._preload_batch_<assoc>(records)        # one batched IN load
+//   def _preload_<belongs_to>(rec)                  # cache setter
+//
+// plus a cache guard prepended to each belongs_to reader (mirroring the
+// has_many readers' `return @x_cache if @x_loaded` shape; the has_many
+// setters/caches already exist from the static-path work).
+//
+// No method_missing, no send: nested specs (`story: :user`) recurse
+// through the case arm's statically-named target class — the same
+// case-dispatch shape as dynamic-partial rendering. Bodies are generated
+// as Ruby source and parsed back through `runtime_src::parse_methods`
+// (templates are fixed; identifiers come from assoc/table names).
+//
+// Known gaps, deliberate: has_one and scope-carrying through-assocs
+// (other than a plain `order("...")`) get no batch arm — the dispatch
+// falls through and the lazy reader stays correct (just N+1, matching
+// Rails, which also lazy-loads what `includes` doesn't name). Assigning
+// a belongs_to (`c.story = s`) on a PRELOADED record does not refresh
+// the cache (fresh records never have the loaded flag set, so the
+// benchmark's build-then-render flows are unaffected).
+pub(crate) fn apply_preload_lowering(lcs: &mut [LibraryClass], app: &App) {
+    use crate::dialect::Association;
+
+    // Gate: runtime Relations only arise in scope-chain apps (scope-free
+    // apps resolve every chain on the static arel path), and synthesis
+    // only pays for itself when some `includes(...)` survives to
+    // runtime. real-blog (`includes` but no scopes) and tiny-blog
+    // (scopes but no `includes`) both stay byte-identical.
+    let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
+    if !crate::lower::scope_chain::any_scopes(&scopes) || !app_mentions_includes(app) {
+        return;
+    }
+
+    for lc in lcs.iter_mut() {
+        let Some(model) = app.models.iter().find(|m| m.name == lc.name) else { continue };
+
+        // belongs_to readers gain the cache guard the has_many readers
+        // already carry: `return @user_cache if @user_loaded`.
+        for assoc in model.associations() {
+            let Association::BelongsTo { name, .. } = assoc else { continue };
+            let Some(m) = lc.methods.iter_mut().find(|m| {
+                m.name == *name && m.receiver == MethodReceiver::Instance
+            }) else {
+                continue;
+            };
+            let old = std::mem::replace(
+                &mut m.body,
+                Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
+            );
+            m.body = Expr::new(
+                Span::synthetic(),
+                ExprNode::Seq { exprs: vec![preload_cache_guard(name), old] },
+            );
+        }
+
+        let src = preload_methods_source(model, app);
+        let methods = crate::runtime_src::parse_methods(&src).unwrap_or_else(|e| {
+            panic!("apply_preload_lowering: generated source failed to parse: {e}\n{src}")
+        });
+        for mut m in methods {
+            if lc.methods.iter().any(|existing| {
+                existing.name == m.name && existing.receiver == m.receiver
+            }) {
+                continue; // user-defined names win
+            }
+            m.enclosing_class = Some(lc.name.0.clone());
+            lc.methods.push(m);
+        }
+    }
+}
+
+/// `return @<name>_cache if @<name>_loaded` — the same guard shape the
+/// has_many readers carry (`through_reader_body`), so preloaded and lazy
+/// reads share one cache contract.
+fn preload_cache_guard(name: &Symbol) -> Expr {
+    let span = Span::synthetic;
+    Expr::new(
+        span(),
+        ExprNode::If {
+            cond: Expr::new(
+                span(),
+                ExprNode::Ivar { name: Symbol::from(format!("{}_loaded", name.as_str())) },
+            ),
+            then_branch: Expr::new(
+                span(),
+                ExprNode::Return {
+                    value: Expr::new(
+                        span(),
+                        ExprNode::Ivar {
+                            name: Symbol::from(format!("{}_cache", name.as_str())),
+                        },
+                    ),
+                },
+            ),
+            else_branch: Expr::new(span(), ExprNode::Lit { value: Literal::Nil }),
+        },
+    )
+}
+
+/// True when any raw app body (controller actions, library-class
+/// methods, model scopes/methods) sends `includes`/`preload`/
+/// `eager_load` to a receiver. Over-approximates (a chain the arel pass
+/// later consumes statically still counts) — the cost of a false
+/// positive is inert synthesized methods, not wrong behavior.
+fn app_mentions_includes(app: &App) -> bool {
+    use crate::dialect::{ControllerBodyItem, ModelBodyItem};
+    let in_expr = expr_mentions_includes;
+    app.controllers.iter().any(|c| {
+        c.body.iter().any(|item| match item {
+            ControllerBodyItem::Action { action, .. } => in_expr(&action.body),
+            _ => false,
+        })
+    }) || app.library_classes.iter().any(|lc| lc.methods.iter().any(|m| in_expr(&m.body)))
+        || app.models.iter().any(|m| {
+            m.body.iter().any(|item| match item {
+                ModelBodyItem::Scope { scope, .. } => in_expr(&scope.body),
+                ModelBodyItem::Method { method, .. } => in_expr(&method.body),
+                _ => false,
+            })
+        })
+}
+
+fn expr_mentions_includes(expr: &Expr) -> bool {
+    let mut found = false;
+    fn walk(e: &Expr, found: &mut bool) {
+        if *found {
+            return;
+        }
+        if let ExprNode::Send { recv: Some(_), method, .. } = &*e.node {
+            if matches!(method.as_str(), "includes" | "preload" | "eager_load") {
+                *found = true;
+                return;
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, found));
+    }
+    walk(expr, &mut found);
+    found
+}
+
+/// One preloadable association, resolved against the app's model set.
+enum PreloadKind {
+    /// (fk column on the owner, target class, target table)
+    BelongsTo { fk: String, target: String, table: String },
+    /// (fk column on the target, target class)
+    HasMany { fk: String, target: String },
+    /// Batched form of the through-reader join:
+    /// `SELECT <t>.*, <thr>.<thr_fk> AS __src FROM <t> JOIN <thr> ON
+    /// <thr>.<src_fk> = <t>.id WHERE <thr>.<thr_fk> IN (...)`.
+    Through { target: String, join: String, group_col: String, order: Option<String> },
+}
+
+fn preload_targets(model: &crate::dialect::Model, app: &App) -> Vec<(String, PreloadKind)> {
+    use crate::dialect::Association;
+    use crate::naming::pluralize_snake;
+
+    let model_exists = |id: &ClassId| app.models.iter().any(|m| &m.name == id);
+    let mut out = Vec::new();
+    for assoc in model.associations() {
+        match assoc {
+            Association::BelongsTo { name, target, foreign_key, .. } => {
+                if !model_exists(target) {
+                    continue;
+                }
+                out.push((
+                    name.as_str().to_string(),
+                    PreloadKind::BelongsTo {
+                        fk: foreign_key.as_str().to_string(),
+                        target: target.0.as_str().to_string(),
+                        table: pluralize_snake(target.0.as_str()),
+                    },
+                ));
+            }
+            Association::HasMany { name, target, foreign_key, through: None, .. } => {
+                if !model_exists(target) {
+                    continue;
+                }
+                out.push((
+                    name.as_str().to_string(),
+                    PreloadKind::HasMany {
+                        fk: foreign_key.as_str().to_string(),
+                        target: target.0.as_str().to_string(),
+                    },
+                ));
+            }
+            // Through: same two-hop resolution as
+            // `apply_through_assoc_lowering`; assoc scopes other than a
+            // plain `order("...")` (or none) don't batch — the lazy
+            // reader keeps them correct.
+            Association::HasMany {
+                name, target, through: Some(thr_name), scope, ..
+            } => {
+                if !model_exists(target) {
+                    continue;
+                }
+                let order = match scope {
+                    None => None,
+                    Some(s) => match order_literal(s) {
+                        Some(o) => Some(o),
+                        None => continue,
+                    },
+                };
+                let Some(Association::HasMany { target: thr_target, foreign_key: thr_fk, .. }) =
+                    model.associations().find(|a| {
+                        matches!(a, Association::HasMany { name, .. } if name == thr_name)
+                    })
+                else {
+                    continue;
+                };
+                let Some(thr_model) = app.models.iter().find(|m| &m.name == thr_target) else {
+                    continue;
+                };
+                let Some(Association::BelongsTo { foreign_key: src_fk, .. }) =
+                    thr_model.associations().find(|a| {
+                        matches!(a, Association::BelongsTo { target: t, .. } if t == target)
+                    })
+                else {
+                    continue;
+                };
+                let thr_table = pluralize_snake(thr_target.0.as_str());
+                let target_table = pluralize_snake(target.0.as_str());
+                out.push((
+                    name.as_str().to_string(),
+                    PreloadKind::Through {
+                        target: target.0.as_str().to_string(),
+                        join: format!(
+                            "INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.id"
+                        ),
+                        group_col: format!("{thr_table}.{thr_fk}"),
+                        order: order.map(|o| o.to_string()),
+                    },
+                ));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Extract the string literal from an assoc-scope lambda body of the
+/// exact shape `order("...")` (lobsters `has_many :tags, -> { order
+///('tags.is_media desc, tags.tag') }, through: :taggings`).
+fn order_literal(scope_body: &Expr) -> Option<&str> {
+    let ExprNode::Send { recv: None, method, args, .. } = &*scope_body.node else {
+        return None;
+    };
+    if method.as_str() != "order" || args.len() != 1 {
+        return None;
+    }
+    let ExprNode::Lit { value: Literal::Str { value } } = &*args[0].node else {
+        return None;
+    };
+    Some(value.as_str())
+}
+
+/// Generate the per-model preload methods as Ruby source (fed back
+/// through `runtime_src::parse_methods`). Templates stay boring on
+/// purpose: statement-level assigns and explicit nil-guards round-trip
+/// through every walker; no `||=`-on-index, no ternaries.
+fn preload_methods_source(model: &crate::dialect::Model, app: &App) -> String {
+    let targets = preload_targets(model, app);
+    let mut src = String::new();
+
+    // Batch loaders + belongs_to cache setters.
+    for (name, kind) in &targets {
+        match kind {
+            PreloadKind::BelongsTo { fk, target, table } => {
+                let _ = write!(
+                    src,
+                    r#"
+def self._preload_batch_{name}(records)
+  ids = []
+  records.each do |r|
+    v = r.{fk}
+    ids << v unless v.nil? || v == 0
+  end
+  ids.uniq!
+  by_id = {{}}
+  if ids.length > 0
+    ActiveRecord.adapter.select_rows("SELECT {table}.* FROM {table} WHERE {table}.id IN (" + Db.escape_int_list(ids) + ")").each do |row|
+      rec = {target}.instantiate(row)
+      by_id[rec.id] = rec
+    end
+  end
+  records.each do |r|
+    r._preload_{name}(by_id[r.{fk}])
+  end
+  by_id.values
+end
+
+def _preload_{name}(rec)
+  @{name}_cache = rec
+  @{name}_loaded = true
+  nil
+end
+"#
+                );
+            }
+            PreloadKind::HasMany { fk, target } => {
+                let _ = write!(
+                    src,
+                    r#"
+def self._preload_batch_{name}(records)
+  ids = []
+  records.each do |r|
+    ids << r.id
+  end
+  loaded = []
+  if ids.length > 0
+    loaded = ActiveRecord::Relation.new({target}).where({fk}: ids).to_a
+  end
+  grouped = {{}}
+  loaded.each do |rec|
+    k = rec.{fk}
+    grouped[k] = [] if grouped[k].nil?
+    grouped[k] << rec
+  end
+  records.each do |r|
+    r._preload_{name}(grouped[r.id] || [])
+  end
+  loaded
+end
+"#
+                );
+            }
+            PreloadKind::Through { target, join, group_col, order } => {
+                let table = crate::naming::pluralize_snake(target.as_str());
+                let order_sql = match order {
+                    Some(o) => format!(" ORDER BY {o}"),
+                    None => String::new(),
+                };
+                let _ = write!(
+                    src,
+                    r#"
+def self._preload_batch_{name}(records)
+  ids = []
+  records.each do |r|
+    ids << r.id
+  end
+  grouped = {{}}
+  loaded = []
+  if ids.length > 0
+    rows = ActiveRecord.adapter.select_rows("SELECT {table}.*, {group_col} AS __src FROM {table} {join} WHERE {group_col} IN (" + Db.escape_int_list(ids) + "){order_sql}")
+    rows.each do |row|
+      rec = {target}.instantiate(row)
+      loaded << rec
+      k = row["__src"].to_i
+      grouped[k] = [] if grouped[k].nil?
+      grouped[k] << rec
+    end
+  end
+  records.each do |r|
+    r._preload_{name}(grouped[r.id] || [])
+  end
+  loaded
+end
+"#
+                );
+            }
+        }
+    }
+
+    // Dispatch: one case arm per preloadable assoc; unknown names fall
+    // through silently (lazy readers stay correct — mirrors what Rails
+    // does for anything `includes` didn't name).
+    src.push_str("\ndef self._preload_dispatch(records, name, nested)\n");
+    if targets.is_empty() {
+        src.push_str("  nil\nend\n");
+    } else {
+        src.push_str("  case name\n");
+        for (name, kind) in &targets {
+            let target = match kind {
+                PreloadKind::BelongsTo { target, .. } => target,
+                PreloadKind::HasMany { target, .. } => target,
+                PreloadKind::Through { target, .. } => target,
+            };
+            let _ = write!(
+                src,
+                "  when :{name}\n    loaded = _preload_batch_{name}(records)\n    {target}.preload_associations(loaded, [nested]) unless nested.nil?\n"
+            );
+        }
+        src.push_str("  end\n  nil\nend\n");
+    }
+
+    // Spec walker — the entry point `Relation#to_a` calls. Specs are
+    // Symbols, Hashes (nested: `story: :user`), or Arrays of either.
+    src.push_str(
+        r#"
+def self.preload_associations(records, specs)
+  return nil if records.length == 0
+  specs.each do |spec|
+    if spec.is_a?(Hash)
+      spec.each do |name, nested|
+        _preload_dispatch(records, name, nested)
+      end
+    elsif spec.is_a?(Array)
+      preload_associations(records, spec)
+    elsif !spec.nil?
+      _preload_dispatch(records, spec, nil)
+    end
+  end
+  nil
+end
+"#,
+    );
+
+    src
+}

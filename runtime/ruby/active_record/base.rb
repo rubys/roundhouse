@@ -60,6 +60,16 @@ module ActiveRecord
       raise NotImplementedError, "#{name}.instantiate must be overridden"
     end
 
+    # Eager-load hook: `Relation#to_a` calls this on its model with the
+    # hydrated records and the recorded `includes(...)` specs. The Ruby
+    # emit path synthesizes per-model overrides (batched IN-loads into
+    # the `_preload_<assoc>` caches — see `apply_preload_lowering`);
+    # models without one fall back to this no-op, which leaves the lazy
+    # association readers doing the work (correct, just N+1).
+    def self.preload_associations(_records, _specs)
+      nil
+    end
+
     # Per-model adapter primitives — public AR API delegates here.
     # Default implementations route through the legacy
     # `ActiveRecord.adapter.X` + `instantiate` path so subclasses that

@@ -111,9 +111,12 @@ module ActiveRecord
       self
     end
 
-    # `includes`/`preload`/`eager_load` — eager-load hints. v1 records the
-    # names but does NOT batch-preload; association reads lazy-load on
-    # access (correct, just N+1). Real preload is a perf follow-up.
+    # `includes`/`preload`/`eager_load` — eager-load hints. The specs
+    # (Symbols, or Hashes for nested includes like `story: :user`) are
+    # recorded here and executed by `to_a`, which hands them to the
+    # model's synthesized `preload_associations` (batched `IN` loads
+    # into the `_preload_<assoc>` caches). Models without a synthesized
+    # override inherit Base's no-op and stay lazy (correct, just N+1).
     def includes(*names)
       names.each { |n| @includes << n }
       self
@@ -158,7 +161,9 @@ module ActiveRecord
 
     def to_a
       rows = ActiveRecord.adapter.select_rows(to_sql)
-      rows.map { |row| @model.instantiate(row) }
+      records = rows.map { |row| @model.instantiate(row) }
+      @model.preload_associations(records, @includes) if @includes.length > 0
+      records
     end
 
     def each

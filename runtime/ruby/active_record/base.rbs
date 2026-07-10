@@ -70,6 +70,10 @@ module ActiveRecord
     def self.schema_columns: () -> Array[Symbol]
     def self.instantiate: (Hash[String, untyped] _row) -> Base
 
+    # Eager-load hook consumed by `Relation#to_a`; the Ruby emit path
+    # synthesizes per-model overrides, this default is a no-op.
+    def self.preload_associations: (Array[untyped] _records, Array[untyped] _specs) -> void
+
     # Subclass-overridden instance API. `attributes` returns the
     # column hash for adapter writes; `assign_from_row` populates
     # state from a fetched row (raises in Base).

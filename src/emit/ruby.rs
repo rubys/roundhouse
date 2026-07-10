@@ -202,6 +202,12 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // model bodies tolerate the nil.
     library::apply_hydration_nil_lowering(&mut lcs, app);
     library::apply_nilsafe_empty_lowering(&mut lcs);
+    // Runtime-Relation eager loading: per-model `preload_associations`
+    // machinery + belongs_to reader cache guards, so `includes(...)`
+    // on a runtime Relation executes as batched IN-loads instead of
+    // N+1 lazy reads. Runs last so nothing reprocesses the synthesized
+    // bodies (no-op unless the app has scopes AND surviving includes).
+    library::apply_preload_lowering(&mut lcs, app);
 
     // Synthesized siblings need explicit `require_relative` even when
     // they live in the same directory as their referencer — nothing else
