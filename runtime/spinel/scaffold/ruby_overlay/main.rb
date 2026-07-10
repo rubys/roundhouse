@@ -143,6 +143,19 @@ module Main
   # constant resolver sees the references without walking included-
   # module namespaces — a path it doesn't currently follow.
   def self.dispatch_core(env, stdin)
+    # Rails wraps every request in the AR query cache: identical
+    # SELECTs within one request replay the first result; any write
+    # invalidates. The CRuby Db shim implements the same discipline
+    # (fiber-local, so Puma threads don't share entries).
+    Db.query_cache_begin
+    begin
+      dispatch_core_inner(env, stdin)
+    ensure
+      Db.query_cache_end
+    end
+  end
+
+  def self.dispatch_core_inner(env, stdin)
     ActionView::ViewHelpers.reset_slots!
     Broadcasts.reset_log!
 

@@ -43,11 +43,17 @@ module Db
   @next_id = 0
   @mutex   = nil
   @cv      = nil
-  # Per-connection prepared-statement cache bound (roundhouse#12). Beyond
-  # this many distinct SQL strings on one connection, further statements
-  # are transient (closed on finalize) rather than cached — bounds growth
-  # when inlined literals make id-bearing queries key per-id.
-  STMT_CACHE_CAP = 128
+  # Per-connection prepared-statement cache bound (roundhouse#12). The
+  # cache is LRU (hits re-insert; at cap the oldest entry is closed and
+  # evicted), so a working set larger than the cap degrades gracefully
+  # instead of pinning the first N statements forever and re-parsing
+  # everything else — profiling the lobsters bench showed the old
+  # first-come-stays policy spending 13% of wall time in
+  # sqlite3_prepare/close because inlined id literals key per-id. The
+  # cap covers the lobsters sequence's per-iteration distinct-SQL
+  # working set with room; a prepared stmt is ~KBs, so worst case is a
+  # few MB per connection.
+  STMT_CACHE_CAP = 4096
   # Query-log capture (issue #27). `nil` ⇒ not capturing; an Array ⇒
   # accumulate the SQL each prepare/exec issues. The funnel hook
   # `record_query` is near-free (one nil check) when not capturing, so
@@ -124,6 +130,10 @@ module Db
 
   def self.exec(sql)
     record_query(sql)
+    # Any exec is (per the Db contract) DDL or a write — Rails
+    # invalidates the whole query cache on write; so do we.
+    qcache = Fiber[:rh_qcache]
+    qcache.clear unless qcache.nil?
     current_dbh.execute(sql)
   end
 
@@ -138,8 +148,31 @@ module Db
   # STMT_CACHE_CAP bounds growth, beyond which statements are transient and
   # closed on finalize). Placeholder binding — the planned follow-on —
   # makes the key the static query shape.
+  # ── per-request SQL query cache (Rails AR query-cache semantics) ──
+  # Identical SELECTs within one request replay the first result set;
+  # any `exec` (writes ride exec per the Db contract) invalidates.
+  # Fiber-local so Puma's thread-per-request can't cross-pollute.
+  # Entries capture rows AS CONSUMED plus an eof flag: a point-lookup
+  # reader that steps once caches one row + eof=false, and a later
+  # consumer wanting more rows promotes to a real re-executed
+  # statement (rare). Enabled per-request by the dispatch; nil ⇒ off
+  # (tests, scripts) with a single fiber-storage read of overhead.
+  def self.query_cache_begin
+    Fiber[:rh_qcache] = {}
+  end
+
+  def self.query_cache_end
+    Fiber[:rh_qcache] = nil
+  end
+
   def self.prepare(sql)
     record_query(sql)
+    qcache = Fiber[:rh_qcache]
+    if !qcache.nil? && (hit = qcache[sql])
+      @next_id += 1
+      @rows[@next_id] = { stmt: nil, row: nil, cached: false, replay: hit, pos: 0, sql: sql }
+      return @next_id
+    end
     conn  = current_dbh
     cache = conn.instance_variable_get(:@rh_stmt_cache)
     if cache.nil?
@@ -150,25 +183,73 @@ module Db
     cached = true
     if stmt.nil?
       stmt = conn.prepare(sql)
-      if cache.size < STMT_CACHE_CAP
-        cache[sql] = stmt
-      else
-        cached = false
+      if cache.size >= STMT_CACHE_CAP
+        # Evict least-recently-used (Ruby Hash is insertion-ordered and
+        # hits below re-insert, so the earliest key is the LRU). Skip
+        # any statement still held by an open @rows handle — closing it
+        # under a live cursor would break nested prepare patterns. If
+        # everything is somehow in use, insert past the cap (soft
+        # bound) rather than close a live statement.
+        live = nil
+        cache.each_key do |k|
+          candidate = cache[k]
+          next if @rows.any? { |_, e| e[:stmt].equal?(candidate) }
+          live = k
+          break
+        end
+        unless live.nil?
+          cache.delete(live).close
+        end
       end
+      cache[sql] = stmt
     else
       # Reused: rewind the cursor before re-stepping (robust even if a
-      # prior request raised before its finalize).
+      # prior request raised before its finalize). Re-insert to record
+      # recency (LRU discipline).
+      cache.delete(sql)
+      cache[sql] = stmt
       stmt.reset!
     end
     @next_id += 1
-    @rows[@next_id] = { stmt: stmt, row: nil, cached: cached }
+    capture = nil
+    qcache = Fiber[:rh_qcache]
+    unless qcache.nil?
+      capture = { rows: [], names: stmt.columns, eof: false, sql: sql }
+    end
+    @rows[@next_id] = { stmt: stmt, row: nil, cached: cached, capture: capture }
     @next_id
   end
 
   def self.step?(stmt_id)
     entry = @rows[stmt_id]
+    if (hit = entry[:replay])
+      if entry[:pos] < hit[:rows].length
+        entry[:row] = hit[:rows][entry[:pos]]
+        entry[:pos] += 1
+        return true
+      end
+      return false if hit[:eof]
+      # Cached prefix exhausted without eof (original consumer stopped
+      # early) — promote to a real transient statement, fast-forwarded
+      # past the rows already replayed.
+      stmt = current_dbh.prepare(entry[:sql])
+      entry[:pos].times { stmt.step }
+      entry[:stmt] = stmt
+      entry[:replay] = nil
+      entry[:promoted] = true
+      row = stmt.step
+      entry[:row] = row
+      return !row.nil?
+    end
     row = entry[:stmt].step
     entry[:row] = row
+    if (c = entry[:capture])
+      if row.nil?
+        c[:eof] = true
+      else
+        c[:rows] << row
+      end
+    end
     !row.nil?
   end
 
@@ -193,18 +274,32 @@ module Db
   end
 
   def self.column_count(stmt_id)
-    @rows[stmt_id][:stmt].columns.length
+    e = @rows[stmt_id]
+    return e[:replay][:names].length if e[:replay]
+    e[:stmt].columns.length
   end
 
   def self.column_name(stmt_id, i)
-    @rows[stmt_id][:stmt].columns[i]
+    e = @rows[stmt_id]
+    return e[:replay][:names][i] if e[:replay]
+    e[:stmt].columns[i]
   end
 
   # Release the per-call handle. A cached stmt is reset! (rewound + read
-  # lock dropped) and kept for reuse; a transient (over-cap) stmt is closed.
+  # lock dropped) and kept for reuse; a transient (over-cap or
+  # replay-promoted) stmt is closed; a pure replay handle held no
+  # statement at all. A capture is published to the request's query
+  # cache on release — even a partial one (eof=false): the next
+  # identical SELECT replays the consumed prefix and promotes past it
+  # only if it wants more.
   def self.finalize(stmt_id)
     entry = @rows.delete(stmt_id)
     return unless entry
+    return if entry[:replay] # replay handle — nothing to release
+    if (c = entry[:capture])
+      qcache = Fiber[:rh_qcache]
+      qcache[c[:sql]] = c if !qcache.nil? && !qcache.key?(c[:sql])
+    end
     if entry[:cached]
       entry[:stmt].reset!
     else

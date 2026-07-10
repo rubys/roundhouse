@@ -1172,11 +1172,74 @@ pub(crate) fn apply_datetime_lowering(lcs: &mut [LibraryClass], app: &App) {
                             m.body = temporal_writer_body(&col, &param.name);
                         }
                     }
+                    // Synthesized `<col>_raw=` writer: invalidate the
+                    // reader memo (below) before storing.
+                    if let Some(base) = m.name.as_str().strip_suffix("_raw=") {
+                        let base_sym = Symbol::from(base);
+                        if temporal.contains(&base_sym) {
+                            m.body = Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Seq {
+                                    exprs: vec![
+                                        Expr::new(
+                                            Span::synthetic(),
+                                            ExprNode::Assign {
+                                                target: LValue::Ivar {
+                                                    name: parse_memo_ivar(&base_sym),
+                                                },
+                                                value: Expr::new(
+                                                    Span::synthetic(),
+                                                    ExprNode::Lit { value: Literal::Nil },
+                                                ),
+                                            },
+                                        ),
+                                        m.body.clone(),
+                                    ],
+                                },
+                            );
+                        }
+                    }
+                }
+                // Schema-synthesized temporal reader:
+                // `ActiveSupport.parse_db_time(@<col>_raw)`. Profiling
+                // the lobsters bench put Date._parse + its regexps at
+                // ~4% of wall time — every `created_at` read re-parses
+                // the same string. Memoize per instance:
+                // `@__t_<col> ||= ActiveSupport.parse_db_time(@<col>_raw)`
+                // (writer above invalidates). nil/"" raw re-evaluates
+                // each read — parse_db_time's empty path is cheap.
+                AccessorKind::Method | AccessorKind::AttributeReader
+                    if temporal.contains(&m.name) && is_parse_db_time_body(&m.body) =>
+                {
+                    m.body = Expr::new(
+                        Span::synthetic(),
+                        ExprNode::OpAssign {
+                            target: LValue::Ivar { name: parse_memo_ivar(&m.name) },
+                            op: crate::expr::OpAssignOp::OrOr,
+                            value: m.body.clone(),
+                        },
+                    );
                 }
                 _ => {}
             }
         }
     }
+}
+
+/// `@__t_<col>` — the per-instance memo slot for a parsed temporal
+/// column. Underscore-prefixed so it can't collide with a real column.
+fn parse_memo_ivar(col: &Symbol) -> Symbol {
+    Symbol::from(format!("__t_{}", col.as_str()))
+}
+
+/// Is this body exactly `ActiveSupport.parse_db_time(<anything>)` —
+/// the synthesized temporal-reader shape?
+fn is_parse_db_time_body(body: &Expr) -> bool {
+    matches!(&*body.node, ExprNode::Send { recv: Some(r), method, args, .. }
+        if method.as_str() == "parse_db_time"
+            && args.len() == 1
+            && matches!(&*r.node, ExprNode::Const { path }
+                if path.len() == 1 && path[0].as_str() == "ActiveSupport"))
 }
 
 /// Ruby-family pre-emit pass: SQL NULL survives hydration as real nil.
