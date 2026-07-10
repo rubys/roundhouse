@@ -299,6 +299,14 @@ fn classify_form_with_components(
                             url_expr = Some(v.clone());
                             continue;
                         }
+                        // form_with's generated-id prefix option, not an
+                        // HTML attribute — left in opts it rendered a
+                        // bogus namespace="…" attr on /settings. The id
+                        // prefixing itself (edit_user_user_username)
+                        // rides the typed-record param_key follow-up.
+                        "namespace" => {
+                            continue;
+                        }
                         _ => {}
                     }
                 }

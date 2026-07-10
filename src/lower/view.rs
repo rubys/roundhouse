@@ -157,11 +157,19 @@ pub fn classify_render_partial<'a>(
             let ExprNode::Hash { entries, .. } = &*b.node else {
                 return None;
             };
+            // Shorthand locals (`render "comments/comment", :comment =>
+            // c, :show_story => true`): Rails treats the whole hash as
+            // locals, so it rides in `locals` for by-name binding —
+            // record via the singular-of-dir convention, the rest at
+            // their trailing extra-param positions. Dropping the
+            // non-first entries lost /comments' show_story and /s's
+            // show_tree_lines. `arg` stays for emitters that only
+            // consume the first-entry convention.
             let arg = entries.first().map(|(_k, v)| v);
             Some(RenderPartial::Named {
                 partial: partial.as_str(),
                 arg,
-                locals: None,
+                locals: Some(entries),
             })
         }
         _ => None,

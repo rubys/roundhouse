@@ -25,7 +25,19 @@ module ActiveRecord
         end
       h = {}
       names.each do |n|
-        h[n] = send(n) if respond_to?(n)
+        # Rails' serializable_hash reads COLUMN attributes only: a
+        # requested name with no column storage behind it (a
+        # typed_store accessor like lobsters' homepage, which lives
+        # inside the settings YAML) serializes as null — the store
+        # reader is NOT consulted (verified against the Rails dump:
+        # the user's settings blob holds a homepage value, the JSON
+        # says null). Column storage = the same-named ivar, or the
+        # `_raw` ivar the datetime lowering renames storage to.
+        h[n] =
+          if instance_variable_defined?("@#{n}") ||
+             instance_variable_defined?("@#{n}_raw")
+            send(n) if respond_to?(n)
+          end
       end
       h
     end

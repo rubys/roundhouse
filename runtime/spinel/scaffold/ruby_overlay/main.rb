@@ -87,6 +87,7 @@ require_relative "runtime/action_controller_cookies"
 # that reopen (same ordering contract as action_controller_session's
 # form_authenticity_token override below).
 require_relative "runtime/action_view_safe_buffer"
+require_relative "runtime/action_view_image_tag"
 require_relative "runtime/action_view_missing_template"
 require_relative "runtime/action_dispatch_request"
 require_relative "runtime/action_controller_session"

@@ -213,6 +213,33 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             }
             vec![todo_io_append("unknown stmt")]
         }
+        // `<% case action_name when "all" %>…<% when … %>…<% end %>` at
+        // the template level (lobsters' replies help text switches copy
+        // on the action). Same treatment as If: recurse each arm's body
+        // so inner `_buf` appends land on the accumulator; scrutinee
+        // and guards pass through untouched. Was swallowed by the
+        // catch-all TODO append — the whole case emitted `io << ""`.
+        ExprNode::Case { scrutinee, arms } => {
+            let new_arms = arms
+                .iter()
+                .map(|arm| crate::expr::Arm {
+                    pattern: arm.pattern.clone(),
+                    guard: arm.guard.clone(),
+                    body: {
+                        let stmts = walk_body(&arm.body, ctx);
+                        if stmts.len() == 1 {
+                            stmts.into_iter().next().unwrap()
+                        } else {
+                            seq(stmts)
+                        }
+                    },
+                })
+                .collect();
+            vec![Expr::new(
+                stmt.span,
+                ExprNode::Case { scrutinee: scrutinee.clone(), arms: new_arms },
+            )]
+        }
         // `<% while cond %>…<% end %>` at the template level —
         // lobsters' users/tree.html.erb walks the invitation tree with
         // an explicit stack (`while subtree`, `ancestors << subtree`,

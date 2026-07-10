@@ -203,8 +203,16 @@ pub(super) fn rewrite_render_to_views(
                             // `render html:` / `render plain:` — a body
                             // expression, not a template name. Normalized
                             // below to the positional-body form the runtime
-                            // render takes.
-                            "html" => body = Some((v.clone(), None)),
+                            // render takes. Rails ESCAPES an html: body
+                            // unless it's an html_safe buffer — about_
+                            // controller's MissingTemplate fallback quote
+                            // carries a literal `<h1>` Rails shows
+                            // escaped. The CRuby html_escape honors the
+                            // SafeString mark, so marked bodies still
+                            // pass through.
+                            "html" => {
+                                body = Some((html_escape_call(v), None))
+                            }
                             "plain" => body = Some((v.clone(), Some("text/plain"))),
                             // Inline `render json: <expr>` — the body is
                             // the JSON encoding of the value. Encoding
@@ -478,6 +486,29 @@ fn strip_format_kwarg(arg: &Expr) -> Option<Expr> {
 /// the overlay (as_json-aware recursive encode); a strict target whose
 /// app reaches this call surfaces an unresolved-constant gap loudly
 /// rather than silently rendering html.
+/// `ActionView::ViewHelpers.html_escape(<body>)` — the `render html:`
+/// escape Rails applies to non-safe bodies. Runtime-dispatched (not
+/// folded) because safety is a runtime fact under the CRuby
+/// SafeString overlay.
+fn html_escape_call(value: &Expr) -> Expr {
+    let recv = Expr::new(
+        value.span,
+        ExprNode::Const {
+            path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")],
+        },
+    );
+    Expr::new(
+        value.span,
+        ExprNode::Send {
+            recv: Some(recv),
+            method: Symbol::from("html_escape"),
+            args: vec![value.clone()],
+            block: None,
+            parenthesized: true,
+        },
+    )
+}
+
 fn json_render_encode(value: &Expr) -> Expr {
     let recv = Expr::new(
         value.span,
