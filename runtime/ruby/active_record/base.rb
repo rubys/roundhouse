@@ -67,7 +67,6 @@ module ActiveRecord
     # models without one fall back to this no-op, which leaves the lazy
     # association readers doing the work (correct, just N+1).
     def self.preload_associations(_records, _specs)
-      nil
     end
 
     # Per-model adapter primitives — public AR API delegates here.
