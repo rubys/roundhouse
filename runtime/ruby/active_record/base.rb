@@ -270,19 +270,19 @@ module ActiveRecord
       instance
     end
 
-    # `Article.last` — highest-id row, or nil when the table is
-    # empty. Real-blog tests use it after a create-action redirect:
-    # `assert_redirected_to article_url(Article.last)`. Implemented
-    # via `all` rather than an adapter primitive so every adapter
-    # gets it for free. Explicit empty?-ternary because Crystal's
-    # `Array#last` raises on empty (Ruby returns nil), and `records[-1]`
-    # avoids Rust's negative-indexing-panic in the empty-case dead
-    # branch. The Rust emit of this method still has a residual gap
-    # (`records[-1]` emits as `records[(-1_i64) as usize]` which is
-    # also wrong) — flagged for a future Vec.last() bridge.
+    # `Article.last` — highest-id row, or nil when the table is empty.
+    # Real-blog tests use it after a create-action redirect:
+    # `assert_redirected_to article_url(Article.last)`. Resolves to a
+    # single `ORDER BY <pk> DESC LIMIT 1` row through the relation, the
+    # way Rails does — NOT a full-table `all` + `[-1]`, which hydrated
+    # every row (catastrophic on large tables: lobsters' /u cache key is
+    # `User.last.id` over 10k+ users, run once per request). Routing
+    # through `Relation#last` also retires the old `records[-1]`
+    # empty/negative-index cross-target gaps (Crystal `Array#last`
+    # raising, Rust `records[(-1_i64) as usize]`) — `first` returns nil
+    # on empty for every target.
     def self.last
-      records = all
-      records.empty? ? nil : records[-1]
+      ActiveRecord::Relation.new(self).last
     end
 
     # ---- Instance lifecycle ------------------------------------------
