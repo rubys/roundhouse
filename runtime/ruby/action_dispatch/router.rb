@@ -24,13 +24,18 @@ module ActionDispatch
     # call sites; positional avoids the asymmetry on internal classes
     # like this one.
     class Route
-      attr_reader :verb, :pattern, :controller, :action
+      attr_reader :verb, :pattern, :controller, :action, :req_format
 
-      def initialize(verb, pattern, controller, action)
+      # `req_format` — the route-forced response format (Rails'
+      # `get "/rss" => "home#index", :format => "rss"`), nil for the
+      # common infer-from-path case. Named `req_format` (not `format`)
+      # so targets whose stdlibs claim `format` never collide.
+      def initialize(verb, pattern, controller, action, req_format = nil)
         @verb        = verb
         @pattern     = pattern
         @controller  = controller
         @action      = action
+        @req_format  = req_format
       end
     end
 
@@ -39,12 +44,13 @@ module ActionDispatch
     # Replaces the prior `{ controller:, action:, path_params: }` hash
     # return shape. Positional initialize, same rationale as Route.
     class MatchResult
-      attr_reader :controller, :action, :path_params
+      attr_reader :controller, :action, :path_params, :req_format
 
-      def initialize(controller, action, path_params)
+      def initialize(controller, action, path_params, req_format = nil)
         @controller  = controller
         @action      = action
         @path_params = path_params
+        @req_format  = req_format
       end
     end
 
@@ -64,7 +70,7 @@ module ActionDispatch
         if route.verb.to_s == method_upcase
           params = match_pattern(route.pattern.to_s, path)
           unless params.nil?
-            return MatchResult.new(route.controller, route.action, params)
+            return MatchResult.new(route.controller, route.action, params, route.req_format)
           end
         end
         i += 1

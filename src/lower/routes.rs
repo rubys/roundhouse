@@ -42,6 +42,13 @@ pub struct FlatRoute {
     /// `comments` for `/replies/comments/page/:page` would otherwise
     /// shadow the real `/comments` helper).
     pub named: bool,
+    /// Route-forced response format — the `:format => "rss"` option on
+    /// an explicit route (`get "/rss" => "home#index", :format =>
+    /// "rss"`). Dispatch seeds the controller's `request_format` from
+    /// it so the `respond_to`-flattened branch picks the right view.
+    /// None (the overwhelmingly common case) leaves format inference
+    /// to the request path.
+    pub format: Option<Symbol>,
 }
 
 /// The seven standard Rails scaffold actions a `resources` block
@@ -137,7 +144,13 @@ fn singular_resource_actions() -> &'static [(&'static str, HttpMethod, &'static 
 
 fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
     match spec {
-        RouteSpec::Explicit { method, path, controller, action, as_name, scope, .. } => {
+        RouteSpec::Explicit { method, path, controller, action, as_name, scope, constraints } => {
+            // `:format => "rss"` rides the constraints map at ingest
+            // (it shapes the request, not the routing triple); surface
+            // it as the route's forced response format.
+            let forced_format = constraints
+                .get(&Symbol::from("format"))
+                .map(|f| Symbol::from(f.as_str()));
             let (nested, base_params) = nest_path(path, ctx.parent_pair(), *scope);
             let full_path = prefix_path(&ctx.ns_path, &nested);
             // Rails optional `(…)` segments (`get "/s/:id/(:title)"`) match
@@ -186,6 +199,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     as_name: derived_name.clone(),
                     path_params: params,
                     named: named && i == 0,
+                    format: forced_format.clone(),
                 });
             }
         }
@@ -215,6 +229,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 as_name: format!("{}root", ctx.name_prefix),
                 path_params: vec![],
                 named: true,
+                format: None,
             });
         }
         RouteSpec::Resources { name, only, except, nested, singular } => {
@@ -277,6 +292,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     as_name,
                     path_params: params,
                     named: true,
+                    format: None,
                 });
             }
             let child_ctx = Ctx {

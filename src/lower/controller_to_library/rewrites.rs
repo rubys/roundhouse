@@ -189,7 +189,9 @@ pub(super) fn rewrite_render_to_views(
                 ExprNode::Lit { value: Literal::Sym { value } } => (value.clone(), Vec::new()),
                 ExprNode::Hash { entries, kwargs: true } => {
                     let mut name: Option<Symbol> = None;
-                    let mut body: Option<(Expr, bool)> = None; // (expr, is_plain)
+                    // (expr, content_type-to-tag) — html carries None
+                    // (text/html is the runtime default).
+                    let mut body: Option<(Expr, Option<&str>)> = None;
                     let mut rest: Vec<(Expr, Expr)> = Vec::new();
                     for (k, v) in entries {
                         let key = match &*k.node {
@@ -202,8 +204,16 @@ pub(super) fn rewrite_render_to_views(
                             // expression, not a template name. Normalized
                             // below to the positional-body form the runtime
                             // render takes.
-                            "html" => body = Some((v.clone(), false)),
-                            "plain" => body = Some((v.clone(), true)),
+                            "html" => body = Some((v.clone(), None)),
+                            "plain" => body = Some((v.clone(), Some("text/plain"))),
+                            // Inline `render json: <expr>` — the body is
+                            // the JSON encoding of the value. Encoding
+                            // happens at runtime (`JsonRender.encode`
+                            // walks as_json/Hash/Array/Time), because the
+                            // value's shape is a runtime fact.
+                            "json" => {
+                                body = Some((json_render_encode(v), Some("application/json")))
+                            }
                             _ => rest.push((k.clone(), v.clone())),
                         }
                     }
@@ -215,7 +225,7 @@ pub(super) fn rewrite_render_to_views(
                         // status: N, content_type: "text/plain")`. A
                         // `layout: false` entry is dropped (no layout is
                         // already the runtime default for a body render).
-                        let Some((body_expr, is_plain)) = body else { return None };
+                        let Some((body_expr, tagged_content_type)) = body else { return None };
                         rest.retain(|(k, v)| {
                             let is_layout_false = matches!(
                                 &*k.node,
@@ -234,13 +244,8 @@ pub(super) fn rewrite_render_to_views(
                                 ExprNode::Hash { entries: rest, kwargs: true },
                             ));
                         }
-                        if is_plain {
-                            merge_or_append_kwarg(
-                                &mut new_args,
-                                "content_type",
-                                "text/plain",
-                                e.span,
-                            );
+                        if let Some(ct) = tagged_content_type {
+                            merge_or_append_kwarg(&mut new_args, "content_type", ct, e.span);
                         }
                         new_args.extend(args.iter().skip(1).cloned());
                         return Some(Expr::new(
@@ -468,6 +473,30 @@ fn strip_format_kwarg(arg: &Expr) -> Option<Expr> {
 /// append the entry to it; otherwise push a fresh kwarg Hash with
 /// just this entry. The runtime's `render(body, status:, content_type:)`
 /// expects ONE kwargs hash, not multiple.
+/// `ActionController::JsonRender.encode(<value>)` — the runtime JSON
+/// encoder behind inline `render json: <expr>`. CRuby answers it via
+/// the overlay (as_json-aware recursive encode); a strict target whose
+/// app reaches this call surfaces an unresolved-constant gap loudly
+/// rather than silently rendering html.
+fn json_render_encode(value: &Expr) -> Expr {
+    let recv = Expr::new(
+        value.span,
+        ExprNode::Const {
+            path: vec![Symbol::from("ActionController"), Symbol::from("JsonRender")],
+        },
+    );
+    Expr::new(
+        value.span,
+        ExprNode::Send {
+            recv: Some(recv),
+            method: Symbol::from("encode"),
+            args: vec![value.clone()],
+            block: None,
+            parenthesized: true,
+        },
+    )
+}
+
 fn merge_or_append_kwarg(args: &mut Vec<Expr>, key: &str, value: &str, span: Span) {
     let key_node = Expr::new(
         span,

@@ -537,6 +537,7 @@ fn is_framework_view_helper(name: &str) -> bool {
         name,
         "image_tag"
             | "image_path"
+            | "image_url"
             | "path_to_javascript"
             | "javascript_path"
             | "javascript_include_tag"

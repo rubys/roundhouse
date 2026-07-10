@@ -9,8 +9,9 @@ module ActionDispatch
       def pattern: () -> String
       def controller: () -> Symbol
       def action: () -> Symbol
+      def req_format: () -> Symbol?
 
-      def initialize: (String verb, String pattern, Symbol controller, Symbol action) -> void
+      def initialize: (String verb, String pattern, Symbol controller, Symbol action, ?Symbol? req_format) -> void
     end
 
     # Successful match result: the resolved controller + action symbols
@@ -19,8 +20,9 @@ module ActionDispatch
       def controller: () -> Symbol
       def action: () -> Symbol
       def path_params: () -> Hash[String, String]
+      def req_format: () -> Symbol?
 
-      def initialize: (Symbol controller, Symbol action, Hash[String, String] path_params) -> void
+      def initialize: (Symbol controller, Symbol action, Hash[String, String] path_params, ?Symbol? req_format) -> void
     end
 
     # Match a request against the route table. Returns a MatchResult

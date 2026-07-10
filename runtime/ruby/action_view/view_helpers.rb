@@ -272,6 +272,18 @@ module ActionView
       "/assets/#{source}"
     end
 
+    # `image_url` — Rails' absolute-URL variant of `image_path`. With no
+    # asset host configured (the benchmark shape) Rails emits the same
+    # path `image_path` produces, so this mirrors it. Inlined rather
+    # than delegating: forwarding `skip_pipeline:` would transpile to a
+    # positional Map on strict targets (the kwarg-forwarding trap).
+    def self.image_url(source, skip_pipeline: false)
+      return source if skip_pipeline
+      return source if source.start_with?("/")
+      return source if source.include?("://")
+      "/assets/#{source}"
+    end
+
     # `path_to_javascript "application"` → the asset path for a JS source.
     # Rails appends the `.js` extension when the source carries none, then
     # prefixes the asset path (undigested here, per the `image_path` note —

@@ -2,7 +2,7 @@
 //! spinel-shape statement list. Dispatches output-position expressions
 //! to the helper / partial / form-with / form-builder sub-modules.
 
-use crate::expr::{Expr, ExprNode, LValue, Literal};
+use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
 use crate::ident::Symbol;
 use crate::span::Span;
 
@@ -532,6 +532,31 @@ fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
             surface: *surface,
             left: rewrite_helpers_in_expr(left, ctx),
             right: rewrite_helpers_in_expr(right, ctx),
+        },
+        // Value-position compounds that can carry helper calls in their
+        // legs — `<%= cond ? ": " + h(x) : "" %>` (lobsters rss title),
+        // `<%= "#{h(x)}!" %>`, `<%= [link_to(...), …].join %>`. Without
+        // these arms the nested helper Send survives raw and the view
+        // module has no method to answer it.
+        ExprNode::If { cond, then_branch, else_branch } => ExprNode::If {
+            cond: rewrite_helpers_in_expr(cond, ctx),
+            then_branch: rewrite_helpers_in_expr(then_branch, ctx),
+            else_branch: rewrite_helpers_in_expr(else_branch, ctx),
+        },
+        ExprNode::StringInterp { parts } => ExprNode::StringInterp {
+            parts: parts
+                .iter()
+                .map(|p| match p {
+                    InterpPart::Text { value } => InterpPart::Text { value: value.clone() },
+                    InterpPart::Expr { expr } => {
+                        InterpPart::Expr { expr: rewrite_helpers_in_expr(expr, ctx) }
+                    }
+                })
+                .collect(),
+        },
+        ExprNode::Array { elements, style } => ExprNode::Array {
+            elements: elements.iter().map(|el| rewrite_helpers_in_expr(el, ctx)).collect(),
+            style: *style,
         },
         other => other.clone(),
     };

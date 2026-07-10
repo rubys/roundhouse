@@ -702,7 +702,21 @@ fn walk_erb<V: Vfs + ?Sized>(
             // surface them as a coverage gap rather than dropping silently.
             Some(e) if ViewEngine::from_extension(e).is_some() => {
                 let engine = ViewEngine::from_extension(e).expect("checked is_some");
-                if path.to_string_lossy().ends_with(&format!(".html.{e}")) {
+                // `.html.erb` renders through the view path. So does a
+                // FORMAT-AGNOSTIC template (`rss.erb` — engine ext with
+                // no inner format): Rails renders those for any request
+                // format (lobsters' home/rss.erb backs its RSS feeds).
+                // Explicit non-html formats (`.text.erb` mailer variants)
+                // stay skipped: their stems collide with the html
+                // template's on emit and their bodies aren't typed.
+                let file_name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let stem = file_name
+                    .strip_suffix(&format!(".{e}"))
+                    .unwrap_or(&file_name);
+                if stem.ends_with(".html") || !stem.contains('.') {
                     out.push((path, engine));
                 } else {
                     record_skipped_view(&path, &format!("{e} (non-html format)"));

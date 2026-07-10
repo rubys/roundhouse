@@ -122,12 +122,18 @@ fn build_route_new(r: &FlatRoute, class_id: &ClassId, route_ty: &Ty) -> Expr {
         HttpMethod::Any => "ANY",
     };
     let controller_sym = controller_symbol(r.controller.0.as_str());
-    let args = vec![
+    let mut args = vec![
         lit_str(verb_str.to_string()),
         lit_str(r.path.clone()),
         lit_sym(Symbol::from(controller_sym)),
         lit_sym(r.action.clone()),
     ];
+    // Route-forced format rides as the optional 5th positional
+    // (`Route.new(..., :rss)`); format-free routes stay 4-arg so
+    // existing route tables emit byte-identical.
+    if let Some(fmt) = &r.format {
+        args.push(lit_sym(fmt.clone()));
+    }
     let class_path: Vec<Symbol> = class_id
         .0
         .as_str()

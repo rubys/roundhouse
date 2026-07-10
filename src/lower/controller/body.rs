@@ -31,7 +31,7 @@ use super::util::{is_format_binding, unwrap_lambda};
 /// preserves the json branch as a `request_format == :json`
 /// conditional.
 pub fn unwrap_respond_to(expr: &Expr) -> Expr {
-    unwrap_respond_to_inner(expr, /*with_format_dispatch=*/ false)
+    unwrap_respond_to_inner(expr, /*with_format_dispatch=*/ false, /*breadth=*/ false)
 }
 
 /// Format-dispatching variant of `unwrap_respond_to`.
@@ -46,6 +46,14 @@ pub fn unwrap_respond_to(expr: &Expr) -> Expr {
 /// branches — we fall back to html-only flattening so the HTTP-HTML
 /// paths every emitter targets stay lossless.
 ///
+/// `breadth: true` (the CRuby emit path, whose overlay runtime can
+/// answer the extra surface) widens the dispatch: `format.json`
+/// branches of ANY shape are preserved (inline `render json: <expr>`
+/// normalizes downstream to a `JsonRender.encode` body render), and
+/// `format.rss` branches are preserved under a `request_format ==
+/// :rss` arm (lobsters' /rss private feed). Non-breadth callers keep
+/// the narrow behavior so their emit stays byte-identical.
+///
 /// Handles both scaffold shapes:
 ///   - Simple:    `respond_to { format.html { a }; format.json { b } }` → `if c; b' else a end`
 ///   - Branched:  `respond_to { if c; format.html { a1 }; format.json { b1 }
@@ -56,11 +64,11 @@ pub fn unwrap_respond_to(expr: &Expr) -> Expr {
 /// bottom-up, and non-respond_to sub-expressions pass through their
 /// structural variants so anything already at the top level is
 /// preserved.
-pub fn unwrap_respond_to_with_format_dispatch(expr: &Expr) -> Expr {
-    unwrap_respond_to_inner(expr, /*with_format_dispatch=*/ true)
+pub fn unwrap_respond_to_with_format_dispatch(expr: &Expr, breadth: bool) -> Expr {
+    unwrap_respond_to_inner(expr, /*with_format_dispatch=*/ true, breadth)
 }
 
-fn unwrap_respond_to_inner(expr: &Expr, with_format_dispatch: bool) -> Expr {
+fn unwrap_respond_to_inner(expr: &Expr, with_format_dispatch: bool, breadth: bool) -> Expr {
     // Top-level `respond_to` with a block — replace the whole Send
     // with its flattened body. This short-circuits the structural
     // recursion so we don't re-enter the respond_to's Send/Lambda
@@ -68,10 +76,10 @@ fn unwrap_respond_to_inner(expr: &Expr, with_format_dispatch: bool) -> Expr {
     if let ExprNode::Send { recv: None, method, block: Some(block), .. } = &*expr.node {
         if method.as_str() == "respond_to" {
             let lambda_body = unwrap_lambda(block);
-            return flatten_respond_to_body(lambda_body, with_format_dispatch);
+            return flatten_respond_to_body(lambda_body, with_format_dispatch, breadth);
         }
     }
-    let recurse = |e: &Expr| unwrap_respond_to_inner(e, with_format_dispatch);
+    let recurse = |e: &Expr| unwrap_respond_to_inner(e, with_format_dispatch, breadth);
     let new_node = match &*expr.node {
         ExprNode::Seq { exprs } => ExprNode::Seq {
             exprs: exprs.iter().map(&recurse).collect(),
@@ -155,12 +163,13 @@ fn unwrap_respond_to_inner(expr: &Expr, with_format_dispatch: bool) -> Expr {
 /// `with_format_dispatch=false` keeps just the html branch (legacy
 /// behavior, used by Group 2 emit paths). `true` emits the
 /// `if request_format == :json; …; else; …; end` shape.
-fn flatten_respond_to_body(body: &Expr, with_format_dispatch: bool) -> Expr {
-    let recurse_outer = |e: &Expr| unwrap_respond_to_inner(e, with_format_dispatch);
+fn flatten_respond_to_body(body: &Expr, with_format_dispatch: bool, breadth: bool) -> Expr {
+    let recurse_outer = |e: &Expr| unwrap_respond_to_inner(e, with_format_dispatch, breadth);
     match &*body.node {
         ExprNode::Seq { exprs } => {
             let mut html: Option<Expr> = None;
             let mut json: Option<Expr> = None;
+            let mut rss: Option<Expr> = None;
             let mut other: Vec<Expr> = Vec::new();
             for e in exprs {
                 match classify_format_stmt(e) {
@@ -168,29 +177,36 @@ fn flatten_respond_to_body(body: &Expr, with_format_dispatch: bool) -> Expr {
                         html = Some(recurse_outer(&branch_body));
                     }
                     Some((fmt, branch_body)) if fmt.as_str() == "json" => {
-                        // Only preserve simple `render :sym [, kwargs]`
-                        // shapes — others fall through and effectively
-                        // drop (the html branch alone covers the
-                        // response). Group 2 emit doesn't carry the
+                        // Narrow mode preserves only simple `render :sym
+                        // [, kwargs]` shapes — others fall through and
+                        // effectively drop (the html branch alone covers
+                        // the response). Breadth mode (CRuby) keeps ANY
+                        // body: inline `render json: <expr>` normalizes
+                        // downstream. Group 2 emit doesn't carry the
                         // dispatch (its emitters don't recognize
                         // `request_format`), so we drop unconditionally
                         // when `with_format_dispatch=false`.
-                        if with_format_dispatch && is_simple_render_sym(&branch_body) {
+                        if with_format_dispatch
+                            && (breadth || is_simple_render_sym(&branch_body))
+                        {
                             json = Some(recurse_outer(&branch_body));
                         }
+                    }
+                    Some((fmt, branch_body)) if fmt.as_str() == "rss" && breadth => {
+                        rss = Some(recurse_outer(&branch_body));
                     }
                     Some(_) => {} // unknown format (e.g. format.xml) — drop
                     None => other.push(recurse_outer(e)),
                 }
             }
-            build_format_dispatch(html, json, other, body.span)
+            build_format_dispatch(html, json, rss, other, body.span)
         }
         ExprNode::If { cond, then_branch, else_branch } => Expr::new(
             body.span,
             ExprNode::If {
                 cond: recurse_outer(cond),
-                then_branch: flatten_respond_to_body(then_branch, with_format_dispatch),
-                else_branch: flatten_respond_to_body(else_branch, with_format_dispatch),
+                then_branch: flatten_respond_to_body(then_branch, with_format_dispatch, breadth),
+                else_branch: flatten_respond_to_body(else_branch, with_format_dispatch, breadth),
             },
         ),
         // A single expression at respond_to-body scope — either a
@@ -201,9 +217,24 @@ fn flatten_respond_to_body(body: &Expr, with_format_dispatch: bool) -> Expr {
             Some((fmt, branch_body))
                 if fmt.as_str() == "json"
                     && with_format_dispatch
-                    && is_simple_render_sym(&branch_body) =>
+                    && (breadth || is_simple_render_sym(&branch_body)) =>
             {
-                build_format_dispatch(None, Some(recurse_outer(&branch_body)), Vec::new(), body.span)
+                build_format_dispatch(
+                    None,
+                    Some(recurse_outer(&branch_body)),
+                    None,
+                    Vec::new(),
+                    body.span,
+                )
+            }
+            Some((fmt, branch_body)) if fmt.as_str() == "rss" && breadth => {
+                build_format_dispatch(
+                    None,
+                    None,
+                    Some(recurse_outer(&branch_body)),
+                    Vec::new(),
+                    body.span,
+                )
             }
             Some(_) => Expr::new(body.span, ExprNode::Seq { exprs: vec![] }),
             None => recurse_outer(body),
@@ -259,26 +290,40 @@ fn is_simple_render_sym(body: &Expr) -> bool {
 fn build_format_dispatch(
     html: Option<Expr>,
     json: Option<Expr>,
+    rss: Option<Expr>,
     other: Vec<Expr>,
     span: Span,
 ) -> Expr {
-    let dispatch = match (html, json) {
-        (Some(h), None) => h,
-        (None, None) => Expr::new(span, ExprNode::Seq { exprs: vec![] }),
-        (h, Some(j)) => {
-            let html_body =
-                h.unwrap_or_else(|| Expr::new(span, ExprNode::Seq { exprs: vec![] }));
-            let json_body = mark_render_format(&j, "json");
-            Expr::new(
-                span,
-                ExprNode::If {
-                    cond: request_format_eq(span, "json"),
-                    then_branch: json_body,
-                    else_branch: html_body,
-                },
-            )
-        }
+    // Innermost-first: the html branch is the else-default, an rss arm
+    // (breadth mode only) wraps it, and the json arm wraps outermost —
+    // so the no-rss shape stays byte-identical to the legacy two-way
+    // dispatch.
+    let mut dispatch = match (&html, &json, &rss) {
+        (Some(h), None, None) => h.clone(),
+        (None, None, None) => Expr::new(span, ExprNode::Seq { exprs: vec![] }),
+        _ => html.unwrap_or_else(|| Expr::new(span, ExprNode::Seq { exprs: vec![] })),
     };
+    if let Some(r) = rss {
+        dispatch = Expr::new(
+            span,
+            ExprNode::If {
+                cond: request_format_eq(span, "rss"),
+                then_branch: r,
+                else_branch: dispatch,
+            },
+        );
+    }
+    if let Some(j) = json {
+        let json_body = mark_render_format(&j, "json");
+        dispatch = Expr::new(
+            span,
+            ExprNode::If {
+                cond: request_format_eq(span, "json"),
+                then_branch: json_body,
+                else_branch: dispatch,
+            },
+        );
+    }
     if other.is_empty() {
         dispatch
     } else {

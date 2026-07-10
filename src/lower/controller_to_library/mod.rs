@@ -468,6 +468,12 @@ fn build_methods(
 ) -> Vec<MethodDef> {
     let mut methods: Vec<MethodDef> = Vec::new();
 
+    // Route-aware callers (today: the Ruby emit path) also get
+    // respond_to BREADTH — format.rss branches + inline `render json:`
+    // preserved under the request_format dispatch. Legacy callers keep
+    // the narrow html(+simple-json) flatten so their emit is unchanged.
+    let format_breadth = routed.is_some();
+
     let (publics_all, privs) = split_public_private_actions(controller);
     // With route info, a public method is a routable action only if a route
     // reaches it; the rest are helper/filter methods that must keep their
@@ -525,13 +531,13 @@ fn build_methods(
     for a in &publics_inlined {
         methods.push(action_to_method(
             a, controller, &privs, /*is_public=*/ true, params_specs, json_actions, view_ivars,
-            partials,
+            partials, format_breadth,
         ));
     }
     for a in &privs_kept {
         methods.push(action_to_method(
             a, controller, &privs, /*is_public=*/ false, params_specs, json_actions, view_ivars,
-            partials,
+            partials, format_breadth,
         ));
     }
     // Public methods no route reaches are helpers/filters, not actions:
@@ -541,7 +547,7 @@ fn build_methods(
     for a in &helper_publics {
         methods.push(action_to_method(
             a, controller, &privs, /*is_public=*/ false, params_specs, json_actions, view_ivars,
-            partials,
+            partials, format_breadth,
         ));
     }
 
@@ -910,6 +916,7 @@ fn action_to_method(
     json_actions: &std::collections::HashSet<Symbol>,
     view_ivars: &ViewIvarMap,
     partials: &PartialMap,
+    format_breadth: bool,
 ) -> MethodDef {
     let method_name = method_name_for_action(a.name.as_str());
     // Required positionals first, then optional positionals with their
@@ -935,6 +942,7 @@ fn action_to_method(
         has_json_variant,
         view_ivars,
         partials,
+        format_breadth,
     );
     // Action params type to Untyped for now — Rails action signatures
     // are conventionally `def show(id)` with all-string CGI inputs;
@@ -1031,8 +1039,9 @@ fn lower_action_body(
     has_json_variant: bool,
     view_ivars: &ViewIvarMap,
     partials: &PartialMap,
+    format_breadth: bool,
 ) -> Expr {
-    let unwrapped = unwrap_respond_to_with_format_dispatch(body);
+    let unwrapped = unwrap_respond_to_with_format_dispatch(body, format_breadth);
     let with_render = if is_public {
         let synth = synthesize_implicit_render(&unwrapped, action_name, has_json_variant);
         let ivars = ivars_in_scope(controller, action_name, &synth, privs);

@@ -75,6 +75,7 @@ require_relative "runtime/action_view_form_builder_extras"
 require_relative "runtime/action_view_capture_helper"
 require_relative "runtime/active_record"
 require_relative "runtime/active_record_bang"
+require_relative "runtime/active_record_serialization"
 require_relative "runtime/active_record_relation_ext"
 require_relative "runtime/active_record_arel"
 require_relative "config/schema"
@@ -84,6 +85,7 @@ require_relative "runtime/action_controller_cookies"
 require_relative "runtime/action_view_missing_template"
 require_relative "runtime/action_dispatch_request"
 require_relative "runtime/action_controller_session"
+require_relative "runtime/action_controller_json_render"
 require_relative "runtime/typed_store"
 require_relative "runtime/action_mailer"
 # App-code gem dependencies, guarded so apps that don't use them (the
@@ -166,6 +168,10 @@ module Main
     if matched.nil?
       return [404, "<h1>404 Not Found</h1>", "text/html; charset=utf-8", nil, {}]
     end
+    # A route-forced format (`get "/rss" => "home#index", :format =>
+    # "rss"`) overrides the path-suffix sniff — the URL has no
+    # extension but the route pins the response format.
+    request_format = matched.req_format unless matched.req_format.nil?
 
     controller = Main.instantiate_controller(matched.controller)
     merged = matched.path_params.dup
@@ -265,6 +271,9 @@ module Main
       if controller.request_format == :json
         [controller.status, controller.body,
          controller.content_type, controller.location, out_cookies]
+      elsif controller.request_format == :rss
+        [controller.status, controller.body,
+         "application/rss+xml; charset=utf-8", controller.location, out_cookies]
       else
         [controller.status, controller.body,
          "text/html; charset=utf-8", controller.location, out_cookies]
