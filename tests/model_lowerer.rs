@@ -144,6 +144,7 @@ fn article_lowers_with_schema_methods() {
         "from_stmt",
         "_adapter_find_by_id",
         "_adapter_all",
+        "_adapter_last",
         "_adapter_count",
         "_adapter_exists_by_id?",
         "_adapter_truncate",
