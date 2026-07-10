@@ -82,12 +82,13 @@ fn ingests_associations_with_convention_defaults() {
     let post_assocs: Vec<&Association> = post.associations().collect();
     assert_eq!(post_assocs.len(), 1);
     match post_assocs[0] {
-        Association::HasMany { name, target, foreign_key, through, dependent } => {
+        Association::HasMany { name, target, foreign_key, through, dependent, scope } => {
             assert_eq!(name.as_str(), "comments");
             assert_eq!(target.0.as_str(), "Comment");
             assert_eq!(foreign_key.as_str(), "post_id");
             assert!(through.is_none());
             assert!(matches!(dependent, Dependent::None));
+            assert!(scope.is_none());
         }
         other => panic!("expected HasMany, got {other:?}"),
     }

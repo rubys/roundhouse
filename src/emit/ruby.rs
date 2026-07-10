@@ -316,7 +316,11 @@ pub fn emit_lowered_routes(app: &App) -> EmittedFile {
 /// `app/models/<name>.rb` because they're plain holders, not request
 /// handlers.
 pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
-    let mut lcs = lower_controllers_for_spinel(app);
+    // format_breadth=false: the spinel tree compiles these — rss/inline-
+    // json respond_to arms reference the CRuby-overlay JsonRender and
+    // don't type under the AOT compile (CI caught `render(JsonRender.
+    // encode(...))` as sp_RbVal-vs-char* in articles_controller).
+    let mut lcs = lower_controllers_for_spinel(app, false);
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
     library::apply_duration_lowering(&mut lcs);
@@ -336,7 +340,10 @@ pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
 /// re-emit controllers through this and dedupe last-wins over the
 /// spinel-shape files.
 pub fn emit_lowered_controllers_with_layout(app: &App) -> Vec<EmittedFile> {
-    let mut lcs = lower_controllers_for_spinel(app);
+    // format_breadth=true: the CRuby/JRuby trees ship the overlay
+    // (JsonRender + rss dispatch) so the widened respond_to arms
+    // resolve; these files dedupe last-wins over the spinel-shape ones.
+    let mut lcs = lower_controllers_for_spinel(app, true);
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
     library::apply_duration_lowering(&mut lcs);
@@ -353,7 +360,7 @@ pub fn emit_lowered_controllers_with_layout(app: &App) -> Vec<EmittedFile> {
 /// controller lowerer's registry as extras — the Arel pass needs
 /// them to resolve `Article.includes(...).order(...)` chain
 /// receivers to a TableRef.
-fn lower_controllers_for_spinel(app: &App) -> Vec<LibraryClass> {
+fn lower_controllers_for_spinel(app: &App, format_breadth: bool) -> Vec<LibraryClass> {
     // Use lower_models_with_registry (not lower_models_to_library_classes
     // + class_info_from_library_class) because the former returns
     // ClassInfo with `table` set — the Arel pass needs `info.table`
@@ -388,6 +395,7 @@ fn lower_controllers_for_spinel(app: &App) -> Vec<LibraryClass> {
         &app.library_classes,
         &assocs,
         Some(&routed),
+        format_breadth,
     )
 }
 

@@ -275,6 +275,7 @@ mod tests {
             foreign_key: sym(fk),
             through: None,
             dependent: Dependent::None,
+            scope: None,
         }
     }
 

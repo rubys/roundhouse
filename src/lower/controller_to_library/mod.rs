@@ -156,7 +156,7 @@ pub fn lower_controllers_with_arel_views_and_assocs(
     assocs: &[crate::lower::model_associations::AssociationEdge],
 ) -> Vec<LibraryClass> {
     lower_controllers_with_arel_views_assocs_and_routes(
-        controllers, extras, schema, views, &[], assocs, None,
+        controllers, extras, schema, views, &[], assocs, None, false,
     )
 }
 
@@ -180,6 +180,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     routed_by_controller: Option<
         &std::collections::HashMap<ClassId, std::collections::HashSet<Symbol>>,
     >,
+    format_breadth: bool,
 ) -> Vec<LibraryClass> {
     // Scan source-shape action bodies for `permit(...)` declarations.
     // Each unique resource yields one `<Resource>Params` synthesized
@@ -205,7 +206,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         // `None` → legacy: every public method is an action.
         let routed = routed_by_controller
             .map(|m| m.get(&controller.name).cloned().unwrap_or_default());
-        let methods = build_methods(controller, controllers, &params_specs, &json_actions, routed.as_ref(), &view_ivars, &partials);
+        let methods = build_methods(controller, controllers, &params_specs, &json_actions, routed.as_ref(), &view_ivars, &partials, format_breadth);
         all_methods.push((methods, controller));
     }
 
@@ -423,6 +424,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         None,
         &view_ivars,
         &partials,
+        false,
     );
     LibraryClass {
         name: controller.name.clone(),
@@ -465,14 +467,15 @@ fn build_methods(
     routed: Option<&std::collections::HashSet<Symbol>>,
     view_ivars: &ViewIvarMap,
     partials: &PartialMap,
+    // respond_to BREADTH — format.rss branches + inline `render json:`
+    // preserved under the request_format dispatch. ONLY the CRuby/JRuby
+    // trees pass true: the widened arms call the CRuby-overlay
+    // JsonRender, which the spinel AOT compile (same emit family,
+    // routed-aware too) cannot resolve. Everyone else keeps the narrow
+    // html(+simple-json) flatten, emit unchanged.
+    format_breadth: bool,
 ) -> Vec<MethodDef> {
     let mut methods: Vec<MethodDef> = Vec::new();
-
-    // Route-aware callers (today: the Ruby emit path) also get
-    // respond_to BREADTH — format.rss branches + inline `render json:`
-    // preserved under the request_format dispatch. Legacy callers keep
-    // the narrow html(+simple-json) flatten so their emit is unchanged.
-    let format_breadth = routed.is_some();
 
     let (publics_all, privs) = split_public_private_actions(controller);
     // With route info, a public method is a routable action only if a route
