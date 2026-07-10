@@ -1750,6 +1750,33 @@ jobs:
         if: steps.fetch-bench.outputs.bench_data == 'present'
         run: scripts/bench-report _site/bench/summary.json _site/bench/index.html
 
+      # Lobsters bench results page — same Hetzner endpoint, /lobsters/ path
+      # (roundbench.showcase.party/lobsters/ → _site/bench/lobsters/). Fetched
+      # and rendered independently of the blog bench above: it renders
+      # whenever lobsters data is reachable even if the blog data isn't, and
+      # degrades the same way (no dir, link 404s until the next cycle).
+      - name: Fetch latest lobsters bench data
+        id: fetch-lobsters-bench
+        env:
+          BENCH_URL: https://roundbench.showcase.party/lobsters
+        run: |
+          mkdir -p _site/bench/lobsters
+          if curl -fsSL --max-time 30 "$BENCH_URL/summary.json" -o _site/bench/lobsters/summary.json; then
+            curl -fsSL --max-time 30 "$BENCH_URL/rails.json"    -o _site/bench/lobsters/rails.json    || true
+            curl -fsSL --max-time 30 "$BENCH_URL/env.json"      -o _site/bench/lobsters/env.json      || true
+            curl -fsSL --max-time 30 "$BENCH_URL/sequence.json" -o _site/bench/lobsters/sequence.json || true
+            curl -fsSL --max-time 30 "$BENCH_URL/summary.md"    -o _site/bench/lobsters/summary.md    || true
+            echo "lobsters_bench_data=present" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::lobsters bench data unavailable at $BENCH_URL; skipping lobsters bench page render"
+            rmdir _site/bench/lobsters
+            rmdir _site/bench 2>/dev/null || true
+            echo "lobsters_bench_data=absent" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Render lobsters bench page
+        if: steps.fetch-lobsters-bench.outputs.lobsters_bench_data == 'present'
+        run: scripts/lobsters-report _site/bench/lobsters/summary.json _site/bench/lobsters/index.html
+
       # The per-target archives, for the e2e-<target> jobs to download and
       # boot — the exact bytes published to rubys.github.io/roundhouse.
       - name: Upload browse archives
