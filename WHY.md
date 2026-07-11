@@ -62,14 +62,27 @@ and the [benchmark results](https://rubys.github.io/roundhouse/bench/)
 on the real-blog fixture cover it across Rust, Crystal, Go,
 TypeScript, Ruby, and Rails on a fixed Hetzner box. The standard
 objection — "Rails apps are I/O-bound, the runtime doesn't matter" —
-inverts the problem. Because of the GVL, CRuby scales by forking
-Puma workers, each carrying its own copy of the framework; those
-processes mostly sit blocked on the database while still pinning
-memory. Threaded targets handle the same concurrency through a
-single image at a fraction of the RAM. Requests per second per
-gigabyte of resident memory spans three orders of magnitude across
-the targets, and whether you're paying GB-hours to a PaaS or
-amortizing a Kamal box, it's what the bill is actually charging for.
+doesn't survive the arithmetic. Roundhouse's emitted Ruby runs the
+Lobsters benchmark about 3× faster than Rails, and the one thing it
+can't speed up is the database, which does the same work no matter
+what calls it. So the database is at most a third of the original
+request — more than that, and no runtime rewrite could have made the
+whole thing 3× faster. Profiling puts it far lower: the query is
+about a twentieth of a stock-Rails request, and the other ~95% is
+CPU — interpreting the framework, marshalling rows into objects,
+rendering templates, serializing responses, the work a faster
+runtime does faster. Those proportions are a fact about Rails, not
+about us, so they hold still; what moves is how much of that 95% we
+reclaim — 3× today on stock CRuby, with Spinel's native binary and
+JRuby's JIT going further.
+
+Memory compounds it. Because of the GVL, CRuby scales concurrency by
+forking Puma workers, each carrying its own copy of the framework;
+threaded targets handle the same load through a single image at a
+fraction of the RAM. Requests per second per gigabyte of resident
+memory spans three orders of magnitude across the targets, and
+whether you're paying GB-hours to a PaaS or amortizing a Kamal box,
+that ratio is what the bill is actually charging for.
 
 These pressures don't show up evenly. Most applications hit one or
 two of them; very few hit all five. The hard part is that you can't
