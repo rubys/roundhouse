@@ -479,6 +479,112 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     }
 }
 
+/// Db — the per-target primitive persistence shim's typing contract
+/// (backend-agnostic: cruby-gem sqlite, spinel-FFI sqlite, future
+/// siblings all satisfy it; stmt handle opaque-as-Integer, per-target
+/// narrowing at emit). Shared between the app-lowering registry
+/// (`insert_framework_stubs`) and the runtime-transpile pre-seed
+/// (`runtime_src::seed_well_known_classes`) — the raw-SQL connection
+/// facade in runtime/ruby/active_record/connection.rb calls Db
+/// directly, so the runtime body-typer needs the same contract.
+pub fn insert_db_stub(
+    classes: &mut std::collections::HashMap<ClassId, crate::analyze::ClassInfo>,
+) {
+    use crate::lower::typing::fn_sig;
+    use crate::ty::Ty;
+
+    // Db — primitive surface the per-model `_adapter_*` Level-3
+    // emit calls into. Backend-agnostic (sqlite via cruby gem here,
+    // spinel-FFI sqlite planned, postgres/etc. siblings later); every
+    // shim satisfies this contract. Stmt handle is opaque (Integer
+    // here); per-target narrowing happens at emit time. See
+    // project_level_3_adapter_emit.md and runtime/ruby/db.rbs.
+    let mut db_info = crate::analyze::ClassInfo::default();
+    db_info.class_methods.insert(
+        Symbol::from("configure"),
+        fn_sig(vec![(Symbol::from("path"), Ty::Str)], Ty::Nil),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("close"),
+        fn_sig(vec![], Ty::Nil),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("exec"),
+        fn_sig(vec![(Symbol::from("sql"), Ty::Str)], Ty::Nil),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("prepare"),
+        fn_sig(vec![(Symbol::from("sql"), Ty::Str)], Ty::Int),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("step?"),
+        fn_sig(vec![(Symbol::from("stmt"), Ty::Int)], Ty::Bool),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("column_int"),
+        fn_sig(
+            vec![(Symbol::from("stmt"), Ty::Int), (Symbol::from("i"), Ty::Int)],
+            Ty::Int,
+        ),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("column_text"),
+        fn_sig(
+            vec![(Symbol::from("stmt"), Ty::Int), (Symbol::from("i"), Ty::Int)],
+            Ty::Str,
+        ),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("finalize"),
+        fn_sig(vec![(Symbol::from("stmt"), Ty::Int)], Ty::Nil),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("last_insert_rowid"),
+        fn_sig(vec![], Ty::Int),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("changes"),
+        fn_sig(vec![], Ty::Int),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("escape_string"),
+        fn_sig(vec![(Symbol::from("s"), Ty::Str)], Ty::Str),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("escape_int"),
+        fn_sig(vec![(Symbol::from("n"), Ty::Int)], Ty::Str),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("column_count"),
+        fn_sig(vec![(Symbol::from("stmt"), Ty::Int)], Ty::Int),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("column_name"),
+        fn_sig(
+            vec![(Symbol::from("stmt"), Ty::Int), (Symbol::from("i"), Ty::Int)],
+            Ty::Str,
+        ),
+    );
+    // Dynamic per-column read — Int/Float/Str/nil by column affinity;
+    // Untyped is the honest contract for raw SQL.
+    db_info.class_methods.insert(
+        Symbol::from("column_value"),
+        fn_sig(
+            vec![(Symbol::from("stmt"), Ty::Int), (Symbol::from("i"), Ty::Int)],
+            Ty::Untyped,
+        ),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("column_bool"),
+        fn_sig(
+            vec![(Symbol::from("stmt"), Ty::Int), (Symbol::from("idx"), Ty::Int)],
+            Ty::Bool,
+        ),
+    );
+    classes.insert(ClassId(Symbol::from("Db")), db_info);
+}
+
+
 /// Framework runtime stubs the view bodies dispatch on. Each helper
 /// returns `Ty::Str` (HTML output) or `Ty::Nil` (side-effecting
 /// helpers like content_for_set). Args are mostly Untyped — refining
@@ -706,69 +812,10 @@ pub(crate) fn insert_framework_stubs(
     tag_all_method(&mut jb);
     classes.insert(ClassId(Symbol::from("JsonBuilder")), jb);
 
-    // Db — primitive surface the per-model `_adapter_*` Level-3
-    // emit calls into. Backend-agnostic (sqlite via cruby gem here,
-    // spinel-FFI sqlite planned, postgres/etc. siblings later); every
-    // shim satisfies this contract. Stmt handle is opaque (Integer
-    // here); per-target narrowing happens at emit time. See
-    // project_level_3_adapter_emit.md and runtime/ruby/db.rbs.
-    let mut db_info = crate::analyze::ClassInfo::default();
-    db_info.class_methods.insert(
-        Symbol::from("configure"),
-        fn_sig(vec![(Symbol::from("path"), Ty::Str)], Ty::Nil),
-    );
-    db_info.class_methods.insert(
-        Symbol::from("close"),
-        fn_sig(vec![], Ty::Nil),
-    );
-    db_info.class_methods.insert(
-        Symbol::from("exec"),
-        fn_sig(vec![(Symbol::from("sql"), Ty::Str)], Ty::Nil),
-    );
-    db_info.class_methods.insert(
-        Symbol::from("prepare"),
-        fn_sig(vec![(Symbol::from("sql"), Ty::Str)], Ty::Int),
-    );
-    db_info.class_methods.insert(
-        Symbol::from("step?"),
-        fn_sig(vec![(Symbol::from("stmt"), Ty::Int)], Ty::Bool),
-    );
-    db_info.class_methods.insert(
-        Symbol::from("column_int"),
-        fn_sig(
-            vec![(Symbol::from("stmt"), Ty::Int), (Symbol::from("i"), Ty::Int)],
-            Ty::Int,
-        ),
-    );
-    db_info.class_methods.insert(
-        Symbol::from("column_text"),
-        fn_sig(
-            vec![(Symbol::from("stmt"), Ty::Int), (Symbol::from("i"), Ty::Int)],
-            Ty::Str,
-        ),
-    );
-    db_info.class_methods.insert(
-        Symbol::from("finalize"),
-        fn_sig(vec![(Symbol::from("stmt"), Ty::Int)], Ty::Nil),
-    );
-    db_info.class_methods.insert(
-        Symbol::from("last_insert_rowid"),
-        fn_sig(vec![], Ty::Int),
-    );
-    db_info.class_methods.insert(
-        Symbol::from("changes"),
-        fn_sig(vec![], Ty::Int),
-    );
-    db_info.class_methods.insert(
-        Symbol::from("escape_string"),
-        fn_sig(vec![(Symbol::from("s"), Ty::Str)], Ty::Str),
-    );
-    db_info.class_methods.insert(
-        Symbol::from("escape_int"),
-        fn_sig(vec![(Symbol::from("n"), Ty::Int)], Ty::Str),
-    );
-    tag_all_method(&mut db_info);
-    classes.insert(ClassId(Symbol::from("Db")), db_info);
+    // Db — see `insert_db_stub` (shared with the runtime-transpile
+    // pre-seed; runtime/ruby/active_record/connection.rb calls Db
+    // directly).
+    insert_db_stub(classes);
 
     // String — register `new` returning Ty::Str so the lowered
     // `io = String.new` produces a Str-typed local; downstream

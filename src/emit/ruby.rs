@@ -187,6 +187,8 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // duration lowering: a duration-unit dispatch's arms emit plural
     // unit calls that the duration pass then grounds.
     send_dispatch::apply_send_static_dispatch(&mut lcs);
+    // `Time.current` → `Time.now.utc` (Rails-ism; no-op elsewhere).
+    library::apply_time_current_lowering(&mut lcs);
     // ActiveSupport durations: `70.days` → `Duration.days(70)` (no-op for
     // duration-free apps).
     library::apply_duration_lowering(&mut lcs);
@@ -335,6 +337,7 @@ pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
     let mut lcs = lower_controllers_for_spinel(app, false);
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
+    library::apply_time_current_lowering(&mut lcs);
     library::apply_duration_lowering(&mut lcs);
     library::apply_nilsafe_empty_lowering(&mut lcs);
     emit_lowered_controllers_from_lcs(&lcs, app)
@@ -358,6 +361,7 @@ pub fn emit_lowered_controllers_with_layout(app: &App) -> Vec<EmittedFile> {
     let mut lcs = lower_controllers_for_spinel(app, true);
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
+    library::apply_time_current_lowering(&mut lcs);
     library::apply_duration_lowering(&mut lcs);
     library::apply_nilsafe_empty_lowering(&mut lcs);
     library::apply_layout_lowering(&mut lcs, app);
@@ -523,6 +527,7 @@ pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
     // model, so only the call-site rewrite arm runs.
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
+    library::apply_time_current_lowering(&mut lcs);
     library::apply_duration_lowering(&mut lcs);
     // Nullable columns hydrate to nil on the Ruby tree — synthesized
     // `.empty?` predicate forms in view bodies must tolerate it.

@@ -1,0 +1,22 @@
+# Typing contract for the raw-SQL connection facade. Rows are
+# Hash[String, untyped] by design — raw SQL's row shape (aliased
+# aggregates, computed columns) is genuinely dynamic; see connection.rb.
+module ActiveRecord
+  class Result
+    @rows: Array[Hash[String, untyped]]
+
+    def initialize: (Array[Hash[String, untyped]] rows) -> void
+    def rows: () -> Array[Hash[String, untyped]]
+    def to_a: () -> Array[Hash[String, untyped]]
+    def first: () -> Hash[String, untyped]?
+    def each: () { (Hash[String, untyped]) -> void } -> Array[Hash[String, untyped]]
+  end
+
+  class Connection
+    def adapter_name: () -> String
+    def quote: (untyped value) -> String
+    def quote_string: (String str) -> String
+    def execute: (String sql) -> Result
+    def exec_query: (String sql) -> Result
+  end
+end

@@ -26,6 +26,7 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     apply_helper_lowering(&mut lcs, app);
     // Before duration lowering — see the emit_lowered_models stack.
     super::send_dispatch::apply_send_static_dispatch(&mut lcs);
+    apply_time_current_lowering(&mut lcs);
     apply_duration_lowering(&mut lcs);
     // Transpiled-shape classes carry hand-written accessors that
     // `synth_attr_reader` never sees, so the datetime reader/writer
@@ -1034,6 +1035,56 @@ fn rewrite_layout_wrap(expr: &mut Expr, app: &App) {
     }
 }
 
+/// Ruby-family pre-emit pass: `Time.current` (Rails' zone-aware now) →
+/// `Time.now.utc`. Plain Ruby has no `Time.current` — the Rails-ism is
+/// as undefined on the CRuby tree as under spinel AOT, just lazily so —
+/// and the corpus apps run UTC, where the two are second-for-second
+/// equivalent. Grounding it at emit keeps `Time` un-reopened (built-in
+/// reopening in the shared runtime is off-limits).
+pub(crate) fn apply_time_current_lowering(lcs: &mut [LibraryClass]) {
+    for lc in lcs.iter_mut() {
+        for m in &mut lc.methods {
+            rewrite_time_current(&mut m.body);
+        }
+    }
+}
+
+fn rewrite_time_current(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut rewrite_time_current);
+    let is_target = matches!(
+        &*expr.node,
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "current"
+                && args.is_empty()
+                && matches!(&*r.node,
+                    ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Time")
+    );
+    if is_target {
+        let span = expr.span;
+        let time_const =
+            Expr::new(span, ExprNode::Const { path: vec![Symbol::from("Time")] });
+        let now = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(time_const),
+                method: Symbol::from("now"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        // Keep expr.ty — analyze already types `Time.current` as Time,
+        // and `Time.now.utc` is the same type.
+        *expr.node = ExprNode::Send {
+            recv: Some(now),
+            method: Symbol::from("utc"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        };
+    }
+}
+
 /// Ruby-family pre-emit pass: rewrite ActiveSupport duration builders
 /// (`70.days`, `NEW_USER_DAYS.days`, `1.week`) — which would call a
 /// nonexistent `Integer#days` — into `ActiveSupport::Duration.days(...)`
@@ -1711,6 +1762,17 @@ pub(super) fn emit_library_class_decl_with_synthesized(
             }
         }
     }
+    // A reopen of a runtime framework class (lobsters' `module
+    // ActiveRecord; class Base; def q ...`) must load the runtime's
+    // definition first — under plain Ruby a bare reopen would otherwise
+    // DEFINE an empty class, and under spinel the reopen's method
+    // bodies reference runtime members. Parent-less and named into a
+    // runtime namespace is the reopen signature.
+    if lc.parent.is_none() {
+        if let Some(anchor) = runtime_reopen_anchor(name) {
+            requires.push(relpath(&out_dir, anchor));
+        }
+    }
     // `include`d modules must be LOADED before the `include` executes at
     // class-definition time — unlike body const-refs (request-time), so we
     // require them even when they're same-dir siblings (plain Ruby has no
@@ -1856,9 +1918,39 @@ pub(super) fn emit_library_class_decl_with_synthesized(
 /// (ApplicationRecord, custom abstract bases) resolve to a sibling under
 /// `app/models/`. Everything else returns `None` (assume the loader sees
 /// the parent some other way).
+/// The runtime stem a framework-class REOPEN must load first, if the
+/// class lives in a runtime namespace this tree ships. App classes with
+/// `::` names outside these namespaces (ShortId::CandidateId) get None.
+fn runtime_reopen_anchor(name: &str) -> Option<&'static str> {
+    for (prefix, anchor) in [
+        ("ActiveRecord", "runtime/active_record"),
+        ("ActionController", "runtime/action_controller"),
+        ("ActionView", "runtime/action_view"),
+        ("ActionDispatch", "runtime/action_dispatch"),
+    ] {
+        if name == prefix || name.strip_prefix(prefix).is_some_and(|r| r.starts_with("::")) {
+            return Some(anchor);
+        }
+    }
+    None
+}
+
 fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {
     let raw = parent.0.as_str();
     if raw == "ActiveRecord::Base" {
+        // When the app REOPENS ActiveRecord::Base (lobsters' `q`
+        // monkeypatch, emitted as a library class), route the parent
+        // require through the reopen file — it requires the runtime
+        // itself first, so subclasses see both the framework methods
+        // and the app's additions. Without this the reopen dangles:
+        // nothing else in the require graph names it.
+        if app
+            .library_classes
+            .iter()
+            .any(|lc| lc.name.0.as_str() == "ActiveRecord::Base")
+        {
+            return Some("app/models/active_record/base".to_string());
+        }
         return Some("runtime/active_record".to_string());
     }
     if raw == "ActionController::Base" || raw == "ActionController::API" {

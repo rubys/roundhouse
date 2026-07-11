@@ -1372,6 +1372,9 @@ pub(super) fn universal_method(method: &Symbol) -> Option<Ty> {
         // also written as bare `!cond` (Send recv=None, method="!").
         // Universally returns Bool regardless of receiver.
         "!" => Some(Ty::Bool),
+        // Kernel#block_given? — bare call inside any method body
+        // (`yield x if block_given?` in the runtime's create/create!).
+        "block_given?" => Some(Ty::Bool),
         // `class` is receiver-aware and handled in `dispatch` itself
         // (preserves `Ty::Class { id }` so chained `obj.class.foo`
         // resolves against `id`'s registry entry).

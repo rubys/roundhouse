@@ -44,6 +44,29 @@ module ActiveRecord
       @destroyed = false
     end
 
+    # Raw-SQL escape hatch: `Model.connection.execute/quote/...`. The
+    # facade is stateless (every member delegates straight to `Db`), so
+    # a fresh instance per call is cheap and dodges class-ivar state.
+    def self.connection
+      ActiveRecord::Connection.new
+    end
+
+    # `Model.transaction { ... }` — the block inside BEGIN/COMMIT, with
+    # ROLLBACK + re-raise on any exception. Flat transactions only: the
+    # corpus never nests (a nested BEGIN would error in SQLite rather
+    # than silently join, which is the honest failure).
+    def self.transaction
+      Db.exec("BEGIN")
+      begin
+        result = yield
+        Db.exec("COMMIT")
+        result
+      rescue => e
+        Db.exec("ROLLBACK")
+        raise e
+      end
+    end
+
     # ---- Per-model overrides ----------------------------------------
     # Subclasses MUST override these. The base implementations exist as
     # contract markers; calling them on Base directly raises.
@@ -269,6 +292,7 @@ module ActiveRecord
     # the seed scripts use (`Article.create(title: ..., body: ...)`).
     def self.create(attrs = {})
       instance = new(attrs)
+      yield instance if block_given?
       instance.save
       instance
     end
@@ -278,8 +302,12 @@ module ActiveRecord
     # instance. Used by seeds and tests that expect creation to
     # succeed unconditionally; failure is a fatal error rather
     # than a flow-control branch.
+    # Both forms take Rails' optional block, yielding the built record
+    # before the save (`create! do |kv| kv.key = ... end` — lobsters'
+    # Keystore upsert path).
     def self.create!(attrs = {})
       instance = new(attrs)
+      yield instance if block_given?
       raise RecordInvalid, instance unless instance.save
       instance
     end

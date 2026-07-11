@@ -413,6 +413,11 @@ fn every_runtime_method_body_is_fully_typed() {
     // requires Base#errors to be known).
     let mut class_registry: std::collections::HashMap<ClassId, ClassInfo> =
         std::collections::HashMap::new();
+    // The Db primitive shim's contract — connection.rb calls
+    // `Db.prepare`/`step?`/`column_*` directly (same pre-seed the
+    // production pipelines get via `seed_well_known_classes` /
+    // `insert_framework_stubs`).
+    roundhouse::lower::view_to_library::insert_db_stub(&mut class_registry);
     // Per-class include lists, accumulated across all .rbs files.
     // Key: short class id (last segment); Value: list of short module
     // ids the class includes.

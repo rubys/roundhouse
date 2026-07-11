@@ -43,6 +43,11 @@ require_relative "runtime/json"
 # `JsonBuilder.encode_value` / `encode_string` for per-value encoding.
 require_relative "runtime/json_builder"
 require_relative "runtime/importmap"
+# ActiveSupport::Duration value class — the emit grounds `70.days` etc.
+# to `ActiveSupport::Duration.days(70)`, so the class must be loadable
+# on every tree (the CRuby overlay swaps in its Time-reopen-augmented
+# sibling at the same path).
+require_relative "runtime/active_support_duration"
 require_relative "runtime/rails"
 require_relative "runtime/active_record"
 require_relative "config/schema"

@@ -576,6 +576,12 @@ fn seed_well_known_classes(
     use crate::analyze::ClassInfo;
     use crate::ident::{ClassId, Symbol};
 
+    // Db — the primitive persistence shim's contract, shared with the
+    // app-lowering registry. The raw-SQL connection facade
+    // (active_record/connection.rb) calls `Db.prepare`/`step?`/
+    // `column_*` directly, so its bodies need the same typing here.
+    crate::lower::view_to_library::insert_db_stub(classes);
+
     let row_ty = Ty::Hash {
         key: Box::new(Ty::Str),
         value: Box::new(Ty::Untyped),

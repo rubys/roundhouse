@@ -623,12 +623,28 @@ mod tests {
         // NEW un-lowerable construct, re-point one of these to witness the
         // gap; a valid target with gaps is still isError=false — the gaps
         // are the *answer*, not a tool failure.)
-        for target in ["rust", "python", "go", "typescript"] {
+        for target in ["rust", "typescript"] {
             let r = call(&server(), "wont_lower", json!({ "target": target }));
             assert_eq!(r["result"]["isError"], false);
             assert!(
                 text_of(&r).contains("lowers cleanly"),
                 "expected `{target}` to lower real-blog cleanly (datetime seam), got: {}",
+                text_of(&r)
+            );
+        }
+        // python/go don't lower BeginRescue yet; the shared runtime's
+        // `Base.transaction` (BEGIN/yield/COMMIT with ROLLBACK+re-raise)
+        // reaches them through the transpiled adapter contract, so they
+        // witness the gap-reporting side: a real gap is a listed answer
+        // (isError=false), not a tool failure. When those emitters grow
+        // try/except / recover lowering, fold them back into the clean
+        // loop above.
+        for target in ["python", "go"] {
+            let r = call(&server(), "wont_lower", json!({ "target": target }));
+            assert_eq!(r["result"]["isError"], false);
+            assert!(
+                text_of(&r).contains("BeginRescue"),
+                "expected `{target}` to witness the BeginRescue gap, got: {}",
                 text_of(&r)
             );
         }

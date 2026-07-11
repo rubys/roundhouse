@@ -277,6 +277,22 @@ impl<'a> BodyTyper<'a> {
                     for c in rc.classes.iter_mut() {
                         self.analyze_expr(c, ctx);
                     }
+                    // `rescue X => e` binds the exception object. Typed
+                    // as StandardError (Ruby's implicit rescue class) —
+                    // enough for the corpus's uses (`raise e`, message
+                    // reads) without modeling the per-clause class list.
+                    if let Some(name) = &rc.binding {
+                        let mut inner = ctx.clone();
+                        inner.local_bindings.insert(
+                            name.clone(),
+                            Ty::Class {
+                                id: crate::ident::ClassId(Symbol::from("StandardError")),
+                                args: vec![],
+                            },
+                        );
+                        self.analyze_expr(&mut rc.body, &inner);
+                        continue;
+                    }
                     self.analyze_expr(&mut rc.body, ctx);
                 }
                 if let Some(e) = else_branch {

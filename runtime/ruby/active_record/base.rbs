@@ -66,6 +66,8 @@ module ActiveRecord
     # contract type even though the Base body itself never returns
     # one. The body-typer treats `raise` as divergent; it doesn't
     # contradict the declared return type.
+    def self.connection: () -> Connection
+    def self.transaction: () { () -> untyped } -> untyped
     def self.table_name: () -> String
     def self.schema_columns: () -> Array[Symbol]
     def self.instantiate: (Hash[String, untyped] _row) -> Base
@@ -136,8 +138,12 @@ module ActiveRecord
     def self.count: () -> Integer
     def self.exists?: (Integer id) -> bool
     def self.destroy_all: () -> Array[Base]
-    def self.create: (Hash[Symbol, untyped] attrs) -> Base
-    def self.create!: (Hash[Symbol, untyped] attrs) -> Base
+    # The block yields the built record — the SUBCLASS instance, not
+    # Base (spinel clones class methods per subclass and re-infers
+    # `new`; a `(Base)` pin here would block the clone's column
+    # setters, e.g. lobsters' `create! do |kv| kv.key = ...`).
+    def self.create: (?Hash[Symbol, untyped] attrs) ?{ (untyped) -> void } -> Base
+    def self.create!: (?Hash[Symbol, untyped] attrs) ?{ (untyped) -> void } -> Base
     def self.last: () -> Base?
 
     # Instance lifecycle. `save` returns true/false based on
