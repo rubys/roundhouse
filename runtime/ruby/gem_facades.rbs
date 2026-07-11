@@ -1,0 +1,69 @@
+# Typing contract for the gem façades. These are the REAL shapes of the
+# touched surface — every body raises via GemFacade.fail! before its
+# (unreachable) typed tail, so call sites type against these returns
+# while any runtime hit fails loudly.
+module GemFacade
+  def self.fail!: (String member) -> void
+end
+
+module Markly
+  SMART: Integer
+  DEFAULT: Integer
+
+  def self.parse: (untyped _text, ?flags: Integer, ?extensions: Array[Symbol]) -> Markly::Node
+
+  class Node
+    @type: Symbol?
+
+    def initialize: (?Symbol? _type) -> void
+    def type: () -> Symbol
+    def each: () { (Node) -> void } -> void
+    def to_html: (?flags: Integer, ?extensions: Array[Symbol]) -> String
+    def string_content: () -> String
+    def string_content=: (String _value) -> String
+    def url=: (String _value) -> String
+    def insert_after: (Node _node) -> void
+    def append_child: (Node _node) -> void
+  end
+end
+
+module Nokogiri
+  def self.HTML: (String _html) -> Nokogiri::Document
+
+  class Attr
+    def text: () -> String
+    def to_s: () -> String
+  end
+
+  class Element
+    def name=: (String _value) -> String
+    def []: (untyped _key) -> String?
+    def []=: (untyped _key, String _value) -> String
+    def text: () -> String
+    def inner_html: () -> String
+    def attributes: () -> Hash[String, Attr]
+    def content=: (untyped _value) -> untyped
+    def replace: (Element _node) -> void
+  end
+
+  class NodeSet
+    def each: () { (Element) -> void } -> void
+  end
+
+  class Document
+    def css: (String _selector) -> NodeSet
+    def at_css: (String _selector) -> Element?
+    def create_element: (String _name) -> Element
+  end
+end
+
+module Mail
+  class Address
+    @value: String
+
+    def initialize: (String _value) -> void
+    def address: () -> String
+    def domain: () -> String
+    def local: () -> String
+  end
+end

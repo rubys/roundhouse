@@ -546,7 +546,7 @@ fn format_float(n: f64) -> String {
 /// here (this lowerer inlines literal strings, not runtime
 /// interpolation — see the module header), so the humanization has to
 /// happen at lower time rather than in an errors object.
-fn humanize(attr: &str) -> String {
+pub(crate) fn humanize(attr: &str) -> String {
     let trimmed = attr.strip_suffix("_id").unwrap_or(attr);
     let spaced = trimmed.replace('_', " ");
     let mut chars = spaced.chars();

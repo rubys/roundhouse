@@ -145,6 +145,30 @@ fn emit_node(n: &ExprNode) -> String {
         // `target += value`, etc. Preserves source short-circuit
         // semantics (and Rails dirty-tracking on `||=`).
         ExprNode::OpAssign { target, op, value } => {
+            // Attr-target arithmetic compounds (`node.string_content +=
+            // user`) desugar to read-op-write: spinel AOT rejects the
+            // compound form on a method attr, and arithmetic ops have no
+            // short-circuit to preserve (the IR contract explicitly
+            // allows free desugar; `||=`/`&&=` keep their native form).
+            // Only when the receiver is a pure read — evaluating it
+            // twice must be side-effect-free.
+            if let (crate::expr::LValue::Attr { recv, name }, false) = (
+                target,
+                matches!(op, crate::expr::OpAssignOp::OrOr | crate::expr::OpAssignOp::AndAnd),
+            ) {
+                if matches!(
+                    &*recv.node,
+                    ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::SelfRef
+                        | ExprNode::Const { .. }
+                ) {
+                    let r = emit_expr(recv);
+                    let infix = op.as_ruby().trim_end_matches('=');
+                    return format!(
+                        "{r}.{name} = {r}.{name} {infix} {}",
+                        emit_expr(value)
+                    );
+                }
+            }
             format!("{} {} {}", emit_lvalue(target), op.as_ruby(), emit_expr(value))
         }
         ExprNode::Yield { args } => {

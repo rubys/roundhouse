@@ -97,7 +97,15 @@ pub fn emit_library(app: &App) -> Vec<EmittedFile> {
 /// requires it conditionally (same idiom as config/importmap.rb).
 pub fn emit_rails_application(app: &App) -> Option<EmittedFile> {
     app.rails_application.as_ref().map(|lc| {
-        library::emit_library_class_decl(lc, app, PathBuf::from("config/application.rb"))
+        let mut lc = lc.clone();
+        // Ground `Rails.application.routes.url_helpers.<x>_url(host:,
+        // protocol:)` (lobsters' root_url) — the routing internals
+        // behind url_helpers aren't modeled, but the absolute URL is
+        // just protocol + "://" + host + RouteHelpers.<x>_path.
+        for m in &mut lc.methods {
+            library::rewrite_url_helpers_absolute(&mut m.body);
+        }
+        library::emit_library_class_decl(&lc, app, PathBuf::from("config/application.rb"))
     })
 }
 
@@ -190,6 +198,10 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // Block-form `create!/create do |kv| ... end` inlined at the call
     // site — the runtime factories stay blockless (no-op elsewhere).
     library::apply_create_block_inline(&mut lcs);
+    // `errors.add(:f, "msg")` → `errors << "F msg"` (no-op elsewhere).
+    library::apply_errors_add_lowering(&mut lcs);
+    // `record.update!(k: v)` → writer assigns + save! (no-op elsewhere).
+    library::apply_update_kwargs_inline(&mut lcs);
     // `Time.current` → `Time.now.utc` (Rails-ism; no-op elsewhere).
     library::apply_time_current_lowering(&mut lcs);
     // ActiveSupport durations: `70.days` → `Duration.days(70)` (no-op for
@@ -668,6 +680,28 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
                       end\n"
                 .to_string(),
         });
+    }
+
+    // Per-app Rails::Application reopen (config/application.rb) — the
+    // app's real config methods (`read_only?`, `name`, `domain`) so
+    // `Rails.application.<m>` dispatches to them instead of the empty
+    // runtime shim. Same unconditional-require contract as importmap:
+    // apps without one get a bare reopen stub.
+    match emit_rails_application(app) {
+        Some(f) => files.push(f),
+        None => files.push(EmittedFile {
+            path: PathBuf::from("config/application.rb"),
+            content: "# No config/application.rb methods in the source app; the\n\
+                      # runtime's empty Rails::Application shim stands. This file\n\
+                      # exists because the scaffold main.rb requires it\n\
+                      # unconditionally (spinel AOT resolves the whole require\n\
+                      # graph statically).\n\
+                      module Rails\n\
+                      \x20\x20class Application\n\
+                      \x20\x20end\n\
+                      end\n"
+                .to_string(),
+        }),
     }
     files.extend(emit_lowered_models(app));
     files.extend(emit_lowered_controllers(app));

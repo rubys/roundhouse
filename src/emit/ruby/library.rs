@@ -27,6 +27,8 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     // Before duration lowering — see the emit_lowered_models stack.
     super::send_dispatch::apply_send_static_dispatch(&mut lcs);
     apply_create_block_inline(&mut lcs);
+    apply_errors_add_lowering(&mut lcs);
+    apply_update_kwargs_inline(&mut lcs);
     apply_mailer_class_side_lowering(&mut lcs);
     apply_time_current_lowering(&mut lcs);
     apply_duration_lowering(&mut lcs);
@@ -1035,6 +1037,243 @@ fn rewrite_layout_wrap(expr: &mut Expr, app: &App) {
     if let Some(wrapped) = crate::lower::view_to_library::layout_wrap_expr(app, inner) {
         args[0] = wrapped;
     }
+}
+
+/// Ruby-family pre-emit pass: `record.update!(k: v, ...)` /
+/// `record.update(k: v, ...)` with literal kwargs inlined to
+/// writer-assignments + save:
+///
+///   record.k = v
+///   ...
+///   record.save!   (save for the non-bang form)
+///
+/// Routed through the real per-attribute writers, so column writers,
+/// temporal normalizes, AND belongs_to virtuals (`new_user: nil`) all
+/// resolve — the runtime `self[k] =` indexer seam only covers columns.
+/// Pure-read receivers only (each assignment re-reads it); a dynamic
+/// hash argument is left alone.
+pub(crate) fn apply_update_kwargs_inline(lcs: &mut [LibraryClass]) {
+    for lc in lcs.iter_mut() {
+        for m in &mut lc.methods {
+            rewrite_update_kwargs(&mut m.body);
+        }
+    }
+}
+
+fn rewrite_update_kwargs(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut rewrite_update_kwargs);
+    let matches = matches!(
+        &*expr.node,
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if matches!(method.as_str(), "update" | "update!")
+                && args.len() == 1
+                && matches!(&*args[0].node, ExprNode::Hash { entries, .. }
+                    if entries.iter().all(|(k, _)| matches!(
+                        &*k.node, ExprNode::Lit { value: Literal::Sym { .. } })))
+                && super::send_dispatch::expr_is_pure_read(r)
+    );
+    if !matches {
+        return;
+    }
+    let span = expr.span;
+    let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
+    let ExprNode::Send { recv: Some(r), method, args, .. } = node else { unreachable!() };
+    let ExprNode::Hash { entries, .. } = &*args[0].node else { unreachable!() };
+    let mut exprs: Vec<Expr> = Vec::new();
+    for (k, v) in entries {
+        let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
+            unreachable!()
+        };
+        exprs.push(Expr::new(
+            span,
+            ExprNode::Assign {
+                target: LValue::Attr { recv: r.clone(), name: key.clone() },
+                value: v.clone(),
+            },
+        ));
+    }
+    let save = if method.as_str() == "update!" { "save!" } else { "save" };
+    exprs.push(Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(r),
+            method: Symbol::from(save),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    ));
+    *expr.node = ExprNode::Seq { exprs };
+    expr.ty = None;
+}
+
+/// Ruby-family pre-emit pass: `errors.add(:field, "msg")` →
+/// `errors << "Field msg"`. The runtime's error accumulator is a plain
+/// Array[String] (the validates lowering already bakes humanized full
+/// messages at lower time — "Short can't be blank"); this grounds the
+/// hand-written `add` calls into the same shape. `:base` contributes
+/// the bare message (Rails semantics); a dynamic message interpolates
+/// after the humanized field; a missing message defaults to Rails'
+/// "is invalid".
+pub(crate) fn apply_errors_add_lowering(lcs: &mut [LibraryClass]) {
+    for lc in lcs.iter_mut() {
+        for m in &mut lc.methods {
+            rewrite_errors_add(&mut m.body);
+        }
+    }
+}
+
+fn rewrite_errors_add(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut rewrite_errors_add);
+    let matches = matches!(
+        &*expr.node,
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "add"
+                && !args.is_empty()
+                && args.len() <= 2
+                && matches!(&*args[0].node, ExprNode::Lit { value: Literal::Sym { .. } })
+                && matches!(&*r.node, ExprNode::Send { recv: er, method: em, args: ea, .. }
+                    if em.as_str() == "errors"
+                        && ea.is_empty()
+                        && matches!(er, None | Some(_) if er.as_ref().is_none_or(
+                            |e| matches!(&*e.node, ExprNode::SelfRef))))
+    );
+    if !matches {
+        return;
+    }
+    let span = expr.span;
+    let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
+    let ExprNode::Send { recv, args, .. } = node else { unreachable!() };
+    let mut args = args.into_iter();
+    let field_expr = args.next().expect("checked non-empty");
+    let ExprNode::Lit { value: Literal::Sym { value: field } } = &*field_expr.node else {
+        unreachable!()
+    };
+    let msg = args.next();
+    let humanized = crate::lower::model_to_library::validations::humanize(field.as_str());
+    let message: Expr = if field.as_str() == "base" {
+        // :base attaches the message to the record, not a field.
+        msg.unwrap_or_else(|| {
+            Expr::new(span, ExprNode::Lit { value: Literal::Str { value: "is invalid".into() } })
+        })
+    } else {
+        match msg {
+            Some(m) => match &*m.node {
+                ExprNode::Lit { value: Literal::Str { value } } => Expr::new(
+                    span,
+                    ExprNode::Lit {
+                        value: Literal::Str { value: format!("{humanized} {value}") },
+                    },
+                ),
+                _ => Expr::new(
+                    span,
+                    ExprNode::StringInterp {
+                        parts: vec![
+                            crate::expr::InterpPart::Text { value: format!("{humanized} ") },
+                            crate::expr::InterpPart::Expr { expr: m },
+                        ],
+                    },
+                ),
+            },
+            None => Expr::new(
+                span,
+                ExprNode::Lit {
+                    value: Literal::Str { value: format!("{humanized} is invalid") },
+                },
+            ),
+        }
+    };
+    *expr.node = ExprNode::Send {
+        recv,
+        method: Symbol::from("<<"),
+        args: vec![message],
+        block: None,
+        parenthesized: false,
+    };
+    expr.ty = None;
+}
+
+/// Ground `Rails.application.routes.url_helpers.<x>_url(host: H,
+/// protocol: P)` → `"#{P}://#{H}#{RouteHelpers.<x>_path}"`. The routing
+/// object graph behind `url_helpers` isn't modeled (and never needs to
+/// be for this shape — an absolute URL is protocol + host + the
+/// generated path helper). Non-matching url_helpers uses are left
+/// alone. Applied to the Rails::Application reopen, whose `root_url`
+/// (lobsters) is the corpus occurrence.
+pub(crate) fn rewrite_url_helpers_absolute(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut rewrite_url_helpers_absolute);
+    let matches = matches!(
+        &*expr.node,
+        ExprNode::Send { recv: Some(uh), method, args, block: None, .. }
+            if method.as_str().ends_with("_url")
+                && args.len() == 1
+                && matches!(&*args[0].node, ExprNode::Hash { .. })
+                && is_url_helpers_chain(uh)
+    );
+    if !matches {
+        return;
+    }
+    let span = expr.span;
+    let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
+    let ExprNode::Send { method, args, .. } = node else { unreachable!() };
+    let ExprNode::Hash { entries, .. } = &*args[0].node else { unreachable!() };
+    let mut host: Option<Expr> = None;
+    let mut protocol: Option<Expr> = None;
+    for (k, v) in entries {
+        if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
+            match value.as_str() {
+                "host" => host = Some(v.clone()),
+                "protocol" => protocol = Some(v.clone()),
+                _ => {}
+            }
+        }
+    }
+    let stem = method.as_str().trim_end_matches("_url");
+    let path_call = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                span,
+                ExprNode::Const { path: vec![Symbol::from("RouteHelpers")] },
+            )),
+            method: Symbol::from(format!("{stem}_path")),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let lit = |s: &str| crate::expr::InterpPart::Text { value: s.to_string() };
+    let dyn_part = |e: Expr| crate::expr::InterpPart::Expr { expr: e };
+    let mut parts: Vec<crate::expr::InterpPart> = Vec::new();
+    if let Some(p) = protocol {
+        parts.push(dyn_part(p));
+    } else {
+        parts.push(lit("http"));
+    }
+    parts.push(lit("://"));
+    if let Some(h) = host {
+        parts.push(dyn_part(h));
+    }
+    parts.push(dyn_part(path_call));
+    *expr.node = ExprNode::StringInterp { parts };
+    expr.ty = Some(crate::ty::Ty::Str);
+}
+
+fn is_url_helpers_chain(e: &Expr) -> bool {
+    let ExprNode::Send { recv: Some(routes), method, .. } = &*e.node else { return false };
+    if method.as_str() != "url_helpers" {
+        return false;
+    }
+    let ExprNode::Send { recv: Some(rails_app), method: routes_m, .. } = &*routes.node else {
+        return false;
+    };
+    if routes_m.as_str() != "routes" {
+        return false;
+    }
+    matches!(&*rails_app.node, ExprNode::Send { recv: Some(r), method: app_m, .. }
+        if app_m.as_str() == "application"
+            && matches!(&*r.node, ExprNode::Const { path }
+                if path.len() == 1 && path[0].as_str() == "Rails"))
 }
 
 /// Ruby-family pre-emit pass: Rails' mailer class-side call idiom.
@@ -2354,6 +2593,10 @@ fn require_path_for_body_const(
         "Inflector" => Some("runtime/inflector".to_string()),
         "ViewHelpers" => Some("runtime/action_view".to_string()),
         "RouteHelpers" => Some("app/route_helpers".to_string()),
+        // Gem façades — typed raising stand-ins for write-path-only
+        // gem surface (see runtime/ruby/gem_facades.rb). One file
+        // hosts every stubbed gem, so all their roots anchor here.
+        "Markly" | "Nokogiri" | "Mail" => Some("runtime/gem_facades".to_string()),
         _ => None,
     }
 }

@@ -996,14 +996,9 @@ fn ruby_runtime_files(
     // scaffold targets. Nothing after this point adds view files, so the
     // base's aggregator content stays correct.
 
-    // Per-app Rails::Application reopen (config/application.rb) — the
-    // app's real config methods (`read_only?`, `name`, `domain`) so
-    // `Rails.application.<m>` dispatches to them instead of the empty
-    // runtime shim. Absent when the source app has none; the scaffold
-    // main.rb's conditional require tolerates that.
-    if let Some(f) = emit::ruby::emit_rails_application(app) {
-        files.push((f.path.to_string_lossy().into_owned(), f.content));
-    }
+    // config/application.rb (the per-app Rails::Application reopen) is
+    // inherited from `spinel_files` — emit_spinel emits it (or a stub)
+    // unconditionally for all three scaffold targets.
 
     // Controllers re-emitted WITH the layout wrap (dedupe last-wins
     // supersedes the spinel-shape versions): this tree's main.rb ships
@@ -1329,6 +1324,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         "action_controller",
         "action_dispatch",
         "action_mailer",
+        "gem_facades",
         "inflector",
         "json_builder",
     ] {

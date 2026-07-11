@@ -49,6 +49,11 @@ require_relative "runtime/importmap"
 # sibling at the same path).
 require_relative "runtime/active_support_duration"
 require_relative "runtime/rails"
+# Per-app Rails::Application reopen — the app's real config methods
+# (`Rails.application.name` in layouts). Emitted unconditionally (a
+# stub reopen when the source app has none); loads right after the
+# runtime shim it reopens.
+require_relative "config/application"
 require_relative "runtime/active_record"
 require_relative "config/schema"
 require_relative "runtime/action_dispatch"

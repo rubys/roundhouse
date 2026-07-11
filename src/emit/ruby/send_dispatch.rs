@@ -358,7 +358,7 @@ fn recv_is_duplicable(recv: &Option<Expr>) -> bool {
     }
 }
 
-fn expr_is_pure_read(e: &Expr) -> bool {
+pub(super) fn expr_is_pure_read(e: &Expr) -> bool {
     match &*e.node {
         ExprNode::SelfRef
         | ExprNode::Var { .. }
