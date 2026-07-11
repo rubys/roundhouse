@@ -187,6 +187,9 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // duration lowering: a duration-unit dispatch's arms emit plural
     // unit calls that the duration pass then grounds.
     send_dispatch::apply_send_static_dispatch(&mut lcs);
+    // Block-form `create!/create do |kv| ... end` inlined at the call
+    // site — the runtime factories stay blockless (no-op elsewhere).
+    library::apply_create_block_inline(&mut lcs);
     // `Time.current` → `Time.now.utc` (Rails-ism; no-op elsewhere).
     library::apply_time_current_lowering(&mut lcs);
     // ActiveSupport durations: `70.days` → `Duration.days(70)` (no-op for

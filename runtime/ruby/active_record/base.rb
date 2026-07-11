@@ -44,28 +44,12 @@ module ActiveRecord
       @destroyed = false
     end
 
-    # Raw-SQL escape hatch: `Model.connection.execute/quote/...`. The
-    # facade is stateless (every member delegates straight to `Db`), so
-    # a fresh instance per call is cheap and dodges class-ivar state.
-    def self.connection
-      ActiveRecord::Connection.new
-    end
-
-    # `Model.transaction { ... }` — the block inside BEGIN/COMMIT, with
-    # ROLLBACK + re-raise on any exception. Flat transactions only: the
-    # corpus never nests (a nested BEGIN would error in SQLite rather
-    # than silently join, which is the honest failure).
-    def self.transaction
-      Db.exec("BEGIN")
-      begin
-        result = yield
-        Db.exec("COMMIT")
-        result
-      rescue => e
-        Db.exec("ROLLBACK")
-        raise e
-      end
-    end
+    # `Model.connection` / `Model.transaction` — the raw-SQL surface —
+    # live in connection.rb's `class Base` reopen, NOT here: base.rb is
+    # transpiled into every strict target's runtime (runtime_loader
+    # tables), and that surface leans on constructs several emitters
+    # don't lower yet (begin/rescue) plus a class those tables don't
+    # ship. connection.rb is walked only into the ruby-family trees.
 
     # ---- Per-model overrides ----------------------------------------
     # Subclasses MUST override these. The base implementations exist as
@@ -292,7 +276,6 @@ module ActiveRecord
     # the seed scripts use (`Article.create(title: ..., body: ...)`).
     def self.create(attrs = {})
       instance = new(attrs)
-      yield instance if block_given?
       instance.save
       instance
     end
@@ -302,12 +285,13 @@ module ActiveRecord
     # instance. Used by seeds and tests that expect creation to
     # succeed unconditionally; failure is a fatal error rather
     # than a flow-control branch.
-    # Both forms take Rails' optional block, yielding the built record
-    # before the save (`create! do |kv| kv.key = ... end` — lobsters'
-    # Keystore upsert path).
+    # Rails' block form (`create! do |kv| ... end`) is grounded at emit
+    # — `apply_create_block_inline` expands the call site into
+    # new/block-body/save — so the runtime signature stays blockless on
+    # every target (a `yield` here forced a block param onto all twelve
+    # transpiled runtimes and broke their 1-arg callers).
     def self.create!(attrs = {})
       instance = new(attrs)
-      yield instance if block_given?
       raise RecordInvalid, instance unless instance.save
       instance
     end

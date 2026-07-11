@@ -94,4 +94,35 @@ module ActiveRecord
       execute(sql)
     end
   end
+
+  # The Base half of the raw-SQL surface. Lives HERE (not base.rb)
+  # deliberately: base.rb is transpiled into every strict target's
+  # runtime via the runtime_loader tables, and this surface uses
+  # begin/rescue (which several emitters don't lower yet) and the
+  # Connection class (which those tables don't ship). This file is
+  # walked only into the ruby-family trees, and active_record.rb
+  # requires it AFTER base.rb so the reopen sees the real class.
+  class Base
+    # Stateless facade — every member delegates straight to `Db`, so a
+    # fresh instance per call is cheap and dodges class-ivar state.
+    def self.connection
+      ActiveRecord::Connection.new
+    end
+
+    # `Model.transaction { ... }` — the block inside BEGIN/COMMIT, with
+    # ROLLBACK + re-raise on any exception. Flat transactions only: the
+    # corpus never nests (a nested BEGIN would error in SQLite rather
+    # than silently join, which is the honest failure).
+    def self.transaction
+      Db.exec("BEGIN")
+      begin
+        result = yield
+        Db.exec("COMMIT")
+        result
+      rescue => e
+        Db.exec("ROLLBACK")
+        raise e
+      end
+    end
+  end
 end

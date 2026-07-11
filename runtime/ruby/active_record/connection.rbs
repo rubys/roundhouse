@@ -19,4 +19,9 @@ module ActiveRecord
     def execute: (String sql) -> Result
     def exec_query: (String sql) -> Result
   end
+
+  class Base
+    def self.connection: () -> Connection
+    def self.transaction: () { () -> untyped } -> untyped
+  end
 end
