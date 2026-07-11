@@ -79,7 +79,9 @@ change in the IR.
 **Files:** `tests/rust_toolchain.rs`, `tests/typescript_toolchain.rs`,
 `tests/go_toolchain.rs`, `tests/crystal_toolchain.rs`,
 `tests/elixir_toolchain.rs`, `tests/python_toolchain.rs`,
-`tests/ruby_toolchain.rs`. All marked `#[ignore]` so `cargo test`
+`tests/ruby_toolchain.rs`, `tests/kotlin_toolchain.rs`,
+`tests/swift_toolchain.rs`, `tests/csharp_toolchain.rs`,
+`tests/spinel_toolchain.rs`. All marked `#[ignore]` so `cargo test`
 doesn't require every language toolchain installed — CI runs each in
 its own job. Invoke locally:
 
@@ -194,7 +196,8 @@ layers:
    target toolchain, downloads the fixture, and runs
    `cargo test --test <target>_toolchain -- --ignored`.
 4. **`compare-<target>`** — one job per target (rust, crystal,
-   typescript, go, elixir, python, ruby). Each runs
+   typescript, go, elixir, python, ruby, jruby, kotlin, swift, csharp,
+   spinel). Each runs
    `scripts/compare <target>`, which boots Rails on the fixture and
    the emitted runtime, then DOM-diffs the responses for a fixed URL
    set. The Pages deploy is gated on every compare job passing — any
@@ -205,12 +208,11 @@ layers:
 
 Fixture generation happens once per CI run; every subsequent job
 reuses it. `ruby/setup-ruby` + `rails` install costs are paid once,
-not seven times.
+not once per downstream job.
 
-`compare-spinel` is the open future job — `scripts/compare ruby`
-covers DOM parity for the lowered Ruby today via shell-out to
-`main.rb`; the spinel-compiled binary plugs into the same compare
-harness once end-to-end runnable.
+`compare-spinel` now runs the spinel-compiled binary through the same
+compare harness; `scripts/compare ruby` continues to cover DOM parity
+for the lowered Ruby via shell-out to `main.rb`.
 
 ## Key files
 
@@ -220,7 +222,7 @@ harness once end-to-end runnable.
 | `tests/roundtrip.rs` | IR → JSON → IR identity (hand-constructed `App` + literal coverage) |
 | `tests/runtime_src_roundtrip.rs` | Framework-Ruby round-trip identity |
 | `tests/ingest.rs` | Construct-level ingest coverage |
-| `tests/<target>_toolchain.rs` | `--ignored` real-toolchain builds (rust, ts, go, crystal, elixir, python, ruby) |
+| `tests/<target>_toolchain.rs` | `--ignored` real-toolchain builds (rust, ts, go, crystal, elixir, python, ruby, kotlin, swift, csharp, spinel) |
 | `tools/compare/` | Cross-runtime DOM comparator |
 | `scripts/compare` | CI driver for `compare-<target>` jobs |
 | `src/bin/roundhouse-ast.rs` | Interactive pipeline inspector |

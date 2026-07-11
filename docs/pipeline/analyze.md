@@ -95,7 +95,7 @@ load-bearing:
 | schema → model | Column type becomes the instance-method return type | `t.string "title"` in schema.rb makes `article.title : Str` |
 | `belongs_to :x` | Instance method `article.user : User` | Foreign-key typed via the Association IR |
 | `has_many :xs` | `article.comments : Relation<Comment>` | Resolved via `src/lower/associations.rs` |
-| `before_action :m` | The action body is entered with `@post = m()`'s binding in ivar scope | See `src/lower/controller.rs::resolve_before_actions` |
+| `before_action :m` | The action body is entered with `@post = m()`'s binding in ivar scope | See `src/lower/controller/actions.rs::resolve_before_actions` |
 | `render :name` / implicit render | Binds the view to the action's ivars at the concrete types | View body is typed with the controller's ivar scope pre-populated |
 | `render "partial"` | Collection-partial rendering types the local from the collection's element type | Implicit `local` binding in `_article.html.erb` is `Article` when invoked as `render @article` |
 

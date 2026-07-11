@@ -88,7 +88,7 @@ That's the graceful-fallback contract.
 
 ## Current coverage
 
-~45 AR methods — factory methods (`new`, `create`, `create!`, `build`),
+~80 AR methods — factory methods (`new`, `create`, `create!`, `build`),
 class reads (`find`, `find_by`, `all`, `where`, `first`, `last`,
 `count`, `exists?`, `pluck`, `limit`, `order`, `includes`, `joins`),
 instance writes (`save`, `save!`, `destroy`, `destroy!`, `update`,
@@ -125,8 +125,8 @@ Adding a new AR method:
      delegates to catalog lookup.
    - Analyzer class/instance method registries — built from
      `AR_CATALOG` at `Analyzer::with_adapter` time.
-   - Controller walker chain detection — `is_query_builder_method`
-     checks `chain == ChainKind::Builder`.
+   - Chain classification — `is_query_builder_method`
+     (`src/catalog/mod.rs`) checks `chain == ChainKind::Builder`.
 3. Run the tests. If a new fixture exercises the method, the
    round-trip and toolchain tests will confirm the emission path.
 
@@ -155,7 +155,7 @@ added):
 | `src/catalog/mod.rs` | `CatalogedMethod`, `AR_CATALOG`, `ReceiverContext`, `EffectClass`, `ChainKind`, `ReturnKind` |
 | `src/adapter.rs` | `SqliteAdapter` / `SqliteAsyncAdapter` — consume the catalog for effect classification |
 | `src/analyze/mod.rs` | `Analyzer::with_adapter` seeds method registries from the catalog |
-| `src/lower/controller.rs` | `is_query_builder_method` — chain classification consumer |
+| `src/lower/controller/` | Pre-emit lowering passes that consult chain classification (`is_query_builder_method` lives in `src/catalog/mod.rs`) |
 
 ## Related docs
 

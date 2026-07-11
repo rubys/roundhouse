@@ -241,6 +241,5 @@ The pattern today (example: adding `ExprNode::Array`):
   schema/routes/seeds, method catalog, database adapter).
 - [`docs/pipeline/`](docs/pipeline/) — analyze, lower, emit, runtime
   integration, verification.
-- **Auto-memory** (`~/.claude/projects/-Users-rubys-git-railcar/memory/`)
-  — strategy notes, target roadmap, ERB fidelity plan, comment
-  preservation plan.
+- [`AGENTS.md`](AGENTS.md) — orientation and invariants for agents and
+  new contributors.

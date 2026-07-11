@@ -7,26 +7,29 @@ target-neutral lowerings that produce a universal IR; per-target
 emitters render that IR into idiomatic source.
 
 **Source:** `src/emit/<target>/`, one directory per target (Ruby,
-TypeScript, Crystal, Rust, Go, Python, Elixir, Spinel). Generic
+TypeScript, Crystal, Rust, Go, Kotlin, Python, Swift, C#/.NET, Elixir,
+Spinel). Generic
 `Expr` walkers live as `<target>/expr.rs`. Cross-cutting helpers live
 in `src/emit/shared/`.
 
 ## Status
 
-Roundhouse is mid-migration from per-target derivation to thin
-emitters that consume the universal post-lowering IR
-(`LibraryClass | LibraryFunction`). The first three rip-and-replaces
-(Spinel/Ruby, TypeScript, Crystal) are landed; rust2 is the active
-front of work; the remaining three targets (Go, Python, Elixir) still
-run on the legacy per-target derivation.
+Roundhouse has largely completed its migration from per-target
+derivation to thin emitters that consume the universal post-lowering
+IR (`LibraryClass | LibraryFunction`). Spinel/Ruby, TypeScript,
+Crystal, Rust, and Python run on the thin path; the newer Kotlin,
+Swift, and C#/.NET targets were built on it from the start. Only Go
+and Elixir still run on the legacy per-target derivation, with `go2`
+and `elixir2` thin rewrites in progress in-tree.
 
 | Target | Models | Views | Controllers | Tests | Schema/Routes/Seeds | Notes |
 |--------|--------|-------|-------------|-------|---------------------|-------|
 | Spinel / Ruby | thin | thin | thin | thin | thin | Reference shape — drove the universal IR contract; Ruby emit collapsed to lowered-IR-only (2026-05-05) |
 | TypeScript | thin | thin (function) | thin | thin | thin (function) | Rip-and-replace complete; `tsc` green sync + libsql under `tests/typescript_toolchain.rs` (2026-05-07) |
 | Crystal | thin | thin (function) | thin | thin | thin | Rip-and-replace complete; compare-crystal 5/5 + framework_tests 8/8 (2026-05-06 → 2026-05-10) |
-| Rust (`src/emit/rust2/`) | in flight | in flight | in flight | in flight | in flight | Phases 0–2.5 ✅; Phase 3 primitive-runtime gaps in progress |
-| Rust (`src/emit/rust/`), Go, Python, Elixir | per-target | per-target | per-target | per-target | per-target | Legacy path; rip-and-replace once shape stabilizes |
+| Rust (`src/emit/rust2/`) | thin | thin | thin | thin | thin | rust2 landed 2026-05-20; `src/emit/rust.rs::emit` delegates to `rust2::emit` |
+| Python, Kotlin, Swift, C#/.NET | thin | thin | thin | thin | thin | On the universal IR (Python rip-and-replaced; Kotlin/Swift/C# built on it) |
+| Go, Elixir | per-target | per-target | per-target | per-target | per-target | Legacy path; `go2` / `elixir2` thin rewrites in progress |
 
 "thin" = consumes the universal IR (`LibraryClass` or
 `LibraryFunction`) from a `*_to_library` lowerer. "per-target" =

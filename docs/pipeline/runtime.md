@@ -72,6 +72,7 @@ current inventory:
 | `runtime/crystal/` | `broadcasts.cr`, `cable.cr`, `db.cr`, `framework_test_adapter.cr`, `http.cr`, `param_value.cr`, `server.cr`, `test_helper.cr`, `test_support.cr` |
 | `runtime/typescript/` | DB / server / Cable primitives (`db.ts`, `db-libsql.ts`, `db_worker.ts`, `server.ts`, `server-libsql.ts`, `server-worker.ts`, `broadcasts.ts`, `client.ts`, `param_value.ts`, `sqlite_wasm_engine.ts`), the worker bridge (`juntos*.ts`), and async/sync minitest adapters (`minitest.ts`, `minitest-async.ts`). Framework-runtime files (`active_record_base.ts`, `action_controller_base.ts`, `inflector.ts`, `json_builder.ts`, …) are emitter-generated from `runtime/ruby/` and appear under `src/` in emitted projects, not in this directory. |
 | `runtime/go/`, `runtime/python/`, `runtime/elixir/` | Conventional 7-file primitive set (`cable`, `db`, `http`, `runtime`, `server`, `test_support`, `view_helpers`) |
+| `runtime/kotlin/`, `runtime/swift/`, `runtime/csharp/` | Newer-target primitives (per-target file set) |
 | `runtime/spinel/` | Per-target primitives for the Ruby/Spinel target (`base64.rb`, `broadcasts.rb`, `cgi_io.rb`, `db.rb`, `db_cruby.rb`, `importmap.rb`, `json.rb`, `sqlite_adapter.rb`) plus a `scaffold/` tree (Gemfile, inner Makefile, main.rb, Tailwind config) overlaid into every emitted Ruby/Spinel project, and a `test/` tree of target-specific test files |
 
 ## Framework runtime — `runtime/ruby/`
@@ -156,7 +157,7 @@ function is a compile failure in the generated project.
 | `runtime/rust/` | Rust primitives |
 | `runtime/typescript/` | TS primitives (framework runtime is emitter-generated from `runtime/ruby/`) |
 | `runtime/crystal/` | Crystal primitives |
-| `runtime/{go,python,elixir,spinel}/` | Sibling targets, partial |
+| `runtime/{go,python,elixir,kotlin,swift,csharp,spinel}/` | Sibling targets, partial |
 | `src/emit/<target>.rs` | Emitter side that reads + embeds the runtime |
 | `src/runtime_src.rs` | Framework-Ruby ingestion + transpile pipeline |
 

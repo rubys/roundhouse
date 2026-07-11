@@ -1,3 +1,5 @@
+> **COMPLETED — historical design record.** The work described in this plan has shipped; see [README](../README.md) for the current state of these targets. Retained for the design rationale that source comments still reference — this is not a live roadmap.
+
 # Browser demo plan
 
 Build a family of in-browser demos that run the roundhouse compiler — and,

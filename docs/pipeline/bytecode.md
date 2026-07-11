@@ -1,8 +1,9 @@
 # Bytecode
 
-An experimental additional emission target alongside the seven
-source-code targets (Ruby, Rust, TypeScript, Go, Crystal, Elixir,
-Python, Spinel). Instead of emitting target-language source, emit a
+An experimental additional emission target alongside the source-code
+targets (Rust, TypeScript, Crystal, Elixir, Go, Kotlin, Swift, Python,
+C#/.NET, and Spinel-shape Ruby). Instead of emitting target-language
+source, emit a
 typed stack-based bytecode and execute it in a VM that reuses the
 existing Rust runtime.
 
@@ -18,17 +19,18 @@ receivers. Everything else returns `WalkError::NotYetSupported` until
 the corresponding M3b+ work lands.
 
 Phase B (source-code targets at parity) was the originally-cited gate
-for resuming Phase C work. That gate is no longer simply met —
-roundhouse is mid-migration to a universal post-lowering IR
-(`LibraryClass`); TypeScript was rip-and-replaced and the remaining
-targets are in flight (see [`emit.md`](emit.md)). The bytecode emitter
-will consume the same `LibraryClass` shape every other thin emitter
-sees, so resuming Phase C is best deferred until that shape stabilizes
-across two or three more targets.
+for resuming Phase C work. The universal post-lowering IR
+(`LibraryClass | LibraryFunction`) that Phase B waited on has now
+largely landed — Spinel/Ruby, TypeScript, Crystal, Rust, and Python
+run on the thin path, with only Go and Elixir still on the legacy
+derivation (see [`emit.md`](emit.md)). The bytecode emitter will
+consume the same `LibraryClass` shape every other thin emitter sees,
+so resuming Phase C is now gated on picking the work up rather than on
+the shape stabilizing.
 
 ## Why a bytecode target
 
-The seven existing emitters each produce source code compiled or
+The existing source-code emitters each produce source code compiled or
 interpreted by the target language's toolchain. A bytecode target
 changes shape in three ways:
 
@@ -56,10 +58,10 @@ What that buys, if it works end-to-end:
 Phase A (framework) and Phase C (emitter + integration) were originally
 separated by Phase B (**complete the existing targets first**), so
 that lifts from bringing each target to 5/5 parity could benefit the
-bytecode emitter the same way they benefit each other. Phase B
-remains in flight — the LibraryClass-shape migration is rolling
-through the source-code targets one at a time. Phase C is parked
-until that migration produces a stable shape; M3a walker is landed,
+bytecode emitter the same way they benefit each other. The
+LibraryClass-shape migration Phase B waited on has largely landed
+(most source-code targets are thin; Go and Elixir remain). Phase C is
+parked by priority, not by a missing shape; M3a walker is landed,
 M3b+ deferred.
 
 | # | Milestone | Phase | Status |
@@ -67,7 +69,7 @@ M3b+ deferred.
 | M1 | Bytecode format + roundtrip tests | A | ✅ landed |
 | M2 | Minimal VM: arithmetic, locals, branches | A | ✅ landed |
 | — | Variant experiments (stack vs register, dispatch strategies) | A | ⏳ parked |
-| — | All targets migrated to LibraryClass-shape thin emitters | B | ⏳ in flight |
+| — | All targets migrated to LibraryClass-shape thin emitters | B | ⏳ Go/Elixir remain |
 | M3 | Bytecode emitter for tiny-blog | C | ⏳ parked |
 | M4 | VM runs one controller action end-to-end | C | ⏳ parked |
 | M5 | tiny-blog controller tests pass through VM | C | ⏳ parked |
@@ -194,7 +196,7 @@ roundhouse, hour-long runs, pinned-governor Hetzner host).
 
 ## See also
 
-- [`emit.md`](emit.md) — the seven source-code emitters that share the
+- [`emit.md`](emit.md) — the source-code emitters that share the
   analyzer, lower, and runtime integration this target will consume.
 - [`lower.md`](lower.md) — target-neutral IR. The bytecode emitter
   will consume the same `LoweredAction`, `LoweredPersistence`,

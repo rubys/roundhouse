@@ -143,41 +143,13 @@ attempt: a typed IR with multiple target emitters sharing one
 analyze-and-lower pipeline, so a new target is glue plus a runtime,
 not a fork of the compiler.
 
-Targets in flight — Ruby (CRuby + YJIT, the lowered output run
-through stock Ruby), TypeScript, Crystal, Spinel (Matz's Ruby-to-C
-compiler, used as a stay-in-Ruby native-binary path), Rust, Elixir,
-Go, Python — share that pipeline. TypeScript and Crystal are
-furthest along: both pass byte-equivalence against the Rails
-reference on the demo fixture, and both have framework-test gates
-exercising the lowered runtime end-to-end on every commit. Rust is
-mid-migration from a hand-written emit to consuming the same
-lowered IR Crystal already does; Spinel is integrating in
-collaboration with Matz as Spinel's whole-program inference
-matures. A DOM-diff harness compares every emitted runtime against
-the original Rails app on every commit, so a template that renders
-differently in any target is a bug.
-
-The Ruby emitter drives a working demo today. `bin/rh dev ruby` from
-the repo root transpiles the Phase-1 Rails 8 MVC fixture, builds
-Tailwind + Turbo assets, and starts a dev server on `:3000`. The
-transpiled output runs end to end in a browser — create + destroy
-flows with `data-turbo-confirm` and `_method` override, real-time
-Turbo Stream broadcasts over WebSocket, SQLite persistence —
-through code Roundhouse generated mechanically from the original
-Rails source. Crystal reaches the same parity through the same
-lowered emit, compiled to a single native binary.
-
-Spinel is the AOT companion to the Ruby target: same lowered IR,
-native binary at the end, no Ruby VM at runtime. The collaboration
-with Matz runs as an ongoing feedback loop — issues surfaced by
-validating Roundhouse's emit against Spinel's compiler are
-typically filed and closed within hours, and the cadence has
-sharpened both projects. Roundhouse's emit shape forces concrete
-Spinel coverage decisions; Spinel maturing enlarges the set of
-patterns the lowerer can confidently emit. The other targets
-(Elixir, Go, Python) sit at varying maturity along the same spine
-— each new target is incremental work against the shared pipeline,
-not a fork of the compiler.
+Which targets are live, how far each has passed the conformance
+gates, and the current benchmark numbers move week to week; the
+[README](README.md) tracks them and is the authoritative snapshot.
+The durable claim is the discipline behind those numbers: a DOM-diff
+harness holds every emitted target to byte-level parity with the
+original Rails app on every commit, so a template that renders
+differently anywhere is a bug, not a variant.
 
 The point of this page isn't to claim the work is done. It's to
 argue that the work is worth doing — that "Rails is great for time

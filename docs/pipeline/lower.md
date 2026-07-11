@@ -184,22 +184,25 @@ two emitters could disagree.
 ## Status of legacy per-target derivation
 
 The older shape — `CtrlWalker` trait, `WalkCtx` / `WalkState`,
-`SendKind` classifier in `src/lower/controller.rs` — walks controller
+`SendKind` classifier in `src/lower/controller/` — walks controller
 bodies through a target-implemented dispatch trait, with each target
 overriding leaf `write_*` / `render_*` methods.
 
-Migration status as of 2026-05-13:
+Migration status:
 
-- **Migrated to universal IR** (no longer use `CtrlWalker`):
-  Spinel/Ruby, TypeScript, Crystal. All three were rip-and-replaced
-  end-to-end against the `LibraryClass | LibraryFunction` shape.
-- **In flight:** `src/emit/rust2/` — Phases 0–2.5 closed (HWIA
-  elimination, Parameters retirement, primitive-runtime bridge);
-  Phase 3 primitive-runtime gaps in progress.
-- **Still on the legacy path:** `src/emit/rust/` (kept alive while
-  rust2 lands), Go, Python, Elixir. Each will rip-and-replace
-  against the same shape once the rust2 pattern stabilizes; the
-  CtrlWalker code stays in tree until the last consumer is gone.
+- **On the universal IR** (no longer use `CtrlWalker`): Spinel/Ruby,
+  TypeScript, Crystal, Rust, and Python were rip-and-replaced
+  end-to-end against the `LibraryClass | LibraryFunction` shape; the
+  newer Kotlin, Swift, and C#/.NET targets were built on it from the
+  start. Rust's rip-and-replace landed 2026-05-20 —
+  `src/emit/rust.rs::emit` now delegates unconditionally to
+  `super::rust2::emit`.
+- **In flight:** `src/emit/go2/` and `src/emit/elixir2/` — thin
+  rewrites of the Go and Elixir emitters, not yet the default dispatch.
+- **Still on the legacy path:** `src/emit/go.rs` and
+  `src/emit/elixir.rs` (the live Go/Elixir dispatch until go2/elixir2
+  land); the CtrlWalker code stays in tree until the last consumer is
+  gone.
 
 New work shouldn't extend the legacy form; existing per-target
 emitters either migrate to the universal IR or get rip-and-replaced
@@ -221,7 +224,7 @@ emitters either migrate to the universal IR or get rip-and-replaced
 | `src/lower/importmap_to_library/` | Importmap → `LibraryFunction` (Importmap module) |
 | `src/lower/schema_to_library/` | Schema → `LibraryFunction` (`Schema.create_tables`) |
 | `src/lower/seeds_to_library/` | Seeds → `LibraryFunction` (`Seeds.run`) |
-| `src/lower/controller.rs`, `controller_walk.rs` | Legacy per-target derivation (being torn down) |
+| `src/lower/controller/`, `controller_walk.rs` | Legacy per-target derivation (being torn down) |
 | `src/lower/validations.rs` | `LoweredValidation`, `Check` enum |
 | `src/lower/routes.rs` | `flatten_routes`, `FlatRoute` |
 | `src/lower/persistence.rs` | `LoweredPersistence` |

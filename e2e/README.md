@@ -18,6 +18,7 @@ reference server — they run against a single **target** server.
 | `tailwind.spec.js`      | the compiled stylesheet serves and Tailwind utilities apply |
 | `turbo_comment.spec.js` | adding a comment inserts the row via Turbo, no full reload |
 | `action_cable.spec.js`  | a new comment broadcasts live to another viewer over the websocket |
+| `flash.spec.js`         | a redirect's flash notice renders once, then is swept — a later navigation doesn't show it again |
 
 The expected data (titles, comment counts) matches `db/seed.sql` shipped in
 every target archive — article 1 has 2 comments, article 2 has 1, article 3

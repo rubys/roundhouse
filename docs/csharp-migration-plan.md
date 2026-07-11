@@ -1,3 +1,5 @@
+> **COMPLETED — historical design record.** The work described in this plan has shipped; see [README](../README.md) for the current state of these targets. Retained for the design rationale that source comments still reference — this is not a live roadmap.
+
 # C# / .NET target migration plan
 
 Roundhouse is lowerer-first: the Rails DSL is lowered into a universal post-lowering IR

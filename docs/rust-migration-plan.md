@@ -1,3 +1,5 @@
+> **COMPLETED — historical design record.** The work described in this plan has shipped; see [README](../README.md) for the current state of these targets. Retained for the design rationale that source comments still reference — this is not a live roadmap.
+
 # Rust target migration plan
 
 Migration of the Rust target from Group 2 (hand-written Rails-domain

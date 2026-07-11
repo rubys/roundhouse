@@ -32,12 +32,12 @@ Three bets, each independently testable, with independent failure modes and back
 
 ### Bet 1: Developers want a Rails-DSL frontend over subset Ruby, plus reach beyond any single target
 
-Spinel takes subset-clean Ruby to fast native binaries. Roundhouse and spinel are complementary: roundhouse adds the Rails-DSL frontend that lowers app code to subset-clean IR, and the multi-target reach where the IR feeds seven backends (spinel being the stay-in-Ruby native-binary one of those seven). Together they give developers what neither provides alone.
+Spinel takes subset-clean Ruby to fast native binaries. Roundhouse and spinel are complementary: roundhouse adds the Rails-DSL frontend that lowers app code to subset-clean IR, and the multi-target reach where the IR feeds ten backends (spinel being the stay-in-Ruby native-binary one of those ten). Together they give developers what neither provides alone.
 
 Thirteen years of Rails-as-preferred-Ruby-web-framework empirically supports the DSL-frontend half. The multi-target half is supported by ruby2js+juntos's existing demos shipping to seven JS-runtime deployment surfaces.
 
 - **If wrong**: developers prefer to target the subset directly → spinel serves that audience.
-- **Continuing value**: roundhouse continues to add value on the multi-target side (TS, Rust, Swift, Kotlin, Python, Elixir, Go) where spinel doesn't reach.
+- **Continuing value**: roundhouse continues to add value on the multi-target side (TS, Rust, Swift, Kotlin, Python, Elixir, Go, Crystal, C#) where spinel doesn't reach.
 - **Reasoned probability estimate**: ~95%.
 
 ### Bet 2: Framework runtime in the subset + type inference covers the rest
@@ -46,7 +46,7 @@ Argued in detail in [Rails Was Already Typed](https://intertwingly.net/blog/2026
 
 The bet is load-bearing for *all* targets, not just strict-typed ones. Per [Static Types for Dynamic Targets](https://intertwingly.net/blog/2026/04/23/Static-Types-for-Dynamic-Targets.html): Ruby's polymorphism means the compiler can't pick the correct target syntax without operand types — `[1,2] + [3,4]` becomes `[...a, ...b]` in TS only if the compiler knows the operands are arrays. Type inference is what makes correct multi-target emission possible; the alternative is heuristic transpilation that's right most of the time and silently wrong the rest.
 
-- **Empirical evidence**: zero diagnostics on the Phase-1 MVC fixture with no developer-written annotations. Six of seven targets (TypeScript, Rust, Crystal, Elixir, Go, Python) produce DOM-byte-identical output to Rails on the standard blog scaffold, enforced continuously by CI. The seventh (Spinel) drives a working end-to-end demo.
+- **Empirical evidence**: zero diagnostics on the Phase-1 MVC fixture with no developer-written annotations. Ten target emitters are live and DOM-equivalent against Rails on the standard blog scaffold (Rust, TypeScript, Crystal, Elixir, Go, Kotlin, Swift, Python, C#/.NET, and Spinel-shape Ruby), enforced continuously by CI. Spinel goes furthest: it compiles that same fixture to a native binary that serves the blog's HTTP + WebSocket traffic end-to-end.
 - **Failure mode**: inference plateaus too high; framework runtime gaps don't close.
 - **Backup**: RBS sidecars or inline pragmas as escape hatches for the residual.
 - **Scoping**: 80% target, not perfection. Long-tail apps need refactoring of untypable hot spots.
