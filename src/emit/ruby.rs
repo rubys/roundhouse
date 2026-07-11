@@ -23,6 +23,7 @@ const SPINEL_TEST_HELPER: &str =
 mod expr;
 mod library;
 mod rbs;
+mod send_dispatch;
 mod shared;
 
 /// Render a `Ty` to its RBS string form (`String`, `Array[Comment]`,
@@ -181,6 +182,11 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // avatar_img(...)` + helper modules become module-functions (no-op when
     // the app ships no non-empty helpers).
     library::apply_helper_lowering(&mut lcs, app);
+    // Dynamic `send(k)` over a provable literal name set → static
+    // `case` dispatch (no-op for apps with no reflective sends). Before
+    // duration lowering: a duration-unit dispatch's arms emit plural
+    // unit calls that the duration pass then grounds.
+    send_dispatch::apply_send_static_dispatch(&mut lcs);
     // ActiveSupport durations: `70.days` → `Duration.days(70)` (no-op for
     // duration-free apps).
     library::apply_duration_lowering(&mut lcs);

@@ -966,8 +966,15 @@ fn emit_lvalue(lv: &LValue) -> String {
 }
 
 fn emit_arm(arm: &Arm) -> String {
-    let mut s = format!("when {}", emit_pattern(&arm.pattern));
-    if let Some(g) = &arm.guard { s.push_str(&format!(" if {}", emit_expr(g))); }
+    // A guard-free Wildcard is the case's `else` clause (that's what
+    // ingest lowers `else` to); `when _` would read an undefined local.
+    let mut s = if matches!(arm.pattern, Pattern::Wildcard) && arm.guard.is_none() {
+        "else".to_string()
+    } else {
+        let mut s = format!("when {}", emit_pattern(&arm.pattern));
+        if let Some(g) = &arm.guard { s.push_str(&format!(" if {}", emit_expr(g))); }
+        s
+    };
     s.push('\n');
     s.push_str(&indent_lines(&emit_expr(&arm.body), 1));
     s.push('\n');

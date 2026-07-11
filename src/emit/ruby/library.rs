@@ -24,6 +24,8 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     apply_scope_lowering(&mut lcs, app);
     apply_library_partial_render_lowering(&mut lcs, app);
     apply_helper_lowering(&mut lcs, app);
+    // Before duration lowering — see the emit_lowered_models stack.
+    super::send_dispatch::apply_send_static_dispatch(&mut lcs);
     apply_duration_lowering(&mut lcs);
     // Transpiled-shape classes carry hand-written accessors that
     // `synth_attr_reader` never sees, so the datetime reader/writer
