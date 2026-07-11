@@ -39,7 +39,12 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     apply_nilsafe_empty_lowering(&mut lcs);
     lcs.iter()
         .flat_map(|lc| {
-            let file_stem = snake_case(lc.name.0.as_str());
+            // `underscore`, not `snake_case`: a namespaced reopen
+            // (lobsters' `ActiveRecord::Base.q`, `Net::HTTP`,
+            // `ShortId::CandidateId`) nests as `active_record/base.rb` —
+            // a literal `::` in the filename breaks the emitted
+            // Makefile's dependency list.
+            let file_stem = crate::naming::underscore(lc.name.0.as_str());
             let out_path = PathBuf::from(format!("app/models/{file_stem}.rb"));
             emit_library_class_pair(lc, app, out_path)
         })
@@ -1860,7 +1865,8 @@ fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {
     if app.models.iter().any(|m| m.name.0.as_str() == raw)
         || app.library_classes.iter().any(|lc| lc.name.0.as_str() == raw)
     {
-        return Some(format!("app/models/{}", snake_case(raw)));
+        // underscore: namespaced parents nest (see emit_library_class_decls).
+        return Some(format!("app/models/{}", crate::naming::underscore(raw)));
     }
     if app.controllers.iter().any(|c| c.name.0.as_str() == raw) {
         return Some(format!("app/controllers/{}", snake_case(raw)));

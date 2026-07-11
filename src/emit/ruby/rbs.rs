@@ -265,7 +265,7 @@ pub(super) fn emit_library_class_rbs_decls(app: &crate::App) -> Vec<EmittedFile>
     app.library_classes
         .iter()
         .map(|lc| {
-            let file_stem = crate::naming::snake_case(lc.name.0.as_str());
+            let file_stem = crate::naming::underscore(lc.name.0.as_str());
             let rb_path = PathBuf::from(format!("app/models/{file_stem}.rb"));
             emit_library_class_rbs(lc, &rb_path)
         })

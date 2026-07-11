@@ -19,6 +19,19 @@ pub fn snake_case(class_name: &str) -> String {
     s
 }
 
+/// Rails `underscore`: like `snake_case`, but `::` becomes a path
+/// separator (`ShortId::CandidateId` → `short_id/candidate_id`). Use for
+/// file placement of possibly-namespaced classes — a literal `::` in a
+/// filename breaks make dependency lists (parsed as a target separator)
+/// and diverges from the Rails file convention.
+pub fn underscore(class_name: &str) -> String {
+    class_name
+        .split("::")
+        .map(snake_case)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 pub fn camelize(snake: &str) -> String {
     let mut out = String::with_capacity(snake.len());
     let mut upper_next = true;

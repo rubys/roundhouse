@@ -990,17 +990,11 @@ fn ruby_runtime_files(
         &mut files,
     )?;
 
-    // Emit the ingested support classes (extras/, lib/, app/helpers/,
-    // app/mailers/, and non-AR classes under app/models/ — Markdowner,
-    // TrafficHelper, StoriesPaginator, …) as `app/models/<stem>.rb`.
-    // `emit_spinel` (the shared Rails-shape path) emits only the lowered
-    // models/controllers/views; these `app.library_classes` are ingested
-    // for analysis and *referenced* by emitted code (so a require is
-    // generated) but were never produced, leaving the require graph
-    // dangling. CRuby/JRuby only for now — the bodies are source-shape
-    // (un-lowered) Ruby, faithful under the Ruby→Ruby round-trip but not
-    // yet vetted against the spinel AOT subset (that's the spinel phase).
-    files.extend(sort_files(emit::ruby::emit_library(app)));
+    // Library classes (app/models/<stem>.rb for the ingested support
+    // classes) and the regenerated app/views.rb aggregator are inherited
+    // from `spinel_files` — the shared base emits both for all three
+    // scaffold targets. Nothing after this point adds view files, so the
+    // base's aggregator content stays correct.
 
     // Per-app Rails::Application reopen (config/application.rb) — the
     // app's real config methods (`read_only?`, `name`, `domain`) so
@@ -1025,8 +1019,10 @@ fn ruby_runtime_files(
     // to add here beyond the overlay above. The scaffold README → SPECIMEN
     // rename already happened in `spinel_files`.
     let mut files = dedupe_last_wins(files);
-    apply_controller_dispatch(&mut files, app);
-    apply_views_aggregator(&mut files);
+    // Lazy flavor: rewrites the ruby_overlay main.rb (which superseded the
+    // base's eagerly-rewritten one at dedupe) and strips routes.rb's eager
+    // controller-require header.
+    apply_controller_dispatch(&mut files, app, true);
     Ok(files)
 }
 
@@ -1093,12 +1089,22 @@ fn apply_views_aggregator(files: &mut [(String, String)]) {
 /// dispatch generated from the app's own route table — one
 /// `when :<sym> then <Controller>.new` arm per controller the router can
 /// reach. Without this, every non-blog app's routes resolve to a `nil`
-/// controller and crash at dispatch (`controller.params=` on nil). The
-/// symbol derivation (`controller_symbol`) is the same one the emitted
-/// route table uses, so the arms match the router's `:sym` exactly. For
-/// the blog the generated arms equal the hardcoded stub, so its output is
-/// byte-identical.
-fn apply_controller_dispatch(files: &mut [(String, String)], app: &App) {
+/// controller and crash at dispatch (`controller.params=` on nil) — and
+/// under spinel AOT the stale `ArticlesController` constant is already a
+/// compile error. The symbol derivation (`controller_symbol`) is the same
+/// one the emitted route table uses, so the arms match the router's
+/// `:sym` exactly. For the blog the generated arms equal the hardcoded
+/// stub, so its output is byte-identical.
+///
+/// `lazy_requires` selects the require strategy. The CRuby/JRuby trees
+/// pass true: each arm `require_relative`s its controller at first
+/// dispatch (Rails-faithful autoload; a never-dispatched controller with
+/// unsatisfiable deps doesn't abort boot) and the eager controller-require
+/// header is stripped from `config/routes.rb`. The spinel tree passes
+/// false: AOT resolves the whole require graph statically, so arms are
+/// bare `<Class>.new` and routes.rb keeps its eager header — there is no
+/// lazy escape hatch to preserve.
+fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_requires: bool) {
     use std::fmt::Write;
     const HARDCODED: &str = "  def self.instantiate_controller(sym)\n    case sym\n    when :articles then ArticlesController.new\n    when :comments then CommentsController.new\n    end\n  end";
 
@@ -1111,20 +1117,16 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App) {
         if !seen.insert(sym.clone()) {
             continue;
         }
-        // Lazy-require the controller at dispatch rather than eagerly at
-        // boot. This is Rails-faithful (controllers autoload on first use)
-        // and, crucially, means a never-dispatched controller whose deps we
-        // can't yet satisfy (a gem superclass, an unmodeled framework
-        // mixin) doesn't abort boot — only the routes actually served need
-        // to load. `require_relative` is idempotent, so repeat dispatches
-        // are free. Paired with stripping the eager controller-require
-        // header from `config/routes.rb` below.
-        let stem = crate::naming::snake_case(class);
-        writeln!(
-            arms,
-            "    when :{sym} then require_relative \"app/controllers/{stem}\"; {class}.new"
-        )
-        .unwrap();
+        if lazy_requires {
+            let stem = crate::naming::snake_case(class);
+            writeln!(
+                arms,
+                "    when :{sym} then require_relative \"app/controllers/{stem}\"; {class}.new"
+            )
+            .unwrap();
+        } else {
+            writeln!(arms, "    when :{sym} then {class}.new").unwrap();
+        }
     }
     if arms.is_empty() {
         return;
@@ -1139,8 +1141,10 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App) {
         // Drop the eager `require_relative "../app/controllers/<x>"` header
         // from routes.rb — controllers now load lazily via
         // instantiate_controller. Routing itself only needs the route
-        // table (data), not the controller classes.
-        if path.ends_with("config/routes.rb") {
+        // table (data), not the controller classes. Lazy trees only: the
+        // spinel tree's whole-graph compile reaches controllers through
+        // this header.
+        if lazy_requires && path.ends_with("config/routes.rb") {
             *content = content
                 .lines()
                 .filter(|l| !l.trim_start().starts_with("require_relative \"../app/controllers/"))
@@ -1250,7 +1254,11 @@ fn jruby_runtime_files(
     files.extend(sort_files(emit::ruby::emit_lowered_controllers_with_layout(app)));
 
     // The scaffold README → SPECIMEN rename already happened in `spinel_files`.
-    Ok(dedupe_last_wins(files))
+    let mut files = dedupe_last_wins(files);
+    // Same lazy-dispatch rewrite as the CRuby tree — the ruby_overlay
+    // main.rb superseded the base's eagerly-rewritten one at dedupe.
+    apply_controller_dispatch(&mut files, app, true);
+    Ok(files)
 }
 
 /// Spinel-target files: lowered emit (app/, config/, test/) plus
@@ -1337,6 +1345,19 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
 
     files.extend(sort_files(emit::ruby::emit_spinel(app)));
 
+    // Emit the ingested support classes (extras/, lib/, app/helpers/,
+    // app/mailers/, and non-AR classes under app/models/ — Markdowner,
+    // TrafficHelper, StoriesPaginator, …) as `app/models/<stem>.rb`.
+    // `emit_spinel` (the shared Rails-shape path) emits only the lowered
+    // models/controllers/views; these `app.library_classes` are ingested
+    // for analysis and *referenced* by emitted code (so a require is
+    // generated) but were never produced, leaving the require graph
+    // dangling. The bodies are source-shape (un-lowered) Ruby — faithful
+    // under the Ruby→Ruby round-trip; under spinel AOT they are priced by
+    // the strict whole-graph check, which is the point (spinel as
+    // completeness oracle).
+    files.extend(sort_files(emit::ruby::emit_library(app)));
+
     let js = fixture.join("app/javascript");
     if js.exists() {
         walk_dir_into(&js, "app/javascript/", &mut files)?;
@@ -1347,6 +1368,15 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     }
 
     let mut files = dedupe_last_wins(files);
+    // De-blog the scaffold for whatever app was ingested: regenerate the
+    // `app/views.rb` aggregator from the emitted view set and rewrite
+    // `main.rb`'s `instantiate_controller` from the app's route table
+    // (eager arms — AOT has no lazy-require escape hatch). Runs here, in
+    // the shared base, so all three scaffold targets inherit it; the
+    // CRuby/JRuby trees re-apply the dispatch in lazy flavor to the
+    // ruby_overlay main.rb that supersedes this one.
+    apply_controller_dispatch(&mut files, app, false);
+    apply_views_aggregator(&mut files);
     // All three scaffold targets (spinel + the ruby/jruby trees derived
     // from this set) ship the comprehensive scaffold README as SPECIMEN.md,
     // freeing README.md for the generated quick-start `ensure_readme`

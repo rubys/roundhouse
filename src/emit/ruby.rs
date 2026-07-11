@@ -637,6 +637,23 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
             app,
             PathBuf::from("config/importmap.rb"),
         ));
+    } else {
+        // The scaffold main.rb `require_relative`s this file
+        // unconditionally — spinel's static require graph has no
+        // begin/rescue escape hatch (the CRuby overlay's conditional
+        // require is exactly that hatch). A source app without an
+        // importmap still needs the file to exist; a bare reopen keeps
+        // the `runtime/importmap.rb` fallback's pins/entry standing.
+        files.push(EmittedFile {
+            path: PathBuf::from("config/importmap.rb"),
+            content: "# No importmap in the source app; the runtime/importmap\n\
+                      # fallback's empty pins stand. This file exists because the\n\
+                      # scaffold main.rb requires it unconditionally (spinel AOT\n\
+                      # resolves the whole require graph statically).\n\
+                      module Importmap\n\
+                      end\n"
+                .to_string(),
+        });
     }
     files.extend(emit_lowered_models(app));
     files.extend(emit_lowered_controllers(app));
