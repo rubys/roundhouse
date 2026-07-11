@@ -21,6 +21,12 @@ module SqliteAdapter
     Db.exec(sql)
   end
 
+  # Rows affected by the last INSERT/UPDATE/DELETE — Rails'
+  # `delete_all`/`update_all` return this count.
+  def self.changes
+    Db.changes
+  end
+
   def self.all(table)
     select_rows("SELECT * FROM #{table}")
   end

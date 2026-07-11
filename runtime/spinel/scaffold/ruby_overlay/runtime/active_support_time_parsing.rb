@@ -83,4 +83,23 @@ module ActiveSupport
       t.year, t.month, t.day, t.hour, t.min, t.sec, t.usec
     )
   end
+
+  # Normalize a temporal-writer value into the canonical storage form
+  # above. Time → stamped; nil → nil (a nullable column being cleared:
+  # `self.banned_at = nil`); String passes through untouched (already
+  # canonical, or carries its own zone marker — same trust the readers
+  # give the column). The synthesized model writers (`banned_at=`)
+  # route every store through this so column TEXT stays homogeneous
+  # and lexicographically ordered.
+  def self.format_db_time(value)
+    return nil if value.nil?
+    if value.is_a?(Time)
+      t = value.getutc
+      return format(
+        "%04d-%02d-%02d %02d:%02d:%02d.%06d",
+        t.year, t.month, t.day, t.hour, t.min, t.sec, t.usec
+      )
+    end
+    value
+  end
 end

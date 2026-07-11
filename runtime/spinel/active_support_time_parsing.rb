@@ -38,4 +38,24 @@ module ActiveSupport
       t.year, t.mon, t.mday, t.hour, t.min, t.sec, micros
     )
   end
+
+  # Normalize a temporal-writer value into the canonical storage form.
+  # Time → stamped (same shape as db_now); nil → nil (nullable column
+  # cleared: `self.banned_at = nil`); String passes through untouched.
+  # The synthesized model writers (`banned_at=`) route every store
+  # through this so column TEXT stays homogeneous and lexicographically
+  # ordered.
+  def self.format_db_time(value)
+    return nil if value.nil?
+    if value.is_a?(Time)
+      t = value.utc
+      f = t.to_f
+      micros = ((f - f.to_i) * 1_000_000).to_i
+      return format(
+        "%04d-%02d-%02d %02d:%02d:%02d.%06d",
+        t.year, t.mon, t.mday, t.hour, t.min, t.sec, micros
+      )
+    end
+    value
+  end
 end

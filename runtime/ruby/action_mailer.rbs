@@ -1,0 +1,29 @@
+# Typing contract for the ActionMailer delivery-capture runtime.
+# Header values are untyped by design — they arrive through mail()'s
+# heterogeneous opts hash and nothing downstream re-dispatches on them.
+module ActionMailer
+  class Message
+    @to: untyped
+    @from: untyped
+    @replyto: untyped
+    @subject: untyped
+    @body: untyped
+
+    def initialize: (Hash[Symbol, untyped] opts) -> void
+    def to: () -> untyped
+    def from: () -> untyped
+    def replyto: () -> untyped
+    def subject: () -> untyped
+    def body: () -> untyped
+    def deliver_now: () -> Message
+    def deliver_later: () -> Message
+  end
+
+  class Base
+    self.@deliveries: Array[Message]
+
+    def self.default: (?Hash[Symbol, untyped]? opts) -> nil
+    def self.deliveries: () -> Array[Message]
+    def mail: (Hash[Symbol, untyped] opts) -> Message
+  end
+end

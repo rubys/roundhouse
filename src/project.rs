@@ -1328,6 +1328,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         "action_view",
         "action_controller",
         "action_dispatch",
+        "action_mailer",
         "inflector",
         "json_builder",
     ] {

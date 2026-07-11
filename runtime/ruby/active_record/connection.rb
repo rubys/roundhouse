@@ -71,23 +71,10 @@ module ActiveRecord
     end
 
     # Run raw SQL, collecting every row as name→value. DML statements
-    # simply produce zero rows. One prepare/step/finalize cycle — the
-    # same protocol the lowerer-emitted `_adapter_*` methods use.
+    # simply produce zero rows. Delegates to the adapter's row loop
+    # (which resolves column names once, not rows×cols times).
     def execute(sql)
-      stmt = Db.prepare(sql)
-      rows = []
-      while Db.step?(stmt)
-        row = {}
-        i = 0
-        n = Db.column_count(stmt)
-        while i < n
-          row[Db.column_name(stmt, i)] = Db.column_value(stmt, i)
-          i += 1
-        end
-        rows.push(row)
-      end
-      Db.finalize(stmt)
-      Result.new(rows)
+      Result.new(ActiveRecord.adapter.select_rows(sql))
     end
 
     def exec_query(sql)

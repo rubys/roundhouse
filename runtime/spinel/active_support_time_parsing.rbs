@@ -4,4 +4,5 @@
 module ActiveSupport
   def self.parse_db_time: (String? str) -> Time?
   def self.db_now: () -> String
+  def self.format_db_time: (untyped value) -> String?
 end

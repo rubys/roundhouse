@@ -33,6 +33,10 @@ module ActiveRecord
     %a{abstract}
     def select_rows: (String sql) -> Array[Hash[String, untyped]]
     %a{abstract}
+    def execute_ddl: (String sql) -> void
+    %a{abstract}
+    def changes: () -> Integer
+    %a{abstract}
     def escape_value: (untyped value) -> String
   end
 

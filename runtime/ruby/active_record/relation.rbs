@@ -40,6 +40,8 @@ module ActiveRecord
     def exists?: () -> bool
     def length: () -> Integer
     def size: () -> Integer
+    def delete_all: () -> Integer
+    def update_all: (untyped updates) -> Integer
     def pluck: (untyped col) -> Array[String]
     def ids: () -> Array[Integer]
     def find: (Integer id) -> untyped

@@ -234,6 +234,36 @@ module ActiveRecord
       to_a.length
     end
 
+    # `delete_all` — bulk DELETE scoped by the accumulated WHEREs.
+    # Rails contract: no callbacks, no per-row loads, returns the
+    # affected-row count. ORDER/LIMIT don't apply to bulk ops.
+    def delete_all
+      sql = "DELETE FROM #{@table}"
+      sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
+      ActiveRecord.adapter.execute_ddl(sql)
+      ActiveRecord.adapter.changes
+    end
+
+    # `update_all(...)` — bulk UPDATE scoped by the accumulated WHEREs.
+    # Hash form (`update_all(user_id: 3)`) escapes values; String form
+    # (`update_all("hits = hits + 1")`) is trusted verbatim, same as
+    # Rails. Returns the affected-row count.
+    def update_all(updates)
+      set_sql = if updates.is_a?(Hash)
+        parts = []
+        updates.each do |key, val|
+          parts.push("#{key} = #{ActiveRecord.adapter.escape_value(val)}")
+        end
+        parts.join(", ")
+      else
+        updates.to_s
+      end
+      sql = "UPDATE #{@table} SET #{set_sql}"
+      sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
+      ActiveRecord.adapter.execute_ddl(sql)
+      ActiveRecord.adapter.changes
+    end
+
     # `pluck(:col)` — a single column projected to an Array of its raw
     # values (strings as stored; callers coerce).
     def pluck(col)

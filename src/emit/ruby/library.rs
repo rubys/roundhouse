@@ -27,6 +27,7 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     // Before duration lowering — see the emit_lowered_models stack.
     super::send_dispatch::apply_send_static_dispatch(&mut lcs);
     apply_create_block_inline(&mut lcs);
+    apply_mailer_class_side_lowering(&mut lcs);
     apply_time_current_lowering(&mut lcs);
     apply_duration_lowering(&mut lcs);
     // Transpiled-shape classes carry hand-written accessors that
@@ -1036,6 +1037,111 @@ fn rewrite_layout_wrap(expr: &mut Expr, app: &App) {
     }
 }
 
+/// Ruby-family pre-emit pass: Rails' mailer class-side call idiom.
+/// `BanNotification.notify(user, banner, reason)` is method_missing in
+/// Rails (the class proxies to `new.notify(...)` and wraps delivery);
+/// under static resolution every public instance method of a mailer
+/// class gets an explicit class-side wrapper:
+///
+///   def self.notify(user, banner, reason)
+///     new.notify(user, banner, reason)
+///   end
+///
+/// Mailer classes are those whose parent chain (within the ingested
+/// set) reaches ActionMailer::Base. Positional forwarding only — the
+/// corpus's mailer methods take positional args, and typed-kwarg
+/// forwarding is the known strict-target trap.
+pub(crate) fn apply_mailer_class_side_lowering(lcs: &mut [LibraryClass]) {
+    use std::collections::BTreeSet;
+
+    let mut mailers: BTreeSet<String> = BTreeSet::new();
+    loop {
+        let mut changed = false;
+        for lc in lcs.iter() {
+            let name = lc.name.0.as_str();
+            if mailers.contains(name) {
+                continue;
+            }
+            if let Some(p) = &lc.parent {
+                let ps = p.0.as_str();
+                if ps == "ActionMailer::Base" || mailers.contains(ps) {
+                    mailers.insert(name.to_string());
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    if mailers.is_empty() {
+        return;
+    }
+
+    for lc in lcs.iter_mut() {
+        if !mailers.contains(lc.name.0.as_str()) {
+            continue;
+        }
+        let class_side: BTreeSet<&str> = lc
+            .methods
+            .iter()
+            .filter(|m| m.receiver == MethodReceiver::Class)
+            .map(|m| m.name.as_str())
+            .collect();
+        let mut wrappers: Vec<crate::dialect::MethodDef> = Vec::new();
+        for m in &lc.methods {
+            if m.receiver != MethodReceiver::Instance
+                || m.name.as_str() == "initialize"
+                || class_side.contains(m.name.as_str())
+            {
+                continue;
+            }
+            let span = m.body.span;
+            let args: Vec<Expr> = m
+                .params
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    Expr::new(
+                        span,
+                        ExprNode::Var {
+                            id: crate::ident::VarId(i as u32),
+                            name: p.name.clone(),
+                        },
+                    )
+                })
+                .collect();
+            let new_call = Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from("new"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            let body = Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(new_call),
+                    method: m.name.clone(),
+                    args,
+                    block: None,
+                    parenthesized: true,
+                },
+            );
+            // Clone the instance method wholesale (signature, effects,
+            // kind all carry over), then swap receiver + body.
+            let mut w = m.clone();
+            w.receiver = MethodReceiver::Class;
+            w.body = body;
+            wrappers.push(w);
+        }
+        lc.methods.extend(wrappers);
+    }
+}
+
 /// Ruby-family pre-emit pass: Rails' block-form record factory
 /// (`X.create! do |kv| ... end`) inlined at the call site:
 ///
@@ -1414,6 +1520,74 @@ pub(crate) fn apply_datetime_lowering(lcs: &mut [LibraryClass], app: &App) {
                 _ => {}
             }
         }
+
+        // Schema-synthesized models carry `<col>_raw=` but no plain
+        // `<col>=` — write paths were CRuby-lazy until lobsters' ban
+        // flow (`self.banned_at = Time.now.utc`) forced the question.
+        // Synthesize the writer: route through the raw writer (which
+        // invalidates the parse memo) with the value normalized to the
+        // canonical storage text.
+        //
+        //   def <col>=(value)
+        //     self.<col>_raw = ActiveSupport.format_db_time(value)
+        //   end
+        let have: BTreeSet<Symbol> = lc
+            .methods
+            .iter()
+            .filter(|m| m.receiver == MethodReceiver::Instance)
+            .map(|m| m.name.clone())
+            .collect();
+        let mut writers: Vec<crate::dialect::MethodDef> = Vec::new();
+        for col in &temporal {
+            let writer_name = Symbol::from(format!("{}=", col.as_str()));
+            let raw_writer = format!("{}_raw=", col.as_str());
+            if have.contains(&writer_name) || !have.contains(&Symbol::from(raw_writer.as_str()))
+            {
+                continue;
+            }
+            let value = Symbol::from("value");
+            let span = Span::synthetic();
+            let normalize = Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(Expr::new(
+                        span,
+                        ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
+                    )),
+                    method: Symbol::from("format_db_time"),
+                    args: vec![Expr::new(
+                        span,
+                        ExprNode::Var { id: crate::ident::VarId(0), name: value.clone() },
+                    )],
+                    block: None,
+                    parenthesized: true,
+                },
+            );
+            let body = Expr::new(
+                span,
+                ExprNode::Assign {
+                    target: LValue::Attr {
+                        recv: Expr::new(span, ExprNode::SelfRef),
+                        name: Symbol::from(format!("{}_raw", col.as_str())),
+                    },
+                    value: normalize,
+                },
+            );
+            writers.push(crate::dialect::MethodDef {
+                name: writer_name,
+                receiver: MethodReceiver::Instance,
+                params: vec![crate::dialect::Param::positional(value)],
+                block_param: None,
+                body,
+                signature: None,
+                effects: Default::default(),
+                enclosing_class: None,
+                kind: AccessorKind::AttributeWriter,
+                is_async: false,
+                mutates_self: true,
+            });
+        }
+        lc.methods.extend(writers);
     }
 }
 
@@ -2060,6 +2234,7 @@ fn runtime_reopen_anchor(name: &str) -> Option<&'static str> {
         ("ActionController", "runtime/action_controller"),
         ("ActionView", "runtime/action_view"),
         ("ActionDispatch", "runtime/action_dispatch"),
+        ("ActionMailer", "runtime/action_mailer"),
     ] {
         if name == prefix || name.strip_prefix(prefix).is_some_and(|r| r.starts_with("::")) {
             return Some(anchor);
@@ -2088,6 +2263,9 @@ fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {
     }
     if raw == "ActionController::Base" || raw == "ActionController::API" {
         return Some("runtime/action_controller".to_string());
+    }
+    if raw == "ActionMailer::Base" {
+        return Some("runtime/action_mailer".to_string());
     }
     if app.models.iter().any(|m| m.name.0.as_str() == raw)
         || app.library_classes.iter().any(|lc| lc.name.0.as_str() == raw)
