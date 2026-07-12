@@ -116,6 +116,36 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                     ));
                 }
             }
+            // ActiveSupport `hash.reverse_merge(defaults)` — `defaults`
+            // fills in only the keys `hash` lacks (hash's values win). It
+            // is exactly `defaults.merge(hash)` in core Ruby, so lower to
+            // that (both operands appear once, just swapped). `defaults`
+            // is the single hash arg (kwargs collapse to it).
+            if method == "reverse_merge"
+                && block.is_none()
+                && recv.is_some()
+                && args.len() == 1
+            {
+                let r = recv.unwrap();
+                let mut defaults = args.into_iter().next().unwrap();
+                // `reverse_merge(a: 1, b: 2)` — the trailing kwargs parsed
+                // as a bare (`kwargs: true`) Hash; as the `.merge`
+                // RECEIVER it must render braced (`{ a: 1 }.merge(...)`),
+                // so re-mark it as a literal hash.
+                if let ExprNode::Hash { kwargs, .. } = &mut *defaults.node {
+                    *kwargs = false;
+                }
+                return Ok(Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(defaults),
+                        method: Symbol::from("merge"),
+                        args: vec![r],
+                        block: None,
+                        parenthesized: true,
+                    },
+                ));
+            }
             let send = ExprNode::Send {
                 recv: recv.clone(),
                 method: Symbol::from(method),
