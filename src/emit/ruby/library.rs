@@ -574,6 +574,13 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
             if is_helper_module && m.receiver == MethodReceiver::Instance {
                 m.receiver = MethodReceiver::Class;
             }
+            // Ground `…url_helpers.<x>_url(record?, host:)` → absolute-URL
+            // interpolation BEFORE `rewrite_helper_calls` collapses the
+            // `Rails.application.routes.url_helpers` chain to `RouteHelpers`
+            // (that collapse is children-first, so it would erase the chain
+            // shape this grounding matches on). mod_note's `user_url` lives
+            // in a model body, reached by this same pass.
+            rewrite_url_helpers_absolute(&mut m.body);
             rewrite_helper_calls(
                 &mut m.body,
                 &app.helper_method_index,
@@ -1193,21 +1200,25 @@ fn rewrite_errors_add(expr: &mut Expr) {
     expr.ty = None;
 }
 
-/// Ground `Rails.application.routes.url_helpers.<x>_url(host: H,
-/// protocol: P)` → `"#{P}://#{H}#{RouteHelpers.<x>_path}"`. The routing
-/// object graph behind `url_helpers` isn't modeled (and never needs to
-/// be for this shape — an absolute URL is protocol + host + the
-/// generated path helper). Non-matching url_helpers uses are left
-/// alone. Applied to the Rails::Application reopen, whose `root_url`
-/// (lobsters) is the corpus occurrence.
+/// Ground `Rails.application.routes.url_helpers.<x>_url(record?, host: H,
+/// protocol: P)` → `"#{P}://#{H}#{RouteHelpers.<x>_path(record?)}"`. The
+/// routing object graph behind `url_helpers` isn't modeled (and never
+/// needs to be for this shape — an absolute URL is protocol + host + the
+/// generated path helper). Leading positional args (the record in
+/// `user_url(sender, host:)`) and any non-host/protocol kwargs (real
+/// path params) are forwarded to the `<x>_path` helper; the record rides
+/// whole so its custom `to_param` resolves. Non-matching url_helpers
+/// uses are left alone. Applied to the Rails::Application reopen (whose
+/// kwargs-only `root_url` is the original occurrence) and mod_note's
+/// `user_url(sender, host:)`.
 pub(crate) fn rewrite_url_helpers_absolute(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut rewrite_url_helpers_absolute);
     let matches = matches!(
         &*expr.node,
         ExprNode::Send { recv: Some(uh), method, args, block: None, .. }
             if method.as_str().ends_with("_url")
-                && args.len() == 1
-                && matches!(&*args[0].node, ExprNode::Hash { .. })
+                && !args.is_empty()
+                && matches!(&*args[args.len() - 1].node, ExprNode::Hash { .. })
                 && is_url_helpers_chain(uh)
     );
     if !matches {
@@ -1215,18 +1226,41 @@ pub(crate) fn rewrite_url_helpers_absolute(expr: &mut Expr) {
     }
     let span = expr.span;
     let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
-    let ExprNode::Send { method, args, .. } = node else { unreachable!() };
-    let ExprNode::Hash { entries, .. } = &*args[0].node else { unreachable!() };
+    let ExprNode::Send { method, mut args, .. } = node else { unreachable!() };
+    // Split leading positional path args (e.g. the record in
+    // `user_url(sender, host:)`) from the trailing kwargs hash.
+    let trailing = args.pop().unwrap();
+    let positional = args;
+    let ExprNode::Hash { entries, .. } = &*trailing.node else { unreachable!() };
     let mut host: Option<Expr> = None;
     let mut protocol: Option<Expr> = None;
+    let mut path_kwargs: Vec<(Expr, Expr)> = Vec::new();
     for (k, v) in entries {
         if let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node {
             match value.as_str() {
-                "host" => host = Some(v.clone()),
-                "protocol" => protocol = Some(v.clone()),
+                "host" => {
+                    host = Some(v.clone());
+                    continue;
+                }
+                "protocol" => {
+                    protocol = Some(v.clone());
+                    continue;
+                }
                 _ => {}
             }
         }
+        // Any non-host/protocol key is a real path parameter — forward it.
+        path_kwargs.push((k.clone(), v.clone()));
+    }
+    // Forward leading positionals plus any surviving path kwargs to the
+    // generated `<stem>_path` helper (the record rides whole, so custom
+    // `to_param` — User=username — resolves inside the path helper).
+    let mut path_args: Vec<Expr> = positional;
+    if !path_kwargs.is_empty() {
+        path_args.push(Expr::new(
+            trailing.span,
+            ExprNode::Hash { entries: path_kwargs, kwargs: true },
+        ));
     }
     let stem = method.as_str().trim_end_matches("_url");
     let path_call = Expr::new(
@@ -1237,9 +1271,9 @@ pub(crate) fn rewrite_url_helpers_absolute(expr: &mut Expr) {
                 ExprNode::Const { path: vec![Symbol::from("RouteHelpers")] },
             )),
             method: Symbol::from(format!("{stem}_path")),
-            args: vec![],
+            args: path_args,
             block: None,
-            parenthesized: false,
+            parenthesized: true,
         },
     );
     let lit = |s: &str| crate::expr::InterpPart::Text { value: s.to_string() };
