@@ -46,7 +46,8 @@
 //!
 //! Test-module and fixture bodies are not walked (they run on CRuby
 //! where the overlay serves the dynamic call); extendable when a
-//! strict-target test lane needs it.
+//! strict-target test lane needs it. View bodies are not walked
+//! either — see the note in [`apply_blank_lowering`].
 
 use crate::app::App;
 use crate::diagnostic::{Diagnostic, DiagnosticKind};
@@ -107,9 +108,15 @@ pub fn apply_blank_lowering(app: &mut App) -> Vec<Diagnostic> {
             }
         }
     }
-    for view in &mut app.views {
-        walk(&mut view.body, &defs, &mut diags);
-    }
+    // View bodies are deliberately NOT walked. Every target already
+    // has working view-cond predicate handling — the shared
+    // `view_to_library::predicates` rewrite for the ruby/spinel
+    // family, and the python/rust view emitters' own vocabulary —
+    // and those walkers match the ORIGINAL `present?`/`blank?`
+    // shapes. Rewriting under them breaks the ones with closed
+    // vocabularies (python's unemittable-cond fallback is a silent
+    // `False`; the flash-notice smoke caught it). Views rejoin when
+    // the view pipeline migrates to shared lowerings.
     if let Some(seeds) = &mut app.seeds {
         walk(seeds, &defs, &mut diags);
     }
