@@ -111,5 +111,40 @@ module ActiveRecord
         raise e
       end
     end
+
+    # `Model.update_counters(id, col: delta, …)` — atomic column
+    # increments (`col = col + delta`) on one row, skipping validations
+    # and callbacks. Returns the affected-row count.
+    def self.update_counters(id, counters)
+      parts = []
+      counters.each do |col, delta|
+        parts.push("#{col} = #{col} + #{delta.to_i}")
+      end
+      sql = "UPDATE #{table_name} SET #{parts.join(", ")} WHERE id = #{ActiveRecord.adapter.escape_value(id)}"
+      ActiveRecord.adapter.execute_ddl(sql)
+      ActiveRecord.adapter.changes
+    end
+
+    # `self.record_timestamps=` — Rails class-attribute toggling auto
+    # timestamp stamping around a bulk write. `fill_timestamps` always
+    # stamps (the toggle only matters on write paths); accept and ignore
+    # the assignment so the class-side setter resolves.
+    def self.record_timestamps=(value)
+      value
+    end
+
+    def self.record_timestamps
+      true
+    end
+
+    # `record.update_column(name, value)` — write one attribute straight
+    # to the row, skipping validations and callbacks. Sets the in-memory
+    # value via the `[]=` indexer, then persists via the same adapter
+    # path `save` uses.
+    def update_column(name, value)
+      self[name] = value
+      _adapter_update
+      true
+    end
   end
 end

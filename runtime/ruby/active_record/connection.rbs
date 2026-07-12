@@ -23,5 +23,9 @@ module ActiveRecord
   class Base
     def self.connection: () -> Connection
     def self.transaction: () { () -> untyped } -> untyped
+    def self.update_counters: (untyped id, Hash[Symbol, untyped] counters) -> Integer
+    def self.record_timestamps=: (untyped value) -> untyped
+    def self.record_timestamps: () -> bool
+    def update_column: (untyped name, untyped value) -> bool
   end
 end
