@@ -30,7 +30,6 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     apply_errors_add_lowering(&mut lcs);
     apply_update_kwargs_inline(&mut lcs);
     apply_mailer_class_side_lowering(&mut lcs);
-    apply_time_current_lowering(&mut lcs);
     apply_duration_lowering(&mut lcs);
     // Transpiled-shape classes carry hand-written accessors that
     // `synth_attr_reader` never sees, so the datetime reader/writer
@@ -1547,53 +1546,17 @@ fn find_var_id(e: &Expr, name: &Symbol) -> Option<crate::ident::VarId> {
     found
 }
 
-/// Ruby-family pre-emit pass: `Time.current` (Rails' zone-aware now) →
-/// `Time.now.utc`. Plain Ruby has no `Time.current` — the Rails-ism is
-/// as undefined on the CRuby tree as under spinel AOT, just lazily so —
-/// and the corpus apps run UTC, where the two are second-for-second
-/// equivalent. Grounding it at emit keeps `Time` un-reopened (built-in
-/// reopening in the shared runtime is off-limits).
+/// View-pipeline vestige of the shared `Time.current` grounding
+/// (`lower::apply_time_current_lowering`): the post-analyze hook skips
+/// view bodies, so lowered view classes still take the rewrite here.
+/// Delete when the view pipeline migrates to shared lowerings. Every
+/// other body class arrives already grounded (re-running is an
+/// idempotent no-op — `Time.current` no longer occurs).
 pub(crate) fn apply_time_current_lowering(lcs: &mut [LibraryClass]) {
     for lc in lcs.iter_mut() {
         for m in &mut lc.methods {
-            rewrite_time_current(&mut m.body);
+            crate::lower::time_current::rewrite_time_current(&mut m.body);
         }
-    }
-}
-
-fn rewrite_time_current(expr: &mut Expr) {
-    expr.node.for_each_child_mut(&mut rewrite_time_current);
-    let is_target = matches!(
-        &*expr.node,
-        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
-            if method.as_str() == "current"
-                && args.is_empty()
-                && matches!(&*r.node,
-                    ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Time")
-    );
-    if is_target {
-        let span = expr.span;
-        let time_const =
-            Expr::new(span, ExprNode::Const { path: vec![Symbol::from("Time")] });
-        let now = Expr::new(
-            span,
-            ExprNode::Send {
-                recv: Some(time_const),
-                method: Symbol::from("now"),
-                args: vec![],
-                block: None,
-                parenthesized: false,
-            },
-        );
-        // Keep expr.ty — analyze already types `Time.current` as Time,
-        // and `Time.now.utc` is the same type.
-        *expr.node = ExprNode::Send {
-            recv: Some(now),
-            method: Symbol::from("utc"),
-            args: vec![],
-            block: None,
-            parenthesized: false,
-        };
     }
 }
 

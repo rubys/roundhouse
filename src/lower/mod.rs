@@ -42,6 +42,7 @@ pub mod scope_chain;
 pub mod schema_to_library;
 pub mod seeds_to_library;
 pub mod test_module_to_library;
+pub mod time_current;
 pub(crate) mod typed_store;
 pub mod ty_coerce_insertion;
 pub mod typing;
@@ -50,6 +51,19 @@ pub mod view;
 pub mod view_to_library;
 
 pub use blank::apply_blank_lowering;
+pub use time_current::apply_time_current_lowering;
+
+/// Post-analyze shared lowerings — type-directed IR rewrites every
+/// target consumes, run between `Analyzer::analyze` and any emitter.
+/// One entry point so the transpile driver, the site build, and the IR
+/// dump can't drift as passes accumulate (the LSP/MCP/IDE paths stay
+/// off it on purpose: they want source-shaped IR). Returns the residue
+/// diagnostics — sites a pass had to leave dynamic, with the reason.
+pub fn apply_post_analyze_lowerings(app: &mut crate::app::App) -> Vec<crate::diagnostic::Diagnostic> {
+    let diags = blank::apply_blank_lowering(app);
+    time_current::apply_time_current_lowering(app);
+    diags
+}
 pub use controller_walk::{CtrlWalker, Stmt, WalkCtx, WalkState};
 
 pub use associations::{

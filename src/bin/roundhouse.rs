@@ -226,11 +226,11 @@ fn run_transpile(
     Analyzer::new(&app).analyze(&mut app);
 
     // Post-analyze shared lowerings — type-directed IR rewrites every
-    // target consumes (the blank-predicate grounding today). Residue
-    // diagnostics (sites a pass had to leave dynamic) join the analyze
-    // warnings below: same collapse-to-count print policy, same
+    // target consumes (blank-predicate grounding, `Time.current`).
+    // Residue diagnostics (sites a pass had to leave dynamic) join the
+    // analyze warnings below: same collapse-to-count print policy, same
     // --allow-unsupported full-inventory behavior.
-    let lower_diags = roundhouse::lower::apply_blank_lowering(&mut app);
+    let lower_diags = roundhouse::lower::apply_post_analyze_lowerings(&mut app);
 
     // Analyze-time diagnostics — the same type errors roundhouse-check
     // reports (dispatch failures, unresolved ivars, incompatible ops).

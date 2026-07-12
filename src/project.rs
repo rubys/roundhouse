@@ -1934,7 +1934,7 @@ pub fn build_site(fixture: &Path, out: &Path) -> Result<(), String> {
     Analyzer::new(&app).analyze(&mut app);
     // Same post-analyze shared lowerings as the single-target driver;
     // the site build has no diagnostic surface, so residue is dropped.
-    let _ = crate::lower::apply_blank_lowering(&mut app);
+    let _ = crate::lower::apply_post_analyze_lowerings(&mut app);
 
     for target in BuildTarget::ALL {
         let files = target_files(&app, fixture, *target)?;

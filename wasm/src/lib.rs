@@ -122,12 +122,19 @@ fn transpile_inner(json_in: &str) -> String {
     let mut analyzer = Analyzer::new(&app);
     analyzer.analyze(&mut app);
 
+    // Same post-analyze shared lowerings as the CLI transpile driver
+    // (bin/roundhouse): the playground emits from the same IR the CLI
+    // does. Residue joins the diagnostics below; synthetic spans drop
+    // out in the existing filter.
+    let lower_diags = roundhouse::lower::apply_post_analyze_lowerings(&mut app);
+
     // Analyzer diagnostics + gap-attributed coverage notes (Info severity),
     // resolved to source positions. Synthetic spans (no source site) are
     // dropped — there's nowhere to put a marker.
     let mut diags = diagnose(&app);
     roundhouse::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &gaps);
     diags.extend(parse_diags);
+    diags.extend(lower_diags);
     let diagnostics: Vec<DiagnosticOut> = diags
         .into_iter()
         .filter_map(|d| {
