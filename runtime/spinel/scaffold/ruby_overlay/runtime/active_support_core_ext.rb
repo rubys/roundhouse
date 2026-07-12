@@ -135,15 +135,3 @@ class Array
     end
   end
 end
-
-# AS Hash#reverse_merge — self's entries win over the defaults
-# (lobsters' ApplicationHelper#link_post option defaults).
-class Hash
-  def reverse_merge(other)
-    other.merge(self)
-  end
-
-  def reverse_merge!(other)
-    replace(other.merge(self))
-  end
-end

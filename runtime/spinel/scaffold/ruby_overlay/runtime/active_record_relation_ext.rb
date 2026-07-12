@@ -1,21 +1,14 @@
-# CRuby-only ActiveRecord::Relation extensions: `+` and record-valued
-# IN lists.
+# CRuby-only ActiveRecord::Relation extensions: enumerable terminals
+# and record-valued IN lists.
 #
 # Lives on the CRuby overlay, not shared runtime/ruby/active_record/
-# relation.rb: `+` takes an untyped operand and answers Array[untyped],
-# and the IN-list coercion dispatches on is_a?(ActiveRecord::Base) —
-# both exactly the shapes the typed shared runtime refuses (see the
-# monomorphic-API rule). When lobsters comes up on another target, that
-# target grows its own variant.
+# relation.rb: the IN-list coercion dispatches on
+# is_a?(ActiveRecord::Base) — exactly the shape the typed shared
+# runtime refuses (see the monomorphic-API rule). When lobsters comes
+# up on another target, that target grows its own variant.
+# (`Relation#+` lived here too until it moved to the shared runtime.)
 module ActiveRecord
   class Relation
-    # Rails' Relation#+ delegates to to_a: `Story.select(:id).where(…) +
-    # [self.id]` (lobsters Story#merged_comments) concatenates the
-    # hydrated rows with the extra elements.
-    def +(other)
-      to_a + other.to_a
-    end
-
     # Enumerable terminal Rails relations answer via to_a delegation;
     # lobsters' Comment.arrange_for_user groups its ordered relation by
     # parent id.
