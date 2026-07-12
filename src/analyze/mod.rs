@@ -1563,6 +1563,72 @@ impl Analyzer {
             // and Var bindings the first pass couldn't.
             self.run_typing_passes(app);
         }
+
+        self.stamp_inferred_helper_signatures(app);
+    }
+
+    /// Post-fixpoint: write call-site-inferred parameter types into the
+    /// `MethodDef.signature` of app-helper methods, so the emitted RBS
+    /// carries what inference discovered (`errors_for: (Comment |
+    /// Story | …) -> String?` instead of `(untyped) -> untyped`) and
+    /// AOT targets can dispatch inside the helper body. Self-describing
+    /// IR: the body typer already consumed these seeds during the
+    /// fixpoint; this records the same fact where emitters read it.
+    ///
+    /// Scoped to helper modules (`app.helper_method_index` values) —
+    /// the view→helper channel is where params have no other typing
+    /// source. Widening to all library classes is a deliberate later
+    /// step (it shifts strict-target emit for non-helper classes).
+    /// Never clobbers an existing signature (RBS-derived or
+    /// author-written), and stamps nothing when inference learned
+    /// nothing (all params `Var`).
+    fn stamp_inferred_helper_signatures(&self, app: &mut App) {
+        let helper_classes: std::collections::HashSet<ClassId> =
+            app.helper_method_index.values().cloned().collect();
+        for lc in &mut app.library_classes {
+            if !helper_classes.contains(&lc.name) {
+                continue;
+            }
+            for method in &mut lc.methods {
+                if method.signature.is_some() {
+                    continue;
+                }
+                let key = (lc.name.clone(), method.name.clone());
+                let Some(inferred) = self.inferred_params.get(&key) else { continue };
+                if inferred.iter().all(|t| matches!(t, Ty::Var { .. })) {
+                    continue;
+                }
+                let params: Vec<crate::ty::Param> = method
+                    .params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| {
+                        let ty = inferred
+                            .get(i)
+                            .filter(|t| !matches!(t, Ty::Var { .. }))
+                            .cloned()
+                            .unwrap_or(Ty::Untyped);
+                        let kind = if p.keyword {
+                            crate::ty::ParamKind::Keyword { required: p.default.is_none() }
+                        } else if p.default.is_some() {
+                            crate::ty::ParamKind::Optional
+                        } else {
+                            crate::ty::ParamKind::Required
+                        };
+                        crate::ty::Param { name: p.name.clone(), ty, kind }
+                    })
+                    .collect();
+                let ret = effective_return_ty(&method.body)
+                    .filter(|t| !matches!(t, Ty::Var { .. }))
+                    .unwrap_or(Ty::Untyped);
+                method.signature = Some(Ty::Fn {
+                    params,
+                    block: None,
+                    ret: Box::new(ret),
+                    effects: method.effects.clone(),
+                });
+            }
+        }
     }
 
     /// Collect every app-level constant (`CONST = <value>`) declared in a
@@ -2277,7 +2343,10 @@ impl Analyzer {
                 // not chased (the direct-call case is what recurs). Own
                 // and before_action assignments already present win.
                 let mut sites: Vec<(ClassId, Symbol, Vec<Ty>)> = Vec::new();
-                self.collect_send_sites(&action.body, Some(&ctrl_name), &mut sites);
+                // Only own-class sites are consumed below, so helper
+                // attribution is irrelevant — an empty index keeps
+                // this walk exactly as before.
+                self.collect_send_sites(&action.body, Some(&ctrl_name), &HashMap::new(), &mut sites);
                 for (class_id, method, _) in &sites {
                     if *class_id != ctrl_name {
                         continue;
@@ -3189,30 +3258,31 @@ impl Analyzer {
     /// than string fingerprints, so unification is direct: same type →
     /// keep; nil + T → T?; otherwise → union widen.
     fn unify_params_from_call_sites(&mut self, app: &App) {
+        let helpers = &app.helper_method_index;
         let mut sites: Vec<(ClassId, Symbol, Vec<Ty>)> = Vec::new();
         for model in &app.models {
             for method in model.methods() {
-                self.collect_send_sites(&method.body, Some(&model.name), &mut sites);
+                self.collect_send_sites(&method.body, Some(&model.name), helpers, &mut sites);
             }
             for scope in model.scopes() {
-                self.collect_send_sites(&scope.body, Some(&model.name), &mut sites);
+                self.collect_send_sites(&scope.body, Some(&model.name), helpers, &mut sites);
             }
         }
         for lc in &app.library_classes {
             for method in &lc.methods {
-                self.collect_send_sites(&method.body, Some(&lc.name), &mut sites);
+                self.collect_send_sites(&method.body, Some(&lc.name), helpers, &mut sites);
             }
         }
         for controller in &app.controllers {
             for action in controller.actions() {
-                self.collect_send_sites(&action.body, Some(&controller.name), &mut sites);
+                self.collect_send_sites(&action.body, Some(&controller.name), helpers, &mut sites);
             }
         }
         for view in &app.views {
-            self.collect_send_sites(&view.body, None, &mut sites);
+            self.collect_send_sites(&view.body, None, helpers, &mut sites);
         }
         if let Some(seeds) = &app.seeds {
-            self.collect_send_sites(seeds, None, &mut sites);
+            self.collect_send_sites(seeds, None, helpers, &mut sites);
         }
 
         for (class_id, method, arg_tys) in sites {
@@ -3245,6 +3315,7 @@ impl Analyzer {
         &self,
         expr: &Expr,
         self_class: Option<&ClassId>,
+        helpers: &HashMap<Symbol, ClassId>,
         out: &mut Vec<(ClassId, Symbol, Vec<Ty>)>,
     ) {
         match &*expr.node {
@@ -3254,113 +3325,140 @@ impl Analyzer {
                 // (`period(query)` inside a controller) — the
                 // enclosing class. The latter is what lets a sibling
                 // method's params be inferred from its self-call sites.
+                // A bare send with NO enclosing class is a template
+                // body (`errors_for(comment)` in a view): Rails mixes
+                // every app helper into every view, so the helper
+                // index is the dispatch — attributing the site to the
+                // defining helper module is what lets helper params
+                // unify from their template call sites.
+                let mut via_helper_index = false;
                 let recv_class = match recv {
                     Some(r) => match r.ty.as_ref() {
                         Some(Ty::Class { id, .. }) => Some(id.clone()),
                         _ => None,
                     },
-                    None => self_class.cloned(),
+                    None => self_class.cloned().or_else(|| {
+                        via_helper_index = true;
+                        helpers.get(method).cloned()
+                    }),
                 };
                 if let Some(class_id) = recv_class {
                     let arg_tys: Vec<Ty> = args
                         .iter()
-                        .map(|a| a.ty.clone().unwrap_or(Ty::Var { var: crate::ident::TyVar(0) }))
+                        .map(|a| {
+                            let t = a.ty.clone().unwrap_or(Ty::Var { var: crate::ident::TyVar(0) });
+                            // Template call sites are evidence of what
+                            // callers pass; an `Untyped` arg there
+                            // (`errors_for f.object`) means the CALLER's
+                            // type is unknown — no evidence — not that
+                            // the param accepts anything. Recording it
+                            // as Untyped would absorb the whole union
+                            // (gradual absorption in dispatch) and erase
+                            // the typed sites' information. Scoped to
+                            // the helper channel; explicit-receiver and
+                            // own-class channels keep their semantics.
+                            if via_helper_index && matches!(t, Ty::Untyped) {
+                                Ty::Var { var: crate::ident::TyVar(0) }
+                            } else {
+                                t
+                            }
+                        })
                         .collect();
                     out.push((class_id, method.clone(), arg_tys));
                 }
-                if let Some(r) = recv { self.collect_send_sites(r, self_class, out); }
-                for a in args { self.collect_send_sites(a, self_class, out); }
-                if let Some(b) = block { self.collect_send_sites(b, self_class, out); }
+                if let Some(r) = recv { self.collect_send_sites(r, self_class, helpers, out); }
+                for a in args { self.collect_send_sites(a, self_class, helpers, out); }
+                if let Some(b) = block { self.collect_send_sites(b, self_class, helpers, out); }
             }
             ExprNode::Seq { exprs } | ExprNode::Array { elements: exprs, .. } => {
-                for e in exprs { self.collect_send_sites(e, self_class, out); }
+                for e in exprs { self.collect_send_sites(e, self_class, helpers, out); }
             }
             ExprNode::Hash { entries, .. } => {
                 for (k, v) in entries {
-                    self.collect_send_sites(k, self_class, out);
-                    self.collect_send_sites(v, self_class, out);
+                    self.collect_send_sites(k, self_class, helpers, out);
+                    self.collect_send_sites(v, self_class, helpers, out);
                 }
             }
             ExprNode::If { cond, then_branch, else_branch } => {
-                self.collect_send_sites(cond, self_class, out);
-                self.collect_send_sites(then_branch, self_class, out);
-                self.collect_send_sites(else_branch, self_class, out);
+                self.collect_send_sites(cond, self_class, helpers, out);
+                self.collect_send_sites(then_branch, self_class, helpers, out);
+                self.collect_send_sites(else_branch, self_class, helpers, out);
             }
             ExprNode::Case { scrutinee, arms } => {
-                self.collect_send_sites(scrutinee, self_class, out);
+                self.collect_send_sites(scrutinee, self_class, helpers, out);
                 for arm in arms {
-                    if let Some(g) = &arm.guard { self.collect_send_sites(g, self_class, out); }
-                    self.collect_send_sites(&arm.body, self_class, out);
+                    if let Some(g) = &arm.guard { self.collect_send_sites(g, self_class, helpers, out); }
+                    self.collect_send_sites(&arm.body, self_class, helpers, out);
                 }
             }
             ExprNode::BoolOp { left, right, .. }
             | ExprNode::RescueModifier { expr: left, fallback: right } => {
-                self.collect_send_sites(left, self_class, out);
-                self.collect_send_sites(right, self_class, out);
+                self.collect_send_sites(left, self_class, helpers, out);
+                self.collect_send_sites(right, self_class, helpers, out);
             }
             ExprNode::Let { value, body, .. } => {
-                self.collect_send_sites(value, self_class, out);
-                self.collect_send_sites(body, self_class, out);
+                self.collect_send_sites(value, self_class, helpers, out);
+                self.collect_send_sites(body, self_class, helpers, out);
             }
-            ExprNode::Lambda { body, .. } => self.collect_send_sites(body, self_class, out),
+            ExprNode::Lambda { body, .. } => self.collect_send_sites(body, self_class, helpers, out),
             ExprNode::Apply { fun, args, block } => {
-                self.collect_send_sites(fun, self_class, out);
-                for a in args { self.collect_send_sites(a, self_class, out); }
-                if let Some(b) = block { self.collect_send_sites(b, self_class, out); }
+                self.collect_send_sites(fun, self_class, helpers, out);
+                for a in args { self.collect_send_sites(a, self_class, helpers, out); }
+                if let Some(b) = block { self.collect_send_sites(b, self_class, helpers, out); }
             }
             ExprNode::Assign { target, value }
             | ExprNode::OpAssign { target, value, .. } => {
-                self.collect_send_sites(value, self_class, out);
+                self.collect_send_sites(value, self_class, helpers, out);
                 if let LValue::Attr { recv, .. } = target {
-                    self.collect_send_sites(recv, self_class, out);
+                    self.collect_send_sites(recv, self_class, helpers, out);
                 }
                 if let LValue::Index { recv, index } = target {
-                    self.collect_send_sites(recv, self_class, out);
-                    self.collect_send_sites(index, self_class, out);
+                    self.collect_send_sites(recv, self_class, helpers, out);
+                    self.collect_send_sites(index, self_class, helpers, out);
                 }
             }
             ExprNode::StringInterp { parts } => {
                 for p in parts {
                     if let crate::expr::InterpPart::Expr { expr } = p {
-                        self.collect_send_sites(expr, self_class, out);
+                        self.collect_send_sites(expr, self_class, helpers, out);
                     }
                 }
             }
             ExprNode::Yield { args } => {
-                for a in args { self.collect_send_sites(a, self_class, out); }
+                for a in args { self.collect_send_sites(a, self_class, helpers, out); }
             }
-            ExprNode::Raise { value } => self.collect_send_sites(value, self_class, out),
-            ExprNode::Return { value } => self.collect_send_sites(value, self_class, out),
+            ExprNode::Raise { value } => self.collect_send_sites(value, self_class, helpers, out),
+            ExprNode::Return { value } => self.collect_send_sites(value, self_class, helpers, out),
             ExprNode::Super { args } => {
                 if let Some(args) = args {
-                    for a in args { self.collect_send_sites(a, self_class, out); }
+                    for a in args { self.collect_send_sites(a, self_class, helpers, out); }
                 }
             }
             ExprNode::BeginRescue { body, rescues, else_branch, ensure, .. } => {
-                self.collect_send_sites(body, self_class, out);
+                self.collect_send_sites(body, self_class, helpers, out);
                 for rc in rescues {
-                    for c in &rc.classes { self.collect_send_sites(c, self_class, out); }
-                    self.collect_send_sites(&rc.body, self_class, out);
+                    for c in &rc.classes { self.collect_send_sites(c, self_class, helpers, out); }
+                    self.collect_send_sites(&rc.body, self_class, helpers, out);
                 }
-                if let Some(e) = else_branch { self.collect_send_sites(e, self_class, out); }
-                if let Some(e) = ensure { self.collect_send_sites(e, self_class, out); }
+                if let Some(e) = else_branch { self.collect_send_sites(e, self_class, helpers, out); }
+                if let Some(e) = ensure { self.collect_send_sites(e, self_class, helpers, out); }
             }
             ExprNode::Next { value } | ExprNode::Break { value } => {
-                if let Some(v) = value { self.collect_send_sites(v, self_class, out); }
+                if let Some(v) = value { self.collect_send_sites(v, self_class, helpers, out); }
             }
-            ExprNode::Splat { value } => self.collect_send_sites(value, self_class, out),
+            ExprNode::Splat { value } => self.collect_send_sites(value, self_class, helpers, out),
             ExprNode::MultiAssign { value, .. } => {
-                self.collect_send_sites(value, self_class, out)
+                self.collect_send_sites(value, self_class, helpers, out)
             }
             ExprNode::While { cond, body, .. } => {
-                self.collect_send_sites(cond, self_class, out);
-                self.collect_send_sites(body, self_class, out);
+                self.collect_send_sites(cond, self_class, helpers, out);
+                self.collect_send_sites(body, self_class, helpers, out);
             }
             ExprNode::Range { begin, end, .. } => {
-                if let Some(b) = begin { self.collect_send_sites(b, self_class, out); }
-                if let Some(e) = end { self.collect_send_sites(e, self_class, out); }
+                if let Some(b) = begin { self.collect_send_sites(b, self_class, helpers, out); }
+                if let Some(e) = end { self.collect_send_sites(e, self_class, helpers, out); }
             }
-            ExprNode::Cast { value, .. } => self.collect_send_sites(value, self_class, out),
+            ExprNode::Cast { value, .. } => self.collect_send_sites(value, self_class, helpers, out),
             ExprNode::Lit { .. }
             | ExprNode::Var { .. }
             | ExprNode::Ivar { .. }

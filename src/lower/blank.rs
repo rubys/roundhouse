@@ -190,7 +190,13 @@ fn classify(ty: Option<&Ty>, defs: &AppDefinitions) -> Grounding {
             let last = raw.rsplit("::").next().unwrap_or(raw);
             if defs.own_predicate.contains(last) {
                 OwnDispatch
-            } else if last == "Relation" || defs.own_empty.contains(last) {
+            } else if last == "Relation" || last == "Errors" || defs.own_empty.contains(last) {
+                // Registry classes the analyzer types but the app
+                // doesn't define: ActiveRecord::Relation and
+                // ActiveModel::Errors both answer `empty?` (the
+                // transpiled runtime's `errors` reader is an Array).
+                // Folding either to never-blank would render
+                // errors_for-style guards unconditionally.
                 Container { nilable: false }
             } else if last == "ParamValue" {
                 // Param access wraps possibly-absent input; blankness
