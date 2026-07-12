@@ -42,6 +42,7 @@ pub mod scope_chain;
 pub mod schema_to_library;
 pub mod seeds_to_library;
 pub mod test_module_to_library;
+pub mod create_block;
 pub mod errors_add;
 pub mod time_current;
 pub(crate) mod typed_store;
@@ -52,6 +53,7 @@ pub mod view;
 pub mod view_to_library;
 
 pub use blank::apply_blank_lowering;
+pub use create_block::apply_create_block_inline;
 pub use errors_add::apply_errors_add_lowering;
 pub use time_current::apply_time_current_lowering;
 
@@ -65,6 +67,7 @@ pub fn apply_post_analyze_lowerings(app: &mut crate::app::App) -> Vec<crate::dia
     let mut diags = blank::apply_blank_lowering(app);
     time_current::apply_time_current_lowering(app);
     diags.extend(errors_add::apply_errors_add_lowering(app));
+    diags.extend(create_block::apply_create_block_inline(app));
     diags
 }
 
