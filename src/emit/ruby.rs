@@ -198,8 +198,6 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // Block-form `create!/create do |kv| ... end` inlined at the call
     // site — the runtime factories stay blockless (no-op elsewhere).
     library::apply_create_block_inline(&mut lcs);
-    // `errors.add(:f, "msg")` → `errors << "F msg"` (no-op elsewhere).
-    library::apply_errors_add_lowering(&mut lcs);
     // `record.update!(k: v)` → writer assigns + save! (no-op elsewhere).
     library::apply_update_kwargs_inline(&mut lcs);
     // `Time.current` is grounded app-wide by the shared post-analyze

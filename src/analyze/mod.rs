@@ -5202,11 +5202,19 @@ fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
             DiagnosticKind::MissingPreload { association, .. } => {
                 format!("query does not preload :{}", association.as_str())
             }
-            // Produced by `lower::apply_blank_lowering` as a returned
-            // list, never as an `Expr.diagnostic` annotation; handled
-            // defensively so the match stays exhaustive.
+            // Produced by `lower::apply_post_analyze_lowerings` as
+            // returned lists, never as `Expr.diagnostic` annotations;
+            // handled defensively so the match stays exhaustive.
             DiagnosticKind::BlankUnlowered { method, reason, .. } => {
                 format!("`{}` left as dynamic dispatch ({})", method.as_str(), reason.as_str())
+            }
+            DiagnosticKind::LowerResidue { pass, construct, reason } => {
+                format!(
+                    "`{}` left unlowered by {} ({})",
+                    construct.as_str(),
+                    pass.as_str(),
+                    reason.as_str()
+                )
             }
         };
         out.push(Diagnostic {

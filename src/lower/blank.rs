@@ -66,60 +66,16 @@ pub fn apply_blank_lowering(app: &mut App) -> Vec<Diagnostic> {
     let defs = AppDefinitions::collect(app);
     let mut diags = Vec::new();
 
-    for model in &mut app.models {
-        for item in &mut model.body {
-            match item {
-                crate::dialect::ModelBodyItem::Method { method, .. } => {
-                    walk(&mut method.body, &defs, &mut diags);
-                }
-                crate::dialect::ModelBodyItem::Scope { scope, .. } => {
-                    walk(&mut scope.body, &defs, &mut diags);
-                }
-                crate::dialect::ModelBodyItem::Callback { callback, .. } => {
-                    if let Some(cond) = &mut callback.condition {
-                        walk(cond, &defs, &mut diags);
-                    }
-                }
-                // Unrecognized class-body exprs (constant procs and
-                // friends) round-trip verbatim into the emit — their
-                // predicate sites are just as reachable.
-                crate::dialect::ModelBodyItem::Unknown { expr, .. } => {
-                    walk(expr, &defs, &mut diags);
-                }
-                _ => {}
-            }
-        }
-    }
-    for lc in &mut app.library_classes {
-        for method in &mut lc.methods {
-            walk(&mut method.body, &defs, &mut diags);
-        }
-    }
-    for controller in &mut app.controllers {
-        for item in &mut controller.body {
-            match item {
-                crate::dialect::ControllerBodyItem::Action { action, .. } => {
-                    walk(&mut action.body, &defs, &mut diags);
-                }
-                crate::dialect::ControllerBodyItem::Unknown { expr, .. } => {
-                    walk(expr, &defs, &mut diags);
-                }
-                _ => {}
-            }
-        }
-    }
-    // View bodies are deliberately NOT walked. Every target already
-    // has working view-cond predicate handling — the shared
-    // `view_to_library::predicates` rewrite for the ruby/spinel
-    // family, and the python/rust view emitters' own vocabulary —
-    // and those walkers match the ORIGINAL `present?`/`blank?`
-    // shapes. Rewriting under them breaks the ones with closed
-    // vocabularies (python's unemittable-cond fallback is a silent
-    // `False`; the flash-notice smoke caught it). Views rejoin when
-    // the view pipeline migrates to shared lowerings.
-    if let Some(seeds) = &mut app.seeds {
-        walk(seeds, &defs, &mut diags);
-    }
+    // View bodies are deliberately NOT walked (`for_each_hook_body`
+    // excludes them). Every target already has working view-cond
+    // predicate handling — the shared `view_to_library::predicates`
+    // rewrite for the ruby/spinel family, and the python/rust view
+    // emitters' own vocabulary — and those walkers match the ORIGINAL
+    // `present?`/`blank?` shapes. Rewriting under them breaks the ones
+    // with closed vocabularies (python's unemittable-cond fallback is a
+    // silent `False`; the flash-notice smoke caught it). Views rejoin
+    // when the view pipeline migrates to shared lowerings.
+    super::for_each_hook_body(app, &mut |body| walk(body, &defs, &mut diags));
 
     diags
 }

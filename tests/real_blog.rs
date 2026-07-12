@@ -208,6 +208,10 @@ fn diagnostic_signature(d: &roundhouse::analyze::Diagnostic) -> (String, String)
             "BlankUnlowered".into(),
             format!("{}:{}", method.as_str(), reason.as_str()),
         ),
+        DiagnosticKind::LowerResidue { pass, construct, reason } => (
+            "LowerResidue".into(),
+            format!("{}:{}:{}", pass.as_str(), construct.as_str(), reason.as_str()),
+        ),
     }
 }
 

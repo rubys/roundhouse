@@ -27,7 +27,6 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     // Before duration lowering — see the emit_lowered_models stack.
     super::send_dispatch::apply_send_static_dispatch(&mut lcs);
     apply_create_block_inline(&mut lcs);
-    apply_errors_add_lowering(&mut lcs);
     apply_update_kwargs_inline(&mut lcs);
     apply_mailer_class_side_lowering(&mut lcs);
     apply_duration_lowering(&mut lcs);
@@ -1113,91 +1112,10 @@ fn rewrite_update_kwargs(expr: &mut Expr) {
     expr.ty = None;
 }
 
-/// Ruby-family pre-emit pass: `errors.add(:field, "msg")` →
-/// `errors << "Field msg"`. The runtime's error accumulator is a plain
-/// Array[String] (the validates lowering already bakes humanized full
-/// messages at lower time — "Short can't be blank"); this grounds the
-/// hand-written `add` calls into the same shape. `:base` contributes
-/// the bare message (Rails semantics); a dynamic message interpolates
-/// after the humanized field; a missing message defaults to Rails'
-/// "is invalid".
-pub(crate) fn apply_errors_add_lowering(lcs: &mut [LibraryClass]) {
-    for lc in lcs.iter_mut() {
-        for m in &mut lc.methods {
-            rewrite_errors_add(&mut m.body);
-        }
-    }
-}
-
-fn rewrite_errors_add(expr: &mut Expr) {
-    expr.node.for_each_child_mut(&mut rewrite_errors_add);
-    let matches = matches!(
-        &*expr.node,
-        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
-            if method.as_str() == "add"
-                && !args.is_empty()
-                && args.len() <= 2
-                && matches!(&*args[0].node, ExprNode::Lit { value: Literal::Sym { .. } })
-                && matches!(&*r.node, ExprNode::Send { recv: er, method: em, args: ea, .. }
-                    if em.as_str() == "errors"
-                        && ea.is_empty()
-                        && matches!(er, None | Some(_) if er.as_ref().is_none_or(
-                            |e| matches!(&*e.node, ExprNode::SelfRef))))
-    );
-    if !matches {
-        return;
-    }
-    let span = expr.span;
-    let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
-    let ExprNode::Send { recv, args, .. } = node else { unreachable!() };
-    let mut args = args.into_iter();
-    let field_expr = args.next().expect("checked non-empty");
-    let ExprNode::Lit { value: Literal::Sym { value: field } } = &*field_expr.node else {
-        unreachable!()
-    };
-    let msg = args.next();
-    let humanized = crate::lower::model_to_library::validations::humanize(field.as_str());
-    let message: Expr = if field.as_str() == "base" {
-        // :base attaches the message to the record, not a field.
-        msg.unwrap_or_else(|| {
-            Expr::new(span, ExprNode::Lit { value: Literal::Str { value: "is invalid".into() } })
-        })
-    } else {
-        match msg {
-            Some(m) => match &*m.node {
-                ExprNode::Lit { value: Literal::Str { value } } => Expr::new(
-                    span,
-                    ExprNode::Lit {
-                        value: Literal::Str { value: format!("{humanized} {value}") },
-                    },
-                ),
-                _ => Expr::new(
-                    span,
-                    ExprNode::StringInterp {
-                        parts: vec![
-                            crate::expr::InterpPart::Text { value: format!("{humanized} ") },
-                            crate::expr::InterpPart::Expr { expr: m },
-                        ],
-                    },
-                ),
-            },
-            None => Expr::new(
-                span,
-                ExprNode::Lit {
-                    value: Literal::Str { value: format!("{humanized} is invalid") },
-                },
-            ),
-        }
-    };
-    *expr.node = ExprNode::Send {
-        recv,
-        method: Symbol::from("<<"),
-        args: vec![message],
-        block: None,
-        parenthesized: false,
-    };
-    expr.ty = None;
-}
+// `errors.add(:field, "msg")` grounding moved to the shared
+// post-analyze hook (`lower::apply_errors_add_lowering`) — every hook
+// body arrives here already rewritten to the `errors << "Field msg"`
+// accumulator shape, with non-self receivers on the residue ledger.
 
 /// Ground `Rails.application.routes.url_helpers.<x>_url(record?, host: H,
 /// protocol: P)` → `"#{P}://#{H}#{RouteHelpers.<x>_path(record?)}"`. The

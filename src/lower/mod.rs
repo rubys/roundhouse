@@ -42,6 +42,7 @@ pub mod scope_chain;
 pub mod schema_to_library;
 pub mod seeds_to_library;
 pub mod test_module_to_library;
+pub mod errors_add;
 pub mod time_current;
 pub(crate) mod typed_store;
 pub mod ty_coerce_insertion;
@@ -51,6 +52,7 @@ pub mod view;
 pub mod view_to_library;
 
 pub use blank::apply_blank_lowering;
+pub use errors_add::apply_errors_add_lowering;
 pub use time_current::apply_time_current_lowering;
 
 /// Post-analyze shared lowerings — type-directed IR rewrites every
@@ -60,9 +62,62 @@ pub use time_current::apply_time_current_lowering;
 /// off it on purpose: they want source-shaped IR). Returns the residue
 /// diagnostics — sites a pass had to leave dynamic, with the reason.
 pub fn apply_post_analyze_lowerings(app: &mut crate::app::App) -> Vec<crate::diagnostic::Diagnostic> {
-    let diags = blank::apply_blank_lowering(app);
+    let mut diags = blank::apply_blank_lowering(app);
     time_current::apply_time_current_lowering(app);
+    diags.extend(errors_add::apply_errors_add_lowering(app));
     diags
+}
+
+/// Every app body the post-analyze hook owns: model methods, scope
+/// bodies, callback conditions and unrecognized class-body exprs;
+/// library-class methods; controller actions and unrecognized items;
+/// seeds. The one definition of the hook's scope — passes iterate
+/// through here so they can't drift. View bodies are deliberately
+/// excluded (each target's view pipeline still has its own working
+/// walkers over source shapes — see the note in
+/// [`blank::apply_blank_lowering`]; views rejoin when the view pipeline
+/// migrates to shared lowerings). Test-module and fixture bodies are
+/// excluded too (they run on CRuby lanes; extendable when a
+/// strict-target test lane needs it).
+pub(crate) fn for_each_hook_body(
+    app: &mut crate::app::App,
+    f: &mut impl FnMut(&mut crate::expr::Expr),
+) {
+    for model in &mut app.models {
+        for item in &mut model.body {
+            match item {
+                crate::dialect::ModelBodyItem::Method { method, .. } => f(&mut method.body),
+                crate::dialect::ModelBodyItem::Scope { scope, .. } => f(&mut scope.body),
+                crate::dialect::ModelBodyItem::Callback { callback, .. } => {
+                    if let Some(cond) = &mut callback.condition {
+                        f(cond);
+                    }
+                }
+                // Unrecognized class-body exprs (constant procs and
+                // friends) round-trip verbatim into the emit — their
+                // sites are just as reachable.
+                crate::dialect::ModelBodyItem::Unknown { expr, .. } => f(expr),
+                _ => {}
+            }
+        }
+    }
+    for lc in &mut app.library_classes {
+        for method in &mut lc.methods {
+            f(&mut method.body);
+        }
+    }
+    for controller in &mut app.controllers {
+        for item in &mut controller.body {
+            match item {
+                crate::dialect::ControllerBodyItem::Action { action, .. } => f(&mut action.body),
+                crate::dialect::ControllerBodyItem::Unknown { expr, .. } => f(expr),
+                _ => {}
+            }
+        }
+    }
+    if let Some(seeds) = &mut app.seeds {
+        f(seeds);
+    }
 }
 pub use controller_walk::{CtrlWalker, Stmt, WalkCtx, WalkState};
 

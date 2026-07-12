@@ -31,48 +31,7 @@ use crate::ident::Symbol;
 /// Rewrite `Time.current` sends across every app body the post-analyze
 /// hook owns (models, library classes, controllers, seeds — not views).
 pub fn apply_time_current_lowering(app: &mut App) {
-    for model in &mut app.models {
-        for item in &mut model.body {
-            match item {
-                crate::dialect::ModelBodyItem::Method { method, .. } => {
-                    rewrite_time_current(&mut method.body);
-                }
-                crate::dialect::ModelBodyItem::Scope { scope, .. } => {
-                    rewrite_time_current(&mut scope.body);
-                }
-                crate::dialect::ModelBodyItem::Callback { callback, .. } => {
-                    if let Some(cond) = &mut callback.condition {
-                        rewrite_time_current(cond);
-                    }
-                }
-                crate::dialect::ModelBodyItem::Unknown { expr, .. } => {
-                    rewrite_time_current(expr);
-                }
-                _ => {}
-            }
-        }
-    }
-    for lc in &mut app.library_classes {
-        for method in &mut lc.methods {
-            rewrite_time_current(&mut method.body);
-        }
-    }
-    for controller in &mut app.controllers {
-        for item in &mut controller.body {
-            match item {
-                crate::dialect::ControllerBodyItem::Action { action, .. } => {
-                    rewrite_time_current(&mut action.body);
-                }
-                crate::dialect::ControllerBodyItem::Unknown { expr, .. } => {
-                    rewrite_time_current(expr);
-                }
-                _ => {}
-            }
-        }
-    }
-    if let Some(seeds) = &mut app.seeds {
-        rewrite_time_current(seeds);
-    }
+    super::for_each_hook_body(app, &mut rewrite_time_current);
 }
 
 /// `Time.current` → `Time.now.utc`, in place, recursively. The original

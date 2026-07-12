@@ -68,6 +68,7 @@ impl Diagnostic {
             DiagnosticKind::MissingPreload { .. } => "missing_preload",
             DiagnosticKind::Parse { .. } => "parse",
             DiagnosticKind::BlankUnlowered { .. } => "blank_unlowered",
+            DiagnosticKind::LowerResidue { .. } => "lower_residue",
         }
     }
 
@@ -81,6 +82,7 @@ impl Diagnostic {
             DiagnosticKind::UnresolvedType { .. } => Severity::Warning,
             DiagnosticKind::MissingPreload { .. } => Severity::Warning,
             DiagnosticKind::BlankUnlowered { .. } => Severity::Warning,
+            DiagnosticKind::LowerResidue { .. } => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -189,6 +191,14 @@ impl Diagnostic {
             DiagnosticKind::Parse { message } => format!("syntax error: {message}"),
             DiagnosticKind::BlankUnlowered { method, reason, .. } => {
                 format!("`{}` left as dynamic dispatch ({})", method.as_str(), reason.as_str())
+            }
+            DiagnosticKind::LowerResidue { pass, construct, reason } => {
+                format!(
+                    "`{}` left unlowered by {} ({})",
+                    construct.as_str(),
+                    pass.as_str(),
+                    reason.as_str()
+                )
             }
         }
     }
@@ -456,4 +466,14 @@ pub enum DiagnosticKind {
     /// default severity is Warning. `reason` is a stable short phrase
     /// naming which bail branch fired.
     BlankUnlowered { method: Symbol, recv_ty: Ty, reason: Symbol },
+    /// A site a shared post-analyze lowering pass
+    /// (`lower::apply_post_analyze_lowerings`) recognized but could not
+    /// ground — left in its dynamic source shape. `pass` names the
+    /// lowering, `construct` the surface form, `reason` the bail branch
+    /// that fired. The residue ledger for AOT/strict targets (on CRuby
+    /// the overlay usually still serves the call), so default severity
+    /// is Warning. The generic successor to the pass-specific
+    /// `BlankUnlowered`; produced as returned lists, never as
+    /// `Expr.diagnostic` annotations.
+    LowerResidue { pass: Symbol, construct: Symbol, reason: Symbol },
 }
