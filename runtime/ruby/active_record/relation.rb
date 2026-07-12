@@ -95,6 +95,11 @@ module ActiveRecord
       self
     end
 
+    # `left_joins` — Rails alias for `left_outer_joins`.
+    def left_joins(spec)
+      left_outer_joins(spec)
+    end
+
     # `select(:id, :username, "raw AS x")` — Symbols qualify against this
     # relation's table (as Rails renders them); raw strings ride verbatim.
     def select(*specs)
@@ -157,6 +162,13 @@ module ActiveRecord
       self
     end
 
+    # `reload` — this Relation is lazy and re-queries on every terminal (no
+    # materialized cache), so reloading is a no-op returning self; the next
+    # `to_a`/`each`/`map` already reflects committed changes.
+    def reload
+      self
+    end
+
     # ---- terminals --------------------------------------------------
 
     def to_a
@@ -164,6 +176,12 @@ module ActiveRecord
       records = rows.map { |row| @model.instantiate(row) }
       @model.preload_associations(records, @includes) if @includes.length > 0
       records
+    end
+
+    # `relation + array` — Rails materializes and concatenates
+    # (`to_a + other`), yielding a plain Array.
+    def +(other)
+      to_a + other
     end
 
     def each
@@ -294,6 +312,15 @@ module ActiveRecord
       record = find_by(conditions)
       raise RecordNotFound, "Couldn't find record in #{@table}" if record.nil?
       record
+    end
+
+    # `first_or_initialize` — the first matching row, or a new unsaved
+    # record when there is none. The caller assigns the remaining
+    # attributes before `save` (the write path this serves), so the built
+    # record starts blank rather than pre-filled from the where-conditions.
+    def first_or_initialize
+      record = first
+      record.nil? ? @model.new : record
     end
 
     # ---- SQL composition --------------------------------------------
