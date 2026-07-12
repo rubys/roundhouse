@@ -204,6 +204,10 @@ fn diagnostic_signature(d: &roundhouse::analyze::Diagnostic) -> (String, String)
         DiagnosticKind::MissingPreload { association, .. } => {
             ("MissingPreload".into(), format!(":{}", association.as_str()))
         }
+        DiagnosticKind::BlankUnlowered { method, reason, .. } => (
+            "BlankUnlowered".into(),
+            format!("{}:{}", method.as_str(), reason.as_str()),
+        ),
     }
 }
 

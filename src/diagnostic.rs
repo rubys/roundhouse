@@ -67,6 +67,7 @@ impl Diagnostic {
             DiagnosticKind::Unsupported { .. } => "unsupported",
             DiagnosticKind::MissingPreload { .. } => "missing_preload",
             DiagnosticKind::Parse { .. } => "parse",
+            DiagnosticKind::BlankUnlowered { .. } => "blank_unlowered",
         }
     }
 
@@ -79,6 +80,7 @@ impl Diagnostic {
             DiagnosticKind::GradualUntyped { .. } => Severity::Warning,
             DiagnosticKind::UnresolvedType { .. } => Severity::Warning,
             DiagnosticKind::MissingPreload { .. } => Severity::Warning,
+            DiagnosticKind::BlankUnlowered { .. } => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -185,6 +187,9 @@ impl Diagnostic {
                 format!("query does not preload :{}", association.as_str())
             }
             DiagnosticKind::Parse { message } => format!("syntax error: {message}"),
+            DiagnosticKind::BlankUnlowered { method, reason, .. } => {
+                format!("`{}` left as dynamic dispatch ({})", method.as_str(), reason.as_str())
+            }
         }
     }
 
@@ -442,4 +447,13 @@ pub enum DiagnosticKind {
     /// resurfacing later as a confusing downstream gap. `message` is
     /// Prism's own error text. Default severity `Error`.
     Parse { message: String },
+    /// An ActiveSupport blank-predicate (`blank?` / `present?` /
+    /// `presence`) the typed lowering pass (`lower::blank`) left as
+    /// dynamic dispatch — the receiver had no groundable static type
+    /// (untyped, unresolved, multi-variant union) or wasn't safely
+    /// re-evaluable. The residue ledger for AOT/strict targets: on
+    /// CRuby the overlay's `Object#blank?` still serves the call, so
+    /// default severity is Warning. `reason` is a stable short phrase
+    /// naming which bail branch fired.
+    BlankUnlowered { method: Symbol, recv_ty: Ty, reason: Symbol },
 }

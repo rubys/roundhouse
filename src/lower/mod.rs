@@ -19,6 +19,7 @@
 
 pub mod arel;
 pub mod associations;
+pub mod blank;
 pub mod broadcasts;
 pub mod chain;
 pub mod controller;
@@ -48,6 +49,7 @@ pub mod validations;
 pub mod view;
 pub mod view_to_library;
 
+pub use blank::apply_blank_lowering;
 pub use controller_walk::{CtrlWalker, Stmt, WalkCtx, WalkState};
 
 pub use associations::{

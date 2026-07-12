@@ -31,8 +31,8 @@ pub mod block_refine;
 pub mod mutates_self;
 
 pub use body::{BodyTyper, ClassInfo, Ctx};
-pub use preload::{missing_preload_report, PreloadCoverage};
 pub(crate) use body::union_of;
+pub use preload::{missing_preload_report, PreloadCoverage};
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -5103,6 +5103,12 @@ fn diagnose_expr(expr: &Expr, out: &mut Vec<Diagnostic>) {
             DiagnosticKind::Parse { message } => format!("syntax error: {message}"),
             DiagnosticKind::MissingPreload { association, .. } => {
                 format!("query does not preload :{}", association.as_str())
+            }
+            // Produced by `lower::apply_blank_lowering` as a returned
+            // list, never as an `Expr.diagnostic` annotation; handled
+            // defensively so the match stays exhaustive.
+            DiagnosticKind::BlankUnlowered { method, reason, .. } => {
+                format!("`{}` left as dynamic dispatch ({})", method.as_str(), reason.as_str())
             }
         };
         out.push(Diagnostic {

@@ -94,6 +94,9 @@ fn main() {
         std::process::exit(1);
     });
     Analyzer::new(&app).analyze(&mut app);
+    // Mirror the transpile driver's post-analyze shared lowerings so
+    // the dumped IR is what emitters actually consume.
+    let _ = roundhouse::lower::apply_blank_lowering(&mut app);
 
     if opts.raw_views {
         let mut printed = 0usize;

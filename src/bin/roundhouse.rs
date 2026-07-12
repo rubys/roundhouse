@@ -225,6 +225,13 @@ fn run_transpile(
     };
     Analyzer::new(&app).analyze(&mut app);
 
+    // Post-analyze shared lowerings — type-directed IR rewrites every
+    // target consumes (the blank-predicate grounding today). Residue
+    // diagnostics (sites a pass had to leave dynamic) join the analyze
+    // warnings below: same collapse-to-count print policy, same
+    // --allow-unsupported full-inventory behavior.
+    let lower_diags = roundhouse::lower::apply_blank_lowering(&mut app);
+
     // Analyze-time diagnostics — the same type errors roundhouse-check
     // reports (dispatch failures, unresolved ivars, incompatible ops).
     // Emitters only stub *annotated* sites (body-typer `expr.diagnostic`);
@@ -232,6 +239,7 @@ fn run_transpile(
     // that fails later in tsc/cargo/runtime with a worse message, so
     // they print and gate here alongside the emit-gap inventory.
     let mut analyze_diags = diagnose(&app);
+    analyze_diags.extend(lower_diags);
 
     // Emit inside a diagnostic scope so unsupported-construct gaps in
     // any lowerer/emitter are collected rather than lost (issue #28).
