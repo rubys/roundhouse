@@ -80,7 +80,7 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             };
             let parenthesized = c.opening_loc().is_some();
             let block = match c.block() {
-                Some(block_node) => ingest_call_block(&block_node, file)?,
+                Some(block_node) => ingest_call_block(&block_node, file, &method)?,
                 None => None,
             };
             // ActiveSupport `recv.try(:sym[, args])` — a nil-safe method
@@ -1614,7 +1614,11 @@ fn detect_leading_guard<'a>(node: &Node<'a>) -> Option<Node<'a>> {
 /// Ingest a `CallNode`'s block — the `do |...| ... end` or `{ |...| ... }`
 /// attached to a method call. Represented as a `Lambda` expression.
 /// Returns `None` for block-argument nodes (`&block`) which aren't closures.
-fn ingest_call_block(node: &Node<'_>, file: &str) -> IngestResult<Option<Expr>> {
+fn ingest_call_block(
+    node: &Node<'_>,
+    file: &str,
+    enclosing_method: &str,
+) -> IngestResult<Option<Expr>> {
     // `&:method_name` — symbol-to-proc shorthand. Ruby treats this as
     // `{ |x| x.method_name }`. Lower to an explicit Lambda so downstream
     // emitters see a real closure.
@@ -1622,31 +1626,47 @@ fn ingest_call_block(node: &Node<'_>, file: &str) -> IngestResult<Option<Expr>> 
         if let Some(expr) = ba.expression() {
             if expr.as_symbol_node().is_some() {
                 let method_name = symbol_value(&expr).unwrap_or_default();
-                let param_name = Symbol::from("x");
+                // Symbol#to_proc is arity-adaptive: for a 1-arg yield
+                // (`map(&:name)`) it's `{ |x| x.name }`; for the 2-arg
+                // accumulator yield of `inject`/`reduce` (`inject(&:+)`)
+                // it's `{ |acc, x| acc.+(x) }` (the symbol names the
+                // operator applied to the memo with the element). A fixed
+                // 1-param lambda is wrong for the latter — it drops the
+                // element and calls `memo.+` with no argument. Pick the
+                // shape from the receiving method.
+                let two_arg = matches!(enclosing_method, "inject" | "reduce");
                 // Anchor the desugared call (and the lambda) at the
                 // `:sym` token: diagnostics inside the expansion (e.g.
                 // missing_preload's access site) then render a real
                 // file:line and span-containment consumers (traceroute
-                // hop annotations) can place them. The `x` param stays
-                // synthetic — it has no source text.
+                // hop annotations) can place them. The params stay
+                // synthetic — they have no source text.
                 let loc = expr.location();
                 let sym_span = Span {
                     file: super::sources::file_id(file),
                     start: loc.start_offset() as u32,
                     end: loc.end_offset() as u32,
                 };
+                let var = |name: &Symbol| {
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() },
+                    )
+                };
+                let (params, recv_name, call_args) = if two_arg {
+                    let acc = Symbol::from("acc");
+                    let x = Symbol::from("x");
+                    (vec![acc.clone(), x.clone()], acc, vec![var(&x)])
+                } else {
+                    let x = Symbol::from("x");
+                    (vec![x.clone()], x, vec![])
+                };
                 let body = Expr::new(
                     sym_span,
                     ExprNode::Send {
-                        recv: Some(Expr::new(
-                            Span::synthetic(),
-                            ExprNode::Var {
-                                id: crate::ident::VarId(0),
-                                name: param_name.clone(),
-                            },
-                        )),
+                        recv: Some(var(&recv_name)),
                         method: Symbol::from(method_name),
-                        args: vec![],
+                        args: call_args,
                         block: None,
                         // `&:sym` shorthand is a method *call*, not a
                         // property read. Mark as parenthesized so the
@@ -1657,7 +1677,7 @@ fn ingest_call_block(node: &Node<'_>, file: &str) -> IngestResult<Option<Expr>> 
                 return Ok(Some(Expr::new(
                     sym_span,
                     ExprNode::Lambda {
-                        params: vec![param_name],
+                        params,
                         block_param: None,
                         body,
                         block_style: crate::expr::BlockStyle::Brace,
