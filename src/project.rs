@@ -984,6 +984,26 @@ fn ruby_runtime_files(
     // placeholder in net.rb would confuse anyone exploring the tree.
     files.retain(|(p, _)| !p.starts_with("runtime/tep/"));
 
+    // Gem façades are SPINEL-ONLY: spinel AOT can't link the native
+    // gems, so it ships loudly-raising stubs. On the CRuby/JRuby path the
+    // real gems (markly / nokogiri / mail) ARE available — main.rb
+    // guarded-requires them — and app code renders through them at
+    // request time (Markdowner.to_html behind User#linkified_about is
+    // read-path: `/u/:username` markdown-renders the profile bio live).
+    // The inherited façade reopens those modules and REDEFINES their
+    // methods to raise, shadowing the real gems. Neutralize it here to a
+    // no-op so the `require_relative "runtime/gem_facades"` anchor still
+    // resolves without clobbering the real implementations.
+    for (path, content) in files.iter_mut() {
+        if path == "runtime/gem_facades.rb" {
+            *content = "# Gem façades are spinel-only (no native gems there). On the CRuby/\n\
+                        # JRuby path the real markly / nokogiri / mail gems are used (guarded\n\
+                        # requires in main.rb); this no-op keeps the require anchor resolving\n\
+                        # without shadowing them.\n"
+                .to_string();
+        }
+    }
+
     walk_dir_into(
         Path::new("runtime/spinel/scaffold/ruby_overlay"),
         "",
