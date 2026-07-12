@@ -825,6 +825,16 @@ fn binop_of(e: &Expr) -> Option<&str> {
         {
             Some(method.as_str())
         }
+        // `&&`/`||` (and their `and`/`or` word forms) bind looser than
+        // every infix operator here, so a BoolOp operand of one (`a << (b
+        // && c)`, e.g. the `try`/`&.` desugar `moderation && moderation.
+        // reason` inside a `<<` chain) re-parses wrong without parens.
+        ExprNode::BoolOp { op, surface, .. } => Some(match (op, surface) {
+            (crate::expr::BoolOpKind::And, crate::expr::BoolOpSurface::Symbol) => "&&",
+            (crate::expr::BoolOpKind::Or, crate::expr::BoolOpSurface::Symbol) => "||",
+            (crate::expr::BoolOpKind::And, crate::expr::BoolOpSurface::Word) => "and",
+            (crate::expr::BoolOpKind::Or, crate::expr::BoolOpSurface::Word) => "or",
+        }),
         _ => None,
     }
 }
@@ -842,6 +852,12 @@ fn binop_prec(op: &str) -> u8 {
         "|" | "^" => 50,
         ">" | ">=" | "<" | "<=" => 40,
         "==" | "!=" | "<=>" | "=~" | "===" => 30,
+        // Below every infix operator above; `&&` binds tighter than `||`,
+        // and the `and`/`or` word forms are the loosest of all.
+        "&&" => 26,
+        "||" => 25,
+        "and" => 11,
+        "or" => 10,
         _ => 20,
     }
 }
