@@ -197,6 +197,16 @@ pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
         {
             emit_if_value_body(cond, then_branch, else_branch, return_ty)
         }
+        // A VOID tail `If` with statement-shaped branches needs the
+        // statement emitter for the same reason — the ternary fallback
+        // below would drop the branches' assignment LHSs. The
+        // belongs_to writer (`if value.nil? then @fk = 0 else @fk =
+        // value.id end`, `-> nil`) is exactly this shape.
+        ExprNode::If { then_branch, else_branch, .. }
+            if is_void && (is_stmt_shaped(then_branch) || is_stmt_shaped(else_branch)) =>
+        {
+            emit_stmt(body, true, true)
+        }
         _ => {
             if let Some(s) = try_emit_raise_stmt(body) {
                 s

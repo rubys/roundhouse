@@ -25,5 +25,13 @@ pub(super) fn ts_method_name(ruby_name: &str) -> String {
     if let Some(stem) = ruby_name.strip_suffix('!') {
         return format!("{stem}_bang");
     }
+    // `=`-suffix writer → `set_<stem>`, same rule as
+    // `library::sanitize_identifier` so call sites and definitions
+    // line up. Guarded so operator names (`==`, `<=`) pass through.
+    if let Some(stem) = ruby_name.strip_suffix('=') {
+        if !stem.is_empty() && stem.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return format!("set_{stem}");
+        }
+    }
     ruby_name.to_string()
 }

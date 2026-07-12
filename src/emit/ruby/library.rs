@@ -63,7 +63,6 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
 /// (a module body has no controller ivars to thread). Slashed partial
 /// names only; a bare name has no module context here.
 pub(crate) fn apply_library_partial_render_lowering(lcs: &mut [LibraryClass], app: &App) {
-    use crate::expr::Literal;
     let contracts = crate::lower::view_to_library::partial_call_contracts(
         &app.views,
         &app.controllers,
@@ -324,69 +323,6 @@ pub(crate) fn apply_through_assoc_lowering(lcs: &mut [LibraryClass], app: &App) 
                 continue;
             };
             m.body = through_reader_body(name, target, &join_sql, &where_sql, assoc_scope);
-        }
-    }
-}
-
-/// Ruby-family pre-emit pass: belongs_to writers. Rails' `belongs_to
-/// :story` provides `comment.story = story_obj` alongside the reader;
-/// the shared lowering synthesizes only the reader. The writer stores
-/// the foreign key, mirroring the reader's `@fk == 0` nil sentinel
-/// (fk columns are non-nullable Int in the schema typing):
-///
-///   def story=(value)
-///     if value.nil?
-///       @story_id = 0
-///     else
-///       @story_id = value.id
-///     end
-///   end
-///
-/// No object cache: the reader re-queries by fk, which matches its
-/// existing shape (assigning an UNSAVED record then reading the
-/// association back is the one Rails behavior this doesn't cover).
-/// Skips names the app already defines (custom writers win).
-pub(crate) fn apply_belongs_to_writer_lowering(lcs: &mut [LibraryClass], app: &App) {
-    use crate::dialect::Association;
-
-    for lc in lcs.iter_mut() {
-        let Some(model) = app.models.iter().find(|m| m.name == lc.name) else { continue };
-        for assoc in model.associations() {
-            let Association::BelongsTo { name, foreign_key, .. } = assoc else { continue };
-            let value = || sp_expr(ExprNode::Var { id: VarId(0), name: Symbol::from("value") });
-            let fk_assign = |v: Expr| {
-                sp_expr(ExprNode::Assign {
-                    target: LValue::Ivar { name: foreign_key.clone() },
-                    value: v,
-                })
-            };
-            let body = sp_expr(ExprNode::If {
-                cond: sp_expr(ExprNode::Send {
-                    recv: Some(value()),
-                    method: Symbol::from("nil?"),
-                    args: Vec::new(),
-                    block: None,
-                    parenthesized: false,
-                }),
-                then_branch: fk_assign(sp_expr(ExprNode::Lit {
-                    value: crate::expr::Literal::Int { value: 0 },
-                })),
-                else_branch: fk_assign(sp_expr(ExprNode::Send {
-                    recv: Some(value()),
-                    method: Symbol::from("id"),
-                    args: Vec::new(),
-                    block: None,
-                    parenthesized: false,
-                })),
-            });
-            push_instance_method_unless_defined(
-                lc,
-                Symbol::from(format!("{}=", name.as_str())),
-                vec![Param::positional(Symbol::from("value"))],
-                body,
-                AccessorKind::Method,
-                true,
-            );
         }
     }
 }

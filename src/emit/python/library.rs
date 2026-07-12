@@ -139,7 +139,7 @@ fn emit_class_method(m: &MethodDef) -> String {
         }
     };
     let (params, ret_ty) = params_and_ret(m);
-    let py_name = super::shared::py_method_name(m.name.as_str());
+    let py_name = super::shared::py_def_name(m.name.as_str());
     let mut sig = vec![leader.to_string()];
     sig.extend(params);
     // A method that `yield`s gets an injected `_block` parameter; the
@@ -272,7 +272,7 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
         writeln!(
             out,
             "def {}({}) -> {}:",
-            super::shared::py_method_name(m.name.as_str()),
+            super::shared::py_def_name(m.name.as_str()),
             params.join(", "),
             python_ty(&ret_ty)
         )

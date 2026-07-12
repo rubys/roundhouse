@@ -1509,6 +1509,16 @@ pub(super) fn sanitize_identifier(ruby_name: &str) -> String {
     if let Some(stem) = ruby_name.strip_suffix('!') {
         return format!("{stem}_bang");
     }
+    // `=`-suffix writer (association / custom writers) → `set_<stem>`.
+    // Not a TS accessor (`set story(v)`): the reader is an ordinary
+    // method `story()`, and JS puts accessors and methods in the same
+    // name space, so the pair can't coexist. Guarded so operator
+    // names (`==`, `<=`) pass through untouched.
+    if let Some(stem) = ruby_name.strip_suffix('=') {
+        if !stem.is_empty() && stem.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return format!("set_{stem}");
+        }
+    }
     ruby_name.to_string()
 }
 

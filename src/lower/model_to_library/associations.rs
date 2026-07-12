@@ -24,6 +24,22 @@ pub(super) fn push_association_methods(methods: &mut Vec<MethodDef>, model: &Mod
             }
             Association::BelongsTo { name, target, foreign_key, .. } => {
                 methods.push(synth_belongs_to_reader(owner, name, target, foreign_key));
+                // Rails provides the writer alongside the reader
+                // (`comment.story = obj` stores the foreign key). A
+                // custom writer in the model body must win (Rails: the
+                // later `def` overrides the association's), but
+                // `push_user_methods` runs after this and drops
+                // collisions — so the synthesized writer yields here.
+                // Same for a name an earlier synthesizer claimed (a
+                // column sharing the association's name).
+                let writer_name = Symbol::from(format!("{}=", name.as_str()));
+                if !model_defines_instance_method(model, &writer_name)
+                    && !methods
+                        .iter()
+                        .any(|m| m.name == writer_name && m.receiver == MethodReceiver::Instance)
+                {
+                    methods.push(synth_belongs_to_writer(owner, name, target, foreign_key));
+                }
             }
             Association::HasOne { name, target, foreign_key, .. } => {
                 methods.push(synth_has_one_reader(owner, name, target, foreign_key));
@@ -358,6 +374,97 @@ fn synth_belongs_to_reader(
         is_async: false,
             mutates_self: false,
             block_param: None,
+    }
+}
+
+/// True when the model's own body defines an instance method `name` —
+/// the signal that a synthesized association accessor must yield to
+/// the app's definition.
+fn model_defines_instance_method(model: &Model, name: &Symbol) -> bool {
+    use crate::dialect::ModelBodyItem;
+    model.body.iter().any(|item| {
+        matches!(item, ModelBodyItem::Method { method, .. }
+            if method.name == *name && method.receiver == MethodReceiver::Instance)
+    })
+}
+
+fn synth_belongs_to_writer(
+    owner: &ClassId,
+    name: &Symbol,
+    target: &ClassId,
+    foreign_key: &Symbol,
+) -> MethodDef {
+    // def story=(value)
+    //   if value.nil?
+    //     @story_id = 0
+    //   else
+    //     @story_id = value.id
+    //   end
+    // end
+    //
+    // Stores the foreign key, mirroring the reader's `@fk == 0` nil
+    // sentinel (fk columns are non-nullable Int in the schema typing).
+    // No object cache: the reader re-queries by fk, which matches its
+    // existing shape — assigning an UNSAVED record then reading the
+    // association back is the one Rails behavior this doesn't cover.
+    let value = Symbol::from("value");
+    let fk_assign = |v: Expr| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Ivar { name: foreign_key.clone() },
+                value: v,
+            },
+        )
+    };
+    let nil_check = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(var_ref(value.clone())),
+            method: Symbol::from("nil?"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let id_read = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(var_ref(value.clone())),
+            method: Symbol::from("id"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: nil_check,
+            then_branch: fk_assign(lit_int(0)),
+            else_branch: fk_assign(id_read),
+        },
+    );
+
+    // Void return (Ty::Nil), matching `synth_preload_setter`: callers
+    // assign for the side effect, and a void shape keeps the strict
+    // targets from having to thread the assign's value out of an
+    // if/else statement position.
+    let value_ty = Ty::Union {
+        variants: vec![Ty::Class { id: target.clone(), args: vec![] }, Ty::Nil],
+    };
+    MethodDef {
+        name: Symbol::from(format!("{}=", name.as_str())),
+        receiver: MethodReceiver::Instance,
+        params: vec![Param::positional(value.clone())],
+        body,
+        signature: Some(fn_sig(vec![(value, value_ty)], Ty::Nil)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+        block_param: None,
     }
 }
 

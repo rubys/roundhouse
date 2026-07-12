@@ -96,6 +96,15 @@ pub fn pascal_of_camel(key: &str) -> String {
 fn cased(raw: &str, upper_first: bool) -> String {
     let bang = raw.ends_with('!');
     let pred = raw.ends_with('?');
+    // `=`-suffix writer (`article=`, association/custom writers) gets a
+    // `Set` affix, same convention as Bang/Pred. Guarded to identifier
+    // stems so operator names (`==`, `<=`) pass through untouched.
+    let set = !bang
+        && !pred
+        && raw.len() > 1
+        && raw.ends_with('=')
+        && raw[..raw.len() - 1].chars().all(|c| c.is_alphanumeric() || c == '_');
+    let raw = if set { &raw[..raw.len() - 1] } else { raw };
     let trimmed = raw.trim_end_matches(['?', '!']);
     let leading_us = trimmed.len() - trimmed.trim_start_matches('_').len();
     let core = &trimmed[leading_us..];
@@ -127,6 +136,8 @@ fn cased(raw: &str, upper_first: bool) -> String {
         out.push_str("Bang");
     } else if pred {
         out.push_str("Pred");
+    } else if set {
+        out.push_str("Set");
     }
 
     if is_csharp_keyword(&out) {
@@ -151,6 +162,11 @@ mod tests {
         assert_ne!(pascal("save"), pascal("save!"));
         assert_eq!(pascal("deleted_at?"), "DeletedAtPred");
         assert_eq!(camel("deleted_at?"), "deletedAtPred");
+        assert_ne!(pascal("article"), pascal("article="));
+        assert_eq!(pascal("article="), "ArticleSet");
+        assert_eq!(camel("article="), "articleSet");
+        // Operator names must not be mistaken for writers.
+        assert_eq!(pascal("=="), "==");
     }
 
     /// `pascal_of_camel` must reproduce `pascal` exactly when fed a `camel`

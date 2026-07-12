@@ -24,7 +24,34 @@ pub(super) fn py_method_name(name: &str) -> String {
         "initialize" => "__init__".to_string(),
         // `?`/`!` only ever occur as a Ruby suffix, so a global replace
         // is safe (operator names like `<=>` carry neither).
+        //
+        // `=`-suffix writer names deliberately pass through UNCHANGED
+        // here: a Send call site renders `recv.x=(v)`, which Python
+        // parses as an ASSIGNMENT with a parenthesized RHS — the
+        // correct behavior for column writers, which collapse to plain
+        // annotated fields (`is_accessor`). Only `def` emission must
+        // legalize the name (see `py_def_name`).
         _ => name.replace('?', "_p").replace('!', "_bang"),
+    }
+}
+
+/// Legalize a method name for a Python `def` line. Everything
+/// `py_method_name` does, plus `=`-suffix writers (`article=`, from
+/// association writers and app-defined custom writers) → `article_set`
+/// — `def article=` isn't valid Python. Call sites do NOT share this
+/// mapping (unlike `?`/`!`): a Send to `x=` renders as the assignment
+/// `recv.x=(v)`, which is what column writers (collapsed to plain
+/// fields) need. Routing writer-method call sites to `x_set(...)` is
+/// the deferred cross-target extension.
+pub(super) fn py_def_name(name: &str) -> String {
+    match name.strip_suffix('=') {
+        Some(base)
+            if !base.is_empty()
+                && base.chars().all(|c| c.is_alphanumeric() || c == '_') =>
+        {
+            format!("{base}_set")
+        }
+        _ => py_method_name(name),
     }
 }
 

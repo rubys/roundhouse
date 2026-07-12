@@ -887,16 +887,22 @@ fn pascalize_instance_method_name(name: &str) -> String {
     if !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '?' || c == '!' || c == '=') {
         return super::shared::go_method_name(&sanitize_method_name(name));
     }
-    // Mirror go2_method_ident: `?` → `_pred`, `!` → `_bang`, then
-    // pascalize via go_method_name (`_`-split, per-segment Pascal,
-    // `id` → `ID`). The `?` affix (vs a bare strip) keeps a column
-    // predicate distinct from its same-named reader: `deleted_at?` →
-    // `DeletedAtPred` vs `deleted_at` → `DeletedAt`.
+    // Mirror go2_method_ident: `?` → `_pred`, `!` → `_bang`, `=` →
+    // `_eq` (sanitize_method_name's writer convention: `article=` →
+    // `ArticleEq`), then pascalize via go_method_name (`_`-split,
+    // per-segment Pascal, `id` → `ID`). The `?` affix (vs a bare
+    // strip) keeps a column predicate distinct from its same-named
+    // reader: `deleted_at?` → `DeletedAtPred` vs `deleted_at` →
+    // `DeletedAt`.
     let with_pred = match name.strip_suffix('?') {
         Some(base) => format!("{base}_pred"),
         None => name.to_string(),
     };
-    let normalized = with_pred.replace('!', "_bang");
+    let with_set = match with_pred.strip_suffix('=') {
+        Some(base) => format!("{base}_eq"),
+        None => with_pred,
+    };
+    let normalized = with_set.replace('!', "_bang");
     super::shared::go_method_name(&normalized)
 }
 

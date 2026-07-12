@@ -75,6 +75,15 @@ pub fn type_name(qualified: &str) -> String {
 pub fn camel(raw: &str) -> String {
     let bang = raw.ends_with('!');
     let pred = raw.ends_with('?');
+    // `=`-suffix writer (`article=`, association/custom writers) gets a
+    // `Set` affix, same convention as Bang/Pred. Guarded to identifier
+    // stems so operator names (`==`, `<=`) pass through untouched.
+    let set = !bang
+        && !pred
+        && raw.len() > 1
+        && raw.ends_with('=')
+        && raw[..raw.len() - 1].chars().all(|c| c.is_alphanumeric() || c == '_');
+    let raw = if set { &raw[..raw.len() - 1] } else { raw };
     let trimmed = raw.trim_end_matches(['?', '!']);
     let leading_us = trimmed.len() - trimmed.trim_start_matches('_').len();
     let core = &trimmed[leading_us..];
@@ -105,6 +114,8 @@ pub fn camel(raw: &str) -> String {
         out.push_str("Bang");
     } else if pred {
         out.push_str("Pred");
+    } else if set {
+        out.push_str("Set");
     }
 
     if is_kotlin_keyword(&out) {
@@ -129,5 +140,9 @@ mod tests {
         assert_ne!(camel("save"), camel("save!"));
         assert_eq!(camel("deleted_at?"), "deletedAtPred");
         assert_eq!(camel("save!"), "saveBang");
+        assert_ne!(camel("article"), camel("article="));
+        assert_eq!(camel("article="), "articleSet");
+        // Operator names must not be mistaken for writers.
+        assert_eq!(camel("=="), "==");
     }
 }
