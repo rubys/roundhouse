@@ -32,6 +32,16 @@ pub fn ingest_expr(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     }
 }
 
+/// The method name carried by a `:symbol` or `"string"` literal argument
+/// (e.g. the first arg of `recv.try(:sym)`), if it is a literal.
+fn literal_method_name(expr: &Expr) -> Option<String> {
+    match &*expr.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        _ => None,
+    }
+}
+
 fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     // Byte offsets into the text registered for `file` (the exact text
     // prism is parsing). FileId(0) when the entry point didn't
@@ -73,6 +83,39 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 Some(block_node) => ingest_call_block(&block_node, file)?,
                 None => None,
             };
+            // ActiveSupport `recv.try(:sym[, args])` — a nil-safe method
+            // call. Lower to `recv && recv.sym(args)`, the same shape as
+            // the `&.` desugar below. `try` is not core Ruby, and its
+            // real definition is `respond_to?(name) && public_send(name,
+            // …)` — dynamic dispatch AOT can't resolve — so the literal
+            // method name is grounded here where it's statically known
+            // (every corpus site passes a `:symbol`/`"string"` literal).
+            // A dynamic method name is left as a plain `try` send.
+            if method == "try" && block.is_none() && recv.is_some() {
+                if let Some(name) = args.first().and_then(literal_method_name) {
+                    let r = recv.unwrap();
+                    let rest: Vec<Expr> = args.into_iter().skip(1).collect();
+                    let call = Expr::new(
+                        span,
+                        ExprNode::Send {
+                            recv: Some(r.clone()),
+                            method: Symbol::from(name),
+                            args: rest,
+                            block: None,
+                            parenthesized: true,
+                        },
+                    );
+                    return Ok(Expr::new(
+                        span,
+                        ExprNode::BoolOp {
+                            op: BoolOpKind::And,
+                            surface: BoolOpSurface::Symbol,
+                            left: r,
+                            right: call,
+                        },
+                    ));
+                }
+            }
             let send = ExprNode::Send {
                 recv: recv.clone(),
                 method: Symbol::from(method),
