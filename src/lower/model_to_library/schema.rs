@@ -43,15 +43,24 @@ pub(super) fn push_schema_methods(
     // a native `Time`. Every synthesized internal reference (hydration,
     // predicate, attributes, `[]`/`[]=`, fill_timestamps, `_adapter_*`)
     // targets `<col>_raw` — so per-target emitters render what they see
-    // instead of each re-deriving a storage/accessor redirect. There is
-    // deliberately NO public `<col>=` writer: hydration writes stored
-    // text via `<col>_raw=`, and a Rails-parity Time-accepting writer
-    // (needing a `format_db_time` intrinsic) can be layered on when an
-    // app needs one.
+    // instead of each re-deriving a storage/accessor redirect. The
+    // public `<col>=` writer normalizes through the `format_db_time`
+    // intrinsic (the write-side sibling of `parse_db_time`/`db_now`,
+    // native in every target runtime); hydration keeps writing stored
+    // text via `<col>_raw=` directly.
     for col in &table.columns {
         methods.push(synth_attr_reader(owner, col));
         if is_temporal_col(col) {
             methods.push(synth_raw_reader(owner, col));
+            // Rails-parity Time-accepting writer (lobsters' ban flow:
+            // `self.banned_at = Time.now.utc`). A custom writer in the
+            // model body must win, and `push_user_methods` runs after
+            // this and drops collisions — so the synthesized writer
+            // yields here (same dance as `synth_belongs_to_writer`).
+            let writer_name = Symbol::from(format!("{}=", col.name.as_str()));
+            if !super::associations::model_defines_instance_method(model, &writer_name) {
+                methods.push(synth_temporal_writer(owner, col));
+            }
         }
         methods.push(synth_attr_writer(owner, col));
         methods.push(synth_column_predicate(owner, col));
@@ -554,6 +563,80 @@ fn synth_raw_reader(owner: &ClassId, col: &Column) -> MethodDef {
         kind: AccessorKind::AttributeReader,
         is_async: false,
         mutates_self: false,
+        block_param: None,
+    }
+}
+
+/// `def <col>=(value)` — the Rails-parity PUBLIC writer for a temporal
+/// column: normalize the value to canonical storage text and store it
+/// through the raw field.
+///
+///   def banned_at=(value)
+///     self.banned_at_raw = ActiveSupport.format_db_time(value)
+///   end
+///
+/// `format_db_time` (the write-side sibling of `parse_db_time` and
+/// `db_now`, native in every target runtime) maps `nil` → `nil` and a
+/// `Time` → Rails' exact storage form ("YYYY-MM-DD HH:MM:SS.ffffff",
+/// UTC), so every write lands on the same on-disk format the reader
+/// parses. Param typed `Time | Nil` — the corpus writes Time values
+/// (`self.banned_at = Time.now.utc`); stored-text writes go through
+/// `<col>_raw=`. Void return and `AccessorKind::Method`, mirroring
+/// `synth_belongs_to_writer` (a kind of `AttributeWriter` would read
+/// as a plain field pair to per-target collapse walkers — and to the
+/// ruby emit datetime pass's hand-written-writer arm — re-pointing
+/// storage at a nonexistent `@<col>`). On the Ruby tree the
+/// `self.<col>_raw =` attr-assign dispatches the raw writer, which is
+/// where the emit-time parse-memo invalidation hooks in.
+///
+/// Shared home of what used to be the ruby-family emit pass's
+/// synthesized-writer arm (`emit::ruby::library::apply_datetime_
+/// lowering`); strict targets previously had NO public temporal writer
+/// at all.
+fn synth_temporal_writer(owner: &ClassId, col: &Column) -> MethodDef {
+    let value_param = Symbol::from("value");
+    let value_ty = Ty::Union { variants: vec![Ty::Time, Ty::Nil] };
+    let text_ty = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    let normalize = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
+                )),
+                method: Symbol::from("format_db_time"),
+                args: vec![with_ty(var_ref(value_param.clone()), value_ty.clone())],
+                block: None,
+                parenthesized: true,
+            },
+        ),
+        text_ty.clone(),
+    );
+    let body = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Attr {
+                    recv: Expr::new(Span::synthetic(), ExprNode::SelfRef),
+                    name: col_storage_name(col),
+                },
+                value: normalize,
+            },
+        ),
+        text_ty,
+    );
+    MethodDef {
+        name: Symbol::from(format!("{}=", col.name.as_str())),
+        receiver: MethodReceiver::Instance,
+        params: vec![Param::positional(value_param.clone())],
+        body,
+        signature: Some(fn_sig(vec![(value_param, value_ty)], Ty::Nil)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
         block_param: None,
     }
 }

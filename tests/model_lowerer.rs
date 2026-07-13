@@ -73,9 +73,10 @@ fn article_lowers_with_schema_methods() {
         assert!(names.contains(&col), "missing reader `{col}`: {names:?}");
     }
     // Plain columns keep the `<col>=` writer; temporal columns store
-    // under a `<col>_raw` String accessor pair instead (the public
-    // reader is a computed Time getter, and there is deliberately NO
-    // public `<col>=` writer — see `schema::col_storage_name`).
+    // under a `<col>_raw` String accessor pair (the public reader is a
+    // computed Time getter) plus a Rails-parity public `<col>=` writer
+    // normalizing through the `format_db_time` intrinsic — see
+    // `schema::synth_temporal_writer`.
     for col in ["title", "body"] {
         let writer = format!("{col}=");
         assert!(
@@ -95,9 +96,25 @@ fn article_lowers_with_schema_methods() {
             names.iter().any(|n| *n == raw_writer.as_str()),
             "missing storage writer `{raw_writer}`: {names:?}",
         );
+        let w = lc
+            .methods
+            .iter()
+            .find(|m| m.name.as_str() == writer && m.receiver == MethodReceiver::Instance)
+            .unwrap_or_else(|| panic!("missing public temporal writer `{writer}`: {names:?}"));
+        // Kind `Method`, not `AttributeWriter` — a writer kind would
+        // read as a plain field pair to per-target collapse walkers
+        // (and to the ruby emit datetime pass's hand-written-writer
+        // arm), re-pointing storage at a nonexistent `@<col>`.
         assert!(
-            !names.iter().any(|n| *n == writer.as_str()),
-            "temporal column must NOT synthesize a public `{writer}`: {names:?}",
+            matches!(w.kind, roundhouse::dialect::AccessorKind::Method),
+            "temporal writer `{writer}` must be kind Method",
+        );
+        // Body normalizes through the intrinsic and stores via the raw
+        // field (`self.<col>_raw = ActiveSupport.format_db_time(value)`).
+        let body_str = format!("{:?}", w.body);
+        assert!(
+            body_str.contains("format_db_time"),
+            "temporal writer `{writer}` must normalize through format_db_time: {body_str}",
         );
     }
     // id reader/writer ARE synthesized (per-class so target emitters

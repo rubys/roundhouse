@@ -159,6 +159,27 @@ enum Roundhouse {
                 (rem / 1_000_000) % 60, rem % 1_000_000
             )
         }
+
+        // Write-side normalize sibling of `dbNow` — the
+        // `ActiveSupport.format_db_time` intrinsic behind the
+        // synthesized public `<col>=` temporal writer. nil → nil; a
+        // native `Date` formats to the same storage text `dbNow`
+        // produces (same civil-from-days arithmetic, applied to the
+        // given instant instead of now).
+        static func formatDbTime(_ value: Date?) -> String? {
+            guard let value = value else { return nil }
+            let micros = Int((value.timeIntervalSince1970 * 1_000_000).rounded())
+            var days = micros / 86_400_000_000
+            var rem = micros % 86_400_000_000
+            if rem < 0 { rem += 86_400_000_000; days -= 1 }
+            let (y, mo, d) = civilFromDays(days)
+            return String(
+                format: "%04d-%02d-%02d %02d:%02d:%02d.%06d",
+                y, mo, d,
+                rem / 3_600_000_000, (rem / 60_000_000) % 60,
+                (rem / 1_000_000) % 60, rem % 1_000_000
+            )
+        }
     }
 }
 

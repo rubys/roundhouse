@@ -99,6 +99,24 @@ pub(super) fn emit_send(
             }
         }
     }
+    // Temporal writer normalize intrinsic: `ActiveSupport.
+    // format_db_time(v)` — None → None, `DateTime<Utc>` → the same
+    // owned storage `String` that `db_now` produces. The synthesized
+    // public `<col>=` writer normalizes through it; its `Time | Nil`
+    // param renders as `Option<DateTime<Utc>>`, matching the helper's
+    // signature.
+    if method == "format_db_time" && args.len() == 1 {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                    return format!(
+                        "crate::rh_datetime::format_db_time({})",
+                        emit_expr(&args[0])
+                    );
+                }
+            }
+        }
+    }
     if let Some(s) = try_constructor_field_assign(recv, method, args) { return s; }
     if let Some(s) = try_stdlib_class_method(recv, method, args) { return s; }
     if let Some(s) = try_binary_operator(recv, method, args) { return s; }

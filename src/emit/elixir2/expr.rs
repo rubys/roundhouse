@@ -1174,6 +1174,21 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         }
     }
 
+    // Temporal writer normalize intrinsic: `ActiveSupport.
+    // format_db_time(v)` — nil → nil, native `%DateTime{}` → the same
+    // storage text `db_now` produces, binary passes through. The
+    // synthesized public `<col>=` writer normalizes through it. Same
+    // hand-written runtime module as its siblings above.
+    if method == "format_db_time" && args.len() == 1 {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                    return format!("RhDateTime.format_db_time({})", emit_expr(&args[0]));
+                }
+            }
+        }
+    }
+
     // `JsonBuilder.encode_datetime(x)` routes through the hand-written
     // guard-clause wrapper: a native `%DateTime{}` (temporal reader
     // value) formats to Rails' canonical millisecond JSON; stored text /

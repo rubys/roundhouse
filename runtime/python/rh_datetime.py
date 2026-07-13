@@ -66,6 +66,24 @@ class Roundhouse:
                 "%Y-%m-%d %H:%M:%S.%f"
             )
 
+        @staticmethod
+        def format_db_time(value: object) -> str | None:
+            # Write-side normalize sibling of `db_now` — the
+            # `ActiveSupport.format_db_time` intrinsic behind the
+            # synthesized public `<col>=` temporal writer. None -> None;
+            # a native `datetime` formats to the same storage text
+            # `db_now` produces (a zone-less value is implicitly UTC,
+            # matching `parse` above); pre-formatted text passes through
+            # untouched.
+            if value is None:
+                return None
+            if isinstance(value, datetime.datetime):
+                dt = value
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone(datetime.timezone.utc)
+                return dt.strftime("%Y-%m-%d %H:%M:%S.%f")
+            return str(value)
+
 
 def _encode_datetime_native(value: object) -> str:
     # `datetime` dispatch of `json_builder.encode_datetime`. Formats a

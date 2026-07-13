@@ -1234,6 +1234,14 @@ fn emit_send(
                 (Some("ActiveSupport"), "db_now") if args.is_empty() => {
                     return "Roundhouse.RhDateTime.DbNow()".to_string();
                 }
+                // Temporal writer normalize intrinsic: `ActiveSupport.
+                // format_db_time(v)` — null → null, native
+                // `DateTimeOffset` → the same storage text `DbNow`
+                // produces. The synthesized public `<col>=` writer
+                // normalizes through it.
+                (Some("ActiveSupport"), "format_db_time") if args.len() == 1 => {
+                    return format!("Roundhouse.RhDateTime.FormatDbTime({})", args_s[0]);
+                }
                 _ => {}
             }
         }

@@ -1720,6 +1720,26 @@ fn js_send_inner(
             }
         }
     }
+    // Temporal writer normalize intrinsic: `ActiveSupport.
+    // format_db_time(v)` — null → null, native `Date` → the same
+    // storage text `dbNow` produces, string passes through. The
+    // synthesized public `<col>=` writer normalizes through it; the
+    // import rides the temporal-reader gate in library.rs (the writer
+    // only exists alongside its column's reader).
+    if method == "format_db_time" && args.len() == 1 {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                    return Js::method_call(
+                        span,
+                        Js::ident(span, "RhDateTime"),
+                        "formatDbTime",
+                        vec![js_expr(&args[0])],
+                    );
+                }
+            }
+        }
+    }
     // Framework class-instance receivers route bracket access to
     // method dispatch (`.get(k)` / `.set(k, v)`). JS bracket access
     // on a class instance returns `undefined` for runtime keys

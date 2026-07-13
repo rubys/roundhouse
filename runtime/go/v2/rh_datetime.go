@@ -70,6 +70,19 @@ func Rh_db_now() string {
 	return time.Now().UTC().Format("2006-01-02 15:04:05.000000")
 }
 
+// Write-side normalize sibling of Rh_db_now — the
+// `ActiveSupport.format_db_time` intrinsic behind the synthesized
+// public `<col>=` temporal writer. The zero Time (the nil of Go's
+// value-typed temporal seam, matching Rh_parse_db_time's failure
+// value) normalizes to ""; anything else formats to the same storage
+// text Rh_db_now produces.
+func Rh_format_db_time(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format("2006-01-02 15:04:05.000000")
+}
+
 // Native-`time.Time` twin of the transpiled `JsonBuilder_encode_datetime`
 // (json_builder.go, string→string reformat): UTC, millisecond precision,
 // `Z` suffix — Rails' canonical datetime JSON. Go's `Format(".000")`

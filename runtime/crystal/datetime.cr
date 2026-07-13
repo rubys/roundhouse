@@ -51,6 +51,15 @@ module Roundhouse
     def self.db_now : String
       Time.utc.to_s("%F %H:%M:%S.%6N")
     end
+
+    # Write-side normalize sibling of `db_now` — the
+    # `ActiveSupport.format_db_time` intrinsic behind the synthesized
+    # public `<col>=` temporal writer. nil → nil; a native `Time`
+    # formats to the same storage text `db_now` produces.
+    def self.format_db_time(value : Time?) : String?
+      return nil if value.nil?
+      value.to_utc.to_s("%F %H:%M:%S.%6N")
+    end
   end
 end
 

@@ -57,6 +57,20 @@ public static class RhDateTime
     {
         return DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture);
     }
+
+    // Write-side normalize sibling of `DbNow` — the
+    // `ActiveSupport.format_db_time` intrinsic behind the synthesized
+    // public `<col>=` temporal writer. null → null; a native
+    // `DateTimeOffset` formats to the same storage text `DbNow`
+    // produces.
+    public static string? FormatDbTime(DateTimeOffset? value)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+        return value.Value.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss.ffffff", CultureInfo.InvariantCulture);
+    }
 }
 
 // `DateTimeOffset` overload of `EncodeDatetime`, added to the transpiled

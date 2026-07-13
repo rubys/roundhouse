@@ -1263,73 +1263,13 @@ pub(crate) fn apply_datetime_lowering(lcs: &mut [LibraryClass], app: &App) {
             }
         }
 
-        // Schema-synthesized models carry `<col>_raw=` but no plain
-        // `<col>=` — write paths were CRuby-lazy until lobsters' ban
-        // flow (`self.banned_at = Time.now.utc`) forced the question.
-        // Synthesize the writer: route through the raw writer (which
-        // invalidates the parse memo) with the value normalized to the
-        // canonical storage text.
-        //
-        //   def <col>=(value)
-        //     self.<col>_raw = ActiveSupport.format_db_time(value)
-        //   end
-        let have: BTreeSet<Symbol> = lc
-            .methods
-            .iter()
-            .filter(|m| m.receiver == MethodReceiver::Instance)
-            .map(|m| m.name.clone())
-            .collect();
-        let mut writers: Vec<crate::dialect::MethodDef> = Vec::new();
-        for col in &temporal {
-            let writer_name = Symbol::from(format!("{}=", col.as_str()));
-            let raw_writer = format!("{}_raw=", col.as_str());
-            if have.contains(&writer_name) || !have.contains(&Symbol::from(raw_writer.as_str()))
-            {
-                continue;
-            }
-            let value = Symbol::from("value");
-            let span = Span::synthetic();
-            let normalize = Expr::new(
-                span,
-                ExprNode::Send {
-                    recv: Some(Expr::new(
-                        span,
-                        ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
-                    )),
-                    method: Symbol::from("format_db_time"),
-                    args: vec![Expr::new(
-                        span,
-                        ExprNode::Var { id: crate::ident::VarId(0), name: value.clone() },
-                    )],
-                    block: None,
-                    parenthesized: true,
-                },
-            );
-            let body = Expr::new(
-                span,
-                ExprNode::Assign {
-                    target: LValue::Attr {
-                        recv: Expr::new(span, ExprNode::SelfRef),
-                        name: Symbol::from(format!("{}_raw", col.as_str())),
-                    },
-                    value: normalize,
-                },
-            );
-            writers.push(crate::dialect::MethodDef {
-                name: writer_name,
-                receiver: MethodReceiver::Instance,
-                params: vec![crate::dialect::Param::positional(value)],
-                block_param: None,
-                body,
-                signature: None,
-                effects: Default::default(),
-                enclosing_class: None,
-                kind: AccessorKind::AttributeWriter,
-                is_async: false,
-                mutates_self: true,
-            });
-        }
-        lc.methods.extend(writers);
+        // The public `<col>=` writer (`self.<col>_raw =
+        // ActiveSupport.format_db_time(value)`) is synthesized by the
+        // shared model lowering (`schema::synth_temporal_writer`, kind
+        // `Method` so the AttributeWriter arm above can't re-point it
+        // at a nonexistent `@<col>`) — it arrives here already present,
+        // and its raw-writer dispatch picks up the memo invalidation
+        // installed above.
     }
 }
 

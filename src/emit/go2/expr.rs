@@ -1958,6 +1958,16 @@ pub(super) fn emit_send(
                 if class_name == "ActiveSupport" && method == "db_now" && args_s.is_empty() {
                     return "Rh_db_now()".to_string();
                 }
+                // Temporal writer normalize intrinsic: `ActiveSupport.
+                // format_db_time(v)` — nil → nil, native `time.Time` →
+                // the same storage text `Rh_db_now` produces. The
+                // synthesized public `<col>=` writer normalizes through
+                // it (`Rh_format_db_time`, write-side sibling in
+                // runtime/go/v2/rh_datetime.go).
+                if class_name == "ActiveSupport" && method == "format_db_time" && args_s.len() == 1
+                {
+                    return format!("Rh_format_db_time({})", args_s.join(", "));
+                }
                 // `JsonBuilder.encode_datetime` with a native-`time.Time`
                 // argument (a temporal reader call) routes to the
                 // hand-written `_time` twin — Go has no overloading, so
@@ -2535,6 +2545,18 @@ fn emit_assign(ctx: &EmitCtx, target: &crate::expr::LValue, value: &Expr) -> Str
                 let pascal = go_field_name(name.as_str());
                 format!("self.{pascal} = {v}")
             }
+        }
+        // `self.<name> = v` — the canonical writer-dispatch form
+        // (`Assign{Attr{SelfRef}}`, e.g. the synthesized temporal
+        // writer's `self.<col>_raw = ...`). Go has no property
+        // dispatch, so it renders as the same struct-field write a
+        // plain Ivar assign produces — matching the other strict
+        // targets' field-write reading of Attr-assign (the shared
+        // call-site→writer routing rewrite is the deferred fix; see
+        // the pass-4 note in project_overlay_emitter_migration).
+        LValue::Attr { recv, name } if matches!(&*recv.node, ExprNode::SelfRef) => {
+            let pascal = go_field_name(name.as_str());
+            format!("self.{pascal} = {v}")
         }
         _ => crate::emit::diagnostics::report_unsupported(value.span, "go2", "Assign-target", ""),
     }

@@ -69,6 +69,27 @@ defmodule RhDateTime do
     |> IO.iodata_to_binary()
   end
 
+  # Write-side normalize sibling of `db_now` — the
+  # `ActiveSupport.format_db_time` intrinsic behind the synthesized
+  # public `<col>=` temporal writer. nil → nil; a native `%DateTime{}`
+  # formats to the same storage text `db_now` produces; a pre-formatted
+  # binary passes through untouched. Guard-clause dispatch, matching
+  # the runtime's idiom (see `encode_datetime` below).
+  def format_db_time(nil), do: nil
+
+  def format_db_time(%DateTime{} = dt) do
+    utc = DateTime.shift_zone!(dt, "Etc/UTC")
+    {us, _precision} = utc.microsecond
+
+    :io_lib.format(
+      "~4..0B-~2..0B-~2..0B ~2..0B:~2..0B:~2..0B.~6..0B",
+      [utc.year, utc.month, utc.day, utc.hour, utc.minute, utc.second, us]
+    )
+    |> IO.iodata_to_binary()
+  end
+
+  def format_db_time(value) when is_binary(value), do: value
+
   # UTC, millisecond precision, `Z` suffix — Rails' canonical datetime
   # JSON (`"2026-05-15T21:14:56.300Z"`). Sub-millisecond digits are
   # TRUNCATED (integer division), matching Rails and the compare

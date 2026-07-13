@@ -2180,6 +2180,19 @@ fn emit_send(
         }
     }
 
+    // Temporal writer normalize intrinsic: `ActiveSupport.format_db_time(v)`
+    // — nil → nil, native `Date` → the same storage text `dbNow` produces.
+    // The synthesized public `<col>=` writer normalizes through it.
+    if method == "format_db_time" && args.len() == 1 {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                    return format!("Roundhouse.RhDateTime.formatDbTime({})", args_s[0]);
+                }
+            }
+        }
+    }
+
     // Negation — `!x` arrives BOTH prefix (`Send{None, "!", [x]}`) and
     // postfix (`Send{Some(x), "!", []}`), the same two IR shapes the
     // Kotlin emitter reconciles.

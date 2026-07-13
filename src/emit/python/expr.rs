@@ -181,6 +181,13 @@ pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
         ExprNode::While { .. } | ExprNode::Return { .. } | ExprNode::Case { .. } => {
             emit_stmt(body, true, is_void)
         }
+        // A whole-body attribute write (`self.<col>_raw = …`, the
+        // synthesized temporal writer) is a statement — the expression
+        // fallback below would drop the assignment LHS and emit only
+        // the RHS call. (The `Ivar` arm above predates this one and
+        // keeps its value-only void shape for byte-parity; it has no
+        // live instances of the dropped-store disease.)
+        ExprNode::Assign { target: LValue::Attr { .. }, .. } => emit_stmt(body, true, is_void),
         // A value-returning tail `If` whose branches are statement-shaped
         // (a multi-statement `Seq`, an assignment, a loop, …) cannot be a
         // ternary: `emit_expr` would drop assignment LHSs (`stmt = …` →
@@ -346,6 +353,13 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
         }
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
             format!("self.{} = {}", name.as_str(), emit_expr(value))
+        }
+        // Attribute write through an explicit receiver (`self.<col>_raw =
+        // …`, the synthesized temporal writer's storage store). Python
+        // has no property dispatch for the raw field — it IS the field —
+        // so this renders as a plain attribute assignment.
+        ExprNode::Assign { target: LValue::Attr { recv, name }, value } => {
+            format!("{}.{} = {}", emit_expr(recv), name.as_str(), emit_expr(value))
         }
         // Compound assignment. Python's arithmetic/bitwise compound ops
         // are spelled identically to Ruby's (`+=`, `**=`, `<<=`, …), so
@@ -857,6 +871,21 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
             if let ExprNode::Const { path } = &*r.node {
                 if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
                     return "Roundhouse.RhDateTime.db_now()".to_string();
+                }
+            }
+        }
+    }
+    // Temporal writer normalize intrinsic: `ActiveSupport.
+    // format_db_time(v)` — None → None, native `datetime` → the same
+    // storage text `db_now` produces, `str` passes through. The
+    // synthesized public `<col>=` writer normalizes through it. (The
+    // `Roundhouse.` prefix rides the same content-scan import in
+    // model.rs as `parse` above.)
+    if method == "format_db_time" && args.len() == 1 {
+        if let Some(r) = recv {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                    return format!("Roundhouse.RhDateTime.format_db_time({})", args_s[0]);
                 }
             }
         }

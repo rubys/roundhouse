@@ -77,4 +77,31 @@ export class RhDateTime {
       "000"
     );
   }
+
+  // Write-side normalize sibling of `dbNow` — the
+  // `ActiveSupport.format_db_time` intrinsic behind the synthesized
+  // public `<col>=` temporal writer. null → null; a native `Date`
+  // formats to the same storage text `dbNow` produces; a pre-formatted
+  // string passes through untouched.
+  static formatDbTime(value: Date | string | null): string | null {
+    if (value === null || value === undefined) return null;
+    if (typeof value === "string") return value;
+    const pad = (n: number, w: number) => String(n).padStart(w, "0");
+    return (
+      pad(value.getUTCFullYear(), 4) +
+      "-" +
+      pad(value.getUTCMonth() + 1, 2) +
+      "-" +
+      pad(value.getUTCDate(), 2) +
+      " " +
+      pad(value.getUTCHours(), 2) +
+      ":" +
+      pad(value.getUTCMinutes(), 2) +
+      ":" +
+      pad(value.getUTCSeconds(), 2) +
+      "." +
+      pad(value.getUTCMilliseconds(), 3) +
+      "000"
+    );
+  }
 }

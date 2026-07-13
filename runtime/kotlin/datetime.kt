@@ -78,6 +78,14 @@ object RhDateTime {
     // ordered — when a roundhouse-emitted app shares a database with a real
     // Rails app.
     fun dbNow(): String = DB_NOW_FORMAT.format(Instant.now())
+
+    // Write-side normalize sibling of `dbNow` — the
+    // `ActiveSupport.format_db_time` intrinsic behind the synthesized
+    // public `<col>=` temporal writer. null → null; a native
+    // `OffsetDateTime` formats to the same storage text `dbNow`
+    // produces.
+    fun formatDbTime(value: OffsetDateTime?): String? =
+        value?.let { DB_NOW_FORMAT.format(it.toInstant()) }
 }
 
 // UTC, millisecond precision, `Z` suffix — Rails' canonical datetime JSON.

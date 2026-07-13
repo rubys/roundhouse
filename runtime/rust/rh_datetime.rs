@@ -69,6 +69,15 @@ pub fn db_now() -> String {
     Utc::now().format("%Y-%m-%d %H:%M:%S%.6f").to_string()
 }
 
+/// Write-side normalize sibling of `db_now` — the
+/// `ActiveSupport.format_db_time` intrinsic behind the synthesized
+/// public `<col>=` temporal writer (its `Time | Nil` param renders as
+/// `Option<DateTime<Utc>>`). `None` → `None`; a `DateTime<Utc>`
+/// formats to the same storage text `db_now` produces.
+pub fn format_db_time(value: Option<DateTime<Utc>>) -> Option<String> {
+    value.map(|t| t.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
+}
+
 /// Trait backing the generic `JsonBuilder::encode_datetime`. Formats a
 /// temporal value to Rails' canonical JSON shape (UTC, millisecond
 /// precision, `Z` suffix, quoted) or the literal `null`.

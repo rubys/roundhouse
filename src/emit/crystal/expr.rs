@@ -400,6 +400,22 @@ fn emit_node(n: &ExprNode) -> String {
                     }
                 }
             }
+            // Temporal writer normalize intrinsic: `ActiveSupport.
+            // format_db_time(v)` — nil → nil, native `Time` → the same
+            // storage text `db_now` produces. The synthesized public
+            // `<col>=` writer normalizes through it.
+            if method.as_str() == "format_db_time" && args.len() == 1 {
+                if let Some(r) = recv {
+                    if let ExprNode::Const { path } = &*r.node {
+                        if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
+                            return format!(
+                                "Roundhouse::DateTime.format_db_time({})",
+                                emit_expr(&args[0])
+                            );
+                        }
+                    }
+                }
+            }
             // Buffer-accumulate idiom: `io << x` (Ruby) where `io` is a
             // String-typed local appends in place. Crystal Strings are
             // immutable and don't define `<<`; rewrite to the

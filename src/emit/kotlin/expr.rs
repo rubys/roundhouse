@@ -1363,6 +1363,14 @@ fn emit_send(
                 (Some("ActiveSupport"), "db_now") if args.is_empty() => {
                     return "RhDateTime.dbNow()".to_string();
                 }
+                // Temporal writer normalize intrinsic: `ActiveSupport.
+                // format_db_time(v)` — null → null, native
+                // `OffsetDateTime` → the same storage text `dbNow`
+                // produces. The synthesized public `<col>=` writer
+                // normalizes through it.
+                (Some("ActiveSupport"), "format_db_time") if args.len() == 1 => {
+                    return format!("RhDateTime.formatDbTime({})", args_s[0]);
+                }
                 _ => {}
             }
         }

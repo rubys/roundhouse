@@ -353,6 +353,14 @@ impl<'a> BodyTyper<'a> {
                 if id.0.as_str() == "ActiveSupport" && method.as_str() == "db_now" {
                     return Ty::Str;
                 }
+                // `ActiveSupport.format_db_time(value)` — the write-side
+                // normalize sibling: nil → nil, `Time` → the same
+                // storage text `db_now` produces. The synthesized
+                // public `<col>=` temporal writer normalizes through it
+                // (see `schema::synth_temporal_writer`).
+                if id.0.as_str() == "ActiveSupport" && method.as_str() == "format_db_time" {
+                    return Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+                }
                 // Walk the parent chain so inherited methods resolve:
                 // `Article.last` looks up `last` on Article → Application
                 // Record → ActiveRecord::Base (where the RBS-declared
