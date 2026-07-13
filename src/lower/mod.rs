@@ -46,6 +46,7 @@ pub mod create_block;
 pub mod duration;
 pub mod errors_add;
 pub mod mailer_class_side;
+pub mod request_index;
 pub mod send_dispatch;
 pub(crate) mod secure_password;
 pub mod time_current;
@@ -62,6 +63,7 @@ pub use create_block::apply_create_block_inline;
 pub use duration::apply_duration_lowering;
 pub use errors_add::apply_errors_add_lowering;
 pub use mailer_class_side::apply_mailer_class_side;
+pub use request_index::apply_request_index_lowering;
 pub use send_dispatch::apply_send_static_dispatch;
 pub use time_current::apply_time_current_lowering;
 pub use update_kwargs::apply_update_kwargs_inline;
@@ -83,6 +85,7 @@ pub fn apply_post_analyze_lowerings(
 ) -> Vec<crate::diagnostic::Diagnostic> {
     let mut diags = blank::apply_blank_lowering(app);
     time_current::apply_time_current_lowering(app);
+    request_index::apply_request_index_lowering(app);
     diags.extend(errors_add::apply_errors_add_lowering(app));
     diags.extend(create_block::apply_create_block_inline(app));
     diags.extend(update_kwargs::apply_update_kwargs_inline(app));
