@@ -203,12 +203,11 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // Date/DateTime/Time column accessors coerce to/from real `Time`
     // (no-op for apps with no temporal columns).
     library::apply_datetime_lowering(&mut lcs, app);
-    // has_secure_password models gain `authenticate` + plaintext
-    // accessors backed by the bcrypt gem (no-op without the marker).
-    library::apply_secure_password_lowering(&mut lcs, app);
-    // typed_store virtual-attribute accessors are synthesized by the
-    // shared model lowering (`lower::typed_store`) — they arrive here
-    // already present.
+    // has_secure_password (authenticate + plaintext accessors, bcrypt
+    // contract) and typed_store virtual-attribute accessors are
+    // synthesized by the shared model lowering
+    // (`lower::secure_password`, `lower::typed_store`) — they arrive
+    // here already present.
     // Boolean-column readers/predicates cast SQLite's 0/1 Integers
     // (0 is truthy in Ruby).
     library::apply_boolean_lowering(&mut lcs, app);

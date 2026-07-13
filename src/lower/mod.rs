@@ -47,6 +47,7 @@ pub mod duration;
 pub mod errors_add;
 pub mod mailer_class_side;
 pub mod send_dispatch;
+pub(crate) mod secure_password;
 pub mod time_current;
 pub mod update_kwargs;
 pub(crate) mod typed_store;

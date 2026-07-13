@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use super::super::EmittedFile;
 use crate::App;
-use crate::dialect::{AccessorKind, LibraryClass, MethodReceiver, Param};
+use crate::dialect::{AccessorKind, LibraryClass, MethodReceiver};
 use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::naming::snake_case;
@@ -35,7 +35,6 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     // re-applies the same reader idempotently and adds the Ruby writer
     // normalize.
     apply_datetime_lowering(&mut lcs, app);
-    apply_secure_password_lowering(&mut lcs, app);
     apply_boolean_lowering(&mut lcs, app);
     apply_hydration_nil_lowering(&mut lcs, app);
     apply_nilsafe_empty_lowering(&mut lcs);
@@ -2182,138 +2181,13 @@ pub(super) fn walk_const_paths(e: &Expr, out: &mut BTreeSet<Vec<String>>) {
     }
 }
 
-// ── has_secure_password lowering ─────────────────────────────────────
-
-/// Ruby-family pre-emit pass: synthesize the methods
-/// `has_secure_password` provides — `authenticate` (returning the
-/// record or `false`) plus the plaintext virtual-attribute accessors
-/// (`password`/`password=`/`password_confirmation`/…, or a custom
-/// attribute's spellings) — onto models that declare the marker.
-///
-/// Lives on the Ruby emit path because the bodies call the bcrypt gem
-/// (`BCrypt::Password`), which only the CRuby/JRuby tree loads (a
-/// guarded require in the overlay main.rb); shared `lower/` stays
-/// target-agnostic per the scope-lowering rule. The analyze layer
-/// already *types* this surface (`register_has_secure_password` in
-/// analyze/mod.rs); this pass supplies the runtime bodies that type
-/// registry promised. Strict no-op for marker-free apps (the blog).
-pub(crate) fn apply_secure_password_lowering(lcs: &mut [LibraryClass], app: &App) {
-    for model in &app.models {
-        let Some(attr) = secure_password_attr(&model.body) else {
-            continue;
-        };
-        let Some(lc) = lcs.iter_mut().find(|lc| lc.name == model.name) else {
-            continue;
-        };
-        let digest = Symbol::from(format!("{}_digest", attr.as_str()));
-        let confirmation = Symbol::from(format!("{}_confirmation", attr.as_str()));
-        // Rails names the authenticator after the attribute, except the
-        // default `password` which gets the bare `authenticate`.
-        let auth_name = if attr.as_str() == "password" {
-            Symbol::from("authenticate")
-        } else {
-            Symbol::from(format!("authenticate_{}", attr.as_str()))
-        };
-        push_instance_method_unless_defined(
-            lc,
-            auth_name,
-            vec![Param::positional(Symbol::from("unencrypted_password"))],
-            authenticate_body(&digest),
-            AccessorKind::Method,
-            false,
-        );
-        push_instance_method_unless_defined(
-            lc,
-            attr.clone(),
-            Vec::new(),
-            ivar_read(&attr),
-            AccessorKind::AttributeReader,
-            false,
-        );
-        push_instance_method_unless_defined(
-            lc,
-            Symbol::from(format!("{}=", attr.as_str())),
-            vec![Param::positional(Symbol::from("unencrypted_password"))],
-            plaintext_writer_body(&attr, &digest),
-            AccessorKind::Method,
-            true,
-        );
-        push_instance_method_unless_defined(
-            lc,
-            confirmation.clone(),
-            Vec::new(),
-            ivar_read(&confirmation),
-            AccessorKind::AttributeReader,
-            false,
-        );
-        push_instance_method_unless_defined(
-            lc,
-            Symbol::from(format!("{}=", confirmation.as_str())),
-            vec![Param::positional(Symbol::from("value"))],
-            plain_ivar_assign(&confirmation, "value"),
-            AccessorKind::AttributeWriter,
-            true,
-        );
-    }
-}
-
-/// The secure-password attribute name when the model body declares
-/// `has_secure_password` (first positional symbol, default
-/// `password`), else None. Mirrors analyze's registration scan.
-fn secure_password_attr(body: &[crate::dialect::ModelBodyItem]) -> Option<Symbol> {
-    for item in body {
-        let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else {
-            continue;
-        };
-        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else {
-            continue;
-        };
-        if method.as_str() != "has_secure_password" {
-            continue;
-        }
-        let attr = args
-            .iter()
-            .find_map(|a| match &*a.node {
-                ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => {
-                    Some(value.clone())
-                }
-                _ => None,
-            })
-            .unwrap_or_else(|| Symbol::from("password"));
-        return Some(attr);
-    }
-    None
-}
-
-fn push_instance_method_unless_defined(
-    lc: &mut LibraryClass,
-    name: Symbol,
-    params: Vec<Param>,
-    body: Expr,
-    kind: AccessorKind,
-    mutates_self: bool,
-) {
-    if lc
-        .methods
-        .iter()
-        .any(|m| m.receiver == MethodReceiver::Instance && m.name == name)
-    {
-        return;
-    }
-    lc.methods.push(crate::dialect::MethodDef {
-        name,
-        receiver: MethodReceiver::Instance,
-        params,
-        body,
-        signature: None,
-        effects: crate::effect::EffectSet::default(),
-        enclosing_class: Some(lc.name.0.clone()),
-        kind,
-        is_async: false,
-        mutates_self,
-        block_param: None,
-    });
-}
+// has_secure_password synthesis moved to the shared model lowering
+// (`lower::secure_password::push_secure_password_methods`) — every
+// target's model classes now carry authenticate + the plaintext
+// accessors, in the bcrypt gem's own contract shape
+// (`BCrypt::Password.create/new`): the CRuby/JRuby trees load the
+// real gem (guarded require in the overlay main.rb), and a future
+// spinel-bcrypt spin package satisfies the same calls.
 
 fn sp_expr(node: ExprNode) -> Expr {
     Expr::new(Span::synthetic(), node)
@@ -2321,89 +2195,6 @@ fn sp_expr(node: ExprNode) -> Expr {
 
 fn ivar_read(name: &Symbol) -> Expr {
     sp_expr(ExprNode::Ivar { name: name.clone() })
-}
-
-fn plain_ivar_assign(name: &Symbol, param: &str) -> Expr {
-    sp_expr(ExprNode::Assign {
-        target: LValue::Ivar { name: name.clone() },
-        value: sp_expr(ExprNode::Var { id: VarId(0), name: Symbol::from(param) }),
-    })
-}
-
-/// `BCrypt::Password.new(@<digest>) == unencrypted_password ? self : false`.
-fn authenticate_body(digest: &Symbol) -> Expr {
-    let wrapped = sp_expr(ExprNode::Send {
-        recv: Some(sp_expr(ExprNode::Const {
-            path: vec![Symbol::from("BCrypt"), Symbol::from("Password")],
-        })),
-        method: Symbol::from("new"),
-        args: vec![ivar_read(digest)],
-        block: None,
-        parenthesized: true,
-    });
-    let cmp = sp_expr(ExprNode::Send {
-        recv: Some(wrapped),
-        method: Symbol::from("=="),
-        args: vec![sp_expr(ExprNode::Var {
-            id: VarId(0),
-            name: Symbol::from("unencrypted_password"),
-        })],
-        block: None,
-        parenthesized: false,
-    });
-    sp_expr(ExprNode::If {
-        cond: cmp,
-        then_branch: sp_expr(ExprNode::SelfRef),
-        else_branch: sp_expr(ExprNode::Lit {
-            value: crate::expr::Literal::Bool { value: false },
-        }),
-    })
-}
-
-/// The plaintext writer Rails' macro provides:
-///   `@<attr> = v; @<attr>_digest = BCrypt::Password.create(v).to_s unless v.nil?`
-/// (`.to_s` because BCrypt::Password subclasses String but the digest
-/// column stores plain text). Nil skips digest generation, mirroring
-/// Rails' blank-guard closely enough for the login/rehash paths.
-fn plaintext_writer_body(attr: &Symbol, digest: &Symbol) -> Expr {
-    let value_var = || {
-        sp_expr(ExprNode::Var { id: VarId(0), name: Symbol::from("unencrypted_password") })
-    };
-    let store_plain = sp_expr(ExprNode::Assign {
-        target: LValue::Ivar { name: attr.clone() },
-        value: value_var(),
-    });
-    let create = sp_expr(ExprNode::Send {
-        recv: Some(sp_expr(ExprNode::Const {
-            path: vec![Symbol::from("BCrypt"), Symbol::from("Password")],
-        })),
-        method: Symbol::from("create"),
-        args: vec![value_var()],
-        block: None,
-        parenthesized: true,
-    });
-    let digest_str = sp_expr(ExprNode::Send {
-        recv: Some(create),
-        method: Symbol::from("to_s"),
-        args: Vec::new(),
-        block: None,
-        parenthesized: false,
-    });
-    let guarded_digest = sp_expr(ExprNode::If {
-        cond: sp_expr(ExprNode::Send {
-            recv: Some(value_var()),
-            method: Symbol::from("nil?"),
-            args: Vec::new(),
-            block: None,
-            parenthesized: false,
-        }),
-        then_branch: sp_expr(ExprNode::Lit { value: crate::expr::Literal::Nil }),
-        else_branch: sp_expr(ExprNode::Assign {
-            target: LValue::Ivar { name: digest.clone() },
-            value: digest_str,
-        }),
-    });
-    sp_expr(ExprNode::Seq { exprs: vec![store_plain, guarded_digest] })
 }
 
 // Request-params key normalization moved to the Ruby expr emitter's

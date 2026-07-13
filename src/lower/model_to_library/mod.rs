@@ -31,7 +31,7 @@ pub mod row;
 
 use std::collections::HashMap;
 
-use crate::dialect::{LibraryClass, MethodDef, MethodReceiver, Model};
+use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver, Model, Param};
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::schema::{ColumnType, Schema, Table};
@@ -40,6 +40,45 @@ use crate::ty::{Row, Ty};
 
 use self::associations::{push_association_methods, push_dependent_destroy};
 pub(crate) use self::associations::model_defines_instance_method;
+
+/// Push a synthesized instance method unless the model body defines the
+/// name (custom methods win — `push_user_methods` runs after the
+/// synthesizers and drops collisions, so a synthesized duplicate would
+/// shadow the user's) or an earlier synthesizer already claimed it.
+/// Shared by the DSL-marker synthesizers (typed_store,
+/// secure_password) that run late in `build_methods`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_synth_instance_method(
+    methods: &mut Vec<MethodDef>,
+    model: &Model,
+    name: Symbol,
+    params: Vec<Param>,
+    body: Expr,
+    signature: Option<Ty>,
+    kind: AccessorKind,
+    mutates_self: bool,
+) {
+    if model_defines_instance_method(model, &name)
+        || methods
+            .iter()
+            .any(|m| m.receiver == MethodReceiver::Instance && m.name == name)
+    {
+        return;
+    }
+    methods.push(MethodDef {
+        name,
+        receiver: MethodReceiver::Instance,
+        params,
+        body,
+        signature,
+        effects: crate::effect::EffectSet::default(),
+        enclosing_class: Some(model.name.0.clone()),
+        kind,
+        is_async: false,
+        mutates_self,
+        block_param: None,
+    });
+}
 use self::broadcasts::push_broadcasts_methods;
 use self::markers::{
     push_attr_accessor_methods, push_block_callback_methods, push_dom_prefix_method,
@@ -438,6 +477,11 @@ fn report_unclaimed_unknowns(model: &Model) {
         if name == "typed_store" {
             continue;
         }
+        // `has_secure_password` — claimed by lower::secure_password's
+        // shared method synthesis (all targets).
+        if name == "has_secure_password" {
+            continue;
+        }
         // `primary_abstract_class` — claimed by markers.rs.
         if name == "primary_abstract_class" {
             continue;
@@ -496,6 +540,10 @@ fn build_methods(
     // YAML seam). Before `push_user_methods` so a custom method in the
     // model body wins via the synthesizer's own model-body check.
     crate::lower::typed_store::push_typed_store_methods(&mut methods, model);
+    // has_secure_password — authenticate + plaintext accessors,
+    // against the bcrypt gem's own surface (`BCrypt::Password`). Same
+    // ordering rationale.
+    crate::lower::secure_password::push_secure_password_methods(&mut methods, model);
     push_user_methods(&mut methods, model);
     push_dom_prefix_method(&mut methods, model);
     push_broadcasts_methods(&mut methods, model);

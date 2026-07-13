@@ -18,8 +18,9 @@
 //! synthesis emits predicates for booleans only (the corpus shape) —
 //! widening is a deliberate later step.
 
+use super::model_to_library::push_synth_instance_method;
 use crate::analyze::{typed_store_is_array, typed_store_ty};
-use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Model, ModelBodyItem, Param};
+use crate::dialect::{AccessorKind, MethodDef, Model, ModelBodyItem, Param};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{Symbol, VarId};
 use crate::span::Span;
@@ -158,70 +159,41 @@ pub(crate) fn push_typed_store_methods(methods: &mut Vec<MethodDef>, model: &Mod
             } else {
                 elem_ty
             };
-            push_unless_claimed(
+            push_synth_instance_method(
                 methods,
                 model,
                 a.name.clone(),
                 Vec::new(),
                 read_body(col, a),
-                super::model_to_library::fn_sig(vec![], attr_ty.clone()),
+                Some(super::model_to_library::fn_sig(vec![], attr_ty.clone())),
+                AccessorKind::Method,
                 false,
             );
             if a.is_bool {
-                push_unless_claimed(
+                push_synth_instance_method(
                     methods,
                     model,
                     Symbol::from(format!("{}?", a.name.as_str())),
                     Vec::new(),
                     read_body(col, a),
-                    super::model_to_library::fn_sig(vec![], Ty::Bool),
+                    Some(super::model_to_library::fn_sig(vec![], Ty::Bool)),
+                    AccessorKind::Method,
                     false,
                 );
             }
             let value = Symbol::from("value");
-            push_unless_claimed(
+            push_synth_instance_method(
                 methods,
                 model,
                 Symbol::from(format!("{}=", a.name.as_str())),
                 vec![Param::positional(value.clone())],
                 write_body(col, a),
-                super::model_to_library::fn_sig(vec![(value, attr_ty)], Ty::Nil),
+                Some(super::model_to_library::fn_sig(vec![(value, attr_ty)], Ty::Nil)),
+                AccessorKind::Method,
                 true,
             );
         }
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn push_unless_claimed(
-    methods: &mut Vec<MethodDef>,
-    model: &Model,
-    name: Symbol,
-    params: Vec<Param>,
-    body: Expr,
-    signature: Ty,
-    mutates_self: bool,
-) {
-    if super::model_to_library::model_defines_instance_method(model, &name)
-        || methods
-            .iter()
-            .any(|m| m.receiver == MethodReceiver::Instance && m.name == name)
-    {
-        return;
-    }
-    methods.push(MethodDef {
-        name,
-        receiver: MethodReceiver::Instance,
-        params,
-        body,
-        signature: Some(signature),
-        effects: crate::effect::EffectSet::default(),
-        enclosing_class: Some(model.name.0.clone()),
-        kind: AccessorKind::Method,
-        is_async: false,
-        mutates_self,
-        block_param: None,
-    });
 }
 
 fn sp_expr(node: ExprNode) -> Expr {
