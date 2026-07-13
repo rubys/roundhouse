@@ -1,18 +1,38 @@
-//! `typed_store :<col> do |s| … end` — parse the DSL (the typed_store
-//! gem: named attributes YAML-serialized into one TEXT column) out of a
-//! model body. Two consumers: the Ruby emit path synthesizes overlay-
-//! backed reader/writer methods from it, and the view lowering derives
-//! which reader names are nilable scalars (an attr with no default reads
-//! nil when unset, so `present?`/`blank?` on it need the nil-safe form).
+//! `typed_store :<col> do |s| … end` — the typed_store gem: named
+//! attributes YAML-serialized into one TEXT column. This is the DSL's
+//! one home: the parser (`typed_store_decls`), and the shared model
+//! lowering's method synthesis (`push_typed_store_methods`) — per
+//! attribute a reader, a `<name>?` predicate for booleans, and a
+//! writer, each routing through the `TypedStore` runtime module
+//! (`TypedStore.read/write` — the YAML seam; CRuby/JRuby trees ship it
+//! in the overlay, strict targets carry the calls as ONE named runtime
+//! seam until a native impl lands, same posture as Duration). The view
+//! lowering also derives which reader names are nilable scalars from
+//! the parse (an attr with no default reads nil when unset, so
+//! `present?`/`blank?` on it need the nil-safe form).
+//!
+//! Signatures mirror what the analyzer registers for dispatch
+//! (`analyze::register_typed_store` / `typed_store_ty`) so the
+//! emitted RBS and the type-checker agree. Note the gem generates a
+//! `?` predicate for EVERY attribute and the analyzer registers it so;
+//! synthesis emits predicates for booleans only (the corpus shape) —
+//! widening is a deliberate later step.
 
-use crate::dialect::ModelBodyItem;
-use crate::expr::{Expr, ExprNode, Literal};
-use crate::ident::Symbol;
+use crate::analyze::{typed_store_is_array, typed_store_ty};
+use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Model, ModelBodyItem, Param};
+use crate::expr::{Expr, ExprNode, LValue, Literal};
+use crate::ident::{Symbol, VarId};
+use crate::span::Span;
+use crate::ty::Ty;
 
 pub(crate) struct TypedStoreAttr {
     pub(crate) name: Symbol,
     pub(crate) is_bool: bool,
     pub(crate) default: Option<Expr>,
+    /// The `s.<type>` method name (`string`, `boolean`, `any`, …).
+    pub(crate) decl_ty: Symbol,
+    /// `array: true` — stores a list of the declared scalar type.
+    pub(crate) is_array: bool,
 }
 
 impl TypedStoreAttr {
@@ -100,6 +120,8 @@ pub(crate) fn typed_store_decls(
                 name,
                 is_bool: ty_m.as_str() == "boolean",
                 default,
+                decl_ty: ty_m.clone(),
+                is_array: typed_store_is_array(a_args),
             });
         }
         if !attrs.is_empty() {
@@ -107,4 +129,147 @@ pub(crate) fn typed_store_decls(
         }
     }
     out
+}
+
+/// Synthesize the per-attribute accessor methods for every
+/// `typed_store` declaration on `model`, into the shared model
+/// lowering (all targets — the shared home of what used to be the
+/// ruby-family emit pass `apply_typed_store_lowering`):
+///
+///   def <name>           = TypedStore.read(@<col>, "<name>", <default|nil>)
+///   def <name>?          = same read body (boolean attrs only)
+///   def <name>=(value)   = @<col> = TypedStore.write(@<col>, "<name>", value)
+///
+/// A custom method in the model body must win (`push_user_methods`
+/// runs after this and drops collisions — the pass-4 inverted-dedupe
+/// dance), and so must a name an earlier synthesizer claimed (schema
+/// column accessors). Signatures come from the declared attribute type
+/// (`typed_store_ty`), matching the analyzer's dispatch registration.
+pub(crate) fn push_typed_store_methods(methods: &mut Vec<MethodDef>, model: &Model) {
+    let stores = typed_store_decls(&model.body);
+    for (col, attrs) in &stores {
+        for a in attrs {
+            let elem_ty = typed_store_ty(a.decl_ty.as_str()).unwrap_or(Ty::Untyped);
+            // `array: true` stores a list of the scalar type; `any`
+            // stays the gradual escape even as an array (mirrors
+            // `register_typed_store_decls`).
+            let attr_ty = if a.is_array && !matches!(elem_ty, Ty::Untyped) {
+                Ty::Array { elem: Box::new(elem_ty) }
+            } else {
+                elem_ty
+            };
+            push_unless_claimed(
+                methods,
+                model,
+                a.name.clone(),
+                Vec::new(),
+                read_body(col, a),
+                super::model_to_library::fn_sig(vec![], attr_ty.clone()),
+                false,
+            );
+            if a.is_bool {
+                push_unless_claimed(
+                    methods,
+                    model,
+                    Symbol::from(format!("{}?", a.name.as_str())),
+                    Vec::new(),
+                    read_body(col, a),
+                    super::model_to_library::fn_sig(vec![], Ty::Bool),
+                    false,
+                );
+            }
+            let value = Symbol::from("value");
+            push_unless_claimed(
+                methods,
+                model,
+                Symbol::from(format!("{}=", a.name.as_str())),
+                vec![Param::positional(value.clone())],
+                write_body(col, a),
+                super::model_to_library::fn_sig(vec![(value, attr_ty)], Ty::Nil),
+                true,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_unless_claimed(
+    methods: &mut Vec<MethodDef>,
+    model: &Model,
+    name: Symbol,
+    params: Vec<Param>,
+    body: Expr,
+    signature: Ty,
+    mutates_self: bool,
+) {
+    if super::model_to_library::model_defines_instance_method(model, &name)
+        || methods
+            .iter()
+            .any(|m| m.receiver == MethodReceiver::Instance && m.name == name)
+    {
+        return;
+    }
+    methods.push(MethodDef {
+        name,
+        receiver: MethodReceiver::Instance,
+        params,
+        body,
+        signature: Some(signature),
+        effects: crate::effect::EffectSet::default(),
+        enclosing_class: Some(model.name.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self,
+        block_param: None,
+    });
+}
+
+fn sp_expr(node: ExprNode) -> Expr {
+    Expr::new(Span::synthetic(), node)
+}
+
+fn ivar_read(col: &Symbol) -> Expr {
+    sp_expr(ExprNode::Ivar { name: col.clone() })
+}
+
+/// `TypedStore.read(@<col>, "<name>", <default|nil>)`.
+fn read_body(col: &Symbol, a: &TypedStoreAttr) -> Expr {
+    let default = a
+        .default
+        .clone()
+        .unwrap_or_else(|| sp_expr(ExprNode::Lit { value: Literal::Nil }));
+    sp_expr(ExprNode::Send {
+        recv: Some(sp_expr(ExprNode::Const { path: vec![Symbol::from("TypedStore")] })),
+        method: Symbol::from("read"),
+        args: vec![
+            ivar_read(col),
+            sp_expr(ExprNode::Lit {
+                value: Literal::Str { value: a.name.as_str().to_string() },
+            }),
+            default,
+        ],
+        block: None,
+        parenthesized: true,
+    })
+}
+
+/// `@<col> = TypedStore.write(@<col>, "<name>", value)`.
+fn write_body(col: &Symbol, a: &TypedStoreAttr) -> Expr {
+    let write = sp_expr(ExprNode::Send {
+        recv: Some(sp_expr(ExprNode::Const { path: vec![Symbol::from("TypedStore")] })),
+        method: Symbol::from("write"),
+        args: vec![
+            ivar_read(col),
+            sp_expr(ExprNode::Lit {
+                value: Literal::Str { value: a.name.as_str().to_string() },
+            }),
+            sp_expr(ExprNode::Var { id: VarId(0), name: Symbol::from("value") }),
+        ],
+        block: None,
+        parenthesized: true,
+    });
+    sp_expr(ExprNode::Assign {
+        target: LValue::Ivar { name: col.clone() },
+        value: write,
+    })
 }

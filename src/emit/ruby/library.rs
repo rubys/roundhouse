@@ -36,7 +36,6 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     // normalize.
     apply_datetime_lowering(&mut lcs, app);
     apply_secure_password_lowering(&mut lcs, app);
-    apply_typed_store_lowering(&mut lcs, app);
     apply_boolean_lowering(&mut lcs, app);
     apply_hydration_nil_lowering(&mut lcs, app);
     apply_nilsafe_empty_lowering(&mut lcs);
@@ -2415,100 +2414,11 @@ fn plaintext_writer_body(attr: &Symbol, digest: &Symbol) -> Expr {
 // helpers (params flows there too) and never touches a genuine
 // symbol-keyed `Hash[Symbol, _]` like `StoryRepository#@params`.
 
-// ── typed_store lowering ─────────────────────────────────────────────
-
-/// Ruby-family pre-emit pass: lower `typed_store :settings do |s|
-/// s.string :totp_secret … end` (the typed_store gem — virtual
-/// attributes YAML-serialized into a TEXT column) to per-attribute
-/// reader/writer methods routing through the overlay `TypedStore`
-/// module. Boolean attributes additionally get the Rails `<name>?`
-/// predicate spelling. Lives on the Ruby emit path (the bodies call a
-/// CRuby-overlay module); strict no-op for apps without the DSL.
-pub(crate) fn apply_typed_store_lowering(lcs: &mut [LibraryClass], app: &App) {
-    use crate::lower::typed_store::typed_store_decls;
-    for model in &app.models {
-        let stores = typed_store_decls(&model.body);
-        if stores.is_empty() {
-            continue;
-        }
-        let Some(lc) = lcs.iter_mut().find(|lc| lc.name == model.name) else {
-            continue;
-        };
-        for (col, attrs) in &stores {
-            for a in attrs {
-                push_instance_method_unless_defined(
-                    lc,
-                    a.name.clone(),
-                    Vec::new(),
-                    typed_store_read_body(col, a),
-                    AccessorKind::Method,
-                    false,
-                );
-                if a.is_bool {
-                    push_instance_method_unless_defined(
-                        lc,
-                        Symbol::from(format!("{}?", a.name.as_str())),
-                        Vec::new(),
-                        typed_store_read_body(col, a),
-                        AccessorKind::Method,
-                        false,
-                    );
-                }
-                push_instance_method_unless_defined(
-                    lc,
-                    Symbol::from(format!("{}=", a.name.as_str())),
-                    vec![Param::positional(Symbol::from("value"))],
-                    typed_store_write_body(col, a),
-                    AccessorKind::Method,
-                    true,
-                );
-            }
-        }
-    }
-}
-
-/// `TypedStore.read(@<col>, "<name>", <default|nil>)`.
-use crate::lower::typed_store::TypedStoreAttr;
-
-fn typed_store_read_body(col: &Symbol, a: &TypedStoreAttr) -> Expr {
-    let default = a.default.clone().unwrap_or_else(|| {
-        sp_expr(ExprNode::Lit { value: crate::expr::Literal::Nil })
-    });
-    sp_expr(ExprNode::Send {
-        recv: Some(sp_expr(ExprNode::Const { path: vec![Symbol::from("TypedStore")] })),
-        method: Symbol::from("read"),
-        args: vec![
-            ivar_read(col),
-            sp_expr(ExprNode::Lit {
-                value: crate::expr::Literal::Str { value: a.name.as_str().to_string() },
-            }),
-            default,
-        ],
-        block: None,
-        parenthesized: true,
-    })
-}
-
-/// `@<col> = TypedStore.write(@<col>, "<name>", value)`.
-fn typed_store_write_body(col: &Symbol, a: &TypedStoreAttr) -> Expr {
-    let write = sp_expr(ExprNode::Send {
-        recv: Some(sp_expr(ExprNode::Const { path: vec![Symbol::from("TypedStore")] })),
-        method: Symbol::from("write"),
-        args: vec![
-            ivar_read(col),
-            sp_expr(ExprNode::Lit {
-                value: crate::expr::Literal::Str { value: a.name.as_str().to_string() },
-            }),
-            sp_expr(ExprNode::Var { id: VarId(0), name: Symbol::from("value") }),
-        ],
-        block: None,
-        parenthesized: true,
-    });
-    sp_expr(ExprNode::Assign {
-        target: LValue::Ivar { name: col.clone() },
-        value: write,
-    })
-}
+// typed_store accessor synthesis moved to the shared model lowering
+// (`lower::typed_store::push_typed_store_methods`) — every target's
+// model classes now carry the reader/predicate/writer methods; the
+// `TypedStore` runtime module (YAML seam) still ships only on the
+// CRuby/JRuby overlay trees.
 
 // ── boolean-column cast lowering ─────────────────────────────────────
 

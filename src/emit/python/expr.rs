@@ -161,7 +161,12 @@ pub(super) fn emit_body(body: &Expr, return_ty: &Ty) -> String {
     match &*body.node {
         ExprNode::Assign { target: LValue::Ivar { .. }, value } => {
             if is_void {
-                emit_expr(value)
+                // Statement route keeps the store: `self.x = v`. The
+                // old value-only shape silently dropped the ivar write
+                // — latent until the typed_store writer (`@settings =
+                // TypedStore.write(...)`, `-> nil`) became the first
+                // live whole-body void ivar-assign.
+                emit_stmt(body, true, true)
             } else {
                 format!("return {}", emit_expr(value))
             }

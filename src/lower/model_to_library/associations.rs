@@ -380,7 +380,7 @@ fn synth_belongs_to_reader(
 /// True when the model's own body defines an instance method `name` —
 /// the signal that a synthesized association accessor must yield to
 /// the app's definition.
-pub(super) fn model_defines_instance_method(model: &Model, name: &Symbol) -> bool {
+pub(crate) fn model_defines_instance_method(model: &Model, name: &Symbol) -> bool {
     use crate::dialect::ModelBodyItem;
     model.body.iter().any(|item| {
         matches!(item, ModelBodyItem::Method { method, .. }

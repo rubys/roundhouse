@@ -39,6 +39,7 @@ use crate::span::Span;
 use crate::ty::{Row, Ty};
 
 use self::associations::{push_association_methods, push_dependent_destroy};
+pub(crate) use self::associations::model_defines_instance_method;
 use self::broadcasts::push_broadcasts_methods;
 use self::markers::{
     push_attr_accessor_methods, push_block_callback_methods, push_dom_prefix_method,
@@ -432,6 +433,11 @@ fn report_unclaimed_unknowns(model: &Model) {
         if name == "broadcasts_to" {
             continue;
         }
+        // `typed_store` — claimed by lower::typed_store's shared
+        // method synthesis (all targets).
+        if name == "typed_store" {
+            continue;
+        }
         // `primary_abstract_class` — claimed by markers.rs.
         if name == "primary_abstract_class" {
             continue;
@@ -485,6 +491,11 @@ fn build_methods(
     push_dependent_destroy(&mut methods, model);
     push_unknown_marker_methods(&mut methods, model);
     push_attr_accessor_methods(&mut methods, model);
+    // typed_store virtual attributes — reader/predicate/writer per
+    // declared attr, routing through the `TypedStore` runtime (the
+    // YAML seam). Before `push_user_methods` so a custom method in the
+    // model body wins via the synthesizer's own model-body check.
+    crate::lower::typed_store::push_typed_store_methods(&mut methods, model);
     push_user_methods(&mut methods, model);
     push_dom_prefix_method(&mut methods, model);
     push_broadcasts_methods(&mut methods, model);
@@ -1091,7 +1102,7 @@ pub fn ty_of_column(t: &ColumnType) -> Ty {
 
 /// Build a `Ty::Fn` signature from positional (name, type) pairs and a return type.
 /// Effects default to pure — callers refine if needed (lifecycle hooks etc.).
-pub(super) fn fn_sig(params: Vec<(Symbol, Ty)>, ret: Ty) -> Ty {
+pub(crate) fn fn_sig(params: Vec<(Symbol, Ty)>, ret: Ty) -> Ty {
     Ty::Fn {
         params: params
             .into_iter()

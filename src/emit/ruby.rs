@@ -206,9 +206,9 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // has_secure_password models gain `authenticate` + plaintext
     // accessors backed by the bcrypt gem (no-op without the marker).
     library::apply_secure_password_lowering(&mut lcs, app);
-    // typed_store columns gain their virtual-attribute accessors
-    // (no-op without the DSL).
-    library::apply_typed_store_lowering(&mut lcs, app);
+    // typed_store virtual-attribute accessors are synthesized by the
+    // shared model lowering (`lower::typed_store`) — they arrive here
+    // already present.
     // Boolean-column readers/predicates cast SQLite's 0/1 Integers
     // (0 is truthy in Ruby).
     library::apply_boolean_lowering(&mut lcs, app);

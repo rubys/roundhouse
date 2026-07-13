@@ -5020,7 +5020,7 @@ fn register_typed_store_decls(expr: &Expr, methods: &mut HashMap<Symbol, Ty>) {
 /// untyped escape (`Ty::Untyped`); `datetime`/`time`/`date` fold into the
 /// first-class `Ty::Time`. Anything unrecognized returns `None` and
 /// stays unregistered.
-fn typed_store_ty(type_method: &str) -> Option<Ty> {
+pub(crate) fn typed_store_ty(type_method: &str) -> Option<Ty> {
     Some(match type_method {
         "string" | "text" => Ty::Str,
         "boolean" => Ty::Bool,
@@ -5034,7 +5034,7 @@ fn typed_store_ty(type_method: &str) -> Option<Ty> {
 
 /// True when a `typed_store` declaration carries `array: true` — the
 /// column stores a list of its element type rather than a scalar.
-fn typed_store_is_array(args: &[Expr]) -> bool {
+pub(crate) fn typed_store_is_array(args: &[Expr]) -> bool {
     args.iter().any(|a| {
         let ExprNode::Hash { entries, .. } = &*a.node else { return false };
         entries.iter().any(|(k, v)| {
