@@ -413,6 +413,9 @@ pub(super) fn emit_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> String {
     // Wildcard arm: synthesized based on the enclosing return type —
     // `Value::Null` for `Value`-returning fns, `()` for unit-returning
     // fns. Without an `_` arm, the match isn't exhaustive over `&str`.
+    // An IR-carried guard-free Wildcard (a source `else`, or the shared
+    // send grounding's raise arm) already IS the default — appending a
+    // second `_` would be unreachable.
     let scrutinee_s = emit_expr(scrutinee);
     let return_ty = current_return_ty();
     let return_is_value = matches!(return_ty.as_ref(), Some(crate::ty::Ty::Untyped));
@@ -433,6 +436,12 @@ pub(super) fn emit_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> String {
             format!("        {pat_s} => {{ {body_wrapped} }}")
         })
         .collect();
+    let has_default = arms
+        .iter()
+        .any(|a| matches!(a.pattern, crate::expr::Pattern::Wildcard) && a.guard.is_none());
+    if has_default {
+        return format!("match {scrutinee_s} {{\n{}\n    }}", arm_strs.join(",\n"));
+    }
     let default_arm = if return_is_value {
         "serde_json::Value::Null".to_string()
     } else {
