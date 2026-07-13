@@ -1,0 +1,225 @@
+#!/usr/bin/env ruby
+# scripts/markly-conformance — gem-shim conformance harness for markly.
+#
+# The markly gem (cmark-gfm C bindings) has no JRuby build, so the JRuby
+# target ships a shim implementing the same contract over commonmark-java
+# (runtime/spinel/markly_jruby.rb). This harness keeps the shim honest:
+# the REAL gem running under CRuby is the reference implementation, and
+# the vectors it generates are the contract's behavioral half (the typed
+# half is runtime/ruby/gem_facades.rbs).
+#
+# Two vector levels:
+#   markly:     Markly.parse(...).to_html(...) — the raw gem surface.
+#   markdowner: lobsters' extras/markdowner.rb driven end-to-end (with
+#               User/Rails stubbed) — the composition lobsters actually
+#               ships: Markly AST surgery (@mention linkification) plus
+#               Nokogiri postprocessing. Inputs include real user bios
+#               sampled from the staged bench DB, because /u/:username
+#               renders bios live — this is the read path being certified.
+#
+# Usage:
+#   scripts/markly-conformance --generate       # CRuby + real gems: write vectors
+#   scripts/markly-conformance                  # verify with whatever `require "markly"` finds
+#   jruby scripts/markly-conformance --shim runtime/spinel/markly_jruby.rb
+#
+# Exit code = number of failing vectors. Divergences from the reference
+# that are ACCEPTED (ledgered, not silent) live in the vectors file under
+# "accepted_divergences" keyed by vector name — a failing vector whose
+# actual output matches its ledgered alternate counts as a pass, and is
+# reported separately so the ledger never rots invisibly.
+
+require "json"
+
+REPO_ROOT = File.expand_path("..", __dir__)
+VECTORS_DEFAULT = File.join(REPO_ROOT, "bench/gem-shims/markly/vectors.json")
+LOBSTERS_SRC = ENV["LOBSTERS_SRC"] || File.expand_path("~/git/ruby-bench/benchmarks/lobsters")
+BENCH_DB = File.join(REPO_ROOT, "build/transpiled-lobsters-ruby/storage/bench.sqlite3")
+
+opts = { vectors: VECTORS_DEFAULT }
+args = ARGV.dup
+until args.empty?
+  case (a = args.shift)
+  when "--generate" then opts[:generate] = true
+  when "--vectors"  then opts[:vectors]  = args.shift
+  when "--shim"     then opts[:shim]     = args.shift
+  when "--quiet"    then opts[:quiet]    = true
+  else abort "markly-conformance: unknown arg #{a}"
+  end
+end
+
+if opts[:shim]
+  require File.expand_path(opts[:shim], Dir.pwd)
+else
+  require "markly"
+end
+require "nokogiri"
+require "uri"
+
+# ── Markdowner's app-side dependencies, stubbed ──────────────────────
+# Minimal core_ext so markdowner.rb runs outside ActiveSupport.
+class String
+  def blank? = strip.empty? unless method_defined?(:blank?)
+  def present? = !blank? unless method_defined?(:present?)
+end
+class NilClass
+  def blank? = true unless method_defined?(:blank?)
+  def present? = false unless method_defined?(:present?)
+end
+
+$existing_users = []
+class User
+  VALID_USERNAME = /[A-Za-z0-9][A-Za-z0-9_-]{0,24}/.freeze
+  def self.exists?(cond)
+    $existing_users.include?(cond[:username])
+  end
+end
+
+module Rails
+  def self.application = self
+  def self.root_url = "https://lobste.rs/"
+end
+
+markdowner_rb = File.join(LOBSTERS_SRC, "extras/markdowner.rb")
+abort "markly-conformance: no markdowner at #{markdowner_rb}" unless File.exist?(markdowner_rb)
+eval(File.read(markdowner_rb), TOPLEVEL_BINDING, markdowner_rb)
+
+# ── vector runners ───────────────────────────────────────────────────
+GFM_EXTS = [:tagfilter, :autolink, :strikethrough].freeze
+
+def run_markly(vec)
+  flags = vec["smart"] ? Markly::SMART : Markly::DEFAULT
+  root = Markly.parse(vec["input"], flags: flags, extensions: GFM_EXTS)
+  root.to_html(flags: Markly::DEFAULT, extensions: GFM_EXTS)
+end
+
+def run_markdowner(vec)
+  $existing_users = vec["existing_users"] || []
+  Markdowner.to_html(vec["input"], vec["allow_images"] ? { allow_images: true } : {})
+end
+
+# ── generation (CRuby + real gems only) ──────────────────────────────
+if opts[:generate]
+  if defined?(Markly::JRUBY_SHIM)
+    abort "markly-conformance: --generate must run against the real gem (CRuby), not the shim"
+  end
+
+  synthetic = [
+    ["paragraph",        "Hello, world."],
+    ["emphasis",         "Some *emphasis*, **bold**, and `code`."],
+    ["heading-demotion", "# Big\n\n## Smaller\n\nBody text."],
+    ["link-absolute",    "See [the site](https://example.com/page) for more."],
+    ["link-relative",    "See [local](/about) for more."],
+    ["autolink-bare",    "Go to https://example.com/x?y=1 now."],
+    ["autolink-www",     "Go to www.example.com now."],
+    ["strikethrough",    "This is ~~struck~~ text."],
+    ["tagfilter-script", "Raw <script>alert(1)</script> and <em>kept</em> HTML."],
+    ["tagfilter-close",  "Open <style>x</style> done."],
+    ["raw-html-kept",    "A <b>bold</b> move and a <br> break."],
+    ["raw-html-block",   "before\n\n<div>\nblock html\n</div>\n\nafter"],
+    ["dash-runs",        "a---- b----- c-- d--- e------"],
+    ["dots-four",        "wait...."],
+    ["autolink-dashed",  "see https://ex.com/a--b?q=\"x\" now"],
+    ["quote-after-emph", "*bold*'s thing and \"*quoted*\" text"],
+    ["list",             "- one\n- two\n  - nested\n\n1. first\n2. second"],
+    ["blockquote",       "> quoted text\n\nafter"],
+    ["code-block",       "```\ndon't \"smart\" this -- ever...\n```"],
+    ["code-span",        "Inline `\"quotes\" -- dashes` here."],
+    ["smart-quotes",     "\"Double\" and 'single' quotes, it's fine."],
+    ["smart-dashes",     "En -- dash, em --- dash, ellipsis..."],
+    ["smart-mixed",      "She said \"it's 'nested' -- really...\" then left."],
+    ["unicode",          "Café naïve — already unicode ünd emoji 🦞."],
+    ["hard-wrap",        "line one\nline two"],
+    ["image",            "An image: ![alt text](https://example.com/i.png \"title\")"],
+    ["mention-only",     "@alice"],
+    ["mention-exists",   "ping @alice about this", ["alice"]],
+    ["mention-missing",  "ping @nobody about this"],
+    ["mention-tail",     "@alice: see the thing", ["alice"]],
+    ["mention-multi",    "cc @alice and @bob too", ["alice", "bob"]],
+    ["mention-in-link",  "[@alice](https://example.com/) is a link", ["alice"]],
+    ["mention-in-code",  "`@alice` in code", ["alice"]],
+    ["mention-punct",    "(@alice) and @bob's idea", ["alice", "bob"]],
+    ["mention-smart",    "\"quote\" then @alice appears", ["alice"]],
+  ]
+
+  vectors = { "markly" => [], "markdowner" => [], "accepted_divergences" => {} }
+
+  synthetic.each do |name, input, existing|
+    vectors["markly"] << {
+      "name" => "syn-#{name}", "input" => input, "smart" => true,
+      "html" => run_markly({ "input" => input, "smart" => true }),
+    }
+    vec = { "name" => "syn-#{name}", "input" => input,
+            "existing_users" => existing || [], "allow_images" => false }
+    vec["html"] = run_markdowner(vec)
+    vectors["markdowner"] << vec
+  end
+
+  # image conversion is opts-dependent — pin both settings
+  img = "An image: ![alt text](https://example.com/i.png \"title\")"
+  [true, false].each do |allow|
+    vec = { "name" => "syn-image-allow-#{allow}", "input" => img,
+            "existing_users" => [], "allow_images" => allow }
+    vec["html"] = run_markdowner(vec)
+    vectors["markdowner"] << vec
+  end
+
+  # Real bios from the staged bench DB — the exact strings /u/:username
+  # renders live. Deterministic sample: lowest ids, substantive bios.
+  if File.exist?(BENCH_DB)
+    require "sqlite3"
+    db = SQLite3::Database.new(BENCH_DB, readonly: true)
+    rows = db.execute(
+      "SELECT id, about FROM users WHERE about IS NOT NULL AND length(about) > 20 ORDER BY id LIMIT 25"
+    )
+    rows.each do |id, about|
+      vec = { "name" => "bio-user-#{id}", "input" => about,
+              "existing_users" => [], "allow_images" => false }
+      vec["html"] = run_markdowner(vec)
+      vectors["markdowner"] << vec
+    end
+    db.close
+  else
+    warn "markly-conformance: no bench DB at #{BENCH_DB} — skipping real-bio vectors"
+  end
+
+  vectors["meta"] = {
+    "generated" => "scripts/markly-conformance --generate",
+    "reference" => "markly #{Markly::VERSION rescue "?"} on #{RUBY_DESCRIPTION}",
+  }
+
+  require "fileutils"
+  FileUtils.mkdir_p(File.dirname(opts[:vectors]))
+  File.write(opts[:vectors], JSON.pretty_generate(vectors) + "\n")
+  total = vectors["markly"].size + vectors["markdowner"].size
+  puts "wrote #{total} vectors to #{opts[:vectors]}"
+  exit 0
+end
+
+# ── verification ─────────────────────────────────────────────────────
+vectors = JSON.parse(File.read(opts[:vectors]))
+ledger = vectors["accepted_divergences"] || {}
+fail_count = 0
+ledgered = []
+
+check = lambda do |level, vec, actual|
+  key = "#{level}/#{vec["name"]}"
+  if actual == vec["html"]
+    puts "  ok   #{key}" unless opts[:quiet]
+  elsif ledger[key] && actual == ledger[key]["html"]
+    ledgered << key
+    puts "  LEDG #{key} (#{ledger[key]["reason"]})" unless opts[:quiet]
+  else
+    fail_count += 1
+    puts "  FAIL #{key}"
+    puts "    expected: #{vec["html"].inspect}"
+    puts "    actual:   #{actual.inspect}"
+  end
+end
+
+vectors["markly"].each     { |v| check.call("markly", v, run_markly(v)) }
+vectors["markdowner"].each { |v| check.call("markdowner", v, run_markdowner(v)) }
+
+total = vectors["markly"].size + vectors["markdowner"].size
+puts "#{total - fail_count}/#{total} vectors pass on #{RUBY_DESCRIPTION}" \
+     "#{" (#{ledgered.size} via accepted-divergence ledger)" unless ledgered.empty?}"
+exit fail_count

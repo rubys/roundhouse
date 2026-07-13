@@ -1,0 +1,684 @@
+{
+  "markly": [
+    {
+      "name": "syn-paragraph",
+      "input": "Hello, world.",
+      "smart": true,
+      "html": "<p>Hello, world.</p>\n"
+    },
+    {
+      "name": "syn-emphasis",
+      "input": "Some *emphasis*, **bold**, and `code`.",
+      "smart": true,
+      "html": "<p>Some <em>emphasis</em>, <strong>bold</strong>, and <code>code</code>.</p>\n"
+    },
+    {
+      "name": "syn-heading-demotion",
+      "input": "# Big\n\n## Smaller\n\nBody text.",
+      "smart": true,
+      "html": "<h1>Big</h1>\n<h2>Smaller</h2>\n<p>Body text.</p>\n"
+    },
+    {
+      "name": "syn-link-absolute",
+      "input": "See [the site](https://example.com/page) for more.",
+      "smart": true,
+      "html": "<p>See <a href=\"https://example.com/page\">the site</a> for more.</p>\n"
+    },
+    {
+      "name": "syn-link-relative",
+      "input": "See [local](/about) for more.",
+      "smart": true,
+      "html": "<p>See <a href=\"/about\">local</a> for more.</p>\n"
+    },
+    {
+      "name": "syn-autolink-bare",
+      "input": "Go to https://example.com/x?y=1 now.",
+      "smart": true,
+      "html": "<p>Go to <a href=\"https://example.com/x?y=1\">https://example.com/x?y=1</a> now.</p>\n"
+    },
+    {
+      "name": "syn-autolink-www",
+      "input": "Go to www.example.com now.",
+      "smart": true,
+      "html": "<p>Go to <a href=\"http://www.example.com\">www.example.com</a> now.</p>\n"
+    },
+    {
+      "name": "syn-strikethrough",
+      "input": "This is ~~struck~~ text.",
+      "smart": true,
+      "html": "<p>This is <del>struck</del> text.</p>\n"
+    },
+    {
+      "name": "syn-tagfilter-script",
+      "input": "Raw <script>alert(1)</script> and <em>kept</em> HTML.",
+      "smart": true,
+      "html": "<p>Raw <!-- raw HTML omitted -->alert(1)<!-- raw HTML omitted --> and <!-- raw HTML omitted -->kept<!-- raw HTML omitted --> HTML.</p>\n"
+    },
+    {
+      "name": "syn-tagfilter-close",
+      "input": "Open <style>x</style> done.",
+      "smart": true,
+      "html": "<p>Open <!-- raw HTML omitted -->x<!-- raw HTML omitted --> done.</p>\n"
+    },
+    {
+      "name": "syn-raw-html-kept",
+      "input": "A <b>bold</b> move and a <br> break.",
+      "smart": true,
+      "html": "<p>A <!-- raw HTML omitted -->bold<!-- raw HTML omitted --> move and a <!-- raw HTML omitted --> break.</p>\n"
+    },
+    {
+      "name": "syn-raw-html-block",
+      "input": "before\n\n<div>\nblock html\n</div>\n\nafter",
+      "smart": true,
+      "html": "<p>before</p>\n<!-- raw HTML omitted -->\n<p>after</p>\n"
+    },
+    {
+      "name": "syn-dash-runs",
+      "input": "a---- b----- c-- d--- e------",
+      "smart": true,
+      "html": "<p>a–– b—– c– d— e——</p>\n"
+    },
+    {
+      "name": "syn-dots-four",
+      "input": "wait....",
+      "smart": true,
+      "html": "<p>wait….</p>\n"
+    },
+    {
+      "name": "syn-autolink-dashed",
+      "input": "see https://ex.com/a--b?q=\"x\" now",
+      "smart": true,
+      "html": "<p>see <a href=\"https://ex.com/a--b?q=%22x\">https://ex.com/a--b?q=&quot;x</a>” now</p>\n"
+    },
+    {
+      "name": "syn-quote-after-emph",
+      "input": "*bold*'s thing and \"*quoted*\" text",
+      "smart": true,
+      "html": "<p><em>bold</em>’s thing and “<em>quoted</em>” text</p>\n"
+    },
+    {
+      "name": "syn-list",
+      "input": "- one\n- two\n  - nested\n\n1. first\n2. second",
+      "smart": true,
+      "html": "<ul>\n<li>one</li>\n<li>two\n<ul>\n<li>nested</li>\n</ul>\n</li>\n</ul>\n<ol>\n<li>first</li>\n<li>second</li>\n</ol>\n"
+    },
+    {
+      "name": "syn-blockquote",
+      "input": "> quoted text\n\nafter",
+      "smart": true,
+      "html": "<blockquote>\n<p>quoted text</p>\n</blockquote>\n<p>after</p>\n"
+    },
+    {
+      "name": "syn-code-block",
+      "input": "```\ndon't \"smart\" this -- ever...\n```",
+      "smart": true,
+      "html": "<pre><code>don't &quot;smart&quot; this -- ever...\n</code></pre>\n"
+    },
+    {
+      "name": "syn-code-span",
+      "input": "Inline `\"quotes\" -- dashes` here.",
+      "smart": true,
+      "html": "<p>Inline <code>&quot;quotes&quot; -- dashes</code> here.</p>\n"
+    },
+    {
+      "name": "syn-smart-quotes",
+      "input": "\"Double\" and 'single' quotes, it's fine.",
+      "smart": true,
+      "html": "<p>“Double” and ‘single’ quotes, it’s fine.</p>\n"
+    },
+    {
+      "name": "syn-smart-dashes",
+      "input": "En -- dash, em --- dash, ellipsis...",
+      "smart": true,
+      "html": "<p>En – dash, em — dash, ellipsis…</p>\n"
+    },
+    {
+      "name": "syn-smart-mixed",
+      "input": "She said \"it's 'nested' -- really...\" then left.",
+      "smart": true,
+      "html": "<p>She said “it’s ‘nested’ – really…” then left.</p>\n"
+    },
+    {
+      "name": "syn-unicode",
+      "input": "Café naïve — already unicode ünd emoji 🦞.",
+      "smart": true,
+      "html": "<p>Café naïve — already unicode ünd emoji 🦞.</p>\n"
+    },
+    {
+      "name": "syn-hard-wrap",
+      "input": "line one\nline two",
+      "smart": true,
+      "html": "<p>line one\nline two</p>\n"
+    },
+    {
+      "name": "syn-image",
+      "input": "An image: ![alt text](https://example.com/i.png \"title\")",
+      "smart": true,
+      "html": "<p>An image: <img src=\"https://example.com/i.png\" alt=\"alt text\" title=\"title\" /></p>\n"
+    },
+    {
+      "name": "syn-mention-only",
+      "input": "@alice",
+      "smart": true,
+      "html": "<p>@alice</p>\n"
+    },
+    {
+      "name": "syn-mention-exists",
+      "input": "ping @alice about this",
+      "smart": true,
+      "html": "<p>ping @alice about this</p>\n"
+    },
+    {
+      "name": "syn-mention-missing",
+      "input": "ping @nobody about this",
+      "smart": true,
+      "html": "<p>ping @nobody about this</p>\n"
+    },
+    {
+      "name": "syn-mention-tail",
+      "input": "@alice: see the thing",
+      "smart": true,
+      "html": "<p>@alice: see the thing</p>\n"
+    },
+    {
+      "name": "syn-mention-multi",
+      "input": "cc @alice and @bob too",
+      "smart": true,
+      "html": "<p>cc @alice and @bob too</p>\n"
+    },
+    {
+      "name": "syn-mention-in-link",
+      "input": "[@alice](https://example.com/) is a link",
+      "smart": true,
+      "html": "<p><a href=\"https://example.com/\">@alice</a> is a link</p>\n"
+    },
+    {
+      "name": "syn-mention-in-code",
+      "input": "`@alice` in code",
+      "smart": true,
+      "html": "<p><code>@alice</code> in code</p>\n"
+    },
+    {
+      "name": "syn-mention-punct",
+      "input": "(@alice) and @bob's idea",
+      "smart": true,
+      "html": "<p>(@alice) and @bob’s idea</p>\n"
+    },
+    {
+      "name": "syn-mention-smart",
+      "input": "\"quote\" then @alice appears",
+      "smart": true,
+      "html": "<p>“quote” then @alice appears</p>\n"
+    }
+  ],
+  "markdowner": [
+    {
+      "name": "syn-paragraph",
+      "input": "Hello, world.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Hello, world.</p>\n"
+    },
+    {
+      "name": "syn-emphasis",
+      "input": "Some *emphasis*, **bold**, and `code`.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Some <em>emphasis</em>, <strong>bold</strong>, and <code>code</code>.</p>\n"
+    },
+    {
+      "name": "syn-heading-demotion",
+      "input": "# Big\n\n## Smaller\n\nBody text.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<strong>Big</strong>\n<strong>Smaller</strong>\n<p>Body text.</p>\n"
+    },
+    {
+      "name": "syn-link-absolute",
+      "input": "See [the site](https://example.com/page) for more.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>See <a href=\"https://example.com/page\" rel=\"ugc\">the site</a> for more.</p>\n"
+    },
+    {
+      "name": "syn-link-relative",
+      "input": "See [local](/about) for more.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>See <a href=\"/about\">local</a> for more.</p>\n"
+    },
+    {
+      "name": "syn-autolink-bare",
+      "input": "Go to https://example.com/x?y=1 now.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Go to <a href=\"https://example.com/x?y=1\" rel=\"ugc\">https://example.com/x?y=1</a> now.</p>\n"
+    },
+    {
+      "name": "syn-autolink-www",
+      "input": "Go to www.example.com now.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Go to <a href=\"http://www.example.com\" rel=\"ugc\">www.example.com</a> now.</p>\n"
+    },
+    {
+      "name": "syn-strikethrough",
+      "input": "This is ~~struck~~ text.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>This is <del>struck</del> text.</p>\n"
+    },
+    {
+      "name": "syn-tagfilter-script",
+      "input": "Raw <script>alert(1)</script> and <em>kept</em> HTML.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Raw <!-- raw HTML omitted -->alert(1)<!-- raw HTML omitted --> and <!-- raw HTML omitted -->kept<!-- raw HTML omitted --> HTML.</p>\n"
+    },
+    {
+      "name": "syn-tagfilter-close",
+      "input": "Open <style>x</style> done.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Open <!-- raw HTML omitted -->x<!-- raw HTML omitted --> done.</p>\n"
+    },
+    {
+      "name": "syn-raw-html-kept",
+      "input": "A <b>bold</b> move and a <br> break.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>A <!-- raw HTML omitted -->bold<!-- raw HTML omitted --> move and a <!-- raw HTML omitted --> break.</p>\n"
+    },
+    {
+      "name": "syn-raw-html-block",
+      "input": "before\n\n<div>\nblock html\n</div>\n\nafter",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>before</p>\n<!-- raw HTML omitted -->\n<p>after</p>\n"
+    },
+    {
+      "name": "syn-dash-runs",
+      "input": "a---- b----- c-- d--- e------",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>a–– b—– c– d— e——</p>\n"
+    },
+    {
+      "name": "syn-dots-four",
+      "input": "wait....",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>wait….</p>\n"
+    },
+    {
+      "name": "syn-autolink-dashed",
+      "input": "see https://ex.com/a--b?q=\"x\" now",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>see <a href=\"https://ex.com/a--b?q=%22x\" rel=\"ugc\">https://ex.com/a--b?q=\"x</a>” now</p>\n"
+    },
+    {
+      "name": "syn-quote-after-emph",
+      "input": "*bold*'s thing and \"*quoted*\" text",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p><em>bold</em>’s thing and “<em>quoted</em>” text</p>\n"
+    },
+    {
+      "name": "syn-list",
+      "input": "- one\n- two\n  - nested\n\n1. first\n2. second",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<ul>\n<li>one</li>\n<li>two\n<ul>\n<li>nested</li>\n</ul>\n</li>\n</ul>\n<ol>\n<li>first</li>\n<li>second</li>\n</ol>\n"
+    },
+    {
+      "name": "syn-blockquote",
+      "input": "> quoted text\n\nafter",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<blockquote>\n<p>quoted text</p>\n</blockquote>\n<p>after</p>\n"
+    },
+    {
+      "name": "syn-code-block",
+      "input": "```\ndon't \"smart\" this -- ever...\n```",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<pre><code>don't \"smart\" this -- ever...\n</code></pre>\n"
+    },
+    {
+      "name": "syn-code-span",
+      "input": "Inline `\"quotes\" -- dashes` here.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Inline <code>\"quotes\" -- dashes</code> here.</p>\n"
+    },
+    {
+      "name": "syn-smart-quotes",
+      "input": "\"Double\" and 'single' quotes, it's fine.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>“Double” and ‘single’ quotes, it’s fine.</p>\n"
+    },
+    {
+      "name": "syn-smart-dashes",
+      "input": "En -- dash, em --- dash, ellipsis...",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>En – dash, em — dash, ellipsis…</p>\n"
+    },
+    {
+      "name": "syn-smart-mixed",
+      "input": "She said \"it's 'nested' -- really...\" then left.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>She said “it’s ‘nested’ – really…” then left.</p>\n"
+    },
+    {
+      "name": "syn-unicode",
+      "input": "Café naïve — already unicode ünd emoji 🦞.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Café naïve — already unicode ünd emoji 🦞.</p>\n"
+    },
+    {
+      "name": "syn-hard-wrap",
+      "input": "line one\nline two",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>line one\nline two</p>\n"
+    },
+    {
+      "name": "syn-image",
+      "input": "An image: ![alt text](https://example.com/i.png \"title\")",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>An image: <a href=\"https://example.com/i.png\" rel=\"ugc\">title</a></p>\n"
+    },
+    {
+      "name": "syn-mention-only",
+      "input": "@alice",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>@alice</p>\n"
+    },
+    {
+      "name": "syn-mention-exists",
+      "input": "ping @alice about this",
+      "existing_users": [
+        "alice"
+      ],
+      "allow_images": false,
+      "html": "<p>ping <a href=\"https://lobste.rs/u/alice\" rel=\"ugc\">@alice</a> about this</p>\n"
+    },
+    {
+      "name": "syn-mention-missing",
+      "input": "ping @nobody about this",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>ping @nobody about this</p>\n"
+    },
+    {
+      "name": "syn-mention-tail",
+      "input": "@alice: see the thing",
+      "existing_users": [
+        "alice"
+      ],
+      "allow_images": false,
+      "html": "<p><a href=\"https://lobste.rs/u/alice\" rel=\"ugc\">@alice</a>: see the thing</p>\n"
+    },
+    {
+      "name": "syn-mention-multi",
+      "input": "cc @alice and @bob too",
+      "existing_users": [
+        "alice",
+        "bob"
+      ],
+      "allow_images": false,
+      "html": "<p>cc <a href=\"https://lobste.rs/u/alice\" rel=\"ugc\">@alice</a> and <a href=\"https://lobste.rs/u/bob\" rel=\"ugc\">@bob</a> too</p>\n"
+    },
+    {
+      "name": "syn-mention-in-link",
+      "input": "[@alice](https://example.com/) is a link",
+      "existing_users": [
+        "alice"
+      ],
+      "allow_images": false,
+      "html": "<p><a href=\"https://example.com/\" rel=\"ugc\">@alice</a> is a link</p>\n"
+    },
+    {
+      "name": "syn-mention-in-code",
+      "input": "`@alice` in code",
+      "existing_users": [
+        "alice"
+      ],
+      "allow_images": false,
+      "html": "<p><code>@alice</code> in code</p>\n"
+    },
+    {
+      "name": "syn-mention-punct",
+      "input": "(@alice) and @bob's idea",
+      "existing_users": [
+        "alice",
+        "bob"
+      ],
+      "allow_images": false,
+      "html": "<p>(<a href=\"https://lobste.rs/u/alice\" rel=\"ugc\">@alice</a>) and <a href=\"https://lobste.rs/u/bob\" rel=\"ugc\">@bob</a>’s idea</p>\n"
+    },
+    {
+      "name": "syn-mention-smart",
+      "input": "\"quote\" then @alice appears",
+      "existing_users": [
+        "alice"
+      ],
+      "allow_images": false,
+      "html": "<p>“quote” then <a href=\"https://lobste.rs/u/alice\" rel=\"ugc\">@alice</a> appears</p>\n"
+    },
+    {
+      "name": "syn-image-allow-true",
+      "input": "An image: ![alt text](https://example.com/i.png \"title\")",
+      "existing_users": [],
+      "allow_images": true,
+      "html": "<p>An image: <img src=\"https://example.com/i.png\" alt=\"alt text\" title=\"title\"></p>\n"
+    },
+    {
+      "name": "syn-image-allow-false",
+      "input": "An image: ![alt text](https://example.com/i.png \"title\")",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>An image: <a href=\"https://example.com/i.png\" rel=\"ugc\">title</a></p>\n"
+    },
+    {
+      "name": "bio-user-3",
+      "input": "Tempora aliquam id molestiae est modi enim.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Tempora aliquam id molestiae est modi enim.</p>\n"
+    },
+    {
+      "name": "bio-user-4",
+      "input": "Et dolorem maxime molestiae et quis deserunt.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Et dolorem maxime molestiae et quis deserunt.</p>\n"
+    },
+    {
+      "name": "bio-user-5",
+      "input": "Quisquam alias et est atque suscipit illo.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Quisquam alias et est atque suscipit illo.</p>\n"
+    },
+    {
+      "name": "bio-user-6",
+      "input": "Illo aut pariatur culpa ea commodi sit.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Illo aut pariatur culpa ea commodi sit.</p>\n"
+    },
+    {
+      "name": "bio-user-7",
+      "input": "Provident deleniti sit soluta est voluptas minima.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Provident deleniti sit soluta est voluptas minima.</p>\n"
+    },
+    {
+      "name": "bio-user-8",
+      "input": "Libero nesciunt facilis commodi quod dicta esse.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Libero nesciunt facilis commodi quod dicta esse.</p>\n"
+    },
+    {
+      "name": "bio-user-9",
+      "input": "Ullam maxime omnis sed vel voluptatem dicta.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Ullam maxime omnis sed vel voluptatem dicta.</p>\n"
+    },
+    {
+      "name": "bio-user-10",
+      "input": "Maiores quia excepturi est beatae mollitia qui.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Maiores quia excepturi est beatae mollitia qui.</p>\n"
+    },
+    {
+      "name": "bio-user-11",
+      "input": "Ut consequuntur hic neque qui voluptas commodi.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Ut consequuntur hic neque qui voluptas commodi.</p>\n"
+    },
+    {
+      "name": "bio-user-12",
+      "input": "Consequatur earum ut exercitationem expedita fugit perferendis.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Consequatur earum ut exercitationem expedita fugit perferendis.</p>\n"
+    },
+    {
+      "name": "bio-user-13",
+      "input": "Magnam facere enim cum aut eligendi laboriosam.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Magnam facere enim cum aut eligendi laboriosam.</p>\n"
+    },
+    {
+      "name": "bio-user-14",
+      "input": "Quidem quia nesciunt placeat eius molestiae laudantium.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Quidem quia nesciunt placeat eius molestiae laudantium.</p>\n"
+    },
+    {
+      "name": "bio-user-15",
+      "input": "Eius tempora quidem impedit odit nisi voluptatem.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Eius tempora quidem impedit odit nisi voluptatem.</p>\n"
+    },
+    {
+      "name": "bio-user-16",
+      "input": "Voluptatem assumenda qui veniam inventore nesciunt culpa.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Voluptatem assumenda qui veniam inventore nesciunt culpa.</p>\n"
+    },
+    {
+      "name": "bio-user-17",
+      "input": "Facilis libero dolorum explicabo earum ratione ea.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Facilis libero dolorum explicabo earum ratione ea.</p>\n"
+    },
+    {
+      "name": "bio-user-18",
+      "input": "Aliquam reprehenderit voluptatem non asperiores hic sit.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Aliquam reprehenderit voluptatem non asperiores hic sit.</p>\n"
+    },
+    {
+      "name": "bio-user-19",
+      "input": "Ad corporis animi eligendi aliquid eaque quasi.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Ad corporis animi eligendi aliquid eaque quasi.</p>\n"
+    },
+    {
+      "name": "bio-user-20",
+      "input": "Quae temporibus beatae tempore nemo ratione aut.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Quae temporibus beatae tempore nemo ratione aut.</p>\n"
+    },
+    {
+      "name": "bio-user-21",
+      "input": "Aut mollitia asperiores nisi delectus quaerat quis.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Aut mollitia asperiores nisi delectus quaerat quis.</p>\n"
+    },
+    {
+      "name": "bio-user-22",
+      "input": "Cum recusandae voluptatem fuga explicabo temporibus debitis.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Cum recusandae voluptatem fuga explicabo temporibus debitis.</p>\n"
+    },
+    {
+      "name": "bio-user-23",
+      "input": "Eum culpa quas est ipsam facilis exercitationem.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Eum culpa quas est ipsam facilis exercitationem.</p>\n"
+    },
+    {
+      "name": "bio-user-24",
+      "input": "Ducimus fuga nemo repellat vitae quasi consectetur.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Ducimus fuga nemo repellat vitae quasi consectetur.</p>\n"
+    },
+    {
+      "name": "bio-user-25",
+      "input": "Ullam dolor itaque illo nulla quia occaecati.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Ullam dolor itaque illo nulla quia occaecati.</p>\n"
+    },
+    {
+      "name": "bio-user-26",
+      "input": "Debitis porro est exercitationem ipsa fugiat repellendus.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Debitis porro est exercitationem ipsa fugiat repellendus.</p>\n"
+    },
+    {
+      "name": "bio-user-27",
+      "input": "Quia est ipsa repellendus officiis atque neque.",
+      "existing_users": [],
+      "allow_images": false,
+      "html": "<p>Quia est ipsa repellendus officiis atque neque.</p>\n"
+    }
+  ],
+  "accepted_divergences": {
+    "markly/syn-autolink-dashed": {
+      "html": "<p>see <a href=\"https://ex.com/a--b?q=\">https://ex.com/a--b?q=</a>”x” now</p>\n",
+      "reason": "org.nibor.autolink excludes quote chars from URL boundaries; cmark-gfm includes them"
+    },
+    "markdowner/syn-autolink-dashed": {
+      "html": "<p>see <a href=\"https://ex.com/a--b?q=\" rel=\"ugc\">https://ex.com/a--b?q=</a>”x” now</p>\n",
+      "reason": "same autolink URL-boundary divergence, through Markdowner"
+    },
+    "markdowner/syn-image-allow-true": {
+      "html": "<p>An image: <img alt=\"alt text\" src=\"https://example.com/i.png\" title=\"title\"></p>\n",
+      "reason": "nokogiri-java (NekoHTML) alphabetizes attributes at parse; off lobsters live path (allow_images unset there)"
+    }
+  },
+  "meta": {
+    "generated": "scripts/markly-conformance --generate",
+    "reference": "markly 0.16.0 on ruby 4.0.5 (2026-05-20 revision 64336ffd0e) +PRISM [arm64-darwin25]"
+  }
+}

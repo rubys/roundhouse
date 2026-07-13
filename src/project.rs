@@ -996,10 +996,11 @@ fn ruby_runtime_files(
     // resolves without clobbering the real implementations.
     for (path, content) in files.iter_mut() {
         if path == "runtime/gem_facades.rb" {
-            *content = "# Gem façades are spinel-only (no native gems there). On the CRuby/\n\
-                        # JRuby path the real markly / nokogiri / mail gems are used (guarded\n\
+            *content = "# Gem façades are spinel-only (no native gems there). On the CRuby\n\
+                        # path the real markly / nokogiri / mail gems are used (guarded\n\
                         # requires in main.rb); this no-op keeps the require anchor resolving\n\
-                        # without shadowing them.\n"
+                        # without shadowing them. (JRuby swaps in the commonmark-java Markly\n\
+                        # shim instead — see jruby_runtime_files.)\n"
                 .to_string();
         }
     }
@@ -1263,6 +1264,60 @@ fn jruby_runtime_files(
     // + Rack via the ruby_overlay, same as the CRuby target.
     files.retain(|(p, _)| !p.starts_with("runtime/tep/"));
 
+    // Markly shim: markly is cmark-gfm C bindings with no JRuby build,
+    // so this tree implements the markly contract over commonmark-java
+    // (reference-conformant: scripts/markly-conformance, vectors
+    // generated from the real gem under CRuby). The shim rides the
+    // gem_facades require anchor: swap the scaffold base's raising
+    // façade for a loader that provides Markly via the shim, while
+    // Nokogiri (java platform gem) and Mail (pure Ruby) resolve to the
+    // real gems — the JRuby analogue of the CRuby neutralization in
+    // `ruby_runtime_files`. Apps that never require the anchor (blog)
+    // never load the shim, so the jars stay optional.
+    let markly_shim = fs::read_to_string("runtime/spinel/markly_jruby.rb")
+        .map_err(|e| format!("read runtime/spinel/markly_jruby.rb: {e}"))?;
+    files.push(("runtime/markly_jruby.rb".to_string(), markly_shim));
+    for (path, content) in files.iter_mut() {
+        if path == "runtime/gem_facades.rb" {
+            *content = "# On the JRuby tree Markly is provided by the commonmark-java shim\n\
+                        # (markly_jruby.rb); nokogiri (java platform gem) and mail (pure Ruby)\n\
+                        # are the real gems, loaded by main.rb's guarded requires. This file\n\
+                        # keeps the `require_relative \"runtime/gem_facades\"` anchor resolving.\n\
+                        require_relative \"markly_jruby\"\n"
+                .to_string();
+        }
+    }
+
+    // The shim's jars (commonmark-java + org.nibor.autolink) can't ship
+    // through the text-only emit; the tree fetches them from Maven
+    // Central on demand.
+    files.push((
+        "bin/fetch-jars".to_string(),
+        "#!/bin/sh\n\
+         # Fetch the commonmark-java jars the Markly shim needs (see\n\
+         # runtime/markly_jruby.rb). Run once: sh bin/fetch-jars\n\
+         set -e\n\
+         dir=\"$(dirname \"$0\")/../vendor/jars\"\n\
+         mkdir -p \"$dir\"\n\
+         for spec in \\\n\
+           org/commonmark/commonmark/0.29.0/commonmark-0.29.0.jar \\\n\
+           org/commonmark/commonmark-ext-gfm-strikethrough/0.29.0/commonmark-ext-gfm-strikethrough-0.29.0.jar \\\n\
+           org/commonmark/commonmark-ext-autolink/0.29.0/commonmark-ext-autolink-0.29.0.jar \\\n\
+           org/nibor/autolink/autolink/0.12.0/autolink-0.12.0.jar \\\n\
+         ; do\n\
+           f=\"$dir/$(basename \"$spec\")\"\n\
+           [ -f \"$f\" ] || curl -sf -o \"$f\" \"https://repo1.maven.org/maven2/$spec\"\n\
+         done\n\
+         echo \"jars ready in $dir\"\n"
+            .to_string(),
+    ));
+
+    // Extras façades: same reasoning as the CRuby tree — Sponge's
+    // vendored source is pure stdlib (net/https, resolv, ipaddr), all
+    // of which run on the JVM — so restore the verbatim emit over the
+    // scaffold base's raising façade.
+    emit::ruby::restore_extras_facades(&mut files, app);
+
     walk_dir_into(
         Path::new("runtime/spinel/scaffold/ruby_overlay"),
         "",
@@ -1324,6 +1379,12 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // the spinel-subset compliance gate) must never see. It is injected
     // only by `jruby_runtime_files`, so keep it out of the shared base.
     files.retain(|(p, _)| p != "runtime/db_jruby.rb");
+
+    // Same story for `markly_jruby.rb` — the JRuby implementation of the
+    // markly contract over commonmark-java (Java interop; conformance
+    // vectors at bench/gem-shims/markly/). Injected only by
+    // `jruby_runtime_files`.
+    files.retain(|(p, _)| p != "runtime/markly_jruby.rb");
 
     // Vendored Tep transport (FFI HTTP server). Both .rb files and
     // sphttp.c (precompiled to sphttp.o at transpile-post time).
