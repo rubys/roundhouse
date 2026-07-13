@@ -53,6 +53,10 @@ module ActiveSupport
 
     def to_i = @seconds.to_i
     def to_f = @seconds.to_f
+    # Rails parity: Duration#to_s is the seconds value's to_s
+    # (`30.minutes.to_s == "1800"`) — also what interpolation calls
+    # (lobsters embeds durations in cache keys).
+    def to_s = @seconds.to_s
     def seconds = @seconds
 
     # Numeric comparison protocol: `Time.current - created_at <=

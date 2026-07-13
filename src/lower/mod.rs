@@ -98,23 +98,45 @@ pub fn apply_post_analyze_lowerings(
 /// Every app body the post-analyze hook owns: model methods, scope
 /// bodies, callback conditions and unrecognized class-body exprs;
 /// library-class methods; controller actions and unrecognized items;
-/// seeds. The one definition of the hook's scope — passes iterate
-/// through here so they can't drift. View bodies are deliberately
-/// excluded (each target's view pipeline still has its own working
-/// walkers over source shapes — see the note in
-/// [`blank::apply_blank_lowering`]; views rejoin when the view pipeline
-/// migrates to shared lowerings). Test-module and fixture bodies are
-/// excluded too (they run on CRuby lanes; extendable when a
-/// strict-target test lane needs it).
+/// seeds. Param DEFAULTS ride along everywhere a body does — a default
+/// is call-time-evaluated body code, and `def initialize(cache_time =
+/// 30.minutes)` needs the duration grounding (or `Time.current` its
+/// own) exactly as much as a body site; defaults were the one
+/// reachable-expr position the hook skipped (lobsters'
+/// FlaggedCommenters left an ungrounded `Integer#minutes` send whose
+/// untyped result every downstream consumer inherited). The one
+/// definition of the hook's scope — passes iterate through here so
+/// they can't drift. View bodies are deliberately excluded (each
+/// target's view pipeline still has its own working walkers over
+/// source shapes — see the note in [`blank::apply_blank_lowering`];
+/// views rejoin when the view pipeline migrates to shared lowerings).
+/// Test-module and fixture bodies are excluded too (they run on CRuby
+/// lanes; extendable when a strict-target test lane needs it).
 pub(crate) fn for_each_hook_body(
     app: &mut crate::app::App,
     f: &mut impl FnMut(&mut crate::expr::Expr),
 ) {
+    fn visit_param_defaults(
+        params: &mut [crate::dialect::Param],
+        f: &mut impl FnMut(&mut crate::expr::Expr),
+    ) {
+        for p in params {
+            if let Some(default) = &mut p.default {
+                f(default);
+            }
+        }
+    }
     for model in &mut app.models {
         for item in &mut model.body {
             match item {
-                crate::dialect::ModelBodyItem::Method { method, .. } => f(&mut method.body),
-                crate::dialect::ModelBodyItem::Scope { scope, .. } => f(&mut scope.body),
+                crate::dialect::ModelBodyItem::Method { method, .. } => {
+                    visit_param_defaults(&mut method.params, f);
+                    f(&mut method.body)
+                }
+                crate::dialect::ModelBodyItem::Scope { scope, .. } => {
+                    visit_param_defaults(&mut scope.params, f);
+                    f(&mut scope.body)
+                }
                 crate::dialect::ModelBodyItem::Callback { callback, .. } => {
                     if let Some(cond) = &mut callback.condition {
                         f(cond);
@@ -130,13 +152,19 @@ pub(crate) fn for_each_hook_body(
     }
     for lc in &mut app.library_classes {
         for method in &mut lc.methods {
+            visit_param_defaults(&mut method.params, f);
             f(&mut method.body);
         }
     }
     for controller in &mut app.controllers {
         for item in &mut controller.body {
             match item {
-                crate::dialect::ControllerBodyItem::Action { action, .. } => f(&mut action.body),
+                crate::dialect::ControllerBodyItem::Action { action, .. } => {
+                    for (_name, default) in &mut action.opt_params {
+                        f(default);
+                    }
+                    f(&mut action.body)
+                }
                 crate::dialect::ControllerBodyItem::Unknown { expr, .. } => f(expr),
                 _ => {}
             }

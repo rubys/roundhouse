@@ -121,6 +121,15 @@ module ActiveSupport
       @seconds.to_f
     end
 
+    # Rails parity: Duration#to_s is the seconds VALUE's to_s
+    # (`30.minutes.to_s == "1800"`). Also what string interpolation
+    # calls — lobsters' cache keys embed durations
+    # (`"aggregates_#{interval}_#{cache_time}"`), and matching Rails
+    # here keeps those keys byte-identical.
+    def to_s
+      @seconds.to_s
+    end
+
     def seconds
       @seconds
     end
