@@ -109,11 +109,12 @@ BENCH_EMAIL    = "wiegand.michell@mertz-vonrueden.test"
 BENCH_PASSWORD = "ji3W36xR"
 BENCH_USERNAME = "michell_wiegand"
 
-require "sqlite3"
-ids_db  = SQLite3::Database.new(DB_FILE, readonly: true)
-STORY   = ids_db.get_first_value("SELECT short_id FROM stories  WHERE is_deleted = 0 ORDER BY id LIMIT 1") || "enr7ye"
-COMMENT = ids_db.get_first_value("SELECT short_id FROM comments WHERE is_deleted = 0 ORDER BY id LIMIT 1") || "6srqij"
-ids_db.close
+# Sample through the tree's own adapter (already configured above) so
+# the replay runs wherever the tree runs — the sqlite3 C gem doesn't
+# exist under JRuby, whose tree reaches SQLite over JDBC.
+short_id = ->(sql) { ActiveRecord.adapter.select_rows(sql).first&.fetch("short_id", nil) }
+STORY   = short_id.call("SELECT short_id FROM stories  WHERE is_deleted = 0 ORDER BY id LIMIT 1") || "enr7ye"
+COMMENT = short_id.call("SELECT short_id FROM comments WHERE is_deleted = 0 ORDER BY id LIMIT 1") || "6srqij"
 
 ROUTES = [
   "/u",
