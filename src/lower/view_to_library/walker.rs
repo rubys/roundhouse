@@ -747,6 +747,7 @@ mod tests {
             reference_reads: Default::default(),
             reference_targets: Default::default(),
             nilable_scalar_reads: Default::default(),
+            model_singulars: Default::default(),
             stylesheets: Vec::new(),
             partial_ivars: Default::default(),
             dyn_pools: Default::default(),

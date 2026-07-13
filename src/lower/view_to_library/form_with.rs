@@ -236,18 +236,49 @@ fn simplify_opts_value(k: &Expr, v: &Expr) -> Expr {
 /// helper (`login_path` — a no-receiver `*_path`/`*_url` Send) becomes
 /// `RouteHelpers.login_path(args)`; anything else (a String literal, an
 /// already-qualified call) passes through unchanged.
-fn route_helperize(url: Expr, route_helpers: &impl Fn() -> Expr) -> Expr {
+fn route_helperize(url: Expr, route_helpers: &impl Fn() -> Expr, ctx: &ViewCtx) -> Expr {
     if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*url.node {
         let m = method.as_str();
         if m.ends_with("_path") || m.ends_with("_url") {
             return send(Some(route_helpers()), m, args.clone(), None, true);
         }
     }
-    // A bare local/ivar `url:` is Rails' polymorphic-record form
-    // (`form_with url: comment` → POST /comments or PATCH
-    // /comments/:id). Route through the runtime's url_for, which
-    // passes strings unchanged and resolves records via their class
-    // table + persistence. Literals (string paths) stay verbatim.
+    // A bare local/ivar `url:` naming a KNOWN MODEL is Rails'
+    // polymorphic-record form (`form_with url: comment`), and its
+    // action resolves at COMPILE time — `url_for(record)` semantics:
+    // member path when persisted, collection path when new (the `url:`
+    // form keeps POST either way; only `model:` derives PATCH). The
+    // record rides WHOLE into the member helper so a custom `to_param`
+    // (lobsters' Comment#short_id) shapes the segment exactly as Rails
+    // does. This is the typed replacement for the runtime `url_for`
+    // fallback below, whose `is_a?`-dispatch body is CRuby-overlay-only
+    // and refuses under spinel AOT.
+    let bare_name: Option<&str> = match &*url.node {
+        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
+            Some(method.as_str())
+        }
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => Some(name.as_str()),
+        _ => None,
+    };
+    if let Some(name) = bare_name {
+        if ctx.model_singulars.contains(name) {
+            let plural = crate::naming::pluralize_snake(name);
+            return Expr::new(
+                url.span,
+                ExprNode::If {
+                    cond: send(Some(url.clone()), "persisted?", Vec::new(), None, false),
+                    then_branch: super::route_helpers_call(
+                        &format!("{name}_path"),
+                        vec![url.clone()],
+                    ),
+                    else_branch: super::route_helpers_call(&format!("{plural}_path"), Vec::new()),
+                },
+            );
+        }
+    }
+    // Any other bare local/ivar defers to the runtime's url_for
+    // (strings pass through unchanged there; record resolution via
+    // class table + persistence is the CRuby overlay's job).
     let is_bareword = matches!(
         &*url.node,
         ExprNode::Send { recv: None, args, block: None, .. } if args.is_empty()
@@ -347,7 +378,7 @@ fn classify_form_with_components(
             return Some(FormWithComponents {
                 model: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
                 model_name: String::new(),
-                action: route_helperize(url, &route_helpers),
+                action: route_helperize(url, &route_helpers, ctx),
                 method,
                 opts_entries,
             });
@@ -393,7 +424,7 @@ fn classify_form_with_components(
         return Some(FormWithComponents {
             model,
             model_name: singular,
-            action: route_helperize(url, &route_helpers),
+            action: route_helperize(url, &route_helpers, ctx),
             method,
             opts_entries,
         });

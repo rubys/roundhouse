@@ -204,6 +204,7 @@ pub struct ViewLowerCtx<'a> {
     reference_reads: std::rc::Rc<std::collections::HashSet<String>>,
     reference_targets: std::rc::Rc<std::collections::HashMap<String, String>>,
     nilable_scalar_reads: std::rc::Rc<std::collections::HashSet<String>>,
+    model_singulars: std::rc::Rc<std::collections::HashSet<String>>,
 }
 
 impl<'a> ViewLowerCtx<'a> {
@@ -222,6 +223,12 @@ impl<'a> ViewLowerCtx<'a> {
             reference_reads: std::rc::Rc::new(reference_reader_names(app)),
             reference_targets: std::rc::Rc::new(reference_target_names(app)),
             nilable_scalar_reads: std::rc::Rc::new(nilable_scalar_reader_names(app)),
+            model_singulars: std::rc::Rc::new(
+                app.models
+                    .iter()
+                    .map(|m| crate::naming::snake_case(m.name.0.as_str()))
+                    .collect(),
+            ),
         }
     }
 
@@ -424,6 +431,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         reference_reads: lx.reference_reads.clone(),
         reference_targets: lx.reference_targets.clone(),
         nilable_scalar_reads: lx.nilable_scalar_reads.clone(),
+        model_singulars: lx.model_singulars.clone(),
         stylesheets: app.stylesheets.clone(),
         partial_ivars: closures.clone(),
         dyn_pools: dyn_pools.clone(),
@@ -2222,6 +2230,13 @@ pub(super) struct ViewCtx {
     /// predicates on these get the nil-safe forms (see
     /// `rewrite_predicates`). Empty for apps without the DSL.
     pub(super) nilable_scalar_reads: std::rc::Rc<std::collections::HashSet<String>>,
+    /// Snake-singular names of the app's models (`comment`, `story`).
+    /// `form_with url: <bare record>` consults this to resolve the
+    /// form action polymorphically at COMPILE time (`persisted?` →
+    /// member path, else collection path) instead of deferring to the
+    /// runtime `url_for`, whose `is_a?`-dispatch shape is
+    /// CRuby-overlay-only.
+    pub(super) model_singulars: std::rc::Rc<std::collections::HashSet<String>>,
     /// Stylesheet logical names ingested from `app/assets/stylesheets/`
     /// + `app/assets/builds/`. Used by the `stylesheet_link_tag(:app,
     /// ...)` expansion: a `:app` symbol arg fans out to one call per
