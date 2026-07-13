@@ -501,6 +501,102 @@ fn report_unclaimed_unknowns(model: &Model) {
     }
 }
 
+/// Filter a controller's permitted-fields list down to the names this
+/// model can actually assign — the union of every writer source the
+/// synthesizers and the model body jointly provide: table columns,
+/// `belongs_to` writers, `attr_accessor`/`attr_writer` virtuals,
+/// `typed_store` attrs, `has_secure_password`'s plaintext pair, and
+/// user-defined `def <field>=`.
+///
+/// Rails' permit contract is wider than its assign contract: permitting
+/// a name is harmless until assignment meets a field with no writer
+/// (`ActiveModel::UnknownAttributeError`). Lobsters permits lookup keys
+/// (`tag[tag_name]`, `category[category_name]`) that no writer backs —
+/// synthesizing `self.tag_name = p.tag_name` into `update` turned that
+/// latent contract gap into a hard undefined-method error under spinel
+/// AOT. Dropping the assignment diverges from Rails only for a request
+/// that actually submits the writerless key (Rails raises, we ignore);
+/// each dropped name is ledgered as a `lower_residue` warning.
+fn writable_permit_fields(
+    model: &Model,
+    table: &crate::schema::Table,
+    fields: &[crate::ident::Symbol],
+) -> Vec<crate::ident::Symbol> {
+    use crate::diagnostic::{Diagnostic, DiagnosticKind};
+    use crate::dialect::{Association, ModelBodyItem};
+    use crate::expr::{ExprNode, Literal};
+    use crate::ident::Symbol;
+
+    let mut writable: std::collections::BTreeSet<Symbol> = std::collections::BTreeSet::new();
+    for col in &table.columns {
+        writable.insert(col.name.clone());
+    }
+    for (_span, assoc) in model.spanned_associations() {
+        if let Association::BelongsTo { name, .. } = assoc {
+            writable.insert(name.clone());
+        }
+    }
+    // `attr_accessor` / `attr_writer` virtuals (mirrors the scan in
+    // markers::push_attr_accessor_methods).
+    for item in &model.body {
+        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
+            continue;
+        };
+        if !matches!(method.as_str(), "attr_accessor" | "attr_writer") {
+            continue;
+        }
+        for arg in args {
+            if let ExprNode::Lit { value: Literal::Sym { value } } = &*arg.node {
+                writable.insert(value.clone());
+            }
+        }
+    }
+    for (_store, attrs) in crate::lower::typed_store::typed_store_decls(&model.body) {
+        for attr in attrs {
+            writable.insert(attr.name);
+        }
+    }
+    if let Some(attr) = crate::lower::secure_password::secure_password_attr(&model.body) {
+        writable.insert(Symbol::from(format!("{}_confirmation", attr.as_str())));
+        writable.insert(attr);
+    }
+
+    fields
+        .iter()
+        .filter(|field| {
+            if writable.contains(*field) {
+                return true;
+            }
+            let writer = Symbol::from(format!("{}=", field.as_str()));
+            if model_defines_instance_method(model, &writer) {
+                return true;
+            }
+            let kind = DiagnosticKind::LowerResidue {
+                pass: Symbol::from("permit_writer_filter"),
+                construct: Symbol::from("permit"),
+                reason: Symbol::from("no writer"),
+            };
+            let d = Diagnostic {
+                span: model.span,
+                severity: Diagnostic::default_severity(&kind),
+                kind,
+                message: format!(
+                    "permitted field `{field}` has no writer on `{model_name}` (not a \
+                     column, attr_writer, belongs_to, typed_store, has_secure_password, \
+                     or `def {field}=`) — dropped from the synthesized update/from_params; \
+                     Rails would raise UnknownAttributeError if a request submitted it",
+                    field = field.as_str(),
+                    model_name = model.name.0.as_str(),
+                ),
+            };
+            crate::emit::diagnostics::push(d);
+            false
+        })
+        .cloned()
+        .collect()
+}
+
 fn build_methods(
     model: &Model,
     schema: &Schema,
@@ -515,6 +611,15 @@ fn build_methods(
     if let Some(table) = schema.tables.get(&model.table.0) {
         let resource = crate::ident::Symbol::from(crate::naming::snake_case(model.name.0.as_str()));
         let permitted_fields = params_specs.get(&resource).map(|v| v.as_slice());
+        // A controller's permit list is wider than the model's writer
+        // surface (lobsters permits lookup keys like `tag[tag_name]`
+        // that no writer backs) — filter to assignable names before
+        // sizing `update`/`from_params`. The `<Resource>Params` class
+        // itself keeps every permitted field (registration below uses
+        // the unfiltered spec); only the assignment synthesis narrows.
+        let writable_fields =
+            permitted_fields.map(|fields| writable_permit_fields(model, table, fields));
+        let permitted_fields = writable_fields.as_deref();
         push_schema_methods(&mut methods, model, table, permitted_fields);
         // Per-model Level-3 adapter primitives (`_adapter_find_by_id`, etc.)
         // — typed methods that go directly from SQL composition to typed

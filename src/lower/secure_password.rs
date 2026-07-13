@@ -114,7 +114,9 @@ pub(crate) fn push_secure_password_methods(methods: &mut Vec<MethodDef>, model: 
 /// The secure-password attribute name when the model body declares
 /// `has_secure_password` (first positional symbol, default
 /// `password`), else None. Mirrors analyze's registration scan.
-fn secure_password_attr(body: &[ModelBodyItem]) -> Option<Symbol> {
+/// `pub(crate)` for the permit-writer filter (model_to_library), which
+/// counts the synthesized plaintext writers as assignable.
+pub(crate) fn secure_password_attr(body: &[ModelBodyItem]) -> Option<Symbol> {
     for item in body {
         let ModelBodyItem::Unknown { expr, .. } = item else {
             continue;
