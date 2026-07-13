@@ -197,8 +197,9 @@ fn classify(ty: Option<&Ty>, defs: &AppDefinitions) -> Grounding {
 /// A receiver that is safe to re-evaluate or drop: an effect-free
 /// chain of reads. Zero-arg sends ride the analyzer's effect
 /// annotations — an AR write (`save`, `destroy`) carries effects and
-/// fails this test, a memoized column reader doesn't.
-fn is_effect_free_reader(e: &Expr) -> bool {
+/// fails this test, a memoized column reader doesn't. Shared purity
+/// gate for the hook passes (blank grounding, update-kwargs inlining).
+pub(crate) fn is_effect_free_reader(e: &Expr) -> bool {
     if !e.effects.is_pure() {
         return false;
     }

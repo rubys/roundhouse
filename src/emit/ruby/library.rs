@@ -26,7 +26,8 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     apply_helper_lowering(&mut lcs, app);
     // Before duration lowering — see the emit_lowered_models stack.
     super::send_dispatch::apply_send_static_dispatch(&mut lcs);
-    apply_update_kwargs_inline(&mut lcs);
+    // update-kwargs inlining runs in the shared post-analyze hook,
+    // which covers these library-class bodies.
     apply_mailer_class_side_lowering(&mut lcs);
     apply_duration_lowering(&mut lcs);
     // Transpiled-shape classes carry hand-written accessors that
@@ -979,73 +980,10 @@ fn rewrite_layout_wrap(expr: &mut Expr, app: &App) {
     }
 }
 
-/// Ruby-family pre-emit pass: `record.update!(k: v, ...)` /
-/// `record.update(k: v, ...)` with literal kwargs inlined to
-/// writer-assignments + save:
-///
-///   record.k = v
-///   ...
-///   record.save!   (save for the non-bang form)
-///
-/// Routed through the real per-attribute writers, so column writers,
-/// temporal normalizes, AND belongs_to virtuals (`new_user: nil`) all
-/// resolve — the runtime `self[k] =` indexer seam only covers columns.
-/// Pure-read receivers only (each assignment re-reads it); a dynamic
-/// hash argument is left alone.
-pub(crate) fn apply_update_kwargs_inline(lcs: &mut [LibraryClass]) {
-    for lc in lcs.iter_mut() {
-        for m in &mut lc.methods {
-            rewrite_update_kwargs(&mut m.body);
-        }
-    }
-}
-
-fn rewrite_update_kwargs(expr: &mut Expr) {
-    expr.node.for_each_child_mut(&mut rewrite_update_kwargs);
-    let matches = matches!(
-        &*expr.node,
-        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
-            if matches!(method.as_str(), "update" | "update!")
-                && args.len() == 1
-                && matches!(&*args[0].node, ExprNode::Hash { entries, .. }
-                    if entries.iter().all(|(k, _)| matches!(
-                        &*k.node, ExprNode::Lit { value: Literal::Sym { .. } })))
-                && super::send_dispatch::expr_is_pure_read(r)
-    );
-    if !matches {
-        return;
-    }
-    let span = expr.span;
-    let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
-    let ExprNode::Send { recv: Some(r), method, args, .. } = node else { unreachable!() };
-    let ExprNode::Hash { entries, .. } = &*args[0].node else { unreachable!() };
-    let mut exprs: Vec<Expr> = Vec::new();
-    for (k, v) in entries {
-        let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
-            unreachable!()
-        };
-        exprs.push(Expr::new(
-            span,
-            ExprNode::Assign {
-                target: LValue::Attr { recv: r.clone(), name: key.clone() },
-                value: v.clone(),
-            },
-        ));
-    }
-    let save = if method.as_str() == "update!" { "save!" } else { "save" };
-    exprs.push(Expr::new(
-        span,
-        ExprNode::Send {
-            recv: Some(r),
-            method: Symbol::from(save),
-            args: vec![],
-            block: None,
-            parenthesized: false,
-        },
-    ));
-    *expr.node = ExprNode::Seq { exprs };
-    expr.ty = None;
-}
+// `record.update!(k: v, ...)` kwargs inlining moved to the shared
+// post-analyze hook (`lower::apply_update_kwargs_inline`) — hook
+// bodies arrive here already in writer-assign + save form, with
+// unknown-receiver and impure-receiver sites on the residue ledger.
 
 // `errors.add(:field, "msg")` grounding moved to the shared
 // post-analyze hook (`lower::apply_errors_add_lowering`) — every hook

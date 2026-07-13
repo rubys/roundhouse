@@ -194,8 +194,9 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // duration lowering: a duration-unit dispatch's arms emit plural
     // unit calls that the duration pass then grounds.
     send_dispatch::apply_send_static_dispatch(&mut lcs);
-    // `record.update!(k: v)` → writer assigns + save! (no-op elsewhere).
-    library::apply_update_kwargs_inline(&mut lcs);
+    // `record.update!(k: v)` inlining moved to the shared post-analyze
+    // hook (`lower::apply_update_kwargs_inline`) — hook bodies arrive
+    // here already in writer-assign + save form.
     // `Time.current` is grounded app-wide by the shared post-analyze
     // hook (`lower::apply_time_current_lowering`); only the view
     // pipeline still applies the emit-time copy.
