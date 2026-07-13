@@ -26,9 +26,8 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     apply_helper_lowering(&mut lcs, app);
     // Before duration lowering — see the emit_lowered_models stack.
     super::send_dispatch::apply_send_static_dispatch(&mut lcs);
-    // update-kwargs inlining runs in the shared post-analyze hook,
-    // which covers these library-class bodies.
-    apply_mailer_class_side_lowering(&mut lcs);
+    // update-kwargs inlining and mailer class-side wrappers run in the
+    // shared post-analyze hook, which covers these library classes.
     apply_duration_lowering(&mut lcs);
     // Transpiled-shape classes carry hand-written accessors that
     // `synth_attr_reader` never sees, so the datetime reader/writer
@@ -1100,110 +1099,11 @@ fn is_url_helpers_chain(e: &Expr) -> bool {
                 if path.len() == 1 && path[0].as_str() == "Rails"))
 }
 
-/// Ruby-family pre-emit pass: Rails' mailer class-side call idiom.
-/// `BanNotification.notify(user, banner, reason)` is method_missing in
-/// Rails (the class proxies to `new.notify(...)` and wraps delivery);
-/// under static resolution every public instance method of a mailer
-/// class gets an explicit class-side wrapper:
-///
-///   def self.notify(user, banner, reason)
-///     new.notify(user, banner, reason)
-///   end
-///
-/// Mailer classes are those whose parent chain (within the ingested
-/// set) reaches ActionMailer::Base. Positional forwarding only — the
-/// corpus's mailer methods take positional args, and typed-kwarg
-/// forwarding is the known strict-target trap.
-pub(crate) fn apply_mailer_class_side_lowering(lcs: &mut [LibraryClass]) {
-    use std::collections::BTreeSet;
-
-    let mut mailers: BTreeSet<String> = BTreeSet::new();
-    loop {
-        let mut changed = false;
-        for lc in lcs.iter() {
-            let name = lc.name.0.as_str();
-            if mailers.contains(name) {
-                continue;
-            }
-            if let Some(p) = &lc.parent {
-                let ps = p.0.as_str();
-                if ps == "ActionMailer::Base" || mailers.contains(ps) {
-                    mailers.insert(name.to_string());
-                    changed = true;
-                }
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    if mailers.is_empty() {
-        return;
-    }
-
-    for lc in lcs.iter_mut() {
-        if !mailers.contains(lc.name.0.as_str()) {
-            continue;
-        }
-        let class_side: BTreeSet<&str> = lc
-            .methods
-            .iter()
-            .filter(|m| m.receiver == MethodReceiver::Class)
-            .map(|m| m.name.as_str())
-            .collect();
-        let mut wrappers: Vec<crate::dialect::MethodDef> = Vec::new();
-        for m in &lc.methods {
-            if m.receiver != MethodReceiver::Instance
-                || m.name.as_str() == "initialize"
-                || class_side.contains(m.name.as_str())
-            {
-                continue;
-            }
-            let span = m.body.span;
-            let args: Vec<Expr> = m
-                .params
-                .iter()
-                .enumerate()
-                .map(|(i, p)| {
-                    Expr::new(
-                        span,
-                        ExprNode::Var {
-                            id: crate::ident::VarId(i as u32),
-                            name: p.name.clone(),
-                        },
-                    )
-                })
-                .collect();
-            let new_call = Expr::new(
-                span,
-                ExprNode::Send {
-                    recv: None,
-                    method: Symbol::from("new"),
-                    args: vec![],
-                    block: None,
-                    parenthesized: false,
-                },
-            );
-            let body = Expr::new(
-                span,
-                ExprNode::Send {
-                    recv: Some(new_call),
-                    method: m.name.clone(),
-                    args,
-                    block: None,
-                    parenthesized: true,
-                },
-            );
-            // Clone the instance method wholesale (signature, effects,
-            // kind all carry over), then swap receiver + body.
-            let mut w = m.clone();
-            w.receiver = MethodReceiver::Class;
-            w.body = body;
-            wrappers.push(w);
-        }
-        lc.methods.extend(wrappers);
-    }
-}
+// Mailer class-side wrappers (`def self.notify = new.notify(...)`)
+// moved to the shared post-analyze hook
+// (`lower::apply_mailer_class_side`) — mailer classes arrive here
+// with the wrappers already synthesized, keyword/block-taking methods
+// on the residue ledger.
 
 // Block-form `create!/create do |kv| ... end` inlining moved to the
 // shared post-analyze hook (`lower::apply_create_block_inline`) —
