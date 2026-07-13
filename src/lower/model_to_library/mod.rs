@@ -374,7 +374,7 @@ pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryCl
 /// controller path's `collect_class_constants`. They reach the body as
 /// `ModelBodyItem::Unknown` Const-assigns (the DSL classifier doesn't claim
 /// them); single-segment paths only — qualified writes are something else.
-fn collect_model_constants(model: &Model) -> Vec<(Symbol, Expr)> {
+pub(crate) fn collect_model_constants(model: &Model) -> Vec<(Symbol, Expr)> {
     let mut out = Vec::new();
     for item in &model.body {
         let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };

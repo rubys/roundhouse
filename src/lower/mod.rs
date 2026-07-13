@@ -45,6 +45,7 @@ pub mod test_module_to_library;
 pub mod create_block;
 pub mod errors_add;
 pub mod mailer_class_side;
+pub mod send_dispatch;
 pub mod time_current;
 pub mod update_kwargs;
 pub(crate) mod typed_store;
@@ -58,6 +59,7 @@ pub use blank::apply_blank_lowering;
 pub use create_block::apply_create_block_inline;
 pub use errors_add::apply_errors_add_lowering;
 pub use mailer_class_side::apply_mailer_class_side;
+pub use send_dispatch::apply_send_static_dispatch;
 pub use time_current::apply_time_current_lowering;
 pub use update_kwargs::apply_update_kwargs_inline;
 
@@ -67,13 +69,22 @@ pub use update_kwargs::apply_update_kwargs_inline;
 /// dump can't drift as passes accumulate (the LSP/MCP/IDE paths stay
 /// off it on purpose: they want source-shaped IR). Returns the residue
 /// diagnostics — sites a pass had to leave dynamic, with the reason.
-pub fn apply_post_analyze_lowerings(app: &mut crate::app::App) -> Vec<crate::diagnostic::Diagnostic> {
+///
+/// `registry` is the analyzer's post-fixpoint class table
+/// ([`crate::analyze::Analyzer::class_registry`]) — passes that
+/// synthesize dispatches consult it to stamp what analyze would have
+/// computed.
+pub fn apply_post_analyze_lowerings(
+    app: &mut crate::app::App,
+    registry: &std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
+) -> Vec<crate::diagnostic::Diagnostic> {
     let mut diags = blank::apply_blank_lowering(app);
     time_current::apply_time_current_lowering(app);
     diags.extend(errors_add::apply_errors_add_lowering(app));
     diags.extend(create_block::apply_create_block_inline(app));
     diags.extend(update_kwargs::apply_update_kwargs_inline(app));
     diags.extend(mailer_class_side::apply_mailer_class_side(app));
+    diags.extend(send_dispatch::apply_send_static_dispatch(app, registry));
     diags
 }
 

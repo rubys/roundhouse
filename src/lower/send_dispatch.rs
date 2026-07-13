@@ -1,4 +1,4 @@
-//! Ruby-family pre-emit pass: dynamic `send` → static `case` dispatch.
+//! Shared lowering: dynamic `send` → static `case` dispatch.
 //!
 //! Spinel AOT rejects `send` with a runtime method name ("AOT needs a
 //! compile-time-known name"), and every strict target has the same
@@ -21,38 +21,79 @@
 //!
 //! which every target compiles and CRuby executes identically (the
 //! `else` arm preserves `send`'s NoMethodError-on-unknown behavior in
-//! spirit). Sites whose name set can't be proven are left untouched —
-//! an incomplete arm list would turn a legal dispatch into a raise, so
-//! enumeration bails toward "no rewrite" on anything unclassifiable.
-//! This is the emit-side completion of the analyze-side receiver-aware
-//! send typing (d776278): analyze bounds the *type*, this pass grounds
-//! the *dispatch*.
+//! spirit). Sites whose name set can't be proven go on the residue
+//! ledger and keep their source shape — an incomplete arm list would
+//! turn a legal dispatch into a raise, so enumeration bails toward
+//! "no rewrite" on anything unclassifiable. This is the lowering-side
+//! completion of the analyze-side receiver-aware send typing
+//! (d776278): analyze bounds the *type*, this pass grounds the
+//! *dispatch*.
 //!
-//! Expr-level and target-neutral by construction; lives with its
-//! sibling ruby-family passes until a second emit family adopts it.
+//! Runs on the post-analyze hook (`apply_post_analyze_lowerings`) so
+//! every target consumes the grounded form. Two deltas vs the
+//! emit-time ruby-family pass this re-homes: (a) shape C's provider
+//! calls are matched in their SOURCE form — a bare `time_interval(...)`
+//! reaching a mixed-in helper — where the emit pass saw them only
+//! after helper-qualification (`IntervalHelper.time_interval(...)`);
+//! (b) synthesized arms are ty-stamped from the analyzer's class
+//! registry, because the residual-diagnostics audit walks hook output
+//! (the emit-time pass ran after it and dodged).
+//!
+//! Duration-unit arms deliberately call the PLURAL unit form
+//! (`"day" → days`) — identical semantics on a numeric receiver, and
+//! the plural is what the ruby-family duration lowering (still
+//! emit-time, running after this pass by construction) grounds into
+//! the Duration runtime. Strict targets carry the plural call as
+//! honest residue until the duration pass migrates here too.
 
 use std::collections::{BTreeSet, HashMap};
 
-use crate::dialect::LibraryClass;
+use crate::analyze::ClassInfo;
+use crate::app::App;
+use crate::diagnostic::{Diagnostic, DiagnosticKind};
+use crate::dialect::{ControllerBodyItem, ModelBodyItem};
 use crate::expr::{Arm, Expr, ExprNode, Literal, Pattern};
-use crate::ident::Symbol;
+use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
+use crate::ty::Ty;
 
 /// Method names that perform reflective dispatch on their first arg.
 fn is_send_method(name: &str) -> bool {
     matches!(name, "send" | "public_send" | "__send__")
 }
 
-pub(crate) fn apply_send_static_dispatch(lcs: &mut [LibraryClass]) {
-    // Read-only pre-pass: for helper methods whose every return is a
-    // hash literal, the per-key string sets (shape C consults these
-    // through `length[:intv]`-style reads).
-    let providers = collect_hash_providers(lcs);
-    for lc in lcs.iter_mut() {
-        for m in &mut lc.methods {
-            let elems = collect_var_element_sets(&m.body);
-            rewrite(&mut m.body, &elems, &providers, &[]);
-        }
+/// Ground dynamic `send` sites across every hook body. Returns the
+/// residue ledger: reflective sends left in source shape, with the
+/// reason.
+pub fn apply_send_static_dispatch(
+    app: &mut App,
+    registry: &HashMap<ClassId, ClassInfo>,
+) -> Vec<Diagnostic> {
+    let providers = collect_hash_providers(app);
+    let defined = defined_method_name_counts(app);
+    let mut diags = Vec::new();
+    super::for_each_hook_body(app, &mut |body| {
+        let elems = collect_var_element_sets(body);
+        let origins = collect_provider_var_origins(body, &providers, &defined);
+        rewrite(body, &elems, &providers, &origins, &[], registry, &mut diags);
+    });
+    diags
+}
+
+fn residue(expr: &Expr, reason: &str) -> Diagnostic {
+    let kind = DiagnosticKind::LowerResidue {
+        pass: Symbol::from("send_static_dispatch"),
+        construct: Symbol::from("dynamic-send"),
+        reason: Symbol::from(reason),
+    };
+    Diagnostic {
+        span: expr.span,
+        severity: Diagnostic::default_severity(&kind),
+        kind,
+        message: format!(
+            "reflective `send` left as dynamic dispatch ({reason}) — \
+             strict targets cannot compile a runtime method name"
+        ),
     }
 }
 
@@ -152,7 +193,10 @@ fn rewrite(
     e: &mut Expr,
     var_sets: &HashMap<Symbol, Vec<Expr>>,
     providers: &HashProviders,
+    origins: &HashMap<Symbol, (Symbol, Symbol)>,
     bindings: &[IterBinding<'_>],
+    registry: &HashMap<ClassId, ClassInfo>,
+    diags: &mut Vec<Diagnostic>,
 ) {
     // Iterator with a provable element set: descend into the block with
     // the binding pushed. Everything else recurses plainly; an inner
@@ -178,8 +222,8 @@ fn rewrite(
                         }
                     }
                     inner.push(IterBinding { name: &param, elems: &elems });
-                    rewrite(body, var_sets, providers, &inner);
-                    rewrite(r, var_sets, providers, bindings);
+                    rewrite(body, var_sets, providers, origins, &inner, registry, diags);
+                    rewrite(r, var_sets, providers, origins, bindings, registry, diags);
                     return;
                 }
             }
@@ -191,12 +235,13 @@ fn rewrite(
             .filter(|b| !params.contains(b.name))
             .map(|b| IterBinding { name: b.name, elems: b.elems })
             .collect();
-        rewrite(body, var_sets, providers, &survivors);
+        rewrite(body, var_sets, providers, origins, &survivors, registry, diags);
         return;
     }
 
-    e.node
-        .for_each_child_mut(&mut |c| rewrite(c, var_sets, providers, bindings));
+    e.node.for_each_child_mut(&mut |c| {
+        rewrite(c, var_sets, providers, origins, bindings, registry, diags)
+    });
 
     let ExprNode::Send { recv, method, args, block: None, .. } = &*e.node else {
         return;
@@ -214,10 +259,14 @@ fn rewrite(
         return;
     }
     if !recv_is_duplicable(recv) {
+        diags.push(residue(e, "receiver is not an effect-free reader"));
         return;
     }
-    let dispatch = enumerate_names(target, bindings, providers);
-    let Some(dispatch) = dispatch else { return };
+    let dispatch = enumerate_names(target, bindings, providers, origins);
+    let Some(dispatch) = dispatch else {
+        diags.push(residue(e, "method-name set not statically enumerable"));
+        return;
+    };
     if dispatch.names.is_empty() {
         // Provably no symbol can reach this send (the guard idioms make
         // such sites unreachable); leave the source shape alone rather
@@ -225,9 +274,11 @@ fn rewrite(
         return;
     }
     let span = e.span;
-    let arms = build_arms(&dispatch, recv, rest, span);
+    let arms = build_arms(&dispatch, recv, rest, span, registry);
     *e.node = ExprNode::Case { scrutinee: target.clone(), arms };
-    e.ty = None;
+    // Keep the site type: analyze bounded the dynamic send by the
+    // union of reachable method returns, and the case evaluates to
+    // exactly one of them.
 }
 
 /// The enumerated dispatch: method names in first-seen order, plus
@@ -249,6 +300,7 @@ fn enumerate_names(
     target: &Expr,
     bindings: &[IterBinding<'_>],
     providers: &HashProviders,
+    origins: &HashMap<Symbol, (Symbol, Symbol)>,
 ) -> Option<Dispatch> {
     // Shape A/B: the arg is a block param (or a projection of one)
     // ranging over a literal collection.
@@ -314,7 +366,7 @@ fn enumerate_names(
         ExprNode::Send { recv: Some(inner), method, args, .. }
             if method.as_str() == "downcase" && args.is_empty() =>
         {
-            let set = providers.string_set_of(inner)?;
+            let set = providers.string_set_of(inner, origins)?;
             let mut names = Vec::new();
             for s in set {
                 push_unique(&mut names, s.to_lowercase());
@@ -354,21 +406,7 @@ fn collect_symbol_outcomes(e: &Expr, names: &mut Vec<String>) {
 fn recv_is_duplicable(recv: &Option<Expr>) -> bool {
     match recv {
         None => true,
-        Some(e) => expr_is_pure_read(e),
-    }
-}
-
-pub(super) fn expr_is_pure_read(e: &Expr) -> bool {
-    match &*e.node {
-        ExprNode::SelfRef
-        | ExprNode::Var { .. }
-        | ExprNode::Ivar { .. }
-        | ExprNode::Const { .. }
-        | ExprNode::Lit { .. } => true,
-        ExprNode::Send { recv, method, args, block: None, .. } if method.as_str() == "[]" => {
-            recv.as_ref().is_some_and(expr_is_pure_read) && args.iter().all(expr_is_pure_read)
-        }
-        _ => false,
+        Some(e) => super::blank::is_effect_free_reader(e),
     }
 }
 
@@ -376,8 +414,8 @@ pub(super) fn expr_is_pure_read(e: &Expr) -> bool {
 /// string-scrutinee dispatch's names are all duration units (lobsters'
 /// `dur.send(intv.downcase).ago`), the arms call the plural form —
 /// identical semantics on a numeric receiver, and the plural is what
-/// `apply_duration_lowering` (which runs after this pass) rewrites
-/// unconditionally into the Duration runtime.
+/// the ruby-family duration lowering (which runs at emit, after this
+/// pass) rewrites unconditionally into the Duration runtime.
 fn duration_plural(name: &str) -> Option<&'static str> {
     Some(match name {
         "second" => "seconds",
@@ -392,9 +430,62 @@ fn duration_plural(name: &str) -> Option<&'static str> {
     })
 }
 
-fn build_arms(dispatch: &Dispatch, recv: &Option<Expr>, rest: &[Expr], span: Span) -> Vec<Arm> {
+/// The return type dispatch would compute for `name` on the receiver's
+/// class — own instance methods, then mixed-in modules, then the parent
+/// chain, exactly the walk analyze's dispatch performs. `None` when the
+/// receiver isn't a registered class or the method's return is still an
+/// open inference variable.
+fn method_return_via_registry(
+    registry: &HashMap<ClassId, ClassInfo>,
+    class: &ClassId,
+    name: &str,
+) -> Option<Ty> {
+    let mut seen: BTreeSet<ClassId> = BTreeSet::new();
+    let mut stack = vec![class.clone()];
+    while let Some(cid) = stack.pop() {
+        if !seen.insert(cid.clone()) {
+            continue;
+        }
+        let Some(cls) = registry.get(&cid) else { continue };
+        if let Some(ty) = cls.instance_methods.get(&Symbol::from(name)) {
+            let ret = match ty {
+                Ty::Fn { ret, .. } => (**ret).clone(),
+                t => t.clone(),
+            };
+            return match ret {
+                Ty::Var { .. } | Ty::Bottom => None,
+                t => Some(t),
+            };
+        }
+        stack.extend(cls.includes.iter().cloned());
+        if let Some(p) = &cls.parent {
+            stack.push(p.clone());
+        }
+    }
+    None
+}
+
+/// The class the arms dispatch on, when the receiver types to one.
+/// `None` receivers are implicit self — the hook walk carries no class
+/// context, so those arms fall back to the gradual stamp.
+fn recv_class(recv: &Option<Expr>) -> Option<ClassId> {
+    let r = recv.as_ref()?;
+    match r.ty.as_ref() {
+        Some(Ty::Class { id, .. }) => Some(id.clone()),
+        _ => None,
+    }
+}
+
+fn build_arms(
+    dispatch: &Dispatch,
+    recv: &Option<Expr>,
+    rest: &[Expr],
+    span: Span,
+    registry: &HashMap<ClassId, ClassInfo>,
+) -> Vec<Arm> {
     let all_durations = dispatch.string_scrutinee
         && dispatch.names.iter().all(|n| duration_plural(n).is_some());
+    let class = recv_class(recv);
     let mut arms: Vec<Arm> = dispatch
         .names
         .iter()
@@ -409,15 +500,27 @@ fn build_arms(dispatch: &Dispatch, recv: &Option<Expr>, rest: &[Expr], span: Spa
             } else {
                 Symbol::from(name.as_str())
             };
-            let body = Expr::new(
+            let mut body = Expr::new(
                 span,
                 ExprNode::Send {
                     recv: recv.clone(),
-                    method: called,
+                    method: called.clone(),
                     args: rest.to_vec(),
                     block: None,
                     parenthesized: !rest.is_empty(),
                 },
+            );
+            // The residual-diagnostics audit walks hook output — an
+            // unstamped send on a typed receiver reads as a dispatch
+            // failure. Stamp what dispatch would compute; where the
+            // registry can't answer (untyped receivers, duration-unit
+            // arms awaiting the duration lowering), the honest type of
+            // a formerly-reflective call is the gradual one.
+            body.ty = Some(
+                class
+                    .as_ref()
+                    .and_then(|c| method_return_via_registry(registry, c, called.as_str()))
+                    .unwrap_or(Ty::Untyped),
             );
             Arm { pattern, guard: None, body }
         })
@@ -452,20 +555,26 @@ fn build_arms(dispatch: &Dispatch, recv: &Option<Expr>, rest: &[Expr], span: Spa
 
 /// For every class method whose *every* return expression is a hash
 /// literal: the per-key sets of string values those literals can carry.
-/// `providers[(class, method)][key]` is the full set of strings the
-/// key can hold, present only when every return provably pins it.
-pub(crate) struct HashProviders {
+/// `providers.by_class_method[(class, method)][key]` is the full set of
+/// strings the key can hold, present only when every return provably
+/// pins it.
+struct HashProviders {
     by_class_method: HashMap<(Symbol, Symbol), HashMap<Symbol, BTreeSet<String>>>,
-    /// Local-variable copies of provider calls are matched per rewrite
-    /// via the assignment scan, keyed by the called (class, method).
-    var_origins: HashMap<Symbol, (Symbol, Symbol)>,
+    /// Provider keyed by bare method name, for attributing unqualified
+    /// calls (`time_interval(...)` reaching a mixed-in helper). `None`
+    /// marks a name multiple providers define — ambiguous, never
+    /// attributed.
+    by_method_name: HashMap<Symbol, Option<(Symbol, Symbol)>>,
 }
 
 impl HashProviders {
     /// The string set of `v[:key]` where `v` is a local assigned from a
-    /// provider call (`length = IntervalHelper.time_interval(...)`;
-    /// `length[:intv]`).
-    fn string_set_of(&self, e: &Expr) -> Option<&BTreeSet<String>> {
+    /// provider call (`length = time_interval(...)`; `length[:intv]`).
+    fn string_set_of(
+        &self,
+        e: &Expr,
+        origins: &HashMap<Symbol, (Symbol, Symbol)>,
+    ) -> Option<&BTreeSet<String>> {
         let ExprNode::Send { recv: Some(v), method, args, .. } = &*e.node else {
             return None;
         };
@@ -476,14 +585,19 @@ impl HashProviders {
             return None;
         };
         let ExprNode::Var { name, .. } = &*v.node else { return None };
-        let origin = self.var_origins.get(name)?;
+        let origin = origins.get(name)?;
         self.by_class_method.get(origin)?.get(key)
     }
 }
 
-fn collect_hash_providers(lcs: &[LibraryClass]) -> HashProviders {
+fn collect_hash_providers(app: &App) -> HashProviders {
     let mut by_class_method = HashMap::new();
-    for lc in lcs {
+    let mut register = |class: &str, consts: &HashMap<&str, &Expr>, name: &Symbol, body: &Expr| {
+        if let Some(keysets) = hash_return_key_sets(body, consts) {
+            by_class_method.insert((Symbol::from(class), name.clone()), keysets);
+        }
+    };
+    for lc in &app.library_classes {
         // Constants visible to this class's method bodies.
         let consts: HashMap<&str, &Expr> = lc
             .constants
@@ -491,48 +605,107 @@ fn collect_hash_providers(lcs: &[LibraryClass]) -> HashProviders {
             .map(|(n, e)| (n.as_str(), e))
             .collect();
         for m in &lc.methods {
-            if let Some(keysets) = hash_return_key_sets(&m.body, &consts) {
-                by_class_method
-                    .insert((Symbol::from(lc.name.0.as_str()), m.name.clone()), keysets);
+            register(lc.name.0.as_str(), &consts, &m.name, &m.body);
+        }
+    }
+    for model in &app.models {
+        let constants = super::model_to_library::collect_model_constants(model);
+        let consts: HashMap<&str, &Expr> =
+            constants.iter().map(|(n, e)| (n.as_str(), e)).collect();
+        for item in &model.body {
+            if let ModelBodyItem::Method { method, .. } = item {
+                register(model.name.0.as_str(), &consts, &method.name, &method.body);
             }
         }
     }
-    // Second walk: bind local vars assigned from provider calls
-    // (`length = IntervalHelper.time_interval(...)`). Variable names
-    // are method-local, but a name-collision across methods only
-    // matters if both assign from *different* providers — poison those.
-    let mut var_origins: HashMap<Symbol, (Symbol, Symbol)> = HashMap::new();
-    let mut poisoned: BTreeSet<Symbol> = BTreeSet::new();
-    for lc in lcs {
-        for m in &lc.methods {
-            collect_provider_var_origins(
-                &m.body,
-                &by_class_method,
-                &mut var_origins,
-                &mut poisoned,
-            );
-        }
+    let mut by_method_name: HashMap<Symbol, Option<(Symbol, Symbol)>> = HashMap::new();
+    for key in by_class_method.keys() {
+        by_method_name
+            .entry(key.1.clone())
+            .and_modify(|e| *e = None)
+            .or_insert_with(|| Some(key.clone()));
     }
-    for name in poisoned {
-        var_origins.remove(&name);
-    }
-    HashProviders { by_class_method, var_origins }
+    HashProviders { by_class_method, by_method_name }
 }
 
+/// Every user-defined method name in the app, with its definition
+/// count. A bare provider call attributes only when the name resolves
+/// uniquely app-wide — a second definition anywhere (even a
+/// non-provider) means the call could dispatch elsewhere, so it never
+/// grounds.
+fn defined_method_name_counts(app: &App) -> HashMap<Symbol, usize> {
+    let mut counts: HashMap<Symbol, usize> = HashMap::new();
+    {
+        let mut bump = |n: &Symbol| *counts.entry(n.clone()).or_insert(0) += 1;
+        for model in &app.models {
+            for item in &model.body {
+                if let ModelBodyItem::Method { method, .. } = item {
+                    bump(&method.name);
+                }
+            }
+        }
+        for lc in &app.library_classes {
+            for m in &lc.methods {
+                bump(&m.name);
+            }
+        }
+        for c in &app.controllers {
+            for item in &c.body {
+                if let ControllerBodyItem::Action { action, .. } = item {
+                    bump(&action.name);
+                }
+            }
+        }
+    }
+    counts
+}
+
+/// Local vars in one body assigned from a provider call, matched in
+/// source form: `Const.method(...)` (a single-segment constant
+/// receiver) or a bare `method(...)` whose name is defined exactly
+/// once app-wide (the mixed-in helper idiom — at this stage helper
+/// calls are still unqualified). A reassignment from anything else
+/// poisons the var.
 fn collect_provider_var_origins(
+    body: &Expr,
+    providers: &HashProviders,
+    defined: &HashMap<Symbol, usize>,
+) -> HashMap<Symbol, (Symbol, Symbol)> {
+    let mut origins: HashMap<Symbol, (Symbol, Symbol)> = HashMap::new();
+    let mut poisoned: BTreeSet<Symbol> = BTreeSet::new();
+    walk_provider_origins(body, providers, defined, &mut origins, &mut poisoned);
+    for name in poisoned {
+        origins.remove(&name);
+    }
+    origins
+}
+
+fn walk_provider_origins(
     e: &Expr,
-    providers: &HashMap<(Symbol, Symbol), HashMap<Symbol, BTreeSet<String>>>,
+    providers: &HashProviders,
+    defined: &HashMap<Symbol, usize>,
     origins: &mut HashMap<Symbol, (Symbol, Symbol)>,
     poisoned: &mut BTreeSet<Symbol>,
 ) {
     if let ExprNode::Assign { target: crate::expr::LValue::Var { name, .. }, value } = &*e.node {
         let mut origin: Option<(Symbol, Symbol)> = None;
-        if let ExprNode::Send { recv: Some(r), method, .. } = &*value.node {
-            if let ExprNode::Const { path } = &*r.node {
-                if path.len() == 1 {
-                    let key = (path[0].clone(), method.clone());
-                    if providers.contains_key(&key) {
-                        origin = Some(key);
+        if let ExprNode::Send { recv, method, .. } = &*value.node {
+            match recv {
+                Some(r) => {
+                    if let ExprNode::Const { path } = &*r.node {
+                        if path.len() == 1 {
+                            let key = (path[0].clone(), method.clone());
+                            if providers.by_class_method.contains_key(&key) {
+                                origin = Some(key);
+                            }
+                        }
+                    }
+                }
+                None => {
+                    if defined.get(method).copied() == Some(1) {
+                        if let Some(Some(key)) = providers.by_method_name.get(method) {
+                            origin = Some(key.clone());
+                        }
                     }
                 }
             }
@@ -554,7 +727,7 @@ fn collect_provider_var_origins(
         }
     }
     e.node
-        .for_each_child(&mut |c| collect_provider_var_origins(c, providers, origins, poisoned));
+        .for_each_child(&mut |c| walk_provider_origins(c, providers, defined, origins, poisoned));
 }
 
 /// If every return expression of `body` is a hash literal, the per-key

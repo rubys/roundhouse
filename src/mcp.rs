@@ -326,12 +326,12 @@ impl Server {
             .ok_or_else(|| {
                 format!("unknown transpile target `{target_str}`; valid: {}", transpile_target_names())
             })?;
-        let (mut app, _, _, _) = self.analyze()?;
+        let (mut app, _, _, analyzer) = self.analyze()?;
         // The wont-lower ledger reports gaps in what emitters actually
         // consume, so mirror the transpile driver's post-analyze shared
         // lowerings (this tool's App is its own copy; the source-shaped
         // query tools each analyze afresh).
-        let _ = crate::lower::apply_post_analyze_lowerings(&mut app);
+        let _ = crate::lower::apply_post_analyze_lowerings(&mut app, analyzer.class_registry());
 
         // Run lower+emit for the target inside the emit-diagnostic scope so
         // every unsupported-construct gap is collected (issue #28's sink).
