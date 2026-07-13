@@ -89,6 +89,18 @@ pub fn emit_library(app: &App) -> Vec<EmittedFile> {
     library::emit_library_class_decls(app)
 }
 
+/// Swap façade-fated extras emits (Sponge) for their raising façades —
+/// scaffold-base step; see `library::EXTRAS_FACADES`.
+pub fn apply_extras_facades(files: &mut [(String, String)]) {
+    library::apply_extras_facades(files)
+}
+
+/// Restore the verbatim source-shape emit over the extras façades
+/// (CRuby tree — the real stdlib is available there).
+pub fn restore_extras_facades(files: &mut [(String, String)], app: &App) {
+    library::restore_extras_facades(files, app)
+}
+
 /// Per-app `Rails::Application` reopen from the source
 /// config/application.rb (see `App.rails_application`) — emitted to
 /// `config/application.rb` so `Rails.application.read_only?` etc.

@@ -52,6 +52,59 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
         .collect()
 }
 
+/// App-defined vendored classes whose bodies drive un-modeled native/
+/// stdlib surface (Sponge = Net::HTTP + Resolv + IPAddr + OpenSSL,
+/// pending the stdlib spin packages). Spinel AOT prices every method
+/// body in the reachable require graph, and these bodies cannot
+/// compile without that stdlib — so the scaffold base swaps their
+/// emitted files for hand-written raising façades at the SAME emit
+/// path, leaving the require graph untouched. The CRuby tree, where
+/// the real stdlib exists and the vendored source runs as written,
+/// restores the verbatim emit via `restore_extras_facades`. Same
+/// raise-loudly contract as runtime/ruby/gem_facades.rb; the real fix
+/// (compiling the verbatim bodies) arrives with the stdlib packages.
+const EXTRAS_FACADES: &[(&str, &str, &str)] = &[(
+    "app/models/sponge",
+    include_str!("../../../runtime/spinel/facades/sponge.rb"),
+    include_str!("../../../runtime/spinel/facades/sponge.rbs"),
+)];
+
+/// Swap façade-fated extras emits (scaffold base: spinel + the trees
+/// derived from it). No-op when the app doesn't define the class —
+/// the path simply isn't present.
+pub(super) fn apply_extras_facades(files: &mut [(String, String)]) {
+    for (stem, rb, rbs) in EXTRAS_FACADES {
+        for (path, content) in files.iter_mut() {
+            if path == &format!("{stem}.rb") {
+                *content = (*rb).to_string();
+            } else if path == &format!("{stem}.rbs") {
+                *content = (*rbs).to_string();
+            }
+        }
+    }
+}
+
+/// CRuby: put the verbatim source-shape emit back over the façades —
+/// the real net/https / resolv / ipaddr are available there and the
+/// vendored bodies run as written. Re-renders the library classes so
+/// the restored bytes are exactly what the base would have emitted
+/// without the swap.
+pub(super) fn restore_extras_facades(files: &mut [(String, String)], app: &App) {
+    for ef in emit_library_class_decls(app) {
+        let p = ef.path.to_string_lossy().into_owned();
+        if EXTRAS_FACADES
+            .iter()
+            .any(|(stem, _, _)| p == format!("{stem}.rb") || p == format!("{stem}.rbs"))
+        {
+            for (path, content) in files.iter_mut() {
+                if *path == p {
+                    content.clone_from(&ef.content);
+                }
+            }
+        }
+    }
+}
+
 /// Ruby-family pre-emit pass: `render partial:` in a LIBRARY-CLASS body
 /// (lobsters' ApplicationHelper#link_post renders a partial from a
 /// helper). A helper's render RETURNS the string, so the rewrite is the

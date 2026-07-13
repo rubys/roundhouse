@@ -1,0 +1,30 @@
+# Typing contract for the Sponge façade (see sponge.rb beside this
+# file). Returns are the real shapes consumers chain on; every body
+# raises via GemFacade.fail! before its unreachable typed tail.
+class Sponge
+  MAX_TIME: Integer
+  MAX_DNS_TIME: Integer
+
+  class Response
+    def body: () -> String
+    def code: () -> String
+    def []: (String _name) -> String
+  end
+
+  attr_reader debug: bool
+  attr_writer debug: bool
+  attr_reader last_res: untyped
+  attr_writer last_res: untyped
+  attr_reader timeout: Integer
+  attr_writer timeout: Integer
+  attr_reader ssl_verify: bool
+  attr_writer ssl_verify: bool
+
+  def self.fetch: (String url, ?untyped headers, ?Integer limit) -> Sponge::Response
+  def initialize: () -> void
+  def set_cookie: (String host, String name, String val) -> void
+  def cookies: (String host) -> String
+  def fetch: (String url, ?untyped method, ?untyped fields, ?untyped raw_post_data, ?untyped headers, ?Integer limit) -> Sponge::Response
+  def get: (String url) -> Sponge::Response
+  def post: (String url, untyped fields) -> Sponge::Response
+end

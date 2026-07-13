@@ -1004,6 +1004,12 @@ fn ruby_runtime_files(
         }
     }
 
+    // Same reasoning for the extras façades (Sponge): CRuby has the real
+    // net/https / resolv / ipaddr stdlib and the vendored source runs as
+    // written, so put the verbatim source-shape emit back over the
+    // scaffold base's raising façade.
+    emit::ruby::restore_extras_facades(&mut files, app);
+
     walk_dir_into(
         Path::new("runtime/spinel/scaffold/ruby_overlay"),
         "",
@@ -1374,6 +1380,12 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // the strict whole-graph check, which is the point (spinel as
     // completeness oracle).
     files.extend(sort_files(emit::ruby::emit_library(app)));
+    // Vendored extras whose bodies drive un-modeled stdlib (Sponge →
+    // Net::HTTP/Resolv/IPAddr/OpenSSL) get raising façades at the same
+    // require path — spinel AOT prices every reachable body and the
+    // verbatim ones can't compile until the stdlib spin packages land.
+    // The CRuby tree restores the verbatim emit (real stdlib there).
+    emit::ruby::apply_extras_facades(&mut files);
 
     let js = fixture.join("app/javascript");
     if js.exists() {
