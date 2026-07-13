@@ -126,7 +126,8 @@ fn transpile_inner(json_in: &str) -> String {
     // (bin/roundhouse): the playground emits from the same IR the CLI
     // does. Residue joins the diagnostics below; synthetic spans drop
     // out in the existing filter.
-    let lower_diags = roundhouse::lower::apply_post_analyze_lowerings(&mut app);
+    let lower_diags =
+        roundhouse::lower::apply_post_analyze_lowerings(&mut app, analyzer.class_registry());
 
     // Analyzer diagnostics + gap-attributed coverage notes (Info severity),
     // resolved to source positions. Synthetic spans (no source site) are
