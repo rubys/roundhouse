@@ -755,9 +755,18 @@ fn rewrite_helper_calls(
 
     // Cases 3/4: a bare call resolving to an app or framework helper module.
     let path: Option<Vec<Symbol>> = match &*expr.node {
-        ExprNode::Send { recv: None, method, .. } => {
+        ExprNode::Send { recv: None, method, args, .. } => {
             if let Some(module) = index.get(method) {
                 Some(module.0.as_str().split("::").map(Symbol::from).collect())
+            } else if method.as_str() == "pluralize" && args.len() == 2 {
+                // Count-labeling `pluralize(count, word)` in a helper
+                // body — the same home the view pipeline's classifier
+                // already grounds to (`Inflector.pluralize`, the
+                // spinel-blog convention), NOT a second ViewHelpers
+                // impl. Two-arg form only: the optional plural-word /
+                // locale variants aren't in the runtime's surface, so
+                // they stay verbatim rather than mis-bind arity.
+                Some(vec![Symbol::from("Inflector")])
             } else if is_framework_view_helper(method.as_str()) {
                 Some(view_helpers_path())
             } else if route_helpers.contains(method) {
