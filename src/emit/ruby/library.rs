@@ -24,11 +24,10 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     apply_scope_lowering(&mut lcs, app);
     apply_library_partial_render_lowering(&mut lcs, app);
     apply_helper_lowering(&mut lcs, app);
-    // send→case grounding, update-kwargs inlining, and mailer
-    // class-side wrappers run in the shared post-analyze hook, which
-    // covers these library classes (send arms arrive in plural
-    // duration-unit form for the duration lowering below).
-    apply_duration_lowering(&mut lcs);
+    // send→case grounding, update-kwargs inlining, mailer class-side
+    // wrappers, and duration grounding run in the shared post-analyze
+    // hook, which covers these library classes (dispatch's plural
+    // duration-unit arms arrive already grounded).
     // Transpiled-shape classes carry hand-written accessors that
     // `synth_attr_reader` never sees, so the datetime reader/writer
     // rewrite still runs here for them (Ruby-only). Model-lowered classes
@@ -1124,76 +1123,19 @@ pub(crate) fn apply_time_current_lowering(lcs: &mut [LibraryClass]) {
     }
 }
 
-/// Ruby-family pre-emit pass: rewrite ActiveSupport duration builders
-/// (`70.days`, `NEW_USER_DAYS.days`, `1.week`) — which would call a
-/// nonexistent `Integer#days` — into `ActiveSupport::Duration.days(...)`
-/// against the CRuby-only Duration overlay. Reopening `Integer` in the
-/// shared runtime is off-limits (no built-in subclassing; `Time` arithmetic
-/// doesn't transpile uniformly), so this and the runtime both stay on the
-/// Ruby tree. `<dur>.ago` / `.from_now` then ride the returned Duration
-/// instance and need no rewrite. A strict no-op for duration-free apps
-/// (the blog).
+/// View-pipeline vestige of the shared duration grounding
+/// (`lower::apply_duration_lowering`): the post-analyze hook skips view
+/// bodies, so lowered view classes still take the rewrite here
+/// (lobsters' `_commentbox.html.erb` compares against
+/// `COMMENTABLE_DAYS.days.ago`). Delete when the view pipeline migrates
+/// to shared lowerings. Every other body class arrives already
+/// grounded (re-running is an idempotent no-op — the grounded form no
+/// longer matches).
 pub(crate) fn apply_duration_lowering(lcs: &mut [LibraryClass]) {
     for lc in lcs.iter_mut() {
         for m in &mut lc.methods {
-            rewrite_durations(&mut m.body);
+            crate::lower::duration::rewrite_durations(&mut m.body);
         }
-    }
-}
-
-/// ActiveSupport duration unit method names (`70.days`, `1.week`). The
-/// singular `day`/`hour`/`month`/`year` also name `Time` component readers
-/// (`created_at.day`), so those rewrite only when the receiver is numeric;
-/// the others — every plural, plus `minute`/`second`/`week`/`fortnight` —
-/// never collide and rewrite unconditionally (so an Int constant receiver
-/// like `NEW_USER_DAYS.days`, whose type may be unresolved, still lands).
-fn duration_unit_collides_with_time(unit: &str) -> bool {
-    matches!(unit, "day" | "hour" | "month" | "year")
-}
-
-fn is_duration_unit(unit: &str) -> bool {
-    matches!(
-        unit,
-        "days" | "day" | "hours" | "hour" | "minutes" | "minute" | "seconds" | "second"
-            | "weeks" | "week" | "fortnights" | "fortnight" | "months" | "month" | "years" | "year"
-    )
-}
-
-/// Is `e` a numeric value — an Int/Float literal or an expression the typer
-/// resolved to `Int`/`Float`? (Used to keep `created_at.day` — a Str-typed
-/// datetime — out of the colliding-unit rewrite.)
-fn is_numeric_expr(e: &Expr) -> bool {
-    if matches!(&*e.node, ExprNode::Lit { value: crate::expr::Literal::Int { .. } })
-        || matches!(&*e.node, ExprNode::Lit { value: crate::expr::Literal::Float { .. } })
-    {
-        return true;
-    }
-    matches!(&e.ty, Some(crate::ty::Ty::Int) | Some(crate::ty::Ty::Float))
-}
-
-fn rewrite_durations(expr: &mut Expr) {
-    expr.node.for_each_child_mut(&mut rewrite_durations);
-    let rewrite = match &*expr.node {
-        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
-            if args.is_empty() && is_duration_unit(method.as_str()) =>
-        {
-            !duration_unit_collides_with_time(method.as_str()) || is_numeric_expr(r)
-        }
-        _ => false,
-    };
-    if rewrite {
-        let span = expr.span;
-        let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
-        let ExprNode::Send { recv, method, .. } = node else { unreachable!() };
-        let arg = recv.expect("duration send has a receiver");
-        let path = vec![Symbol::from("ActiveSupport"), Symbol::from("Duration")];
-        *expr.node = ExprNode::Send {
-            recv: Some(Expr::new(span, ExprNode::Const { path })),
-            method,
-            args: vec![arg],
-            block: None,
-            parenthesized: true,
-        };
     }
 }
 

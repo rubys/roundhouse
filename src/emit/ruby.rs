@@ -195,12 +195,11 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // `record.update!(k: v)` inlining moved to the shared post-analyze
     // hook (`lower::apply_update_kwargs_inline`) — hook bodies arrive
     // here already in writer-assign + save form.
-    // `Time.current` is grounded app-wide by the shared post-analyze
-    // hook (`lower::apply_time_current_lowering`); only the view
-    // pipeline still applies the emit-time copy.
-    // ActiveSupport durations: `70.days` → `Duration.days(70)` (no-op for
-    // duration-free apps).
-    library::apply_duration_lowering(&mut lcs);
+    // `Time.current` and ActiveSupport durations (`70.days` →
+    // `Duration.days(70)`) are grounded app-wide by the shared
+    // post-analyze hook (`lower::apply_time_current_lowering`,
+    // `lower::apply_duration_lowering`); only the view pipeline still
+    // applies the emit-time copies.
     // Date/DateTime/Time column accessors coerce to/from real `Time`
     // (no-op for apps with no temporal columns).
     library::apply_datetime_lowering(&mut lcs, app);
@@ -346,7 +345,6 @@ pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
     let mut lcs = lower_controllers_for_spinel(app, false);
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
-    library::apply_duration_lowering(&mut lcs);
     library::apply_nilsafe_empty_lowering(&mut lcs);
     emit_lowered_controllers_from_lcs(&lcs, app)
 }
@@ -369,7 +367,6 @@ pub fn emit_lowered_controllers_with_layout(app: &App) -> Vec<EmittedFile> {
     let mut lcs = lower_controllers_for_spinel(app, true);
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
-    library::apply_duration_lowering(&mut lcs);
     library::apply_nilsafe_empty_lowering(&mut lcs);
     library::apply_layout_lowering(&mut lcs, app);
     emit_lowered_controllers_from_lcs(&lcs, app)

@@ -20,10 +20,12 @@ use roundhouse::analyze::Analyzer;
 use roundhouse::diagnostic::Diagnostic;
 use roundhouse::emit::ruby::emit_library;
 use roundhouse::ingest::ingest_library_classes;
-use roundhouse::lower::apply_send_static_dispatch;
+use roundhouse::lower::{apply_duration_lowering, apply_send_static_dispatch};
 
-/// Ingest → analyze → shared send grounding → ruby render. Returns the
-/// emitted source plus the pass's residue ledger.
+/// Ingest → analyze → shared send grounding → duration grounding →
+/// ruby render, mirroring the post-analyze hook's pass order (duration
+/// AFTER dispatch — the all-duration-unit arms below count on it).
+/// Returns the emitted source plus the dispatch pass's residue ledger.
 fn ground_and_emit(source: &str) -> (String, Vec<Diagnostic>) {
     let classes =
         ingest_library_classes(source.as_bytes(), "test.rb").expect("ingest test source");
@@ -34,6 +36,7 @@ fn ground_and_emit(source: &str) -> (String, Vec<Diagnostic>) {
     let mut analyzer = Analyzer::new(&app);
     analyzer.analyze(&mut app);
     let diags = apply_send_static_dispatch(&mut app, analyzer.class_registry());
+    apply_duration_lowering(&mut app);
     let out = emit_library(&app)
         .into_iter()
         .filter(|f| f.path.extension().is_some_and(|e| e == "rb"))

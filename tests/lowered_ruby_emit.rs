@@ -2109,14 +2109,15 @@ fn app_helper_calls_resolve_to_module_functions() {
 
 #[test]
 fn integer_durations_rewrite_to_duration_calls() {
-    // `Integer#days` doesn't exist (no built-in subclassing), so the Ruby
-    // emit path rewrites `<int>.days` → `ActiveSupport::Duration.days(<int>)`
-    // against the CRuby Duration overlay; `.ago` then rides the instance.
-    // A plural unit rewrites unconditionally (handles an untyped Int constant
-    // receiver), but a singular `day`/`hour`/`month`/`year` also names a Time
-    // component reader, so it rewrites only when the receiver is numeric —
-    // `created_at.day` (a datetime, typed Ty::Time) must be left alone.
-    let app = ingest_tree(&[
+    // `Integer#days` doesn't exist (no built-in subclassing), so the shared
+    // post-analyze pass rewrites `<int>.days` → `ActiveSupport::Duration.
+    // days(<int>)` against the per-tree Duration runtime; `.ago` then rides
+    // the instance. A plural unit rewrites unconditionally (handles an
+    // untyped Int constant receiver), but a singular `day`/`hour`/`month`/
+    // `year` also names a Time component reader, so it rewrites only when
+    // the receiver is numeric — `created_at.day` (a datetime) must be left
+    // alone.
+    let mut app = ingest_tree(&[
         (
             "db/schema.rb",
             "ActiveRecord::Schema.define(version: 1) do\n  create_table :users do |t|\n    t.datetime :created_at\n  end\nend\n",
@@ -2126,6 +2127,8 @@ fn integer_durations_rewrite_to_duration_calls() {
             "class User < ApplicationRecord\n  WINDOW = 70\n  def recent?\n    created_at > 70.days.ago\n  end\n  def windowed?\n    created_at > WINDOW.days.ago\n  end\n  def created_day\n    created_at.day\n  end\nend\n",
         ),
     ]);
+    roundhouse::analyze::Analyzer::new(&app).analyze(&mut app);
+    roundhouse::lower::apply_duration_lowering(&mut app);
     let files = ruby::emit_lowered_models(&app);
     let src = find(&files, "user.rb");
     assert!(
@@ -2139,6 +2142,28 @@ fn integer_durations_rewrite_to_duration_calls() {
     assert!(
         !src.contains("Duration.day(created_at)"),
         "a Time component reader (`created_at.day`) must NOT be rewritten; got:\n{src}",
+    );
+}
+
+#[test]
+fn view_durations_rewrite_through_the_emit_vestige() {
+    // The post-analyze hook skips view bodies, so the ruby view pipeline
+    // keeps an emit-time vestige of the duration grounding (lobsters'
+    // `_commentbox.html.erb` compares against `COMMENTABLE_DAYS.days.ago`).
+    // Exercises `emit_lowered_views` WITHOUT the shared hook — the vestige
+    // alone must ground the view site.
+    let app = ingest_tree(&[
+        ("db/schema.rb", "ActiveRecord::Schema.define(version: 1) do\nend\n"),
+        (
+            "app/views/articles/index.html.erb",
+            "<% if Time.now > 70.days.ago %>\n<p>old</p>\n<% end %>\n",
+        ),
+    ]);
+    let files = ruby::emit_lowered_views(&app);
+    let src = find(&files, "articles/index.rb");
+    assert!(
+        src.contains("ActiveSupport::Duration.days(70).ago"),
+        "view-body duration must ground via the emit vestige; got:\n{src}",
     );
 }
 

@@ -43,6 +43,7 @@ pub mod schema_to_library;
 pub mod seeds_to_library;
 pub mod test_module_to_library;
 pub mod create_block;
+pub mod duration;
 pub mod errors_add;
 pub mod mailer_class_side;
 pub mod send_dispatch;
@@ -57,6 +58,7 @@ pub mod view_to_library;
 
 pub use blank::apply_blank_lowering;
 pub use create_block::apply_create_block_inline;
+pub use duration::apply_duration_lowering;
 pub use errors_add::apply_errors_add_lowering;
 pub use mailer_class_side::apply_mailer_class_side;
 pub use send_dispatch::apply_send_static_dispatch;
@@ -85,6 +87,10 @@ pub fn apply_post_analyze_lowerings(
     diags.extend(update_kwargs::apply_update_kwargs_inline(app));
     diags.extend(mailer_class_side::apply_mailer_class_side(app));
     diags.extend(send_dispatch::apply_send_static_dispatch(app, registry));
+    // AFTER send_dispatch, by contract: an all-duration-unit name set
+    // dispatches through case arms synthesized as plural unit calls
+    // that count on this grounding (`send_dispatch::duration_plural`).
+    duration::apply_duration_lowering(app);
     diags
 }
 

@@ -41,10 +41,9 @@
 //!
 //! Duration-unit arms deliberately call the PLURAL unit form
 //! (`"day" → days`) — identical semantics on a numeric receiver, and
-//! the plural is what the ruby-family duration lowering (still
-//! emit-time, running after this pass by construction) grounds into
-//! the Duration runtime. Strict targets carry the plural call as
-//! honest residue until the duration pass migrates here too.
+//! the plural is what the shared duration lowering (running right
+//! after this pass in the hook, by contract) grounds into the
+//! Duration runtime unconditionally.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -414,8 +413,8 @@ fn recv_is_duplicable(recv: &Option<Expr>) -> bool {
 /// string-scrutinee dispatch's names are all duration units (lobsters'
 /// `dur.send(intv.downcase).ago`), the arms call the plural form —
 /// identical semantics on a numeric receiver, and the plural is what
-/// the ruby-family duration lowering (which runs at emit, after this
-/// pass) rewrites unconditionally into the Duration runtime.
+/// the shared duration lowering (which runs right after this pass in
+/// the hook) rewrites unconditionally into the Duration runtime.
 fn duration_plural(name: &str) -> Option<&'static str> {
     Some(match name {
         "second" => "seconds",
