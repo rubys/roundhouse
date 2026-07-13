@@ -313,6 +313,12 @@ impl<'a> BodyTyper<'a> {
         if let Some(ty) = universal_method(method) {
             return ty;
         }
+        // Captured before the match: the `Ty::Class { id, args }` arm
+        // below shadows the call-args slice with the class's generic
+        // type args, so the `format_db_time` intrinsic's arg-
+        // optionality probe must read the real first argument here.
+        let first_arg_is_plain_time =
+            matches!(args.first().and_then(|a| a.ty.as_ref()), Some(Ty::Time));
         match recv_ty {
             None => unknown(),
             // RBS-declared gradual receiver. Method dispatch on
@@ -354,12 +360,21 @@ impl<'a> BodyTyper<'a> {
                     return Ty::Str;
                 }
                 // `ActiveSupport.format_db_time(value)` — the write-side
-                // normalize sibling: nil → nil, `Time` → the same
-                // storage text `db_now` produces. The synthesized
-                // public `<col>=` temporal writer normalizes through it
-                // (see `schema::synth_temporal_writer`).
+                // normalize sibling: `Time` → the same storage text
+                // `db_now` produces, propagating the argument's
+                // optionality (a `Time|Nil` arg — nullable column —
+                // yields `Str|Nil`; a plain `Time` yields `Str`, which
+                // is what lets strict targets assign the result into a
+                // NOT NULL column's non-optional storage field). The
+                // synthesized public `<col>=` temporal writer
+                // normalizes through it (`schema::synth_temporal_
+                // writer`).
                 if id.0.as_str() == "ActiveSupport" && method.as_str() == "format_db_time" {
-                    return Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+                    return if first_arg_is_plain_time {
+                        Ty::Str
+                    } else {
+                        Ty::Union { variants: vec![Ty::Str, Ty::Nil] }
+                    };
                 }
                 // Walk the parent chain so inherited methods resolve:
                 // `Article.last` looks up `last` on Article → Application

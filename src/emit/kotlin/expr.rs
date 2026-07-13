@@ -1364,12 +1364,21 @@ fn emit_send(
                     return "RhDateTime.dbNow()".to_string();
                 }
                 // Temporal writer normalize intrinsic: `ActiveSupport.
-                // format_db_time(v)` — null → null, native
-                // `OffsetDateTime` → the same storage text `dbNow`
-                // produces. The synthesized public `<col>=` writer
-                // normalizes through it.
+                // format_db_time(v)` — native `OffsetDateTime` → the
+                // same storage text `dbNow` produces. The runtime
+                // helper is non-null in and out; the argument's
+                // stamped optionality picks the call form: a NOT NULL
+                // column's writer passes a plain `Time` (direct call,
+                // `String`), a nullable column's passes `Time|Nil`
+                // (`?.let` the helper over it, `String?`). Both align
+                // with the raw storage field's nullability-derived
+                // type.
                 (Some("ActiveSupport"), "format_db_time") if args.len() == 1 => {
-                    return format!("RhDateTime.formatDbTime({})", args_s[0]);
+                    return if matches!(args[0].ty, Some(crate::ty::Ty::Time)) {
+                        format!("RhDateTime.formatDbTime({})", args_s[0])
+                    } else {
+                        format!("{}?.let {{ RhDateTime.formatDbTime(it) }}", args_s[0])
+                    };
                 }
                 _ => {}
             }

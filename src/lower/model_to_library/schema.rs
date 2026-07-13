@@ -576,11 +576,19 @@ fn synth_raw_reader(owner: &ClassId, col: &Column) -> MethodDef {
 ///   end
 ///
 /// `format_db_time` (the write-side sibling of `parse_db_time` and
-/// `db_now`, native in every target runtime) maps `nil` → `nil` and a
-/// `Time` → Rails' exact storage form ("YYYY-MM-DD HH:MM:SS.ffffff",
-/// UTC), so every write lands on the same on-disk format the reader
-/// parses. Param typed `Time | Nil` — the corpus writes Time values
-/// (`self.banned_at = Time.now.utc`); stored-text writes go through
+/// `db_now`, native in every target runtime) maps a `Time` → Rails'
+/// exact storage form ("YYYY-MM-DD HH:MM:SS.ffffff", UTC), so every
+/// write lands on the same on-disk format the reader parses. The
+/// param's optionality follows COLUMN NULLABILITY: a nullable column
+/// takes `Time | Nil` (nil clears it — the corpus shape,
+/// `self.banned_at = Time.now.utc`), while a `null: false` column
+/// takes a plain `Time` — its storage field is non-optional on strict
+/// targets (Rust `String`, Kotlin `String`), so a nil-accepting param
+/// would assign `Option<String>` into `String` (CI compare-rust/
+/// kotlin/swift caught exactly that on blog's `null: false`
+/// timestamps). Assigning nil to a NOT NULL column is unrepresentable
+/// in the strict storage model — an honest subset of the Rails
+/// in-memory-nil-until-save behavior. Stored-text writes go through
 /// `<col>_raw=`. Void return and `AccessorKind::Method`, mirroring
 /// `synth_belongs_to_writer` (a kind of `AttributeWriter` would read
 /// as a plain field pair to per-target collapse walkers — and to the
@@ -595,8 +603,14 @@ fn synth_raw_reader(owner: &ClassId, col: &Column) -> MethodDef {
 /// at all.
 fn synth_temporal_writer(owner: &ClassId, col: &Column) -> MethodDef {
     let value_param = Symbol::from("value");
-    let value_ty = Ty::Union { variants: vec![Ty::Time, Ty::Nil] };
-    let text_ty = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    let (value_ty, text_ty) = if col.nullable {
+        (
+            Ty::Union { variants: vec![Ty::Time, Ty::Nil] },
+            Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+        )
+    } else {
+        (Ty::Time, Ty::Str)
+    };
     let normalize = with_ty(
         Expr::new(
             Span::synthetic(),

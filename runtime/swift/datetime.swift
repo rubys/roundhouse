@@ -162,12 +162,16 @@ enum Roundhouse {
 
         // Write-side normalize sibling of `dbNow` — the
         // `ActiveSupport.format_db_time` intrinsic behind the
-        // synthesized public `<col>=` temporal writer. nil → nil; a
-        // native `Date` formats to the same storage text `dbNow`
-        // produces (same civil-from-days arithmetic, applied to the
-        // given instant instead of now).
-        static func formatDbTime(_ value: Date?) -> String? {
-            guard let value = value else { return nil }
+        // synthesized public `<col>=` temporal writer. Formats a
+        // native `Date` to the same storage text `dbNow` produces
+        // (same civil-from-days arithmetic, applied to the given
+        // instant instead of now). Non-optional in and out, like
+        // `dbNow`: a NOT NULL column's writer calls it directly, and
+        // a nullable column's writer maps it over its optional
+        // (`value.map { formatDbTime($0) }` → `String?`) — the
+        // emitter picks the form from the argument's stamped
+        // optionality.
+        static func formatDbTime(_ value: Date) -> String {
             let micros = Int((value.timeIntervalSince1970 * 1_000_000).rounded())
             var days = micros / 86_400_000_000
             var rem = micros % 86_400_000_000

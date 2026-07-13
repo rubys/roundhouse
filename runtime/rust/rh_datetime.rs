@@ -71,11 +71,14 @@ pub fn db_now() -> String {
 
 /// Write-side normalize sibling of `db_now` — the
 /// `ActiveSupport.format_db_time` intrinsic behind the synthesized
-/// public `<col>=` temporal writer (its `Time | Nil` param renders as
-/// `Option<DateTime<Utc>>`). `None` → `None`; a `DateTime<Utc>`
-/// formats to the same storage text `db_now` produces.
-pub fn format_db_time(value: Option<DateTime<Utc>>) -> Option<String> {
-    value.map(|t| t.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
+/// public `<col>=` temporal writer. Formats a `DateTime<Utc>` to the
+/// same storage text `db_now` produces. Non-optional in and out, like
+/// `db_now`: a NOT NULL column's writer calls it directly
+/// (`String` = `String`), and a nullable column's writer maps it over
+/// its `Option` (`value.map(format_db_time)` → `Option<String>`) —
+/// the emitter picks the form from the argument's stamped optionality.
+pub fn format_db_time(t: DateTime<Utc>) -> String {
+    t.format("%Y-%m-%d %H:%M:%S%.6f").to_string()
 }
 
 /// Trait backing the generic `JsonBuilder::encode_datetime`. Formats a

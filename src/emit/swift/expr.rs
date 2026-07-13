@@ -2181,13 +2181,25 @@ fn emit_send(
     }
 
     // Temporal writer normalize intrinsic: `ActiveSupport.format_db_time(v)`
-    // — nil → nil, native `Date` → the same storage text `dbNow` produces.
-    // The synthesized public `<col>=` writer normalizes through it.
+    // — native `Date` → the same storage text `dbNow` produces. The
+    // runtime helper is non-optional in and out; the argument's stamped
+    // optionality picks the call form: a NOT NULL column's writer
+    // passes a plain `Time` (direct call, `String`), a nullable
+    // column's passes `Time|Nil` (`.map` the helper over it,
+    // `String?`). Both align with the raw storage field's
+    // nullability-derived type.
     if method == "format_db_time" && args.len() == 1 {
         if let Some(r) = recv {
             if let ExprNode::Const { path } = &*r.node {
                 if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
-                    return format!("Roundhouse.RhDateTime.formatDbTime({})", args_s[0]);
+                    return if matches!(args[0].ty, Some(crate::ty::Ty::Time)) {
+                        format!("Roundhouse.RhDateTime.formatDbTime({})", args_s[0])
+                    } else {
+                        format!(
+                            "{}.map {{ Roundhouse.RhDateTime.formatDbTime($0) }}",
+                            args_s[0]
+                        )
+                    };
                 }
             }
         }

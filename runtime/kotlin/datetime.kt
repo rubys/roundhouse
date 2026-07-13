@@ -81,11 +81,14 @@ object RhDateTime {
 
     // Write-side normalize sibling of `dbNow` — the
     // `ActiveSupport.format_db_time` intrinsic behind the synthesized
-    // public `<col>=` temporal writer. null → null; a native
-    // `OffsetDateTime` formats to the same storage text `dbNow`
-    // produces.
-    fun formatDbTime(value: OffsetDateTime?): String? =
-        value?.let { DB_NOW_FORMAT.format(it.toInstant()) }
+    // public `<col>=` temporal writer. Formats a native
+    // `OffsetDateTime` to the same storage text `dbNow` produces.
+    // Non-null in and out, like `dbNow`: a NOT NULL column's writer
+    // calls it directly (`String` = `String`), and a nullable column's
+    // writer maps it over its optional (`value?.let { formatDbTime(it) }`
+    // → `String?`) — the emitter picks the form from the argument's
+    // stamped optionality.
+    fun formatDbTime(value: OffsetDateTime): String = DB_NOW_FORMAT.format(value.toInstant())
 }
 
 // UTC, millisecond precision, `Z` suffix — Rails' canonical datetime JSON.

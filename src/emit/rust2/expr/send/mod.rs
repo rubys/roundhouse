@@ -100,19 +100,29 @@ pub(super) fn emit_send(
         }
     }
     // Temporal writer normalize intrinsic: `ActiveSupport.
-    // format_db_time(v)` — None → None, `DateTime<Utc>` → the same
-    // owned storage `String` that `db_now` produces. The synthesized
-    // public `<col>=` writer normalizes through it; its `Time | Nil`
-    // param renders as `Option<DateTime<Utc>>`, matching the helper's
-    // signature.
+    // format_db_time(v)` — `DateTime<Utc>` → the same owned storage
+    // `String` that `db_now` produces. The runtime helper is
+    // non-optional in and out; the argument's stamped optionality
+    // picks the call form: a NOT NULL column's writer passes a plain
+    // `Time` (direct call, `String`), a nullable column's passes
+    // `Time|Nil` (`Option<DateTime<Utc>>` — map the helper over it,
+    // `Option<String>`). Both align with the raw storage field's own
+    // nullability-derived type.
     if method == "format_db_time" && args.len() == 1 {
         if let Some(r) = recv {
             if let ExprNode::Const { path } = &*r.node {
                 if path.last().map(|s| s.as_str()) == Some("ActiveSupport") {
-                    return format!(
-                        "crate::rh_datetime::format_db_time({})",
-                        emit_expr(&args[0])
-                    );
+                    return if matches!(args[0].ty, Some(crate::ty::Ty::Time)) {
+                        format!(
+                            "crate::rh_datetime::format_db_time({})",
+                            emit_expr(&args[0])
+                        )
+                    } else {
+                        format!(
+                            "{}.map(crate::rh_datetime::format_db_time)",
+                            emit_expr(&args[0])
+                        )
+                    };
                 }
             }
         }
