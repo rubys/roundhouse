@@ -527,13 +527,27 @@ fn is_simple_ident(s: &str) -> bool {
 
 /// Emit an expression in argument position. A bare modifier `if`/`unless`
 /// (`x if c`) is a syntax error as a call argument — `foo(x if c)` — so
-/// wrap it in parens. Everything else passes through unchanged.
+/// wrap it in parens. A command-style (paren-less, arg-bearing) send
+/// carrying a `do` block also wraps: CRuby parses
+/// `f(g a: 1 do ... end)` but JRuby (through at least 10.1) rejects it,
+/// and `f((g a: 1 do ... end))` parses identically everywhere.
+/// Everything else passes through unchanged.
 fn emit_arg(e: &Expr) -> String {
-    if renders_as_trailing_modifier(e) {
+    if renders_as_trailing_modifier(e) || renders_as_command_with_block(e) {
         format!("({})", emit_expr(e))
     } else {
         emit_expr(e)
     }
+}
+
+/// Does `e` emit as a paren-less call with arguments AND a `do` block
+/// (`tag.details class: "x" do ... end`)? Fine in statement position;
+/// as a call argument it needs wrapping parens (see `emit_arg`).
+fn renders_as_command_with_block(e: &Expr) -> bool {
+    matches!(
+        &*e.node,
+        ExprNode::Send { args, block: Some(_), parenthesized: false, .. } if !args.is_empty()
+    )
 }
 
 /// Does `e` emit with a trailing modifier (`x if cond` / `x rescue f`)?
@@ -1136,6 +1150,35 @@ mod tests {
             ExprNode::Hash { entries: vec![(lit_sym("open"), val)], kwargs: false },
         );
         assert_eq!(emit_expr(&hash), r#"{ open: ("y" if cond?) }"#);
+    }
+
+    #[test]
+    fn command_with_block_in_arg_position_is_parenthesized() {
+        // `f(g :a do ... end)` parses under CRuby but not JRuby
+        // (through at least 10.1); the wrapped `f((g :a do ... end))`
+        // parses identically everywhere. Found against lobsters'
+        // stories/_form.erb (`html_escape(tag.details class: "…",
+        // open: (…) do … end)`). Statement position stays unwrapped —
+        // the wrap is surgical to argument position, like the
+        // modifier-if wrap above.
+        let block = Expr::new(
+            Span::default(),
+            ExprNode::Lambda {
+                params: vec![],
+                block_param: None,
+                body: lit_sym("body"),
+                block_style: Default::default(),
+            },
+        );
+        let mut inner = cmd_send(None, "g", vec![lit_sym("a")]);
+        if let ExprNode::Send { block: b, .. } = &mut *inner.node {
+            *b = Some(block);
+        }
+        let statement = emit_expr(&inner);
+        assert!(statement.starts_with("g :a do"), "got: {statement}");
+        let arg_position = emit_expr(&send(None, "f", vec![inner]));
+        assert!(arg_position.starts_with("f((g :a do"), "got: {arg_position}");
+        assert!(arg_position.trim_end().ends_with("end))"), "got: {arg_position}");
     }
 
     /// Paren-less command-style send (`recv.method arg, ...`).
