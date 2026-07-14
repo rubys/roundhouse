@@ -10,6 +10,8 @@ module ActiveRecord
     def not: (?untyped condition, *untyped args) -> Relation
     def add_condition: (untyped condition, Array[untyped] args, bool negate) -> void
     def order: (*untyped parts) -> Relation
+    def where!: (?untyped condition, *untyped args) -> Relation
+    def order!: (*untyped parts) -> Relation
     def limit: (Integer n) -> Relation
     def offset: (Integer n) -> Relation
     def group: (*untyped parts) -> Relation
@@ -27,10 +29,13 @@ module ActiveRecord
     def arel: () -> Arel::SelectManager
     def none: () -> Relation
     def reload: () -> Relation
+    def load: () -> Relation
+    def klass: () -> Class
 
     def to_a: () -> Array[untyped]
     def +: (Array[untyped] other) -> Array[untyped]
     def each: () { (untyped) -> void } -> Array[untyped]
+    def index_by: () { (untyped) -> untyped } -> Hash[untyped, untyped]
     def find_each: () { (untyped) -> void } -> Array[untyped]
     def map: () { (untyped) -> untyped } -> Array[untyped]
     def group_by: () { (untyped) -> untyped } -> Hash[untyped, Array[untyped]]

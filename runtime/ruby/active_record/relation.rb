@@ -65,6 +65,20 @@ module ActiveRecord
       self
     end
 
+    # Rails' mutating spellings. This Relation's chain methods already
+    # mutate in place and return self, so the bang forms are the same
+    # operation under a second name (bodies duplicated rather than
+    # splat-forwarded — strict targets inline, not forward, rest args).
+    def where!(condition = nil, *args)
+      add_condition(condition, args, false)
+      self
+    end
+
+    def order!(*parts)
+      parts.each { |p| @orders << order_term(p) }
+      self
+    end
+
     def limit(n)
       @limit = n
       self
@@ -169,6 +183,19 @@ module ActiveRecord
       self
     end
 
+    # Rails' `load` forces the query and memoizes the records; with no
+    # materialized cache here it's the same no-op as reload — the next
+    # `to_a`/`each`/`map` runs the query.
+    def load
+      self
+    end
+
+    # The model class this relation queries — Rails' Relation#klass
+    # (lobsters' Search switches on it to pick per-model joins).
+    def klass
+      @model
+    end
+
     # ---- terminals --------------------------------------------------
 
     def to_a
@@ -186,6 +213,15 @@ module ActiveRecord
 
     def each
       to_a.each { |x| yield x }
+    end
+
+    # `index_by { |r| key }` — the records as a Hash keyed by the
+    # block's value, last write winning on duplicates (Rails'
+    # contract; lobsters keys tag filters by id).
+    def index_by
+      h = {}
+      to_a.each { |x| h[yield x] = x }
+      h
     end
 
     # `find_each` — Rails batches in groups of 1000; the result set sizes
