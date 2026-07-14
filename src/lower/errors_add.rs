@@ -8,13 +8,18 @@
 //! semantics); a dynamic message interpolates after the humanized
 //! field; a missing message defaults to Rails' "is invalid".
 //!
-//! Only the self-receiver spelling grounds: `errors` must be a
-//! zero-arg send on `self` (bare or explicit), i.e. a model adding to
-//! its own errors during validation. `record.errors.add(...)` from the
-//! outside keeps its dynamic call and joins the residue ledger — the
-//! accumulator is an `Array[String]`, which has no `add`, so on strict
-//! targets each such site is a named per-target gap rather than a
-//! silent compile error (`lower_residue` warning, pass `errors_add`).
+//! Any receiver spelling grounds: `errors` as a zero-arg send on
+//! `self` (a model adding to its own errors during validation) or on
+//! another expression (`record.errors.add(...)` from a controller —
+//! lobsters' duplicate-comment guard). The rewrite keeps the receiver,
+//! so both land on the same accumulator. A dynamic (non-symbol) field
+//! still joins the residue ledger — the accumulator is an
+//! `Array[String]`, which has no `add`, so on strict targets each such
+//! site is a named per-target gap rather than a silent compile error
+//! (`lower_residue` warning, pass `errors_add`). Adjacent
+//! string-literal concats in the message (`"a " << "b"`, lobsters'
+//! line-wrap idiom) fold to one literal first — a runtime `<<` on a
+//! frozen literal is a hazard the bake sidesteps.
 //!
 //! Purely shape-directed; runs on the post-analyze hook
 //! (`apply_post_analyze_lowerings`) with its siblings so every target
@@ -53,6 +58,25 @@ fn residue(expr: &Expr, reason: &str) -> Diagnostic {
     }
 }
 
+/// Fold `"a" << "b"` / `"a" + "b"` chains of string literals into one
+/// literal (left-recursively, so multi-line wraps fold whole). Any
+/// non-literal operand leaves the expression untouched.
+fn fold_str_concat(e: Expr) -> Expr {
+    let ExprNode::Send { recv: Some(l), method, args, block: None, .. } = &*e.node else {
+        return e;
+    };
+    if !(method.as_str() == "<<" || method.as_str() == "+") || args.len() != 1 {
+        return e;
+    }
+    let left = fold_str_concat(l.clone());
+    let (ExprNode::Lit { value: Literal::Str { value: lv } },
+         ExprNode::Lit { value: Literal::Str { value: rv } }) = (&*left.node, &*args[0].node)
+    else {
+        return e;
+    };
+    Expr::new(e.span, ExprNode::Lit { value: Literal::Str { value: format!("{lv}{rv}") } })
+}
+
 fn rewrite_errors_add(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     expr.node
         .for_each_child_mut(&mut |c| rewrite_errors_add(c, diags));
@@ -70,22 +94,13 @@ fn rewrite_errors_add(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     }
     let matches = matches!(
         &*expr.node,
-        ExprNode::Send { recv: Some(r), args, .. }
+        ExprNode::Send { args, .. }
             if !args.is_empty()
                 && args.len() <= 2
                 && matches!(&*args[0].node, ExprNode::Lit { value: Literal::Sym { .. } })
-                && matches!(&*r.node, ExprNode::Send { recv: er, .. }
-                    if er.as_ref().is_none_or(
-                        |e| matches!(&*e.node, ExprNode::SelfRef)))
     );
     if !matches {
         let reason = match &*expr.node {
-            ExprNode::Send { recv: Some(r), .. }
-                if matches!(&*r.node, ExprNode::Send { recv: Some(er), .. }
-                    if !matches!(&*er.node, ExprNode::SelfRef)) =>
-            {
-                "non-self errors receiver"
-            }
             ExprNode::Send { args, .. }
                 if args.first().is_some_and(
                     |a| !matches!(&*a.node, ExprNode::Lit { value: Literal::Sym { .. } })) =>
@@ -105,7 +120,35 @@ fn rewrite_errors_add(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     let ExprNode::Lit { value: Literal::Sym { value: field } } = &*field_expr.node else {
         unreachable!()
     };
-    let msg = args.next();
+    let mut msg = args.next().map(fold_str_concat);
+    // Rails' options spelling: `errors.add(:field, message: "…")`.
+    // The kwargs hash IS the message carrier — unwrap a sole
+    // `message:` entry; any other option set stays residue (put the
+    // Send back — it was already moved out).
+    let sole_message = matches!(
+        msg.as_ref().map(|m| &*m.node),
+        Some(ExprNode::Hash { entries, .. })
+            if entries.len() == 1
+                && matches!(&*entries[0].0.node,
+                    ExprNode::Lit { value: Literal::Sym { value } }
+                        if value.as_str() == "message")
+    );
+    if sole_message {
+        let Some(ExprNode::Hash { entries, .. }) = msg.take().map(|m| *m.node) else {
+            unreachable!()
+        };
+        msg = Some(fold_str_concat(entries.into_iter().next().unwrap().1));
+    } else if matches!(msg.as_ref().map(|m| &*m.node), Some(ExprNode::Hash { .. })) {
+        diags.push(residue(expr, "unrecognized arg shape"));
+        *expr.node = ExprNode::Send {
+            recv,
+            method: Symbol::from("add"),
+            args: vec![field_expr, msg.unwrap()],
+            block: None,
+            parenthesized: true,
+        };
+        return;
+    }
     let humanized = super::model_to_library::validations::humanize(field.as_str());
     let message: Expr = if field.as_str() == "base" {
         // :base attaches the message to the record, not a field.

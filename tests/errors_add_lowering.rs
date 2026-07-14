@@ -102,7 +102,10 @@ end
 }
 
 #[test]
-fn non_self_receiver_keeps_dispatch_with_residue() {
+fn non_self_receiver_grounds_on_its_own_accumulator() {
+    // `record.errors.add(...)` from outside the model (lobsters'
+    // duplicate-comment guard) grounds the same way — the receiver is
+    // preserved, so the append lands on record's accumulator.
     let (out, diags) = lower_and_emit(
         r#"
 class Reviewer
@@ -113,14 +116,68 @@ end
 "#,
     );
     assert!(
+        out.contains(r#"record.errors << "Title not yours""#),
+        "outside-the-record add should ground with its receiver:\n{out}"
+    );
+    assert!(diags.is_empty(), "non-self site should ground without residue: {diags:?}");
+}
+
+#[test]
+fn message_keyword_unwraps_to_the_message() {
+    // Rails' options spelling: the sole `message:` entry carries the
+    // message; any other option set stays residue.
+    let (out, diags) = lower_and_emit(
+        r#"
+class Story
+  def check
+    errors.add(:moderation_reason, message: "is required")
+  end
+end
+"#,
+    );
+    assert!(
+        out.contains(r#"errors << "Moderation reason is required""#),
+        "expected the message: value baked after the humanized field:\n{out}"
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+#[test]
+fn non_message_options_keep_dispatch_with_residue() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Story
+  def check
+    errors.add(:url, message: "is taken", strict: true)
+  end
+end
+"#,
+    );
+    assert!(
         out.contains("errors.add"),
-        "outside-the-record add must keep its dynamic call:\n{out}"
+        "unrecognized option set must keep its dynamic call:\n{out}"
     );
     assert_eq!(diags.len(), 1, "expected one residue entry: {diags:?}");
-    assert_eq!(diags[0].code(), "lower_residue");
-    assert!(
-        diags[0].message.contains("non-self errors receiver"),
-        "{:?}",
-        diags[0].message
+    assert!(diags[0].message.contains("unrecognized arg shape"), "{:?}", diags[0].message);
+}
+
+#[test]
+fn literal_concat_message_folds_before_bake() {
+    // Lobsters wraps long messages as `"a " << "b"` — string-literal
+    // concat folds into the baked literal (a runtime `<<` on a frozen
+    // literal is a hazard the bake sidesteps).
+    let (out, diags) = lower_and_emit(
+        r#"
+class Comment
+  def check
+    errors.add(:comment, "^You have already posted " << "here recently.")
+  end
+end
+"#,
     );
+    assert!(
+        out.contains(r#"errors << "Comment ^You have already posted here recently.""#),
+        "expected the concat folded into one literal:\n{out}"
+    );
+    assert!(diags.is_empty(), "{diags:?}");
 }

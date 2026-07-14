@@ -21,7 +21,6 @@
 use crate::app::App;
 use crate::expr::{Expr, ExprNode, LValue};
 use crate::ident::{Symbol, VarId};
-use crate::span::Span;
 
 pub fn apply_capture_inline(app: &mut App) {
     super::for_each_hook_body(app, &mut rewrite);
