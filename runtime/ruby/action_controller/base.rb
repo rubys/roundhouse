@@ -52,7 +52,7 @@ module ActionController
       @location = nil
       @request_format = :html
       @content_type = "text/html; charset=utf-8"
-      @response_headers = {}
+      @headers = {}
       @performed = false
     end
 
@@ -146,16 +146,18 @@ module ActionController
     end
 
     def headers
-      @response_headers
+      @headers
     end
 
     # `send_data data, type:, disposition:` — a binary response body
     # (lobsters streams avatar PNGs). Same buffering contract as
-    # render.
+    # render. `disposition` is accepted but not yet buffered — extra
+    # headers ride the same unsent seam as `headers` above, and the
+    # Content-Disposition write joins it when the harness wires
+    # header emission.
     def send_data(data, type: "application/octet-stream", disposition: "attachment")
       @body = data
       @content_type = type
-      @response_headers["Content-Disposition"] = disposition
       @performed = true
       nil
     end
