@@ -11,7 +11,10 @@ use crate::lower::view::{
     extract_sym_or_str, ViewHelperKind,
 };
 
-use super::form_builder::{emit_button_tag, emit_form_builder_inline, emit_submit_tag};
+use super::form_builder::{
+    emit_button_tag, emit_check_box_tag, emit_form_builder_inline, emit_label_tag,
+    emit_submit_tag,
+};
 use super::form_with::{
     emit_form_tag_inline, emit_form_with_inline, is_errors_each, rewrite_errors_each_body,
 };
@@ -405,6 +408,13 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         if method.as_str() == "form_tag" {
             return emit_form_tag_inline(sa, block, ctx);
         }
+        // `<%= label_tag name do %>…<% end %>` — block-content label
+        // (filters page); the open tag inlines, the body splices.
+        if method.as_str() == "label_tag" {
+            if let Some(out) = emit_label_tag(sa, Some(block), ctx) {
+                return out;
+            }
+        }
     }
 
     // Bare `<%= submit_tag label, opts %>` / `<%= button_tag content,
@@ -418,6 +428,17 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         }
         if method.as_str() == "button_tag" {
             return emit_button_tag(sa, ctx);
+        }
+        if method.as_str() == "check_box_tag" {
+            return emit_check_box_tag(sa, ctx);
+        }
+        // Blockless `<%= label_tag name, content[, opts] %>` — the
+        // settings page's labeled fields. No-content non-literal
+        // shapes fall through to the runtime helper.
+        if method.as_str() == "label_tag" {
+            if let Some(out) = emit_label_tag(sa, None, ctx) {
+                return out;
+            }
         }
     }
 

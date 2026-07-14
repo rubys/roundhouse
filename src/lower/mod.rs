@@ -50,6 +50,7 @@ pub mod request_index;
 pub mod send_dispatch;
 pub(crate) mod secure_password;
 pub mod time_current;
+pub mod transaction_ground;
 pub mod update_kwargs;
 pub(crate) mod typed_store;
 pub mod ty_coerce_insertion;
@@ -66,6 +67,7 @@ pub use mailer_class_side::apply_mailer_class_side;
 pub use request_index::apply_request_index_lowering;
 pub use send_dispatch::apply_send_static_dispatch;
 pub use time_current::apply_time_current_lowering;
+pub use transaction_ground::apply_transaction_grounding;
 pub use update_kwargs::apply_update_kwargs_inline;
 
 /// Post-analyze shared lowerings — type-directed IR rewrites every
@@ -86,6 +88,7 @@ pub fn apply_post_analyze_lowerings(
     let mut diags = blank::apply_blank_lowering(app);
     time_current::apply_time_current_lowering(app);
     request_index::apply_request_index_lowering(app);
+    transaction_ground::apply_transaction_grounding(app);
     diags.extend(errors_add::apply_errors_add_lowering(app));
     diags.extend(create_block::apply_create_block_inline(app));
     diags.extend(update_kwargs::apply_update_kwargs_inline(app));

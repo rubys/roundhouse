@@ -15,6 +15,8 @@ use crate::span::Span;
 
 use crate::lower::view::FormBuilderMethod;
 
+use super::walker::walk_body;
+
 use super::{
     accumulator_append_call, lit_str, lit_sym, send, view_helpers_call, FormBuilderBinding,
     ViewCtx,
@@ -803,6 +805,167 @@ fn str_or_sym_lit(e: &Expr) -> Option<String> {
 pub(super) fn emit_button_tag(args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
     let (positional, opts) = split_args(args);
     emit_button(positional.first().copied(), opts.as_slice(), ctx)
+}
+
+/// Bare `<%= check_box_tag name[, value[, checked]][, opts] %>` — the
+/// model-less checkbox: `<input type="checkbox" name="N" id="I"
+/// value="V"[ checked="checked"][opts]>` in Rails' attr order. The
+/// default id is Rails' sanitize_to_id of the name — compile-time for
+/// a literal name, the typed runtime helper for an interp (`"tags[
+/// #{tag.tag}]"` on the filters page); an explicit `id:` opt wins
+/// (messages' delete_all). The third positional is the checked
+/// EXPRESSION (`@filtered_tags.include?(tag.id)`) — a plain ternary.
+pub(super) fn emit_check_box_tag(args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
+    let (positional, opts) = split_args(args);
+    let Some(name) = positional.first() else {
+        return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+    };
+    let explicit_id = opts.iter().find_map(|(k, v)| {
+        matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+            if value.as_str() == "id")
+        .then(|| (*v).clone())
+    });
+    let attr_opts: Vec<(Expr, Expr)> = opts
+        .iter()
+        .filter(|(k, _)| {
+            !matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+                if value.as_str() == "id")
+        })
+        .cloned()
+        .collect();
+
+    let mut parts: Vec<InterpPart> = Vec::new();
+    parts.push(InterpPart::Text { value: "<input type=\"checkbox\" name=\"".to_string() });
+    let name_lit = match &*name.node {
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        _ => None,
+    };
+    match &name_lit {
+        Some(lit) => parts.push(InterpPart::Text { value: html_escape_static(lit) }),
+        None => parts.push(InterpPart::Expr {
+            expr: view_helpers_call("html_escape", vec![to_s((*name).clone())]),
+        }),
+    }
+    parts.push(InterpPart::Text { value: "\" id=\"".to_string() });
+    match explicit_id {
+        Some(id) => match &*id.node {
+            ExprNode::Lit { value: Literal::Str { value } } => {
+                parts.push(InterpPart::Text { value: html_escape_static(value) })
+            }
+            _ => parts.push(InterpPart::Expr {
+                expr: view_helpers_call("html_escape", vec![to_s(id.clone())]),
+            }),
+        },
+        None => match &name_lit {
+            Some(lit) => {
+                parts.push(InterpPart::Text { value: sanitize_to_id_static(lit) })
+            }
+            // sanitize_to_id's output alphabet is attr-safe by
+            // construction — no escape wrapper needed.
+            None => parts.push(InterpPart::Expr {
+                expr: view_helpers_call("sanitize_to_id", vec![to_s((*name).clone())]),
+            }),
+        },
+    }
+    parts.push(InterpPart::Text { value: "\" value=\"".to_string() });
+    match positional.get(1) {
+        None => parts.push(InterpPart::Text { value: "1".to_string() }),
+        Some(v) => match &*v.node {
+            ExprNode::Lit { value: Literal::Str { value } } => {
+                parts.push(InterpPart::Text { value: html_escape_static(value) })
+            }
+            _ => parts.push(InterpPart::Expr {
+                expr: view_helpers_call("html_escape", vec![to_s((*v).clone())]),
+            }),
+        },
+    }
+    parts.push(InterpPart::Text { value: "\"".to_string() });
+    if let Some(checked) = positional.get(2) {
+        parts.push(InterpPart::Expr {
+            expr: Expr::new(
+                Span::synthetic(),
+                ExprNode::If {
+                    cond: (*checked).clone(),
+                    then_branch: lit_str(" checked=\"checked\"".to_string()),
+                    else_branch: lit_str(String::new()),
+                },
+            ),
+        });
+    }
+    append_attr_parts(&mut parts, &attr_opts);
+    parts.push(InterpPart::Text { value: ">".to_string() });
+    vec![accumulator_append_call(string_interp(parts), ctx)]
+}
+
+/// Bare `<%= label_tag name[, content][, opts] %>` and the block form
+/// (`<%= label_tag "tags[#{tag.tag}]" do %>…<% end %>`, filters page).
+/// `<label for="SANITIZED(name)"[opts]>CONTENT</label>` — the for-attr
+/// gets Rails' sanitize_to_id (identity for the settings page's plain
+/// `:gravatar`-style names, so the replay-locked bytes hold; the
+/// filters page's `tags[…]` names sanitize to match the checkbox ids
+/// beside them). Blockless content comes from the second positional
+/// (escaped); the block form splices its walked body. A blockless call
+/// with NO content and a non-literal name stays on the runtime helper
+/// (the humanized-default path; no corpus site).
+pub(super) fn emit_label_tag(
+    args: &[Expr],
+    block: Option<&Expr>,
+    ctx: &ViewCtx,
+) -> Option<Vec<Expr>> {
+    let (positional, opts) = split_args(args);
+    let name = positional.first()?;
+    let name_lit = match &*name.node {
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        _ => None,
+    };
+    let mut open: Vec<InterpPart> = Vec::new();
+    open.push(InterpPart::Text { value: "<label for=\"".to_string() });
+    match &name_lit {
+        Some(lit) => open.push(InterpPart::Text { value: sanitize_to_id_static(lit) }),
+        None => open.push(InterpPart::Expr {
+            expr: view_helpers_call("sanitize_to_id", vec![to_s((*name).clone())]),
+        }),
+    }
+    open.push(InterpPart::Text { value: "\"".to_string() });
+    append_attr_parts(&mut open, &opts);
+    open.push(InterpPart::Text { value: ">".to_string() });
+
+    if let Some(block) = block {
+        let ExprNode::Lambda { body, .. } = &*block.node else { return None };
+        let mut out = vec![accumulator_append_call(string_interp(open), ctx)];
+        out.extend(walk_body(body, ctx));
+        out.push(accumulator_append_call(lit_str("</label>".to_string()), ctx));
+        return Some(out);
+    }
+
+    let content = positional.get(1)?;
+    let mut parts = open;
+    match &*content.node {
+        ExprNode::Lit { value: Literal::Str { value } } => {
+            parts.push(InterpPart::Text { value: html_escape_static(value) })
+        }
+        _ => parts.push(InterpPart::Expr {
+            expr: view_helpers_call("html_escape", vec![to_s((*content).clone())]),
+        }),
+    }
+    parts.push(InterpPart::Text { value: "</label>".to_string() });
+    Some(vec![accumulator_append_call(string_interp(parts), ctx)])
+}
+
+/// Compile-time mirror of the runtime `sanitize_to_id` (Rails: drop
+/// "]", non-[-a-zA-Z0-9:.] → "_").
+fn sanitize_to_id_static(name: &str) -> String {
+    name.chars()
+        .filter(|c| *c != ']')
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == ':' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn emit_button(

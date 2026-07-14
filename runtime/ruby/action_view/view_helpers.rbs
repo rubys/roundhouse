@@ -87,6 +87,8 @@ module ActionView
     # (and absolute/protocol-relative sources) returns it verbatim.
     def self.image_path: (String source, ?skip_pipeline: bool) -> String
     def self.url_for: (String target) -> String
+    def self.sanitize_to_id: (String name) -> String
+    def self.number_with_delimiter: (Integer value) -> String
     def self.image_url: (String source, ?skip_pipeline: bool) -> String
     def self.image_tag: (String source, ?Hash[Symbol, untyped] opts) -> String
     def self.path_to_javascript: (String source, ?skip_pipeline: bool) -> String

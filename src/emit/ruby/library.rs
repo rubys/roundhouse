@@ -759,6 +759,65 @@ fn rewrite_helper_calls(
         return;
     }
 
+    // Bare `<x>_url` whose `<x>_path` sibling is generated — the
+    // absolute variant grounds to protocol + configured domain + the
+    // path helper (same convention as `rewrite_url_helpers_absolute`'s
+    // host-kwarg form): `"http://#{Rails.application.domain}#{
+    // RouteHelpers.<x>_path(args)}"`. Lobsters' hats page links
+    // `request_hat_url` bare.
+    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
+        if let Some(stem) = method.as_str().strip_suffix("_url") {
+            let path_name = Symbol::from(format!("{stem}_path"));
+            if route_helpers.contains(&path_name) {
+                let span = expr.span;
+                let args = args.clone();
+                let domain = Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(Expr::new(
+                            span,
+                            ExprNode::Send {
+                                recv: Some(Expr::new(
+                                    span,
+                                    ExprNode::Const { path: vec![Symbol::from("Rails")] },
+                                )),
+                                method: Symbol::from("application"),
+                                args: vec![],
+                                block: None,
+                                parenthesized: false,
+                            },
+                        )),
+                        method: Symbol::from("domain"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    },
+                );
+                let path_call = Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(Expr::new(
+                            span,
+                            ExprNode::Const { path: vec![Symbol::from("RouteHelpers")] },
+                        )),
+                        method: path_name,
+                        args,
+                        block: None,
+                        parenthesized: true,
+                    },
+                );
+                *expr.node = ExprNode::StringInterp {
+                    parts: vec![
+                        crate::expr::InterpPart::Text { value: "http://".to_string() },
+                        crate::expr::InterpPart::Expr { expr: domain },
+                        crate::expr::InterpPart::Expr { expr: path_call },
+                    ],
+                };
+                return;
+            }
+        }
+    }
+
     // Cases 3/4: a bare call resolving to an app or framework helper module.
     let path: Option<Vec<Symbol>> = match &*expr.node {
         ExprNode::Send { recv: None, method, args, .. } => {

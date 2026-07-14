@@ -291,8 +291,43 @@ fn simplify_opts_value(k: &Expr, v: &Expr) -> Expr {
 fn route_helperize(url: Expr, route_helpers: &impl Fn() -> Expr, ctx: &ViewCtx) -> Expr {
     if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*url.node {
         let m = method.as_str();
-        if m.ends_with("_path") || m.ends_with("_url") {
+        if m.ends_with("_path") {
             return send(Some(route_helpers()), m, args.clone(), None, true);
+        }
+        // `_url` absolute variants: RouteHelpers only generates `_path`
+        // functions, so ground to protocol + configured domain + the
+        // path sibling (the rewrite_url_helpers_absolute convention).
+        // Lobsters' keybase form posts to `keybase_proofs_url`.
+        if let Some(stem) = m.strip_suffix("_url") {
+            let span = url.span;
+            let rails_app = send(
+                Some(Expr::new(
+                    span,
+                    ExprNode::Const { path: vec![Symbol::from("Rails")] },
+                )),
+                "application",
+                Vec::new(),
+                None,
+                false,
+            );
+            let domain = send(Some(rails_app), "domain", Vec::new(), None, false);
+            let path_call = send(
+                Some(route_helpers()),
+                &format!("{stem}_path"),
+                args.clone(),
+                None,
+                true,
+            );
+            return Expr::new(
+                span,
+                ExprNode::StringInterp {
+                    parts: vec![
+                        InterpPart::Text { value: "http://".to_string() },
+                        InterpPart::Expr { expr: domain },
+                        InterpPart::Expr { expr: path_call },
+                    ],
+                },
+            );
         }
     }
     // A bare local/ivar `url:` naming a KNOWN MODEL is Rails'

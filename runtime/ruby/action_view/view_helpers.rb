@@ -282,6 +282,51 @@ module ActionView
       target
     end
 
+    # `number_with_delimiter(12345)` → "12,345" — comma grouping every
+    # three digits, sign-aware. Integer-only, matching the signature
+    # (every corpus arg is a count); while-loop over the digit string
+    # so every target runtime types it; byte-equal to the CRuby overlay
+    # variant it supersedes on the replay-locked /u page. The overlay's
+    # `delimiter:` kwarg and float handling have no caller — the shared
+    # version stays monomorphic.
+    def self.number_with_delimiter(value)
+      int = value.to_s
+      sign = ""
+      if int.start_with?("-")
+        sign = "-"
+        int = int[1, int.length - 1].to_s
+      end
+      out = ""
+      i = int.length
+      while i > 3
+        out = "," + int[i - 3, 3].to_s + out
+        i = i - 3
+      end
+      out = int[0, i].to_s + out
+      sign + out
+    end
+
+    # Rails' sanitize_to_id — the default `id` a `*_tag` control
+    # derives from its `name` ("tags[foo]" → "tags_foo"): drop "]",
+    # replace every char outside [-a-zA-Z0-9:.] with "_". Char loop
+    # over an inline membership literal (a module-const receiver reads
+    # as an unresolved class in the strict typer), not gsub-with-regex:
+    # portable and typed on every target runtime. The output alphabet
+    # is attr-safe by construction, so call sites splice it unescaped.
+    def self.sanitize_to_id(name)
+      out = ""
+      i = 0
+      n = name.length
+      while i < n
+        c = name[i].to_s
+        if c != "]"
+          out << ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-:.".include?(c) ? c : "_")
+        end
+        i = i + 1
+      end
+      out
+    end
+
     # `image_url` — Rails' absolute-URL variant of `image_path`. With no
     # asset host configured (the benchmark shape) Rails emits the same
     # path `image_path` produces, so this mirrors it. Inlined rather
