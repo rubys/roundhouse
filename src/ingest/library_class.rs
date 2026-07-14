@@ -588,7 +588,31 @@ pub fn classify_class_file(source: &[u8]) -> Option<ClassKind> {
 
     Some(match parent_path.as_deref() {
         Some("ApplicationRecord") | Some("ActiveRecord::Base") => ClassKind::Model,
+        // A superclass-less class that `include`s the ActiveModel
+        // validation surface (lobsters' Search) is a tableless model:
+        // the model path lowers its `validates` DSL and synthesizes
+        // `valid?`/`errors`; the library-class path would drop them.
+        None if includes_active_model(&class) => ClassKind::Model,
         _ => ClassKind::LibraryClass,
+    })
+}
+
+fn includes_active_model(class: &ruby_prism::ClassNode<'_>) -> bool {
+    let Some(body) = class.body() else { return false };
+    let Some(stmts) = body.as_statements_node() else { return false };
+    stmts.body().iter().any(|stmt| {
+        let Some(call) = stmt.as_call_node() else { return false };
+        if call.receiver().is_some() || call.name().as_slice() != b"include" {
+            return false;
+        }
+        call.arguments().is_some_and(|args| {
+            args.arguments().iter().any(|arg| {
+                constant_path_of(&arg).is_some_and(|path| {
+                    path.join("::") == "ActiveModel::Validations"
+                        || path.join("::") == "ActiveModel::Model"
+                })
+            })
+        })
     })
 }
 

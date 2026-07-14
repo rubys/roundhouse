@@ -70,6 +70,90 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) 
             mutates_self: false,
             block_param: None,
     });
+
+    // A validating model OUTSIDE the ActiveRecord hierarchy (`class
+    // Search` + `include ActiveModel::Validations`, no superclass)
+    // can't inherit `valid?`/`errors` from the runtime Base —
+    // synthesize the same pair here. Skipped when the source defines
+    // either name itself.
+    if model.parent.is_none() {
+        push_active_model_validation_surface(methods, model);
+    }
+}
+
+/// `valid?` + `errors` mirroring the runtime Base implementations,
+/// for `include ActiveModel::Validations` classes with no superclass.
+fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Model) {
+    let defines = |name: &str| {
+        model.body.iter().any(|item| matches!(
+            item,
+            crate::dialect::ModelBodyItem::Method { method, .. } if method.name.as_str() == name
+        ))
+    };
+    let span = model.span;
+    let errors_read = || Expr::new(span, ExprNode::Ivar { name: Symbol::from("errors") });
+    if !defines("valid?") {
+        let body = seq(vec![
+            Expr::new(
+                span,
+                ExprNode::Assign {
+                    target: crate::expr::LValue::Ivar { name: Symbol::from("errors") },
+                    value: Expr::new(
+                        span,
+                        ExprNode::Array { elements: vec![], style: ArrayStyle::default() },
+                    ),
+                },
+            ),
+            Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from("validate"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(errors_read()),
+                    method: Symbol::from("empty?"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+        ]);
+        methods.push(MethodDef {
+            name: Symbol::from("valid?"),
+            receiver: MethodReceiver::Instance,
+            params: Vec::new(),
+            body,
+            signature: Some(fn_sig(vec![], Ty::Bool)),
+            effects: EffectSet::default(),
+            enclosing_class: Some(model.name.0.clone()),
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: true,
+            block_param: None,
+        });
+    }
+    if !defines("errors") {
+        methods.push(MethodDef {
+            name: Symbol::from("errors"),
+            receiver: MethodReceiver::Instance,
+            params: Vec::new(),
+            body: errors_read(),
+            signature: Some(fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Str) })),
+            effects: EffectSet::default(),
+            enclosing_class: Some(model.name.0.clone()),
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        });
+    }
 }
 
 /// Produce the list of helper-call expressions for one `ValidationRule` on
