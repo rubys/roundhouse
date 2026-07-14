@@ -59,6 +59,56 @@ pub fn rewrite_arel_in_expr_with_assocs(
     registry: &HashMap<ClassId, ClassInfo>,
     assocs: &[crate::lower::model_associations::AssociationEdge],
 ) {
+    // Names (ivars/locals) the body later refines with relation-chain
+    // methods (`@moderations.where(...)` after `@moderations =
+    // Moderation.all...`). Materializing the assigned chain here would
+    // hand those refiners an Array — leave such statements on the
+    // runtime Relation path.
+    let mut refined = std::collections::HashSet::new();
+    collect_relation_refined_names(expr, &mut refined);
+    rewrite_arel_inner(expr, schema, registry, assocs, &refined);
+}
+
+const RELATION_REFINERS: &[&str] = &[
+    "where", "not", "joins", "left_outer_joins", "left_joins", "order", "group", "having",
+    "limit", "offset", "merge", "includes", "preload", "eager_load", "distinct", "select",
+    "where!", "order!", "reorder", "rewhere",
+];
+
+fn collect_relation_refined_names(
+    expr: &Expr,
+    out: &mut std::collections::HashSet<crate::ident::Symbol>,
+) {
+    if let ExprNode::Send { recv: Some(r), method, .. } = expr.node.as_ref() {
+        if RELATION_REFINERS.contains(&method.as_str()) {
+            match r.node.as_ref() {
+                ExprNode::Ivar { name } | ExprNode::Var { name, .. } => {
+                    out.insert(name.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    expr.node.for_each_child(&mut |c| collect_relation_refined_names(c, out));
+}
+
+fn rewrite_arel_inner(
+    expr: &mut Expr,
+    schema: &Schema,
+    registry: &HashMap<ClassId, ClassInfo>,
+    assocs: &[crate::lower::model_associations::AssociationEdge],
+    refined: &std::collections::HashSet<crate::ident::Symbol>,
+) {
+    if let ExprNode::Assign { target, .. } = expr.node.as_ref() {
+        let name = match target {
+            crate::expr::LValue::Ivar { name } => Some(name),
+            crate::expr::LValue::Var { name, .. } => Some(name),
+            _ => None,
+        };
+        if name.is_some_and(|n| refined.contains(n)) {
+            return;
+        }
+    }
     if let ExprNode::Send { .. } = expr.node.as_ref() {
         if let Some((op, owner)) =
             build::try_build_arel_with_assocs(expr, schema, registry, assocs)
@@ -74,7 +124,7 @@ pub fn rewrite_arel_in_expr_with_assocs(
         }
     }
     walk_subexprs_mut(expr, &mut |e| {
-        rewrite_arel_in_expr_with_assocs(e, schema, registry, assocs)
+        rewrite_arel_inner(e, schema, registry, assocs, refined)
     });
     // Post-pass: when an Arel rewrite landed a multi-stmt hydrate Seq
     // in a *value* position — directly as an Assign value
