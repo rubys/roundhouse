@@ -69,7 +69,6 @@ require_relative "runtime/active_support_time_parsing"
 require_relative "runtime/active_support_core_ext"
 require_relative "runtime/action_view_date_helper"
 require_relative "runtime/action_view_number_helper"
-require_relative "runtime/action_view_url_for"
 require_relative "runtime/action_view_form_builder_extras"
 require_relative "runtime/action_view_capture_helper"
 require_relative "runtime/active_record"
@@ -84,8 +83,12 @@ require_relative "runtime/action_controller_cookies"
 # After action_controller: its require chain loads the shared
 # action_view/view_helpers, and the safe-buffer overrides must win
 # that reopen (same ordering contract as action_controller_session's
-# form_authenticity_token override below).
+# form_authenticity_token override below). url_for rides the same
+# contract: the shared view_helpers now defines the typed
+# String-identity case, and this overlay's polymorphic is_a? version
+# must redefine it for CRuby's residual dynamic sites.
 require_relative "runtime/action_view_safe_buffer"
+require_relative "runtime/action_view_url_for"
 require_relative "runtime/action_view_image_tag"
 require_relative "runtime/action_view_missing_template"
 require_relative "runtime/action_dispatch_request"

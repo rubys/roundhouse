@@ -531,6 +531,25 @@ fn emit_text_area(
 /// captured form method: `:patch` → "Update <ModelName>",
 /// otherwise → "Create <ModelName>". `<ModelName>` is the
 /// capitalized model_name (lowered to a literal at this point).
+/// Bare `<%= submit_tag label, opts %>` — the builder-less sibling of
+/// `form.submit`, same `<input type="submit" name="commit" …>` shape
+/// with Rails' bare default text ("Save changes") instead of the
+/// builder's Create/Update branch. Inline-expanded for the same reason
+/// the builder methods are: the opts hashes are literal at every call
+/// site, and the runtime alternative (the CRuby overlay's
+/// `options.each` + `is_a?(Hash)` walk) is the shape the typed
+/// runtime refuses. Args split like a builder call: first non-Hash
+/// positional = label, first Hash = opts.
+pub(super) fn emit_submit_tag(args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
+    let (positional, opts) = split_args(args);
+    let label_expr = positional
+        .first()
+        .copied()
+        .cloned()
+        .unwrap_or_else(|| lit_str("Save changes".to_string()));
+    emit_submit_input(label_expr, opts.as_slice(), ctx)
+}
+
 fn emit_submit(
     positional: Option<&Expr>,
     opts: &[(Expr, Expr)],
@@ -541,6 +560,13 @@ fn emit_submit(
         Some(lbl) => lbl.clone(),
         None => default_submit_text(binding),
     };
+    emit_submit_input(label_expr, opts, ctx)
+}
+
+/// Shared `<input type="submit" …>` emission for `form.submit` and the
+/// bare `submit_tag` — label into both `value` and `data-disable-with`,
+/// then the compile-time attr expansion.
+fn emit_submit_input(label_expr: Expr, opts: &[(Expr, Expr)], ctx: &ViewCtx) -> Vec<Expr> {
     // The label flows into both `value` and `data-disable-with` —
     // wrap it in html_escape once each; the body-typer narrows the
     // result to Str so the surrounding StringInterp stays uniform.
@@ -606,6 +632,59 @@ fn append_attr_parts(parts: &mut Vec<InterpPart>, opts: &[(Expr, Expr)]) {
         let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
             continue;
         };
+        // `data: { confirm: … }` fans out to `data-<key>` attributes at
+        // COMPILE time (Rails walks the hash at request time). A
+        // non-literal value gets the runtime nil-guard Rails has —
+        // `unless dv.nil?` — as an inline conditional part, so a nil
+        // `confirm` drops the whole attribute instead of rendering
+        // `data-confirm=""` (lobsters' link_post passes `confirm`
+        // through optionally).
+        if key.as_str() == "data" {
+            if let ExprNode::Hash { entries, .. } = &*v.node {
+                for (dk, dv) in entries {
+                    let ExprNode::Lit { value: Literal::Sym { value: dkey } } = &*dk.node
+                    else {
+                        continue;
+                    };
+                    let attr_name = format!(" data-{}=\"", dkey.as_str());
+                    if matches!(&*dv.node, ExprNode::Lit { value: Literal::Str { .. } }) {
+                        parts.push(InterpPart::Text { value: attr_name });
+                        parts.push(InterpPart::Expr {
+                            expr: view_helpers_call("html_escape", vec![dv.clone()]),
+                        });
+                        parts.push(InterpPart::Text { value: "\"".to_string() });
+                    } else {
+                        let rendered = string_interp(vec![
+                            InterpPart::Text { value: attr_name },
+                            InterpPart::Expr {
+                                expr: view_helpers_call(
+                                    "html_escape",
+                                    vec![lit_str_coerce(dv.clone())],
+                                ),
+                            },
+                            InterpPart::Text { value: "\"".to_string() },
+                        ]);
+                        parts.push(InterpPart::Expr {
+                            expr: Expr::new(
+                                Span::synthetic(),
+                                ExprNode::If {
+                                    cond: send(
+                                        Some(dv.clone()),
+                                        "nil?",
+                                        Vec::new(),
+                                        None,
+                                        false,
+                                    ),
+                                    then_branch: lit_str(String::new()),
+                                    else_branch: rendered,
+                                },
+                            ),
+                        });
+                    }
+                }
+                continue;
+            }
+        }
         let simplified = if key.as_str() == "class" {
             simplify_class_array(v)
         } else {

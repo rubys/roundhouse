@@ -11,8 +11,10 @@ use crate::lower::view::{
     extract_sym_or_str, ViewHelperKind,
 };
 
-use super::form_builder::emit_form_builder_inline;
-use super::form_with::{emit_form_with_inline, is_errors_each, rewrite_errors_each_body};
+use super::form_builder::{emit_form_builder_inline, emit_submit_tag};
+use super::form_with::{
+    emit_form_tag_inline, emit_form_with_inline, is_errors_each, rewrite_errors_each_body,
+};
 use super::helpers::emit_view_helper_call;
 use super::partial::{emit_render_partial, emit_yield};
 use super::predicates::rewrite_predicates;
@@ -397,6 +399,22 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         if method.as_str() == "form_with" {
             return emit_form_with_inline(sa, block, ctx);
         }
+        // `<%= form_tag(action, opts) do ...inner... %>` — the
+        // builder-less bare form, same inline expansion minus the
+        // FormBuilder binding (lobsters' link_post).
+        if method.as_str() == "form_tag" {
+            return emit_form_tag_inline(sa, block, ctx);
+        }
+    }
+
+    // Bare `<%= submit_tag label, opts %>` — builder-less submit,
+    // inline-expanded like the `form.*` builder methods (the opts
+    // hashes are literal at every call site; the runtime alternative
+    // is the CRuby overlay's untyped opts-walk).
+    if let ExprNode::Send { recv: None, method, args: sa, block: None, .. } = &*inner.node {
+        if method.as_str() == "submit_tag" {
+            return emit_submit_tag(sa, ctx);
+        }
     }
 
     // FormBuilder method dispatch: `<%= form.text_field :title, opts
@@ -755,12 +773,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn form_block_body_lowers_to_capture_accumulator() {
-        // Compiled `<%= form_tag(x) do %> inner <% end %>` is
-        //   _buf = _buf + (form_tag(x) do _buf = _buf + "inner" end).to_s
-        // The inner `_buf` ops must be walked into a returned capture
-        // accumulator, not left raw (the bug found against lobsters).
+    fn block_helper_call(method: &str) -> Expr {
+        // Compiled `<%= <method>(x) do %> inner <% end %>` is
+        //   _buf = _buf + (<method>(x) do _buf = _buf + "inner" end).to_s
         let inner = Expr::new(
             Span::default(),
             ExprNode::Lambda {
@@ -770,27 +785,36 @@ mod tests {
                 block_style: BlockStyle::Do,
             },
         );
-        let form_call = Expr::new(
+        let call = Expr::new(
             Span::default(),
             ExprNode::Send {
                 recv: None,
-                method: Symbol::from("form_tag"),
+                method: Symbol::from(method),
                 args: vec![var("x")],
                 block: Some(inner),
                 parenthesized: false,
             },
         );
-        let to_s = Expr::new(
+        Expr::new(
             Span::default(),
             ExprNode::Send {
-                recv: Some(form_call),
+                recv: Some(call),
                 method: Symbol::from("to_s"),
                 args: Vec::new(),
                 block: None,
                 parenthesized: false,
             },
-        );
-        let stmts = walk_body(&buf_append(to_s), &test_ctx());
+        )
+    }
+
+    #[test]
+    fn form_block_body_lowers_to_capture_accumulator() {
+        // A generic block helper's inner `_buf` ops must be walked into
+        // a returned capture accumulator, not left raw (the bug found
+        // against lobsters). `form_tag` used to be the example here but
+        // now inline-expands (test below); any unclassified block
+        // helper still rides the capture machinery.
+        let stmts = walk_body(&buf_append(block_helper_call("custom_wrapper")), &test_ctx());
         let emitted = stmts
             .iter()
             .map(crate::emit::ruby::emit_expr)
@@ -798,7 +822,31 @@ mod tests {
             .join("\n");
 
         assert!(emitted.contains("_cap"), "expected capture accumulator:\n{emitted}");
-        assert!(emitted.contains("form_tag"), "form_tag call preserved:\n{emitted}");
+        assert!(emitted.contains("custom_wrapper"), "helper call preserved:\n{emitted}");
+        assert!(!emitted.contains("_buf"), "raw _buf must not survive:\n{emitted}");
+    }
+
+    #[test]
+    fn form_tag_block_inline_expands_to_form_statements() {
+        // `<%= form_tag(x) do %> inner <% end %>` no longer survives as
+        // a runtime call: the open tag (action through html_escape),
+        // the CSRF hidden input, the walked body, and the close tag
+        // splice directly into the outer accumulator.
+        let stmts = walk_body(&buf_append(block_helper_call("form_tag")), &test_ctx());
+        let emitted = stmts
+            .iter()
+            .map(crate::emit::ruby::emit_expr)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(emitted.contains("<form action="), "expected inline open tag:\n{emitted}");
+        assert!(
+            emitted.contains("csrf_token_hidden_input"),
+            "CSRF input must follow the open tag:\n{emitted}"
+        );
+        assert!(emitted.contains("inner"), "block body walked inline:\n{emitted}");
+        assert!(emitted.contains("</form>"), "close tag emitted:\n{emitted}");
+        assert!(!emitted.contains("form_tag"), "no runtime form_tag call:\n{emitted}");
         assert!(!emitted.contains("_buf"), "raw _buf must not survive:\n{emitted}");
     }
 

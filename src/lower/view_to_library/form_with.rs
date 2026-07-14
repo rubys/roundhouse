@@ -38,6 +38,58 @@ pub(super) struct FormWithComponents {
     pub(super) opts_entries: Vec<(Expr, Expr)>,
 }
 
+/// Inline-expand `<%= form_tag(action, opts) do ...inner... %>` — the
+/// builder-less bare form (lobsters' link_post). Same statement-splice
+/// shape as `emit_form_with_inline` minus the record/builder
+/// machinery: open `<form>` tag (action spliced through html_escape,
+/// literal opts as compile-time attributes), the CSRF hidden input
+/// (Rails embeds it for this always-POST form; no `_method` override —
+/// form_tag never PATCHes here), the walked block body against the
+/// outer accumulator, `</form>`. Byte-matches the CRuby overlay's
+/// runtime form_tag, which the bench replay exercises. The action goes
+/// through `route_helperize`, so bare path helpers and model-named
+/// records resolve exactly like form_with's `url:`.
+pub(super) fn emit_form_tag_inline(args: &[Expr], block: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
+    let ExprNode::Lambda { body, .. } = &*block.node else {
+        return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+    };
+    let Some(action_arg) = args.first() else {
+        return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+    };
+    let route_helpers = || {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Const { path: vec![Symbol::from("RouteHelpers")] },
+        )
+    };
+    let opts_entries: Vec<(Expr, Expr)> = args
+        .iter()
+        .skip(1)
+        .find_map(|a| match &*a.node {
+            ExprNode::Hash { entries, .. } => Some(entries.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let comps = FormWithComponents {
+        model: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+        model_name: String::new(),
+        action: route_helperize(action_arg.clone(), &route_helpers, ctx),
+        // Unused by the open-tag emission (it hard-codes POST), but
+        // the components struct carries it for shape parity.
+        method: lit_sym(Symbol::from("post")),
+        opts_entries,
+    };
+    let mut out: Vec<Expr> = Vec::new();
+    out.push(emit_open_form_tag(&comps, ctx));
+    out.push(accumulator_append_call(
+        view_helpers_call("csrf_token_hidden_input", Vec::new()),
+        ctx,
+    ));
+    out.extend(walk_body(body, ctx));
+    out.push(accumulator_append_call(lit_str("</form>".to_string()), ctx));
+    out
+}
+
 /// Inline-expand `<%= form_with(opts) do |form| ...inner... %>` at
 /// lower time. Returns a Vec of statements the caller splices into
 /// the outer accumulator's statement list. Walks the inner block body

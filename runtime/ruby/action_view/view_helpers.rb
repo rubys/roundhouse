@@ -272,6 +272,16 @@ module ActionView
       "/assets/#{source}"
     end
 
+    # `url_for` STRING case — identity passthrough (Rails: a String
+    # url_for argument is already a URL). Record arguments resolve at
+    # COMPILE time (route_helperize's model-gated lowering emits the
+    # persisted?/path-helper form), so the typed runtime only ever
+    # sees strings; the CRuby overlay shadows this with its
+    # polymorphic `is_a?` version for any residual dynamic site.
+    def self.url_for(target)
+      target
+    end
+
     # `image_url` — Rails' absolute-URL variant of `image_path`. With no
     # asset host configured (the benchmark shape) Rails emits the same
     # path `image_path` produces, so this mirrors it. Inlined rather
