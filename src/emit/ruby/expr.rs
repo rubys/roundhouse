@@ -929,7 +929,23 @@ fn is_setter_method(m: &str) -> bool {
 pub(super) fn emit_do_block(base: &str, block: &Expr) -> String {
     use crate::expr::BlockStyle;
     let ExprNode::Lambda { params, body, block_style, .. } = &*block.node else {
-        return format!("{base} {{ {} }}", emit_expr(block));
+        // A non-Lambda block expression is a Proc FORWARD (`&block` —
+        // ingest lowers the block-pass arg to a bare Var in the block
+        // slot). Rendering it as a literal `{ block }` block made the
+        // callee YIELD THE PROC OBJECT instead of calling it —
+        // lobsters' `Rails.cache.fetch(key, &block)` forward returned
+        // the Proc, poisoning `@comments` to Proc under spinel and
+        // silently mis-caching on CRuby. Re-attach as a `&` argument.
+        let fwd = emit_expr(block);
+        return if let Some(stripped) = base.strip_suffix(')') {
+            if stripped.ends_with('(') {
+                format!("{stripped}&{fwd})")
+            } else {
+                format!("{stripped}, &{fwd})")
+            }
+        } else {
+            format!("{base}(&{fwd})")
+        };
     };
     let body_str = emit_expr(body);
     let params_str = if params.is_empty() {
