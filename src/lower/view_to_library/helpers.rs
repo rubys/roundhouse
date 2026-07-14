@@ -296,6 +296,14 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
             }
         }
     }
+    // Bare `<x>_url` absolute helpers (`button_to "Verify",
+    // twofa_verify_url`) — RouteHelpers has no `_url` functions;
+    // ground to the shared absolute interp.
+    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*url.node {
+        if let Some(stem) = method.as_str().strip_suffix("_url") {
+            return Some(super::absolute_url_interp(stem, args.clone()));
+        }
+    }
     let is_local = |n: &str| ctx.is_local(n);
     let kind = classify_view_url_arg(url, &is_local)?;
     match kind {

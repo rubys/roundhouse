@@ -2830,6 +2830,36 @@ pub(super) fn view_helpers_call(method: &str, args: Vec<Expr>) -> Expr {
     send(Some(recv), method, args, None, true)
 }
 
+/// `"http://#{Rails.application.domain}#{RouteHelpers.<stem>_path(args)}"`
+/// — the grounding for bare `<x>_url` absolute route helpers
+/// (RouteHelpers only generates `_path` functions; the convention
+/// matches `rewrite_url_helpers_absolute`'s host-kwarg form). Shared
+/// by the form-action resolver and the URL-position classifier.
+pub(super) fn absolute_url_interp(stem: &str, args: Vec<Expr>) -> Expr {
+    let rails_app = send(
+        Some(Expr::new(
+            Span::synthetic(),
+            ExprNode::Const { path: vec![Symbol::from("Rails")] },
+        )),
+        "application",
+        Vec::new(),
+        None,
+        false,
+    );
+    let domain = send(Some(rails_app), "domain", Vec::new(), None, false);
+    let path_call = route_helpers_call(&format!("{stem}_path"), args);
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::StringInterp {
+            parts: vec![
+                InterpPart::Text { value: "http://".to_string() },
+                InterpPart::Expr { expr: domain },
+                InterpPart::Expr { expr: path_call },
+            ],
+        },
+    )
+}
+
 pub(super) fn route_helpers_call(method: &str, args: Vec<Expr>) -> Expr {
     let recv = Expr::new(
         Span::synthetic(),
