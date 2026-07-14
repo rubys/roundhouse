@@ -56,5 +56,13 @@ module ActionView
       end
       out
     end
+
+    # `number_with_precision(4.5678, precision: 2)` → "4.57" — the
+    # overlay number-helper's exact shape; here so the spinel tree
+    # carries it (users/show renders karma averages). On CRuby the
+    # overlay's later require re-defines it, same bytes.
+    def self.number_with_precision(value, precision: 3)
+      format("%.#{precision}f", value.to_f)
+    end
   end
 end

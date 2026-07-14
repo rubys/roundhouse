@@ -61,9 +61,14 @@ fn typed_store_attrs_synthesize_shared_accessors() {
         "reader must carry the declared default: {body}",
     );
     assert!(find("prefers_color_scheme=").is_some(), "writer synthesized");
+    // The typed_store gem generates a `?` predicate for EVERY attr;
+    // non-booleans get the typed nil-check (users/show's
+    // keybase_signatures? drove the widening).
+    let pred = find("prefers_color_scheme?").expect("predicate synthesized for non-bool attr");
+    let pbody = format!("{:?}", pred.body);
     assert!(
-        find("prefers_color_scheme?").is_none(),
-        "non-boolean attrs get no predicate (corpus shape)",
+        pbody.contains("nil?"),
+        "non-bool predicate is the nil-check form:\n{pbody}"
     );
 
     // Boolean attr: reader + predicate + writer.

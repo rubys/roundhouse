@@ -169,18 +169,43 @@ pub(crate) fn push_typed_store_methods(methods: &mut Vec<MethodDef>, model: &Mod
                 AccessorKind::Method,
                 false,
             );
-            if a.is_bool {
-                push_synth_instance_method(
-                    methods,
-                    model,
-                    Symbol::from(format!("{}?", a.name.as_str())),
-                    Vec::new(),
-                    read_body(col, a),
-                    Some(super::model_to_library::fn_sig(vec![], Ty::Bool)),
-                    AccessorKind::Method,
-                    false,
-                );
-            }
+            // The typed_store gem generates a `?` predicate for EVERY
+            // attribute (the analyzer registers them so). Booleans
+            // read through directly; everything else gets the typed
+            // nil-check — `present?` on an `any`-typed read has no
+            // AOT dispatch, and the corpus value (users/show's
+            // `keybase_signatures?`) is nil-or-populated-hash, where
+            // the nil test IS presence. (Divergence for empty-string/
+            // empty-collection values: none in the corpus.)
+            let pred_body = if a.is_bool {
+                read_body(col, a)
+            } else {
+                let read = read_body(col, a);
+                let nil_check = sp_expr(ExprNode::Send {
+                    recv: Some(read),
+                    method: Symbol::from("nil?"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                });
+                sp_expr(ExprNode::Send {
+                    recv: Some(nil_check),
+                    method: Symbol::from("!"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                })
+            };
+            push_synth_instance_method(
+                methods,
+                model,
+                Symbol::from(format!("{}?", a.name.as_str())),
+                Vec::new(),
+                pred_body,
+                Some(super::model_to_library::fn_sig(vec![], Ty::Bool)),
+                AccessorKind::Method,
+                false,
+            );
             let value = Symbol::from("value");
             push_synth_instance_method(
                 methods,

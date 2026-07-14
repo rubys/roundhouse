@@ -488,6 +488,13 @@ impl<'a> BodyTyper<'a> {
                         for a in args.iter_mut() { self.analyze_expr(a, ctx); }
                         return Ty::Nil;
                     }
+                    // Kernel#format / #sprintf — a String, whatever the
+                    // args (the runtime's number_with_precision builds
+                    // its format string dynamically).
+                    if matches!(method.as_str(), "format" | "sprintf") {
+                        for a in args.iter_mut() { self.analyze_expr(a, ctx); }
+                        return Ty::Str;
+                    }
                 }
 
                 // Self-dispatch annotation. When `recv == None` and the
