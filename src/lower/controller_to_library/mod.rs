@@ -509,9 +509,17 @@ fn build_methods(
     // be defensive) stay.
     let filter_target_names: std::collections::HashSet<&Symbol> =
         before_filters.iter().map(|f| &f.target).collect();
+    // A subclassed controller keeps its filter targets: descendants
+    // inherit the before_action and their preambles call the target
+    // BY NAME (`default_periods` in ModNotesController's dispatcher,
+    // defined on ModController) — inline-and-drop would leave those
+    // calls dangling.
+    let has_descendants = all_controllers
+        .iter()
+        .any(|c| ancestor_chain(c, all_controllers).iter().any(|p| p.name == controller.name));
     let privs_kept: Vec<Action> = privs
         .iter()
-        .filter(|a| !filter_target_names.contains(&a.name))
+        .filter(|a| has_descendants || !filter_target_names.contains(&a.name))
         .cloned()
         .collect();
 
