@@ -436,11 +436,13 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         ..
     } = &*inner.node
     {
-        if let ExprNode::Var { name, .. } = &*r.node {
+        // Var inside a form_with lambda; bare Send in a bound PARTIAL
+        // (the form local dropped out of the partial's params).
+        if let Some(name) = super::form_with::form_param_ref_name(r) {
             if let Some(binding) = ctx
                 .form_records
                 .iter()
-                .find(|b| b.form_param == name.as_str())
+                .find(|b| b.form_param == name)
             {
                 if let Some(fb) = classify_form_builder_method(method.as_str()) {
                     return emit_form_builder_inline(binding, fb, sa, ctx);
@@ -606,7 +608,7 @@ fn coerce_to_s(expr: Expr) -> Expr {
 /// %>` and similar combinations end up with the helper rewritten
 /// before the html_escape wrap, matching the convention every
 /// emitter would otherwise have to repeat.
-fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
+pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
     let new_node = match &*e.node {
         ExprNode::Send {
             recv: None,
@@ -681,6 +683,22 @@ fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
         ExprNode::Array { elements, style } => ExprNode::Array {
             elements: elements.iter().map(|el| rewrite_helpers_in_expr(el, ctx)).collect(),
             style: *style,
+        },
+        // Statement compounds: a form-builder map lambda hoisted into a
+        // select-options loop is a `Seq` of local Assigns building the
+        // option text (`html = "<strong>#{h(t.tag)}</strong>"`;
+        // `html << …`) — the helper calls live under the Assign values.
+        ExprNode::Seq { exprs } => ExprNode::Seq {
+            exprs: exprs.iter().map(|s| rewrite_helpers_in_expr(s, ctx)).collect(),
+        },
+        ExprNode::Assign { target, value } => ExprNode::Assign {
+            target: target.clone(),
+            value: rewrite_helpers_in_expr(value, ctx),
+        },
+        ExprNode::OpAssign { target, op, value } => ExprNode::OpAssign {
+            target: target.clone(),
+            op: op.clone(),
+            value: rewrite_helpers_in_expr(value, ctx),
         },
         other => other.clone(),
     };
@@ -771,6 +789,7 @@ mod tests {
             nilable_scalar_reads: Default::default(),
             model_singulars: Default::default(),
             bool_readers: Default::default(),
+            route_helper_names: Default::default(),
             stylesheets: Vec::new(),
             partial_ivars: Default::default(),
             dyn_pools: Default::default(),

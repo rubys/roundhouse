@@ -206,6 +206,8 @@ pub struct ViewLowerCtx<'a> {
     nilable_scalar_reads: std::rc::Rc<std::collections::HashSet<String>>,
     model_singulars: std::rc::Rc<std::collections::HashSet<String>>,
     bool_readers: std::rc::Rc<std::collections::HashMap<String, std::collections::HashSet<String>>>,
+    partial_form_bindings: std::collections::HashMap<ViewKey, PartialFormBinding>,
+    route_helper_names: std::rc::Rc<std::collections::HashSet<String>>,
 }
 
 impl<'a> ViewLowerCtx<'a> {
@@ -231,6 +233,13 @@ impl<'a> ViewLowerCtx<'a> {
                     .collect(),
             ),
             bool_readers: std::rc::Rc::new(bool_reader_names(app)),
+            partial_form_bindings: partial_form_bindings(&app.views),
+            route_helper_names: std::rc::Rc::new(
+                crate::lower::lower_routes_to_library_functions(app)
+                    .into_iter()
+                    .map(|f| f.name.as_str().to_string())
+                    .collect(),
+            ),
         }
     }
 
@@ -349,6 +358,19 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         }
     }
 
+    // A bound form local is NOT interface (see `partial_form_bindings`):
+    // render_locals_keys already filters the locals channel, and this
+    // retain covers the OTHER extras channel — `defined?(f)` in the
+    // partial body (stories/_form_errors guards a builder-dependent
+    // hidden field with it) marks `f` as a defined?-extra in
+    // collect_extra_params.
+    let form_binding = (is_partial)
+        .then(|| view_key_of(view).and_then(|k| lx.partial_form_bindings.get(&k)))
+        .flatten();
+    if let Some(binding) = form_binding {
+        extra_params.retain(|k| k != &binding.form_local);
+    }
+
     // Typed primary params: (name, type, required). Extras (notice/alert/…)
     // are appended afterward as nullable optionals.
     let mut typed: Vec<(String, crate::ty::Ty)> = Vec::new();
@@ -421,7 +443,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         }
     }
 
-    let ctx = ViewCtx {
+    let mut ctx = ViewCtx {
         locals,
         // Only layouts consult arg_name (emit_yield → the `body` local);
         // action views don't yield, so an empty name is fine for them.
@@ -435,14 +457,69 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         nilable_scalar_reads: lx.nilable_scalar_reads.clone(),
         model_singulars: lx.model_singulars.clone(),
         bool_readers: lx.bool_readers.clone(),
+        route_helper_names: lx.route_helper_names.clone(),
         stylesheets: app.stylesheets.clone(),
         partial_ivars: closures.clone(),
         dyn_pools: dyn_pools.clone(),
         partial_extras: lx.partial_extras.clone(),
     };
 
+    // A partial that receives a form builder as a local re-derives the
+    // binding at compile time (`partial_form_bindings`): seed the
+    // FormBuilderBinding so `f.*` calls inline exactly as in the
+    // defining template, substitute `f.object` reads to the record
+    // local, fold `defined?(f)` to true (the binding guarantees the
+    // builder — every caller passes it), and prelude `f_method` (PATCH
+    // for a persisted record, POST otherwise — same derivation the
+    // inline form_with makes; `f.submit`'s default text branches on
+    // it).
+    let mut rewritten = rewritten;
+    let mut prelude: Vec<Expr> = Vec::new();
+    if let Some(binding) = form_binding {
+        let record_var = Symbol::from(binding.record_local.as_str());
+        let form_method_var = Symbol::from("f_method");
+        rewritten = self::form_with::rewrite_form_object_reads(
+            &rewritten,
+            &binding.form_local,
+            &record_var,
+        );
+        rewritten = fold_defined_form_local(&rewritten, &binding.form_local);
+        ctx.form_records.push(FormBuilderBinding {
+            form_param: binding.form_local.clone(),
+            model_name: binding.model_name.clone(),
+            record_var: record_var.clone(),
+            form_method_var: form_method_var.clone(),
+        });
+        let record_ref = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(0), name: record_var },
+        );
+        let persisted = send(
+            Some(record_ref),
+            "persisted?",
+            Vec::new(),
+            None,
+            false,
+        );
+        prelude.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Var { id: VarId(0), name: form_method_var },
+                value: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If {
+                        cond: persisted,
+                        then_branch: lit_sym(Symbol::from("patch")),
+                        else_branch: lit_sym(Symbol::from("post")),
+                    },
+                ),
+            },
+        ));
+    }
+
     let mut body_stmts: Vec<Expr> = Vec::new();
     body_stmts.push(assign_accumulator_string_new(&ctx.accumulator));
+    body_stmts.extend(prelude);
     body_stmts.extend(walk_body(&rewritten, &ctx));
     body_stmts.push(accumulator_result_ref(&ctx.accumulator));
 
@@ -1219,6 +1296,255 @@ pub(crate) struct ViewArgs {
 /// Values are SORTED so every producer (def site, view-side emit map,
 /// controller-side contract map) agrees on positions even when one of
 /// them sees fewer call sites.
+/// `defined?(<form_local>)` → `true` in a bound partial: the binding
+/// exists precisely because every caller passes the builder, so the
+/// guard is statically satisfied (its else-branch — typically a
+/// standalone `form_with` fallback — stays in the tree as dead code
+/// that still lowers through the normal form machinery). `defined?`
+/// ingests as `Send(None, :defined?, [Var(name)])`.
+fn fold_defined_form_local(body: &Expr, form_local: &str) -> Expr {
+    fn walk(e: &Expr, form_local: &str) -> Expr {
+        if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
+            if method.as_str() == "defined?" && args.len() == 1 {
+                let named = match &*args[0].node {
+                    ExprNode::Var { name, .. } => name.as_str() == form_local,
+                    ExprNode::Send { recv: None, method, args, block: None, .. } => {
+                        method.as_str() == form_local && args.is_empty()
+                    }
+                    _ => false,
+                };
+                if named {
+                    return Expr::new(
+                        e.span,
+                        ExprNode::Lit { value: Literal::Bool { value: true } },
+                    );
+                }
+            }
+        }
+        let mut out = e.clone();
+        out.node.for_each_child_mut(&mut |c| {
+            *c = walk(c, form_local);
+        });
+        out
+    }
+    walk(body, form_local)
+}
+
+/// A partial that receives a form builder as a LOCAL (`render partial:
+/// "stories/form", locals: { story: @story, f: f }` from inside
+/// `form_with model: @story do |f|`). No FormBuilder object exists at
+/// runtime — the macro-inline retirement constructs none, so the `f`
+/// local the render site passes is a NameError waiting to happen — and
+/// the partial's `f.*` calls had no binding to inline against (every
+/// one fell to the default escape path). The binding is re-derived at
+/// COMPILE time instead: the form local seeds the partial's
+/// FormBuilderBinding, `f.*` calls inline exactly as in the defining
+/// template, `f.object` reads substitute to the record local, and the
+/// form local drops out of the partial's interface entirely
+/// (`render_locals_keys` filters it, so neither the param nor the
+/// call-site arg exists).
+///
+/// Requirements, all conservative: a RECORD local must ride alongside
+/// (the locals entry whose value is the form's model expr or
+/// `f.object`) — it doubles as the model_name (lobsters passes
+/// `story: @story` / `story: f.object`; Rails derives the name from
+/// the model class, and the record local names it identically at every
+/// corpus site). Inference is transitive — a bound partial forwarding
+/// its own form local binds the next one (stories/_form →
+/// stories/_form_errors) — and callers must AGREE: conflicting
+/// bindings poison the partial (its `f.*` calls stay honest residue).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PartialFormBinding {
+    pub(crate) form_local: String,
+    pub(crate) record_local: String,
+    pub(crate) model_name: String,
+}
+
+pub(crate) fn partial_form_bindings(
+    views: &[View],
+) -> std::collections::HashMap<ViewKey, PartialFormBinding> {
+    use std::collections::{HashMap, HashSet};
+
+    // A "simple reference" — the shapes a form's record expr and a
+    // locals value can share (`@story`, a bare local).
+    fn simple_ref(e: &Expr) -> Option<String> {
+        match &*e.node {
+            ExprNode::Ivar { name } => Some(format!("@{}", name.as_str())),
+            ExprNode::Var { name, .. } => Some(name.as_str().to_string()),
+            ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
+                Some(method.as_str().to_string())
+            }
+            _ => None,
+        }
+    }
+
+    fn is_form_object_read(e: &Expr, form_param: &str) -> bool {
+        let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node else {
+            return false;
+        };
+        method.as_str() == "object"
+            && args.is_empty()
+            && simple_ref(r).is_some_and(|n| n == form_param)
+    }
+
+    /// Collect `(partial key, binding)` edges from render calls under a
+    /// form scope (`form_param` names the builder; `record_refs` the
+    /// spellings that mean "the record").
+    fn render_edges(
+        e: &Expr,
+        own_dir: Option<&str>,
+        form_param: &str,
+        record_refs: &HashSet<String>,
+        out: &mut Vec<(ViewKey, PartialFormBinding)>,
+    ) {
+        if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
+            if (method.as_str() == "render" || method.as_str() == "render_to_string")
+                && !args.is_empty()
+            {
+                if let ExprNode::Hash { entries, kwargs: true } = &*args[0].node {
+                    let mut partial: Option<String> = None;
+                    let mut form_local: Option<String> = None;
+                    let mut record_local: Option<String> = None;
+                    for (k, v) in entries {
+                        let key = match &*k.node {
+                            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str(),
+                            _ => "",
+                        };
+                        match key {
+                            "partial" => {
+                                if let ExprNode::Lit { value: Literal::Str { value } } =
+                                    &*v.node
+                                {
+                                    partial = Some(value.clone());
+                                }
+                            }
+                            "locals" => {
+                                if let ExprNode::Hash { entries: le, .. } = &*v.node {
+                                    for (lk, lv) in le {
+                                        let ExprNode::Lit {
+                                            value: Literal::Sym { value: lname },
+                                        } = &*lk.node
+                                        else {
+                                            continue;
+                                        };
+                                        if simple_ref(lv).is_some_and(|n| n == form_param) {
+                                            form_local =
+                                                Some(lname.as_str().to_string());
+                                        } else if simple_ref(lv)
+                                            .is_some_and(|n| record_refs.contains(&n))
+                                            || is_form_object_read(lv, form_param)
+                                        {
+                                            record_local =
+                                                Some(lname.as_str().to_string());
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let (Some(p), Some(form_local), Some(record_local)) =
+                        (partial, form_local, record_local)
+                    {
+                        let resolved = match p.rsplit_once('/') {
+                            Some((d, n)) => Some((d.to_string(), n.to_string())),
+                            None => own_dir.map(|d| (d.to_string(), p.clone())),
+                        };
+                        if let Some((d, n)) = resolved {
+                            let key = (
+                                camelize(&snake_case(&d)),
+                                n.trim_start_matches('_').to_string(),
+                            );
+                            let model_name = record_local.clone();
+                            out.push((
+                                key,
+                                PartialFormBinding { form_local, record_local, model_name },
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        e.node
+            .for_each_child(&mut |c| render_edges(c, own_dir, form_param, record_refs, out));
+    }
+
+    /// Find `form_with ... do |f|` scopes and collect their render
+    /// edges.
+    fn seed_scopes(e: &Expr, own_dir: Option<&str>, out: &mut Vec<(ViewKey, PartialFormBinding)>) {
+        if let ExprNode::Send { recv: None, method, args, block: Some(block), .. } = &*e.node {
+            if method.as_str() == "form_with" {
+                if let ExprNode::Lambda { params, body, .. } = &*block.node {
+                    if let Some(form_param) = params.first() {
+                        let mut record_refs: HashSet<String> = HashSet::new();
+                        for arg in args {
+                            if let ExprNode::Hash { entries, .. } = &*arg.node {
+                                for (k, v) in entries {
+                                    if matches!(&*k.node,
+                                        ExprNode::Lit { value: Literal::Sym { value } }
+                                            if value.as_str() == "model")
+                                    {
+                                        if let Some(r) = simple_ref(v) {
+                                            record_refs.insert(r);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        render_edges(body, own_dir, form_param.as_str(), &record_refs, out);
+                    }
+                }
+            }
+        }
+        e.node.for_each_child(&mut |c| seed_scopes(c, own_dir, out));
+    }
+
+    let mut edges: Vec<(ViewKey, PartialFormBinding)> = Vec::new();
+    for v in views {
+        let (dir, _) = split_view_name(v.name.as_str());
+        let own = (!dir.is_empty()).then_some(dir);
+        seed_scopes(&v.body, own, &mut edges);
+    }
+
+    let mut out: HashMap<ViewKey, PartialFormBinding> = HashMap::new();
+    let mut poisoned: HashSet<ViewKey> = HashSet::new();
+    let mut pending = edges;
+    // Transitive closure: a partial that just gained a binding acts as
+    // a form scope for its own render calls. Conflicts poison.
+    while !pending.is_empty() {
+        let mut next: Vec<(ViewKey, PartialFormBinding)> = Vec::new();
+        for (key, binding) in pending.drain(..) {
+            if poisoned.contains(&key) {
+                continue;
+            }
+            match out.get(&key) {
+                Some(existing) if *existing != binding => {
+                    poisoned.insert(key.clone());
+                    out.remove(&key);
+                    continue;
+                }
+                Some(_) => continue,
+                None => {}
+            }
+            out.insert(key.clone(), binding.clone());
+            // Re-scan the newly bound partial's body for forwarded
+            // edges.
+            for v in views {
+                if view_key_of(v).as_ref() != Some(&key) {
+                    continue;
+                }
+                let (dir, _) = split_view_name(v.name.as_str());
+                let own = (!dir.is_empty()).then_some(dir);
+                let mut refs: HashSet<String> = HashSet::new();
+                refs.insert(binding.record_local.clone());
+                render_edges(&v.body, own, &binding.form_local, &refs, &mut next);
+            }
+        }
+        pending = next;
+    }
+    out
+}
+
 pub(crate) fn render_locals_keys(
     views: &[View],
     controllers: &[crate::dialect::Controller],
@@ -1293,6 +1619,15 @@ pub(crate) fn render_locals_keys(
     for lc in library_classes {
         for m in &lc.methods {
             scan(&m.body, None, &mut acc);
+        }
+    }
+    // A form-builder local is NOT interface: the bound partial inlines
+    // every `f.*` call at compile time, so neither the nil-default
+    // param nor the call-site arg should exist (the arg would be a
+    // NameError — no FormBuilder object is ever constructed).
+    for (key, binding) in partial_form_bindings(views) {
+        if let Some(set) = acc.get_mut(&key) {
+            set.remove(&binding.form_local);
         }
     }
     acc.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect()
@@ -1461,6 +1796,14 @@ pub(super) fn partial_extras_map(
             }
         }
         out.insert(key, extras);
+    }
+    // Mirror the def site's bound-form-local drop (the defined?-extras
+    // channel re-adds it here otherwise, and the call site would pass
+    // an arg the def no longer has).
+    for (key, binding) in partial_form_bindings(&app.views) {
+        if let Some(extras) = out.get_mut(&key) {
+            extras.retain(|k| k != &binding.form_local);
+        }
     }
     out
 }
@@ -2246,6 +2589,13 @@ pub(super) struct ViewCtx {
     /// runtime `checked_box_attr` seam).
     pub(super) bool_readers:
         std::rc::Rc<std::collections::HashMap<String, std::collections::HashSet<String>>>,
+    /// Generated RouteHelpers function names. The form-action
+    /// persisted?-ternary emits only the arms whose helper EXISTS
+    /// (lobsters' domains has a member route but no collection —
+    /// `RouteHelpers.domains_path` would be an undefined method).
+    /// Empty in single-view test harnesses → both arms (the
+    /// pre-gating shape).
+    pub(super) route_helper_names: std::rc::Rc<std::collections::HashSet<String>>,
     /// Stylesheet logical names ingested from `app/assets/stylesheets/`
     /// + `app/assets/builds/`. Used by the `stylesheet_link_tag(:app,
     /// ...)` expansion: a `:app` symbol arg fans out to one call per

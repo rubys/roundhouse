@@ -314,11 +314,19 @@ fn emit_select(
             if value.as_str() == "include_blank")
             && matches!(&*v.node, ExprNode::Lit { value: Literal::Bool { value: true } })
     });
+    // `multiple: true` is select BEHAVIOR too: Rails renders
+    // ` multiple="multiple"` (not multiple="true") and marks EVERY
+    // option whose value the selected ARRAY includes.
+    let multiple = opts.iter().any(|(k, v)| {
+        matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+            if value.as_str() == "multiple")
+            && matches!(&*v.node, ExprNode::Lit { value: Literal::Bool { value: true } })
+    });
     let attr_opts: Vec<(Expr, Expr)> = opts
         .iter()
         .filter(|(k, _)| {
             !matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
-                if value.as_str() == "include_blank")
+                if value.as_str() == "include_blank" || value.as_str() == "multiple")
         })
         .cloned()
         .collect();
@@ -326,10 +334,13 @@ fn emit_select(
     parts.push(InterpPart::Text {
         value: format!("<select{}", name_id_attrs(model_name, field_str)),
     });
+    if multiple {
+        parts.push(InterpPart::Text { value: " multiple=\"multiple\"".to_string() });
+    }
     append_attr_parts(&mut parts, &attr_opts);
     parts.push(InterpPart::Text { value: ">".to_string() });
     let (setup, options_expr) =
-        match emit_select_options(choices, value_read.clone(), include_blank, field_str, ctx) {
+        match emit_select_options(choices, value_read.clone(), include_blank, multiple, field_str, ctx) {
             Some(pair) => pair,
             // Unclassified choices shape — keep the runtime seam (the
             // CRuby overlay's select_options_for). Honest residue: the
@@ -379,6 +390,7 @@ fn emit_select_options(
     choices: &Expr,
     field_current: Expr,
     include_blank: bool,
+    multiple: bool,
     field_str: &str,
     ctx: &ViewCtx,
 ) -> Option<(Vec<Expr>, Expr)> {
@@ -402,6 +414,7 @@ fn emit_select_options(
                 &t,
                 args.get(3).cloned(),
                 include_blank,
+                multiple,
                 field_str,
                 ctx,
             );
@@ -420,7 +433,7 @@ fn emit_select_options(
             let mut parts: Vec<InterpPart> = blank;
             for e in elements {
                 let (text, value) = literal_choice(e).expect("checked literal");
-                push_static_option(&mut parts, &text, &value, selected.as_ref());
+                push_static_option(&mut parts, &text, &value, selected.as_ref(), multiple);
             }
             Some((Vec::new(), string_interp(parts)))
         }
@@ -436,16 +449,16 @@ fn emit_select_options(
             let mut parts = blank;
             for e in elements {
                 let (text, value) = literal_choice(e).expect("checked literal");
-                push_static_option(&mut parts, &text, &value, selected.as_ref());
+                push_static_option(&mut parts, &text, &value, selected.as_ref(), multiple);
             }
             let (setup, loop_var) =
-                map_loop_options(&args[0], selected.as_ref(), field_str, parts, ctx)?;
+                map_loop_options(&args[0], selected.as_ref(), multiple, field_str, parts, ctx)?;
             Some((setup, loop_var))
         }
         // Bare `<coll>.map { |x| [...] }`.
         ExprNode::Send { method, block: Some(_), .. } if method.as_str() == "map" => {
             let (setup, loop_var) =
-                map_loop_options(&container, selected.as_ref(), field_str, blank, ctx)?;
+                map_loop_options(&container, selected.as_ref(), multiple, field_str, blank, ctx)?;
             Some((setup, loop_var))
         }
         // Any other container expr — flat scalar loop (the corpus:
@@ -463,6 +476,7 @@ fn emit_select_options(
                 to_s(el_ref),
                 &[],
                 selected.as_ref(),
+                multiple,
             );
             let (setup, var) =
                 each_loop(&container, el, string_interp(option), field_str, blank, ctx);
@@ -509,10 +523,11 @@ fn push_static_option(
     text: &str,
     value: &str,
     selected: Option<&Expr>,
+    multiple: bool,
 ) {
     parts.push(InterpPart::Text { value: "<option".to_string() });
     if let Some(sel) = selected {
-        parts.push(selected_attr_part(sel.clone(), lit_str(value.to_string())));
+        parts.push(selected_attr_part(sel.clone(), lit_str(value.to_string()), multiple));
     }
     parts.push(InterpPart::Text {
         value: format!(
@@ -531,19 +546,26 @@ fn push_dynamic_option(
     value: Expr,
     attrs: &[(String, Expr)],
     selected: Option<&Expr>,
+    multiple: bool,
 ) {
     parts.push(InterpPart::Text { value: "<option".to_string() });
     if let Some(sel) = selected {
-        parts.push(selected_attr_part(sel.clone(), value.clone()));
+        parts.push(selected_attr_part(sel.clone(), value.clone(), multiple));
     }
     parts.push(InterpPart::Text { value: " value=\"".to_string() });
     parts.push(InterpPart::Expr { expr: view_helpers_call("html_escape", vec![value]) });
     parts.push(InterpPart::Text { value: "\"".to_string() });
     for (name, v) in attrs {
         parts.push(InterpPart::Text { value: format!(" {name}=\"") });
-        parts.push(InterpPart::Expr {
-            expr: view_helpers_call("html_escape", vec![lit_str_coerce(v.clone())]),
-        });
+        // `raw(...)` attr values are html_safe by contract (lobsters'
+        // `"data-title" => raw(html)`) — splice unescaped.
+        if let Some(inner) = raw_call_arg(v) {
+            parts.push(InterpPart::Expr { expr: to_s(inner.clone()) });
+        } else {
+            parts.push(InterpPart::Expr {
+                expr: view_helpers_call("html_escape", vec![lit_str_coerce(v.clone())]),
+            });
+        }
         parts.push(InterpPart::Text { value: "\"".to_string() });
     }
     parts.push(InterpPart::Text { value: ">".to_string() });
@@ -551,10 +573,16 @@ fn push_dynamic_option(
     parts.push(InterpPart::Text { value: "</option>".to_string() });
 }
 
-/// ` selected="selected"` when `sel.to_s == value.to_s` (the overlay's
-/// comparison, matching Rails' string-side select semantics).
-fn selected_attr_part(sel: Expr, value: Expr) -> InterpPart {
-    let cond = send(Some(to_s(sel)), "==", vec![to_s(value)], None, false);
+/// ` selected="selected"` when `sel.to_s == value.to_s` — or, for a
+/// `multiple: true` select, when the selected ARRAY includes the value
+/// (Rails marks every member; lobsters' tags picker selects against
+/// `story.tags_a`).
+fn selected_attr_part(sel: Expr, value: Expr, multiple: bool) -> InterpPart {
+    let cond = if multiple {
+        send(Some(sel), "include?", vec![to_s(value)], None, false)
+    } else {
+        send(Some(to_s(sel)), "==", vec![to_s(value)], None, false)
+    };
     InterpPart::Expr {
         expr: Expr::new(
             Span::synthetic(),
@@ -577,6 +605,7 @@ fn collection_options(
     text_method: &str,
     selected: Option<Expr>,
     include_blank: bool,
+    multiple: bool,
     field_str: &str,
     ctx: &ViewCtx,
 ) -> Option<(Vec<Expr>, Expr)> {
@@ -586,7 +615,7 @@ fn collection_options(
     let value = send(Some(el_ref.clone()), value_method, Vec::new(), None, false);
     let text = send(Some(el_ref), text_method, Vec::new(), None, false);
     let mut option = Vec::new();
-    push_dynamic_option(&mut option, to_s(text), to_s(value), &[], selected.as_ref());
+    push_dynamic_option(&mut option, to_s(text), to_s(value), &[], selected.as_ref(), multiple);
     let (setup, var) = each_loop(
         coll,
         el,
@@ -605,6 +634,7 @@ fn collection_options(
 fn map_loop_options(
     map_call: &Expr,
     selected: Option<&Expr>,
+    multiple: bool,
     field_str: &str,
     prefix: Vec<InterpPart>,
     ctx: &ViewCtx,
@@ -618,10 +648,36 @@ fn map_loop_options(
     }
     let ExprNode::Lambda { params, body, .. } = &*block.node else { return None };
     let el = params.first().cloned()?;
-    let ExprNode::Array { elements, .. } = &*body.node else { return None };
-    let (text, attrs_hash, value) = match elements.as_slice() {
-        [t, v] => (t.clone(), None, v.clone()),
+    // The lambda pieces were argument-position code the template walk
+    // never touched — run the helper rewrite over them so `h(x)` (the
+    // ERB escape alias in lobsters' tags picker) and friends ground to
+    // ViewHelpers before hoisting.
+    let body = super::walker::rewrite_helpers_in_expr(body, ctx);
+    // The lambda body: a bare `[text, …]` literal, or a Seq of
+    // per-element statements ENDING in one (lobsters' tags picker
+    // builds an `html` local across conditionals before the triple) —
+    // the leading statements hoist into the loop body ahead of the
+    // option append, where the element param is still in scope.
+    let (leading, array_elements): (Vec<Expr>, _) = match &*body.node {
+        ExprNode::Array { elements, .. } => (Vec::new(), elements.clone()),
+        ExprNode::Seq { exprs } => match exprs.split_last() {
+            Some((last, init)) => match &*last.node {
+                ExprNode::Array { elements, .. } => (init.to_vec(), elements.clone()),
+                _ => return None,
+            },
+            None => return None,
+        },
+        _ => return None,
+    };
+    // Pair `[text, value]`, or triple with the attrs hash in EITHER
+    // position Rails accepts: `[text, {attrs}, value]` (messages) and
+    // `[text, value, {attrs}]` (the documented form; lobsters' tags).
+    let (text, attrs_hash, value) = match array_elements.as_slice() {
+        [t, v] if !matches!(&*v.node, ExprNode::Hash { .. }) => (t.clone(), None, v.clone()),
         [t, a, v] if matches!(&*a.node, ExprNode::Hash { .. }) => {
+            (t.clone(), Some(a.clone()), v.clone())
+        }
+        [t, v, a] if matches!(&*a.node, ExprNode::Hash { .. }) => {
             (t.clone(), Some(a.clone()), v.clone())
         }
         _ => return None,
@@ -639,8 +695,28 @@ fn map_loop_options(
         }
     }
     let mut option = Vec::new();
-    push_dynamic_option(&mut option, to_s(text), to_s(value), &attrs, selected);
-    Some(each_loop(coll, el, string_interp(option), field_str, prefix, ctx))
+    push_dynamic_option(&mut option, to_s(text), to_s(value), &attrs, selected, multiple);
+    let mut loop_body = leading;
+    loop_body.push(options_append(
+        &Symbol::from(format!("_options_{field_str}")),
+        string_interp(option),
+    ));
+    Some(each_loop_with_body(
+        coll,
+        el,
+        seq_of(loop_body),
+        field_str,
+        prefix,
+        ctx,
+    ))
+}
+
+fn seq_of(mut exprs: Vec<Expr>) -> Expr {
+    if exprs.len() == 1 {
+        exprs.remove(0)
+    } else {
+        Expr::new(Span::synthetic(), ExprNode::Seq { exprs })
+    }
 }
 
 /// Build `(setup, options_var_ref)`: a `_options_<field>` accumulator
@@ -652,6 +728,24 @@ fn each_loop(
     option_interp: Expr,
     field_str: &str,
     prefix: Vec<InterpPart>,
+    ctx: &ViewCtx,
+) -> (Vec<Expr>, Expr) {
+    let body = options_append(
+        &Symbol::from(format!("_options_{field_str}")),
+        option_interp,
+    );
+    each_loop_with_body(coll, el, body, field_str, prefix, ctx)
+}
+
+/// Like `each_loop`, but the caller supplies the FULL loop body (the
+/// Seq-bodied map arm hoists per-element statements ahead of its
+/// option append).
+fn each_loop_with_body(
+    coll: &Expr,
+    el: Symbol,
+    loop_body: Expr,
+    field_str: &str,
+    prefix: Vec<InterpPart>,
     _ctx: &ViewCtx,
 ) -> (Vec<Expr>, Expr) {
     let var_name = Symbol::from(format!("_options_{field_str}"));
@@ -660,7 +754,6 @@ fn each_loop(
     if !prefix.is_empty() {
         setup.push(options_append(&var_name, string_interp(prefix)));
     }
-    let loop_body = options_append(&var_name, option_interp);
     let lambda = Expr::new(
         Span::synthetic(),
         ExprNode::Lambda {

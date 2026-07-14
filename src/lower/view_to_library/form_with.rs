@@ -315,17 +315,24 @@ fn route_helperize(url: Expr, route_helpers: &impl Fn() -> Expr, ctx: &ViewCtx) 
     if let Some(name) = bare_name {
         if ctx.model_singulars.contains(name) {
             let plural = crate::naming::pluralize_snake(name);
-            return Expr::new(
-                url.span,
-                ExprNode::If {
-                    cond: send(Some(url.clone()), "persisted?", Vec::new(), None, false),
-                    then_branch: super::route_helpers_call(
-                        &format!("{name}_path"),
-                        vec![url.clone()],
-                    ),
-                    else_branch: super::route_helpers_call(&format!("{plural}_path"), Vec::new()),
-                },
-            );
+            let member = super::route_helpers_call(&format!("{name}_path"), vec![url.clone()]);
+            let collection = super::route_helpers_call(&format!("{plural}_path"), Vec::new());
+            let has_member = ctx.route_helper_names.is_empty()
+                || ctx.route_helper_names.contains(&format!("{name}_path"));
+            let has_collection = ctx.route_helper_names.is_empty()
+                || ctx.route_helper_names.contains(&format!("{plural}_path"));
+            return match (has_member, has_collection) {
+                (true, false) => member,
+                (false, true) => collection,
+                _ => Expr::new(
+                    url.span,
+                    ExprNode::If {
+                        cond: send(Some(url.clone()), "persisted?", Vec::new(), None, false),
+                        then_branch: member,
+                        else_branch: collection,
+                    },
+                ),
+            };
         }
     }
     // Any other bare local/ivar defers to the runtime's url_for
@@ -502,14 +509,28 @@ fn classify_form_with_components(
         None,
         false,
     );
-    let action = Expr::new(
-        Span::synthetic(),
-        ExprNode::If {
-            cond: persisted.clone(),
-            then_branch: member_path,
-            else_branch: collection_path,
-        },
-    );
+    // Emit only the arms whose route helper EXISTS (domains has a
+    // member route but no collection; an unconditional ternary calls
+    // an undefined RouteHelpers method). An empty helper set (test
+    // harnesses without routes) keeps both arms. A one-armed form is
+    // Rails-honest: submitting the missing arm's case would be a
+    // routing error there too.
+    let has_member = ctx.route_helper_names.is_empty()
+        || ctx.route_helper_names.contains(&format!("{singular}_path"));
+    let has_collection = ctx.route_helper_names.is_empty()
+        || ctx.route_helper_names.contains(&format!("{plural}_path"));
+    let action = match (has_member, has_collection) {
+        (true, false) => member_path,
+        (false, true) => collection_path,
+        _ => Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: persisted.clone(),
+                then_branch: member_path,
+                else_branch: collection_path,
+            },
+        ),
+    };
     let method = Expr::new(
         Span::synthetic(),
         ExprNode::If {
@@ -743,17 +764,19 @@ fn find_kwarg_local_name(args: &[Expr]) -> Option<String> {
 /// Replace `<form_param>.object` reads with the record local
 /// (`f.object` → `f_record`). Runs over the form block body before the
 /// walk; every other `f.<method>` stays for the macro-inline dispatch.
-fn rewrite_form_object_reads(body: &Expr, form_param: &str, record_var: &Symbol) -> Expr {
+pub(super) fn rewrite_form_object_reads(body: &Expr, form_param: &str, record_var: &Symbol) -> Expr {
     fn walk(e: &Expr, form_param: &str, record_var: &Symbol) -> Expr {
         if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node {
             if method.as_str() == "object" && args.is_empty() {
-                if let ExprNode::Var { name, .. } = &*r.node {
-                    if name.as_str() == form_param {
-                        return Expr::new(
-                            e.span,
-                            ExprNode::Var { id: crate::ident::VarId(0), name: record_var.clone() },
-                        );
-                    }
+                // The builder reference is a Var inside a form_with
+                // lambda (a real block param) but a bare zero-arg Send
+                // in a bound PARTIAL (the form local dropped out of
+                // the partial's params, so nothing declares it).
+                if form_param_ref_name(r).is_some_and(|n| n == form_param) {
+                    return Expr::new(
+                        e.span,
+                        ExprNode::Var { id: crate::ident::VarId(0), name: record_var.clone() },
+                    );
                 }
             }
         }
@@ -764,4 +787,17 @@ fn rewrite_form_object_reads(body: &Expr, form_param: &str, record_var: &Symbol)
         out
     }
     walk(body, form_param, record_var)
+}
+
+/// The name a form-builder receiver reference carries: a `Var` (block
+/// param inside form_with) or a bare zero-arg `Send` (a bound
+/// partial's form local — dropped from its params, so undeclared).
+pub(super) fn form_param_ref_name(e: &Expr) -> Option<&str> {
+    match &*e.node {
+        ExprNode::Var { name, .. } => Some(name.as_str()),
+        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
+            Some(method.as_str())
+        }
+        _ => None,
+    }
 }
