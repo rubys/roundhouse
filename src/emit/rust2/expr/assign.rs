@@ -158,12 +158,31 @@ pub(super) fn emit_assign(target: &LValue, value: &Expr) -> String {
             // requires `.insert(k, v)`. Wrap in `{ ...; }` so the
             // assignment evaluates to `()` (insert returns Option<V>
             // which rustc rejects in no-else if-statement contexts).
-            if matches!(recv.ty.as_ref(), Some(crate::ty::Ty::Hash { .. })) {
-                return format!(
-                    "{{ {}.insert({}, {rhs}); }}",
-                    emit_expr(recv),
-                    emit_expr(index),
-                );
+            let recv_hash = recv.ty.as_ref().map(super::util::peel_nil).and_then(|t| {
+                if let crate::ty::Ty::Hash { key, value } = t {
+                    Some((key.as_ref().clone(), value.as_ref().clone()))
+                } else {
+                    None
+                }
+            });
+            if let Some((k_ty, v_ty)) = recv_hash {
+                // Reseeded ivar hashes arrive as Union[Hash, Nil] —
+                // peel. Str-slot args coerce via `.to_string()`
+                // (idempotent for already-owned Strings): literal
+                // keys and RBS-String params render borrowed
+                // (`@headers[name.to_s] = value` in the runtime
+                // controller's set_header).
+                let coerce = |slot: &crate::ty::Ty, raw: String| -> String {
+                    match slot {
+                        crate::ty::Ty::Str | crate::ty::Ty::Sym => {
+                            format!("({raw}).to_string()")
+                        }
+                        _ => raw,
+                    }
+                };
+                let key = coerce(&k_ty, emit_expr(index));
+                let val = coerce(&v_ty, rhs.clone());
+                return format!("{{ {}.insert({key}, {val}); }}", emit_expr(recv));
             }
             format!("{}[{}] = {rhs}", emit_expr(recv), emit_expr(index))
         }

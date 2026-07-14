@@ -315,6 +315,18 @@ pub(crate) fn rewrite_method_name(m: &str) -> String {
 /// Rust 2024 reserved-word set. The `r#ident` raw-identifier form
 /// lifts the keyword restriction so user-defined names like `match`,
 /// `loop`, `type` can become function/struct names.
+/// Raw-escape a Ruby identifier that collides with a Rust keyword
+/// (`type` in `send_data(data, type:, …)` → `r#type`). Lookup tables
+/// (param/local types, narrowing state) stay keyed by the RUBY name —
+/// apply this only when formatting the identifier into output.
+pub(crate) fn escape_rust_keyword(name: &str) -> String {
+    if is_rust_keyword(name) {
+        format!("r#{name}")
+    } else {
+        name.to_string()
+    }
+}
+
 pub(crate) fn is_rust_keyword(name: &str) -> bool {
     matches!(
         name,

@@ -100,11 +100,11 @@ pub(super) fn narrowed_param_read(
     let narrowed = narrowed_ty?;
     let declared = var_decl_ty(name)?;
     if is_option_of(&declared, narrowed) && !is_rebound_var(name) {
-        return Some(format!("{name}.clone().unwrap()"));
+        return Some(format!("{}.clone().unwrap()", util::escape_rust_keyword(name)));
     }
     if matches!(declared, crate::ty::Ty::Untyped) {
         if let Some(coerce) = value_narrowing_coercion(narrowed) {
-            return Some(format!("{name}.{coerce}"));
+            return Some(format!("{}.{coerce}", util::escape_rust_keyword(name)));
         }
     }
     None
@@ -827,7 +827,7 @@ fn emit_expr_inner(e: &Expr) -> String {
                         _ => None,
                     };
                     if let Some(c) = coercion {
-                        return format!("{n}.{c}");
+                        return format!("{}.{c}", util::escape_rust_keyword(n));
                     }
                 }
             }
@@ -843,9 +843,9 @@ fn emit_expr_inner(e: &Expr) -> String {
                 .map(|ctx| ctx.suppress_var_clone.get())
                 .unwrap_or(false);
             if e.decisions & super::decide::bits::CLONE_AT != 0 && !at_send_recv {
-                return format!("{n}.clone()");
+                return format!("{}.clone()", util::escape_rust_keyword(n));
             }
-            n.to_string()
+            util::escape_rust_keyword(n)
         }
         ExprNode::Ivar { name } => {
             if in_module_singleton() {

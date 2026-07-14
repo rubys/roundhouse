@@ -111,7 +111,7 @@ fn render_params(m: &MethodDef) -> String {
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            let name = p.name.as_str();
+            let name = super::expr::util::escape_rust_keyword(p.name.as_str());
             match sig_params.and_then(|sp| sp.get(i)) {
                 Some(sig_p) => format!("{name}: {}", rust_param_ty(&sig_p.ty)),
                 None => format!("{name}: ()"),
@@ -712,7 +712,7 @@ fn render_instance_params(
         parts.push(r.to_string());
     }
     for (i, p) in m.params.iter().enumerate() {
-        let name = p.name.as_str();
+        let name = super::expr::util::escape_rust_keyword(p.name.as_str());
         let rendered = match sig_params.and_then(|sp| sp.get(i)) {
             Some(sig_p) => format!("{name}: {}", rust_param_ty(&sig_p.ty)),
             None => format!("{name}: ()"),

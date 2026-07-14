@@ -817,6 +817,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                             else {{ let _ = self._adapter_insert();{after_create_commit} }}\n\
                             true\n\
                         }}\n\
+                        pub fn save_bang(&mut self) -> Self {{\n\
+                            if !(self.save()) {{ crate::errors_ext::raise(crate::errors_ext::RecordInvalid, self.clone()) }};\n\
+                            self.clone()\n\
+                        }}\n\
                         pub fn destroy(&mut self) {{ {destroy_body} }}\n\
                         pub fn exists_pred(id: i64) -> bool {{ Self::_adapter_exists_by_id_pred(id) }}\n\
                         pub fn persisted_pred(&self) -> bool {{ self.id != 0 }}\n\
