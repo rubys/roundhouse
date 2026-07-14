@@ -106,6 +106,13 @@ pub enum RenderPartial<'a> {
     /// controllers assign to `@<ivar>` (see `dynamic_partial_pools`),
     /// each arm calling the resolved partial with its threaded closure.
     DynamicNamed { name: &'a Expr, ivar: &'a str },
+    /// `render template: "stories/show"` — a full ACTION VIEW rendered
+    /// from another view (lobsters' new-story page previews the story).
+    /// Resolves through the same `(module, stem)` key space as
+    /// partials; the call passes the target's closure params only (an
+    /// action view has no record arg), which the render-graph fold
+    /// threads into the caller like any other edge.
+    Template { name: &'a str },
 }
 
 /// Recognize a `render ...` call inside an ERB view body. Returns
@@ -189,6 +196,7 @@ fn classify_render_kwargs(entries: &[(Expr, Expr)]) -> Option<RenderPartial<'_>>
         _ => None,
     };
     let mut partial: Option<&str> = None;
+    let mut template: Option<&str> = None;
     let mut dyn_partial: Option<(&Expr, &str)> = None;
     let mut collection: Option<&Expr> = None;
     let mut as_name: Option<&str> = None;
@@ -206,6 +214,11 @@ fn classify_render_kwargs(entries: &[(Expr, Expr)]) -> Option<RenderPartial<'_>>
                 }
                 _ => return None,
             },
+            Some("template") => {
+                if let ExprNode::Lit { value: Literal::Str { value } } = &*v.node {
+                    template = Some(value.as_str());
+                }
+            }
             Some("collection") => collection = Some(v),
             Some("as") => {
                 if let ExprNode::Lit { value: Literal::Sym { value } } = &*v.node {
@@ -235,6 +248,10 @@ fn classify_render_kwargs(entries: &[(Expr, Expr)]) -> Option<RenderPartial<'_>>
     let partial = match partial {
         Some(p) => p,
         None => {
+            // A full-template render (`render template: "stories/show"`).
+            if let Some(name) = template {
+                return Some(RenderPartial::Template { name });
+            }
             // No literal partial name. A bare dynamic name (`render partial:
             // @above`, no `collection:`) resolves via the pool dispatch; a
             // dynamic collection form isn't modeled yet.

@@ -179,6 +179,36 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
         // threaded closure ivars. A name outside the pool matches no arm →
         // renders nothing (Rails would raise; the pool covers every assigned
         // value). Empty pool → None (leaves the original render unresolved).
+        RenderPartial::Template { name } => {
+            let (module_camel, method_sym) =
+                super::partial_name_to_key(name, &ctx.resource_dir);
+            if module_camel.is_empty() {
+                return None;
+            }
+            // An action view has no record arg — its params are its
+            // FULL closure (threaded into the caller by the
+            // render-graph fold) plus nil-default extras. No
+            // record-name dedup here: `story` is a plain closure param
+            // on Views::Stories.show, not a separately-passed record.
+            let call_args: Vec<Expr> = ctx
+                .partial_ivars
+                .get(&(module_camel.clone(), method_sym.clone()))
+                .map(|ivars| ivars.iter().map(|n| var_ref(n.clone())).collect())
+                .unwrap_or_default();
+            let render_call = send(
+                Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const {
+                        path: vec![Symbol::from("Views"), Symbol::from(module_camel)],
+                    },
+                )),
+                &method_sym,
+                call_args,
+                None,
+                true,
+            );
+            Some(accumulator_append_call(render_call, ctx))
+        }
         RenderPartial::DynamicNamed { name, ivar } => {
             let names = ctx
                 .dyn_pools

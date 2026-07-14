@@ -199,6 +199,25 @@ module ActiveRecord
       to_a.map { |x| yield x }
     end
 
+    # `group_by { |rec| key }` — Enumerable's grouping over the
+    # materialized rows (lobsters threads comments with
+    # `@comments.group_by(&:parent_comment_id)`). fetch-then-insert
+    # rather than `Hash.new { [] }` (no default-proc portability) or
+    # `[]=`-chaining on a maybe-missing key.
+    def group_by
+      out = {}
+      to_a.each do |rec|
+        k = yield rec
+        arr = out.fetch(k, nil)
+        if arr.nil?
+          arr = []
+          out[k] = arr
+        end
+        arr << rec
+      end
+      out
+    end
+
     # `inject(initial) { |acc, x| ... }` — the accumulator form the
     # corpus uses (vote-hash batchers). The no-initial and Symbol forms
     # aren't modeled; callers pass an explicit seed.

@@ -33,6 +33,7 @@ module ActiveRecord
     def each: () { (untyped) -> void } -> Array[untyped]
     def find_each: () { (untyped) -> void } -> Array[untyped]
     def map: () { (untyped) -> untyped } -> Array[untyped]
+    def group_by: () { (untyped) -> untyped } -> Hash[untyped, Array[untyped]]
     def inject: (untyped initial) { (untyped, untyped) -> untyped } -> untyped
     def first: () -> untyped
     def first!: () -> untyped

@@ -1321,6 +1321,11 @@ fn emit_py_render_partial(
         RenderPartial::DynamicNamed { .. } => {
             "_buf += \"\"  # TODO ERB: render partial (dynamic name)".to_string()
         }
+        // Full-template renders are modeled on the Ruby emit path only
+        // (same CRuby-first posture as the dynamic dispatch above).
+        RenderPartial::Template { .. } => {
+            "_buf += \"\"  # TODO ERB: render template".to_string()
+        }
     }
 }
 

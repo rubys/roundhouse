@@ -1,0 +1,7 @@
+# Typing contract for the ruby-family ViewHelpers extensions.
+module ActionView
+  module ViewHelpers
+    def self.number_with_delimiter: (Integer value) -> String
+    def self.sanitize_to_id: (String name) -> String
+  end
+end
