@@ -703,6 +703,15 @@ fn str_or_sym_lit(e: &Expr) -> Option<String> {
 
 /// `<button name="button" type="submit"<opts>>TEXT</button>` — the
 /// default type yields to a caller-supplied `type:` opt.
+/// Bare `<%= button_tag content, opts %>` — the builder-less sibling
+/// of `form.button`, riding the same `<button>` emission (lobsters'
+/// story-form "Fetch Title" button). Blockless form only; no corpus
+/// site passes a block.
+pub(super) fn emit_button_tag(args: &[Expr], ctx: &ViewCtx) -> Vec<Expr> {
+    let (positional, opts) = split_args(args);
+    emit_button(positional.first().copied(), opts.as_slice(), ctx)
+}
+
 fn emit_button(
     text: Option<&Expr>,
     opts: &[(Expr, Expr)],
@@ -723,12 +732,41 @@ fn emit_button(
     append_attr_parts(&mut parts, opts);
     parts.push(InterpPart::Text { value: ">".to_string() });
     if let Some(t) = text {
-        parts.push(InterpPart::Expr {
-            expr: view_helpers_call("html_escape", vec![to_s(t.clone())]),
-        });
+        // `raw("Fetch&nbsp;Title")` content is html_safe by contract —
+        // unwrap and emit verbatim (a literal folds to static text)
+        // instead of double-escaping the entities.
+        if let Some(inner) = raw_call_arg(t) {
+            if let ExprNode::Lit { value: Literal::Str { value } } = &*inner.node {
+                parts.push(InterpPart::Text { value: value.clone() });
+            } else {
+                parts.push(InterpPart::Expr { expr: to_s(inner.clone()) });
+            }
+        } else {
+            parts.push(InterpPart::Expr {
+                expr: view_helpers_call("html_escape", vec![to_s(t.clone())]),
+            });
+        }
     }
     parts.push(InterpPart::Text { value: "</button>".to_string() });
     vec![accumulator_append_call(string_interp(parts), ctx)]
+}
+
+/// The argument of a `raw(...)` call — bare or already
+/// ViewHelpers-prefixed (the walker may rewrite helper calls before
+/// this classifier sees them).
+fn raw_call_arg(e: &Expr) -> Option<&Expr> {
+    let ExprNode::Send { recv, method, args, block: None, .. } = &*e.node else {
+        return None;
+    };
+    if method.as_str() != "raw" || args.len() != 1 {
+        return None;
+    }
+    match recv {
+        None => Some(&args[0]),
+        Some(r) => matches!(&*r.node, ExprNode::Const { path }
+            if path.last().is_some_and(|s| s.as_str() == "ViewHelpers"))
+        .then(|| &args[0]),
+    }
 }
 
 /// `<input type="<ty>" …>` — the text_field shape with a different

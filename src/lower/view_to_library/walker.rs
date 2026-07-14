@@ -11,7 +11,7 @@ use crate::lower::view::{
     extract_sym_or_str, ViewHelperKind,
 };
 
-use super::form_builder::{emit_form_builder_inline, emit_submit_tag};
+use super::form_builder::{emit_button_tag, emit_form_builder_inline, emit_submit_tag};
 use super::form_with::{
     emit_form_tag_inline, emit_form_with_inline, is_errors_each, rewrite_errors_each_body,
 };
@@ -407,13 +407,17 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         }
     }
 
-    // Bare `<%= submit_tag label, opts %>` — builder-less submit,
-    // inline-expanded like the `form.*` builder methods (the opts
-    // hashes are literal at every call site; the runtime alternative
-    // is the CRuby overlay's untyped opts-walk).
+    // Bare `<%= submit_tag label, opts %>` / `<%= button_tag content,
+    // opts %>` — builder-less controls, inline-expanded like the
+    // `form.*` builder methods (the opts hashes are literal at every
+    // call site; the runtime alternative is the CRuby overlay's
+    // untyped opts-walk).
     if let ExprNode::Send { recv: None, method, args: sa, block: None, .. } = &*inner.node {
         if method.as_str() == "submit_tag" {
             return emit_submit_tag(sa, ctx);
+        }
+        if method.as_str() == "button_tag" {
+            return emit_button_tag(sa, ctx);
         }
     }
 
