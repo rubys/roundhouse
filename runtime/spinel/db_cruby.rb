@@ -257,6 +257,10 @@ module Db
     @rows[stmt_id][:row][i].to_i
   end
 
+  def self.column_float(stmt_id, i)
+    @rows[stmt_id][:row][i].to_f
+  end
+
   def self.column_text(stmt_id, i)
     v = @rows[stmt_id][:row][i]
     v.nil? ? "" : v.to_s

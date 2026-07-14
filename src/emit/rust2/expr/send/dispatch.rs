@@ -31,6 +31,7 @@ pub(super) fn external_class_method_param_tys(class: &str, method: &str) -> Opti
         ("Db", "exec") => Some(vec![Ty::Str]),
         ("Db", "step") => Some(vec![Ty::Int]),
         ("Db", "column_int") => Some(vec![Ty::Int, Ty::Int]),
+        ("Db", "column_float") => Some(vec![Ty::Int, Ty::Int]),
         ("Db", "column_text") => Some(vec![Ty::Int, Ty::Int]),
         ("Db", "column_bool") => Some(vec![Ty::Int, Ty::Int]),
         ("Db", "finalize") => Some(vec![Ty::Int]),

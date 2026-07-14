@@ -314,6 +314,20 @@ impl Db {
     /// Read an integer column from the row most recently stepped.
     /// NULL coerces to 0 (matches Crystal/TS shims); non-Int variants
     /// best-effort coerce.
+    pub fn column_float(stmt_id: i64, i: i64) -> f64 {
+        STATEMENTS.with(|s| {
+            let map = s.borrow();
+            let Some(entry) = map.get(&stmt_id) else { return 0.0 };
+            let Some(row) = entry.current.as_ref() else { return 0.0 };
+            match row.get(i as usize) {
+                Some(Value::Real(v)) => *v,
+                Some(Value::Integer(v)) => *v as f64,
+                Some(Value::Text(t)) => t.parse().unwrap_or(0.0),
+                _ => 0.0,
+            }
+        })
+    }
+
     pub fn column_int(stmt_id: i64, i: i64) -> i64 {
         STATEMENTS.with(|s| {
             let map = s.borrow();

@@ -208,6 +208,10 @@ module Db
     stmt.rs.get_int(i + 1)
   end
 
+  def self.column_float(stmt, i)
+    stmt.rs.get_double(i + 1)
+  end
+
   # Per-request query-cache hooks — the shared overlay dispatch calls
   # these around every request. The CRuby shim implements Rails' AR
   # query-cache semantics; this JDBC shim doesn't cache yet, so they

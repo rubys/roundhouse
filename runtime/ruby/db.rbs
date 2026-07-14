@@ -16,6 +16,7 @@ module Db
   def self.prepare: (String) -> Integer
   def self.step?: (Integer) -> bool
   def self.column_int: (Integer, Integer) -> Integer
+  def self.column_float: (Integer, Integer) -> Float
   def self.column_text: (Integer, Integer) -> String
   def self.finalize: (Integer) -> void
   def self.last_insert_rowid: () -> Integer

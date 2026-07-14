@@ -1037,6 +1037,7 @@ fn column_read_method(col_ty: &Ty) -> &'static str {
     match col_ty {
         Ty::Int => "column_int",
         Ty::Bool => "column_bool",
+        Ty::Float => "column_float",
         _ => "column_text",
     }
 }

@@ -423,6 +423,7 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
         let read_method = match ty_of_column(&col.col_type) {
             Ty::Int => "column_int",
             Ty::Bool => "column_bool",
+            Ty::Float => "column_float",
             _ => "column_text",
         };
         let read_call = arel_db_call(

@@ -15,6 +15,7 @@
 #   Db.prepare(sql)            — prepare a SELECT, returns stmt handle
 #   Db.step?(stmt)             — advance, returns true if a row arrived
 #   Db.column_int(stmt, i)     — read int column at zero-based index
+#   Db.column_float(stmt, i)   — read float (REAL) column at zero-based index
 #   Db.column_text(stmt, i)    — read text column at zero-based index
 #   Db.column_count(stmt)      — number of columns in the prepared row
 #   Db.column_name(stmt, i)    — name of column at zero-based index
@@ -62,6 +63,7 @@ module SQL
   ffi_func :sqlite3_reset,             [:ptr],                                :int
   ffi_func :sqlite3_clear_bindings,    [:ptr],                                :int
   ffi_func :sqlite3_column_int,        [:ptr, :int],                          :int
+  ffi_func :sqlite3_column_double,     [:ptr, :int],                          :double
   ffi_func :sqlite3_column_text,       [:ptr, :int],                          :str
   ffi_func :sqlite3_column_count,      [:ptr],                                :int
   ffi_func :sqlite3_column_name,       [:ptr, :int],                          :str
@@ -334,6 +336,10 @@ module Db
 
   def self.column_int(stmt, i)
     SQL.sqlite3_column_int(stmt, i)
+  end
+
+  def self.column_float(stmt, i)
+    SQL.sqlite3_column_double(stmt, i)
   end
 
   # The libsqlite3 column buffer is invalidated by the next step or
