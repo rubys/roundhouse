@@ -81,6 +81,9 @@ module ActionController
     # `head(:no_content, content_type: "application/json")` — empty
     # body, status only; content_type optional.
     def head: (Symbol status, ?content_type: String?) -> void
+    def response: () -> Base
+    def headers: () -> Hash[String, String]
+    def send_data: (String data, ?type: String, ?disposition: String) -> void
 
     # Monomorphic on Symbol — body looks up STATUS_CODES. Integer
     # pass-through was previously supported via `is_a?(Integer)`

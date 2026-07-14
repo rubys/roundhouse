@@ -52,6 +52,7 @@ module ActionController
       @location = nil
       @request_format = :html
       @content_type = "text/html; charset=utf-8"
+      @response_headers = {}
       @performed = false
     end
 
@@ -130,6 +131,32 @@ module ActionController
       @body   = ""
       @performed = true
       @content_type = content_type unless content_type.nil?
+      nil
+    end
+
+    # `response.headers["Expires"] = …` — Rails actions reach header
+    # state through the response object; this controller IS its own
+    # buffered response, so `response` returns self and `headers` the
+    # extra-header hash. The CGI harness emits status/body/
+    # content-type today; extra headers are buffered but unsent — a
+    # ledgered seam (they tune caching, not content), wired through
+    # the harness when a consumer needs them.
+    def response
+      self
+    end
+
+    def headers
+      @response_headers
+    end
+
+    # `send_data data, type:, disposition:` — a binary response body
+    # (lobsters streams avatar PNGs). Same buffering contract as
+    # render.
+    def send_data(data, type: "application/octet-stream", disposition: "attachment")
+      @body = data
+      @content_type = type
+      @response_headers["Content-Disposition"] = disposition
+      @performed = true
       nil
     end
 
