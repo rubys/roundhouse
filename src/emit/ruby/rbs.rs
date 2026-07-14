@@ -136,12 +136,21 @@ fn render_def(m: &MethodDef) -> String {
 }
 
 fn render_untyped_fallback(m: &MethodDef) -> String {
+    // Kind-aware like render_typed_params — a keyword param rendered
+    // positionally makes the sig disagree with the def (spinel then
+    // mis-binds the call and type-checks kwarg defaults in the
+    // caller's context).
     let parts: Vec<String> = m
         .params
         .iter()
         .map(|p| {
-            let prefix = if p.default.is_some() { "?" } else { "" };
-            format!("{prefix}untyped {}", p.name.as_str())
+            let name = p.name.as_str();
+            let optional = if p.default.is_some() { "?" } else { "" };
+            if p.keyword {
+                format!("{optional}{name}: untyped")
+            } else {
+                format!("{optional}untyped {name}")
+            }
         })
         .collect();
     format!("({}) -> untyped", parts.join(", "))
