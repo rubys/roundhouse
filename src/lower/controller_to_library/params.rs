@@ -133,6 +133,22 @@ fn match_permit_call(expr: &Expr) -> Option<(Symbol, Vec<Symbol>)> {
         return Some((resource, fields));
     }
 
+    // Form 3: `<permit-chain>.merge(field: expr, …)` — server-side
+    // fields folded into the permitted set (lobsters merges
+    // `edit_user_id: @user.id` after permit). The merged keys join the
+    // spec's fields, so the synthesized class carries their accessors;
+    // `rewrite_to_from_raw` assigns the values after `from_raw`.
+    // Pre-order collection sees this node before its inner permit, so
+    // the wider spec wins the per-resource slot.
+    if method.as_str() == "merge" && args.len() == 1 {
+        let ExprNode::Hash { entries, .. } = &*args[0].node else { return None };
+        let (resource, mut fields) = match_permit_call(recv)?;
+        for (k, _) in entries {
+            fields.push(sym_of(k)?);
+        }
+        return Some((resource, fields));
+    }
+
     None
 }
 
@@ -281,6 +297,7 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
     }
     methods.push(synth_from_raw(&spec.class_id, &spec.resource, &spec.fields));
     methods.push(synth_to_h(&spec.class_id, &spec.fields));
+    methods.push(synth_except(&spec.class_id, &spec.fields));
 
     // Provenance: every synthesized body attributes to the
     // `permit(...)` / `expect(...)` call the spec was recognized from.
@@ -391,6 +408,70 @@ fn synth_attr_reader(owner: &ClassId, field: &Symbol) -> MethodDef {
         is_async: false,
             mutates_self: false,
             block_param: None,
+    }
+}
+
+/// `def except(key)` — nil the named field's slot and return self.
+/// Rails' `permitted.except(:reason)` drops a key before `update`
+/// consumes the params; the typed `update` skips nil fields, so a
+/// nil'd slot is exactly "not provided". The receiver is always a
+/// fresh `from_raw` product at the corpus sites, so mutate-and-return
+/// stands in for Rails' copy semantics.
+fn synth_except(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
+    let key = Symbol::from("key");
+    let key_read = |()| Expr::new(
+        Span::synthetic(),
+        ExprNode::Var { id: VarId(0), name: key.clone() },
+    );
+    let mut stmts: Vec<Expr> = Vec::new();
+    for field in fields {
+        let cond = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(key_read(())),
+                method: Symbol::from("=="),
+                args: vec![Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lit { value: Literal::Sym { value: field.clone() } },
+                )],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let clear = Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Ivar { name: field.clone() },
+                value: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+            },
+        );
+        stmts.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond,
+                then_branch: clear,
+                else_branch: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lit { value: Literal::Nil },
+                ),
+            },
+        ));
+    }
+    stmts.push(Expr::new(Span::synthetic(), ExprNode::SelfRef));
+    let body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs: stmts });
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+    MethodDef {
+        name: Symbol::from("except"),
+        receiver: MethodReceiver::Instance,
+        params: vec![Param::positional(key.clone())],
+        body,
+        signature: Some(fn_sig(vec![(key, Ty::Sym)], owner_ty)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+        block_param: None,
     }
 }
 
@@ -822,10 +903,53 @@ pub fn rewrite_to_from_raw(
     specs: &BTreeMap<Symbol, ParamsSpec>,
 ) -> Expr {
     map_expr(expr, &|e| {
+        // Merge form first — the bare-permit arm below would match the
+        // same node (Form 3 delegates) and drop the merged values.
+        if let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*e.node {
+            if method.as_str() == "merge"
+                && args.len() == 1
+                && match_permit_call(recv).is_some()
+            {
+                let (resource, _) = match_permit_call(e)?;
+                let spec = specs.get(&resource)?;
+                let ExprNode::Hash { entries, .. } = &*args[0].node else { return None };
+                return Some(build_from_raw_merge(&spec.class_id, entries, e.span));
+            }
+        }
         let (resource, _fields) = match_permit_call(e)?;
         let spec = specs.get(&resource)?;
         Some(build_from_raw_call(&spec.class_id, e.span))
     })
+}
+
+/// `<chain>.merge(k: v)` → `_p = <Class>.from_raw(@params); _p.k = v;
+/// _p` — a statement-shaped Seq; the corpus site is a params-helper
+/// tail, where the Seq renders as plain statements. The setters run
+/// after `from_raw`, so a client-supplied value under the same key is
+/// overwritten (Rails' merge contract).
+fn build_from_raw_merge(class_id: &ClassId, entries: &[(Expr, Expr)], span: Span) -> Expr {
+    let p = |()| Expr::new(span, ExprNode::Var { id: VarId(0), name: Symbol::from("_p") });
+    let mut stmts = vec![Expr::new(
+        span,
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: Symbol::from("_p") },
+            value: build_from_raw_call(class_id, span),
+        },
+    )];
+    for (k, v) in entries {
+        let ExprNode::Lit { value: Literal::Sym { value: name } } = &*k.node else {
+            continue;
+        };
+        stmts.push(Expr::new(
+            span,
+            ExprNode::Assign {
+                target: LValue::Attr { recv: p(()), name: name.clone() },
+                value: v.clone(),
+            },
+        ));
+    }
+    stmts.push(p(()));
+    Expr::new(span, ExprNode::Seq { exprs: stmts })
 }
 
 fn build_from_raw_call(class_id: &ClassId, span: Span) -> Expr {
