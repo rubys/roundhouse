@@ -388,10 +388,16 @@ pub enum FormBuilderMethod {
 
 /// Method name for a view template stem. A digit-leading stem
 /// (`about/404.html.erb`) can't name a Ruby/most-target method — prefix
-/// `_` (`Views::About._404`). Def site (view_to_library) and render
-/// call site (controller rewrites) share this so they can't drift.
+/// `_` (`Views::About._404`). A `new` stem (stories/new.html.erb →
+/// `Views::Stories.new`) collides with the CONSTRUCTOR under spinel
+/// AOT — callers get instantiation semantics and the argument
+/// unification poisons every downstream param type (stories/show's
+/// `comments` param unified to Proc) — so it gets the same prefix.
+/// Def site (view_to_library), render call sites (controller
+/// rewrites), and the partial/template dispatch arms share this so
+/// they can't drift.
 pub fn view_method_name(stem: &str) -> crate::ident::Symbol {
-    if stem.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+    if stem.chars().next().is_some_and(|c| c.is_ascii_digit()) || stem == "new" {
         crate::ident::Symbol::from(format!("_{stem}"))
     } else {
         crate::ident::Symbol::from(stem)

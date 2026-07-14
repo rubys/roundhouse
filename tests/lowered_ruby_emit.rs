@@ -871,18 +871,19 @@ fn controllers_show_views_call_pulls_ivars_from_filter_targets() {
 
 #[test]
 fn controllers_new_action_views_call_uses_action_name_not_method_name() {
-    // The view module method is `new` (matches the action symbol), even
-    // though the Ruby method is renamed to `new_action` to avoid the
-    // Object#new shadow.
+    // The view module method is `_new` (view_method_name sanitizes the
+    // `new` stem — `def self.new` on a Views class is a constructor
+    // collision on class-based targets), NOT the controller's
+    // `new_action` rename.
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     assert!(
-        src.contains("render(Views::Articles.new(@article, @flash[:notice], @flash[:alert]))"),
-        "expected Views::Articles.new(@article, ...flash...); got:\n{src}",
+        src.contains("render(Views::Articles._new(@article, @flash[:notice], @flash[:alert]))"),
+        "expected Views::Articles._new(@article, ...flash...); got:\n{src}",
     );
     assert!(
         !src.contains("Views::Articles.new_action"),
-        "view-module method should be `new`, not `new_action`:\n{src}",
+        "view-module method should be `_new`, not `new_action`:\n{src}",
     );
 }
 
@@ -890,7 +891,8 @@ fn controllers_new_action_views_call_uses_action_name_not_method_name() {
 fn controllers_render_symbol_in_else_branch_rewrites_to_views_call() {
     // create's `respond_to` block has the HTML-branch
     // `render :new, status: :unprocessable_*` after unwrap_respond_to.
-    // Should rewrite to `render(Views::Articles.new(@article), status: ...)`.
+    // Should rewrite to `render(Views::Articles._new(@article), status: ...)`
+    // (`new` stem sanitized — constructor collision on class-based targets).
     // Rails 8.1.x scaffold renamed `:unprocessable_entity` →
     // `:unprocessable_content` mid-version; accept either since the
     // fixture's exact keyword depends on which point release of Rails
@@ -898,9 +900,9 @@ fn controllers_render_symbol_in_else_branch_rewrites_to_views_call() {
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     let create_entity =
-        "render(Views::Articles.new(@article, @flash[:notice], @flash[:alert]), status: :unprocessable_entity)";
+        "render(Views::Articles._new(@article, @flash[:notice], @flash[:alert]), status: :unprocessable_entity)";
     let create_content =
-        "render(Views::Articles.new(@article, @flash[:notice], @flash[:alert]), status: :unprocessable_content)";
+        "render(Views::Articles._new(@article, @flash[:notice], @flash[:alert]), status: :unprocessable_content)";
     assert!(
         src.contains(create_entity) || src.contains(create_content),
         "expected Views call in create's else branch; got:\n{src}",
@@ -2009,12 +2011,14 @@ fn lowered_new_view_dispatches_named_partial() {
     // RenderPartial variant. Bare partial name `"form"` routes to
     // the current resource_dir's module — `Views::Articles.form
     // (article)`. The hash's first value (`@article` post-ivar
-    // rewrite → `article`) becomes the call's positional arg.
+    // rewrite → `article`) becomes the call's positional arg. The
+    // view method for the `new` action is `_new` (stem sanitized —
+    // constructor collision on class-based targets).
     let files = lowered_real_blog_views();
     let src = find(&files, "app/views/articles/new.rb");
     assert!(
-        src.contains("def self.new(article, notice = nil, alert = nil)"),
-        "expected `def self.new(article, notice, alert)`; got:\n{src}",
+        src.contains("def self._new(article, notice = nil, alert = nil)"),
+        "expected `def self._new(article, notice, alert)`; got:\n{src}",
     );
     assert!(
         src.contains("Views::Articles.form(article)"),

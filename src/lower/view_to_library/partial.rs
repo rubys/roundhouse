@@ -185,6 +185,8 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             if module_camel.is_empty() {
                 return None;
             }
+            let method_name =
+                crate::lower::view::view_method_name(&method_sym).as_str().to_string();
             // An action view has no record arg — its params are its
             // FULL closure (threaded into the caller by the
             // render-graph fold) plus nil-default extras. No
@@ -202,7 +204,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                         path: vec![Symbol::from("Views"), Symbol::from(module_camel)],
                     },
                 )),
-                &method_sym,
+                &method_name,
                 call_args,
                 None,
                 true,
