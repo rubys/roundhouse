@@ -1035,8 +1035,18 @@ fn action_to_method(
             // typed-coarse rather than panicking).
             Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) }
         }
-    } else {
+    } else if is_public {
+        // Routed actions terminate in render/redirect → Nil.
         Ty::Nil
+    } else {
+        // Helper/private methods RETURN VALUES — lobsters'
+        // get_from_cache yields the (stories, show_more) pair its
+        // actions destructure, user_token_link builds a URL. The old
+        // blanket Nil was a WRONG PIN the AOT trusted: spinel refused
+        // `@a, @b = get_from_cache(...)` as a nil destructure (and the
+        // massign repro matrix showed every honest shape passes).
+        // Untyped lets the compiler infer from the body instead.
+        Ty::Untyped
     };
     let sig_params: Vec<(Symbol, Ty)> = params
         .iter()
