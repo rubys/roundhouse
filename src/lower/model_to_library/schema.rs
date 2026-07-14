@@ -170,9 +170,16 @@ pub(super) fn push_schema_methods(
     // exposed by any controller), falls back to the Hash-shaped variant
     // for backward compatibility.
     methods.push(match permitted_fields {
-        Some(fields) => synth_update_typed(owner, fields, table),
+        Some(fields) => synth_update_typed(owner, fields, table, false),
         None => synth_update(owner, table),
     });
+
+    // `update!` — same typed assignment, `save!` tail (raises on
+    // invalid via Base). Only the typed variant: the corpus bang
+    // sites all go through permitted resources.
+    if let Some(fields) = permitted_fields {
+        methods.push(synth_update_typed(owner, fields, table, true));
+    }
 
     // def fill_timestamps(creating); now = ActiveSupport.db_now; @updated_at = now; @created_at = now if creating; end
     //
@@ -1489,7 +1496,7 @@ fn column_union_ty(table: &Table) -> Ty {
 ///     (`record.update(title: "Renamed")` doesn't clobber body).
 ///
 /// Save, return Bool.
-fn synth_update_typed(owner: &ClassId, fields: &[Symbol], table: &Table) -> MethodDef {
+fn synth_update_typed(owner: &ClassId, fields: &[Symbol], table: &Table, bang: bool) -> MethodDef {
     let p = Symbol::from("p");
     let resource = Symbol::from(crate::naming::snake_case(owner.0.as_str()));
     let params_class_id = ClassId(Symbol::from(format!(
@@ -1545,7 +1552,7 @@ fn synth_update_typed(owner: &ClassId, fields: &[Symbol], table: &Table) -> Meth
         Span::synthetic(),
         ExprNode::Send {
             recv: None,
-            method: Symbol::from("save"),
+            method: Symbol::from(if bang { "save!" } else { "save" }),
             args: Vec::new(),
             block: None,
             parenthesized: false,
@@ -1553,12 +1560,13 @@ fn synth_update_typed(owner: &ClassId, fields: &[Symbol], table: &Table) -> Meth
     ));
 
     let params_ty = Ty::Class { id: params_class_id, args: vec![] };
+    let ret_ty = if bang { Ty::Class { id: owner.clone(), args: vec![] } } else { Ty::Bool };
     MethodDef {
-        name: Symbol::from("update"),
+        name: Symbol::from(if bang { "update!" } else { "update" }),
         receiver: MethodReceiver::Instance,
         params: vec![Param::positional(p.clone())],
         body: seq(stmts),
-        signature: Some(fn_sig(vec![(p, params_ty)], Ty::Bool)),
+        signature: Some(fn_sig(vec![(p, params_ty)], ret_ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
