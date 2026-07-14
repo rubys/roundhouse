@@ -554,7 +554,72 @@ fn build_methods(
         ));
     }
 
+    // `helper_method :name` exposes a controller method to templates.
+    // The lowered views are module functions with no controller
+    // instance, so each ARG-PURE marked method (no ivar reads — the
+    // corpus members take the record as a parameter) also gets a
+    // class-side clone; the bare view call rewrites to
+    // `DomainsController.caption_of_button(domain)` via
+    // helper_method_index (registered at ingest). Ivar-reading marked
+    // methods stay instance-only — their view calls remain honest
+    // residue.
+    for name in controller_helper_method_names(controller) {
+        if let Some(m) = methods
+            .iter()
+            .find(|m| m.name == name && m.receiver == MethodReceiver::Instance)
+        {
+            let mut clone = m.clone();
+            clone.receiver = MethodReceiver::Class;
+            methods.push(clone);
+        }
+    }
+
     methods
+}
+
+/// Names a controller marks with `helper_method :x` whose public
+/// method body is IVAR-FREE (pure over its arguments) — the set the
+/// view-call rewrite and the class-side clone above serve. Shared with
+/// ingest, which registers these in `app.helper_method_index`.
+pub(crate) fn controller_helper_method_names(controller: &Controller) -> Vec<Symbol> {
+    use crate::expr::Literal;
+
+    fn has_ivar(e: &Expr) -> bool {
+        if matches!(&*e.node, ExprNode::Ivar { .. }) {
+            return true;
+        }
+        let mut found = false;
+        e.node.for_each_child(&mut |c| {
+            if has_ivar(c) {
+                found = true;
+            }
+        });
+        found
+    }
+
+    let mut marked: Vec<Symbol> = Vec::new();
+    for item in &controller.body {
+        let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
+            continue;
+        };
+        if method.as_str() != "helper_method" {
+            continue;
+        }
+        for arg in args {
+            if let ExprNode::Lit { value: Literal::Sym { value } } = &*arg.node {
+                marked.push(value.clone());
+            }
+        }
+    }
+    marked.retain(|name| {
+        controller.actions().any(|a| {
+            a.name == *name
+                && !has_ivar(&a.body)
+                && a.opt_params.iter().all(|(_, d)| !has_ivar(d))
+        })
+    });
+    marked
 }
 
 /// Return a copy of `action` with every applicable before_action

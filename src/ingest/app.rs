@@ -328,6 +328,19 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 unwrap_or_record(ingest_controller(&source, &path_str))?
             {
                 if let Some(controller) = maybe_controller {
+                    // `helper_method :x` exposes controller methods to
+                    // templates. The ARG-PURE ones (no ivar reads)
+                    // register like app-helper functions — the bare
+                    // view call rewrites to `<Controller>.x(args)`
+                    // against a class-side clone the controller
+                    // lowering synthesizes. Registered before the
+                    // app/helpers pass below, so a same-named helper-
+                    // module function wins (its insert overwrites).
+                    for name in crate::lower::controller_to_library::controller_helper_method_names(
+                        &controller,
+                    ) {
+                        app.helper_method_index.insert(name, controller.name.clone());
+                    }
                     app.controllers.push(controller);
                 } else {
                     // No class in the file — a module: a concern under

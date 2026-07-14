@@ -542,7 +542,13 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
             .map(|f| f.name)
             .collect();
     for lc in lcs.iter_mut() {
-        let is_helper_module = helper_modules.contains(&lc.name);
+        // CONTROLLERS in the index provide `helper_method`s to views:
+        // only the call-site rewrite applies to them — their methods
+        // must NOT flip class-side wholesale (actions are instance
+        // methods; the class-side clone for the marked helpers comes
+        // from the controller lowering itself).
+        let is_helper_module = helper_modules.contains(&lc.name)
+            && !app.controllers.iter().any(|c| c.name == lc.name);
         // Helper and view module functions have no controller context —
         // a bare `request` read there resolves to the per-dispatch
         // `ActionController::Current.request` (controllers keep their
