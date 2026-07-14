@@ -18,6 +18,13 @@ module Rails
     Env.new("development")
   end
 
+  # `Rails.root` — the app root. Rails hands back a Pathname; the
+  # corpus interpolates it into path strings, so "." (the emitted app
+  # serves from its root) is the faithful grounding.
+  def self.root
+    "."
+  end
+
   def self.cache
     Cache.new
   end

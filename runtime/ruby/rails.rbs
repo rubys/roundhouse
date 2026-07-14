@@ -1,5 +1,6 @@
 module Rails
   def self.env: () -> Env
+  def self.root: () -> String
   def self.cache: () -> Cache
   def self.logger: () -> Logger
   def self.application: () -> Application
