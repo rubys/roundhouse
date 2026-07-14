@@ -105,6 +105,7 @@ fn emit_node(n: &ExprNode) -> String {
                 && !matches!(&*then_branch.node, ExprNode::Seq { .. })
                 && !then_s.contains('\n')
                 && !contains_assign(cond)
+                && !renders_as_trailing_modifier(then_branch)
             {
                 format!("{then_s} if {cond_s}")
             } else if else_empty {

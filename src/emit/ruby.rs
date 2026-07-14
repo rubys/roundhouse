@@ -47,10 +47,10 @@ pub fn emit_method(m: &MethodDef) -> String {
         .iter()
         .map(|p| match (&p.default, p.keyword) {
             (Some(default), false) => {
-                format!("{} = {}", p.name.as_str(), expr::emit_expr(default))
+                format!("{} = {}", p.name.as_str(), emit_default(default))
             }
             (Some(default), true) => {
-                format!("{}: {}", p.name.as_str(), expr::emit_expr(default))
+                format!("{}: {}", p.name.as_str(), emit_default(default))
             }
             (None, true) => format!("{}:", p.name.as_str()),
             (None, false) => p.name.as_str().to_string(),
@@ -69,6 +69,17 @@ pub fn emit_method(m: &MethodDef) -> String {
     let mut out = String::new();
     writeln!(out, "def {prefix}{}{}", m.name, params).unwrap();
     let body_text = emit_expr(&m.body);
+    fn emit_default(default: &crate::expr::Expr) -> String {
+        let src = expr::emit_expr(default);
+        // A command-call default (`raise "…"`, the dead_default
+        // grounding) needs parens to close unambiguously inside the
+        // parameter list.
+        if matches!(&*default.node, crate::expr::ExprNode::Raise { .. }) {
+            format!("({src})")
+        } else {
+            src
+        }
+    }
     for line in body_text.lines() {
         if line.is_empty() {
             out.push('\n');
