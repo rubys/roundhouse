@@ -1558,6 +1558,12 @@ fn synth_update_typed(owner: &ClassId, fields: &[Symbol], table: &Table, bang: b
             parenthesized: false,
         },
     ));
+    if bang {
+        // update! returns the record — an explicit self read, not
+        // save!'s Base-typed return (strict targets type the
+        // difference).
+        stmts.push(Expr::new(Span::synthetic(), ExprNode::SelfRef));
+    }
 
     let params_ty = Ty::Class { id: params_class_id, args: vec![] };
     let ret_ty = if bang { Ty::Class { id: owner.clone(), args: vec![] } } else { Ty::Bool };
