@@ -71,6 +71,11 @@ pub struct ParamsSpec {
     /// recognized from — the enclosing source span for everything the
     /// synthesized class contains.
     pub span: Span,
+    /// Some call site chains `.except(:key)` off this resource's
+    /// permit — synthesize the `except` method. Demand-gated because
+    /// its nil-writes widen the class's fields to nilable on
+    /// inferring targets; classes nobody excepts keep tight types.
+    pub wants_except: bool,
 }
 
 /// Walk every controller's action bodies and collect one ParamsSpec per
@@ -89,12 +94,30 @@ pub fn collect_specs(controllers: &[Controller]) -> BTreeMap<Symbol, ParamsSpec>
 }
 
 fn collect_from_expr(expr: &Expr, out: &mut BTreeMap<Symbol, ParamsSpec>) {
+    // `<permit-chain>.except(:key)` — mark the spec before the walk
+    // reaches the inner chain, so the flag survives or_insert.
+    if let ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node {
+        if method.as_str() == "except" {
+            if let Some((resource, fields)) = match_permit_call(recv) {
+                out.entry(resource.clone())
+                    .and_modify(|s| s.wants_except = true)
+                    .or_insert_with(|| ParamsSpec {
+                        class_id: params_class_id(&resource),
+                        resource,
+                        fields,
+                        span: expr.span,
+                        wants_except: true,
+                    });
+            }
+        }
+    }
     if let Some((resource, fields)) = match_permit_call(expr) {
         out.entry(resource.clone()).or_insert_with(|| ParamsSpec {
             class_id: params_class_id(&resource),
             resource,
             fields,
             span: expr.span,
+            wants_except: false,
         });
     }
     walk_children(expr, &mut |c| collect_from_expr(c, out));
@@ -297,7 +320,9 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
     }
     methods.push(synth_from_raw(&spec.class_id, &spec.resource, &spec.fields));
     methods.push(synth_to_h(&spec.class_id, &spec.fields));
-    methods.push(synth_except(&spec.class_id, &spec.fields));
+    if spec.wants_except {
+        methods.push(synth_except(&spec.class_id, &spec.fields));
+    }
 
     // Provenance: every synthesized body attributes to the
     // `permit(...)` / `expect(...)` call the spec was recognized from.
