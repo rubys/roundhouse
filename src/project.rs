@@ -1374,6 +1374,15 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         ));
     }
 
+    // Duration sidecar — pins @seconds Integer so ago/from_now stay
+    // Time-typed under AOT inference (an untyped @seconds widens the
+    // temporal arithmetic to poly against the Time-typed C return).
+    {
+        let rbs = fs::read_to_string("runtime/spinel/active_support_duration.rbs")
+            .map_err(|e| format!("read runtime/spinel/active_support_duration.rbs: {e}"))?;
+        files.push(("sig/runtime/active_support_duration.rbs".to_string(), rbs));
+    }
+
     // `db_jruby.rb` is the JRuby/JDBC Db backend — it uses Java interop
     // (`java_import`, `Java::`) that the CRuby and Spinel toolchains (and
     // the spinel-subset compliance gate) must never see. It is injected
