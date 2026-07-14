@@ -71,5 +71,45 @@ pub(crate) fn rewrite_time_current(expr: &mut Expr) {
             block: None,
             parenthesized: false,
         };
+        return;
+    }
+    // `t.httpdate` — stdlib-`time` sugar neither the CRuby tree
+    // (without a `require "time"`) nor AOT targets know. Ground to
+    // its definition: `t.getutc.strftime("%a, %d %b %Y %H:%M:%S
+    // GMT")` — `getutc`, not `utc`, which mutates its receiver.
+    // Shape-directed on the zero-arg name; `httpdate` is
+    // Time-specific vocabulary.
+    let is_httpdate = matches!(
+        &*expr.node,
+        ExprNode::Send { recv: Some(_), method, args, block: None, .. }
+            if method.as_str() == "httpdate" && args.is_empty()
+    );
+    if is_httpdate {
+        let span = expr.span;
+        let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
+        let ExprNode::Send { recv: Some(t), .. } = node else { unreachable!() };
+        let getutc = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(t),
+                method: Symbol::from("getutc"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let fmt = Expr::new(
+            span,
+            ExprNode::Lit {
+                value: crate::expr::Literal::Str { value: "%a, %d %b %Y %H:%M:%S GMT".into() },
+            },
+        );
+        *expr.node = ExprNode::Send {
+            recv: Some(getutc),
+            method: Symbol::from("strftime"),
+            args: vec![fmt],
+            block: None,
+            parenthesized: true,
+        };
     }
 }
