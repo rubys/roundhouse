@@ -318,9 +318,13 @@ module ActionView
       i = 0
       n = name.length
       while i < n
-        c = name[i].to_s
+        # Two-arg slice + plain concat, the shapes every strict emitter
+        # already ships (truncate's s[0, cutoff]); `out << c` renders as
+        # an immutable-local .add() on Kotlin/Swift, and one-arg s[i]
+        # isn't in the proven surface.
+        c = name[i, 1].to_s
         if c != "]"
-          out << ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-:.".include?(c) ? c : "_")
+          out = out + ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-:.".include?(c) ? c : "_")
         end
         i = i + 1
       end
