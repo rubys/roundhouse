@@ -205,6 +205,7 @@ pub struct ViewLowerCtx<'a> {
     reference_targets: std::rc::Rc<std::collections::HashMap<String, String>>,
     nilable_scalar_reads: std::rc::Rc<std::collections::HashSet<String>>,
     model_singulars: std::rc::Rc<std::collections::HashSet<String>>,
+    bool_readers: std::rc::Rc<std::collections::HashMap<String, std::collections::HashSet<String>>>,
 }
 
 impl<'a> ViewLowerCtx<'a> {
@@ -229,6 +230,7 @@ impl<'a> ViewLowerCtx<'a> {
                     .map(|m| crate::naming::snake_case(m.name.0.as_str()))
                     .collect(),
             ),
+            bool_readers: std::rc::Rc::new(bool_reader_names(app)),
         }
     }
 
@@ -432,6 +434,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         reference_targets: lx.reference_targets.clone(),
         nilable_scalar_reads: lx.nilable_scalar_reads.clone(),
         model_singulars: lx.model_singulars.clone(),
+        bool_readers: lx.bool_readers.clone(),
         stylesheets: app.stylesheets.clone(),
         partial_ivars: closures.clone(),
         dyn_pools: dyn_pools.clone(),
@@ -2237,6 +2240,12 @@ pub(super) struct ViewCtx {
     /// runtime `url_for`, whose `is_a?`-dispatch shape is
     /// CRuby-overlay-only.
     pub(super) model_singulars: std::rc::Rc<std::collections::HashSet<String>>,
+    /// Per-model bool-reader names (`bool_reader_names`): Boolean
+    /// columns + bool typed_store attrs. `f.check_box` grounds its
+    /// checked state through these (typed ternary instead of the
+    /// runtime `checked_box_attr` seam).
+    pub(super) bool_readers:
+        std::rc::Rc<std::collections::HashMap<String, std::collections::HashSet<String>>>,
     /// Stylesheet logical names ingested from `app/assets/stylesheets/`
     /// + `app/assets/builds/`. Used by the `stylesheet_link_tag(:app,
     /// ...)` expansion: a `:app` symbol arg fans out to one call per
@@ -2280,6 +2289,41 @@ fn nilable_scalar_reader_names(app: &App) -> std::collections::HashSet<String> {
                 }
             }
         }
+    }
+    out
+}
+
+/// Per-model bool-reader names (model snake-singular → reader set):
+/// Boolean schema columns plus bool `typed_store` attrs. `f.check_box`
+/// grounds its checked state through these — a bool reader reduces the
+/// runtime `checked_box_attr` seam to a plain ternary on the typed
+/// reader.
+fn bool_reader_names(
+    app: &App,
+) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
+    let mut out = std::collections::HashMap::new();
+    for m in &app.models {
+        let mut set = std::collections::HashSet::new();
+        if let Some(table) = app.schema.tables.get(&m.table.0) {
+            for col in &table.columns {
+                if matches!(col.col_type, crate::schema::ColumnType::Boolean) {
+                    set.insert(col.name.as_str().to_string());
+                }
+            }
+        }
+        for (_store, attrs) in crate::lower::typed_store::typed_store_decls(&m.body) {
+            for a in attrs {
+                if a.is_bool {
+                    set.insert(a.name.as_str().to_string());
+                }
+            }
+        }
+        for (name, ty) in crate::lower::model_to_library::attribute_api_decls(&m.body) {
+            if ty.as_str() == "boolean" {
+                set.insert(name.as_str().to_string());
+            }
+        }
+        out.insert(crate::naming::snake_case(m.name.0.as_str()), set);
     }
     out
 }

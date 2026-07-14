@@ -40,6 +40,7 @@ use crate::ty::{Row, Ty};
 
 use self::associations::{push_association_methods, push_dependent_destroy};
 pub(crate) use self::associations::model_defines_instance_method;
+pub(crate) use self::markers::attribute_api_decls;
 
 /// Push a synthesized instance method unless the model body defines the
 /// name (custom methods win — `push_user_methods` runs after the
@@ -482,6 +483,17 @@ fn report_unclaimed_unknowns(model: &Model) {
         if name == "has_secure_password" {
             continue;
         }
+        // 2-arg `attribute :name, :type` — claimed by
+        // markers::push_attribute_api_methods (typed virtual
+        // attributes). Other arities (default:-carrying) stay
+        // unclaimed and warn.
+        if name == "attribute" {
+            if let ExprNode::Send { args, .. } = &*expr.node {
+                if args.len() == 2 {
+                    continue;
+                }
+            }
+        }
         // `primary_abstract_class` — claimed by markers.rs.
         if name == "primary_abstract_class" {
             continue;
@@ -560,6 +572,9 @@ fn writable_permit_fields(
     if let Some(attr) = crate::lower::secure_password::secure_password_attr(&model.body) {
         writable.insert(Symbol::from(format!("{}_confirmation", attr.as_str())));
         writable.insert(attr);
+    }
+    for (name, _ty) in self::markers::attribute_api_decls(&model.body) {
+        writable.insert(name);
     }
 
     fields
@@ -640,6 +655,9 @@ fn build_methods(
     push_dependent_destroy(&mut methods, model);
     push_unknown_marker_methods(&mut methods, model);
     push_attr_accessor_methods(&mut methods, model);
+    // `attribute :name, :type` (Rails Attributes API) — typed virtual
+    // readers + cast writers; same before-user-methods ordering.
+    self::markers::push_attribute_api_methods(&mut methods, model);
     // typed_store virtual attributes — reader/predicate/writer per
     // declared attr, routing through the `TypedStore` runtime (the
     // YAML seam). Before `push_user_methods` so a custom method in the

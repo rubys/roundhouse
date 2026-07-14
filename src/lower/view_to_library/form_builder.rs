@@ -135,7 +135,6 @@ fn emit_check_box(
     };
     let model_name = &binding.model_name;
     let field_str = field_sym.as_str();
-    let value_read = field_value_read(binding, field_sym.clone());
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text {
         value: format!(
@@ -145,9 +144,67 @@ fn emit_check_box(
             nid = name_id_attrs(model_name, field_str),
         ),
     });
-    parts.push(InterpPart::Expr {
-        expr: view_helpers_call("checked_box_attr", vec![value_read]),
-    });
+    // Checked state, typed instead of the runtime `checked_box_attr`
+    // seam (an untyped truthiness walk, CRuby-overlay-only). A PROVABLE
+    // bool reader (Boolean column / bool typed_store attr / `attribute
+    // :x, :boolean`) reduces to a plain ternary on the reader send —
+    // the reader is guaranteed synthesized. Anything else reads via the
+    // `[]` indexer, which returns nil for names the model doesn't
+    // carry: lobsters' `f.check_box :i_am_sure` binds a User attribute
+    // that exists NOWHERE (it's only ever read back as a param), and a
+    // bare reader send raised NoMethodError mid-replay — the indexer
+    // renders it unchecked, byte-identical to the old seam. The
+    // fallback test is Rails-truthful over the realistic value space
+    // via to_s (nil / "0" / false stay unchecked; "1" / true check).
+    let checked = lit_str(" checked=\"checked\"".to_string());
+    let is_bool_reader = ctx
+        .bool_readers
+        .get(model_name.as_str())
+        .is_some_and(|s| s.contains(field_str));
+    let checked_expr = if is_bool_reader {
+        let record_ref = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(0), name: binding.record_var.clone() },
+        );
+        let reader = send(Some(record_ref), field_str, Vec::new(), None, false);
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: reader,
+                then_branch: checked,
+                else_branch: lit_str(String::new()),
+            },
+        )
+    } else {
+        let value_read = field_value_read(binding, field_sym.clone());
+        let eq = |s: &str| {
+            send(
+                Some(to_s(value_read.clone())),
+                "==",
+                vec![lit_str(s.to_string())],
+                None,
+                false,
+            )
+        };
+        let cond = Expr::new(
+            Span::synthetic(),
+            ExprNode::BoolOp {
+                op: crate::expr::BoolOpKind::Or,
+                surface: crate::expr::BoolOpSurface::Symbol,
+                left: eq("1"),
+                right: eq("true"),
+            },
+        );
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond,
+                then_branch: checked,
+                else_branch: lit_str(String::new()),
+            },
+        )
+    };
+    parts.push(InterpPart::Expr { expr: checked_expr });
     append_attr_parts(&mut parts, opts);
     parts.push(InterpPart::Text { value: ">".to_string() });
     vec![accumulator_append_call(string_interp(parts), ctx)]
@@ -168,15 +225,47 @@ fn emit_radio_button(
     };
     let model_name = &binding.model_name;
     let field_str = field_sym.as_str();
-    let value_read = field_value_read(binding, field_sym.clone());
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text { value: "<input type=\"radio\" value=\"".to_string() });
     parts.push(InterpPart::Expr {
         expr: view_helpers_call("html_escape", vec![to_s(value.clone())]),
     });
     parts.push(InterpPart::Text { value: "\"".to_string() });
+    // Checked state, inline instead of the runtime `radio_checked_attr`
+    // seam. An explicit `checked:` opt wins (lobsters' search radios:
+    // `checked: @search.what == "stories"` — previously it leaked into
+    // the tag as `checked="false"`, which still CHECKS in HTML); the
+    // default is Rails' to_s comparison against the `[]` indexer read
+    // (nil-safe for names the model doesn't carry — same rationale as
+    // check_box's fallback arm; to_s == to_s types on every target).
+    let checked = lit_str(" checked=\"checked\"".to_string());
+    let explicit_checked = opts.iter().find_map(|(k, v)| {
+        matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+            if value.as_str() == "checked")
+        .then(|| v.clone())
+    });
+    let cond = match explicit_checked {
+        Some(c) => c,
+        None => {
+            let value_read = field_value_read(binding, field_sym.clone());
+            send(
+                Some(to_s(value_read)),
+                "==",
+                vec![to_s(value.clone())],
+                None,
+                false,
+            )
+        }
+    };
     parts.push(InterpPart::Expr {
-        expr: view_helpers_call("radio_checked_attr", vec![value_read, value.clone()]),
+        expr: Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond,
+                then_branch: checked,
+                else_branch: lit_str(String::new()),
+            },
+        ),
     });
     parts.push(InterpPart::Text {
         value: format!(" name=\"{model_name}[{field_str}]\" id=\"{model_name}_{field_str}_"),
@@ -185,7 +274,17 @@ fn emit_radio_button(
         expr: view_helpers_call("html_escape", vec![to_s(value.clone())]),
     });
     parts.push(InterpPart::Text { value: "\"".to_string() });
-    append_attr_parts(&mut parts, opts);
+    // `checked:` is consumed above — it's checked STATE, not an HTML
+    // attribute.
+    let attr_opts: Vec<(Expr, Expr)> = opts
+        .iter()
+        .filter(|(k, _)| {
+            !matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+                if value.as_str() == "checked")
+        })
+        .cloned()
+        .collect();
+    append_attr_parts(&mut parts, &attr_opts);
     parts.push(InterpPart::Text { value: ">".to_string() });
     vec![accumulator_append_call(string_interp(parts), ctx)]
 }

@@ -139,6 +139,192 @@ pub(super) fn push_attr_accessor_methods(methods: &mut Vec<MethodDef>, model: &M
     }
 }
 
+/// `attribute :name, :type` declarations (the Rails Attributes API) in
+/// a model body — `(name, type)` pairs, both symbol literals. The
+/// 2-arg form only; `default:`-carrying declarations stay unclaimed
+/// (and warned) until a fixture demands them. Shared with the view
+/// lowerer's `bool_reader_names` (a `:boolean` attribute is a bool
+/// reader for `f.check_box`) and the permit-writer filter (an
+/// `attribute` writer is assignable).
+pub(crate) fn attribute_api_decls(body: &[ModelBodyItem]) -> Vec<(Symbol, Symbol)> {
+    let mut out = Vec::new();
+    for item in body {
+        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
+            continue;
+        };
+        if method.as_str() != "attribute" || args.len() != 2 {
+            continue;
+        }
+        let (
+            ExprNode::Lit { value: Literal::Sym { value: name } },
+            ExprNode::Lit { value: Literal::Sym { value: ty } },
+        ) = (&*args[0].node, &*args[1].node)
+        else {
+            continue;
+        };
+        out.push((name.clone(), ty.clone()));
+    }
+    out
+}
+
+/// `attribute :name, :type` — typed virtual attributes (lobsters'
+/// `attribute :mod_note, :boolean` on Message, `:is_unread` on the
+/// SQL-view-backed ReplyingComment). Reader is a typed ivar read;
+/// the `:boolean` writer applies Rails' Type::Boolean cast over the
+/// realistic value space via to_s (`"" / "0" / "false" / "f"` →
+/// false, anything else → true — the form roundtrip assigns "0"/"1"
+/// strings, and an uncast write would leave "0" truthy). Other types
+/// assign verbatim. A custom method in the model body wins (the
+/// synthesizers run before `push_user_methods`, which drops
+/// collisions — same dance as attr_accessor).
+pub(super) fn push_attribute_api_methods(methods: &mut Vec<MethodDef>, model: &Model) {
+    if is_abstract_class(model) {
+        return;
+    }
+    for (name, ty_sym) in attribute_api_decls(&model.body) {
+        let is_bool = ty_sym.as_str() == "boolean";
+        let setter = Symbol::from(format!("{}=", name.as_str()));
+        if !methods.iter().any(|m| m.name == name) {
+            methods.push(MethodDef {
+                name: name.clone(),
+                receiver: MethodReceiver::Instance,
+                params: Vec::new(),
+                body: if is_bool {
+                    with_ty(
+                        Expr::new(Span::synthetic(), ExprNode::Ivar { name: name.clone() }),
+                        Ty::Bool,
+                    )
+                } else {
+                    Expr::new(Span::synthetic(), ExprNode::Ivar { name: name.clone() })
+                },
+                signature: if is_bool {
+                    Some(super::fn_sig(vec![], Ty::Bool))
+                } else {
+                    None
+                },
+                effects: EffectSet::default(),
+                enclosing_class: Some(model.name.0.clone()),
+                kind: AccessorKind::AttributeReader,
+                is_async: false,
+                mutates_self: false,
+                block_param: None,
+            });
+        }
+        if !methods.iter().any(|m| m.name == setter) {
+            let value = Symbol::from("value");
+            let value_ref = Expr::new(
+                Span::synthetic(),
+                ExprNode::Var { id: VarId(0), name: value.clone() },
+            );
+            let body = if is_bool {
+                // s = value.to_s
+                // @name = (s == "" || s == "0" || s == "false" || s == "f" ? false : true)
+                let s = Symbol::from("s");
+                let s_ref = |_: ()| {
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Var { id: VarId(0), name: s.clone() },
+                    )
+                };
+                let to_s = Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(value_ref),
+                        method: Symbol::from("to_s"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    },
+                );
+                let assign_s = Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Assign {
+                        target: LValue::Var { id: VarId(0), name: s.clone() },
+                        value: to_s,
+                    },
+                );
+                let eq = |lit: &str| {
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Send {
+                            recv: Some(s_ref(())),
+                            method: Symbol::from("=="),
+                            args: vec![Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Lit { value: Literal::Str { value: lit.to_string() } },
+                            )],
+                            block: None,
+                            parenthesized: false,
+                        },
+                    )
+                };
+                let or = |left: Expr, right: Expr| {
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::BoolOp {
+                            op: crate::expr::BoolOpKind::Or,
+                            surface: crate::expr::BoolOpSurface::Symbol,
+                            left,
+                            right,
+                        },
+                    )
+                };
+                let falsey = or(or(or(eq(""), eq("0")), eq("false")), eq("f"));
+                let cast = Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If {
+                        cond: falsey,
+                        then_branch: with_ty(
+                            Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Lit { value: Literal::Bool { value: false } },
+                            ),
+                            Ty::Bool,
+                        ),
+                        else_branch: with_ty(
+                            Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Lit { value: Literal::Bool { value: true } },
+                            ),
+                            Ty::Bool,
+                        ),
+                    },
+                );
+                let assign = Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Assign {
+                        target: LValue::Ivar { name: name.clone() },
+                        value: cast,
+                    },
+                );
+                Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![assign_s, assign] })
+            } else {
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Assign {
+                        target: LValue::Ivar { name: name.clone() },
+                        value: value_ref,
+                    },
+                )
+            };
+            methods.push(MethodDef {
+                name: setter,
+                receiver: MethodReceiver::Instance,
+                params: vec![Param::positional(value)],
+                body,
+                signature: None,
+                effects: EffectSet::default(),
+                enclosing_class: Some(model.name.0.clone()),
+                kind: AccessorKind::AttributeWriter,
+                is_async: false,
+                mutates_self: true,
+                block_param: None,
+            });
+        }
+    }
+}
+
 /// `primary_abstract_class` marks a model as the abstract base of a Rails
 /// app. Lowered to `def self.abstract?; true; end` — the explicit form
 /// spinel-blog's runtime expects.
