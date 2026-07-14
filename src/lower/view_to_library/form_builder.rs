@@ -207,17 +207,399 @@ fn emit_select(
     let model_name = &binding.model_name;
     let field_str = field_sym.as_str();
     let value_read = field_value_read(binding, field_sym.clone());
+    // `include_blank:` is select BEHAVIOR, not an HTML attribute — pull
+    // it out before the attr expansion (previously it leaked into the
+    // tag as `include_blank="true"`).
+    let include_blank = opts.iter().any(|(k, v)| {
+        matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+            if value.as_str() == "include_blank")
+            && matches!(&*v.node, ExprNode::Lit { value: Literal::Bool { value: true } })
+    });
+    let attr_opts: Vec<(Expr, Expr)> = opts
+        .iter()
+        .filter(|(k, _)| {
+            !matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+                if value.as_str() == "include_blank")
+        })
+        .cloned()
+        .collect();
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text {
         value: format!("<select{}", name_id_attrs(model_name, field_str)),
     });
-    append_attr_parts(&mut parts, opts);
+    append_attr_parts(&mut parts, &attr_opts);
     parts.push(InterpPart::Text { value: ">".to_string() });
-    parts.push(InterpPart::Expr {
-        expr: view_helpers_call("select_options_for", vec![choices.clone(), value_read]),
-    });
+    let (setup, options_expr) =
+        match emit_select_options(choices, value_read.clone(), include_blank, field_str, ctx) {
+            Some(pair) => pair,
+            // Unclassified choices shape — keep the runtime seam (the
+            // CRuby overlay's select_options_for). Honest residue: the
+            // strict trees will refuse it, naming the site.
+            None => (
+                Vec::new(),
+                view_helpers_call("select_options_for", vec![choices.clone(), value_read]),
+            ),
+        };
+    parts.push(InterpPart::Expr { expr: options_expr });
     parts.push(InterpPart::Text { value: "</select>".to_string() });
-    vec![accumulator_append_call(string_interp(parts), ctx)]
+    let mut out = setup;
+    out.push(accumulator_append_call(string_interp(parts), ctx));
+    out
+}
+
+/// Compile-time select-option rendering — replaces the runtime
+/// `select_options_for` seam (a CRuby-overlay `is_a?`-walk over
+/// heterogeneous choices, the shape the typed runtime refuses) with
+/// per-shape expansion. Returns `(setup_stmts, options_expr)`; `None`
+/// falls back to the runtime seam.
+///
+/// Shapes (the lobsters corpus, all `f.select` args):
+/// - literal pair/scalar array (`[["No e-mails", 0], …]`, settings) —
+///   fully static options, per-option selected ternary against the
+///   record read;
+/// - `options_for_select(container[, selected])` — unwrapped; selection
+///   comes ONLY from the explicit arg (Rails does not re-select
+///   pre-rendered options against the field);
+/// - `options_from_collection_for_select(coll, "v", "t"[, selected])` —
+///   loop with STATIC reader calls (the method names are literals);
+/// - `A + coll.map { |x| [text, {attrs}, value] }` (messages' hat
+///   picker) — static prefix + loop over the map source with the
+///   lambda's element exprs inlined (pair `[t, v]` and triple with a
+///   literal middle attrs-hash both handled);
+/// - any other container expr — a FLAT loop (`<option value="#{el}">`)
+///   matching the corpus (`@moderators`, `Category.pluck`): every such
+///   site holds plain strings.
+///
+/// Byte-contract: matches the overlay's `select_options_for` — options
+/// concatenated (no newline join), `<option[ selected="selected"]
+/// value="V"[ attrs]>TEXT</option>`, to_s comparison for selection —
+/// which is what the bench replay has locked in for /settings. The
+/// include_blank prefix is Rails' `<option value="" label=" ">
+/// </option>` shape.
+fn emit_select_options(
+    choices: &Expr,
+    field_current: Expr,
+    include_blank: bool,
+    field_str: &str,
+    ctx: &ViewCtx,
+) -> Option<(Vec<Expr>, Expr)> {
+    // Unwrap the options_* helpers to (container, selection).
+    let (container, selected): (Expr, Option<Expr>) = match &*choices.node {
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if method.as_str() == "options_for_select" && !args.is_empty() =>
+        {
+            (args[0].clone(), args.get(1).cloned())
+        }
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if method.as_str() == "options_from_collection_for_select" && args.len() >= 3 =>
+        {
+            let (Some(v), Some(t)) = (str_or_sym_lit(&args[1]), str_or_sym_lit(&args[2]))
+            else {
+                return None;
+            };
+            return collection_options(
+                &args[0],
+                &v,
+                &t,
+                args.get(3).cloned(),
+                include_blank,
+                field_str,
+                ctx,
+            );
+        }
+        // Bare container straight from `f.select :field, <container>` —
+        // Rails selects against the record's current value.
+        _ => (choices.clone(), Some(field_current)),
+    };
+
+    let blank = blank_option_prefix(include_blank);
+    match &*container.node {
+        // Fully literal array — static options.
+        ExprNode::Array { elements, .. }
+            if elements.iter().all(|e| literal_choice(e).is_some()) =>
+        {
+            let mut parts: Vec<InterpPart> = blank;
+            for e in elements {
+                let (text, value) = literal_choice(e).expect("checked literal");
+                push_static_option(&mut parts, &text, &value, selected.as_ref());
+            }
+            Some((Vec::new(), string_interp(parts)))
+        }
+        // `<literal array> + <coll>.map { |x| [...] }` — static prefix,
+        // then a loop over the map source.
+        ExprNode::Send { recv: Some(prefix), method, args, block: None, .. }
+            if method.as_str() == "+" && args.len() == 1 =>
+        {
+            let ExprNode::Array { elements, .. } = &*prefix.node else { return None };
+            if !elements.iter().all(|e| literal_choice(e).is_some()) {
+                return None;
+            }
+            let mut parts = blank;
+            for e in elements {
+                let (text, value) = literal_choice(e).expect("checked literal");
+                push_static_option(&mut parts, &text, &value, selected.as_ref());
+            }
+            let (setup, loop_var) =
+                map_loop_options(&args[0], selected.as_ref(), field_str, parts, ctx)?;
+            Some((setup, loop_var))
+        }
+        // Bare `<coll>.map { |x| [...] }`.
+        ExprNode::Send { method, block: Some(_), .. } if method.as_str() == "map" => {
+            let (setup, loop_var) =
+                map_loop_options(&container, selected.as_ref(), field_str, blank, ctx)?;
+            Some((setup, loop_var))
+        }
+        // Any other container expr — flat scalar loop (the corpus:
+        // `@moderators`, `Category.pluck(:category)` — plain strings).
+        _ => {
+            let el = Symbol::from("_choice");
+            let el_ref = Expr::new(
+                Span::synthetic(),
+                ExprNode::Var { id: VarId(0), name: el.clone() },
+            );
+            let mut option = Vec::new();
+            push_dynamic_option(
+                &mut option,
+                to_s(el_ref.clone()),
+                to_s(el_ref),
+                &[],
+                selected.as_ref(),
+            );
+            let (setup, var) =
+                each_loop(&container, el, string_interp(option), field_str, blank, ctx);
+            Some((setup, var))
+        }
+    }
+}
+
+/// `[text_lit, value_lit]` pair or bare scalar literal → compile-time
+/// (text, value) strings. Triples and dynamic elements return None.
+fn literal_choice(e: &Expr) -> Option<(String, String)> {
+    fn scalar(e: &Expr) -> Option<String> {
+        match &*e.node {
+            ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+            ExprNode::Lit { value: Literal::Int { value } } => Some(value.to_string()),
+            _ => None,
+        }
+    }
+    match &*e.node {
+        ExprNode::Array { elements, .. } if elements.len() == 2 => {
+            Some((scalar(&elements[0])?, scalar(&elements[1])?))
+        }
+        _ => {
+            let s = scalar(e)?;
+            Some((s.clone(), s))
+        }
+    }
+}
+
+fn blank_option_prefix(include_blank: bool) -> Vec<InterpPart> {
+    if include_blank {
+        vec![InterpPart::Text {
+            value: "<option value=\"\" label=\" \"></option>".to_string(),
+        }]
+    } else {
+        Vec::new()
+    }
+}
+
+/// `<option[ selected] value="V">TEXT</option>` with compile-time text
+/// and value; the selected ternary is the only dynamic piece.
+fn push_static_option(
+    parts: &mut Vec<InterpPart>,
+    text: &str,
+    value: &str,
+    selected: Option<&Expr>,
+) {
+    parts.push(InterpPart::Text { value: "<option".to_string() });
+    if let Some(sel) = selected {
+        parts.push(selected_attr_part(sel.clone(), lit_str(value.to_string())));
+    }
+    parts.push(InterpPart::Text {
+        value: format!(
+            " value=\"{}\">{}</option>",
+            html_escape_static(value),
+            html_escape_static(text)
+        ),
+    });
+}
+
+/// `<option[ selected] value="#{he(v)}"[ attrs]>#{he(t)}</option>` with
+/// runtime text/value/attr exprs (loop bodies).
+fn push_dynamic_option(
+    parts: &mut Vec<InterpPart>,
+    text: Expr,
+    value: Expr,
+    attrs: &[(String, Expr)],
+    selected: Option<&Expr>,
+) {
+    parts.push(InterpPart::Text { value: "<option".to_string() });
+    if let Some(sel) = selected {
+        parts.push(selected_attr_part(sel.clone(), value.clone()));
+    }
+    parts.push(InterpPart::Text { value: " value=\"".to_string() });
+    parts.push(InterpPart::Expr { expr: view_helpers_call("html_escape", vec![value]) });
+    parts.push(InterpPart::Text { value: "\"".to_string() });
+    for (name, v) in attrs {
+        parts.push(InterpPart::Text { value: format!(" {name}=\"") });
+        parts.push(InterpPart::Expr {
+            expr: view_helpers_call("html_escape", vec![lit_str_coerce(v.clone())]),
+        });
+        parts.push(InterpPart::Text { value: "\"".to_string() });
+    }
+    parts.push(InterpPart::Text { value: ">".to_string() });
+    parts.push(InterpPart::Expr { expr: view_helpers_call("html_escape", vec![text]) });
+    parts.push(InterpPart::Text { value: "</option>".to_string() });
+}
+
+/// ` selected="selected"` when `sel.to_s == value.to_s` (the overlay's
+/// comparison, matching Rails' string-side select semantics).
+fn selected_attr_part(sel: Expr, value: Expr) -> InterpPart {
+    let cond = send(Some(to_s(sel)), "==", vec![to_s(value)], None, false);
+    InterpPart::Expr {
+        expr: Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond,
+                then_branch: lit_str(" selected=\"selected\"".to_string()),
+                else_branch: lit_str(String::new()),
+            },
+        ),
+    }
+}
+
+/// `options_from_collection_for_select(coll, "v", "t"[, sel])` — loop
+/// with STATIC reader calls (`r.v` / `r.t`; the method names are
+/// literals at every corpus site, so no runtime-name dispatch
+/// survives).
+fn collection_options(
+    coll: &Expr,
+    value_method: &str,
+    text_method: &str,
+    selected: Option<Expr>,
+    include_blank: bool,
+    field_str: &str,
+    ctx: &ViewCtx,
+) -> Option<(Vec<Expr>, Expr)> {
+    let el = Symbol::from("_choice");
+    let el_ref =
+        Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: el.clone() });
+    let value = send(Some(el_ref.clone()), value_method, Vec::new(), None, false);
+    let text = send(Some(el_ref), text_method, Vec::new(), None, false);
+    let mut option = Vec::new();
+    push_dynamic_option(&mut option, to_s(text), to_s(value), &[], selected.as_ref());
+    let (setup, var) = each_loop(
+        coll,
+        el,
+        string_interp(option),
+        field_str,
+        blank_option_prefix(include_blank),
+        ctx,
+    );
+    Some((setup, var))
+}
+
+/// `<coll>.map { |x| [text, value] / [text, {attrs}, value] }` — loop
+/// over the map SOURCE with the lambda's element exprs inlined (the
+/// loop rebinds the lambda's own param name, so the exprs read it
+/// directly).
+fn map_loop_options(
+    map_call: &Expr,
+    selected: Option<&Expr>,
+    field_str: &str,
+    prefix: Vec<InterpPart>,
+    ctx: &ViewCtx,
+) -> Option<(Vec<Expr>, Expr)> {
+    let ExprNode::Send { recv: Some(coll), method, block: Some(block), .. } = &*map_call.node
+    else {
+        return None;
+    };
+    if method.as_str() != "map" {
+        return None;
+    }
+    let ExprNode::Lambda { params, body, .. } = &*block.node else { return None };
+    let el = params.first().cloned()?;
+    let ExprNode::Array { elements, .. } = &*body.node else { return None };
+    let (text, attrs_hash, value) = match elements.as_slice() {
+        [t, v] => (t.clone(), None, v.clone()),
+        [t, a, v] if matches!(&*a.node, ExprNode::Hash { .. }) => {
+            (t.clone(), Some(a.clone()), v.clone())
+        }
+        _ => return None,
+    };
+    let mut attrs: Vec<(String, Expr)> = Vec::new();
+    if let Some(a) = attrs_hash {
+        let ExprNode::Hash { entries, .. } = &*a.node else { return None };
+        for (k, v) in entries {
+            let name = match &*k.node {
+                ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+                _ => return None,
+            };
+            attrs.push((name, v.clone()));
+        }
+    }
+    let mut option = Vec::new();
+    push_dynamic_option(&mut option, to_s(text), to_s(value), &attrs, selected);
+    Some(each_loop(coll, el, string_interp(option), field_str, prefix, ctx))
+}
+
+/// Build `(setup, options_var_ref)`: a `_options_<field>` accumulator
+/// seeded with any static prefix, an `each` loop appending one option
+/// per element, and the Var read that splices into the `<select>`.
+fn each_loop(
+    coll: &Expr,
+    el: Symbol,
+    option_interp: Expr,
+    field_str: &str,
+    prefix: Vec<InterpPart>,
+    _ctx: &ViewCtx,
+) -> (Vec<Expr>, Expr) {
+    let var_name = Symbol::from(format!("_options_{field_str}"));
+    let mut setup: Vec<Expr> = Vec::new();
+    setup.push(super::assign_accumulator_string_new(var_name.as_str()));
+    if !prefix.is_empty() {
+        setup.push(options_append(&var_name, string_interp(prefix)));
+    }
+    let loop_body = options_append(&var_name, option_interp);
+    let lambda = Expr::new(
+        Span::synthetic(),
+        ExprNode::Lambda {
+            params: vec![el],
+            block_param: None,
+            body: loop_body,
+            block_style: crate::expr::BlockStyle::Do,
+        },
+    );
+    setup.push(send(Some(coll.clone()), "each", Vec::new(), Some(lambda), false));
+    let var_ref =
+        Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: var_name });
+    (setup, var_ref)
+}
+
+fn options_append(var: &Symbol, value: Expr) -> Expr {
+    let var_ref =
+        Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: var.clone() });
+    send(Some(var_ref), "<<", vec![value], None, false)
+}
+
+/// Compile-time HTML escape for static option text/values (same 5-char
+/// set as `ViewHelpers::HTML_ESCAPES`).
+fn html_escape_static(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// A `"literal"` / `:symbol` literal's string value.
+fn str_or_sym_lit(e: &Expr) -> Option<String> {
+    match &*e.node {
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        _ => None,
+    }
 }
 
 /// `<button name="button" type="submit"<opts>>TEXT</button>` — the
@@ -754,12 +1136,17 @@ fn record_field_read(binding: &FormBuilderBinding, field: Symbol) -> Expr {
 /// Extract the Symbol payload from a field-name arg (`:title`).
 /// Returns None when the arg isn't a Symbol literal — the macro
 /// degenerates to an empty append in that case.
+/// The field name from `f.<method> :field` — Rails accepts a String
+/// spelling too (lobsters' `f.select "hat_id"`), which used to fall
+/// through the Sym-only match and silently collapse the whole control
+/// to an empty append.
 fn field_symbol(field: Option<&Expr>) -> Option<Symbol> {
     let f = field?;
-    let ExprNode::Lit { value: Literal::Sym { value } } = &*f.node else {
-        return None;
-    };
-    Some(value.clone())
+    match &*f.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(Symbol::from(value.as_str())),
+        _ => None,
+    }
 }
 
 /// `String#capitalize` semantics (first char uppercase, rest
