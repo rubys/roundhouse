@@ -158,12 +158,18 @@ jobs:
         # from tools/spin.rb) ships too: the spinel archive is a spin
         # package and smoke-spinel's README blocks drive `spin build` /
         # `spin test`. spin locates the compiler as its PATH sibling.
+        # `packages/` ships as well: the compiler resolves bundled spin
+        # packages (json, set, …) at `<lib-parent>/packages` — a plain
+        # `require "json"` in runtime code (runtime/spinel/json.rb since
+        # 72029f0a) silently resolves NOTHING without it, and every
+        # spinel job goes red on `undefined method 'generate'`.
         run: |
           mkdir spinel-dist
           cp -L spinel-src/spinel               spinel-dist/spinel
           cp    spinel-src/bin/spin             spinel-dist/spin
           cp    spinel-src/build/spinel_rbs_extract spinel-dist/
           cp -R spinel-src/lib                  spinel-dist/lib
+          cp -R spinel-src/packages             spinel-dist/packages
       - name: Upload spinel toolchain
         uses: actions/upload-artifact@v7
         with:
