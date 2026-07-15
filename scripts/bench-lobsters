@@ -41,7 +41,15 @@
 #                   versioned at bench/lobsters/frozen-sequence.json; a
 #                   regeneration that differs means the ruby-bench DB or
 #                   generator changed — investigate before comparing.
-#   --out DIR       results dir (default bench/results/lobsters/<timestamp>)
+#   --frozen        time the emit on the committed frozen 114-visit sequence,
+#                   in-memory, WITHOUT booting Rails — the canonical ruby-bench
+#                   workload as an emit-only lane (the per-runtime matrix rows,
+#                   decoupled from the Rails baseline). Implies --memory;
+#                   mutually exclusive with --vs-rails. scripts/lobsters-matrix
+#                   drives one of these per runtime/JIT.
+#   --out DIR       results dir (default bench/results/lobsters/<timestamp>).
+#                   Passing this suppresses the shared `latest` symlink (the
+#                   caller owns placement).
 #
 # Output:
 #   bench/results/lobsters/<timestamp>/summary.json   # per-route parity + timing
@@ -65,10 +73,12 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${LOBSTERS_SRC:-$HOME/git/ruby-bench/benchmarks/lobsters}"
 OUT_DIR=""
+EXPLICIT_OUT=0
 SKIP_EMIT=0
 TIME_ITERS=0
 MEMORY=0
 VS_RAILS=0
+FROZEN=0
 RUNTIME=cruby
 WARMUP=""              # timed-run warmup iters; default derived per runtime below
 # OUT_TREE, RUBY_BIN, EMIT_TARGET, GEMS are resolved from RUNTIME after parse.
@@ -85,9 +95,10 @@ while [[ $# -gt 0 ]]; do
         --skip-emit) SKIP_EMIT=1; shift ;;
         --memory)    MEMORY=1; shift ;;
         --vs-rails)  VS_RAILS=1; MEMORY=1; shift ;;
+        --frozen)    FROZEN=1; MEMORY=1; shift ;;
         --time)      TIME_ITERS="$2"; shift 2 ;;
         --warmup)    WARMUP="$2"; shift 2 ;;
-        --out)       OUT_DIR="$2"; shift 2 ;;
+        --out)       OUT_DIR="$2"; EXPLICIT_OUT=1; shift 2 ;;
         -h|--help)   sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *)           echo "unknown flag: $1" >&2; exit 2 ;;
     esac
@@ -145,6 +156,16 @@ esac
 if [[ "$RUNTIME" == jruby ]] && (( MEMORY == 1 )); then
     fail "jruby lane is file-backed only: --memory/--vs-rails need SQLite3::Backup (JDBC equivalent undone). Drop the flag."
     exit 2
+fi
+
+# --frozen: time the emit on the committed frozen 114-visit sequence,
+# in-memory, WITHOUT booting Rails — the canonical ruby-bench workload as an
+# emit-only lane (the matrix's per-runtime rows, decoupled from the Rails
+# baseline). Mutually exclusive with --vs-rails (which owns the Rails side).
+FROZEN_SEQ="$REPO_ROOT/bench/lobsters/frozen-sequence.json"
+if (( FROZEN == 1 )); then
+    (( VS_RAILS == 1 )) && { fail "--frozen and --vs-rails are mutually exclusive (--frozen is the emit-only lane)"; exit 2; }
+    [[ -f "$FROZEN_SEQ" ]] || { fail "no committed frozen sequence at $FROZEN_SEQ (run --vs-rails once to freeze it)"; exit 2; }
 fi
 
 [[ -d "$SRC" ]] || { fail "lobsters source not found at $SRC (clone ruby-bench or pass --src)"; exit 2; }
@@ -241,14 +262,16 @@ step "replaying benchmark routes under $RUNTIME (in-process Main.run_rack)"
 REPLAY_ARGS=(--json "$OUT_DIR/summary.json" --md "$OUT_DIR/summary.md")
 if (( TIME_ITERS > 0 )); then
     REPLAY_ARGS+=(--time "$TIME_ITERS")
-    # --warmup tunes the route-set timing only. The --vs-rails path times
-    # the frozen --sequence, which keeps its OWN established warmup (15) so
-    # the nightly Rails comparison methodology stays fixed — don't override
-    # it here.
-    (( VS_RAILS == 0 )) && REPLAY_ARGS+=(--warmup "$WARMUP")
+    # --warmup tunes the route-set timing only. The --vs-rails and --frozen
+    # paths time the frozen --sequence, which keeps its OWN established warmup
+    # (15) so the canonical-metric methodology stays fixed — don't override it.
+    (( VS_RAILS == 0 && FROZEN == 0 )) && REPLAY_ARGS+=(--warmup "$WARMUP")
 fi
 (( MEMORY == 1 ))    && REPLAY_ARGS+=(--memory)
 (( VS_RAILS == 1 ))  && REPLAY_ARGS+=(--sequence "$OUT_DIR/sequence.json")
+# --frozen replays the COMMITTED frozen sequence (no Rails boot, no per-run
+# regeneration) so an emit-only run lands on the exact ruby-bench workload.
+(( FROZEN == 1 ))    && REPLAY_ARGS+=(--sequence "$FROZEN_SEQ")
 
 status=0
 (cd "$OUT_TREE" && "$RUBY_BIN" "$REPO_ROOT/scripts/lobsters-replay" "${REPLAY_ARGS[@]}") || status=$?
@@ -258,9 +281,13 @@ status=0
 # bare `latest` for back-compat; other runtimes get `latest-<runtime>`) so
 # the two lanes never cross-compare. Regressions print loudly so a
 # `>> bench.log` cron capture is greppable (PARITY REGRESSION).
+#
+# Skipped entirely when --out was given explicitly: that means a caller (e.g.
+# scripts/lobsters-matrix) owns result placement, and repointing the shared
+# `latest` symlink at a run buried under a caller's dir would break it.
 LATEST_NAME="latest"; [[ "$RUNTIME" != cruby ]] && LATEST_NAME="latest-$RUNTIME"
 PREV_LINK="$REPO_ROOT/bench/results/lobsters/$LATEST_NAME"
-if [[ -f "$PREV_LINK/summary.json" && -f "$OUT_DIR/summary.json" ]]; then
+if (( EXPLICIT_OUT == 0 )) && [[ -f "$PREV_LINK/summary.json" && -f "$OUT_DIR/summary.json" ]]; then
     PREV_NAME="$(readlink "$PREV_LINK" 2>/dev/null || echo previous)"
     ruby -rjson -e '
       prev_name, prev_path, cur_path = ARGV
@@ -305,6 +332,8 @@ if (( VS_RAILS == 1 )) && [[ -f "$OUT_DIR/rails.json" && -f "$OUT_DIR/summary.js
     ' "$OUT_DIR/rails.json" "$OUT_DIR/summary.json" "$OUT_DIR/summary.md" || true
 fi
 
-ln -sfn "$(basename "$OUT_DIR")" "$REPO_ROOT/bench/results/lobsters/$LATEST_NAME" 2>/dev/null || true
+# Repoint the shared `latest` symlink only for default-placement runs; a
+# caller passing --out (the matrix) manages its own tree.
+(( EXPLICIT_OUT == 0 )) && ln -sfn "$(basename "$OUT_DIR")" "$REPO_ROOT/bench/results/lobsters/$LATEST_NAME" 2>/dev/null || true
 ok "summary written to $OUT_DIR/summary.md"
 exit "$status"
