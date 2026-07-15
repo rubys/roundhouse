@@ -194,16 +194,36 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
         if !seen.insert(helper.clone()) {
             continue;
         }
-        funcs.push(build_helper_function(&module_path, &helper, route));
+        funcs.push(build_helper_function(&module_path, &helper, route, app));
     }
     funcs
+}
+
+/// Does the route's resource model override `to_param`? Rails feeds a
+/// path helper's `:id` segment from `record.to_param`, so an override
+/// (lobsters' Story#to_param → short_id) makes the helper's id param
+/// String-shaped, not Integer. Controller → model by singularizing
+/// the controller symbol (`StoriesController` → `story`).
+fn model_overrides_to_param(controller: &str, app: &App) -> bool {
+    let resource = crate::naming::singularize(&controller_symbol(controller));
+    let model_name = crate::naming::camelize(&resource);
+    app.models.iter().any(|m| {
+        m.name.0.as_str() == model_name
+            && m.body.iter().any(|item| matches!(
+                item,
+                crate::dialect::ModelBodyItem::Method { method, .. }
+                    if method.name.as_str() == "to_param"
+            ))
+    })
 }
 
 fn build_helper_function(
     module_path: &[Symbol],
     helper_name: &str,
     route: &FlatRoute,
+    app: &App,
 ) -> LibraryFunction {
+    let slug_id = model_overrides_to_param(route.controller.0.as_str(), app);
     // A trailing `(.:format)` is Rails' OPTIONAL format suffix, not a
     // path segment: the helper takes `format = nil` last and appends
     // `.<format>` only when given (`domain_path(d)` → "/domains/d",
@@ -225,9 +245,9 @@ fn build_helper_function(
         .collect();
     let mut sig_params: Vec<(Symbol, Ty)> = seg_params
         .iter()
-        .map(|p| (Symbol::from(p.clone()), param_ty(p)))
+        .map(|p| (Symbol::from(p.clone()), param_ty(p, slug_id)))
         .collect();
-    let mut body = build_path_expr(path, &seg_params);
+    let mut body = build_path_expr(path, &seg_params, slug_id);
     if has_format {
         let format_sym = Symbol::from("format");
         params.push(Param::with_default(
@@ -279,10 +299,13 @@ fn build_helper_function(
 }
 
 /// `id`-shape params (`id`, `<x>_id`) are integer; everything else is
-/// a string. Matches the existing emitter convention.
-fn param_ty(name: &str) -> Ty {
+/// a string. Matches the existing emitter convention — EXCEPT when
+/// the route's model overrides `to_param` (`slug_id`): Rails fills
+/// the segment from the override's (string) value, so the helper
+/// takes a String.
+fn param_ty(name: &str, slug_id: bool) -> Ty {
     if name == "id" || name.ends_with("_id") {
-        Ty::Int
+        if slug_id { Ty::Str } else { Ty::Int }
     } else {
         Ty::Str
     }
@@ -291,7 +314,7 @@ fn param_ty(name: &str) -> Ty {
 /// Walk the path template and build a `StringInterp` expression with
 /// literal text segments and `Var` substitutions for `:param`s. A
 /// param-less path collapses to a plain `Lit::Str`.
-fn build_path_expr(path: &str, path_params: &[String]) -> Expr {
+fn build_path_expr(path: &str, path_params: &[String], slug_id: bool) -> Expr {
     if path_params.is_empty() {
         return lit_str(path.to_string());
     }
@@ -315,7 +338,7 @@ fn build_path_expr(path: &str, path_params: &[String]) -> Expr {
                     parts.push(InterpPart::Text { value: std::mem::take(&mut buf) });
                 }
                 parts.push(InterpPart::Expr {
-                    expr: var_ref(&ident),
+                    expr: var_ref_slug(&ident, slug_id),
                 });
             } else {
                 buf.push(':');
@@ -335,13 +358,17 @@ fn build_path_expr(path: &str, path_params: &[String]) -> Expr {
 }
 
 fn var_ref(name: &str) -> Expr {
+    var_ref_slug(name, false)
+}
+
+fn var_ref_slug(name: &str, slug_id: bool) -> Expr {
     let sym = Symbol::from(name);
     with_ty(
         Expr::new(
             Span::synthetic(),
             ExprNode::Var { id: VarId(0), name: sym },
         ),
-        param_ty(name),
+        param_ty(name, slug_id),
     )
 }
 
