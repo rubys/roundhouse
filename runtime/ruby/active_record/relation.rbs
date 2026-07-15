@@ -44,6 +44,8 @@ module ActiveRecord
     def first!: () -> untyped
     def last: () -> untyped
     def count: () -> Integer
+    def sum: (untyped expr) -> Float
+    def group_count: () -> Hash[untyped, Integer]
     def empty?: () -> bool
     def any?: () -> bool
     def exists?: () -> bool

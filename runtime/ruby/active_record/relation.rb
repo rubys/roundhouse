@@ -287,6 +287,37 @@ module ActiveRecord
       rows.length == 0 ? 0 : rows[0]["n"].to_i
     end
 
+    # `sum(:col)` / `sum("<sql expr>")` — SQL SUM over the relation.
+    # Returns Float: both corpus consumers are float arithmetic
+    # (lobsters' hotness math); an Integer-column caller would want
+    # column typing here, ledgered when one appears.
+    def sum(expr)
+      term = expr.is_a?(Symbol) ? "#{@table}.#{expr}" : expr.to_s
+      sql = "SELECT COALESCE(SUM(#{term}), 0) AS n FROM #{@table}"
+      sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
+      sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
+      rows = ActiveRecord.adapter.select_rows(sql)
+      rows.length == 0 ? 0.0 : rows[0]["n"].to_f
+    end
+
+    # `group(:col).count` — Rails hands back a Hash of group-key =>
+    # COUNT. The group_count lowering renames the grouped chain's
+    # terminal to this method, so the scalar `count` keeps its
+    # Integer return (no polymorphic count). Single group expression
+    # (the corpus shape); Rails' multi-group array keys would need a
+    # composite key here first.
+    def group_count
+      key = @groups.join(", ")
+      sql = "SELECT #{key} AS k, COUNT(*) AS n FROM #{@table}"
+      sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
+      sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
+      sql = "#{sql} GROUP BY #{key}"
+      h = {}
+      rows = ActiveRecord.adapter.select_rows(sql)
+      rows.each { |row| h[row["k"]] = row["n"].to_i }
+      h
+    end
+
     def empty?
       count == 0
     end
