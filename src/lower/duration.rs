@@ -47,6 +47,82 @@ use crate::ty::Ty;
 /// hook owns (models, library classes, controllers, seeds — not views).
 pub fn apply_duration_lowering(app: &mut App) {
     super::for_each_hook_body(app, &mut rewrite_durations);
+    super::for_each_hook_body(app, &mut rewrite_duration_comparisons);
+}
+
+/// A Duration compared against a NUMERIC scalar grounds to its
+/// seconds: `Time.now.utc - created_at <= 70.days` — the left side is
+/// Float seconds after the temporal lowering, and nothing coerces the
+/// Duration operand on strict targets (Rails resolves it through
+/// Duration#coerce, comparing seconds — `.to_f` is identical).
+///
+/// STRICTLY numeric-vs-Duration: a TIME compared against a bare
+/// Duration must stay untouched — Rails EVALUATES that shape
+/// (compare_with_coercion's ajd-vs-seconds arithmetic; lobsters ships
+/// the dormant `created_at <= 1.hour` and Rails answers false), and
+/// the CRuby overlay's Time reopen mirrors it by intercepting the
+/// Duration operand. Rewriting it to Float bypassed the intercept and
+/// raised on every /newest render.
+fn rewrite_duration_comparisons(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut rewrite_duration_comparisons);
+    let is_cmp = matches!(
+        &*expr.node,
+        ExprNode::Send { recv: Some(_), method, args, block: None, .. }
+            if args.len() == 1
+                && matches!(method.as_str(), "<" | "<=" | ">" | ">=")
+    );
+    if !is_cmp {
+        return;
+    }
+    let ExprNode::Send { recv: Some(recv), args, .. } = &mut *expr.node else { unreachable!() };
+    let mut sides: Vec<&mut Expr> = [recv as &mut Expr].into_iter().chain(args.iter_mut()).collect();
+    // The numeric side is a SUBTRACTION (`Time.now.utc - created_at`,
+    // Float seconds) or a stamped numeric; a bare temporal read stays
+    // un-numeric and blocks the rewrite.
+    let numeric_other = sides.iter().any(|s| {
+        !is_duration_const_call(s)
+            && (matches!(s.ty, Some(Ty::Float) | Some(Ty::Int))
+                || matches!(&*s.node,
+                    ExprNode::Send { method, args, block: None, .. }
+                        if method.as_str() == "-" && args.len() == 1))
+    });
+    if !numeric_other {
+        return;
+    }
+    for side in sides.iter_mut() {
+        if is_duration_const_call(side) {
+            let span = side.span;
+            let inner = std::mem::replace(
+                &mut **side,
+                Expr::new(span, ExprNode::Seq { exprs: vec![] }),
+            );
+            **side = Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(inner),
+                    method: Symbol::from("to_f"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            side.ty = Some(Ty::Float);
+        }
+    }
+}
+
+/// `ActiveSupport::Duration.<unit>(n)` — the shape `rewrite_durations`
+/// itself produces.
+fn is_duration_const_call(e: &Expr) -> bool {
+    matches!(
+        &*e.node,
+        ExprNode::Send { recv: Some(r), method, block: None, .. }
+            if is_duration_unit(method.as_str())
+                && matches!(&*r.node,
+                    ExprNode::Const { path } if path.len() == 2
+                        && path[0].as_str() == "ActiveSupport"
+                        && path[1].as_str() == "Duration")
+    )
 }
 
 /// ActiveSupport duration unit method names (`70.days`, `1.week`). The
