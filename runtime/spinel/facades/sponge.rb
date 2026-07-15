@@ -73,3 +73,29 @@ class Sponge
     Response.new
   end
 end
+
+# OpenSSL::Random — entropy for Utils.random_str (short-ids, session
+# and reset tokens; short-id generation runs on the replay's story
+# and comment submits, so this façade is REAL, not raising).
+# Kernel#rand is a PRNG, not a CSPRNG — adequate for the benchmark
+# lane; the honest fate is a spinel entropy primitive (or the
+# spinel-openssl package) before any security-sensitive use. The
+# implementation module is `RandomSource` with a constant alias
+# because a module literally named Random collides with the builtin
+# PRNG's C typedef (spinel#2455). The CRuby tree restores the real
+# stdlib (see restore_extras_facades) and never sees this.
+module OpenSSL
+  module RandomSource
+    def self.random_bytes(n)
+      out = ""
+      i = 0
+      while i < n
+        out = out + rand(256).chr
+        i += 1
+      end
+      out
+    end
+  end
+
+  Random = RandomSource
+end

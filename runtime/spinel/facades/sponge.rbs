@@ -28,3 +28,9 @@ class Sponge
   def get: (String url) -> Sponge::Response
   def post: (String url, untyped fields) -> Sponge::Response
 end
+
+module OpenSSL
+  module RandomSource
+    def self.random_bytes: (Integer n) -> String
+  end
+end
