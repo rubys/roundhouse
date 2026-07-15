@@ -239,7 +239,14 @@ fi
 # ── replay ───────────────────────────────────────────────────────────
 step "replaying benchmark routes under $RUNTIME (in-process Main.run_rack)"
 REPLAY_ARGS=(--json "$OUT_DIR/summary.json" --md "$OUT_DIR/summary.md")
-(( TIME_ITERS > 0 )) && REPLAY_ARGS+=(--time "$TIME_ITERS" --warmup "$WARMUP")
+if (( TIME_ITERS > 0 )); then
+    REPLAY_ARGS+=(--time "$TIME_ITERS")
+    # --warmup tunes the route-set timing only. The --vs-rails path times
+    # the frozen --sequence, which keeps its OWN established warmup (15) so
+    # the nightly Rails comparison methodology stays fixed — don't override
+    # it here.
+    (( VS_RAILS == 0 )) && REPLAY_ARGS+=(--warmup "$WARMUP")
+fi
 (( MEMORY == 1 ))    && REPLAY_ARGS+=(--memory)
 (( VS_RAILS == 1 ))  && REPLAY_ARGS+=(--sequence "$OUT_DIR/sequence.json")
 
