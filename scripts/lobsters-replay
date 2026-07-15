@@ -20,10 +20,11 @@
 #   --json PATH   write machine-readable summary
 #   --md PATH     write markdown summary
 #   --time N      after the parity pass, run N timed iterations of the
-#                 full route sequence and report ms/iter. A dev trend
-#                 line only — NOT the ruby-bench metric (that replays the
-#                 frozen 114-visit RNG sequence via --sequence) — and
-#                 marked partial while any route still fails.
+#                 full route sequence and report ms/iter, preceded by
+#                 --warmup discarded iterations. A dev trend line only —
+#                 NOT the ruby-bench metric (that replays the frozen
+#                 114-visit RNG sequence via --sequence) — and marked
+#                 partial while any route still fails.
 #   --sequence F  P6 mode: after the parity pass, replay the frozen
 #                 114-visit sequence in F (scripts/lobsters-rails-replay
 #                 --seq-out dumps it) under the ruby-bench timing rule:
@@ -32,7 +33,10 @@
 #                 >= --min-time S seconds (default 10). Keep the loop in
 #                 sync with scripts/lobsters-rails-replay — the numbers
 #                 are only comparable if both sides do identical work.
-#   --warmup N    warmup iterations for --sequence (default 15)
+#   --warmup N    warmup iterations discarded before timing, for both
+#                 --sequence (default 15) and --time (default 0). Give
+#                 JRuby a nonzero warmup — its JIT needs it before the
+#                 numbers stabilize.
 #   --min-time S  minimum timed seconds for --sequence (default 10)
 #   --dump DIR    write each parity-pass response body to DIR (P7
 #                 content-diff input; filename = route with / -> _)
@@ -344,6 +348,11 @@ if opts[:sequence]
 
 # ── optional timed iterations ────────────────────────────────────────
 elsif opts[:time] && opts[:time] > 0
+  # Discarded warmup before timing: JRuby's JIT needs a warm run before
+  # its ms/iter stabilizes, and warming both runtimes keeps a CRuby-vs-
+  # JRuby comparison fair. Mirrors the --sequence path's warmup rule.
+  warmup = opts[:warmup] || 0
+  warmup.times { ROUTES.each { |r| req("GET", r) } }
   iters = Array.new(opts[:time]) do
     t0 = now_ms
     ROUTES.each { |r| req("GET", r) }
@@ -354,6 +363,7 @@ elsif opts[:time] && opts[:time] > 0
   median = sorted.size.odd? ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2.0
   summary["timing"] = {
     "iterations"        => opts[:time],
+    "warmup"            => warmup,
     "routes_per_iter"   => ROUTES.size,
     "ms_per_iter_median"=> median.round(2),
     "ms_per_iter_min"   => sorted.first.round(2),
@@ -387,7 +397,9 @@ if opts[:md]
   if (t = summary["timing"])
     md << "\n## Timing#{t['partial'] ? ' (PARTIAL — failing routes short-circuit)' : ''}\n\n"
     md << "#{t['ms_per_iter_median']} ms/iter median over #{t['iterations']} iterations "
-    md << "(min #{t['ms_per_iter_min']}, max #{t['ms_per_iter_max']})\n"
+    md << "(min #{t['ms_per_iter_min']}, max #{t['ms_per_iter_max']}"
+    md << ", warmup #{t['warmup']}" if t['warmup'].to_i.positive?
+    md << ")\n"
   end
   if (t = summary["sequence_timing"])
     md << "\n## Frozen-sequence timing#{t['partial'] ? " (PARTIAL — #{t['failed_visits']} failing visits)" : ''}\n\n"

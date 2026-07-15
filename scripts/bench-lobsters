@@ -12,12 +12,26 @@
 #
 #   --src DIR       lobsters source checkout
 #                   (default $LOBSTERS_SRC, else ~/git/ruby-bench/benchmarks/lobsters)
+#   --runtime R     which runtime to emit for and replay under:
+#                     cruby  (default) — --target ruby,  replay under `ruby`
+#                     jruby            — --target jruby, replay under `jruby`
+#                   Both drive the SAME scripts/lobsters-replay; only the
+#                   emit target, interpreter, and gem/JVM setup differ. The
+#                   JRuby lane is file-backed only (its JDBC adapter has no
+#                   SQLite3::Backup), so --memory/--vs-rails are CRuby-only.
+#                   Results land under a per-runtime `latest`/`latest-jruby`
+#                   symlink so the two lanes don't cross-compare.
+#   --jruby         shorthand for --runtime jruby
 #   --skip-emit     reuse the existing build tree (fast replay iteration)
 #   --memory        serve from an in-memory SQLite seeded from the staged
 #                   DB at boot (SQLite3::Backup) — the shape the real
 #                   ruby-bench benchmark runs; the file-backed default
 #                   remains for bisection against older runs
-#   --time N        run N timed iterations after the parity pass
+#   --time N        run N timed iterations after the parity pass, preceded
+#                   by --warmup discarded iterations
+#   --warmup N      discarded warmup iterations before the timed run
+#                   (default: 5 for cruby, 100 for jruby's JIT — which warms
+#                   slowly here; a publication jruby number wants >=500)
 #   --vs-rails      P6 comparison: boot the REAL Rails lobsters (needs the
 #                   ruby-bench checkout's bundle), dump + time the frozen
 #                   114-visit sequence there, then replay the SAME sequence
@@ -50,12 +64,14 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="${LOBSTERS_SRC:-$HOME/git/ruby-bench/benchmarks/lobsters}"
-OUT_TREE="$REPO_ROOT/build/transpiled-lobsters-ruby"
 OUT_DIR=""
 SKIP_EMIT=0
 TIME_ITERS=0
 MEMORY=0
 VS_RAILS=0
+RUNTIME=cruby
+WARMUP=""              # timed-run warmup iters; default derived per runtime below
+# OUT_TREE, RUBY_BIN, EMIT_TARGET, GEMS are resolved from RUNTIME after parse.
 # Snapshot before the parse loop shifts everything away — the
 # provenance step reads this (a bare `$*` there always recorded an
 # arg-less command; caught on the first published Hetzner run).
@@ -64,10 +80,13 @@ ORIG_ARGS="$*"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --src)       SRC="$2"; shift 2 ;;
+        --runtime)   RUNTIME="$2"; shift 2 ;;
+        --jruby)     RUNTIME=jruby; shift ;;
         --skip-emit) SKIP_EMIT=1; shift ;;
         --memory)    MEMORY=1; shift ;;
         --vs-rails)  VS_RAILS=1; MEMORY=1; shift ;;
         --time)      TIME_ITERS="$2"; shift 2 ;;
+        --warmup)    WARMUP="$2"; shift 2 ;;
         --out)       OUT_DIR="$2"; shift 2 ;;
         -h|--help)   sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *)           echo "unknown flag: $1" >&2; exit 2 ;;
@@ -78,6 +97,56 @@ step() { printf '\033[36m→\033[0m %s\n' "$*"; }
 ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
 fail() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; }
 
+# ── runtime resolution ───────────────────────────────────────────────
+# The lobsters lane runs the SAME emitted app + replay driver under
+# either CRuby or JRuby; only the emit target, the interpreter, and the
+# gem/JVM setup differ. lobsters-replay is interpreter-agnostic (it
+# samples ids and serves through the tree's own adapter), so one driver
+# covers both.
+case "$RUNTIME" in
+    cruby)
+        RUBY_BIN=ruby
+        EMIT_TARGET=ruby
+        OUT_TREE="$REPO_ROOT/build/transpiled-lobsters-ruby"
+        GEMS=(sqlite3 bcrypt htmlentities rotp markly nokogiri)
+        : "${WARMUP:=5}"
+        ;;
+    jruby)
+        RUBY_BIN=jruby
+        EMIT_TARGET=jruby
+        OUT_TREE="$REPO_ROOT/build/transpiled-lobsters-jruby"
+        # jdbc-sqlite3 replaces the C-ext sqlite3; markly is the
+        # commonmark-java shim (jars via bin/fetch-jars), not a gem;
+        # bcrypt/nokogiri resolve to their java-platform builds.
+        GEMS=(jdbc-sqlite3 bcrypt htmlentities rotp nokogiri)
+        # JRuby's JIT needs a LONG warm run before its numbers mean
+        # anything, and a pinned heap keeps GC behaviour from drifting
+        # between runs (managed-runtime bench discipline). Override the heap
+        # with BENCH_JRUBY_HEAP; --enable-native-access silences the
+        # jdbc-sqlite3 restricted-method warnings on recent JDKs.
+        #
+        # Convergence is slow on this metric — the route set round-robins 26
+        # cold paths, so each warms independently. Measured ms/iter median
+        # vs --warmup (100 timed iters, file-backed, jruby 10.1): warmup 20
+        # -> 91, 200 -> 47, 500 -> 42 (steady). So 20 wildly under-reports;
+        # 100 is the fast-dev default, but a publication-grade jruby-vs-cruby
+        # number wants --warmup 500 (or the frozen --sequence, the real
+        # ruby-bench metric — gated on the JDBC in-mem backup, item (d)).
+        : "${WARMUP:=100}"
+        export JAVA_OPTS="${BENCH_JRUBY_HEAP:--Xmx2g -Xms2g} --enable-native-access=ALL-UNNAMED ${JAVA_OPTS:-}"
+        ;;
+    *)
+        fail "unknown runtime: $RUNTIME (want cruby|jruby)"; exit 2 ;;
+esac
+
+# JDBC has no SQLite3::Backup, so the in-memory seed (--memory) and the
+# Rails comparison (--vs-rails, which implies it) are CRuby-only until the
+# JDBC backup path lands. Fail loudly rather than silently file-back.
+if [[ "$RUNTIME" == jruby ]] && (( MEMORY == 1 )); then
+    fail "jruby lane is file-backed only: --memory/--vs-rails need SQLite3::Backup (JDBC equivalent undone). Drop the flag."
+    exit 2
+fi
+
 [[ -d "$SRC" ]] || { fail "lobsters source not found at $SRC (clone ruby-bench or pass --src)"; exit 2; }
 [[ -f "$SRC/db/production.sqlite3" ]] || { fail "no benchmark DB at $SRC/db/production.sqlite3"; exit 2; }
 
@@ -87,18 +156,27 @@ mkdir -p "$OUT_DIR"
 
 # ── emit ─────────────────────────────────────────────────────────────
 if (( SKIP_EMIT == 0 )) || [[ ! -f "$OUT_TREE/main.rb" ]]; then
-    step "transpiling lobsters (--target ruby --allow-unsupported)"
+    step "transpiling lobsters (--target $EMIT_TARGET --allow-unsupported)"
     # cargo run rebuilds the compiler when sources changed, so the dev
     # loop never replays against a stale binary. Survey-mode warnings
     # are the expected torrent — keep them in emit.log, not the console.
     if ! (cd "$REPO_ROOT" && cargo run --quiet --bin roundhouse -- \
-            --target ruby "$SRC" -o "$OUT_TREE" --allow-unsupported \
+            --target "$EMIT_TARGET" "$SRC" -o "$OUT_TREE" --allow-unsupported \
             >"$OUT_DIR/emit.log" 2>&1); then
         fail "emit failed; last lines of $OUT_DIR/emit.log:"
         tail -20 "$OUT_DIR/emit.log" >&2
         exit 1
     fi
     ok "emitted to $OUT_TREE ($(grep -c 'warning' "$OUT_DIR/emit.log" || true) warnings in emit.log)"
+fi
+
+# The JRuby tree's Markly shim needs the commonmark-java jars, which can't
+# ride the text-only emit. Fetch them into the tree (idempotent — the
+# generated bin/fetch-jars skips jars already present). Run every time
+# (even under --skip-emit) so a tree that predates the jars self-heals.
+if [[ "$RUNTIME" == jruby ]]; then
+    step "fetching commonmark-java jars (bin/fetch-jars)"
+    sh "$OUT_TREE/bin/fetch-jars" >/dev/null || { fail "bin/fetch-jars failed"; exit 1; }
 fi
 
 # ── stage DB ─────────────────────────────────────────────────────────
@@ -111,23 +189,31 @@ rm -f "$DB" "$DB-wal" "$DB-shm"
 sqlite3 "$SRC/db/production.sqlite3" ".backup $DB"
 
 # ── provenance ───────────────────────────────────────────────────────
-ruby -rjson -e 'puts JSON.pretty_generate({
+# Run under the target interpreter so RUBY_DESCRIPTION names the runtime
+# actually replayed (jruby vs cruby), not whatever `ruby` is on PATH.
+"$RUBY_BIN" -rjson -e 'puts JSON.pretty_generate({
   generated_at: Time.now.utc.strftime("%FT%TZ"),
   command: ARGV[0], src: ARGV[1],
+  runtime: ARGV[3],
   roundhouse_commit: `git -C #{ARGV[2]} rev-parse HEAD`.strip,
   ruby: RUBY_DESCRIPTION,
-})' "scripts/bench-lobsters $ORIG_ARGS" "$SRC" "$REPO_ROOT" > "$OUT_DIR/env.json" || true
+  java_opts: ENV["JAVA_OPTS"],
+})' "scripts/bench-lobsters $ORIG_ARGS" "$SRC" "$REPO_ROOT" "$RUNTIME" > "$OUT_DIR/env.json" || true
 
 # ── runtime gems ─────────────────────────────────────────────────────
-# The replay runs under the system/mise ruby, not a bundle. A Ruby bump
-# empties the per-version gem dir (same hazard scripts/bench self-heals
-# around), so check-then-install rather than assume. markly + nokogiri
-# back Markdowner (guarded requires in the overlay: boot survives
-# without them but /u/:username fails), so a fresh box needs them too.
-for g in sqlite3 bcrypt htmlentities rotp markly nokogiri; do
-    if ! gem list -i "^${g}$" >/dev/null 2>&1; then
-        step "installing gem $g"
-        gem install --no-document "$g" >/dev/null
+# The replay runs under the ambient interpreter's gem home, not a bundle.
+# A runtime bump empties the per-version gem dir (same hazard scripts/bench
+# self-heals around), so check-then-install rather than assume. markly +
+# nokogiri back Markdowner (guarded requires in the overlay: boot survives
+# without them but /u/:username fails), so a fresh box needs them too. The
+# GEMS set is runtime-resolved above (jruby swaps sqlite3->jdbc-sqlite3 and
+# drops markly, which its tree provides via the commonmark-java shim); the
+# gem tool is the interpreter's own so java-platform builds resolve.
+if [[ "$RUNTIME" == jruby ]]; then GEM=(jruby -S gem); else GEM=(gem); fi
+for g in "${GEMS[@]}"; do
+    if ! "${GEM[@]}" list -i "^${g}$" >/dev/null 2>&1; then
+        step "installing gem $g ($RUNTIME)"
+        "${GEM[@]}" install --no-document "$g" >/dev/null
     fi
 done
 
@@ -151,19 +237,22 @@ if (( VS_RAILS == 1 )); then
 fi
 
 # ── replay ───────────────────────────────────────────────────────────
-step "replaying benchmark routes (in-process Main.run_rack)"
+step "replaying benchmark routes under $RUNTIME (in-process Main.run_rack)"
 REPLAY_ARGS=(--json "$OUT_DIR/summary.json" --md "$OUT_DIR/summary.md")
-(( TIME_ITERS > 0 )) && REPLAY_ARGS+=(--time "$TIME_ITERS")
+(( TIME_ITERS > 0 )) && REPLAY_ARGS+=(--time "$TIME_ITERS" --warmup "$WARMUP")
 (( MEMORY == 1 ))    && REPLAY_ARGS+=(--memory)
 (( VS_RAILS == 1 ))  && REPLAY_ARGS+=(--sequence "$OUT_DIR/sequence.json")
 
 status=0
-(cd "$OUT_TREE" && ruby "$REPO_ROOT/scripts/lobsters-replay" "${REPLAY_ARGS[@]}") || status=$?
+(cd "$OUT_TREE" && "$RUBY_BIN" "$REPO_ROOT/scripts/lobsters-replay" "${REPLAY_ARGS[@]}") || status=$?
 
 # ── compare against the previous run ─────────────────────────────────
-# Resolve `latest` BEFORE repointing it. Regressions print loudly so a
+# Resolve the runtime's own `latest` BEFORE repointing it (cruby keeps the
+# bare `latest` for back-compat; other runtimes get `latest-<runtime>`) so
+# the two lanes never cross-compare. Regressions print loudly so a
 # `>> bench.log` cron capture is greppable (PARITY REGRESSION).
-PREV_LINK="$REPO_ROOT/bench/results/lobsters/latest"
+LATEST_NAME="latest"; [[ "$RUNTIME" != cruby ]] && LATEST_NAME="latest-$RUNTIME"
+PREV_LINK="$REPO_ROOT/bench/results/lobsters/$LATEST_NAME"
 if [[ -f "$PREV_LINK/summary.json" && -f "$OUT_DIR/summary.json" ]]; then
     PREV_NAME="$(readlink "$PREV_LINK" 2>/dev/null || echo previous)"
     ruby -rjson -e '
@@ -209,6 +298,6 @@ if (( VS_RAILS == 1 )) && [[ -f "$OUT_DIR/rails.json" && -f "$OUT_DIR/summary.js
     ' "$OUT_DIR/rails.json" "$OUT_DIR/summary.json" "$OUT_DIR/summary.md" || true
 fi
 
-ln -sfn "$(basename "$OUT_DIR")" "$REPO_ROOT/bench/results/lobsters/latest" 2>/dev/null || true
+ln -sfn "$(basename "$OUT_DIR")" "$REPO_ROOT/bench/results/lobsters/$LATEST_NAME" 2>/dev/null || true
 ok "summary written to $OUT_DIR/summary.md"
 exit "$status"
