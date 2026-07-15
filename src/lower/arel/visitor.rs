@@ -26,6 +26,66 @@ use super::ir::{
 
 const DB_MOD: &str = "Db";
 
+/// Prototype gate for placeholder-bind emit (roundhouse#12, the
+/// "planned follow-on" the Db shims name). When
+/// `ROUNDHOUSE_PARAM_BINDS=1`, the `Db.prepare` read paths
+/// (single/multi hydrate, count, exists) render *runtime* WHERE values
+/// as `?` placeholders plus `Db.bind_*` calls after prepare — so the
+/// prepared-statement cache keys on the static query shape
+/// (`WHERE id = ?`) instead of per-value (`WHERE id = 3`). Compile-time
+/// literals stay inline (they're already part of the static shape).
+///
+/// Default OFF ⇒ byte-identical inline-escape emit for every target.
+/// Only the spinel + cruby `Db` shims implement `bind_*` today; the
+/// other targets gain it on real rollout, at which point this gate is
+/// replaced by a per-target capability flag threaded from the driver.
+/// Env-var gating is deliberate prototype scaffolding: it keeps the
+/// change behind one switch so it can be measured on the spinel lane
+/// without touching the other ten targets' shims.
+///
+/// Write paths (INSERT/UPDATE/DELETE) are intentionally NOT
+/// parameterized: they go through `Db.exec` (`sqlite3_exec`), which
+/// never populates the prepared-statement cache — so binding them buys
+/// nothing here.
+pub(crate) fn param_binds_enabled() -> bool {
+    std::env::var("ROUNDHOUSE_PARAM_BINDS")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// One deferred bind: the unrendered value expr plus the `ValueType`
+/// that picks `bind_int` / `bind_text` / `bind_bool`. Accumulated by the
+/// SQL composers alongside the `?` they emit, then drained into
+/// `Db.bind_*(stmt, i, expr)` calls right after the `Db.prepare`.
+struct Bind {
+    expr: Expr,
+    ty: ValueType,
+}
+
+/// `Db.bind_<ty>(stmt, <1-based idx>, <expr>)` for each accumulated
+/// bind, in placeholder order (sqlite bind indices are 1-based). The
+/// per-value type is known at composition time, so each bind is
+/// monomorphic — no heterogeneous bind bag on the hot path.
+fn emit_bind_calls(stmt: &Symbol, binds: &[Bind]) -> Vec<Expr> {
+    let db = ClassId(Symbol::from(DB_MOD));
+    binds
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let method = match b.ty {
+                ValueType::Int => "bind_int",
+                ValueType::Str => "bind_text",
+                ValueType::Bool => "bind_bool",
+            };
+            db_call(
+                &db,
+                method,
+                vec![var_ref(stmt), lit_int((i + 1) as i64), b.expr.clone()],
+            )
+        })
+        .collect()
+}
+
 /// Render an Arel tree into an `Expr` that calls into the per-target
 /// `Db` primitive surface. `owner` is the model class that owns the
 /// emitted method (used by Select to construct hydrated instances);
@@ -57,12 +117,16 @@ impl ArelVisitor for SqliteVisitor {
 
 fn visit_select(sel: &Select, schema: &Schema, owner: &ClassId) -> Expr {
     let table = lookup_table(schema, &sel.table.0);
+    // Read the placeholder-bind gate once per Select. All four prepare
+    // paths honor it; a false value reproduces the inline-escape emit
+    // byte-for-byte.
+    let param = param_binds_enabled();
     match &sel.columns {
-        ColumnSpec::Count => emit_count(sel, table),
-        ColumnSpec::Exists => emit_exists(sel, table),
+        ColumnSpec::Count => emit_count(sel, table, param),
+        ColumnSpec::Exists => emit_exists(sel, table, param),
         ColumnSpec::All => match sel.limit {
-            Some(super::ir::LimitSpec(1)) => emit_single_hydrate(sel, table, owner),
-            _ => emit_multi_hydrate(sel, table, owner, schema),
+            Some(super::ir::LimitSpec(1)) => emit_single_hydrate(sel, table, owner, param),
+            _ => emit_multi_hydrate(sel, table, owner, schema, param),
         },
         ColumnSpec::Named(_) => {
             // Reserved — no Phase 1 builder produces Named yet (it's for
@@ -92,12 +156,13 @@ fn visit_select(sel: &Select, schema: &Schema, owner: &ClassId) -> Expr {
 
 /// `SELECT <cols> FROM <table> [WHERE …] LIMIT 1` →
 /// nilable single-instance hydrate.
-fn emit_single_hydrate(sel: &Select, table: &Table, owner: &ClassId) -> Expr {
+fn emit_single_hydrate(sel: &Select, table: &Table, owner: &ClassId, param: bool) -> Expr {
     let stmt = Symbol::from("stmt");
     let result = Symbol::from("result");
     let db = ClassId(Symbol::from(DB_MOD));
 
-    let sql = compose_sql_select(sel, table);
+    let mut binds = Vec::new();
+    let sql = compose_sql_select(sel, table, param, &mut binds);
     let stmt_assign = assign_var(&stmt, db_call(&db, "prepare", vec![sql]));
     let result_init = assign_var(&result, nil_lit());
 
@@ -117,17 +182,31 @@ fn emit_single_hydrate(sel: &Select, table: &Table, owner: &ClassId) -> Expr {
     );
 
     let finalize = db_call(&db, "finalize", vec![var_ref(&stmt)]);
-    seq(vec![stmt_assign, result_init, if_expr, finalize, var_ref(&result)])
+    // stmt = prepare ; [bind …] ; result = nil ; if step? {…} ; finalize ; result
+    let mut stmts = vec![stmt_assign];
+    stmts.extend(emit_bind_calls(&stmt, &binds));
+    stmts.push(result_init);
+    stmts.push(if_expr);
+    stmts.push(finalize);
+    stmts.push(var_ref(&result));
+    seq(stmts)
 }
 
 /// `SELECT <cols> FROM <table> [WHERE …]` →
 /// `Array[<Owner>]` via `while step?` loop.
-fn emit_multi_hydrate(sel: &Select, table: &Table, owner: &ClassId, schema: &Schema) -> Expr {
+fn emit_multi_hydrate(
+    sel: &Select,
+    table: &Table,
+    owner: &ClassId,
+    schema: &Schema,
+    param: bool,
+) -> Expr {
     let stmt = Symbol::from("stmt");
     let results = Symbol::from("results");
     let db = ClassId(Symbol::from(DB_MOD));
 
-    let sql = compose_sql_select(sel, table);
+    let mut binds = Vec::new();
+    let sql = compose_sql_select(sel, table, param, &mut binds);
     let stmt_assign = assign_var(&stmt, db_call(&db, "prepare", vec![sql]));
     // Empty Array literal carries an explicit `Array<Owner>` type
     // annotation so strict-target emit (Crystal `[] of Owner`)
@@ -178,7 +257,15 @@ fn emit_multi_hydrate(sel: &Select, table: &Table, owner: &ClassId, schema: &Sch
     // distribute loop that fills the parents' association caches, all
     // operating on `results` before it's returned. With no preloads
     // this is byte-identical to the pre-#27 5-stmt Seq.
-    let mut stmts = vec![stmt_assign, results_init, while_loop, finalize];
+    // Binds for the MAIN query land right after its prepare, before the
+    // hydrate loop. Preload sub-queries build their own statements and
+    // keep the inline `IN (…)` list (variable arity — not parameterized
+    // here; see the note in `push_preload_stmts`).
+    let mut stmts = vec![stmt_assign];
+    stmts.extend(emit_bind_calls(&stmt, &binds));
+    stmts.push(results_init);
+    stmts.push(while_loop);
+    stmts.push(finalize);
     for directive in &sel.preloads {
         push_preload_stmts(&mut stmts, directive, schema, owner, &results);
     }
@@ -315,7 +402,7 @@ fn push_preload_stmts(
 }
 
 /// `SELECT COUNT(*) FROM <table> [WHERE …]` → integer scalar.
-fn emit_count(sel: &Select, table: &Table) -> Expr {
+fn emit_count(sel: &Select, table: &Table, param: bool) -> Expr {
     let stmt = Symbol::from("stmt");
     let result = Symbol::from("result");
     let db = ClassId(Symbol::from(DB_MOD));
@@ -324,7 +411,8 @@ fn emit_count(sel: &Select, table: &Table) -> Expr {
         "SELECT COUNT(*) FROM {}",
         table.name.as_str()
     ))];
-    push_where_segments(&mut segments, sel.conditions.as_ref(), table);
+    let mut binds = Vec::new();
+    push_where_segments(&mut segments, sel.conditions.as_ref(), table, param, &mut binds);
 
     let stmt_assign = assign_var(&stmt, db_call(&db, "prepare", vec![concat_chain(segments)]));
     let step = db_call(&db, "step?", vec![var_ref(&stmt)]);
@@ -332,18 +420,26 @@ fn emit_count(sel: &Select, table: &Table) -> Expr {
     let result_assign = assign_var(&result, read);
     let finalize = db_call(&db, "finalize", vec![var_ref(&stmt)]);
 
-    seq(vec![stmt_assign, step, result_assign, finalize, var_ref(&result)])
+    // stmt = prepare ; [bind …] ; step? ; result = column_int ; finalize ; result
+    let mut stmts = vec![stmt_assign];
+    stmts.extend(emit_bind_calls(&stmt, &binds));
+    stmts.push(step);
+    stmts.push(result_assign);
+    stmts.push(finalize);
+    stmts.push(var_ref(&result));
+    seq(stmts)
 }
 
 /// `SELECT 1 FROM <table> WHERE … LIMIT 1` → bool from `step?`.
-fn emit_exists(sel: &Select, table: &Table) -> Expr {
+fn emit_exists(sel: &Select, table: &Table, param: bool) -> Expr {
     let stmt = Symbol::from("stmt");
     let result = Symbol::from("result");
     let db = ClassId(Symbol::from(DB_MOD));
 
     let mut segments: Vec<Expr> =
         vec![lit_str(format!("SELECT 1 FROM {}", table.name.as_str()))];
-    push_where_segments(&mut segments, sel.conditions.as_ref(), table);
+    let mut binds = Vec::new();
+    push_where_segments(&mut segments, sel.conditions.as_ref(), table, param, &mut binds);
     if let Some(super::ir::LimitSpec(n)) = sel.limit {
         segments.push(lit_str(format!(" LIMIT {}", n)));
     }
@@ -352,7 +448,13 @@ fn emit_exists(sel: &Select, table: &Table) -> Expr {
     let result_assign = assign_var(&result, db_call(&db, "step?", vec![var_ref(&stmt)]));
     let finalize = db_call(&db, "finalize", vec![var_ref(&stmt)]);
 
-    seq(vec![stmt_assign, result_assign, finalize, var_ref(&result)])
+    // stmt = prepare ; [bind …] ; result = step? ; finalize ; result
+    let mut stmts = vec![stmt_assign];
+    stmts.extend(emit_bind_calls(&stmt, &binds));
+    stmts.push(result_assign);
+    stmts.push(finalize);
+    stmts.push(var_ref(&result));
+    seq(stmts)
 }
 
 // ---------------------------------------------------------------------------
@@ -402,7 +504,10 @@ fn visit_update(upd: &Update, schema: &Schema) -> Expr {
         segments.push(lit_str(prefix));
         segments.push(escape_value(&db, &a.value));
     }
-    push_where_segments(&mut segments, upd.conditions.as_ref(), table);
+    // Writes go through `Db.exec` (`sqlite3_exec`), which never touches
+    // the prepared-statement cache — so the WHERE stays inline-escaped
+    // regardless of the placeholder-bind gate.
+    push_where_segments(&mut segments, upd.conditions.as_ref(), table, false, &mut Vec::new());
     db_call(&db, "exec", vec![concat_chain(segments)])
 }
 
@@ -411,7 +516,8 @@ fn visit_delete(del: &Delete, schema: &Schema) -> Expr {
     let db = ClassId(Symbol::from(DB_MOD));
 
     let mut segments: Vec<Expr> = vec![lit_str(format!("DELETE FROM {}", del.table.0.as_str()))];
-    push_where_segments(&mut segments, del.conditions.as_ref(), table);
+    // Exec path — inline WHERE (see visit_update note); not cached.
+    push_where_segments(&mut segments, del.conditions.as_ref(), table, false, &mut Vec::new());
     let delete_call = db_call(&db, "exec", vec![concat_chain(segments)]);
 
     // Truncate (Delete with no WHERE) — also reset the
@@ -447,7 +553,7 @@ fn visit_delete(del: &Delete, schema: &Schema) -> Expr {
 
 /// Build the SELECT prefix `"SELECT <cols> FROM <table>[...]"` plus
 /// any WHERE / LIMIT segments, returning the concat chain.
-fn compose_sql_select(sel: &Select, table: &Table) -> Expr {
+fn compose_sql_select(sel: &Select, table: &Table, param: bool, binds: &mut Vec<Bind>) -> Expr {
     let cols_csv = match &sel.columns {
         ColumnSpec::All => select_cols_csv(table),
         ColumnSpec::Named(refs) => refs
@@ -463,7 +569,7 @@ fn compose_sql_select(sel: &Select, table: &Table) -> Expr {
         cols_csv,
         table.name.as_str()
     ))];
-    push_where_segments(&mut segments, sel.conditions.as_ref(), table);
+    push_where_segments(&mut segments, sel.conditions.as_ref(), table, param, binds);
     push_order_segment(&mut segments, &sel.orders);
     if let Some(super::ir::LimitSpec(n)) = sel.limit {
         segments.push(lit_str(format!(" LIMIT {}", n)));
@@ -496,15 +602,26 @@ fn push_order_segment(segments: &mut Vec<Expr>, orders: &[super::ir::Order]) {
 /// Walks the Predicate, emitting literal SQL chunks for column names
 /// and operators, and `Db.escape_<ty>(<expr>)` calls for Runtime
 /// values. Literal values are baked directly into the SQL string.
-fn push_where_segments(segments: &mut Vec<Expr>, preds: Option<&Predicate>, _table: &Table) {
+fn push_where_segments(
+    segments: &mut Vec<Expr>,
+    preds: Option<&Predicate>,
+    _table: &Table,
+    param: bool,
+    binds: &mut Vec<Bind>,
+) {
     let Some(pred) = preds else {
         return;
     };
     segments.push(lit_str(" WHERE ".to_string()));
-    push_predicate_segments(segments, pred);
+    push_predicate_segments(segments, pred, param, binds);
 }
 
-fn push_predicate_segments(segments: &mut Vec<Expr>, pred: &Predicate) {
+fn push_predicate_segments(
+    segments: &mut Vec<Expr>,
+    pred: &Predicate,
+    param: bool,
+    binds: &mut Vec<Bind>,
+) {
     match pred {
         // SQL equality never matches NULL (`col = NULL` is three-valued
         // unknown, i.e. no rows); a literal-nil condition is the IS NULL
@@ -514,32 +631,39 @@ fn push_predicate_segments(segments: &mut Vec<Expr>, pred: &Predicate) {
         }
         Predicate::Eq(col, val) => {
             segments.push(lit_str(format!("{} = ", col.column.as_str())));
-            push_value_segment(segments, val);
+            push_value_segment(segments, val, param, binds);
         }
         Predicate::And(l, r) => {
-            push_predicate_segments(segments, l);
+            push_predicate_segments(segments, l, param, binds);
             segments.push(lit_str(" AND ".to_string()));
-            push_predicate_segments(segments, r);
+            push_predicate_segments(segments, r, param, binds);
         }
         Predicate::Or(l, r) => {
             segments.push(lit_str("(".to_string()));
-            push_predicate_segments(segments, l);
+            push_predicate_segments(segments, l, param, binds);
             segments.push(lit_str(" OR ".to_string()));
-            push_predicate_segments(segments, r);
+            push_predicate_segments(segments, r, param, binds);
             segments.push(lit_str(")".to_string()));
         }
     }
 }
 
-/// Emit one SQL value segment. Literal values bake into the SQL
-/// string directly; Runtime values become `Db.escape_<ty>(<expr>)`.
-fn push_value_segment(segments: &mut Vec<Expr>, val: &Value) {
+/// Emit one SQL value segment. Literal values bake into the SQL string
+/// directly (they're part of the static query shape either way). A
+/// Runtime value becomes `Db.escape_<ty>(<expr>)` inline when `param`
+/// is off, or a `?` placeholder + a recorded `Bind` when on — so the
+/// composed SQL keys the prepared-statement cache by shape, not value.
+fn push_value_segment(segments: &mut Vec<Expr>, val: &Value, param: bool, binds: &mut Vec<Bind>) {
     let db = ClassId(Symbol::from(DB_MOD));
     match val {
         Value::LiteralInt(n) => segments.push(lit_str(n.to_string())),
         Value::LiteralStr(s) => segments.push(lit_str(format!("'{}'", s.replace('\'', "''")))),
         Value::LiteralBool(b) => segments.push(lit_str(if *b { "1".into() } else { "0".into() })),
         Value::LiteralNull => segments.push(lit_str("NULL".into())),
+        Value::Runtime { expr, ty } if param => {
+            segments.push(lit_str("?".to_string()));
+            binds.push(Bind { expr: expr.clone(), ty: *ty });
+        }
         Value::Runtime { .. } => segments.push(escape_value(&db, val)),
     }
 }
@@ -1065,5 +1189,171 @@ mod tests {
         let body = SqliteVisitor.visit(&op, &schema, &owner);
         assert_eq!(outer_kind(&body), "seq");
         assert_eq!(seq_len(&body), 5);
+    }
+
+    // ---- placeholder-bind emit (ROUNDHOUSE_PARAM_BINDS) -------------
+    //
+    // These drive the emitters directly with `param = true` rather than
+    // flipping the process-global env var (which would race the other
+    // tests in this binary). `param_binds_enabled()` selects the same
+    // code path at runtime.
+
+    /// Flatten the literal-string segments of a `+` concat chain into
+    /// `out`; non-literal segments (escape calls, bind exprs) render as
+    /// the sentinel `«expr»` so their absence/presence is assertable.
+    fn flatten_sql(e: &Expr, out: &mut String) {
+        match e.node.as_ref() {
+            ExprNode::Lit { value: Literal::Str { value } } => out.push_str(value),
+            ExprNode::Send { recv: Some(left), args, method, .. } if method.as_str() == "+" => {
+                flatten_sql(left, out);
+                for a in args {
+                    flatten_sql(a, out);
+                }
+            }
+            _ => out.push_str("«expr»"),
+        }
+    }
+
+    /// The SQL string handed to the first `Db.prepare(...)` in a Seq
+    /// body (stmt = Db.prepare(<sql>) is always exprs[0]).
+    fn prepare_sql(body: &Expr) -> String {
+        let ExprNode::Seq { exprs } = body.node.as_ref() else { panic!("expected Seq") };
+        let ExprNode::Assign { value, .. } = exprs[0].node.as_ref() else {
+            panic!("expected `stmt = …`")
+        };
+        let ExprNode::Send { args, .. } = value.node.as_ref() else {
+            panic!("expected Db.prepare(…)")
+        };
+        let mut s = String::new();
+        flatten_sql(&args[0], &mut s);
+        s
+    }
+
+    /// Bare `Db.<method>(...)` statement calls in a Seq body, in order
+    /// (skips the `stmt = Db.prepare` Assign and any control flow).
+    fn db_stmt_calls(body: &Expr) -> Vec<(String, Vec<Expr>)> {
+        let ExprNode::Seq { exprs } = body.node.as_ref() else { return vec![] };
+        exprs
+            .iter()
+            .filter_map(|e| {
+                if let ExprNode::Send { recv: Some(r), method, args, .. } = e.node.as_ref() {
+                    if matches!(r.node.as_ref(), ExprNode::Const { .. }) {
+                        return Some((method.as_str().to_string(), args.clone()));
+                    }
+                }
+                None
+            })
+            .collect()
+    }
+
+    #[test]
+    fn param_on_single_hydrate_emits_placeholder_and_bind() {
+        let (schema, owner) = fixture_schema();
+        let sel = Select {
+            table: TableRef(Symbol::from("articles")),
+            columns: ColumnSpec::All,
+            conditions: Some(Predicate::Eq(
+                id_col(),
+                Value::Runtime { expr: var_ref(&Symbol::from("id")), ty: ValueType::Int },
+            )),
+            orders: vec![],
+            limit: Some(LimitSpec(1)),
+            joins: vec![],
+            preloads: vec![],
+        };
+        let table = &schema.tables[&Symbol::from("articles")];
+        let body = emit_single_hydrate(&sel, table, &owner, true);
+
+        // SQL keys on the static shape — placeholder, no inline escape call.
+        let sql = prepare_sql(&body);
+        assert!(sql.contains("WHERE id = ?"), "expected placeholder WHERE; got:\n{sql}");
+        assert!(!sql.contains("«expr»"), "no inline value segment expected; got:\n{sql}");
+
+        // A `Db.bind_int(stmt, 1, id)` lands right after prepare.
+        let calls = db_stmt_calls(&body);
+        let bind = calls.iter().find(|(m, _)| m == "bind_int").expect("bind_int call");
+        assert_eq!(bind.1.len(), 3, "bind_int(stmt, idx, expr)");
+        assert!(
+            matches!(bind.1[1].node.as_ref(), ExprNode::Lit { value: Literal::Int { value: 1 } }),
+            "1-based bind index"
+        );
+        // And exactly one bind for one runtime value.
+        assert_eq!(calls.iter().filter(|(m, _)| m.starts_with("bind_")).count(), 1);
+    }
+
+    #[test]
+    fn param_off_keeps_inline_escape() {
+        // Same op, gate OFF → the pre-existing inline-escape emit: no
+        // `?`, no bind call (byte-identical to today).
+        let (schema, owner) = fixture_schema();
+        let sel = Select {
+            table: TableRef(Symbol::from("articles")),
+            columns: ColumnSpec::All,
+            conditions: Some(Predicate::Eq(
+                id_col(),
+                Value::Runtime { expr: var_ref(&Symbol::from("id")), ty: ValueType::Int },
+            )),
+            orders: vec![],
+            limit: Some(LimitSpec(1)),
+            joins: vec![],
+            preloads: vec![],
+        };
+        let table = &schema.tables[&Symbol::from("articles")];
+        let body = emit_single_hydrate(&sel, table, &owner, false);
+
+        let sql = prepare_sql(&body);
+        assert!(!sql.contains('?'), "no placeholder when gate off; got:\n{sql}");
+        assert!(sql.contains("«expr»"), "expected inline escape value segment; got:\n{sql}");
+        assert!(
+            db_stmt_calls(&body).iter().all(|(m, _)| !m.starts_with("bind_")),
+            "no bind calls when gate off"
+        );
+        // Shape unchanged: 5-stmt Seq.
+        assert_eq!(seq_len(&body), 5);
+    }
+
+    #[test]
+    fn param_on_count_with_where_binds() {
+        let (schema, _) = fixture_schema();
+        let sel = Select {
+            table: TableRef(Symbol::from("articles")),
+            columns: ColumnSpec::Count,
+            conditions: Some(Predicate::Eq(
+                id_col(),
+                Value::Runtime { expr: var_ref(&Symbol::from("id")), ty: ValueType::Int },
+            )),
+            orders: vec![],
+            limit: None,
+            joins: vec![],
+            preloads: vec![],
+        };
+        let table = &schema.tables[&Symbol::from("articles")];
+        let body = emit_count(&sel, table, true);
+        let sql = prepare_sql(&body);
+        assert!(sql.contains("COUNT(*)") && sql.contains("WHERE id = ?"), "got:\n{sql}");
+        assert!(db_stmt_calls(&body).iter().any(|(m, _)| m == "bind_int"), "expected bind_int");
+    }
+
+    #[test]
+    fn param_on_string_value_binds_text() {
+        // A Str-typed runtime value picks `bind_text` (the monomorphic
+        // dispatch the ValueType tag already carries).
+        let (schema, _) = fixture_schema();
+        let sel = Select {
+            table: TableRef(Symbol::from("articles")),
+            columns: ColumnSpec::Exists,
+            conditions: Some(Predicate::Eq(
+                ColRef { table: TableRef(Symbol::from("articles")), column: Symbol::from("title") },
+                Value::Runtime { expr: var_ref(&Symbol::from("title")), ty: ValueType::Str },
+            )),
+            orders: vec![],
+            limit: Some(LimitSpec(1)),
+            joins: vec![],
+            preloads: vec![],
+        };
+        let table = &schema.tables[&Symbol::from("articles")];
+        let body = emit_exists(&sel, table, true);
+        assert!(prepare_sql(&body).contains("WHERE title = ?"));
+        assert!(db_stmt_calls(&body).iter().any(|(m, _)| m == "bind_text"), "expected bind_text");
     }
 }

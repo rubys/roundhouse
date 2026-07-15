@@ -19,6 +19,14 @@ module Db
   def self.column_float: (Integer, Integer) -> Float
   def self.column_text: (Integer, Integer) -> String
   def self.finalize: (Integer) -> void
+  # Placeholder binding (roundhouse#12) — bind a `?` param (1-based) on a
+  # prepared stmt before the first step?, when the ROUNDHOUSE_PARAM_BINDS
+  # gate emits parameterized queries. Keys the prepared-statement cache
+  # on the static query shape instead of per-value. Every Db shim
+  # (cruby-gem + spinel-FFI) implements these.
+  def self.bind_int: (Integer, Integer, Integer) -> void
+  def self.bind_text: (Integer, Integer, String) -> void
+  def self.bind_bool: (Integer, Integer, bool) -> void
   def self.last_insert_rowid: () -> Integer
   def self.changes: () -> Integer
   # Query-log capture (issue #27) — records the SQL each prepare/exec

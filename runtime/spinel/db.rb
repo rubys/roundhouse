@@ -20,17 +20,23 @@
 #   Db.column_count(stmt)      — number of columns in the prepared row
 #   Db.column_name(stmt, i)    — name of column at zero-based index
 #   Db.finalize(stmt)          — release the prepared stmt
+#   Db.bind_int(stmt, i, v)    — bind int to `?` param i (1-based)
+#   Db.bind_text(stmt, i, v)   — bind string to `?` param i (1-based)
+#   Db.bind_bool(stmt, i, v)   — bind 0/1 to `?` param i (1-based)
 #   Db.last_insert_rowid       — id of the last INSERTed row
 #   Db.changes                 — affected-row count of the last statement
 #   Db.escape_string(s)        — SQL-quote a string value
 #   Db.escape_int(n)           — render an integer for SQL inlining
 #
 # Stmt handles are opaque pointers (`:ptr`) returned by sqlite3_prepare_v2
-# via the SQL.stmt_out out-buffer. The contract today is "inline values
-# into SQL"; lowerer-emitted code goes through `escape_string` /
-# `escape_int` (both shimmed below) before composition. `bind_text` is
-# unblocked at the FFI layer (spinel #576 + matz/spinel#686 doc fix) —
-# placeholder-bind emit is a planned follow-on.
+# via the SQL.stmt_out out-buffer. Two value paths coexist: the lowerer
+# INLINES literals (`escape_string`/`escape_int`, both shimmed below) and
+# BINDS runtime values (`bind_*`) when the placeholder-bind gate is on
+# (roundhouse#12, ROUNDHOUSE_PARAM_BINDS). Binding keys the
+# prepared-statement cache by static shape (`WHERE id = ?`) instead of
+# per-value, so a query hammered with varying ids reuses one cached stmt.
+# `bind_text` is unblocked at the FFI layer (spinel #576 +
+# matz/spinel#686 doc fix).
 #
 # Module-level state is a single `@pool` (ActiveRecord ConnectionPool of N
 # opaque dbh ptrs). `Db.current_dbh` reads Fiber.storage[:db_handle] when
@@ -62,6 +68,17 @@ module SQL
   # which now runs only at pool shutdown (see DbConn#finalize_all).
   ffi_func :sqlite3_reset,             [:ptr],                                :int
   ffi_func :sqlite3_clear_bindings,    [:ptr],                                :int
+  # Placeholder binding (roundhouse#12, Path A.2). `bind_int64` binds a
+  # `?` param to an integer (int64 so lobsters-scale ids don't truncate);
+  # `bind_text` binds a string — the trailing two args are `nbyte` and
+  # the destructor, both passed as `-1`: nbyte -1 lets sqlite strlen the
+  # NUL-terminated text, and destructor -1 is `SQLITE_TRANSIENT`
+  # (`((sqlite3_destructor_type)-1)`) so sqlite copies the bytes before
+  # returning — safe even if the Ruby string is later GC'd. int→:ptr
+  # coercion for the -1 destructor is the spinel primitive validated in
+  # spinel's test/ffi_ptr_int_literal.rb.
+  ffi_func :sqlite3_bind_int64,        [:ptr, :int, :long],                   :int
+  ffi_func :sqlite3_bind_text,         [:ptr, :int, :str, :int, :ptr],        :int
   ffi_func :sqlite3_column_int,        [:ptr, :int],                          :int
   ffi_func :sqlite3_column_double,     [:ptr, :int],                          :double
   ffi_func :sqlite3_column_text,       [:ptr, :int],                          :str
@@ -87,11 +104,12 @@ end
 # DbConn to exactly one fiber at a time, the per-connection cache is also
 # concurrency-safe without a mutex.
 #
-# Cache key is the fully-composed SQL string. Today the lowerer inlines
-# literals (`WHERE id = 1`), so id-bearing queries key per-id — fine for
-# the fixed-id benchmark, and the CAP below bounds growth until
-# placeholder-binding (the planned follow-on) makes the key the static
-# query shape.
+# Cache key is the fully-composed SQL string. With the placeholder-bind
+# gate on (roundhouse#12), runtime values emit as `?` and the key is the
+# static query shape (`WHERE id = ?`), so a query hammered with varying
+# ids reuses one entry. With the gate off the lowerer inlines literals
+# (`WHERE id = 1`) and id-bearing queries key per-id; the CAP below
+# bounds growth in that mode.
 # One cache entry: the composed SQL and its prepared stmt ptr. A concrete
 # user class (not a raw ptr) so an Array of these types concretely the way
 # ConnectionPool's @free does — spinel infers the element type from the
@@ -392,6 +410,28 @@ module Db
   def self.finalize(stmt)
     SQL.sqlite3_reset(stmt)
     SQL.sqlite3_clear_bindings(stmt)
+  end
+
+  # Placeholder binding (roundhouse#12, Path A.2). Bind one `?` param
+  # (1-based index, sqlite convention) on a prepared stmt before the
+  # first `step?`. The lowerer emits `Db.bind_int`/`bind_text`/
+  # `bind_bool` calls straight after `Db.prepare` when the query carries
+  # runtime WHERE values, so those queries key the prepared-statement
+  # cache by shape (`WHERE id = ?`) not value. A cached stmt was already
+  # reset + clear_bindings'd at its previous `finalize`, so re-binding
+  # here starts clean.
+  def self.bind_int(stmt, idx, value)
+    SQL.sqlite3_bind_int64(stmt, idx, value)
+  end
+
+  def self.bind_text(stmt, idx, value)
+    SQL.sqlite3_bind_text(stmt, idx, value, -1, -1)
+  end
+
+  # SQLite has no native bool — bind 0/1, matching escape_bool's inline
+  # form and the INTEGER affinity `t.boolean` columns get.
+  def self.bind_bool(stmt, idx, value)
+    SQL.sqlite3_bind_int64(stmt, idx, value ? 1 : 0)
   end
 
   def self.last_insert_rowid

@@ -389,27 +389,54 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
         .collect::<Vec<_>>()
         .join(", ");
 
-    let sql_prefix = arel_lit_str(format!(
-        "SELECT {} FROM {} WHERE id = ",
-        cols_csv,
-        table.name.as_str()
-    ));
+    // Placeholder-bind gate (roundhouse#12). Reload is a `Db.prepare`
+    // read — it hits the prepared-statement cache with a per-id key when
+    // inlined, so parameterize its `@id` predicate too, keeping it in
+    // step with the visitor-emitted find/exists paths. Gate off ⇒
+    // inline-escape, byte-identical to before.
+    let param = crate::lower::arel::visitor::param_binds_enabled();
     let id_ivar = Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("id") });
-    let escape_id = Expr::new(
-        Span::synthetic(),
-        ExprNode::Send {
-            recv: Some(Expr::new(
-                Span::synthetic(),
-                ExprNode::Const { path: vec![Symbol::from("Db")] },
+    let (sql_concat, bind_id) = if param {
+        // SQL: "SELECT <cols> FROM <table> WHERE id = ?" + " LIMIT 1"
+        let sql = arel_concat(vec![
+            arel_lit_str(format!(
+                "SELECT {} FROM {} WHERE id = ",
+                cols_csv,
+                table.name.as_str()
             )),
-            method: Symbol::from("escape_int"),
-            args: vec![id_ivar],
-            block: None,
-            parenthesized: true,
-        },
-    );
-    let sql_suffix = arel_lit_str(" LIMIT 1".to_string());
-    let sql_concat = arel_concat(vec![sql_prefix, escape_id, sql_suffix]);
+            arel_lit_str("?".to_string()),
+            arel_lit_str(" LIMIT 1".to_string()),
+        ]);
+        // Db.bind_int(stmt, 1, @id)
+        let bind = arel_db_call(
+            &db,
+            "bind_int",
+            vec![var_ref(&stmt), arel_lit_int(1), id_ivar],
+        );
+        (sql, Some(bind))
+    } else {
+        // SQL: "SELECT <cols> FROM <table> WHERE id = " + Db.escape_int(@id) + " LIMIT 1"
+        let sql_prefix = arel_lit_str(format!(
+            "SELECT {} FROM {} WHERE id = ",
+            cols_csv,
+            table.name.as_str()
+        ));
+        let escape_id = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: vec![Symbol::from("Db")] },
+                )),
+                method: Symbol::from("escape_int"),
+                args: vec![id_ivar],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        let sql_suffix = arel_lit_str(" LIMIT 1".to_string());
+        (arel_concat(vec![sql_prefix, escape_id, sql_suffix]), None)
+    };
 
     // stmt = Db.prepare(sql)
     let stmt_assign = arel_assign(
@@ -461,12 +488,15 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
 
     let finalize = arel_db_call(&db, "finalize", vec![var_ref(&stmt)]);
     let self_ref = Expr::new(Span::synthetic(), ExprNode::SelfRef);
-    let body = Expr::new(
-        Span::synthetic(),
-        ExprNode::Seq {
-            exprs: vec![stmt_assign, if_expr, finalize, self_ref],
-        },
-    );
+    // stmt = prepare ; [bind_int(stmt, 1, @id)] ; if step? {…} ; finalize ; self
+    let mut body_exprs = vec![stmt_assign];
+    if let Some(bind) = bind_id {
+        body_exprs.push(bind);
+    }
+    body_exprs.push(if_expr);
+    body_exprs.push(finalize);
+    body_exprs.push(self_ref);
+    let body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs: body_exprs });
 
     MethodDef {
         name: Symbol::from("_adapter_reload"),

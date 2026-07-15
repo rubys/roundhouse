@@ -17,6 +17,7 @@
 #   Db.column_count(stmt)      — number of columns in the prepared row
 #   Db.column_name(stmt, i)    — name of column at zero-based index
 #   Db.finalize(stmt)          — release the prepared stmt
+#   Db.bind_int/bind_text/bind_bool(stmt, i, v) — bind `?` param i (1-based)
 #   Db.last_insert_rowid       — id of the last INSERTed row
 #   Db.changes                 — affected-row count of the last statement
 #
@@ -146,8 +147,9 @@ module Db
   # (real `close` runs at pool shutdown). Key is the composed SQL: inlined
   # literals mean id-bearing queries key per-id (fine for the bench;
   # STMT_CACHE_CAP bounds growth, beyond which statements are transient and
-  # closed on finalize). Placeholder binding — the planned follow-on —
-  # makes the key the static query shape.
+  # closed on finalize). With placeholder binding on (roundhouse#12) the
+  # key is instead the static shape (`WHERE id = ?`), so id-varying
+  # queries share one cached statement.
   # ── per-request SQL query cache (Rails AR query-cache semantics) ──
   # Identical SELECTs within one request replay the first result set;
   # any `exec` (writes ride exec per the Db contract) invalidates.
@@ -167,8 +169,17 @@ module Db
 
   def self.prepare(sql)
     record_query(sql)
+    # A `?`-bearing SQL string is a placeholder query (roundhouse#12):
+    # its result depends on the runtime binds set AFTER prepare, which
+    # aren't in the SQL key — so it must NOT participate in the
+    # result-replay query cache (replaying would serve one bind value's
+    # rows for another). The prepared-statement cache below still keys on
+    # the shared shape, which is the whole point. (Heuristic: a literal
+    # value containing `?` would also skip qcache — a safe miss, never a
+    # wrong result.)
+    parameterized = sql.include?("?")
     qcache = Fiber[:rh_qcache]
-    if !qcache.nil? && (hit = qcache[sql])
+    if !qcache.nil? && !parameterized && (hit = qcache[sql])
       @next_id += 1
       @rows[@next_id] = { stmt: nil, row: nil, cached: false, replay: hit, pos: 0, sql: sql }
       return @next_id
@@ -213,7 +224,7 @@ module Db
     @next_id += 1
     capture = nil
     qcache = Fiber[:rh_qcache]
-    unless qcache.nil?
+    unless qcache.nil? || parameterized
       capture = { rows: [], names: stmt.columns, eof: false, sql: sql }
     end
     @rows[@next_id] = { stmt: stmt, row: nil, cached: cached, capture: capture }
@@ -311,6 +322,31 @@ module Db
     end
   end
 
+  # Placeholder binding (roundhouse#12). Bind one `?` param (1-based) on
+  # a prepared stmt before the first `step?`, via the gem's
+  # `Statement#bind_param`. The emitted `_adapter_*` bodies always
+  # re-bind every param before stepping, so a cached stmt's prior binds
+  # are overwritten (SQLite `reset` keeps bindings; our re-bind replaces
+  # them positionally — same param count for the same SQL shape). The
+  # nil guard covers the replay-handle case, which `?` queries never take
+  # (prepare skips replay for parameterized SQL).
+  def self.bind_int(stmt_id, idx, value)
+    st = @rows[stmt_id][:stmt]
+    st.bind_param(idx, value) unless st.nil?
+  end
+
+  def self.bind_text(stmt_id, idx, value)
+    st = @rows[stmt_id][:stmt]
+    st.bind_param(idx, value) unless st.nil?
+  end
+
+  # SQLite has no native bool — bind 0/1, matching escape_bool's inline
+  # form and the INTEGER affinity `t.boolean` columns get.
+  def self.bind_bool(stmt_id, idx, value)
+    st = @rows[stmt_id][:stmt]
+    st.bind_param(idx, value ? 1 : 0) unless st.nil?
+  end
+
   def self.last_insert_rowid
     current_dbh.last_insert_row_id
   end
@@ -348,12 +384,12 @@ module Db
     @query_log.push(sql) unless @query_log.nil?
   end
 
-  # SQL-value escaping primitives — lowerer-emitted code uses these
-  # to compose SQL with inlined values. Spinel-FFI can't construct
-  # SQLITE_TRANSIENT for bind_text, so the contract across both
-  # runtimes is "inline values into SQL"; the cruby gem accepts that
-  # form fine (no semantic difference vs bound params for safety
-  # since the lowerer controls every string that flows here).
+  # SQL-value escaping primitives — lowerer-emitted code uses these to
+  # inline literals (and runtime values when the placeholder-bind gate is
+  # off). With the gate on, runtime values instead flow through `bind_*`
+  # above; both shims (this gem-backed one and spinel-FFI) now support
+  # binding. Inlining stays safe regardless since the lowerer controls
+  # every string that flows here.
   def self.escape_string(s)
     "'" + s.to_s.gsub("'", "''") + "'"
   end
