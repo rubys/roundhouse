@@ -677,18 +677,43 @@ impl<'a> BodyTyper<'a> {
                 // `x = post.title` binds `x` for subsequent statements.
                 let mut local_ctx = ctx.clone();
                 let mut last = Ty::Nil;
-                for e in exprs.iter_mut() {
+                // Statement index of each live empty-array accumulator
+                // seed (`parts = []`), keyed by (is_ivar, name). The push
+                // refinement below updates the BINDING when the element
+                // type is revealed, but emitters that must commit a decl
+                // type at the seed (Go's `parts := []string{}`, Crystal's
+                // `[] of String`) read the literal's stamped ty — leaving
+                // it at the `Var` placeholder makes the decl and the
+                // refined uses disagree (`[]interface{}` handed to
+                // `strings.Join`). Recording the index lets the
+                // refinement retro-stamp the seed. A later reassignment
+                // of the name retires its entry.
+                let mut array_seed_idx: HashMap<(bool, Symbol), usize> = HashMap::new();
+                for i in 0..exprs.len() {
+                    let e = &mut exprs[i];
                     last = self.analyze_expr(e, &local_ctx);
-                    if let ExprNode::Assign { target, .. } = &*e.node {
-                        if let Some(ty) = e.ty.clone() {
-                            match target {
-                                LValue::Ivar { name } => {
+                    if let ExprNode::Assign { target, value } = &*e.node {
+                        let slot = match target {
+                            LValue::Ivar { name } => Some((true, name.clone())),
+                            LValue::Var { name, .. } => Some((false, name.clone())),
+                            _ => None,
+                        };
+                        if let Some((is_ivar, name)) = slot {
+                            if let Some(ty) = e.ty.clone() {
+                                if is_ivar {
                                     local_ctx.ivar_bindings.insert(name.clone(), ty);
-                                }
-                                LValue::Var { name, .. } => {
+                                } else {
                                     local_ctx.local_bindings.insert(name.clone(), ty);
                                 }
-                                _ => {}
+                            }
+                            let empty_seed = matches!(&*value.node,
+                                    ExprNode::Array { elements, .. } if elements.is_empty())
+                                && matches!(e.ty.as_ref(),
+                                    Some(Ty::Array { elem }) if matches!(&**elem, Ty::Var { .. }));
+                            if empty_seed {
+                                array_seed_idx.insert((is_ivar, name), i);
+                            } else {
+                                array_seed_idx.remove(&(is_ivar, name));
                             }
                         }
                     }
@@ -827,9 +852,25 @@ impl<'a> BodyTyper<'a> {
                             } else {
                                 union_of((**cur).clone(), elem)
                             };
-                            bindings.insert(name, Ty::Array { elem: Box::new(new_elem) });
+                            let refined = Ty::Array { elem: Box::new(new_elem) };
+                            bindings.insert(name.clone(), refined.clone());
+                            // Retro-stamp the seed literal so decl-site
+                            // emitters agree with the refined uses: the
+                            // binding refinement alone left Go declaring
+                            // `[]interface{}{}` while a later `.join`
+                            // (typed off the refined binding) emitted
+                            // `strings.Join` over it. Each subsequent
+                            // push re-stamps with the widened union.
+                            if let Some(&si) = array_seed_idx.get(&(is_ivar, name)) {
+                                let seed = &mut exprs[si];
+                                if let ExprNode::Assign { value, .. } = &mut *seed.node {
+                                    value.ty = Some(refined.clone());
+                                }
+                                seed.ty = Some(refined);
+                            }
                         }
                     }
+                    let e = &exprs[i];
                     // A conditional/loop whose CONDITION assigns a local
                     // (`if !(story = find) || story.gone?`, `while (line =
                     // gets)`) binds that local for the statements that
@@ -1722,6 +1763,36 @@ mod tests {
         let ctx = Ctx::default();
         let ty = typer.analyze_expr(&mut seq, &ctx);
         assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Int) });
+    }
+
+    #[test]
+    fn array_accumulator_seed_literal_retro_stamped() {
+        // The refinement must reach the SEED literal's stamped ty, not
+        // just the forward binding: decl-site emitters (Go `parts :=
+        // []string{}`, Crystal `[] of String`) type the declaration
+        // from the literal, while later uses (`.join`) type off the
+        // refined binding — a binding-only refinement made Go declare
+        // `[]interface{}{}` and hand it to `strings.Join([]string)`.
+        let assign = synth(ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: Symbol::from("ordered") },
+            value: synth(ExprNode::Array { elements: vec![], style: Default::default() }),
+        });
+        let five = synth(ExprNode::Lit { value: Literal::Int { value: 5 } });
+        let push = send(Some(var("ordered")), "<<", vec![five]);
+        let read = var("ordered");
+        let mut seq =
+            synth(ExprNode::Seq { exprs: vec![assign, push, read] });
+
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        let ctx = Ctx::default();
+        typer.analyze_expr(&mut seq, &ctx);
+
+        let expected = Ty::Array { elem: Box::new(Ty::Int) };
+        let ExprNode::Seq { exprs } = &*seq.node else { panic!("seq") };
+        assert_eq!(exprs[0].ty.as_ref(), Some(&expected));
+        let ExprNode::Assign { value, .. } = &*exprs[0].node else { panic!("assign") };
+        assert_eq!(value.ty.as_ref(), Some(&expected));
     }
 
     #[test]
