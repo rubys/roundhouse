@@ -8,11 +8,14 @@
 #
 # CONSOLIDATION: the primary input is the LANE layout that
 # `bench-lobsters LANES…` writes — matrix.json at the run root plus one
-# subdir per lane (rails/rails-int/ruby/ruby-int/jruby) — rendered as one
-# sectioned page: headline, runtime × JIT matrix, per-endpoint breakdown,
-# stability, per-lane route parity. The pre-orchestrator LEGACY layout
-# (summary.json at the root, optional matrix/ + jruby/ symlinks) still
-# renders so archived runs and single-lane dev runs re-render unchanged.
+# subdir per lane (rails/rails-int/ruby/ruby-int/jruby) — rendered as
+# three sections: (1) headline + runtime × JIT matrix (stability folded
+# in), (2) per-endpoint breakdown (chart = each stack's best config, all
+# lanes in the table), (3) coverage & parity — the attestation that the
+# timing sections measured a complete app surface per emit target. The
+# pre-orchestrator LEGACY layout (summary.json at the root, optional
+# matrix/ + jruby/ symlinks) still renders so archived runs and
+# single-lane dev runs re-render unchanged.
 #
 # Usage:
 #   scripts/lobsters-report [PATH] [OUT.html]
@@ -67,6 +70,7 @@ if lanes_mode
   jruby     = sibling(File.join(run_path, 'jruby'), 'summary.json')
   jruby_env = jruby && sibling(File.join(run_path, 'jruby'), 'env.json')
 else
+  prim  = nil
   input = File.directory?(arg) ? File.join(arg, 'summary.json') : arg
   File.exist?(input) or abort "no summary.json at #{input}"
   summary = JSON.parse(File.read(input))
@@ -592,6 +596,11 @@ end
 rh_pr = timing && timing['per_route']
 rl_pr = rails && rails['per_route']
 jr_pr = jruby_seq && jruby_seq['per_route']
+# The no-JIT lanes' per-endpoint medians (lane layout): table-only columns
+# — the chart stays at one series per stack's best configuration. Skipped
+# when the primary emit lane IS ruby-int (they'd duplicate the main columns).
+rl_int_pr = prim == 'ruby' ? sibling(File.join(run_path, 'rails-int'), 'rails.json')&.dig('per_route') : nil
+rh_int_pr = prim == 'ruby' ? sibling(File.join(run_path, 'ruby-int'), 'summary.json')&.dig('sequence_timing', 'per_route') : nil
 if rh_pr && rl_pr && !rh_pr.empty?
   shared = rh_pr.keys.select { |k| rl_pr.key?(k) }
   rh_iters = timing['iterations'].to_i
@@ -600,33 +609,47 @@ if rh_pr && rl_pr && !rh_pr.empty?
     rh = rh_pr[k]['ms_median'].to_f
     { key: k, rails: rl, rh: rh,
       jr: jr_pr&.dig(k, 'ms_median')&.to_f,
+      rails_int: rl_int_pr&.dig(k, 'ms_median')&.to_f,
+      rh_int:    rh_int_pr&.dig(k, 'ms_median')&.to_f,
       ratio: rh > 0 ? rl / rh : nil,
       per_iter: rh_iters > 0 ? (rh_pr[k]['n'].to_f / rh_iters).round : nil }
   end.sort_by { |r| -r[:rails] }
 
-  jr_col = jr_pr && breakdown.any? { |b| b[:jr] }
+  jr_col  = jr_pr && breakdown.any? { |b| b[:jr] }
+  rli_col = rl_int_pr && breakdown.any? { |b| b[:rails_int] }
+  rhi_col = rh_int_pr && breakdown.any? { |b| b[:rh_int] }
+  chart_note = if jr_col
+    ' The chart shows each stack\'s <strong>best configuration</strong> — Rails +YJIT, Roundhouse +YJIT, Roundhouse on JRuby' \
+      "#{rli_col || rhi_col ? '; the no-JIT lanes appear as extra columns in the table below' : ''}."
+  else
+    ''
+  end
   html << "<h2>#{section_no}. Per-endpoint breakdown</h2>\n"
   html << <<~P
-    <p>Where the overall #{speedup ? "#{fmt_dec(speedup, 2)}× " : ''}win comes from — each endpoint's median latency over every timed visit of the frozen sequence#{jr_col ? ', per lane' : ', Rails vs roundhouse'}. Bars are log-scaled; the <strong>ratio</strong> at the right is Rails ÷ roundhouse#{jr_col ? ' (CRuby, same JIT)' : ''} (green = roundhouse faster).</p>
+    <p>Where the overall #{speedup ? "#{fmt_dec(speedup, 2)}× " : ''}win comes from — each endpoint's median latency over every timed visit of the frozen sequence#{jr_col ? ', per lane' : ', Rails vs roundhouse'}. Bars are log-scaled; the <strong>ratio</strong> at the right is Rails ÷ roundhouse#{jr_col ? ' (both CRuby +YJIT)' : ''} (green = roundhouse faster).#{chart_note}</p>
     <p class="caveat">A diagnostic breakdown, not a re-derivation: per-endpoint medians don't sum to the sequence median (GC and ordering don't decompose linearly), and the sub-millisecond rows sit near clock resolution — trust the ranking, not the third decimal.</p>
   P
   html << paired_hbar(breakdown, jr: jr_col)
 
   html << "<details>\n<summary>Per-endpoint table (#{breakdown.size} endpoints)</summary>\n"
-  html << "<table>\n<thead><tr><th>endpoint</th><th>rails ms</th><th>roundhouse ms</th>#{jr_col ? '<th>jruby ms</th>' : ''}<th>ratio</th><th>visits/iter</th></tr></thead>\n<tbody>\n"
+  html << "<table>\n<thead><tr><th>endpoint</th><th>rails</th>#{rli_col ? '<th>rails no-JIT</th>' : ''}<th>roundhouse</th>#{rhi_col ? '<th>roundhouse no-JIT</th>' : ''}#{jr_col ? '<th>jruby</th>' : ''}<th>ratio</th><th>visits/iter</th></tr></thead>\n<tbody>\n"
   breakdown.each do |b|
     rcls = b[:ratio].nil? ? '' : (b[:ratio] >= 1 ? 'ok' : 'no')
     html << "<tr>"
     html << %(<td><code>#{esc(b[:key])}</code></td>)
     html << %(<td class="num">#{fmt_dec(b[:rails], 2)}</td>)
+    html << %(<td class="num">#{b[:rails_int] ? fmt_dec(b[:rails_int], 2) : '—'}</td>) if rli_col
     html << %(<td class="num">#{fmt_dec(b[:rh], 2)}</td>)
+    html << %(<td class="num">#{b[:rh_int] ? fmt_dec(b[:rh_int], 2) : '—'}</td>) if rhi_col
     html << %(<td class="num">#{b[:jr] ? fmt_dec(b[:jr], 2) : '—'}</td>) if jr_col
     html << %(<td class="num #{rcls}">#{b[:ratio] ? "#{fmt_dec(b[:ratio], 2)}×" : '—'}</td>)
     html << %(<td class="num">#{b[:per_iter]}</td>)
     html << "</tr>\n"
   end
   html << "</tbody></table>\n"
-  html << %(<p class="legend">ratio = rails ÷ roundhouse (CRuby lanes, same JIT).</p>\n) if jr_col
+  if jr_col || rli_col || rhi_col
+    html << %(<p class="legend">All lane columns are median ms per visit; ratio = rails ÷ roundhouse (the +YJIT pair).</p>\n)
+  end
   html << "</details>\n"
 end
 
@@ -655,9 +678,29 @@ end
 # parity as extra columns so cross-runtime coverage reads off one table.
 jr_routes = lanes_mode && jruby ? (jruby['routes'] || []).to_h { |r| [r['route'], r] } : {}
 
-html << "<h2>#{section_no}. Route parity (#{pass}/#{total}#{jr_routes.empty? ? '' : " · jruby #{jruby_pass}/#{jruby_total}"})</h2>\n"
-html << %(<p>Every distinct benchmark route, replayed once#{jr_routes.empty? ? '' : ' per emit lane'}. Bars are log-scaled single-shot latency#{jr_routes.empty? ? '' : ' of the CRuby lane'}; #{all_pass ? 'all routes return 200' : 'red bars are non-200 routes'}.</p>\n)
-html << route_hbar(routes, metric: 'ms', unit: 'ms', fmt: ->(v) { "#{fmt_dec(v, 1)} ms" })
+if lanes_mode
+  # This section is the COVERAGE ATTESTATION, not a performance chart:
+  # it certifies that the timing sections above measured a complete
+  # application surface, per emit target. (The old single-shot latency
+  # chart invited performance readings of noisy one-shot numbers that
+  # the medians above answer properly — dropped.)
+  jr_all = !jr_routes.empty? && jruby_pass == jruby_total
+  html << "<h2>#{section_no}. Coverage &amp; parity (#{pass}/#{total}#{jr_routes.empty? ? '' : " · jruby #{jruby_pass}/#{jruby_total}"})</h2>\n"
+  if all_pass && (jr_routes.empty? || jr_all)
+    html << <<~P
+      <p>What the numbers above are numbers <em>of</em>: every distinct route the benchmark exercises returns <strong>200 on every emit target</strong> — the timing sections measure a complete application, not a working subset. Response sizes are compared across runtimes as a same-output proxy (bodies differ only in CSRF token and clock; normalized body hashes are the planned upgrade). A failing cell here would invalidate that lane's rows above.</p>
+    P
+  else
+    fails = []
+    fails << "#{total - pass} route(s) fail on the CRuby lane" unless all_pass
+    fails << "#{jruby_total - jruby_pass} route(s) fail on the jruby lane" unless jr_routes.empty? || jr_all
+    html << %(<p><strong>Incomplete coverage:</strong> #{fails.join('; ')} — the failing routes' visits short-circuit cheaply, so treat the affected lane's timing rows above as optimistic. Details in the table.</p>\n)
+  end
+else
+  html << "<h2>#{section_no}. Route parity (#{pass}/#{total})</h2>\n"
+  html << %(<p>Every distinct benchmark route, replayed once. Bars are log-scaled single-shot latency; #{all_pass ? 'all routes return 200' : 'red bars are non-200 routes'}.</p>\n)
+  html << route_hbar(routes, metric: 'ms', unit: 'ms', fmt: ->(v) { "#{fmt_dec(v, 1)} ms" })
+end
 
 html << "<details open>\n<summary>Per-route table (#{routes.size} routes)</summary>\n"
 html << "<table>\n<thead><tr><th>route</th><th>status</th><th>bytes</th><th>ms</th>#{jr_routes.empty? ? '' : '<th>jruby</th><th>jruby ms</th>'}</tr></thead>\n<tbody>\n"
@@ -683,8 +726,9 @@ routes.each do |c|
   html << "</tr>\n"
 end
 html << "</tbody></table>\n"
-unless jr_routes.empty?
-  html << %(<p class="legend">jruby cells flag a response size that drifts more than 64 bytes from the CRuby lane's.</p>\n)
+if lanes_mode
+  drift = jr_routes.empty? ? '' : ' jruby cells flag a response size that drifts more than 64 bytes from the CRuby lane\'s.'
+  html << %(<p class="legend">ms columns are single-shot diagnostic latencies — use the medians above for performance.#{drift}</p>\n)
 end
 html << "</details>\n"
 
