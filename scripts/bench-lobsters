@@ -16,17 +16,19 @@
 #                     cruby  (default) — --target ruby,  replay under `ruby`
 #                     jruby            — --target jruby, replay under `jruby`
 #                   Both drive the SAME scripts/lobsters-replay; only the
-#                   emit target, interpreter, and gem/JVM setup differ. The
-#                   JRuby lane is file-backed only (its JDBC adapter has no
-#                   SQLite3::Backup), so --memory/--vs-rails are CRuby-only.
-#                   Results land under a per-runtime `latest`/`latest-jruby`
-#                   symlink so the two lanes don't cross-compare.
+#                   emit target, interpreter, and gem/JVM setup differ.
+#                   --memory/--frozen work on both (JRuby seeds :memory: via
+#                   the JDBC driver's restore()); --vs-rails is CRuby-only
+#                   (same-interpreter baseline). Results land under a
+#                   per-runtime `latest`/`latest-jruby` symlink so the two
+#                   lanes don't cross-compare.
 #   --jruby         shorthand for --runtime jruby
 #   --skip-emit     reuse the existing build tree (fast replay iteration)
 #   --memory        serve from an in-memory SQLite seeded from the staged
-#                   DB at boot (SQLite3::Backup) — the shape the real
-#                   ruby-bench benchmark runs; the file-backed default
-#                   remains for bisection against older runs
+#                   DB at boot (SQLite3::Backup on CRuby, JDBC restore()
+#                   on JRuby) — the shape the real ruby-bench benchmark
+#                   runs; the file-backed default remains for bisection
+#                   against older runs
 #   --time N        run N timed iterations after the parity pass, preceded
 #                   by --warmup discarded iterations
 #   --warmup N      discarded warmup iterations before the timed run
@@ -81,6 +83,7 @@ VS_RAILS=0
 FROZEN=0
 RUNTIME=cruby
 WARMUP=""              # timed-run warmup iters; default derived per runtime below
+WARMUP_EXPLICIT=0      # explicit --warmup also overrides the sequence path's 15
 # OUT_TREE, RUBY_BIN, EMIT_TARGET, GEMS are resolved from RUNTIME after parse.
 # Snapshot before the parse loop shifts everything away — the
 # provenance step reads this (a bare `$*` there always recorded an
@@ -97,7 +100,7 @@ while [[ $# -gt 0 ]]; do
         --vs-rails)  VS_RAILS=1; MEMORY=1; shift ;;
         --frozen)    FROZEN=1; MEMORY=1; shift ;;
         --time)      TIME_ITERS="$2"; shift 2 ;;
-        --warmup)    WARMUP="$2"; shift 2 ;;
+        --warmup)    WARMUP="$2"; WARMUP_EXPLICIT=1; shift 2 ;;
         --out)       OUT_DIR="$2"; EXPLICIT_OUT=1; shift 2 ;;
         -h|--help)   sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *)           echo "unknown flag: $1" >&2; exit 2 ;;
@@ -140,9 +143,10 @@ case "$RUNTIME" in
         # cold paths, so each warms independently. Measured ms/iter median
         # vs --warmup (100 timed iters, file-backed, jruby 10.1): warmup 20
         # -> 91, 200 -> 47, 500 -> 42 (steady). So 20 wildly under-reports;
-        # 100 is the fast-dev default, but a publication-grade jruby-vs-cruby
-        # number wants --warmup 500 (or the frozen --sequence, the real
-        # ruby-bench metric — gated on the JDBC in-mem backup, item (d)).
+        # 100 is the fast-dev default; a publication-grade number wants an
+        # explicit --warmup (which also overrides the sequence path's 15 —
+        # a frozen-sequence warmup iteration is 114 visits, so the same
+        # steady-state needs fewer iterations there than on the route set).
         : "${WARMUP:=100}"
         export JAVA_OPTS="${BENCH_JRUBY_HEAP:--Xmx2g -Xms2g} --enable-native-access=ALL-UNNAMED ${JAVA_OPTS:-}"
         ;;
@@ -150,11 +154,13 @@ case "$RUNTIME" in
         fail "unknown runtime: $RUNTIME (want cruby|jruby)"; exit 2 ;;
 esac
 
-# JDBC has no SQLite3::Backup, so the in-memory seed (--memory) and the
-# Rails comparison (--vs-rails, which implies it) are CRuby-only until the
-# JDBC backup path lands. Fail loudly rather than silently file-back.
-if [[ "$RUNTIME" == jruby ]] && (( MEMORY == 1 )); then
-    fail "jruby lane is file-backed only: --memory/--vs-rails need SQLite3::Backup (JDBC equivalent undone). Drop the flag."
+# --vs-rails stays CRuby-only: its point is a same-interpreter baseline
+# (real Rails boots under plain `ruby`), so pairing it with a jruby emit
+# would compare across runtimes AND stacks at once. Cross-runtime rows
+# belong to the matrix, where each lane is labeled. --memory/--frozen work
+# on both runtimes (JRuby seeds via the JDBC driver's restore()).
+if [[ "$RUNTIME" == jruby ]] && (( VS_RAILS == 1 )); then
+    fail "--vs-rails is CRuby-only (same-interpreter baseline); use --frozen for the jruby in-memory lane."
     exit 2
 fi
 
@@ -262,10 +268,14 @@ step "replaying benchmark routes under $RUNTIME (in-process Main.run_rack)"
 REPLAY_ARGS=(--json "$OUT_DIR/summary.json" --md "$OUT_DIR/summary.md")
 if (( TIME_ITERS > 0 )); then
     REPLAY_ARGS+=(--time "$TIME_ITERS")
-    # --warmup tunes the route-set timing only. The --vs-rails and --frozen
-    # paths time the frozen --sequence, which keeps its OWN established warmup
-    # (15) so the canonical-metric methodology stays fixed — don't override it.
-    (( VS_RAILS == 0 && FROZEN == 0 )) && REPLAY_ARGS+=(--warmup "$WARMUP")
+    # The --vs-rails and --frozen paths time the frozen --sequence, which
+    # keeps its OWN established warmup (15) so the canonical-metric
+    # methodology stays fixed — the per-runtime WARMUP default doesn't
+    # touch it. An EXPLICIT --warmup overrides everywhere: the jruby
+    # sequence lane needs a longer warm run than the CRuby-derived 15.
+    if (( VS_RAILS == 0 && FROZEN == 0 )) || (( WARMUP_EXPLICIT == 1 )); then
+        REPLAY_ARGS+=(--warmup "$WARMUP")
+    fi
 fi
 (( MEMORY == 1 ))    && REPLAY_ARGS+=(--memory)
 (( VS_RAILS == 1 ))  && REPLAY_ARGS+=(--sequence "$OUT_DIR/sequence.json")

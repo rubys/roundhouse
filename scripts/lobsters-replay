@@ -42,9 +42,11 @@
 #                 content-diff input; filename = route with / -> _)
 #   --db PATH     benchmark DB (default storage/bench.sqlite3)
 #   --memory      serve from an in-memory SQLite seeded from --db at
-#                 boot via SQLite3::Backup — the exact shape the real
-#                 benchmark runs (benchmark.rb copies production.sqlite3
-#                 into :memory: on every boot). Uses a shared-cache URI
+#                 boot — the exact shape the real benchmark runs
+#                 (benchmark.rb copies production.sqlite3 into :memory:
+#                 on every boot). CRuby seeds via SQLite3::Backup; JRuby
+#                 via the JDBC driver's restore() (the same online-backup
+#                 C API). Uses a shared-cache URI
 #                 (file:…?mode=memory&cache=shared) because Db.configure
 #                 opens a POOL of connections: plain ":memory:" would
 #                 give each pool handle its own empty database.
@@ -91,17 +93,30 @@ require File.expand_path("main", Dir.pwd)
 Main.configure_default_adapter!
 
 if opts[:memory]
-  # Seed the in-mem DB the way benchmark.rb does: page-level Backup from
+  # Seed the in-mem DB the way benchmark.rb does: page-level backup from
   # the file DB. This REPLACES the whole destination database, so the
   # empty tables Schema DDL just created are simply superseded.
-  require "sqlite3"
-  mem  = SQLite3::Database.new(MEM_URI)
-  file = SQLite3::Database.new(DB_FILE, readonly: true)
-  bk = SQLite3::Backup.new(mem, "main", file, "main")
-  bk.step(-1)
-  bk.finish
-  file.close
-  mem.close
+  if RUBY_ENGINE == "jruby"
+    # Same seed through the JDBC driver: org.sqlite.core.DB exposes
+    # SQLite's online-backup C API, and restore() is Backup with source
+    # and destination swapped. A fresh connection on the same shared-cache
+    # URI joins the pool's in-mem DB; the emit's Db shim already loaded
+    # the driver when Main booted above.
+    ds = org.sqlite.SQLiteDataSource.new
+    ds.set_url("jdbc:sqlite:#{MEM_URI}")
+    conn = ds.get_connection
+    conn.get_database.restore("main", DB_FILE, nil)
+    conn.close
+  else
+    require "sqlite3"
+    mem  = SQLite3::Database.new(MEM_URI)
+    file = SQLite3::Database.new(DB_FILE, readonly: true)
+    bk = SQLite3::Backup.new(mem, "main", file, "main")
+    bk.step(-1)
+    bk.finish
+    file.close
+    mem.close
+  end
 end
 
 # ── benchmark identity + route ids ───────────────────────────────────
