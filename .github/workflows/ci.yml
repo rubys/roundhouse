@@ -1774,7 +1774,7 @@ jobs:
           fetch() { curl -fsSL --max-time 30 "$1" -o "$2" || { rm -f "$2"; return 1; }; }
           if fetch "$BENCH_URL/matrix.json" _site/bench/lobsters/matrix.json; then
             fetch "$BENCH_URL/env.json" _site/bench/lobsters/env.json || true
-            for lane in rails rails-int ruby ruby-int jruby; do
+            for lane in rails rails-int rails-jruby ruby ruby-int jruby; do
               mkdir -p "_site/bench/lobsters/$lane"
               for f in summary.json rails.json env.json summary.md; do
                 fetch "$BENCH_URL/$lane/$f" "_site/bench/lobsters/$lane/$f" || true

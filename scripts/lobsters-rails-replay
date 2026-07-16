@@ -54,7 +54,13 @@ unless ENV["LOBSTERS_RAILS_REPLAY_BOOTSTRAPPED"]
           "--min-iters", opts[:min_iters].to_s, "--min-time", opts[:min_time].to_s]
   argv += ["--seq-out", opts[:seq_out]] if opts[:seq_out]
   argv += ["--json", opts[:json]] if opts[:json]
-  exec("bundle", "exec", "ruby", me, *argv)
+  if RUBY_ENGINE == "jruby"
+    # The rails-jruby lane: bare `bundle`/`ruby` would resolve CRuby's via
+    # PATH — re-exec explicitly into JRuby's bundler and interpreter.
+    exec("jruby", "-S", "bundle", "exec", "jruby", me, *argv)
+  else
+    exec("bundle", "exec", "ruby", me, *argv)
+  end
 end
 
 # ── boot (mirrors benchmark.rb) ──────────────────────────────────────
@@ -62,12 +68,22 @@ $stderr.puts "booting Rails lobsters (production, in-mem DB)..."
 require_relative File.join(opts[:src], "config/environment")
 require_relative File.join(opts[:src], "route_generator")
 
-mem_db  = ActiveRecord::Base.connection.raw_connection
-file_db = SQLite3::Database.new(File.join(opts[:src], "db/production.sqlite3"))
-b = SQLite3::Backup.new(mem_db, "main", file_db, "main")
-b.step(-1)
-b.finish
-file_db.close
+if RUBY_ENGINE == "jruby"
+  # AR-JDBC exposes SQLite's online-backup C API through the driver:
+  # restore() is Backup with source/destination swapped — the same move
+  # scripts/lobsters-replay makes for the emit lane's in-memory seed.
+  raw   = ActiveRecord::Base.connection.raw_connection
+  jconn = raw.respond_to?(:connection) ? raw.connection : raw.jdbc_connection
+  sq    = jconn.respond_to?(:getDatabase) ? jconn : jconn.unwrap(org.sqlite.SQLiteConnection.java_class)
+  sq.get_database.restore("main", File.join(opts[:src], "db/production.sqlite3"), nil)
+else
+  mem_db  = ActiveRecord::Base.connection.raw_connection
+  file_db = SQLite3::Database.new(File.join(opts[:src], "db/production.sqlite3"))
+  b = SQLite3::Backup.new(mem_db, "main", file_db, "main")
+  b.step(-1)
+  b.finish
+  file_db.close
+end
 
 app = Rails.application
 generator = RouteGenerator.new(app)

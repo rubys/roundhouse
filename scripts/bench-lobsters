@@ -12,16 +12,20 @@
 #                   per lane, one aggregated matrix.json (what
 #                   scripts/lobsters-report renders). Lane vocabulary
 #                   matches scripts/bench:
-#                     rails      real Rails, YJIT        [needs the bundle]
-#                     rails-int  real Rails, no JIT      [needs the bundle]
-#                     ruby       roundhouse emit, YJIT
-#                     ruby-int   roundhouse emit, no JIT
-#                     jruby      roundhouse emit, JRuby/JVM
+#                     rails       real Rails, YJIT        [needs the bundle]
+#                     rails-int   real Rails, no JIT      [needs the bundle]
+#                     rails-jruby real Rails on JRuby, from a patched
+#                                 sibling fixture (see prep_rails_jruby_
+#                                 fixture) — list it AFTER jruby, whose
+#                                 emit tree it borrows the markly shim from
+#                     ruby        roundhouse emit, YJIT
+#                     ruby-int    roundhouse emit, no JIT
+#                     jruby       roundhouse emit, JRuby/JVM
 #                   Rails lanes are skipped (loudly) when the checkout's
-#                   bundle isn't installable; the jruby lane when jruby
+#                   bundle isn't installable; the JVM lanes when jruby
 #                   isn't on PATH. JIT is pinned per lane via RUBYOPT —
 #                   the ambient environment can't leak in. Example:
-#                     scripts/bench-lobsters rails rails-int ruby ruby-int jruby --time 20
+#                     scripts/bench-lobsters rails rails-int ruby ruby-int jruby rails-jruby --time 20
 #
 #   With no LANE args this is the single-lane worker (the dev loop and
 #   the lane mode's own building block): emit + file-backed parity replay
@@ -157,6 +161,84 @@ compare_parity() {  # PREV_NAME PREV_JSON CUR_JSON
     ' "$1" "$2" "$3" || true
 }
 
+# rails-jruby fixture: a sibling copy of the lobsters checkout patched to
+# run stock Rails under JRuby (the blog bench's rails-jruby precedent,
+# proven by the 2026-07-17 probe). The recipe:
+#   - sqlite3 (C ext) -> activerecord-jdbcsqlite3-adapter 80.0.pre1,
+#     which pins Rails to 8.0.x — one minor behind the CRuby lanes;
+#     ledgered as a caveat on the report page
+#   - markly (C ext) -> the emit tree's commonmark-java shim, snapshotted
+#     into the fixture (SAME markdown backend as the roundhouse jruby
+#     lane, so the JVM comparison is backend-for-backend fair)
+#   - rdoc < 8 (rdoc 8 pulls rbs, a C ext) + top-level ostruct (ruumba's
+#     rubocop 0.81 requires it; gone from jruby 10's stdlib)
+#   - initializer working around the JRuby 10.1 Time.new(str, in:) call-
+#     site bug (TypeError on the 3rd call; hits every Rails timestamp cast)
+# Rebuilt when the source Gemfile changes; the benchmark DB re-syncs every
+# run. Needs the jruby emit tree for the shim + jars — list the jruby lane
+# before rails-jruby.
+prep_rails_jruby_fixture() {
+    FIXTURE="$REPO_ROOT/build/lobsters-rails-jruby-fixture"
+    EMIT_JRUBY="$REPO_ROOT/build/transpiled-lobsters-jruby"
+    if [[ ! -f "$EMIT_JRUBY/runtime/markly_jruby.rb" ]] || ! ls "$EMIT_JRUBY/vendor/jars/"commonmark-*.jar >/dev/null 2>&1; then
+        fail "rails-jruby fixture needs the jruby emit tree (markly shim + jars): put the jruby lane before rails-jruby"
+        return 1
+    fi
+    if [[ ! -f "$FIXTURE/.source-gemfile" ]] || ! cmp -s "$SRC/Gemfile" "$FIXTURE/.source-gemfile"; then
+        step "building rails-jruby fixture at $FIXTURE"
+        rm -rf "$FIXTURE"
+        cp -R "$SRC" "$FIXTURE"
+        cp "$SRC/Gemfile" "$FIXTURE/.source-gemfile"
+        rm -f "$FIXTURE/Gemfile.lock"
+        perl -0pi -e 's/^gem "sqlite3"$/gem "sqlite3", platform: :mri\ngem "activerecord-jdbcsqlite3-adapter", "80.0.pre1", platform: :jruby/m' "$FIXTURE/Gemfile"
+        perl -0pi -e 's/^gem "markly"$/gem "markly", platform: :mri/m' "$FIXTURE/Gemfile"
+        perl -0pi -e 's/^gem "cgi"/gem "rdoc", "< 8", platform: :jruby # rdoc 8 pulls rbs (C ext, no jruby build)\ngem "ostruct", platform: :jruby # ruumba -> rubocop 0.81 needs it; not in jruby 10 stdlib\ngem "cgi"/m' "$FIXTURE/Gemfile"
+        mkdir -p "$FIXTURE/vendor/jars"
+        cp "$EMIT_JRUBY/vendor/jars/"*.jar "$FIXTURE/vendor/jars/"
+        cp "$EMIT_JRUBY/runtime/markly_jruby.rb" "$FIXTURE/vendor/markly_jruby.rb"
+        cat > "$FIXTURE/config/initializers/00_markly_jruby.rb" <<'INIT'
+# rails-jruby fixture: markly is C-ext only; under JRuby load the
+# roundhouse commonmark-java shim snapshotted into vendor/ (the same
+# markdown backend the roundhouse jruby lane uses).
+if RUBY_ENGINE == "jruby"
+  ENV["MARKLY_JRUBY_JARS"] ||= File.expand_path("../../vendor/jars", __dir__)
+  require File.expand_path("../../vendor/markly_jruby", __dir__)
+end
+INIT
+        cat > "$FIXTURE/config/initializers/01_jruby_time_workaround.rb" <<'INIT'
+# JRuby 10.1.0.0 call-site bug: Time.new(str, in: "UTC") raises
+# TypeError (no implicit conversion of Hash into Integer) on the 3rd
+# call with identical args:
+#   3.times { Time.new("2023-05-08 10:21:21", in: "UTC") }
+# Rails 8's fast_string_to_time hits it on every timestamp cast. Regex
+# fast path (the pre-Rails-8 shape) until fixed upstream; misses return
+# nil -> Rails falls back to its slow parse.
+if RUBY_ENGINE == "jruby"
+  module ActiveModel
+    module Type
+      module Helpers
+        module TimeValue
+          FAST_TS = /\A(\d{4})-(\d\d)-(\d\d)[ T](\d\d):(\d\d):(\d\d)(?:\.(\d+))?\z/
+          def fast_string_to_time(string)
+            m = FAST_TS.match(string) or return nil
+            usec = m[7] ? m[7].ljust(6, "0")[0, 6].to_i : 0
+            args = [m[1].to_i, m[2].to_i, m[3].to_i, m[4].to_i, m[5].to_i, m[6].to_i, usec]
+            is_utc? ? ::Time.utc(*args) : ::Time.local(*args)
+          end
+        end
+      end
+    end
+  end
+end
+INIT
+    else
+        cp "$SRC/db/production.sqlite3" "$FIXTURE/db/production.sqlite3"
+    fi
+    step "rails-jruby fixture: bundle install (jruby)"
+    (cd "$FIXTURE" && BUNDLE_WITHOUT=development:test jruby -S bundle install --quiet) || {
+        fail "rails-jruby fixture bundle install failed"; return 1; }
+}
+
 # ── lane mode (orchestrator) ─────────────────────────────────────────
 # One run dir, one subdir per lane, one aggregated matrix.json — the
 # layout scripts/lobsters-report renders as the consolidated page. Each
@@ -170,8 +252,8 @@ if (( ${#LANES[@]} > 0 )); then
         exit 2
     fi
     for LANE in "${LANES[@]}"; do
-        case "$LANE" in rails|rails-int|ruby|ruby-int|jruby) ;; *)
-            fail "unknown lane: $LANE (want rails rails-int ruby ruby-int jruby)"; exit 2 ;;
+        case "$LANE" in rails|rails-int|ruby|ruby-int|jruby|rails-jruby) ;; *)
+            fail "unknown lane: $LANE (want rails rails-int ruby ruby-int jruby rails-jruby)"; exit 2 ;;
         esac
     done
     [[ -d "$SRC" ]] || { fail "lobsters source not found at $SRC (clone ruby-bench or pass --src)"; exit 2; }
@@ -230,6 +312,28 @@ if (( ${#LANES[@]} > 0 )); then
                     fail "lane $LANE failed (see $LDIR/run.log)"; FAILED_LANES=$((FAILED_LANES + 1))
                 fi
                 ;;
+            rails-jruby)
+                if (( JRUBY_OK == 0 )); then
+                    fail "lane rails-jruby skipped: no jruby on PATH"; continue
+                fi
+                if ! prep_rails_jruby_fixture; then
+                    FAILED_LANES=$((FAILED_LANES + 1)); continue
+                fi
+                step "lane rails-jruby: real Rails under JRuby on the frozen sequence (long warmup; many minutes)"
+                if RUBYOPT= BUNDLE_WITHOUT=development:test \
+                        JAVA_OPTS="${BENCH_JRUBY_HEAP:--Xmx2g -Xms2g} --enable-native-access=ALL-UNNAMED ${JAVA_OPTS:-}" \
+                        jruby "$REPO_ROOT/scripts/lobsters-rails-replay" \
+                        --src "$FIXTURE" --warmup "${WARMUP:-100}" --min-iters "$TIME_ITERS" --min-time 10 \
+                        --seq-out "$LDIR/sequence.json" --json "$LDIR/rails.json" \
+                        >"$LDIR/run.log" 2>&1; then
+                    if ! diff -q "$FROZEN_SEQ" "$LDIR/sequence.json" >/dev/null; then
+                        fail "lane rails-jruby: regenerated sequence != committed frozen-sequence.json"
+                    fi
+                    ok "lane rails-jruby done"
+                else
+                    fail "lane rails-jruby failed (see $LDIR/run.log)"; FAILED_LANES=$((FAILED_LANES + 1))
+                fi
+                ;;
             jruby)
                 if (( JRUBY_OK == 0 )); then
                     fail "lane jruby skipped: no jruby on PATH"; continue
@@ -265,11 +369,12 @@ require "json"
 require "socket"
 run_dir, time_iters = ARGV
 META = {
-  "rails"     => { label: "Rails",      kind: "rails", runtime: "cruby", yjit: true,  jit: "YJIT",   src: "rails.json"   },
-  "rails-int" => { label: "Rails",      kind: "rails", runtime: "cruby", yjit: false, jit: "no JIT", src: "rails.json"   },
-  "ruby"      => { label: "Roundhouse", kind: "emit",  runtime: "cruby", yjit: true,  jit: "YJIT",   src: "summary.json" },
-  "ruby-int"  => { label: "Roundhouse", kind: "emit",  runtime: "cruby", yjit: false, jit: "no JIT", src: "summary.json" },
-  "jruby"     => { label: "Roundhouse", kind: "emit",  runtime: "jruby", yjit: nil,   jit: "JRuby",  src: "summary.json" },
+  "rails"       => { label: "Rails",      kind: "rails", runtime: "cruby", yjit: true,  jit: "YJIT",   src: "rails.json"   },
+  "rails-int"   => { label: "Rails",      kind: "rails", runtime: "cruby", yjit: false, jit: "no JIT", src: "rails.json"   },
+  "rails-jruby" => { label: "Rails",      kind: "rails", runtime: "jruby", yjit: nil,   jit: "JRuby",  src: "rails.json"   },
+  "ruby"        => { label: "Roundhouse", kind: "emit",  runtime: "cruby", yjit: true,  jit: "YJIT",   src: "summary.json" },
+  "ruby-int"    => { label: "Roundhouse", kind: "emit",  runtime: "cruby", yjit: false, jit: "no JIT", src: "summary.json" },
+  "jruby"       => { label: "Roundhouse", kind: "emit",  runtime: "jruby", yjit: nil,   jit: "JRuby",  src: "summary.json" },
 }
 rows = META.filter_map do |id, m|
   path = File.join(run_dir, id, m[:src])
@@ -286,11 +391,14 @@ rows = META.filter_map do |id, m|
     "visits" => t["visits_per_iter"], "partial" => t["partial"] }
 end
 abort "no lane produced timing data" if rows.empty?
-# Ratio = same-JIT Rails baseline / this row. The jruby row (yjit: nil)
-# compares against Rails+YJIT — Rails' best CRuby configuration.
-rails_by = rows.select { |r| r["kind"] == "rails" }.to_h { |r| [r["yjit"], r] }
+# Ratio = same-configuration Rails baseline / this row. CRuby emit rows
+# pair with Rails at the same JIT level; JVM rows pair with Rails on
+# JRuby when that lane ran (same runtime), else fall back to Rails+YJIT
+# (Rails' best CRuby configuration).
+rails_cruby = rows.select { |r| r["kind"] == "rails" && r["runtime"] == "cruby" }.to_h { |r| [r["yjit"], r] }
+rails_jvm   = rows.find { |r| r["kind"] == "rails" && r["runtime"] == "jruby" }
 rows.each do |r|
-  base = rails_by[r["yjit"].nil? ? true : r["yjit"]]
+  base = r["runtime"] == "jruby" ? (rails_jvm || rails_cruby[true]) : rails_cruby[r["yjit"]]
   r["vs_rails"] = base ? (base["ms_median"] / r["ms_median"]).round(2) : nil
 end
 matrix = {

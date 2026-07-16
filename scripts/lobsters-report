@@ -485,7 +485,7 @@ if mrows && !mrows.empty?
   mby_key = mrows.to_h { |r| [[r['kind'], r['yjit']], r] }
   # Colors keyed by lane id (matches the blog bench vocabulary); the
   # kind/yjit fallback covers matrix.json files that predate lane ids.
-  mcolor = { 'rails' => COLOR_RAILS, 'rails-int' => '#e89c93',
+  mcolor = { 'rails' => COLOR_RAILS, 'rails-int' => '#e89c93', 'rails-jruby' => '#46707f',
              'ruby' => COLOR_RH, 'ruby-int' => '#b9a3ea', 'jruby' => COLOR_JR }
   lane_color = ->(r) do
     mcolor[r['id']] ||
@@ -525,6 +525,15 @@ if mrows && !mrows.empty?
     next unless rl && em && em['ms_median'].to_f > 0
     insights << "<strong>Roundhouse</strong> is #{fmt_dec(rl['ms_median'].to_f / em['ms_median'].to_f, 2)}× faster than Rails #{yj ? 'with YJIT' : 'without a JIT'} (#{fmt_dec(rl['ms_median'], 1)} → #{fmt_dec(em['ms_median'], 1)} ms/iter)"
   end
+  rj_row = mrows.find { |r| r['id'] == 'rails-jruby' }
+  je_row = mrows.find { |r| r['id'] == 'jruby' }
+  if rj_row && je_row && je_row['ms_median'].to_f > 0
+    insights << "On the JVM, <strong>Roundhouse</strong> is #{fmt_dec(rj_row['ms_median'].to_f / je_row['ms_median'].to_f, 2)}× faster than Rails (#{fmt_dec(rj_row['ms_median'], 1)} → #{fmt_dec(je_row['ms_median'], 1)} ms/iter)"
+    rl_y = mby_key[['rails', true]]
+    if rl_y && rl_y['ms_median'].to_f > 0
+      insights << "<strong>Rails itself</strong> runs #{fmt_dec(rj_row['ms_median'].to_f / rl_y['ms_median'].to_f, 2)}× slower on JRuby than on CRuby+YJIT (#{fmt_dec(rl_y['ms_median'], 1)} → #{fmt_dec(rj_row['ms_median'], 1)} ms/iter)"
+    end
+  end
   html << "<ul>\n#{insights.map { |i| "<li>#{i}</li>" }.join("\n")}\n</ul>\n" unless insights.empty?
 
   # Per-lane iteration series (lane layout): a CV column in the table
@@ -557,9 +566,18 @@ if mrows && !mrows.empty?
     html << "</tr>\n"
   end
   html << "</tbody></table>\n"
-  jr_note = mrows.any? { |r| r['id'] == 'jruby' } ? ' The JRuby row compares against Rails +YJIT — Rails\' best CRuby configuration.' : ''
+  jr_note = if mrows.any? { |r| r['id'] == 'jruby' }
+    mrows.any? { |r| r['id'] == 'rails-jruby' } ?
+      ' The JVM rows pair with each other: Roundhouse JRuby\'s ratio is vs Rails on JRuby.' :
+      ' The JRuby row compares against Rails +YJIT — Rails\' best CRuby configuration.'
+  else
+    ''
+  end
   cv_note = cv_col ? ' CV = per-lane standard deviation ÷ mean across the timed iterations.' : ''
   html << %(<p class="legend">“vs Rails” compares each row to Rails at the same JIT level.#{jr_note}#{cv_note}</p>\n)
+  if (rjc = mrows.find { |r| r['id'] == 'rails-jruby' })
+    html << %(<p class="caveat"><code>Rails JRuby</code> is the stock-Rails-on-the-JVM baseline: the same app from a patched fixture — Rails #{esc(rjc['rails'] || '8.0.x')} (the AR-JDBC prerelease adapter pins it one minor behind the CRuby lanes), markdown through the same commonmark-java shim the Roundhouse JRuby lane uses, and a JRuby <code>Time.new</code> call-site bug worked around in an initializer.</p>\n)
+  end
 
   strips = msorted.filter_map { |r| (im = lane_iters[r['id']]) ? [r, im] : nil }
   unless strips.empty?
@@ -601,6 +619,7 @@ jr_pr = jruby_seq && jruby_seq['per_route']
 # when the primary emit lane IS ruby-int (they'd duplicate the main columns).
 rl_int_pr = prim == 'ruby' ? sibling(File.join(run_path, 'rails-int'), 'rails.json')&.dig('per_route') : nil
 rh_int_pr = prim == 'ruby' ? sibling(File.join(run_path, 'ruby-int'), 'summary.json')&.dig('sequence_timing', 'per_route') : nil
+rl_jvm_pr = lanes_mode ? sibling(File.join(run_path, 'rails-jruby'), 'rails.json')&.dig('per_route') : nil
 if rh_pr && rl_pr && !rh_pr.empty?
   shared = rh_pr.keys.select { |k| rl_pr.key?(k) }
   rh_iters = timing['iterations'].to_i
@@ -611,6 +630,7 @@ if rh_pr && rl_pr && !rh_pr.empty?
       jr: jr_pr&.dig(k, 'ms_median')&.to_f,
       rails_int: rl_int_pr&.dig(k, 'ms_median')&.to_f,
       rh_int:    rh_int_pr&.dig(k, 'ms_median')&.to_f,
+      rails_jvm: rl_jvm_pr&.dig(k, 'ms_median')&.to_f,
       ratio: rh > 0 ? rl / rh : nil,
       per_iter: rh_iters > 0 ? (rh_pr[k]['n'].to_f / rh_iters).round : nil }
   end.sort_by { |r| -r[:rails] }
@@ -618,6 +638,7 @@ if rh_pr && rl_pr && !rh_pr.empty?
   jr_col  = jr_pr && breakdown.any? { |b| b[:jr] }
   rli_col = rl_int_pr && breakdown.any? { |b| b[:rails_int] }
   rhi_col = rh_int_pr && breakdown.any? { |b| b[:rh_int] }
+  rjv_col = rl_jvm_pr && breakdown.any? { |b| b[:rails_jvm] }
   chart_note = if jr_col
     ' The chart shows each stack\'s <strong>best configuration</strong> — Rails +YJIT, Roundhouse +YJIT, Roundhouse on JRuby' \
       "#{rli_col || rhi_col ? '; the no-JIT lanes appear as extra columns in the table below' : ''}."
@@ -632,13 +653,14 @@ if rh_pr && rl_pr && !rh_pr.empty?
   html << paired_hbar(breakdown, jr: jr_col)
 
   html << "<details>\n<summary>Per-endpoint table (#{breakdown.size} endpoints)</summary>\n"
-  html << "<table>\n<thead><tr><th>endpoint</th><th>rails</th>#{rli_col ? '<th>rails no-JIT</th>' : ''}<th>roundhouse</th>#{rhi_col ? '<th>roundhouse no-JIT</th>' : ''}#{jr_col ? '<th>jruby</th>' : ''}<th>ratio</th><th>visits/iter</th></tr></thead>\n<tbody>\n"
+  html << "<table>\n<thead><tr><th>endpoint</th><th>rails</th>#{rli_col ? '<th>rails no-JIT</th>' : ''}#{rjv_col ? '<th>rails JRuby</th>' : ''}<th>roundhouse</th>#{rhi_col ? '<th>roundhouse no-JIT</th>' : ''}#{jr_col ? '<th>jruby</th>' : ''}<th>ratio</th><th>visits/iter</th></tr></thead>\n<tbody>\n"
   breakdown.each do |b|
     rcls = b[:ratio].nil? ? '' : (b[:ratio] >= 1 ? 'ok' : 'no')
     html << "<tr>"
     html << %(<td><code>#{esc(b[:key])}</code></td>)
     html << %(<td class="num">#{fmt_dec(b[:rails], 2)}</td>)
     html << %(<td class="num">#{b[:rails_int] ? fmt_dec(b[:rails_int], 2) : '—'}</td>) if rli_col
+    html << %(<td class="num">#{b[:rails_jvm] ? fmt_dec(b[:rails_jvm], 2) : '—'}</td>) if rjv_col
     html << %(<td class="num">#{fmt_dec(b[:rh], 2)}</td>)
     html << %(<td class="num">#{b[:rh_int] ? fmt_dec(b[:rh_int], 2) : '—'}</td>) if rhi_col
     html << %(<td class="num">#{b[:jr] ? fmt_dec(b[:jr], 2) : '—'}</td>) if jr_col
@@ -647,7 +669,7 @@ if rh_pr && rl_pr && !rh_pr.empty?
     html << "</tr>\n"
   end
   html << "</tbody></table>\n"
-  if jr_col || rli_col || rhi_col
+  if jr_col || rli_col || rhi_col || rjv_col
     html << %(<p class="legend">All lane columns are median ms per visit; ratio = rails ÷ roundhouse (the +YJIT pair).</p>\n)
   end
   html << "</details>\n"
