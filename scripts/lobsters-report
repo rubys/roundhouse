@@ -6,6 +6,15 @@
 # route parity, the frozen 114-visit sequence timing, and the
 # roundhouse-vs-Rails comparison — into a single static page.
 #
+# CONSOLIDATION: the nightly driver links its sibling lanes into the run
+# dir before rendering —
+#   matrix -> ../matrix/<ts>        (scripts/lobsters-matrix: matrix.json)
+#   jruby  -> ../<ts>               (bench-lobsters --jruby: summary.json)
+# When those links are present their datasets render as additional
+# sections of THIS page (runtime × JIT matrix, JRuby lane), so one URL
+# carries the whole lobsters story. Absent links just skip the sections —
+# a bare CRuby run renders exactly as before.
+#
 # Usage:
 #   scripts/lobsters-report [PATH] [OUT.html]
 #
@@ -44,6 +53,17 @@ end
 
 rails = sibling(run_path, 'rails.json')
 env   = sibling(run_path, 'env.json')
+
+# Sibling lanes linked into the run dir by the nightly driver (see header).
+# Read strictly through the in-dir links — never the shared `latest`
+# pointers — so re-rendering an archived run can't pull another night's
+# data into its page.
+matrix    = sibling(File.join(run_path, 'matrix'), 'matrix.json')
+jruby     = sibling(File.join(run_path, 'jruby'),  'summary.json')
+jruby_env = jruby && sibling(File.join(run_path, 'jruby'), 'env.json')
+
+jruby_pass = jruby && (jruby['pass'] || (jruby['routes'] || []).count { |r| r['ok'] })
+jruby_total = jruby && (jruby['total'] || (jruby['routes'] || []).size)
 
 routes   = summary['routes'] || []
 timing   = summary['sequence_timing']
@@ -97,9 +117,8 @@ COLOR_FAIL  = '#c0392b'
 # and both stacks sit within one decade. A min–max whisker rides each bar
 # so the median isn't mistaken for a point estimate.
 
-def compare_bars(rows)
+def compare_bars(rows, left_pad: 90)
   width    = 760
-  left_pad = 90
   right    = 110
   plot_w   = width - left_pad - right
   row_h    = 34
@@ -118,6 +137,9 @@ def compare_bars(rows)
     buf << r(left_pad, y, [bw, 1].max, row_h, fill: row[:color])
     buf << t(left_pad + [bw, 1].max + 8, y + row_h * 0.62,
              "#{fmt_dec(row[:median], 1)} ms", fill: '#222', weight: 'bold')
+    if row[:note]
+      buf << t(left_pad + [bw, 1].max + 8, y + row_h * 0.62 + 13, row[:note], fill: '#777', size: 10)
+    end
     # min–max whisker across the bar's vertical mid-line
     if row[:min] && row[:max]
       ymid = y + row_h / 2.0
@@ -328,6 +350,7 @@ styles = <<~CSS
   td.ok  { color: #2e7d32; font-weight: 600; }
   td.no  { color: #c0392b; font-weight: 600; }
   details summary { cursor: pointer; color: #555; padding: 0.4em 0; }
+  .legend { font-size: 0.85em; color: #666; }
   svg { display: block; margin: 0.4em auto; max-width: 100%; }
 CSS
 
@@ -349,10 +372,14 @@ html << %(<span class="badge fail">#{thin} thin</span>) if thin.to_i > 0
 if speedup
   html << %(<span class="badge speed">#{fmt_dec(speedup, 2)}× faster than Rails</span>)
 end
+if jruby_total.to_i > 0
+  html << %(<span class="badge #{jruby_pass == jruby_total ? 'pass' : 'fail'}">jruby #{jruby_pass}/#{jruby_total} routes</span>)
+end
 html << "</div>\n"
 
 # Sibling artifacts published alongside this page.
-artifacts = %w[summary.json summary.md rails.json sequence.json env.json emit.log]
+artifacts = %w[summary.json summary.md rails.json sequence.json env.json emit.log
+               matrix/matrix.json jruby/summary.json jruby/summary.md]
   .select { |f| File.exist?(File.join(run_path, f)) }
 unless artifacts.empty?
   html << %(<div class="meta">Artifacts: #{artifacts.map { |f| %(<a href="#{f}"><code>#{f}</code></a>) }.join(' · ')}</div>\n)
@@ -366,6 +393,8 @@ memnote = summary['memory'] ? 'an in-memory SQLite seeded at boot' : 'a file-bac
 html << <<~METHOD
   <div class="methodology">
     <strong>Methodology.</strong> The route table replays each distinct lobsters route once against the Roundhouse emit and records status, response bytes, and single-shot latency. #{vpi ? "The stability and comparison numbers replay a <strong>frozen #{vpi}-visit sequence</strong> (versioned at <code>bench/lobsters/frozen-sequence.json</code>) so every run — and the Rails baseline — walks the identical path." : ''} Both stacks serve from #{memnote}#{db ? " (<code>#{esc(db)}</code>)" : ''}, the shape the ruby-bench lobsters benchmark runs. Median of the timed iterations is reported.
+    #{matrix ? %(<p>The <strong>runtime × JIT matrix</strong> section re-runs the same frozen sequence once per interpreter × JIT lane — in-process, in-memory, single-threaded — so its rows differ only in the runtime under test.</p>) : ''}
+    #{jruby ? %(<p>The <strong>JRuby lane</strong> replays the JRuby-emitted app in its own run: file-backed (no in-memory backup on the JDBC adapter) and timing the full route set — its numbers trend against earlier JRuby runs, not against the in-memory sections.</p>) : ''}
     <p class="caveat">This measures one specific reference app (the ruby-bench lobsters fixture), not arbitrary Rails workloads. The Rails baseline runs the <em>real</em> Rails lobsters over the same sequence; the roundhouse cell serves the same routes from the Roundhouse-emitted framework.</p>
   </div>
 METHOD
@@ -387,6 +416,60 @@ if rails && timing
     html << %(<p><strong>#{fmt_dec(speedup, 2)}× faster than Rails</strong> — )
     html << %(#{fmt_dec(timing['ms_per_iter_median'], 1)} ms/iter vs Rails' #{fmt_dec(rails['ms_per_iter_median'], 1)} ms/iter.</p>\n)
   end
+end
+
+# ── Section: runtime × JIT matrix (from matrix/matrix.json) ──────────
+
+mrows = matrix && (matrix['rows'] || [])
+if mrows && !mrows.empty?
+  msorted = mrows.sort_by { |r| r['ms_median'].to_f }
+  mby_key = mrows.to_h { |r| [[r['kind'], r['yjit']], r] }
+  lane_color = ->(r) do
+    r['kind'] == 'rails' ? (r['yjit'] ? COLOR_RAILS : '#e89c93')
+                         : (r['yjit'] ? COLOR_RH    : '#b9a3ea')
+  end
+  lane_jit = ->(r) { r['yjit'] ? '+YJIT' : 'no JIT' }
+
+  html << "<h2>#{section_no}. Runtime × JIT matrix</h2>\n"
+  html << <<~P
+    <p>Every lane replays the same frozen sequence <strong>in-process, in-memory, single-threaded</strong> — no HTTP server, no load generator — so the only variable across rows is the interpreter × JIT under test (the <a href="https://railsatscale.com/2023-08-25-we-turned-lobsters-into-a-rails-benchmark-for-yjit/">ruby-bench lobsters-for-YJIT</a> shape). Lower is better.</p>
+  P
+  html << compare_bars(msorted.map { |r|
+    { label: "#{r['label']} #{lane_jit.(r)}", color: lane_color.(r),
+      median: r['ms_median'], min: r['ms_min'], max: r['ms_max'],
+      iters: r['iters'],
+      note: (r['vs_rails'] && r['kind'] != 'rails' ? "#{fmt_dec(r['vs_rails'], 2)}× vs Rails" : nil) }
+  }, left_pad: 160)
+
+  insights = []
+  %w[rails emit].each do |kind|
+    on, off = mby_key[[kind, true]], mby_key[[kind, false]]
+    next unless on && off && on['ms_median'].to_f > 0
+    name = kind == 'rails' ? 'Rails' : 'Roundhouse'
+    insights << "<strong>#{name}</strong> gains #{fmt_dec(off['ms_median'].to_f / on['ms_median'].to_f, 2)}× from YJIT (#{fmt_dec(off['ms_median'], 1)} → #{fmt_dec(on['ms_median'], 1)} ms/iter)"
+  end
+  [true, false].each do |yj|
+    rl, em = mby_key[['rails', yj]], mby_key[['emit', yj]]
+    next unless rl && em && em['ms_median'].to_f > 0
+    insights << "<strong>Roundhouse</strong> is #{fmt_dec(rl['ms_median'].to_f / em['ms_median'].to_f, 2)}× faster than Rails #{yj ? 'with YJIT' : 'without a JIT'} (#{fmt_dec(rl['ms_median'], 1)} → #{fmt_dec(em['ms_median'], 1)} ms/iter)"
+  end
+  html << "<ul>\n#{insights.map { |i| "<li>#{i}</li>" }.join("\n")}\n</ul>\n" unless insights.empty?
+
+  html << "<table>\n<thead><tr><th>stack</th><th>JIT</th><th>ms/iter</th><th>min–max</th><th>iters</th><th>vs Rails</th></tr></thead>\n<tbody>\n"
+  msorted.each do |r|
+    html << "<tr>"
+    html << %(<td><strong>#{esc(r['label'])}</strong></td>)
+    html << %(<td>#{lane_jit.(r)}</td>)
+    html << %(<td class="num">#{fmt_dec(r['ms_median'], 2)}</td>)
+    html << %(<td class="num">#{fmt_dec(r['ms_min'], 1)}–#{fmt_dec(r['ms_max'], 1)}</td>)
+    html << %(<td class="num">#{r['iters']}</td>)
+    html << %(<td class="num">#{r['vs_rails'] ? "#{fmt_dec(r['vs_rails'], 2)}×" : '—'}</td>)
+    html << "</tr>\n"
+  end
+  html << "</tbody></table>\n"
+  html << %(<p class="legend">“vs Rails” compares each row to Rails at the same JIT level.</p>\n)
+  prov = [matrix['generated_at'], matrix['host'] && "host <code>#{esc(matrix['host'])}</code>"].compact.join(' · ')
+  html << %(<p class="caveat">Matrix lanes measured #{prov} — one process per lane over the same emit tree. The Roundhouse&nbsp;+YJIT lane and the headline comparison above run the same workload; small differences between them are run-to-run jitter.</p>\n) unless prov.empty?
 end
 
 # ── Section: per-endpoint breakdown ──────────────────────────────────
@@ -462,6 +545,41 @@ routes.each do |c|
   html << "</tr>\n"
 end
 html << "</tbody></table>\n</details>\n"
+
+# ── Section: JRuby lane (from jruby/summary.json) ────────────────────
+
+if jruby
+  jt = jruby['sequence_timing'] || jruby['timing']
+  html << "<h2>#{section_no}. JRuby lane (#{jruby_pass}/#{jruby_total})</h2>\n"
+  metric = if jruby['sequence_timing']
+    "the frozen #{jt['visits_per_iter']}-visit sequence"
+  elsif jt
+    "the full route set (#{jt['routes_per_iter']} routes per iteration)"
+  else
+    'route parity only'
+  end
+  html << <<~P
+    <p>The same lobsters app emitted with <code>--target jruby</code> and replayed in-process under JRuby, in its own run. This lane is <strong>file-backed</strong> — the JDBC SQLite adapter has no in-memory backup — and times #{metric}, so its numbers trend against earlier JRuby runs rather than comparing with the in-memory sections above.</p>
+  P
+  facts = [['route parity', "#{jruby_pass}/#{jruby_total} routes return 200"]]
+  if jt
+    facts += [
+      ['ms/iter (median)', "#{fmt_dec(jt['ms_per_iter_median'], 1)} ms"],
+      ['min–max',          "#{fmt_dec(jt['ms_per_iter_min'], 1)}–#{fmt_dec(jt['ms_per_iter_max'], 1)} ms"],
+      ['iterations',       jt['iterations']],
+      ['warmup',           jt['warmup'] && "#{jt['warmup']} discarded iterations (JRuby's JIT warms slowly on this metric)"],
+    ]
+    facts << ['partial', 'yes — failing routes short-circuit cheaply; not comparable to a full-parity run'] if jt['partial']
+  end
+  facts << ['runtime', jruby_env&.dig('ruby') && "<code>#{esc(jruby_env['ruby'])}</code>"]
+  facts << ['java opts', jruby_env&.dig('java_opts') && "<code>#{esc(jruby_env['java_opts'])}</code>"]
+  facts << ['measured', jruby['generated_at']]
+  html << kv_table(facts)
+  jbad = (jruby['routes'] || []).reject { |r| r['ok'] }
+  unless jbad.empty?
+    html << %(<p class="caveat">Non-200 routes: #{jbad.map { |r| "<code>#{esc(r['route'])}</code> (#{r['status']})" }.join(', ')}.</p>\n)
+  end
+end
 
 # ── environment appendix ─────────────────────────────────────────────
 
