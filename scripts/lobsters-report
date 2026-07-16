@@ -103,6 +103,15 @@ def fmt_dec(n, p = 1) ; format("%.#{p}f", n.to_f) ; end
 # RUBYOPT (unlike the matrix, which pins YJIT per lane), so the page must
 # say which JIT level each measurement actually ran — nil when unknown.
 def jit_label(desc) ; desc && (desc.include?('+YJIT') ? '+YJIT' : 'no JIT') ; end
+
+# Coefficient of variation (%) across a lane's timed iterations — the
+# "is the median masking noise?" number, one per lane.
+def cv_pct(iter_ms)
+  return nil unless iter_ms && iter_ms.size > 1
+  mean = iter_ms.sum / iter_ms.size.to_f
+  return nil unless mean > 0
+  Math.sqrt(iter_ms.map { |v| (v - mean)**2 }.sum / iter_ms.size) / mean * 100
+end
 def esc(s) ; s.to_s.gsub('&', '&amp;').gsub('<', '&lt;').gsub('>', '&gt;') ; end
 
 def kv_table(rows)
@@ -138,6 +147,7 @@ end
 
 COLOR_RH    = '#7d4cdb'   # roundhouse (matches spinel/violet family in bench-report)
 COLOR_RAILS = '#cc342d'   # Rails (ruby red)
+COLOR_JR    = '#5382a1'   # JRuby (steel blue, matches bench-report's jruby)
 COLOR_OK    = '#2e7d32'
 COLOR_FAIL  = '#c0392b'
 
@@ -192,7 +202,7 @@ end
 # from zero) so run-to-run jitter is legible; the dashed line marks the
 # median. This is the "is the number stable?" chart.
 
-def iter_columns(iter_ms, median:, min:, max:)
+def iter_columns(iter_ms, median:, min:, max:, color: COLOR_RH)
   return '' if iter_ms.nil? || iter_ms.empty?
   width    = 760
   left_pad = 44
@@ -212,10 +222,10 @@ def iter_columns(iter_ms, median:, min:, max:)
 
   buf = +svg_open(width, height)
   # y ticks: min / median / max
-  [[min, '#888'], [median, COLOR_RH], [max, '#888']].each do |v, c|
+  [[min, '#888'], [median, color], [max, '#888']].each do |v, c|
     yy = top + plot_h - (v - lo) / span * plot_h
     dash = (v == median) ? '4 3' : nil
-    buf << l(left_pad, yy, width - right, yy, stroke: (v == median ? COLOR_RH : '#eee'), dash: dash)
+    buf << l(left_pad, yy, width - right, yy, stroke: (v == median ? color : '#eee'), dash: dash)
     buf << t(left_pad - 6, yy + 4, fmt_dec(v, 0), anchor: 'end', fill: c, size: 10)
   end
   iter_ms.each_with_index do |v, i|
@@ -223,7 +233,7 @@ def iter_columns(iter_ms, median:, min:, max:)
     bh = (v - lo) / span * plot_h
     bh = 1 if bh < 1
     yy = top + plot_h - bh
-    buf << r(x + (colw - bw) / 2, yy, bw, bh, fill: '#7d4cdb99')
+    buf << r(x + (colw - bw) / 2, yy, bw, bh, fill: "#{color}99")
   end
   buf << t(left_pad, top + plot_h + 16, "iteration 1", fill: '#999', size: 10)
   buf << t(width - right, top + plot_h + 16, "iteration #{iter_ms.size}", anchor: 'end', fill: '#999', size: 10)
@@ -237,12 +247,13 @@ end
 # Rails ms descending so the endpoints that dominate the sequence sit on
 # top. Log scale because endpoint latencies span 0.1–30+ ms.
 
-def paired_hbar(rows)
-  vals = rows.flat_map { |r| [r[:rails], r[:rh]] }.compact.select { |v| v > 0 }
+def paired_hbar(rows, jr: false)
+  vals = rows.flat_map { |r| [r[:rails], r[:rh], (r[:jr] if jr)] }.compact.select { |v| v > 0 }
   return '' if vals.empty?
   min_dec = [Math.log10(vals.min).floor, 0].min
   max_dec = [Math.log10(vals.max).ceil, min_dec + 1].max
 
+  nbars    = jr ? 3 : 2
   width    = 760
   left_pad = 190
   right    = 70
@@ -250,7 +261,7 @@ def paired_hbar(rows)
   barh     = 8
   inner    = 2
   gap      = 9
-  group_h  = barh * 2 + inner + gap
+  group_h  = barh * nbars + inner * (nbars - 1) + gap
   top      = 22
   bot      = 26
   height   = top + group_h * rows.size + bot
@@ -261,6 +272,10 @@ def paired_hbar(rows)
   buf << t(left_pad + 16, 15, 'rails', fill: '#333', size: 11)
   buf << r(left_pad + 70, 6, 12, 10, fill: COLOR_RH)
   buf << t(left_pad + 86, 15, 'roundhouse', fill: '#333', size: 11)
+  if jr
+    buf << r(left_pad + 170, 6, 12, 10, fill: COLOR_JR)
+    buf << t(left_pad + 186, 15, 'jruby', fill: '#333', size: 11)
+  end
 
   (min_dec..max_dec).each do |d|
     x = left_pad + (d - min_dec).to_f / (max_dec - min_dec) * plot_w
@@ -276,15 +291,19 @@ def paired_hbar(rows)
 
   rows.each_with_index do |row, i|
     y = top + i * group_h
-    buf << t(left_pad - 6, y + barh + 1, row[:key], anchor: 'end', size: 10, fill: '#333')
+    label_y = y + (barh * nbars + inner * (nbars - 1)) / 2.0 + 3
+    buf << t(left_pad - 6, label_y, row[:key], anchor: 'end', size: 10, fill: '#333')
     if row[:rails]
       buf << r(left_pad, y, scale.call(row[:rails]), barh, fill: COLOR_RAILS)
     end
     if row[:rh]
       buf << r(left_pad, y + barh + inner, scale.call(row[:rh]), barh, fill: COLOR_RH)
     end
+    if jr && row[:jr] && row[:jr] > 0
+      buf << r(left_pad, y + (barh + inner) * 2, scale.call(row[:jr]), barh, fill: COLOR_JR)
+    end
     if row[:ratio]
-      buf << t(width - right + 4, y + barh + 1, "#{fmt_dec(row[:ratio], 1)}×",
+      buf << t(width - right + 4, label_y, "#{fmt_dec(row[:ratio], 1)}×",
                fill: (row[:ratio] >= 1 ? COLOR_OK : COLOR_FAIL), size: 10, weight: 'bold')
     end
   end
@@ -434,9 +453,10 @@ html << <<~METHOD
   </div>
 METHOD
 
-# ── Section: vs Rails ────────────────────────────────────────────────
+# ── Section: vs Rails (legacy layout only — the lane layout's headline
+# lives at the top of the matrix section, since they are one dataset) ──
 
-if rails && timing
+if rails && timing && !lanes_mode
   html << "<h2>#{section_no}. Roundhouse vs Rails</h2>\n"
   html << %(<p>Milliseconds per iteration of the frozen #{vpi}-visit sequence — <strong>lower is better</strong>. The whisker spans each stack's min–max across its timed iterations.</p>\n)
   html << compare_bars([
@@ -462,7 +482,7 @@ if mrows && !mrows.empty?
   # Colors keyed by lane id (matches the blog bench vocabulary); the
   # kind/yjit fallback covers matrix.json files that predate lane ids.
   mcolor = { 'rails' => COLOR_RAILS, 'rails-int' => '#e89c93',
-             'ruby' => COLOR_RH, 'ruby-int' => '#b9a3ea', 'jruby' => '#5382a1' }
+             'ruby' => COLOR_RH, 'ruby-int' => '#b9a3ea', 'jruby' => COLOR_JR }
   lane_color = ->(r) do
     mcolor[r['id']] ||
       (r['kind'] == 'rails' ? (r['yjit'] ? COLOR_RAILS : '#e89c93')
@@ -470,9 +490,17 @@ if mrows && !mrows.empty?
   end
   lane_jit = ->(r) { r['jit'] || (r['yjit'] ? '+YJIT' : 'no JIT') }
 
-  html << "<h2>#{section_no}. Runtime × JIT matrix</h2>\n"
+  # In the lane layout this section IS the headline — the vs-Rails number
+  # is the same-JIT pair of these rows, so it opens the section rather
+  # than duplicating as a chart of its own.
+  if lanes_mode && speedup
+    html << "<h2>#{section_no}. Roundhouse vs Rails — runtime × JIT</h2>\n"
+    html << %(<p><strong>#{fmt_dec(speedup, 2)}× faster than Rails</strong> — #{fmt_dec(timing['ms_per_iter_median'], 1)} ms/iter vs Rails' #{fmt_dec(rails['ms_per_iter_median'], 1)}, both stacks CRuby with YJIT. The full field:</p>\n)
+  else
+    html << "<h2>#{section_no}. Runtime × JIT matrix</h2>\n"
+  end
   html << <<~P
-    <p>Every lane replays the same frozen sequence <strong>in-process, in-memory, single-threaded</strong> — no HTTP server, no load generator — so the only variable across rows is the interpreter × JIT under test (the <a href="https://railsatscale.com/2023-08-25-we-turned-lobsters-into-a-rails-benchmark-for-yjit/">ruby-bench lobsters-for-YJIT</a> shape). Lower is better.</p>
+    <p>Every lane replays the same frozen sequence <strong>in-process, in-memory, single-threaded</strong> — no HTTP server, no load generator — so the only variable across rows is the interpreter × JIT under test (the <a href="https://railsatscale.com/2023-08-25-we-turned-lobsters-into-a-rails-benchmark-for-yjit/">ruby-bench lobsters-for-YJIT</a> shape). Lower is better; whiskers span each lane's min–max.</p>
   P
   html << compare_bars(msorted.map { |r|
     { label: "#{r['label']} #{lane_jit.(r)}", color: lane_color.(r),
@@ -495,24 +523,55 @@ if mrows && !mrows.empty?
   end
   html << "<ul>\n#{insights.map { |i| "<li>#{i}</li>" }.join("\n")}\n</ul>\n" unless insights.empty?
 
-  html << "<table>\n<thead><tr><th>stack</th><th>JIT</th><th>ms/iter</th><th>min–max</th><th>iters</th><th>vs Rails</th></tr></thead>\n<tbody>\n"
+  # Per-lane iteration series (lane layout): a CV column in the table
+  # and collapsible stability strips — the old standalone stability
+  # section, folded in so it scales with the lane count.
+  lane_iters = {}
+  if lanes_mode
+    mrows.each do |r|
+      data = sibling(File.join(run_path, r['id']), r['kind'] == 'rails' ? 'rails.json' : 'summary.json')
+      t = r['kind'] == 'rails' ? data : data && data['sequence_timing']
+      im = t && t['iter_ms']
+      lane_iters[r['id']] = im if im && im.size > 1
+    end
+  end
+  cv_col = !lane_iters.empty?
+
+  html << "<table>\n<thead><tr><th>stack</th><th>JIT</th><th>ms/iter</th><th>min–max</th>#{cv_col ? '<th>CV</th>' : ''}<th>iters</th><th>vs Rails</th></tr></thead>\n<tbody>\n"
   msorted.each do |r|
     html << "<tr>"
     html << %(<td><strong>#{esc(r['label'])}</strong></td>)
     html << %(<td>#{lane_jit.(r)}</td>)
     html << %(<td class="num">#{fmt_dec(r['ms_median'], 2)}</td>)
     html << %(<td class="num">#{fmt_dec(r['ms_min'], 1)}–#{fmt_dec(r['ms_max'], 1)}</td>)
+    if cv_col
+      cv = cv_pct(lane_iters[r['id']])
+      html << %(<td class="num">#{cv ? "#{fmt_dec(cv, 1)}%" : '—'}</td>)
+    end
     html << %(<td class="num">#{r['iters']}</td>)
     html << %(<td class="num">#{r['vs_rails'] ? "#{fmt_dec(r['vs_rails'], 2)}×" : '—'}</td>)
     html << "</tr>\n"
   end
   html << "</tbody></table>\n"
   jr_note = mrows.any? { |r| r['id'] == 'jruby' } ? ' The JRuby row compares against Rails +YJIT — Rails\' best CRuby configuration.' : ''
-  html << %(<p class="legend">“vs Rails” compares each row to Rails at the same JIT level.#{jr_note}</p>\n)
+  cv_note = cv_col ? ' CV = per-lane standard deviation ÷ mean across the timed iterations.' : ''
+  html << %(<p class="legend">“vs Rails” compares each row to Rails at the same JIT level.#{jr_note}#{cv_note}</p>\n)
+
+  strips = msorted.filter_map { |r| (im = lane_iters[r['id']]) ? [r, im] : nil }
+  unless strips.empty?
+    html << "<details>\n<summary>Per-lane iteration stability (#{strips.size} lanes)</summary>\n"
+    strips.each do |r, im|
+      html << "<h3>#{esc(r['label'])} #{lane_jit.(r)} — #{fmt_dec(r['ms_median'], 1)} ms/iter median over #{im.size} iterations (#{r['warmup']} warmup)</h3>\n"
+      html << iter_columns(im, median: r['ms_median'], min: r['ms_min'], max: r['ms_max'],
+                           color: lane_color.(r))
+    end
+    html << %(<p class="legend">Each column is one timed iteration, scaled within a tight band around the lane's spread; the dashed line is the median.</p>\n)
+    html << "</details>\n"
+  end
+
   prov = [matrix['generated_at'], matrix['host'] && "host <code>#{esc(matrix['host'])}</code>"].compact.join(' · ')
   if lanes_mode
-    head_note = speedup ? ' The headline comparison above IS this table\'s same-JIT pair — one measurement, two views.' : ''
-    html << %(<p class="caveat">Lanes measured #{prov} — one process per lane, JIT pinned per lane.#{head_note}</p>\n) unless prov.empty?
+    html << %(<p class="caveat">Lanes measured #{prov} — one process per lane, JIT pinned per lane.</p>\n) unless prov.empty?
   else
     # Legacy layout: the headline was a SEPARATE run inheriting ambient
     # RUBYOPT — tie it to its same-JIT matrix row; the cross-JIT gap is
@@ -545,15 +604,15 @@ if rh_pr && rl_pr && !rh_pr.empty?
       per_iter: rh_iters > 0 ? (rh_pr[k]['n'].to_f / rh_iters).round : nil }
   end.sort_by { |r| -r[:rails] }
 
+  jr_col = jr_pr && breakdown.any? { |b| b[:jr] }
   html << "<h2>#{section_no}. Per-endpoint breakdown</h2>\n"
   html << <<~P
-    <p>Where the overall #{speedup ? "#{fmt_dec(speedup, 2)}× " : ''}win comes from — each endpoint's median latency over every timed visit of the frozen sequence, Rails vs roundhouse. Bars are log-scaled; the <strong>ratio</strong> at the right is Rails ÷ roundhouse (green = roundhouse faster).</p>
+    <p>Where the overall #{speedup ? "#{fmt_dec(speedup, 2)}× " : ''}win comes from — each endpoint's median latency over every timed visit of the frozen sequence#{jr_col ? ', per lane' : ', Rails vs roundhouse'}. Bars are log-scaled; the <strong>ratio</strong> at the right is Rails ÷ roundhouse#{jr_col ? ' (CRuby, same JIT)' : ''} (green = roundhouse faster).</p>
     <p class="caveat">A diagnostic breakdown, not a re-derivation: per-endpoint medians don't sum to the sequence median (GC and ordering don't decompose linearly), and the sub-millisecond rows sit near clock resolution — trust the ranking, not the third decimal.</p>
   P
-  html << paired_hbar(breakdown)
+  html << paired_hbar(breakdown, jr: jr_col)
 
   html << "<details>\n<summary>Per-endpoint table (#{breakdown.size} endpoints)</summary>\n"
-  jr_col = jr_pr && breakdown.any? { |b| b[:jr] }
   html << "<table>\n<thead><tr><th>endpoint</th><th>rails ms</th><th>roundhouse ms</th>#{jr_col ? '<th>jruby ms</th>' : ''}<th>ratio</th><th>visits/iter</th></tr></thead>\n<tbody>\n"
   breakdown.each do |b|
     rcls = b[:ratio].nil? ? '' : (b[:ratio] >= 1 ? 'ok' : 'no')
@@ -571,9 +630,10 @@ if rh_pr && rl_pr && !rh_pr.empty?
   html << "</details>\n"
 end
 
-# ── Section: frozen-sequence stability ───────────────────────────────
+# ── Section: frozen-sequence stability (legacy layout only — the lane
+# layout folds this into the matrix section's CV column + strips) ──────
 
-if timing && timing['iter_ms']
+if timing && timing['iter_ms'] && !lanes_mode
   n = timing['iter_ms'].size
   html << "<h2>#{section_no}. Frozen-sequence stability</h2>\n"
   caption = "#{fmt_dec(timing['ms_per_iter_median'], 1)} ms/iter median over #{n} iterations " \
