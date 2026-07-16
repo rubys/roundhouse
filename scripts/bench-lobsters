@@ -1,14 +1,32 @@
 #!/usr/bin/env bash
-# scripts/bench-lobsters — emit lobsters and replay the benchmark route set.
+# scripts/bench-lobsters — the lobsters benchmark orchestrator.
 #
-# The lobsters lane of the nightly bench: where scripts/bench measures
-# blog throughput, this script measures how much of the ruby-bench
-# lobsters benchmark the roundhouse emit can serve. Until every route
-# returns 200 the headline metric IS the parity count (16/26, 17/26, …);
-# once parity lands, --time N adds a ms/iter trend line, and the full
-# frozen-sequence comparison vs Rails takes over (P6).
+# The lobsters counterpart of scripts/bench: where that measures blog
+# throughput per target, this measures the ruby-bench lobsters benchmark
+# (frozen 114-visit sequence, in-memory, in-process, single-threaded)
+# across runtime × JIT lanes, plus route parity per emit lane.
 #
-# Usage:  scripts/bench-lobsters [options]
+# Usage:  scripts/bench-lobsters [options] [LANE...]
+#
+#   LANE            lane list — the nightly form. One run dir, one subdir
+#                   per lane, one aggregated matrix.json (what
+#                   scripts/lobsters-report renders). Lane vocabulary
+#                   matches scripts/bench:
+#                     rails      real Rails, YJIT        [needs the bundle]
+#                     rails-int  real Rails, no JIT      [needs the bundle]
+#                     ruby       roundhouse emit, YJIT
+#                     ruby-int   roundhouse emit, no JIT
+#                     jruby      roundhouse emit, JRuby/JVM
+#                   Rails lanes are skipped (loudly) when the checkout's
+#                   bundle isn't installable; the jruby lane when jruby
+#                   isn't on PATH. JIT is pinned per lane via RUBYOPT —
+#                   the ambient environment can't leak in. Example:
+#                     scripts/bench-lobsters rails rails-int ruby ruby-int jruby --time 20
+#
+#   With no LANE args this is the single-lane worker (the dev loop and
+#   the lane mode's own building block): emit + file-backed parity replay
+#   by default, plus the flags below. Until every route returns 200 the
+#   headline metric IS the parity count; --time N adds a ms/iter trend.
 #
 #   --src DIR       lobsters source checkout
 #                   (default $LOBSTERS_SRC, else ~/git/ruby-bench/benchmarks/lobsters)
@@ -84,6 +102,7 @@ FROZEN=0
 RUNTIME=cruby
 WARMUP=""              # timed-run warmup iters; default derived per runtime below
 WARMUP_EXPLICIT=0      # explicit --warmup also overrides the sequence path's 15
+LANES=()               # positional lane args -> orchestrator mode
 # OUT_TREE, RUBY_BIN, EMIT_TARGET, GEMS are resolved from RUNTIME after parse.
 # Snapshot before the parse loop shifts everything away — the
 # provenance step reads this (a bare `$*` there always recorded an
@@ -103,13 +122,212 @@ while [[ $# -gt 0 ]]; do
         --warmup)    WARMUP="$2"; WARMUP_EXPLICIT=1; shift 2 ;;
         --out)       OUT_DIR="$2"; EXPLICIT_OUT=1; shift 2 ;;
         -h|--help)   sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
-        *)           echo "unknown flag: $1" >&2; exit 2 ;;
+        -*)          echo "unknown flag: $1" >&2; exit 2 ;;
+        *)           LANES+=("$1"); shift ;;
     esac
 done
 
 step() { printf '\033[36m→\033[0m %s\n' "$*"; }
 ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
 fail() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; }
+
+# Route-parity trend vs a previous run: pass-count delta, regressed/fixed
+# routes, changed failure signatures. PARITY REGRESSION lines print loudly
+# so a `>> bench.log` cron capture stays greppable.
+compare_parity() {  # PREV_NAME PREV_JSON CUR_JSON
+    ruby -rjson -e '
+      prev_name, prev_path, cur_path = ARGV
+      prev = JSON.parse(File.read(prev_path))
+      cur  = JSON.parse(File.read(cur_path))
+      by_route = ->(s) { (s["routes"] || []).to_h { |r| [r["route"], r] } }
+      p_routes, c_routes = by_route.(prev), by_route.(cur)
+      puts "vs #{prev_name}: #{prev["pass"]}/#{prev["total"]} -> #{cur["pass"]}/#{cur["total"]}"
+      c_routes.each do |route, c|
+        p = p_routes[route] or next
+        if p["ok"] && !c["ok"]
+          puts "  PARITY REGRESSION: #{route} #{p["status"]} -> #{c["status"]}"
+        elsif !p["ok"] && c["ok"]
+          puts "  fixed: #{route} #{p["status"]} -> 200"
+        elsif !c["ok"]
+          pe = p["error"].to_s.lines.first.to_s.strip
+          ce = c["error"].to_s.lines.first.to_s.strip
+          puts "  signature changed: #{route}\n    was: #{pe}\n    now: #{ce}" if pe != ce
+        end
+      end
+    ' "$1" "$2" "$3" || true
+}
+
+# ── lane mode (orchestrator) ─────────────────────────────────────────
+# One run dir, one subdir per lane, one aggregated matrix.json — the
+# layout scripts/lobsters-report renders as the consolidated page. Each
+# lane re-invokes this script (or lobsters-rails-replay for the Rails
+# lanes) with JIT pinned via RUBYOPT, methodology fixed to the in-memory
+# frozen sequence, and output routed to the lane subdir. A lane that
+# fails is dropped with a note; the run aggregates whatever succeeded.
+if (( ${#LANES[@]} > 0 )); then
+    if (( MEMORY == 1 || VS_RAILS == 1 || FROZEN == 1 )) || [[ "$RUNTIME" != cruby ]]; then
+        fail "lane mode fixes the methodology (in-memory frozen sequence per lane); drop --memory/--vs-rails/--frozen/--runtime/--jruby"
+        exit 2
+    fi
+    for LANE in "${LANES[@]}"; do
+        case "$LANE" in rails|rails-int|ruby|ruby-int|jruby) ;; *)
+            fail "unknown lane: $LANE (want rails rails-int ruby ruby-int jruby)"; exit 2 ;;
+        esac
+    done
+    [[ -d "$SRC" ]] || { fail "lobsters source not found at $SRC (clone ruby-bench or pass --src)"; exit 2; }
+    FROZEN_SEQ="$REPO_ROOT/bench/lobsters/frozen-sequence.json"
+    [[ -f "$FROZEN_SEQ" ]] || { fail "no committed frozen sequence at $FROZEN_SEQ"; exit 2; }
+    (( TIME_ITERS > 0 )) || TIME_ITERS=10
+
+    RUN_TS="$(date +%Y%m%d-%H%M%S)"
+    RUN_DIR="${OUT_DIR:-$REPO_ROOT/bench/results/lobsters/$RUN_TS}"
+    mkdir -p "$RUN_DIR"
+
+    RAILS_OK=0
+    (cd "$SRC" && bundle check >/dev/null 2>&1) && RAILS_OK=1
+    JRUBY_OK=0
+    command -v jruby >/dev/null 2>&1 && JRUBY_OK=1
+
+    EMITTED_CRUBY=$SKIP_EMIT
+    EMITTED_JRUBY=$SKIP_EMIT
+    FAILED_LANES=0
+
+    for LANE in "${LANES[@]}"; do
+        LDIR="$RUN_DIR/$LANE"
+        mkdir -p "$LDIR"
+        case "$LANE" in
+            rails|rails-int)
+                if (( RAILS_OK == 0 )); then
+                    fail "lane $LANE skipped: bundle not installable in $SRC"; continue
+                fi
+                RO=--yjit; JIT_LABEL=YJIT
+                [[ "$LANE" == rails-int ]] && { RO=; JIT_LABEL="no JIT"; }
+                step "lane $LANE: real Rails on the frozen sequence ($JIT_LABEL; boots Rails, minutes)"
+                if RUBYOPT="$RO" ruby "$REPO_ROOT/scripts/lobsters-rails-replay" \
+                        --src "$SRC" --warmup 15 --min-iters "$TIME_ITERS" --min-time 10 \
+                        --seq-out "$LDIR/sequence.json" --json "$LDIR/rails.json" \
+                        >"$LDIR/run.log" 2>&1; then
+                    # The rails lane regenerates the sequence; a mismatch with
+                    # the committed one means the ruby-bench DB or generator
+                    # changed — rows are NOT comparable across that boundary.
+                    if ! diff -q "$FROZEN_SEQ" "$LDIR/sequence.json" >/dev/null; then
+                        fail "lane $LANE: regenerated sequence != committed frozen-sequence.json"
+                    fi
+                    ok "lane $LANE done"
+                else
+                    fail "lane $LANE failed (see $LDIR/run.log)"; FAILED_LANES=$((FAILED_LANES + 1))
+                fi
+                ;;
+            ruby|ruby-int)
+                RO=--yjit; JIT_LABEL=YJIT
+                [[ "$LANE" == ruby-int ]] && { RO=; JIT_LABEL="no JIT"; }
+                CMD=("$0" --frozen --time "$TIME_ITERS" --src "$SRC" --out "$LDIR")
+                (( EMITTED_CRUBY == 1 )) && CMD+=(--skip-emit)
+                step "lane $LANE: emit replay on the frozen sequence ($JIT_LABEL)"
+                if RUBYOPT="$RO" "${CMD[@]}" >"$LDIR/run.log" 2>&1; then
+                    EMITTED_CRUBY=1; ok "lane $LANE done"
+                else
+                    fail "lane $LANE failed (see $LDIR/run.log)"; FAILED_LANES=$((FAILED_LANES + 1))
+                fi
+                ;;
+            jruby)
+                if (( JRUBY_OK == 0 )); then
+                    fail "lane jruby skipped: no jruby on PATH"; continue
+                fi
+                # JRuby's JIT warms slowly; an unset --warmup gets a bigger
+                # default than the CRuby lanes' canonical sequence warmup.
+                CMD=("$0" --jruby --frozen --time "$TIME_ITERS" --warmup "${WARMUP:-100}" --src "$SRC" --out "$LDIR")
+                (( EMITTED_JRUBY == 1 )) && CMD+=(--skip-emit)
+                step "lane jruby: emit replay on the frozen sequence (JRuby/JVM, long warmup)"
+                if RUBYOPT= "${CMD[@]}" >"$LDIR/run.log" 2>&1; then
+                    EMITTED_JRUBY=1; ok "lane jruby done"
+                else
+                    fail "lane jruby failed (see $LDIR/run.log)"; FAILED_LANES=$((FAILED_LANES + 1))
+                fi
+                ;;
+        esac
+    done
+
+    # Top-level provenance: the ORIGINAL invocation (lane env.json files
+    # carry each lane's interpreter; this carries the orchestration).
+    ruby -rjson -rsocket -e 'puts JSON.pretty_generate({
+      generated_at: Time.now.utc.strftime("%FT%TZ"),
+      command: "scripts/bench-lobsters #{ARGV[0]}".strip,
+      src: ARGV[1], host: Socket.gethostname,
+      roundhouse_commit: `git -C #{ARGV[2]} rev-parse HEAD`.strip,
+    })' "$ORIG_ARGS" "$SRC" "$REPO_ROOT" > "$RUN_DIR/env.json" || true
+
+    # Aggregate lane artifacts into matrix.json (one row per lane) and
+    # print the console table. Row fields feed scripts/lobsters-report.
+    step "aggregating matrix.json"
+    ruby - "$RUN_DIR" "$TIME_ITERS" <<'AGG' || FAILED_LANES=$((FAILED_LANES + 1))
+require "json"
+require "socket"
+run_dir, time_iters = ARGV
+META = {
+  "rails"     => { label: "Rails",      kind: "rails", runtime: "cruby", yjit: true,  jit: "YJIT",   src: "rails.json"   },
+  "rails-int" => { label: "Rails",      kind: "rails", runtime: "cruby", yjit: false, jit: "no JIT", src: "rails.json"   },
+  "ruby"      => { label: "Roundhouse", kind: "emit",  runtime: "cruby", yjit: true,  jit: "YJIT",   src: "summary.json" },
+  "ruby-int"  => { label: "Roundhouse", kind: "emit",  runtime: "cruby", yjit: false, jit: "no JIT", src: "summary.json" },
+  "jruby"     => { label: "Roundhouse", kind: "emit",  runtime: "jruby", yjit: nil,   jit: "JRuby",  src: "summary.json" },
+}
+rows = META.filter_map do |id, m|
+  path = File.join(run_dir, id, m[:src])
+  next unless File.exist?(path)
+  data = JSON.parse(File.read(path)) rescue next
+  t = m[:src] == "rails.json" ? data : data["sequence_timing"]
+  next unless t && t["ms_per_iter_median"]
+  env = (JSON.parse(File.read(File.join(run_dir, id, "env.json"))) rescue {})
+  { "id" => id, "label" => m[:label], "kind" => m[:kind], "runtime" => m[:runtime],
+    "yjit" => m[:yjit], "jit" => m[:jit],
+    "ms_median" => t["ms_per_iter_median"], "ms_min" => t["ms_per_iter_min"],
+    "ms_max" => t["ms_per_iter_max"], "iters" => t["iterations"], "warmup" => t["warmup"],
+    "ruby" => data["ruby"] || env["ruby"], "rails" => data["rails"],
+    "visits" => t["visits_per_iter"], "partial" => t["partial"] }
+end
+abort "no lane produced timing data" if rows.empty?
+# Ratio = same-JIT Rails baseline / this row. The jruby row (yjit: nil)
+# compares against Rails+YJIT — Rails' best CRuby configuration.
+rails_by = rows.select { |r| r["kind"] == "rails" }.to_h { |r| [r["yjit"], r] }
+rows.each do |r|
+  base = rails_by[r["yjit"].nil? ? true : r["yjit"]]
+  r["vs_rails"] = base ? (base["ms_median"] / r["ms_median"]).round(2) : nil
+end
+matrix = {
+  "generated_at" => Time.now.utc.strftime("%FT%TZ"),
+  "host"         => Socket.gethostname,
+  "workload"     => "frozen #{rows.filter_map { |r| r["visits"] }.first || 114}-visit sequence, in-memory, in-process, single-threaded",
+  "time"         => Integer(time_iters),
+  "rows"         => rows,
+}
+File.write(File.join(run_dir, "matrix.json"), JSON.pretty_generate(matrix))
+puts "\n== lobsters lanes (#{rows.size}, ms/iter, lower=better) =="
+rows.sort_by { |r| r["ms_median"] }.each do |r|
+  printf "  %-11s %-7s %9.2f ms/iter  %s\n", r["label"], r["jit"], r["ms_median"],
+         (r["vs_rails"] ? "#{r["vs_rails"]}x vs Rails" : "")
+end
+AGG
+
+    # Per-lane parity trend vs the previous run (resolve BEFORE repointing
+    # latest). Older layouts kept the cruby summary at the run root — the
+    # ruby lane falls back to it so the trend survives the layout change.
+    LATEST_LINK="$REPO_ROOT/bench/results/lobsters/latest"
+    if [[ -e "$LATEST_LINK" ]]; then
+        PREV_NAME="$(readlink "$LATEST_LINK" 2>/dev/null || echo previous)"
+        for LANE in ruby ruby-int jruby; do
+            CUR="$RUN_DIR/$LANE/summary.json"
+            [[ -f "$CUR" ]] || continue
+            PREV="$LATEST_LINK/$LANE/summary.json"
+            if [[ ! -f "$PREV" && "$LANE" == ruby ]]; then PREV="$LATEST_LINK/summary.json"; fi
+            [[ -f "$PREV" ]] || continue
+            compare_parity "$PREV_NAME ($LANE)" "$PREV" "$CUR"
+        done
+    fi
+    (( EXPLICIT_OUT == 0 )) && ln -sfn "$(basename "$RUN_DIR")" "$LATEST_LINK"
+
+    ok "lane run complete: $RUN_DIR ($FAILED_LANES failed lane(s))"
+    exit "$FAILED_LANES"
+fi
 
 # ── runtime resolution ───────────────────────────────────────────────
 # The lobsters lane runs the SAME emitted app + replay driver under
@@ -297,28 +515,16 @@ status=0
 # `latest` symlink at a run buried under a caller's dir would break it.
 LATEST_NAME="latest"; [[ "$RUNTIME" != cruby ]] && LATEST_NAME="latest-$RUNTIME"
 PREV_LINK="$REPO_ROOT/bench/results/lobsters/$LATEST_NAME"
-if (( EXPLICIT_OUT == 0 )) && [[ -f "$PREV_LINK/summary.json" && -f "$OUT_DIR/summary.json" ]]; then
+if (( EXPLICIT_OUT == 0 )) && [[ -f "$OUT_DIR/summary.json" ]]; then
     PREV_NAME="$(readlink "$PREV_LINK" 2>/dev/null || echo previous)"
-    ruby -rjson -e '
-      prev_name, prev_path, cur_path = ARGV
-      prev = JSON.parse(File.read(prev_path))
-      cur  = JSON.parse(File.read(cur_path))
-      by_route = ->(s) { (s["routes"] || []).to_h { |r| [r["route"], r] } }
-      p_routes, c_routes = by_route.(prev), by_route.(cur)
-      puts "vs #{prev_name}: #{prev["pass"]}/#{prev["total"]} -> #{cur["pass"]}/#{cur["total"]}"
-      c_routes.each do |route, c|
-        p = p_routes[route] or next
-        if p["ok"] && !c["ok"]
-          puts "  PARITY REGRESSION: #{route} #{p["status"]} -> #{c["status"]}"
-        elsif !p["ok"] && c["ok"]
-          puts "  fixed: #{route} #{p["status"]} -> 200"
-        elsif !c["ok"]
-          pe = p["error"].to_s.lines.first.to_s.strip
-          ce = c["error"].to_s.lines.first.to_s.strip
-          puts "  signature changed: #{route}\n    was: #{pe}\n    now: #{ce}" if pe != ce
-        end
-      end
-    ' "$PREV_NAME" "$PREV_LINK/summary.json" "$OUT_DIR/summary.json" || true
+    PREV_SUM="$PREV_LINK/summary.json"
+    # `latest` may point at a lane-layout run (no root summary); compare
+    # against its matching emit lane instead.
+    if [[ ! -f "$PREV_SUM" ]]; then
+        PREV_SUM="$PREV_LINK/ruby/summary.json"
+        [[ "$RUNTIME" == jruby ]] && PREV_SUM="$PREV_LINK/jruby/summary.json"
+    fi
+    [[ -f "$PREV_SUM" ]] && compare_parity "$PREV_NAME" "$PREV_SUM" "$OUT_DIR/summary.json"
 fi
 
 # ── roundhouse vs Rails ──────────────────────────────────────────────

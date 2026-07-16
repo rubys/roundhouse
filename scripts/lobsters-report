@@ -6,14 +6,13 @@
 # route parity, the frozen 114-visit sequence timing, and the
 # roundhouse-vs-Rails comparison — into a single static page.
 #
-# CONSOLIDATION: the nightly driver links its sibling lanes into the run
-# dir before rendering —
-#   matrix -> ../matrix/<ts>        (scripts/lobsters-matrix: matrix.json)
-#   jruby  -> ../<ts>               (bench-lobsters --jruby: summary.json)
-# When those links are present their datasets render as additional
-# sections of THIS page (runtime × JIT matrix, JRuby lane), so one URL
-# carries the whole lobsters story. Absent links just skip the sections —
-# a bare CRuby run renders exactly as before.
+# CONSOLIDATION: the primary input is the LANE layout that
+# `bench-lobsters LANES…` writes — matrix.json at the run root plus one
+# subdir per lane (rails/rails-int/ruby/ruby-int/jruby) — rendered as one
+# sectioned page: headline, runtime × JIT matrix, per-endpoint breakdown,
+# stability, per-lane route parity. The pre-orchestrator LEGACY layout
+# (summary.json at the root, optional matrix/ + jruby/ symlinks) still
+# renders so archived runs and single-lane dev runs re-render unchanged.
 #
 # Usage:
 #   scripts/lobsters-report [PATH] [OUT.html]
@@ -35,15 +34,10 @@ require 'time'
 arg = ARGV[0] || File.join(__dir__, '..', 'bench', 'results', 'lobsters', 'latest')
 arg = File.expand_path(arg)
 run_path = File.directory?(arg) ? arg : File.dirname(arg)
-input    = File.directory?(arg) ? File.join(arg, 'summary.json') : arg
-File.exist?(input) or abort "no summary.json at #{input}"
 out = ARGV[1] || File.join(run_path, 'index.html')
 
-summary = JSON.parse(File.read(input))
-
-# Siblings written alongside summary.json by scripts/bench-lobsters. All
-# optional — the comparison and stability sections only render when their
-# data is present.
+# Optional sidecar files. The comparison/matrix/jruby sections only
+# render when their data is present.
 def sibling(dir, name)
   path = File.join(dir, name)
   File.exist?(path) ? JSON.parse(File.read(path)) : nil
@@ -51,19 +45,50 @@ rescue JSON::ParserError
   nil
 end
 
-rails = sibling(run_path, 'rails.json')
-env   = sibling(run_path, 'env.json')
-
-# Sibling lanes linked into the run dir by the nightly driver (see header).
-# Read strictly through the in-dir links — never the shared `latest`
-# pointers — so re-rendering an archived run can't pull another night's
-# data into its page.
-matrix    = sibling(File.join(run_path, 'matrix'), 'matrix.json')
-jruby     = sibling(File.join(run_path, 'jruby'),  'summary.json')
-jruby_env = jruby && sibling(File.join(run_path, 'jruby'), 'env.json')
+# Two layouts render through this one page:
+#  - LANE layout (bench-lobsters LANES…): matrix.json at the run root and
+#    one subdir per lane; the `ruby` lane is the canonical emit.
+#  - LEGACY layout: summary.json at the run root plus optional matrix/
+#    and jruby/ links (the pre-orchestrator nightly) — kept so archived
+#    runs re-render unchanged.
+lanes_mode = File.exist?(File.join(run_path, 'matrix.json'))
+if lanes_mode
+  matrix = sibling(run_path, 'matrix.json') or abort "unparseable matrix.json in #{run_path}"
+  prim   = %w[ruby ruby-int].find { |id| File.exist?(File.join(run_path, id, 'summary.json')) }
+  prim or abort "lane layout but no ruby lane summary under #{run_path}"
+  input   = File.join(run_path, prim, 'summary.json')
+  summary = JSON.parse(File.read(input))
+  # Rails baseline at the SAME JIT level as the primary emit lane.
+  rails = sibling(File.join(run_path, prim == 'ruby' ? 'rails' : 'rails-int'), 'rails.json')
+  # Lane env carries the interpreter (the headline's JIT label); the
+  # run-root env carries the orchestration command — merge, root wins.
+  env = (sibling(File.join(run_path, prim), 'env.json') || {}).merge(sibling(run_path, 'env.json') || {})
+  env = nil if env.empty?
+  jruby     = sibling(File.join(run_path, 'jruby'), 'summary.json')
+  jruby_env = jruby && sibling(File.join(run_path, 'jruby'), 'env.json')
+else
+  input = File.directory?(arg) ? File.join(arg, 'summary.json') : arg
+  File.exist?(input) or abort "no summary.json at #{input}"
+  summary = JSON.parse(File.read(input))
+  rails = sibling(run_path, 'rails.json')
+  env   = sibling(run_path, 'env.json')
+  # Sibling lanes linked into the run dir by the pre-orchestrator nightly.
+  # Read strictly through the in-dir links — never the shared `latest`
+  # pointers — so re-rendering an archived run can't pull another night's
+  # data into its page.
+  matrix    = sibling(File.join(run_path, 'matrix'), 'matrix.json')
+  jruby     = sibling(File.join(run_path, 'jruby'),  'summary.json')
+  jruby_env = jruby && sibling(File.join(run_path, 'jruby'), 'env.json')
+end
 
 jruby_pass = jruby && (jruby['pass'] || (jruby['routes'] || []).count { |r| r['ok'] })
 jruby_total = jruby && (jruby['total'] || (jruby['routes'] || []).size)
+# In the lane layout the jruby lane runs the SAME in-memory frozen
+# sequence as everyone else — it lives in the matrix, the per-endpoint
+# table, and the parity table. The standalone file-backed section (and
+# its caveats) only applies to the legacy layout's separate run.
+jruby_seq = lanes_mode && jruby && jruby['sequence_timing']
+legacy_jruby = !lanes_mode && jruby
 
 routes   = summary['routes'] || []
 timing   = summary['sequence_timing']
@@ -383,9 +408,14 @@ end
 html << "</div>\n"
 
 # Sibling artifacts published alongside this page.
-artifacts = %w[summary.json summary.md rails.json sequence.json env.json emit.log
-               matrix/matrix.json jruby/summary.json jruby/summary.md]
-  .select { |f| File.exist?(File.join(run_path, f)) }
+artifact_names = if lanes_mode
+  %w[matrix.json env.json] +
+    (matrix['rows'] || []).map { |r| File.join(r['id'], r['kind'] == 'rails' ? 'rails.json' : 'summary.json') }
+else
+  %w[summary.json summary.md rails.json sequence.json env.json emit.log
+     matrix/matrix.json jruby/summary.json jruby/summary.md]
+end
+artifacts = artifact_names.select { |f| File.exist?(File.join(run_path, f)) }
 unless artifacts.empty?
   html << %(<div class="meta">Artifacts: #{artifacts.map { |f| %(<a href="#{f}"><code>#{f}</code></a>) }.join(' · ')}</div>\n)
 end
@@ -399,7 +429,7 @@ html << <<~METHOD
   <div class="methodology">
     <strong>Methodology.</strong> The route table replays each distinct lobsters route once against the Roundhouse emit and records status, response bytes, and single-shot latency. #{vpi ? "The stability and comparison numbers replay a <strong>frozen #{vpi}-visit sequence</strong> (versioned at <code>bench/lobsters/frozen-sequence.json</code>) so every run — and the Rails baseline — walks the identical path." : ''} Both stacks serve from #{memnote}#{db ? " (<code>#{esc(db)}</code>)" : ''}, the shape the ruby-bench lobsters benchmark runs. Median of the timed iterations is reported.
     #{matrix ? %(<p>The <strong>runtime × JIT matrix</strong> section re-runs the same frozen sequence once per interpreter × JIT lane — in-process, in-memory, single-threaded — so its rows differ only in the runtime under test.</p>) : ''}
-    #{jruby ? %(<p>The <strong>JRuby lane</strong> replays the JRuby-emitted app in its own run: file-backed (no in-memory backup on the JDBC adapter) and timing the full route set — its numbers trend against earlier JRuby runs, not against the in-memory sections.</p>) : ''}
+    #{legacy_jruby ? %(<p>The <strong>JRuby lane</strong> replays the JRuby-emitted app in its own run: file-backed (no in-memory backup on the JDBC adapter) and timing the full route set — its numbers trend against earlier JRuby runs, not against the in-memory sections.</p>) : ''}
     <p class="caveat">This measures one specific reference app (the ruby-bench lobsters fixture), not arbitrary Rails workloads. The Rails baseline runs the <em>real</em> Rails lobsters over the same sequence; the roundhouse cell serves the same routes from the Roundhouse-emitted framework.</p>
   </div>
 METHOD
@@ -429,11 +459,16 @@ mrows = matrix && (matrix['rows'] || [])
 if mrows && !mrows.empty?
   msorted = mrows.sort_by { |r| r['ms_median'].to_f }
   mby_key = mrows.to_h { |r| [[r['kind'], r['yjit']], r] }
+  # Colors keyed by lane id (matches the blog bench vocabulary); the
+  # kind/yjit fallback covers matrix.json files that predate lane ids.
+  mcolor = { 'rails' => COLOR_RAILS, 'rails-int' => '#e89c93',
+             'ruby' => COLOR_RH, 'ruby-int' => '#b9a3ea', 'jruby' => '#5382a1' }
   lane_color = ->(r) do
-    r['kind'] == 'rails' ? (r['yjit'] ? COLOR_RAILS : '#e89c93')
-                         : (r['yjit'] ? COLOR_RH    : '#b9a3ea')
+    mcolor[r['id']] ||
+      (r['kind'] == 'rails' ? (r['yjit'] ? COLOR_RAILS : '#e89c93')
+                            : (r['yjit'] ? COLOR_RH    : '#b9a3ea'))
   end
-  lane_jit = ->(r) { r['yjit'] ? '+YJIT' : 'no JIT' }
+  lane_jit = ->(r) { r['jit'] || (r['yjit'] ? '+YJIT' : 'no JIT') }
 
   html << "<h2>#{section_no}. Runtime × JIT matrix</h2>\n"
   html << <<~P
@@ -472,25 +507,32 @@ if mrows && !mrows.empty?
     html << "</tr>\n"
   end
   html << "</tbody></table>\n"
-  html << %(<p class="legend">“vs Rails” compares each row to Rails at the same JIT level.</p>\n)
+  jr_note = mrows.any? { |r| r['id'] == 'jruby' } ? ' The JRuby row compares against Rails +YJIT — Rails\' best CRuby configuration.' : ''
+  html << %(<p class="legend">“vs Rails” compares each row to Rails at the same JIT level.#{jr_note}</p>\n)
   prov = [matrix['generated_at'], matrix['host'] && "host <code>#{esc(matrix['host'])}</code>"].compact.join(' · ')
-  # Tie the headline lane to its SAME-JIT matrix row (the headline inherits
-  # ambient RUBYOPT, so which row that is varies by box) — only those two
-  # measure the same workload; the cross-JIT gap is real, not jitter.
-  head_note = ''
-  if speedup && env&.dig('ruby')
-    head_yjit = env['ruby'].include?('+YJIT')
-    if mby_key[['emit', head_yjit]]
-      head_note = %( The headline comparison above ran #{head_yjit ? 'with YJIT' : 'without a JIT'} on both stacks, so it corresponds to the #{head_yjit ? '+YJIT' : 'no-JIT'} rows here; small differences from those rows are run-to-run jitter.)
+  if lanes_mode
+    head_note = speedup ? ' The headline comparison above IS this table\'s same-JIT pair — one measurement, two views.' : ''
+    html << %(<p class="caveat">Lanes measured #{prov} — one process per lane, JIT pinned per lane.#{head_note}</p>\n) unless prov.empty?
+  else
+    # Legacy layout: the headline was a SEPARATE run inheriting ambient
+    # RUBYOPT — tie it to its same-JIT matrix row; the cross-JIT gap is
+    # real, not jitter.
+    head_note = ''
+    if speedup && env&.dig('ruby')
+      head_yjit = env['ruby'].include?('+YJIT')
+      if mby_key[['emit', head_yjit]]
+        head_note = %( The headline comparison above ran #{head_yjit ? 'with YJIT' : 'without a JIT'} on both stacks, so it corresponds to the #{head_yjit ? '+YJIT' : 'no-JIT'} rows here; small differences from those rows are run-to-run jitter.)
+      end
     end
+    html << %(<p class="caveat">Matrix lanes measured #{prov} — one process per lane over the same emit tree.#{head_note}</p>\n) unless prov.empty?
   end
-  html << %(<p class="caveat">Matrix lanes measured #{prov} — one process per lane over the same emit tree.#{head_note}</p>\n) unless prov.empty?
 end
 
 # ── Section: per-endpoint breakdown ──────────────────────────────────
 
 rh_pr = timing && timing['per_route']
 rl_pr = rails && rails['per_route']
+jr_pr = jruby_seq && jruby_seq['per_route']
 if rh_pr && rl_pr && !rh_pr.empty?
   shared = rh_pr.keys.select { |k| rl_pr.key?(k) }
   rh_iters = timing['iterations'].to_i
@@ -498,6 +540,7 @@ if rh_pr && rl_pr && !rh_pr.empty?
     rl = rl_pr[k]['ms_median'].to_f
     rh = rh_pr[k]['ms_median'].to_f
     { key: k, rails: rl, rh: rh,
+      jr: jr_pr&.dig(k, 'ms_median')&.to_f,
       ratio: rh > 0 ? rl / rh : nil,
       per_iter: rh_iters > 0 ? (rh_pr[k]['n'].to_f / rh_iters).round : nil }
   end.sort_by { |r| -r[:rails] }
@@ -510,18 +553,22 @@ if rh_pr && rl_pr && !rh_pr.empty?
   html << paired_hbar(breakdown)
 
   html << "<details>\n<summary>Per-endpoint table (#{breakdown.size} endpoints)</summary>\n"
-  html << "<table>\n<thead><tr><th>endpoint</th><th>rails ms</th><th>roundhouse ms</th><th>ratio</th><th>visits/iter</th></tr></thead>\n<tbody>\n"
+  jr_col = jr_pr && breakdown.any? { |b| b[:jr] }
+  html << "<table>\n<thead><tr><th>endpoint</th><th>rails ms</th><th>roundhouse ms</th>#{jr_col ? '<th>jruby ms</th>' : ''}<th>ratio</th><th>visits/iter</th></tr></thead>\n<tbody>\n"
   breakdown.each do |b|
     rcls = b[:ratio].nil? ? '' : (b[:ratio] >= 1 ? 'ok' : 'no')
     html << "<tr>"
     html << %(<td><code>#{esc(b[:key])}</code></td>)
     html << %(<td class="num">#{fmt_dec(b[:rails], 2)}</td>)
     html << %(<td class="num">#{fmt_dec(b[:rh], 2)}</td>)
+    html << %(<td class="num">#{b[:jr] ? fmt_dec(b[:jr], 2) : '—'}</td>) if jr_col
     html << %(<td class="num #{rcls}">#{b[:ratio] ? "#{fmt_dec(b[:ratio], 2)}×" : '—'}</td>)
     html << %(<td class="num">#{b[:per_iter]}</td>)
     html << "</tr>\n"
   end
-  html << "</tbody></table>\n</details>\n"
+  html << "</tbody></table>\n"
+  html << %(<p class="legend">ratio = rails ÷ roundhouse (CRuby lanes, same JIT).</p>\n) if jr_col
+  html << "</details>\n"
 end
 
 # ── Section: frozen-sequence stability ───────────────────────────────
@@ -544,12 +591,16 @@ end
 
 # ── Section: route parity ────────────────────────────────────────────
 
-html << "<h2>#{section_no}. Route parity (#{pass}/#{total})</h2>\n"
-html << %(<p>Every distinct benchmark route, replayed once. Bars are log-scaled single-shot latency; #{all_pass ? 'all routes return 200' : 'red bars are non-200 routes'}.</p>\n)
+# In the lane layout the jruby lane replayed the same routes — render its
+# parity as extra columns so cross-runtime coverage reads off one table.
+jr_routes = lanes_mode && jruby ? (jruby['routes'] || []).to_h { |r| [r['route'], r] } : {}
+
+html << "<h2>#{section_no}. Route parity (#{pass}/#{total}#{jr_routes.empty? ? '' : " · jruby #{jruby_pass}/#{jruby_total}"})</h2>\n"
+html << %(<p>Every distinct benchmark route, replayed once#{jr_routes.empty? ? '' : ' per emit lane'}. Bars are log-scaled single-shot latency#{jr_routes.empty? ? '' : ' of the CRuby lane'}; #{all_pass ? 'all routes return 200' : 'red bars are non-200 routes'}.</p>\n)
 html << route_hbar(routes, metric: 'ms', unit: 'ms', fmt: ->(v) { "#{fmt_dec(v, 1)} ms" })
 
 html << "<details open>\n<summary>Per-route table (#{routes.size} routes)</summary>\n"
-html << "<table>\n<thead><tr><th>route</th><th>status</th><th>bytes</th><th>ms</th></tr></thead>\n<tbody>\n"
+html << "<table>\n<thead><tr><th>route</th><th>status</th><th>bytes</th><th>ms</th>#{jr_routes.empty? ? '' : '<th>jruby</th><th>jruby ms</th>'}</tr></thead>\n<tbody>\n"
 routes.each do |c|
   status_cls = c['ok'] == false ? 'no' : 'ok'
   html << "<tr>"
@@ -557,13 +608,30 @@ routes.each do |c|
   html << %(<td class="num #{status_cls}">#{c['status']}</td>)
   html << %(<td class="num">#{fmt_int(c['bytes'])}</td>)
   html << %(<td class="num">#{fmt_dec(c['ms'], 2)}</td>)
+  unless jr_routes.empty?
+    if (j = jr_routes[c['route']])
+      jcls = j['ok'] == false ? 'no' : 'ok'
+      # Response sizes should track the CRuby lane (bodies are byte-
+      # identical mod CSRF token + clock); flag drift beyond noise.
+      bytes_note = (j['bytes'].to_i - c['bytes'].to_i).abs > 64 ? %( <span class="no">(#{fmt_int(j['bytes'])} B)</span>) : ''
+      html << %(<td class="num #{jcls}">#{j['status']}#{bytes_note}</td>)
+      html << %(<td class="num">#{fmt_dec(j['ms'], 2)}</td>)
+    else
+      html << %(<td class="num">—</td><td class="num">—</td>)
+    end
+  end
   html << "</tr>\n"
 end
-html << "</tbody></table>\n</details>\n"
+html << "</tbody></table>\n"
+unless jr_routes.empty?
+  html << %(<p class="legend">jruby cells flag a response size that drifts more than 64 bytes from the CRuby lane's.</p>\n)
+end
+html << "</details>\n"
 
-# ── Section: JRuby lane (from jruby/summary.json) ────────────────────
+# ── Section: JRuby lane (legacy layout only — in the lane layout the ──
+# jruby lane lives in the matrix / per-endpoint / parity sections) ─────
 
-if jruby
+if legacy_jruby
   jt = jruby['sequence_timing'] || jruby['timing']
   html << "<h2>#{section_no}. JRuby lane (#{jruby_pass}/#{jruby_total})</h2>\n"
   metric = if jruby['sequence_timing']
