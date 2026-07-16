@@ -73,6 +73,11 @@ run_dir  = File.basename(run_path)
 
 def fmt_int(n)  ; n.to_i.to_s.reverse.scan(/\d{1,3}/).join(',').reverse ; end
 def fmt_dec(n, p = 1) ; format("%.#{p}f", n.to_f) ; end
+
+# JIT state from a RUBY_DESCRIPTION. The headline lane inherits the ambient
+# RUBYOPT (unlike the matrix, which pins YJIT per lane), so the page must
+# say which JIT level each measurement actually ran — nil when unknown.
+def jit_label(desc) ; desc && (desc.include?('+YJIT') ? '+YJIT' : 'no JIT') ; end
 def esc(s) ; s.to_s.gsub('&', '&amp;').gsub('<', '&lt;').gsub('>', '&gt;') ; end
 
 def kv_table(rows)
@@ -405,13 +410,13 @@ if rails && timing
   html << "<h2>#{section_no}. Roundhouse vs Rails</h2>\n"
   html << %(<p>Milliseconds per iteration of the frozen #{vpi}-visit sequence — <strong>lower is better</strong>. The whisker spans each stack's min–max across its timed iterations.</p>\n)
   html << compare_bars([
-    { label: "rails #{rails['rails']}", color: COLOR_RAILS,
+    { label: ["rails #{rails['rails']}", jit_label(rails['ruby'])].compact.join(' '), color: COLOR_RAILS,
       median: rails['ms_per_iter_median'], min: rails['ms_per_iter_min'],
       max: rails['ms_per_iter_max'], iters: rails['iterations'] },
-    { label: 'roundhouse', color: COLOR_RH,
+    { label: ['roundhouse', jit_label(env&.dig('ruby'))].compact.join(' '), color: COLOR_RH,
       median: timing['ms_per_iter_median'], min: timing['ms_per_iter_min'],
       max: timing['ms_per_iter_max'], iters: timing['iterations'] },
-  ])
+  ], left_pad: 160)
   if speedup
     html << %(<p><strong>#{fmt_dec(speedup, 2)}× faster than Rails</strong> — )
     html << %(#{fmt_dec(timing['ms_per_iter_median'], 1)} ms/iter vs Rails' #{fmt_dec(rails['ms_per_iter_median'], 1)} ms/iter.</p>\n)
@@ -469,7 +474,17 @@ if mrows && !mrows.empty?
   html << "</tbody></table>\n"
   html << %(<p class="legend">“vs Rails” compares each row to Rails at the same JIT level.</p>\n)
   prov = [matrix['generated_at'], matrix['host'] && "host <code>#{esc(matrix['host'])}</code>"].compact.join(' · ')
-  html << %(<p class="caveat">Matrix lanes measured #{prov} — one process per lane over the same emit tree. The Roundhouse&nbsp;+YJIT lane and the headline comparison above run the same workload; small differences between them are run-to-run jitter.</p>\n) unless prov.empty?
+  # Tie the headline lane to its SAME-JIT matrix row (the headline inherits
+  # ambient RUBYOPT, so which row that is varies by box) — only those two
+  # measure the same workload; the cross-JIT gap is real, not jitter.
+  head_note = ''
+  if speedup && env&.dig('ruby')
+    head_yjit = env['ruby'].include?('+YJIT')
+    if mby_key[['emit', head_yjit]]
+      head_note = %( The headline comparison above ran #{head_yjit ? 'with YJIT' : 'without a JIT'} on both stacks, so it corresponds to the #{head_yjit ? '+YJIT' : 'no-JIT'} rows here; small differences from those rows are run-to-run jitter.)
+    end
+  end
+  html << %(<p class="caveat">Matrix lanes measured #{prov} — one process per lane over the same emit tree.#{head_note}</p>\n) unless prov.empty?
 end
 
 # ── Section: per-endpoint breakdown ──────────────────────────────────
