@@ -800,6 +800,36 @@ impl<'a> BodyTyper<'a> {
                             }
                         }
                     }
+                    // Array accumulator writes anywhere in this statement —
+                    // `arr << x` / `arr.push(x)`, including nested in a loop,
+                    // branch, or block (`while { acc << x }`, `items.each {
+                    // acc << x }`). The Array analog of the Hash `h[k]=v`
+                    // block above, but subtree-wide: the accumulator idiom
+                    // fills a nested loop/block while the `arr = []` seed sits
+                    // at the top level, so a same-level-only match (like the
+                    // Hash one) would miss it — `analyze_expr(e)` above has
+                    // already stamped every pushed arg's `.ty`, so a subtree
+                    // scan can read them. Widen the outer-bound array's
+                    // element from its empty-literal `Var` placeholder (or
+                    // union the observed element into an existing one). Only
+                    // bindings that already exist as `Array[_]` are touched.
+                    let mut pushes: Vec<(bool, Symbol, Ty)> = Vec::new();
+                    collect_array_pushes(e, &mut pushes);
+                    for (is_ivar, name, elem) in pushes {
+                        let bindings = if is_ivar {
+                            &mut local_ctx.ivar_bindings
+                        } else {
+                            &mut local_ctx.local_bindings
+                        };
+                        if let Some(Ty::Array { elem: cur }) = bindings.get(&name) {
+                            let new_elem = if matches!(**cur, Ty::Var { .. }) {
+                                elem
+                            } else {
+                                union_of((**cur).clone(), elem)
+                            };
+                            bindings.insert(name, Ty::Array { elem: Box::new(new_elem) });
+                        }
+                    }
                     // A conditional/loop whose CONDITION assigns a local
                     // (`if !(story = find) || story.gone?`, `while (line =
                     // gets)`) binds that local for the statements that
@@ -1087,6 +1117,45 @@ pub(crate) fn multiassign_target_ty(rhs: &Option<Ty>, index: usize) -> Option<Ty
 ///
 /// Descent stops at scope-introducing nodes (`Lambda`, `Let`) so a
 /// block parameter assignment doesn't leak out.
+/// Collect array-accumulator pushes (`arr << x`, `arr.push/append/
+/// unshift/prepend(x, …)`) anywhere in `expr`, as `(is_ivar, name,
+/// element_ty)` per push whose receiver is a plain local or ivar.
+/// Recurses through loop/branch bodies and blocks (via `for_each_child`)
+/// so the accumulator idiom — seed `arr = []` at the top, fill it inside
+/// a nested `while`/`each` — is caught. `concat` is excluded: it flattens
+/// its argument, so the pushed element type isn't the argument's type.
+/// A pushed arg typed `Var`/`Bottom` contributes nothing. Callers refine
+/// only bindings that already exist as `Array[_]`, so an inner shadowing
+/// local of the same name at worst adds imprecision, never a wrong write.
+fn collect_array_pushes(expr: &Expr, out: &mut Vec<(bool, Symbol, Ty)>) {
+    if let ExprNode::Send { recv: Some(recv), method, args, .. } = &*expr.node {
+        if matches!(method.as_str(), "<<" | "push" | "append" | "unshift" | "prepend") {
+            let slot = match &*recv.node {
+                ExprNode::Ivar { name } => Some((true, name.clone())),
+                ExprNode::Var { name, .. } => Some((false, name.clone())),
+                _ => None,
+            };
+            if let Some((is_ivar, name)) = slot {
+                let mut pushed: Option<Ty> = None;
+                for a in args {
+                    let Some(t) = a.ty.clone() else { continue };
+                    if matches!(t, Ty::Var { .. } | Ty::Bottom) {
+                        continue;
+                    }
+                    pushed = Some(match pushed.take() {
+                        Some(p) => union_of(p, t),
+                        None => t,
+                    });
+                }
+                if let Some(t) = pushed {
+                    out.push((is_ivar, name, t));
+                }
+            }
+        }
+    }
+    expr.node.for_each_child(&mut |child| collect_array_pushes(child, out));
+}
+
 fn collect_var_assignments_into(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
     match &*expr.node {
         ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
@@ -1629,6 +1698,30 @@ mod tests {
         let ty = typer.analyze_expr(&mut expr, &ctx);
 
         assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Str) });
+    }
+
+    #[test]
+    fn array_accumulator_element_refined_by_shovel() {
+        // `ordered = []; ordered << 5; ordered` should read `Array[Int]`,
+        // not `Array[untyped]` — the empty-literal accumulator's element
+        // type is revealed at the `<<` push. Mirrors the Hash `h[k]=v`
+        // accumulator refinement. This is the arrange_for_user shape that
+        // was leaving the comment-threading collection untyped.
+        let assign = synth(ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: Symbol::from("ordered") },
+            value: synth(ExprNode::Array { elements: vec![], style: Default::default() }),
+        });
+        let five = synth(ExprNode::Lit { value: Literal::Int { value: 5 } });
+        let push = send(Some(var("ordered")), "<<", vec![five]);
+        let read = var("ordered");
+        let mut seq =
+            synth(ExprNode::Seq { exprs: vec![assign, push, read] });
+
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        let ctx = Ctx::default();
+        let ty = typer.analyze_expr(&mut seq, &ctx);
+        assert_eq!(ty, Ty::Array { elem: Box::new(Ty::Int) });
     }
 
     #[test]
