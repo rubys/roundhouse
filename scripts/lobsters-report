@@ -416,13 +416,13 @@ end
 html << %(<div class="meta">Run <code>#{run_dir}</code>#{prov}</div>\n)
 
 html << %(<div class="badges">)
-html << %(<span class="badge #{all_pass ? 'pass' : 'fail'}">#{pass}/#{total} routes return 200</span>)
-html << %(<span class="badge fail">#{thin} thin</span>) if thin.to_i > 0
+html << %(<span class="badge #{all_pass ? 'pass' : 'fail'}">#{pass}/#{total} routes return 200</span>\n)
+html << %(<span class="badge fail">#{thin} thin</span>\n) if thin.to_i > 0
 if speedup
-  html << %(<span class="badge speed">#{fmt_dec(speedup, 2)}× faster than Rails</span>)
+  html << %(<span class="badge speed">#{fmt_dec(speedup, 2)}× faster than Rails</span>\n)
 end
 if jruby_total.to_i > 0
-  html << %(<span class="badge #{jruby_pass == jruby_total ? 'pass' : 'fail'}">jruby #{jruby_pass}/#{jruby_total} routes</span>)
+  html << %(<span class="badge #{jruby_pass == jruby_total ? 'pass' : 'fail'}">jruby #{jruby_pass}/#{jruby_total} routes</span>\n)
 end
 html << "</div>\n"
 
@@ -673,7 +673,7 @@ routes.each do |c|
       jcls = j['ok'] == false ? 'no' : 'ok'
       # Response sizes should track the CRuby lane (bodies are byte-
       # identical mod CSRF token + clock); flag drift beyond noise.
-      bytes_note = (j['bytes'].to_i - c['bytes'].to_i).abs > 64 ? %( <span class="no">(#{fmt_int(j['bytes'])} B)</span>) : ''
+      bytes_note = (j['bytes'].to_i - c['bytes'].to_i).abs > 64 ? %( <span class="no">(#{fmt_int(j['bytes'])} B)</span>\n) : ''
       html << %(<td class="num #{jcls}">#{j['status']}#{bytes_note}</td>)
       html << %(<td class="num">#{fmt_dec(j['ms'], 2)}</td>)
     else
