@@ -212,7 +212,8 @@ INIT
 #   3.times { Time.new("2023-05-08 10:21:21", in: "UTC") }
 # Rails 8's fast_string_to_time hits it on every timestamp cast. Regex
 # fast path (the pre-Rails-8 shape) until fixed upstream; misses return
-# nil -> Rails falls back to its slow parse.
+# nil -> Rails falls back to its slow parse. Upstream: jruby/jruby#9531 --
+# drop this initializer (and the fixture rebuild will follow) once fixed.
 if RUBY_ENGINE == "jruby"
   module ActiveModel
     module Type
