@@ -300,10 +300,10 @@ pub fn emit_lowered_schema_pair(app: &App) -> Vec<EmittedFile> {
     library::emit_module_file_pair(&funcs, app, PathBuf::from("config/schema.rb"))
 }
 
-/// Emit `config/routes.rb` in spinel-blog shape — a `Routes` module
-/// `Routes` module exposing the dispatch data via class methods:
-/// `Routes.table` returns the array of `{method:, pattern:,
-/// controller:, action:}` hashes; `Routes.root` returns the
+/// Emit `config/routes.rb` in spinel-blog shape — a `RouteTable` module
+/// `RouteTable` module exposing the dispatch data via class methods:
+/// `RouteTable.table` returns the array of `{method:, pattern:,
+/// controller:, action:}` hashes; `RouteTable.root` returns the
 /// shorthand `root "c#a"` route (when present). Companion to
 /// `emit_lowered_models` and `emit_lowered_schema` for the spinel
 /// emit pipeline.

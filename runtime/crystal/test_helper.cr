@@ -73,7 +73,7 @@ abstract class RoundhouseTest
 
   # ── ActionDispatch::IntegrationTest surface ──────────────────────
   #
-  # In-process dispatch via `Routes.table` + the registered controller
+  # In-process dispatch via `RouteTable.table` + the registered controller
   # registry. Mirrors `runtime/typescript/minitest.ts:290-371` and
   # spinel's `dispatch_request` (`runtime/spinel/test/test_helper.rb:
   # 219-248`). Tests stash status / body / location on the test

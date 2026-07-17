@@ -918,8 +918,14 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
             // can't tell the column type from method/elem alone, so
             // produce `Array<Untyped>` (gradual escape — emitters
             // handle the cast at the call site if needed).
-            "pluck" | "pick" => {
+            "pluck" => {
                 return Ty::Array { elem: Box::new(Ty::Untyped) };
+            }
+            // `pick(*cols)` is `limit(1).pluck(*cols).first` — a single
+            // value (or nil), not an array. Gradual on the value; the
+            // nil case folds into Untyped's absorption.
+            "pick" => {
+                return Ty::Untyped;
             }
             // `count` / `sum` / `average` on a relation return Int
             // (count) or Numeric (sum/avg). Approximate as Int; the
@@ -1027,6 +1033,9 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         },
         "to_a" => Ty::Array { elem: Box::new(elem.clone()) },
         "join" => Ty::Str,
+        // `[0, 0, 0].pack("CCC")` — binary packing (lobsters'
+        // confidence_order byte strings).
+        "pack" => Ty::Str,
         // `arr[i] = v` returns the assigned value in Ruby, but the value
         // type isn't available from the receiver alone and the result is
         // rarely chained. Return Nil to keep the expression's type known
@@ -1235,6 +1244,7 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         "upcase" | "downcase" | "strip" | "chomp" | "chop" | "reverse" | "to_s"
         | "capitalize" | "swapcase" | "squeeze" | "dup" | "clone"
         | "tr" | "tr_s" | "delete" | "gsub" | "sub" | "lstrip" | "rstrip"
+        | "delete_prefix" | "delete_suffix"
         | "succ" | "next" | "swapcase!" | "+@" | "-@" => Ty::Str,
         "to_i" => Ty::Int,
         "to_f" => Ty::Float,

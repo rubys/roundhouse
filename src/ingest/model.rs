@@ -362,11 +362,12 @@ fn parse_scope(
         });
     };
 
-    // Lambda parameters: required (`->(user)`) then optional-with-default
-    // (`->(user = nil)`). Defaults are carried so the lowered class method
-    // reproduces the signature; the lowerer appends a trailing relation
-    // parameter. Block/keyword/splat scope params are rare on real models
-    // and fall through unrecorded.
+    // Lambda parameters: required (`->(user)`), optional-with-default
+    // (`->(user = nil)`), and keywords (`->(user, unmerged: true)` —
+    // lobsters' base/recent scopes). Defaults are carried so the
+    // lowered class method reproduces the signature; the lowerer
+    // inserts the trailing relation parameter before any keywords.
+    // Block/splat scope params still fall through unrecorded.
     let mut params: Vec<crate::dialect::Param> = Vec::new();
     if let Some(pn) = param_node
         .and_then(|p| p.as_block_parameters_node().and_then(|bpn| bpn.parameters()))
@@ -384,6 +385,20 @@ fn parse_scope(
                 params.push(crate::dialect::Param::with_default(
                     Symbol::from(constant_id_str(&op.name())),
                     default,
+                ));
+            }
+        }
+        for kw in pn.keywords().iter() {
+            if let Some(okw) = kw.as_optional_keyword_parameter_node() {
+                let default = ingest_expr(&okw.value(), file)?;
+                params.push(crate::dialect::Param::keyword(
+                    Symbol::from(constant_id_str(&okw.name())),
+                    Some(default),
+                ));
+            } else if let Some(rkw) = kw.as_required_keyword_parameter_node() {
+                params.push(crate::dialect::Param::keyword(
+                    Symbol::from(constant_id_str(&rkw.name())),
+                    None,
                 ));
             }
         }

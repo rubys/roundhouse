@@ -654,12 +654,12 @@ fn emit_main_cr(app: &App) -> EmittedFile {
     s.push_str("Roundhouse::Server.start(\n");
     s.push_str("  schema_sql: Schema.statements.join(\";\\n\"),\n");
     if has_routes {
-        s.push_str("  routes: Routes.table,\n");
+        s.push_str("  routes: RouteTable.table,\n");
     } else {
         s.push_str("  routes: [] of ActionDispatch::Router::Route,\n");
     }
     if has_root {
-        s.push_str("  root_route: Routes.root,\n");
+        s.push_str("  root_route: RouteTable.root,\n");
     }
     if has_layout {
         // Wire the transpiled layout method as the per-response wrapper.
@@ -705,11 +705,11 @@ fn emit_main_cr(app: &App) -> EmittedFile {
 ///
 /// File layout:
 ///   - schema SQL string (one-shot Db.setup_test_db driver)
-///   - `RoundhouseTest.routes = Routes.table.as(...)`
+///   - `RoundhouseTest.routes = RouteTable.table.as(...)`
 ///   - `RoundhouseTest.controllers = { :articles => …, … }`
 ///   - `RoundhouseTest.fixture_loaders = [ ->{ …Fixtures._fixtures_load! }, … ]`
 ///
-/// Routes is the standard `Routes` module emitted by
+/// Routes is the standard `RouteTable` module emitted by
 /// `lower_routes_to_library_functions`; controllers are looked up
 /// from `app.controllers`. Fixture loaders reference each
 /// `<Plural>Fixtures._fixtures_load!` synthesized by
@@ -739,7 +739,7 @@ fn emit_test_setup_cr(
         s.push_str("RoundhouseTest.schema_sql = Schema.statements.join(\";\\n\")\n");
     }
     if has_routes {
-        s.push_str("RoundhouseTest.routes = Routes.table\n");
+        s.push_str("RoundhouseTest.routes = RouteTable.table\n");
     }
     if has_controllers {
         s.push_str("RoundhouseTest.controllers = {\n");

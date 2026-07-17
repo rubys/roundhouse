@@ -546,7 +546,7 @@ fn recv_is_known_sync(recv: Option<&Expr>, _method: &str) -> bool {
                     | "String"
                     | "Symbol"
                     // Router-internal data classes: pure-construction
-                    // `Route.new(...)` rows in `Routes.table` + the
+                    // `Route.new(...)` rows in `RouteTable.table` + the
                     // `MatchResult.new(...)` return from `Router.match`.
                     // No async work in either constructor; without this,
                     // the libsql adapter's name-collision with `new`

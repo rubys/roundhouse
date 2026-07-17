@@ -87,6 +87,27 @@ pub struct GemClass {
 /// The catalog. One entry per gem class/module; add a gem by adding a
 /// row.
 pub const GEM_CATALOG: &[GemClass] = &[
+    // Faker — synthetic data. Production code shouldn't call it, but
+    // lobsters' /cabinet dev-tools page renders sample content
+    // inline; every generator returns a String.
+    GemClass {
+        name: "Faker::Internet",
+        class_methods: &[
+            ("url", GemTy::Str),
+            ("user_name", GemTy::Str),
+            ("email", GemTy::Str),
+        ],
+        instance_methods: &[],
+    },
+    GemClass {
+        name: "Faker::Lorem",
+        class_methods: &[
+            ("sentence", GemTy::Str),
+            ("paragraph", GemTy::Str),
+            ("word", GemTy::Str),
+        ],
+        instance_methods: &[],
+    },
     // Telebugs — error-reporting service (lobsters). Config/enrichment
     // calls made for side effect from controller filters; returns are
     // discarded at every corpus call site. The reporting itself is

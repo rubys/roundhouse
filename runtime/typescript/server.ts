@@ -534,7 +534,7 @@ function openDatabase(dbPath: string, schemaStatements: string[]): void {
 
 // ── Public entry point ─────────────────────────────────────────
 
-/** One row from the emitted `Routes.table()` / `Routes.root()`. The
+/** One row from the emitted `RouteTable.table()` / `RouteTable.root()`. The
  *  routes lowerer emits these as symbol-keyed Ruby hashes whose TS
  *  rendering is the typed `Route` class from the transpiled router.
  *  Per-field accessors (`route.verb`, `route.controller`, etc.)
@@ -585,10 +585,10 @@ export interface StartOptions {
    *  server falls back to
    *  the minimal `renderLayout` shell below. */
   layout?: (body: string) => string;
-  /** Routes table — `Routes.table()` from the emitted
+  /** Routes table — `RouteTable.table()` from the emitted
    *  `app/routes.ts`. Order is config/routes.rb order. */
   routes: RouteRow[];
-  /** Optional root route — `Routes.root()` from the emitted
+  /** Optional root route — `RouteTable.root()` from the emitted
    *  `app/routes.ts`. Composed at the head of `routes` so a
    *  GET `/` matches before fallthroughs. */
   rootRoute?: RouteRow;

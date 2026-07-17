@@ -163,7 +163,7 @@ module Main
   # constant resolver sees the references without walking included-
   # module namespaces — a path it doesn't currently follow.
 
-  # The composed dispatch table, built once. `Routes.table` is an
+  # The composed dispatch table, built once. `RouteTable.table` is an
   # emitted def that CONSTRUCTS every Route object on each call —
   # rebuilding ~200 of them per request (~23k allocations per bench
   # iteration) is pure GC pressure for boot-time constants. At today's
@@ -171,7 +171,7 @@ module Main
   # hygiene, not a measured win. (Benign race under Puma threads: both
   # winners compute the same array.)
   def self.route_table
-    @route_table ||= [Routes.root] + Routes.table
+    @route_table ||= [RouteTable.root] + RouteTable.table
   end
 
   def self.dispatch_core(env, stdin)

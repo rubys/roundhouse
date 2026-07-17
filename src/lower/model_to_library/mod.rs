@@ -729,7 +729,17 @@ pub(crate) fn push_scope_methods(
     for item in &model.body {
         let ModelBodyItem::Scope { scope, .. } = item else { continue };
         let mut params = scope.params.clone();
-        params.push(Param::with_default(rel_param.clone(), relation_new_self()));
+        // `__rel` is an optional POSITIONAL param — it must precede any
+        // keyword params in the def (`def recent(user = nil, __rel = …,
+        // unmerged: true)`), or the signature is a syntax error.
+        let insert_at = params
+            .iter()
+            .position(|p| p.keyword)
+            .unwrap_or(params.len());
+        params.insert(
+            insert_at,
+            Param::with_default(rel_param.clone(), relation_new_self()),
+        );
 
         let mut body = scope.body.clone();
         crate::lower::scope_chain::rewrite_scope_body(

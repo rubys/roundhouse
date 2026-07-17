@@ -1420,6 +1420,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         "action_controller",
         "action_dispatch",
         "action_mailer",
+        "active_job",
         "gem_facades",
         "inflector",
         "inflector_ext",

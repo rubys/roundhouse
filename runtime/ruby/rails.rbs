@@ -1,9 +1,18 @@
 module Rails
   def self.env: () -> Env
-  def self.root: () -> String
+  def self.root: () -> AppPath
+  def self.public_path: () -> AppPath
   def self.cache: () -> Cache
   def self.logger: () -> Logger
   def self.application: () -> Application
+
+  class AppPath
+    @base: String
+
+    def initialize: (String base) -> void
+    def join: (String part) -> AppPath
+    def to_s: () -> String
+  end
 
   class Env
     @name: String

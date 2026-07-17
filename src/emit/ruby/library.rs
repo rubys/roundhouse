@@ -250,12 +250,24 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
             for m in &mut lc.methods {
                 if m.receiver == MethodReceiver::Class
                     && registered.contains(&m.name)
-                    && m.params.last().map(|p| p.as_str()) != Some("__rel")
+                    // Any-position check: push_scope_methods inserts
+                    // __rel BEFORE keyword params, so a kwarg-taking
+                    // scope's __rel is not last.
+                    && !m.params.iter().any(|p| p.as_str() == "__rel")
                 {
-                    m.params.push(crate::dialect::Param::with_default(
-                        rel_param.clone(),
-                        crate::lower::model_to_library::relation_new_self(),
-                    ));
+                    // Insert before keywords for the same reason.
+                    let insert_at = m
+                        .params
+                        .iter()
+                        .position(|p| p.keyword)
+                        .unwrap_or(m.params.len());
+                    m.params.insert(
+                        insert_at,
+                        crate::dialect::Param::with_default(
+                            rel_param.clone(),
+                            crate::lower::model_to_library::relation_new_self(),
+                        ),
+                    );
                     crate::lower::scope_chain::rewrite_scope_body(
                         &mut m.body,
                         &lc.name,
@@ -2086,6 +2098,7 @@ fn runtime_reopen_anchor(name: &str) -> Option<&'static str> {
         ("ActionView", "runtime/action_view"),
         ("ActionDispatch", "runtime/action_dispatch"),
         ("ActionMailer", "runtime/action_mailer"),
+        ("ActiveJob", "runtime/active_job"),
     ] {
         if name == prefix || name.strip_prefix(prefix).is_some_and(|r| r.starts_with("::")) {
             return Some(anchor);
@@ -2117,6 +2130,9 @@ fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {
     }
     if raw == "ActionMailer::Base" {
         return Some("runtime/action_mailer".to_string());
+    }
+    if raw == "ActiveJob::Base" {
+        return Some("runtime/active_job".to_string());
     }
     if app.models.iter().any(|m| m.name.0.as_str() == raw)
         || app.library_classes.iter().any(|lc| lc.name.0.as_str() == raw)

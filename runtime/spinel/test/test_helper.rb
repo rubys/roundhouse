@@ -291,7 +291,7 @@ module RequestDispatch
     require_relative "../app/controllers/articles_controller"
     require_relative "../app/controllers/comments_controller"
     ViewHelpers.reset_slots!
-    matched = Router.match(method, path, Routes.table)
+    matched = Router.match(method, path, RouteTable.table)
     raise "No route matches #{method} #{path}" if matched.nil?
     controller = case matched.controller
                  when :articles then ArticlesController.new

@@ -271,7 +271,7 @@ module Main
     end
 
     matched = ActionDispatch::Router.match(verb, request_path,
-                           [Routes.root] + Routes.table)
+                           [RouteTable.root] + RouteTable.table)
     if matched.nil?
       res.status = 404
       res.body = "<h1>404 Not Found</h1>"

@@ -1001,7 +1001,7 @@ fn emit_main_ts(app: &App, has_seeds: bool) -> EmittedFile {
     // Mirror the routes lowerer's "root iff path == \"/\"" partition.
     let has_root = flat.iter().any(|r| r.path == "/");
     if has_routes {
-        s.push_str("import { Routes } from \"./app/routes.js\";\n");
+        s.push_str("import { RouteTable } from \"./app/routes.js\";\n");
     }
     // The application layout transpiles to a `(body) => string` function
     // exported as `application` from `app/views/layouts/application.ts`.
@@ -1039,9 +1039,9 @@ fn emit_main_ts(app: &App, has_seeds: bool) -> EmittedFile {
         s.push_str("  layout: renderLayoutsApplication,\n");
     }
     if has_routes {
-        s.push_str("  routes: Routes.table(),\n");
+        s.push_str("  routes: RouteTable.table(),\n");
         if has_root {
-            s.push_str("  rootRoute: Routes.root(),\n");
+            s.push_str("  rootRoute: RouteTable.root(),\n");
         }
         s.push_str("  controllers: {\n");
         for c in &app.controllers {
@@ -1107,7 +1107,7 @@ fn emit_worker_app_ts(app: &App, has_seeds: bool) -> EmittedFile {
     let has_routes = !flat.is_empty();
     let has_root = flat.iter().any(|r| r.path == "/");
     if has_routes {
-        s.push_str("import { Routes } from \"./app/routes.js\";\n");
+        s.push_str("import { RouteTable } from \"./app/routes.js\";\n");
     }
     let has_layout = app
         .views
@@ -1158,9 +1158,9 @@ fn emit_worker_app_ts(app: &App, has_seeds: bool) -> EmittedFile {
         s.push_str("  layout: renderLayoutsApplication,\n");
     }
     if has_routes {
-        s.push_str("  routes: Routes.table(),\n");
+        s.push_str("  routes: RouteTable.table(),\n");
         if has_root {
-            s.push_str("  rootRoute: Routes.root(),\n");
+            s.push_str("  rootRoute: RouteTable.root(),\n");
         }
         s.push_str("  controllers: {\n");
         for c in &app.controllers {
@@ -1441,7 +1441,7 @@ fn emit_test_setup_ts(
     let has_root = flat.iter().any(|r| r.path == "/");
     if has_routes {
         s.push_str("import { installRoutes } from \"./minitest.js\";\n");
-        s.push_str("import { Routes } from \"../../app/routes.js\";\n");
+        s.push_str("import { RouteTable } from \"../../app/routes.js\";\n");
         for c in &app.controllers {
             let stem = crate::naming::snake_case(c.name.0.as_str());
             let class_name = c.name.0.as_str();
@@ -1491,9 +1491,9 @@ fn emit_test_setup_ts(
 
     if has_routes {
         s.push_str("installRoutes(\n");
-        s.push_str("  Routes.table(),\n");
+        s.push_str("  RouteTable.table(),\n");
         if has_root {
-            s.push_str("  Routes.root(),\n");
+            s.push_str("  RouteTable.root(),\n");
         } else {
             s.push_str("  undefined,\n");
         }

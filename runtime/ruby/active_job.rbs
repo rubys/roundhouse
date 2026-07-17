@@ -1,0 +1,8 @@
+module ActiveJob
+  class Base
+    def self.queue_as: (?Symbol? name) -> nil
+    def self.enqueue_after_transaction_commit=: (bool value) -> nil
+    def self.retry_on: (untyped error, ?untyped? opts) -> nil
+    def self.discard_on: (untyped error) -> nil
+  end
+end

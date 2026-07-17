@@ -464,8 +464,17 @@ fn syn(span: crate::span::Span, node: ExprNode) -> Expr {
 /// the relation, so `hottest` → `Story.hottest(nil, nil, __rel)` not
 /// `Story.hottest(__rel)`. `leading` is the scope's user params (no `__rel`).
 fn thread_rel(mut args: Vec<Expr>, rel: Expr, leading: Option<&Vec<Param>>, span: crate::span::Span) -> Vec<Expr> {
+    // A trailing kwargs hash (`base(user, unmerged: unmerged)`) binds
+    // the scope's KEYWORD params; the relation is a positional and must
+    // land before it. Split it off, pad, thread, re-append.
+    let kwargs_tail = match args.last() {
+        Some(e) if matches!(&*e.node, ExprNode::Hash { kwargs: true, .. }) => args.pop(),
+        _ => None,
+    };
     if let Some(params) = leading {
-        for p in params.iter().skip(args.len()) {
+        // Only positional params pad — keywords are bound by name via
+        // the kwargs tail (or their own defaults).
+        for p in params.iter().filter(|p| !p.keyword).skip(args.len()) {
             let filler = p
                 .default
                 .clone()
@@ -474,6 +483,7 @@ fn thread_rel(mut args: Vec<Expr>, rel: Expr, leading: Option<&Vec<Param>>, span
         }
     }
     args.push(rel);
+    args.extend(kwargs_tail);
     args
 }
 

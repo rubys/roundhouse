@@ -24,9 +24,9 @@ use crate::lower::typing::{fn_sig, lit_str, lit_sym, with_ty};
 use crate::span::Span;
 use crate::ty::Ty;
 
-/// Build the `Routes` dispatch module — `Routes.table -> Array<Route>`
+/// Build the `Routes` dispatch module — `RouteTable.table -> Array<Route>`
 /// (one `Route` instance per concrete `(verb, pattern, controller,
-/// action)`) and `Routes.root -> Route` (the shorthand `root "c#a"`
+/// action)`) and `RouteTable.root -> Route` (the shorthand `root "c#a"`
 /// route, when present). Empty when `app.routes` has no entries.
 ///
 /// Each entry is `ActionDispatch::Router::Route.new(...)` — a typed
@@ -44,11 +44,11 @@ pub fn lower_routes_to_dispatch_functions(app: &App) -> Vec<LibraryFunction> {
     if flat.is_empty() {
         return Vec::new();
     }
-    let module_path = vec![Symbol::from("Routes")];
+    let module_path = vec![Symbol::from("RouteTable")];
     // Same partition the per-target Spinel emit used: path "/" goes
-    // to `Routes.root`, everything else to `Routes.table`. Callers
-    // typically combine them at use site (`[Routes.root] +
-    // Routes.table`).
+    // to `RouteTable.root`, everything else to `RouteTable.table`. Callers
+    // typically combine them at use site (`[RouteTable.root] +
+    // RouteTable.table`).
     let (root_routes, table_routes): (Vec<&FlatRoute>, Vec<&FlatRoute>) =
         flat.iter().partition(|r| r.path == "/");
 

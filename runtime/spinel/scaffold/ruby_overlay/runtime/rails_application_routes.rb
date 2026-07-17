@@ -14,7 +14,7 @@ module Rails
       Routes
     end
 
-    module Routes
+    module RouteTable
       def self.url_helpers
         UrlHelpers
       end

@@ -19,10 +19,38 @@ module Rails
   end
 
   # `Rails.root` — the app root. Rails hands back a Pathname; the
-  # corpus interpolates it into path strings, so "." (the emitted app
-  # serves from its root) is the faithful grounding.
+  # corpus both interpolates it (`"#{Rails.root}/x"` — AppPath#to_s
+  # keeps that byte-identical at ".") and chains `.join("tmp/…")`
+  # (lobsters' blocklist job), so the AppPath stand-in serves both.
+  # The emitted app serves from its root, hence ".".
   def self.root
-    "."
+    AppPath.new(".")
+  end
+
+  # `Rails.public_path` — Rails returns a Pathname; the corpus chains
+  # `.join("avatars/").to_s` (lobsters' avatar cache dir). AppPath is
+  # the minimal typed stand-in: join concatenates with a single
+  # separator, to_s reads the accumulated path. Rooted at "public"
+  # relative to the emitted app root (matching Rails.root's "."
+  # grounding above).
+  def self.public_path
+    AppPath.new("public")
+  end
+
+  # Plain value object, no Pathname subclassing (the runtime stays
+  # statically resolvable).
+  class AppPath
+    def initialize(base)
+      @base = base
+    end
+
+    def join(part)
+      AppPath.new(@base + "/" + part)
+    end
+
+    def to_s
+      @base
+    end
   end
 
   def self.cache

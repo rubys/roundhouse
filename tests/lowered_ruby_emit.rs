@@ -477,7 +477,7 @@ fn routes_emits_module_wrapper_at_config_path() {
     let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
     let f = ruby::emit_lowered_routes(&app);
     assert_eq!(f.path.to_string_lossy(), "config/routes.rb");
-    assert!(f.content.contains("module Routes"), "{}", f.content);
+    assert!(f.content.contains("module RouteTable"), "{}", f.content);
     // New shape: `def self.table` returning the dispatch list +
     // `def self.root` returning the shorthand entry. Reconciled
     // with TS's LibraryFunction shape so the lowerer produces
@@ -556,8 +556,8 @@ fn routes_nest_child_resource_under_parent_id_scope() {
 
 #[test]
 fn routes_extract_root_into_separate_method() {
-    // `root "articles#index"` becomes a top-level `Routes.root`
-    // method, not a `Routes.table` entry — the spinel router
+    // `root "articles#index"` becomes a top-level `RouteTable.root`
+    // method, not a `RouteTable.table` entry — the spinel router
     // checks root separately so the dispatch loop doesn't have to
     // special-case "/". (Reconciled to method form 2026-05-02; was
     // a `ROOT = ...freeze` constant before.)
