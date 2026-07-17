@@ -68,6 +68,11 @@ $stderr.puts "booting Rails lobsters (production, in-mem DB)..."
 require_relative File.join(opts[:src], "config/environment")
 require_relative File.join(opts[:src], "route_generator")
 
+# Post-seed ANALYZE: the fixture DB ships with no sqlite_stat1, and
+# without planner statistics SQLite misplans the hottest-stories SELECT
+# (the engine under /rss, /hottest, /recent) — 5.1ms vs 0.05ms per
+# query. Keep this in lockstep with scripts/lobsters-replay — BOTH
+# lanes must get identical stats or the comparison is dishonest.
 if RUBY_ENGINE == "jruby"
   # AR-JDBC exposes SQLite's online-backup C API through the driver:
   # restore() is Backup with source/destination swapped — the same move
@@ -76,6 +81,9 @@ if RUBY_ENGINE == "jruby"
   jconn = raw.respond_to?(:connection) ? raw.connection : raw.jdbc_connection
   sq    = jconn.respond_to?(:getDatabase) ? jconn : jconn.unwrap(org.sqlite.SQLiteConnection.java_class)
   sq.get_database.restore("main", File.join(opts[:src], "db/production.sqlite3"), nil)
+  st = sq.create_statement
+  st.execute("ANALYZE")
+  st.close
 else
   mem_db  = ActiveRecord::Base.connection.raw_connection
   file_db = SQLite3::Database.new(File.join(opts[:src], "db/production.sqlite3"))
@@ -83,6 +91,7 @@ else
   b.step(-1)
   b.finish
   file_db.close
+  mem_db.execute("ANALYZE")
 end
 
 app = Rails.application

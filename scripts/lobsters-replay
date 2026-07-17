@@ -96,6 +96,16 @@ if opts[:memory]
   # Seed the in-mem DB the way benchmark.rb does: page-level backup from
   # the file DB. This REPLACES the whole destination database, so the
   # empty tables Schema DDL just created are simply superseded.
+  #
+  # Then ANALYZE: the fixture DB ships with no sqlite_stat1, and without
+  # planner statistics SQLite misplans the hottest-stories SELECT (the
+  # engine under /rss, /hottest, /recent) — merged_story_id index +
+  # temp-btree sort over the whole table instead of walking hotness_idx
+  # to the LIMIT: 5.1ms vs 0.05ms per query. A production database has
+  # statistics; a benchmark seeded from a bare fixture measures a planner
+  # accident without them. Keep this in lockstep with
+  # scripts/lobsters-rails-replay — BOTH lanes must get identical stats
+  # or the comparison is dishonest.
   if RUBY_ENGINE == "jruby"
     # Same seed through the JDBC driver: org.sqlite.core.DB exposes
     # SQLite's online-backup C API, and restore() is Backup with source
@@ -106,6 +116,9 @@ if opts[:memory]
     ds.set_url("jdbc:sqlite:#{MEM_URI}")
     conn = ds.get_connection
     conn.get_database.restore("main", DB_FILE, nil)
+    st = conn.create_statement
+    st.execute("ANALYZE")
+    st.close
     conn.close
   else
     require "sqlite3"
@@ -115,6 +128,7 @@ if opts[:memory]
     bk.step(-1)
     bk.finish
     file.close
+    mem.execute("ANALYZE")
     mem.close
   end
 end
