@@ -195,6 +195,21 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             collect_interp_parts(is.parts(), &mut parts, file)?;
             ExprNode::StringInterp { parts }
         }
+        // `:"#{x}_id"` — interpolated symbol. Desugar to the
+        // interpolated string sent `.to_sym`; symbols built at
+        // runtime are inherently dynamic, same as interp regexes.
+        n if n.as_interpolated_symbol_node().is_some() => {
+            let is = n.as_interpolated_symbol_node().unwrap();
+            let mut parts: Vec<InterpPart> = Vec::new();
+            collect_interp_parts(is.parts(), &mut parts, file)?;
+            ExprNode::Send {
+                recv: Some(Expr::new(Span::synthetic(), ExprNode::StringInterp { parts })),
+                method: Symbol::from("to_sym"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            }
+        }
         // `/pattern#{x}flags/` — regex with interpolation. Desugar to
         // `Regexp.new(<interpolated-string>)` so the IR doesn't need
         // a separate RegexInterp variant. The static-only `/foo/`
@@ -203,12 +218,14 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         //
         // The standard option flags i/m/x are carried through as
         // `Regexp.new`'s second argument (the options bitmask). The
-        // `o` (once) and encoding flags (e/s/u/n) have no options-int
-        // equivalent and stay a (rarer) visible gap.
+        // `o` (once) flag is dropped: it only memoizes the first
+        // interpolation, so re-evaluating is identical for
+        // deterministic parts (and merely re-computes otherwise).
+        // Encoding flags (e/s/u/n) change match semantics and stay
+        // a (rarer) visible gap.
         n if n.as_interpolated_regular_expression_node().is_some() => {
             let r = n.as_interpolated_regular_expression_node().unwrap();
-            if r.is_once()
-                || r.is_euc_jp()
+            if r.is_euc_jp()
                 || r.is_windows_31j()
                 || r.is_utf_8()
                 || r.is_ascii_8bit()
@@ -422,6 +439,12 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 id: crate::ident::VarId(0),
                 name: Symbol::from(constant_id_str(&v.name())),
             }
+        }
+        // Ruby 3.4 `it` implicit block parameter — reads desugar to a
+        // plain local named `it`; block_param_names synthesizes the
+        // matching |it| parameter from the block's ItParametersNode.
+        n if n.as_it_local_variable_read_node().is_some() => {
+            ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("it") }
         }
         n if n.as_instance_variable_read_node().is_some() => {
             let v = n.as_instance_variable_read_node().unwrap();
@@ -1476,6 +1499,14 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             }
             ExprNode::Case { scrutinee, arms }
         }
+        // Ruby 3.1 hash/keyword value omission (`{short_id:}`,
+        // `find_by!(short_id:)`) — prism wraps the implied value
+        // (a local read or same-named method call, resolved at parse
+        // time) in an ImplicitNode; unwrap and ingest that value.
+        n if n.as_implicit_node().is_some() => {
+            let implicit = n.as_implicit_node().unwrap();
+            return ingest_expr(&implicit.value(), file);
+        }
         // `def`/`def self.X` at expression position — appears inside
         // `Class.new(Parent) do ... end` blocks (anonymous-class
         // idiom). Roundhouse's IR has no first-class "method def as
@@ -1775,6 +1806,9 @@ fn block_style_from_opening(bytes: &[u8]) -> crate::expr::BlockStyle {
 
 fn block_param_names(b: &ruby_prism::BlockNode<'_>) -> Vec<Symbol> {
     let Some(params_node) = b.parameters() else { return vec![] };
+    if params_node.as_it_parameters_node().is_some() {
+        return vec![Symbol::from("it")];
+    }
     let Some(bpn) = params_node.as_block_parameters_node() else {
         return vec![];
     };

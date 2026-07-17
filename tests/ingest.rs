@@ -356,11 +356,11 @@ end
 
 #[test]
 fn routes_recover_per_entry_under_survey() {
-    // One `mount` (unsupported DSL) must not zero the table: survey
-    // mode records the gap and keeps the sibling routes; strict mode
-    // still fails loud so fixtures force recognizers.
+    // One unknown DSL entry (`devise_for`) must not zero the table:
+    // survey mode records the gap and keeps the sibling routes;
+    // strict mode still fails loud so fixtures force recognizers.
     let source = br#"Rails.application.routes.draw do
-  mount Sidekiq::Web, at: "sidekiq"
+  devise_for :users
   get "/posts", to: "posts#index"
 end
 "#;
@@ -368,7 +368,7 @@ end
     let strict = roundhouse::ingest::prism::scope(|| {
         roundhouse::ingest::ingest_routes(source, "config/routes.rb")
     });
-    assert!(strict.0.is_err(), "strict ingest fails loud on `mount`");
+    assert!(strict.0.is_err(), "strict ingest fails loud on unknown DSL");
 
     roundhouse::ingest::survey::activate();
     let (result, _) = roundhouse::ingest::prism::scope(|| {
@@ -378,8 +378,38 @@ end
     let table = result.expect("survey ingest recovers");
     assert_eq!(table.entries.len(), 1, "the good route survives");
     assert!(
+        gaps.iter().any(|g| format!("{g:?}").contains("devise_for")),
+        "the devise_for gap is recorded, not silently dropped: {gaps:?}"
+    );
+}
+
+#[test]
+fn routes_mount_drops_as_recognized_gap() {
+    // `mount SomeEngine` is external code, never part of the
+    // transpiled app: strict ingest drops the route (the modeled
+    // truth, like `to: redirect(...)`), survey runs get a ledger
+    // line so the drop stays visible.
+    let source = br#"Rails.application.routes.draw do
+  mount Sidekiq::Web, at: "sidekiq"
+  get "/posts", to: "posts#index"
+end
+"#;
+
+    let (strict, _) = roundhouse::ingest::prism::scope(|| {
+        roundhouse::ingest::ingest_routes(source, "config/routes.rb")
+    });
+    let table = strict.expect("strict ingest tolerates mount");
+    assert_eq!(table.entries.len(), 1, "mount drops, the sibling route survives");
+
+    roundhouse::ingest::survey::activate();
+    let (result, _) = roundhouse::ingest::prism::scope(|| {
+        roundhouse::ingest::ingest_routes(source, "config/routes.rb")
+    });
+    let gaps = roundhouse::ingest::survey::drain();
+    result.expect("survey ingest succeeds");
+    assert!(
         gaps.iter().any(|g| format!("{g:?}").contains("mount")),
-        "the mount gap is recorded, not silently dropped: {gaps:?}"
+        "the mount drop is ledgered, not silent: {gaps:?}"
     );
 }
 
@@ -505,6 +535,44 @@ fn retry_and_redo_ingest_and_round_trip_through_ruby() {
         emit_expr(&with_redo).contains("redo"),
         "Ruby emit should keep `redo`; got:\n{}",
         emit_expr(&with_redo)
+    );
+}
+
+#[test]
+fn modern_ruby_syntax_desugars() {
+    use roundhouse::emit::ruby::emit_expr;
+
+    // Ruby 3.1 keyword punning: `f(short_id:)` reads the same-named
+    // local/method (prism ImplicitNode) — desugars to an explicit pair.
+    let punned = ingest_snippet(b"find_by!(short_id:)");
+    assert!(
+        emit_expr(&punned).contains("short_id: short_id"),
+        "punned kwarg expands to an explicit pair; got:\n{}",
+        emit_expr(&punned)
+    );
+
+    // Ruby 3.4 `it` implicit block parameter — becomes a real |it| param.
+    let with_it = ingest_snippet(b"[1].map { it + 1 }");
+    let emitted = emit_expr(&with_it);
+    assert!(
+        emitted.contains("|it|") && emitted.contains("it + 1"),
+        "`it` block gains an explicit |it| param; got:\n{emitted}"
+    );
+
+    // Interpolated symbol — string interpolation sent `.to_sym`.
+    let interp_sym = ingest_snippet(b":\"#{name}_id\"");
+    assert!(
+        emit_expr(&interp_sym).contains(".to_sym"),
+        "interpolated symbol desugars via to_sym; got:\n{}",
+        emit_expr(&interp_sym)
+    );
+
+    // `/o` once-flag interp regex — flag dropped, plain Regexp.new.
+    let once_re = ingest_snippet(b"/^\\$2a\\$#{cost}\\$/o");
+    assert!(
+        emit_expr(&once_re).contains("Regexp.new"),
+        "once-flag interp regex still desugars to Regexp.new; got:\n{}",
+        emit_expr(&once_re)
     );
 }
 

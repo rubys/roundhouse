@@ -167,7 +167,21 @@ fn ingest_route_call(
         "namespace" => ingest_namespace_route(call, file, draws).map(Some),
         "scope" => ingest_scope_route(call, file, draws).map(Some),
         "draw" => ingest_draw_route(call, file, draws),
-        // Unknown DSL — `concern`, `mount`, `devise_for`,
+        // `mount SomeEngine, at: "/path"` — the mounted engine is
+        // external code (mission_control, sidekiq-web, …), never part
+        // of the transpiled app. Dropping the route is the modeled
+        // truth (same contract as `to: redirect(...)` above); survey
+        // runs still get a ledger line so the drop is visible.
+        "mount" => {
+            if super::survey::is_active() {
+                super::survey::record(&IngestError::Unsupported {
+                    file: file.into(),
+                    message: "route dropped: `mount` of an external engine".into(),
+                });
+            }
+            Ok(None)
+        }
+        // Unknown DSL — `concern`, `devise_for`,
         // `use_doorkeeper`, `authenticate`, etc. land here. Strict
         // ingest fails loud so the fixture that introduces them forces
         // a recognizer; survey callers get a per-entry ledger line
