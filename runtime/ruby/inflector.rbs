@@ -1,3 +1,4 @@
 module Inflector
   def self.pluralize: (Integer, String) -> String
+  def self.parameterize: (String) -> String
 end

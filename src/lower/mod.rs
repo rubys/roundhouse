@@ -51,6 +51,8 @@ pub mod group_count;
 pub mod dead_default;
 pub mod errors_add;
 pub mod mailer_class_side;
+pub mod as_json_super;
+pub mod parameterize;
 pub mod request_index;
 pub mod send_dispatch;
 pub(crate) mod secure_password;
@@ -76,6 +78,8 @@ pub use group_count::apply_group_count_lowering;
 pub use dead_default::apply_dead_default_lowering;
 pub use errors_add::apply_errors_add_lowering;
 pub use mailer_class_side::apply_mailer_class_side;
+pub use as_json_super::apply_as_json_super_grounding;
+pub use parameterize::apply_parameterize_grounding;
 pub use request_index::apply_request_index_lowering;
 pub use send_dispatch::apply_send_static_dispatch;
 pub use capture_inline::apply_capture_inline;
@@ -101,6 +105,8 @@ pub fn apply_post_analyze_lowerings(
 ) -> Vec<crate::diagnostic::Diagnostic> {
     let mut diags = blank::apply_blank_lowering(app);
     time_current::apply_time_current_lowering(app);
+    as_json_super::apply_as_json_super_grounding(app);
+    parameterize::apply_parameterize_grounding(app);
     request_index::apply_request_index_lowering(app);
     transaction_ground::apply_transaction_grounding(app);
     partial_qualify::apply_partial_qualification(app);

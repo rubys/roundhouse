@@ -53,7 +53,22 @@ fn inflector_module_transpiles_to_typescript() {
     let methods = parse_methods_with_rbs(&ruby, &rbs).expect("parse");
     let emitted = emit_module(&methods).expect("emit_module");
 
-    assert_eq!(emitted, EXPECTED_TS, "emitted TS mismatch");
+    // Module = pluralize + parameterize. The PARAMETERIZE_* regex
+    // consts referenced here are emitted separately by runtime_loader
+    // (`parse_module_constant_exprs` → top-level `const NAME = ...;`),
+    // not by emit_module — this golden covers the method bodies only.
+    // Each `.replace` wraps its pattern in the g-flag guard: Ruby's
+    // gsub replaces ALL matches, JS `.replace` with a non-global
+    // RegExp replaces only the first.
+    let expected = format!(
+        "{EXPECTED_TS}\n{}",
+        "export function parameterize(str: string): string {\n  \
+         return str.toLowerCase()\
+         .replace(PARAMETERIZE_SQUASH instanceof RegExp && !PARAMETERIZE_SQUASH.flags.includes(\"g\") ? new RegExp(PARAMETERIZE_SQUASH.source, PARAMETERIZE_SQUASH.flags + \"g\") : PARAMETERIZE_SQUASH, \"-\")\
+         .replace(PARAMETERIZE_RUNS instanceof RegExp && !PARAMETERIZE_RUNS.flags.includes(\"g\") ? new RegExp(PARAMETERIZE_RUNS.source, PARAMETERIZE_RUNS.flags + \"g\") : PARAMETERIZE_RUNS, \"-\")\
+         .replace(PARAMETERIZE_EDGES instanceof RegExp && !PARAMETERIZE_EDGES.flags.includes(\"g\") ? new RegExp(PARAMETERIZE_EDGES.source, PARAMETERIZE_EDGES.flags + \"g\") : PARAMETERIZE_EDGES, \"\");\n}\n"
+    );
+    assert_eq!(emitted, expected, "emitted TS mismatch");
 }
 
 /// Phase 1 second target: errors.rb has two classes (RecordNotFound,

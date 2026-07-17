@@ -125,10 +125,13 @@ fn inflector_rb_ingests_module_as_namespace() {
     assert_eq!(inflector.name.0.as_str(), "Inflector");
     assert!(inflector.is_module, "Inflector is a module in source");
     assert!(inflector.parent.is_none(), "module has no parent");
-    assert_eq!(inflector.methods.len(), 1);
+    assert_eq!(inflector.methods.len(), 2, "pluralize + parameterize");
 
-    let m = &inflector.methods[0];
-    assert_eq!(m.name.as_str(), "pluralize");
+    let m = inflector
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "pluralize")
+        .expect("pluralize present");
     // `def self.pluralize` → MethodReceiver::Class.
     assert!(
         matches!(m.receiver, roundhouse::dialect::MethodReceiver::Class),
