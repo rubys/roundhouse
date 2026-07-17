@@ -172,10 +172,20 @@ pub fn compile_erb_mapped(source: &str) -> (String, Vec<ErbSegment>) {
                 }
                 let is_output = bytes.get(open + 2) == Some(&b'=');
                 let is_comment = !is_output && bytes.get(open + 2) == Some(&b'#');
-                let body_start = if is_output { open + 3 } else { open + 2 };
+                // Erubi trim markers: under Rails' default trim mode
+                // `<%-` behaves exactly like `<%`, and the `-` of a
+                // closing `-%>` is likewise just a marker — strip both
+                // so the tag body parses as plain Ruby. (Line-level
+                // whitespace handling for code tags already lives in
+                // `erubi_trim_body` at target-emit time.)
+                let is_trim_open =
+                    !is_output && !is_comment && bytes.get(open + 2) == Some(&b'-');
+                let body_start =
+                    if is_output || is_trim_open { open + 3 } else { open + 2 };
                 let close = find_at(bytes, body_start, b"%>")
                     .expect("unterminated ERB tag");
                 let body = &source[body_start..close];
+                let body = body.strip_suffix('-').unwrap_or(body);
                 let ruby = body.trim();
                 if is_comment {
                     // Comment tag — intentionally drop without flushing, so
@@ -228,6 +238,20 @@ pub fn compile_erb_mapped(source: &str) -> (String, Vec<ErbSegment>) {
                 } else {
                     // `<% code %>` — passthrough. Track block openers so
                     // their matching `<% end %>` stays a plain `end`.
+                    //
+                    // Case-arm continuation tags (`<% when X %>`,
+                    // `<% in X %>`): a whitespace-only chunk pending
+                    // between `<% case x %>` and its first arm would
+                    // flush as a `_buf` append *between* the scrutinee
+                    // and `when` — invalid Ruby. Erubi's trim mode
+                    // drops such whitespace-only lines; mirror it here
+                    // for the arm keywords so the translation parses.
+                    if (ruby.starts_with("when ") || ruby.starts_with("in "))
+                        && pending.text.bytes().all(|b| b.is_ascii_whitespace())
+                    {
+                        pending.text.clear();
+                        pending.range = None;
+                    }
                     pending.flush(&mut out, &mut map);
                     record_code(&mut map, out.len(), ruby, body_start, body);
                     out.push_str(ruby);
@@ -353,6 +377,35 @@ mod tests {
             e_off,
             "compiled offset of {compiled_needle:?} should map to template offset of {template_needle:?}",
         );
+    }
+
+    #[test]
+    fn trim_marker_tags_strip_to_plain_code() {
+        // `<%- ... -%>` — erubi trim markers are not part of the Ruby.
+        let src = "<%- raise \"x\" if bad -%>\ndone";
+        let (compiled, _) = compile_erb_mapped(src);
+        assert!(
+            compiled.contains("raise \"x\" if bad\n"),
+            "trim markers stripped from tag body:\n{compiled}"
+        );
+        assert!(!compiled.contains("- raise"), "leading `-` must not survive:\n{compiled}");
+    }
+
+    #[test]
+    fn case_arms_split_across_tags_stay_parseable() {
+        // Whitespace between `<% case x %>` and `<% when A %>` must not
+        // flush as a `_buf` append (invalid Ruby between scrutinee and
+        // first arm) — erubi trim mode drops it; so do we.
+        let src = "<% case x %>\n  <% when A %>a<% when B %>b<% end %>";
+        let (compiled, _) = compile_erb_mapped(src);
+        assert!(
+            compiled.contains("case x\nwhen A\n"),
+            "no buffer append between case and first when:\n{compiled}"
+        );
+        ruby_prism::parse(compiled.as_bytes())
+            .errors()
+            .next()
+            .map(|e| panic!("translated case/when template must parse: {e:?}\n{compiled}"));
     }
 
     #[test]
