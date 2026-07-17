@@ -506,7 +506,25 @@ fn classify_form_with_components(
     // `record.id` otherwise. A typed scalar either way — passing the
     // record whole would widen the helper's param on strict targets
     // (go types `article_path(int64)`).
-    let member_arg = if ctx.slug_models.contains(singular.as_str()) {
+    //
+    // The slug lookup keys on the RECORD's own name (`@domain` →
+    // domain), not the view-directory `singular`: the two diverge when
+    // a form's model is a foreign resource (users/show's `form_with
+    // model: @mod_note` — directory says user, a to_param model, but
+    // ModNote has no to_param and the record is what the member reads
+    // from). That foreign-resource form's action helper is itself
+    // directory-derived and Rails-divergent (it renders only for
+    // moderators, off-replay) — a pre-existing gap this pass leaves
+    // as-was rather than turning into a compile stop.
+    let record_name: Option<String> = match &*model.node {
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => Some(name.as_str().to_string()),
+        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
+            Some(method.as_str().to_string())
+        }
+        _ => None,
+    };
+    let slug_key = record_name.as_deref().unwrap_or(singular.as_str());
+    let member_arg = if ctx.slug_models.contains(slug_key) {
         send(Some(model.clone()), "to_param", Vec::new(), None, false)
     } else {
         send(Some(model.clone()), "id", Vec::new(), None, false)
