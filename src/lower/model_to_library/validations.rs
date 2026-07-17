@@ -46,7 +46,7 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) 
     // helper short-circuits when the FK is unset (nil/0) and queries
     // `<Target>.exists?(fk_value)` otherwise.
     for (span, assoc) in model.spanned_associations() {
-        if let Association::BelongsTo { name, target, foreign_key, optional: false } = assoc {
+        if let Association::BelongsTo { name, target, foreign_key, optional: false, .. } = assoc {
             let mut check = inline_belongs_to_check(name, foreign_key, target);
             check.inherit_span(span);
             stmts.push(check);

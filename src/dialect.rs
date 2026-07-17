@@ -255,6 +255,15 @@ pub enum Association {
         target: ClassId,
         foreign_key: Symbol,
         optional: bool,
+        /// `belongs_to :notifiable, polymorphic: true` — the target
+        /// above is the assoc-name phantom; the real target set is
+        /// resolved at ingest assembly from the inverse `as:` decls
+        /// and recorded here (self-describing IR: every consumer sees
+        /// the same set without re-scanning the app).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        polymorphic: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        polymorphic_targets: Vec<ClassId>,
     },
     HasMany {
         name: Symbol,
@@ -262,6 +271,11 @@ pub enum Association {
         foreign_key: Symbol,
         through: Option<Symbol>,
         dependent: Dependent,
+        /// `has_many :notifications, as: :notifiable` — this side is
+        /// one implementor of the named polymorphic interface; rows
+        /// are scoped by `<as>_type = OwnerClass` on `<as>_id`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_interface: Option<Symbol>,
         /// Association scope lambda body (`has_many :upvoted_stories,
         /// -> { where('votes.vote' => 1) ... }`) — a receiver-less
         /// `where`/`order` chain evaluated against the association's
@@ -275,6 +289,9 @@ pub enum Association {
         target: ClassId,
         foreign_key: Symbol,
         dependent: Dependent,
+        /// See `HasMany::as_interface`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_interface: Option<Symbol>,
     },
     HasAndBelongsToMany {
         name: Symbol,

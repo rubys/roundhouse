@@ -4448,6 +4448,20 @@ pub(crate) fn extract_controller_const_assignments(
 fn association_member_ty(assoc: &crate::dialect::Association) -> (Symbol, Ty) {
     use crate::dialect::Association;
     match assoc {
+        // Polymorphic belongs_to with a resolved implementor set —
+        // the reader yields any implementor (or nil); dispatch on the
+        // union resolves member-wise. Unresolved (no inverse `as:`
+        // decls found) falls through to the phantom-target arm below.
+        Association::BelongsTo { name, polymorphic: true, polymorphic_targets, .. }
+            if !polymorphic_targets.is_empty() =>
+        {
+            let mut variants: Vec<Ty> = polymorphic_targets
+                .iter()
+                .map(|t| Ty::Class { id: t.clone(), args: vec![] })
+                .collect();
+            variants.push(Ty::Nil);
+            (name.clone(), Ty::Union { variants })
+        }
         Association::BelongsTo { name, target, .. }
         | Association::HasOne { name, target, .. } => (
             name.clone(),

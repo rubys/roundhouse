@@ -530,6 +530,8 @@ fn parse_association(
     let mut optional: Option<bool> = None;
     let mut join_table: Option<String> = None;
     let mut scope: Option<crate::expr::Expr> = None;
+    let mut polymorphic: Option<bool> = None;
+    let mut as_interface: Option<String> = None;
 
     for arg in iter {
         // Positional lambda between name and kwargs — the association
@@ -568,6 +570,8 @@ fn parse_association(
                 }
                 "optional" => optional = bool_value(&value),
                 "join_table" => join_table = string_value(&value),
+                "polymorphic" => polymorphic = bool_value(&value),
+                "as" => as_interface = symbol_value(&value),
                 _ => {}
             }
         }
@@ -587,11 +591,17 @@ fn parse_association(
                 .map(|s| ClassId(Symbol::from(s.as_str())))
                 .or_else(|| source.map(|s| ClassId(Symbol::from(camelize(s.as_str())))))
                 .unwrap_or_else(|| ClassId(Symbol::from(singularize_camelize(name_str.as_str())))),
+            // `as: :notifiable` — the rows point back through the
+            // interface columns, not an owner-named key.
             foreign_key: foreign_key
                 .map(|s| Symbol::from(s.as_str()))
-                .unwrap_or_else(|| Symbol::from(format!("{owner_snake}_id"))),
+                .unwrap_or_else(|| match &as_interface {
+                    Some(intf) => Symbol::from(format!("{intf}_id")),
+                    None => Symbol::from(format!("{owner_snake}_id")),
+                }),
             through: through.map(|s| Symbol::from(s.as_str())),
             dependent: dependent.unwrap_or_default(),
+            as_interface: as_interface.as_deref().map(Symbol::from),
             scope,
         }),
         "has_one" => Some(Association::HasOne {
@@ -601,8 +611,12 @@ fn parse_association(
                 .unwrap_or_else(|| ClassId(Symbol::from(camelize(name_str.as_str())))),
             foreign_key: foreign_key
                 .map(|s| Symbol::from(s.as_str()))
-                .unwrap_or_else(|| Symbol::from(format!("{owner_snake}_id"))),
+                .unwrap_or_else(|| match &as_interface {
+                    Some(intf) => Symbol::from(format!("{intf}_id")),
+                    None => Symbol::from(format!("{owner_snake}_id")),
+                }),
             dependent: dependent.unwrap_or_default(),
+            as_interface: as_interface.as_deref().map(Symbol::from),
         }),
         "belongs_to" => Some(Association::BelongsTo {
             name: name.clone(),
@@ -613,6 +627,10 @@ fn parse_association(
                 .map(|s| Symbol::from(s.as_str()))
                 .unwrap_or_else(|| Symbol::from(format!("{name_str}_id"))),
             optional: optional.unwrap_or(false),
+            polymorphic: polymorphic.unwrap_or(false),
+            // Filled by `resolve_polymorphic_targets` once every
+            // model's inverse `as:` declarations are ingested.
+            polymorphic_targets: Vec::new(),
         }),
         "has_and_belongs_to_many" => Some(Association::HasAndBelongsToMany {
             name: name.clone(),

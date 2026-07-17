@@ -573,7 +573,166 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // joins `dir`); map-VFS trees pass `""` and register app-relative.
     app.root = dir.display().to_string().trim_end_matches('/').to_string();
 
+    resolve_polymorphic_targets(&mut app);
+
     Ok(app)
+}
+
+/// Fill each `belongs_to …, polymorphic: true` association's target
+/// set from the inverse side: every model declaring a `has_many`/
+/// `has_one` with `as: <name>` implements that polymorphic interface
+/// (the Rails-canonical registration). Runs once at app assembly so
+/// the IR is self-describing — lowerers and the analyzer read the
+/// resolved set instead of re-scanning the app. Models are collected
+/// in ingest order (alphabetical fs walk), so the set is stable.
+fn resolve_polymorphic_targets(app: &mut App) {
+    use crate::dialect::{Association, ModelBodyItem};
+
+    let mut implementors: HashMap<crate::ident::Symbol, Vec<crate::ident::ClassId>> =
+        HashMap::new();
+    for model in &app.models {
+        for assoc in model.associations() {
+            let (Association::HasMany { as_interface: Some(intf), .. }
+            | Association::HasOne { as_interface: Some(intf), .. }) = assoc
+            else {
+                continue;
+            };
+            let entry = implementors.entry(intf.clone()).or_default();
+            if !entry.contains(&model.name) {
+                entry.push(model.name.clone());
+            }
+        }
+    }
+    for model in &mut app.models {
+        // Secondary source, resolved before the mutable borrow: the
+        // owner model's own body may name implementors as literals —
+        // `where(item_type: "Moderation")` hash conditions or raw-SQL
+        // joins (`item_type = 'Moderation'`). Rails apps without
+        // inverse `as:` declarations (lobsters' ModActivity) register
+        // the set this way.
+        let literal_sets: Vec<(crate::ident::Symbol, Vec<crate::ident::ClassId>)> = model
+            .associations()
+            .filter_map(|assoc| match assoc {
+                Association::BelongsTo { name, polymorphic: true, .. }
+                    if !implementors.contains_key(name) =>
+                {
+                    let found = scan_type_literals(model, name);
+                    (!found.is_empty()).then(|| (name.clone(), found))
+                }
+                _ => None,
+            })
+            .collect();
+        for item in &mut model.body {
+            let ModelBodyItem::Association { assoc, .. } = item else { continue };
+            let Association::BelongsTo {
+                name, polymorphic: true, polymorphic_targets, ..
+            } = assoc
+            else {
+                continue;
+            };
+            if let Some(targets) = implementors.get(name) {
+                *polymorphic_targets = targets.clone();
+            } else if let Some((_, found)) =
+                literal_sets.iter().find(|(n, _)| n == name)
+            {
+                *polymorphic_targets = found.clone();
+            }
+        }
+    }
+}
+
+/// Scan a model's body expressions for literal mentions of
+/// `<assoc>_type` paired with a class-name string: hash conditions
+/// (`where(item_type: "Moderation")`) and raw-SQL fragments
+/// (`… item_type = 'Moderation' …`). Returns the class names in
+/// first-appearance order.
+fn scan_type_literals(
+    model: &crate::dialect::Model,
+    assoc_name: &crate::ident::Symbol,
+) -> Vec<crate::ident::ClassId> {
+    use crate::dialect::{Association, ModelBodyItem};
+    use crate::expr::{Expr, ExprNode, Literal};
+
+    let type_col = format!("{assoc_name}_type");
+    let mut found: Vec<crate::ident::ClassId> = Vec::new();
+    let mut push = |s: &str| {
+        // Class names only — reject anything that isn't a constant path.
+        if !s.is_empty()
+            && s.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+        {
+            let id = crate::ident::ClassId(crate::ident::Symbol::from(s));
+            if !found.contains(&id) {
+                found.push(id);
+            }
+        }
+    };
+
+    fn walk(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+        f(e);
+        e.node.for_each_child(&mut |c| walk(c, f));
+    }
+    let mut visit = |e: &Expr| {
+        walk(e, &mut |e| {
+            match &*e.node {
+                // where(item_type: "Moderation") — hash entry keyed by
+                // the type column with a string literal value.
+                ExprNode::Hash { entries, .. } => {
+                    for (k, v) in entries {
+                        let key_matches = match &*k.node {
+                            ExprNode::Lit { value: Literal::Sym { value } } => {
+                                value.as_str() == type_col
+                            }
+                            ExprNode::Lit { value: Literal::Str { value } } => {
+                                value == &type_col
+                            }
+                            _ => false,
+                        };
+                        if key_matches {
+                            if let ExprNode::Lit { value: Literal::Str { value } } = &*v.node {
+                                push(value);
+                            }
+                        }
+                    }
+                }
+                // Raw SQL: every `<col> = '<Name>'` / `= "<Name>"`
+                // occurrence inside one string literal.
+                ExprNode::Lit { value: Literal::Str { value } } => {
+                    let mut rest = value.as_str();
+                    while let Some(pos) = rest.find(type_col.as_str()) {
+                        rest = &rest[pos + type_col.len()..];
+                        let tail = rest.trim_start();
+                        let Some(tail) = tail.strip_prefix('=') else { continue };
+                        let tail = tail.trim_start();
+                        let Some(quote) = tail.chars().next().filter(|c| *c == '\'' || *c == '"')
+                        else {
+                            continue;
+                        };
+                        let inner = &tail[1..];
+                        if let Some(end) = inner.find(quote) {
+                            push(&inner[..end]);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        });
+    };
+
+    for item in &model.body {
+        match item {
+            ModelBodyItem::Scope { scope, .. } => visit(&scope.body),
+            ModelBodyItem::Method { method, .. } => visit(&method.body),
+            ModelBodyItem::Unknown { expr, .. } => visit(expr),
+            ModelBodyItem::Association { assoc, .. } => {
+                if let Association::HasMany { scope: Some(s), .. } = assoc {
+                    visit(s);
+                }
+            }
+            _ => {}
+        }
+    }
+    found
 }
 
 /// Ingest `config/importmap.rb`. The DSL has three common shapes:

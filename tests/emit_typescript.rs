@@ -200,6 +200,8 @@ fn optional_belongs_to_emits_ternary_guard() {
                 target: ClassId(Symbol::from("User")),
                 foreign_key: Symbol::from("author_id"),
                 optional: true,
+                polymorphic: false,
+                polymorphic_targets: vec![],
             },
             leading_comments: vec![],
             leading_blank_line: false,

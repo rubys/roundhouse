@@ -275,6 +275,7 @@ mod tests {
             foreign_key: sym(fk),
             through: None,
             dependent: Dependent::None,
+            as_interface: None,
             scope: None,
         }
     }
@@ -285,6 +286,8 @@ mod tests {
             target: cid(target),
             foreign_key: sym(fk),
             optional: false,
+            polymorphic: false,
+            polymorphic_targets: vec![],
         }
     }
 

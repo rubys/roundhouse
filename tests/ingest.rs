@@ -82,7 +82,7 @@ fn ingests_associations_with_convention_defaults() {
     let post_assocs: Vec<&Association> = post.associations().collect();
     assert_eq!(post_assocs.len(), 1);
     match post_assocs[0] {
-        Association::HasMany { name, target, foreign_key, through, dependent, scope } => {
+        Association::HasMany { name, target, foreign_key, through, dependent, scope, .. } => {
             assert_eq!(name.as_str(), "comments");
             assert_eq!(target.0.as_str(), "Comment");
             assert_eq!(foreign_key.as_str(), "post_id");
@@ -101,7 +101,7 @@ fn ingests_associations_with_convention_defaults() {
     let comment_assocs: Vec<&Association> = comment.associations().collect();
     assert_eq!(comment_assocs.len(), 1);
     match comment_assocs[0] {
-        Association::BelongsTo { name, target, foreign_key, optional } => {
+        Association::BelongsTo { name, target, foreign_key, optional, .. } => {
             assert_eq!(name.as_str(), "post");
             assert_eq!(target.0.as_str(), "Post");
             assert_eq!(foreign_key.as_str(), "post_id");

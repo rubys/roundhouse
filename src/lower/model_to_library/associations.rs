@@ -18,9 +18,46 @@ pub(super) fn push_association_methods(methods: &mut Vec<MethodDef>, model: &Mod
     for (span, assoc) in model.spanned_associations() {
         let before = methods.len();
         match assoc {
-            Association::HasMany { name, target, foreign_key, .. } => {
-                methods.push(synth_has_many_reader(owner, name, target, foreign_key));
+            Association::HasMany { name, target, foreign_key, as_interface, .. } => {
+                methods.push(synth_has_many_reader(
+                    owner,
+                    name,
+                    target,
+                    foreign_key,
+                    as_interface.as_ref(),
+                ));
                 methods.push(synth_preload_setter(owner, name, target));
+            }
+            Association::BelongsTo {
+                name,
+                target,
+                foreign_key,
+                polymorphic: true,
+                polymorphic_targets,
+                ..
+            } if !polymorphic_targets.is_empty() => {
+                // Polymorphic: the reader dispatches on the `<name>_type`
+                // column across the resolved implementor set; the writer
+                // stores both halves of the (type, id) pair.
+                methods.push(synth_polymorphic_reader(
+                    owner,
+                    name,
+                    polymorphic_targets,
+                    foreign_key,
+                ));
+                let writer_name = Symbol::from(format!("{}=", name.as_str()));
+                if !model_defines_instance_method(model, &writer_name)
+                    && !methods
+                        .iter()
+                        .any(|m| m.name == writer_name && m.receiver == MethodReceiver::Instance)
+                {
+                    methods.push(synth_polymorphic_writer(
+                        owner,
+                        name,
+                        polymorphic_targets,
+                        foreign_key,
+                    ));
+                }
             }
             Association::BelongsTo { name, target, foreign_key, .. } => {
                 methods.push(synth_belongs_to_reader(owner, name, target, foreign_key));
@@ -41,8 +78,14 @@ pub(super) fn push_association_methods(methods: &mut Vec<MethodDef>, model: &Mod
                     methods.push(synth_belongs_to_writer(owner, name, target, foreign_key));
                 }
             }
-            Association::HasOne { name, target, foreign_key, .. } => {
-                methods.push(synth_has_one_reader(owner, name, target, foreign_key));
+            Association::HasOne { name, target, foreign_key, as_interface, .. } => {
+                methods.push(synth_has_one_reader(
+                    owner,
+                    name,
+                    target,
+                    foreign_key,
+                    as_interface.as_ref(),
+                ));
             }
             // HABTM lands when a fixture demands it.
             _ => {}
@@ -60,20 +103,34 @@ fn synth_has_many_reader(
     name: &Symbol,
     target: &ClassId,
     foreign_key: &Symbol,
+    as_interface: Option<&Symbol>,
 ) -> MethodDef {
     // def comments; Comment.where(article_id: @id); end
+    //
+    // With `as: :notifiable` the rows point back through the
+    // polymorphic interface columns, so the type half scopes too:
+    //   Notification.where(notifiable_id: @id, notifiable_type: "Comment")
+    let mut entries = vec![(
+        lit_sym(foreign_key.clone()),
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Ivar { name: Symbol::from("id") },
+        ),
+    )];
+    if let Some(intf) = as_interface {
+        entries.push((
+            lit_sym(Symbol::from(format!("{intf}_type"))),
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit {
+                    value: Literal::Str { value: owner.0.as_str().to_string() },
+                },
+            ),
+        ));
+    }
     let where_args = vec![Expr::new(
         Span::synthetic(),
-        ExprNode::Hash {
-            entries: vec![(
-                lit_sym(foreign_key.clone()),
-                Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Ivar { name: Symbol::from("id") },
-                ),
-            )],
-            kwargs: true,
-        },
+        ExprNode::Hash { entries, kwargs: true },
     )];
 
     let lazy_query = Expr::new(
@@ -159,16 +216,27 @@ fn synth_has_one_reader(
     name: &Symbol,
     target: &ClassId,
     foreign_key: &Symbol,
+    as_interface: Option<&Symbol>,
 ) -> MethodDef {
+    let mut entries = vec![(
+        lit_sym(foreign_key.clone()),
+        Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("id") }),
+    )];
+    // See `synth_has_many_reader` — `as:` adds the type-half scope.
+    if let Some(intf) = as_interface {
+        entries.push((
+            lit_sym(Symbol::from(format!("{intf}_type"))),
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit {
+                    value: Literal::Str { value: owner.0.as_str().to_string() },
+                },
+            ),
+        ));
+    }
     let where_args = vec![Expr::new(
         Span::synthetic(),
-        ExprNode::Hash {
-            entries: vec![(
-                lit_sym(foreign_key.clone()),
-                Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("id") }),
-            )],
-            kwargs: true,
-        },
+        ExprNode::Hash { entries, kwargs: true },
     )];
     let query = Expr::new(
         Span::synthetic(),
@@ -374,6 +442,194 @@ fn synth_belongs_to_reader(
         is_async: false,
             mutates_self: false,
             block_param: None,
+    }
+}
+
+fn synth_polymorphic_reader(
+    owner: &ClassId,
+    name: &Symbol,
+    targets: &[ClassId],
+    foreign_key: &Symbol,
+) -> MethodDef {
+    // def notifiable
+    //   case @notifiable_type
+    //   when "Comment" then Comment.find_by(id: @notifiable_id)
+    //   when "Message" then Message.find_by(id: @notifiable_id)
+    //   else nil
+    //   end
+    // end
+    //
+    // Rails stores the implementor's class name in `<name>_type`; the
+    // target set was resolved at ingest from the inverse `as:` decls.
+    let type_col = Symbol::from(format!("{}_type", name.as_str()));
+    let find_by = |t: &ClassId| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(class_const(t)),
+                method: Symbol::from("find_by"),
+                args: vec![Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Hash {
+                        entries: vec![(
+                            lit_sym(Symbol::from("id")),
+                            Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Ivar { name: foreign_key.clone() },
+                            ),
+                        )],
+                        kwargs: true,
+                    },
+                )],
+                block: None,
+                parenthesized: true,
+            },
+        )
+    };
+    let mut arms: Vec<crate::expr::Arm> = targets
+        .iter()
+        .map(|t| crate::expr::Arm {
+            pattern: crate::expr::Pattern::Lit {
+                value: Literal::Str { value: t.0.as_str().to_string() },
+            },
+            guard: None,
+            body: find_by(t),
+        })
+        .collect();
+    arms.push(crate::expr::Arm {
+        pattern: crate::expr::Pattern::Wildcard,
+        guard: None,
+        body: nil_lit(),
+    });
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Case {
+            scrutinee: Expr::new(Span::synthetic(), ExprNode::Ivar { name: type_col }),
+            arms,
+        },
+    );
+
+    let mut variants: Vec<Ty> = targets
+        .iter()
+        .map(|t| Ty::Class { id: t.clone(), args: vec![] })
+        .collect();
+    variants.push(Ty::Nil);
+    MethodDef {
+        name: name.clone(),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        signature: Some(fn_sig(vec![], Ty::Union { variants })),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    }
+}
+
+fn synth_polymorphic_writer(
+    owner: &ClassId,
+    name: &Symbol,
+    targets: &[ClassId],
+    foreign_key: &Symbol,
+) -> MethodDef {
+    // def notifiable=(value)
+    //   if value.nil?
+    //     @notifiable_id = 0
+    //     @notifiable_type = ""
+    //   else
+    //     @notifiable_id = value.id
+    //     case value
+    //     when Comment then @notifiable_type = "Comment"
+    //     when Message then @notifiable_type = "Message"
+    //     end
+    //   end
+    // end
+    //
+    // Both halves of the (type, id) pair, mirroring the plain writer's
+    // `@fk == 0` nil sentinel. The class-pattern `when` keeps the type
+    // string a compile-time constant per arm (no `.class.name`).
+    let value = Symbol::from("value");
+    let type_col = Symbol::from(format!("{}_type", name.as_str()));
+    let assign = |target_ivar: &Symbol, v: Expr| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Ivar { name: target_ivar.clone() },
+                value: v,
+            },
+        )
+    };
+    let lit_str = |s: &str| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit { value: Literal::Str { value: s.to_string() } },
+        )
+    };
+
+    let nil_check = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(var_ref(value.clone())),
+            method: Symbol::from("nil?"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let id_read = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(var_ref(value.clone())),
+            method: Symbol::from("id"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let type_arms: Vec<crate::expr::Arm> = targets
+        .iter()
+        .map(|t| crate::expr::Arm {
+            pattern: crate::expr::Pattern::Expr { expr: class_const(t) },
+            guard: None,
+            body: assign(&type_col, lit_str(t.0.as_str())),
+        })
+        .collect();
+    let type_switch = Expr::new(
+        Span::synthetic(),
+        ExprNode::Case { scrutinee: var_ref(value.clone()), arms: type_arms },
+    );
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: nil_check,
+            then_branch: seq(vec![
+                assign(foreign_key, lit_int(0)),
+                assign(&type_col, lit_str("")),
+            ]),
+            else_branch: seq(vec![assign(foreign_key, id_read), type_switch]),
+        },
+    );
+
+    let mut variants: Vec<Ty> = targets
+        .iter()
+        .map(|t| Ty::Class { id: t.clone(), args: vec![] })
+        .collect();
+    variants.push(Ty::Nil);
+    MethodDef {
+        name: Symbol::from(format!("{}=", name.as_str())),
+        receiver: MethodReceiver::Instance,
+        params: vec![Param::positional(value.clone())],
+        body,
+        signature: Some(fn_sig(vec![(value, Ty::Union { variants })], Ty::Nil)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+        block_param: None,
     }
 }
 
