@@ -152,6 +152,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         "extras",
         "lib",
         "app/lib",
+        "app/jobs",
         "app/mailers",
         "app/services",
         "app/workers",

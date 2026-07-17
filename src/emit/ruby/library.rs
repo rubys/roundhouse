@@ -541,6 +541,19 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
             .into_iter()
             .map(|f| f.name)
             .collect();
+    // App classes that `include Rails.application.routes.url_helpers`
+    // (ingest records the marker as an include of RouteHelpers —
+    // lobsters' Routes). Explicit `X.<helper>` call sites anywhere in
+    // the tree rewrite through RouteHelpers below. Sourced from
+    // `app.library_classes`, not the local `lcs` slice — this pass
+    // also runs over the lowered-models stack, whose slice doesn't
+    // contain the including class itself.
+    let url_helper_classes: std::collections::HashSet<Symbol> = app
+        .library_classes
+        .iter()
+        .filter(|lc| lc.includes.iter().any(|i| i.0.as_str() == "RouteHelpers"))
+        .map(|lc| lc.name.0.clone())
+        .collect();
     for lc in lcs.iter_mut() {
         // CONTROLLERS in the index provide `helper_method`s to views:
         // only the call-site rewrite applies to them — their methods
@@ -574,6 +587,7 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
                 &mut m.body,
                 &app.helper_method_index,
                 &route_helpers,
+                &url_helper_classes,
                 rewrite_request,
             );
         }
@@ -714,11 +728,41 @@ fn rewrite_helper_calls(
     expr: &mut Expr,
     index: &HashMap<Symbol, ClassId>,
     route_helpers: &std::collections::HashSet<Symbol>,
+    url_helper_classes: &std::collections::HashSet<Symbol>,
     rewrite_request: bool,
 ) {
     expr.node.for_each_child_mut(&mut |c| {
-        rewrite_helper_calls(c, index, route_helpers, rewrite_request)
+        rewrite_helper_calls(c, index, route_helpers, url_helper_classes, rewrite_request)
     });
+
+    // `X.<helper>` where X singleton-includes url_helpers (lobsters'
+    // `Routes.user_url reparent_user`): a `<x>_path` retargets to the
+    // generated RouteHelpers module; a `<x>_url` whose path sibling is
+    // generated re-lands as the bare `<x>_url` form so the absolute-URL
+    // grounding a few blocks down claims it in this same visit.
+    if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node {
+        if let ExprNode::Const { path } = &*r.node {
+            if path.len() == 1 && url_helper_classes.contains(&path[0]) {
+                let named_path = route_helpers.contains(method);
+                let named_url = method
+                    .as_str()
+                    .strip_suffix("_url")
+                    .is_some_and(|stem| {
+                        route_helpers.contains(&Symbol::from(format!("{stem}_path")))
+                    });
+                if named_path {
+                    let ExprNode::Send { recv, .. } = &mut *expr.node else { unreachable!() };
+                    *recv = Some(Expr::new(
+                        expr.span,
+                        ExprNode::Const { path: vec![Symbol::from("RouteHelpers")] },
+                    ));
+                } else if named_url {
+                    let ExprNode::Send { recv, .. } = &mut *expr.node else { unreachable!() };
+                    *recv = None;
+                }
+            }
+        }
+    }
 
     // Bare `request` in a helper/view module body → the per-dispatch
     // `ActionController::Current.request` (module functions have no

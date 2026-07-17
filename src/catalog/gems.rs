@@ -87,6 +87,21 @@ pub struct GemClass {
 /// The catalog. One entry per gem class/module; add a gem by adding a
 /// row.
 pub const GEM_CATALOG: &[GemClass] = &[
+    // Telebugs — error-reporting service (lobsters). Config/enrichment
+    // calls made for side effect from controller filters; returns are
+    // discarded at every corpus call site. The reporting itself is
+    // ops-tooling outside the transpiled app's semantics (gem-fate:
+    // facade), so resolving the calls as gradual is the whole job.
+    GemClass {
+        name: "Telebugs",
+        class_methods: &[
+            ("user", GemTy::Untyped),
+            ("context", GemTy::Untyped),
+            ("capture", GemTy::Untyped),
+            ("report", GemTy::Untyped),
+        ],
+        instance_methods: &[],
+    },
     // I18n — Rails' translation module, called as a bare singleton
     // (`I18n.t('admin.…')`) everywhere outside views (in views the
     // `t` helper delegates here). `t`/`l` return the translated /

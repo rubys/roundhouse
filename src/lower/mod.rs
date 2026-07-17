@@ -50,6 +50,7 @@ pub mod first_or_create;
 pub mod group_count;
 pub mod dead_default;
 pub mod errors_add;
+pub mod job_class_side;
 pub mod mailer_class_side;
 pub mod as_json_super;
 pub mod parameterize;
@@ -120,6 +121,7 @@ pub fn apply_post_analyze_lowerings(
     diags.extend(create_block::apply_create_block_inline(app));
     diags.extend(update_kwargs::apply_update_kwargs_inline(app));
     diags.extend(mailer_class_side::apply_mailer_class_side(app));
+    diags.extend(job_class_side::apply_job_class_side(app));
     diags.extend(send_dispatch::apply_send_static_dispatch(app, registry));
     // AFTER send_dispatch, by contract: an all-duration-unit name set
     // dispatches through case arms synthesized as plural unit calls

@@ -1321,6 +1321,18 @@ impl Analyzer {
                     args: vec![],
                 });
             }
+            // `include Rails.application.routes.url_helpers` (recorded
+            // at ingest as an include of the generated RouteHelpers
+            // module — lobsters' Routes class does this inside
+            // `class << self`): the whole route-helper surface becomes
+            // class-callable, every helper returning a path/URL String.
+            if lc.includes.iter().any(|i| i.0.as_str() == "RouteHelpers") {
+                for name in &route_helper_names {
+                    cls.class_methods
+                        .entry(Symbol::from(name.as_str()))
+                        .or_insert(Ty::Str);
+                }
+            }
             // Carry the superclass link so inheritance dispatch walks it.
             // Crucial for classes extending an *unmodeled* gem parent
             // (`TimeSeries < SVG::Graph::TimeSeries`): the walk reaches the
@@ -1421,6 +1433,67 @@ impl Analyzer {
             classes
                 .entry(ClassId(Symbol::from("ActionMailer::MessageDelivery")))
                 .or_insert(delivery_cls);
+        }
+
+        // ActiveJob classes: the app defines an instance
+        // `def perform(…)` but *calls* the class-side queue entries —
+        // `Job.perform_later(…)` / `perform_now(…)` /
+        // `set(wait: …).perform_later(…)`. Same shape as the mailer
+        // block above: identify jobs by walking the parent chain to
+        // `ActiveJob::Base`, then register the entries.
+        // `perform_later`/`set` return the class-typed value (`set`
+        // collapses to self under the inline semantics
+        // `lower::job_class_side` synthesizes, so the chained
+        // `perform_later` re-dispatches on the class);
+        // `perform_now` returns `perform`'s declared type.
+        {
+            let parent_of: HashMap<&ClassId, Option<&ClassId>> = app
+                .library_classes
+                .iter()
+                .map(|lc| (&lc.name, lc.parent.as_ref()))
+                .collect();
+            let is_job = |start: &ClassId| -> bool {
+                let mut cur = Some(start);
+                let mut depth = 0usize;
+                while let Some(id) = cur {
+                    if id.0.as_str() == "ActiveJob::Base" {
+                        return true;
+                    }
+                    depth += 1;
+                    if depth > 32 {
+                        break;
+                    }
+                    cur = parent_of.get(id).copied().flatten();
+                }
+                false
+            };
+            for lc in &app.library_classes {
+                if !is_job(&lc.name) {
+                    continue;
+                }
+                let self_ty = Ty::Class { id: lc.name.clone(), args: vec![] };
+                let perform_ret = lc
+                    .methods
+                    .iter()
+                    .find(|m| {
+                        m.receiver == crate::dialect::MethodReceiver::Instance
+                            && m.name.as_str() == "perform"
+                    })
+                    .and_then(|m| match &m.signature {
+                        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
+                        _ => None,
+                    })
+                    .unwrap_or(Ty::Untyped);
+                let cls = classes.entry(lc.name.clone()).or_default();
+                cls.parent = lc.parent.clone();
+                for (entry, ty) in [
+                    ("perform_later", self_ty.clone()),
+                    ("set", self_ty.clone()),
+                    ("perform_now", perform_ret),
+                ] {
+                    cls.class_methods.entry(Symbol::from(entry)).or_insert(ty);
+                }
+            }
         }
 
         // Sidekiq workers: `include Sidekiq::Worker` grants the

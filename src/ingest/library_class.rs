@@ -280,6 +280,17 @@ fn walk_decl_body<'pr>(
                             for arg in args.arguments().iter() {
                                 if let Some(path) = constant_path_of(&arg) {
                                     includes.push(ClassId(Symbol::from(path.join("::"))));
+                                } else if is_rails_url_helpers_chain(&arg) {
+                                    // `include Rails.application.routes.
+                                    // url_helpers` (lobsters' Routes class,
+                                    // inside `class << self`) — the whole
+                                    // route-helper surface. Recorded as an
+                                    // include of our generated RouteHelpers
+                                    // module: the analyzer registers the
+                                    // helper names off this marker and the
+                                    // ruby emit rewrites `X.<helper>` call
+                                    // sites through RouteHelpers.
+                                    includes.push(ClassId(Symbol::from("RouteHelpers")));
                                 }
                             }
                         }
@@ -363,6 +374,35 @@ fn walk_decl_body<'pr>(
 
 /// Rewrite `@@X` (ingested as a sigil-verbatim `Var`) to `Ivar { X }`,
 /// both in read position and as an `Assign` target.
+/// Match the `Rails.application.routes.url_helpers` receiver chain (a
+/// nested CallNode ladder rooted at the `Rails` constant).
+fn is_rails_url_helpers_chain(node: &ruby_prism::Node<'_>) -> bool {
+    let mut expected = ["url_helpers", "routes", "application"].iter();
+    let mut cur = match node.as_call_node() {
+        Some(c) => c,
+        None => return false,
+    };
+    loop {
+        let Some(want) = expected.next() else { return false };
+        if cur.name().as_slice() != want.as_bytes() {
+            return false;
+        }
+        match cur.receiver() {
+            Some(r) => {
+                if let Some(cr) = r.as_constant_read_node() {
+                    return expected.next().is_none()
+                        && cr.name().as_slice() == b"Rails";
+                }
+                match r.as_call_node() {
+                    Some(next) => cur = next,
+                    None => return false,
+                }
+            }
+            None => return false,
+        }
+    }
+}
+
 fn normalize_classvars_to_ivars(e: &mut Expr) {
     match &mut *e.node {
         ExprNode::Var { name, .. } if name.as_str().starts_with("@@") => {
@@ -497,7 +537,17 @@ pub(super) fn ingest_library_method(
         for kw in pn.keywords().iter() {
             if let Some(rkp) = kw.as_required_keyword_parameter_node() {
                 if let Ok(s) = std::str::from_utf8(rkp.name().as_slice()) {
-                    params.push(Param::positional(Symbol::from(s)));
+                    // Marked keyword so passes that cannot forward
+                    // kwargs positionally (mailer/job class-side
+                    // wrappers) see the truth and ledger instead of
+                    // synthesizing a mis-binding wrapper. (The
+                    // optional-keyword branch below deliberately stays
+                    // positional-with-default — the trailing-kwargs
+                    // normalize path depends on that shape.)
+                    params.push(Param::keyword(
+                        Symbol::from(s.trim_end_matches(':')),
+                        None,
+                    ));
                 }
             } else if let Some(okp) = kw.as_optional_keyword_parameter_node() {
                 if let Ok(s) = std::str::from_utf8(okp.name().as_slice()) {
