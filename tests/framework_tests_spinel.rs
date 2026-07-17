@@ -105,6 +105,7 @@ fn build_and_run(test_file: &Path, tag: &str) {
         "action_controller.rb",
         "action_dispatch.rb",
         "inflector.rb",
+        "inflector_ext.rb",
         "json_builder.rb",
     ] {
         let src = runtime_ruby.join(entry);

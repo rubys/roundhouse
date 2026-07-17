@@ -1422,6 +1422,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         "action_mailer",
         "gem_facades",
         "inflector",
+        "inflector_ext",
         "json_builder",
     ] {
         let rb = Path::new("runtime/ruby").join(format!("{stem}.rb"));
