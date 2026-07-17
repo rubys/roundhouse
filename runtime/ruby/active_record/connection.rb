@@ -146,5 +146,20 @@ module ActiveRecord
       _adapter_update
       true
     end
+
+    # Rails' `Base#as_json(only:)` attribute serializer, monomorphized:
+    # the corpus reaches it only as `super(only: attrs)` inside a
+    # model's own `as_json`, which the as_json_super lowering rewrites
+    # to this call. String-keyed like Rails; values are the raw
+    # attribute reads via the `[]` indexer (temporal columns therefore
+    # render in DB format, not Rails' ISO8601(3) — the JSON endpoints
+    # are off-replay; tighten when a replay route locks bytes).
+    def _as_json_only(only)
+      h = {}
+      only.each do |k|
+        h[k.to_s] = self[k]
+      end
+      h
+    end
   end
 end

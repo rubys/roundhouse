@@ -27,5 +27,6 @@ module ActiveRecord
     def self.record_timestamps=: (untyped value) -> untyped
     def self.record_timestamps: () -> bool
     def update_column: (untyped name, untyped value) -> bool
+    def _as_json_only: (Array[Symbol] only) -> Hash[String, untyped]
   end
 end
