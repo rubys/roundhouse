@@ -17,6 +17,15 @@ module ActiveRecord
   # target-specific surface leaks in here. Chain methods mutate and return
   # `self`; lowered chains are linear (build then terminate), so a fresh
   # Relation per chain start is enough isolation.
+  #
+  # Terminals memoize: the first `to_a` loads and caches the records
+  # (Rails' loaded-relation contract), so `map` + `each` + `empty?` on
+  # the same relation hit the database once, not once per call — and
+  # record mutations made between terminals (lobsters' current_vote
+  # stamping) survive to the render. Every chain method drops the cache:
+  # app code does re-chain after a terminal (`rel = rel.where(...)`
+  # returns this same object, mutated), and a stale cache there would
+  # serve the pre-refinement rows.
   class Relation
     def initialize(model)
       @model = model
@@ -31,6 +40,7 @@ module ActiveRecord
       @limit = nil
       @offset = nil
       @includes = []
+      @records = nil
     end
 
     # ---- chain methods (return self) --------------------------------
@@ -49,6 +59,7 @@ module ActiveRecord
     end
 
     def add_condition(condition, args, negate)
+      @records = nil
       return if condition.nil?
       sql = if condition.is_a?(Hash)
         hash_conditions(condition)
@@ -61,6 +72,7 @@ module ActiveRecord
     end
 
     def order(*parts)
+      @records = nil
       parts.each { |p| @orders << order_term(p) }
       self
     end
@@ -75,36 +87,43 @@ module ActiveRecord
     end
 
     def order!(*parts)
+      @records = nil
       parts.each { |p| @orders << order_term(p) }
       self
     end
 
     def limit(n)
+      @records = nil
       @limit = n
       self
     end
 
     def offset(n)
+      @records = nil
       @offset = n
       self
     end
 
     def group(*parts)
+      @records = nil
       parts.each { |p| @groups << p.to_s }
       self
     end
 
     def having(condition, *args)
+      @records = nil
       @havings << substitute_binds(condition.to_s, args)
       self
     end
 
     def joins(spec)
+      @records = nil
       @joins << spec.to_s
       self
     end
 
     def left_outer_joins(spec)
+      @records = nil
       @joins << spec.to_s
       self
     end
@@ -117,6 +136,7 @@ module ActiveRecord
     # `select(:id, :username, "raw AS x")` — Symbols qualify against this
     # relation's table (as Rails renders them); raw strings ride verbatim.
     def select(*specs)
+      @records = nil
       cols = []
       specs.each do |spec|
         cols << (spec.is_a?(Symbol) ? "#{@table}.#{spec}" : spec.to_s)
@@ -126,6 +146,7 @@ module ActiveRecord
     end
 
     def distinct
+      @records = nil
       @distinct = true
       self
     end
@@ -137,16 +158,19 @@ module ActiveRecord
     # into the `_preload_<assoc>` caches). Models without a synthesized
     # override inherit Base's no-op and stay lazy (correct, just N+1).
     def includes(*names)
+      @records = nil
       names.each { |n| @includes << n }
       self
     end
 
     def preload(*names)
+      @records = nil
       names.each { |n| @includes << n }
       self
     end
 
     def eager_load(*names)
+      @records = nil
       names.each { |n| @includes << n }
       self
     end
@@ -154,6 +178,7 @@ module ActiveRecord
     # `merge(other)` — fold another relation's WHEREs in. v1 handles the
     # common case (merging a same-table scope's conditions).
     def merge(other)
+      @records = nil
       other.where_clauses.each { |w| @wheres << w }
       self
     end
@@ -172,21 +197,21 @@ module ActiveRecord
     end
 
     def none
+      @records = nil
       @wheres << "(1 = 0)"
       self
     end
 
-    # `reload` — this Relation is lazy and re-queries on every terminal (no
-    # materialized cache), so reloading is a no-op returning self; the next
-    # `to_a`/`each`/`map` already reflects committed changes.
+    # `reload` — drop the loaded records; the next terminal re-queries and
+    # reflects committed changes.
     def reload
+      @records = nil
       self
     end
 
-    # Rails' `load` forces the query and memoizes the records; with no
-    # materialized cache here it's the same no-op as reload — the next
-    # `to_a`/`each`/`map` runs the query.
+    # Rails' `load` — force the query now and memoize the records.
     def load
+      to_a
       self
     end
 
@@ -198,11 +223,18 @@ module ActiveRecord
 
     # ---- terminals --------------------------------------------------
 
+    # Loads once, then serves the memoized records (see the class
+    # comment). Hands back a shallow copy each call — Rails' `to_a`
+    # contract — so a caller sorting or appending to the result can't
+    # corrupt the cache; the record objects themselves stay shared.
     def to_a
+      cached = @records
+      return cached.dup unless cached.nil?
       rows = ActiveRecord.adapter.select_rows(to_sql)
       records = rows.map { |row| @model.instantiate(row) }
       @model.preload_associations(records, @includes) if @includes.length > 0
-      records
+      @records = records
+      records.dup
     end
 
     # `relation + array` — Rails materializes and concatenates
@@ -318,8 +350,11 @@ module ActiveRecord
       h
     end
 
+    # Loaded relations answer from the cache; unloaded ones keep the
+    # COUNT round-trip (Rails asks EXISTS here — one row either way).
     def empty?
-      count == 0
+      r = @records
+      r.nil? ? count == 0 : r.length == 0
     end
 
     def any?

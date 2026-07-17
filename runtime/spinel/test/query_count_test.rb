@@ -54,6 +54,45 @@ class QueryCountTest < ActionDispatch::IntegrationTest
             "#{per_article.join("\n")}"
     end
   end
+
+  # Relation memoization: the first terminal loads and caches the
+  # records (Rails' loaded-relation contract); later terminals on the
+  # same relation answer from the cache. Lobsters' /comments leaned on
+  # this three-terminals-deep (controller `.map`, controller `.each`,
+  # view `.each` + `.empty?`) and paid 17 queries per request — and lost
+  # record mutations made between terminals — until Relation memoized.
+  # (The blog lowering inlines simple chains straight to Db calls, so
+  # the Relation under test is constructed directly.)
+  def test_loaded_relation_reterminals_issue_no_queries
+    rel = ActiveRecord::Relation.new(Article).order("created_at DESC")
+    ids = rel.map { |a| a.id }
+    raise "fixture seeded no articles" if ids.length == 0
+    sql = Db.capture_sql do
+      rel.each { |a| a }
+      is_empty = rel.empty?
+      raise "loaded non-empty relation answered empty? = true" if is_empty
+      rel.to_a
+    end
+    unless sql.length == 0
+      raise "expected re-terminals on a loaded relation to issue 0 " \
+            "queries, got #{sql.length}:\n#{sql.join("\n")}"
+    end
+  end
+
+  # The flip side: chaining after a terminal (`rel.where(...)` mutates
+  # and returns the same object) must drop the cache — serving the
+  # pre-refinement rows would be a correctness bug, not a perf feature.
+  def test_rechaining_a_loaded_relation_requeries
+    rel = ActiveRecord::Relation.new(Article).order("id")
+    ids = rel.map { |a| a.id }
+    raise "fixture seeded no articles" if ids.length == 0
+    rel.where("id = #{ids[0]}")
+    fresh = rel.to_a
+    unless fresh.length == 1
+      raise "expected re-chained relation to re-query and return 1 row, " \
+            "got #{fresh.length} — stale loaded records served"
+    end
+  end
 end
 
 # Self-driving footer — the hand-written counterpart to the emitted
@@ -67,4 +106,12 @@ __t = QueryCountTest.new
 __t.setup
 __t.test_articles_index_is_two_queries_not_n_plus_one
 __t.teardown
-puts "QueryCountTest: 1 tests passed"
+__t2 = QueryCountTest.new
+__t2.setup
+__t2.test_loaded_relation_reterminals_issue_no_queries
+__t2.teardown
+__t3 = QueryCountTest.new
+__t3.setup
+__t3.test_rechaining_a_loaded_relation_requeries
+__t3.teardown
+puts "QueryCountTest: 3 tests passed"
