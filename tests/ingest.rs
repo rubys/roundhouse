@@ -1163,3 +1163,44 @@ fn non_nil_classvar_initializer_is_refused() {
         "non-nil class-variable initializer must not be silently dropped"
     );
 }
+
+#[test]
+fn exists_with_conditions_hash_desugars_to_where_chain() {
+    // ActiveRecord `Model.exists?(code: x)` (and the `:code => x` form) is
+    // the conditions overload — semantically `where(conditions).exists?`.
+    // Ingest desugars it to that chain so the runtime keeps a monomorphic
+    // `exists?`; the id form (`exists?(5)`) must stay untouched.
+    use roundhouse::emit::ruby::emit_expr;
+
+    fn ingest_first(source: &[u8]) -> Expr {
+        let result = ruby_prism::parse(source);
+        let program = result.node();
+        let prog = program.as_program_node().unwrap();
+        let stmt = prog.statements().body().iter().next().unwrap();
+        roundhouse::ingest::ingest_expr(&stmt, "<snippet>").unwrap()
+    }
+
+    let kwargs_form = emit_expr(&ingest_first(b"Invitation.exists?(code: self.code)"));
+    assert!(
+        kwargs_form.contains("where") && kwargs_form.ends_with(".exists?"),
+        "kwargs conditions should chain through where(...).exists?; got: {kwargs_form}"
+    );
+
+    let rocket_form = emit_expr(&ingest_first(b"Invitation.exists?(:code => code)"));
+    assert!(
+        rocket_form.contains("where") && rocket_form.ends_with(".exists?"),
+        "hash-rocket conditions should chain through where(...).exists?; got: {rocket_form}"
+    );
+
+    let relation_recv = emit_expr(&ingest_first(b"self.tags.exists?(tag: tag_name)"));
+    assert!(
+        relation_recv.contains("where") && relation_recv.ends_with(".exists?"),
+        "relation-receiver conditions should chain too; got: {relation_recv}"
+    );
+
+    let id_form = emit_expr(&ingest_first(b"Invitation.exists?(5)"));
+    assert!(
+        !id_form.contains("where"),
+        "id form must stay a plain exists?(id); got: {id_form}"
+    );
+}

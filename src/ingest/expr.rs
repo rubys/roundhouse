@@ -146,6 +146,42 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                     },
                 ));
             }
+            // ActiveRecord `Model.exists?(conditions)` / `rel.exists?(conditions)`
+            // — a hash argument is Rails' conditions form, semantically
+            // `where(conditions).exists?`. Lower to that chain: `where(hash)`
+            // and the zero-arg `Relation#exists?` are both modeled, while a
+            // hash-taking `exists?` overload would force is_a?-dispatch into
+            // the runtime. The id form (`exists?(5)`) is left for the
+            // runtime's `Base.exists?(id)`.
+            if method == "exists?"
+                && block.is_none()
+                && recv.is_some()
+                && args.len() == 1
+                && matches!(&*args[0].node, ExprNode::Hash { .. })
+            {
+                let r = recv.unwrap();
+                let cond = args.into_iter().next().unwrap();
+                let where_call = Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(r),
+                        method: Symbol::from("where"),
+                        args: vec![cond],
+                        block: None,
+                        parenthesized: true,
+                    },
+                );
+                return Ok(Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(where_call),
+                        method: Symbol::from("exists?"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: true,
+                    },
+                ));
+            }
             let send = ExprNode::Send {
                 recv: recv.clone(),
                 method: Symbol::from(method),
