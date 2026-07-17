@@ -205,6 +205,7 @@ pub struct ViewLowerCtx<'a> {
     reference_targets: std::rc::Rc<std::collections::HashMap<String, String>>,
     nilable_scalar_reads: std::rc::Rc<std::collections::HashSet<String>>,
     model_singulars: std::rc::Rc<std::collections::HashSet<String>>,
+    slug_models: std::rc::Rc<std::collections::HashSet<String>>,
     bool_readers: std::rc::Rc<std::collections::HashMap<String, std::collections::HashSet<String>>>,
     partial_form_bindings: std::collections::HashMap<ViewKey, PartialFormBinding>,
     route_helper_names: std::rc::Rc<std::collections::HashSet<String>>,
@@ -229,6 +230,19 @@ impl<'a> ViewLowerCtx<'a> {
             model_singulars: std::rc::Rc::new(
                 app.models
                     .iter()
+                    .map(|m| crate::naming::snake_case(m.name.0.as_str()))
+                    .collect(),
+            ),
+            slug_models: std::rc::Rc::new(
+                app.models
+                    .iter()
+                    .filter(|m| {
+                        m.body.iter().any(|item| matches!(
+                            item,
+                            crate::dialect::ModelBodyItem::Method { method, .. }
+                                if method.name.as_str() == "to_param"
+                        ))
+                    })
                     .map(|m| crate::naming::snake_case(m.name.0.as_str()))
                     .collect(),
             ),
@@ -456,6 +470,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         reference_targets: lx.reference_targets.clone(),
         nilable_scalar_reads: lx.nilable_scalar_reads.clone(),
         model_singulars: lx.model_singulars.clone(),
+        slug_models: lx.slug_models.clone(),
         bool_readers: lx.bool_readers.clone(),
         route_helper_names: lx.route_helper_names.clone(),
         stylesheets: app.stylesheets.clone(),
@@ -2586,6 +2601,13 @@ pub(super) struct ViewCtx {
     /// runtime `url_for`, whose `is_a?`-dispatch shape is
     /// CRuby-overlay-only.
     pub(super) model_singulars: std::rc::Rc<std::collections::HashSet<String>>,
+    /// Snake-singular names of models that OVERRIDE `to_param`
+    /// (lobsters' Story→short_id, Domain→domain). The form-action
+    /// member arm passes `record.to_param` for these — Rails fills
+    /// the `:id` segment from `to_param`, and the route helper's
+    /// param is String-typed. Non-slug models pass `record.id`
+    /// (Integer param) so strict targets keep a typed scalar.
+    pub(super) slug_models: std::rc::Rc<std::collections::HashSet<String>>,
     /// Per-model bool-reader names (`bool_reader_names`): Boolean
     /// columns + bool typed_store attrs. `f.check_box` grounds its
     /// checked state through these (typed ternary instead of the

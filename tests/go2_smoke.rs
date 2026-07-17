@@ -1600,9 +1600,12 @@ fn inflector_v2_shape() {
         text.contains("package v2"),
         "v2/inflector.go missing `package v2` declaration:\n{text}",
     );
+    // The import may be a single line (`import "fmt"`) or, once the
+    // file pulls in more than one package (parameterize's regexp
+    // consts), a parenthesized import block with `"fmt"` inside it.
     assert!(
-        text.contains("import \"fmt\""),
-        "v2/inflector.go missing `import \"fmt\"`:\n{text}",
+        text.contains("import \"fmt\"") || text.contains("\"fmt\""),
+        "v2/inflector.go missing fmt import:\n{text}",
     );
 
     // Type declaration — Inflector is a Mode::Library entry so it

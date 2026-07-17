@@ -203,10 +203,22 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
 /// path helper's `:id` segment from `record.to_param`, so an override
 /// (lobsters' Story#to_param → short_id) makes the helper's id param
 /// String-shaped, not Integer. Controller → model by singularizing
-/// the controller symbol (`StoriesController` → `story`).
-fn model_overrides_to_param(controller: &str, app: &App) -> bool {
-    let resource = crate::naming::singularize(&controller_symbol(controller));
-    let model_name = crate::naming::camelize(&resource);
+/// the controller symbol (`StoriesController` → `story`); an
+/// `as:`-named route can point at a foreign controller (lobsters'
+/// `/domains/:id => home#for_domain, as: "domain"`), so the helper's
+/// own name is the fallback resource lookup (`domain_path` → Domain).
+fn model_overrides_to_param(controller: &str, helper_name: &str, app: &App) -> bool {
+    let from_controller = crate::naming::singularize(&controller_symbol(controller));
+    if named_model_overrides_to_param(&from_controller, app) {
+        return true;
+    }
+    let base = helper_name.strip_suffix("_path").unwrap_or(helper_name);
+    let word = base.rsplit('_').next().unwrap_or(base);
+    named_model_overrides_to_param(&crate::naming::singularize(word), app)
+}
+
+fn named_model_overrides_to_param(resource: &str, app: &App) -> bool {
+    let model_name = crate::naming::camelize(resource);
     app.models.iter().any(|m| {
         m.name.0.as_str() == model_name
             && m.body.iter().any(|item| matches!(
@@ -223,7 +235,7 @@ fn build_helper_function(
     route: &FlatRoute,
     app: &App,
 ) -> LibraryFunction {
-    let slug_id = model_overrides_to_param(route.controller.0.as_str(), app);
+    let slug_id = model_overrides_to_param(route.controller.0.as_str(), helper_name, app);
     // A trailing `(.:format)` is Rails' OPTIONAL format suffix, not a
     // path segment: the helper takes `format = nil` last and appends
     // `.<format>` only when given (`domain_path(d)` → "/domains/d",

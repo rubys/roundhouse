@@ -498,13 +498,23 @@ fn classify_form_with_components(
     // record.persisted?
     let persisted = send(Some(model.clone()), "persisted?", Vec::new(), None, false);
 
-    // RouteHelpers.<singular>_path(record.id) when persisted, else
-    // RouteHelpers.<plural>_path for new records.
-    let model_id = send(Some(model.clone()), "id", Vec::new(), None, false);
+    // RouteHelpers.<singular>_path(<member>) when persisted, else
+    // RouteHelpers.<plural>_path for new records. The member is the
+    // value Rails feeds the `:id` segment: `record.to_param` when the
+    // model overrides it (Story→short_id, Domain→domain — a bare
+    // `.id` builds `/domains/73` where the route matches the slug),
+    // `record.id` otherwise. A typed scalar either way — passing the
+    // record whole would widen the helper's param on strict targets
+    // (go types `article_path(int64)`).
+    let member_arg = if ctx.slug_models.contains(singular.as_str()) {
+        send(Some(model.clone()), "to_param", Vec::new(), None, false)
+    } else {
+        send(Some(model.clone()), "id", Vec::new(), None, false)
+    };
     let member_path = send(
         Some(route_helpers()),
         &format!("{singular}_path"),
-        vec![model_id],
+        vec![member_arg],
         None,
         true,
     );

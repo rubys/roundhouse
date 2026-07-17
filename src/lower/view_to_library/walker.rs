@@ -809,6 +809,7 @@ mod tests {
             reference_targets: Default::default(),
             nilable_scalar_reads: Default::default(),
             model_singulars: Default::default(),
+            slug_models: Default::default(),
             bool_readers: Default::default(),
             route_helper_names: Default::default(),
             stylesheets: Vec::new(),
