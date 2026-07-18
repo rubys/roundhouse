@@ -33,7 +33,6 @@ pub mod naming;
 pub mod profile;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod project;
-pub mod query;
 pub mod rbs;
 pub mod runtime_loader;
 pub mod runtime_src;
@@ -57,7 +56,6 @@ pub use effect::{Effect, EffectSet};
 pub use expr::{Arm, BlockStyle, Expr, ExprNode, LValue, Literal, Pattern};
 pub use ident::{ClassId, EffectVar, Symbol, TableRef, TyVar, VarId};
 pub use ide::{Position, Reference, TypeAt};
-pub use query::{ColumnExpr, JoinKind, OrderKey, Predicate, Query, ValueExpr};
 pub use schema::{Column, ColumnType, ForeignKey, Index, ReferentialAction, Schema, Table};
 pub use span::{FileId, Span};
 pub use ty::{Param, ParamKind, Row, Ty};
