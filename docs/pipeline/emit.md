@@ -224,8 +224,9 @@ toolchain test green.
 Practical consequences:
 
 - Disable the target's CI gate during migration.
-- Land the new emitter behind an env-flag fork
-  (`ROUNDHOUSE_<TARGET>_VIEW_THIN=1`) so the old path keeps working
+- Land the new emitter behind an env-flag fork (the established
+  convention is `ROUNDHOUSE_<TARGET>_V2=1`, as used by the rust and go
+  migrations — see `docs/env-gates.md`) so the old path keeps working
   for other targets that haven't migrated yet.
 - Flip the default once the new path is green; delete the old.
 - `expr.rs` is the exception — port forward, don't rewrite from
