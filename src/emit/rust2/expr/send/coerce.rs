@@ -63,10 +63,8 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     // positions). Pre-Stage-6 unwrapped args hit this same path via
     // Family 2 below — peek-through here keeps the emit identical.
     if let ExprNode::Cast { value, target_ty } = &*arg.node {
-        if matches!(
-            target_ty,
-            Ty::Str | Ty::Sym | Ty::Int | Ty::Float | Ty::Bool
-        ) && value.ty.as_ref().map(ty_contains_untyped).unwrap_or(false)
+        if target_ty.is_scalar()
+            && value.ty.as_ref().map(ty_contains_untyped).unwrap_or(false)
         {
             if let Some(coerce) = super::super::util::value_narrowing_coercion(target_ty) {
                 let inner_raw = emit_expr(value);

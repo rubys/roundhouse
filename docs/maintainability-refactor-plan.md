@@ -396,3 +396,14 @@ Every numbered step is a legal stopping point.
   Also left as-is (match *arms*, not boolean `matches!` — converting to a guard would be a
   readability regression): rbs.rs:799, ide.rs:186, kotlin/ty.rs:80, crystal/ty.rs:70,
   swift/ty.rs:77, csharp/ty.rs:96, swift/library.rs:1282, kotlin/library.rs:1093.
+
+- **2.1 `is_scalar()` (`Int | Float | Bool | Str | Sym`)** — added to `impl Ty`; migrated
+  5 direct-`&Ty` boolean sites (crystal/expr.rs:131 — the `is_non_nilable_primitive` helper
+  body now delegates; rust2/expr/send/coerce.rs:68; ty_coerce_insertion.rs 483/509/557).
+  Emit-neutral, analyze passes.
+
+  **Left for optional follow-up (equivalent-but-restructuring)** — `Some(<scalar set>)`
+  matches! sites that would migrate via `.is_some_and(|t| t.is_scalar())` (provably
+  equivalent, but restructures the Option handling rather than a 1:1 swap):
+  rust2/expr/control.rs:561, rust2/expr/send/coerce.rs:235, coerce.rs:261.
+  Left as match-arms (not boolean): kotlin/expr.rs:442, csharp/expr.rs:483, go2/expr.rs:1638.

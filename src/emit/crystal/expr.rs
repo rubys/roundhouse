@@ -127,8 +127,7 @@ pub fn emit_expr(e: &Expr) -> String {
 /// (`Int`, `Str`, `Bool`, `Float`). Class types are excluded — they
 /// hit the Ivar/instance path with their own narrowing.
 fn is_non_nilable_primitive(ty: &crate::ty::Ty) -> bool {
-    use crate::ty::Ty;
-    matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Sym)
+    ty.is_scalar()
 }
 
 /// Strip a trailing `Nil` variant from a binary `Union { T, Nil }`,

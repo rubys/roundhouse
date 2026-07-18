@@ -478,10 +478,7 @@ fn needs_value_to_primitive(param_ty: &Ty, arg: &Expr) -> bool {
     if matches!(&*arg.node, ExprNode::Cast { .. }) {
         return false;
     }
-    if !matches!(
-        param_ty,
-        Ty::Str | Ty::Sym | Ty::Int | Ty::Float | Ty::Bool
-    ) {
+    if !param_ty.is_scalar() {
         return false;
     }
     let Some(arg_ty) = arg.ty.as_ref() else {
@@ -506,7 +503,7 @@ fn needs_value_to_primitive(param_ty: &Ty, arg: &Expr) -> bool {
     if let Ty::Union { variants } = arg_ty {
         let has_nil = variants.iter().any(|v| matches!(v, Ty::Nil));
         let has_other_primitive = variants.iter().any(|v| {
-            matches!(v, Ty::Str | Ty::Sym | Ty::Int | Ty::Float | Ty::Bool) && v != param_ty
+            v.is_scalar() && v != param_ty
         });
         if has_nil && has_other_primitive {
             return true;
@@ -552,10 +549,7 @@ fn needs_primitive_to_value(param_ty: &Ty, arg: &Expr) -> bool {
         return false;
     };
     let arg_ty_peeled = peel_nil(arg_ty);
-    matches!(
-        arg_ty_peeled,
-        Ty::Str | Ty::Sym | Ty::Int | Ty::Float | Ty::Bool
-    )
+    arg_ty_peeled.is_scalar()
 }
 
 /// Hash-literal-to-Value trigger: param renders as a wide runtime

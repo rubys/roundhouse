@@ -107,6 +107,14 @@ impl Ty {
         matches!(self, Ty::Var { .. } | Ty::Bottom)
     }
 
+    /// True for the primitive scalar leaf types: `Int`, `Float`,
+    /// `Bool`, `Str`, `Sym`. Excludes `Time` (temporal, target-native)
+    /// and every compound/reference type. Used by coercion-insertion and
+    /// emit paths that treat "a plain scalar value" uniformly.
+    pub fn is_scalar(&self) -> bool {
+        matches!(self, Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Sym)
+    }
+
     /// True when this type is `Time` or a union containing it — the
     /// shape of a temporal-column reader's return (`Time | Nil`).
     /// Emitters without a native datetime seam key their stored-text
