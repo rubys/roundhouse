@@ -16,7 +16,9 @@
 //! post-analyze hook — for an all-duration-unit name set, dispatch
 //! synthesizes its case arms as plural unit calls counting on this
 //! pass to ground them (`send_dispatch::duration_plural`; guard test
-//! `tests/send_dispatch_lowering.rs`).
+//! `tests/send_dispatch_lowering.rs`). This constraint is declared
+//! canonically in `lower::POST_ANALYZE_PASS_ORDER` (the `duration`
+//! entry's `runs_after`).
 //!
 //! Collision gate: the singular `day`/`hour`/`month`/`year` also name
 //! `Time` component readers (`created_at.day`, lobsters

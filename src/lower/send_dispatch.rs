@@ -42,8 +42,9 @@
 //! Duration-unit arms deliberately call the PLURAL unit form
 //! (`"day" → days`) — identical semantics on a numeric receiver, and
 //! the plural is what the shared duration lowering (running right
-//! after this pass in the hook, by contract) grounds into the
-//! Duration runtime unconditionally.
+//! after this pass in the hook, by contract — see
+//! `lower::POST_ANALYZE_PASS_ORDER`) grounds into the Duration runtime
+//! unconditionally.
 
 use std::collections::{BTreeSet, HashMap};
 

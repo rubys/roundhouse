@@ -119,12 +119,72 @@ pub(crate) fn residue_diagnostic(
     }
 }
 
+/// Canonical execution order of the post-analyze pass pipeline, and the
+/// single authority for its ordering constraints. Each entry is
+/// `(pass_name, &[passes_that_must_run_before_it])`; the list itself is
+/// the intended call order in [`apply_post_analyze_lowerings`]. Passes
+/// with an empty `runs_after` are order-independent.
+///
+/// This replaces the ordering knowledge that used to live only in prose
+/// scattered across the passes ("AFTER send_dispatch, by contract" in
+/// `duration.rs` / `send_dispatch.rs`). Those comments now point here.
+/// The `fn` pointer is deliberately NOT part of the entry: the passes
+/// have heterogeneous signatures (some return `Vec<Diagnostic>`, some
+/// take the class `registry`), so a uniform table would need wrappers
+/// for zero benefit over the name — the list's job is ordering, not
+/// dispatch. Soundness (every predecessor precedes its dependent) is
+/// checked by a `debug_assert!` on entry to the pipeline and by the
+/// `post_analyze_pass_order_is_sound` unit test.
+const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
+    ("blank", &[]),
+    ("time_current", &[]),
+    ("as_json_super", &[]),
+    ("parameterize", &[]),
+    ("request_index", &[]),
+    ("transaction_ground", &[]),
+    ("partial_qualify", &[]),
+    ("capture_inline", &[]),
+    ("and_return", &[]),
+    ("case_lambda", &[]),
+    ("first_or_create", &[]),
+    ("group_count", &[]),
+    ("dead_default", &[]),
+    ("errors_add", &[]),
+    ("create_block", &[]),
+    ("update_kwargs", &[]),
+    ("mailer_class_side", &[]),
+    ("job_class_side", &[]),
+    ("send_static_dispatch", &[]),
+    // Grounds the plural duration-unit calls that send_static_dispatch
+    // synthesizes into case arms, so it must observe that pass's output.
+    ("duration", &["send_static_dispatch"]),
+];
+
+/// True iff `POST_ANALYZE_PASS_ORDER` is a valid topological order —
+/// every pass's declared predecessors appear at an earlier index, and
+/// each predecessor name actually exists in the list.
+fn post_analyze_pass_order_is_sound() -> bool {
+    for (i, (_name, after)) in POST_ANALYZE_PASS_ORDER.iter().enumerate() {
+        for pred in *after {
+            match POST_ANALYZE_PASS_ORDER.iter().position(|(n, _)| n == pred) {
+                Some(j) if j < i => {}
+                _ => return false,
+            }
+        }
+    }
+    true
+}
+
 /// Post-analyze shared lowerings — type-directed IR rewrites every
 /// target consumes, run between `Analyzer::analyze` and any emitter.
 /// One entry point so the transpile driver, the site build, and the IR
 /// dump can't drift as passes accumulate (the LSP/MCP/IDE paths stay
 /// off it on purpose: they want source-shaped IR). Returns the residue
 /// diagnostics — sites a pass had to leave dynamic, with the reason.
+///
+/// The call order below is the canonical [`POST_ANALYZE_PASS_ORDER`];
+/// keep the two in sync when adding a pass (the debug_assert guards the
+/// ordering constraints, not the code↔list correspondence).
 ///
 /// `registry` is the analyzer's post-fixpoint class table
 /// ([`crate::analyze::Analyzer::class_registry`]) — passes that
@@ -134,6 +194,10 @@ pub fn apply_post_analyze_lowerings(
     app: &mut crate::app::App,
     registry: &std::collections::HashMap<crate::ident::ClassId, crate::analyze::ClassInfo>,
 ) -> Vec<crate::diagnostic::Diagnostic> {
+    debug_assert!(
+        post_analyze_pass_order_is_sound(),
+        "POST_ANALYZE_PASS_ORDER violates a declared runs_after constraint",
+    );
     let mut diags = blank::apply_blank_lowering(app);
     time_current::apply_time_current_lowering(app);
     as_json_super::apply_as_json_super_grounding(app);
@@ -153,9 +217,10 @@ pub fn apply_post_analyze_lowerings(
     diags.extend(mailer_class_side::apply_mailer_class_side(app));
     diags.extend(job_class_side::apply_job_class_side(app));
     diags.extend(send_dispatch::apply_send_static_dispatch(app, registry));
-    // AFTER send_dispatch, by contract: an all-duration-unit name set
-    // dispatches through case arms synthesized as plural unit calls
-    // that count on this grounding (`send_dispatch::duration_plural`).
+    // AFTER send_dispatch — see POST_ANALYZE_PASS_ORDER (the `duration`
+    // entry's runs_after). An all-duration-unit name set dispatches
+    // through case arms synthesized as plural unit calls that count on
+    // this grounding (`send_dispatch::duration_plural`).
     duration::apply_duration_lowering(app);
     diags
 }
@@ -309,3 +374,29 @@ pub use view::{
     ErrorsFieldPredicate, FormBuilderMethod, NestedFormChild, NestedUrlElement, RenderPartial,
     ViewHelperKind, ViewUrlArg,
 };
+
+#[cfg(test)]
+mod pass_order_tests {
+    use super::{post_analyze_pass_order_is_sound, POST_ANALYZE_PASS_ORDER};
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn post_analyze_pass_order_is_sound_topologically() {
+        // Every declared predecessor precedes its dependent and names a
+        // real pass in the list.
+        assert!(
+            post_analyze_pass_order_is_sound(),
+            "POST_ANALYZE_PASS_ORDER is not a valid topological order",
+        );
+    }
+
+    #[test]
+    fn post_analyze_pass_names_are_unique() {
+        // Names key the ordering constraints, so duplicates would make a
+        // `runs_after` reference ambiguous.
+        let mut seen = BTreeSet::new();
+        for (name, _) in POST_ANALYZE_PASS_ORDER {
+            assert!(seen.insert(*name), "duplicate pass name in order table: {name}");
+        }
+    }
+}

@@ -533,3 +533,15 @@ Every numbered step is a legal stopping point.
   condition isn't met. Cryptic trailing `&[], None, false` at the two direct call sites
   (the `_and_assocs` wrapper + emit/ruby.rs) become named fields. Emit byte-identical,
   ruby + controller tests pass.
+
+- **7.1 pass ordering** — added `const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])]` in
+  `lower/mod.rs` as the single authority for the post-analyze pipeline's order + `runs_after`
+  constraints (the only real one: `duration` after `send_static_dispatch`; `typed_store`'s
+  ordering note is a *different* pipeline — model synthesis — and out of scope). Soundness
+  checked by a `debug_assert!` on pipeline entry + two unit tests
+  (`post_analyze_pass_order_is_sound_topologically`, `..._names_are_unique`). Repointed the
+  scattered prose ("AFTER send_dispatch, by contract" in mod.rs/duration.rs/send_dispatch.rs)
+  at the const. Dropped the `fn` from the entry tuple the plan sketched — the passes have
+  heterogeneous signatures (`Vec<Diagnostic>` vs `()`, some take `registry`), so a uniform
+  fn table needs wrappers for no benefit; the list's job is ordering, not dispatch. Emit
+  byte-identical.
