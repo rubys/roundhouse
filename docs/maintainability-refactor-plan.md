@@ -457,3 +457,14 @@ Every numbered step is a legal stopping point.
   **swift excluded** — its Expr arm wraps optionals in `RhString.s(...)` (type-directed,
   not a plain delimiter). **go2 excluded** — `emit_interp_appends` appends to a variable
   rather than building a quoted literal. Both keep their own walker.
+
+- **3.3** No action (a "do NOT unify `escape_str`" directive) — honored throughout 3.2:
+  every migrated target keeps its own escape fn/closure.
+
+- **3.4 binop dispatch** — new `src/emit/shared/ops.rs`: `classify_binop(method) ->
+  BinopCase { NativeInfix(op), Append, NotBinop }`. Adopted in swift/kotlin/csharp — the
+  byte-identical infix-operator `matches!` + `<<`/`push` append pair becomes one `match`;
+  each target still renders its own append (`.append`/`.add`/`.Add`). Classified on
+  `method` alone (arity + receiver stay enforced by the enclosing `(Some(r), 1)` guard,
+  which the rest of each block needs anyway). go2's append (`go2/expr.rs:1220`, inline
+  `&& args.len() == 1`) left as-is — not in the shared block shape. Emit byte-identical.

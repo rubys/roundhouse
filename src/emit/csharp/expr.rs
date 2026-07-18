@@ -1366,14 +1366,14 @@ fn emit_send(
 
     // Binary operators with a receiver and one arg.
     if let (Some(r), 1) = (recv, args.len()) {
-        if matches!(
-            method,
-            "+" | "-" | "*" | "/" | "%" | "<" | ">" | "<=" | ">=" | "==" | "!=" | "&&" | "||"
-        ) {
-            return format!("{} {} {}", emit_expr(r), method, args_s[0]);
-        }
-        if method == "<<" || method == "push" {
-            return format!("{}.Add({})", emit_expr(r), args_s[0]);
+        match crate::emit::shared::ops::classify_binop(method) {
+            crate::emit::shared::ops::BinopCase::NativeInfix(op) => {
+                return format!("{} {} {}", emit_expr(r), op, args_s[0]);
+            }
+            crate::emit::shared::ops::BinopCase::Append => {
+                return format!("{}.Add({})", emit_expr(r), args_s[0]);
+            }
+            crate::emit::shared::ops::BinopCase::NotBinop => {}
         }
         if (method == "key?" || method == "has_key?") && recv_is_hash(r) {
             return format!("{}.ContainsKey({})", emit_expr(r), args_s[0]);

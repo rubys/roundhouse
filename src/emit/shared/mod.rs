@@ -17,5 +17,6 @@ pub mod interp;
 pub mod modulo;
 pub mod mul;
 pub mod operand;
+pub mod ops;
 pub mod schema_sql;
 pub mod sub;

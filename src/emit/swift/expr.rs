@@ -2327,15 +2327,15 @@ fn emit_send(
 
     // Binary operators with a receiver and one arg.
     if let (Some(r), 1) = (recv, args.len()) {
-        if matches!(
-            method,
-            "+" | "-" | "*" | "/" | "%" | "<" | ">" | "<=" | ">=" | "==" | "!=" | "&&" | "||"
-        ) {
-            return format!("{} {} {}", emit_expr(r), method, args_s[0]);
-        }
-        // `<<` / `push` → Array.append.
-        if method == "<<" || method == "push" {
-            return format!("{}.append({})", emit_expr(r), args_s[0]);
+        match crate::emit::shared::ops::classify_binop(method) {
+            crate::emit::shared::ops::BinopCase::NativeInfix(op) => {
+                return format!("{} {} {}", emit_expr(r), op, args_s[0]);
+            }
+            // `<<` / `push` → Array.append.
+            crate::emit::shared::ops::BinopCase::Append => {
+                return format!("{}.append({})", emit_expr(r), args_s[0]);
+            }
+            crate::emit::shared::ops::BinopCase::NotBinop => {}
         }
         // Index read `recv[k]` — or a Range arg, the Ruby string-slice
         // `str[b..]` / `str[..e]` (Swift's String index API has no
