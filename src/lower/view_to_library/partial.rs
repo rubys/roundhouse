@@ -237,24 +237,53 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             Some(accumulator_append_call(render_call, ctx))
         }
         RenderPartial::DynamicNamed { name, ivar } => {
-            let names = ctx
+            let entries = ctx
                 .dyn_pools
                 .get(&(ctx.resource_dir.clone(), Symbol::from(*ivar)))
                 .cloned()
                 .unwrap_or_default();
             let mut arms: Vec<Arm> = Vec::new();
-            for pname in &names {
+            for entry in &entries {
+                let pname = &entry.name;
                 let (module_camel, method_sym) =
                     super::partial_name_to_key(pname, &ctx.resource_dir);
                 if module_camel.is_empty() {
                     continue;
                 }
-                // A name-only partial gets no record object: pass nil for the
-                // convention record arg, then its closure ivars (which the
-                // rendering view threads as params — see view_ivar_closures'
-                // dynamic edges).
-                let mut call_args = vec![nil_lit()];
+                // The entry's options-form `locals:` resolve here: an
+                // ivar value was folded into this view's closure (see
+                // view_ivar_closures' dynamic edges), so it reads as the
+                // threaded local; a literal passes through verbatim.
+                let lookup = |n: &str| -> Option<Expr> {
+                    entry.locals.iter().find(|(k, _)| k.as_str() == n).map(|(_, v)| {
+                        match &*v.node {
+                            ExprNode::Ivar { name } => var_ref(Symbol::from(
+                                crate::naming::safe_local(name.as_str()),
+                            )),
+                            _ => v.clone(),
+                        }
+                    })
+                };
+                let strict_key = (module_camel.clone(), method_sym.clone());
+                let strict_decl = ctx.strict_locals.get(&strict_key);
+                // A strict-locals target's record slot is its first
+                // declared local — bind it from the entry's locals by
+                // the DECLARED name (header default when absent). A
+                // convention target gets no record object: nil, then
+                // its closure ivars (threaded as this view's params).
+                let record = match strict_decl {
+                    Some(decl) => lookup(decl[0].name.as_str())
+                        .or_else(|| decl[0].default.clone())
+                        .unwrap_or_else(nil_lit),
+                    None => nil_lit(),
+                };
+                let mut call_args = vec![record];
                 call_args.extend(partial_extra_args(ctx, &module_camel, &method_sym));
+                if let Some(decl) = strict_decl {
+                    if let Some(hash) = strict_kwargs(&decl[1..], &lookup) {
+                        call_args.push(hash);
+                    }
+                }
                 let render_call = send(
                     Some(Expr::new(
                         Span::synthetic(),

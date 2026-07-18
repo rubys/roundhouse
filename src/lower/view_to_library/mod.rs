@@ -198,7 +198,7 @@ pub struct ViewLowerCtx<'a> {
     app: &'a App,
     known_models: Vec<String>,
     closures: std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Symbol>>>,
-    dyn_pools: std::rc::Rc<std::collections::HashMap<(String, Symbol), Vec<String>>>,
+    dyn_pools: std::rc::Rc<std::collections::HashMap<(String, Symbol), Vec<DynPoolEntry>>>,
     partial_extras: std::rc::Rc<std::collections::HashMap<(String, String), Vec<String>>>,
     locals_keys: std::collections::HashMap<(String, String), Vec<String>>,
     reference_reads: std::rc::Rc<std::collections::HashSet<String>>,
@@ -2021,8 +2021,12 @@ pub(crate) fn view_ivar_closures(
         let mut child_keys = render_partial_keys(&v.body, dir, &pools);
         // A `render partial: @above` folds every pooled candidate partial's
         // ivar needs into this view, so the dispatch's arms have their
-        // closure args threaded as params here.
-        child_keys.extend(dynamic_render_edges(&v.body, dir, &pools));
+        // closure args threaded as params here. The pool entries' ivar-
+        // valued locals (`locals: {tag: @tag}`) count as reads of THIS
+        // view — the arm rebinds them onto the partial's declared locals.
+        let (dyn_keys, dyn_locals_ivars) = dynamic_render_edges(&v.body, dir, &pools);
+        child_keys.extend(dyn_keys);
+        closure.entry(key.clone()).or_default().extend(dyn_locals_ivars);
         edges.entry(key).or_default().extend(child_keys);
     }
     // Fixpoint: propagate each partial's needs up to every view that
@@ -2061,7 +2065,7 @@ pub(crate) fn view_ivar_closures(
 fn render_partial_keys(
     body: &Expr,
     dir: &str,
-    pools: &std::collections::HashMap<(String, Symbol), Vec<String>>,
+    pools: &std::collections::HashMap<(String, Symbol), Vec<DynPoolEntry>>,
 ) -> Vec<ViewKey> {
     let mut out = Vec::new();
     collect_render_keys(body, dir, pools, &mut out);
@@ -2071,7 +2075,7 @@ fn render_partial_keys(
 fn collect_render_keys(
     e: &Expr,
     dir: &str,
-    pools: &std::collections::HashMap<(String, Symbol), Vec<String>>,
+    pools: &std::collections::HashMap<(String, Symbol), Vec<DynPoolEntry>>,
     out: &mut Vec<ViewKey>,
 ) {
     if let ExprNode::Send { recv, method, args, block, .. } = &*e.node {
@@ -2136,18 +2140,31 @@ fn controller_view_dir(name: &ClassId) -> String {
     snake_case(s.strip_suffix("Controller").unwrap_or(s))
 }
 
-/// For each `(view-dir, ivar)`, the partial-name string literals a
-/// controller assigns to `@<ivar>` — the pool a `render partial: @<ivar>`
-/// can resolve to at runtime. Collected from every action body's
-/// `@x = "literal"` writes. Only consulted when a view actually renders
-/// `@<ivar>` dynamically, so over-collection (every string ivar, not just
-/// the rendered ones) is inert. Empty for the blog (no such assignments →
-/// no dynamic-partial dispatch anywhere).
+/// One pooled candidate partial for a dynamic-render ivar: the name a
+/// controller assigns plus the `locals:` sub-hash of the options form
+/// (empty for bare-string assigns). Locals keep only the value shapes a
+/// dispatch arm can re-express — ivar reads (threaded into the rendering
+/// view's closure) and literals; any other shape is dropped and the
+/// declared local falls to its header default.
+#[derive(Clone)]
+pub(crate) struct DynPoolEntry {
+    pub(crate) name: String,
+    pub(crate) locals: Vec<(Symbol, Expr)>,
+}
+
+/// For each `(view-dir, ivar)`, the partial options a controller assigns
+/// to `@<ivar>` — the pool a `render partial: @<ivar>` can resolve to at
+/// runtime. Collected from every action body's `@x = "literal"` /
+/// `@x = {partial: "literal", …}` writes. Only consulted when a view
+/// actually renders `@<ivar>` dynamically, so over-collection (every
+/// string ivar, not just the rendered ones) is inert. Empty for the blog
+/// (no such assignments → no dynamic-partial dispatch anywhere).
 pub(crate) fn dynamic_partial_pools(
     controllers: &[crate::dialect::Controller],
-) -> std::collections::HashMap<(String, Symbol), Vec<String>> {
-    use std::collections::{BTreeSet, HashMap};
-    let mut acc: HashMap<(String, Symbol), BTreeSet<String>> = HashMap::new();
+) -> std::collections::HashMap<(String, Symbol), Vec<DynPoolEntry>> {
+    use std::collections::{BTreeMap, HashMap};
+    let mut acc: HashMap<(String, Symbol), BTreeMap<String, Vec<(Symbol, Expr)>>> =
+        HashMap::new();
     for c in controllers {
         let dir = controller_view_dir(&c.name);
         for action in c.actions() {
@@ -2155,7 +2172,14 @@ pub(crate) fn dynamic_partial_pools(
         }
     }
     acc.into_iter()
-        .map(|(k, v)| (k, v.into_iter().collect()))
+        .map(|(k, m)| {
+            (
+                k,
+                m.into_iter()
+                    .map(|(name, locals)| DynPoolEntry { name, locals })
+                    .collect(),
+            )
+        })
         .collect()
 }
 
@@ -2178,63 +2202,116 @@ fn strict_locals_by_key(views: &[View]) -> std::collections::HashMap<ViewKey, Ve
 fn collect_ivar_str_assigns(
     e: &Expr,
     dir: &str,
-    acc: &mut std::collections::HashMap<(String, Symbol), std::collections::BTreeSet<String>>,
+    acc: &mut std::collections::HashMap<
+        (String, Symbol),
+        std::collections::BTreeMap<String, Vec<(Symbol, Expr)>>,
+    >,
 ) {
     if let ExprNode::Assign { target: LValue::Ivar { name }, value } = &*e.node {
-        if let Some(pname) = partial_name_from_assign_value(value) {
-            acc.entry((dir.to_string(), name.clone())).or_default().insert(pname);
+        if let Some(entry) = partial_options_from_assign_value(value) {
+            let slot = acc
+                .entry((dir.to_string(), name.clone()))
+                .or_default()
+                .entry(entry.name)
+                .or_default();
+            // Several actions can assign the same partial name; merge
+            // their locals, first-seen value winning per local name.
+            for (k, v) in entry.locals {
+                if !slot.iter().any(|(n, _)| n == &k) {
+                    slot.push((k, v));
+                }
+            }
         }
     }
     e.node.for_each_child(&mut |c| collect_ivar_str_assigns(c, dir, acc));
 }
 
-/// The partial NAME a controller assigns to a dynamic-render ivar
+/// The partial options a controller assigns to a dynamic-render ivar
 /// (`@above`/`@below`), in either shape upstream lobsters uses:
 /// the bare string (`@above = "stories/subnav"`) or the options-hash
-/// (`@above = {partial: "stories/subnav", locals: {…}}`). Returns the
-/// `partial:` string in the hash case. The `locals:` sub-hash is NOT
-/// threaded — the pool dispatch passes each arm's render-tree closure
-/// only; partials that need caller-supplied locals (`single_tag`'s
-/// `tag:`/`related:`) render those unbound (ledgered, see the
-/// strict-locals partial-header work).
-fn partial_name_from_assign_value(value: &Expr) -> Option<String> {
+/// (`@above = {partial: "stories/subnav", locals: {…}}`). The `locals:`
+/// sub-hash keeps symbol-keyed ivar-read and literal values — the shapes
+/// a dispatch arm can rebind (`{tag: @tag}` reads as the threaded `tag`
+/// local at the arm); any other value shape is dropped and that local
+/// falls to the partial's header default.
+fn partial_options_from_assign_value(value: &Expr) -> Option<DynPoolEntry> {
     match &*value.node {
-        ExprNode::Lit { value: Literal::Str { value: s } } => Some(s.as_str().to_string()),
-        ExprNode::Hash { entries, .. } => entries.iter().find_map(|(k, v)| {
-            let is_partial = matches!(
-                &*k.node,
-                ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "partial"
-            );
-            match (is_partial, &*v.node) {
-                (true, ExprNode::Lit { value: Literal::Str { value: s } }) => {
-                    Some(s.as_str().to_string())
+        ExprNode::Lit { value: Literal::Str { value: s } } => {
+            Some(DynPoolEntry { name: s.as_str().to_string(), locals: Vec::new() })
+        }
+        ExprNode::Hash { entries, .. } => {
+            let name = entries.iter().find_map(|(k, v)| {
+                let is_partial = matches!(
+                    &*k.node,
+                    ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "partial"
+                );
+                match (is_partial, &*v.node) {
+                    (true, ExprNode::Lit { value: Literal::Str { value: s } }) => {
+                        Some(s.as_str().to_string())
+                    }
+                    _ => None,
                 }
-                _ => None,
-            }
-        }),
+            })?;
+            let locals = entries
+                .iter()
+                .find_map(|(k, v)| {
+                    let is_locals = matches!(
+                        &*k.node,
+                        ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "locals"
+                    );
+                    match (is_locals, &*v.node) {
+                        (true, ExprNode::Hash { entries: locals_entries, .. }) => Some(
+                            locals_entries
+                                .iter()
+                                .filter_map(|(lk, lv)| {
+                                    let lname = match &*lk.node {
+                                        ExprNode::Lit { value: Literal::Sym { value } } => {
+                                            value.clone()
+                                        }
+                                        _ => return None,
+                                    };
+                                    matches!(
+                                        &*lv.node,
+                                        ExprNode::Ivar { .. } | ExprNode::Lit { .. }
+                                    )
+                                    .then(|| (lname, lv.clone()))
+                                })
+                                .collect::<Vec<_>>(),
+                        ),
+                        _ => None,
+                    }
+                })
+                .unwrap_or_default();
+            Some(DynPoolEntry { name, locals })
+        }
         _ => None,
     }
 }
 
-/// The render-graph edges a view's DYNAMIC partials contribute: for each
-/// `render partial: @<ivar>` in the body, every pooled name for
-/// `(dir, ivar)` resolves to a partial ViewKey. Lets the closure fixpoint
-/// fold each candidate partial's ivar needs into the rendering view.
+/// The render-graph edges a view's DYNAMIC partials contribute, plus the
+/// ivars the pool entries' `locals:` values read: for each `render
+/// partial: @<ivar>` in the body, every pooled name for `(dir, ivar)`
+/// resolves to a partial ViewKey (so the closure fixpoint folds each
+/// candidate's ivar needs into the rendering view), and each ivar-valued
+/// local (`locals: {tag: @tag}`) is a read of the rendering view too —
+/// the dispatch arm rebinds it onto the partial's declared local.
 fn dynamic_render_edges(
     body: &Expr,
     dir: &str,
-    pools: &std::collections::HashMap<(String, Symbol), Vec<String>>,
-) -> Vec<ViewKey> {
-    let mut out = Vec::new();
-    collect_dynamic_edges(body, dir, pools, &mut out);
-    out
+    pools: &std::collections::HashMap<(String, Symbol), Vec<DynPoolEntry>>,
+) -> (Vec<ViewKey>, Vec<Symbol>) {
+    let mut keys = Vec::new();
+    let mut locals_ivars = Vec::new();
+    collect_dynamic_edges(body, dir, pools, &mut keys, &mut locals_ivars);
+    (keys, locals_ivars)
 }
 
 fn collect_dynamic_edges(
     e: &Expr,
     dir: &str,
-    pools: &std::collections::HashMap<(String, Symbol), Vec<String>>,
-    out: &mut Vec<ViewKey>,
+    pools: &std::collections::HashMap<(String, Symbol), Vec<DynPoolEntry>>,
+    keys: &mut Vec<ViewKey>,
+    locals_ivars: &mut Vec<Symbol>,
 ) {
     if let ExprNode::Send { recv, method, args, block, .. } = &*e.node {
         if let Some(crate::lower::view::RenderPartial::DynamicNamed { ivar, .. }) =
@@ -2247,14 +2324,19 @@ fn collect_dynamic_edges(
                 &|n| pools.contains_key(&(dir.to_string(), Symbol::from(n))),
             )
         {
-            if let Some(names) = pools.get(&(dir.to_string(), Symbol::from(ivar))) {
-                for name in names {
-                    out.push(partial_name_to_key(name, dir));
+            if let Some(entries) = pools.get(&(dir.to_string(), Symbol::from(ivar))) {
+                for entry in entries {
+                    keys.push(partial_name_to_key(&entry.name, dir));
+                    for (_, v) in &entry.locals {
+                        if let ExprNode::Ivar { name } = &*v.node {
+                            locals_ivars.push(name.clone());
+                        }
+                    }
                 }
             }
         }
     }
-    e.node.for_each_child(&mut |c| collect_dynamic_edges(c, dir, pools, out));
+    e.node.for_each_child(&mut |c| collect_dynamic_edges(c, dir, pools, keys, locals_ivars));
 }
 
 /// The instance variables an action view READS, in first-seen order.
@@ -2786,13 +2868,16 @@ pub(super) struct ViewCtx {
     /// needed ivars here and passes them as call-site args (the caller's
     /// own locals — its closure ⊇ the partial's, so it always has them).
     pub(super) partial_ivars: std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Symbol>>>,
-    /// Dynamic-partial name pools, `(view-dir, ivar) -> [partial-name
-    /// literals]` (`dynamic_partial_pools`). `emit_render_partial` reads
-    /// this for a `render partial: @<ivar>` DynamicNamed dispatch: each
-    /// pooled name resolves to a `Views::X.method` arm. Empty for apps
-    /// without dynamic partials (the blog), so the dispatch never fires.
+    /// Dynamic-partial pools, `(view-dir, ivar) -> [pool entries]`
+    /// (`dynamic_partial_pools`): each entry is a partial-name literal a
+    /// controller assigns plus its options-form `locals:`. `emit_render_
+    /// partial` reads this for a `render partial: @<ivar>` DynamicNamed
+    /// dispatch: each pooled name resolves to a `Views::X.method` arm,
+    /// binding the entry's locals onto a strict-locals target's declared
+    /// interface. Empty for apps without dynamic partials (the blog), so
+    /// the dispatch never fires.
     pub(super) dyn_pools:
-        std::rc::Rc<std::collections::HashMap<(String, Symbol), Vec<String>>>,
+        std::rc::Rc<std::collections::HashMap<(String, Symbol), Vec<DynPoolEntry>>>,
     /// Per-partial extras list (`partial_extras_map`): the trailing
     /// nil-default params (notice/alert/defined?-marked locals) in def
     /// order. `emit_render_partial` binds an explicit `locals:` hash's
