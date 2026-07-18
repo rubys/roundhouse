@@ -360,6 +360,33 @@ Every numbered step is a legal stopping point.
 
 (append findings, skipped steps, near-miss `matches!` sites, and behavior deltas here)
 
+### Session summary (2026-07-18)
+
+**Done + pushed** (all behavior-neutral; emit byte-identical across 9 targets × 2 fixtures
+verified per step, full `cargo test --all-targets` green):
+`1.1` `1.2` `1.3` `1.4` · `2.1` (4 predicates, 34 sites) `2.2` · `3.1` `3.2` `3.4`
+· `4.1`†  · `7.1` `7.2`.
+
+**Directive honored, no code:** `3.3` (do-not-unify `escape_str` — respected throughout 3.2).
+
+**Findings / blocked (documented, no forced change):**
+- `4.1`† — premise false: `is_query_builder_method` is a narrower curation, NOT catalog-
+  `chain`-derivable (would broaden by 26 methods = lowering behavior change). Added guard
+  doc + test.
+- `4.2` — blocked on catalog modeling relation receivers + missing `ReturnKind` variants.
+- near-miss `matches!` sites for `2.1` predicates (listed above) left for Sam.
+
+**Deferred (larger / behavior-affecting / needs toolchains — each a focused session):**
+`3.5` (arith-classifier adoption, behavior-affecting), `3.6` (monolith variant-split),
+`4.3` + analyze/mod.rs squatter extractions (largest code-motion), `5` (Session facade —
+thin dedup, dominated by per-entry-point error-handling variation), `6` (runtime manifest +
+`6.1` CI matrix — CI-only, not locally verifiable), `7.3` (Python view helpers — behavior-
+affecting), `7.4` (route-helper dedup — investigate-first), `7.5` (view_to_library motion).
+
+Verification harness used: `emit_preview` snapshot of every target×fixture into a scratch
+tree, `diff -r` against a baseline after each step (ruby target — not in emit_preview —
+covered by `lowered_ruby_emit`'s 100 tests).
+
 ### Phase 1 (2026-07-18) — all four steps done, behavior-neutral
 
 - **1.1** Deleted `src/query.rs` + its `pub mod`/`pub use` in lib.rs. Confirmed zero
