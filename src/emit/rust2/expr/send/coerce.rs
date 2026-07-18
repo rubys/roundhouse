@@ -123,7 +123,7 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
                 let needs_to_string = matches!(
                     &*value.node,
                     ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
-                ) && matches!(cast_inner, Ty::Str | Ty::Sym)
+                ) && cast_inner.is_stringish()
                     && !super::super::has_str_coercion(value);
                 let payload = if needs_to_string {
                     format!("{inner_raw}.to_string()")
@@ -339,7 +339,7 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     // lowerer would either over-fire on targets that handle nilable
     // strings natively or produce a target-specific Cast — neither
     // pulls its weight vs. keeping the decision rust-local.
-    if matches!(param_ty, Ty::Str | Ty::Sym)
+    if param_ty.is_stringish()
         && !super::super::has_str_coercion(arg)
         && matches!(arg.ty.as_ref(), Some(t) if is_option_ty(t))
         && matches!(
@@ -356,7 +356,7 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         return format!("{raw}.as_deref().unwrap_or(\"\")");
     }
 
-    if matches!(param_ty, Ty::Str | Ty::Sym) && !super::super::has_str_coercion(arg) {
+    if param_ty.is_stringish() && !super::super::has_str_coercion(arg) {
         // Peek through `Cast` wrappers — the model lowerer wraps row
         // accessors in `Cast { Send(row.col), col_ty }` to bridge
         // Crystal's nilable row holder, but rust2's row class is
@@ -508,7 +508,7 @@ pub(crate) fn coerce_arg_for_field_ty(arg: &Expr, field_ty: &crate::ty::Ty) -> S
         };
     if arg_renders_as_value {
         if let Ty::Hash { key, value } = field_ty {
-            if matches!(**key, Ty::Str | Ty::Sym) {
+            if key.is_stringish() {
                 let value_is_value_shaped = matches!(**value, Ty::Untyped | Ty::Record { .. })
                     || matches!(
                         &**value,

@@ -2111,7 +2111,7 @@ fn emit_cast(ctx: &EmitCtx, value: &Expr, target_ty: &Ty) -> String {
     // `needs_value_to_primitive` gate ensures we only see this when
     // the source Ty actually contains Untyped — no widening-only or
     // already-typed args reach here.
-    if matches!(target_ty, Ty::Str | Ty::Sym) {
+    if target_ty.is_stringish() {
         if already_typed {
             return inner;
         }

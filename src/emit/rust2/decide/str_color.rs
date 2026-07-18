@@ -586,7 +586,7 @@ fn walk_children(e: &mut Expr, tail_expect: ParentExpect, ctx: &mut WalkCtx<'_>)
                     count += walk(index, ParentExpect::None, ctx);
                     match recv.ty.as_ref() {
                         Some(Ty::Hash { value: v_ty, .. })
-                            if matches!(v_ty.as_ref(), Ty::Str | Ty::Sym) =>
+                            if v_ty.as_ref().is_stringish() =>
                         {
                             ParentExpect::Color(StrColor::Owned)
                         }

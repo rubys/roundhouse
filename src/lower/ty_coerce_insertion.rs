@@ -452,7 +452,7 @@ fn needs_some_wrap(param_ty: &Ty, arg: &Expr) -> bool {
     if matches!(
         &*arg.node,
         ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
-    ) && matches!(inner, Ty::Str | Ty::Sym)
+    ) && inner.is_stringish()
     {
         return true;
     }

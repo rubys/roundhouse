@@ -115,6 +115,13 @@ impl Ty {
         matches!(self, Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Sym)
     }
 
+    /// True for the two string-like leaf types: `Str` and `Sym`. Many
+    /// targets render a symbol identically to a string, so coercion and
+    /// str-coloring paths treat the pair uniformly.
+    pub fn is_stringish(&self) -> bool {
+        matches!(self, Ty::Str | Ty::Sym)
+    }
+
     /// True when this type is `Time` or a union containing it — the
     /// shape of a temporal-column reader's return (`Time | Nil`).
     /// Emitters without a native datetime seam key their stored-text

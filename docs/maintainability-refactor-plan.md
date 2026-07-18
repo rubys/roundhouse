@@ -407,3 +407,13 @@ Every numbered step is a legal stopping point.
   equivalent, but restructures the Option handling rather than a 1:1 swap):
   rust2/expr/control.rs:561, rust2/expr/send/coerce.rs:235, coerce.rs:261.
   Left as match-arms (not boolean): kotlin/expr.rs:442, csharp/expr.rs:483, go2/expr.rs:1638.
+
+- **2.1 `is_stringish()` (`Str | Sym`)** — added to `impl Ty`; migrated 7 direct-`&Ty`
+  boolean sites (str_color.rs:589; rust2/expr/send/coerce.rs — cast_inner, both param_ty,
+  and the `**key` hash-key check; ty_coerce_insertion.rs:455; go2/expr.rs:2114). The many
+  remaining `Ty::Str | Ty::Sym` occurrences are match-*arms* (rendering a type string) or
+  `Some(Ty::Str | Ty::Sym)` Option-wrapped predicates — left as-is. Emit-neutral, analyze
+  passes.
+
+  **Phase 2.1 complete** — all four predicates (`is_unknown`, `is_open`, `is_scalar`,
+  `is_stringish`) landed. Total 34 exact boolean sites migrated across 4 commits.
