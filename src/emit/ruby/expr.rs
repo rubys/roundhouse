@@ -392,33 +392,31 @@ fn emit_bool_op_operand(
 }
 
 fn emit_string_interp(parts: &[crate::expr::InterpPart]) -> String {
-    use crate::expr::InterpPart;
-    let mut out = String::with_capacity(2);
-    out.push('"');
-    for p in parts {
-        match p {
-            InterpPart::Text { value } => {
-                for c in value.chars() {
-                    match c {
-                        '"' => out.push_str("\\\""),
-                        '\\' => out.push_str("\\\\"),
-                        '\n' => out.push_str("\\n"),
-                        '\r' => out.push_str("\\r"),
-                        '\t' => out.push_str("\\t"),
-                        '#' => out.push_str("\\#"),
-                        other => out.push(other),
-                    }
+    crate::emit::shared::interp::render(
+        parts,
+        &crate::emit::shared::interp::InterpDelims {
+            open_quote: "\"",
+            close_quote: "\"",
+            expr_open: "#{",
+            expr_close: "}",
+        },
+        emit_expr,
+        |value| {
+            let mut out = String::new();
+            for c in value.chars() {
+                match c {
+                    '"' => out.push_str("\\\""),
+                    '\\' => out.push_str("\\\\"),
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    '#' => out.push_str("\\#"),
+                    other => out.push(other),
                 }
             }
-            InterpPart::Expr { expr } => {
-                out.push_str("#{");
-                out.push_str(&emit_expr(expr));
-                out.push('}');
-            }
-        }
-    }
-    out.push('"');
-    out
+            out
+        },
+    )
 }
 
 fn emit_array(elements: &[Expr], style: &crate::expr::ArrayStyle) -> String {
