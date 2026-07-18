@@ -209,6 +209,11 @@ pub struct ViewLowerCtx<'a> {
     bool_readers: std::rc::Rc<std::collections::HashMap<String, std::collections::HashSet<String>>>,
     partial_form_bindings: std::collections::HashMap<ViewKey, PartialFormBinding>,
     route_helper_names: std::rc::Rc<std::collections::HashSet<String>>,
+    /// Partials with a `<%# locals: (…) -%>` header, keyed by ViewKey →
+    /// their declared keyword locals (excluding the first/positional
+    /// record). Render call sites consult it to bind provided locals by
+    /// name and to suppress convention closure-threading.
+    strict_locals: std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Param>>>,
 }
 
 impl<'a> ViewLowerCtx<'a> {
@@ -254,6 +259,7 @@ impl<'a> ViewLowerCtx<'a> {
                     .map(|f| f.name.as_str().to_string())
                     .collect(),
             ),
+            strict_locals: std::rc::Rc::new(strict_locals_by_key(&app.views)),
         }
     }
 
@@ -441,7 +447,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // type-aware dispatch) resolves `articles.empty?` to Array dispatch,
     // `article.title` to a model attribute, etc. Primaries typed above;
     // extras are nullable strings.
-    let signature = build_view_signature_from(&typed, &extra_params);
+    let mut signature = build_view_signature_from(&typed, &extra_params);
 
     let mut locals: Vec<String> = typed.iter().map(|(n, _)| n.clone()).collect();
     locals.extend(extra_params.iter().cloned());
@@ -459,6 +465,89 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         if matches!(ty, crate::ty::Ty::Untyped) {
             nullable.insert(n.clone());
         }
+    }
+
+    // ── Strict-locals override ───────────────────────────────────────
+    // A partial with a `<%# locals: (…) -%>` header declares its locals
+    // interface EXACTLY. Its signature becomes: the FIRST declared local
+    // as the POSITIONAL record (every render call site passes the record
+    // positionally), then the ivar CLOSURE it reads (strict-locals
+    // partials still access `@user`/`@showing_user` — Rails restricts
+    // locals, not ivars — threaded from the caller like any partial),
+    // then the remaining declared locals as KEYWORD params with header
+    // defaults. Body refs to a declared local (`tag`, `comment`) resolve
+    // as that param, not a same-named helper (`ApplicationHelper.tag`);
+    // callers bind provided keyword locals by name, omitted ones default.
+    if let Some(sl) = view.strict_locals.as_ref().filter(|_| is_partial) {
+        use crate::ty::{Param as TyParam, ParamKind, Ty};
+        let record = &sl[0];
+        let record_name = record.name.as_str().to_string();
+        let kw_locals = &sl[1..];
+        // Closure ivars this partial reads, MINUS every declared local: a
+        // name that's both a declared local and an `@ivar` read (`_threads`
+        // declares `story:` and reads `@story`) collapses to one identifier
+        // after the ivar→local rewrite, so the declared param covers it —
+        // threading it again would emit a duplicate argument name.
+        let declared: std::collections::HashSet<&str> =
+            sl.iter().map(|p| p.name.as_str()).collect();
+        let closure: Vec<String> = closure_ivars
+            .iter()
+            .filter(|iv| !declared.contains(iv.as_str()))
+            .cloned()
+            .collect();
+
+        let mut new_params: Vec<Param> = Vec::new();
+        let mut sig_params: Vec<TyParam> = Vec::new();
+        new_params.push(match &record.default {
+            Some(d) => Param::with_default(record.name.clone(), d.clone()),
+            None => Param::positional(record.name.clone()),
+        });
+        sig_params.push(TyParam {
+            name: record.name.clone(),
+            ty: ivar_ty(&record_name, &known_models),
+            kind: ParamKind::Required,
+        });
+        for iv in &closure {
+            new_params.push(Param::positional(Symbol::from(iv.clone())));
+            sig_params.push(TyParam {
+                name: Symbol::from(iv.clone()),
+                ty: ivar_ty(iv, &known_models),
+                kind: ParamKind::Required,
+            });
+        }
+        for p in kw_locals {
+            new_params.push(p.clone());
+            let is_bool_default = matches!(
+                &p.default,
+                Some(d) if matches!(&*d.node, ExprNode::Lit { value: Literal::Bool { .. } })
+            );
+            sig_params.push(TyParam {
+                name: p.name.clone(),
+                ty: if is_bool_default { Ty::Bool } else { ivar_ty(p.name.as_str(), &known_models) },
+                kind: if p.default.is_some() { ParamKind::Optional } else { ParamKind::Required },
+            });
+        }
+        params = new_params;
+        signature = Some(Ty::Fn {
+            params: sig_params,
+            block: None,
+            ret: Box::new(Ty::Str),
+            effects: crate::effect::EffectSet::default(),
+        });
+        locals = std::iter::once(record_name.clone())
+            .chain(closure.iter().cloned())
+            .chain(kw_locals.iter().map(|p| p.name.as_str().to_string()))
+            .collect();
+        // nil-defaulted keyword locals are nullable-for-predicates; a
+        // `false`/`true` default is a concrete Bool, not nil.
+        nullable = kw_locals
+            .iter()
+            .filter(|p| {
+                matches!(&p.default, Some(d)
+                    if matches!(&*d.node, ExprNode::Lit { value: Literal::Nil }))
+            })
+            .map(|p| p.name.as_str().to_string())
+            .collect();
     }
 
     let mut ctx = ViewCtx {
@@ -481,6 +570,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         partial_ivars: closures.clone(),
         dyn_pools: dyn_pools.clone(),
         partial_extras: lx.partial_extras.clone(),
+        strict_locals: lx.strict_locals.clone(),
     };
 
     // A partial that receives a form builder as a local re-derives the
@@ -2069,6 +2159,22 @@ pub(crate) fn dynamic_partial_pools(
         .collect()
 }
 
+/// Map each strict-locals partial to its FULL declared locals (record
+/// first, then the keyword tail). Keyed by the same ViewKey space as
+/// `partial_name_to_key`, so a render site resolving a partial name can
+/// look up whether the target declares strict locals, which closure
+/// ivars to suppress, and which names it binds by keyword. Consumers
+/// skip index 0 (the positional record) when binding keywords.
+fn strict_locals_by_key(views: &[View]) -> std::collections::HashMap<ViewKey, Vec<Param>> {
+    let mut out = std::collections::HashMap::new();
+    for v in views {
+        let Some(sl) = v.strict_locals.as_ref() else { continue };
+        let Some(key) = view_key_of(v) else { continue };
+        out.insert(key, sl.clone());
+    }
+    out
+}
+
 fn collect_ivar_str_assigns(
     e: &Expr,
     dir: &str,
@@ -2693,6 +2799,13 @@ pub(super) struct ViewCtx {
     /// values to these positions.
     pub(super) partial_extras:
         std::rc::Rc<std::collections::HashMap<(String, String), Vec<String>>>,
+    /// Strict-locals partials → their KEYWORD locals (`strict_locals_by_key`).
+    /// `emit_render_partial` consults it to (a) suppress convention
+    /// closure-threading for these partials (they take only declared
+    /// locals) and (b) emit a provided `locals:` value as a keyword arg
+    /// bound by name.
+    pub(super) strict_locals:
+        std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Param>>>,
 }
 
 /// Every `belongs_to`/`has_one` association name across the app's models

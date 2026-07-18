@@ -29,6 +29,7 @@ fn helper_app(view_body: Expr) -> App {
         format: Symbol::from("html"),
         locals: Row::default(),
         body: view_body,
+        strict_locals: None,
     });
     app
 }

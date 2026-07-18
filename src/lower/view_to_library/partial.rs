@@ -71,7 +71,18 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             };
             let mut call_args = vec![arg_expr];
             call_args.extend(partial_extra_args(ctx, &module_camel, &method_sym));
-            if locals.is_some() {
+            let strict_key = (module_camel.clone(), method_sym.clone());
+            if let Some(decl) = ctx.strict_locals.get(&strict_key) {
+                // Strict-locals partial: bind each PROVIDED keyword local by
+                // name (`render "comments/comment", comment: c, show_story:
+                // true` → `Views::Comments.comment(c, show_story: true)`);
+                // the record (index 0) rode positionally as `arg_expr` and
+                // the closure ivars followed. Omitted optionals fall to the
+                // header defaults.
+                if let Some(hash) = strict_kwargs(&decl[1..], &lookup_local) {
+                    call_args.push(hash);
+                }
+            } else if locals.is_some() {
                 if let Some(extras) = ctx
                     .partial_extras
                     .get(&(module_camel.clone(), method_sym.clone()))
@@ -261,6 +272,29 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
     }
 }
 
+/// Build the trailing keyword-args hash for a strict-locals partial call
+/// from the locals a render site provides. `kw_locals` is the partial's
+/// declared KEYWORD tail (record excluded); `lookup` resolves a local
+/// name to its provided value. Only declared locals the caller actually
+/// supplies are emitted — the rest fall to the header's defaults. Returns
+/// `None` when nothing beyond the record is passed (a bare positional call).
+fn strict_kwargs(
+    kw_locals: &[crate::dialect::Param],
+    lookup: &impl Fn(&str) -> Option<Expr>,
+) -> Option<Expr> {
+    let entries: Vec<(Expr, Expr)> = kw_locals
+        .iter()
+        .filter_map(|p| lookup(p.name.as_str()).map(|v| (lit_sym(p.name.clone()), v)))
+        .collect();
+    if entries.is_empty() {
+        return None;
+    }
+    Some(Expr::new(
+        Span::synthetic(),
+        ExprNode::Hash { entries, kwargs: true },
+    ))
+}
+
 /// The threaded ivar args a rendered partial needs (its render-tree
 /// closure), looked up by `(module, method)`. These are the calling
 /// view's own locals (its closure ⊇ the partial's), passed positionally
@@ -270,12 +304,22 @@ fn partial_extra_args(ctx: &ViewCtx, module: &str, method: &str) -> Vec<Expr> {
     // and covers any same-named ivar, so exclude it from the threaded set —
     // matching the dedup on the partial's def side (build_library_class).
     let record_name = singularize(&snake_case(last_segment(module)));
+    let key = (module.to_string(), method.to_string());
+    // For a strict-locals partial, its def-side closure excludes EVERY
+    // declared local (a name that is both a local and an `@ivar` collapses
+    // after the ivar→local rewrite). Exclude the same set here so the
+    // threaded positional closure args line up with the signature.
+    let declared: std::collections::HashSet<&str> = ctx
+        .strict_locals
+        .get(&key)
+        .map(|ps| ps.iter().map(|p| p.name.as_str()).collect())
+        .unwrap_or_default();
     ctx.partial_ivars
-        .get(&(module.to_string(), method.to_string()))
+        .get(&key)
         .map(|ivars| {
             ivars
                 .iter()
-                .filter(|n| n.as_str() != record_name)
+                .filter(|n| n.as_str() != record_name && !declared.contains(n.as_str()))
                 // Caller bodies are post-ivar-rewrite: a reserved-word
                 // ivar (`@for`) lives there as its `safe_local` form.
                 .map(|n| var_ref(Symbol::from(crate::naming::safe_local(n.as_str()))))

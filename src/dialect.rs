@@ -999,6 +999,15 @@ pub struct View {
     pub format: Symbol,
     pub locals: Row,
     pub body: Expr,
+    /// Rails strict-locals declaration from a leading `<%# locals:
+    /// (comment:, was_merged: false, …) -%>` header, in declaration
+    /// order. Each entry is a KEYWORD `Param` — required (`comment:`)
+    /// or defaulted (`was_merged: false`). When present it fixes the
+    /// partial's signature exactly (the render call sites bind by name),
+    /// superseding the convention-inferred record arg + closure. `None`
+    /// for the overwhelmingly common headerless partial/view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict_locals: Option<Vec<Param>>,
 }
 
 // Tests -----------------------------------------------------------------

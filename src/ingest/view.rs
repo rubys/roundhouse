@@ -18,6 +18,7 @@ use std::path::Path;
 
 use crate::Symbol;
 use crate::dialect::View;
+use crate::expr::Expr;
 use crate::{erb, haml};
 use crate::ty::Row;
 
@@ -116,7 +117,132 @@ pub fn ingest_template(
         format: Symbol::from(format),
         locals: Row::closed(),
         body,
+        strict_locals: parse_strict_locals(source),
     })
+}
+
+/// Parse a Rails strict-locals magic comment — a leading `<%# locals:
+/// (comment:, was_merged: false, …) -%>` — into ordered KEYWORD
+/// `Param`s. Required locals (`comment:`) get no default; defaulted
+/// ones (`was_merged: false`) carry the parsed literal. Returns `None`
+/// when the template has no such header (the common case). Only the
+/// literal defaults lobsters uses (true/false/nil/int/str/sym) are
+/// modeled; an unrecognized default degrades to `nil` (the param stays
+/// optional, just mis-defaulted — no caller in the corpus hits it).
+fn parse_strict_locals(source: &str) -> Option<Vec<crate::dialect::Param>> {
+    use crate::dialect::Param;
+    // The magic comment must be a `<%# … locals: ( … ) … %>` tag. Anchor
+    // on `locals:` and require an enclosing `<%#` comment opener with no
+    // intervening tag close (so a stray `locals:` in body text is ignored).
+    let kw = source.find("locals:")?;
+    let open = source[..kw].rfind("<%#")?;
+    if source[open..kw].contains("%>") {
+        return None;
+    }
+    let after = &source[kw + "locals:".len()..];
+    let lp = after.find('(')?;
+    let rest = &after[lp + 1..];
+    let mut depth = 1usize;
+    let mut end = None;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let inner = &rest[..end?];
+    let mut params = Vec::new();
+    for entry in split_top_level_commas(inner) {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        // `name:` (required) or `name: <default>` (optional). The colon
+        // after the name is mandatory in the strict-locals syntax.
+        let colon = entry.find(':')?;
+        let name = entry[..colon].trim();
+        if name.is_empty() {
+            continue;
+        }
+        let default_src = entry[colon + 1..].trim();
+        let sym = Symbol::from(name);
+        if default_src.is_empty() {
+            params.push(Param::keyword(sym, None));
+        } else {
+            params.push(Param::keyword(sym, Some(parse_default_literal(default_src))));
+        }
+    }
+    (!params.is_empty()).then_some(params)
+}
+
+/// Split on commas that aren't nested inside `()`/`[]`/`{}` or a string
+/// literal — strict-locals defaults can be `{a: 1}` or `[1, 2]`.
+fn split_top_level_commas(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    for c in s.chars() {
+        match quote {
+            Some(q) => {
+                buf.push(c);
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '"' | '\'' => {
+                    quote = Some(c);
+                    buf.push(c);
+                }
+                '(' | '[' | '{' => {
+                    depth += 1;
+                    buf.push(c);
+                }
+                ')' | ']' | '}' => {
+                    depth -= 1;
+                    buf.push(c);
+                }
+                ',' if depth == 0 => {
+                    out.push(std::mem::take(&mut buf));
+                }
+                _ => buf.push(c),
+            },
+        }
+    }
+    if !buf.trim().is_empty() {
+        out.push(buf);
+    }
+    out
+}
+
+/// Parse a strict-locals default's source into a literal `Expr`. Covers
+/// the literals a header default realistically uses; anything else
+/// degrades to `nil`.
+fn parse_default_literal(s: &str) -> Expr {
+    use crate::expr::{ExprNode, Literal};
+    use crate::span::Span;
+    let lit = match s {
+        "true" => Literal::Bool { value: true },
+        "false" => Literal::Bool { value: false },
+        "nil" => Literal::Nil,
+        _ if s.starts_with(':') => Literal::Sym { value: Symbol::from(&s[1..]) },
+        _ if (s.starts_with('"') && s.ends_with('"') && s.len() >= 2)
+            || (s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2) =>
+        {
+            Literal::Str { value: s[1..s.len() - 1].to_string() }
+        }
+        _ if s.parse::<i64>().is_ok() => Literal::Int { value: s.parse().unwrap() },
+        _ => Literal::Nil,
+    };
+    Expr::new(Span::synthetic(), ExprNode::Lit { value: lit })
 }
 
 #[cfg(test)]

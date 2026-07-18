@@ -828,6 +828,7 @@ mod tests {
             partial_ivars: Default::default(),
             dyn_pools: Default::default(),
             partial_extras: Default::default(),
+            strict_locals: Default::default(),
         }
     }
 

@@ -654,13 +654,19 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
             // shape this grounding matches on). mod_note's `user_url` lives
             // in a model body, reached by this same pass.
             rewrite_url_helpers_absolute(&mut m.body);
+            // The method's OWN params shadow the helper index too: a bare
+            // `tag` in a partial whose strict-locals header declares `tag:`
+            // is that local, not `ApplicationHelper.tag`. (Rails mixes
+            // helpers BENEATH a template's locals.)
+            let mut shadow = own_methods.clone();
+            shadow.extend(m.params.iter().map(|p| p.name.clone()));
             rewrite_helper_calls(
                 &mut m.body,
                 &app.helper_method_index,
                 &route_helpers,
                 &url_helper_classes,
                 rewrite_request,
-                &own_methods,
+                &shadow,
             );
         }
     }
