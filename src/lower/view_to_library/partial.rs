@@ -64,15 +64,29 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                 })
             };
             let record_name = singularize(&snake_case(last_segment(&module_camel)));
-            let arg_expr = if locals.is_some() {
-                lookup_local(&record_name).unwrap_or_else(nil_lit)
-            } else {
-                arg.cloned().unwrap_or_else(nil_lit)
+            let strict_key = (module_camel.clone(), method_sym.clone());
+            let strict_decl = ctx.strict_locals.get(&strict_key);
+            // A strict-locals partial's positional record is its FIRST
+            // declared local (the def side builds the signature from the
+            // header, not the dir convention — `messages/_form` declares
+            // `new_message:`, not `message:`), so bind it by the DECLARED
+            // name; an omitted record falls to the header default. The
+            // dir-convention singular governs only convention-inferred
+            // partials.
+            let arg_expr = match (strict_decl, locals.is_some()) {
+                (Some(decl), true) => lookup_local(decl[0].name.as_str())
+                    .or_else(|| decl[0].default.clone())
+                    .unwrap_or_else(nil_lit),
+                (Some(decl), false) => arg
+                    .cloned()
+                    .or_else(|| decl[0].default.clone())
+                    .unwrap_or_else(nil_lit),
+                (None, true) => lookup_local(&record_name).unwrap_or_else(nil_lit),
+                (None, false) => arg.cloned().unwrap_or_else(nil_lit),
             };
             let mut call_args = vec![arg_expr];
             call_args.extend(partial_extra_args(ctx, &module_camel, &method_sym));
-            let strict_key = (module_camel.clone(), method_sym.clone());
-            if let Some(decl) = ctx.strict_locals.get(&strict_key) {
+            if let Some(decl) = strict_decl {
                 // Strict-locals partial: bind each PROVIDED keyword local by
                 // name (`render "comments/comment", comment: c, show_story:
                 // true` → `Views::Comments.comment(c, show_story: true)`);
