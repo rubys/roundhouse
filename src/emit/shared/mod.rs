@@ -9,6 +9,7 @@
 //! `crate::lower`.
 
 pub mod add;
+pub mod args;
 pub mod cmp;
 pub mod div_pow;
 pub mod eq;

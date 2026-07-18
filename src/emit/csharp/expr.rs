@@ -1573,26 +1573,24 @@ fn emit_send(
 }
 
 fn emit_call_args(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
-    if let Some((last, head)) = args.split_last() {
-        if let ExprNode::Hash { entries, kwargs: true } = &*last.node {
-            if !entries.is_empty() {
-                let keys: Option<Vec<String>> = entries
-                    .iter()
-                    .map(|(k, _)| match &*k.node {
-                        ExprNode::Lit { value: Literal::Sym { value } } => {
-                            Some(camel(value.as_str()))
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                if let Some(keys) = keys {
-                    if kwargs_match_params(recv, method, &keys) {
-                        let mut parts: Vec<String> = head.iter().map(emit_expr).collect();
-                        for (k, (_, v)) in keys.iter().zip(entries.iter()) {
-                            parts.push(format!("{k}: {}", emit_expr(v)));
-                        }
-                        return parts.join(", ");
+    if let (head, Some(entries)) = crate::emit::shared::args::split_trailing_kwargs(args) {
+        if !entries.is_empty() {
+            let keys: Option<Vec<String>> = entries
+                .iter()
+                .map(|(k, _)| match &*k.node {
+                    ExprNode::Lit { value: Literal::Sym { value } } => {
+                        Some(camel(value.as_str()))
                     }
+                    _ => None,
+                })
+                .collect();
+            if let Some(keys) = keys {
+                if kwargs_match_params(recv, method, &keys) {
+                    let mut parts: Vec<String> = head.iter().map(emit_expr).collect();
+                    for (k, (_, v)) in keys.iter().zip(entries.iter()) {
+                        parts.push(format!("{k}: {}", emit_expr(v)));
+                    }
+                    return parts.join(", ");
                 }
             }
         }
