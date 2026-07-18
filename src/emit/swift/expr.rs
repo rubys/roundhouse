@@ -317,59 +317,54 @@ fn method_params_for(receiver: &str, method: &str) -> Option<Vec<(String, Option
 /// genuine sym-keyed map arg (an unregistered primitive like
 /// `Broadcasts.append`) is never miscaptured.
 fn emit_call_args(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
-    if let Some((last, head)) = args.split_last() {
-        if let ExprNode::Hash { entries, kwargs: true } = &*last.node {
-            if !entries.is_empty() {
-                let keys: Option<Vec<String>> = entries
-                    .iter()
-                    .map(|(k, _)| match &*k.node {
-                        ExprNode::Lit { value: Literal::Sym { value } } => {
-                            Some(camel(value.as_str()))
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                let recv_type = match recv {
-                    Some(r) => match &*r.node {
-                        ExprNode::Const { path } => Some(super::naming::type_name(
-                            &path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::"),
-                        )),
-                        // Self-send: the current class (ancestors walk in
-                        // the lookup).
-                        ExprNode::SelfRef => Some(CURRENT_CLASS.with(|c| c.borrow().clone())),
-                        _ => None,
-                    },
-                    None => Some(CURRENT_CLASS.with(|c| c.borrow().clone())),
-                };
-                if let (Some(keys), Some(rt)) = (keys, recv_type) {
-                    if let Some(params) = method_params_for(&rt, method) {
-                        let tail = &params[head.len().min(params.len())..];
-                        let mut parts: Vec<String> = head.iter().map(emit_expr).collect();
-                        let mut consumed = 0;
-                        let mut pending_defaults: Vec<String> = Vec::new();
-                        let mut ok = true;
-                        for (p, default) in tail {
-                            if let Some(idx) = keys.iter().position(|k| k == p) {
-                                // Fill any skipped defaulted params first.
-                                parts.append(&mut pending_defaults);
-                                parts.push(emit_expr(&entries[idx].1));
-                                consumed += 1;
-                            } else if let Some(d) = default {
-                                // Maybe-skipped middle param — only emitted
-                                // if a later kwarg lands.
-                                pending_defaults.push(d.clone());
-                            } else {
-                                ok = false;
-                                break;
-                            }
-                            if consumed == keys.len() {
-                                break;
-                            }
-                        }
-                        if ok && consumed == keys.len() {
-                            return parts.join(", ");
-                        }
+    let (head, kwargs) = crate::emit::shared::args::split_trailing_kwargs(args);
+    if let Some(entries) = kwargs.filter(|e| !e.is_empty()) {
+        let keys: Option<Vec<String>> = entries
+            .iter()
+            .map(|(k, _)| match &*k.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => Some(camel(value.as_str())),
+                _ => None,
+            })
+            .collect();
+        let recv_type = match recv {
+            Some(r) => match &*r.node {
+                ExprNode::Const { path } => Some(super::naming::type_name(
+                    &path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::"),
+                )),
+                // Self-send: the current class (ancestors walk in
+                // the lookup).
+                ExprNode::SelfRef => Some(CURRENT_CLASS.with(|c| c.borrow().clone())),
+                _ => None,
+            },
+            None => Some(CURRENT_CLASS.with(|c| c.borrow().clone())),
+        };
+        if let (Some(keys), Some(rt)) = (keys, recv_type) {
+            if let Some(params) = method_params_for(&rt, method) {
+                let tail = &params[head.len().min(params.len())..];
+                let mut parts: Vec<String> = head.iter().map(emit_expr).collect();
+                let mut consumed = 0;
+                let mut pending_defaults: Vec<String> = Vec::new();
+                let mut ok = true;
+                for (p, default) in tail {
+                    if let Some(idx) = keys.iter().position(|k| k == p) {
+                        // Fill any skipped defaulted params first.
+                        parts.append(&mut pending_defaults);
+                        parts.push(emit_expr(&entries[idx].1));
+                        consumed += 1;
+                    } else if let Some(d) = default {
+                        // Maybe-skipped middle param — only emitted
+                        // if a later kwarg lands.
+                        pending_defaults.push(d.clone());
+                    } else {
+                        ok = false;
+                        break;
                     }
+                    if consumed == keys.len() {
+                        break;
+                    }
+                }
+                if ok && consumed == keys.len() {
+                    return parts.join(", ");
                 }
             }
         }
