@@ -619,7 +619,7 @@ fn ty_from_node(node: &Node<'_>, scope: Option<&str>) -> Result<Ty, String> {
         Node::AnyType(_) => Ok(Ty::Untyped),
         Node::OptionalType(opt) => {
             let inner = ty_from_node(&opt.type_(), scope)?;
-            Ok(union_of(vec![inner, Ty::Nil]))
+            Ok(union_or_single(vec![inner, Ty::Nil]))
         }
         Node::UnionType(u) => {
             let variants: Vec<Ty> = u
@@ -627,7 +627,7 @@ fn ty_from_node(node: &Node<'_>, scope: Option<&str>) -> Result<Ty, String> {
                 .iter()
                 .map(|n| ty_from_node(&n, scope))
                 .collect::<Result<_, _>>()?;
-            Ok(union_of(variants))
+            Ok(union_or_single(variants))
         }
         Node::TupleType(t) => {
             let elems: Vec<Ty> = t
@@ -688,7 +688,17 @@ fn map_class_instance(name: &str, args: Vec<Ty>) -> Ty {
     }
 }
 
-fn union_of(variants: Vec<Ty>) -> Ty {
+/// Wrap parsed RBS union variants into a `Ty`: the sole variant if
+/// there is only one, else a `Ty::Union` preserving the author-written
+/// order and multiplicity verbatim.
+///
+/// Deliberately NOT the analyzer's lattice join (`analyze::body::
+/// union_of` / `union_many`): this is the *parse* direction, so it must
+/// reproduce exactly what the `sig/**/*.rbs` author wrote — no Bottom
+/// filtering, no dedup, no structural container merge, no canonical
+/// re-sort. Normalizing here would break round-trip printing and could
+/// silently rewrite a declared signature.
+fn union_or_single(variants: Vec<Ty>) -> Ty {
     if variants.len() == 1 {
         variants.into_iter().next().unwrap()
     } else {

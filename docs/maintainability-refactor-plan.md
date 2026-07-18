@@ -417,3 +417,25 @@ Every numbered step is a legal stopping point.
 
   **Phase 2.1 complete** — all four predicates (`is_unknown`, `is_open`, `is_scalar`,
   `is_stringish`) landed. Total 34 exact boolean sites migrated across 4 commits.
+
+- **2.2 union_of** — **the two implementations are semantically DIFFERENT; NOT unified**
+  (per the plan's "if they differ" branch). Finding:
+  - `analyze::body::union_of(a: Ty, b: Ty)` is a *normalizing binary lattice join*:
+    Bottom-drop, pointwise Hash/Array container merge, flatten + dedup nested unions,
+    canonical variant sort. `union_many` folds a `Vec` through it. Its `==`-based fixpoint
+    convergence and the lattice-law tests depend on the canonicalization.
+  - `rbs::union_of(variants: Vec<Ty>)` was a *bare non-normalizing constructor* — return
+    the sole variant, else `Ty::Union { variants }` verbatim. It's the RBS **parse**
+    direction and must reproduce exactly what the author wrote (round-trip printing +
+    not silently rewriting a declared signature). Normalizing here would be a behavior bug.
+
+    Actions taken (all behavior-neutral): renamed `rbs::union_of` → **`union_or_single`**
+    with a doc stating it is deliberately not the lattice join (kills the misleading name
+    collision); added a cross-ref note. Did NOT mass-move the 49-call-site lattice
+    `union_of`/`union_many`/`push_union_variants` onto `impl Ty` — that move was contingent
+    on the two being identical, and the churn/risk isn't justified given they diverge; they
+    keep their home in `analyze::body`.
+  - **Pure code motion done**: moved `peel_nilable`, `strip_nil`, `canonicalize_variants`
+    to `impl Ty` in `ty.rs` (each had exactly one caller). `ide.rs`'s `can_be_nil`/
+    `nil_verdict` left alone as instructed. Lattice-law + rbs + analyze tests pass, emit
+    byte-identical.

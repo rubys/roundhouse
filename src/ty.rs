@@ -133,6 +133,50 @@ impl Ty {
             _ => false,
         }
     }
+
+    /// For a binary nilable union `T | Nil`, return the non-`Nil` arm
+    /// `T`; otherwise return `self` unchanged. Only the exact two-variant
+    /// `{T, Nil}` shape is peeled — wider unions stay intact.
+    pub(crate) fn peel_nilable(&self) -> &Ty {
+        if let Ty::Union { variants } = self {
+            if variants.len() == 2 {
+                let nil_idx = variants.iter().position(|v| matches!(v, Ty::Nil));
+                if let Some(idx) = nil_idx {
+                    return &variants[1 - idx];
+                }
+            }
+        }
+        self
+    }
+
+    /// Drop every `Nil` variant from a union, returning the reduced
+    /// type: the sole survivor if one remains, a narrower `Union` if
+    /// several do, and `Nil` if the union was all-`Nil`. Non-union
+    /// types pass through unchanged. (This normalizes membership only;
+    /// it does not re-canonicalize variant order.)
+    pub(crate) fn strip_nil(self) -> Ty {
+        let Ty::Union { variants } = self else { return self };
+        let kept: Vec<Ty> = variants
+            .into_iter()
+            .filter(|v| !matches!(v, Ty::Nil))
+            .collect();
+        match kept.len() {
+            0 => Ty::Nil,
+            1 => kept.into_iter().next().unwrap(),
+            _ => Ty::Union { variants: kept },
+        }
+    }
+
+    /// Sort a flattened variant list into the canonical order: `Nil`
+    /// last (so nilable unions keep reading `T | Nil`), everything else
+    /// by its structural `Debug` rendering — an arbitrary but total and
+    /// stable key. Two unions built from the same variants in any join
+    /// order compare equal under derived `==` only because of this;
+    /// `analyze`'s lattice join (`union_of`) relies on it for fixpoint
+    /// convergence.
+    pub(crate) fn canonicalize_variants(variants: &mut [Ty]) {
+        variants.sort_by_cached_key(|v| (matches!(v, Ty::Nil), format!("{v:?}")));
+    }
 }
 
 /// A row-polymorphic record shape.

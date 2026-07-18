@@ -1100,7 +1100,7 @@ pub(super) fn unknown() -> Ty {
 /// union the assignment type with Nil to model first-read-before-
 /// initialize; peel that wrapper before matching the container shape.
 fn propagate_expected_to_empty_container(value: &mut Expr, expected: &Ty) {
-    let peeled = peel_nilable(expected);
+    let peeled = expected.peel_nilable();
     match &mut *value.node {
         ExprNode::Hash { entries, .. } if entries.is_empty() => {
             if matches!(peeled, Ty::Hash { .. }) {
@@ -1114,18 +1114,6 @@ fn propagate_expected_to_empty_container(value: &mut Expr, expected: &Ty) {
         }
         _ => {}
     }
-}
-
-fn peel_nilable(ty: &Ty) -> &Ty {
-    if let Ty::Union { variants } = ty {
-        if variants.len() == 2 {
-            let nil_idx = variants.iter().position(|v| matches!(v, Ty::Nil));
-            if let Some(idx) = nil_idx {
-                return &variants[1 - idx];
-            }
-        }
-    }
-    ty
 }
 
 /// Type a single destructuring target of `a, b, ... = rhs` at
@@ -1285,7 +1273,7 @@ pub(crate) fn union_of(a: Ty, b: Ty) -> Ty {
     let mut variants = Vec::new();
     push_union_variants(a, &mut variants);
     push_union_variants(b, &mut variants);
-    canonicalize_variants(&mut variants);
+    Ty::canonicalize_variants(&mut variants);
     match variants.len() {
         0 => Ty::Bottom,
         1 => variants.into_iter().next().unwrap(),
@@ -1331,15 +1319,6 @@ fn push_union_variants(t: Ty, out: &mut Vec<Ty>) {
             }
         }
     }
-}
-
-/// Sort a flattened variant list into the canonical order: `Nil` last
-/// (so nilable unions keep reading `T | Nil`), everything else by its
-/// structural Debug rendering — an arbitrary but total and stable key.
-/// Two unions built from the same variants in any join order compare
-/// equal under derived `==` only because of this.
-fn canonicalize_variants(variants: &mut [Ty]) {
-    variants.sort_by_cached_key(|v| (matches!(v, Ty::Nil), format!("{v:?}")));
 }
 
 pub(super) fn union_many(tys: Vec<Ty>) -> Ty {

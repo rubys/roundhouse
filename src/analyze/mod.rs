@@ -2216,7 +2216,7 @@ impl Analyzer {
                         }
                     }
                     env.into_iter()
-                        .map(|(k, v)| (k, strip_nil(v)))
+                        .map(|(k, v)| (k, v.strip_nil()))
                         .collect()
                 };
 
@@ -4608,19 +4608,6 @@ fn record_const(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
 /// fall back to. Used when building the controller-wide ivar base,
 /// where the find-then-guard idiom makes nilable ivars effectively
 /// non-nil on the path that reaches a cross-method reader.
-fn strip_nil(ty: Ty) -> Ty {
-    let Ty::Union { variants } = ty else { return ty };
-    let kept: Vec<Ty> = variants
-        .into_iter()
-        .filter(|v| !matches!(v, Ty::Nil))
-        .collect();
-    match kept.len() {
-        0 => Ty::Nil,
-        1 => kept.into_iter().next().unwrap(),
-        _ => Ty::Union { variants: kept },
-    }
-}
-
 /// A method's return type is the union of every `return X` value type
 /// reachable in its body PLUS the tail (implicit-return) expression's
 /// type. The body-typer types a `return` *expression* as `Bottom` — it
