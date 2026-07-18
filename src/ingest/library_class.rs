@@ -524,7 +524,7 @@ pub(super) fn ingest_library_method(
             if let Some(rp) = rest.as_rest_parameter_node() {
                 if let Some(loc) = rp.name() {
                     if let Ok(s) = std::str::from_utf8(loc.as_slice()) {
-                        params.push(Param::positional(Symbol::from(s)));
+                        params.push(Param::rest(Symbol::from(s)));
                     }
                 }
             }

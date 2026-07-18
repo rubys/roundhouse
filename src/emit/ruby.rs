@@ -53,6 +53,7 @@ pub fn emit_method(m: &MethodDef) -> String {
                 format!("{}: {}", p.name.as_str(), emit_default(default))
             }
             (None, true) => format!("{}:", p.name.as_str()),
+            (None, false) if p.rest => format!("*{}", p.name.as_str()),
             (None, false) => p.name.as_str().to_string(),
         })
         .collect();

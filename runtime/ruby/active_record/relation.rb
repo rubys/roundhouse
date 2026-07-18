@@ -257,6 +257,13 @@ module ActiveRecord
       to_a + other
     end
 
+    # `include?(record)` — Rails checks membership against the loaded
+    # records (`load` then id-compare); materializing matches that
+    # contract at our result-set sizes.
+    def include?(record)
+      to_a.include?(record)
+    end
+
     def each
       to_a.each { |x| yield x }
     end

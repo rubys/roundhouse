@@ -394,19 +394,29 @@ pub struct Param {
     /// transpiled call site on such a target passes keywords).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keyword: bool,
+    /// Rest parameter (`*name`) — the Ruby-family emitters render
+    /// `*name` and the body sees an Array. Emitters without a rest
+    /// concept render it as a plain positional (an approximation;
+    /// correct only while no transpiled call site passes extra args).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rest: bool,
 }
 
 impl Param {
     pub fn positional(name: Symbol) -> Self {
-        Self { name, default: None, keyword: false }
+        Self { name, default: None, keyword: false, rest: false }
     }
 
     pub fn with_default(name: Symbol, default: Expr) -> Self {
-        Self { name, default: Some(default), keyword: false }
+        Self { name, default: Some(default), keyword: false, rest: false }
     }
 
     pub fn keyword(name: Symbol, default: Option<Expr>) -> Self {
-        Self { name, default, keyword: true }
+        Self { name, default, keyword: true, rest: false }
+    }
+
+    pub fn rest(name: Symbol) -> Self {
+        Self { name, default: None, keyword: false, rest: true }
     }
 
     pub fn as_str(&self) -> &str {

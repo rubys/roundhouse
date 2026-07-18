@@ -148,6 +148,8 @@ fn render_untyped_fallback(m: &MethodDef) -> String {
             let optional = if p.default.is_some() { "?" } else { "" };
             if p.keyword {
                 format!("{optional}{name}: untyped")
+            } else if p.rest {
+                format!("*untyped {name}")
             } else {
                 format!("{optional}untyped {name}")
             }

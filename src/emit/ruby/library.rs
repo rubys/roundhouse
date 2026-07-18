@@ -634,6 +634,11 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
         // own `request` accessor and are left alone).
         let rewrite_request =
             is_helper_module || lc.name.0.as_str().starts_with("Views::");
+        // The class's own method names shadow the helper index inside its
+        // bodies — a bare call to one of them is a self-dispatch, never a
+        // cross-module helper reference.
+        let own_methods: std::collections::HashSet<Symbol> =
+            lc.methods.iter().map(|m| m.name.clone()).collect();
         for m in &mut lc.methods {
             // A helper module's own methods become module-functions so the
             // rewritten `Module.method` call has a real target — Rails mixed
@@ -655,6 +660,7 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
                 &route_helpers,
                 &url_helper_classes,
                 rewrite_request,
+                &own_methods,
             );
         }
     }
@@ -798,9 +804,17 @@ fn rewrite_helper_calls(
     route_helpers: &std::collections::HashSet<Symbol>,
     url_helper_classes: &std::collections::HashSet<Symbol>,
     rewrite_request: bool,
+    own_methods: &std::collections::HashSet<Symbol>,
 ) {
     expr.node.for_each_child_mut(&mut |c| {
-        rewrite_helper_calls(c, index, route_helpers, url_helper_classes, rewrite_request)
+        rewrite_helper_calls(
+            c,
+            index,
+            route_helpers,
+            url_helper_classes,
+            rewrite_request,
+            own_methods,
+        )
     });
 
     // `X.<helper>` where X singleton-includes url_helpers (lobsters'
@@ -957,7 +971,17 @@ fn rewrite_helper_calls(
     // Cases 3/4: a bare call resolving to an app or framework helper module.
     let path: Option<Vec<Symbol>> = match &*expr.node {
         ExprNode::Send { recv: None, method, args, .. } => {
-            if let Some(module) = index.get(method) {
+            if own_methods.contains(method) {
+                // Self wins: a bare call naming a method the enclosing
+                // class itself defines is a self-dispatch (Tag#to_param's
+                // `tag` column reader), not a helper reference — Rails
+                // helpers are mixed in beneath the receiver's own
+                // methods, and models never see helpers at all. Without
+                // this, an app helper that happens to share a model
+                // accessor's name (lobsters' ApplicationHelper#tag
+                // builder override vs Tag#tag) captures every read.
+                None
+            } else if let Some(module) = index.get(method) {
                 Some(module.0.as_str().split("::").map(Symbol::from).collect())
             } else if method.as_str() == "pluralize" && args.len() == 2 {
                 // Count-labeling `pluralize(count, word)` in a helper

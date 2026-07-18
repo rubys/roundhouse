@@ -35,6 +35,7 @@ module ActiveRecord
 
     def to_a: () -> Array[untyped]
     def +: (Array[untyped] other) -> Array[untyped]
+    def include?: (untyped record) -> bool
     def each: () { (untyped) -> void } -> Array[untyped]
     def index_by: () { (untyped) -> untyped } -> Hash[untyped, untyped]
     def find_each: () { (untyped) -> void } -> Array[untyped]
