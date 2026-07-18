@@ -715,6 +715,9 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
         }),
     }
     files.extend(emit_lowered_models(app));
+    if let Some(f) = library::emit_relation_scope_delegates(app) {
+        files.push(f);
+    }
     files.extend(emit_lowered_controllers(app));
     files.extend(emit_lowered_views(app));
     files.extend(emit_lowered_jbuilder_views(app));
@@ -970,6 +973,45 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
             files.push(library::emit_rbs_sidecar(&lc_for_emit, &rbs_path));
         }
     }
+
+    // `app/models.rb` aggregator — loads every emitted app/models/*.rb.
+    // Model files carry requires only for their LOAD-time deps
+    // (superclass, includes, class-body constant refs); method-body
+    // references between them resolve because main.rb / test_helper.rb
+    // require this file before any dispatch (see the edge
+    // classification in `library::emit_library_class_decl_with_
+    // synthesized`). Emitted here so every consumer of `emit_spinel`
+    // (the toolchain scratch trees included) satisfies those
+    // unconditional requires; the project pipeline regenerates it
+    // after `emit_library` adds the ingested support classes
+    // (`apply_models_aggregator`).
+    let mut model_anchors: Vec<String> = files
+        .iter()
+        .filter_map(|f| {
+            let p = f.path.to_str()?;
+            if p.starts_with("app/models/") && p.ends_with(".rb") {
+                Some(p.strip_suffix(".rb").unwrap().strip_prefix("app/").unwrap().to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    model_anchors.sort();
+    let mut aggregator = String::from(
+        "# Loads every model/support class under app/models/. Generated\n\
+         # from the emitted tree (see emit_spinel / apply_models_aggregator).\n\
+         # Each file requires its own LOAD-time deps (superclass, includes,\n\
+         # class-body constants), so the order here is only for legibility;\n\
+         # method-body references between these files rely on this\n\
+         # aggregator having run by dispatch time.\n",
+    );
+    for anchor in &model_anchors {
+        writeln!(aggregator, "require_relative {anchor:?}").unwrap();
+    }
+    files.push(EmittedFile {
+        path: PathBuf::from("app/models.rb"),
+        content: aggregator,
+    });
 
     files
 }

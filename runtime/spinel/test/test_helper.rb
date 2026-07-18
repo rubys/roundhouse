@@ -35,6 +35,11 @@ require_relative "../runtime/broadcasts"
 require_relative "../runtime/importmap"
 require_relative "../config/importmap"
 require_relative "../config/routes"
+# The app/models.rb aggregator (generated — see apply_models_aggregator)
+# loads every model/support class. Model files only require their own
+# LOAD-time deps; tests reach the rest (and fixtures reach their models)
+# through this line, mirroring main.rb's boot order.
+require_relative "../app/models"
 
 # One-time global setup: configure the Db primitive surface (cruby
 # shim under stock CRuby — `runtime/spinel/db.rb` wraps the sqlite3

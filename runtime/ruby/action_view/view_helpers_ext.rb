@@ -8,6 +8,38 @@
 # up and lobsters reaches them.
 module ActionView
   module ViewHelpers
+    # `content_security_policy_nonce` — the per-request CSP script
+    # nonce Rails interpolates into `<script nonce=…>`. The CSP HEADER
+    # pipeline isn't modeled (no Content-Security-Policy response
+    # header is emitted), so the nonce is inert to browsers; a stable
+    # token keeps the layout's interpolation rendering without pulling
+    # a randomness primitive into every target runtime.
+    def self.content_security_policy_nonce
+      "roundhouse-nonce"
+    end
+
+    # Rails `class_names` (alias of `token_list`): strings/arrays add
+    # their tokens, hash entries contribute their key when the value is
+    # truthy (`class_names("nav", current_page: cur == path)`), nil and
+    # blank tokens drop. Joined with single spaces.
+    def self.class_names(*args)
+      tokens = []
+      args.each do |arg|
+        if arg.is_a?(Hash)
+          arg.each { |k, v| tokens << k.to_s if v }
+        elsif arg.is_a?(Array)
+          arg.each do |a|
+            s = a.to_s
+            tokens << s unless s.strip.empty?
+          end
+        elsif !arg.nil?
+          s = arg.to_s
+          tokens << s unless s.strip.empty?
+        end
+      end
+      tokens.join(" ")
+    end
+
     # `number_with_delimiter(12345)` → "12,345" — comma grouping every
     # three digits, sign-aware. Integer-only, matching the signature
     # (every corpus arg is a count); while-loop over the digit string

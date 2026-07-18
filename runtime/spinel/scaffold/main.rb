@@ -49,6 +49,9 @@ require_relative "runtime/importmap"
 # sibling at the same path).
 require_relative "runtime/active_support_duration"
 require_relative "runtime/rails"
+# Park RAILS_ENV where the typed runtime can read it (`Rails.env`
+# defaults to development when unset).
+Rails.env_name = ENV["RAILS_ENV"]
 # Per-app Rails::Application reopen — the app's real config methods
 # (`Rails.application.name` in layouts). Emitted unconditionally (a
 # stub reopen when the source app has none); loads right after the
@@ -72,6 +75,12 @@ require_relative "config/routes"
 # same-name cmeth dispatch (matz/spinel#517), so this is now a plain
 # require_relative under both CRuby and spinel.
 require_relative "config/importmap"
+# The app/models.rb aggregator (generated — see apply_models_aggregator)
+# loads every model/support class. Model files only require their own
+# LOAD-time deps (superclass, class-body consts); method-body references
+# between them count on this line — and spinel-AOT's static require
+# graph reaches every model file through it.
+require_relative "app/models"
 require_relative "app/views"
 
 module Main

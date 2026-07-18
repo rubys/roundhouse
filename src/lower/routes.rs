@@ -417,11 +417,29 @@ fn expand_optional_paths(path: &str) -> Vec<String> {
     let Some(open) = path.find('(') else {
         return vec![path.to_string()];
     };
-    let Some(close_rel) = path[open..].find(')') else {
+    // Depth-matched close: Rails optional groups nest
+    // (`/top(/:length(/page/:page))`), and pairing with the FIRST `)`
+    // would leave the outer close as a stray literal in the
+    // without-branch (`"/top)"`).
+    let mut depth = 0usize;
+    let mut close_found = None;
+    for (i, c) in path.char_indices().skip(open) {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close_found = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(close) = close_found else {
         // Unbalanced parens — strip the stray `(` defensively.
         return vec![path.replace('(', "")];
     };
-    let close = open + close_rel;
     let before = &path[..open];
     let inside = &path[open + 1..close];
     let after = &path[close + 1..];

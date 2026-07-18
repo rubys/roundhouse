@@ -37,7 +37,7 @@ use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver, Para
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, InterpPart, IrHint, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
-use crate::naming::{camelize, singularize, snake_case};
+use crate::naming::{camelize_path, last_segment, singularize, snake_case};
 use crate::span::Span;
 
 use self::extra_params::collect_extra_params;
@@ -346,11 +346,15 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // for now (their call site is main.rb, not yet threaded).
     let closures = lx.closures.clone();
     let dyn_pools = lx.dyn_pools.clone();
+    // `safe_local`: closure maps carry RAW ivar names (controller call
+    // sites emit `@for` from them); the view-local identifiers derived
+    // here rename reserved words (`for` → `for_`), position-for-position
+    // with the raw list so caller arg order still matches.
     let closure_ivars: Vec<String> = view_key_of(view)
         .and_then(|k| closures.get(&k).cloned())
         .unwrap_or_default()
         .iter()
-        .map(|s| s.as_str().to_string())
+        .map(|s| crate::naming::safe_local(s.as_str()))
         .collect();
 
     // A partial's locals are its interface: every `locals:` key any call
@@ -1163,7 +1167,7 @@ pub(crate) fn view_module_id(dir: &str) -> ClassId {
     if dir.is_empty() {
         return ClassId(Symbol::from("Views"));
     }
-    let camelized = camelize(&snake_case(dir));
+    let camelized = camelize_path(&snake_case(dir));
     ClassId(Symbol::from(format!("Views::{camelized}")))
 }
 
@@ -1228,7 +1232,7 @@ pub(crate) fn build_view_signature(
         return None;
     }
 
-    let model_class = crate::naming::singularize_camelize(dir);
+    let model_class = camelize_path(&crate::naming::singularize_last(dir));
     let model_known = known_models.iter().any(|m| m == &model_class);
 
     // Type for the main arg (when present).
@@ -1467,7 +1471,7 @@ pub(crate) fn partial_form_bindings(
                         };
                         if let Some((d, n)) = resolved {
                             let key = (
-                                camelize(&snake_case(&d)),
+                                camelize_path(&snake_case(&d)),
                                 n.trim_start_matches('_').to_string(),
                             );
                             let model_name = record_local.clone();
@@ -1609,7 +1613,7 @@ pub(crate) fn render_locals_keys(
                         };
                         if let Some((d, n)) = resolved {
                             let key = (
-                                camelize(&snake_case(&d)),
+                                camelize_path(&snake_case(&d)),
                                 n.trim_start_matches('_').to_string(),
                             );
                             acc.entry(key).or_default().extend(keys);
@@ -1677,16 +1681,16 @@ pub(crate) fn partial_call_contracts(
             continue;
         }
         let stem = base.trim_start_matches('_');
-        let record = singularize(dir);
+        let record = singularize(last_segment(dir));
         let rewritten = rewrite_ivars_to_locals(&view.body);
         let rewritten = crate::lower::erb_trim::trim_view(&rewritten);
         let mut extras = collect_extra_params(&rewritten, &record);
-        let key = (camelize(&snake_case(dir)), stem.to_string());
+        let key = (camelize_path(&snake_case(dir)), stem.to_string());
         let closure: Vec<String> = closures
             .get(&key)
             .map(|ivs| {
                 ivs.iter()
-                    .map(|s| s.as_str().to_string())
+                    .map(|s| crate::naming::safe_local(s.as_str()))
                     .filter(|n| n != &record)
                     .collect()
             })
@@ -1722,7 +1726,7 @@ pub(crate) fn action_view_ivar_map(
         if v.format.as_str() != "html" {
             continue;
         }
-        let module = camelize(&snake_case(dir));
+        let module = camelize_path(&snake_case(dir));
         let key = (module, base.to_string());
         let ivars = closures
             .get(&key)
@@ -1797,11 +1801,11 @@ pub(super) fn partial_extras_map(
         let rewritten = rewrite_ivars_to_locals(&view.body);
         let rewritten = crate::lower::erb_trim::trim_view(&rewritten);
         let mut extras = collect_extra_params(&rewritten, &arg_name);
-        let key = (camelize(&snake_case(dir)), stem.to_string());
+        let key = (camelize_path(&snake_case(dir)), stem.to_string());
         // locals-key params — mirrors the def site's append exactly.
         let closure: Vec<String> = closures
             .get(&key)
-            .map(|ivs| ivs.iter().map(|s| s.as_str().to_string()).collect())
+            .map(|ivs| ivs.iter().map(|s| crate::naming::safe_local(s.as_str())).collect())
             .unwrap_or_default();
         if let Some(keys) = keys_map.get(&key) {
             for k in keys {
@@ -1828,7 +1832,7 @@ fn view_key_of(v: &View) -> Option<ViewKey> {
     if dir.is_empty() {
         return None;
     }
-    Some((camelize(&snake_case(dir)), base.trim_start_matches('_').to_string()))
+    Some((camelize_path(&snake_case(dir)), base.trim_start_matches('_').to_string()))
 }
 
 /// Ruby-emit-path layout wrap factory: the Expr for
@@ -1993,9 +1997,9 @@ fn collect_render_keys(e: &Expr, dir: &str, out: &mut Vec<ViewKey>) {
 /// directory) — matching Rails' relative-partial-path lookup.
 fn partial_name_to_key(name: &str, dir: &str) -> ViewKey {
     match name.rsplit_once('/') {
-        Some((d, n)) => (camelize(&snake_case(d)), n.trim_start_matches('_').to_string()),
+        Some((d, n)) => (camelize_path(&snake_case(d)), n.trim_start_matches('_').to_string()),
         None => (
-            camelize(&snake_case(dir)),
+            camelize_path(&snake_case(dir)),
             name.trim_start_matches('_').to_string(),
         ),
     }
@@ -2004,9 +2008,9 @@ fn partial_name_to_key(name: &str, dir: &str) -> ViewKey {
 fn render_partial_key(rp: &crate::lower::view::RenderPartial<'_>, dir: &str) -> Option<ViewKey> {
     use crate::lower::view::RenderPartial;
     Some(match rp {
-        RenderPartial::Collection { name, .. } => (camelize(&snake_case(name)), singularize(name)),
+        RenderPartial::Collection { name, .. } => (camelize_path(&snake_case(name)), singularize(name)),
         RenderPartial::Association { method, .. } => {
-            (camelize(&snake_case(method)), singularize(method))
+            (camelize_path(&snake_case(method)), singularize(method))
         }
         RenderPartial::Named { partial, .. } | RenderPartial::CollectionNamed { partial, .. } => {
             partial_name_to_key(partial, dir)
@@ -2142,7 +2146,7 @@ fn collect_read_ivars(
 /// `build_view_signature` applies to the single arg, but per-ivar.
 fn ivar_ty(name: &str, known_models: &[String]) -> crate::ty::Ty {
     use crate::ty::Ty;
-    let cam = crate::naming::singularize_camelize(name);
+    let cam = camelize_path(&crate::naming::singularize_last(name));
     if known_models.iter().any(|m| m == &cam) {
         let model = Ty::Class {
             id: crate::ident::ClassId(crate::ident::Symbol::from(cam.as_str())),
@@ -2166,7 +2170,7 @@ fn record_arg_ty(dir: &str, is_layout: bool, known_models: &[String]) -> crate::
     if is_layout {
         return Ty::Str;
     }
-    let model_class = crate::naming::singularize_camelize(dir);
+    let model_class = camelize_path(&crate::naming::singularize_last(dir));
     if known_models.iter().any(|m| m == &model_class) {
         Ty::Class {
             id: crate::ident::ClassId(crate::ident::Symbol::from(model_class.as_str())),
@@ -2219,11 +2223,11 @@ pub(crate) fn infer_view_arg(stem: &str, dir: &str, is_partial: bool, _known_mod
         return "body".to_string();
     }
     if is_partial {
-        return singularize(dir);
+        return singularize(last_segment(dir));
     }
     match stem {
-        "index" => dir.to_string(),
-        _ => singularize(dir),
+        "index" => last_segment(dir).to_string(),
+        _ => singularize(last_segment(dir)),
     }
 }
 
@@ -2234,7 +2238,10 @@ pub(crate) fn infer_view_arg(stem: &str, dir: &str, is_partial: bool, _known_mod
 /// extra params resolve to those rewritten Vars in the emitted body.
 fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
     let new_node = match &*expr.node {
-        ExprNode::Ivar { name } => ExprNode::Var { id: VarId(0), name: name.clone() },
+        ExprNode::Ivar { name } => ExprNode::Var {
+            id: VarId(0),
+            name: Symbol::from(crate::naming::safe_local(name.as_str())),
+        },
         ExprNode::Assign { target: LValue::Ivar { name }, value } => ExprNode::Assign {
             target: LValue::Var { id: VarId(0), name: name.clone() },
             value: rewrite_ivars_to_locals(value),
@@ -2314,7 +2321,10 @@ fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
 fn rewrite_lvalue(lv: &LValue) -> LValue {
     match lv {
         LValue::Var { id, name } => LValue::Var { id: *id, name: name.clone() },
-        LValue::Ivar { name } => LValue::Var { id: VarId(0), name: name.clone() },
+        LValue::Ivar { name } => LValue::Var {
+            id: VarId(0),
+            name: Symbol::from(crate::naming::safe_local(name.as_str())),
+        },
         LValue::Attr { recv, name } => LValue::Attr {
             recv: rewrite_ivars_to_locals(recv),
             name: name.clone(),

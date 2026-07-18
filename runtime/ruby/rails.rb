@@ -14,8 +14,20 @@
 # correct, just not actually caching, which is adequate until a real cache
 # backend is wired.
 module Rails
+  class << self
+    # RAILS_ENV, parked by the scaffold main.rb at boot (the runtime
+    # typing gate doesn't model `ENV[]`, so the read lives in the
+    # scaffold). Same global-slot idiom as `ActiveRecord.adapter`.
+    attr_accessor :env_name
+  end
+
+  # Rails-faithful: the parked RAILS_ENV wins, development is the
+  # default when unset (serving/bench harnesses pass
+  # RAILS_ENV=production; lobsters gates dev-only filters on
+  # `Rails.env.development?`).
   def self.env
-    Env.new("development")
+    name = env_name
+    Env.new(name.nil? || name.empty? ? "development" : name)
   end
 
   # `Rails.root` — the app root. Rails hands back a Pathname; the

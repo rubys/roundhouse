@@ -148,6 +148,18 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // larger scale: Mastodon keeps ~450 plain-Ruby classes across those
     // six dirs, and every `FooService.new.call(…)` in a controller
     // dispatches into nothing until they register.
+    // Rails loads lib/ subtrees per the app's declared
+    // `config.autoload_lib(ignore: %w[...])` list — lobsters ignores
+    // assets/custom_cops/tasks (the custom_cops are RuboCop cop classes
+    // subclassing an unmodeled dev gem, never loaded at app runtime).
+    // Honor the ignore list when walking lib/ so dev-tooling classes
+    // don't register as app library classes (and don't end up in the
+    // `app/models.rb` aggregator's eager-load set).
+    let lib_ignores: Vec<String> = vfs
+        .read(&dir.join("config/application.rb"))
+        .ok()
+        .map(|s| extract_autoload_lib_ignores(&s))
+        .unwrap_or_default();
     for sub in [
         "extras",
         "lib",
@@ -167,6 +179,15 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         }
         let Ok(entries) = read_rb_files(vfs, &support_dir) else { continue };
         for entry in entries {
+            if sub == "lib"
+                && entry.strip_prefix(&support_dir).is_ok_and(|rel| {
+                    rel.components().next().is_some_and(|c| {
+                        lib_ignores.iter().any(|ig| c.as_os_str() == ig.as_str())
+                    })
+                })
+            {
+                continue;
+            }
             let Ok(source) = vfs.read(&entry) else { continue };
             let path_str = entry.display().to_string();
             match ingest_library_classes(&source, &path_str) {
@@ -1012,6 +1033,44 @@ fn read_rb_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<PathB
     collect(vfs, dir, &mut out)?;
     out.sort();
     Ok(out)
+}
+
+/// Extract the `ignore:` list from a `config.autoload_lib(ignore:
+/// %w[assets tasks])` call in config/application.rb. Same textual
+/// line-scan contract as `extract_config_time_zone` (railtie soup is
+/// deliberately not parsed); commented lines don't match. Absent call
+/// or unrecognized shape → empty list (walk everything, the prior
+/// behavior).
+fn extract_autoload_lib_ignores(source: &[u8]) -> Vec<String> {
+    let source = String::from_utf8_lossy(source);
+    for line in source.lines() {
+        let t = line.trim_start();
+        if t.starts_with('#') {
+            continue;
+        }
+        let Some(rest) = t.strip_prefix("config.autoload_lib") else {
+            continue;
+        };
+        let Some(start) = rest.find("%w") else {
+            return Vec::new();
+        };
+        let rest = &rest[start + 2..];
+        let close = match rest.chars().next() {
+            Some('[') => ']',
+            Some('(') => ')',
+            Some('{') => '}',
+            _ => return Vec::new(),
+        };
+        let inner = &rest[1..];
+        let Some(end) = inner.find(close) else {
+            return Vec::new();
+        };
+        return inner[..end]
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+    }
+    Vec::new()
 }
 
 /// Extract the string value of a `config.time_zone = "..."` assignment

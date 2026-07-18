@@ -844,6 +844,7 @@ impl Analyzer {
             "stylesheet_pack_tag", "javascript_pack_tag", "csrf_meta_tags",
             "csrf_meta_tag", "csp_meta_tag", "auto_discovery_link_tag",
             "preload_link_tag", "action_cable_meta_tag",
+            "content_security_policy_nonce",
             // text / number formatting
             "pluralize", "truncate", "simple_format", "highlight", "excerpt",
             "word_wrap", "sanitize", "sanitize_css", "strip_tags",
@@ -3955,6 +3956,8 @@ fn build_sourced_filter_chain(
                                 except_style: crate::expr::ArrayStyle::default(),
                                 if_cond: None,
                                 unless_cond: None,
+                                if_cond_expr: None,
+                                unless_cond_expr: None,
                             },
                             own_id.clone(),
                         ));

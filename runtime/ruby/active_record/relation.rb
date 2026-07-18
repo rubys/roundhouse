@@ -58,6 +58,20 @@ module ActiveRecord
       self
     end
 
+    # `rel.or(other)` — Rails' Relation#or: this relation's accumulated
+    # WHERE conjunction OR'd with the other's, grouped as one condition.
+    # Rails requires matching structure (joins/limit) on both sides;
+    # the receiver's structural clauses are kept here. An empty side is
+    # an always-true condition (matches Rails: no filter to OR against).
+    def or(other)
+      @records = nil
+      mine = @wheres.length > 0 ? @wheres.join(" AND ") : "1=1"
+      other_wheres = other.where_clauses
+      theirs = other_wheres.length > 0 ? other_wheres.join(" AND ") : "1=1"
+      @wheres = ["((#{mine}) OR (#{theirs}))"]
+      self
+    end
+
     def add_condition(condition, args, negate)
       @records = nil
       return if condition.nil?

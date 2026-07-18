@@ -37,6 +37,17 @@ module ActionController
     end
 
     # Pending writes, for the dispatcher's Set-Cookie serialization.
+    # Iterate the request's effective cookie set — inbound overlaid
+    # with same-request writes (lobsters' remove_unknown_cookies walks
+    # every cookie to delete unrecognized keys).
+    def each(&block)
+      merged = {}
+      @inbound.each { |k, v| merged[k] = v }
+      @out.each { |k, v| merged[k] = v }
+      merged.each(&block)
+      nil
+    end
+
     def to_set
       @out
     end

@@ -309,17 +309,17 @@ fn application_record_requires_active_record_runtime() {
 #[test]
 fn article_emits_parent_runtime_and_view_requires() {
     // Article needs:
-    //   - parent: ApplicationRecord (same dir)
-    //   - Broadcasts (runtime module)
+    //   - parent: ApplicationRecord (same dir) — a LOAD-time edge, so
+    //     it keeps an explicit require.
+    //   - Broadcasts (runtime module) — not aggregator-covered, kept.
     //   - Views (per-app aggregator that loads every view module)
-    //   - sibling `Comment` (referenced from method bodies). Same-dir
-    //     siblings are required explicitly — plain Ruby has no Rails
-    //     autoload, and a model referenced only from another model's
-    //     body (lobsters: story.rb → HiddenStory) is invisible to the
-    //     controller require chain that was once assumed to load it.
-    //     The article ↔ comment require cycle is benign: require_relative
-    //     returns early on a mid-load file, and model-to-model refs
-    //     resolve at request time.
+    //   - sibling `Comment` is referenced from METHOD BODIES only — a
+    //     request-time edge. Those no longer emit requires: the
+    //     `app/models.rb` aggregator (required from main.rb before any
+    //     dispatch) loads every model, and emitting the edge is what
+    //     closed require cycles against genuine load-time needs
+    //     (lobsters: user.rb body → markdowner.rb, whose class body
+    //     reads User::VALID_USERNAME mid-require).
     // The aggregator pattern (vs per-template requires) lets any
     // `Views::X.method` call resolve regardless of which template
     // file the method lives in — same as spinel-blog's hand-written
@@ -329,7 +329,7 @@ fn article_emits_parent_runtime_and_view_requires() {
     assert!(src.contains("require_relative \"application_record\""), "{src}");
     assert!(src.contains("require_relative \"../../runtime/broadcasts\""), "{src}");
     assert!(src.contains("require_relative \"../views\""), "{src}");
-    assert!(src.contains("require_relative \"comment\""), "{src}");
+    assert!(!src.contains("require_relative \"comment\""), "{src}");
 }
 
 #[test]
@@ -718,12 +718,15 @@ fn controllers_articles_drops_pure_filter_targets() {
 
 #[test]
 fn controllers_articles_requires_referenced_models_from_models_dir() {
-    // ArticlesController references the `Article` model in action bodies
-    // (`Article.includes(...)`, `Article.new`, `Article.find(...)`).
-    // Spinel requires it explicitly from `../models/article`.
+    // ArticlesController references the `Article` model only from
+    // action bodies — a request-time edge, satisfied by the
+    // `app/models.rb` aggregator main.rb requires before any dispatch.
+    // No per-file require is emitted (body-only edges into app/models/
+    // are the aggregator's job; see the edge classification in
+    // emit::ruby::library).
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
-    assert!(src.contains("require_relative \"../models/article\""), "{src}");
+    assert!(!src.contains("require_relative \"../models/article\""), "{src}");
 }
 
 #[test]
@@ -1175,14 +1178,15 @@ fn comments_destroy_expands_assoc_find_to_lookup_plus_belongs_to_guard() {
 
 #[test]
 fn comments_controller_requires_comment_model_after_assoc_lowering() {
-    // Once `Comment.new` and `Comment.find` appear in the body, the
-    // emitter's body-derived requires should pull in
-    // `../models/comment` automatically.
+    // `Comment.new` / `Comment.find` in action bodies are request-time
+    // edges — covered by the `app/models.rb` aggregator, not a
+    // per-file require (which the edge classification no longer
+    // emits for app/models targets).
     let files = lowered_real_blog_controllers();
     let src = find(&files, "comments_controller.rb");
     assert!(
-        src.contains("require_relative \"../models/comment\""),
-        "expected ../models/comment require; got:\n{src}",
+        !src.contains("require_relative \"../models/comment\""),
+        "body-only model refs should not emit requires; got:\n{src}",
     );
 }
 

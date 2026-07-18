@@ -1808,7 +1808,14 @@ fn ingest_call_block(
                 message: "block-argument forms other than `&:symbol` and `&local_var` not yet supported".into(),
             });
         }
-        return Ok(None);
+        // Ruby 3.4 anonymous block forwarding (`fetch(key, &)`) —
+        // reference the synthesized `__blk` binding the def-side
+        // anonymous `&` param ingests to (see the controller /
+        // library-class method ingests).
+        return Ok(Some(Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("__blk") },
+        )));
     }
     let Some(b) = node.as_block_node() else {
         // Unknown node shape in block position — surface rather than drop.

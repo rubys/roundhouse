@@ -773,7 +773,7 @@ fn emit_test_setup_cr(
 /// `src/lower/routes_to_library/mod.rs::controller_symbol`.
 fn controller_symbol(class_name: &str) -> String {
     let base = class_name.strip_suffix("Controller").unwrap_or(class_name);
-    crate::naming::snake_case(base)
+    crate::naming::underscore(base).replace('/', "_")
 }
 
 fn emit_app_cr(emitted: &[EmittedFile]) -> EmittedFile {

@@ -48,6 +48,59 @@ pub fn camelize(snake: &str) -> String {
     out
 }
 
+/// Rails `camelize` on a `/`-separated path: each segment camelizes,
+/// joined by `::` (`mod/activities` → `Mod::Activities`). Inverse of
+/// `underscore`; slash-free input degrades to plain `camelize`.
+pub fn camelize_path(path: &str) -> String {
+    path.split('/')
+        .map(camelize)
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
+/// Singularize only the last `/` segment, leaving namespace segments
+/// intact (`mod/activities` → `mod/activity`). Slash-free input
+/// degrades to plain `singularize`.
+pub fn singularize_last(path: &str) -> String {
+    match path.rsplit_once('/') {
+        Some((ns, last)) => format!("{ns}/{}", singularize(last)),
+        None => singularize(path),
+    }
+}
+
+/// Ruby reserved words that cannot serve as local/parameter names.
+/// Instance-variable names aren't keywords (`@for` is legal Ruby —
+/// lobsters uses it), so the view lowering's ivar→local rewrite must
+/// step around these.
+const RESERVED_LOCALS: &[&str] = &[
+    "alias", "and", "begin", "break", "case", "class", "def", "defined?",
+    "do", "else", "elsif", "end", "ensure", "false", "for", "if", "in",
+    "module", "next", "nil", "not", "or", "redo", "rescue", "retry",
+    "return", "self", "super", "then", "true", "undef", "unless",
+    "until", "when", "while", "yield",
+];
+
+/// A name safe to use as a local/param identifier: reserved words get
+/// a trailing `_` (`for` → `for_`), everything else passes through.
+/// Must be applied at EVERY point an ivar name becomes a view-local
+/// identifier (param lists, body rewrites, partial call-site args) so
+/// the renamed forms agree; ivar emission sites (`@for`) stay raw.
+pub fn safe_local(name: &str) -> String {
+    if RESERVED_LOCALS.contains(&name) {
+        format!("{name}_")
+    } else {
+        name.to_string()
+    }
+}
+
+/// Base (final) segment of a `/`-separated view-dir path or a
+/// `::`-namespaced module name — the piece bare record/arg identifiers
+/// derive from (`mod/activities` → `activities`, `Mod::Activities` →
+/// `Activities`).
+pub fn last_segment(name: &str) -> &str {
+    name.rsplit(['/', ':']).next().unwrap_or(name)
+}
+
 pub fn pluralize_snake(class_name: &str) -> String {
     let snake = snake_case(class_name);
     if snake.ends_with('s') {

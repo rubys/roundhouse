@@ -1,5 +1,7 @@
 module Rails
   def self.env: () -> Env
+  def self.env_name: () -> String?
+  def self.env_name=: (String? name) -> String?
   def self.root: () -> AppPath
   def self.public_path: () -> AppPath
   def self.cache: () -> Cache

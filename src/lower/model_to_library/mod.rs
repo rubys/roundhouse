@@ -246,7 +246,12 @@ fn lower_models_inner(
             name: model.name.clone(),
             is_module: false,
             parent: model.parent.clone(),
-            includes: Vec::new(),
+            // Concern mixins (`include UsernameAttribute`) thread through
+            // to the emitted class: the emitters render the `include` line
+            // and a load-time require, so module constants reached through
+            // the includer (`User::VALID_USERNAME` from markdowner.rb) and
+            // concern instance methods resolve under plain Ruby.
+            includes: crate::analyze::model_includes(model),
             methods,
             origin: None,
             constants: collect_model_constants(model),
@@ -403,7 +408,8 @@ pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryCl
         name: model.name.clone(),
         is_module: false,
         parent: model.parent.clone(),
-        includes: Vec::new(),
+        // Same concern-mixin threading as the bulk entry point above.
+        includes: crate::analyze::model_includes(model),
         methods,
         origin: None,
         constants: collect_model_constants(model),

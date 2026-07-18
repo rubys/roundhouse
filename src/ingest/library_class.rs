@@ -578,12 +578,15 @@ pub(super) fn ingest_library_method(
     // `&block` rides in `MethodDef.block_param`, not the flat list —
     // it occupies the call-site `block:` slot, never `args:`. Mirrors
     // the runtime_src split (see runtime_src::method_params).
-    let block_param = def
-        .parameters()
-        .and_then(|pn| pn.block())
-        .and_then(|block| block.name())
-        .and_then(|loc| std::str::from_utf8(loc.as_slice()).ok())
-        .map(|s| Param::positional(Symbol::from(s)));
+    let block_param = def.parameters().and_then(|pn| pn.block()).map(|block| {
+        let name = block
+            .name()
+            .and_then(|loc| std::str::from_utf8(loc.as_slice()).ok())
+            // Ruby 3.4 anonymous block param (`def f(&)`) — synthesize a
+            // name so body-side bare-`&` forwarding (`__blk`) binds.
+            .unwrap_or("__blk");
+        Param::positional(Symbol::from(name))
+    });
 
     let body = match def.body() {
         Some(b) => ingest_expr(&b, file)?,
@@ -683,7 +686,7 @@ pub enum ClassKind {
 /// method defs are captured separately by [`ingest_library_classes`]).
 pub fn ingest_concern_filters(
     source: &[u8],
-    _file: &str,
+    file: &str,
 ) -> Vec<(ClassId, Vec<crate::dialect::Filter>)> {
     let result = parse(source);
     let root = result.node();
@@ -704,7 +707,7 @@ pub fn ingest_concern_filters(
             let Some(block) = call.block().and_then(|b| b.as_block_node()) else { continue };
             let Some(block_body) = block.body() else { continue };
             for inner in flatten_statements(block_body) {
-                if let Some(fs) = super::controller::parse_filter_call(&inner) {
+                if let Some(fs) = super::controller::parse_filter_call(&inner, file) {
                     filters.extend(fs);
                 }
             }

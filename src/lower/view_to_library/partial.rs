@@ -3,7 +3,7 @@
 
 use crate::expr::{Arm, BlockStyle, Expr, ExprNode, Literal, Pattern};
 use crate::ident::Symbol;
-use crate::naming::{camelize, singularize, snake_case};
+use crate::naming::{camelize_path, last_segment, singularize, snake_case};
 use crate::span::Span;
 
 use crate::lower::view::RenderPartial;
@@ -42,7 +42,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             if module_dir.is_empty() {
                 return None;
             }
-            let module_camel = camelize(&snake_case(&module_dir));
+            let module_camel = camelize_path(&snake_case(&module_dir));
             let method_sym = base_name.trim_start_matches('_').to_string();
 
             // An explicit `locals:` hash binds by NAME: the entry matching
@@ -63,7 +63,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                     })
                 })
             };
-            let record_name = singularize(&snake_case(&module_camel));
+            let record_name = singularize(&snake_case(last_segment(&module_camel)));
             let arg_expr = if locals.is_some() {
                 lookup_local(&record_name).unwrap_or_else(nil_lit)
             } else {
@@ -132,7 +132,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             if module_dir.is_empty() {
                 return None;
             }
-            let module_camel = camelize(&snake_case(&module_dir));
+            let module_camel = camelize_path(&snake_case(&module_dir));
             let method_sym = base_name.trim_start_matches('_').to_string();
             let var_name = Symbol::from(
                 as_name
@@ -269,14 +269,16 @@ fn partial_extra_args(ctx: &ViewCtx, module: &str, method: &str) -> Vec<Expr> {
     // The partial's record arg (singular of its dir) is passed separately
     // and covers any same-named ivar, so exclude it from the threaded set —
     // matching the dedup on the partial's def side (build_library_class).
-    let record_name = singularize(&snake_case(module));
+    let record_name = singularize(&snake_case(last_segment(module)));
     ctx.partial_ivars
         .get(&(module.to_string(), method.to_string()))
         .map(|ivars| {
             ivars
                 .iter()
                 .filter(|n| n.as_str() != record_name)
-                .map(|n| var_ref(n.clone()))
+                // Caller bodies are post-ivar-rewrite: a reserved-word
+                // ivar (`@for`) lives there as its `safe_local` form.
+                .map(|n| var_ref(Symbol::from(crate::naming::safe_local(n.as_str()))))
                 .collect()
         })
         .unwrap_or_default()
@@ -290,7 +292,7 @@ fn partial_extra_args(ctx: &ViewCtx, module: &str, method: &str) -> Vec<Expr> {
 /// letter (`a` / `c`).
 fn emit_partial_each(recv: &Expr, plural_name: &str, ctx: &ViewCtx) -> Expr {
     let singular = singularize(plural_name);
-    let plural_camel = camelize(&snake_case(plural_name));
+    let plural_camel = camelize_path(&snake_case(plural_name));
     let var_name = Symbol::from(singular.chars().next().unwrap_or('x').to_string());
 
     let mut call_args = vec![var_ref(var_name.clone())];

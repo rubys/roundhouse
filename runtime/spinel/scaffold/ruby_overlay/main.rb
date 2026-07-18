@@ -60,6 +60,10 @@ require_relative "runtime/json"
 require_relative "runtime/json_builder"
 require_relative "runtime/importmap"
 require_relative "runtime/rails"
+# Park RAILS_ENV where the typed runtime can read it (`Rails.env`
+# defaults to development when unset — pass RAILS_ENV=production for
+# serving/bench postures; lobsters gates dev-only filters on it).
+Rails.env_name = ENV["RAILS_ENV"]
 # Real in-mem cache store behind Rails.cache (CRuby-only; the shared
 # runtime's Cache is a recompute-every-fetch no-op).
 require_relative "runtime/rails_cache"
@@ -103,7 +107,10 @@ require_relative "runtime/action_mailer"
 # html_encoder.rb runs `HTMLEntities.new` in its class body) or at
 # request time (bcrypt behind the synthesized User#authenticate, rotp
 # behind 2FA, markly+nokogiri behind Markdowner.to_html) resolve.
-["bcrypt", "htmlentities", "rotp", "markly", "nokogiri"].each do |gem_name|
+# svg-graph loads via its file path (the gem has no svg-graph.rb entry
+# file; lobsters' Gemfile declares `require: "SVG/Graph/TimeSeries"`).
+["bcrypt", "htmlentities", "rotp", "markly", "nokogiri", "parslet",
+ "SVG/Graph/TimeSeries"].each do |gem_name|
   begin
     require gem_name
   rescue LoadError
@@ -144,6 +151,11 @@ else
   "UTC"
 end
 ENV["TZ"] = ActiveSupport::RAILS_TZ_TO_IANA.fetch(tz_name, tz_name)
+# The app/models.rb aggregator (generated — see apply_models_aggregator)
+# loads every model/support class. Model files only require their own
+# LOAD-time deps (superclass, class-body consts); method-body references
+# between them count on this line having run before any dispatch.
+require_relative "app/models"
 require_relative "app/views"
 
 module Main

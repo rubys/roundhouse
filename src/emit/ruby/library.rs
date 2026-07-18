@@ -212,6 +212,60 @@ fn rewrite_library_partial_render(
 /// tree provides, so the shared `lower/` must stay target-agnostic. Run
 /// once per LC group (models / controllers / library_classes) before
 /// rendering. A strict no-op for scope-free apps (the blog).
+/// Generate `app/models/relation_scopes.rb` — an
+/// `ActiveRecord::Relation` reopen delegating each declared model
+/// scope to its class method with `self` threaded as `__rel`, so a
+/// scope chained on a relation VALUE (lobsters' StoriesPaginator:
+/// `@scope.limit(n).for_presentation` where `@scope` is an untyped
+/// ctor param) resolves without static receiver-type knowledge.
+/// `klass` dispatch keeps one def per scope NAME correct for every
+/// model sharing it; `self` lands positionally where
+/// `push_scope_methods` inserts `__rel` (after positionals, before
+/// keywords). Statically resolvable — explicit defs, no
+/// method_missing. Emitted under app/models/ so the aggregator loads
+/// it. None when the app declares no scopes.
+pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
+    // Names Relation itself defines never delegate — a scope named
+    // like a builtin would already dispatch to the builtin under
+    // Rails' merge semantics, and the reopen must not clobber the
+    // query-builder surface.
+    const RELATION_BUILTINS: &[&str] = &[
+        "where", "not", "or", "order", "limit", "offset", "group", "having", "joins",
+        "left_outer_joins", "left_joins", "select", "distinct", "includes", "preload",
+        "find", "find_by", "first", "last", "all", "each", "map", "to_a", "count",
+        "exists?", "empty?", "any?", "none?", "sum", "maximum", "minimum", "pluck",
+        "pick", "destroy_all", "delete_all", "update_all", "klass", "where_clauses",
+    ];
+    let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
+    let mut names: Vec<String> = crate::lower::scope_chain::all_scope_names(&scopes)
+        .into_iter()
+        .map(|s| s.as_str().to_string())
+        .filter(|n| !RELATION_BUILTINS.contains(&n.as_str()))
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    names.sort();
+    let mut s = String::from(
+        "# Generated Relation scope delegation (see\n\
+         # emit_relation_scope_delegates): each model scope, callable on a\n\
+         # relation value mid-chain, forwarding to the model's synthesized\n\
+         # scope class method with this relation as its `__rel`.\n\
+         module ActiveRecord\n\
+         \x20\x20class Relation\n",
+    );
+    for name in &names {
+        writeln!(s, "\x20\x20\x20\x20def {name}(*args, **kwargs)").unwrap();
+        writeln!(s, "\x20\x20\x20\x20\x20\x20klass.{name}(*args, self, **kwargs)").unwrap();
+        writeln!(s, "\x20\x20\x20\x20end").unwrap();
+    }
+    s.push_str("  end\nend\n");
+    Some(EmittedFile {
+        path: PathBuf::from("app/models/relation_scopes.rb"),
+        content: s,
+    })
+}
+
 pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
     if !crate::lower::scope_chain::any_scopes(&scopes) {
@@ -625,6 +679,8 @@ fn is_framework_view_helper(name: &str) -> bool {
             | "javascript_include_tag"
             | "number_with_precision"
             | "number_with_delimiter"
+            | "content_security_policy_nonce"
+            | "class_names"
             | "label_tag"
             | "url_for"
             | "submit_tag"
@@ -776,24 +832,48 @@ fn rewrite_helper_calls(
         }
     }
 
-    // Bare `request` in a helper/view module body → the per-dispatch
-    // `ActionController::Current.request` (module functions have no
-    // controller to delegate to).
+    // Bare controller-context reads in a helper/view module body →
+    // the per-dispatch parked objects (module functions have no
+    // controller to delegate to): `request` →
+    // `ActionController::Current.request`; `cookies`/`session`/`flash`
+    // → `ActionController::Current.controller.<x>` (lobsters'
+    // ApplicationHelper.filtered_tags reads the tag-filter cookie).
     if rewrite_request {
         if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
-            if method.as_str() == "request" && args.is_empty() {
+            let m = method.as_str();
+            if (m == "request" || m == "cookies" || m == "session" || m == "flash")
+                && args.is_empty()
+            {
                 let span = expr.span;
+                let current = Expr::new(
+                    span,
+                    ExprNode::Const {
+                        path: vec![
+                            Symbol::from("ActionController"),
+                            Symbol::from("Current"),
+                        ],
+                    },
+                );
+                let (recv, meth) = if m == "request" {
+                    (current, Symbol::from("request"))
+                } else {
+                    (
+                        Expr::new(
+                            span,
+                            ExprNode::Send {
+                                recv: Some(current),
+                                method: Symbol::from("controller"),
+                                args: vec![],
+                                block: None,
+                                parenthesized: false,
+                            },
+                        ),
+                        Symbol::from(m),
+                    )
+                };
                 *expr.node = ExprNode::Send {
-                    recv: Some(Expr::new(
-                        span,
-                        ExprNode::Const {
-                            path: vec![
-                                Symbol::from("ActionController"),
-                                Symbol::from("Current"),
-                            ],
-                        },
-                    )),
-                    method: Symbol::from("request"),
+                    recv: Some(recv),
+                    method: meth,
                     args: vec![],
                     block: None,
                     parenthesized: false,
@@ -1955,42 +2035,57 @@ pub(super) fn emit_library_class_decl_with_synthesized(
             }
         }
     }
-    let mut const_paths: BTreeSet<Vec<String>> = BTreeSet::new();
-    for m in &lc.methods {
-        walk_const_paths(&m.body, &mut const_paths);
-    }
+    // Require-edge classification: LOAD-time refs vs body-only refs.
+    //
+    // Class-body constant initializers execute while the file is being
+    // required (lobsters' markdowner.rb interpolates
+    // `User::VALID_USERNAME` into a class-body regexp constant), so
+    // their targets need explicit requires — same footing as the
+    // parent and `include`s above.
+    //
+    // Method-body refs resolve at request time, after boot completes.
+    // Their `app/models/*` targets load through the `app/models.rb`
+    // aggregator (required from main.rb / test_helper.rb before any
+    // dispatch — see `apply_models_aggregator`), NOT through per-file
+    // requires. Emitting requires for them is what broke the lobsters
+    // boot: user.rb's body-only edge to markdowner.rb closed a cycle
+    // against markdowner's genuine load-time need on user.rb, and
+    // `require_relative`'s mid-load short-circuit left `User` undefined
+    // where the class body read it. Non-aggregated anchors (runtime/*,
+    // app/views, app/controllers/*, test/fixtures/*) keep their
+    // requires — nothing else loads those.
+    let mut load_const_paths: BTreeSet<Vec<String>> = BTreeSet::new();
     for (_, value) in &lc.constants {
-        walk_const_paths(value, &mut const_paths);
+        walk_const_paths(value, &mut load_const_paths);
+    }
+    let mut body_const_paths: BTreeSet<Vec<String>> = BTreeSet::new();
+    for m in &lc.methods {
+        walk_const_paths(&m.body, &mut body_const_paths);
     }
     let mut body_requires: BTreeSet<String> = BTreeSet::new();
-    for path in &const_paths {
+    for path in load_const_paths.iter().chain(&body_const_paths) {
+        let load_time = load_const_paths.contains(path);
         let first = match path.first() {
             Some(s) => s,
             None => continue,
         };
-        // Synthesized siblings: emit require regardless of same-dir,
-        // because nothing else loads them. Match by exact first-segment
-        // name; deeper paths (`X::Y`) don't match here since synthesized
-        // classes are flat.
-        if let Some((_, anchor)) = synthesized_siblings.iter().find(|(n, _)| n == first) {
-            if anchor != &self_anchor {
-                body_requires.insert(relpath(&out_dir, anchor));
-                continue;
-            }
+        // Synthesized siblings (`<Model>Row`, `<Resource>Params`,
+        // `<Plural>Fixtures`) match by exact first-segment name; deeper
+        // paths (`X::Y`) don't match here since synthesized classes are
+        // flat. Their anchors flow through the same aggregator gate
+        // below (model-dir synthesized classes are in `app/models.rb`;
+        // fixture siblings keep explicit requires).
+        let anchor = synthesized_siblings
+            .iter()
+            .find(|(n, _)| n == first)
+            .map(|(_, a)| a.clone())
+            .or_else(|| require_path_for_body_const(path, app, name));
+        let Some(anchor) = anchor else { continue };
+        if !load_time && anchor.starts_with("app/models/") {
+            continue;
         }
-        // Same-dir siblings are required too (not just cross-dir):
-        // a model referenced ONLY from another model's scope body
-        // (story.rb's `not_hidden_by` → HiddenStory) is invisible to
-        // the controller require chain that was assumed to load it —
-        // nothing else loads the file by request time. The require
-        // cycles this creates between models (story ↔ user) are
-        // benign: `require_relative` returns early on a file already
-        // mid-load, and model-to-model references live inside method
-        // bodies, resolved at request time when both classes exist.
-        if let Some(anchor) = require_path_for_body_const(path, app, name) {
-            if anchor != self_anchor {
-                body_requires.insert(relpath(&out_dir, &anchor));
-            }
+        if anchor != self_anchor {
+            body_requires.insert(relpath(&out_dir, &anchor));
         }
     }
     requires.extend(body_requires);
@@ -2011,15 +2106,30 @@ pub(super) fn emit_library_class_decl_with_synthesized(
     let depth = segments.len();
     let body_pad = "  ".repeat(depth);
 
+    // An outer segment that names a known app CLASS must reopen as
+    // `class`, not `module` — lobsters nests `CandidateId` inside the
+    // `ShortId` model, and `module ShortId` after the model file loaded
+    // is a TypeError under Ruby. (Aggregator order guarantees the owner
+    // file loads first: `x.rb` sorts before `x/y.rb` because '.' < '/'.)
+    let outer_kw = |seg: &str| {
+        let is_class = app.models.iter().any(|m| m.name.0.as_str() == seg)
+            || app
+                .library_classes
+                .iter()
+                .any(|c| c.name.0.as_str() == seg && !c.is_module);
+        if is_class { "class" } else { "module" }
+    };
+
     if lc.is_module {
         // Modules don't take a parent; ingest already enforces this.
         for (i, seg) in segments.iter().enumerate() {
-            writeln!(s, "{}module {seg}", "  ".repeat(i)).unwrap();
+            let kw = if i < depth - 1 { outer_kw(seg) } else { "module" };
+            writeln!(s, "{}{kw} {seg}", "  ".repeat(i)).unwrap();
         }
     } else {
         // Outer segments (if any) are namespace modules; the last is the class.
         for (i, seg) in segments.iter().take(depth - 1).enumerate() {
-            writeln!(s, "{}module {seg}", "  ".repeat(i)).unwrap();
+            writeln!(s, "{}{} {seg}", "  ".repeat(i), outer_kw(seg)).unwrap();
         }
         let last = segments[depth - 1];
         let pad = "  ".repeat(depth - 1);

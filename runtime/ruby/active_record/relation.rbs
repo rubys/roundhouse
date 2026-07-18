@@ -8,6 +8,7 @@ module ActiveRecord
 
     def where: (?untyped condition, *untyped args) -> Relation
     def not: (?untyped condition, *untyped args) -> Relation
+    def or: (Relation other) -> Relation
     def add_condition: (untyped condition, Array[untyped] args, bool negate) -> void
     def order: (*untyped parts) -> Relation
     def where!: (?untyped condition, *untyped args) -> Relation

@@ -1106,6 +1106,57 @@ fn apply_views_aggregator(files: &mut [(String, String)]) {
     }
 }
 
+/// Generate `app/models.rb` — the aggregator that loads every emitted
+/// `app/models/*.rb` (AR models, ingested support classes, synthesized
+/// `*Row`/`*Params` siblings). Counterpart of `apply_views_aggregator`,
+/// with one semantic difference: views never need each other at load
+/// time, while model files DO carry load-time edges (superclass,
+/// `include`s, class-body constant refs) — those stay as per-file
+/// `require_relative` headers, so the order here is still free. What
+/// model files no longer carry is requires for method-body-only refs
+/// (see the edge classification in `emit::ruby::library`); this file is
+/// what guarantees those targets are loaded before any dispatch. The
+/// scaffold main.rb and test_helper.rb require it up front.
+///
+/// Always emitted (even empty) because main.rb's require is
+/// unconditional.
+fn apply_models_aggregator(files: &mut Vec<(String, String)>) {
+    use std::fmt::Write;
+
+    let mut models: Vec<String> = files
+        .iter()
+        .map(|(p, _)| p.as_str())
+        .filter(|p| p.starts_with("app/models/") && p.ends_with(".rb"))
+        .map(str::to_string)
+        .collect();
+    models.sort();
+
+    let mut body = String::from(
+        "# Loads every model/support class under app/models/. Generated\n\
+         # from the emitted tree (see apply_models_aggregator). Each file\n\
+         # requires its own LOAD-time deps (superclass, includes, class-body\n\
+         # constants), so the order here is only for legibility; method-body\n\
+         # references between these files rely on this aggregator having\n\
+         # run by dispatch time.\n",
+    );
+    for path in &models {
+        // `app/models/x.rb` -> require_relative "models/x" (relative to
+        // `app/models.rb`, whose directory is `app/`).
+        let anchor = path
+            .strip_prefix("app/")
+            .unwrap_or(path)
+            .strip_suffix(".rb")
+            .unwrap_or(path);
+        writeln!(body, "require_relative {anchor:?}").unwrap();
+    }
+
+    if let Some((_, content)) = files.iter_mut().find(|(p, _)| p == "app/models.rb") {
+        *content = body;
+    } else {
+        files.push(("app/models.rb".to_string(), body));
+    }
+}
+
 /// Replace the scaffold `main.rb`'s blog-hardcoded
 /// `instantiate_controller` (`:articles`/`:comments` only) with a
 /// dispatch generated from the app's own route table — one
@@ -1478,6 +1529,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // ruby_overlay main.rb that supersedes this one.
     apply_controller_dispatch(&mut files, app, false);
     apply_views_aggregator(&mut files);
+    apply_models_aggregator(&mut files);
     // All three scaffold targets (spinel + the ruby/jruby trees derived
     // from this set) ship the comprehensive scaffold README as SPECIMEN.md,
     // freeing README.md for the generated quick-start `ensure_readme`

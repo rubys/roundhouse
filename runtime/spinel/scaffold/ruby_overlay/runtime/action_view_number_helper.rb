@@ -28,4 +28,21 @@ module ActionView
       format("%.#{precision}f", value.to_f)
     end
   end
+
+  # Rails-namespace mixin form: app lib classes `include
+  # ActionView::Helpers::NumberHelper` (lobsters' TimeSeries chart
+  # subclass). Instance-method wrappers over the module functions
+  # above, so the include resolves and the mixed-in surface matches
+  # Rails' instance-method contract.
+  module Helpers
+    module NumberHelper
+      def number_with_delimiter(value, delimiter: ",")
+        ActionView::ViewHelpers.number_with_delimiter(value, delimiter: delimiter)
+      end
+
+      def number_with_precision(value, precision: 3)
+        ActionView::ViewHelpers.number_with_precision(value, precision: precision)
+      end
+    end
+  end
 end

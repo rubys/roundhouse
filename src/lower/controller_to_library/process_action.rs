@@ -144,10 +144,37 @@ fn filter_dispatch_stmt(f: &Filter) -> Expr {
         block: None,
         parenthesized: false,
     });
-    if f.only.is_empty() && f.except.is_empty() {
-        return target_call;
+    // Guard conjunction: only/except action check, then lambda-form
+    // `if:` / `unless:` bodies (lobsters gates dev-only filters with
+    // `if: -> { Rails.env.development? }` — without the guard the
+    // filter runs unconditionally). Symbol-form guards stay carried-
+    // but-unenforced (see `Filter::if_cond`).
+    let mut conds: Vec<Expr> = Vec::new();
+    if !(f.only.is_empty() && f.except.is_empty()) {
+        conds.push(include_check(&f.only, &f.except));
     }
-    let cond = include_check(&f.only, &f.except);
+    if let Some(c) = &f.if_cond_expr {
+        conds.push(c.clone());
+    }
+    if let Some(c) = &f.unless_cond_expr {
+        conds.push(syn(ExprNode::Send {
+            recv: Some(c.clone()),
+            method: Symbol::from("!"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        }));
+    }
+    let Some(cond) = conds.into_iter().reduce(|l, r| {
+        syn(ExprNode::BoolOp {
+            op: crate::expr::BoolOpKind::And,
+            surface: crate::expr::BoolOpSurface::Symbol,
+            left: l,
+            right: r,
+        })
+    }) else {
+        return target_call;
+    };
     syn(ExprNode::If {
         cond,
         then_branch: target_call,

@@ -806,6 +806,16 @@ pub struct Filter {
     /// Symbol-form `unless:` guard. Same carriage rules as `if_cond`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unless_cond: Option<Symbol>,
+    /// Lambda/proc-form `if:` guard (`before_action :x, if: -> {
+    /// Rails.env.development? }`) — the lambda's BODY expression, so the
+    /// synthesized dispatch chain can guard the filter call at request
+    /// time (lobsters gates dev-only filters this way; dropping the
+    /// guard ran them unconditionally).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub if_cond_expr: Option<Expr>,
+    /// Lambda/proc-form `unless:` guard body, negated at the call site.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unless_cond_expr: Option<Expr>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

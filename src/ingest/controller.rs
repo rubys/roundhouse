@@ -129,7 +129,7 @@ pub fn ingest_controller(source: &[u8], file: &str) -> IngestResult<Option<Contr
             // (`before_action { ... }`, no symbol target) return `None` here,
             // fall through to `Unknown`, and round-trip verbatim — analyze
             // harvests their ivars separately.
-            if let Some(filters) = parse_filter_call(&stmt) {
+            if let Some(filters) = parse_filter_call(&stmt, file) {
                 for (i, filter) in filters.into_iter().enumerate() {
                     body_items.push(ControllerBodyItem::Filter {
                         filter,
@@ -270,9 +270,13 @@ fn ingest_controller_body_item(
             // the body can pass it on (`&block`) or that crash without the
             // arity slot.
             if let Some(bn) = pn.block() {
-                if let Some(n) = bn.name() {
-                    block_param = Some(Symbol::from(constant_id_str(&n)));
-                }
+                block_param = Some(match bn.name() {
+                    Some(n) => Symbol::from(constant_id_str(&n)),
+                    // Ruby 3.4 anonymous block param (`def f(&)`) —
+                    // synthesize a name so body-side bare-`&`
+                    // forwarding (ingested as `__blk`) has a binding.
+                    None => Symbol::from("__blk"),
+                });
             }
         }
         return Ok(ControllerBodyItem::Action {
@@ -332,7 +336,10 @@ fn ingest_controller_body_item(
 /// target — notably the block form `before_action { ... }`, which has no
 /// named method to reference. Those fall through to `Unknown`, round-trip
 /// verbatim, and have their ivars harvested directly during analyze.
-pub(super) fn parse_filter_call(stmt: &Node<'_>) -> Option<Vec<crate::dialect::Filter>> {
+pub(super) fn parse_filter_call(
+    stmt: &Node<'_>,
+    file: &str,
+) -> Option<Vec<crate::dialect::Filter>> {
     use crate::dialect::{Filter, FilterKind};
 
     let call = stmt.as_call_node()?;
@@ -356,6 +363,8 @@ pub(super) fn parse_filter_call(stmt: &Node<'_>) -> Option<Vec<crate::dialect::F
     let mut except_style = crate::expr::ArrayStyle::default();
     let mut if_cond: Option<Symbol> = None;
     let mut unless_cond: Option<Symbol> = None;
+    let mut if_cond_expr: Option<Expr> = None;
+    let mut unless_cond_expr: Option<Expr> = None;
 
     for arg in args.arguments().iter() {
         if let Some(sym) = symbol_value(&arg) {
@@ -376,10 +385,16 @@ pub(super) fn parse_filter_call(stmt: &Node<'_>) -> Option<Vec<crate::dialect::F
                     except = symbol_list_value(&value);
                     except_style = symbol_list_style(&value);
                 }
-                // Symbol-form guards only (`if: :account_required?`);
-                // lambda/proc guards have no static name to carry.
-                "if" => if_cond = symbol_value(&value).map(|s| Symbol::from(s.as_str())),
-                "unless" => unless_cond = symbol_value(&value).map(|s| Symbol::from(s.as_str())),
+                // Symbol-form guards carry the predicate name;
+                // lambda/proc guards carry their body expression.
+                "if" => {
+                    if_cond = symbol_value(&value).map(|s| Symbol::from(s.as_str()));
+                    if_cond_expr = lambda_body_expr(&value, file);
+                }
+                "unless" => {
+                    unless_cond = symbol_value(&value).map(|s| Symbol::from(s.as_str()));
+                    unless_cond_expr = lambda_body_expr(&value, file);
+                }
                 _ => {}
             }
         }
@@ -401,9 +416,30 @@ pub(super) fn parse_filter_call(stmt: &Node<'_>) -> Option<Vec<crate::dialect::F
                 except_style,
                 if_cond: if_cond.clone(),
                 unless_cond: unless_cond.clone(),
+                if_cond_expr: if_cond_expr.clone(),
+                unless_cond_expr: unless_cond_expr.clone(),
             })
             .collect(),
     )
+}
+
+/// Body expression of a lambda/proc-form filter guard (`-> { … }` /
+/// `proc { … }`). None for symbol-form guards or unparseable bodies —
+/// callers fall back to carrying only the symbol name (or nothing).
+fn lambda_body_expr(node: &Node<'_>, file: &str) -> Option<Expr> {
+    let body = if let Some(lambda) = node.as_lambda_node() {
+        lambda.body()?
+    } else if let Some(call) = node.as_call_node() {
+        // `proc { … }` / `lambda { … }` call forms.
+        let name = constant_id_str(&call.name()).to_string();
+        if name != "proc" && name != "lambda" {
+            return None;
+        }
+        call.block()?.as_block_node()?.body()?
+    } else {
+        return None;
+    };
+    ingest_expr(&body, file).ok()
 }
 
 /// Resolve the template an action explicitly renders, so the analyzer can
