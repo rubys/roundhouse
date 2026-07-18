@@ -436,12 +436,14 @@ fn lower_controllers_for_spinel(app: &App, format_breadth: bool) -> Vec<LibraryC
     crate::lower::lower_controllers_with_arel_views_assocs_and_routes(
         &app.controllers,
         model_extras,
-        Some(&app.schema),
-        &app.views,
-        &app.library_classes,
-        &assocs,
-        Some(&routed),
-        format_breadth,
+        crate::lower::controller_to_library::LowerControllerOptions {
+            schema: Some(&app.schema),
+            views: &app.views,
+            library_classes: &app.library_classes,
+            assocs: &assocs,
+            routed_by_controller: Some(&routed),
+            format_breadth,
+        },
     )
 }
 

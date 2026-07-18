@@ -156,7 +156,9 @@ pub fn lower_controllers_with_arel_views_and_assocs(
     assocs: &[crate::lower::model_associations::AssociationEdge],
 ) -> Vec<LibraryClass> {
     lower_controllers_with_arel_views_assocs_and_routes(
-        controllers, extras, schema, views, &[], assocs, None, false,
+        controllers,
+        extras,
+        LowerControllerOptions { schema, views, assocs, ..Default::default() },
     )
 }
 
@@ -170,18 +172,48 @@ pub fn lower_controllers_with_arel_views_and_assocs(
 /// value instead of being clobbered by a synthesized `render`. `None`
 /// preserves the legacy "every public method is an action" behavior for
 /// callers that haven't wired routes yet.
+/// The optional, feature-gated inputs to
+/// [`lower_controllers_with_arel_views_assocs_and_routes`]. Each field
+/// defaults to "feature off" (empty slice / `None` / `false`), matching
+/// the legacy behavior the telescoping wrappers preserve — so a caller
+/// wiring only some features writes `LowerControllerOptions { schema,
+/// views, ..Default::default() }` instead of trailing `&[], None, false`
+/// positional args.
+#[derive(Default)]
+pub struct LowerControllerOptions<'a> {
+    /// App `Schema` — enables the Arel SQL-chain lowering pass.
+    pub schema: Option<&'a crate::schema::Schema>,
+    /// App views — scanned for `*.json.jbuilder` format dispatch and the
+    /// view↔controller ivar contract.
+    pub views: &'a [crate::dialect::View],
+    /// App library classes — used to resolve controller-side partial
+    /// render contracts.
+    pub library_classes: &'a [crate::dialect::LibraryClass],
+    /// Association graph — lowers `includes(:assoc)` to eager-load
+    /// preloads (issue #27).
+    pub assocs: &'a [crate::lower::model_associations::AssociationEdge],
+    /// Per-controller route-reachable action names. `Some` restricts
+    /// implicit-render/dispatch to routed actions; `None` is legacy
+    /// "every public method is an action."
+    pub routed_by_controller:
+        Option<&'a std::collections::HashMap<ClassId, std::collections::HashSet<Symbol>>>,
+    /// Whether to synthesize the full format-dispatch breadth.
+    pub format_breadth: bool,
+}
+
 pub fn lower_controllers_with_arel_views_assocs_and_routes(
     controllers: &[Controller],
     extras: Vec<(ClassId, crate::analyze::ClassInfo)>,
-    schema: Option<&crate::schema::Schema>,
-    views: &[crate::dialect::View],
-    library_classes: &[crate::dialect::LibraryClass],
-    assocs: &[crate::lower::model_associations::AssociationEdge],
-    routed_by_controller: Option<
-        &std::collections::HashMap<ClassId, std::collections::HashSet<Symbol>>,
-    >,
-    format_breadth: bool,
+    opts: LowerControllerOptions,
 ) -> Vec<LibraryClass> {
+    let LowerControllerOptions {
+        schema,
+        views,
+        library_classes,
+        assocs,
+        routed_by_controller,
+        format_breadth,
+    } = opts;
     // Scan source-shape action bodies for `permit(...)` declarations.
     // Each unique resource yields one `<Resource>Params` synthesized
     // class plus the (resource, fields, class_id) record we need to

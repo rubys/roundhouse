@@ -514,3 +514,22 @@ Every numbered step is a legal stopping point.
     Doing 4.2 requires first extending the catalog (`ReceiverContext::Relation`, new
     `ReturnKind` variants) — feature work beyond a behavior-neutral refactor. Left for Sam
     as a design task. No code change.
+
+- **4.3 + analyze/mod.rs squatter extractions DEFERRED** — `with_adapter` is
+  analyze/mod.rs:89–1585 (per-model loop 101–404 with shared `self_ty`/`instantiate` state,
+  then ~1180 lines of post-loop ActiveModel/form-builder/routes/stdlib registration). The
+  extraction is pure code motion in principle but the single largest, most interleaved
+  mechanical task in the plan; it (and the render/effects/diagnose free-fn extractions)
+  warrant a dedicated focused session with careful incremental verification rather than the
+  tail of this one. Not attempted here.
+
+### Phase 7 (2026-07-18)
+
+- **7.2 params struct** — added `LowerControllerOptions<'a>` (`#[derive(Default)]`, all
+  feature fields default to off) to `controller_to_library`. The 8-positional-param
+  `lower_controllers_with_arel_views_assocs_and_routes` now takes `(controllers, extras,
+  opts)`; body unchanged (destructures opts at the top). The wrapper chain is KEPT — every
+  intermediate arity has external callers (tests, emit/\*, dump_ir), so the plan's collapse
+  condition isn't met. Cryptic trailing `&[], None, false` at the two direct call sites
+  (the `_and_assocs` wrapper + emit/ruby.rs) become named fields. Emit byte-identical,
+  ruby + controller tests pass.
