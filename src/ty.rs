@@ -97,6 +97,16 @@ impl Ty {
         matches!(self, Ty::Var { .. } | Ty::Untyped)
     }
 
+    /// True for the two variants that leave a value's type open to
+    /// refinement: [`Ty::Var`] (not yet inferred) and [`Ty::Bottom`]
+    /// (the expression diverges, so any type is admissible). Fixpoint
+    /// passes use this to decide "safe to overwrite with a more precise
+    /// type." Distinct from [`Ty::is_unknown`], which pairs `Var` with
+    /// the *gradual* `Untyped`, not the *divergent* `Bottom`.
+    pub fn is_open(&self) -> bool {
+        matches!(self, Ty::Var { .. } | Ty::Bottom)
+    }
+
     /// True when this type is `Time` or a union containing it — the
     /// shape of a temporal-column reader's return (`Time | Nil`).
     /// Emitters without a native datetime seam key their stored-text

@@ -2205,7 +2205,7 @@ impl Analyzer {
                     let mut env: HashMap<Symbol, Ty> = HashMap::new();
                     for ivars in chained_bindings.values() {
                         for (k, v) in ivars {
-                            if matches!(v, Ty::Var { .. } | Ty::Bottom) {
+                            if v.is_open() {
                                 continue;
                             }
                             let merged = match env.remove(k) {
@@ -2271,13 +2271,13 @@ impl Analyzer {
                     let mut ivars: HashMap<Symbol, Ty> = HashMap::new();
                     extract_ivar_assignments(&action.body, &mut ivars);
                     for (k, v) in ivars {
-                        if matches!(v, Ty::Var { .. } | Ty::Bottom) {
+                        if v.is_open() {
                             continue;
                         }
                         let entry = chained_bindings.entry(action.name.clone()).or_default();
                         let stale = entry
                             .get(&k)
-                            .is_none_or(|t| matches!(t, Ty::Var { .. } | Ty::Bottom));
+                            .is_none_or(|t| t.is_open());
                         if stale {
                             entry.insert(k, v);
                             refined = true;
@@ -2338,7 +2338,7 @@ impl Analyzer {
                 for action in controller.actions() {
                     chained_effects.insert(action.name.clone(), action.effects.clone());
                 }
-                let noise = |t: &Ty| matches!(t, Ty::Var { .. } | Ty::Bottom);
+                let noise = |t: &Ty| t.is_open();
                 let filter_chain: Vec<crate::app::ResolvedFilter> = chained_filters
                     .iter()
                     .map(|(filter, defined_in, included_via)| {
@@ -2427,7 +2427,7 @@ impl Analyzer {
                     }
                     if let Some(hivars) = chained_bindings.get(method) {
                         for (k, v) in hivars {
-                            if matches!(v, Ty::Var { .. } | Ty::Bottom) {
+                            if v.is_open() {
                                 continue;
                             }
                             ivars.entry(k.clone()).or_insert_with(|| v.clone());
@@ -2484,7 +2484,7 @@ impl Analyzer {
                         }
                         let entry = content_partial_ivars.entry(partial).or_default();
                         for (k, v) in &ivars {
-                            if matches!(v, Ty::Var { .. } | Ty::Bottom) {
+                            if v.is_open() {
                                 continue;
                             }
                             let merged = match entry.remove(k) {
@@ -4658,7 +4658,7 @@ fn collect_return_types(expr: &Expr, out: &mut Vec<Ty>) {
     match &*expr.node {
         ExprNode::Return { value } => {
             if let Some(t) = &value.ty {
-                if !matches!(t, Ty::Bottom | Ty::Var { .. }) {
+                if !t.is_open() {
                     out.push(t.clone());
                 }
             }

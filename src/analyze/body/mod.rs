@@ -795,7 +795,7 @@ impl<'a> BodyTyper<'a> {
                         _ => None,
                     };
                     if let Some((recv, rhs)) = elem_write {
-                        if !matches!(rhs, Ty::Var { .. } | Ty::Bottom) {
+                        if !rhs.is_open() {
                             let slot = match &*recv.node {
                                 ExprNode::Ivar { name } => Some((true, name.clone())),
                                 ExprNode::Var { name, .. } => Some((false, name.clone())),
@@ -891,7 +891,7 @@ impl<'a> BodyTyper<'a> {
                         let mut cond_assigns: HashMap<Symbol, Ty> = HashMap::new();
                         collect_var_assignments_into(cond, &mut cond_assigns);
                         for (name, ty) in cond_assigns {
-                            if matches!(ty, Ty::Var { .. } | Ty::Bottom) {
+                            if ty.is_open() {
                                 continue;
                             }
                             local_ctx.local_bindings.insert(name, ty);
@@ -1180,7 +1180,7 @@ fn collect_array_pushes(expr: &Expr, out: &mut Vec<(bool, Symbol, Ty)>) {
                 let mut pushed: Option<Ty> = None;
                 for a in args {
                     let Some(t) = a.ty.clone() else { continue };
-                    if matches!(t, Ty::Var { .. } | Ty::Bottom) {
+                    if t.is_open() {
                         continue;
                     }
                     pushed = Some(match pushed.take() {

@@ -719,7 +719,7 @@ impl<'a> BodyTyper<'a> {
                 if matches!(r, Ty::Untyped) {
                     return Ty::Untyped;
                 }
-                if !matches!(r, Ty::Var { .. } | Ty::Bottom) {
+                if !r.is_open() {
                     rets.push(r);
                 }
             }
