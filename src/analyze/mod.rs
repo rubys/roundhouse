@@ -2451,7 +2451,7 @@ impl Analyzer {
                         // Without this, N controllers each failing to
                         // type `@user` would either fan a Var into
                         // every union variant or be order-sensitive.
-                        let noise = |t: &Ty| matches!(t, Ty::Var { .. } | Ty::Untyped);
+                        let noise = |t: &Ty| t.is_unknown();
                         let merged = match layout_map.remove(k) {
                             Some(prev) if noise(&prev) => v.clone(),
                             Some(prev) if noise(v) => prev,
@@ -2514,7 +2514,7 @@ impl Analyzer {
                     view_feeders.entry(view_name.clone()).or_default().insert(ctrl_name.clone());
                     let entry = action_ivars_by_view.entry(view_name).or_default();
                     for (k, v) in &ivars {
-                        let noise = |t: &Ty| matches!(t, Ty::Var { .. } | Ty::Untyped);
+                        let noise = |t: &Ty| t.is_unknown();
                         let merged = match entry.remove(k) {
                             Some(prev) if noise(&prev) => v.clone(),
                             Some(prev) if noise(v) => prev,
@@ -2574,7 +2574,7 @@ impl Analyzer {
                             .insert(ctrl_name.clone());
                         let entry = action_ivars_by_view.entry(view_name).or_default();
                         for (k, v) in &ivars {
-                            let noise = |t: &Ty| matches!(t, Ty::Var { .. } | Ty::Untyped);
+                            let noise = |t: &Ty| t.is_unknown();
                             let merged = match entry.remove(k) {
                                 Some(prev) if noise(&prev) => v.clone(),
                                 Some(prev) if noise(v) => prev,
@@ -2932,7 +2932,7 @@ impl Analyzer {
         for (partial, ivars) in content_partial_ivars {
             partial_ivars_by_name.insert(partial, ivars);
         }
-        let noise = |t: &Ty| matches!(t, Ty::Var { .. } | Ty::Untyped);
+        let noise = |t: &Ty| t.is_unknown();
         // Depth cap guards against a render cycle (`_a` renders `_b`
         // renders `_a`); 16 is far beyond any real partial nesting.
         for _ in 0..16 {

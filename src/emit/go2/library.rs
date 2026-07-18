@@ -1287,7 +1287,7 @@ fn backprop_return_ty_to_tail(body: &Expr, target_ty: &Ty) -> Expr {
 fn target_value_is_widening(target_ty: &Ty) -> bool {
     matches!(
         target_ty,
-        Ty::Hash { value, .. } if matches!(value.as_ref(), Ty::Untyped | Ty::Var { .. })
+        Ty::Hash { value, .. } if value.as_ref().is_unknown()
     )
 }
 
@@ -1300,12 +1300,9 @@ fn literal_ty_uninformative(e: &Expr) -> bool {
         Some(Ty::Untyped) => true,
         Some(Ty::Var { .. }) => true,
         Some(Ty::Hash { key, value }) => {
-            matches!(key.as_ref(), Ty::Var { .. } | Ty::Untyped)
-                && matches!(value.as_ref(), Ty::Var { .. } | Ty::Untyped)
+            key.as_ref().is_unknown() && value.as_ref().is_unknown()
         }
-        Some(Ty::Array { elem }) => {
-            matches!(elem.as_ref(), Ty::Var { .. } | Ty::Untyped)
-        }
+        Some(Ty::Array { elem }) => elem.as_ref().is_unknown(),
         _ => false,
     }
 }

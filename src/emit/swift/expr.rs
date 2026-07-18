@@ -509,7 +509,7 @@ fn coerce_for_prop(prop_camel: &str, value: &Expr, val: String) -> String {
     let surface_untrusted = is_map_read_shape(value)
         || match value.ty.as_ref() {
             None => true,
-            Some(t) => matches!(t, Ty::Untyped | Ty::Var { .. }),
+            Some(t) => t.is_unknown(),
         };
     // (Covariant static-call widening — `self.article = Article.find`
     // — is handled at the CALL SITE by coerce_send_result, so the prop

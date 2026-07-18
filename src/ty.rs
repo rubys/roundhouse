@@ -85,6 +85,18 @@ pub enum Ty {
 }
 
 impl Ty {
+    /// True for the two "no known type" variants: [`Ty::Var`] (the
+    /// analyzer couldn't infer a type) and [`Ty::Untyped`] (an
+    /// author-signed gradual-typing opt-out). Both mean "don't reason
+    /// about this value's shape."
+    ///
+    /// Note the deliberate exclusions: [`Ty::Nil`] and [`Ty::Bottom`]
+    /// are *known* types, so sites that also treat those as noise use
+    /// their own `matches!` and must not be folded into this predicate.
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Ty::Var { .. } | Ty::Untyped)
+    }
+
     /// True when this type is `Time` or a union containing it — the
     /// shape of a temporal-column reader's return (`Time | Nil`).
     /// Emitters without a native datetime seam key their stored-text

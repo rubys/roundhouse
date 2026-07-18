@@ -2222,7 +2222,7 @@ pub fn candidate_signature(
     if matches!(known, Ty::Fn { .. }) {
         return crate::rbs::print_method_signature(method.as_str(), known);
     }
-    if matches!(known, Ty::Var { .. } | Ty::Untyped) {
+    if known.is_unknown() {
         return None; // a `-> untyped` candidate prices nothing
     }
     let param_names = method_def_param_names(app, class_id, method)?;

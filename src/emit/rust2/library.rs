@@ -694,7 +694,7 @@ fn walk_collect_ivar_reads(
             let n = name.as_str();
             if !written.contains(n) {
                 if let Some(ty) = e.ty.as_ref() {
-                    if !matches!(ty, Ty::Untyped | Ty::Var { .. }) {
+                    if !ty.is_unknown() {
                         record(n, ty.clone(), order, observed);
                     }
                 }
