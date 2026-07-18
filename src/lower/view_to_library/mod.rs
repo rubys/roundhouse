@@ -524,10 +524,34 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
             sig_params.push(TyParam {
                 name: p.name.clone(),
                 ty: if is_bool_default { Ty::Bool } else { ivar_ty(p.name.as_str(), &known_models) },
-                kind: if p.default.is_some() { ParamKind::Optional } else { ParamKind::Required },
+                // These are Ruby KEYWORD params (`show_story: false`), not
+                // positionals — strict targets (rust2 unpack_trailing_kwargs,
+                // TS destructured-object def) need the Keyword kind to emit
+                // and call them correctly.
+                kind: ParamKind::Keyword { required: p.default.is_none() },
             });
         }
         params = new_params;
+        // Nullable-for-predicates: nil-defaulted keyword locals PLUS any
+        // Untyped record/closure param. Built BEFORE sig_params is moved
+        // into the signature. Rebuilding (not extending the earlier set) is
+        // correct because params were fully replaced — but it must still
+        // cover the Untyped record/closure the caller may leave nil, or a
+        // body predicate emits a bare `!x.empty?` that crashes on nil. A
+        // bare `false`/`true` keyword default is a concrete Bool, not nil.
+        nullable = kw_locals
+            .iter()
+            .filter(|p| {
+                matches!(&p.default, Some(d)
+                    if matches!(&*d.node, ExprNode::Lit { value: Literal::Nil }))
+            })
+            .map(|p| p.name.as_str().to_string())
+            .collect();
+        for tp in &sig_params {
+            if matches!(tp.ty, crate::ty::Ty::Untyped) {
+                nullable.insert(tp.name.as_str().to_string());
+            }
+        }
         signature = Some(Ty::Fn {
             params: sig_params,
             block: None,
@@ -537,16 +561,6 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         locals = std::iter::once(record_name.clone())
             .chain(closure.iter().cloned())
             .chain(kw_locals.iter().map(|p| p.name.as_str().to_string()))
-            .collect();
-        // nil-defaulted keyword locals are nullable-for-predicates; a
-        // `false`/`true` default is a concrete Bool, not nil.
-        nullable = kw_locals
-            .iter()
-            .filter(|p| {
-                matches!(&p.default, Some(d)
-                    if matches!(&*d.node, ExprNode::Lit { value: Literal::Nil }))
-            })
-            .map(|p| p.name.as_str().to_string())
             .collect();
     }
 

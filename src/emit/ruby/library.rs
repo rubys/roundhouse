@@ -657,16 +657,19 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
             // The method's OWN params shadow the helper index too: a bare
             // `tag` in a partial whose strict-locals header declares `tag:`
             // is that local, not `ApplicationHelper.tag`. (Rails mixes
-            // helpers BENEATH a template's locals.)
-            let mut shadow = own_methods.clone();
-            shadow.extend(m.params.iter().map(|p| p.name.clone()));
+            // helpers BENEATH a template's locals.) Passed SEPARATELY from
+            // own_methods so the arity guard (bare-reference only) applies
+            // to params but not to real self-dispatched methods.
+            let own_params: std::collections::HashSet<Symbol> =
+                m.params.iter().map(|p| p.name.clone()).collect();
             rewrite_helper_calls(
                 &mut m.body,
                 &app.helper_method_index,
                 &route_helpers,
                 &url_helper_classes,
                 rewrite_request,
-                &shadow,
+                &own_methods,
+                &own_params,
             );
         }
     }
@@ -812,6 +815,7 @@ fn rewrite_helper_calls(
     url_helper_classes: &std::collections::HashSet<Symbol>,
     rewrite_request: bool,
     own_methods: &std::collections::HashSet<Symbol>,
+    own_params: &std::collections::HashSet<Symbol>,
 ) {
     expr.node.for_each_child_mut(&mut |c| {
         rewrite_helper_calls(
@@ -821,6 +825,7 @@ fn rewrite_helper_calls(
             url_helper_classes,
             rewrite_request,
             own_methods,
+            own_params,
         )
     });
 
@@ -977,8 +982,16 @@ fn rewrite_helper_calls(
 
     // Cases 3/4: a bare call resolving to an app or framework helper module.
     let path: Option<Vec<Symbol>> = match &*expr.node {
-        ExprNode::Send { recv: None, method, args, .. } => {
-            if own_methods.contains(method) {
+        ExprNode::Send { recv: None, method, args, block, .. } => {
+            // A method's own PARAM shadows the helper index only as a BARE
+            // reference (no args, no block) — that's a local read. `tag(x)`
+            // or `tag { }` is a method call that still needs helper
+            // qualification, so a same-named param must NOT capture it
+            // (that dropped the qualification → latent NameError). Real
+            // own-METHODS shadow at any arity (a self-dispatch).
+            let param_shadow =
+                own_params.contains(method) && args.is_empty() && block.is_none();
+            if own_methods.contains(method) || param_shadow {
                 // Self wins: a bare call naming a method the enclosing
                 // class itself defines is a self-dispatch (Tag#to_param's
                 // `tag` column reader), not a helper reference — Rails
@@ -1751,10 +1764,15 @@ pub(crate) fn apply_nilsafe_empty_lowering(lcs: &mut [LibraryClass]) {
 /// pool of string names, so the runtime value must be the string. Upstream
 /// lobsters uses both this hash form and the bare-string form (`@above =
 /// "saved/subnav"`) — normalizing here lets the view stay string-uniform.
-/// The `locals:` sub-hash is DROPPED (ledgered): the dispatch threads each
-/// arm's render-tree closure ivars, not caller-supplied locals, so a
-/// partial that needs `tag:`/`related:` renders those unbound until the
-/// strict-locals partial-header work lands.
+/// The `locals:` sub-hash is dropped HERE; the pool dispatch captures it
+/// separately (see the DynPoolEntry / strict-locals kwargs path).
+///
+/// SCOPE: this is a Ruby-emit-path pass, but the `case @x when "…"` string
+/// dispatch it feeds is emitted by the SHARED view lowerer. That's correct
+/// only while lobsters (the sole dynamic-partial app) is ruby-only — a
+/// strict target rendering `render @above` would see the un-collapsed hash
+/// and never match a string arm. Revisit when another target grows dynamic
+/// partials (move this collapse to the shared controller lowering then).
 pub(crate) fn apply_dynamic_render_options_lowering(lcs: &mut [LibraryClass]) {
     for lc in lcs.iter_mut() {
         for m in &mut lc.methods {
@@ -1772,16 +1790,27 @@ fn rewrite_render_options_assign(expr: &mut Expr) {
     let ExprNode::Hash { entries, .. } = &*value.node else {
         return;
     };
-    let partial_name = entries.iter().find_map(|(k, v)| {
-        let is_partial = matches!(
-            &*k.node,
-            ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "partial"
-        );
-        match (is_partial, &*v.node) {
-            (true, ExprNode::Lit { value: Literal::Str { value: s } }) => Some(s.clone()),
-            _ => None,
+    // Collapse ONLY a render-options hash: symbol keys drawn exactly from
+    // {partial, locals}, with a String-literal `partial:`. Gating on the
+    // full shape (not merely "contains a partial: key") avoids rewriting an
+    // unrelated config hash like `@x = {partial: "y", scope: z}` app-wide —
+    // `render @above` is the only consumer of this collapse.
+    let mut partial_name: Option<String> = None;
+    for (k, v) in entries.iter() {
+        let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
+            return; // non-symbol key → not a render-options hash
+        };
+        match key.as_str() {
+            "partial" => match &*v.node {
+                ExprNode::Lit { value: Literal::Str { value: s } } => {
+                    partial_name = Some(s.clone())
+                }
+                _ => return, // dynamic partial name — leave the hash intact
+            },
+            "locals" => {} // allowed; dropped in the collapse (ledgered)
+            _ => return, // any foreign key → not a render-options hash
         }
-    });
+    }
     if let Some(name) = partial_name {
         let span = value.span;
         *value = Expr::new(span, ExprNode::Lit { value: Literal::Str { value: name } });

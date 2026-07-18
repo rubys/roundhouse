@@ -196,9 +196,27 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             // longer variants add are the trailing optional-group params.
             // The canonical (named) helper carries that required count so
             // its optional params get `nil` defaults.
+            //
+            // The optional-path helper body (build_optional_path_expr)
+            // assumes the optional groups are TRAILING — each shorter
+            // variant is a segment-prefix of the longer. A MID-path group
+            // (`/foo(/:bar)/baz`) breaks that: the shortest ("/foo/baz")
+            // isn't a prefix of the longest ("/foo/:bar/baz"), and the
+            // conditional-append body would fold the always-present "/baz"
+            // into `:bar`'s optional chunk. No lobsters route has one; when
+            // the assumption doesn't hold, fall back to all-required (a
+            // valid, if over-constrained, helper) rather than emit a
+            // mangled path.
+            let trailing_optionals = {
+                let short: Vec<&str> = variants.last().unwrap().split('/').collect();
+                let long: Vec<&str> = variants[0].split('/').collect();
+                short.len() <= long.len()
+                    && short.iter().zip(long.iter()).all(|(a, b)| a == b)
+            };
             let required_count = {
                 let mut p = base_params.clone();
-                extract_path_params(variants.last().unwrap(), &mut p);
+                let shortest = if trailing_optionals { variants.last() } else { variants.first() };
+                extract_path_params(shortest.unwrap(), &mut p);
                 p.len()
             };
             // Only the canonical variant carries the helper name; the

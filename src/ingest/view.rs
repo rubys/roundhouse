@@ -139,7 +139,13 @@ fn parse_strict_locals(source: &str) -> Option<Vec<crate::dialect::Param>> {
     if source[open..kw].contains("%>") {
         return None;
     }
-    let after = &source[kw + "locals:".len()..];
+    // Bound the header to THIS comment's close: `%>` after `locals:` ends
+    // the tag (we already know there's none before it). Without this bound
+    // the `(`/`)` scan runs past the comment into unrelated template code,
+    // where a stray paren would hijack the signature (finding: phantom
+    // header). No `%>` after `locals:` at all → not a real header.
+    let close = kw + source[kw..].find("%>")?;
+    let after = &source[kw + "locals:".len()..close];
     let lp = after.find('(')?;
     let rest = &after[lp + 1..];
     let mut depth = 1usize;
@@ -164,9 +170,10 @@ fn parse_strict_locals(source: &str) -> Option<Vec<crate::dialect::Param>> {
         if entry.is_empty() {
             continue;
         }
-        // `name:` (required) or `name: <default>` (optional). The colon
-        // after the name is mandatory in the strict-locals syntax.
-        let colon = entry.find(':')?;
+        // `name:` (required) or `name: <default>` (optional). A colon-less
+        // entry (`**attrs`, or a splat) isn't a plain local — SKIP it, don't
+        // abort the whole header (a `?` here dropped every declared local).
+        let Some(colon) = entry.find(':') else { continue };
         let name = entry[..colon].trim();
         if name.is_empty() {
             continue;
@@ -227,8 +234,17 @@ fn split_top_level_commas(s: &str) -> Vec<String> {
 /// the literals a header default realistically uses; anything else
 /// degrades to `nil`.
 fn parse_default_literal(s: &str) -> Expr {
-    use crate::expr::{ExprNode, Literal};
+    use crate::expr::{ArrayStyle, ExprNode, Literal};
     use crate::span::Span;
+    // Empty-array default (`read_by_notifications: []`) → a real empty
+    // Array, so a body `.include?`/`.each`/`.length` on it doesn't
+    // NoMethodError against a degraded `nil`.
+    if s == "[]" {
+        return Expr::new(
+            Span::synthetic(),
+            ExprNode::Array { elements: Vec::new(), style: ArrayStyle::default() },
+        );
+    }
     let lit = match s {
         "true" => Literal::Bool { value: true },
         "false" => Literal::Bool { value: false },
@@ -240,6 +256,8 @@ fn parse_default_literal(s: &str) -> Expr {
             Literal::Str { value: s[1..s.len() - 1].to_string() }
         }
         _ if s.parse::<i64>().is_ok() => Literal::Int { value: s.parse().unwrap() },
+        // Float before the nil fallback (`1.5` fails i64 but parses f64).
+        _ if s.parse::<f64>().is_ok() => Literal::Float { value: s.parse().unwrap() },
         _ => Literal::Nil,
     };
     Expr::new(Span::synthetic(), ExprNode::Lit { value: lit })
@@ -322,5 +340,60 @@ mod tests {
         // `compile_fn` arm is the whole drop-in for a new engine.
         assert_eq!(ViewEngine::from_extension("herb"), None);
         assert_eq!(ViewEngine::from_extension("jbuilder"), None);
+    }
+
+    fn locals_names(src: &str) -> Vec<String> {
+        parse_strict_locals(src)
+            .unwrap_or_default()
+            .iter()
+            .map(|p| p.name.as_str().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn strict_locals_parses_required_and_defaulted() {
+        let src = "<%# locals: (comment:, was_merged: false, story: nil) -%>\n<div>";
+        let ps = parse_strict_locals(src).unwrap();
+        assert_eq!(ps.len(), 3);
+        assert_eq!(ps[0].name.as_str(), "comment");
+        assert!(ps[0].default.is_none()); // required
+        assert!(ps[1].default.is_some()); // was_merged: false
+    }
+
+    #[test]
+    fn strict_locals_default_literals_int_float_array_sym() {
+        use crate::expr::{ExprNode, Literal};
+        // `[]` → a real empty Array; `1.5` → Float; neither degrades to nil.
+        let src = "<%# locals: (a: [], b: 1.5, c: :x, d: 3) -%>";
+        let ps = parse_strict_locals(src).unwrap();
+        assert!(matches!(&*ps[0].default.as_ref().unwrap().node, ExprNode::Array { .. }));
+        assert!(matches!(
+            &*ps[1].default.as_ref().unwrap().node,
+            ExprNode::Lit { value: Literal::Float { .. } }
+        ));
+        assert!(matches!(
+            &*ps[2].default.as_ref().unwrap().node,
+            ExprNode::Lit { value: Literal::Sym { .. } }
+        ));
+    }
+
+    #[test]
+    fn strict_locals_colonless_entry_is_skipped_not_fatal() {
+        // A splat/colon-less entry must not abort the whole header.
+        let src = "<%# locals: (comment:, **attrs) -%>";
+        assert_eq!(locals_names(src), vec!["comment"]);
+    }
+
+    #[test]
+    fn strict_locals_paren_scan_bounded_to_comment() {
+        // A bare `locals:` in a NON-header comment must not scavenge a `(`
+        // from later template code and hijack the signature.
+        let src = "<%# locals: no parens here %>\n<%= foo(bar) %>";
+        assert_eq!(parse_strict_locals(src), None);
+    }
+
+    #[test]
+    fn strict_locals_absent_returns_none() {
+        assert_eq!(parse_strict_locals("<div>plain view</div>"), None);
     }
 }

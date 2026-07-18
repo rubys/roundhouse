@@ -348,21 +348,27 @@ fn partial_extra_args(ctx: &ViewCtx, module: &str, method: &str) -> Vec<Expr> {
     // matching the dedup on the partial's def side (build_library_class).
     let record_name = singularize(&snake_case(last_segment(module)));
     let key = (module.to_string(), method.to_string());
-    // For a strict-locals partial, its def-side closure excludes EVERY
-    // declared local (a name that is both a local and an `@ivar` collapses
-    // after the ivar→local rewrite). Exclude the same set here so the
-    // threaded positional closure args line up with the signature.
-    let declared: std::collections::HashSet<&str> = ctx
-        .strict_locals
-        .get(&key)
+    // A strict-locals partial's record is its FIRST DECLARED local (which
+    // is in `declared`), NOT the dir-convention singular. Its def-side
+    // closure excludes exactly the declared set, so this side must too —
+    // and must NOT additionally drop the dir-singular, or a strict partial
+    // that reads a dir-conventional `@ivar` (present in the def closure)
+    // gets one fewer arg here → arity mismatch. The dir-singular exclusion
+    // applies only to convention-inferred (non-strict) partials.
+    let strict = ctx.strict_locals.get(&key);
+    let declared: std::collections::HashSet<&str> = strict
         .map(|ps| ps.iter().map(|p| p.name.as_str()).collect())
         .unwrap_or_default();
+    let is_strict = strict.is_some();
     ctx.partial_ivars
         .get(&key)
         .map(|ivars| {
             ivars
                 .iter()
-                .filter(|n| n.as_str() != record_name && !declared.contains(n.as_str()))
+                .filter(|n| {
+                    (is_strict || n.as_str() != record_name)
+                        && !declared.contains(n.as_str())
+                })
                 // Caller bodies are post-ivar-rewrite: a reserved-word
                 // ivar (`@for`) lives there as its `safe_local` form.
                 .map(|n| var_ref(Symbol::from(crate::naming::safe_local(n.as_str()))))
