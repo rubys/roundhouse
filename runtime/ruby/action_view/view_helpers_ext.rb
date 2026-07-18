@@ -96,5 +96,30 @@ module ActionView
     def self.number_with_precision(value, precision: 3)
       format("%.#{precision}f", value.to_f)
     end
+
+    # `number_to_human(1500, format: "%n%u")` → "1.5Thousand";
+    # `number_to_human(5)` → "5". Rails scales by powers of 1000 with a
+    # unit label, 3-significant-digit precision, insignificant zeros (and
+    # a bare trailing ".") stripped. lobsters' `upvoter_score` passes a
+    # small integer score + format "%n%u", so the unit-less common case
+    # renders as the plain number. `sprintf` (not the `format` alias) so
+    # it can't bind to the `format` kwarg local.
+    def self.number_to_human(value, format: "%n %u")
+      units = ["", "Thousand", "Million", "Billion", "Trillion", "Quadrillion"]
+      n = value.to_f
+      neg = n < 0.0
+      abs = neg ? -n : n
+      idx = 0
+      while abs >= 1000.0 && idx < units.length - 1
+        abs = abs / 1000.0
+        idx = idx + 1
+      end
+      rounded = sprintf("%.3f", abs)
+      while rounded.include?(".") && (rounded.end_with?("0") || rounded.end_with?("."))
+        rounded = rounded[0, rounded.length - 1].to_s
+      end
+      rounded = "-" + rounded if neg
+      format.sub("%n", rounded).sub("%u", units[idx]).strip
+    end
   end
 end

@@ -685,6 +685,7 @@ fn is_framework_view_helper(name: &str) -> bool {
             | "javascript_include_tag"
             | "number_with_precision"
             | "number_with_delimiter"
+            | "number_to_human"
             | "content_security_policy_nonce"
             | "class_names"
             | "label_tag"
