@@ -1781,7 +1781,19 @@ jobs:
               done
               rmdir "_site/bench/lobsters/$lane" 2>/dev/null || true
             done
-            echo "lobsters_bench_data=present" >> "$GITHUB_OUTPUT"
+            # A matrix with only the Rails lanes (a partial nightly where the
+            # roundhouse emit lane failed to produce a summary) is unrenderable
+            # — lobsters-report aborts without the canonical ruby/ruby-int lane.
+            # Treat that like absent data and skip the render, rather than
+            # failing the whole build-site job on a bench-box hiccup.
+            if [ -f _site/bench/lobsters/ruby/summary.json ] || [ -f _site/bench/lobsters/ruby-int/summary.json ]; then
+              echo "lobsters_bench_data=present" >> "$GITHUB_OUTPUT"
+            else
+              echo "::warning::lobsters matrix present but no ruby emit lane summary at $BENCH_URL; skipping lobsters bench page render"
+              rm -rf _site/bench/lobsters
+              rmdir _site/bench 2>/dev/null || true
+              echo "lobsters_bench_data=absent" >> "$GITHUB_OUTPUT"
+            fi
           elif fetch "$BENCH_URL/summary.json" _site/bench/lobsters/summary.json; then
             fetch "$BENCH_URL/rails.json"    _site/bench/lobsters/rails.json    || true
             fetch "$BENCH_URL/env.json"      _site/bench/lobsters/env.json      || true
