@@ -975,17 +975,17 @@ fn emit_array(elements: &[Expr], e: &Expr) -> String {
 }
 
 fn emit_string_interp(parts: &[InterpPart]) -> String {
-    let mut out = String::from("$\"");
-    for part in parts {
-        match part {
-            InterpPart::Text { value } => out.push_str(&escape_interp_text(value)),
-            InterpPart::Expr { expr } => {
-                out.push_str(&format!("{{{}}}", emit_expr(expr)));
-            }
-        }
-    }
-    out.push('"');
-    out
+    crate::emit::shared::interp::render(
+        parts,
+        &crate::emit::shared::interp::InterpDelims {
+            open_quote: "$\"",
+            close_quote: "\"",
+            expr_open: "{",
+            expr_close: "}",
+        },
+        emit_expr,
+        escape_interp_text,
+    )
 }
 
 fn emit_bool_op(op: BoolOpKind, left: &Expr, right: &Expr, e: &Expr) -> String {

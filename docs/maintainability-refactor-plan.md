@@ -439,3 +439,21 @@ Every numbered step is a legal stopping point.
     to `impl Ty` in `ty.rs` (each had exactly one caller). `ide.rs`'s `can_be_nil`/
     `nil_verdict` left alone as instructed. Lattice-law + rbs + analyze tests pass, emit
     byte-identical.
+
+### Phase 3 (2026-07-18)
+
+- **3.1 `split_trailing_kwargs`** — new `src/emit/shared/args.rs`:
+  `split_trailing_kwargs(args) -> (&[Expr], Option<&[(Expr, Expr)]>)` on the exact
+  `split_last` + `Hash { kwargs: true }` decision. Adopted in csharp, swift, kotlin,
+  elixir2 (`emit_call_args` / `unpack_kwargs_with`), one commit each, emit-neutral.
+  **go2 excluded** — its trailing-Hash handling is per-callee (`try_expand_render_kwargs`
+  etc., indexing `args[1]` and matching `Hash { .. }` with any `kwargs` flag), a different
+  shape that the helper doesn't model; left as-is.
+
+- **3.2 interp walker** — new `src/emit/shared/interp.rs`: `render(parts, delims,
+  emit_expr, escape)` with an `InterpDelims { open_quote, close_quote, expr_open,
+  expr_close }` config. Adopted in crystal, ruby (byte-identical pair), kotlin, csharp,
+  elixir2. Escape stays per-target (passed as a closure/fn ref) per 3.3.
+  **swift excluded** — its Expr arm wraps optionals in `RhString.s(...)` (type-directed,
+  not a plain delimiter). **go2 excluded** — `emit_interp_appends` appends to a variable
+  rather than building a quoted literal. Both keep their own walker.

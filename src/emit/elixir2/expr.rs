@@ -2973,19 +2973,21 @@ fn emit_const(path: &[crate::ident::Symbol]) -> String {
 }
 
 fn emit_string_interp(parts: &[InterpPart]) -> String {
-    let mut out = String::from("\"");
-    for p in parts {
-        match p {
-            InterpPart::Text { value } => push_escaped(&mut out, value),
-            InterpPart::Expr { expr } => {
-                out.push_str("#{");
-                out.push_str(&emit_expr(expr));
-                out.push('}');
-            }
-        }
-    }
-    out.push('"');
-    out
+    crate::emit::shared::interp::render(
+        parts,
+        &crate::emit::shared::interp::InterpDelims {
+            open_quote: "\"",
+            close_quote: "\"",
+            expr_open: "#{",
+            expr_close: "}",
+        },
+        emit_expr,
+        |value| {
+            let mut out = String::new();
+            push_escaped(&mut out, value);
+            out
+        },
+    )
 }
 
 /// Escape a string for an Elixir double-quoted literal body. Handles
