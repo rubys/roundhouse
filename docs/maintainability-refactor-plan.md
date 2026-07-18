@@ -493,3 +493,24 @@ Every numbered step is a legal stopping point.
   desync it. Did not add a marker field to `CatalogedMethod` — that would re-encode the
   hand-curated list across ~80 struct literals for a single consumer; low value, deferred
   as a design call for Sam.
+
+- **4.2 — BLOCKED on catalog modeling; NOT done.** The suggested cluster (`pluck`, `pick`,
+  `ids`) can't be routed through the catalog today:
+  - The send.rs arms for `pluck`/`pick`/`ids`/`count`/`exists?`/… at send.rs:895–943 live
+    in the **relation-receiver** branch (dispatch on a `Ty::Array<elem>` receiver, e.g.
+    `Model.where(...).pluck`). The catalog's `ReceiverContext` is Class/Instance only — it
+    explicitly does NOT model Relation receivers yet (the enum comment says they "will join
+    as the analyzer gains Relation<T>"). So there is no catalog entry in the matching
+    receiver context to look up.
+  - `pluck`/`pick`/`sum`/`average` have `return_kind: None` in the catalog (their shapes —
+    `Array<Untyped>`, `Untyped` — aren't even expressible in the current `ReturnKind` enum,
+    which has no `ArrayOfUntyped`/`Untyped` variant). So the catalog can't reproduce the
+    arm's computed type.
+  - The Class-receiver catalog methods that DO have return_kinds (`all`, `first`, `last`,
+    `count`, `exists?`) are already consumed by `with_adapter` (analyze/mod.rs:114–137) into
+    `class_methods`; send.rs's string arms are the relation/contextual fallback the registry
+    doesn't cover. There's no redundant *class-receiver* arm to delete.
+
+    Doing 4.2 requires first extending the catalog (`ReceiverContext::Relation`, new
+    `ReturnKind` variants) — feature work beyond a behavior-neutral refactor. Left for Sam
+    as a design task. No code change.
