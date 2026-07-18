@@ -1630,8 +1630,9 @@ fn module_method_params(module: &str, fname: &str) -> Option<Vec<crate::dialect:
 /// a plain per-arg render, so nothing is dropped.
 fn unpack_kwargs_with(params: Option<&[crate::dialect::Param]>, args: &[Expr]) -> Vec<String> {
     let plain = || args.iter().map(emit_expr).collect::<Vec<_>>();
-    let Some((last, head)) = args.split_last() else { return plain() };
-    let ExprNode::Hash { entries, kwargs: true } = &*last.node else { return plain() };
+    let (head, Some(entries)) = crate::emit::shared::args::split_trailing_kwargs(args) else {
+        return plain();
+    };
     let Some(params) = params else {
         return plain();
     };
