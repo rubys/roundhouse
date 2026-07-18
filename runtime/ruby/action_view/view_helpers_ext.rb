@@ -97,29 +97,22 @@ module ActionView
       format("%.#{precision}f", value.to_f)
     end
 
-    # `number_to_human(1500, format: "%n%u")` → "1.5Thousand";
-    # `number_to_human(5)` → "5". Rails scales by powers of 1000 with a
-    # unit label, 3-significant-digit precision, insignificant zeros (and
-    # a bare trailing ".") stripped. lobsters' `upvoter_score` passes a
-    # small integer score + format "%n%u", so the unit-less common case
-    # renders as the plain number. `sprintf` (not the `format` alias) so
-    # it can't bind to the `format` kwarg local.
+    # `number_to_human(5, format: "%n%u")` → "5"; `number_to_human(1500)`
+    # → "1 Thousand". Rails scales by powers of 1000 with a unit label.
+    # lobsters' `upvoter_score` passes a small INTEGER score + format
+    # "%n%u", so the unit-less common case renders as the plain number;
+    # integer-only (no float/precision machinery) keeps every site typed.
     def self.number_to_human(value, format: "%n %u")
       units = ["", "Thousand", "Million", "Billion", "Trillion", "Quadrillion"]
-      n = value.to_f
-      neg = n < 0.0
-      abs = neg ? -n : n
+      neg = value < 0
+      n = neg ? -value : value
       idx = 0
-      while abs >= 1000.0 && idx < units.length - 1
-        abs = abs / 1000.0
+      while n >= 1000 && idx < units.length - 1
+        n = n / 1000
         idx = idx + 1
       end
-      rounded = sprintf("%.3f", abs)
-      while rounded.include?(".") && (rounded.end_with?("0") || rounded.end_with?("."))
-        rounded = rounded[0, rounded.length - 1].to_s
-      end
-      rounded = "-" + rounded if neg
-      format.sub("%n", rounded).sub("%u", units[idx]).strip
+      num = neg ? "-" + n.to_s : n.to_s
+      format.sub("%n", num).sub("%u", units[idx]).strip
     end
   end
 end

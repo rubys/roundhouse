@@ -6,6 +6,6 @@ module ActionView
     def self.number_with_delimiter: (Integer value) -> String
     def self.sanitize_to_id: (String name) -> String
     def self.number_with_precision: (untyped value, ?precision: Integer) -> String
-    def self.number_to_human: (untyped value, ?format: String) -> String
+    def self.number_to_human: (Integer value, ?format: String) -> String
   end
 end
