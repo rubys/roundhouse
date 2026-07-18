@@ -882,6 +882,23 @@ pub fn receivers_for(name: &str) -> BTreeSet<ReceiverContext> {
 /// surface at their runtime. Today's single-SQLite world lets us
 /// keep the list catalog-local; the adapter trait method can
 /// subsume it when a second runtime arrives.
+/// The curated relation-chain surface the lowerer walks: methods whose
+/// presence in a Send chain marks it as a query-builder chain
+/// (`chain.rs::collect_chain_modifiers`, `controller/send.rs`'s
+/// `QueryChain` classification).
+///
+/// NOTE — do NOT "simplify" this into `AR_CATALOG` `chain ∈ {Builder,
+/// Terminal}` lookup: that set is a strict *superset* of this list. The
+/// catalog marks `find`, `find_by`, `count`, `sum`, `average`, `exists?`,
+/// `pick`, `take`, `page`, `having`, `preload`, `eager_load`, `merge`,
+/// `reorder`, … as Builder/Terminal too, and pulling them into this
+/// predicate would reclassify those Sends as query chains — a behavior
+/// change, not a refactor. This list is a deliberately narrower curation
+/// of the "common relation-building/terminal" methods the lowerer
+/// handles, and is not derivable from any single existing catalog field.
+/// (See the maintainability plan's Execution log, 4.1.) The unit test
+/// `query_builder_methods_are_all_cataloged` guards the one invariant
+/// that IS true: every method here has a Builder/Terminal catalog entry.
 pub fn is_query_builder_method(method: &str) -> bool {
     matches!(
         method,
@@ -1033,6 +1050,34 @@ mod tests {
                     entry.name,
                 );
             }
+        }
+    }
+
+    #[test]
+    fn query_builder_methods_are_all_cataloged() {
+        // The lowerer's curated query-chain surface
+        // (`is_query_builder_method`) is a strict *subset* of the
+        // catalog's Builder/Terminal methods — every method the
+        // predicate recognizes must have a Builder/Terminal catalog
+        // entry (the reverse does NOT hold; see the predicate's doc).
+        // This guards the one direction that is an invariant, so a
+        // rename/removal in AR_CATALOG can't silently desync it.
+        for name in [
+            "all", "includes", "order", "where", "group", "limit", "offset", "joins",
+            "distinct", "select", "pluck", "first", "last",
+        ] {
+            assert!(
+                is_query_builder_method(name),
+                "`{name}` should be recognized by is_query_builder_method",
+            );
+            let cataloged = AR_CATALOG.iter().any(|m| {
+                m.name == name
+                    && matches!(m.chain, ChainKind::Builder | ChainKind::Terminal)
+            });
+            assert!(
+                cataloged,
+                "query-builder method `{name}` has no Builder/Terminal AR_CATALOG entry",
+            );
         }
     }
 }

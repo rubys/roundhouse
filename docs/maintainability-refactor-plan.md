@@ -468,3 +468,28 @@ Every numbered step is a legal stopping point.
   `method` alone (arity + receiver stay enforced by the enclosing `(Some(r), 1)` guard,
   which the rest of each block needs anyway). go2's append (`go2/expr.rs:1220`, inline
   `&& args.len() == 1`) left as-is — not in the shared block shape. Emit byte-identical.
+
+- **3.5 / 3.6 DEFERRED** — 3.5 (adopt `classify_add/sub/mul` in the 4 inline targets) is
+  explicitly behavior-affecting: it needs per-change correction analysis and per-target
+  toolchain runs (several toolchains aren't installed here). 3.6 (variant-split the monolith
+  emitters) is optional pure code motion. Both left for a later pass; proceeding to Phase 4
+  (highest value) per the plan's recommended order.
+
+### Phase 4 (2026-07-18)
+
+- **4.1 — the premise is FALSE; NOT a pure duplication.** `is_query_builder_method` does
+  NOT duplicate the catalog's `chain` field. Measured: all 13 methods it recognizes have a
+  Builder/Terminal `AR_CATALOG` entry, but the catalog's Builder/Terminal set has **26
+  more** (`find`, `find_by`, `count`, `sum`, `average`, `maximum`, `minimum`, `exists?`,
+  `pick`, `take`, `page`, `async_count`, `having`, `preload`, `eager_load`,
+  `left_outer_joins`, `references`, `reorder`, `rewhere`, `unscope`, `readonly`, `reselect`,
+  `extending`, `merge`, …). The predicate is a deliberately *narrower curation* — the
+  relation-chain surface the lowerer walks (`chain.rs`, `controller/send.rs`'s `QueryChain`
+  classification). Deriving it from `chain ∈ {Builder, Terminal}` would reclassify those 26
+  Sends as query chains — a real lowering behavior change, not a refactor.
+  **Action (behavior-neutral):** left the predicate as-is; added a doc comment warning
+  against the trap and a unit test (`query_builder_methods_are_all_cataloged`) guarding the
+  one true invariant (subset ⊆ catalog Builder/Terminal), so a catalog rename can't silently
+  desync it. Did not add a marker field to `CatalogedMethod` — that would re-encode the
+  hand-curated list across ~80 struct literals for a single consumer; low value, deferred
+  as a design call for Sam.
