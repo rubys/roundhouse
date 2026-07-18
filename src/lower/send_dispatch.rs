@@ -49,7 +49,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::analyze::ClassInfo;
 use crate::app::App;
-use crate::diagnostic::{Diagnostic, DiagnosticKind};
+use crate::diagnostic::Diagnostic;
 use crate::dialect::{ControllerBodyItem, ModelBodyItem};
 use crate::expr::{Arm, Expr, ExprNode, Literal, Pattern};
 use crate::ident::{ClassId, Symbol};
@@ -80,20 +80,16 @@ pub fn apply_send_static_dispatch(
 }
 
 fn residue(expr: &Expr, reason: &str) -> Diagnostic {
-    let kind = DiagnosticKind::LowerResidue {
-        pass: Symbol::from("send_static_dispatch"),
-        construct: Symbol::from("dynamic-send"),
-        reason: Symbol::from(reason),
-    };
-    Diagnostic {
-        span: expr.span,
-        severity: Diagnostic::default_severity(&kind),
-        kind,
-        message: format!(
+    crate::lower::residue_diagnostic(
+        "send_static_dispatch",
+        "dynamic-send",
+        expr.span,
+        reason,
+        format!(
             "reflective `send` left as dynamic dispatch ({reason}) — \
              strict targets cannot compile a runtime method name"
         ),
-    }
+    )
 }
 
 // ---------------------------------------------------------------------

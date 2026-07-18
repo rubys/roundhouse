@@ -23,7 +23,7 @@
 //! change worth a name, not a silence.
 
 use crate::app::App;
-use crate::diagnostic::{Diagnostic, DiagnosticKind};
+use crate::diagnostic::Diagnostic;
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 
@@ -37,20 +37,16 @@ pub fn apply_create_block_inline(app: &mut App) -> Vec<Diagnostic> {
 }
 
 fn residue(expr: &Expr, reason: &str) -> Diagnostic {
-    let kind = DiagnosticKind::LowerResidue {
-        pass: Symbol::from("create_block_inline"),
-        construct: Symbol::from("create-with-block"),
-        reason: Symbol::from(reason),
-    };
-    Diagnostic {
-        span: expr.span,
-        severity: Diagnostic::default_severity(&kind),
-        kind,
-        message: format!(
+    crate::lower::residue_diagnostic(
+        "create_block_inline",
+        "create-with-block",
+        expr.span,
+        reason,
+        format!(
             "block-form `create` left uninlined ({reason}) — the runtime \
              factory is blockless and would silently ignore the block"
         ),
-    }
+    )
 }
 
 fn rewrite_create_block(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {

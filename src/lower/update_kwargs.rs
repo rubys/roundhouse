@@ -29,7 +29,7 @@
 use std::collections::HashSet;
 
 use crate::app::App;
-use crate::diagnostic::{Diagnostic, DiagnosticKind};
+use crate::diagnostic::Diagnostic;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
@@ -45,21 +45,17 @@ pub fn apply_update_kwargs_inline(app: &mut App) -> Vec<Diagnostic> {
 }
 
 fn residue(expr: &Expr, reason: &str) -> Diagnostic {
-    let kind = DiagnosticKind::LowerResidue {
-        pass: Symbol::from("update_kwargs_inline"),
-        construct: Symbol::from("update-with-kwargs"),
-        reason: Symbol::from(reason),
-    };
-    Diagnostic {
-        span: expr.span,
-        severity: Diagnostic::default_severity(&kind),
-        kind,
-        message: format!(
+    crate::lower::residue_diagnostic(
+        "update_kwargs_inline",
+        "update-with-kwargs",
+        expr.span,
+        reason,
+        format!(
             "kwargs-form `update` left uninlined ({reason}) — the hash-bag \
              fallback drops association keys and the bang form has no \
              runtime target"
         ),
-    }
+    )
 }
 
 fn rewrite(expr: &mut Expr, models: &HashSet<ClassId>, diags: &mut Vec<Diagnostic>) {

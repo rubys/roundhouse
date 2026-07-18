@@ -24,7 +24,7 @@
 use std::collections::BTreeSet;
 
 use crate::app::App;
-use crate::diagnostic::{Diagnostic, DiagnosticKind};
+use crate::diagnostic::Diagnostic;
 use crate::expr::{Expr, ExprNode};
 use crate::ident::Symbol;
 use crate::ty::Ty;
@@ -156,19 +156,15 @@ pub fn apply_mailer_class_side(app: &mut App) -> Vec<Diagnostic> {
 }
 
 fn residue(m: &crate::dialect::MethodDef, reason: &str) -> Diagnostic {
-    let kind = DiagnosticKind::LowerResidue {
-        pass: Symbol::from("mailer_class_side"),
-        construct: Symbol::from("mailer-instance-method"),
-        reason: Symbol::from(reason),
-    };
-    Diagnostic {
-        span: m.body.span,
-        severity: Diagnostic::default_severity(&kind),
-        kind,
-        message: format!(
+    crate::lower::residue_diagnostic(
+        "mailer_class_side",
+        "mailer-instance-method",
+        m.body.span,
+        reason,
+        format!(
             "mailer method `{}` gets no class-side wrapper ({reason}) — \
              class-side call sites will not resolve",
             m.name.as_str()
         ),
-    }
+    )
 }

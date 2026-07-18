@@ -26,7 +26,7 @@
 use std::collections::BTreeSet;
 
 use crate::app::App;
-use crate::diagnostic::{Diagnostic, DiagnosticKind};
+use crate::diagnostic::Diagnostic;
 use crate::expr::{Expr, ExprNode};
 use crate::ident::Symbol;
 use crate::ty::Ty;
@@ -186,19 +186,11 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
 }
 
 fn residue(m: &crate::dialect::MethodDef, reason: &str) -> Diagnostic {
-    let kind = DiagnosticKind::LowerResidue {
-        pass: Symbol::from("job_class_side"),
-        construct: Symbol::from("job-class-entry"),
-        reason: Symbol::from(reason),
-    };
-    Diagnostic {
-        span: m.body.span,
-        severity: Diagnostic::default_severity(&kind),
-        message: format!(
-            "job_class_side: `{}` — {}",
-            m.name.as_str(),
-            reason
-        ),
-        kind,
-    }
+    crate::lower::residue_diagnostic(
+        "job_class_side",
+        "job-class-entry",
+        m.body.span,
+        reason,
+        format!("job_class_side: `{}` — {}", m.name.as_str(), reason),
+    )
 }

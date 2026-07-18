@@ -27,7 +27,7 @@
 //! excluded like every hook pass — the construct has no view presence).
 
 use crate::app::App;
-use crate::diagnostic::{Diagnostic, DiagnosticKind};
+use crate::diagnostic::Diagnostic;
 use crate::expr::{Expr, ExprNode, InterpPart, Literal};
 use crate::ident::Symbol;
 
@@ -41,21 +41,17 @@ pub fn apply_errors_add_lowering(app: &mut App) -> Vec<Diagnostic> {
 }
 
 fn residue(expr: &Expr, reason: &str) -> Diagnostic {
-    let kind = DiagnosticKind::LowerResidue {
-        pass: Symbol::from("errors_add"),
-        construct: Symbol::from("errors.add"),
-        reason: Symbol::from(reason),
-    };
-    Diagnostic {
-        span: expr.span,
-        severity: Diagnostic::default_severity(&kind),
-        kind,
-        message: format!(
+    crate::lower::residue_diagnostic(
+        "errors_add",
+        "errors.add",
+        expr.span,
+        reason,
+        format!(
             "`errors.add` left as dynamic dispatch ({reason}) — the error \
              accumulator is an Array[String] with no `add`; ground by hand \
              or extend the errors_add lowering"
         ),
-    }
+    )
 }
 
 /// Fold `"a" << "b"` / `"a" + "b"` chains of string literals into one

@@ -89,6 +89,36 @@ pub use time_current::apply_time_current_lowering;
 pub use transaction_ground::apply_transaction_grounding;
 pub use update_kwargs::apply_update_kwargs_inline;
 
+/// Build a `LowerResidue` diagnostic — the shared assembly a pass emits
+/// when it must leave a construct dynamic. Each pass supplies its own
+/// `pass`/`construct` tags, `span`, and human-readable `message`; the
+/// kind construction, default severity, and field wiring live here so
+/// the six residue-emitting passes don't each re-derive them. Callers
+/// interpolate `reason` into `message` themselves (the phrasing is
+/// per-pass), so it is passed both as a diagnostic field and left to the
+/// caller's message text.
+pub(crate) fn residue_diagnostic(
+    pass: &str,
+    construct: &str,
+    span: crate::span::Span,
+    reason: &str,
+    message: String,
+) -> crate::diagnostic::Diagnostic {
+    use crate::diagnostic::{Diagnostic, DiagnosticKind};
+    use crate::ident::Symbol;
+    let kind = DiagnosticKind::LowerResidue {
+        pass: Symbol::from(pass),
+        construct: Symbol::from(construct),
+        reason: Symbol::from(reason),
+    };
+    Diagnostic {
+        span,
+        severity: Diagnostic::default_severity(&kind),
+        kind,
+        message,
+    }
+}
+
 /// Post-analyze shared lowerings — type-directed IR rewrites every
 /// target consumes, run between `Analyzer::analyze` and any emitter.
 /// One entry point so the transpile driver, the site build, and the IR
