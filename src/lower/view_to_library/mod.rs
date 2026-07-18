@@ -1928,7 +1928,7 @@ pub(crate) fn view_ivar_closures(
         let (dir, _) = split_view_name(v.name.as_str());
         let reads: BTreeSet<Symbol> = view_read_ivars(&v.body).into_iter().collect();
         closure.entry(key.clone()).or_default().extend(reads);
-        let mut child_keys = render_partial_keys(&v.body, dir);
+        let mut child_keys = render_partial_keys(&v.body, dir, &pools);
         // A `render partial: @above` folds every pooled candidate partial's
         // ivar needs into this view, so the dispatch's arms have their
         // closure args threaded as params here.
@@ -1968,13 +1968,22 @@ pub(crate) fn view_ivar_closures(
 /// The partial views a body renders, as `ViewKey`s — for the render graph.
 /// Resolves the same render shapes `classify_render_partial` recognizes;
 /// unresolvable (dynamic) partial names are skipped.
-fn render_partial_keys(body: &Expr, dir: &str) -> Vec<ViewKey> {
+fn render_partial_keys(
+    body: &Expr,
+    dir: &str,
+    pools: &std::collections::HashMap<(String, Symbol), Vec<String>>,
+) -> Vec<ViewKey> {
     let mut out = Vec::new();
-    collect_render_keys(body, dir, &mut out);
+    collect_render_keys(body, dir, pools, &mut out);
     out
 }
 
-fn collect_render_keys(e: &Expr, dir: &str, out: &mut Vec<ViewKey>) {
+fn collect_render_keys(
+    e: &Expr,
+    dir: &str,
+    pools: &std::collections::HashMap<(String, Symbol), Vec<String>>,
+    out: &mut Vec<ViewKey>,
+) {
     if let ExprNode::Send { recv, method, args, block, .. } = &*e.node {
         if let Some(rp) = crate::lower::view::classify_render_partial(
             recv.as_ref(),
@@ -1982,13 +1991,16 @@ fn collect_render_keys(e: &Expr, dir: &str, out: &mut Vec<ViewKey>) {
             args,
             block.as_ref(),
             &|_| true,
+            &|n| pools.contains_key(&(dir.to_string(), Symbol::from(n))),
         ) {
+            // Options-ivar renders (`render @above`) fold in via
+            // `dynamic_render_edges`, not the static key path.
             if let Some(k) = render_partial_key(&rp, dir) {
                 out.push(k);
             }
         }
     }
-    e.node.for_each_child(&mut |c| collect_render_keys(c, dir, out));
+    e.node.for_each_child(&mut |c| collect_render_keys(c, dir, pools, out));
 }
 
 /// Resolve a partial-name string to its `(module, method)` ViewKey.
@@ -2063,13 +2075,39 @@ fn collect_ivar_str_assigns(
     acc: &mut std::collections::HashMap<(String, Symbol), std::collections::BTreeSet<String>>,
 ) {
     if let ExprNode::Assign { target: LValue::Ivar { name }, value } = &*e.node {
-        if let ExprNode::Lit { value: Literal::Str { value: s } } = &*value.node {
-            acc.entry((dir.to_string(), name.clone()))
-                .or_default()
-                .insert(s.as_str().to_string());
+        if let Some(pname) = partial_name_from_assign_value(value) {
+            acc.entry((dir.to_string(), name.clone())).or_default().insert(pname);
         }
     }
     e.node.for_each_child(&mut |c| collect_ivar_str_assigns(c, dir, acc));
+}
+
+/// The partial NAME a controller assigns to a dynamic-render ivar
+/// (`@above`/`@below`), in either shape upstream lobsters uses:
+/// the bare string (`@above = "stories/subnav"`) or the options-hash
+/// (`@above = {partial: "stories/subnav", locals: {…}}`). Returns the
+/// `partial:` string in the hash case. The `locals:` sub-hash is NOT
+/// threaded — the pool dispatch passes each arm's render-tree closure
+/// only; partials that need caller-supplied locals (`single_tag`'s
+/// `tag:`/`related:`) render those unbound (ledgered, see the
+/// strict-locals partial-header work).
+fn partial_name_from_assign_value(value: &Expr) -> Option<String> {
+    match &*value.node {
+        ExprNode::Lit { value: Literal::Str { value: s } } => Some(s.as_str().to_string()),
+        ExprNode::Hash { entries, .. } => entries.iter().find_map(|(k, v)| {
+            let is_partial = matches!(
+                &*k.node,
+                ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "partial"
+            );
+            match (is_partial, &*v.node) {
+                (true, ExprNode::Lit { value: Literal::Str { value: s } }) => {
+                    Some(s.as_str().to_string())
+                }
+                _ => None,
+            }
+        }),
+        _ => None,
+    }
 }
 
 /// The render-graph edges a view's DYNAMIC partials contribute: for each
@@ -2100,6 +2138,7 @@ fn collect_dynamic_edges(
                 args,
                 block.as_ref(),
                 &|_| true,
+                &|n| pools.contains_key(&(dir.to_string(), Symbol::from(n))),
             )
         {
             if let Some(names) = pools.get(&(dir.to_string(), Symbol::from(ivar))) {
@@ -2769,6 +2808,14 @@ fn reference_target_names(app: &App) -> std::collections::HashMap<String, String
 impl ViewCtx {
     pub(super) fn is_local(&self, n: &str) -> bool {
         self.locals.iter().any(|x| x == n)
+    }
+    /// True when `@<n>` is assigned a partial-options value in some
+    /// controller action (a bare partial-name string or a `{partial: …}`
+    /// hash), so a bare `render @<n>` should dispatch over the pool
+    /// instead of rendering `@<n>` as a record collection.
+    pub(super) fn is_options_ivar(&self, n: &str) -> bool {
+        self.dyn_pools
+            .contains_key(&(self.resource_dir.clone(), Symbol::from(n)))
     }
     pub(super) fn with_locals(&self, more: impl IntoIterator<Item = String>) -> Self {
         let mut next = self.clone();

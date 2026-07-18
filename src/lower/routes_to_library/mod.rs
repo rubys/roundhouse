@@ -255,15 +255,43 @@ fn build_helper_function(
         .cloned()
         .collect();
 
+    // Leading required-param count (clamped: a dropped `format` seg may
+    // have been counted required upstream). Params beyond it come from
+    // trailing Rails optional groups and take `nil` defaults.
+    let required = route.required_params.min(seg_params.len());
+    let nil_default = || {
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Nil })
+    };
     let mut params: Vec<Param> = seg_params
         .iter()
-        .map(|p| Param::positional(Symbol::from(p.clone())))
+        .enumerate()
+        .map(|(i, p)| {
+            let sym = Symbol::from(p.clone());
+            if i < required {
+                Param::positional(sym)
+            } else {
+                Param::with_default(sym, nil_default())
+            }
+        })
         .collect();
     let mut sig_params: Vec<(Symbol, Ty)> = seg_params
         .iter()
-        .map(|p| (Symbol::from(p.clone()), param_ty(p, slug_id)))
+        .enumerate()
+        .map(|(i, p)| {
+            let base = param_ty(p, slug_id);
+            let ty = if i < required {
+                base
+            } else {
+                Ty::Union { variants: vec![base, Ty::Nil] }
+            };
+            (Symbol::from(p.clone()), ty)
+        })
         .collect();
-    let mut body = build_path_expr(path, &seg_params, slug_id);
+    let mut body = if required < seg_params.len() {
+        build_optional_path_expr(path, &seg_params, required, slug_id)
+    } else {
+        build_path_expr(path, &seg_params, slug_id)
+    };
     if has_format {
         let format_sym = Symbol::from("format");
         params.push(Param::with_default(
@@ -371,6 +399,139 @@ fn build_path_expr(path: &str, path_params: &[String], slug_id: bool) -> Expr {
         Expr::new(Span::synthetic(), ExprNode::StringInterp { parts }),
         Ty::Str,
     )
+}
+
+/// Build a path expr for a route whose trailing params come from Rails
+/// optional groups: the required prefix always renders, each optional
+/// param's segment is appended only when the arg is non-nil.
+/// `/top(/:length(/page/:page))` (required=0) →
+/// `"/top" + (length.nil? ? "" : "/#{length}")
+///        + (page.nil?   ? "" : "/page/#{page}")`.
+/// The leading `/` of an optional group stays with its chunk, so
+/// `top_path()` yields `"/top"`, not `"/top/"`.
+fn build_optional_path_expr(
+    path: &str,
+    seg_params: &[String],
+    required: usize,
+    slug_id: bool,
+) -> Expr {
+    let optional: std::collections::HashSet<&str> =
+        seg_params[required..].iter().map(|s| s.as_str()).collect();
+    let mut base_parts: Vec<InterpPart> = Vec::new();
+    // (param-name, its conditionally-appended segment parts)
+    let mut chunks: Vec<(String, Vec<InterpPart>)> = Vec::new();
+    let mut buf = String::new();
+    let mut in_optional = false;
+    let mut chars = path.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != ':' {
+            buf.push(c);
+            continue;
+        }
+        let mut ident = String::new();
+        while let Some(&nc) = chars.peek() {
+            if nc.is_alphanumeric() || nc == '_' {
+                ident.push(nc);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        if !seg_params.iter().any(|p| p == &ident) {
+            buf.push(':');
+            buf.push_str(&ident);
+            continue;
+        }
+        if optional.contains(ident.as_str()) {
+            let mut chunk: Vec<InterpPart> = Vec::new();
+            if !in_optional {
+                // First optional param: split pending text at its last `/`
+                // — that slash opens the optional group and belongs to the
+                // chunk; everything before it is the always-present base.
+                let split = buf.rfind('/').unwrap_or(0);
+                let (base_text, chunk_prefix) = buf.split_at(split);
+                if !base_text.is_empty() {
+                    base_parts.push(InterpPart::Text { value: base_text.to_string() });
+                }
+                if !chunk_prefix.is_empty() {
+                    chunk.push(InterpPart::Text { value: chunk_prefix.to_string() });
+                }
+                in_optional = true;
+            } else if !buf.is_empty() {
+                chunk.push(InterpPart::Text { value: buf.clone() });
+            }
+            chunk.push(InterpPart::Expr { expr: var_ref_slug(&ident, slug_id) });
+            chunks.push((ident.clone(), chunk));
+            buf.clear();
+        } else {
+            // Required param — stays in the always-present base.
+            if !buf.is_empty() {
+                base_parts.push(InterpPart::Text { value: std::mem::take(&mut buf) });
+            }
+            base_parts.push(InterpPart::Expr { expr: var_ref_slug(&ident, slug_id) });
+        }
+    }
+    if !buf.is_empty() {
+        match chunks.last_mut() {
+            Some((_, last)) => last.push(InterpPart::Text { value: buf }),
+            None => base_parts.push(InterpPart::Text { value: buf }),
+        }
+    }
+    let mut result = parts_to_expr(base_parts);
+    for (pname, chunk) in chunks {
+        // `<param>.nil? ? "" : "<segment>"`
+        let cond = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(var_ref(&pname)),
+                    method: Symbol::from("nil?"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            Ty::Bool,
+        );
+        let ternary = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::If {
+                    cond,
+                    then_branch: lit_str(String::new()),
+                    else_branch: parts_to_expr(chunk),
+                },
+            ),
+            Ty::Str,
+        );
+        result = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(result),
+                    method: Symbol::from("+"),
+                    args: vec![ternary],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            Ty::Str,
+        );
+    }
+    result
+}
+
+/// Collapse `InterpPart`s to an expr: empty → `""`, a lone text →
+/// `Lit::Str`, otherwise a `StringInterp` typed `Str`.
+fn parts_to_expr(parts: Vec<InterpPart>) -> Expr {
+    match parts.as_slice() {
+        [] => lit_str(String::new()),
+        [InterpPart::Text { value }] => lit_str(value.clone()),
+        _ => with_ty(
+            Expr::new(Span::synthetic(), ExprNode::StringInterp { parts }),
+            Ty::Str,
+        ),
+    }
 }
 
 fn var_ref(name: &str) -> Expr {

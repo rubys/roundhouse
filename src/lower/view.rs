@@ -125,6 +125,7 @@ pub fn classify_render_partial<'a>(
     args: &'a [Expr],
     block: Option<&'a Expr>,
     is_local: &impl Fn(&str) -> bool,
+    is_options_ivar: &impl Fn(&str) -> bool,
 ) -> Option<RenderPartial<'a>> {
     if method != "render" || recv.is_some() || block.is_some() {
         return None;
@@ -134,10 +135,22 @@ pub fn classify_render_partial<'a>(
             ExprNode::Var { name, .. } | ExprNode::Ivar { name }
                 if is_local(name.as_str()) =>
             {
-                Some(RenderPartial::Collection {
-                    collection: arg,
-                    name: name.as_str(),
-                })
+                // A bare `render @x` is a COLLECTION render (`@articles.each
+                // { … }`) UNLESS controllers assign `@x` a partial-options
+                // value (`@above = {partial: "stories/subnav"}` or the bare
+                // string form) — then it's a dynamic partial whose name is
+                // only known at runtime, dispatched over the assigned pool.
+                if is_options_ivar(name.as_str()) {
+                    Some(RenderPartial::DynamicNamed {
+                        name: arg,
+                        ivar: name.as_str(),
+                    })
+                } else {
+                    Some(RenderPartial::Collection {
+                        collection: arg,
+                        name: name.as_str(),
+                    })
+                }
             }
             ExprNode::Send {
                 recv: Some(r),
@@ -1019,7 +1032,7 @@ mod tests {
     fn render_partial_dynamic_name_classifies_as_dynamic_named() {
         // `render partial: above` — a runtime name (Var/Ivar).
         let args = vec![hash(vec![(sym("partial"), var("above"))])];
-        let rp = classify_render_partial(None, "render", &args, None, &|_| true).unwrap();
+        let rp = classify_render_partial(None, "render", &args, None, &|_| true, &|_| false).unwrap();
         match rp {
             RenderPartial::DynamicNamed { ivar, .. } => assert_eq!(ivar, "above"),
             other => panic!("expected DynamicNamed, got {other:?}"),
@@ -1031,7 +1044,7 @@ mod tests {
         // `render partial: "stories/subnav"` — a literal name resolves
         // statically; must NOT become the dynamic dispatch.
         let args = vec![hash(vec![(sym("partial"), str_lit("stories/subnav"))])];
-        let rp = classify_render_partial(None, "render", &args, None, &|_| true).unwrap();
+        let rp = classify_render_partial(None, "render", &args, None, &|_| true, &|_| false).unwrap();
         assert!(matches!(rp, RenderPartial::Named { partial: "stories/subnav", .. }));
     }
 
@@ -1043,6 +1056,32 @@ mod tests {
             (sym("partial"), var("above")),
             (sym("collection"), var("stories")),
         ])];
-        assert!(classify_render_partial(None, "render", &args, None, &|_| true).is_none());
+        assert!(classify_render_partial(None, "render", &args, None, &|_| true, &|_| false).is_none());
+    }
+
+    #[test]
+    fn render_bare_ivar_is_collection_unless_options_ivar() {
+        // `render @articles` with no options-pool entry → Collection.
+        let args = vec![var("articles")];
+        let rp = classify_render_partial(None, "render", &args, None, &|_| true, &|_| false).unwrap();
+        assert!(matches!(rp, RenderPartial::Collection { name: "articles", .. }));
+
+        // `render @above` where `@above` is a known partial-options ivar
+        // (`@above = {partial: "stories/subnav"}` in a controller) →
+        // DynamicNamed pool dispatch, not a `.each` collection render.
+        let args = vec![var("above")];
+        let rp = classify_render_partial(
+            None,
+            "render",
+            &args,
+            None,
+            &|_| true,
+            &|n| n == "above",
+        )
+        .unwrap();
+        match rp {
+            RenderPartial::DynamicNamed { ivar, .. } => assert_eq!(ivar, "above"),
+            other => panic!("expected DynamicNamed, got {other:?}"),
+        }
     }
 }

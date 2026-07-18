@@ -207,9 +207,15 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             // throwaway accumulator so the call still happens but
             // nothing lands on the page.
             let is_local = |n: &str| ctx.is_local(n);
-            if let Some(rp) =
-                classify_render_partial(None, method.as_str(), args, None, &is_local)
-            {
+            let is_options_ivar = |n: &str| ctx.is_options_ivar(n);
+            if let Some(rp) = classify_render_partial(
+                None,
+                method.as_str(),
+                args,
+                None,
+                &is_local,
+                &is_options_ivar,
+            ) {
                 let disc = "_discard";
                 let disc_ctx = ViewCtx { accumulator: disc.to_string(), ..ctx.clone() };
                 if let Some(stmt) = emit_render_partial(&rp, &disc_ctx) {
@@ -478,9 +484,15 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     // because `render` is reserved.
     if let ExprNode::Send { recv, method, args: sa, block, .. } = &*inner.node {
         let is_local = |n: &str| ctx.is_local(n);
-        if let Some(rp) =
-            classify_render_partial(recv.as_ref(), method.as_str(), sa, block.as_ref(), &is_local)
-        {
+        let is_options_ivar = |n: &str| ctx.is_options_ivar(n);
+        if let Some(rp) = classify_render_partial(
+            recv.as_ref(),
+            method.as_str(),
+            sa,
+            block.as_ref(),
+            &is_local,
+            &is_options_ivar,
+        ) {
             if let Some(stmt) = emit_render_partial(&rp, ctx) {
                 return vec![stmt];
             }

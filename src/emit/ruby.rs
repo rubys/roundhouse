@@ -241,6 +241,7 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // model bodies tolerate the nil.
     library::apply_hydration_nil_lowering(&mut lcs, app);
     library::apply_nilsafe_empty_lowering(&mut lcs);
+    library::apply_dynamic_render_options_lowering(&mut lcs);
     // Runtime-Relation eager loading: per-model `preload_associations`
     // machinery + belongs_to reader cache guards, so `includes(...)`
     // on a runtime Relation executes as batched IN-loads instead of
@@ -369,6 +370,7 @@ pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
     library::apply_nilsafe_empty_lowering(&mut lcs);
+    library::apply_dynamic_render_options_lowering(&mut lcs);
     emit_lowered_controllers_from_lcs(&lcs, app)
 }
 
@@ -391,6 +393,7 @@ pub fn emit_lowered_controllers_with_layout(app: &App) -> Vec<EmittedFile> {
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
     library::apply_nilsafe_empty_lowering(&mut lcs);
+    library::apply_dynamic_render_options_lowering(&mut lcs);
     library::apply_layout_lowering(&mut lcs, app);
     emit_lowered_controllers_from_lcs(&lcs, app)
 }
@@ -559,6 +562,7 @@ pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
     // Nullable columns hydrate to nil on the Ruby tree — synthesized
     // `.empty?` predicate forms in view bodies must tolerate it.
     library::apply_nilsafe_empty_lowering(&mut lcs);
+    library::apply_dynamic_render_options_lowering(&mut lcs);
     html_views
         .iter()
         .zip(lcs.iter())

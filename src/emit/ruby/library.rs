@@ -1737,6 +1737,50 @@ pub(crate) fn apply_nilsafe_empty_lowering(lcs: &mut [LibraryClass]) {
     }
 }
 
+/// Collapse a controller's dynamic-render-options assignment to its bare
+/// partial-name string: `@above = {partial: "stories/subnav", locals:
+/// {…}}` → `@above = "stories/subnav"`. The matching view (`<%= render
+/// @above %>`) dispatches over a `case @above when "stories/subnav" …`
+/// pool of string names, so the runtime value must be the string. Upstream
+/// lobsters uses both this hash form and the bare-string form (`@above =
+/// "saved/subnav"`) — normalizing here lets the view stay string-uniform.
+/// The `locals:` sub-hash is DROPPED (ledgered): the dispatch threads each
+/// arm's render-tree closure ivars, not caller-supplied locals, so a
+/// partial that needs `tag:`/`related:` renders those unbound until the
+/// strict-locals partial-header work lands.
+pub(crate) fn apply_dynamic_render_options_lowering(lcs: &mut [LibraryClass]) {
+    for lc in lcs.iter_mut() {
+        for m in &mut lc.methods {
+            rewrite_render_options_assign(&mut m.body);
+        }
+    }
+}
+
+fn rewrite_render_options_assign(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut |c| rewrite_render_options_assign(c));
+    let ExprNode::Assign { target: crate::expr::LValue::Ivar { .. }, value } = &mut *expr.node
+    else {
+        return;
+    };
+    let ExprNode::Hash { entries, .. } = &*value.node else {
+        return;
+    };
+    let partial_name = entries.iter().find_map(|(k, v)| {
+        let is_partial = matches!(
+            &*k.node,
+            ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "partial"
+        );
+        match (is_partial, &*v.node) {
+            (true, ExprNode::Lit { value: Literal::Str { value: s } }) => Some(s.clone()),
+            _ => None,
+        }
+    });
+    if let Some(name) = partial_name {
+        let span = value.span;
+        *value = Expr::new(span, ExprNode::Lit { value: Literal::Str { value: name } });
+    }
+}
+
 fn rewrite_empty_nilsafe(expr: &mut Expr) {
     expr.node.for_each_child_mut(&mut |c| rewrite_empty_nilsafe(c));
     let ExprNode::Send { recv: Some(r), method, args, .. } = &mut *expr.node else {

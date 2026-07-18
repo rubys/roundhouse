@@ -49,6 +49,12 @@ pub struct FlatRoute {
     /// None (the overwhelmingly common case) leaves format inference
     /// to the request path.
     pub format: Option<Symbol>,
+    /// Count of LEADING `path_params` that are REQUIRED; the rest come
+    /// from trailing Rails optional groups (`get "/top(/:length(/page/
+    /// :page))"`) and get `nil`-defaulted helper params whose path
+    /// segments are appended only when supplied. Equals `path_params.
+    /// len()` for the common all-required route.
+    pub required_params: usize,
 }
 
 /// The seven standard Rails scaffold actions a `resources` block
@@ -185,12 +191,23 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     },
                 },
             };
+            // The SHORTEST variant (last — variants are longest-first)
+            // fixes how many leading params are required; the extras the
+            // longer variants add are the trailing optional-group params.
+            // The canonical (named) helper carries that required count so
+            // its optional params get `nil` defaults.
+            let required_count = {
+                let mut p = base_params.clone();
+                extract_path_params(variants.last().unwrap(), &mut p);
+                p.len()
+            };
             // Only the canonical variant carries the helper name; the
             // shorter alternates would otherwise register a duplicate
             // helper for the same controller#action.
             for (i, vpath) in variants.into_iter().enumerate() {
                 let mut params = base_params.clone();
                 extract_path_params(&vpath, &mut params);
+                let required_params = if i == 0 { required_count } else { params.len() };
                 out.push(FlatRoute {
                     method: method.clone(),
                     path: vpath,
@@ -200,6 +217,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     path_params: params,
                     named: named && i == 0,
                     format: forced_format.clone(),
+                    required_params,
                 });
             }
         }
@@ -230,6 +248,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 path_params: vec![],
                 named: true,
                 format: None,
+                required_params: 0,
             });
         }
         RouteSpec::Resources { name, only, except, nested, singular } => {
@@ -290,6 +309,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     controller: controller_class.clone(),
                     action: Symbol::from(action_name),
                     as_name,
+                    required_params: params.len(),
                     path_params: params,
                     named: true,
                     format: None,

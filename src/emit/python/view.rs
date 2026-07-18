@@ -631,6 +631,9 @@ fn emit_py_view_append_pass2(arg: &Expr, ctx: &PyViewCtx) -> String {
             args,
             block.as_ref(),
             &|n| ctx.is_local(n),
+            // Python has no options-ivar pool dispatch; bare `render @x`
+            // falls back to the collection render.
+            &|_| false,
         ) {
             return emit_py_render_partial(&rp, ctx);
         }
