@@ -18,7 +18,7 @@ use crate::ident::{Symbol, VarId};
 use crate::naming::{singularize, snake_case};
 use crate::span::Span;
 
-use super::walker::walk_body;
+use super::walker::{rewrite_helpers_in_expr, walk_body};
 use super::{
     accumulator_append_call, lit_str, lit_sym, send, view_helpers_call,
     FormBuilderBinding, ViewCtx,
@@ -284,6 +284,97 @@ fn simplify_opts_value(k: &Expr, v: &Expr) -> Expr {
 /// singular name as `model_name`, and a nested-collection path
 /// helper as `action` (method is :post since `Class.new` is never
 /// persisted).
+/// Inline-expand ActionView's dynamic tag builder
+/// `<%= tag.<element>(opts) do ...inner... %>` — e.g. lobsters'
+/// `tag.details class: "boxline actions", open: cond ? true : nil do`.
+/// The `tag.<element>` shape is otherwise unmodeled (no runtime `tag`
+/// builder), so under spinel AOT it lowered to an `sp_raise_nomethod`
+/// token. Same open/walk/close statement-splice pattern as
+/// `emit_form_tag_inline`: open `<element ...attrs...>`, splice the
+/// block body against the SAME outer accumulator, close `</element>`.
+/// Attribute rendering follows Rails' `tag_options`: a `true` value is
+/// a bare boolean attribute, `false`/`nil` is omitted, any other value
+/// renders `key="html_escape(value)"`.
+pub(super) fn emit_tag_builder_inline(
+    element: &str,
+    args: &[Expr],
+    block: &Expr,
+    ctx: &ViewCtx,
+) -> Vec<Expr> {
+    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+        return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+    };
+
+    // The builder's attributes come from the (single) trailing opts hash.
+    let mut opts: Vec<(Expr, Expr)> = Vec::new();
+    for arg in args {
+        if let ExprNode::Hash { entries, .. } = &*arg.node {
+            for (k, v) in entries {
+                opts.push((k.clone(), v.clone()));
+            }
+        }
+    }
+
+    let mut out: Vec<Expr> = Vec::new();
+    out.push(emit_open_builder_tag(element, &opts, ctx));
+    let inner_ctx = ctx.with_locals(params.iter().map(|p| p.as_str().to_string()));
+    out.extend(walk_body(body, &inner_ctx));
+    out.push(accumulator_append_call(lit_str(format!("</{element}>")), ctx));
+    out
+}
+
+/// Build the opening `<element ...attrs...>` tag for the dynamic tag
+/// builder as one accumulator append. Per Rails' `tag_options`: a
+/// literal `true` value → bare ` key`; literal `false`/`nil` → omitted;
+/// any other literal → ` key="html_escape(value)"`. A runtime value is
+/// rendered as a truthiness-guarded boolean attribute (` key` when
+/// truthy, omitted when falsy) — the `open: cond ? true : nil` shape;
+/// a runtime *string*-valued attribute (`key="v"`) isn't exercised and
+/// would render as a bare attribute here.
+fn emit_open_builder_tag(element: &str, opts: &[(Expr, Expr)], ctx: &ViewCtx) -> Expr {
+    let mut parts: Vec<InterpPart> = Vec::new();
+    parts.push(InterpPart::Text { value: format!("<{element}") });
+    for (k, v) in opts {
+        let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
+            // Non-symbol attribute keys aren't exercised; skip to keep
+            // the tag well-formed.
+            continue;
+        };
+        let key = key.as_str();
+        let val = simplify_opts_value(k, v);
+        match &*val.node {
+            ExprNode::Lit { value: Literal::Bool { value: true } } => {
+                parts.push(InterpPart::Text { value: format!(" {key}") });
+            }
+            ExprNode::Lit { value: Literal::Bool { value: false } }
+            | ExprNode::Lit { value: Literal::Nil } => {}
+            ExprNode::Lit { .. } => {
+                parts.push(InterpPart::Text { value: format!(" {key}=\"") });
+                parts.push(InterpPart::Expr {
+                    expr: view_helpers_call("html_escape", vec![val]),
+                });
+                parts.push(InterpPart::Text { value: "\"".to_string() });
+            }
+            _ => {
+                let guarded = Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If {
+                        cond: rewrite_helpers_in_expr(&val, ctx),
+                        then_branch: lit_str(format!(" {key}")),
+                        else_branch: lit_str(String::new()),
+                    },
+                );
+                parts.push(InterpPart::Expr { expr: guarded });
+            }
+        }
+    }
+    parts.push(InterpPart::Text { value: ">".to_string() });
+    accumulator_append_call(
+        Expr::new(Span::synthetic(), ExprNode::StringInterp { parts }),
+        ctx,
+    )
+}
+
 /// Resolve a `url:` value to a callable action expression. A bare route
 /// helper (`login_path` — a no-receiver `*_path`/`*_url` Send) becomes
 /// `RouteHelpers.login_path(args)`; anything else (a String literal, an

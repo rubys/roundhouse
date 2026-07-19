@@ -16,7 +16,8 @@ use super::form_builder::{
     emit_submit_tag,
 };
 use super::form_with::{
-    emit_form_tag_inline, emit_form_with_inline, is_errors_each, rewrite_errors_each_body,
+    emit_form_tag_inline, emit_form_with_inline, emit_tag_builder_inline, is_errors_each,
+    rewrite_errors_each_body,
 };
 use super::helpers::emit_view_helper_call;
 use super::partial::{emit_render_partial, emit_yield};
@@ -507,6 +508,30 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             if let Some(call) = emit_view_helper_call(&kind, ctx) {
                 return vec![accumulator_append_call(call, ctx)];
             }
+        }
+    }
+
+    // ActionView dynamic tag builder: `<%= tag.<element>(opts) do
+    // ...inner... %>` (lobsters' stories/_form `tag.details`). The
+    // receiver is the bare `tag` builder and the method name is the HTML
+    // element. Inline-expand to open/walk/close rather than let it fall
+    // to the generic fallback, which rebuilds `tag.<element> do ... end`
+    // verbatim — an unresolved `sp_raise_nomethod` under spinel AOT.
+    if let ExprNode::Send {
+        recv: Some(r),
+        method,
+        args: sa,
+        block: Some(block),
+        ..
+    } = &*inner.node
+    {
+        let is_bare_tag = matches!(
+            &*r.node,
+            ExprNode::Send { recv: None, method: m, args, block: None, .. }
+                if m.as_str() == "tag" && args.is_empty()
+        );
+        if is_bare_tag && !ctx.is_local("tag") {
+            return emit_tag_builder_inline(method.as_str(), sa, block, ctx);
         }
     }
 
