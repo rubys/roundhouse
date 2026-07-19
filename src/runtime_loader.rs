@@ -248,6 +248,50 @@ struct RuntimeEntry {
     extra_roots: ExtraRoots,
 }
 
+/// Build a [`RuntimeEntry`] from a single runtime-unit `stem`.
+///
+/// The nine per-target tables below each named one runtime/ruby file by
+/// repeating three independent literals per entry — the `.rb`
+/// `include_str!`, the `.rbs` `include_str!`, and the `rb_path` string —
+/// up to nine times across the tables (76 copies of the pair total).
+/// This macro derives all three from the one `stem` (the path under
+/// `runtime/ruby/` without extension, e.g. `"action_dispatch/flash"`)
+/// via `concat!`, so the embedded bytes and the error-message path
+/// physically can't drift from each other or from the unit's identity,
+/// and a new unit's file path is written once per table instead of
+/// thrice.
+///
+/// Every *other* field stays explicit and required, in fixed order:
+/// `namespace`, `out_path`, `mode`, `imports`, `prelude`, `extra_roots`
+/// each vary across targets for the same unit (a stem is `Mode::Module`
+/// in some targets and `Mode::Library` in others; its namespace, output
+/// path, imports, and hand-written-runtime roots differ per target), so
+/// there is no shared default to hoist — the duplication that was real
+/// to remove was only the stem-derivable triple.
+macro_rules! runtime_entry {
+    (
+        stem: $stem:literal,
+        namespace: $namespace:expr,
+        out_path: $out_path:expr,
+        mode: $mode:expr,
+        imports: $imports:expr,
+        prelude: $prelude:expr,
+        extra_roots: $extra_roots:expr $(,)?
+    ) => {
+        RuntimeEntry {
+            rb_src: include_str!(concat!("../runtime/ruby/", $stem, ".rb")),
+            rbs_src: include_str!(concat!("../runtime/ruby/", $stem, ".rbs")),
+            rb_path: concat!("runtime/ruby/", $stem, ".rb"),
+            namespace: $namespace,
+            out_path: $out_path,
+            mode: $mode,
+            imports: $imports,
+            prelude: $prelude,
+            extra_roots: $extra_roots,
+        }
+    };
+}
+
 /// One emitted runtime file ready to be written into the target
 /// project's `src/` tree.
 pub struct RuntimeUnit {
@@ -277,10 +321,8 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
     // ActionDispatch::Flash / ActionDispatch::Session structs with
     // typed fields + HWIA-shape shims; HWIA stays in runtime/ruby/
     // as a CRuby/Spinel helper for parity.
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/flash.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/flash.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/flash.rb",
+    runtime_entry! {
+        stem: "action_dispatch/flash",
         namespace: "ActionDispatch",
         out_path: "src/flash.ts",
         mode: Mode::Library,
@@ -292,10 +334,8 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         // none visible to the app-side reachability walk, so seed them.
         extra_roots: &[("Flash", "to_h"), ("Flash", "to_persisted")],
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/session.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/session.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/session.rb",
+    runtime_entry! {
+        stem: "action_dispatch/session",
         namespace: "ActionDispatch",
         out_path: "src/session.ts",
         mode: Mode::Library,
@@ -303,10 +343,8 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/inflector.rb"),
-        rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
-        rb_path: "runtime/ruby/inflector.rb",
+    runtime_entry! {
+        stem: "inflector",
         namespace: "",
         out_path: "src/inflector.ts",
         mode: Mode::Module,
@@ -314,10 +352,8 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/json_builder.rb"),
-        rbs_src: include_str!("../runtime/ruby/json_builder.rbs"),
-        rb_path: "runtime/ruby/json_builder.rb",
+    runtime_entry! {
+        stem: "json_builder",
         namespace: "",
         out_path: "src/json_builder.ts",
         mode: Mode::Module,
@@ -325,10 +361,8 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/active_record/errors.rb"),
-        rbs_src: include_str!("../runtime/ruby/active_record/errors.rbs"),
-        rb_path: "runtime/ruby/active_record/errors.rb",
+    runtime_entry! {
+        stem: "active_record/errors",
         namespace: "ActiveRecord",
         out_path: "src/errors.ts",
         mode: Mode::Library,
@@ -340,10 +374,8 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
     // inlines every `validates :x, …` declaration at lower time (see
     // `src/lower/model_to_library/validations.rs`). No transpiled
     // model dispatches into the Validations module any more.
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/active_record/base.rb"),
-        rbs_src: include_str!("../runtime/ruby/active_record/base.rbs"),
-        rb_path: "runtime/ruby/active_record/base.rb",
+    runtime_entry! {
+        stem: "active_record/base",
         namespace: "ActiveRecord",
         out_path: "src/active_record_base.ts",
         mode: Mode::Library,
@@ -363,10 +395,8 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_controller/base.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_controller/base.rbs"),
-        rb_path: "runtime/ruby/action_controller/base.rb",
+    runtime_entry! {
+        stem: "action_controller/base",
         namespace: "ActionController",
         out_path: "src/action_controller_base.ts",
         mode: Mode::Library,
@@ -388,10 +418,8 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/router.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/router.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/router.rb",
+    runtime_entry! {
+        stem: "action_dispatch/router",
         namespace: "",
         out_path: "src/router.ts",
         mode: Mode::Library,
@@ -407,10 +435,8 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
         // would emit empty.
         extra_roots: &[("Router", "match")],
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_view/view_helpers.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_view/view_helpers.rbs"),
-        rb_path: "runtime/ruby/action_view/view_helpers.rb",
+    runtime_entry! {
+        stem: "action_view/view_helpers",
         namespace: "",
         out_path: "src/view_helpers.ts",
         mode: Mode::Library,
@@ -437,10 +463,8 @@ const TYPESCRIPT_RUNTIME: &[RuntimeEntry] = &[
 const CRYSTAL_RUNTIME: &[RuntimeEntry] = &[
     // HWIA dropped per Phase 2.5(b); flash/session moved to typed
     // ActionDispatch structs.
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/flash.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/flash.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/flash.rb",
+    runtime_entry! {
+        stem: "action_dispatch/flash",
         namespace: "ActionDispatch",
         out_path: "src/flash.cr",
         mode: Mode::Library,
@@ -450,10 +474,8 @@ const CRYSTAL_RUNTIME: &[RuntimeEntry] = &[
         // requests — invisible to the app-side reachability walk.
         extra_roots: &[("Flash", "to_persisted")],
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/session.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/session.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/session.rb",
+    runtime_entry! {
+        stem: "action_dispatch/session",
         namespace: "ActionDispatch",
         out_path: "src/session.cr",
         mode: Mode::Library,
@@ -461,10 +483,8 @@ const CRYSTAL_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/inflector.rb"),
-        rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
-        rb_path: "runtime/ruby/inflector.rb",
+    runtime_entry! {
+        stem: "inflector",
         namespace: "",
         out_path: "src/inflector.cr",
         mode: Mode::Module,
@@ -472,10 +492,8 @@ const CRYSTAL_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/json_builder.rb"),
-        rbs_src: include_str!("../runtime/ruby/json_builder.rbs"),
-        rb_path: "runtime/ruby/json_builder.rb",
+    runtime_entry! {
+        stem: "json_builder",
         namespace: "",
         out_path: "src/json_builder.cr",
         mode: Mode::Module,
@@ -483,10 +501,8 @@ const CRYSTAL_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/active_record/errors.rb"),
-        rbs_src: include_str!("../runtime/ruby/active_record/errors.rbs"),
-        rb_path: "runtime/ruby/active_record/errors.rb",
+    runtime_entry! {
+        stem: "active_record/errors",
         namespace: "ActiveRecord",
         out_path: "src/errors.cr",
         mode: Mode::Library,
@@ -498,10 +514,8 @@ const CRYSTAL_RUNTIME: &[RuntimeEntry] = &[
     // inlines every `validates :x, …` declaration at lower time (see
     // `src/lower/model_to_library/validations.rs`). No transpiled
     // model dispatches into the Validations module any more.
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/active_record/base.rb"),
-        rbs_src: include_str!("../runtime/ruby/active_record/base.rbs"),
-        rb_path: "runtime/ruby/active_record/base.rb",
+    runtime_entry! {
+        stem: "active_record/base",
         namespace: "ActiveRecord",
         out_path: "src/active_record_base.cr",
         mode: Mode::Library,
@@ -509,10 +523,8 @@ const CRYSTAL_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_controller/base.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_controller/base.rbs"),
-        rb_path: "runtime/ruby/action_controller/base.rb",
+    runtime_entry! {
+        stem: "action_controller/base",
         namespace: "ActionController",
         out_path: "src/action_controller_base.cr",
         mode: Mode::Library,
@@ -520,10 +532,8 @@ const CRYSTAL_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/router.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/router.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/router.rb",
+    runtime_entry! {
+        stem: "action_dispatch/router",
         namespace: "",
         out_path: "src/router.cr",
         mode: Mode::Library,
@@ -531,10 +541,8 @@ const CRYSTAL_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_view/view_helpers.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_view/view_helpers.rbs"),
-        rb_path: "runtime/ruby/action_view/view_helpers.rb",
+    runtime_entry! {
+        stem: "action_view/view_helpers",
         namespace: "",
         out_path: "src/view_helpers.cr",
         mode: Mode::Library,
@@ -566,10 +574,8 @@ where
 /// dependency order matching Crystal's RUNTIME_ORDER. Phase 3 layers
 /// hand-written primitive runtime (`runtime/rust/`) on top.
 const RUST_RUNTIME: &[RuntimeEntry] = &[
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/inflector.rb"),
-        rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
-        rb_path: "runtime/ruby/inflector.rb",
+    runtime_entry! {
+        stem: "inflector",
         namespace: "",
         out_path: "src/inflector.rs",
         // Library (not Module) so the emit produces `pub struct
@@ -582,10 +588,8 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/json_builder.rb"),
-        rbs_src: include_str!("../runtime/ruby/json_builder.rbs"),
-        rb_path: "runtime/ruby/json_builder.rb",
+    runtime_entry! {
+        stem: "json_builder",
         namespace: "",
         out_path: "src/json_builder.rs",
         // Library mode parallel to inflector — emit `pub struct
@@ -598,10 +602,8 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/router.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/router.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/router.rb",
+    runtime_entry! {
+        stem: "action_dispatch/router",
         namespace: "",
         out_path: "src/router.rs",
         // Library mode (not Module): router.rb now carries typed
@@ -612,10 +614,8 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_view/view_helpers.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_view/view_helpers.rbs"),
-        rb_path: "runtime/ruby/action_view/view_helpers.rb",
+    runtime_entry! {
+        stem: "action_view/view_helpers",
         namespace: "ActionView",
         out_path: "src/view_helpers.rs",
         mode: Mode::Library,
@@ -634,10 +634,8 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/active_record/base.rb"),
-        rbs_src: include_str!("../runtime/ruby/active_record/base.rbs"),
-        rb_path: "runtime/ruby/active_record/base.rb",
+    runtime_entry! {
+        stem: "active_record/base",
         namespace: "ActiveRecord",
         out_path: "src/active_record_base.rs",
         mode: Mode::Library,
@@ -660,10 +658,8 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_controller/base.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_controller/base.rbs"),
-        rb_path: "runtime/ruby/action_controller/base.rb",
+    runtime_entry! {
+        stem: "action_controller/base",
         namespace: "ActionController",
         out_path: "src/action_controller_base.rs",
         mode: Mode::Library,
@@ -899,10 +895,8 @@ fn kotlin_wrap_namespace(_namespace: &str, body: &str) -> String {
 }
 
 const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/inflector.rb"),
-        rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
-        rb_path: "runtime/ruby/inflector.rb",
+    runtime_entry! {
+        stem: "inflector",
         namespace: "",
         out_path: "src/main/kotlin/Inflector.kt",
         mode: Mode::Module,
@@ -910,10 +904,8 @@ const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/json_builder.rb"),
-        rbs_src: include_str!("../runtime/ruby/json_builder.rbs"),
-        rb_path: "runtime/ruby/json_builder.rb",
+    runtime_entry! {
+        stem: "json_builder",
         namespace: "",
         out_path: "src/main/kotlin/JsonBuilder.kt",
         mode: Mode::Module,
@@ -921,10 +913,8 @@ const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/router.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/router.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/router.rb",
+    runtime_entry! {
+        stem: "action_dispatch/router",
         namespace: "",
         out_path: "src/main/kotlin/Router.kt",
         mode: Mode::Library,
@@ -932,10 +922,8 @@ const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: &[("Router", "match"), ("Router", "match_pattern")],
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/active_record/errors.rb"),
-        rbs_src: include_str!("../runtime/ruby/active_record/errors.rbs"),
-        rb_path: "runtime/ruby/active_record/errors.rb",
+    runtime_entry! {
+        stem: "active_record/errors",
         namespace: "",
         out_path: "src/main/kotlin/Errors.kt",
         mode: Mode::Library,
@@ -943,10 +931,8 @@ const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/active_record/base.rb"),
-        rbs_src: include_str!("../runtime/ruby/active_record/base.rbs"),
-        rb_path: "runtime/ruby/active_record/base.rb",
+    runtime_entry! {
+        stem: "active_record/base",
         namespace: "",
         out_path: "src/main/kotlin/ActiveRecordBase.kt",
         mode: Mode::Library,
@@ -954,10 +940,8 @@ const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_view/view_helpers.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_view/view_helpers.rbs"),
-        rb_path: "runtime/ruby/action_view/view_helpers.rb",
+    runtime_entry! {
+        stem: "action_view/view_helpers",
         namespace: "",
         out_path: "src/main/kotlin/ViewHelpers.kt",
         mode: Mode::Module,
@@ -965,10 +949,8 @@ const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/flash.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/flash.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/flash.rb",
+    runtime_entry! {
+        stem: "action_dispatch/flash",
         namespace: "",
         out_path: "src/main/kotlin/Flash.kt",
         mode: Mode::Library,
@@ -980,10 +962,8 @@ const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
         // documents the dep + matches go/crystal/ts.)
         extra_roots: &[("Flash", "to_persisted")],
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/session.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/session.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/session.rb",
+    runtime_entry! {
+        stem: "action_dispatch/session",
         namespace: "",
         out_path: "src/main/kotlin/Session.kt",
         mode: Mode::Library,
@@ -991,10 +971,8 @@ const KOTLIN_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_controller/base.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_controller/base.rbs"),
-        rb_path: "runtime/ruby/action_controller/base.rb",
+    runtime_entry! {
+        stem: "action_controller/base",
         namespace: "",
         out_path: "src/main/kotlin/ActionControllerBase.kt",
         mode: Mode::Library,
@@ -1133,10 +1111,8 @@ fn csharp_wrap_namespace(_namespace: &str, body: &str) -> String {
 }
 
 const CSHARP_RUNTIME: &[RuntimeEntry] = &[
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/inflector.rb"),
-        rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
-        rb_path: "runtime/ruby/inflector.rb",
+    runtime_entry! {
+        stem: "inflector",
         namespace: "",
         out_path: "app/runtime/Inflector.cs",
         mode: Mode::Module,
@@ -1144,10 +1120,8 @@ const CSHARP_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/json_builder.rb"),
-        rbs_src: include_str!("../runtime/ruby/json_builder.rbs"),
-        rb_path: "runtime/ruby/json_builder.rb",
+    runtime_entry! {
+        stem: "json_builder",
         namespace: "",
         out_path: "app/runtime/JsonBuilder.cs",
         mode: Mode::Module,
@@ -1159,10 +1133,8 @@ const CSHARP_RUNTIME: &[RuntimeEntry] = &[
     // `record.errors` (a method on Base), which only resolves as a call once
     // `ActiveRecordBase` is registered. base.rb only *raises* RecordNotFound/
     // RecordInvalid (name-only), so it needs nothing from errors at emit time.
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/active_record/base.rb"),
-        rbs_src: include_str!("../runtime/ruby/active_record/base.rbs"),
-        rb_path: "runtime/ruby/active_record/base.rb",
+    runtime_entry! {
+        stem: "active_record/base",
         namespace: "ActiveRecord",
         out_path: "app/runtime/ActiveRecordBase.cs",
         mode: Mode::Library,
@@ -1170,10 +1142,8 @@ const CSHARP_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/active_record/errors.rb"),
-        rbs_src: include_str!("../runtime/ruby/active_record/errors.rbs"),
-        rb_path: "runtime/ruby/active_record/errors.rb",
+    runtime_entry! {
+        stem: "active_record/errors",
         namespace: "ActiveRecord",
         out_path: "app/runtime/Errors.cs",
         mode: Mode::Library,
@@ -1183,10 +1153,8 @@ const CSHARP_RUNTIME: &[RuntimeEntry] = &[
     },
     // Router: the (method, path) → (controller, action, params) matcher +
     // its typed Route / MatchResult rows. Self-contained (no AR/AC deps).
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/router.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/router.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/router.rb",
+    runtime_entry! {
+        stem: "action_dispatch/router",
         namespace: "",
         out_path: "app/runtime/Router.cs",
         mode: Mode::Library,
@@ -1197,10 +1165,8 @@ const CSHARP_RUNTIME: &[RuntimeEntry] = &[
     // Flash + Session: the per-request state ActionController::Base holds.
     // Independent of the AR layer; needed before AC::Base (it instantiates
     // both and uses `@flash[:notice] = …`).
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/flash.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/flash.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/flash.rb",
+    runtime_entry! {
+        stem: "action_dispatch/flash",
         namespace: "ActionDispatch",
         out_path: "app/runtime/Flash.cs",
         mode: Mode::Library,
@@ -1208,10 +1174,8 @@ const CSHARP_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/session.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/session.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/session.rb",
+    runtime_entry! {
+        stem: "action_dispatch/session",
         namespace: "ActionDispatch",
         out_path: "app/runtime/Session.cs",
         mode: Mode::Library,
@@ -1219,10 +1183,8 @@ const CSHARP_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_controller/base.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_controller/base.rbs"),
-        rb_path: "runtime/ruby/action_controller/base.rb",
+    runtime_entry! {
+        stem: "action_controller/base",
         namespace: "ActionController",
         out_path: "app/runtime/ActionControllerBase.cs",
         mode: Mode::Library,
@@ -1233,10 +1195,8 @@ const CSHARP_RUNTIME: &[RuntimeEntry] = &[
     // View helpers — module functions (link_to, dom_id, render_attrs, the
     // content_for slot store, …) invoked from Views::* render methods.
     // References Inflector + Base; the last runtime file.
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_view/view_helpers.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_view/view_helpers.rbs"),
-        rb_path: "runtime/ruby/action_view/view_helpers.rb",
+    runtime_entry! {
+        stem: "action_view/view_helpers",
         namespace: "",
         out_path: "app/runtime/ViewHelpers.cs",
         mode: Mode::Library,
@@ -1294,10 +1254,8 @@ fn swift_wrap_namespace(_namespace: &str, body: &str) -> String {
 }
 
 const SWIFT_RUNTIME: &[RuntimeEntry] = &[
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/inflector.rb"),
-        rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
-        rb_path: "runtime/ruby/inflector.rb",
+    runtime_entry! {
+        stem: "inflector",
         namespace: "",
         out_path: "Sources/App/Inflector.swift",
         mode: Mode::Module,
@@ -1305,10 +1263,8 @@ const SWIFT_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/json_builder.rb"),
-        rbs_src: include_str!("../runtime/ruby/json_builder.rbs"),
-        rb_path: "runtime/ruby/json_builder.rb",
+    runtime_entry! {
+        stem: "json_builder",
         namespace: "",
         out_path: "Sources/App/JsonBuilder.swift",
         mode: Mode::Module,
@@ -1316,10 +1272,8 @@ const SWIFT_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/router.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/router.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/router.rb",
+    runtime_entry! {
+        stem: "action_dispatch/router",
         namespace: "",
         out_path: "Sources/App/Router.swift",
         mode: Mode::Library,
@@ -1327,10 +1281,8 @@ const SWIFT_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: &[("Router", "match"), ("Router", "match_pattern")],
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/active_record/errors.rb"),
-        rbs_src: include_str!("../runtime/ruby/active_record/errors.rbs"),
-        rb_path: "runtime/ruby/active_record/errors.rb",
+    runtime_entry! {
+        stem: "active_record/errors",
         namespace: "",
         out_path: "Sources/App/Errors.swift",
         mode: Mode::Library,
@@ -1338,10 +1290,8 @@ const SWIFT_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/active_record/base.rb"),
-        rbs_src: include_str!("../runtime/ruby/active_record/base.rbs"),
-        rb_path: "runtime/ruby/active_record/base.rb",
+    runtime_entry! {
+        stem: "active_record/base",
         namespace: "",
         out_path: "Sources/App/ActiveRecordBase.swift",
         mode: Mode::Library,
@@ -1349,10 +1299,8 @@ const SWIFT_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_view/view_helpers.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_view/view_helpers.rbs"),
-        rb_path: "runtime/ruby/action_view/view_helpers.rb",
+    runtime_entry! {
+        stem: "action_view/view_helpers",
         namespace: "",
         out_path: "Sources/App/ViewHelpers.swift",
         mode: Mode::Module,
@@ -1360,10 +1308,8 @@ const SWIFT_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/flash.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/flash.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/flash.rb",
+    runtime_entry! {
+        stem: "action_dispatch/flash",
         namespace: "",
         out_path: "Sources/App/Flash.swift",
         mode: Mode::Library,
@@ -1375,10 +1321,8 @@ const SWIFT_RUNTIME: &[RuntimeEntry] = &[
         // documents the dep + matches go/kotlin/crystal/ts.)
         extra_roots: &[("Flash", "to_persisted")],
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/session.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/session.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/session.rb",
+    runtime_entry! {
+        stem: "action_dispatch/session",
         namespace: "",
         out_path: "Sources/App/Session.swift",
         mode: Mode::Library,
@@ -1386,10 +1330,8 @@ const SWIFT_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_controller/base.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_controller/base.rbs"),
-        rb_path: "runtime/ruby/action_controller/base.rb",
+    runtime_entry! {
+        stem: "action_controller/base",
         namespace: "",
         out_path: "Sources/App/ActionControllerBase.swift",
         mode: Mode::Library,
@@ -1479,10 +1421,8 @@ const GO_RUNTIME: &[RuntimeEntry] = &[
     // for the variants their bodies hit. The list stays narrow on
     // purpose so the v2/ overlay keeps go-build clean — the inventory
     // signal we want is whether the CURRENT scope still passes.
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/inflector.rb"),
-        rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
-        rb_path: "runtime/ruby/inflector.rb",
+    runtime_entry! {
+        stem: "inflector",
         namespace: "",
         out_path: "app/inflector.go",
         mode: Mode::Library,
@@ -1490,10 +1430,8 @@ const GO_RUNTIME: &[RuntimeEntry] = &[
         prelude: GO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/json_builder.rb"),
-        rbs_src: include_str!("../runtime/ruby/json_builder.rbs"),
-        rb_path: "runtime/ruby/json_builder.rb",
+    runtime_entry! {
+        stem: "json_builder",
         namespace: "",
         out_path: "app/json_builder.go",
         mode: Mode::Library,
@@ -1501,10 +1439,8 @@ const GO_RUNTIME: &[RuntimeEntry] = &[
         prelude: GO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/router.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/router.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/router.rb",
+    runtime_entry! {
+        stem: "action_dispatch/router",
         namespace: "",
         out_path: "app/router.go",
         mode: Mode::Library,
@@ -1512,10 +1448,8 @@ const GO_RUNTIME: &[RuntimeEntry] = &[
         prelude: GO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/active_record/base.rb"),
-        rbs_src: include_str!("../runtime/ruby/active_record/base.rbs"),
-        rb_path: "runtime/ruby/active_record/base.rb",
+    runtime_entry! {
+        stem: "active_record/base",
         namespace: "",
         out_path: "app/active_record_base.go",
         mode: Mode::Library,
@@ -1523,10 +1457,8 @@ const GO_RUNTIME: &[RuntimeEntry] = &[
         prelude: GO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/session.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/session.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/session.rb",
+    runtime_entry! {
+        stem: "action_dispatch/session",
         namespace: "",
         out_path: "app/session.go",
         mode: Mode::Library,
@@ -1534,10 +1466,8 @@ const GO_RUNTIME: &[RuntimeEntry] = &[
         prelude: GO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/flash.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/flash.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/flash.rb",
+    runtime_entry! {
+        stem: "action_dispatch/flash",
         namespace: "",
         out_path: "app/flash.go",
         mode: Mode::Library,
@@ -1548,10 +1478,8 @@ const GO_RUNTIME: &[RuntimeEntry] = &[
         // invisible to the app-side reachability walk, so seed it.
         extra_roots: &[("Flash", "to_persisted")],
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_view/view_helpers.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_view/view_helpers.rbs"),
-        rb_path: "runtime/ruby/action_view/view_helpers.rb",
+    runtime_entry! {
+        stem: "action_view/view_helpers",
         namespace: "",
         out_path: "app/view_helpers.go",
         mode: Mode::Library,
@@ -1559,10 +1487,8 @@ const GO_RUNTIME: &[RuntimeEntry] = &[
         prelude: GO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_controller/base.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_controller/base.rbs"),
-        rb_path: "runtime/ruby/action_controller/base.rb",
+    runtime_entry! {
+        stem: "action_controller/base",
         namespace: "",
         out_path: "app/action_controller_base.go",
         mode: Mode::Library,
@@ -1674,10 +1600,8 @@ fn elixir_wrap_namespace(_namespace: &str, body: &str) -> String {
 /// as the body walker grows to cover while-loop→recursion and instance
 /// mutation-threading.
 const ELIXIR_RUNTIME: &[RuntimeEntry] = &[
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/inflector.rb"),
-        rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
-        rb_path: "runtime/ruby/inflector.rb",
+    runtime_entry! {
+        stem: "inflector",
         namespace: "",
         out_path: "lib/v2/inflector.ex",
         mode: Mode::Library,
@@ -1685,10 +1609,8 @@ const ELIXIR_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/json_builder.rb"),
-        rbs_src: include_str!("../runtime/ruby/json_builder.rbs"),
-        rb_path: "runtime/ruby/json_builder.rb",
+    runtime_entry! {
+        stem: "json_builder",
         namespace: "",
         out_path: "lib/v2/json_builder.ex",
         mode: Mode::Library,
@@ -1696,10 +1618,8 @@ const ELIXIR_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/router.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/router.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/router.rb",
+    runtime_entry! {
+        stem: "action_dispatch/router",
         namespace: "",
         out_path: "lib/v2/router.ex",
         mode: Mode::Library,
@@ -1707,10 +1627,8 @@ const ELIXIR_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/flash.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/flash.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/flash.rb",
+    runtime_entry! {
+        stem: "action_dispatch/flash",
         namespace: "",
         out_path: "lib/v2/flash.ex",
         mode: Mode::Library,
@@ -1722,10 +1640,8 @@ const ELIXIR_RUNTIME: &[RuntimeEntry] = &[
         // elixir doesn't treeshake — but documents the dep.)
         extra_roots: &[("Flash", "to_persisted")],
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/session.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/session.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/session.rb",
+    runtime_entry! {
+        stem: "action_dispatch/session",
         namespace: "",
         out_path: "lib/v2/session.ex",
         mode: Mode::Library,
@@ -1733,10 +1649,8 @@ const ELIXIR_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_controller/base.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_controller/base.rbs"),
-        rb_path: "runtime/ruby/action_controller/base.rb",
+    runtime_entry! {
+        stem: "action_controller/base",
         namespace: "",
         out_path: "lib/v2/action_controller_base.ex",
         mode: Mode::Library,
@@ -1744,10 +1658,8 @@ const ELIXIR_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_view/view_helpers.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_view/view_helpers.rbs"),
-        rb_path: "runtime/ruby/action_view/view_helpers.rb",
+    runtime_entry! {
+        stem: "action_view/view_helpers",
         namespace: "ActionView",
         out_path: "lib/v2/view_helpers.ex",
         mode: Mode::Library,
@@ -1864,10 +1776,8 @@ fn py_wrap_namespace(_namespace: &str, body: &str) -> String {
 /// Python has no tree-shake pass yet, so the reachability roots TS needs
 /// don't apply.
 const PYTHON_RUNTIME: &[RuntimeEntry] = &[
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/inflector.rb"),
-        rbs_src: include_str!("../runtime/ruby/inflector.rbs"),
-        rb_path: "runtime/ruby/inflector.rb",
+    runtime_entry! {
+        stem: "inflector",
         namespace: "",
         out_path: "app/inflector.py",
         mode: Mode::Module,
@@ -1875,10 +1785,8 @@ const PYTHON_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/json_builder.rb"),
-        rbs_src: include_str!("../runtime/ruby/json_builder.rbs"),
-        rb_path: "runtime/ruby/json_builder.rb",
+    runtime_entry! {
+        stem: "json_builder",
         namespace: "",
         out_path: "app/json_builder.py",
         mode: Mode::Module,
@@ -1890,10 +1798,8 @@ const PYTHON_RUNTIME: &[RuntimeEntry] = &[
         prelude: "import re\n\n",
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/active_record/errors.rb"),
-        rbs_src: include_str!("../runtime/ruby/active_record/errors.rbs"),
-        rb_path: "runtime/ruby/active_record/errors.rb",
+    runtime_entry! {
+        stem: "active_record/errors",
         namespace: "ActiveRecord",
         out_path: "app/errors.py",
         mode: Mode::Library,
@@ -1901,10 +1807,8 @@ const PYTHON_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/active_record/base.rb"),
-        rbs_src: include_str!("../runtime/ruby/active_record/base.rbs"),
-        rb_path: "runtime/ruby/active_record/base.rb",
+    runtime_entry! {
+        stem: "active_record/base",
         namespace: "ActiveRecord",
         out_path: "app/active_record_base.py",
         mode: Mode::Library,
@@ -1921,10 +1825,8 @@ const PYTHON_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/flash.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/flash.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/flash.rb",
+    runtime_entry! {
+        stem: "action_dispatch/flash",
         namespace: "ActionDispatch",
         out_path: "app/flash.py",
         mode: Mode::Library,
@@ -1936,10 +1838,8 @@ const PYTHON_RUNTIME: &[RuntimeEntry] = &[
         // doesn't treeshake — but documents the dep.)
         extra_roots: &[("Flash", "to_persisted")],
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/session.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/session.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/session.rb",
+    runtime_entry! {
+        stem: "action_dispatch/session",
         namespace: "ActionDispatch",
         out_path: "app/session.py",
         mode: Mode::Library,
@@ -1947,10 +1847,8 @@ const PYTHON_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_controller/base.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_controller/base.rbs"),
-        rb_path: "runtime/ruby/action_controller/base.rb",
+    runtime_entry! {
+        stem: "action_controller/base",
         namespace: "ActionController",
         out_path: "app/action_controller_base.py",
         mode: Mode::Library,
@@ -1958,10 +1856,8 @@ const PYTHON_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_dispatch/router.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_dispatch/router.rbs"),
-        rb_path: "runtime/ruby/action_dispatch/router.rb",
+    runtime_entry! {
+        stem: "action_dispatch/router",
         namespace: "",
         out_path: "app/router.py",
         mode: Mode::Library,
@@ -1969,10 +1865,8 @@ const PYTHON_RUNTIME: &[RuntimeEntry] = &[
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
-    RuntimeEntry {
-        rb_src: include_str!("../runtime/ruby/action_view/view_helpers.rb"),
-        rbs_src: include_str!("../runtime/ruby/action_view/view_helpers.rbs"),
-        rb_path: "runtime/ruby/action_view/view_helpers.rb",
+    runtime_entry! {
+        stem: "action_view/view_helpers",
         namespace: "",
         out_path: "app/view_helpers.py",
         mode: Mode::Library,
