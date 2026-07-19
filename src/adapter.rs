@@ -140,7 +140,15 @@ impl DatabaseAdapter for SqliteAdapter {
         // (IndexedDB, D1) that refuse some methods will return
         // `Unknown` for those even when the catalog has an entry,
         // surfacing as diagnostics downstream.
-        for entry in crate::catalog::lookup_any(method) {
+        // Relation-context entries are excluded until the analyzer's
+        // Relation-receiver dispatch consumes them: this receiver-blind
+        // search must not start classifying names that only exist
+        // under the Relation context (`to_a`, `page`, `merge`, …) —
+        // that would attach effects to Sends the analyzer doesn't yet
+        // type as relations.
+        for entry in crate::catalog::lookup_any(method)
+            .filter(|e| e.receiver != crate::catalog::ReceiverContext::Relation)
+        {
             match entry.effect {
                 crate::catalog::EffectClass::DbRead => return ArMethodKind::Read,
                 crate::catalog::EffectClass::DbWrite => return ArMethodKind::Write,

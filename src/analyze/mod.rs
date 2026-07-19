@@ -139,6 +139,14 @@ impl Analyzer {
                         id: ClassId(Symbol::from(path)),
                         args: vec![],
                     },
+                    // Relation-context kinds. Unreachable from the
+                    // Class/Instance loops below (which filter on
+                    // receiver context) until Relation-receiver
+                    // dispatch instantiates them.
+                    ReturnKind::RelationOfSelf => Ty::Relation { of: model.name.clone() },
+                    ReturnKind::ArrayOfInt => Ty::Array { elem: Box::new(Ty::Int) },
+                    ReturnKind::ArrayOfUntyped => Ty::Array { elem: Box::new(Ty::Untyped) },
+                    ReturnKind::Untyped => Ty::Untyped,
                 }
             };
             for entry in AR_CATALOG {
@@ -3791,9 +3799,17 @@ impl Analyzer {
     /// and emitting `await` would produce one spurious round-trip
     /// per chain link under async backends.
     fn is_builder_chain(&self, method: &str) -> bool {
-        crate::catalog::lookup_any(method).any(|entry| {
-            matches!(entry.chain, crate::catalog::ChainKind::Builder)
-        })
+        // Relation-context entries excluded for the same reason as
+        // `SqliteAdapter::classify_ar_method`: this name-only search
+        // must not reclassify names that only exist under the
+        // Relation context until Relation-receiver dispatch consumes
+        // them (`page`, `per`, `not`, … becoming Builder here would
+        // silently drop effect attachment on today's Sends).
+        crate::catalog::lookup_any(method)
+            .filter(|e| e.receiver != crate::catalog::ReceiverContext::Relation)
+            .any(|entry| {
+                matches!(entry.chain, crate::catalog::ChainKind::Builder)
+            })
     }
 
 }
