@@ -867,20 +867,27 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         return_kind: Some(ReturnKind::Str),
     },
     // ---- Relation-context surface ----
-    // The methods callable on a `Ty::Relation`-typed receiver (scope
-    // results, relation-returning class methods, association reads).
-    // Populated from the relation branch of `analyze/body/send.rs::
-    // array_method` — those arms are the spec; return kinds reproduce
-    // exactly the types the arms produce today on the `Array<Self>`
-    // representation (settled decision: terminal result types must
-    // not change). Facets mirror the Class-context entry where the
+    // The methods callable on a relation-shaped receiver — a
+    // `Ty::Relation` (scope results, relation-returning class
+    // methods) or the `Array<model>` inline-chain representation.
+    // Consumed by BOTH dispatch paths in `analyze/body/send.rs`:
+    // the `Ty::Relation` arm instantiates via
+    // `instantiate_return_kind` (builders preserve the relation),
+    // the `Array` branch via `relation_return_on_array_repr`
+    // (builders preserve the array). Return kinds reproduce exactly
+    // the types the former hand-written arms produced (settled
+    // decision: terminal result types must not change); the
+    // `relation_context_mirrors_send_rs_relation_branch` test pins
+    // the surface. Facets mirror the Class-context entry where the
     // same name exists there.
     //
-    // NOT consumed until the analyzer's Relation dispatch lands: the
-    // two receiver-blind consumers (`SqliteAdapter::classify_ar_method`,
-    // `Analyzer::is_builder_chain`) filter this context out so adding
-    // entries here cannot shift effect classification of names that
-    // had no catalog entry before (`to_a`, `page`, `merge`, …).
+    // The two receiver-blind NAME-based consumers
+    // (`SqliteAdapter::classify_ar_method`, `Analyzer::
+    // is_builder_chain`) still filter this context out so these
+    // entries cannot shift effect classification of names that had
+    // no catalog entry before (`to_a`, `page`, `merge`, …); moving
+    // query-execution effects to the terminal step of Relation-typed
+    // chains is logged follow-on work, not name-classification work.
     //
     // Builders — preserve the relation, no SQL executes.
     CatalogedMethod {

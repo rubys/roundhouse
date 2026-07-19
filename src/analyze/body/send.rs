@@ -912,6 +912,44 @@ fn is_model_relation_elem(elem: &Ty) -> bool {
     }
 }
 
+/// Instantiate a Relation-context catalog [`ReturnKind`] against the
+/// ARRAY representation of a relation (`Array<elem>`, the inline-chain
+/// stand-in), where `elem` is the element model — or a union of models
+/// for a helper-shared relation, which is why this takes the element
+/// `Ty` rather than a `ClassId`. The receiver's representation is
+/// preserved: builders (`RelationOfSelf`) stay `Array<elem>` here;
+/// Relation-typed chains instantiate through
+/// `crate::analyze::instantiate_return_kind` instead. `SelfOrNil` uses
+/// `union_of`, not a literal `Union`, so a union element flattens
+/// instead of nesting.
+fn relation_return_on_array_repr(kind: crate::catalog::ReturnKind, elem: &Ty) -> Ty {
+    use crate::catalog::ReturnKind;
+    match kind {
+        ReturnKind::SelfType => elem.clone(),
+        ReturnKind::RelationOfSelf | ReturnKind::ArrayOfSelf => {
+            Ty::Array { elem: Box::new(elem.clone()) }
+        }
+        ReturnKind::SelfOrNil => union_of(elem.clone(), Ty::Nil),
+        ReturnKind::Int => Ty::Int,
+        ReturnKind::Bool => Ty::Bool,
+        ReturnKind::ArrayOfInt => Ty::Array { elem: Box::new(Ty::Int) },
+        ReturnKind::ArrayOfUntyped => Ty::Array { elem: Box::new(Ty::Untyped) },
+        ReturnKind::Untyped => Ty::Untyped,
+        ReturnKind::ClassRef(path) => Ty::Class {
+            id: crate::ident::ClassId(Symbol::from(path)),
+            args: vec![],
+        },
+        // Not declared by any Relation-context entry today; kept
+        // total so a future entry can't panic this instantiation.
+        ReturnKind::HashSymStr => Ty::Hash {
+            key: Box::new(Ty::Sym),
+            value: Box::new(Ty::Str),
+        },
+        ReturnKind::ArrayOfSym => Ty::Array { elem: Box::new(Ty::Sym) },
+        ReturnKind::Str => Ty::Str,
+    }
+}
+
 pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -> Ty {
     // AR-specific dispatches go FIRST so they win over the generic
     // array methods that share a name (`find` on a relation raises, so
@@ -922,24 +960,10 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
     // admit the relation-builder surface.
     if is_model_relation_elem(elem) {
         match method.as_str() {
-            // Relation chain methods preserve Array<Self>.
-            "where" | "order" | "limit" | "offset" | "includes" | "preload"
-            | "joins" | "left_outer_joins" | "distinct" | "group" | "having"
-            | "references" | "eager_load" | "readonly" | "reorder"
-            | "rewhere" | "merge" | "merge!" | "extending" | "unscope"
-            | "not" | "or" | "and" | "none" | "load" | "reload" | "reselect"
-            // Kaminari's pagination chain — same builder shape.
-            | "page" | "per" | "padding" | "without_count" => {
-                return Ty::Array { elem: Box::new(elem.clone()) };
-            }
-            // `async_count` returns an ActiveRecord::Promise whose
-            // `.value` blocks and yields the count (see GEM_CATALOG).
-            "async_count" => {
-                return Ty::Class {
-                    id: crate::ident::ClassId(Symbol::from("ActiveRecord::Promise")),
-                    args: vec![],
-                };
-            }
+            // Genuinely elem-dependent arms stay code — the catalog's
+            // ReturnKind can't express their union-element cases
+            // (refactor-plan 4.2 guidance).
+            //
             // `relation.model` is the element model class. With a union
             // element it's ambiguous, so fall back to the gradual
             // escape (the common use is `query.model.table_name`).
@@ -949,56 +973,28 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
                     _ => Ty::Untyped,
                 };
             }
-            // CollectionProxy constructors / first-or-X return an element.
-            "build" | "create" | "create!" | "find" | "find!" | "find_by!"
-            | "first!" | "last!" | "take!" | "sole" | "sole!"
-            | "first_or_initialize" | "first_or_create" | "first_or_create!"
-            | "find_or_initialize_by" | "find_or_create_by" | "find_or_create_by!" => {
-                return elem.clone();
-            }
-            // `ids` projects the primary keys; `arel` escapes to raw SQL.
-            "ids" => return Ty::Array { elem: Box::new(Ty::Int) },
+            // `arel` on a single-model relation is intercepted by the
+            // dispatch arm above (→ `Arel::SelectManager`) before
+            // array_method runs; reaching here means a union element,
+            // where the manager's model is ambiguous — gradual.
             "arel" => return Ty::Untyped,
-            // `find_by` / `take` on a relation return Element | Nil
-            // (same as a class call). Already covered by AR_CATALOG
-            // for class receivers; cover the Array<Model> shape here.
-            // union_of, not a literal Union: elem may itself be a
-            // union (`Array<Story|Comment>` from a polymorphic
-            // relation) and must flatten, not nest.
-            "find_by" | "take" => {
-                return union_of(elem.clone(), Ty::Nil);
-            }
-            // `find_each` / `find_in_batches` yield the elem but
-            // return the receiver-relation for chaining.
-            "find_each" | "find_in_batches" | "in_batches" => {
-                return Ty::Array { elem: Box::new(elem.clone()) };
-            }
-            // `pluck(*cols)` returns Array of the column values; we
-            // can't tell the column type from method/elem alone, so
-            // produce `Array<Untyped>` (gradual escape — emitters
-            // handle the cast at the call site if needed).
-            "pluck" => {
-                return Ty::Array { elem: Box::new(Ty::Untyped) };
-            }
-            // `pick(*cols)` is `limit(1).pluck(*cols).first` — a single
-            // value (or nil), not an array. Gradual on the value; the
-            // nil case folds into Untyped's absorption.
-            "pick" => {
-                return Ty::Untyped;
-            }
-            // `count` / `sum` / `average` on a relation return Int
-            // (count) or Numeric (sum/avg). Approximate as Int; the
-            // sum/avg float case is rare in controller code.
-            "count" | "sum" | "average" | "minimum" | "maximum" => {
-                return Ty::Int;
-            }
-            // `exists?` / `any?` / `none?` predicates.
-            "exists?" => return Ty::Bool,
-            // `update_all` / `delete_all` / `destroy_all` return
-            // affected-row count (Int) or affected records.
-            "update_all" | "delete_all" => return Ty::Int,
-            "destroy_all" => return Ty::Array { elem: Box::new(elem.clone()) },
             _ => {}
+        }
+        // Everything else resolves through the Relation-context
+        // catalog (refactor-plan 4.2: the former string arms live in
+        // AR_CATALOG; `relation_context_mirrors_send_rs_relation_branch`
+        // pins the surface). The receiver here carries the ARRAY
+        // representation — an inline `Model.where(...)` chain — so
+        // builders (`RelationOfSelf`) preserve `Array<elem>`, and
+        // terminals instantiate against the element exactly as the
+        // arms did.
+        if let Some(entry) = crate::catalog::lookup(
+            method.as_str(),
+            crate::catalog::ReceiverContext::Relation,
+        ) {
+            if let Some(kind) = entry.return_kind {
+                return relation_return_on_array_repr(kind, elem);
+            }
         }
     }
     // Block-returning transformations: output element type comes from
