@@ -183,8 +183,12 @@ fn post_analyze_pass_order_is_sound() -> bool {
 /// diagnostics — sites a pass had to leave dynamic, with the reason.
 ///
 /// The call order below is the canonical [`POST_ANALYZE_PASS_ORDER`];
-/// keep the two in sync when adding a pass (the debug_assert guards the
-/// ordering constraints, not the code↔list correspondence).
+/// keep the two in sync when adding a pass. In debug builds an
+/// `executed` list is threaded past each call and asserted equal to the
+/// const's names in order, so a pass added to the code but not the const
+/// (or vice versa, or reordered) fails every debug test run — the
+/// code↔list correspondence the `runs_after` debug_assert alone can't
+/// catch.
 ///
 /// `registry` is the analyzer's post-fixpoint class table
 /// ([`crate::analyze::Analyzer::class_registry`]) — passes that
@@ -198,30 +202,76 @@ pub fn apply_post_analyze_lowerings(
         post_analyze_pass_order_is_sound(),
         "POST_ANALYZE_PASS_ORDER violates a declared runs_after constraint",
     );
+    // Debug-only record of the passes actually run, in call order,
+    // asserted against POST_ANALYZE_PASS_ORDER at the end. Catches the
+    // code↔list drift the `runs_after` check above can't: a pass added
+    // here but not to the const (or removed, or reordered) fails the
+    // assert. `push` calls sit adjacent to each pass call below.
+    #[cfg(debug_assertions)]
+    let mut executed: Vec<&str> = Vec::new();
+    #[cfg(debug_assertions)]
+    macro_rules! ran {
+        ($name:expr) => {
+            executed.push($name)
+        };
+    }
+    #[cfg(not(debug_assertions))]
+    macro_rules! ran {
+        ($name:expr) => {};
+    }
     let mut diags = blank::apply_blank_lowering(app);
+    ran!("blank");
     time_current::apply_time_current_lowering(app);
+    ran!("time_current");
     as_json_super::apply_as_json_super_grounding(app);
+    ran!("as_json_super");
     parameterize::apply_parameterize_grounding(app);
+    ran!("parameterize");
     request_index::apply_request_index_lowering(app);
+    ran!("request_index");
     transaction_ground::apply_transaction_grounding(app);
+    ran!("transaction_ground");
     partial_qualify::apply_partial_qualification(app);
+    ran!("partial_qualify");
     capture_inline::apply_capture_inline(app);
+    ran!("capture_inline");
     and_return::apply_and_return_lowering(app);
+    ran!("and_return");
     case_lambda::apply_case_lambda_lowering(app);
+    ran!("case_lambda");
     first_or_create::apply_first_or_create_lowering(app);
+    ran!("first_or_create");
     group_count::apply_group_count_lowering(app);
+    ran!("group_count");
     dead_default::apply_dead_default_lowering(app, registry);
+    ran!("dead_default");
     diags.extend(errors_add::apply_errors_add_lowering(app));
+    ran!("errors_add");
     diags.extend(create_block::apply_create_block_inline(app));
+    ran!("create_block");
     diags.extend(update_kwargs::apply_update_kwargs_inline(app));
+    ran!("update_kwargs");
     diags.extend(mailer_class_side::apply_mailer_class_side(app));
+    ran!("mailer_class_side");
     diags.extend(job_class_side::apply_job_class_side(app));
+    ran!("job_class_side");
     diags.extend(send_dispatch::apply_send_static_dispatch(app, registry));
+    ran!("send_static_dispatch");
     // AFTER send_dispatch — see POST_ANALYZE_PASS_ORDER (the `duration`
     // entry's runs_after). An all-duration-unit name set dispatches
     // through case arms synthesized as plural unit calls that count on
     // this grounding (`send_dispatch::duration_plural`).
     duration::apply_duration_lowering(app);
+    ran!("duration");
+    #[cfg(debug_assertions)]
+    debug_assert_eq!(
+        executed,
+        POST_ANALYZE_PASS_ORDER
+            .iter()
+            .map(|(n, _)| *n)
+            .collect::<Vec<_>>(),
+        "apply_post_analyze_lowerings call sequence drifted from POST_ANALYZE_PASS_ORDER",
+    );
     diags
 }
 
