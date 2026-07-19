@@ -55,6 +55,7 @@ pub mod mailer_class_side;
 pub mod as_json_super;
 pub mod parameterize;
 pub mod request_index;
+pub mod relation_residue;
 pub mod send_dispatch;
 pub(crate) mod secure_password;
 pub mod capture_inline;
@@ -158,6 +159,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Grounds the plural duration-unit calls that send_static_dispatch
     // synthesizes into case arms, so it must observe that pass's output.
     ("duration", &["send_static_dispatch"]),
+    // Pure ledger (no rewrite): counts Relation-typed chains still
+    // dynamic after every grounding pass has had its say — last so a
+    // chain a pass grounds doesn't false-positive.
+    ("relation_residue", &["duration"]),
 ];
 
 /// True iff `POST_ANALYZE_PASS_ORDER` is a valid topological order —
@@ -263,6 +268,8 @@ pub fn apply_post_analyze_lowerings(
     // this grounding (`send_dispatch::duration_plural`).
     duration::apply_duration_lowering(app);
     ran!("duration");
+    diags.extend(relation_residue::apply_relation_residue_ledger(app));
+    ran!("relation_residue");
     #[cfg(debug_assertions)]
     debug_assert_eq!(
         executed,
