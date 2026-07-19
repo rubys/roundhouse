@@ -4696,6 +4696,21 @@ pub(crate) fn model_includes(model: &crate::dialect::Model) -> Vec<ClassId> {
         }
         for arg in args {
             if let ExprNode::Const { path } = &*arg.node {
+                // `ActiveModel::*` mixins (Validations / Conversion /
+                // AttributeMethods / Model) are framework markers, not
+                // runtime modules: a superclass-less model including them
+                // is lowered to a tableless model whose valid?/errors/
+                // validate surface is SYNTHESIZED as real methods, and no
+                // target ships an `ActiveModel` namespace. Emitting the
+                // literal `include ActiveModel::Validations` raises
+                // `uninitialized constant ActiveModel` at load time (the
+                // include runs at class-definition, before any request).
+                // Drop them here — the single shared home feeding every
+                // target's lc.includes — keeping real app mixins
+                // (`include IntervalHelper`) intact.
+                if path.first().map(|s| s.as_str()) == Some("ActiveModel") {
+                    continue;
+                }
                 let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
                 out.push(ClassId(Symbol::from(joined)));
             }
