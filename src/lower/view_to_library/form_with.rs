@@ -378,6 +378,7 @@ fn classify_form_with_components(
 ) -> Option<FormWithComponents> {
     let mut model_expr: Option<Expr> = None;
     let mut url_expr: Option<Expr> = None;
+    let mut method_expr: Option<Expr> = None;
     let mut opts_entries: Vec<(Expr, Expr)> = Vec::new();
 
     for arg in args {
@@ -389,10 +390,31 @@ fn classify_form_with_components(
                             model_expr = Some(v.clone());
                             continue;
                         }
-                        // `scope:`/`method:` also steer form_with; `url:` is
-                        // the non-resource action target — kept out of opts.
+                        // `url:` is the non-resource action target — kept
+                        // out of opts.
                         "url" => {
                             url_expr = Some(v.clone());
+                            continue;
+                        }
+                        // `method:` steers the form verb (feeds the
+                        // `_method` override + `form.submit` default text).
+                        // It is NOT an HTML attribute — left in opts it
+                        // rendered a second literal `method="..."` attr on
+                        // top of the builder's own, and a Symbol value
+                        // (`method: :post`) crashed html_escape under AOT.
+                        // Captured here so every return branch consumes it.
+                        "method" => {
+                            method_expr = Some(v.clone());
+                            continue;
+                        }
+                        // `scope:` is form_with's field-name prefix option,
+                        // not an HTML attribute — left in opts it rendered
+                        // a bogus `scope="…"` attr (keybase's
+                        // `scope: :keybase_proof`) whose Symbol value
+                        // crashed html_escape. Dropped here (field-name
+                        // prefixing itself is a separate unimplemented gap;
+                        // fields name bare today either way).
+                        "scope" => {
                             continue;
                         }
                         // form_with's generated-id prefix option, not an
@@ -411,6 +433,9 @@ fn classify_form_with_components(
         }
     }
 
+    // form_with's POST default when no explicit `method:` was given.
+    let default_post = || lit_sym(Symbol::from("post"));
+
     let route_helpers = || {
         Expr::new(
             Span::synthetic(),
@@ -427,24 +452,11 @@ fn classify_form_with_components(
         Some(m) => m,
         None => {
             let url = url_expr?;
-            // Same `method:` extraction the url+model branch does — left
-            // in opts it renders as a second literal `method="..."` attr
-            // (and a Symbol value crashes html_escape).
-            let is_method_key = |k: &Expr| {
-                matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
-                    if value.as_str() == "method")
-            };
-            let method = opts_entries
-                .iter()
-                .find(|(k, _)| is_method_key(k))
-                .map(|(_, v)| v.clone())
-                .unwrap_or_else(|| lit_sym(Symbol::from("post")));
-            opts_entries.retain(|(k, _)| !is_method_key(k));
             return Some(FormWithComponents {
                 model: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
                 model_name: String::new(),
                 action: route_helperize(url, &route_helpers, ctx),
-                method,
+                method: method_expr.clone().unwrap_or_else(default_post),
                 opts_entries,
             });
         }
@@ -457,7 +469,7 @@ fn classify_form_with_components(
             model: nested_model,
             model_name: nested_name,
             action: nested_action,
-            method: lit_sym(Symbol::from("post")),
+            method: method_expr.clone().unwrap_or_else(default_post),
             opts_entries,
         });
     }
@@ -472,25 +484,13 @@ fn classify_form_with_components(
     // name under the model. Method: an explicit `method:` opt wins,
     // else form_with's POST default.
     if let Some(url) = url_expr {
-        // `method:` steers the form verb — pull it OUT of opts_entries
-        // (left in, it renders as a literal `method="..."` attribute on
-        // top of the builder's own) and use it as the method component;
+        // `method:` steers the form verb (captured out of opts above);
         // default POST like the url-only branch.
-        let is_method_key = |k: &Expr| {
-            matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
-                if value.as_str() == "method")
-        };
-        let method = opts_entries
-            .iter()
-            .find(|(k, _)| is_method_key(k))
-            .map(|(_, v)| v.clone())
-            .unwrap_or_else(|| lit_sym(Symbol::from("post")));
-        opts_entries.retain(|(k, _)| !is_method_key(k));
         return Some(FormWithComponents {
             model,
             model_name: singular,
             action: route_helperize(url, &route_helpers, ctx),
-            method,
+            method: method_expr.clone().unwrap_or_else(default_post),
             opts_entries,
         });
     }
@@ -565,14 +565,20 @@ fn classify_form_with_components(
             },
         ),
     };
-    let method = Expr::new(
-        Span::synthetic(),
-        ExprNode::If {
-            cond: persisted,
-            then_branch: lit_sym(Symbol::from("patch")),
-            else_branch: lit_sym(Symbol::from("post")),
-        },
-    );
+    // An explicit `method:` wins (Rails honors it verbatim); otherwise
+    // the resource convention — PATCH for a persisted record, POST for a
+    // new one. Feeds both the `<form>`'s `_method` override and
+    // `form.submit`'s default text.
+    let method = method_expr.unwrap_or_else(|| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: persisted,
+                then_branch: lit_sym(Symbol::from("patch")),
+                else_branch: lit_sym(Symbol::from("post")),
+            },
+        )
+    });
 
     Some(FormWithComponents {
         model,
