@@ -52,22 +52,37 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
         .collect()
 }
 
-/// App-defined vendored classes whose bodies drive un-modeled native/
-/// stdlib surface (Sponge = Net::HTTP + Resolv + IPAddr + OpenSSL,
-/// pending the stdlib spin packages). Spinel AOT prices every method
-/// body in the reachable require graph, and these bodies cannot
-/// compile without that stdlib — so the scaffold base swaps their
-/// emitted files for hand-written raising façades at the SAME emit
-/// path, leaving the require graph untouched. The CRuby tree, where
-/// the real stdlib exists and the vendored source runs as written,
-/// restores the verbatim emit via `restore_extras_facades`. Same
-/// raise-loudly contract as runtime/ruby/gem_facades.rb; the real fix
-/// (compiling the verbatim bodies) arrives with the stdlib packages.
-const EXTRAS_FACADES: &[(&str, &str, &str)] = &[(
-    "app/models/sponge",
-    include_str!("../../../runtime/spinel/facades/sponge.rb"),
-    include_str!("../../../runtime/spinel/facades/sponge.rbs"),
-)];
+/// App-defined classes whose bodies drive un-modeled native/stdlib
+/// surface or a spinel-refused control-flow shape. Spinel AOT prices
+/// every method body in the reachable require graph, and these bodies
+/// cannot compile — so the scaffold base swaps their emitted files for
+/// hand-written raising façades at the SAME emit path, leaving the
+/// require graph untouched. The CRuby tree, where the real gems/stdlib
+/// exist and the source runs as written, restores the verbatim emit via
+/// `restore_extras_facades`. Same raise-loudly contract as
+/// runtime/ruby/gem_facades.rb.
+///
+/// - Sponge = Net::HTTP + Resolv + IPAddr + OpenSSL (pending the stdlib
+///   spin packages).
+/// - Markdowner walks a Markly DOM with a recursive block-driving helper
+///   (`walk_text_nodes` forwards `&block` through `Markly::Node#each`);
+///   that identity-forwarding block-through-a-yielding-method recursion
+///   is a deliberate spinel always-inline boundary (matz/spinel#2948).
+///   All consumers are write-path (`markeddown_*` precomputed on save),
+///   so the read benchmark never renders markdown. Real fix = a
+///   Commonmarker façade over the gem's iterative `Node#walk`.
+const EXTRAS_FACADES: &[(&str, &str, &str)] = &[
+    (
+        "app/models/sponge",
+        include_str!("../../../runtime/spinel/facades/sponge.rb"),
+        include_str!("../../../runtime/spinel/facades/sponge.rbs"),
+    ),
+    (
+        "app/models/markdowner",
+        include_str!("../../../runtime/spinel/facades/markdowner.rb"),
+        include_str!("../../../runtime/spinel/facades/markdowner.rbs"),
+    ),
+];
 
 /// Swap façade-fated extras emits (scaffold base: spinel + the trees
 /// derived from it). No-op when the app doesn't define the class —

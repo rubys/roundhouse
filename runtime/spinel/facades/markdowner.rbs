@@ -1,0 +1,9 @@
+# Typing contract for the Markdowner façade (see markdowner.rb beside
+# this file). `to_html` returns the HTML String consumers store in the
+# `markeddown_*` columns; the body raises via GemFacade.fail! before its
+# unreachable typed tail. Pinned to String (the real return) so the
+# non-façaded caller models (story/comment/user/...) type the result
+# precisely rather than untyped.
+class Markdowner
+  def self.to_html: (untyped text, ?untyped opts) -> String
+end
