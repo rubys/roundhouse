@@ -273,15 +273,26 @@ impl Analyzer {
 
             // Named scopes resolve as relation-returning class methods, so
             // `Story.active` types and chains like `Story.active.recent`
-            // compose. The relation type (`Array[Self]`) is what lets a scope
-            // also chain on a relation (see the `Array[Class]` dispatch, which
-            // delegates relation-returning class methods to the element model).
-            // Scope bodies are typed separately; this only records the call
-            // surface. `or_insert` so an explicit catalog method still wins.
+            // compose. A scope whose body tail is a query-builder chain
+            // seeds `Ty::Relation { of: Self }` — the true lazy-relation
+            // type, which Relation-receiver dispatch chains and
+            // class-side delegation resolve. A body this classifier
+            // can't recognize (terminal tail, block-taking hop,
+            // cross-model root) keeps the legacy `Array[Self]` stand-in,
+            // whose `Array[Class]` dispatch delegates the same way.
+            // Scope bodies are typed separately; this only records the
+            // call surface. `or_insert` so an explicit catalog method
+            // still wins.
+            let scope_names: std::collections::HashSet<Symbol> =
+                model.scopes().map(|s| s.name.clone()).collect();
             for scope in model.scopes() {
-                cls.class_methods
-                    .entry(scope.name.clone())
-                    .or_insert_with(|| array_of_self.clone());
+                let seed = if body_tail_yields_relation(&scope.body, &model.name, &scope_names)
+                {
+                    Ty::Relation { of: model.name.clone() }
+                } else {
+                    array_of_self.clone()
+                };
+                cls.class_methods.entry(scope.name.clone()).or_insert(seed);
             }
             // Core AR instance methods every model gets. Sourced
             // from the shared catalog — same mechanism as class
@@ -3126,6 +3137,8 @@ impl Analyzer {
     fn harvest_returns_to_registry(&mut self, app: &App) {
         for model in &app.models {
             let class_id = &model.name;
+            let scope_names: std::collections::HashSet<Symbol> =
+                model.scopes().map(|s| s.name.clone()).collect();
             for method in model.methods() {
                 let target = match method.receiver {
                     crate::dialect::MethodReceiver::Instance => {
@@ -3135,6 +3148,24 @@ impl Analyzer {
                         &mut self.classes.entry(class_id.clone()).or_default().class_methods
                     }
                 };
+                // A class method whose body tail is a query-builder
+                // chain declares `Relation { of: Self }` to callers —
+                // the same relation type a scope seeds — overriding
+                // the body's `Array<Self>` typing (inside the body the
+                // chain keeps the inline-chain Array representation;
+                // the relation type is introduced at the boundary).
+                // This is what lets `Story.recent.for_user(u)`
+                // delegate `for_user` on the relation receiver.
+                if method.receiver == crate::dialect::MethodReceiver::Class
+                    && body_tail_yields_relation(&method.body, class_id, &scope_names)
+                {
+                    Self::insert_inferred_return(
+                        target,
+                        &method.name,
+                        Ty::Relation { of: class_id.clone() },
+                    );
+                    continue;
+                }
                 Self::register_method_return(
                     target,
                     &method.name,
@@ -3796,6 +3827,81 @@ impl Analyzer {
 /// - `only: [...]` limits to the listed actions
 /// - `except: [...]` excludes the listed actions
 /// - both empty → applies to all actions on the controller
+/// Does this scope/class-method body *return* a relation? True iff
+/// the body's tail expression is a query-builder chain: the outermost
+/// (tail) hop is a chain builder (a Relation-context `Builder` in the
+/// catalog), a same-model scope call, or a relation root
+/// (`all`/`unscoped`/`none`), and the receiver spine walks down
+/// through such hops to a recognizable root — implicit self, `self`,
+/// or a constant naming this model. Deliberately conservative:
+/// a hop carrying a literal block (`select { |s| … }` is
+/// `Array#select` — it materializes), a terminal tail
+/// (`count`/`pluck`/`first`), a cross-model constant root, or
+/// anything unrecognizable returns false, and the caller keeps
+/// today's `Array<Self>` typing.
+///
+/// This is the *typing* twin of `lower::scope_chain`'s
+/// `mentions_bare_chain_start`: that predicate decides which class
+/// methods get `__rel` threading (a mention anywhere qualifies);
+/// this one decides which bodies *return* the relation (only the
+/// tail position counts), because only those may declare
+/// `Ty::Relation { of: Self }`.
+fn body_tail_yields_relation(
+    body: &Expr,
+    model_id: &ClassId,
+    scope_names: &std::collections::HashSet<Symbol>,
+) -> bool {
+    let mut e = match &*body.node {
+        ExprNode::Seq { exprs } => match exprs.last() {
+            Some(last) => last,
+            None => return false,
+        },
+        _ => body,
+    };
+    loop {
+        let ExprNode::Send { recv, method, block, .. } = &*e.node else {
+            return false;
+        };
+        let is_builder = crate::catalog::lookup(
+            method.as_str(),
+            crate::catalog::ReceiverContext::Relation,
+        )
+        .map(|entry| matches!(entry.chain, crate::catalog::ChainKind::Builder))
+        .unwrap_or(false);
+        let is_scope = scope_names.contains(method);
+        let is_root_call = matches!(method.as_str(), "all" | "unscoped");
+        if !(is_builder || is_scope || is_root_call) {
+            return false;
+        }
+        if block.is_some() {
+            return false;
+        }
+        match recv {
+            None => return true,
+            Some(r) => match &*r.node {
+                ExprNode::SelfRef => return true,
+                // A constant root must name THIS model — a body tail
+                // rooted at another model returns a relation over
+                // that model, which `Relation { of: Self }` would
+                // mistype. (Cross-model class-method returns are the
+                // instance-method `UserMethodReturns` family's
+                // territory, not this seed's.)
+                ExprNode::Const { path } => {
+                    return path.last().is_some_and(|last| {
+                        model_id
+                            .0
+                            .as_str()
+                            .rsplit("::")
+                            .next()
+                            .is_some_and(|own| own == last.as_str())
+                    });
+                }
+                _ => e = r,
+            },
+        }
+    }
+}
+
 /// Instantiate a catalog [`crate::catalog::ReturnKind`] against a
 /// concrete model class. Shared between the per-model registry seeding
 /// in `with_adapter` (Class/Instance receiver contexts, where `self_id`
