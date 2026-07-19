@@ -24,7 +24,6 @@ use flate2::write::GzEncoder;
 use zip::write::SimpleFileOptions;
 
 use crate::App;
-use crate::analyze::Analyzer;
 use crate::emit::{self, EmittedFile};
 use crate::ingest::ingest_app;
 
@@ -2067,11 +2066,10 @@ pub fn build_site(fixture: &Path, out: &Path) -> Result<(), String> {
 
     let mut app =
         ingest_app(fixture).map_err(|e| format!("ingest {}: {e}", fixture.display()))?;
-    let mut analyzer = Analyzer::new(&app);
-    analyzer.analyze(&mut app);
-    // Same post-analyze shared lowerings as the single-target driver;
-    // the site build has no diagnostic surface, so residue is dropped.
-    let _ = crate::lower::apply_post_analyze_lowerings(&mut app, analyzer.class_registry());
+    // Analyze + the same post-analyze shared lowerings as the
+    // single-target driver; the site build has no diagnostic surface,
+    // so the residue is dropped.
+    let _ = crate::session::analyze_and_lower(&mut app);
 
     for target in BuildTarget::ALL {
         let files = target_files(&app, fixture, *target)?;

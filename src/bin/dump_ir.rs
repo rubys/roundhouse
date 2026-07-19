@@ -65,7 +65,6 @@
 
 use std::path::PathBuf;
 
-use roundhouse::analyze::Analyzer;
 use roundhouse::dialect::{LibraryClass, MethodDef, MethodReceiver};
 use roundhouse::expr::{Expr, ExprNode, InterpPart, LValue};
 use roundhouse::ident::{ClassId, Symbol};
@@ -93,12 +92,9 @@ fn main() {
         eprintln!("ingest {}: {:?}", opts.fixture.display(), e);
         std::process::exit(1);
     });
-    let mut analyzer = Analyzer::new(&app);
-    analyzer.analyze(&mut app);
-    // Mirror the transpile driver's post-analyze shared lowerings so
+    // Analyze + the transpile driver's post-analyze shared lowerings so
     // the dumped IR is what emitters actually consume.
-    let _ =
-        roundhouse::lower::apply_post_analyze_lowerings(&mut app, analyzer.class_registry());
+    let _ = roundhouse::session::analyze_and_lower(&mut app);
 
     if opts.raw_views {
         let mut printed = 0usize;

@@ -36,6 +36,7 @@ pub mod project;
 pub mod rbs;
 pub mod runtime_loader;
 pub mod runtime_src;
+pub mod session;
 pub mod treeshake;
 pub mod schema;
 pub mod span;

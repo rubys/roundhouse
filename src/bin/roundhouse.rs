@@ -22,7 +22,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use roundhouse::analyze::{diagnose, Analyzer, Severity};
+use roundhouse::analyze::{diagnose, Severity};
 use roundhouse::ingest::ingest_app;
 use roundhouse::project::{self, BuildTarget};
 
@@ -223,16 +223,13 @@ fn run_transpile(
             return Err(format!("ingest {}: {e}", input.display()));
         }
     };
-    let mut analyzer = Analyzer::new(&app);
-    analyzer.analyze(&mut app);
-
-    // Post-analyze shared lowerings — type-directed IR rewrites every
-    // target consumes (blank-predicate grounding, `Time.current`).
-    // Residue diagnostics (sites a pass had to leave dynamic) join the
-    // analyze warnings below: same collapse-to-count print policy, same
-    // --allow-unsupported full-inventory behavior.
-    let lower_diags =
-        roundhouse::lower::apply_post_analyze_lowerings(&mut app, analyzer.class_registry());
+    // Analyze + the post-analyze shared lowerings — type-directed IR
+    // rewrites every target consumes (blank-predicate grounding,
+    // `Time.current`). The returned residue diagnostics (sites a pass
+    // had to leave dynamic) join the analyze warnings below: same
+    // collapse-to-count print policy, same --allow-unsupported
+    // full-inventory behavior.
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
 
     // Analyze-time diagnostics — the same type errors roundhouse-check
     // reports (dispatch failures, unresolved ivars, incompatible ops).
