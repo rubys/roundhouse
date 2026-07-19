@@ -772,9 +772,24 @@ jobs:
   # tests; these jobs verify it actually behaves the same as Rails on
   # live HTTP. One job per target — same matrix as toolchain.
   # -------------------------------------------------------------------
-  compare-rust:
+  # compare: one job per compile-and-boot target, DOM-diffing the live
+  # transpiled server against Rails over HTTP. Matrixed from nine
+  # near-identical jobs; every per-target difference (toolchain install +
+  # versions) is a guarded step below. ruby/setup-ruby runs LAST on every
+  # target so its MRI 3.4 wins PATH when Rails boots — required by the JVM
+  # targets (setup-java/gradle otherwise leave system Ruby 3.2 resolving
+  # bin/rails; see the old compare-kotlin note) and harmless everywhere
+  # else. fail-fast off so one target's failure doesn't cancel the rest
+  # (matches the old independent jobs). ruby/jruby/spinel stay separate
+  # below: two setup-ruby steps / an extra build-spinel dependency don't
+  # fit this shape.
+  compare:
     needs: generate-fixture
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [rust, crystal, kotlin, swift, csharp, typescript, go, elixir, python]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -784,234 +799,68 @@ jobs:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.4'
-          bundler-cache: true
-          working-directory: ./fixtures/real-blog
-      - name: scripts/compare rust
-        run: scripts/compare rust
-
-  compare-crystal:
-    needs: generate-fixture
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v8
-        with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.4'
-          bundler-cache: true
-          working-directory: ./fixtures/real-blog
       - name: Install Crystal
+        if: matrix.target == 'crystal'
         uses: crystal-lang/install-crystal@v1
         with:
           crystal: latest
-      - name: scripts/compare crystal
-        run: scripts/compare crystal
-
-  # compare-kotlin: DOM-diff the live Javalin server against Rails. Needs Ruby
-  # (Rails reference) + a JDK & Gradle (target build/boot via scripts/compare's
-  # `gradle installDist` + launcher). scripts/compare resolves the JDK from
-  # JAVA_HOME (set by setup-java) via its KOTLIN_JAVA_HOME fallback.
-  compare-kotlin:
-    needs: generate-fixture
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v8
-        with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
-      - uses: actions/setup-java@v4
+      - name: Install JDK (Kotlin)
+        if: matrix.target == 'kotlin'
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
-      - uses: gradle/actions/setup-gradle@v4
+      - name: Install Gradle (Kotlin)
+        if: matrix.target == 'kotlin'
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.5.1'
-      # setup-ruby LAST so its MRI 3.4 wins PATH over the system Ruby when
-      # Rails boots — setup-java/setup-gradle prepend to PATH and otherwise
-      # leave `bin/rails` resolving to system Ruby 3.2 (Bundler::GemNotFound,
-      # Rails never comes up). Same ordering as the passing compare-jruby job.
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.4'
-          bundler-cache: true
-          working-directory: ./fixtures/real-blog
-      - name: scripts/compare kotlin
-        run: scripts/compare kotlin
-
-  # compare-swift: DOM-diff the live Hummingbird server against Rails. Needs
-  # Ruby (Rails reference) + a Swift toolchain + libsqlite3-dev (target
-  # build/boot via scripts/compare's `swift build -c release` + the
-  # .build/release/App binary). Tracked in #34.
-  compare-swift:
-    needs: generate-fixture
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v8
-        with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
-      - uses: swift-actions/setup-swift@v2
+      - name: Install Swift
+        if: matrix.target == 'swift'
+        uses: swift-actions/setup-swift@v2
         with:
           swift-version: '6.1'
-      - name: Install libsqlite3-dev (CSQLite systemLibrary)
+      - name: Install libsqlite3-dev (Swift CSQLite systemLibrary)
+        if: matrix.target == 'swift'
         run: sudo apt-get update -q && sudo apt-get install -y -q libsqlite3-dev
-      # setup-ruby LAST so its MRI 3.4 wins PATH over the system Ruby when
-      # Rails boots — same ordering rationale as compare-kotlin/compare-jruby.
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.4'
-          bundler-cache: true
-          working-directory: ./fixtures/real-blog
-      - name: scripts/compare swift
-        run: scripts/compare swift
-
-  # compare-csharp: DOM-diff the live Kestrel server against Rails. Needs Ruby
-  # (Rails reference) + the .NET SDK (scripts/compare builds with `dotnet build
-  # -c Release` and boots bin/Release/net10.0/roundhouse-app.dll). The sqlite
-  # native lib ships in the SQLitePCLRaw bundle, so no libsqlite3-dev needed.
-  compare-csharp:
-    needs: generate-fixture
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v8
-        with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
-      - uses: actions/setup-dotnet@v4
+      - name: Install .NET (C#)
+        if: matrix.target == 'csharp'
+        uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-      # setup-ruby LAST so its MRI 3.4 wins PATH over the system Ruby when
-      # Rails boots — same ordering rationale as compare-kotlin/compare-swift.
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.4'
-          bundler-cache: true
-          working-directory: ./fixtures/real-blog
-      - name: scripts/compare csharp
-        run: scripts/compare csharp
-
-  compare-typescript:
-    needs: generate-fixture
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v8
-        with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.4'
-          bundler-cache: true
-          working-directory: ./fixtures/real-blog
-      - name: Install Node
+      - name: Install Node (TypeScript)
+        if: matrix.target == 'typescript'
         uses: actions/setup-node@v5
         with:
           node-version: '20'
-      - name: scripts/compare typescript
-        run: scripts/compare typescript
-
-  compare-go:
-    needs: generate-fixture
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v8
-        with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.4'
-          bundler-cache: true
-          working-directory: ./fixtures/real-blog
       - name: Install Go
+        if: matrix.target == 'go'
         uses: actions/setup-go@v6
         with:
           go-version: '1.24'
           cache: false
-      - name: scripts/compare go
-        run: scripts/compare go
-
-  compare-elixir:
-    needs: generate-fixture
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v8
-        with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.4'
-          bundler-cache: true
-          working-directory: ./fixtures/real-blog
       - name: Install Elixir
+        if: matrix.target == 'elixir'
         uses: erlef/setup-beam@v1
         with:
           elixir-version: '1.18'
           otp-version: '27'
-      - name: scripts/compare elixir
-        run: scripts/compare elixir
-
-  compare-python:
-    # Re-enabled 2026-06-06 with toolchain-python above (compare 5/5 vs
-    # Rails). Python version tracks the local dev environment.
-    needs: generate-fixture
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v8
+      - name: Install Python
+        if: matrix.target == 'python'
+        uses: actions/setup-python@v6
         with:
-          name: real-blog-fixture
-      - name: Extract fixture
-        run: tar -xzf real-blog.tar.gz
+          python-version: '3.14'
+      - name: Install uv (Python)
+        if: matrix.target == 'python'
+        uses: astral-sh/setup-uv@v7
+      # setup-ruby LAST — see the job comment (MRI 3.4 must win PATH).
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
           bundler-cache: true
           working-directory: ./fixtures/real-blog
-      - name: Install Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.14'
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-      - name: scripts/compare python
-        run: scripts/compare python
+      - name: scripts/compare ${{ matrix.target }}
+        run: scripts/compare ${{ matrix.target }}
 
   # compare-ruby: same shape as every other compare-* — Puma+Rack
   # server bound to :3000 via ruby_overlay's config.ru, hit over
@@ -1167,201 +1016,79 @@ jobs:
   # extraction surface; not in the smoke matrix).
   # -------------------------------------------------------------------
 
-  smoke-go:
+  smoke:
     needs: build-site
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [rust, crystal, kotlin, swift, csharp, typescript, go, elixir, python, ruby, jruby]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v8
         with:
           name: browse-archives
           path: browse
+      - name: Install Rust
+        if: matrix.target == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install Crystal
+        if: matrix.target == 'crystal'
+        uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: latest
+      - name: Install JDK (Kotlin, JRuby)
+        if: matrix.target == 'kotlin' || matrix.target == 'jruby'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install Gradle (Kotlin)
+        if: matrix.target == 'kotlin'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.1'
+      - name: Install Swift
+        if: matrix.target == 'swift'
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: '6.1'
+      - name: Install libsqlite3-dev (Swift CSQLite systemLibrary)
+        if: matrix.target == 'swift'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libsqlite3-dev
+      - name: Install .NET (C#)
+        if: matrix.target == 'csharp'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
       - name: Install Go
+        if: matrix.target == 'go'
         uses: actions/setup-go@v6
         with:
           go-version: '1.24'
           cache: false
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '20'
-      - name: Pre-warm Playwright (chromium + system deps)
-        run: |
-          cd e2e
-          npm install --no-audit --no-fund
-          npx playwright install --with-deps chromium
-      - name: scripts/smoke go
-        run: scripts/smoke --tgz browse/go.tgz go
-
-  # ruby: the archive builds its own assets (README § Build = make
-  # assets: tailwind via npx + turbo.min.js from the turbo-rails gem)
-  # and its § Test runs the five driver suites that toolchain-ruby
-  # used to run. Ruby IS the runtime here, so setup-ruby is expected.
-  smoke-ruby:
-    needs: build-site
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v8
-        with:
-          name: browse-archives
-          path: browse
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.4'
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '20'
-      - name: Pre-warm Playwright (chromium + system deps)
-        run: |
-          cd e2e
-          npm install --no-audit --no-fund
-          npx playwright install --with-deps chromium
-      - name: scripts/smoke ruby
-        run: scripts/smoke --tgz browse/ruby.tgz ruby
-
-  # ALL TEN smoke targets run the full 5/5 spec suite. build-site bakes
-  # the tailwind.css + JS importmap graph into every archive
-  # (ROUNDHOUSE_ASSETS_DIR), so Turbo boots and the cable stream-source
-  # connects; each target's server serves static/assets/ and ships a
-  # /cable websocket + cable broadcaster.
-
-  # typescript (5/5): tsx server via npm (src/server.ts has the /cable ws +
-  # CableServer). No setup-ruby — runs without Ruby.
-  smoke-typescript:
-    needs: build-site
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v8
-        with:
-          name: browse-archives
-          path: browse
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '20'
-      - name: Pre-warm Playwright (chromium + system deps)
-        run: |
-          cd e2e
-          npm install --no-audit --no-fund
-          npx playwright install --with-deps chromium
-      - name: scripts/smoke typescript
-        run: scripts/smoke --tgz browse/typescript.tgz typescript
-
-  smoke-rust:
-    needs: build-site
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/download-artifact@v8
-        with:
-          name: browse-archives
-          path: browse
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '20'
-      - name: Pre-warm Playwright (chromium + system deps)
-        run: |
-          cd e2e
-          npm install --no-audit --no-fund
-          npx playwright install --with-deps chromium
-      - name: scripts/smoke rust
-        run: scripts/smoke --tgz browse/rust.tgz rust
-
-  smoke-python:
-    needs: build-site
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v8
-        with:
-          name: browse-archives
-          path: browse
-      - name: Install Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.14'
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '20'
-      - name: Pre-warm Playwright (chromium + system deps)
-        run: |
-          cd e2e
-          npm install --no-audit --no-fund
-          npx playwright install --with-deps chromium
-      - name: scripts/smoke python
-        run: scripts/smoke --tgz browse/python.tgz python
-
-  smoke-crystal:
-    needs: build-site
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v8
-        with:
-          name: browse-archives
-          path: browse
-      - name: Install Crystal
-        uses: crystal-lang/install-crystal@v1
-        with:
-          crystal: latest
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '20'
-      - name: Pre-warm Playwright (chromium + system deps)
-        run: |
-          cd e2e
-          npm install --no-audit --no-fund
-          npx playwright install --with-deps chromium
-      - name: scripts/smoke crystal
-        run: scripts/smoke --tgz browse/crystal.tgz crystal
-
-  smoke-elixir:
-    needs: build-site
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v8
-        with:
-          name: browse-archives
-          path: browse
       - name: Install Elixir
+        if: matrix.target == 'elixir'
         uses: erlef/setup-beam@v1
         with:
           elixir-version: '1.18'
           otp-version: '27'
-      - uses: actions/setup-node@v5
+      - name: Install Python
+        if: matrix.target == 'python'
+        uses: actions/setup-python@v6
         with:
-          node-version: '20'
-      - name: Pre-warm Playwright (chromium + system deps)
-        run: |
-          cd e2e
-          npm install --no-audit --no-fund
-          npx playwright install --with-deps chromium
-      - name: scripts/smoke elixir
-        run: scripts/smoke --tgz browse/elixir.tgz elixir
-
-  # jruby: byte-identical emit to ruby on the JVM. No § Build — assets
-  # ship prebaked in the archive (the Makefile's turbo.min.js step
-  # collides MRI vs JRuby bundler, same as compare-jruby). Its § Test
-  # is the first CI coverage the jruby archive's test suite has ever
-  # had. Java 21 for JRuby 10.
-  smoke-jruby:
-    needs: build-site
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v8
+          python-version: '3.14'
+      - name: Install uv (Python)
+        if: matrix.target == 'python'
+        uses: astral-sh/setup-uv@v7
+      - name: Install Ruby (MRI 3.4)
+        if: matrix.target == 'ruby'
+        uses: ruby/setup-ruby@v1
         with:
-          name: browse-archives
-          path: browse
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-      - uses: ruby/setup-ruby@v1
+          ruby-version: '3.4'
+      - name: Install JRuby 10
+        if: matrix.target == 'jruby'
+        uses: ruby/setup-ruby@v1
         with:
           ruby-version: 'jruby-10.0'
       - uses: actions/setup-node@v5
@@ -1372,89 +1099,8 @@ jobs:
           cd e2e
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
-      - name: scripts/smoke jruby
-        run: scripts/smoke --tgz browse/jruby.tgz jruby
-
-  smoke-kotlin:
-    needs: build-site
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v8
-        with:
-          name: browse-archives
-          path: browse
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '9.5.1'
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '20'
-      - name: Pre-warm Playwright (chromium + system deps)
-        run: |
-          cd e2e
-          npm install --no-audit --no-fund
-          npx playwright install --with-deps chromium
-      - name: scripts/smoke kotlin
-        run: scripts/smoke --tgz browse/kotlin.tgz kotlin
-
-  smoke-swift:
-    needs: build-site
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v8
-        with:
-          name: browse-archives
-          path: browse
-      - uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: '6.1'
-      - name: Install libsqlite3-dev (CSQLite systemLibrary)
-        run: sudo apt-get update -q && sudo apt-get install -y -q libsqlite3-dev
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '20'
-      - name: Pre-warm Playwright (chromium + system deps)
-        run: |
-          cd e2e
-          npm install --no-audit --no-fund
-          npx playwright install --with-deps chromium
-      - name: scripts/smoke swift
-        run: scripts/smoke --tgz browse/swift.tgz swift
-
-  # csharp: the archive's README § Build runs `dotnet build`, § Test runs
-  # `dotnet test` (no-op until a test project is emitted), and § End-to-end
-  # boots bin/Debug/net10.0/roundhouse-app.dll under Playwright — all 6 specs,
-  # including action_cable (live Turbo Streams over the /cable WebSocket).
-  # Needs the .NET SDK + Node for Playwright; build-site bakes static/assets/
-  # (turbo.min.js et al.) into the archive so Turbo and the cable boot.
-  smoke-csharp:
-    needs: build-site
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v8
-        with:
-          name: browse-archives
-          path: browse
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '10.0.x'
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '20'
-      - name: Pre-warm Playwright (chromium + system deps)
-        run: |
-          cd e2e
-          npm install --no-audit --no-fund
-          npx playwright install --with-deps chromium
-      - name: scripts/smoke csharp
-        run: scripts/smoke --tgz browse/csharp.tgz csharp
+      - name: scripts/smoke ${{ matrix.target }}
+        run: scripts/smoke --tgz browse/${{ matrix.target }}.tgz ${{ matrix.target }}
 
   # spinel: the archive's README § Build AOT-compiles main.rb → build/blog
   # with the spinel toolchain (build-spinel artifact); § Test runs the
