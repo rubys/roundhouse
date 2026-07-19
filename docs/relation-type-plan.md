@@ -295,6 +295,20 @@ All 48 execute correctly on the runtime Relation in the ruby-family lanes today;
 count is the tier-2/tier-3 decision input. Bigger than the plan's "small handful" guess —
 which strengthens, not weakens, the case for R7's splice decision.
 
+### Post-plan fix — `ac4e438d` (CI caught, bisected to R3, CI green after)
+CI `browser-smoke-ide` regressed on Mastodon: `@account : Account | untyped`. Bisect
+(pre-plan → R3 → R4a probes via `roundhouse-mcp type_at` against the pinned Mastodon
+SHA) landed on R3. Mechanism: **mixed-representation chains** —
+`Account.with_username(u)` keeps the Array seed (ternary body, conservative classifier)
+so the chain runs Array-representation, but `.with_domain(d)` flipped to Relation, and
+the Array-branch class-side delegation only forwarded Array-typed entries → hop fell to
+`Var`, harvest poisoned `find_remote` to Untyped. Fix = the mirror of R4a's delegation:
+Array-representation receivers delegating to a Relation-typed class-side entry re-wrap
+as `Array<element>` (receiver representation preserved, decision #4). Regression test
+`relation_typed_scope_delegates_on_array_representation_receiver`. Lesson for R7's
+convergence decision: every dual-representation seam needs BOTH delegation directions —
+converging (R7 item 2) deletes this hazard class.
+
 ### R7 — decision points for Sam (recorded, not done)
 1. **Build the tier-1 splice after all?** 48 lobsters sites is a real population.
    Recording scope predicate contributions + `try_build_arel` receiver-position

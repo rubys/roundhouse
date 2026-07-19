@@ -5,6 +5,17 @@ analyzer/types/catalog, tests/runtime/glue). This plan is designed to be execute
 Claude session with no prior context. All file:line references were verified on main at the
 time of writing; re-verify with grep before editing — line numbers drift.
 
+> **STATUS 2026-07-18 (post-execution): largely superseded — do not execute from this file.**
+> Phases 1, 2, 3.1/3.2/3.4, 4.1, 7.1, 7.2 are DONE (see Execution log below; 4.1's premise
+> was refuted, 4.2 is blocked on catalog relation modeling). The remaining work has been
+> re-planned into two successor documents:
+> - `docs/relation-type-plan.md` — Relation[T] analysis-side typing (absorbs 4.2's blocker;
+>   feature work, its own gates)
+> - `docs/maintainability-refactor-plan-2.md` — mechanical remainder (7.1 guard tightening,
+>   Phase 5 Session facade, Phase 6 runtime manifest, 6.1 CI matrix), safe to run in
+>   parallel with the Relation plan; 4.3 is queued behind the Relation plan.
+> This file remains as the survey record and execution log.
+
 ## Ground rules (non-negotiable)
 
 1. **Every phase is behavior-neutral unless explicitly flagged otherwise.** This is a
