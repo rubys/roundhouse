@@ -197,6 +197,13 @@ impl AssocRegistry {
     fn has_many_fk(&self, model: &ClassId, assoc: &Symbol) -> Option<&(ClassId, Symbol)> {
         self.has_many_fk.get(&(model.clone(), assoc.clone()))
     }
+    /// Is `name` a has_many association on ANY model? Presence check
+    /// only — used by the `mentions_assoc_constructor` gate, where an
+    /// ambiguous name still qualifies (the rewriter may resolve it
+    /// from the owner's type).
+    fn is_has_many_name(&self, name: &Symbol) -> bool {
+        self.has_many_fk.keys().any(|(_, a)| a == name)
+    }
     fn has_many_by_name(&self, assoc: &Symbol) -> Option<&(ClassId, Symbol)> {
         self.has_many_by_name.get(assoc).and_then(|o| o.as_ref())
     }
@@ -326,6 +333,35 @@ pub fn mentions_scope(expr: &Expr, names: &HashSet<Symbol>) -> bool {
 /// where-hash whose value isn't statically scalar (an Array means `IN`,
 /// nil means `IS NULL`, only runtime knows), so those chains reach emit
 /// as plain sends and must be seeded with a Relation to run.
+/// True when `expr` contains a CollectionProxy constructor on an
+/// association read — `<owner>.<has_many>.build/create(…)`. Gate for
+/// `rewrite_call_site` so a body whose only relation surface is the
+/// constructor (`comment = story.comments.build`) still enters the
+/// rewrite; the resolution itself (owner typing / by-name uniqueness)
+/// happens inside the rewriter. Name presence alone qualifies here —
+/// an ambiguous name may still resolve there via the owner's type.
+pub fn mentions_assoc_constructor(expr: &Expr, assocs: &AssocRegistry) -> bool {
+    let mut found = false;
+    fn walk(e: &Expr, assocs: &AssocRegistry, found: &mut bool) {
+        if *found {
+            return;
+        }
+        if let ExprNode::Send { recv: Some(r), method, .. } = &*e.node {
+            if matches!(method.as_str(), "build" | "create" | "create!") {
+                if let ExprNode::Send { method: aname, args, .. } = &*r.node {
+                    if args.is_empty() && assocs.is_has_many_name(aname) {
+                        *found = true;
+                        return;
+                    }
+                }
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, assocs, found));
+    }
+    walk(expr, assocs, &mut found);
+    found
+}
+
 pub fn mentions_model_chain_start(expr: &Expr, models: &HashSet<ClassId>) -> bool {
     let mut found = false;
     fn walk(e: &Expr, models: &HashSet<ClassId>, found: &mut bool) {
@@ -507,19 +543,37 @@ fn assoc_owner_seed(
     owner: &Expr,
     span: crate::span::Span,
 ) -> Option<(ClassId, Symbol, Expr)> {
-    ctx.assocs.has_many_by_name(aname).cloned().map(|(target, fk)| {
-        let owner_id = syn(
-            span,
-            ExprNode::Send {
-                recv: Some(owner.clone()),
-                method: Symbol::from("id"),
-                args: vec![],
-                block: None,
-                parenthesized: false,
-            },
-        );
-        (target, fk, owner_id)
-    })
+    // Owner-typed resolution first: when the analyzer stamped the
+    // owner expression with its model class, the (model, assoc) pair
+    // resolves directly — this is what disambiguates an assoc name
+    // declared on several models (`comments` on both Story and User;
+    // `ms.comments` with `ms : Story` is unambiguous). The by-NAME
+    // map stays as the fallback for untyped owners, and maps an
+    // ambiguous name to None.
+    // `find_by` owners arrive as `Story | Nil` — peel the nilable
+    // wrapper before matching (the nil case raises at the `.id` read
+    // either way, same as Rails).
+    let typed = match owner.ty.as_ref().map(|t| t.peel_nilable()) {
+        Some(crate::ty::Ty::Class { id, .. }) => {
+            ctx.assocs.has_many_fk(id, aname).cloned()
+        }
+        _ => None,
+    };
+    typed
+        .or_else(|| ctx.assocs.has_many_by_name(aname).cloned())
+        .map(|(target, fk)| {
+            let owner_id = syn(
+                span,
+                ExprNode::Send {
+                    recv: Some(owner.clone()),
+                    method: Symbol::from("id"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            (target, fk, owner_id)
+        })
 }
 
 fn const_expr(span: crate::span::Span, model: &ClassId) -> Expr {
@@ -832,6 +886,63 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                         _ => None,
                     };
                     if let Some((target, fk, owner_id)) = resolved {
+                        // CollectionProxy constructors: `story.comments
+                        // .build(attrs)` constructs the target with the
+                        // association's FK preset — `Comment.new(attrs…,
+                        // story_id: story.id)`. Checked ahead of the
+                        // scope/chain/terminal seeding: a constructor
+                        // returns a record, not a relation. Only the
+                        // kwargs-hash arg shapes rewrite (none, or one
+                        // kwargs hash — the corpus forms; Rails merges
+                        // the FK over caller attrs, so it appends last).
+                        let ctor = match method.as_str() {
+                            "build" => Some("new"),
+                            "create" => Some("create"),
+                            "create!" => Some("create!"),
+                            _ => None,
+                        };
+                        if let Some(ctor_name) = ctor {
+                            let fk_entry = (
+                                syn(
+                                    span,
+                                    ExprNode::Lit {
+                                        value: Literal::Sym { value: fk.clone() },
+                                    },
+                                ),
+                                owner_id.clone(),
+                            );
+                            let merged: Option<Vec<Expr>> = if args.is_empty() {
+                                Some(vec![syn(
+                                    span,
+                                    ExprNode::Hash { entries: vec![fk_entry], kwargs: true },
+                                )])
+                            } else if args.len() == 1 {
+                                match &*args[0].node {
+                                    ExprNode::Hash { entries, kwargs: true } => {
+                                        let mut entries = entries.clone();
+                                        entries.push(fk_entry);
+                                        Some(vec![syn(
+                                            span,
+                                            ExprNode::Hash { entries, kwargs: true },
+                                        )])
+                                    }
+                                    _ => None,
+                                }
+                            } else {
+                                None
+                            };
+                            if let Some(merged) = merged {
+                                *expr = put(
+                                    span,
+                                    Some(const_expr(span, &target)),
+                                    Symbol::from(ctor_name),
+                                    merged,
+                                    block,
+                                    true,
+                                );
+                                return None;
+                            }
+                        }
                         let is_scope = ctx.scope_of(&target, &method);
                         let is_chain = is_relation_chain_method(method.as_str());
                         let is_term = is_relation_terminal(method.as_str());

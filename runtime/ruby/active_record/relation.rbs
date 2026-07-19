@@ -34,7 +34,12 @@ module ActiveRecord
     def klass: () -> Class
 
     def to_a: () -> Array[untyped]
+    def to_ary: () -> Array[untyped]
+    def filter: () { (untyped) -> bool } -> Array[untyped]
     def +: (Array[untyped] other) -> Array[untyped]
+    def &: (Array[untyped] other) -> Array[untyped]
+    def |: (Array[untyped] other) -> Array[untyped]
+    def -: (Array[untyped] other) -> Array[untyped]
     def include?: (untyped record) -> bool
     def each: () { (untyped) -> void } -> Array[untyped]
     def index_by: () { (untyped) -> untyped } -> Hash[untyped, untyped]

@@ -120,7 +120,14 @@ module ActiveRecord
 
     def group(*parts)
       @records = nil
-      parts.each { |p| @groups << p.to_s }
+      # Symbols qualify against this relation's table (Rails renders
+      # `GROUP BY "tags"."id"`), so a grouped column stays unambiguous
+      # once a join brings in a second table carrying the same column
+      # name. Raw strings (expressions, pre-qualified columns) ride
+      # verbatim.
+      parts.each do |p|
+        @groups << (p.is_a?(Symbol) ? "#{@table}.#{p}" : p.to_s)
+      end
       self
     end
 
@@ -251,10 +258,43 @@ module ActiveRecord
       records.dup
     end
 
+    # Implicit array conversion — Rails delegates `to_ary` to the
+    # loaded records, which is what lets `[story, relation].flatten`
+    # splice the relation's records into the surrounding Array
+    # (Array#flatten recurses into elements that respond to to_ary).
+    def to_ary
+      to_a
+    end
+
+    # `filter { |r| … }` / `select { |r| … }`-with-block are Enumerable
+    # on the loaded records. (`select(*cols)` — the projection form —
+    # is the separate chain method above; lowered call sites use
+    # `filter` for the block form, matching the corpus.)
+    def filter
+      out = []
+      to_a.each { |x| out << x if yield x }
+      out
+    end
+
     # `relation + array` — Rails materializes and concatenates
-    # (`to_a + other`), yielding a plain Array.
+    # (`to_a + other`), yielding a plain Array. The set operations
+    # (`&`, `|`, `-`) are delegated to the loaded records the same
+    # way (ActiveRecord::Delegation's array-method delegation);
+    # lobsters intersects `story.tags & filtered_tags`.
     def +(other)
       to_a + other
+    end
+
+    def &(other)
+      to_a & other
+    end
+
+    def |(other)
+      to_a | other
+    end
+
+    def -(other)
+      to_a - other
     end
 
     # `include?(record)` — Rails checks membership against the loaded
@@ -513,7 +553,14 @@ module ActiveRecord
     # `hidden_stories.user_id`, not `user_id`, after `joins(:hidings)`.
     def column_predicate(col, val)
       qcol = col.include?(".") ? col : "#{@table}.#{col}"
-      if val.is_a?(Array)
+      if val.is_a?(Relation)
+        # A relation value is Rails' subquery form —
+        # `where(story_id: Tagging.where(...).select(:story_id))` →
+        # `story_id IN (SELECT taggings.story_id FROM taggings …)`.
+        # The inner relation renders inline; its values were escaped
+        # as its own conditions were added.
+        "#{qcol} IN (#{val.to_sql})"
+      elsif val.is_a?(Array)
         "#{qcol} IN (#{escape_list(val)})"
       elsif val.nil?
         "#{qcol} IS NULL"

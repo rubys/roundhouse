@@ -34,12 +34,24 @@ fn analyzed_app() -> roundhouse::App {
     t.integer "score", null: false
     t.integer "user_id", null: false
   end
+  create_table "comments", force: :cascade do |t|
+    t.text "body", null: false
+    t.integer "story_id", null: false
+  end
+end
+"#,
+        ),
+        (
+            "app/models/comment.rb",
+            r#"class Comment < ApplicationRecord
+  belongs_to :story
 end
 "#,
         ),
         (
             "app/models/story.rb",
             r#"class Story < ApplicationRecord
+  has_many :comments
   scope :recent, -> { order(score: :desc).limit(10) }
   scope :top, -> { recent.where("score > 0") }
   scope :titles_only, -> { pluck(:title) }
@@ -67,6 +79,11 @@ end
     @classm = Story.for_user(1)
     @scope_on_scope = Story.top
     @terminal_scope = Story.titles_only
+  end
+
+  def build_probe
+    story = Story.find(params[:id])
+    @built = story.comments.build
   end
 end
 "#,
@@ -181,6 +198,27 @@ fn terminal_tailed_scope_keeps_legacy_array_seed() {
     assert_eq!(
         ivar_ty(&app, "terminal_scope"),
         Ty::Array { elem: Box::new(Ty::Class { id: story(), args: vec![] }) },
+    );
+}
+
+#[test]
+fn assoc_collection_build_rewrites_to_fk_preset_constructor() {
+    // Ruby-lane lowering (relation-type-plan R5): `story.comments
+    // .build` on a TYPED owner rewrites to the target constructor
+    // with the association FK preset — `Comment.new(story_id:
+    // story.id)` — instead of calling `build` on the folded Array
+    // reader. Owner typing is what disambiguates assoc names
+    // declared on several models.
+    let app = analyzed_app();
+    let controllers = roundhouse::emit::ruby::emit_lowered_controllers(&app);
+    let src: String = controllers
+        .iter()
+        .map(|f| f.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        src.contains("Comment.new(story_id: story.id)"),
+        "expected FK-preset constructor rewrite in emitted controller:\n{src}",
     );
 }
 

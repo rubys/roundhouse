@@ -350,6 +350,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                 .then(|| lc.name.clone());
             if crate::lower::scope_chain::mentions_scope(&m.body, &names)
                 || crate::lower::scope_chain::mentions_model_chain_start(&m.body, &models)
+                || crate::lower::scope_chain::mentions_assoc_constructor(&m.body, &assocs)
                 || (class_self.is_some()
                     && crate::lower::scope_chain::mentions_bare_chain_start(&m.body))
             {

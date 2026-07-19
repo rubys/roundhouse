@@ -734,7 +734,12 @@ fn every_runtime_method_body_concretely_typed() {
     // dispatches on `untyped` by design (JSON entry point); +7
     // untyped sites at the chained `v.is_a?(...)` / `v.to_s` calls;
     // ceiling raised 180 → 190.
-    const CEILING: usize = 190;
+    // 2026-07-18 relation-type-plan R5: Relation gains the Rails
+    // array-delegation surface (`to_ary`, block `filter`, `&`/`|`/`-`)
+    // — record-typed like `to_a`/`+` (element type is the model,
+    // `untyped` in the runtime RBS by the same convention); +5 sites;
+    // ceiling raised 190 → 195.
+    const CEILING: usize = 195;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

@@ -1029,11 +1029,13 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
             variants: vec![elem.clone(), Ty::Nil],
         },
         "dup" | "clone" => Ty::Array { elem: Box::new(elem.clone()) },
-        // Array `+` (concat) and `-` (set difference) preserve Array[elem].
+        // Array `+` (concat), `-` (set difference), `&` (set
+        // intersection), and `|` (set union) preserve Array[elem].
         // `<<` mutates in place and returns self (the array). `concat` /
         // `push` / `unshift` / `prepend` / `append` likewise return the
         // modified array.
-        "+" | "-" | "<<" | "concat" | "push" | "unshift" | "prepend" | "append" => {
+        "+" | "-" | "&" | "|" | "<<" | "concat" | "push" | "unshift" | "prepend"
+        | "append" => {
             Ty::Array { elem: Box::new(elem.clone()) }
         }
         // Array `*` with an Int is array repetition (preserves Array[elem]);
