@@ -23,6 +23,12 @@ pub fn rust_ty(ty: &Ty) -> String {
         // parse_db_time`); `Union{Time, Nil}` renders `Option<...>`.
         Ty::Time => "chrono::DateTime<chrono::Utc>".to_string(),
         Ty::Nil => "()".to_string(),
+        // Analysis-time relation type — erased by query specialization
+        // before emit (see `Ty::Relation`). Reaching here is a
+        // coverage gap: report, never degrade to `Vec<T>`.
+        Ty::Relation { of } => {
+            return crate::emit::diagnostics::unsupported_relation_ty("rust", of);
+        }
         Ty::Array { elem } => format!("Vec<{}>", rust_ty(elem)),
         Ty::Hash { key, value } => format!(
             "std::collections::HashMap<{}, {}>",

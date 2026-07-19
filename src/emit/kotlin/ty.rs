@@ -40,6 +40,13 @@ pub fn kotlin_ty(t: &Ty) -> String {
         // type) is the direct analog of Rust `!` / Crystal `NoReturn`.
         Ty::Bottom => "Nothing".to_string(),
 
+        // Analysis-time relation type — erased by query specialization
+        // before emit (see `Ty::Relation`). Reaching here is a
+        // coverage gap: report, never degrade to `MutableList<T>`.
+        Ty::Relation { of } => {
+            return crate::emit::diagnostics::unsupported_relation_ty("kotlin", of);
+        }
+
         // AR result sets and view accumulators mutate, so default the
         // collection types to the mutable variants. A `mutates_self`-
         // driven tightening to read-only `List`/`Map` is a Phase 2+

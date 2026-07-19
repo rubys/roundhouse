@@ -32,6 +32,30 @@ pub enum Ty {
 
     Nil,
 
+    /// An unmaterialized ActiveRecord-style query over model `of` —
+    /// the analysis-time type of a scope call (`Story.recent`), a
+    /// relation-returning class method, or an association read
+    /// (`tag.stories`) before a terminal executes it.
+    ///
+    /// First-class, deliberately NOT `Ty::Array { elem }` or
+    /// `Ty::Class { "ActiveRecord::Relation" }`: the variant exists so
+    /// the analyzer can reason about query chains across method
+    /// boundaries (delegation of the class-side scope surface, chain
+    /// builders preserving the receiver, terminals producing
+    /// `Array[of]` / `of | Nil` / `Int`). It is an *interpreter-side*
+    /// type in the Futamura sense: specialization folds
+    /// statically-visible chains into direct SQL at their terminal
+    /// (`lower/arel`), so the relation itself is erased from emitted
+    /// code. A target whose emitter meets a reachable `Relation` must
+    /// route it to an `Unsupported` emit diagnostic, never silently
+    /// degrade — adding the variant forces every exhaustive `match`
+    /// to make that choice explicit. Inline chains starting at
+    /// `Model.where(...)` continue to type as `Array<Self>`; this
+    /// variant is introduced only where that approximation fails
+    /// (scope returns, relation-returning class-method bodies,
+    /// association reads).
+    Relation { of: ClassId },
+
     Array { elem: Box<Ty> },
     Hash { key: Box<Ty>, value: Box<Ty> },
     Tuple { elems: Vec<Ty> },

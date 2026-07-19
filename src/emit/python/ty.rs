@@ -16,6 +16,12 @@ pub fn python_ty(ty: &Ty) -> String {
         // branch in python/library.rs and `Roundhouse.RhDateTime.parse`.
         Ty::Time => "datetime.datetime".to_string(),
         Ty::Nil => "None".to_string(),
+        // Analysis-time relation type — erased by query specialization
+        // before emit (see `Ty::Relation`). Reaching here is a
+        // coverage gap: report, never degrade to `list[T]`.
+        Ty::Relation { of } => {
+            return crate::emit::diagnostics::unsupported_relation_ty("python", of);
+        }
         Ty::Array { elem } => format!("list[{}]", python_ty(elem)),
         Ty::Hash { key, value } => format!("dict[{}, {}]", python_ty(key), python_ty(value)),
         Ty::Tuple { elems } => {

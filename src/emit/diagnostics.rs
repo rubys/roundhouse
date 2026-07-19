@@ -114,6 +114,30 @@ pub fn unsupported_time_ty(target: &str) -> String {
     "RoundhouseUnsupportedTime".to_string()
 }
 
+/// Report that a `Ty::Relation` reached a target's type renderer.
+/// Relations are analysis-time types erased by query specialization
+/// (`lower/arel` folds statically-visible chains into direct SQL), so
+/// one surviving into emit means a chain escaped the fold — a
+/// coverage gap, never something to paper over with the target's
+/// array type. Pushes a structured `Unsupported` diagnostic
+/// (`Severity::Error` fails the CLI transpile) and returns a
+/// placeholder type name that does NOT compile in any target, so
+/// direct-`emit()` test paths that bypass the fail-policy get a loud
+/// compiler error instead of a silent degrade. Same pattern as
+/// [`unsupported_time_ty`].
+pub fn unsupported_relation_ty(target: &str, of: &crate::ident::ClassId) -> String {
+    push(Diagnostic::unsupported(
+        crate::span::Span::synthetic(),
+        Some(Symbol::from(target)),
+        "relation_type",
+        format!(
+            "Relation[{}] reached emit — relation chains must specialize to SQL before emission",
+            of.0.as_str()
+        ),
+    ));
+    "RoundhouseUnsupportedRelation".to_string()
+}
+
 /// How a target spells "raise at runtime" — used to render the degrade
 /// stub. Each variant reproduces exactly the raise-equivalent that
 /// target's emitter already drops for `Expr.diagnostic` annotations, so

@@ -2145,6 +2145,8 @@ mod tests {
             Ty::Var { var: TyVar(7) },
             class("Story"),
             class("User"),
+            Ty::Relation { of: ClassId(Symbol::from("Story")) },
+            Ty::Relation { of: ClassId(Symbol::from("User")) },
             arr(Ty::Int),
             arr(Ty::Str),
             arr(Ty::Var { var: TyVar(3) }),
@@ -2224,6 +2226,24 @@ mod tests {
                     "({a:?} ⊔ {b:?}) ⊔ {b:?} must absorb",
                 );
             }
+        }
+    }
+
+    #[test]
+    fn union_of_relations_has_no_cross_model_subtyping() {
+        // `Relation{of: A} ⊔ Relation{of: A}` is itself (structural
+        // equality); differing models join to a flat Union — the
+        // lattice must NOT invent subtyping across models (no merged
+        // spine like the Hash/Array pointwise join: two relations
+        // over different models are genuinely distinct results).
+        let rel = |name: &str| Ty::Relation { of: ClassId(Symbol::from(name)) };
+        assert_eq!(union_of(rel("Story"), rel("Story")), rel("Story"));
+        match union_of(rel("Story"), rel("Comment")) {
+            Ty::Union { variants } => {
+                assert_eq!(variants.len(), 2, "distinct models stay distinct variants");
+                assert!(variants.iter().all(|v| matches!(v, Ty::Relation { .. })));
+            }
+            other => panic!("expected a union, got {other:?}"),
         }
     }
 

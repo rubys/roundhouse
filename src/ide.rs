@@ -883,6 +883,13 @@ pub fn render_ty(ty: &Ty) -> String {
         Ty::Sym => "Symbol".to_string(),
         Ty::Time => "Time".to_string(),
         Ty::Nil => "nil".to_string(),
+        // Consumer-facing projection of the analysis-time relation
+        // type: an unmaterialized query over `of`. `Relation[Story]`
+        // is what a Rails developer expects to read on hover for
+        // `Story.recent` — unlike emit type positions (which must
+        // report Unsupported), showing the relation here is the
+        // honest rendering.
+        Ty::Relation { of } => format!("Relation[{of}]"),
         Ty::Array { elem } => format!("Array[{}]", render_ty(elem)),
         Ty::Hash { key, value } => format!("Hash[{}, {}]", render_ty(key), render_ty(value)),
         Ty::Tuple { elems } => format!("[{}]", render_list(elems)),

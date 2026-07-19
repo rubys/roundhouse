@@ -803,6 +803,12 @@ pub fn print_ty(ty: &Ty) -> String {
                 )
             }
         }
+        // Same asymmetry as `Ty::Time` (module note above): prints as
+        // `Relation[T]`, which re-parses as `Ty::Class{Relation, [T]}`.
+        // The honest consumer-facing rendering wins over the fixed
+        // point — an author reading an inferred signature should see
+        // the relation, not `untyped`.
+        Ty::Relation { of } => format!("Relation[{}]", of.0.as_str()),
         // Value-position function types would need RBS proc syntax,
         // which the parse direction rejects — degrade.
         Ty::Fn { .. } => "untyped".to_string(),

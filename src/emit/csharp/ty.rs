@@ -35,6 +35,12 @@ pub fn csharp_ty(t: &Ty) -> String {
         // `csharp_return_ty` helper will refine the outermost slot in
         // Phase 2.
         Ty::Nil => "void".to_string(),
+        // Analysis-time relation type — erased by query specialization
+        // before emit (see `Ty::Relation`). Reaching here is a
+        // coverage gap: report, never degrade to `List<T>`.
+        Ty::Relation { of } => {
+            return crate::emit::diagnostics::unsupported_relation_ty("csharp", of);
+        }
         // Divergence type — `raise`/`return`. C# has no bottom type (no
         // `Nothing`/`!`); a `throw` expression is convertible to any type,
         // so the slot rarely needs a concrete render. Fall back to the soft

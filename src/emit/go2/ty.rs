@@ -32,6 +32,14 @@ pub fn go_ty_stub(ty: Option<&Ty>) -> String {
             )
         }
         Some(Ty::Array { elem }) => format!("[]{}", go_ty_stub(Some(elem))),
+        // Analysis-time relation type — erased by query specialization
+        // before emit (see `Ty::Relation`). Even the permissive stub
+        // renderer must not absorb it into `interface{}`: report, so
+        // the gap surfaces instead of hiding behind a valid-looking
+        // stub.
+        Some(Ty::Relation { of }) => {
+            crate::emit::diagnostics::unsupported_relation_ty("go", of)
+        }
         // Anonymous record types — RBS `{ name: String, path: String }`.
         // Go has no NamedTuple analog, so collapse to a `map[string]T`.
         // When every field shares the same Ty (the common case: an
@@ -111,6 +119,12 @@ pub fn go_ty(ty: &Ty) -> String {
         // runtime, not the first-class `Ty::Time` column type.)
         Ty::Time => "time.Time".to_string(),
         Ty::Nil => "struct{}".to_string(),
+        // Analysis-time relation type — erased by query specialization
+        // before emit (see `Ty::Relation`). Reaching here is a
+        // coverage gap: report, never degrade to `[]T`.
+        Ty::Relation { of } => {
+            return crate::emit::diagnostics::unsupported_relation_ty("go", of);
+        }
         Ty::Array { elem } => format!("[]{}", go_ty(elem)),
         Ty::Hash { key, value } => format!("map[{}]{}", go_ty(key), go_ty(value)),
         Ty::Tuple { elems } => {

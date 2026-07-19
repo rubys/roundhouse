@@ -204,6 +204,13 @@ pub fn ty_to_rbs(ty: &Ty) -> String {
         // apply_datetime_lowering.
         Ty::Time => "Time".into(),
         Ty::Nil => "nil".into(),
+        // Analysis-time relation type — erased by query specialization
+        // before emit (see `Ty::Relation`). The emitted Ruby has no
+        // runtime relation class for this to name, so reaching here is
+        // a coverage gap: report, never degrade to `Array[T]`.
+        Ty::Relation { of } => {
+            return crate::emit::diagnostics::unsupported_relation_ty("ruby", of);
+        }
         Ty::Array { elem } => format!("Array[{}]", ty_to_rbs(elem)),
         Ty::Hash { key, value } => format!("Hash[{}, {}]", ty_to_rbs(key), ty_to_rbs(value)),
         Ty::Tuple { elems } => {

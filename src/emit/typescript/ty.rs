@@ -23,6 +23,13 @@ pub fn ts_ty(ty: &Ty) -> String {
         Ty::Time => "Date".into(),
         Ty::Untyped => "any".into(),
         Ty::Bottom => "never".into(),
+        // Analysis-time relation type — erased by query specialization
+        // before emit (see `Ty::Relation`). Explicit arm so the `any`
+        // catch-all below can't silently absorb it: report, never
+        // degrade.
+        Ty::Relation { of } => {
+            return crate::emit::diagnostics::unsupported_relation_ty("typescript", of);
+        }
         // A temporal reader's `Time | Nil` union → `Date | null`. Only
         // Time-containing unions are rendered here (the datetime Stage-2
         // reader return type); other unions still fall through to `any`

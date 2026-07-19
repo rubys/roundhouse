@@ -25,6 +25,12 @@ pub fn crystal_ty(t: &Ty) -> String {
         Ty::Time => "Time".to_string(),
         Ty::Nil => "Nil".to_string(),
         Ty::Bottom => "NoReturn".to_string(),
+        // Analysis-time relation type — erased by query specialization
+        // before emit (see `Ty::Relation`). Reaching here is a
+        // coverage gap: report, never degrade to `Array(T)`.
+        Ty::Relation { of } => {
+            return crate::emit::diagnostics::unsupported_relation_ty("crystal", of);
+        }
         Ty::Array { elem } => format!("Array({})", crystal_ty(elem)),
         Ty::Hash { key, value } => format!("Hash({}, {})", crystal_ty(key), crystal_ty(value)),
         Ty::Tuple { elems } => {

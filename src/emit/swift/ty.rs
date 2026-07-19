@@ -38,6 +38,13 @@ pub fn swift_ty(t: &Ty) -> String {
         // direct analog of Kotlin `Nothing` / Rust `!`.
         Ty::Bottom => "Never".to_string(),
 
+        // Analysis-time relation type — erased by query specialization
+        // before emit (see `Ty::Relation`). Reaching here is a
+        // coverage gap: report, never degrade to `[T]`.
+        Ty::Relation { of } => {
+            return crate::emit::diagnostics::unsupported_relation_ty("swift", of);
+        }
+
         // Swift arrays/dictionaries are value types declared with the
         // sugar forms. Mutability lives on the binding (`var` vs `let`),
         // not the type — no MutableList/List split to manage.
