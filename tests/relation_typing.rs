@@ -79,6 +79,7 @@ end
     @classm = Story.for_user(1)
     @scope_on_scope = Story.top
     @terminal_scope = Story.titles_only
+    @mixed = Story.where(user_id: 1).recent
   end
 
   def build_probe
@@ -187,6 +188,24 @@ fn scope_rooted_at_sibling_scope_types_as_relation() {
     // sibling scope call still seeds the relation type.
     let app = analyzed_app();
     assert_eq!(ivar_ty(&app, "scope_on_scope"), relation_of_story());
+}
+
+#[test]
+fn relation_typed_scope_delegates_on_array_representation_receiver() {
+    // Mixed-representation chain: `Story.where(...)` starts an
+    // inline chain (Array representation, settled staging decision)
+    // and `.recent` — a scope whose seed carries the Relation
+    // representation — must still delegate, preserving the
+    // RECEIVER's representation: `Array<Story>`, not Var. This is
+    // the Mastodon `Account.with_username(u).with_domain(d)`
+    // regression (CI browser-smoke-ide): the unflipped ternary-body
+    // scope keeps the chain on the Array representation, and the
+    // flipped scope's hop poisoned it to Var → Untyped.
+    let app = analyzed_app();
+    assert_eq!(
+        ivar_ty(&app, "mixed"),
+        Ty::Array { elem: Box::new(Ty::Class { id: story(), args: vec![] }) },
+    );
 }
 
 #[test]

@@ -569,10 +569,33 @@ impl<'a> BodyTyper<'a> {
                 // resolves on the relation and re-returns the relation.
                 if let Ty::Class { id, .. } = elem {
                     if let Some(cls) = self.classes().get(id) {
-                        if let Some(scope_ret @ Ty::Array { .. }) =
-                            cls.class_methods.get(method)
-                        {
-                            return scope_ret.clone();
+                        match cls.class_methods.get(method) {
+                            Some(scope_ret @ Ty::Array { .. }) => {
+                                return scope_ret.clone();
+                            }
+                            // A scope/class method whose registered
+                            // return carries the Relation
+                            // representation still delegates on an
+                            // Array-representation receiver — chain
+                            // methods preserve the RECEIVER's
+                            // representation (settled staging
+                            // decision), so re-wrap as Array over the
+                            // relation's element. Without this arm, a
+                            // chain that starts on an unflipped scope
+                            // (`Account.with_username(u)` — ternary
+                            // body, conservative Array seed) and hops
+                            // through a flipped one (`.with_domain(d)`)
+                            // fell to Var and poisoned the method's
+                            // harvested return to Untyped.
+                            Some(Ty::Relation { of }) => {
+                                return Ty::Array {
+                                    elem: Box::new(Ty::Class {
+                                        id: of.clone(),
+                                        args: vec![],
+                                    }),
+                                };
+                            }
+                            _ => {}
                         }
                     }
                     // `relation.arel` exposes the relation's underlying
