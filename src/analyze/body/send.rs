@@ -69,6 +69,15 @@ impl<'a> BodyTyper<'a> {
                 "each_with_index" => Some(vec![(**elem).clone(), Ty::Int]),
                 _ => None,
             },
+            // A relation iterates its element model — same block
+            // surface as `Array<of>`, so delegate to the Array arm
+            // with the materialized element type.
+            Ty::Relation { of } => {
+                let as_array = Ty::Array {
+                    elem: Box::new(Ty::Class { id: of.clone(), args: vec![] }),
+                };
+                self.block_params_for(Some(&as_array), method)
+            }
             Ty::Hash { key, value } => match method.as_str() {
                 "each" | "each_pair" | "map" | "collect"
                 | "flat_map" | "collect_concat"
@@ -602,6 +611,56 @@ impl<'a> BodyTyper<'a> {
                     }
                 }
                 array_method(method, elem, block_ret)
+            }
+            // Relation-typed receiver — a chain started from a scope
+            // call, a relation-returning class method, or (later) an
+            // association read. Resolution order:
+            //   1. Relation-context catalog builtins: builders
+            //      preserve the relation, terminals produce exactly
+            //      the types the Array-representation arms produce
+            //      (settled: terminal result types must not change).
+            //   2. Class-side delegation: scopes + relation-returning
+            //      class methods resolve against the element model
+            //      (`Story.recent.for_user(u)`). ONLY the relation-
+            //      returning surface delegates — forwarding arbitrary
+            //      class methods would be Rails' method_missing
+            //      semantics; unresolved sends should surface, not
+            //      silently forward. No parent walk, mirroring the
+            //      Array-representation delegation above.
+            //   3. Enumerable/array fallback on the materialized
+            //      element (`each`/`map`/`size`/…) — same types the
+            //      Array representation gives.
+            Some(Ty::Relation { of }) => {
+                if let Some(entry) = crate::catalog::lookup(
+                    method.as_str(),
+                    crate::catalog::ReceiverContext::Relation,
+                ) {
+                    if let Some(kind) = entry.return_kind {
+                        return crate::analyze::instantiate_return_kind(kind, of);
+                    }
+                }
+                if let Some(cls) = self.classes().get(of) {
+                    match cls.class_methods.get(method) {
+                        Some(ret @ Ty::Relation { .. }) => return ret.clone(),
+                        // A class-side entry still carrying the Array
+                        // representation (builder seeds, scope seeds
+                        // that didn't qualify for the Relation flip):
+                        // chain methods preserve the receiver's
+                        // representation, so re-wrap a single-model
+                        // element as a relation over that model. A
+                        // union-of-models element isn't expressible
+                        // as `Relation { of }` — keep the array form.
+                        Some(Ty::Array { elem }) if is_model_relation_elem(elem) => {
+                            return match &**elem {
+                                Ty::Class { id, .. } => Ty::Relation { of: id.clone() },
+                                _ => Ty::Array { elem: elem.clone() },
+                            };
+                        }
+                        _ => {}
+                    }
+                }
+                let elem = Ty::Class { id: of.clone(), args: vec![] };
+                array_method(method, &elem, block_ret)
             }
             Some(Ty::Hash { key, value }) => hash_method(method, key, value, block_ret),
             Some(Ty::Record { row }) => record_method(method, row, args),

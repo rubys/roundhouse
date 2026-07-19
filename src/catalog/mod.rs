@@ -1383,7 +1383,6 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
     // Introspection. `relation.model` is the element's class object;
     // `SelfType` reproduces the send.rs arm's `elem.clone()` (the
     // class/instance conflation is the arm's, kept deliberately).
-    // `arel` escapes to raw SQL — gradual.
     CatalogedMethod {
         name: "model",
         receiver: ReceiverContext::Relation,
@@ -1391,12 +1390,17 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::NotApplicable,
         return_kind: Some(ReturnKind::SelfType),
     },
+    // `relation.arel` exposes the underlying Arel select manager.
+    // Matches today's Array-representation behavior: the dispatch
+    // intercept in send.rs returns `Arel::SelectManager` for a
+    // model-element receiver BEFORE `array_method`'s (dead) Untyped
+    // arm can fire, so the select-manager type is the live spec.
     CatalogedMethod {
         name: "arel",
         receiver: ReceiverContext::Relation,
         effect: EffectClass::Pure,
         chain: ChainKind::NotApplicable,
-        return_kind: Some(ReturnKind::Untyped),
+        return_kind: Some(ReturnKind::ClassRef("Arel::SelectManager")),
     },
 ];
 

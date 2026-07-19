@@ -120,35 +120,8 @@ impl Analyzer {
             // return_kind automatically enables it for type
             // inference downstream.
             use crate::catalog::{AR_CATALOG, ReceiverContext, ReturnKind};
-            let instantiate = |kind: ReturnKind| -> Ty {
-                match kind {
-                    ReturnKind::SelfType => self_ty.clone(),
-                    ReturnKind::ArrayOfSelf => array_of_self.clone(),
-                    ReturnKind::SelfOrNil => Ty::Union {
-                        variants: vec![self_ty.clone(), Ty::Nil],
-                    },
-                    ReturnKind::Int => Ty::Int,
-                    ReturnKind::Bool => Ty::Bool,
-                    ReturnKind::HashSymStr => Ty::Hash {
-                        key: Box::new(Ty::Sym),
-                        value: Box::new(Ty::Str),
-                    },
-                    ReturnKind::ArrayOfSym => Ty::Array { elem: Box::new(Ty::Sym) },
-                    ReturnKind::Str => Ty::Str,
-                    ReturnKind::ClassRef(path) => Ty::Class {
-                        id: ClassId(Symbol::from(path)),
-                        args: vec![],
-                    },
-                    // Relation-context kinds. Unreachable from the
-                    // Class/Instance loops below (which filter on
-                    // receiver context) until Relation-receiver
-                    // dispatch instantiates them.
-                    ReturnKind::RelationOfSelf => Ty::Relation { of: model.name.clone() },
-                    ReturnKind::ArrayOfInt => Ty::Array { elem: Box::new(Ty::Int) },
-                    ReturnKind::ArrayOfUntyped => Ty::Array { elem: Box::new(Ty::Untyped) },
-                    ReturnKind::Untyped => Ty::Untyped,
-                }
-            };
+            let instantiate =
+                |kind: ReturnKind| -> Ty { instantiate_return_kind(kind, &model.name) };
             for entry in AR_CATALOG {
                 if entry.receiver != ReceiverContext::Class {
                     continue;
@@ -3823,6 +3796,41 @@ impl Analyzer {
 /// - `only: [...]` limits to the listed actions
 /// - `except: [...]` excludes the listed actions
 /// - both empty → applies to all actions on the controller
+/// Instantiate a catalog [`crate::catalog::ReturnKind`] against a
+/// concrete model class. Shared between the per-model registry seeding
+/// in `with_adapter` (Class/Instance receiver contexts, where `self_id`
+/// is the model being seeded) and Relation-receiver dispatch in
+/// `body/send.rs` (where "Self" denotes the relation's *element* model
+/// — `Relation { of }`'s `of`).
+pub(crate) fn instantiate_return_kind(
+    kind: crate::catalog::ReturnKind,
+    self_id: &ClassId,
+) -> Ty {
+    use crate::catalog::ReturnKind;
+    let self_ty = || Ty::Class { id: self_id.clone(), args: vec![] };
+    match kind {
+        ReturnKind::SelfType => self_ty(),
+        ReturnKind::ArrayOfSelf => Ty::Array { elem: Box::new(self_ty()) },
+        ReturnKind::SelfOrNil => Ty::Union { variants: vec![self_ty(), Ty::Nil] },
+        ReturnKind::Int => Ty::Int,
+        ReturnKind::Bool => Ty::Bool,
+        ReturnKind::HashSymStr => Ty::Hash {
+            key: Box::new(Ty::Sym),
+            value: Box::new(Ty::Str),
+        },
+        ReturnKind::ArrayOfSym => Ty::Array { elem: Box::new(Ty::Sym) },
+        ReturnKind::Str => Ty::Str,
+        ReturnKind::ClassRef(path) => Ty::Class {
+            id: ClassId(Symbol::from(path)),
+            args: vec![],
+        },
+        ReturnKind::RelationOfSelf => Ty::Relation { of: self_id.clone() },
+        ReturnKind::ArrayOfInt => Ty::Array { elem: Box::new(Ty::Int) },
+        ReturnKind::ArrayOfUntyped => Ty::Array { elem: Box::new(Ty::Untyped) },
+        ReturnKind::Untyped => Ty::Untyped,
+    }
+}
+
 pub(crate) fn before_filter_applies(filter: &Filter, action_name: &Symbol) -> bool {
     if !filter.only.is_empty() {
         return filter.only.contains(action_name);

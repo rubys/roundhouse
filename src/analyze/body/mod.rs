@@ -1131,6 +1131,9 @@ fn propagate_expected_to_empty_container(value: &mut Expr, expected: &Ty) {
 pub(crate) fn multiassign_target_ty(rhs: &Option<Ty>, index: usize) -> Option<Ty> {
     match rhs {
         Some(Ty::Array { elem }) => Some((**elem).clone()),
+        // Destructuring a relation materializes it — each scalar
+        // target gets the element model, same as `Array<of>`.
+        Some(Ty::Relation { of }) => Some(Ty::Class { id: of.clone(), args: vec![] }),
         Some(Ty::Tuple { elems }) => elems.get(index).cloned(),
         Some(Ty::Untyped) => Some(Ty::Untyped),
         _ => None,
