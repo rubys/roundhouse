@@ -176,8 +176,65 @@ module Nokogiri
   end
 end
 
-# mail — RFC822 address parsing (Hat#sanitized_link).
+# mail — RFC822 address parsing (Hat#sanitized_link) and inbound message
+# parsing (extras/email_parser.rb, the mailbox path — off the read
+# benchmark).
 module Mail
+  def self.read_from_string(_text)
+    GemFacade.fail!("Mail.read_from_string")
+    Message.new
+  end
+
+  # One MIME part of a multipart message; parts nest (parts.first.parts).
+  class Part
+    def parts
+      GemFacade.fail!("Mail::Part#parts")
+      [Part.new]
+    end
+
+    def content_type
+      GemFacade.fail!("Mail::Part#content_type")
+      ""
+    end
+
+    def content_type_parameters
+      GemFacade.fail!("Mail::Part#content_type_parameters")
+      { "" => "" }
+    end
+
+    def body
+      GemFacade.fail!("Mail::Part#body")
+      ""
+    end
+  end
+
+  class Message
+    def multipart?
+      GemFacade.fail!("Mail::Message#multipart?")
+      false
+    end
+
+    def parts
+      GemFacade.fail!("Mail::Message#parts")
+      [Part.new]
+    end
+
+    def content_type
+      GemFacade.fail!("Mail::Message#content_type")
+      ""
+    end
+
+    def content_type_parameters
+      GemFacade.fail!("Mail::Message#content_type_parameters")
+      { "" => "" }
+    end
+
+    def body
+      GemFacade.fail!("Mail::Message#body")
+      ""
+    end
+  end
+
   class Address
     def initialize(_value)
       GemFacade.fail!("Mail::Address.new")
@@ -316,6 +373,16 @@ module SVG
       def get_y_values
         GemFacade.fail!("SVG::Graph::TimeSeries#get_y_values")
         [0]
+      end
+
+      def add_data(data: nil, template: nil)
+        GemFacade.fail!("SVG::Graph::TimeSeries#add_data")
+        self
+      end
+
+      def burn_svg_only
+        GemFacade.fail!("SVG::Graph::TimeSeries#burn_svg_only")
+        ""
       end
     end
   end

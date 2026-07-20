@@ -58,6 +58,23 @@ module Nokogiri
 end
 
 module Mail
+  def self.read_from_string: (untyped _text) -> Mail::Message
+
+  class Part
+    def parts: () -> Array[Mail::Part]
+    def content_type: () -> String
+    def content_type_parameters: () -> Hash[String, untyped]
+    def body: () -> String
+  end
+
+  class Message
+    def multipart?: () -> bool
+    def parts: () -> Array[Mail::Part]
+    def content_type: () -> String
+    def content_type_parameters: () -> Hash[String, untyped]
+    def body: () -> String
+  end
+
   class Address
     @value: String
 
@@ -117,6 +134,8 @@ module SVG
       def x_label_format: () -> String
       def get_x_values: () -> Array[Integer]
       def get_y_values: () -> Array[Integer]
+      def add_data: (?data: untyped, ?template: untyped) -> SVG::Graph::TimeSeries
+      def burn_svg_only: () -> String
     end
   end
 end
