@@ -8,4 +8,5 @@ protocol AdapterInterface {
     func update(_ tableName: String, _ id: Int, _ attributes: [String: Any?])
     func delete(_ tableName: String, _ id: Int)
     func truncate(_ tableName: String)
+    func deleteAll(_ tableName: String)
 }

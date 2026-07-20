@@ -24,6 +24,7 @@ public abstract class AdapterInterface
     public abstract void Update(string tableName, long id, Dictionary<string, object?> attributes);
     public abstract void Delete(string tableName, long id);
     public abstract void Truncate(string tableName);
+    public abstract void DeleteAll(string tableName);
 }
 
 // The default `ActiveRecord.adapter` value: throws on every call. The
@@ -44,4 +45,5 @@ public sealed class NullAdapter : AdapterInterface
     public override void Update(string tableName, long id, Dictionary<string, object?> attributes) => throw Unwired();
     public override void Delete(string tableName, long id) => throw Unwired();
     public override void Truncate(string tableName) => throw Unwired();
+    public override void DeleteAll(string tableName) => throw Unwired();
 }

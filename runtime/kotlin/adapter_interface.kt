@@ -16,4 +16,5 @@ interface AdapterInterface {
     fun count(tableName: String): Long
     fun existsPred(tableName: String, id: Long): Boolean
     fun truncate(tableName: String)
+    fun deleteAll(tableName: String)
 }

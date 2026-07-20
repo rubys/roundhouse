@@ -60,6 +60,9 @@ impl ActiveRecordAdapter for NotConfigured {
     fn truncate(&self, _t: String) {
         panic!("ActiveRecord.adapter was not set before use")
     }
+    fn delete_all(&self, _t: String) {
+        panic!("ActiveRecord.adapter was not set before use")
+    }
 }
 
 #[derive(Clone)]
@@ -107,5 +110,8 @@ impl ActiveRecordAdapter for AdapterInterface {
     }
     fn truncate(&self, t: String) {
         self.0.truncate(t)
+    }
+    fn delete_all(&self, t: String) {
+        self.0.delete_all(t)
     }
 }

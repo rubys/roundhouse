@@ -263,6 +263,7 @@ module Roundhouse
     abstract def update(table_name : String, id, attributes : Hash(Symbol, _)) : Nil
     abstract def delete(table_name : String, id) : Nil
     abstract def truncate(table_name : String) : Nil
+    abstract def delete_all(table_name : String) : Nil
   end
 
   # Concrete sqlite-backed adapter. Method names + arities match the
@@ -352,6 +353,10 @@ module Roundhouse
     end
 
     def truncate(table_name : String) : Nil
+      conn.exec("DELETE FROM #{table_name}")
+    end
+
+    def delete_all(table_name : String) : Nil
       conn.exec("DELETE FROM #{table_name}")
     end
   end

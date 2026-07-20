@@ -41,4 +41,5 @@ type ActiveRecordAdapterInterface interface {
 	Update(tableName string, id int64, attributes map[string]any)
 	Delete(tableName string, id int64)
 	Truncate(tableName string)
+	DeleteAll(tableName string)
 }

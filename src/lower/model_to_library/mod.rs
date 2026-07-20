@@ -1075,6 +1075,11 @@ fn build_class_info(
         "_adapter_truncate",
         fn_sig(vec![], Ty::Nil),
     );
+    insert_default(
+        &mut info.class_methods,
+        "delete_all",
+        fn_sig(vec![], Ty::Nil),
+    );
 
     // Typed factory taking the synthesized `<Model>Row` (one typed slot
     // per schema column). The body-typer needs this signature to resolve

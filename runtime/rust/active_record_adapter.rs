@@ -42,5 +42,6 @@ pub trait ActiveRecordAdapter: Send + Sync {
     fn insert(&self, table_name: String, attributes: HashMap<String, Value>) -> i64;
     fn update(&self, table_name: String, id: i64, attributes: HashMap<String, Value>);
     fn delete(&self, table_name: String, id: i64);
+    fn delete_all(&self, table_name: String);
     fn truncate(&self, table_name: String);
 }

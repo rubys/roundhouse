@@ -61,6 +61,7 @@ pub(super) fn push_adapter_methods(
     methods.push(synth_adapter_count(owner, table, schema));
     methods.push(synth_adapter_exists_by_id(owner, table, schema));
     methods.push(synth_adapter_truncate(owner, table, schema));
+    methods.push(synth_delete_all(owner, table));
     methods.push(synth_adapter_reload(owner, table));
 }
 
@@ -320,6 +321,61 @@ fn synth_adapter_exists_by_id(owner: &ClassId, table: &Table, schema: &Schema) -
         params: vec![Param::positional(id.clone())],
         body: SqliteVisitor.visit(&op, schema, owner),
         signature: Some(fn_sig(vec![(id, Ty::Int)], Ty::Bool)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+            mutates_self: false,
+            block_param: None,
+    }
+}
+
+/// `def self.delete_all` — bulk DELETE with ActiveRecord semantics:
+/// rows go, the autoincrement counter stays (`_adapter_truncate` is
+/// the sequence-resetting sibling, for test setup). A PUBLIC name —
+/// this per-model override shadows `Base.delete_all`'s
+/// adapter-routing default, so strict targets go Db-direct like every
+/// other CRUD primitive (and targets with no adapter module at all,
+/// e.g. Elixir, never see the routing body).
+fn synth_delete_all(owner: &ClassId, table: &Table) -> MethodDef {
+    use crate::expr::Literal;
+
+    let exec = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Const { path: vec![Symbol::from("Db")] },
+            )),
+            method: Symbol::from("exec"),
+            args: vec![Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit {
+                    value: Literal::Str {
+                        value: format!("DELETE FROM {}", table.name.as_str()),
+                    },
+                },
+            )],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Seq {
+            exprs: vec![
+                exec,
+                Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+            ],
+        },
+    );
+
+    MethodDef {
+        name: Symbol::from("delete_all"),
+        receiver: MethodReceiver::Class,
+        params: vec![],
+        body,
+        signature: Some(fn_sig(vec![], Ty::Nil)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,

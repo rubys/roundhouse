@@ -165,6 +165,7 @@ fn article_lowers_with_schema_methods() {
         "_adapter_count",
         "_adapter_exists_by_id?",
         "_adapter_truncate",
+        "delete_all",
     ];
     for m in &lc.methods {
         let n = m.name.as_str();
