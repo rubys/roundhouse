@@ -1,0 +1,23 @@
+<% if article.errors && !article.errors.empty? %>
+  <div class="errors" id="error_explanation">
+    <h2><%= pluralize(article.errors.full_messages.size, "error") %> prohibited this article from being saved:</h2>
+    <ul>
+      <% article.errors.full_messages.each do |message| %>
+        <li><%= message %></li>
+      <% end %>
+    </ul>
+  </div>
+<% end %>
+
+<form method="post" action="<%= action %>">
+  <% if method != "post" %>
+    <input type="hidden" name="_method" value="<%= method %>">
+  <% end %>
+  <label>Title
+    <input type="text" name="article[title]" value="<%= article.title %>">
+  </label>
+  <label>Body
+    <textarea name="article[body]" rows="4"><%= article.body %></textarea>
+  </label>
+  <p><button type="submit">Save Article</button></p>
+</form>

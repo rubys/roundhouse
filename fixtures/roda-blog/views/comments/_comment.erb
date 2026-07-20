@@ -1,0 +1,8 @@
+<div class="comment" id="comment_<%= comment.id %>">
+  <p><strong><%= comment.commenter %></strong></p>
+  <p><%= comment.body %></p>
+  <form class="inline" method="post" action="/articles/<%= comment.article_id %>/comments/<%= comment.id %>">
+    <input type="hidden" name="_method" value="delete">
+    <button type="submit">Delete</button>
+  </form>
+</div>

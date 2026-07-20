@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Roda + Sequel Blog</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+      a { color: #2563eb; }
+      .notice { background: #ecfdf5; color: #047857; padding: .5rem .75rem; border-radius: .375rem; }
+      .alert  { background: #fef2f2; color: #b91c1c; padding: .5rem .75rem; border-radius: .375rem; }
+      .errors { background: #fef2f2; color: #b91c1c; padding: .5rem .75rem; border-radius: .375rem; }
+      .article { border: 1px solid #e5e7eb; border-radius: .5rem; padding: 1rem; margin-bottom: 1rem; }
+      .comment { background: #f9fafb; border-radius: .5rem; padding: .75rem; margin-bottom: .5rem; }
+      label { display: block; font-weight: 600; margin-top: .5rem; }
+      input[type=text], textarea { width: 100%; padding: .5rem; box-sizing: border-box; }
+      form.inline { display: inline; }
+      button { cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <% if flash["notice"] %><p class="notice" id="notice"><%= flash["notice"] %></p><% end %>
+    <% if flash["alert"] %><p class="alert" id="alert"><%= flash["alert"] %></p><% end %>
+    <%== yield %>
+  </body>
+</html>

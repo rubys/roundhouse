@@ -1,0 +1,33 @@
+<div>
+  <h1><%= @article.title %></h1>
+  <p><%= @article.body %></p>
+
+  <p>
+    <a href="/articles/<%= @article.id %>/edit">Edit this article</a>
+    <a href="/articles">Back to articles</a>
+    <form class="inline" method="post" action="/articles/<%= @article.id %>">
+      <input type="hidden" name="_method" value="delete">
+      <button type="submit">Destroy this article</button>
+    </form>
+  </p>
+
+  <hr>
+
+  <h2>Comments</h2>
+  <div id="comments">
+    <% @article.comments.each do |comment| %>
+      <%== part("comments/_comment", comment: comment) %>
+    <% end %>
+  </div>
+
+  <h3>Add a comment</h3>
+  <form method="post" action="/articles/<%= @article.id %>/comments">
+    <label>Commenter
+      <input type="text" name="comment[commenter]">
+    </label>
+    <label>Body
+      <textarea name="comment[body]" rows="3"></textarea>
+    </label>
+    <p><button type="submit">Add Comment</button></p>
+  </form>
+</div>

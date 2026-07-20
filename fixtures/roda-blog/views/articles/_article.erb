@@ -1,0 +1,15 @@
+<div class="article" id="article_<%= article.id %>">
+  <h2>
+    <a href="/articles/<%= article.id %>"><%= article.title %></a>
+    <span>(<%= pluralize(article.comments.size, "comment") %>)</span>
+  </h2>
+  <p><%= truncate(article.body) %></p>
+  <p>
+    <a href="/articles/<%= article.id %>">Show</a>
+    <a href="/articles/<%= article.id %>/edit">Edit</a>
+    <form class="inline" method="post" action="/articles/<%= article.id %>">
+      <input type="hidden" name="_method" value="delete">
+      <button type="submit">Destroy</button>
+    </form>
+  </p>
+</div>

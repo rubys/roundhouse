@@ -1,0 +1,14 @@
+<div>
+  <h1>Articles</h1>
+  <p><a href="/articles/new">New article</a></p>
+
+  <div id="articles">
+    <% if @articles.empty? %>
+      <p>No articles found.</p>
+    <% else %>
+      <% @articles.each do |article| %>
+        <%== part("articles/_article", article: article) %>
+      <% end %>
+    <% end %>
+  </div>
+</div>
