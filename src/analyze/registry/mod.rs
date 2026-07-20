@@ -6,4 +6,5 @@
 
 pub(super) mod activemodel;
 pub(super) mod ar;
+pub(super) mod routes;
 pub(super) mod stdlib;
