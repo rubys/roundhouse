@@ -142,4 +142,44 @@ orchestrator.
 ### Per-commit gate
 Byte-identical emit harness in scratchpad: baseline captured at b30fb5fc (all 13 targets on
 fixtures/real-blog, fixed output path). `gate.sh` rebuilds + re-transpiles + `diff -rq`.
-Determinism verified. Plus `cargo test --all-targets` vs baseline snapshot.
+Determinism verified. Plus `cargo test --all-targets` vs baseline snapshot (91 binaries,
+0 failed at baseline).
+
+### 2026-07-19 — Step 2 EXECUTED (7 commits, all gates green)
+
+`Analyzer::with_adapter` went from ~1486 LOC to **388 LOC** (per-model loop + 7 registry
+calls + RBS sidecars + controller-class registration + `Self{}`). New module family
+`src/analyze/registry/` (1275 LOC across 8 files). Every commit: byte-identical emit across
+all 13 targets + `cargo test --all-targets` clean.
+
+- `0b0a528c` step 2a — `registry::stdlib` (Rails/Time/Date + stdlib singletons + GEM_CATALOG;
+  moved `register_stdlib_class` helper along).
+- `2bfa5d97` step 2b — `registry::activemodel` (Validations/Model + Errors + Error). CollectionProxy
+  (AR) left inline between the two former activemodel spans; distinct keys ⇒ order-neutral.
+- `0e920462` step 2c — `registry::ar` (ActiveRecord::Base + CollectionProxy + AdapterInterface + Arel family).
+- `7c401789` step 2d — `registry::routes::route_helper_names(app) -> Vec<String>` (the cross-domain value).
+- `94ce936e` step 2e — `registry::view` (FormBuilder, Collector, ActionView::Base accumulator, FlashHash);
+  `block_fn` promoted to shared `registry::block_fn` free fn (was inline closure used by view + controller).
+- `da4f1496` step 2f — `registry::library` (library classes, ActionMailer, ActiveJob, Sidekiq).
+- `25994cb6` step 2g — `registry::controllers` (ActionController::Base + ApplicationController incl. Devise fold).
+  ActionController::Base regrouped adjacent to ApplicationController; runs after `view::register`
+  (Devise fold mutates ActionView::Base). Region 22 (per-app controller-class registration) LEFT INLINE —
+  depends on mod-private `controller_includes` + on ApplicationController inserted first.
+
+**Threading design:** each `register` takes `&mut HashMap<ClassId, ClassInfo>` plus explicit
+`app` / `&[String] route_helper_names` params (no struct-field widening). `flash_ty`/
+`form_builder_ty` reconstructed in-place where needed (inline `Ty` literals). `route_helper_names`
+bound once in the orchestrator, passed to view/controllers/library.
+
+### Step 3 — per-model loop: JUDGMENT = LEAVE INLINE
+The `for model in &app.models` loop (~294 LOC) accumulates a single `cls: ClassInfo` across ~12
+sub-passes threading `self_ty`, `array_of_self`, the `instantiate` closure (borrows `model.name`),
+`module_include_map`, `scope_names`, and `includes`. This is the genuinely-shared-state region the
+plan flagged as the risk area. Clean sub-seams exist (class-query surface, schema attrs, associations,
+concern-DSL fold) but extracting them buys little over the achieved 388-LOC orchestrator and adds
+closure/borrow-threading risk. Left inline per plan ("when in doubt, leave it").
+
+### Steps 4 / 5 — DEFERRED (optional, time-gated)
+Sibling free-fn extractions (render/effects/diagnose) and insert-run table-ification not pursued this
+session; independent of the relation-convergence sequencing unblock. Step 2 (the code-motion this plan
+existed to do) is complete, so docs/relation-convergence-plan.md is now unblocked.
