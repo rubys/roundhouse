@@ -47,7 +47,7 @@ fn length_rule_fans_out_into_min_and_max_checks() {
         body: vec![ModelBodyItem::Validation {
             validation: Validation {
                 attribute: Symbol::from("body"),
-                rules: vec![ValidationRule::Length { min: Some(5), max: Some(100) }],
+                rules: vec![ValidationRule::Length { min: Some(5), max: Some(100), message: None }],
             },
             leading_comments: vec![],
             leading_blank_line: false,
@@ -57,8 +57,8 @@ fn length_rule_fans_out_into_min_and_max_checks() {
     let lowered = lower_validations(&model);
     assert_eq!(lowered.len(), 1);
     assert_eq!(lowered[0].checks.len(), 2, "one for min, one for max");
-    assert!(matches!(lowered[0].checks[0], Check::MinLength { n: 5 }));
-    assert!(matches!(lowered[0].checks[1], Check::MaxLength { n: 100 }));
+    assert!(matches!(lowered[0].checks[0], Check::MinLength { n: 5, message: None }));
+    assert!(matches!(lowered[0].checks[1], Check::MaxLength { n: 100, message: None }));
 }
 
 #[test]
@@ -77,7 +77,7 @@ fn multiple_rules_on_one_attribute_stay_grouped() {
                 attribute: Symbol::from("title"),
                 rules: vec![
                     ValidationRule::Presence,
-                    ValidationRule::Length { min: Some(3), max: None },
+                    ValidationRule::Length { min: Some(3), max: None, message: None },
                 ],
             },
             leading_comments: vec![],
@@ -89,7 +89,7 @@ fn multiple_rules_on_one_attribute_stay_grouped() {
     assert_eq!(lowered.len(), 1);
     assert_eq!(lowered[0].checks.len(), 2);
     assert!(matches!(lowered[0].checks[0], Check::Presence));
-    assert!(matches!(lowered[0].checks[1], Check::MinLength { n: 3 }));
+    assert!(matches!(lowered[0].checks[1], Check::MinLength { n: 3, message: None }));
 }
 
 #[test]
@@ -97,11 +97,11 @@ fn default_messages_match_rails_defaults() {
     assert_eq!(Check::Presence.default_message(), "can't be blank");
     assert_eq!(Check::Absence.default_message(), "must be blank");
     assert_eq!(
-        Check::MinLength { n: 10 }.default_message(),
+        Check::MinLength { n: 10, message: None }.default_message(),
         "is too short (minimum is 10 characters)"
     );
     assert_eq!(
-        Check::MaxLength { n: 100 }.default_message(),
+        Check::MaxLength { n: 100, message: None }.default_message(),
         "is too long (maximum is 100 characters)"
     );
     assert_eq!(Check::OnlyInteger.default_message(), "must be an integer");

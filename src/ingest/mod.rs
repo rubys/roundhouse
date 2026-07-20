@@ -23,8 +23,11 @@ pub mod jbuilder;
 pub mod library_class;
 pub mod model;
 pub mod prism;
+pub mod roda_app;
 pub mod routes;
 pub mod schema;
+pub mod sequel_migration;
+pub mod sequel_model;
 pub mod sources;
 pub mod survey;
 pub mod test;
@@ -40,8 +43,11 @@ pub use library_class::{
     classify_class_file, ingest_library_class, ingest_library_classes, ClassKind,
 };
 pub use model::ingest_model;
+pub use roda_app::{ingest_roda_app_with_vfs, is_roda_app};
 pub use routes::ingest_routes;
 pub use schema::{ingest_migration, ingest_schema};
+pub use sequel_migration::ingest_sequel_migration;
+pub use sequel_model::ingest_sequel_model;
 pub use test::ingest_test_file;
 pub use view::ingest_view;
 

@@ -336,7 +336,17 @@ pub enum ValidationRule {
     Presence,
     Absence,
     Uniqueness { scope: Vec<Symbol>, case_sensitive: bool },
-    Length { min: Option<u32>, max: Option<u32> },
+    Length {
+        min: Option<u32>,
+        max: Option<u32>,
+        /// `message:` override for the length failure text. Forced by
+        /// the Sequel front-end (`validates_min_length 10, :body,
+        /// message: "..."`); Rails' `length: { minimum: 10, message:
+        /// "..." }` lands here too when a fixture uses it. `None` →
+        /// the Rails default text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
     Format { pattern: String },
     Numericality { only_integer: bool, gt: Option<f64>, lt: Option<f64> },
     Inclusion { values: Vec<Literal> },

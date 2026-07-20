@@ -48,6 +48,12 @@ pub fn ingest_app_from_tree(tree: HashMap<PathBuf, Vec<u8>>) -> IngestResult<App
 /// The actual whole-app walker. Generic over [`Vfs`] so it can read
 /// from disk or from an in-memory map without code duplication.
 pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<App> {
+    // Front-end dispatch: a rack app with no config/routes.rb whose
+    // app.rb subclasses Roda takes the Roda + Sequel walker (issue
+    // #67); everything else is a Rails-convention tree.
+    if super::roda_app::is_roda_app(vfs, dir) {
+        return super::roda_app::ingest_roda_app_with_vfs(vfs, dir);
+    }
     super::sources::reset();
     let mut app = App::new();
 
@@ -908,7 +914,7 @@ fn read_yml_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<Path
     Ok(out)
 }
 
-fn read_erb_files<V: Vfs + ?Sized>(
+pub(super) fn read_erb_files<V: Vfs + ?Sized>(
     vfs: &V,
     dir: &Path,
 ) -> IngestResult<Vec<(PathBuf, ViewEngine)>> {
@@ -1014,7 +1020,7 @@ fn walk_jbuilder<V: Vfs + ?Sized>(
 /// listing silently ignored them — on Mastodon that dropped 306 of 337
 /// controller files (admin/, api/, settings/, concerns/) with no gap
 /// recorded anywhere. The textbook silent gap; never again.
-fn read_rb_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<PathBuf>> {
+pub(super) fn read_rb_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<PathBuf>> {
     fn collect<V: Vfs + ?Sized>(
         vfs: &V,
         dir: &Path,

@@ -164,9 +164,13 @@ fn validation_rule_to_calls(attr: &Symbol, rule: &ValidationRule, attr_ty: Optio
     match rule {
         ValidationRule::Presence => vec![inline_presence_check(attr, attr_ty)],
         ValidationRule::Absence => vec![inline_absence_check(attr)],
-        ValidationRule::Length { min, max } => {
-            inline_length_check(attr, min.map(|n| n as usize), max.map(|n| n as usize), attr_ty)
-        }
+        ValidationRule::Length { min, max, message } => inline_length_check(
+            attr,
+            min.map(|n| n as usize),
+            max.map(|n| n as usize),
+            message.as_deref(),
+            attr_ty,
+        ),
         ValidationRule::Format { pattern } => vec![inline_format_check(attr, pattern)],
         ValidationRule::Numericality { only_integer, gt, lt } => {
             inline_numericality_check(attr, *only_integer, *gt, *lt)
@@ -415,6 +419,7 @@ fn inline_length_check(
     attr: &Symbol,
     min: Option<usize>,
     max: Option<usize>,
+    message: Option<&str>,
     attr_ty: Option<&Ty>,
 ) -> Vec<Expr> {
     let attr_ivar = ivar(attr);
@@ -475,11 +480,16 @@ fn inline_length_check(
                 ExprNode::Lit { value: Literal::Int { value: n as i64 } },
             )],
         );
-        let msg = format!(
-            "{} is too short (minimum is {} characters)",
-            humanize(attr.as_str()),
-            n
-        );
+        let msg = match message {
+            // `message:` override — Rails prefixes the humanized
+            // attribute exactly as it does for the default text.
+            Some(m) => format!("{} {m}", humanize(attr.as_str())),
+            None => format!(
+                "{} is too short (minimum is {} characters)",
+                humanize(attr.as_str()),
+                n
+            ),
+        };
         inner_stmts.push(if_with_nil_else(lt, errors_push(msg)));
     }
     if let Some(n) = max {
@@ -491,11 +501,14 @@ fn inline_length_check(
                 ExprNode::Lit { value: Literal::Int { value: n as i64 } },
             )],
         );
-        let msg = format!(
-            "{} is too long (maximum is {} characters)",
-            humanize(attr.as_str()),
-            n
-        );
+        let msg = match message {
+            Some(m) => format!("{} {m}", humanize(attr.as_str())),
+            None => format!(
+                "{} is too long (maximum is {} characters)",
+                humanize(attr.as_str()),
+                n
+            ),
+        };
         inner_stmts.push(if_with_nil_else(gt, errors_push(msg)));
     }
     let body_seq = seq(inner_stmts);
@@ -814,7 +827,7 @@ mod tests {
 
     #[test]
     fn length_min_only_emits_too_short() {
-        let exprs = inline_length_check(&attr(), Some(5), None, None);
+        let exprs = inline_length_check(&attr(), Some(5), None, None, None);
         assert_eq!(exprs.len(), 1, "length lowers to one outer expression");
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
         assert_eq!(msgs, vec!["Title is too short (minimum is 5 characters)"]);
@@ -822,14 +835,14 @@ mod tests {
 
     #[test]
     fn length_max_only_emits_too_long() {
-        let exprs = inline_length_check(&attr(), None, Some(100), None);
+        let exprs = inline_length_check(&attr(), None, Some(100), None, None);
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
         assert_eq!(msgs, vec!["Title is too long (maximum is 100 characters)"]);
     }
 
     #[test]
     fn length_min_and_max_emits_both_in_order() {
-        let exprs = inline_length_check(&attr(), Some(5), Some(100), None);
+        let exprs = inline_length_check(&attr(), Some(5), Some(100), None, None);
         let msgs: Vec<String> = exprs.iter().flat_map(collect_error_messages).collect();
         assert_eq!(
             msgs,

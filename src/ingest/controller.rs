@@ -456,7 +456,7 @@ fn lambda_body_expr(node: &Node<'_>, file: &str) -> Option<Expr> {
 /// action's template" idiom — e.g. RepliesController's
 /// all/comments/stories/unread all `render :show`) is unambiguous, and is
 /// exactly the shape whose view otherwise received no controller ivars.
-fn infer_render_template(body: &Expr) -> Option<Symbol> {
+pub(super) fn infer_render_template(body: &Expr) -> Option<Symbol> {
     let mut names: Vec<Symbol> = Vec::new();
     collect_template_renders(body, &mut names);
     let first = names.first()?.clone();

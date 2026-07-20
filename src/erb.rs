@@ -171,6 +171,13 @@ pub fn compile_erb_mapped(source: &str) -> (String, Vec<ErbSegment>) {
                     pending.push(&source[cursor..open], cursor, open);
                 }
                 let is_output = bytes.get(open + 2) == Some(&b'=');
+                // Erubi's raw-output tag `<%== expr %>`: same output
+                // position as `<%=`, but skipping auto-escape. The
+                // escape decision lives downstream (the view walker's
+                // helper/partial/yield carve-outs); here we only need
+                // the tag body to start after BOTH equals signs so the
+                // code parses as plain Ruby.
+                let is_raw_output = is_output && bytes.get(open + 3) == Some(&b'=');
                 let is_comment = !is_output && bytes.get(open + 2) == Some(&b'#');
                 // Erubi trim markers: under Rails' default trim mode
                 // `<%-` behaves exactly like `<%`, and the `-` of a
@@ -180,8 +187,13 @@ pub fn compile_erb_mapped(source: &str) -> (String, Vec<ErbSegment>) {
                 // `erubi_trim_body` at target-emit time.)
                 let is_trim_open =
                     !is_output && !is_comment && bytes.get(open + 2) == Some(&b'-');
-                let body_start =
-                    if is_output || is_trim_open { open + 3 } else { open + 2 };
+                let body_start = if is_raw_output {
+                    open + 4
+                } else if is_output || is_trim_open {
+                    open + 3
+                } else {
+                    open + 2
+                };
                 let close = find_at(bytes, body_start, b"%>")
                     .expect("unterminated ERB tag");
                 let body = &source[body_start..close];

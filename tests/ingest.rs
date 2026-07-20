@@ -741,14 +741,14 @@ end
     assert_eq!(body_v.rules.len(), 2);
     assert!(body_v.rules.iter().any(|r| matches!(r, ValidationRule::Presence)));
     assert!(body_v.rules.iter().any(
-        |r| matches!(r, ValidationRule::Length { min: Some(10), max: None })
+        |r| matches!(r, ValidationRule::Length { min: Some(10), max: None, .. })
     ));
 
     let title_v = validations.iter().find(|v| v.attribute.as_str() == "title").unwrap();
     assert_eq!(title_v.rules.len(), 1);
     assert!(matches!(
         title_v.rules[0],
-        ValidationRule::Length { min: None, max: Some(80) }
+        ValidationRule::Length { min: None, max: Some(80), .. }
     ));
 }
 

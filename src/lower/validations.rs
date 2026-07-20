@@ -55,12 +55,13 @@ pub enum Check {
     Presence,
     /// The attr must be blank. Default message: `"must be blank"`.
     Absence,
-    /// Length (char count or `len()`) must be ≥ `n`.
+    /// Length (char count or `len()`) must be ≥ `n`. `message` is a
+    /// per-declaration override of the default text.
     /// Default message: `"is too short (minimum is {n} characters)"`.
-    MinLength { n: u32 },
+    MinLength { n: u32, message: Option<String> },
     /// Length must be ≤ `n`.
     /// Default message: `"is too long (maximum is {n} characters)"`.
-    MaxLength { n: u32 },
+    MaxLength { n: u32, message: Option<String> },
     /// Numeric value must be > `threshold`.
     /// Default message: `"must be greater than {threshold}"`.
     GreaterThan { threshold: f64 },
@@ -86,16 +87,20 @@ pub enum Check {
 }
 
 impl Check {
-    /// Default Rails-compatible error message. Emitters can override
-    /// per-validation when `validates :x, …, message: "foo"` appears,
-    /// but the source IR doesn't carry the override yet — add when a
+    /// Rails-compatible error message. Length checks honor the
+    /// per-declaration `message:` override (carried through
+    /// `ValidationRule::Length`); other checks add the field when a
     /// fixture needs it.
     pub fn default_message(&self) -> String {
         match self {
             Check::Presence => "can't be blank".into(),
             Check::Absence => "must be blank".into(),
-            Check::MinLength { n } => format!("is too short (minimum is {n} characters)"),
-            Check::MaxLength { n } => format!("is too long (maximum is {n} characters)"),
+            Check::MinLength { n, message } => message
+                .clone()
+                .unwrap_or_else(|| format!("is too short (minimum is {n} characters)")),
+            Check::MaxLength { n, message } => message
+                .clone()
+                .unwrap_or_else(|| format!("is too long (maximum is {n} characters)")),
             Check::GreaterThan { threshold } => format!("must be greater than {threshold}"),
             Check::LessThan { threshold } => format!("must be less than {threshold}"),
             Check::OnlyInteger => "must be an integer".into(),
@@ -152,12 +157,12 @@ fn expand_rule(rule: &ValidationRule, out: &mut Vec<Check>) {
     match rule {
         ValidationRule::Presence => out.push(Check::Presence),
         ValidationRule::Absence => out.push(Check::Absence),
-        ValidationRule::Length { min, max } => {
+        ValidationRule::Length { min, max, message } => {
             if let Some(n) = min {
-                out.push(Check::MinLength { n: *n });
+                out.push(Check::MinLength { n: *n, message: message.clone() });
             }
             if let Some(n) = max {
-                out.push(Check::MaxLength { n: *n });
+                out.push(Check::MaxLength { n: *n, message: message.clone() });
             }
         }
         ValidationRule::Format { pattern } => {
