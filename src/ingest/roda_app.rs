@@ -116,7 +116,19 @@ pub fn ingest_roda_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestR
         }
     }
 
-    // Models — `models/*.rb`, each a `Sequel::Model` subclass.
+    // Models — `models/*.rb`, each a `Sequel::Model` subclass. The
+    // synthesized ApplicationRecord base mirrors what a Rails app's
+    // app/models/application_record.rb ingests to: every Sequel model
+    // reparents onto it, and emit's require graph and the runtime's
+    // ActiveRecord::Base hierarchy expect it to exist.
+    app.models.push(crate::dialect::Model {
+        name: ClassId(Symbol::from("ApplicationRecord")),
+        parent: Some(ClassId(Symbol::from("ActiveRecord::Base"))),
+        table: crate::ident::TableRef(Symbol::from("application_records")),
+        attributes: Row::closed(),
+        body: Vec::new(),
+        span: Span::synthetic(),
+    });
     let models_dir = dir.join("models");
     if vfs.is_dir(&models_dir) {
         for entry in read_rb_files(vfs, &models_dir)? {
@@ -134,11 +146,15 @@ pub fn ingest_roda_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestR
     }
 
     // The Roda class — plugins, helpers, and the routing tree.
+    // `layout_stem` is the render plugin's layout template name; the
+    // view walk below re-homes that template onto Rails' one
+    // conventional layout slot.
     let app_rb = dir.join("app.rb");
+    let mut layout_stem = "layout".to_string();
     if vfs.exists(&app_rb) {
         let source = vfs.read(&app_rb)?;
         match ingest_roda_class(&source, &app_rb.display().to_string(), &mut app) {
-            Ok(()) => {}
+            Ok(stem) => layout_stem = stem,
             Err(err) if survey::is_active() => survey::record(&err),
             Err(err) => return Err(err),
         }
@@ -146,11 +162,21 @@ pub fn ingest_roda_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestR
 
     // Views — `views/**/*.erb`. Same generic template pipeline as
     // Rails views; two dialect touches: Roda's `part(...)` partial
-    // calls normalize to `render`, and the app-level layout template
-    // re-homes under `layouts/` so `LayoutDecl::Name` resolution
-    // (which prefixes `layouts/`) finds it.
+    // calls normalize to `render`, and the render plugin's layout
+    // template re-homes onto `layouts/application` — Rails' one
+    // conventional layout slot, which the layout-wrap lowering and
+    // every emitter key on. A Roda app has exactly one app-wide
+    // layout, so the mapping is semantically exact.
     let views_dir = dir.join("views");
     if vfs.is_dir(&views_dir) {
+        // Roda's `part("articles/_form", article:, action:, …)` kwargs
+        // ARE the partial's signature — each call names every local the
+        // partial receives. Collect them per partial (first call wins;
+        // the vocabulary is closed by construction) and stamp them as
+        // the partial's strict-locals row, the same fixed-signature
+        // channel a Rails `<%# locals: (…) %>` header feeds.
+        let mut part_locals: std::collections::HashMap<String, Vec<Symbol>> =
+            std::collections::HashMap::new();
         for (erb_path, engine) in read_erb_files(vfs, &views_dir)? {
             let source = vfs.read_to_string(&erb_path)?;
             let rel = erb_path
@@ -165,11 +191,22 @@ pub fn ingest_roda_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestR
                 &erb_path.display().to_string(),
                 engine.compile_fn(),
             ))? {
-                if view.name.as_str() == "layout" {
-                    view.name = Symbol::from("layouts/layout");
+                if view.name.as_str() == layout_stem {
+                    view.name = Symbol::from("layouts/application");
                 }
-                rewrite_part_to_render(&mut view.body);
+                rewrite_part_to_render(&mut view.body, &mut part_locals);
+                rewrite_errors_full_messages(&mut view.body);
                 app.views.push(view);
+            }
+        }
+        for view in &mut app.views {
+            if let Some(locals) = part_locals.get(view.name.as_str()) {
+                view.strict_locals = Some(
+                    locals
+                        .iter()
+                        .map(|n| crate::dialect::Param::keyword(n.clone(), None))
+                        .collect(),
+                );
             }
         }
     }
@@ -215,7 +252,7 @@ struct RodaClassFacts {
     not_found_template: String,
 }
 
-fn ingest_roda_class(source: &[u8], file: &str, app: &mut App) -> IngestResult<()> {
+fn ingest_roda_class(source: &[u8], file: &str, app: &mut App) -> IngestResult<String> {
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
     let root = result.node();
@@ -314,13 +351,14 @@ fn ingest_roda_class(source: &[u8], file: &str, app: &mut App) -> IngestResult<(
     }
 
     // ApplicationController — the synthesized parent every linearized
-    // controller inherits from; carries the app-wide layout the way a
-    // Rails app's ApplicationController would.
+    // controller inherits from. Layout stays `Inherit`: the app's one
+    // layout re-homes to `layouts/application` (the convention
+    // default), so no explicit declaration is needed.
     app.controllers.push(Controller {
         name: ClassId(Symbol::from("ApplicationController")),
         parent: Some(ClassId(Symbol::from("ActionController::Base"))),
         body: Vec::new(),
-        layout: LayoutDecl::Name { name: Symbol::from(facts.layout.as_str()) },
+        layout: LayoutDecl::Inherit,
         sibling_classes: Vec::new(),
     });
 
@@ -360,7 +398,7 @@ fn ingest_roda_class(source: &[u8], file: &str, app: &mut App) -> IngestResult<(
         walker.walk_block(flatten_statements(body), WalkCtx::default())?;
     }
     walker.assemble(app);
-    Ok(())
+    Ok(facts.layout)
 }
 
 /// Recognize one `plugin :name[, opts][ { block }]` call against the
@@ -846,10 +884,18 @@ impl<'f> RouteWalker<'f> {
                     leading_blank_line: false,
                 });
             }
+            // Inline `params.expect(article: [...])` calls hoist into
+            // the Rails-conventional `<resource>_params` private
+            // helper — the shape the strong-params lowering
+            // (`rewrite_to_from_raw` + `new` → `from_params`)
+            // recognizes.
+            let mut params_helpers: Vec<(Symbol, Expr)> = Vec::new();
             for (leaf, name) in my_leaves.iter().zip(&action_names) {
-                body.push(action_item(name.clone(), leaf.body.clone()));
+                let mut action_body = leaf.body.clone();
+                hoist_params_expect(&mut action_body, &mut params_helpers);
+                body.push(action_item(name.clone(), action_body));
             }
-            if !pro_ids.is_empty() {
+            if !pro_ids.is_empty() || !params_helpers.is_empty() {
                 body.push(ControllerBodyItem::PrivateMarker {
                     leading_comments: Vec::new(),
                     leading_blank_line: true,
@@ -857,6 +903,9 @@ impl<'f> RouteWalker<'f> {
                 for id in &pro_ids {
                     let name = prologue_method_name(&prologues[*id], *id);
                     body.push(action_item(name, seq(prologues[*id].body.clone())));
+                }
+                for (name, expect) in params_helpers {
+                    body.push(action_item(name, expect));
                 }
             }
             app.controllers.push(Controller {
@@ -868,6 +917,49 @@ impl<'f> RouteWalker<'f> {
             });
         }
     }
+}
+
+/// Replace `params.expect(<key>: [...])` with a bare `<key>_params`
+/// call, recording the hoisted helper body. One helper per key —
+/// create and update share the same allow-list by construction (both
+/// came from the same `set_fields` field list), so the first
+/// occurrence wins.
+fn hoist_params_expect(expr: &mut Expr, helpers: &mut Vec<(Symbol, Expr)>) {
+    expr.node.for_each_child_mut(&mut |c| hoist_params_expect(c, helpers));
+    let key: Option<Symbol> = match &*expr.node {
+        ExprNode::Send { recv: Some(p), method, args, .. }
+            if method.as_str() == "expect"
+                && args.len() == 1
+                && matches!(
+                    &*p.node,
+                    ExprNode::Send { recv: None, method, args, .. }
+                        if method.as_str() == "params" && args.is_empty()
+                ) =>
+        {
+            match &*args[0].node {
+                ExprNode::Hash { entries, kwargs: true } if entries.len() == 1 => {
+                    match &*entries[0].0.node {
+                        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    let Some(key) = key else { return };
+    let helper = Symbol::from(format!("{key}_params"));
+    if !helpers.iter().any(|(n, _)| *n == helper) {
+        helpers.push((helper.clone(), expr.clone()));
+    }
+    expr.node = Box::new(ExprNode::Send {
+        recv: None,
+        method: helper,
+        args: Vec::new(),
+        block: None,
+        parenthesized: false,
+    });
 }
 
 fn prologue_method_name(p: &Prologue, id: usize) -> Symbol {
@@ -1234,9 +1326,15 @@ fn same_simple_recv(a: &Expr, b: &Expr) -> bool {
 
 /// Roda's `part("dir/_name", k: v)` → the Rails partial-render
 /// spelling `render("dir/name", k: v)` in view bodies (the underscore
-/// is re-derived by partial resolution, same as Rails).
-fn rewrite_part_to_render(expr: &mut Expr) {
-    expr.node.for_each_child_mut(&mut rewrite_part_to_render);
+/// is re-derived by partial resolution, same as Rails). Each call's
+/// kwarg names are recorded per partial in `part_locals` — they become
+/// the partial's strict-locals signature.
+fn rewrite_part_to_render(
+    expr: &mut Expr,
+    part_locals: &mut std::collections::HashMap<String, Vec<Symbol>>,
+) {
+    expr.node
+        .for_each_child_mut(&mut |c| rewrite_part_to_render(c, part_locals));
     let ExprNode::Send { recv: None, method, args, block, parenthesized } = &*expr.node else {
         return;
     };
@@ -1244,8 +1342,22 @@ fn rewrite_part_to_render(expr: &mut Expr) {
         return;
     }
     let mut args = args.clone();
+    let kwarg_names: Vec<Symbol> = args
+        .iter()
+        .skip(1)
+        .filter_map(|a| match &*a.node {
+            ExprNode::Hash { entries, kwargs: true } => Some(entries),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|(k, _)| match &*k.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+            _ => None,
+        })
+        .collect();
     if let Some(first) = args.first_mut() {
         if let ExprNode::Lit { value: Literal::Str { value } } = &*first.node {
+            part_locals.entry(value.clone()).or_insert(kwarg_names);
             let stripped = match value.rsplit_once('/') {
                 Some((dir, base)) => {
                     format!("{dir}/{}", base.strip_prefix('_').unwrap_or(base))
@@ -1262,6 +1374,30 @@ fn rewrite_part_to_render(expr: &mut Expr) {
         block: block.clone(),
         parenthesized: *parenthesized,
     });
+}
+
+/// `record.errors.full_messages` → `record.errors`. The framework
+/// runtime's `errors` is already the array of full-message strings
+/// (the inline validation checks push humanized text), so Sequel's
+/// explicit `.full_messages` hop is an identity there.
+fn rewrite_errors_full_messages(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut rewrite_errors_full_messages);
+    let replacement = match &*expr.node {
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "full_messages"
+                && args.is_empty()
+                && matches!(
+                    &*r.node,
+                    ExprNode::Send { method, .. } if method.as_str() == "errors"
+                ) =>
+        {
+            Some((*r.node).clone())
+        }
+        _ => None,
+    };
+    if let Some(node) = replacement {
+        expr.node = Box::new(node);
+    }
 }
 
 fn seq(exprs: Vec<Expr>) -> Expr {

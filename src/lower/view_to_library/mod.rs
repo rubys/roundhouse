@@ -1824,13 +1824,21 @@ pub(crate) fn action_view_ivar_map(
     let mut out = std::collections::HashMap::new();
     for v in views {
         let (dir, base) = split_view_name(v.name.as_str());
-        if dir.is_empty() || dir == "layouts" || base.starts_with('_') {
+        if dir == "layouts" || base.starts_with('_') {
             continue;
         }
         if v.format.as_str() != "html" {
             continue;
         }
-        let module = camelize_path(&snake_case(dir));
+        // Top-level templates (`views/not_found.erb`-style trees) key
+        // under the empty module — `Views.<stem>` — so controller-side
+        // `render "not_found"` resolves them through the same contract
+        // lookup as controller-scoped views.
+        let module = if dir.is_empty() {
+            String::new()
+        } else {
+            camelize_path(&snake_case(dir))
+        };
         let key = (module, base.to_string());
         let ivars = closures
             .get(&key)

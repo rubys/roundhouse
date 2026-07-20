@@ -524,6 +524,17 @@ pub(super) fn normalize_sequel_expr(expr: &mut Expr) {
                         parenthesized: true,
                     })
                 }
+                // Sequel's terminal `.all` materializes a dataset to an
+                // Array; the AR-shaped runtime's chains already
+                // materialize, so the call is a no-op — drop it. Bare
+                // `Article.all` (Const receiver) stays: that's AR's own
+                // whole-table read.
+                "all" if args.is_empty()
+                    && block.is_none()
+                    && matches!(&*recv.node, ExprNode::Send { .. }) =>
+                {
+                    Some((*recv.node).clone())
+                }
                 "with_pk" if args.len() == 1 => Some(ExprNode::Send {
                     recv: Some(recv.clone()),
                     method: Symbol::from("find_by"),

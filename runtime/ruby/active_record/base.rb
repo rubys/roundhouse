@@ -264,6 +264,14 @@ module ActiveRecord
       _adapter_exists_by_id?(id)
     end
 
+    # Bulk DELETE without instantiating records or running callbacks —
+    # ActiveRecord's `Model.delete_all` (used by seeds/tests for table
+    # resets; `Relation#delete_all` covers the scoped form).
+    def self.delete_all
+      ActiveRecord.adapter.delete_all(table_name)
+      nil
+    end
+
     def self.destroy_all
       records = all()
       records.each { |r| r.destroy() }

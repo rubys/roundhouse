@@ -53,7 +53,8 @@ fn schema_folds_from_sequel_migrations() {
 #[test]
 fn sequel_models_converge_on_rails_shape() {
     let app = ingest();
-    assert_eq!(app.models.len(), 2);
+    // Article + Comment + the synthesized ApplicationRecord base.
+    assert_eq!(app.models.len(), 3);
 
     let article = app.models.iter().find(|m| m.name.0.as_str() == "Article").unwrap();
     assert_eq!(article.parent.as_ref().unwrap().0.as_str(), "ApplicationRecord");
@@ -161,10 +162,9 @@ fn controllers_synthesize_with_prologue_filters() {
 
     let application =
         app.controllers.iter().find(|c| c.name.0.as_str() == "ApplicationController").unwrap();
-    assert!(
-        matches!(&application.layout, LayoutDecl::Name { name } if name.as_str() == "layout"),
-        "app-wide layout rides ApplicationController"
-    );
+    // The one app-wide layout re-homes onto layouts/application (the
+    // convention default), so no explicit declaration is needed.
+    assert!(matches!(&application.layout, LayoutDecl::Inherit));
 
     let articles =
         app.controllers.iter().find(|c| c.name.0.as_str() == "ArticlesController").unwrap();
@@ -173,7 +173,17 @@ fn controllers_synthesize_with_prologue_filters() {
     // prologue method after the private marker.
     assert_eq!(
         actions,
-        vec!["index", "create", "new", "show", "update", "destroy", "edit", "set_article"]
+        vec![
+            "index",
+            "create",
+            "new",
+            "show",
+            "update",
+            "destroy",
+            "edit",
+            "set_article",
+            "article_params"
+        ]
     );
     let filter = articles.filters().next().expect("prologue filter");
     assert_eq!(filter.kind, FilterKind::Before);
@@ -192,7 +202,7 @@ fn controllers_synthesize_with_prologue_filters() {
     let comments =
         app.controllers.iter().find(|c| c.name.0.as_str() == "CommentsController").unwrap();
     let actions: Vec<&str> = comments.actions().map(|a| a.name.as_str()).collect();
-    assert_eq!(actions, vec!["create", "destroy", "set_article"]);
+    assert_eq!(actions, vec!["create", "destroy", "set_article", "comment_params"]);
     let filter = comments.filters().next().expect("comments share the article prologue");
     assert_eq!(filter.target.as_str(), "set_article");
     assert!(filter.only.is_empty(), "guards every comments action");
@@ -242,7 +252,7 @@ fn views_ingest_with_roda_dialect_normalized() {
     let app = ingest();
     let names: Vec<&str> = app.views.iter().map(|v| v.name.as_str()).collect();
     for expected in [
-        "layouts/layout",
+        "layouts/application",
         "not_found",
         "articles/index",
         "articles/show",

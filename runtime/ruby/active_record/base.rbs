@@ -26,6 +26,8 @@ module ActiveRecord
     %a{abstract}
     def delete: (String table_name, Integer id) -> void
     %a{abstract}
+    def delete_all: (String table_name) -> void
+    %a{abstract}
     def truncate: (String table_name) -> void
     # Raw-SQL escape hatch used by ActiveRecord::Relation: run a composed
     # SELECT and return its rows; escape a value for inline SQL. The
@@ -139,6 +141,7 @@ module ActiveRecord
     def self.where: (Hash[Symbol, untyped] conditions) -> Array[Base]
     def self.count: () -> Integer
     def self.exists?: (Integer id) -> bool
+    def self.delete_all: () -> nil
     def self.destroy_all: () -> Array[Base]
     def self.create: (Hash[Symbol, untyped] attrs) -> Base
     def self.create!: (Hash[Symbol, untyped] attrs) -> Base

@@ -181,12 +181,48 @@ pub(super) fn rewrite_render_to_views(
                     return None;
                 }
             }
-            // View name comes from `render :index` (a Symbol first arg) or
-            // `render action: "index"` / `render action: :index` (a kwarg
-            // hash). The kwarg form may also carry other options (status:,
-            // …); those leftover entries ride through as `action_hash_extra`.
-            let (view_method, action_hash_extra): (Symbol, Vec<Expr>) = match &*args[0].node {
-                ExprNode::Lit { value: Literal::Sym { value } } => (value.clone(), Vec::new()),
+            // View name comes from `render :index` (a Symbol first arg),
+            // `render "index"` / `render "articles/index"` (a String
+            // first arg — slashed form names another view module), or
+            // `render action: "index"` / `render action: :index` (a
+            // kwarg hash). The kwarg form may also carry other options
+            // (status:, …); those leftover entries ride through as
+            // `action_hash_extra`. `module_override` is `Some` for the
+            // slashed-String form; `Some("")` names a top-level view
+            // (`Views.<stem>` — views/not_found.erb-style trees).
+            let (view_method, action_hash_extra, module_override): (
+                Symbol,
+                Vec<Expr>,
+                Option<String>,
+            ) = match &*args[0].node {
+                ExprNode::Lit { value: Literal::Sym { value } } => {
+                    (value.clone(), Vec::new(), None)
+                }
+                ExprNode::Lit { value: Literal::Str { value } } => {
+                    match value.rsplit_once('/') {
+                        Some((dir, stem)) => (
+                            Symbol::from(stem),
+                            Vec::new(),
+                            Some(crate::naming::camelize_path(
+                                &crate::naming::snake_case(dir),
+                            )),
+                        ),
+                        // Slashless string: current controller's module,
+                        // falling back to a top-level view of that name
+                        // when the module has no such template (the
+                        // shared-404 idiom).
+                        None => {
+                            let key =
+                                (module_name_owned.clone(), value.to_string());
+                            let module = if view_ivars.contains_key(&key) {
+                                None
+                            } else {
+                                Some(String::new())
+                            };
+                            (Symbol::from(value.as_str()), Vec::new(), module)
+                        }
+                    }
+                }
                 ExprNode::Hash { entries, kwargs: true } => {
                     let mut name: Option<Symbol> = None;
                     // (expr, content_type-to-tag) — html carries None
@@ -276,10 +312,16 @@ pub(super) fn rewrite_render_to_views(
                             ExprNode::Hash { entries: rest, kwargs: true },
                         )]
                     };
-                    (n, extra)
+                    (n, extra, None)
                 }
                 _ => return None,
             };
+            // Which Views module owns the target template — the
+            // current controller's by default; the slashed / top-level
+            // String forms override (empty string = the root `Views`
+            // module).
+            let render_module: String =
+                module_override.unwrap_or_else(|| module_name_owned.clone());
             // View-driven arg list: an action view's params are exactly the
             // @ivars it reads, so pass `@<name>` for each (matching the
             // generated view signature). Look up by the html action stem
@@ -287,7 +329,7 @@ pub(super) fn rewrite_render_to_views(
             // controller's in-scope ivars when the view isn't in the map
             // (json/jbuilder views, or a render with no matching template).
             let contract =
-                view_ivars.get(&(module_name_owned.clone(), view_method.as_str().to_string()));
+                view_ivars.get(&(render_module.clone(), view_method.as_str().to_string()));
             // Peek ahead for the jbuilder marker (also computed below):
             // json renders resolve to `<stem>_json` view methods that are
             // deliberately absent from the html-view contract map, so a
@@ -373,7 +415,11 @@ pub(super) fn rewrite_render_to_views(
             let view_call = Expr::new(
                 e.span,
                 ExprNode::Send {
-                    recv: Some(const_path(&["Views", &module_name_owned], e.span)),
+                    recv: Some(if render_module.is_empty() {
+                        const_path(&["Views"], e.span)
+                    } else {
+                        const_path(&["Views", &render_module], e.span)
+                    }),
                     method: view_method,
                     args: view_args,
                     block: None,
@@ -604,8 +650,16 @@ pub(super) fn rewrite_assoc_through_parent_typed(
         .filter(|n| n.as_str().ends_with("_params"))
         .collect();
     map_expr(expr, &|e| {
-        let ExprNode::Assign { target: LValue::Ivar { name: lhs }, value } = &*e.node else {
+        let ExprNode::Assign { target, value } = &*e.node else {
             return None;
+        };
+        // Build/Find expansions synthesize `@<lhs>`-shaped follow-on
+        // statements, so they require an ivar LHS; the single-statement
+        // FindBy rewrite works for local assigns too (`comment =
+        // @article.comments.find_by(id: x)`).
+        let lhs = match target {
+            LValue::Ivar { name } => Some(name),
+            _ => None,
         };
         let ExprNode::Send {
             recv: Some(outer_recv),
@@ -620,8 +674,12 @@ pub(super) fn rewrite_assoc_through_parent_typed(
         let kind = match outer_method.as_str() {
             "build" => AssocKind::Build,
             "find" => AssocKind::Find,
+            "find_by" => AssocKind::FindBy,
             _ => return None,
         };
+        if lhs.is_none() && !matches!(kind, AssocKind::FindBy) {
+            return None;
+        }
         // `find` needs its id arg; `build` may be bare (`@story.comments.
         // build` — new child for a form, FK pre-filled, no attributes).
         let max_args = 1;
@@ -650,6 +708,7 @@ pub(super) fn rewrite_assoc_through_parent_typed(
         let fk = format!("{}_id", parent_name.as_str());
         Some(match kind {
             AssocKind::Build => {
+                let lhs = lhs.expect("checked above");
                 if outer_args.is_empty() {
                     return Some(expand_build_bare(&model_class, &fk, parent_name, lhs, e.span));
                 }
@@ -668,7 +727,56 @@ pub(super) fn rewrite_assoc_through_parent_typed(
                 expand_build(&model_class, &fk, parent_name, lhs, &outer_args[0], e.span)
             }
             AssocKind::Find => {
+                let lhs = lhs.expect("checked above");
                 expand_find(&model_class, &fk, parent_name, lhs, &outer_args[0], e.span)
+            }
+            // `<lhs> = @parent.<assoc>.find_by(id: x)` — the assoc scope
+            // folds into the conditions hash: `<Class>.find_by(id: x,
+            // <fk>: @parent.id)`. One query, nil on missing OR foreign
+            // rows — exactly the source's nil-returning contract, so no
+            // ownership branch and any LHS shape works.
+            AssocKind::FindBy => {
+                let ExprNode::Hash { entries, kwargs: true } = &*outer_args[0].node else {
+                    return None;
+                };
+                let mut new_entries = entries.clone();
+                new_entries.push((
+                    Expr::new(
+                        e.span,
+                        ExprNode::Lit {
+                            value: Literal::Sym { value: Symbol::from(fk.as_str()) },
+                        },
+                    ),
+                    Expr::new(
+                        e.span,
+                        ExprNode::Send {
+                            recv: Some(ivar(parent_name.as_str(), e.span)),
+                            method: Symbol::from("id"),
+                            args: vec![],
+                            block: None,
+                            parenthesized: false,
+                        },
+                    ),
+                ));
+                Expr::new(
+                    e.span,
+                    ExprNode::Assign {
+                        target: target.clone(),
+                        value: Expr::new(
+                            e.span,
+                            ExprNode::Send {
+                                recv: Some(const_path(&[&model_class], e.span)),
+                                method: Symbol::from("find_by"),
+                                args: vec![Expr::new(
+                                    e.span,
+                                    ExprNode::Hash { entries: new_entries, kwargs: true },
+                                )],
+                                block: None,
+                                parenthesized: true,
+                            },
+                        ),
+                    },
+                )
             }
         })
     })
@@ -694,6 +802,7 @@ fn match_params_helper(arg: &Expr, helper_names: &[Symbol]) -> Option<Symbol> {
 enum AssocKind {
     Build,
     Find,
+    FindBy,
 }
 
 /// Typed-factory build expansion:

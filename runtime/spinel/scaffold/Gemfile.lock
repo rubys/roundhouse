@@ -193,6 +193,7 @@ DEPENDENCIES
   minitest
   puma
   rack
+  rack-test
   rake
   rubocop (~> 1.86)
   rubocop_spinel (~> 0.1)

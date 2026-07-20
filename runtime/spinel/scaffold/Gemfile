@@ -10,6 +10,11 @@ gem "sqlite3"
 gem "minitest"
 gem "rake"
 
+# In-process Rack driving for oracle-style suites (the roda-blog
+# toolchain gate runs its behavioral oracle through Rack::Test against
+# config.ru's app instead of booting Puma).
+gem "rack-test"
+
 # CRuby HTTP serving — `rake dev` runs Puma against `config.ru`'s
 # Rack adapter to `Main.run`. Spinel-target builds don't reference
 # these at runtime (the compiled binary uses sphttp via FFI); the

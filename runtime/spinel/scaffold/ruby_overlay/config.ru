@@ -28,6 +28,12 @@ Broadcasts.set_transport(Cable::Registry)
 # Main.run_rack. Anything else falls through to the dynamic Router.
 use Rack::Static, urls: ["/assets", "/icon.png", "/icon.svg"], root: "static"
 
+# NOTE: no Rack::MethodOverride here — Rack 3 inputs aren't
+# rewindable, so that middleware would consume `rack.input` before
+# `dispatch_core`'s own body parse. The `_method` override lives in
+# `Main.dispatch_core_inner` instead, where it also covers the CGI and
+# future spinel serving shapes.
+
 app = lambda do |env|
   # WebSocket upgrade: `/cable`. Hijack the socket from Puma and
   # spawn a per-connection thread that runs the read loop. The Rack

@@ -74,6 +74,12 @@ module SqliteAdapter
     Db.exec("DELETE FROM #{table} WHERE id = #{Db.escape_int(id)}")
   end
 
+  # `Model.delete_all` — bulk row delete with ActiveRecord semantics:
+  # rows go, the autoincrement counter stays (unlike `truncate`).
+  def self.delete_all(table)
+    Db.exec("DELETE FROM #{table}")
+  end
+
   # Adapter-agnostic table reset (test setup). Issues both the row
   # delete and the autoincrement-counter reset so subsequent inserts
   # start from id=1.

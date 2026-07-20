@@ -204,6 +204,17 @@ module Main
     Broadcasts.reset_log!
 
     request = CgiIo.parse_request(env, stdin)
+    # Browser forms can only GET/POST; a hidden `_method` field carries
+    # the real verb (PATCH/DELETE) — the same override Rails' middleware
+    # stack performs. Done here, after the body parse, so every serving
+    # shape (CGI, Rack, spinel's sphttp) honors it; Rack::MethodOverride
+    # can't be used because it consumes the non-rewindable rack.input.
+    if request[:method] == "POST"
+      override = request[:params]["_method"].to_s.upcase
+      if override == "PUT" || override == "PATCH" || override == "DELETE"
+        request[:method] = override
+      end
+    end
     # Per-request format inference. Strip a `.json` suffix from the
     # request path before route matching (so `/articles/1.json` and
     # `/articles/1` share one route entry) and remember the format
