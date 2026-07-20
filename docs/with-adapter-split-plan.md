@@ -91,4 +91,55 @@ runs after this); `src/catalog/` (only consumed, not restructured).
 
 ## Execution log
 
-(step-1 map, per-commit gates, judgments, skipped seams)
+### 2026-07-19 — Step 1 map (re-surveyed against b30fb5fc)
+
+`with_adapter` is now `src/analyze/mod.rs:89–1574` (~1486 LOC). Structure:
+
+- **89–100** setup: `classes: HashMap<ClassId,ClassInfo>` (the output), `module_include_map`.
+- **101–396** per-model loop. Shared/threaded state: `self_ty`, `array_of_self`, the
+  `instantiate` closure (wraps `instantiate_return_kind`), `module_include_map`, `AR_CATALOG`.
+  Genuinely stateful — **stays in the loop** (Step 3).
+- **398–1566** post-loop registration, in emit order (each region does `classes.insert`/`entry`):
+  1. 410–423 `ActiveRecord::Base` — AR
+  2. 434–442 `ActionController::Base` (`.helpers` proxy) — controller
+  3. 444–556 `ActiveModel::Validations`/`Model` + `ActiveModel::Errors` class — activemodel
+  4. 557–578 `CollectionProxy` — AR
+  5. 580–601 individual `ActiveModel::Error` class — activemodel
+  6. 603–655 DB adapter class (`adapter.class_name()`) — AR/adapter
+  7. 656–714 `Arel` / `Arel::Table` / `Attribute` / `Node` / `SelectManager` — AR
+  8. 716–768 `form_builder` + `ActionController::Collector` — view
+  9. 770–958 **`action_view` accumulator** → `classes.insert(ActionView::Base)` @958.
+     form_with, flat helpers, `tag`, flash accessors, `flash`, `json`, route helpers
+     (view side), kaminari, params, simple_form, helper-fold. Depends on
+     `route_helper_names` (built @779) + `form_builder_ty`. — view
+  10. 960–1009 `ActionDispatch::Flash::FlashHash` class — view
+  11. 1011–1034 `Rails` singleton — stdlib
+  12. 1036–1057 `Time` singleton — stdlib
+  13. 1059–1067 `Date`/`DateTime` — stdlib
+  14. 1070–1142 stdlib singletons (SecureRandom/File/Dir/Math/CGI/ERB::Util/Digest/URI/Set) — stdlib
+  15. 1144–1156 `GEM_CATALOG` fold — stdlib
+  16. 1158–1277 `ApplicationController` surface (route helpers @1188, devise @1224) — controller
+  17. 1279–1291 user RBS sidecars — misc (leave in orchestrator)
+  18. 1293–1338 library classes (route helpers @1323) — library
+  19. 1340–1461 ActionMailer classes — library
+  20. 1463–1491 ActiveJob classes — library
+  21. 1492–1543 Sidekiq workers — library
+  22. 1544–1566 controllers registration — controller
+- **1568–1573** `Self { classes, inferred_params: {}, adapter, concern_folded: {} }`.
+
+**Cross-domain shared value:** `route_helper_names: Vec<String>` (built @779 via
+`flatten_routes` + a `path_candidate` closure) is consumed by regions 9, 16, 18.
+→ Extract as a free fn `route_helper_names(app) -> Vec<String>`, call once in the
+orchestrator, pass `&[String]` to view/controller/library extractions. `flash_ty` and
+`form_builder_ty` are inline `Ty::Class`/`block_fn` literals — reconstruct in-place where a
+region needs them (byte-identical), no threading.
+
+**Extraction plan (one commit each, gated):** stdlib.rs (11–15 + `register_stdlib_class`),
+activemodel.rs (3,5), ar.rs (1,4,6,7), routes.rs (`route_helper_names` fn), view.rs (8,9,10),
+controllers/library grouped last (2,16,18,19,20,21,22). Regions 17 + per-model loop stay in
+orchestrator.
+
+### Per-commit gate
+Byte-identical emit harness in scratchpad: baseline captured at b30fb5fc (all 13 targets on
+fixtures/real-blog, fixed output path). `gate.sh` rebuilds + re-transpiles + `diff -rq`.
+Determinism verified. Plus `cargo test --all-targets` vs baseline snapshot.
