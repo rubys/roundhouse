@@ -178,6 +178,13 @@ fn rewrite_errors_add(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
             ),
         }
     };
+    // `<<` returns the accumulator it appends to (Array#<< / the errors
+    // collection), so the synthesized send's result type is the
+    // receiver's. Stamp it: this pass runs *after* analyze, and the
+    // post-lowering `diagnose` walk reads stamped types without re-
+    // dispatching — leaving `ty = None` here makes it false-positive a
+    // `send_dispatch_failed` on a receiver it can see the type of.
+    let recv_ty = recv.as_ref().and_then(|r| r.ty.clone());
     *expr.node = ExprNode::Send {
         recv,
         method: Symbol::from("<<"),
@@ -185,5 +192,5 @@ fn rewrite_errors_add(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
         block: None,
         parenthesized: false,
     };
-    expr.ty = None;
+    expr.ty = recv_ty;
 }
