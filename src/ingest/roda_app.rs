@@ -196,6 +196,7 @@ pub fn ingest_roda_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestR
                 }
                 rewrite_part_to_render(&mut view.body, &mut part_locals);
                 rewrite_errors_full_messages(&mut view.body);
+                rewrite_flash_reads(&mut view.body);
                 app.views.push(view);
             }
         }
@@ -1392,6 +1393,58 @@ fn rewrite_errors_full_messages(expr: &mut Expr) {
                 ) =>
         {
             Some((*r.node).clone())
+        }
+        _ => None,
+    };
+    if let Some(node) = replacement {
+        expr.node = Box::new(node);
+    }
+}
+
+/// View-side `flash["notice"]` / `flash["alert"]` → the bare `notice` /
+/// `alert` extras every lowered view already receives as trailing
+/// params (see view_to_library/extra_params.rs). Converges the layout
+/// signature with the Rails corpus and keeps the poly `flash` object
+/// out of view bodies — strict AOT targets can't type a `flash[...]`
+/// truthiness read, and they never need to: the typed extras carry the
+/// same two values.
+fn rewrite_flash_reads(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut rewrite_flash_reads);
+    let replacement = match &*expr.node {
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "[]"
+                && args.len() == 1
+                && matches!(
+                    &*r.node,
+                    ExprNode::Send { recv: None, method, args, .. }
+                        if method.as_str() == "flash" && args.is_empty()
+                ) =>
+        {
+            match &*args[0].node {
+                ExprNode::Lit { value: Literal::Str { value } }
+                    if value == "notice" || value == "alert" =>
+                {
+                    Some(ExprNode::Send {
+                        recv: None,
+                        method: Symbol::from(value.as_str()),
+                        args: Vec::new(),
+                        block: None,
+                        parenthesized: false,
+                    })
+                }
+                ExprNode::Lit { value: Literal::Sym { value } }
+                    if matches!(value.as_str(), "notice" | "alert") =>
+                {
+                    Some(ExprNode::Send {
+                        recv: None,
+                        method: value.clone(),
+                        args: Vec::new(),
+                        block: None,
+                        parenthesized: false,
+                    })
+                }
+                _ => None,
+            }
         }
         _ => None,
     };
