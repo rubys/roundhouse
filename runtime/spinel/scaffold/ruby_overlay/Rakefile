@@ -92,16 +92,22 @@ file "#{STATIC}/icon.svg" => STATIC do |t|
   sh "cp #{src} #{t.name}" if File.exist?(src)
 end
 
-task :assets => [
-  "#{ASSETS}/application.css",
-  "#{ASSETS}/tailwind.css",
-  "#{ASSETS}/turbo.min.js",
-  "#{ASSETS}/stimulus.min.js",
-  "#{ASSETS}/stimulus-loading.js",
-  *APP_JS.map { |rel| "#{ASSETS}/#{rel}" },
-  "#{STATIC}/icon.png",
-  "#{STATIC}/icon.svg",
-]
+# Prerequisites are conditional on the emitted tree's own sources: a
+# Rails-shaped app ships app/assets/tailwind.css + app/javascript/*
+# and gets the full pipeline; a JS-less app (the Roda + Sequel
+# exemplar renders inline-styled HTML with no JS at all) reduces to
+# the empty application.css + icons, so `rake dev` needs neither npm
+# nor the turbo/stimulus gems' assets.
+asset_deps = ["#{ASSETS}/application.css"]
+asset_deps << "#{ASSETS}/tailwind.css" if File.exist?("app/assets/tailwind.css")
+if File.exist?("app/javascript/application.js")
+  asset_deps += ["#{ASSETS}/turbo.min.js", "#{ASSETS}/stimulus.min.js",
+                 "#{ASSETS}/stimulus-loading.js"]
+  asset_deps += APP_JS.select { |rel| File.exist?("app/javascript/#{rel}") }
+                      .map { |rel| "#{ASSETS}/#{rel}" }
+end
+asset_deps += ["#{STATIC}/icon.png", "#{STATIC}/icon.svg"]
+task :assets => asset_deps
 
 # Dev server — Puma against config.ru. Defaults match Rails 7.1+
 # generator output (3 threads, single process, dev environment).

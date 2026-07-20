@@ -222,7 +222,8 @@ pub fn target_readme(target: BuildTarget) -> String {
              document (layout, runtime, ruleset, limitations).\n\n\
              ## Prerequisites\n\
              - Ruby 3.4+ (with bundler)\n\
-             - Node.js + npm — Tailwind/Turbo asset build\n\
+             - Node.js + npm — Tailwind/Turbo asset build (only when the \
+             source app ships stylesheets/JS; a JS-less app skips this)\n\
              - SQLite (system library)\n\n\
              ## Install dependencies\n\
              ```sh\n\
@@ -956,6 +957,16 @@ fn ruby_runtime_files(
     let mut files = spinel_files(app, fixture)?;
 
     files.retain(|(p, _)| p != "runtime/db.rb");
+
+    // The scaffold's tailwind seed only belongs in trees whose SOURCE
+    // app has stylesheets to build (real-blog's Propshaft setup). A
+    // no-stylesheet app (the Roda + Sequel exemplar renders
+    // inline-styled HTML) drops it, and the emitted Rakefile's
+    // existence-conditional `assets` task then skips the whole
+    // npm/tailwind pipeline — `rake dev` boots with no Node at all.
+    if app.stylesheets.is_empty() {
+        files.retain(|(p, _)| p != "app/assets/tailwind.css");
+    }
     for (path, content) in files.iter_mut() {
         if path == "runtime/db_cruby.rb" {
             *path = "runtime/db.rb".to_string();
