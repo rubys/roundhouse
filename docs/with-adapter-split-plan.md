@@ -179,7 +179,32 @@ plan flagged as the risk area. Clean sub-seams exist (class-query surface, schem
 concern-DSL fold) but extracting them buys little over the achieved 388-LOC orchestrator and adds
 closure/borrow-threading risk. Left inline per plan ("when in doubt, leave it").
 
-### Steps 4 / 5 — DEFERRED (optional, time-gated)
-Sibling free-fn extractions (render/effects/diagnose) and insert-run table-ification not pursued this
-session; independent of the relation-convergence sequencing unblock. Step 2 (the code-motion this plan
-existed to do) is complete, so docs/relation-convergence-plan.md is now unblocked.
+### Step 4 — EXECUTED (4 commits, all gates green)
+Sibling squatter free-fns/methods lifted out of `analyze/mod.rs` into focused submodules; each
+byte-identical emit across 13 targets + `cargo test --all-targets` clean.
+- `881a2497` 4a — `analyze/render.rs`: 9 view/partial render-site fns (6 `pub(super)` + imported in
+  mod.rs, 3 cluster-private). Only external callees are `crate::naming::*`.
+- `4cd39322` 4b — `analyze/effects.rs`: `collect_effects`/`visit_effects`/`contribute_send_effect` as
+  `impl super::Analyzer` (child module reaches Analyzer's private fields + `self.is_builder_chain`).
+  `collect_effects` `pub(super)` for its 7 mod.rs callers. Dropped now-unused Effect/ArMethodKind
+  imports from mod.rs.
+- `75f87207` 4c — `analyze/diagnostics.rs`: `diagnose`/`diagnose_with_coverage` + 4 private walker
+  helpers. Module named `diagnostics` (not `diagnose`, which would collide with the fn); both pub fns
+  **re-exported** from `crate::analyze` so lsp/mcp/roundhouse/roundhouse-check paths are unchanged.
+- `7badbcf5` 4d — `analyze/inferred_types.rs`: `inferred_types` + `collect_types_expr`, re-exported to
+  keep the public path. **DEVIATION from plan:** plan said "move alongside ide.rs's consumers", but
+  ide.rs does NOT call `inferred_types` (only a test's *name* matches) — relocating under `crate::ide`
+  would change the public path for zero co-location gain, so kept in `analyze` with a re-export.
+
+### Step 5 — EXECUTED (1 commit)
+- `a6707e48` — table-ified two uniform `insert(name, ty)` runs into the existing tuple-loop idiom
+  (matches FlashHash in `registry::view`): `registry::activemodel` Errors(14)+Error(4) collections
+  (inline comments preserved; added `errors_ty` local + `str_arr` closure to kill 3× repeated inline
+  constructions) and `registry::stdlib` Rails-singleton 5×`Ty::Untyped`. **Skipped** `app_ctrl`'s Nil
+  run — fragmented by a semantic (HTTP cache-control) comment a single loop would orphan. Most uniform
+  runs in this code were already `for … in […]` loops, so candidates were few.
+
+### Net result
+`analyze/mod.rs` ~6082 → ~3500 LOC. `with_adapter` 1486 → 388 LOC. New modules: `analyze/registry/`
+(8 files) + `analyze/{render,effects,diagnostics,inferred_types}.rs`. `run_typing_passes` untouched
+(design task, per plan). docs/relation-convergence-plan.md unblocked by Step 2.
