@@ -158,3 +158,45 @@ semantics are identical to Rails ERB (`<%=` escapes, `<%==` raw). So
 Timebox: this is a spike, not a lane. If linearization or the dataset
 lowering balloons, ledger the hard cases, post partial results on #67, and
 return to the lobsters worklist.
+
+## Results (2026-07-20)
+
+Both acceptance tests pass; step 1 is complete.
+
+**Oracle parity** — the transpiled app passes the exemplar's 18-check suite
+with the same counts as the source app (18 runs / 70 assertions / 0
+failures). Gates: `tests/roda_toolchain.rs` (`roda_blog_oracle_passes` pins
+the source app; `roda_blog_transpiled_oracle_passes` runs the ported oracle
+— `tests/roda_oracle/blog_oracle_test.rb` — against the emitted Rack app).
+
+**IR convergence** — post-lowering method-level diff vs `real-blog`
+(`dump_ir --format ruby`, both fixtures): 130 shared method names, **93
+byte-identical**. Every one of the 37 differing bodies classifies as:
+
+- *column-order normalization*: real-blog's schema.rb alphabetizes columns,
+  the Sequel migrations declare them in source order — SELECT/INSERT lists
+  differ in order only, semantically identical;
+- *deliberate dialect differences, faithfully carried*: nil-returning
+  `find_by` + explicit not_found render (vs `find`-raises), custom
+  validation message, literal path strings (vs RouteHelpers), flash
+  statement-writes (vs `notice:` kwargs), no json/respond_to variants;
+- *feature asymmetry*: Turbo broadcast callbacks, jbuilder views, and the
+  test/fixture modules exist only in real-blog; RootController and the
+  view helpers only in roda-blog.
+
+**Zero diffs attributable to the IR being secretly Rails-shaped** — the
+research question answers: the IR is Ruby-shaped; Roda + Sequel converge
+onto it as a front end, not a fork.
+
+**Ledger (found by the diff, not the oracle)**: `has_many :comments,
+order: Sequel.desc(:created_at)` — the order scope is recorded on the
+association IR but `synth_has_many_reader` does not apply assoc scopes, so
+the transpiled reader returns table order where the source app returns
+newest-first. Invisible to both test suites (neither asserts comment
+order); observable on the show page. Shared gap (Rails scoped `has_many`
+lambdas hit it too); fix belongs in the reader synthesis.
+
+Out-of-scope surface (per the allowlists above, all survey-ledgered on
+sight): array/regexp/proc/class/symbol matchers, `r.halt` at interior
+nodes, virtual-row blocks, dataset-level-only models, non-allowlisted
+plugins, `alter_table` migrations.
