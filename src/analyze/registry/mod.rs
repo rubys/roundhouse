@@ -5,4 +5,5 @@
 //! orchestrator in `with_adapter` calls them in the original emit order.
 
 pub(super) mod activemodel;
+pub(super) mod ar;
 pub(super) mod stdlib;
