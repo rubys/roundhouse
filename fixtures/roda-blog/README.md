@@ -71,6 +71,28 @@ tree. Swap `--target ruby` for `typescript`, `crystal`, `go`, `rust`, … to
 see the other emitters, or try it without installing anything at
 [the in-browser playground](https://rubys.github.io/roundhouse/playground/?app=roda).
 
+### Native binary (Spinel)
+
+The same source also compiles ahead-of-time to a self-contained
+executable — no Ruby installation on the serving machine — via
+[Spinel](https://github.com/matz/spinel), Matz's AOT Ruby compiler
+(clone it and run `make`; that puts `spinel` and `spin` in its `bin/`):
+
+```sh
+cd roundhouse
+cargo run --release --bin roundhouse -- --target spinel ../roda-sequel-blog -o ../roda-blog-spinel
+
+cd ../roda-blog-spinel
+spin build                                          # spinel's bin/ on PATH; links -lsqlite3
+sqlite3 storage/development.sqlite3 < db/seed.sql   # optional demo rows (sqlite3 CLI)
+./build/bin/blog                                    # http://localhost:3000
+```
+
+The result is a ~559 KB arm64/x86 binary that boots to its first served
+request in about ten milliseconds at ~4.5 MB RSS, with every query a SQL
+string composed at compile time. The emitted tree's own `README.md`
+documents the rest (`spin test`, the Playwright e2e suite, regeneration).
+
 ## Layout
 
 ```
