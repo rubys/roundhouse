@@ -17,11 +17,9 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // propagate through dispatch without bottoming out at Var.
     // `Rails.env` is the one we can type concretely as Str.
     let mut rails_cls = ClassInfo::default();
-    rails_cls.class_methods.insert(Symbol::from("application"), Ty::Untyped);
-    rails_cls.class_methods.insert(Symbol::from("logger"), Ty::Untyped);
-    rails_cls.class_methods.insert(Symbol::from("cache"), Ty::Untyped);
-    rails_cls.class_methods.insert(Symbol::from("configuration"), Ty::Untyped);
-    rails_cls.class_methods.insert(Symbol::from("root"), Ty::Untyped);
+    for m in ["application", "logger", "cache", "configuration", "root"] {
+        rails_cls.class_methods.insert(Symbol::from(m), Ty::Untyped);
+    }
     // `Rails.env` is an ActiveSupport::StringInquirer (a String
     // that also answers `development?`/`production?`/… as Bool),
     // not a plain Str — see the StringInquirer dispatch in send.rs.
