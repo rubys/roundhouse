@@ -46,8 +46,13 @@ class BlogOracleTest < Minitest::Test
     article
   end
 
-  def create_comment(article, commenter: "Ada", body: "Nice post!")
-    Comment.create(article_id: article.id, commenter: commenter, body: body)
+  def create_comment(article, commenter: "Ada", body: "Nice post!", created_at: nil)
+    comment = Comment.create(article_id: article.id, commenter: commenter, body: body)
+    if created_at
+      comment.created_at = created_at
+      comment.save
+    end
+    comment
   end
 
   # --- root ------------------------------------------------------------------
@@ -98,11 +103,16 @@ class BlogOracleTest < Minitest::Test
 
   def test_show_renders_article_and_comments
     article = create_article
-    create_comment(article, commenter: "Grace")
+    create_comment(article, commenter: "Grace", created_at: Time.now - 60)
+    create_comment(article, commenter: "Hopper")
     get "/articles/#{article.id}"
     assert last_response.ok?
     assert_includes last_response.body, article.title
     assert_includes last_response.body, "Grace"
+    # one_to_many :comments carries order: Sequel.desc(:created_at) —
+    # newest comment renders first. This is the assertion the IR diff
+    # showed both suites were missing (the assoc-scope gap).
+    assert_operator last_response.body.index("Hopper"), :<, last_response.body.index("Grace")
   end
 
   def test_show_missing_article_renders_404

@@ -36,8 +36,13 @@ class BlogTest < Minitest::Test
     article
   end
 
-  def create_comment(article, commenter: "Ada", body: "Nice post!")
-    article.add_comment(commenter: commenter, body: body)
+  def create_comment(article, commenter: "Ada", body: "Nice post!", created_at: nil)
+    comment = article.add_comment(commenter: commenter, body: body)
+    if created_at
+      comment.created_at = created_at
+      comment.save
+    end
+    comment
   end
 
   # --- root ------------------------------------------------------------------
@@ -88,11 +93,15 @@ class BlogTest < Minitest::Test
 
   def test_show_renders_article_and_comments
     article = create_article
-    create_comment(article, commenter: "Grace")
+    create_comment(article, commenter: "Grace", created_at: Time.now - 60)
+    create_comment(article, commenter: "Hopper")
     get "/articles/#{article.id}"
     assert last_response.ok?
     assert_includes last_response.body, article.title
     assert_includes last_response.body, "Grace"
+    # one_to_many :comments carries order: Sequel.desc(:created_at) —
+    # newest comment renders first.
+    assert_operator last_response.body.index("Hopper"), :<, last_response.body.index("Grace")
   end
 
   def test_show_missing_article_renders_404

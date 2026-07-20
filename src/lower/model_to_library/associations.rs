@@ -18,13 +18,14 @@ pub(super) fn push_association_methods(methods: &mut Vec<MethodDef>, model: &Mod
     for (span, assoc) in model.spanned_associations() {
         let before = methods.len();
         match assoc {
-            Association::HasMany { name, target, foreign_key, as_interface, .. } => {
+            Association::HasMany { name, target, foreign_key, as_interface, scope, .. } => {
                 methods.push(synth_has_many_reader(
                     owner,
                     name,
                     target,
                     foreign_key,
                     as_interface.as_ref(),
+                    scope.as_ref(),
                 ));
                 methods.push(synth_preload_setter(owner, name, target));
             }
@@ -104,6 +105,7 @@ fn synth_has_many_reader(
     target: &ClassId,
     foreign_key: &Symbol,
     as_interface: Option<&Symbol>,
+    scope: Option<&Expr>,
 ) -> MethodDef {
     // def comments; Comment.where(article_id: @id); end
     //
@@ -143,6 +145,23 @@ fn synth_has_many_reader(
             parenthesized: true,
         },
     );
+    // Association scope (`has_many :comments, -> { order(created_at:
+    // :desc) }` / Sequel's `order:` option) — graft the recorded chain
+    // onto the FK query so the reader honors it: re-root the scope
+    // expression's leftmost implicit-self Send onto `lazy_query`,
+    // yielding `Comment.where(fk: @id).order(created_at: :desc)`. The
+    // arel fold then carries the ORDER BY into the compiled SQL (or the
+    // chain falls back to the runtime Relation, which evaluates it).
+    // A scope whose root isn't an implicit-self call chain is left
+    // ungrafted — the previous (scope-ignoring) behavior, never a
+    // corrupted query. NOTE: the eager-load path (`includes` →
+    // `_preload_comments`) does not apply scopes yet; readers cover
+    // the per-record access pattern (show pages), which is where
+    // ordering is user-visible today.
+    let lazy_query = match scope {
+        Some(scope_expr) => graft_scope(scope_expr, lazy_query),
+        None => lazy_query,
+    };
 
     // Cache-aware body (issue #27):
     //   def comments
@@ -203,6 +222,38 @@ fn synth_has_many_reader(
         is_async: false,
             mutates_self: false,
             block_param: None,
+    }
+}
+
+/// Re-root an association-scope chain onto `base`: walk the scope's
+/// Send spine to its leftmost implicit-self call and substitute `base`
+/// as that call's receiver. Returns `base` unchanged when the scope's
+/// root isn't an implicit-self Send (a shape the graft can't express —
+/// better the unscoped query than a mangled one; the gap stays visible
+/// as a behavioral diff, not a corrupt emit).
+fn graft_scope(scope: &Expr, base: Expr) -> Expr {
+    fn reroot(e: &Expr, base: Expr) -> Option<Expr> {
+        let ExprNode::Send { recv, method, args, block, parenthesized } = &*e.node else {
+            return None;
+        };
+        let new_recv = match recv {
+            None => base,
+            Some(inner) => reroot(inner, base)?,
+        };
+        Some(Expr::new(
+            e.span,
+            ExprNode::Send {
+                recv: Some(new_recv),
+                method: method.clone(),
+                args: args.clone(),
+                block: block.clone(),
+                parenthesized: *parenthesized,
+            },
+        ))
+    }
+    match reroot(scope, base.clone()) {
+        Some(grafted) => grafted,
+        None => base,
     }
 }
 
