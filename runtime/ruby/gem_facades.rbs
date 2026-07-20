@@ -58,7 +58,7 @@ module Nokogiri
 end
 
 module Mail
-  def self.read_from_string: (untyped _text) -> Mail::Message
+  def self.read_from_string: (String _text) -> Mail::Message
 
   class Part
     def parts: () -> Array[Mail::Part]
@@ -87,11 +87,11 @@ end
 
 module ROTP
   class TOTP
-    @secret: untyped
+    @secret: String
 
-    def initialize: (untyped _secret, ?issuer: untyped) -> void
-    def verify: (untyped _code) -> bool
-    def provisioning_uri: (untyped _account) -> String
+    def initialize: (String _secret, ?issuer: String?) -> void
+    def verify: (String _code) -> bool
+    def provisioning_uri: (String _account) -> String
     def secret: () -> String
   end
 
@@ -106,35 +106,35 @@ module BCrypt
   end
 
   class Password
-    @digest: untyped
+    @digest: String
 
-    def self.create: (untyped _secret, ?cost: untyped) -> BCrypt::Password
-    def initialize: (untyped _digest) -> void
-    def ==: (untyped _other) -> bool
+    def self.create: (String _secret, ?cost: Integer?) -> BCrypt::Password
+    def initialize: (String _digest) -> void
+    def ==: (String _other) -> bool
     def to_s: () -> String
   end
 end
 
 module RQRCode
   class QRCode
-    @data: untyped
+    @data: String
 
-    def initialize: (untyped _data) -> void
-    def as_svg: (?offset: Integer, ?fill: untyped, ?color: untyped, ?module_size: untyped, ?shape_rendering: untyped) -> String
+    def initialize: (String _data) -> void
+    def as_svg: (?offset: Integer, ?fill: String?, ?color: String?, ?module_size: Integer?, ?shape_rendering: String?) -> String
   end
 end
 
 module SVG
   module Graph
     class TimeSeries
-      @opts: untyped
+      @opts: Hash[Symbol, untyped]
 
-      def initialize: (untyped _opts) -> void
+      def initialize: (Hash[Symbol, untyped] _opts) -> void
       def popup_format: () -> String
       def x_label_format: () -> String
       def get_x_values: () -> Array[Integer]
       def get_y_values: () -> Array[Integer]
-      def add_data: (?data: untyped, ?template: untyped) -> SVG::Graph::TimeSeries
+      def add_data: (?data: untyped, ?template: String?) -> SVG::Graph::TimeSeries
       def burn_svg_only: () -> String
     end
   end
