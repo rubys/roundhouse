@@ -2454,7 +2454,9 @@ fn require_path_for_body_const(
         // Gem façades — typed raising stand-ins for write-path-only
         // gem surface (see runtime/ruby/gem_facades.rb). One file
         // hosts every stubbed gem, so all their roots anchor here.
-        "Markly" | "Nokogiri" | "Mail" => Some("runtime/gem_facades".to_string()),
+        "Markly" | "Nokogiri" | "Mail" | "ROTP" | "BCrypt" | "RQRCode" | "SVG" => {
+            Some("runtime/gem_facades".to_string())
+        }
         _ => None,
     }
 }

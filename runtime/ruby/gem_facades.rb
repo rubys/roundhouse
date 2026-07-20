@@ -200,3 +200,123 @@ module Mail
     end
   end
 end
+
+# ROTP — TOTP two-factor auth (User#authenticate_totp, settings 2FA
+# enrollment/verify). Off the read benchmark (all uses are write-path
+# POSTs). `verify` returns Bool so the `if user.authenticate_totp(...)`
+# condition type-checks under AOT.
+module ROTP
+  class TOTP
+    def initialize(_secret, issuer: nil)
+      GemFacade.fail!("ROTP::TOTP.new")
+      @secret = _secret
+    end
+
+    def verify(_code)
+      GemFacade.fail!("ROTP::TOTP#verify")
+      false
+    end
+
+    def provisioning_uri(_account)
+      GemFacade.fail!("ROTP::TOTP#provisioning_uri")
+      ""
+    end
+
+    def secret
+      GemFacade.fail!("ROTP::TOTP#secret")
+      ""
+    end
+  end
+
+  module Base32
+    def self.random
+      GemFacade.fail!("ROTP::Base32.random")
+      ""
+    end
+  end
+end
+
+# BCrypt — password hashing. `has_secure_password`'s `authenticate` does
+# `BCrypt::Password.new(digest) == password`, and the login controller
+# reads `Engine::DEFAULT_COST`. LOGIN IS ON THE BENCHMARK PATH (the
+# replay harness POSTs real credentials), so this raising façade compiles
+# the tree but the login handshake raises until real bcrypt is wired
+# (crypt_blowfish via spinel `--link`; see the spinel-AOT probe notes).
+module BCrypt
+  module Engine
+    DEFAULT_COST = 12
+  end
+
+  class Password
+    def self.create(_secret, cost: nil)
+      GemFacade.fail!("BCrypt::Password.create")
+      new("")
+    end
+
+    def initialize(_digest)
+      GemFacade.fail!("BCrypt::Password.new")
+      @digest = _digest
+    end
+
+    def ==(_other)
+      GemFacade.fail!("BCrypt::Password#==")
+      false
+    end
+
+    def to_s
+      GemFacade.fail!("BCrypt::Password#to_s")
+      ""
+    end
+  end
+end
+
+# RQRCode — QR-code rendering for 2FA enrollment. Off the read benchmark.
+module RQRCode
+  class QRCode
+    def initialize(_data)
+      GemFacade.fail!("RQRCode::QRCode.new")
+      @data = _data
+    end
+
+    def as_svg(offset: 0, fill: nil, color: nil, module_size: nil, shape_rendering: nil)
+      GemFacade.fail!("RQRCode::QRCode#as_svg")
+      ""
+    end
+  end
+end
+
+# SVG::Graph::TimeSeries — SVG statistics graphs. lib/time_series.rb
+# subclasses it and the stats controller instantiates it; off the read
+# benchmark. The app subclass calls these inherited methods, so they
+# carry concrete return types (String format strings, Integer value
+# arrays) rather than raising to void.
+module SVG
+  module Graph
+    class TimeSeries
+      def initialize(_opts)
+        GemFacade.fail!("SVG::Graph::TimeSeries.new")
+        @opts = _opts
+      end
+
+      def popup_format
+        GemFacade.fail!("SVG::Graph::TimeSeries#popup_format")
+        ""
+      end
+
+      def x_label_format
+        GemFacade.fail!("SVG::Graph::TimeSeries#x_label_format")
+        ""
+      end
+
+      def get_x_values
+        GemFacade.fail!("SVG::Graph::TimeSeries#get_x_values")
+        [0]
+      end
+
+      def get_y_values
+        GemFacade.fail!("SVG::Graph::TimeSeries#get_y_values")
+        [0]
+      end
+    end
+  end
+end
