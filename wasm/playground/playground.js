@@ -71,7 +71,7 @@ function setStatus(msg, kind = "") {
 // ---- source tree ---------------------------------------------------------
 
 function sourceFiles() {
-  return Object.keys(srcMap).filter((p) => /\.(rb|erb)$/.test(p)).sort();
+  return Object.keys(srcMap).filter((p) => /\.(rb|erb|ru)$/.test(p)).sort();
 }
 
 // buildTree / allDirPaths / renderTree now live in ../lib/tree.js (shared with

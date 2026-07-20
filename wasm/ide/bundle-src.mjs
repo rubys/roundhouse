@@ -38,8 +38,21 @@ async function walk(dir, rootDir) {
     }
   }
 }
-for (const sub of ["app", "extras", "lib", "config/routes"]) await walk(join(root, sub), root);
-for (const single of ["db/schema.rb", "config/routes.rb"]) {
+// Rails-convention dirs, plus the Roda + Sequel layout (models/, views/,
+// db/migrate/, and the root-level app.rb / db.rb / seeds.rb / config.ru —
+// config.ru is what the roda front-end dispatches on). Each walk/read is a
+// no-op when the dir/file doesn't exist, so one list serves both shapes.
+for (const sub of ["app", "extras", "lib", "config/routes", "models", "views", "db/migrate"]) {
+  await walk(join(root, sub), root);
+}
+for (const single of [
+  "db/schema.rb",
+  "config/routes.rb",
+  "config.ru",
+  "app.rb",
+  "db.rb",
+  "seeds.rb",
+]) {
   try { src[single] = await readFile(join(root, single), "utf8"); } catch {}
 }
 
@@ -50,7 +63,7 @@ if (!commit) {
   } catch {}
 }
 let license;
-for (const f of ["LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING"]) {
+for (const f of ["LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING", "MIT-LICENSE"]) {
   try { license = await readFile(join(root, f), "utf8"); break; } catch {}
 }
 

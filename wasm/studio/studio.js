@@ -100,7 +100,7 @@ function setAppStatus(html) { els.appStatus.innerHTML = html; }
 // ---- source tree ---------------------------------------------------------
 
 function sourceFiles() {
-  return Object.keys(srcMap).filter((p) => /\.(rb|erb)$/.test(p)).sort();
+  return Object.keys(srcMap).filter((p) => /\.(rb|erb|ru)$/.test(p)).sort();
 }
 
 function renderSources() {

@@ -306,6 +306,51 @@ fn seeds_ingest_normalized() {
     assert!(sends.iter().any(|s| s == "create"));
 }
 
+/// The in-browser playground ingests through `ingest_app_from_tree`
+/// (an in-memory path→bytes map — the shape `bundle-src.mjs` ships).
+/// Guard that the roda front-end dispatch works on that path with the
+/// bundle's file subset: analyzable sources only, no Gemfile, no
+/// test/, no README.
+#[test]
+fn ingests_from_in_memory_tree() {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    let fixture = Path::new("fixtures/roda-blog");
+    let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    for rel in [
+        "app.rb",
+        "config.ru",
+        "db.rb",
+        "seeds.rb",
+        "db/migrate/001_create_articles.rb",
+        "db/migrate/002_create_comments.rb",
+        "models/article.rb",
+        "models/comment.rb",
+        "views/articles/_article.erb",
+        "views/articles/_form.erb",
+        "views/articles/edit.erb",
+        "views/articles/index.erb",
+        "views/articles/new.erb",
+        "views/articles/show.erb",
+        "views/comments/_comment.erb",
+        "views/layout.erb",
+        "views/not_found.erb",
+    ] {
+        tree.insert(
+            PathBuf::from(rel),
+            std::fs::read(fixture.join(rel)).unwrap_or_else(|_| panic!("read {rel}")),
+        );
+    }
+    let app = roundhouse::ingest::ingest_app_from_tree(tree).expect("tree ingest");
+    assert_eq!(app.routes.entries.len(), 10, "routes linearized from the tree");
+    assert!(
+        app.controllers.iter().any(|c| c.name.0.as_str() == "ArticlesController"),
+        "controllers synthesized from the tree"
+    );
+    assert_eq!(app.schema.tables.len(), 2, "migrations folded from the tree");
+}
+
 fn collect_sends(expr: &roundhouse::expr::Expr, out: &mut Vec<String>) {
     if let roundhouse::expr::ExprNode::Send { method, .. } = &*expr.node {
         out.push(method.to_string());

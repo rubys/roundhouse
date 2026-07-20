@@ -424,6 +424,8 @@ jobs:
           set -euo pipefail
           node wasm/ide/bundle-src.mjs fixtures/real-blog wasm/ide/app-blog.json \
             --name blog --open app/controllers/articles_controller.rb
+          node wasm/ide/bundle-src.mjs fixtures/roda-blog wasm/lib/app-roda.json \
+            --name roda-blog --open app.rb
           cp /tmp/app-lobsters.json wasm/ide/app-lobsters.json
           printf '%s\n' '{"default":"mastodon","apps":[{"name":"blog","label":"Rails blog","src":"app-blog.json"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json"},{"name":"mastodon","label":"Mastodon","src":"app-src.json"}]}' > wasm/ide/apps.json
           # Playground picker (lib/): lobsters + mastodon alongside the committed
@@ -431,7 +433,7 @@ jobs:
           # off-thread Mastodon transpile.
           cp /tmp/app-lobsters.json wasm/lib/app-lobsters.json
           cp wasm/ide/app-src.json  wasm/lib/app-mastodon.json
-          printf '%s\n' '{"default":"blog","apps":[{"name":"blog","label":"Rails blog","src":"fixture.json","open":"app/models/article.rb"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json","open":"app/models/story.rb"},{"name":"mastodon","label":"Mastodon","src":"app-mastodon.json","open":"app/models/status.rb"}]}' > wasm/lib/apps.json
+          printf '%s\n' '{"default":"blog","apps":[{"name":"blog","label":"Rails blog","src":"fixture.json","open":"app/models/article.rb"},{"name":"roda","label":"Roda + Sequel blog","src":"app-roda.json","open":"app.rb"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json","open":"app/models/story.rb"},{"name":"mastodon","label":"Mastodon","src":"app-mastodon.json","open":"app/models/status.rb"}]}' > wasm/lib/apps.json
       - name: Install harness deps (Playwright)
         run: npm ci
         working-directory: tests/browser_smoke
@@ -1370,8 +1372,12 @@ jobs:
           # the emit runs in the shared worker, so the multi-second pass never
           # freezes the tab; see wasm/lib/wasm-client.mjs).
           cp wasm/ide/app-src.json  _site/lib/app-mastodon.json
-          # Playground manifest: blog (clean) + lobsters + mastodon (both partial → honest ledger).
-          printf '%s\n' '{"default":"blog","apps":[{"name":"blog","label":"Rails blog","src":"fixture.json","open":"app/models/article.rb"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json","open":"app/models/story.rb"},{"name":"mastodon","label":"Mastodon","src":"app-mastodon.json","open":"app/models/status.rb"}]}' > _site/lib/apps.json
+          # roda-blog: the Roda + Sequel exemplar (issue #67) — the picker's
+          # second CLEAN app, transpiled through the roda front-end.
+          node wasm/ide/bundle-src.mjs fixtures/roda-blog _site/lib/app-roda.json \
+            --name roda-blog --open app.rb
+          # Playground manifest: blog + roda (clean) + lobsters + mastodon (both partial → honest ledger).
+          printf '%s\n' '{"default":"blog","apps":[{"name":"blog","label":"Rails blog","src":"fixture.json","open":"app/models/article.rb"},{"name":"roda","label":"Roda + Sequel blog","src":"app-roda.json","open":"app.rb"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json","open":"app/models/story.rb"},{"name":"mastodon","label":"Mastodon","src":"app-mastodon.json","open":"app/models/status.rb"}]}' > _site/lib/apps.json
           # IDE manifest: all three (analysis is gap-tolerant; Mastodon default).
           printf '%s\n' '{"default":"mastodon","apps":[{"name":"blog","label":"Rails blog","src":"app-blog.json"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json"},{"name":"mastodon","label":"Mastodon","src":"app-src.json"}]}' > _site/ide/apps.json
           echo "lib app bundles:"; ls -1 _site/lib/*.json | sort

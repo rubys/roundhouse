@@ -224,6 +224,28 @@ await page.screenshot({ path: "playground.png" });
 // which is why the playground offers lobsters but not Mastodon). Skipped for
 // a single-app (no apps.json) deployment.
 const appNames = await page.evaluate(() => window.__playground.apps().map((a) => a.name));
+// roda-blog: the Roda + Sequel exemplar (issue #67), the picker's second
+// CLEAN app — a different source framework transpiling through the roda
+// front-end with zero diagnostics.
+if (appNames.includes("roda")) {
+  console.log("\n=== roda-blog (Roda + Sequel front-end) ===");
+  await page.evaluate(() => window.__playground.setApp("roda"));
+  await page.waitForFunction(() => window.__playground.source("app.rb") != null, { timeout: 60000 });
+  await page.waitForFunction(() => {
+    const out = window.__playground.output();
+    return out && (out.files || out.error);
+  }, { timeout: 60000 });
+  const roda = await page.evaluate(() => {
+    const out = window.__playground.output();
+    return { sources: window.__playground.sourceCount(), emitted: (out.files || []).length, error: out.error || null, diags: (out.diagnostics || []).length };
+  });
+  console.log(`roda-blog: ${roda.sources} sources -> ${roda.emitted} emitted, ${roda.diags} diagnostics`);
+  if (roda.error) fail(`roda-blog transpile errored: ${roda.error}`);
+  if (!(roda.sources >= 15 && roda.emitted >= 15)) fail(`roda-blog re-seed/transpile too small: ${roda.sources}/${roda.emitted}`);
+  if (roda.diags !== 0) fail(`roda-blog should transpile clean, got ${roda.diags} diagnostics`);
+  await page.evaluate(() => window.__playground.setApp("blog"));
+  await page.waitForFunction(() => window.__playground.source("app/models/article.rb") != null, { timeout: 60000 });
+}
 if (appNames.length >= 2 && appNames.includes("lobsters")) {
   console.log("\n=== app picker ===");
   await page.evaluate(() => window.__playground.setApp("lobsters"));
