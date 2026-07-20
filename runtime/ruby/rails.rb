@@ -26,7 +26,7 @@ module Rails
   # RAILS_ENV=production; lobsters gates dev-only filters on
   # `Rails.env.development?`).
   def self.env
-    name = env_name
+    name = self.env_name
     Env.new(name.nil? || name.empty? ? "development" : name)
   end
 
