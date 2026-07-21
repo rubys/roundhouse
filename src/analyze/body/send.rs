@@ -1041,7 +1041,11 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         },
         // `each`, predicates, and shape-preserving transforms keep elem.
         "each" | "reverse_each" | "select" | "filter" | "reject"
-        | "sort" | "sort_by" | "reverse" | "compact" | "flatten" | "uniq" => {
+        | "sort" | "sort_by" | "reverse" | "compact" | "flatten" | "uniq"
+        // `drop`/`take` (and their block forms) return a same-element
+        // sub-array — the tail of a splat destructuring (`a, *rest =`
+        // desugars `rest` to `arr.drop(n)`) among other uses.
+        | "drop" | "take" | "drop_while" | "take_while" => {
             Ty::Array { elem: Box::new(elem.clone()) }
         }
         // `delete(x)` returns the deleted element or nil.

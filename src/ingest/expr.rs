@@ -42,6 +42,115 @@ fn literal_method_name(expr: &Expr) -> Option<String> {
     }
 }
 
+/// Extract one multi-write target — `a`, `@a`, or `recv[i]`
+/// (e.g. `link['href'], title = attrs`) — as an `LValue`. Shared by the
+/// leading targets and the trailing splat target of a `MultiAssign`.
+fn multi_write_target(node: &Node<'_>, file: &str) -> IngestResult<crate::expr::LValue> {
+    if let Some(lvt) = node.as_local_variable_target_node() {
+        Ok(crate::expr::LValue::Var {
+            id: crate::ident::VarId(0),
+            name: Symbol::from(constant_id_str(&lvt.name())),
+        })
+    } else if let Some(ivt) = node.as_instance_variable_target_node() {
+        let raw = constant_id_str(&ivt.name());
+        let name = raw.strip_prefix('@').unwrap_or(raw);
+        Ok(crate::expr::LValue::Ivar { name: Symbol::from(name) })
+    } else if let Some(it) = node.as_index_target_node() {
+        let recv = ingest_expr(&it.receiver(), file)?;
+        let index = ingest_index_argument(it.arguments(), file)?;
+        Ok(crate::expr::LValue::Index { recv, index })
+    } else {
+        Err(IngestError::Unsupported {
+            file: file.into(),
+            message: format!("unsupported multi-write target: {node:?}"),
+        })
+    }
+}
+
+/// Ingest a `MultiWriteNode` (`a, b = …`, `a, *rest = …`). Split out of
+/// the giant `ingest_expr_strict` match so its locals live in a frame
+/// entered only for multi-writes, not on every deep recursive descent.
+fn ingest_multi_write(
+    mw: &ruby_prism::MultiWriteNode<'_>,
+    span: Span,
+    file: &str,
+) -> IngestResult<ExprNode> {
+    // Post-rest targets (`*init, last = c`) need length-relative
+    // indexing off the tail; still out of scope.
+    if mw.rights().iter().next().is_some() {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: "multi-write with post-rest targets not yet supported".into(),
+        });
+    }
+    let mut targets: Vec<crate::expr::LValue> = Vec::new();
+    for left in mw.lefts().iter() {
+        targets.push(multi_write_target(&left, file)?);
+    }
+    let value = ingest_expr(&mw.value(), file)?;
+    let rest = match mw.rest() {
+        // `a, b = expr` — no splat. Native destructuring node; each
+        // target consumes the RHS array positionally.
+        None => return Ok(ExprNode::MultiAssign { targets, value }),
+        Some(rest) => rest,
+    };
+    // `a, *rest = expr` — trailing splat. The shared IR has no rest-aware
+    // destructuring node, so desugar to a temp bind + positional `[]`
+    // reads + `rest = temp.drop(n)`. Every resulting node (Assign / `[]`
+    // / `drop`) is already handled by analyze and all seven emitters, so
+    // splat support stays contained to ingest rather than threading a
+    // rest flag through ~15 MultiAssign consumers. The Seq ends in the
+    // temp read so the whole expression's value is the RHS array —
+    // matching Ruby, where `(a, *b = arr)` evaluates to `arr`.
+    let tmp = Symbol::from(format!("__mw_{}", span.start).as_str());
+    let tmp_read = || {
+        Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: tmp.clone() })
+    };
+    let int_lit = |v: usize| {
+        Expr::new(span, ExprNode::Lit { value: Literal::Int { value: v as i64 } })
+    };
+    let n_lefts = targets.len();
+    let mut exprs: Vec<Expr> = Vec::with_capacity(n_lefts + 3);
+    exprs.push(Expr::new(
+        span,
+        ExprNode::Assign {
+            target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: tmp.clone() },
+            value,
+        },
+    ));
+    for (i, target) in targets.into_iter().enumerate() {
+        let read = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(tmp_read()),
+                method: Symbol::from("[]"),
+                args: vec![int_lit(i)],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        exprs.push(Expr::new(span, ExprNode::Assign { target, value: read }));
+    }
+    // Anonymous splat (`a, * = c`) discards the rest — only a named
+    // target gets a binding.
+    if let Some(rest_node) = rest.as_splat_node().and_then(|s| s.expression()) {
+        let rest_target = multi_write_target(&rest_node, file)?;
+        let drop = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(tmp_read()),
+                method: Symbol::from("drop"),
+                args: vec![int_lit(n_lefts)],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        exprs.push(Expr::new(span, ExprNode::Assign { target: rest_target, value: drop }));
+    }
+    exprs.push(tmp_read());
+    Ok(ExprNode::Seq { exprs })
+}
+
 fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
     // Byte offsets into the text registered for `file` (the exact text
     // prism is parsing). FileId(0) when the entry point didn't
@@ -1440,48 +1549,13 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             ExprNode::Splat { value }
         }
         n if n.as_multi_write_node().is_some() => {
-            let mw = n.as_multi_write_node().unwrap();
-            // Only the simple `a, b = expr` shape — no splat (`*rest`)
-            // and no post-rest targets. The fixture-driven scope.
-            if mw.rest().is_some() {
-                return Err(IngestError::Unsupported {
-                    file: file.into(),
-                    message: "multi-write with splat (`a, *b = c`) not yet supported".into(),
-                });
-            }
-            let rights: Vec<Node<'_>> = mw.rights().iter().collect();
-            if !rights.is_empty() {
-                return Err(IngestError::Unsupported {
-                    file: file.into(),
-                    message: "multi-write with post-rest targets not yet supported".into(),
-                });
-            }
-            let mut targets: Vec<crate::expr::LValue> = Vec::new();
-            for left in mw.lefts().iter() {
-                if let Some(lvt) = left.as_local_variable_target_node() {
-                    targets.push(crate::expr::LValue::Var {
-                        id: crate::ident::VarId(0),
-                        name: Symbol::from(constant_id_str(&lvt.name())),
-                    });
-                } else if let Some(ivt) = left.as_instance_variable_target_node() {
-                    let raw = constant_id_str(&ivt.name());
-                    let name = raw.strip_prefix('@').unwrap_or(raw);
-                    targets.push(crate::expr::LValue::Ivar { name: Symbol::from(name) });
-                } else if let Some(it) = left.as_index_target_node() {
-                    // `recv[index], … = …` — index write as a multi-write
-                    // target (e.g. `link['href'], title, alt = attrs`).
-                    let recv = ingest_expr(&it.receiver(), file)?;
-                    let index = ingest_index_argument(it.arguments(), file)?;
-                    targets.push(crate::expr::LValue::Index { recv, index });
-                } else {
-                    return Err(IngestError::Unsupported {
-                        file: file.into(),
-                        message: format!("unsupported multi-write target: {left:?}"),
-                    });
-                }
-            }
-            let value = ingest_expr(&mw.value(), file)?;
-            ExprNode::MultiAssign { targets, value }
+            // Handled out-of-line: `ingest_expr_strict` recurses once per
+            // expression-nesting level, so its stack frame is on the hot
+            // path for deeply-nested sources (big ERB view trees). Keeping
+            // the multi-write locals (temp bind, index reads, splat Seq) in
+            // their own frame — entered only when a multi-write is actually
+            // hit — stops them from inflating every descent frame.
+            ingest_multi_write(&n.as_multi_write_node().unwrap(), span, file)?
         }
         n if n.as_case_node().is_some() => {
             // `case scrutinee when :a, :b then body ... [else else_body] end`
