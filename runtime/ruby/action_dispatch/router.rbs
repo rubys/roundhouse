@@ -10,9 +10,9 @@ module ActionDispatch
       def controller: () -> Symbol
       def action: () -> Symbol
       def req_format: () -> Symbol?
-      def int_params: () -> Array[String]
+      def int_params: () -> String
 
-      def initialize: (String verb, String pattern, Symbol controller, Symbol action, ?Symbol? req_format, ?Array[String] int_params) -> void
+      def initialize: (String verb, String pattern, Symbol controller, Symbol action, ?Symbol? req_format, ?String int_params) -> void
     end
 
     # Successful match result: the resolved controller + action symbols
@@ -42,17 +42,21 @@ module ActionDispatch
 
     # Match a path against a `:name`-segment pattern. Returns a
     # `Hash[String, String]` of captured params (URL segments are
-    # always strings), or nil if no match.
+    # always strings), or nil if no match. `int_params` is the route's
+    # space-joined digit-only constraint list — a constrained segment
+    # that isn't all digits makes the pattern a non-match.
     def self.match_pattern: (
       String pattern,
-      String path
+      String path,
+      ?String int_params
     ) -> Hash[String, String]?
 
     # Digit-only (`Integer` matcher / `constraints: /\d+/`) param
-    # enforcement — a non-digit segment makes the route a non-match.
-    def self.int_params_ok: (
-      Array[String] int_params,
-      Hash[String, String] params
+    # enforcement — is `name` in the route's space-joined constraint
+    # list? A constrained non-digit segment makes the route a non-match.
+    def self.constrained_int?: (
+      String int_params,
+      String name
     ) -> bool
 
     def self.digits_only: (String s) -> bool

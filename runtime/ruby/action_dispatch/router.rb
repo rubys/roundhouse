@@ -31,12 +31,17 @@ module ActionDispatch
       # common infer-from-path case. Named `req_format` (not `format`)
       # so targets whose stdlibs claim `format` never collide.
       #
-      # `int_params` — names of path params constrained to digit-only
-      # segments (Roda's `Integer` matcher, Rails digit-class
-      # `constraints:`). A candidate segment that isn't all digits
-      # makes the route a non-match, so `/articles/12abc` falls
-      # through to 404 instead of binding `id = "12abc"`.
-      def initialize(verb, pattern, controller, action, req_format = nil, int_params = [])
+      # `int_params` — space-joined names of path params constrained to
+      # digit-only segments (Roda's `Integer` matcher, Rails digit-class
+      # `constraints:`), e.g. `"id"` or `"article_id id"`; the empty
+      # string for the unconstrained common case. Carried as a delimited
+      # String rather than `Array[String]` so this optional positional
+      # stays a single scalar type on strict/AOT targets — a `nil`-or-`[]`
+      # optional tail collapses to `Any?`/a bare variadic on Swift,
+      # Kotlin, Go, and Spinel. A candidate segment that isn't all digits
+      # makes the route a non-match, so `/articles/12abc` falls through
+      # to 404 instead of binding `id = "12abc"`.
+      def initialize(verb, pattern, controller, action, req_format = nil, int_params = "")
         @verb        = verb
         @pattern     = pattern
         @controller  = controller
@@ -75,11 +80,9 @@ module ActionDispatch
       while i < table.length
         route = table[i]
         if route.verb.to_s == method_upcase
-          params = match_pattern(route.pattern.to_s, path)
+          params = match_pattern(route.pattern.to_s, path, route.int_params)
           unless params.nil?
-            if int_params_ok(route.int_params, params)
-              return MatchResult.new(route.controller, route.action, params, route.req_format)
-            end
+            return MatchResult.new(route.controller, route.action, params, route.req_format)
           end
         end
         i += 1
@@ -93,7 +96,14 @@ module ActionDispatch
     # are always string-to-string — URL segments are strings, and
     # the typed-hash form survives strict-typed targets (Crystal,
     # Rust). Callers index by string key (`params["id"]`).
-    def self.match_pattern(pattern, path)
+    #
+    # `int_params` (optional) is the route's space-joined digit-only
+    # constraint list. A constrained `:name` segment whose value isn't
+    # all digits makes the whole pattern a non-match — `Router.match`
+    # keeps scanning and the request 404s. The check runs here on the
+    # raw segment (`ap`, a non-nil String local) rather than after
+    # capture so no target has to model `Hash#[]` returning nil.
+    def self.match_pattern(pattern, path, int_params = "")
       pattern_parts = pattern.split("/")
       path_parts    = path.split("/")
       return nil if pattern_parts.length != path_parts.length
@@ -103,7 +113,16 @@ module ActionDispatch
         pp = pattern_parts[i]
         ap = path_parts[i]
         if pp.start_with?(":")
-          params[pp[1..]] = ap
+          name = pp[1..]
+          # `seg = ap.to_s` (not `digits_only(ap)` directly): some strict
+          # emitters track a bare array-index local as nilable and coerce
+          # it wrongly at a non-nilable call arg; routing the segment
+          # through `to_s` first hands `digits_only` a definite String.
+          seg = ap.to_s
+          if constrained_int?(int_params, name) && !digits_only(seg)
+            return nil
+          end
+          params[name] = ap
         elsif pp != ap
           return nil
         end
@@ -112,34 +131,39 @@ module ActionDispatch
       params
     end
 
-    # Enforce a route's digit-only param constraints against the
-    # captured params. A constrained param whose segment isn't all
-    # digits makes the whole route a non-match — `Router.match` keeps
-    # scanning, and the request 404s like any other unmatched path. A
-    # param the pattern didn't capture is vacuously fine (constraints
-    # apply to segments, not their presence).
-    def self.int_params_ok(int_params, params)
+    # Is `name` one of the route's digit-constrained params?
+    # `int_params` is the space-joined constraint list carried on
+    # `Route`; the empty string means the route constrains nothing.
+    # Membership by split + `==` scan (no `Array#include?`, no `Hash`
+    # read) so it lowers cleanly to every target.
+    def self.constrained_int?(int_params, name)
+      return false if int_params.empty?
+      parts = int_params.split(" ")
       i = 0
-      while i < int_params.length
-        v = params[int_params[i]]
-        return false unless v.nil? || digits_only(v)
+      while i < parts.length
+        return true if parts[i] == name
         i += 1
       end
-      true
+      false
     end
 
     # All-digits check for constrained segments. No regex (the router
     # stays cross-target lowerable) and no `to_i` round-trip (it would
     # reject the leading zeros Roda's `Integer` matcher accepts —
-    # `/articles/007` is id 7, not a 404). Two-arg slice + membership
-    # literal, the proven strict-emitter shapes (see
-    # `ViewHelpersExt.sanitize_to_id`).
+    # `/articles/007` is id 7, not a 404). The digit test is an explicit
+    # `String#==` fan-out rather than `"0123456789".include?(c)`: a
+    # string *literal* receiver for `#include?` lowers to a struct call
+    # on Elixir and an unsatisfiable `Pattern` bound on Rust, whereas
+    # `==` against single-char literals is a proven strict-emitter shape.
     def self.digits_only(s)
       return false if s.empty?
       i = 0
       while i < s.length
         c = s[i, 1].to_s
-        return false unless "0123456789".include?(c)
+        if c != "0" && c != "1" && c != "2" && c != "3" && c != "4" &&
+           c != "5" && c != "6" && c != "7" && c != "8" && c != "9"
+          return false
+        end
         i += 1
       end
       true

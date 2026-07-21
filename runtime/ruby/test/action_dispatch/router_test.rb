@@ -140,13 +140,14 @@ class RouterTest < Minitest::Test
 
   # ── int_params (digit-only constraints) ──
   # Roda's `Integer` matcher and Rails digit-class `constraints:`
-  # lower to `Route.new(..., nil, ["id"])`. A constrained segment
-  # that isn't all digits makes the route a non-match — without
-  # this, `/articles/12abc` would bind `id = "12abc"` and (post
-  # `to_i`) serve article 12 where the source app 404s.
+  # lower to `Route.new(..., nil, "id")` (space-joined constraint
+  # list). A constrained segment that isn't all digits makes the route
+  # a non-match — without this, `/articles/12abc` would bind
+  # `id = "12abc"` and (post `to_i`) serve article 12 where the source
+  # app 404s.
 
   INT_TABLE = [
-    ActionDispatch::Router::Route.new("GET", "/articles/:id", :articles_controller, :show, nil, ["id"]),
+    ActionDispatch::Router::Route.new("GET", "/articles/:id", :articles_controller, :show, nil, "id"),
   ].freeze
 
   def test_int_param_matches_digits
@@ -174,7 +175,7 @@ class RouterTest < Minitest::Test
 
   def test_rejected_int_param_falls_through_to_later_route
     table = [
-      ActionDispatch::Router::Route.new("GET", "/:id", :a, :constrained, nil, ["id"]),
+      ActionDispatch::Router::Route.new("GET", "/:id", :a, :constrained, nil, "id"),
       ActionDispatch::Router::Route.new("GET", "/:slug", :a, :fallback),
     ]
     m = ActionDispatch::Router.match("GET", "/about", table)

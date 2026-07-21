@@ -134,10 +134,12 @@ fn build_route_new(r: &FlatRoute, class_id: &ClassId, route_ty: &Ty) -> Expr {
     if let Some(fmt) = &r.format {
         args.push(lit_sym(fmt.clone()));
     }
-    // Digit-constrained params ride as the optional 6th positional
-    // (`Route.new(..., nil, ["id"])`) — the router rejects candidate
-    // segments that aren't all digits (Roda `Integer` matcher, Rails
-    // digit-class `constraints:`). Constraint-free routes keep their
+    // Digit-constrained params ride as the optional 6th positional, a
+    // single space-joined string (`Route.new(..., nil, "id")`) — the
+    // router rejects candidate segments that aren't all digits (Roda
+    // `Integer` matcher, Rails digit-class `constraints:`). A scalar
+    // `String` (not `Array[String]`) keeps the optional tail one type
+    // across strict/AOT targets; constraint-free routes keep their
     // 4-/5-arg shape.
     if !r.int_params.is_empty() {
         if r.format.is_none() {
@@ -148,20 +150,7 @@ fn build_route_new(r: &FlatRoute, class_id: &ClassId, route_ty: &Ty) -> Expr {
             nil.ty = Some(Ty::Nil);
             args.push(nil);
         }
-        args.push(with_ty(
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::Array {
-                    elements: r
-                        .int_params
-                        .iter()
-                        .map(|p| lit_str(p.clone()))
-                        .collect(),
-                    style: ArrayStyle::Brackets,
-                },
-            ),
-            Ty::Array { elem: Box::new(Ty::Str) },
-        ));
+        args.push(lit_str(r.int_params.join(" ")));
     }
     let class_path: Vec<Symbol> = class_id
         .0
