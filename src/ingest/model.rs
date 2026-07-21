@@ -541,6 +541,7 @@ fn parse_association(
     let mut foreign_key: Option<String> = None;
     let mut through: Option<String> = None;
     let mut source: Option<String> = None;
+    let mut source_type: Option<String> = None;
     let mut dependent: Option<Dependent> = None;
     let mut optional: Option<bool> = None;
     let mut join_table: Option<String> = None;
@@ -580,6 +581,7 @@ fn parse_association(
                 }
                 "through" => through = symbol_value(&value),
                 "source" => source = symbol_value(&value),
+                "source_type" => source_type = string_value(&value),
                 "dependent" => {
                     dependent = symbol_value(&value).and_then(|s| dependent_from_sym(&s))
                 }
@@ -602,8 +604,18 @@ fn parse_association(
             // through: :votes, source: :story` → Story, not the
             // assoc-name-derived "UpvotedStory" phantom). class_name
             // still wins when both are given, per Rails.
+            //
+            // `source_type:` disambiguates a *polymorphic* source
+            // reflection, naming the concrete class directly
+            // (`has_many :comment_references, through: :mod_mail_references,
+            // source: :reference, source_type: "Comment"` → Comment). It
+            // takes precedence over the camelized `source` name, which
+            // would otherwise be the polymorphic association name
+            // ("Reference") — a phantom class. Already CamelCase, so no
+            // transform.
             target: class_name
                 .map(|s| ClassId(Symbol::from(s.as_str())))
+                .or_else(|| source_type.map(|s| ClassId(Symbol::from(s.as_str()))))
                 .or_else(|| source.map(|s| ClassId(Symbol::from(camelize(s.as_str())))))
                 .unwrap_or_else(|| ClassId(Symbol::from(singularize_camelize(name_str.as_str())))),
             // `as: :notifiable` — the rows point back through the
