@@ -3,14 +3,17 @@
 //! a small set carry semantics that translate cleanly into method
 //! definitions on the lowered class.
 //!
-//! Block-form lifecycle callbacks: `after_create_commit { … }` etc. They
-//! surface as Unknown body items (parse_callback rejects them — no
-//! symbol target, just a block). Lowered to a `def hook_name; <block-
-//! body>; end`. Multiple sources can target the same hook (block-form
-//! callback + broadcasts_to expansion + dependent: :destroy cascade);
-//! when this lowering finds an existing method with the matching name
-//! it folds the block body into that method's Seq, preserving source
-//! order across sources.
+//! Lifecycle callbacks, both forms: symbol-form declarations
+//! (`before_save :check_session_token` — ingested as
+//! `ModelBodyItem::Callback`) lower to self-calls inside a `def
+//! hook_name` override of the runtime Base's no-op hook, and
+//! block-form ones (`after_create_commit { … }` — Unknown body items,
+//! parse_callback rejects them) lower to `def hook_name; <block-
+//! body>; end`. Multiple sources can target the same hook (either
+//! callback form + broadcasts_to expansion + dependent: :destroy
+//! cascade); when this lowering finds an existing method with the
+//! matching name it folds the new body into that method's Seq,
+//! preserving source order across sources.
 
 use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Model, ModelBodyItem, Param};
 use crate::effect::EffectSet;
@@ -411,21 +414,141 @@ pub(super) const BLOCK_CALLBACK_HOOKS: &[&str] = &[
     "after_save_commit",
 ];
 
-pub(super) fn push_block_callback_methods(methods: &mut Vec<MethodDef>, model: &Model) {
+/// Lower lifecycle callbacks — both the symbol-form declarations
+/// ingest recognized (`ModelBodyItem::Callback`, e.g. `before_save
+/// :check_session_token`) and the block-form ones that surface as
+/// Unknown items — into `def <hook>` overrides of the runtime Base's
+/// no-op hooks. One body walk so declaration order is preserved
+/// across both forms when they target the same hook.
+pub(super) fn push_callback_methods(methods: &mut Vec<MethodDef>, model: &Model) {
     for item in &model.body {
-        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        match item {
+            ModelBodyItem::Callback { callback, .. } => {
+                push_symbol_callback(methods, model, callback, item.span());
+            }
+            ModelBodyItem::Unknown { expr, .. } => {
+                push_block_callback(methods, model, expr);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Symbol-form callback → self-calls folded into the hook override.
+/// `on:` restrictions lower structurally: `after_commit ..., on:
+/// :create` targets the runtime's `after_create_commit` hook, and
+/// validation hooks get a `new_record?` guard (accurate at validation
+/// time — the insert hasn't happened yet). Ingest already rejected
+/// every (hook, on) pair this match doesn't cover, plus `if:`/
+/// `unless:` conditions.
+fn push_symbol_callback(
+    methods: &mut Vec<MethodDef>,
+    model: &Model,
+    cb: &crate::dialect::Callback,
+    span: Span,
+) {
+    use crate::dialect::{CallbackHook as Hook, CallbackOn as On};
+
+    if cb.condition.is_some() {
+        return;
+    }
+    let hook_name = match (cb.hook, cb.on) {
+        (Hook::AfterCommit, Some(On::Create)) => "after_create_commit",
+        (Hook::AfterCommit, Some(On::Update)) => "after_update_commit",
+        (Hook::AfterCommit, Some(On::Destroy)) => "after_destroy_commit",
+        (hook, _) => hook_method_name(hook),
+    };
+    let self_call = |name: &Symbol| {
+        Expr::new(
+            span,
+            ExprNode::Send {
+                recv: None,
+                method: name.clone(),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        )
+    };
+
+    if matches!(cb.hook, Hook::BeforeValidation | Hook::AfterValidation) && cb.on.is_some() {
+        let new_record = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("new_record?"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let cond = match cb.on {
+            Some(On::Create) => new_record,
+            Some(On::Update) => Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(new_record),
+                    method: Symbol::from("!"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            // Validations never run on destroy; ingest rejects this.
+            Some(On::Destroy) | None => return,
+        };
+        let mut body = Expr::new(
+            span,
+            ExprNode::If {
+                cond,
+                then_branch: seq(cb.targets.iter().map(self_call).collect()),
+                else_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+            },
+        );
+        body.inherit_span(span);
+        fold_into_or_push(methods, model, hook_name, body);
+    } else {
+        for target in &cb.targets {
+            fold_into_or_push(methods, model, hook_name, self_call(target));
+        }
+    }
+}
+
+/// The runtime Base hook method a `CallbackHook` overrides when no
+/// `on:` remap applies. Names match the no-op definitions in
+/// `runtime/ruby/active_record/base.rb`.
+fn hook_method_name(hook: crate::dialect::CallbackHook) -> &'static str {
+    use crate::dialect::CallbackHook as Hook;
+    match hook {
+        Hook::BeforeValidation => "before_validation",
+        Hook::AfterValidation => "after_validation",
+        Hook::BeforeSave => "before_save",
+        Hook::AfterSave => "after_save",
+        Hook::BeforeCreate => "before_create",
+        Hook::AfterCreate => "after_create",
+        Hook::BeforeUpdate => "before_update",
+        Hook::AfterUpdate => "after_update",
+        Hook::BeforeDestroy => "before_destroy",
+        Hook::AfterDestroy => "after_destroy",
+        Hook::AfterCommit => "after_commit",
+        Hook::AfterRollback => "after_rollback",
+    }
+}
+
+fn push_block_callback(methods: &mut Vec<MethodDef>, model: &Model, expr: &Expr) {
+    {
         let ExprNode::Send { recv: None, method, args, block: Some(block), .. } = &*expr.node else {
-            continue;
+            return;
         };
         if !args.is_empty() {
-            continue;
+            return;
         }
         let hook = method.as_str();
         if !BLOCK_CALLBACK_HOOKS.contains(&hook) {
-            continue;
+            return;
         }
         let ExprNode::Lambda { body: lambda_body, .. } = &*block.node else {
-            continue;
+            return;
         };
 
         // Translate Rails-API broadcast calls (`assoc.broadcast_replace_to(...)`

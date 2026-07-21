@@ -139,7 +139,9 @@ fn ingests_callbacks() {
     assert_eq!(callbacks.len(), 1);
     let cb = callbacks[0];
     assert!(matches!(cb.hook, CallbackHook::BeforeSave));
-    assert_eq!(cb.target.as_str(), "normalize_title");
+    assert_eq!(cb.targets.len(), 1);
+    assert_eq!(cb.targets[0].as_str(), "normalize_title");
+    assert!(cb.on.is_none());
     assert!(cb.condition.is_none());
 }
 

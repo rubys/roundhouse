@@ -300,7 +300,7 @@ fn parse_callback(
     call: &ruby_prism::CallNode<'_>,
     method: &str,
 ) -> Option<crate::dialect::Callback> {
-    use crate::dialect::{Callback, CallbackHook};
+    use crate::dialect::{Callback, CallbackHook, CallbackOn};
 
     let hook = match method {
         "before_validation" => CallbackHook::BeforeValidation,
@@ -319,15 +319,62 @@ fn parse_callback(
     };
 
     let args = call.arguments()?;
-    let all_args = args.arguments();
-    let mut iter = all_args.iter();
-    let first = iter.next()?;
-    let target = Symbol::from(symbol_value(&first)?.as_str());
+    let mut targets: Vec<Symbol> = Vec::new();
+    let mut on: Option<CallbackOn> = None;
+    for arg in args.arguments().iter() {
+        if let Some(sym) = symbol_value(&arg) {
+            targets.push(Symbol::from(sym.as_str()));
+        } else if let Some(kh) = arg.as_keyword_hash_node() {
+            for el in kh.elements().iter() {
+                let assoc = el.as_assoc_node()?;
+                let key = symbol_value(&assoc.key())?;
+                match key.as_str() {
+                    "on" => {
+                        on = Some(match symbol_value(&assoc.value())?.as_str() {
+                            "create" => CallbackOn::Create,
+                            "update" => CallbackOn::Update,
+                            "destroy" => CallbackOn::Destroy,
+                            // `on: [:create, :update]` array form and
+                            // unknown values: not modeled — reject.
+                            _ => return None,
+                        });
+                    }
+                    // `if:` / `unless:` / `prepend:` — lowering the
+                    // callback while dropping these would run it in the
+                    // wrong circumstances, which is worse than dropping
+                    // the declaration with a warning. Reject: the item
+                    // falls through to Unknown and the ledger reports it.
+                    _ => return None,
+                }
+            }
+        } else {
+            // Lambda / block-pass target (`after_create -> { … }`):
+            // stays an Unknown item (block-form bodies are handled by
+            // `push_callback_methods`; lambda args are still a gap).
+            return None;
+        }
+    }
+    if targets.is_empty() {
+        return None;
+    }
+    // `on:` is only expressible where the runtime hook surface can
+    // carry it — validation hooks (new_record? guard) and after_commit
+    // (mapped onto the per-lifecycle `after_*_commit` hooks). Rails
+    // doesn't accept `on:` for the save/create/update/destroy hooks,
+    // so anything else here is either source that doesn't run in
+    // Rails or a shape we can't lower faithfully.
+    if on.is_some()
+        && !matches!(
+            hook,
+            CallbackHook::BeforeValidation
+                | CallbackHook::AfterValidation
+                | CallbackHook::AfterCommit
+        )
+    {
+        return None;
+    }
 
-    // `if:` / `unless:` conditions land when a fixture demands them.
-    let condition = None;
-
-    Some(Callback { hook, target, condition })
+    Some(Callback { hook, targets, on, condition: None })
 }
 
 fn parse_scope(
@@ -438,6 +485,7 @@ fn parse_validates(call: &ruby_prism::CallNode<'_>) -> Vec<crate::dialect::Valid
 
     let mut attrs: Vec<Symbol> = Vec::new();
     let mut rules: Vec<ValidationRule> = Vec::new();
+    let mut allow_blank = false;
 
     for arg in all_args.iter() {
         if let Some(sym) = symbol_value(&arg) {
@@ -447,11 +495,28 @@ fn parse_validates(call: &ruby_prism::CallNode<'_>) -> Vec<crate::dialect::Valid
                 let Some(assoc) = el.as_assoc_node() else { continue };
                 let Some(key) = symbol_value(&assoc.key()) else { continue };
                 let value = assoc.value();
-                if let Some(rule) = validation_rule_from_kv(&key, &value) {
+                if key.as_str() == "allow_blank" {
+                    allow_blank = super::util::bool_value(&value).unwrap_or(false);
+                } else if let Some(rule) = validation_rule_from_kv(&key, &value) {
                     rules.push(rule);
                 }
             }
         }
+    }
+
+    // `presence: true, allow_blank: true` is a dead check: presence
+    // fails only when the value is blank, and allow_blank skips every
+    // validator on blank values — so it can never fire (Rails runs
+    // validations BEFORE before_save, so e.g. lobsters' `validates
+    // :session_token, allow_blank: true, presence: true` relies on
+    // this: the token is generated in a before_save). Dropping it here
+    // fixes both lowering paths at once. The remaining parsed rule
+    // kinds are blank-safe as emitted (MaxLength trivially passes on
+    // blank; Absence wants blank); when MinLength/Format/Uniqueness
+    // gain allow_blank fixtures they'll need a skip-when-blank guard
+    // on the check instead of a drop.
+    if allow_blank {
+        rules.retain(|r| !matches!(r, ValidationRule::Presence));
     }
 
     let mut out = Vec::new();

@@ -428,6 +428,123 @@ fn article_lowers_dependent_destroy_to_before_destroy() {
     assert!(block_present, "each call should carry a block");
 }
 
+/// Statements of a method body as a list (single stmt = one element).
+fn body_stmts(m: &roundhouse::dialect::MethodDef) -> Vec<roundhouse::Expr> {
+    match &*m.body.node {
+        roundhouse::ExprNode::Seq { exprs } => exprs.clone(),
+        _ => vec![m.body.clone()],
+    }
+}
+
+/// The method name of a receiverless self-call statement.
+fn self_call_name(e: &roundhouse::Expr) -> &str {
+    match &*e.node {
+        roundhouse::ExprNode::Send { recv: None, method, .. } => method.as_str(),
+        other => panic!("expected self-call; got {other:?}"),
+    }
+}
+
+#[test]
+fn symbol_form_callbacks_lower_to_hook_overrides() {
+    use roundhouse::ingest::ingest_model;
+    use roundhouse::schema::Schema;
+
+    let source = br#"class User < ApplicationRecord
+  before_save :check_session_token
+  after_create :mark_submitter, :record_initial_upvote
+  after_commit :recreate_links, on: :create
+  before_validation :assign_initial_attributes, on: :create
+  after_save :log_hat_use, if: :hat_selected?
+end
+"#;
+    let model = ingest_model(source, "app/models/user.rb", &Schema::default())
+        .expect("ingest")
+        .expect("model");
+    let lc = lower_model_to_library_class(&model, &Schema::default());
+    let names = method_names(&lc);
+
+    // before_save :check_session_token → override with one self-call.
+    let bs = lc.methods.iter().find(|m| m.name.as_str() == "before_save").expect("before_save");
+    assert!(matches!(bs.receiver, MethodReceiver::Instance));
+    assert_eq!(
+        body_stmts(bs).iter().map(self_call_name).collect::<Vec<_>>(),
+        vec!["check_session_token"]
+    );
+
+    // Multi-target form keeps declaration order in one override.
+    let ac = lc.methods.iter().find(|m| m.name.as_str() == "after_create").expect("after_create");
+    assert_eq!(
+        body_stmts(ac).iter().map(self_call_name).collect::<Vec<_>>(),
+        vec!["mark_submitter", "record_initial_upvote"]
+    );
+
+    // `after_commit ..., on: :create` remaps onto the runtime's
+    // after_create_commit hook; no plain after_commit override appears.
+    let acc = lc
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "after_create_commit")
+        .expect("after_create_commit");
+    assert_eq!(
+        body_stmts(acc).iter().map(self_call_name).collect::<Vec<_>>(),
+        vec!["recreate_links"]
+    );
+    assert!(!names.contains(&"after_commit"), "{names:?}");
+
+    // `before_validation ..., on: :create` guards on new_record? —
+    // accurate at validation time (the insert hasn't happened yet).
+    let bv = lc
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "before_validation")
+        .expect("before_validation");
+    match &*body_stmts(bv)[0].node {
+        roundhouse::ExprNode::If { cond, then_branch, .. } => {
+            assert_eq!(self_call_name(cond), "new_record?");
+            let then_stmts = match &*then_branch.node {
+                roundhouse::ExprNode::Seq { exprs } => exprs.clone(),
+                _ => vec![then_branch.clone()],
+            };
+            assert_eq!(
+                then_stmts.iter().map(self_call_name).collect::<Vec<_>>(),
+                vec!["assign_initial_attributes"]
+            );
+        }
+        other => panic!("expected new_record? guard; got {other:?}"),
+    }
+
+    // `if:`-conditioned callbacks must NOT lower (running them
+    // unconditionally is worse than dropping them with a warning).
+    assert!(!names.contains(&"after_save"), "{names:?}");
+}
+
+#[test]
+fn allow_blank_drops_dead_presence_check() {
+    use roundhouse::dialect::ValidationRule;
+    use roundhouse::ingest::ingest_model;
+    use roundhouse::schema::Schema;
+
+    let source = br#"class User < ApplicationRecord
+  validates :session_token, allow_blank: true, presence: true, length: { maximum: 75 }
+  validates :email, presence: true
+end
+"#;
+    let model = ingest_model(source, "app/models/user.rb", &Schema::default())
+        .expect("ingest")
+        .expect("model");
+    let validations: Vec<&roundhouse::Validation> = model.validations().collect();
+
+    // presence + allow_blank can never fire (presence fails only on
+    // blank; allow_blank skips blank) — dropped. Length survives.
+    let st = validations.iter().find(|v| v.attribute.as_str() == "session_token").unwrap();
+    assert!(!st.rules.iter().any(|r| matches!(r, ValidationRule::Presence)), "{st:?}");
+    assert!(st.rules.iter().any(|r| matches!(r, ValidationRule::Length { .. })), "{st:?}");
+
+    // presence without allow_blank is untouched.
+    let email = validations.iter().find(|v| v.attribute.as_str() == "email").unwrap();
+    assert!(email.rules.iter().any(|r| matches!(r, ValidationRule::Presence)), "{email:?}");
+}
+
 // ---------------------------------------------------------------------------
 // Typing-coverage probe — sibling of
 // `inference_on_spinel_blog_runtime::untyped_subexpressions_baseline`,

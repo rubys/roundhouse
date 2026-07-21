@@ -82,7 +82,7 @@ pub(crate) fn push_synth_instance_method(
 }
 use self::broadcasts::push_broadcasts_methods;
 use self::markers::{
-    push_attr_accessor_methods, push_block_callback_methods, push_dom_prefix_method,
+    push_attr_accessor_methods, push_callback_methods, push_dom_prefix_method,
     push_unknown_marker_methods,
 };
 use self::adapter_emit::push_adapter_methods;
@@ -676,7 +676,7 @@ fn build_methods(
     push_user_methods(&mut methods, model);
     push_dom_prefix_method(&mut methods, model);
     push_broadcasts_methods(&mut methods, model);
-    push_block_callback_methods(&mut methods, model);
+    push_callback_methods(&mut methods, model);
 
     // File-grain catch-all (mirrors view_to_library's
     // build_library_class): whatever the synthesizers left span-less —

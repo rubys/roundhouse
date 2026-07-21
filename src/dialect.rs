@@ -367,11 +367,27 @@ pub struct Scope {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Callback {
     pub hook: CallbackHook,
-    pub target: Symbol,
+    /// Methods to invoke, in declaration order (`after_save :a, :b`).
+    pub targets: Vec<Symbol>,
+    /// `on: :create` / `:update` / `:destroy` lifecycle restriction.
+    /// `None` fires on every occurrence of the hook. Ingest rejects
+    /// (hook, on) combinations the lowering can't express — see
+    /// `parse_callback`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<CallbackOn>,
     pub condition: Option<Expr>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// The `on:` restriction on a lifecycle callback declaration.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallbackOn {
+    Create,
+    Update,
+    Destroy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CallbackHook {
     BeforeValidation,
