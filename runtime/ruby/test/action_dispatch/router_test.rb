@@ -137,4 +137,54 @@ class RouterTest < Minitest::Test
     assert_equal "3", h["id"]
     assert_equal 2, h.length
   end
+
+  # ── int_params (digit-only constraints) ──
+  # Roda's `Integer` matcher and Rails digit-class `constraints:`
+  # lower to `Route.new(..., nil, ["id"])`. A constrained segment
+  # that isn't all digits makes the route a non-match — without
+  # this, `/articles/12abc` would bind `id = "12abc"` and (post
+  # `to_i`) serve article 12 where the source app 404s.
+
+  INT_TABLE = [
+    ActionDispatch::Router::Route.new("GET", "/articles/:id", :articles_controller, :show, nil, ["id"]),
+  ].freeze
+
+  def test_int_param_matches_digits
+    m = ActionDispatch::Router.match("GET", "/articles/42", INT_TABLE)
+    raise "expected match" if m.nil?
+    assert_equal :show, m.action
+    assert_equal "42", m.path_params["id"]
+  end
+
+  def test_int_param_rejects_digit_prefixed_garbage
+    assert_nil ActionDispatch::Router.match("GET", "/articles/12abc", INT_TABLE)
+  end
+
+  def test_int_param_rejects_non_digits
+    assert_nil ActionDispatch::Router.match("GET", "/articles/abc", INT_TABLE)
+  end
+
+  def test_int_param_accepts_leading_zeros
+    # Roda's `Integer` matcher accepts "007" (it's id 7) — a `to_i`
+    # round-trip check would wrongly 404 it.
+    m = ActionDispatch::Router.match("GET", "/articles/007", INT_TABLE)
+    raise "expected match" if m.nil?
+    assert_equal "007", m.path_params["id"]
+  end
+
+  def test_rejected_int_param_falls_through_to_later_route
+    table = [
+      ActionDispatch::Router::Route.new("GET", "/:id", :a, :constrained, nil, ["id"]),
+      ActionDispatch::Router::Route.new("GET", "/:slug", :a, :fallback),
+    ]
+    m = ActionDispatch::Router.match("GET", "/about", table)
+    raise "expected match" if m.nil?
+    assert_equal :fallback, m.action
+  end
+
+  def test_unconstrained_route_still_captures_arbitrary_segments
+    m = ActionDispatch::Router.match("GET", "/articles/12abc", TABLE)
+    raise "expected match" if m.nil?
+    assert_equal "12abc", m.path_params["id"]
+  end
 end

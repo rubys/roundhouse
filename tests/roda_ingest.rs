@@ -152,6 +152,36 @@ fn routing_tree_linearizes_to_rest_routes() {
 }
 
 #[test]
+fn integer_matcher_constraint_reaches_the_route_table() {
+    // `r.on Integer` only ever matched digit segments; the constraint
+    // must survive lowering into `FlatRoute.int_params` so the runtime
+    // router can reject `/articles/12abc` the way Roda does (instead
+    // of binding `id = "12abc"` and, post-`to_i`, serving article 12 —
+    // the #67 review finding).
+    let app = ingest();
+    let flat = roundhouse::lower::routes::flatten_routes(&app);
+    for r in &flat {
+        for p in &r.path_params {
+            if p == "id" || p == "comment_id" {
+                assert!(
+                    r.int_params.contains(p),
+                    "route {} {} should digit-constrain :{p} — got {:?}",
+                    format_args!("{:?}", r.method),
+                    r.path,
+                    r.int_params,
+                );
+            }
+        }
+    }
+    // And the root/collection routes carry no spurious constraints.
+    let index = flat
+        .iter()
+        .find(|r| r.path == "/articles")
+        .expect("index route");
+    assert!(index.int_params.is_empty());
+}
+
+#[test]
 fn controllers_synthesize_with_prologue_filters() {
     let app = ingest();
     let names: Vec<&str> = app.controllers.iter().map(|c| c.name.0.as_str()).collect();

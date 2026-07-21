@@ -24,18 +24,25 @@ module ActionDispatch
     # call sites; positional avoids the asymmetry on internal classes
     # like this one.
     class Route
-      attr_reader :verb, :pattern, :controller, :action, :req_format
+      attr_reader :verb, :pattern, :controller, :action, :req_format, :int_params
 
       # `req_format` — the route-forced response format (Rails'
       # `get "/rss" => "home#index", :format => "rss"`), nil for the
       # common infer-from-path case. Named `req_format` (not `format`)
       # so targets whose stdlibs claim `format` never collide.
-      def initialize(verb, pattern, controller, action, req_format = nil)
+      #
+      # `int_params` — names of path params constrained to digit-only
+      # segments (Roda's `Integer` matcher, Rails digit-class
+      # `constraints:`). A candidate segment that isn't all digits
+      # makes the route a non-match, so `/articles/12abc` falls
+      # through to 404 instead of binding `id = "12abc"`.
+      def initialize(verb, pattern, controller, action, req_format = nil, int_params = [])
         @verb        = verb
         @pattern     = pattern
         @controller  = controller
         @action      = action
         @req_format  = req_format
+        @int_params  = int_params
       end
     end
 
@@ -70,7 +77,9 @@ module ActionDispatch
         if route.verb.to_s == method_upcase
           params = match_pattern(route.pattern.to_s, path)
           unless params.nil?
-            return MatchResult.new(route.controller, route.action, params, route.req_format)
+            if int_params_ok(route.int_params, params)
+              return MatchResult.new(route.controller, route.action, params, route.req_format)
+            end
           end
         end
         i += 1
@@ -101,6 +110,39 @@ module ActionDispatch
         i += 1
       end
       params
+    end
+
+    # Enforce a route's digit-only param constraints against the
+    # captured params. A constrained param whose segment isn't all
+    # digits makes the whole route a non-match — `Router.match` keeps
+    # scanning, and the request 404s like any other unmatched path. A
+    # param the pattern didn't capture is vacuously fine (constraints
+    # apply to segments, not their presence).
+    def self.int_params_ok(int_params, params)
+      i = 0
+      while i < int_params.length
+        v = params[int_params[i]]
+        return false unless v.nil? || digits_only(v)
+        i += 1
+      end
+      true
+    end
+
+    # All-digits check for constrained segments. No regex (the router
+    # stays cross-target lowerable) and no `to_i` round-trip (it would
+    # reject the leading zeros Roda's `Integer` matcher accepts —
+    # `/articles/007` is id 7, not a 404). Two-arg slice + membership
+    # literal, the proven strict-emitter shapes (see
+    # `ViewHelpersExt.sanitize_to_id`).
+    def self.digits_only(s)
+      return false if s.empty?
+      i = 0
+      while i < s.length
+        c = s[i, 1].to_s
+        return false unless "0123456789".include?(c)
+        i += 1
+      end
+      true
     end
   end
 end

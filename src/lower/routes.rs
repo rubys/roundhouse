@@ -55,6 +55,31 @@ pub struct FlatRoute {
     /// segments are appended only when supplied. Equals `path_params.
     /// len()` for the common all-required route.
     pub required_params: usize,
+    /// Path params constrained to digit-only segments — Roda's
+    /// `Integer` matcher (`r.on Integer`) and Rails digit-class
+    /// `constraints:` (`/\d+/`, `/[0-9]+/`). The runtime router
+    /// rejects the route when the captured segment isn't all digits,
+    /// so `/articles/12abc` falls through to 404 instead of binding
+    /// `id = "12abc"` (and, post-`to_i`, serving article 12).
+    /// Constraint regexes beyond the digit class aren't modeled — the
+    /// runtime router is deliberately regex-free.
+    pub int_params: Vec<String>,
+}
+
+/// Is this constraint regex a plain digit class (`\d+` / `[0-9]+`,
+/// optionally `\A…\z` / `^…$` anchored)? Those are the only
+/// constraints the regex-free runtime router can enforce; anything
+/// else keeps the pre-existing dropped-at-lowering behavior.
+fn digit_class_regex(rx: &str) -> bool {
+    let rx = rx
+        .strip_prefix("\\A")
+        .or_else(|| rx.strip_prefix('^'))
+        .unwrap_or(rx);
+    let rx = rx
+        .strip_suffix("\\z")
+        .or_else(|| rx.strip_suffix('$'))
+        .unwrap_or(rx);
+    rx == "\\d+" || rx == "[0-9]+"
 }
 
 /// The seven standard Rails scaffold actions a `resources` block
@@ -222,10 +247,27 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             // Only the canonical variant carries the helper name; the
             // shorter alternates would otherwise register a duplicate
             // helper for the same controller#action.
+            // Digit-class constraints (`\d+` — Roda `Integer` matcher,
+            // Rails `constraints: { id: /\d+/ }`) become enforceable
+            // router metadata; anything fancier stays dropped.
+            let digit_params: Vec<String> = constraints
+                .iter()
+                .filter(|(name, rx)| {
+                    name.as_str() != "format" && digit_class_regex(rx)
+                })
+                .map(|(name, _)| name.as_str().to_string())
+                .collect();
             for (i, vpath) in variants.into_iter().enumerate() {
                 let mut params = base_params.clone();
                 extract_path_params(&vpath, &mut params);
                 let required_params = if i == 0 { required_count } else { params.len() };
+                // A shorter optional-group variant may not carry every
+                // constrained param — keep only the ones it captures.
+                let int_params: Vec<String> = digit_params
+                    .iter()
+                    .filter(|n| params.contains(n))
+                    .cloned()
+                    .collect();
                 out.push(FlatRoute {
                     method: method.clone(),
                     path: vpath,
@@ -236,6 +278,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     named: named && i == 0,
                     format: forced_format.clone(),
                     required_params,
+                    int_params,
                 });
             }
         }
@@ -267,6 +310,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 named: true,
                 format: None,
                 required_params: 0,
+                int_params: vec![],
             });
         }
         RouteSpec::Resources { name, only, except, nested, singular } => {
@@ -331,6 +375,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     path_params: params,
                     named: true,
                     format: None,
+                    int_params: vec![],
                 });
             }
             let child_ctx = Ctx {

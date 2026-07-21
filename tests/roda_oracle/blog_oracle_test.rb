@@ -165,6 +165,16 @@ class BlogOracleTest < Minitest::Test
     assert_equal 404, last_response.status
   end
 
+  def test_member_route_with_digit_prefixed_id_is_404
+    # The Integer matcher rejects "#{id}abc" outright — only all-digit
+    # segments match. A router that captured the segment and coerced
+    # later (`to_i`) would serve the article instead; this pins the
+    # stricter Roda behavior. (#67 review finding.)
+    article = create_article
+    get "/articles/#{article.id}abc"
+    assert_equal 404, last_response.status
+  end
+
   # --- comments --------------------------------------------------------------
 
   def test_create_valid_comment_redirects_with_notice

@@ -10,8 +10,9 @@ module ActionDispatch
       def controller: () -> Symbol
       def action: () -> Symbol
       def req_format: () -> Symbol?
+      def int_params: () -> Array[String]
 
-      def initialize: (String verb, String pattern, Symbol controller, Symbol action, ?Symbol? req_format) -> void
+      def initialize: (String verb, String pattern, Symbol controller, Symbol action, ?Symbol? req_format, ?Array[String] int_params) -> void
     end
 
     # Successful match result: the resolved controller + action symbols
@@ -46,5 +47,14 @@ module ActionDispatch
       String pattern,
       String path
     ) -> Hash[String, String]?
+
+    # Digit-only (`Integer` matcher / `constraints: /\d+/`) param
+    # enforcement — a non-digit segment makes the route a non-match.
+    def self.int_params_ok: (
+      Array[String] int_params,
+      Hash[String, String] params
+    ) -> bool
+
+    def self.digits_only: (String s) -> bool
   end
 end

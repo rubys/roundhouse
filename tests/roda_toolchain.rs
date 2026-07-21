@@ -16,7 +16,7 @@
 //! 2. `roda_blog_transpiled_oracle_passes` — ingest `fixtures/roda-blog`
 //!    through the Roda/Sequel recognizers, emit the CRuby target, and
 //!    run the PORTED oracle (`tests/roda_oracle/blog_oracle_test.rb` —
-//!    same 18 checks, driving the emitted Rack app through Rack::Test
+//!    same 19 checks, driving the emitted Rack app through Rack::Test
 //!    and the emitted AR-shaped model API) against the emitted app.
 //!    The analog of `real_blog_spinel_tests_pass` in
 //!    `ruby_toolchain.rs`. A check failing here while passing in gate 1
