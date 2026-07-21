@@ -40,7 +40,13 @@ module ActiveRecord
     def initialize(_attrs = {})
       @id = 0
       @errors = []
-      @__last_saved_attributes = {}
+      # Baseline seeded from `attributes` rather than a bare `{}` —
+      # at super() time the subclass columns are unset so the shapes
+      # are equivalent, and the call gives strict-target emitters the
+      # declared Hash[Symbol, untyped] type an empty literal lacks
+      # (go typed `{}` here as map[string]string vs the field's
+      # attributes-unified type).
+      @__last_saved_attributes = attributes
       @saved_changes = {}
       @id_previously_changed = false
       @persisted = false
@@ -255,14 +261,12 @@ module ActiveRecord
     end
 
     def self.where(conditions)
-      # A lazy Relation, matching Rails — dynamic call-sites chain off
-      # this fallback (`klass.where(short_id: id).exists?` in lobsters'
-      # ShortId, where `klass` is a class-valued attribute no static
-      # lowering can resolve), so the Array the adapter path returned
-      # broke every chained relation method. Lowered call-sites don't
-      # land here — they drive a Relation or `_adapter_*` directly.
-      # See `find_by` above for the `.to_h` rationale.
-      ActiveRecord::Relation.new(self).where(conditions.to_h)
+      # See `find_by` above for the `.to_h` rationale. The ruby-family
+      # trees OVERRIDE this with a lazy-Relation version (connection.rb
+      # reopen — dynamic call-sites chain off the fallback there);
+      # this Array shape stays for the strict-target runtime
+      # transpiles, which have no Relation class in their tables.
+      ActiveRecord.adapter.where(table_name, conditions.to_h).map { |row| instantiate(row) }
     end
 
     def self.count
@@ -367,16 +371,31 @@ module ActiveRecord
     # after_* hooks so callbacks observe the finished save, matching
     # Rails. A record hydrated from the DB has no baseline yet, so its
     # FIRST update over-reports; baseline-at-hydration is future work.
+    # Locals deliberately avoid `before`/`after` — `after` is a
+    # reserved word in Elixir and the transpiled runtime must parse
+    # on every target.
+    # Cross-target-safe idioms throughout: statement-ifs over
+    # ternaries and ivar-indexed writes over a local hash (go emits
+    # expression-ifs as statements and types `{}` locals poorly; the
+    # ivar's field type anchors the writes), plain `[]` over `key?`
+    # (missing-key nil IS the absent signal, and elixir's functional
+    # shape never runs Base#initialize, so `previous` can be nil there
+    # — every save then reports all attributes, the same honest
+    # over-report as a hydrated record's first update).
     def __track_saved_changes(was_new)
-      before = @__last_saved_attributes
-      after = attributes
-      changes = {}
-      after.each do |key, value|
-        prev = before.key?(key) ? before[key] : nil
-        changes[key] = [prev, value] if prev != value
+      previous = @__last_saved_attributes
+      current = attributes
+      @saved_changes = {}
+      current.each do |key, value|
+        prev = nil
+        unless previous.nil?
+          prev = previous[key]
+        end
+        if prev != value
+          @saved_changes[key] = [prev, value]
+        end
       end
-      @__last_saved_attributes = after
-      @saved_changes = changes
+      @__last_saved_attributes = current
       @id_previously_changed = was_new
       nil
     end

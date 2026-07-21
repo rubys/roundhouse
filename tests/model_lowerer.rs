@@ -574,8 +574,19 @@ end
             _ => None,
         })
         .collect();
-    assert!(guarded_writers.contains(&"created_at="), "{guarded_writers:?}");
-    assert!(guarded_writers.contains(&"user="), "{guarded_writers:?}");
+    // temporal: guarded raw-slot assign through the format_db_time
+    // intrinsic (NOT the public `created_at=` writer — several
+    // emitters render that MethodDef without a property-setter
+    // counterpart for the computed getter; tsc flags TS2540).
+    assert!(guarded_writers.contains(&"created_at_raw="), "{guarded_writers:?}");
+    assert!(!guarded_writers.contains(&"created_at="), "{guarded_writers:?}");
+    let init_dbg = format!("{:?}", init.body);
+    assert!(init_dbg.contains("format_db_time"), "temporal attrs normalize via the intrinsic");
+    // belongs_to object key assigns the fk directly (`self.user_id =
+    // Cast(attrs[:user], User).id`) — writer-named Sends on
+    // non-column names break go's field-assign peephole.
+    assert!(guarded_writers.contains(&"user_id="), "{guarded_writers:?}");
+    assert!(!guarded_writers.contains(&"user="), "{guarded_writers:?}");
 
     // The presence check reads the raw storage slot — `@created_at` is
     // never the storage for a temporal column, so a check against it

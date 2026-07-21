@@ -1116,11 +1116,39 @@ fn synth_assign_from_row(owner: &ClassId, table: &Table) -> MethodDef {
 /// runtime Base's last-save diff (lobsters:
 /// `merged_story_id_previously_changed?` in Story#log_moderations).
 fn synth_column_prev_changed(owner: &ClassId, col: &Column) -> MethodDef {
+    // `!saved_changes[:<col>].nil?` rather than `.key?` — the diff's
+    // values are always [prev, value] pairs so nil-of-missing-key IS
+    // key absence, and the indexed read + nil-check renders natively
+    // on every target (go's comma-ok `key?` idiom needs a Hash-typed
+    // receiver, which models' class-info can't see through the
+    // runtime-Base inheritance). Explicit self receiver: strict
+    // emitters resolve receiverless Sends against the model's own
+    // surface only.
     let saved_changes = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
-            recv: None,
+            recv: Some(self_ref()),
             method: Symbol::from("saved_changes"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let entry = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(saved_changes),
+            method: Symbol::from("[]"),
+            args: vec![lit_sym(col.name.clone())],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let is_nil = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(entry),
+            method: Symbol::from("nil?"),
             args: vec![],
             block: None,
             parenthesized: false,
@@ -1129,11 +1157,11 @@ fn synth_column_prev_changed(owner: &ClassId, col: &Column) -> MethodDef {
     let body = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
-            recv: Some(saved_changes),
-            method: Symbol::from("key?"),
-            args: vec![lit_sym(col.name.clone())],
+            recv: Some(is_nil),
+            method: Symbol::from("!"),
+            args: vec![],
             block: None,
-            parenthesized: true,
+            parenthesized: false,
         },
     );
     MethodDef {
@@ -1158,10 +1186,26 @@ fn synth_column_prev_changed(owner: &ClassId, col: &Column) -> MethodDef {
 /// typed parameter honest on strict targets: a missing attrs key never
 /// reaches it.
 fn assign_via_writer_unless_nil(writer: Symbol, lookup: Expr) -> Expr {
+    let assign = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(self_ref()),
+            method: writer,
+            args: vec![lookup.clone()],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    guard_unless_nil(lookup, assign)
+}
+
+/// `<action> unless <lookup>.nil?` as IR (If with negated nil check,
+/// Nil else-branch).
+fn guard_unless_nil(lookup: Expr, action: Expr) -> Expr {
     let nil_check = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
-            recv: Some(lookup.clone()),
+            recv: Some(lookup),
             method: Symbol::from("nil?"),
             args: vec![],
             block: None,
@@ -1178,21 +1222,11 @@ fn assign_via_writer_unless_nil(writer: Symbol, lookup: Expr) -> Expr {
             parenthesized: false,
         },
     );
-    let assign = Expr::new(
-        Span::synthetic(),
-        ExprNode::Send {
-            recv: Some(self_ref()),
-            method: writer,
-            args: vec![lookup],
-            block: None,
-            parenthesized: false,
-        },
-    );
     Expr::new(
         Span::synthetic(),
         ExprNode::If {
             cond: not_nil,
-            then_branch: assign,
+            then_branch: action,
             else_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
         },
     )
@@ -1245,12 +1279,16 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
             // lobsters), so the attrs value can't be stuffed into the
             // raw ISO-text slot directly. Default-init the raw slot
             // (strict targets need every field assigned on every
-            // path), then route a provided value through the PUBLIC
-            // `<col>=` writer, whose `format_db_time` normalization
-            // accepts a Time — and, on the lenient ruby-family
-            // runtime, passes stored-text strings through unchanged.
-            // Hydration is unaffected: `from_row`/`from_stmt` build
-            // via `new()` + `<col>_raw=`, never through attrs.
+            // path), then normalize a provided value straight into the
+            // raw slot via the `format_db_time` intrinsic — the same
+            // funnel `synth_temporal_writer` uses, called directly
+            // because several emitters render the public `<col>=`
+            // MethodDef without a property-setter counterpart for the
+            // computed `<col>` getter (tsc: TS2540 read-only). On the
+            // lenient ruby-family runtime the intrinsic passes
+            // stored-text strings through unchanged. Hydration is
+            // unaffected: `from_row`/`from_stmt` build via `new()` +
+            // `<col>_raw=`, never through attrs.
             stmts.push(Expr::new(
                 Span::synthetic(),
                 ExprNode::Send {
@@ -1261,10 +1299,41 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
                     parenthesized: false,
                 },
             ));
-            stmts.push(assign_via_writer_unless_nil(
-                Symbol::from(format!("{}=", col.name.as_str())),
-                lookup,
-            ));
+            // Cast bridges the untyped attrs-hash value into the
+            // intrinsic's Time parameter on strict targets (same seam
+            // as `from_raw`'s adapter-row Cast); ruby-family emit
+            // unwraps it to the inner value.
+            let time_value = Expr::new(
+                Span::synthetic(),
+                ExprNode::Cast { value: lookup.clone(), target_ty: Ty::Time },
+            );
+            let normalized = with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
+                        )),
+                        method: Symbol::from("format_db_time"),
+                        args: vec![time_value],
+                        block: None,
+                        parenthesized: true,
+                    },
+                ),
+                Ty::Str,
+            );
+            let raw_assign = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(self_ref()),
+                    method: col_storage_setter(col),
+                    args: vec![normalized],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            stmts.push(guard_unless_nil(lookup, raw_assign));
         } else {
             let value = Expr::new(
                 Span::synthetic(),
@@ -1289,13 +1358,20 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
     }
 
     // Association-object keys: `Username.new(user: some_user)` — Rails
-    // routes any attrs key through its public writer, and belongs_to
-    // writers store the foreign key from the object. The fk column
-    // above already defaulted (`attrs[:user_id] || 0`), so the object
-    // key wins when provided. Guarded on nil so the plain
-    // `new(user_id: 3)` shape emits no writer call at runtime.
+    // routes any attrs key through its public writer; the belongs_to
+    // writer's whole body is "store the object's id in the fk", so
+    // assign the fk column directly (`self.user_id = attrs[:user].id`)
+    // — the writer-named Send form broke go, whose writer peephole
+    // rewrites `self.user = …` to a field assignment no such field
+    // backs. Cast bridges the untyped attrs value to the target class
+    // for the `.id` read on strict targets. The fk column above
+    // already defaulted (`attrs[:user_id] || 0`), so the object key
+    // wins when provided; nil-guarded so a plain `new(user_id: 3)`
+    // does nothing extra at runtime. Polymorphic belongs_to skipped —
+    // the object route would also need the `<name>_type` column.
     for assoc in model.associations() {
-        if let Association::BelongsTo { name, .. } = assoc {
+        if let Association::BelongsTo { name, target, foreign_key, polymorphic: false, .. } = assoc
+        {
             let lookup = Expr::new(
                 Span::synthetic(),
                 ExprNode::Send {
@@ -1306,10 +1382,37 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
                     parenthesized: false,
                 },
             );
-            stmts.push(assign_via_writer_unless_nil(
-                Symbol::from(format!("{}=", name.as_str())),
-                lookup,
-            ));
+            let target_obj = Expr::new(
+                Span::synthetic(),
+                ExprNode::Cast {
+                    value: lookup.clone(),
+                    target_ty: Ty::Class { id: target.clone(), args: vec![] },
+                },
+            );
+            let id_read = with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(target_obj),
+                        method: Symbol::from("id"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    },
+                ),
+                Ty::Int,
+            );
+            let fk_assign = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(self_ref()),
+                    method: Symbol::from(format!("{}=", foreign_key.as_str())),
+                    args: vec![id_read],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            stmts.push(guard_unless_nil(lookup, fk_assign));
         }
     }
 

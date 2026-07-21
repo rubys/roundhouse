@@ -161,5 +161,17 @@ module ActiveRecord
       end
       h
     end
+
+    # Rails-shape `where` fallback: a lazy Relation, so dynamic
+    # call-sites chain off it (`klass.where(short_id: id).exists?` in
+    # lobsters' ShortId, where `klass` is a class-valued attribute no
+    # static lowering can resolve). Overrides base.rb's Array-returning
+    # version, which stays for the strict-target runtime transpiles
+    # (no Relation class in their tables); this file is walked only
+    # into the ruby-family trees. Lowered call-sites don't land here —
+    # they drive a Relation or `_adapter_*` directly.
+    def self.where(conditions)
+      ActiveRecord::Relation.new(self).where(conditions.to_h)
+    end
   end
 end

@@ -2125,6 +2125,28 @@ fn emit_cast(ctx: &EmitCtx, value: &Expr, target_ty: &Ty) -> String {
     // key fallback to numeric zero. `v, _ := <inner>.(T)` keeps the
     // ok flag discarded since the caller's site already has its own
     // default-handling (via the BoolOp::Or → cmp.Or peephole).
+    // Value → Time narrowing: `Cast(attrs[:created_at], Time)` from
+    // the synthesized initialize's temporal route. Runtime concrete
+    // type is time.Time when a caller passed one; anything else
+    // (missing key already nil-guarded upstream) zero-values, which
+    // format_db_time renders as the epoch — same honest-subset
+    // posture as the numeric arms.
+    if matches!(target_ty, Ty::Time) {
+        if already_typed {
+            return inner;
+        }
+        return format!("func() time.Time {{ v, _ := ({inner}).(time.Time); return v }}()");
+    }
+    // Value → model narrowing: `Cast(attrs[:user], User)` from the
+    // synthesized initialize's association-object route. Failed
+    // assertion yields a nil pointer — upstream nil guard means a
+    // caller either passed the right class or nothing.
+    if matches!(target_ty, Ty::Class { .. }) {
+        if already_typed {
+            return inner;
+        }
+        return format!("func() {tgt} {{ v, _ := ({inner}).({tgt}); return v }}()");
+    }
     let primitive_go_ty = match target_ty {
         Ty::Int => Some("int64"),
         Ty::Float => Some("float64"),

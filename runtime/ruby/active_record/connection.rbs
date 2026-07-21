@@ -28,5 +28,7 @@ module ActiveRecord
     def self.record_timestamps: () -> bool
     def update_column: (untyped name, untyped value) -> bool
     def _as_json_only: (Array[Symbol] only) -> Hash[String, untyped]
+    # Ruby-family override of base.rb's Array-returning fallback.
+    def self.where: (Hash[Symbol, untyped] conditions) -> Relation
   end
 end
