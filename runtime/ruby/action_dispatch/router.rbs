@@ -54,7 +54,7 @@ module ActionDispatch
     # Digit-only (`Integer` matcher / `constraints: /\d+/`) param
     # enforcement — is `name` in the route's space-joined constraint
     # list? A constrained non-digit segment makes the route a non-match.
-    def self.constrained_int?: (
+    def self.int_constrained: (
       String int_params,
       String name
     ) -> bool

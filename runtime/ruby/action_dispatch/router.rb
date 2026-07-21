@@ -119,7 +119,7 @@ module ActionDispatch
           # it wrongly at a non-nilable call arg; routing the segment
           # through `to_s` first hands `digits_only` a definite String.
           seg = ap.to_s
-          if constrained_int?(int_params, name) && !digits_only(seg)
+          if int_constrained(int_params, name) && !digits_only(seg)
             return nil
           end
           params[name] = ap
@@ -135,8 +135,11 @@ module ActionDispatch
     # `int_params` is the space-joined constraint list carried on
     # `Route`; the empty string means the route constrains nothing.
     # Membership by split + `==` scan (no `Array#include?`, no `Hash`
-    # read) so it lowers cleanly to every target.
-    def self.constrained_int?(int_params, name)
+    # read) so it lowers cleanly to every target. Named without a `?`
+    # suffix on purpose: the Elixir lowering appends `__loop` to a
+    # while-loop method's own name, and `?` can only end an Elixir
+    # identifier — `int_constrained?__loop` would fail to parse.
+    def self.int_constrained(int_params, name)
       return false if int_params.empty?
       parts = int_params.split(" ")
       i = 0
