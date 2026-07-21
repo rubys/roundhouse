@@ -188,6 +188,20 @@ Run `bin/rh doctor` first to see which prerequisites are installed and
 which subcommands are available without a Rust toolchain (`bin/rh
 fetch <target>` downloads pre-transpiled archives).
 
+Building roundhouse itself needs Rust plus a working libclang: the
+`ruby-prism-sys` / `ruby-rbs-sys` build scripts generate their C
+bindings with bindgen, which loads clang's own resource headers. On
+Debian/Ubuntu that means both packages —
+
+```sh
+sudo apt install clang libclang-dev
+```
+
+— installing only `libclang-dev` fails with
+`fatal error: 'stddef.h' file not found` (clang's builtin headers ship
+in the `clang` package). macOS with Xcode Command Line Tools needs
+nothing extra.
+
 Prerequisites and the architecture of what gets generated:
 [`runtime/spinel/scaffold/README.md`](runtime/spinel/scaffold/README.md).
 
