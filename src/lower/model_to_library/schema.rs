@@ -64,6 +64,13 @@ pub(super) fn push_schema_methods(
         }
         methods.push(synth_attr_writer(owner, col));
         methods.push(synth_column_predicate(owner, col));
+        // `<col>_previously_changed?` (ActiveModel::Dirty subset) —
+        // reads the runtime Base's `saved_changes` diff of the last
+        // save. `id` is answered by Base's own flag (it never appears
+        // in the attributes hash the diff is built from).
+        if col.name.as_str() != "id" {
+            methods.push(synth_column_prev_changed(owner, col));
+        }
     }
 
     // def self.table_name
@@ -1104,6 +1111,46 @@ fn synth_assign_from_row(owner: &ClassId, table: &Table) -> MethodDef {
     }
 }
 
+/// `def <col>_previously_changed?; saved_changes.key?(:<col>); end` —
+/// the per-attribute ActiveModel::Dirty predicate, answered from the
+/// runtime Base's last-save diff (lobsters:
+/// `merged_story_id_previously_changed?` in Story#log_moderations).
+fn synth_column_prev_changed(owner: &ClassId, col: &Column) -> MethodDef {
+    let saved_changes = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: None,
+            method: Symbol::from("saved_changes"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(saved_changes),
+            method: Symbol::from("key?"),
+            args: vec![lit_sym(col.name.clone())],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    MethodDef {
+        name: Symbol::from(format!("{}_previously_changed?", col.name.as_str())),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        signature: Some(fn_sig(vec![], Ty::Bool)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    }
+}
+
 /// `self.<writer>(<lookup>) unless <lookup>.nil?` — the guarded
 /// public-writer route `synth_initialize` uses for values that need
 /// normalization (temporal columns) or foreign-key extraction
@@ -1294,7 +1341,28 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
     // in every initialize path). Harmless on dynamic targets. Mirrors the
     // ivar names in `associations::cache_ivar` / `loaded_ivar`.
     for assoc in model.associations() {
-        if let Association::HasMany { name, target, .. } = assoc {
+        if let Association::HasMany { name, target, through, .. } = assoc {
+            // `has_many :through` collection writers stage into the
+            // cache and flag the join rows stale — init the flag on
+            // every construction path (mirrors cache/loaded below).
+            if through.is_some() {
+                let false_lit = with_ty(
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Lit { value: Literal::Bool { value: false } },
+                    ),
+                    Ty::Bool,
+                );
+                stmts.push(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Assign {
+                        target: LValue::Ivar {
+                            name: Symbol::from(format!("{}_stale", name.as_str())),
+                        },
+                        value: false_lit,
+                    },
+                ));
+            }
             let elem = Ty::Class { id: target.clone(), args: vec![] };
             let empty = with_ty(
                 Expr::new(

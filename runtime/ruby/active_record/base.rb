@@ -40,6 +40,9 @@ module ActiveRecord
     def initialize(_attrs = {})
       @id = 0
       @errors = []
+      @__last_saved_attributes = {}
+      @saved_changes = {}
+      @id_previously_changed = false
       @persisted = false
       @destroyed = false
     end
@@ -252,8 +255,14 @@ module ActiveRecord
     end
 
     def self.where(conditions)
+      # A lazy Relation, matching Rails — dynamic call-sites chain off
+      # this fallback (`klass.where(short_id: id).exists?` in lobsters'
+      # ShortId, where `klass` is a class-valued attribute no static
+      # lowering can resolve), so the Array the adapter path returned
+      # broke every chained relation method. Lowered call-sites don't
+      # land here — they drive a Relation or `_adapter_*` directly.
       # See `find_by` above for the `.to_h` rationale.
-      ActiveRecord.adapter.where(table_name, conditions.to_h).map { |row| instantiate(row) }
+      ActiveRecord::Relation.new(self).where(conditions.to_h)
     end
 
     def self.count
@@ -323,17 +332,20 @@ module ActiveRecord
       return false unless ok
 
       before_save
-      if new_record?
+      was_new = new_record?
+      if was_new
         before_create
         fill_timestamps(true)
         @id = _adapter_insert
         @persisted = true
+        __track_saved_changes(was_new)
         after_create
         after_create_commit
       else
         before_update
         fill_timestamps(false)
         _adapter_update
+        __track_saved_changes(was_new)
         after_update
         after_update_commit
       end
@@ -341,6 +353,43 @@ module ActiveRecord
       after_save_commit
       after_commit
       true
+    end
+
+    # ---- Saved-change tracking (ActiveModel::Dirty subset) ----------
+    # Rails exposes what the last save changed via `saved_changes` /
+    # `id_previously_changed?` / the per-attribute predicates the
+    # lowerer synthesizes over `saved_changes` — moderation-log
+    # callbacks branch on them (lobsters' Category/Tag#log_modifications).
+    # Tracked at the attributes-hash grain: the snapshot from the
+    # previous save (empty for a fresh instance, so a create reports
+    # every attribute as [nil, value] — Rails' shape) diffs against the
+    # post-write attributes. Runs between the row write and the
+    # after_* hooks so callbacks observe the finished save, matching
+    # Rails. A record hydrated from the DB has no baseline yet, so its
+    # FIRST update over-reports; baseline-at-hydration is future work.
+    def __track_saved_changes(was_new)
+      before = @__last_saved_attributes
+      after = attributes
+      changes = {}
+      after.each do |key, value|
+        prev = before.key?(key) ? before[key] : nil
+        changes[key] = [prev, value] if prev != value
+      end
+      @__last_saved_attributes = after
+      @saved_changes = changes
+      @id_previously_changed = was_new
+      nil
+    end
+
+    def saved_changes
+      @saved_changes
+    end
+
+    # `id` never appears in the subclass `attributes` hash, so the
+    # created-vs-updated question is answered by the save path itself
+    # rather than the snapshot diff.
+    def id_previously_changed?
+      @id_previously_changed
     end
 
     def save!

@@ -739,7 +739,14 @@ fn every_runtime_method_body_concretely_typed() {
     // — record-typed like `to_a`/`+` (element type is the model,
     // `untyped` in the runtime RBS by the same convention); +5 sites;
     // ceiling raised 190 → 195.
-    const CEILING: usize = 195;
+    // 2026-07-21 saved-change tracking (ActiveModel::Dirty subset):
+    // base.rb's `__track_saved_changes` diffs the subclass
+    // `attributes` hash, whose values are `untyped` by declaration —
+    // the before/after value reads are irreducibly untyped; +2 sites.
+    // Same day: Relation gains block `all?` (element-typed `untyped`
+    // by the R5 delegation convention) for the Relation-returning
+    // `Base.where` fallback; +2 sites; ceiling raised 195 → 199.
+    const CEILING: usize = 199;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

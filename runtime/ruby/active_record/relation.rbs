@@ -55,6 +55,7 @@ module ActiveRecord
     def group_count: () -> Hash[untyped, Integer]
     def empty?: () -> bool
     def any?: () -> bool
+    def all?: () { (untyped) -> bool } -> bool
     def exists?: () -> bool
     def length: () -> Integer
     def size: () -> Integer

@@ -184,9 +184,9 @@ class BaseTest < Minitest::Test
   end
 
   def test_first_bang_returns_row_or_raises
-    # `Base.where` returns an Array; the lowered models drive a Relation
-    # (what `Model.where(...).first!` hits in a real app), so build one
-    # directly to exercise Relation#first!.
+    # `Base.where` now returns a Relation itself; keep the direct
+    # construction so Relation#first! is exercised independent of the
+    # Base fallback.
     a = Item.new; a.title = "A"; a.save()
 
     found = ActiveRecord::Relation.new(Item).where(title: "A").first!

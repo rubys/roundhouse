@@ -590,6 +590,59 @@ end
 }
 
 #[test]
+fn has_many_through_collection_writer_and_save_sync() {
+    use roundhouse::ingest::{ingest_model, ingest_schema};
+
+    let schema = ingest_schema(
+        br#"
+ActiveRecord::Schema[7.1].define(version: 1) do
+  create_table "stories", force: :cascade do |t|
+    t.string "title"
+  end
+end
+"#,
+        "db/schema.rb",
+    )
+    .expect("ingest schema");
+    let model = ingest_model(
+        br#"
+class Story < ApplicationRecord
+  has_many :taggings, dependent: :destroy
+  has_many :tags, through: :taggings
+end
+"#,
+        "app/models/story.rb",
+        &schema,
+    )
+    .expect("ingest")
+    .expect("model");
+    let lc = lower_model_to_library_class(&model, &schema);
+    let names = method_names(&lc);
+
+    // `story.tags = [tag]` stages cache/loaded/stale; `_sync_tags`
+    // replaces the join rows; the sync call folds into after_save.
+    assert!(names.contains(&"tags="), "{names:?}");
+    assert!(names.contains(&"_sync_tags"), "{names:?}");
+    let writer = lc.methods.iter().find(|m| m.name.as_str() == "tags=").unwrap();
+    let writer_dbg = format!("{:?}", writer.body);
+    for ivar in ["tags_cache", "tags_loaded", "tags_stale"] {
+        assert!(writer_dbg.contains(ivar), "writer must assign {ivar}");
+    }
+    let sync = lc.methods.iter().find(|m| m.name.as_str() == "_sync_tags").unwrap();
+    let sync_dbg = format!("{:?}", sync.body);
+    // join resolution: sibling through assoc gives Tagging + story_id;
+    // target-side fk is the `<target>_id` convention.
+    for needle in ["Tagging", "story_id=", "tag_id=", "destroy", "save"] {
+        assert!(sync_dbg.contains(needle), "sync must contain {needle}: {sync_dbg}");
+    }
+    let after_save = lc.methods.iter().find(|m| m.name.as_str() == "after_save").expect("after_save");
+    assert!(format!("{:?}", after_save.body).contains("_sync_tags"));
+
+    // the direct has_many (no through) gets no collection writer.
+    assert!(!names.contains(&"taggings="), "{names:?}");
+}
+
+#[test]
 fn secure_password_attrs_route_through_writers_in_initialize() {
     use roundhouse::ingest::{ingest_model, ingest_schema};
 

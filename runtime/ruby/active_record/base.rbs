@@ -86,6 +86,11 @@ module ActiveRecord
     def attributes: () -> Hash[Symbol, untyped]
     def assign_from_row: (Hash[String, untyped] _row) -> void
 
+    # Saved-change tracking (ActiveModel::Dirty subset) — see save.
+    def __track_saved_changes: (bool was_new) -> void
+    def saved_changes: () -> Hash[Symbol, untyped]
+    def id_previously_changed?: () -> bool
+
     # Per-model DOM prefix (`"article"`, `"comment"`). Used by
     # `ActionView::ViewHelpers.dom_id(record)` to build CSS-id strings
     # like `"article_42"`. Synthesized per-model by the lowerer (see
@@ -138,7 +143,7 @@ module ActiveRecord
     def _adapter_reload: () -> Base?
     def self.find_by: (Hash[Symbol, untyped] conditions) -> Base?
     def self.find_by!: (Hash[Symbol, untyped] conditions) -> Base
-    def self.where: (Hash[Symbol, untyped] conditions) -> Array[Base]
+    def self.where: (Hash[Symbol, untyped] conditions) -> Relation
     def self.count: () -> Integer
     def self.exists?: (Integer id) -> bool
     def self.delete_all: () -> nil

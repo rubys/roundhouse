@@ -422,6 +422,15 @@ module ActiveRecord
       count > 0
     end
 
+    # Block form of Enumerable#all? over the materialized rows (the
+    # runtime `Base.where` fallback returns a Relation, and dynamic
+    # call-sites treat it as the array Rails hands back).
+    def all?
+      ok = true
+      to_a.each { |x| ok = false unless yield x }
+      ok
+    end
+
     def exists?
       count > 0
     end

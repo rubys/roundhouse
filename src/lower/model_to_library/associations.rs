@@ -18,7 +18,7 @@ pub(super) fn push_association_methods(methods: &mut Vec<MethodDef>, model: &Mod
     for (span, assoc) in model.spanned_associations() {
         let before = methods.len();
         match assoc {
-            Association::HasMany { name, target, foreign_key, as_interface, scope, .. } => {
+            Association::HasMany { name, target, foreign_key, as_interface, scope, through, .. } => {
                 methods.push(synth_has_many_reader(
                     owner,
                     name,
@@ -28,6 +28,66 @@ pub(super) fn push_association_methods(methods: &mut Vec<MethodDef>, model: &Mod
                     scope.as_ref(),
                 ));
                 methods.push(synth_preload_setter(owner, name, target));
+                // `has_many :through` collection writer (`story.tags =
+                // [tag]` — the factory/edit shape). Stages the target
+                // collection and marks it stale; `_sync_<name>` folds
+                // into after_save (before any user callbacks — they
+                // run against synced join rows) and replaces the join
+                // rows there. Deferred-sync is an honest subset of
+                // Rails, which syncs immediately for persisted owners.
+                // Join resolution stays owner-local: the sibling
+                // through association names the join class and the
+                // owner-side fk; the target-side fk is the
+                // `<target>_id` convention (the precise recipe —
+                // consulting the join model's belongs_to — lives in
+                // scope_chain's join_tails and needs the full model
+                // slice this pass doesn't have).
+                if let Some(thr_name) = through {
+                    let writer_name = Symbol::from(format!("{}=", name.as_str()));
+                    let join = model.associations().find_map(|a| match a {
+                        Association::HasMany { name: n, target: jt, foreign_key: jfk, .. }
+                            if n == thr_name =>
+                        {
+                            Some((jt.clone(), jfk.clone()))
+                        }
+                        _ => None,
+                    });
+                    if let Some((join_class, owner_fk)) = join {
+                        if !model_defines_instance_method(model, &writer_name)
+                            && !methods.iter().any(|m| {
+                                m.name == writer_name && m.receiver == MethodReceiver::Instance
+                            })
+                        {
+                            let src_fk = Symbol::from(format!(
+                                "{}_id",
+                                crate::naming::snake_case(target.0.as_str())
+                            ));
+                            methods.push(synth_through_collection_writer(owner, name, target));
+                            methods.push(synth_through_sync(
+                                owner,
+                                name,
+                                &join_class,
+                                &owner_fk,
+                                &src_fk,
+                            ));
+                            super::markers::fold_into_or_push(
+                                methods,
+                                model,
+                                "after_save",
+                                Expr::new(
+                                    Span::synthetic(),
+                                    ExprNode::Send {
+                                        recv: None,
+                                        method: Symbol::from(format!("_sync_{}", name.as_str())),
+                                        args: vec![],
+                                        block: None,
+                                        parenthesized: false,
+                                    },
+                                ),
+                            );
+                        }
+                    }
+                }
             }
             Association::BelongsTo {
                 name,
@@ -779,6 +839,218 @@ fn synth_belongs_to_writer(
 /// callback cascading `destroy` over each child. Multiple dependent
 /// has_manys collapse into one `before_destroy` since Ruby allows only
 /// one `def` per name — they fold into a single body in source order.
+/// `def tags=(values)` — stage the target collection for a `has_many
+/// :through` association and mark the join rows stale:
+///
+///   def tags=(values)
+///     @tags_cache = values
+///     @tags_loaded = true
+///     @tags_stale = true
+///   end
+///
+/// The cache/loaded pair is the same one the reader and
+/// `_preload_<name>` use, so a read-after-write returns the assigned
+/// collection without touching the DB (Rails: the writer marks the
+/// target loaded). `_sync_<name>` consumes the stale flag at save.
+fn synth_through_collection_writer(owner: &ClassId, name: &Symbol, target: &ClassId) -> MethodDef {
+    let values = Symbol::from("values");
+    let values_ty = Ty::Array { elem: Box::new(Ty::Class { id: target.clone(), args: vec![] }) };
+    let ivar_assign = |ivar: String, value: Expr| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign { target: LValue::Ivar { name: Symbol::from(ivar) }, value },
+        )
+    };
+    let bool_lit = |value: bool| {
+        Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Bool { value } })
+    };
+    let body = seq(vec![
+        ivar_assign(format!("{}_cache", name.as_str()), var_ref(values.clone())),
+        ivar_assign(format!("{}_loaded", name.as_str()), bool_lit(true)),
+        ivar_assign(format!("{}_stale", name.as_str()), bool_lit(true)),
+    ]);
+    MethodDef {
+        name: Symbol::from(format!("{}=", name.as_str())),
+        receiver: MethodReceiver::Instance,
+        params: vec![Param::positional(values.clone())],
+        body,
+        signature: Some(fn_sig(vec![(values, values_ty)], Ty::Nil)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+        block_param: None,
+    }
+}
+
+/// `def _sync_tags` — replace the join rows with the staged
+/// collection, once, at save time (folded into after_save):
+///
+///   def _sync_tags
+///     if @tags_stale
+///       @tags_stale = false
+///       Tagging.where(story_id: @id).each { |__row| __row.destroy }
+///       @tags_cache.each do |__target|
+///         __join = Tagging.new
+///         __join.story_id = @id
+///         __join.tag_id = __target.id
+///         __join.save
+///       end
+///     end
+///   end
+///
+/// Replace-all rather than a diff: unchanged pairs get fresh join
+/// rows (new ids), which no corpus spec observes; Rails diffs, and
+/// deletes without callbacks — `destroy` here keeps any synthesized
+/// join-model cascades honest.
+fn synth_through_sync(
+    owner: &ClassId,
+    name: &Symbol,
+    join_class: &ClassId,
+    owner_fk: &Symbol,
+    src_fk: &Symbol,
+) -> MethodDef {
+    use crate::ident::VarId;
+
+    let stale_ivar = Symbol::from(format!("{}_stale", name.as_str()));
+    let id_ivar = || Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("id") });
+    let send = |recv: Expr, method: &str, args: Vec<Expr>| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(recv),
+                method: Symbol::from(method),
+                args,
+                block: None,
+                parenthesized: false,
+            },
+        )
+    };
+
+    // Tagging.where(story_id: @id).each { |__row| __row.destroy }
+    let where_call = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(class_const(join_class)),
+            method: Symbol::from("where"),
+            args: vec![Expr::new(
+                Span::synthetic(),
+                ExprNode::Hash {
+                    entries: vec![(lit_sym(owner_fk.clone()), id_ivar())],
+                    kwargs: true,
+                },
+            )],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    let row = Symbol::from("__row");
+    let delete_block = Expr::new(
+        Span::synthetic(),
+        ExprNode::Lambda {
+            params: vec![row.clone()],
+            block_param: None,
+            body: send(var_ref(row), "destroy", vec![]),
+            block_style: crate::expr::BlockStyle::Brace,
+        },
+    );
+    let delete_all = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(where_call),
+            method: Symbol::from("each"),
+            args: vec![],
+            block: Some(delete_block),
+            parenthesized: false,
+        },
+    );
+
+    // @tags_cache.each { |__target| __join = Join.new; __join.<owner_fk> = @id;
+    //                    __join.<src_fk> = __target.id; __join.save }
+    let target_var = Symbol::from("__target");
+    let join_var = Symbol::from("__join");
+    let insert_body = seq(vec![
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Var { id: VarId(0), name: join_var.clone() },
+                value: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(class_const(join_class)),
+                        method: Symbol::from("new"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: true,
+                    },
+                ),
+            },
+        ),
+        send(var_ref(join_var.clone()), &format!("{}=", owner_fk.as_str()), vec![id_ivar()]),
+        send(
+            var_ref(join_var.clone()),
+            &format!("{}=", src_fk.as_str()),
+            vec![send(var_ref(target_var.clone()), "id", vec![])],
+        ),
+        send(var_ref(join_var), "save", vec![]),
+    ]);
+    let insert_block = Expr::new(
+        Span::synthetic(),
+        ExprNode::Lambda {
+            params: vec![target_var],
+            block_param: None,
+            body: insert_body,
+            block_style: crate::expr::BlockStyle::Do,
+        },
+    );
+    let insert_all = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Ivar { name: Symbol::from(format!("{}_cache", name.as_str())) },
+            )),
+            method: Symbol::from("each"),
+            args: vec![],
+            block: Some(insert_block),
+            parenthesized: false,
+        },
+    );
+
+    let clear_stale = Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Ivar { name: stale_ivar.clone() },
+            value: Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Bool { value: false } },
+            ),
+        },
+    );
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: Expr::new(Span::synthetic(), ExprNode::Ivar { name: stale_ivar }),
+            then_branch: seq(vec![clear_stale, delete_all, insert_all]),
+            else_branch: nil_lit(),
+        },
+    );
+    MethodDef {
+        name: Symbol::from(format!("_sync_{}", name.as_str())),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        signature: Some(fn_sig(vec![], Ty::Nil)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+        block_param: None,
+    }
+}
+
 pub(super) fn push_dependent_destroy(methods: &mut Vec<MethodDef>, model: &Model) {
     let mut stmts: Vec<Expr> = Vec::new();
 
