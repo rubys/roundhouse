@@ -1104,6 +1104,53 @@ fn synth_assign_from_row(owner: &ClassId, table: &Table) -> MethodDef {
     }
 }
 
+/// `self.<writer>(<lookup>) unless <lookup>.nil?` — the guarded
+/// public-writer route `synth_initialize` uses for values that need
+/// normalization (temporal columns) or foreign-key extraction
+/// (belongs_to association objects). The nil guard keeps the writer's
+/// typed parameter honest on strict targets: a missing attrs key never
+/// reaches it.
+fn assign_via_writer_unless_nil(writer: Symbol, lookup: Expr) -> Expr {
+    let nil_check = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(lookup.clone()),
+            method: Symbol::from("nil?"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let not_nil = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(nil_check),
+            method: Symbol::from("!"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let assign = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(self_ref()),
+            method: writer,
+            args: vec![lookup],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: not_nil,
+            then_branch: assign,
+            else_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+        },
+    )
+}
+
 fn synth_initialize(owner: &ClassId, table: &Table, model: &Model) -> MethodDef {
     let attrs = Symbol::from("attrs");
 
@@ -1140,30 +1187,104 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
         // generalizes the pattern to the whole column list.
         let col_ty = ty_of_column(&col.col_type);
         let default = default_literal_for_ty(&col_ty);
-        let value = Expr::new(
-            Span::synthetic(),
-            ExprNode::BoolOp {
-                op: crate::expr::BoolOpKind::Or,
-                surface: crate::expr::BoolOpSurface::Symbol,
-                left: lookup,
-                right: default,
-            },
-        );
         // is_id_column reference retained as a feature flag for
         // future per-column override hooks; today every column flows
         // through the same default-lookup shape.
         let _ = is_id_column(&col.name);
 
-        stmts.push(Expr::new(
-            Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(self_ref()),
-                method: col_storage_setter(col),
-                args: vec![value],
-                block: None,
-                parenthesized: false,
-            },
-        ));
+        if is_temporal_col(col) {
+            // Temporal columns: callers pass native `Time` values
+            // (`Username.create!(created_at: user.created_at)` in
+            // lobsters), so the attrs value can't be stuffed into the
+            // raw ISO-text slot directly. Default-init the raw slot
+            // (strict targets need every field assigned on every
+            // path), then route a provided value through the PUBLIC
+            // `<col>=` writer, whose `format_db_time` normalization
+            // accepts a Time — and, on the lenient ruby-family
+            // runtime, passes stored-text strings through unchanged.
+            // Hydration is unaffected: `from_row`/`from_stmt` build
+            // via `new()` + `<col>_raw=`, never through attrs.
+            stmts.push(Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(self_ref()),
+                    method: col_storage_setter(col),
+                    args: vec![default],
+                    block: None,
+                    parenthesized: false,
+                },
+            ));
+            stmts.push(assign_via_writer_unless_nil(
+                Symbol::from(format!("{}=", col.name.as_str())),
+                lookup,
+            ));
+        } else {
+            let value = Expr::new(
+                Span::synthetic(),
+                ExprNode::BoolOp {
+                    op: crate::expr::BoolOpKind::Or,
+                    surface: crate::expr::BoolOpSurface::Symbol,
+                    left: lookup,
+                    right: default,
+                },
+            );
+            stmts.push(Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(self_ref()),
+                    method: col_storage_setter(col),
+                    args: vec![value],
+                    block: None,
+                    parenthesized: false,
+                },
+            ));
+        }
+    }
+
+    // Association-object keys: `Username.new(user: some_user)` — Rails
+    // routes any attrs key through its public writer, and belongs_to
+    // writers store the foreign key from the object. The fk column
+    // above already defaulted (`attrs[:user_id] || 0`), so the object
+    // key wins when provided. Guarded on nil so the plain
+    // `new(user_id: 3)` shape emits no writer call at runtime.
+    for assoc in model.associations() {
+        if let Association::BelongsTo { name, .. } = assoc {
+            let lookup = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(var_ref(attrs.clone())),
+                    method: Symbol::from("[]"),
+                    args: vec![lit_sym(name.clone())],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            stmts.push(assign_via_writer_unless_nil(
+                Symbol::from(format!("{}=", name.as_str())),
+                lookup,
+            ));
+        }
+    }
+
+    // has_secure_password virtual attrs: `User.new(password: "...",
+    // password_confirmation: "...")` is the factory/signup shape —
+    // Rails routes them through the macro's plaintext writers (where
+    // digest computation lives). The digest COLUMN was already covered
+    // by the column loop above.
+    if let Some(attr) = crate::lower::secure_password::secure_password_attr(&model.body) {
+        for key in [attr.as_str().to_string(), format!("{}_confirmation", attr.as_str())] {
+            let lookup = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(var_ref(attrs.clone())),
+                    method: Symbol::from("[]"),
+                    args: vec![lit_sym(Symbol::from(key.clone()))],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            stmts.push(assign_via_writer_unless_nil(Symbol::from(format!("{key}=")), lookup));
+        }
     }
 
     // has_many eager-load cache fields (issue #27): initialize each

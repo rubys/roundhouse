@@ -256,6 +256,22 @@ fn ivar(attr: &Symbol) -> Expr {
 /// `Some(Ty::Array { .. })` — the String arm drops. `None` keeps the
 /// generic three-way form so untyped/dynamic-shape attrs still work.
 fn inline_presence_check(attr: &Symbol, attr_ty: Option<&Ty>) -> Expr {
+    // Temporal columns (schema-typed `Time`) store ISO-8601 text in
+    // `@<attr>_raw`; `@<attr>` is never the storage slot (the ruby
+    // tree's parse memo is `@__t_<attr>`), so a check against it fired
+    // unconditionally — lobsters' `validates :created_at, presence:
+    // true` on Username rejected every record. Blank on the stored
+    // form is nil-or-empty text.
+    if matches!(attr_ty, Some(Ty::Time)) {
+        let raw_ivar = ivar(&Symbol::from(format!("{}_raw", attr.as_str())));
+        let cond = bool_op(
+            BoolOpKind::Or,
+            send(raw_ivar.clone(), "nil?", vec![]),
+            send(raw_ivar, "empty?", vec![]),
+        );
+        let push_err = errors_push(format!("{} can't be blank", humanize(attr.as_str())));
+        return if_with_nil_else(cond, push_err);
+    }
     let attr_ivar = ivar(attr);
     // `@attr.nil?`
     let nil_check = send(attr_ivar.clone(), "nil?", vec![]);

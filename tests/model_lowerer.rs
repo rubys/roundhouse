@@ -519,6 +519,124 @@ end
 }
 
 #[test]
+fn raw_slot_columns_route_through_writers_in_initialize_and_presence() {
+    use roundhouse::ingest::{ingest_model, ingest_schema};
+
+    let schema = ingest_schema(
+        br#"
+ActiveRecord::Schema[7.1].define(version: 1) do
+  create_table "usernames", force: :cascade do |t|
+    t.string "username"
+    t.integer "user_id", null: false
+    t.datetime "created_at", null: false
+  end
+end
+"#,
+        "db/schema.rb",
+    )
+    .expect("ingest schema");
+    let model = ingest_model(
+        br#"
+class Username < ApplicationRecord
+  belongs_to :user
+  validates :created_at, presence: true
+end
+"#,
+        "app/models/username.rb",
+        &schema,
+    )
+    .expect("ingest")
+    .expect("model");
+    let lc = lower_model_to_library_class(&model, &schema);
+
+    // initialize: the temporal column default-inits its raw slot
+    // (strict targets assign every field), then routes a provided
+    // value through the PUBLIC `created_at=` writer under a nil guard
+    // (format_db_time normalizes the Time); the belongs_to
+    // association-object key routes through `user=` the same way
+    // (`Username.new(user: some_user)` — lobsters' User#after_create).
+    let init = lc.methods.iter().find(|m| m.name.as_str() == "initialize").expect("initialize");
+    let stmts = body_stmts(init);
+    assert!(
+        stmts.iter().any(|e| matches!(&*e.node,
+            roundhouse::ExprNode::Send { method, args, .. }
+                if method.as_str() == "created_at_raw="
+                && matches!(args.first().map(|a| &*a.node), Some(roundhouse::ExprNode::Lit { .. })))),
+        "raw slot default-init missing"
+    );
+    let guarded_writers: Vec<&str> = stmts
+        .iter()
+        .filter_map(|e| match &*e.node {
+            roundhouse::ExprNode::If { then_branch, .. } => match &*then_branch.node {
+                roundhouse::ExprNode::Send { method, .. } => Some(method.as_str()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert!(guarded_writers.contains(&"created_at="), "{guarded_writers:?}");
+    assert!(guarded_writers.contains(&"user="), "{guarded_writers:?}");
+
+    // The presence check reads the raw storage slot — `@created_at` is
+    // never the storage for a temporal column, so a check against it
+    // fired unconditionally.
+    let validate = lc.methods.iter().find(|m| m.name.as_str() == "validate").expect("validate");
+    let body_dbg = format!("{:?}", validate.body);
+    assert!(body_dbg.contains("Symbol(\"created_at_raw\")"), "presence must read the raw slot");
+    assert!(
+        !body_dbg.contains("Ivar { name: Symbol(\"created_at\") }"),
+        "presence must not read the bare temporal ivar"
+    );
+}
+
+#[test]
+fn secure_password_attrs_route_through_writers_in_initialize() {
+    use roundhouse::ingest::{ingest_model, ingest_schema};
+
+    let schema = ingest_schema(
+        br#"
+ActiveRecord::Schema[7.1].define(version: 1) do
+  create_table "users", force: :cascade do |t|
+    t.string "username"
+    t.string "password_digest"
+  end
+end
+"#,
+        "db/schema.rb",
+    )
+    .expect("ingest schema");
+    let model = ingest_model(
+        br#"
+class User < ApplicationRecord
+  has_secure_password
+end
+"#,
+        "app/models/user.rb",
+        &schema,
+    )
+    .expect("ingest")
+    .expect("model");
+    let lc = lower_model_to_library_class(&model, &schema);
+
+    // `User.new(password: "...", password_confirmation: "...")` — the
+    // factory/signup shape — must reach the macro's plaintext writers.
+    let init = lc.methods.iter().find(|m| m.name.as_str() == "initialize").expect("initialize");
+    let stmts = body_stmts(init);
+    let guarded_writers: Vec<&str> = stmts
+        .iter()
+        .filter_map(|e| match &*e.node {
+            roundhouse::ExprNode::If { then_branch, .. } => match &*then_branch.node {
+                roundhouse::ExprNode::Send { method, .. } => Some(method.as_str()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert!(guarded_writers.contains(&"password="), "{guarded_writers:?}");
+    assert!(guarded_writers.contains(&"password_confirmation="), "{guarded_writers:?}");
+}
+
+#[test]
 fn allow_blank_drops_dead_presence_check() {
     use roundhouse::dialect::ValidationRule;
     use roundhouse::ingest::ingest_model;
