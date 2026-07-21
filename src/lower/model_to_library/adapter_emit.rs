@@ -618,25 +618,9 @@ fn arel_db_call(db: &ClassId, method: &str, args: Vec<Expr>) -> Expr {
     )
 }
 
-fn arel_concat(segments: Vec<Expr>) -> Expr {
-    use crate::expr::ExprNode;
-    use crate::span::Span;
-    let mut iter = segments.into_iter();
-    let mut acc = iter.next().expect("arel_concat needs at least one segment");
-    for next in iter {
-        acc = Expr::new(
-            Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(acc),
-                method: Symbol::from("+"),
-                args: vec![next],
-                block: None,
-                parenthesized: false,
-            },
-        );
-    }
-    acc
-}
+// Fold through the shared arel helper so adapter SQL gets the same
+// adjacent-literal merge as query emission.
+use crate::lower::arel::visitor::concat_chain as arel_concat;
 
 // ---------------------------------------------------------------------------
 // Helpers

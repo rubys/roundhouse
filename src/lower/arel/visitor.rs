@@ -822,8 +822,30 @@ fn seq(exprs: Vec<Expr>) -> Expr {
     Expr::new(Span::synthetic(), ExprNode::Seq { exprs })
 }
 
-fn concat_chain(segments: Vec<Expr>) -> Expr {
-    let mut iter = segments.into_iter();
+/// Fold SQL segments into a `+` chain, first merging adjacent string
+/// literals: the builders above push prefix / column / separator
+/// pieces separately, which would otherwise emit pure-literal runs
+/// like `"UPDATE t SET " + "a = " + …` in every target (flagged in
+/// the #67 review). `pub(crate)` — `model_to_library::adapter_emit`
+/// folds its SQL through the same helper.
+pub(crate) fn concat_chain(segments: Vec<Expr>) -> Expr {
+    let mut merged: Vec<Expr> = Vec::with_capacity(segments.len());
+    for seg in segments {
+        let text = match seg.node.as_ref() {
+            ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+            _ => None,
+        };
+        if let Some(text) = text {
+            if let Some(last) = merged.last_mut() {
+                if let ExprNode::Lit { value: Literal::Str { value } } = last.node.as_mut() {
+                    value.push_str(&text);
+                    continue;
+                }
+            }
+        }
+        merged.push(seg);
+    }
+    let mut iter = merged.into_iter();
     let mut acc = iter.next().expect("concat_chain needs at least one segment");
     for next in iter {
         acc = Expr::new(
