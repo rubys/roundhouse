@@ -49,6 +49,11 @@ pub enum BuildTarget {
     /// is a C extension with no JRuby build) so the same emitted source
     /// runs on the JVM.
     Jruby,
+    /// Rails → Roda + Sequel source conversion (issue #67 spike). Runs
+    /// on the real roda/sequel gems, not the roundhouse runtime, and
+    /// emits from the INGEST-shape App (`bin/roundhouse` skips
+    /// `analyze_and_lower` for it) — see `emit::roda`.
+    Roda,
     Crystal,
     Elixir,
     Go,
@@ -106,6 +111,7 @@ impl BuildTarget {
         BuildTarget::Spinel,
         BuildTarget::Ruby,
         BuildTarget::Jruby,
+        BuildTarget::Roda,
         BuildTarget::Crystal,
         BuildTarget::Elixir,
         BuildTarget::Go,
@@ -126,6 +132,7 @@ impl BuildTarget {
             BuildTarget::Spinel => "spinel",
             BuildTarget::Ruby => "ruby",
             BuildTarget::Jruby => "jruby",
+            BuildTarget::Roda => "roda",
             BuildTarget::Crystal => "crystal",
             BuildTarget::Elixir => "elixir",
             BuildTarget::Go => "go",
@@ -208,6 +215,28 @@ pub fn target_readme(target: BuildTarget) -> String {
              sidecars to the compiler itself, so no seeding is needed:\n\
              ```sh\n\
              spin test\n\
+             ```\n"
+        }
+        BuildTarget::Roda => {
+            "A Rails → Roda + Sequel source conversion (issue #67 spike). \
+             Runs on the real `roda`/`sequel` gems — no roundhouse \
+             runtime. Convertible constructs are emitted as idiomatic \
+             Roda/Sequel; everything else is a `ROUNDHOUSE-TODO` comment \
+             carrying the original Rails source for manual conversion.\n\n\
+             ## Prerequisites\n\
+             - Ruby 3.4+ (with bundler)\n\
+             - SQLite (system library)\n\n\
+             ## Install dependencies\n\
+             ```sh\n\
+             bundle install\n\
+             ```\n\n\
+             ## Run\n\
+             Migrations run when the app loads (so the migrate step is \
+             just loading `db.rb` once), then seed the demo rows:\n\
+             ```sh\n\
+             bundle exec ruby -r ./db -e \"\"\n\
+             sqlite3 db/blog.db < db/seed.sql\n\
+             bundle exec rackup\n\
              ```\n"
         }
         // ruby/jruby Test sections run the same five driver files as
@@ -485,6 +514,10 @@ pub fn target_readme(target: BuildTarget) -> String {
     // are the two non-server archives.
     let serves = match target {
         BuildTarget::Blog | BuildTarget::TypescriptWorker => "",
+        // The Roda conversion serves through rackup (default :9292) and
+        // has no Action Cable surface — its README body already carries
+        // the run instructions.
+        BuildTarget::Roda => "",
         _ => {
             "Running it serves the blog on http://localhost:3000 \
              (set `PORT` to override), with live Turbo Stream \
@@ -562,6 +595,7 @@ pub fn target_files(
         BuildTarget::Spinel => spinel_files(app, fixture).and_then(spin_shape),
         BuildTarget::Ruby => ruby_runtime_files(app, fixture),
         BuildTarget::Jruby => jruby_runtime_files(app, fixture),
+        BuildTarget::Roda => Ok(sort_files(emit::roda::emit(app))),
         BuildTarget::Crystal => Ok(sort_files(emit::crystal::emit(app))),
         BuildTarget::Elixir => Ok(sort_files(emit::elixir::emit(app))),
         BuildTarget::Go => Ok(sort_files(emit::go::emit(app))),

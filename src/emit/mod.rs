@@ -12,6 +12,7 @@ pub mod go;
 pub mod go2;
 pub mod kotlin;
 pub mod python;
+pub mod roda;
 pub mod ruby;
 pub mod rust;
 pub mod rust2;

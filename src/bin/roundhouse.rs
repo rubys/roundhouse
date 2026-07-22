@@ -229,7 +229,17 @@ fn run_transpile(
     // had to leave dynamic) join the analyze warnings below: same
     // collapse-to-count print policy, same --allow-unsupported
     // full-inventory behavior.
-    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    //
+    // Exception: the Roda conversion target is source-to-source from
+    // the INGEST-shape IR — lowering would rewrite the controller
+    // bodies into runtime vocabulary (SQL-folded queries, Views::
+    // calls), the wrong altitude to re-idiomize into Sequel/Roda from.
+    // See `emit::roda`.
+    let lower_diags = if target == BuildTarget::Roda {
+        Vec::new()
+    } else {
+        roundhouse::session::analyze_and_lower(&mut app)
+    };
 
     // Analyze-time diagnostics — the same type errors roundhouse-check
     // reports (dispatch failures, unresolved ivars, incompatible ops).
@@ -237,7 +247,10 @@ fn run_transpile(
     // walker-found errors would otherwise pass through into target code
     // that fails later in tsc/cargo/runtime with a worse message, so
     // they print and gate here alongside the emit-gap inventory.
-    let mut analyze_diags = diagnose(&app);
+    // (Same Roda exception: analyze never ran, so its diagnostics
+    // would be all noise.)
+    let mut analyze_diags =
+        if target == BuildTarget::Roda { Vec::new() } else { diagnose(&app) };
     analyze_diags.extend(lower_diags);
 
     // Emit inside a diagnostic scope so unsupported-construct gaps in

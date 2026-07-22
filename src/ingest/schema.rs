@@ -52,6 +52,15 @@ pub fn ingest_schema(source: &[u8], file: &str) -> IngestResult<Schema> {
                     schema.tables.insert(name, table);
                 }
             }
+            // Dumped after every create_table, so the target tables are
+            // in place by the time these fold in.
+            "add_foreign_key" => {
+                let args: Vec<Node<'_>> = call
+                    .arguments()
+                    .map(|a| a.arguments().iter().collect())
+                    .unwrap_or_default();
+                apply_add_foreign_key(&args, &mut schema);
+            }
             _ => {}
         }
     });
@@ -275,9 +284,17 @@ fn apply_migration_verb(
                 }
             }
         }
-        // Foreign keys and extensions don't affect column typing; the
-        // schema.rb parser skips them too.
-        "add_foreign_key" | "remove_foreign_key" | "enable_extension" | "disable_extension" => {}
+        // `add_foreign_key "comments", "articles"[, column:, primary_key:,
+        // on_delete:, on_update:]` — recorded into `Table.foreign_keys` so
+        // downstream consumers see the referential shape (the Roda/Sequel
+        // conversion emits real `foreign_key` migration lines from it).
+        // Column typing itself is unaffected: the FK column is already an
+        // ordinary integer column from `create_table`.
+        "add_foreign_key" => apply_add_foreign_key(&args, schema),
+        // Extensions (and FK removal — schema.rb is canonical state, so
+        // a remove would only appear in migration folds where the add is
+        // also seen) don't affect column typing; skipped like before.
+        "remove_foreign_key" | "enable_extension" | "disable_extension" => {}
         // Anything else receiver-less is arbitrary migration Ruby
         // (`say`, backfill helpers) — not schema-affecting.
         _ => {}
@@ -290,6 +307,45 @@ fn apply_migration_verb(
 /// both anywhere a table/column name is read.
 fn name_value(node: &Node<'_>) -> Option<String> {
     string_value(node).or_else(|| symbol_value(node))
+}
+
+/// `add_foreign_key "comments", "articles"[, column:, primary_key:,
+/// on_delete:, on_update:]` — recorded into `Table.foreign_keys` so
+/// downstream consumers see the referential shape (the Roda/Sequel
+/// conversion emits real `foreign_key` migration lines from it).
+/// Shared by the schema.rb walk and the migration fold; column typing
+/// itself is unaffected (the FK column is already an ordinary integer
+/// column from `create_table`).
+fn apply_add_foreign_key(args: &[Node<'_>], schema: &mut Schema) {
+    let arg_name = |i: usize| args.get(i).and_then(name_value);
+    let (Some(from_t), Some(to_t)) = (arg_name(0), arg_name(1)) else { return };
+    let kw = |key: &str| kwarg_value(args.iter().skip(2), key).and_then(|v| name_value(&v));
+    let from_column =
+        kw("column").unwrap_or_else(|| format!("{}_id", crate::naming::singularize(&to_t)));
+    let to_column = kw("primary_key").unwrap_or_else(|| "id".to_string());
+    let on_delete = kw("on_delete").map(|s| referential_action(&s)).unwrap_or_default();
+    let on_update = kw("on_update").map(|s| referential_action(&s)).unwrap_or_default();
+    if let Some(table) = schema.tables.get_mut(&Symbol::from(from_t)) {
+        table.foreign_keys.push(crate::schema::ForeignKey {
+            from_column: Symbol::from(from_column),
+            to_table: TableRef(Symbol::from(to_t)),
+            to_column: Symbol::from(to_column),
+            on_delete,
+            on_update,
+        });
+    }
+}
+
+/// `on_delete:`/`on_update:` symbol → the neutral referential action.
+/// Rails' spelling for SET NULL is `:nullify`.
+fn referential_action(sym: &str) -> crate::schema::ReferentialAction {
+    use crate::schema::ReferentialAction::*;
+    match sym {
+        "cascade" => Cascade,
+        "nullify" => SetNull,
+        "restrict" => Restrict,
+        _ => NoAction,
+    }
 }
 
 /// First kwarg with key `key` among `nodes` (each a KeywordHashNode or
