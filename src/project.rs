@@ -1055,7 +1055,89 @@ fn ruby_runtime_files(
     // base's eagerly-rewritten one at dedupe) and strips routes.rb's eager
     // controller-require header.
     apply_controller_dispatch(&mut files, app, true);
+    apply_cable_strip(&mut files, app)?;
     Ok(files)
+}
+
+/// De-cable the CRuby/JRuby overlay for a broadcast-less app: drop
+/// `cable.rb` and the three /cable seams in `config.ru` (the require,
+/// the `Cable::Registry` transport registration, and the WebSocket-
+/// upgrade hijack branch). Pairs with `apply_gemfile_trim` dropping
+/// `gem "websocket-driver"` from the same tree — keeping the wiring
+/// would force a gem install for a surface the app can't reach
+/// (issue #67: the Roda exemplar's tree loaded websocket-driver at
+/// boot despite the app having no websockets).
+fn apply_cable_strip(files: &mut Vec<(String, String)>, app: &App) -> Result<(), String> {
+    let has_cable = app
+        .models
+        .iter()
+        .any(|m| !crate::lower::lower_broadcasts(m).is_empty());
+    if has_cable {
+        return Ok(());
+    }
+    files.retain(|(p, _)| p != "cable.rb");
+    for (p, content) in files.iter_mut() {
+        if p == "config.ru" {
+            *content = strip_cable_from_config_ru(content)?;
+        }
+    }
+    Ok(())
+}
+
+/// String half of `apply_cable_strip` (separated for unit testing).
+/// Marker-based rather than exact-match so comment rewording in
+/// config.ru doesn't silently defeat it; errors loudly when a marker
+/// is missing so a config.ru restructure updates this function too.
+fn strip_cable_from_config_ru(content: &str) -> Result<String, String> {
+    let mut out: Vec<&str> = Vec::new();
+    let mut found_require = false;
+    let mut found_registry = false;
+    let mut found_branch = false;
+    let mut lines = content.lines().peekable();
+    while let Some(line) = lines.next() {
+        if line == "require_relative \"cable\"" {
+            found_require = true;
+            continue;
+        }
+        // Comment paragraph + `Broadcasts.set_transport(Cable::Registry)`.
+        if line.starts_with("# Register the Cable registry") {
+            found_registry = true;
+            for l in lines.by_ref() {
+                if l.contains("Broadcasts.set_transport") {
+                    break;
+                }
+            }
+            if lines.peek() == Some(&"") {
+                lines.next();
+            }
+            continue;
+        }
+        // The hijack branch inside the Rack lambda: comment block through
+        // its closing two-space `end`.
+        if line.trim_start().starts_with("# WebSocket upgrade:") {
+            found_branch = true;
+            for l in lines.by_ref() {
+                if l == "  end" {
+                    break;
+                }
+            }
+            if lines.peek() == Some(&"") {
+                lines.next();
+            }
+            continue;
+        }
+        out.push(line);
+    }
+    if !(found_require && found_registry && found_branch) {
+        return Err(format!(
+            "strip_cable_from_config_ru: cable markers not all found in ruby_overlay \
+             config.ru (require={found_require} registry={found_registry} \
+             branch={found_branch}) — config.ru restructured? Update the markers here."
+        ));
+    }
+    let mut s = out.join("\n");
+    s.push('\n');
+    Ok(s)
 }
 
 /// Regenerate `app/views.rb` (the per-app `Views::*` aggregator) from the
@@ -1395,6 +1477,9 @@ fn jruby_runtime_files(
     // Same lazy-dispatch rewrite as the CRuby tree — the ruby_overlay
     // main.rb superseded the base's eagerly-rewritten one at dedupe.
     apply_controller_dispatch(&mut files, app, true);
+    // Same cable strip as the CRuby tree (this walk re-added cable.rb +
+    // the config.ru seams; the Gemfile trim already ran in spinel_files).
+    apply_cable_strip(&mut files, app)?;
     Ok(files)
 }
 
@@ -1546,7 +1631,65 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // injects. ruby_overlay carries no README, so this is the only place
     // the rename needs to happen for any of them.
     scaffold_readme_to_specimen(&mut files);
+    apply_gemfile_trim(&mut files, app, fixture);
     Ok(files)
+}
+
+/// De-blog the scaffold Gemfile: drop gem blocks whose backing app
+/// surface the ingested app doesn't have. Two blocks are conditional:
+///
+///   * `group :assets` (turbo-rails + stimulus-rails) — only wanted when
+///     the app ships importmap JS (`app/javascript/application.js` in
+///     the fixture; the emitted Rakefile's `assets` task keys on the
+///     same file). The dependency closure of these two gems is all of
+///     Rails, so a JS-less tree that keeps them `bundle install`s Rails
+///     it never loads — the first thing a reviewer of the Roda exemplar
+///     tree noticed (issue #67).
+///   * `gem "websocket-driver"` — backs the CRuby /cable endpoint;
+///     dead weight when no model declares broadcasts (the paired
+///     overlay wiring is dropped by `apply_cable_strip`).
+///
+/// When either block is dropped, the committed `Gemfile.lock` (which
+/// pins the full closure) is dropped with it — the emitted tree's
+/// `bundle install` resolves the reduced Gemfile fresh, the same way
+/// the JRuby tree already ships lock-free after its sqlite3 gem swap.
+fn apply_gemfile_trim(files: &mut Vec<(String, String)>, app: &App, fixture: &Path) {
+    let has_js = fixture.join("app/javascript/application.js").exists();
+    let has_cable = app
+        .models
+        .iter()
+        .any(|m| !crate::lower::lower_broadcasts(m).is_empty());
+    if has_js && has_cable {
+        return;
+    }
+    let Some((_, gemfile)) = files.iter_mut().find(|(p, _)| p == "Gemfile") else {
+        return;
+    };
+    *gemfile = trim_gemfile(gemfile, has_js, has_cable);
+    files.retain(|(p, _)| p != "Gemfile.lock");
+}
+
+/// String half of `apply_gemfile_trim` (separated for unit testing):
+/// drops whole blank-line-separated Gemfile paragraphs by marker, so
+/// each gem's leading comment block travels with its `gem` line.
+fn trim_gemfile(content: &str, has_js: bool, has_cable: bool) -> String {
+    let kept: Vec<&str> = content
+        .split("\n\n")
+        .filter(|para| {
+            if !has_js && para.contains("group :assets") {
+                return false;
+            }
+            if !has_cable && para.contains("gem \"websocket-driver\"") {
+                return false;
+            }
+            true
+        })
+        .collect();
+    let mut out = kept.join("\n\n");
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 /// Reshape the assembled spinel tree into a spin package — spinel's
@@ -2242,6 +2385,44 @@ fn walk_ruby(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trim_gemfile_drops_assets_and_websocket_blocks() {
+        let gemfile = fs::read_to_string("runtime/spinel/scaffold/Gemfile").unwrap();
+        let out = trim_gemfile(&gemfile, false, false);
+        assert!(!out.contains("turbo-rails"), "assets group should be gone");
+        assert!(!out.contains("stimulus-rails"));
+        assert!(!out.contains("group :assets"));
+        assert!(!out.contains("websocket-driver"));
+        // The unconditional core survives.
+        assert!(out.contains("gem \"sqlite3\""));
+        assert!(out.contains("gem \"puma\""));
+        assert!(out.contains("rubocop_spinel"));
+        assert!(out.ends_with('\n'));
+        // An app with both surfaces keeps the committed file verbatim.
+        assert_eq!(trim_gemfile(&gemfile, true, true), gemfile);
+        // JS-only trim keeps websocket-driver, and vice versa.
+        assert!(trim_gemfile(&gemfile, false, true).contains("websocket-driver"));
+        assert!(trim_gemfile(&gemfile, true, false).contains("turbo-rails"));
+    }
+
+    #[test]
+    fn strip_cable_from_config_ru_removes_all_three_seams() {
+        let config_ru =
+            fs::read_to_string("runtime/spinel/scaffold/ruby_overlay/config.ru").unwrap();
+        let out = strip_cable_from_config_ru(&config_ru).unwrap();
+        assert!(!out.contains("require_relative \"cable\""));
+        assert!(!out.contains("Cable"), "no Cable constant may survive");
+        assert!(!out.contains("/cable"));
+        assert!(!out.contains("rack.hijack"));
+        // The serving core survives intact.
+        assert!(out.contains("require_relative \"main\""));
+        assert!(out.contains("Db.with_connection { Main.run_rack(env) }"));
+        assert!(out.contains("run app"));
+        // A config.ru missing the markers errors loudly instead of
+        // silently shipping a tree whose require graph dangles.
+        assert!(strip_cable_from_config_ru("run app\n").is_err());
+    }
 
     #[test]
     fn ensure_seed_sql_injects_when_absent() {
