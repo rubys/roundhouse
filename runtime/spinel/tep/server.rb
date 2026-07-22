@@ -33,7 +33,8 @@ module Tep
       if workers <= 1
         sfd = Sock.sphttp_listen(port, 0)
         if sfd < 0
-          puts "tep: bind failed on :" + port.to_s
+          $stderr.puts "tep: cannot bind to port " + port.to_s +
+                       " (already in use?)"
           exit(1)
         end
         worker_loop(sfd)

@@ -43,9 +43,25 @@ module Tep
       def run(port, workers, quiet)
         sfd = Sock.sphttp_listen(port, workers > 1 ? 1 : 0)
         if sfd < 0
-          return 1
+          # Loud + nonzero exit: the one plausible cause on a sane host
+          # is another process already bound to the port, and silently
+          # returning here (the caller discards the code) made the
+          # binary look like it started and immediately vanished.
+          $stderr.puts "tep: cannot bind to port " + port.to_s +
+                       " (already in use?)"
+          exit(1)
         end
         Sock.sphttp_set_nonblock(sfd)
+        if !quiet
+          # Same banner shape as the prefork Tep::Server, printed only
+          # after a successful bind so startup and bind-failure are
+          # distinguishable at a glance. Explicit flush: when stdout is
+          # redirected (not a TTY) C stdio block-buffers, and a banner
+          # that only shows up at exit is no banner at all.
+          puts "[tep " + Tep::VERSION + "] listening on http://0.0.0.0:" +
+               port.to_s + " (workers=" + workers.to_s + ")"
+          $stdout.flush
+        end
 
         # Install SIGTERM/SIGINT handlers BEFORE fork so children
         # inherit them; accept_loop checks the term flag once per

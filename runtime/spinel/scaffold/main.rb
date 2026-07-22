@@ -397,12 +397,43 @@ end
 # binary's argv[0] (e.g. `"./build/blog"`), so the guard always
 # returns false. The Ruby-overlay sibling keeps the guard for its
 # Puma/Rack-required-from-config.ru shape.
+#
+# CLI surface. Flags override the PORT/WORKERS env vars; --help exits
+# before any DB or server setup runs. Parsed with a plain while loop
+# (no OptionParser — stdlib optparse isn't in the spinel subset).
+port = (ENV["PORT"] || "3000").to_i
+workers = (ENV["WORKERS"] || "1").to_i
+i = 0
+while i < ARGV.length
+  arg = ARGV[i]
+  if arg == "--help" || arg == "-h"
+    puts "usage: " + $PROGRAM_NAME + " [options]"
+    puts ""
+    puts "  -p, --port N     listen port (default 3000; PORT env)"
+    puts "  -w, --workers N  prefork workers (default 1; WORKERS env)"
+    puts "  -h, --help       show this help and exit"
+    puts ""
+    puts "  SQLite file: BLOG_DB env (default storage/development.sqlite3)"
+    exit(0)
+  elsif (arg == "--port" || arg == "-p") && i + 1 < ARGV.length
+    port = ARGV[i + 1].to_i
+    i += 2
+  elsif (arg == "--workers" || arg == "-w") && i + 1 < ARGV.length
+    workers = ARGV[i + 1].to_i
+    i += 2
+  else
+    $stderr.puts "unknown option: " + arg + " (try --help)"
+    exit(1)
+  end
+end
+if port <= 0 || port > 65535
+  $stderr.puts "invalid port: " + port.to_s
+  exit(1)
+end
 Main.configure_default_adapter!
 # Wire model after-commit Turbo Stream broadcasts to the live WebSocket
 # fan-out. Without this, broadcasts only land in the in-memory log.
 Broadcasts.set_transport(Cable::Transport.new)
-port = (ENV["PORT"] || "3000").to_i
-workers = (ENV["WORKERS"] || "1").to_i
 # Tep::Server::Scheduled is the fiber-per-connection server (Falcon-
 # shape). Required for WebSockets: the /cable recv loop parks on
 # Tep::Scheduler.io_wait so a held-open connection doesn't pin the
