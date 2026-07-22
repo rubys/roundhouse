@@ -174,6 +174,18 @@ module ActiveRecord
       ActiveRecord::Relation.new(self).where(conditions.to_h)
     end
 
+    # Rails-shape `all` fallback, same story as `where` above: a lazy
+    # Relation so refiner chains the lowerers left dynamic
+    # (`Category.all.order("category asc, tags.tag asc")…` on lobsters'
+    # filters page) chain off it instead of crashing on base.rb's
+    # eager-Array version. Lowered call-sites don't land here — the
+    # arel pass claims a plain `Model.all` and the scope-chain
+    # normalizer re-roots recognized chains onto
+    # `ActiveRecord::Relation.new(Model)` directly.
+    def self.all
+      ActiveRecord::Relation.new(self)
+    end
+
     # Saved-change tracking (ActiveModel::Dirty subset) — the real
     # implementation behind base.rb's compile-surface stubs; see the
     # note there for why the diff is ruby-family-only. The snapshot

@@ -25,6 +25,7 @@ module ActiveRecord
     def includes: (*untyped names) -> Relation
     def preload: (*untyped names) -> Relation
     def eager_load: (*untyped names) -> Relation
+    def references: (*untyped names) -> Relation
     def merge: (Relation other) -> Relation
     def where_clauses: () -> Array[String]
     def arel: () -> Arel::SelectManager

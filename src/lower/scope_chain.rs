@@ -432,6 +432,7 @@ fn is_relation_chain_method(name: &str) -> bool {
             | "includes"
             | "preload"
             | "eager_load"
+            | "references"
             | "merge"
             | "none"
     )

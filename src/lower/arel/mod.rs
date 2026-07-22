@@ -71,8 +71,8 @@ pub fn rewrite_arel_in_expr_with_assocs(
 
 const RELATION_REFINERS: &[&str] = &[
     "where", "not", "joins", "left_outer_joins", "left_joins", "order", "group", "having",
-    "limit", "offset", "merge", "includes", "preload", "eager_load", "distinct", "select",
-    "where!", "order!", "reorder", "rewhere",
+    "limit", "offset", "merge", "includes", "preload", "eager_load", "references", "distinct",
+    "select", "where!", "order!", "reorder", "rewhere",
 ];
 
 fn collect_relation_refined_names(
@@ -123,6 +123,35 @@ fn rewrite_arel_inner(
             return;
         }
     }
+    // Inline sibling of the refined-names guard above: this Send is a
+    // relation refiner whose chain did NOT lift (a lifted chain was
+    // replaced wholesale and returned before reaching here — string
+    // `order("tag asc")`, a chained `.where`, `references(...)`, …).
+    // Recursing into its receiver would materialize the liftable base
+    // underneath (`Category.all`, the has_many FK query) and strand the
+    // refiner on a hydrated Array — `results.order("tag asc")`,
+    // NoMethodError on every lane and a hard compile stop under AOT.
+    // Leave the whole chain to the runtime Relation (the scope-chain
+    // normalizer re-roots surviving `Const`-headed chains onto
+    // `ActiveRecord::Relation.new(Model)` at emit). Spine Sends' args
+    // and blocks are ordinary value positions and still rewrite. A
+    // refiner WITH a block (`.select { … }`) is an Enumerable call on
+    // materialized rows, not a chain link — the claim stays.
+    let unlifted_refiner = matches!(
+        expr.node.as_ref(),
+        ExprNode::Send { recv: Some(_), block: None, method, .. }
+            if RELATION_REFINERS.contains(&method.as_str())
+    );
+    if unlifted_refiner {
+        let ExprNode::Send { recv: Some(recv), args, .. } = &mut *expr.node else {
+            unreachable!("matched Send with recv above");
+        };
+        rewrite_arel_spine_args(recv, schema, registry, assocs, refined);
+        for a in args {
+            rewrite_arel_inner(a, schema, registry, assocs, refined);
+        }
+        return;
+    }
     walk_subexprs_mut(expr, &mut |e| {
         rewrite_arel_inner(e, schema, registry, assocs, refined)
     });
@@ -138,6 +167,34 @@ fn rewrite_arel_inner(
     // structurally.
     if let ExprNode::Seq { exprs } = &mut *expr.node {
         hoist_value_seqs_in_stmts(exprs);
+    }
+}
+
+/// Rewrite value positions inside a chain-receiver spine WITHOUT
+/// claiming the spine itself: every Send along the receiver path feeds
+/// its value to an unlifted relation refiner, so materializing one
+/// would strand the chain on a hydrated Array. The spine Sends' args
+/// and blocks are ordinary value positions and rewrite normally.
+/// Non-Send spine roots (a Const, an Ivar, an If picking a branch, …)
+/// stay untouched for the same reason — anything materialized inside
+/// them still becomes the chain's receiver value.
+fn rewrite_arel_spine_args(
+    expr: &mut Expr,
+    schema: &Schema,
+    registry: &HashMap<ClassId, ClassInfo>,
+    assocs: &[crate::lower::model_associations::AssociationEdge],
+    refined: &std::collections::HashSet<crate::ident::Symbol>,
+) {
+    if let ExprNode::Send { recv, args, block, .. } = &mut *expr.node {
+        if let Some(r) = recv {
+            rewrite_arel_spine_args(r, schema, registry, assocs, refined);
+        }
+        for a in args {
+            rewrite_arel_inner(a, schema, registry, assocs, refined);
+        }
+        if let Some(b) = block {
+            rewrite_arel_inner(b, schema, registry, assocs, refined);
+        }
     }
 }
 

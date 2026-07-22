@@ -196,6 +196,16 @@ module ActiveRecord
       self
     end
 
+    # `references(:assoc)` — Rails' marker that a string condition
+    # mentions an eager-loaded table. The preload machinery here decides
+    # what to load from `eager_load`/`includes` alone, so the marker
+    # carries no state; accept and ignore it so marker-bearing chains
+    # stay chainable (lobsters' filters page).
+    def references(*names)
+      names
+      self
+    end
+
     # `merge(other)` — fold another relation's WHEREs in. v1 handles the
     # common case (merging a same-table scope's conditions).
     def merge(other)

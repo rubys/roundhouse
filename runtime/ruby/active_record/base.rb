@@ -98,15 +98,17 @@ module ActiveRecord
 
     # Default `_adapter_last` for hand-written subclasses / Base-level
     # tests — the original `all` + `[-1]`, correct everywhere and cheap
-    # on the small tables those models carry. Uses `all` (not
+    # on the small tables those models carry. Uses `_adapter_all` (not
     # `select_rows`) because the per-target `AdapterInterface` implements
-    # `all`/`find`/`count` but not raw `select_rows`. Lowerer-emitted
-    # Level-3 models OVERRIDE this with a `Db.prepare("... ORDER BY <pk>
-    # DESC LIMIT 1")` single-hydrate (synth_adapter_last), so real apps
-    # get one row — lobsters' /u no longer loads 10k users for its
-    # `User.last.id` cache key.
+    # `all`/`find`/`count` but not raw `select_rows` — and not bare
+    # `all`, which the ruby-family connection.rb reopen overrides with a
+    # lazy Relation (no `[-1]`); this wants the eager Array primitive.
+    # Lowerer-emitted Level-3 models OVERRIDE this with a
+    # `Db.prepare("... ORDER BY <pk> DESC LIMIT 1")` single-hydrate
+    # (synth_adapter_last), so real apps get one row — lobsters' /u no
+    # longer loads 10k users for its `User.last.id` cache key.
     def self._adapter_last
-      records = all
+      records = _adapter_all
       records.empty? ? nil : records[-1]
     end
 
@@ -278,7 +280,10 @@ module ActiveRecord
     end
 
     def self.destroy_all
-      records = all()
+      # `_adapter_all`, not `all`: the eager Array primitive, so the
+      # return value is the destroyed records themselves (a lazy
+      # Relation would re-query the now-empty table on a later read).
+      records = _adapter_all
       records.each { |r| r.destroy() }
       records
     end
