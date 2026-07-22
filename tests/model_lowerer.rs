@@ -561,8 +561,8 @@ end
         stmts.iter().any(|e| matches!(&*e.node,
             roundhouse::ExprNode::Send { method, args, .. }
                 if method.as_str() == "created_at_raw="
-                && matches!(args.first().map(|a| &*a.node), Some(roundhouse::ExprNode::Lit { .. })))),
-        "raw slot default-init missing"
+                && matches!(args.first().map(|a| &*a.node), Some(roundhouse::ExprNode::BoolOp { .. })))),
+        "raw slot standard `attrs[:col] || default` init missing"
     );
     let guarded_writers: Vec<&str> = stmts
         .iter()

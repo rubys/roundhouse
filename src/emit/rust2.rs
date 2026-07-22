@@ -829,6 +829,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                         pub fn all() -> Vec<{name}> {{ Self::_adapter_all() }}\n\
                         pub fn last() -> Option<{name}> {{ Self::_adapter_last() }}\n\
                         pub fn reload(&mut self) {{ let _ = self._adapter_reload(); }}\n\
+                        pub fn saved_changes(&self) -> serde_json::Value {{ serde_json::Value::Object(serde_json::Map::new()) }}\n\
+                        pub fn id_previously_changed_pred(&self) -> bool {{ false }}\n\
                         pub fn create(attrs: std::collections::HashMap<String, serde_json::Value>) -> {name} {{ let mut m = Self::new(attrs); m.save(); m }}\n\
                     }}\n",
                     name = lc.name.0.as_str(),

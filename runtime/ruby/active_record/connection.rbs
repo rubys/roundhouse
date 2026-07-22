@@ -30,5 +30,8 @@ module ActiveRecord
     def _as_json_only: (Array[Symbol] only) -> Hash[String, untyped]
     # Ruby-family override of base.rb's Array-returning fallback.
     def self.where: (Hash[Symbol, untyped] conditions) -> Relation
+    # Ruby-family overrides of base.rb's dirty-tracking stubs.
+    def __track_saved_changes: (bool was_new) -> void
+    def saved_changes: () -> Hash[Symbol, untyped]
   end
 end

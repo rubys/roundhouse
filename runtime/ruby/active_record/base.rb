@@ -40,14 +40,6 @@ module ActiveRecord
     def initialize(_attrs = {})
       @id = 0
       @errors = []
-      # Baseline seeded from `attributes` rather than a bare `{}` —
-      # at super() time the subclass columns are unset so the shapes
-      # are equivalent, and the call gives strict-target emitters the
-      # declared Hash[Symbol, untyped] type an empty literal lacks
-      # (go typed `{}` here as map[string]string vs the field's
-      # attributes-unified type).
-      @__last_saved_attributes = attributes
-      @saved_changes = {}
       @id_previously_changed = false
       @persisted = false
       @destroyed = false
@@ -364,44 +356,23 @@ module ActiveRecord
     # `id_previously_changed?` / the per-attribute predicates the
     # lowerer synthesizes over `saved_changes` — moderation-log
     # callbacks branch on them (lobsters' Category/Tag#log_modifications).
-    # Tracked at the attributes-hash grain: the snapshot from the
-    # previous save (empty for a fresh instance, so a create reports
-    # every attribute as [nil, value] — Rails' shape) diffs against the
-    # post-write attributes. Runs between the row write and the
-    # after_* hooks so callbacks observe the finished save, matching
-    # Rails. A record hydrated from the DB has no baseline yet, so its
-    # FIRST update over-reports; baseline-at-hydration is future work.
-    # Locals deliberately avoid `before`/`after` — `after` is a
-    # reserved word in Elixir and the transpiled runtime must parse
-    # on every target.
-    # Cross-target-safe idioms throughout: statement-ifs over
-    # ternaries and ivar-indexed writes over a local hash (go emits
-    # expression-ifs as statements and types `{}` locals poorly; the
-    # ivar's field type anchors the writes), plain `[]` over `key?`
-    # (missing-key nil IS the absent signal, and elixir's functional
-    # shape never runs Base#initialize, so `previous` can be nil there
-    # — every save then reports all attributes, the same honest
-    # over-report as a hydrated record's first update).
+    # These are STUBS: the attributes-hash diff lives in the
+    # ruby-family-only connection.rb reopen — its heterogeneous
+    # before/after hashes fought every strict transpile's type
+    # inference (crystal unified the ivar across attributes overrides,
+    # go typed the empty literals inconsistently), while the strict
+    # lanes only need the surface to COMPILE for the synthesized
+    # per-column predicates. Not-tracked is the honest strict-target
+    # subset: `saved_changes` stays empty (the same empty-literal
+    # shape as `attributes` above, which every target already types),
+    # so every predicate answers false.
     def __track_saved_changes(was_new)
-      previous = @__last_saved_attributes
-      current = attributes
-      @saved_changes = {}
-      current.each do |key, value|
-        prev = nil
-        unless previous.nil?
-          prev = previous[key]
-        end
-        if prev != value
-          @saved_changes[key] = [prev, value]
-        end
-      end
-      @__last_saved_attributes = current
       @id_previously_changed = was_new
       nil
     end
 
     def saved_changes
-      @saved_changes
+      {}
     end
 
     # `id` never appears in the subclass `attributes` hash, so the

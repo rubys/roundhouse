@@ -3030,6 +3030,11 @@ fn is_known_class_method(name: &str) -> bool {
         // parens these emit as method-value references, which Go's
         // `len()`, `for range`, and assignment all reject.
         | "comments" | "article"
+        // Dirty-tracking surface: a real Base method (compile-surface
+        // stub returning an empty map), read by the synthesized
+        // `<col>_previously_changed?` predicates as
+        // `self.saved_changes[:col]` — indexing needs the call.
+        | "saved_changes"
     )
 }
 

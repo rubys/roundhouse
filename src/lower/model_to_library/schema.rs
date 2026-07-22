@@ -1277,24 +1277,36 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
             // Temporal columns: callers pass native `Time` values
             // (`Username.create!(created_at: user.created_at)` in
             // lobsters), so the attrs value can't be stuffed into the
-            // raw ISO-text slot directly. Default-init the raw slot
-            // (strict targets need every field assigned on every
-            // path), then normalize a provided value straight into the
-            // raw slot via the `format_db_time` intrinsic — the same
-            // funnel `synth_temporal_writer` uses, called directly
-            // because several emitters render the public `<col>=`
-            // MethodDef without a property-setter counterpart for the
-            // computed `<col>` getter (tsc: TS2540 read-only). On the
-            // lenient ruby-family runtime the intrinsic passes
-            // stored-text strings through unchanged. Hydration is
-            // unaffected: `from_row`/`from_stmt` build via `new()` +
-            // `<col>_raw=`, never through attrs.
+            // raw ISO-text slot directly. First the STANDARD
+            // `attrs[:col] || <default>` raw-slot assignment — the
+            // exact pre-existing shape every target compiles (a Time
+            // value transiently lands in the raw slot; nothing reads
+            // between the two statements) — then a nil-guarded
+            // normalize through the `format_db_time` intrinsic, the
+            // same funnel `synth_temporal_writer` uses, called
+            // directly because several emitters render the public
+            // `<col>=` MethodDef without a property-setter
+            // counterpart for the computed getter (tsc TS2540). On
+            // the lenient ruby-family runtime the intrinsic passes
+            // stored-text strings through unchanged. rust2 strips the
+            // guard (let-binding constructor can't express it —
+            // honest not-normalized subset); hydration is unaffected
+            // (`from_row`/`from_stmt` write `<col>_raw=` directly).
+            let standard = Expr::new(
+                Span::synthetic(),
+                ExprNode::BoolOp {
+                    op: crate::expr::BoolOpKind::Or,
+                    surface: crate::expr::BoolOpSurface::Symbol,
+                    left: lookup.clone(),
+                    right: default,
+                },
+            );
             stmts.push(Expr::new(
                 Span::synthetic(),
                 ExprNode::Send {
                     recv: Some(self_ref()),
                     method: col_storage_setter(col),
-                    args: vec![default],
+                    args: vec![standard],
                     block: None,
                     parenthesized: false,
                 },

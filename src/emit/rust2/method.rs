@@ -15,6 +15,33 @@ use crate::ty::Ty;
 /// computed in `library.rs`. Returned tokens already include the
 /// trailing comma when a method has additional params, so callers
 /// can splice without re-checking emptiness.
+/// Drop the synthesized nil-guarded writer routes from an initialize
+/// body: If statements whose then-branch is (or begins with) a
+/// `self.<writer>=`-shaped Send. See the constructor-mode note at the
+/// call site.
+fn strip_guarded_writer_routes(body: &crate::expr::Expr) -> crate::expr::Expr {
+    use crate::expr::ExprNode;
+    let is_guarded_writer = |e: &crate::expr::Expr| -> bool {
+        let ExprNode::If { then_branch, .. } = &*e.node else { return false };
+        let head = match &*then_branch.node {
+            ExprNode::Seq { exprs } => exprs.first(),
+            _ => Some(then_branch),
+        };
+        matches!(
+            head.map(|h| &*h.node),
+            Some(ExprNode::Send { recv: Some(r), method, .. })
+                if matches!(&*r.node, ExprNode::SelfRef) && method.as_str().ends_with('=')
+        )
+    };
+    let mut out = body.clone();
+    if let ExprNode::Seq { exprs } = &*out.node {
+        let kept: Vec<crate::expr::Expr> =
+            exprs.iter().filter(|e| !is_guarded_writer(e)).cloned().collect();
+        *out.node = ExprNode::Seq { exprs: kept };
+    }
+    out
+}
+
 fn render_self_receiver(mutates: bool) -> &'static str {
     if mutates { "&mut self" } else { "&self" }
 }
@@ -444,7 +471,19 @@ pub(super) fn emit_instance_method(
     let body = super::expr::with_param_types(param_types, || super::expr::with_current_return_ty(return_ty.clone(), || super::expr::with_method_scope(&m.body, || {
         if is_init {
             let fields: Vec<String> = ivars.iter().map(|(n, _)| n.clone()).collect();
-            super::expr::with_constructor_mode(fields, || emit_expr(&m.body))
+            // Constructor mode renders field writes as `let` bindings
+            // feeding the final `Self { … }` literal — a conditional
+            // field write can't be expressed (an If would emit a
+            // shadow-and-drop `let` inside its own block). Strip the
+            // synthesized nil-guarded writer routes (temporal
+            // normalize / association-object fk / secure-password:
+            // `self.<x> = … unless attrs[:k].nil?`) — rust callers
+            // keep the flat default inits, the pre-existing honest
+            // subset. Matched narrowly (If whose then-branch is a
+            // self-writer Send) so user-written initialize logic is
+            // untouched.
+            let body = strip_guarded_writer_routes(&m.body);
+            super::expr::with_constructor_mode(fields, || emit_expr(&body))
         } else {
             // Body root is a function return position — let the
             // `Ivar` arm see `IN_RETURN_TAIL=true` so a getter shaped

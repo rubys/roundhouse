@@ -173,5 +173,33 @@ module ActiveRecord
     def self.where(conditions)
       ActiveRecord::Relation.new(self).where(conditions.to_h)
     end
+
+    # Saved-change tracking (ActiveModel::Dirty subset) — the real
+    # implementation behind base.rb's compile-surface stubs; see the
+    # note there for why the diff is ruby-family-only. The snapshot
+    # from the previous save (nil for a fresh instance, so a create
+    # reports every attribute as [nil, value] — Rails' shape) diffs
+    # against the post-write attributes; `save` calls this between the
+    # row write and the after_* hooks, so callbacks observe the
+    # finished save, matching Rails. A record hydrated from the DB has
+    # no baseline yet, so its FIRST update over-reports;
+    # baseline-at-hydration is future work.
+    def __track_saved_changes(was_new)
+      previous = @__last_saved_attributes
+      current = attributes
+      changes = {}
+      current.each do |key, value|
+        prev = previous.nil? ? nil : previous[key]
+        changes[key] = [prev, value] if prev != value
+      end
+      @__last_saved_attributes = current
+      @saved_changes = changes
+      @id_previously_changed = was_new
+      nil
+    end
+
+    def saved_changes
+      @saved_changes || {}
+    end
   end
 end
