@@ -746,7 +746,13 @@ fn every_runtime_method_body_concretely_typed() {
     // Same day: Relation gains block `all?` (element-typed `untyped`
     // by the R5 delegation convention) for the Relation-returning
     // `Base.where` fallback; +2 sites; ceiling raised 195 → 199.
-    const CEILING: usize = 199;
+    // 2026-07-22 request/session two-layer split: ActionDispatch::
+    // Request#format= takes `untyped` (Rails accepts a Symbol, the
+    // writer coerces to the canonical String) and the `env` compat
+    // bag's values are `untyped` by declaration (scratch keys like
+    // `exception_notifier.exception_data`); +3 sites; ceiling raised
+    // 199 → 202.
+    const CEILING: usize = 202;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

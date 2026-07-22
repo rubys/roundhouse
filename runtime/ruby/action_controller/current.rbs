@@ -1,0 +1,17 @@
+# Typing contract for the per-request context statics (current.rb
+# beside this file). Getter+setter def pairs per the runtime .rbs
+# convention.
+module ActionController
+  class Base
+    def request: () -> ActionDispatch::Request?
+    def request=: (ActionDispatch::Request?) -> ActionDispatch::Request?
+  end
+
+  module Current
+    def self.request: () -> ActionDispatch::Request?
+    def self.request=: (ActionDispatch::Request? value) -> ActionDispatch::Request?
+    def self.controller: () -> ActionController::Base?
+    def self.controller=: (ActionController::Base? value) -> ActionController::Base?
+    def self.session: () -> ActionDispatch::Session?
+  end
+end

@@ -1,0 +1,4 @@
+module ActionView
+  class MissingTemplate < StandardError
+  end
+end

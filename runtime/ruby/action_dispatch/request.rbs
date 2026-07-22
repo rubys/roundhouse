@@ -1,0 +1,42 @@
+# Typing contract for the typed Request value object (request.rb
+# beside this file). `attr_accessor` in the .rb surfaces here as
+# getter+setter def pairs, per the runtime .rbs convention.
+module ActionDispatch
+  class Request
+    @remote_ip: String
+    @path: String
+    @query_string: String
+    @request_method: String
+    @referer: String
+    @host: String
+    @format: String
+    @body: String
+    @env: Hash[String, untyped]
+
+    def remote_ip: () -> String
+    def remote_ip=: (String) -> String
+    def path: () -> String
+    def path=: (String) -> String
+    def query_string: () -> String
+    def query_string=: (String) -> String
+    def request_method: () -> String
+    def request_method=: (String) -> String
+    def referer: () -> String
+    def referer=: (String) -> String
+    def host: () -> String
+    def host=: (String) -> String
+    def format: () -> String
+    def format=: (untyped value) -> untyped
+    def body: () -> String
+    def body=: (String) -> String
+    def env: () -> Hash[String, untyped]
+    def env=: (Hash[String, untyped]) -> Hash[String, untyped]
+    def initialize: () -> void
+    def get?: () -> bool
+    def post?: () -> bool
+    def xhr?: () -> bool
+    def fullpath: () -> String
+    def original_fullpath: () -> String
+    def referrer: () -> String
+  end
+end

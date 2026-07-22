@@ -24,5 +24,11 @@ module ActionDispatch
     def each: () { (String, untyped) -> void } -> Session
     def to_h: () -> Hash[String, untyped]
     def merge: (Hash[String, untyped] other) -> Session
+
+    def self.from_cookie: (String raw) -> Session
+    def to_cookie: () -> String
+    def self.cookie_encode: (String s) -> String
+    def self.cookie_decode: (String s) -> String
+    def self.hex_val: (String c) -> Integer
   end
 end

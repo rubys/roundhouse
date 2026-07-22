@@ -60,6 +60,11 @@ require_relative "config/application"
 require_relative "runtime/active_record"
 require_relative "config/schema"
 require_relative "runtime/action_dispatch"
+# Typed Request value object (remote_ip / referer / xhr? / env bag) —
+# spinel-tree only; the CRuby overlay keeps its CGI-env-backed Request
+# at runtime/action_dispatch_request.rb and the two shapes must not
+# blend.
+require_relative "runtime/action_dispatch/request"
 require_relative "runtime/action_controller"
 require_relative "runtime/broadcasts"
 require_relative "runtime/tep/tep"
@@ -82,6 +87,11 @@ require_relative "config/importmap"
 # graph reaches every model file through it.
 require_relative "app/models"
 require_relative "app/views"
+# Session-backed CSRF token — reopens ViewHelpers, so it must load
+# AFTER everything that defines the shared empty-string default (the
+# same ordering contract as the CRuby overlay's
+# action_controller_session require).
+require_relative "runtime/csrf_token"
 
 module Main
 
@@ -293,7 +303,33 @@ module Main
     # the form body into flat bracket keys (req.req_params["article[title]"]);
     # re-nest them + merge the route's path captures (id, ...).
     controller.params = Main.nest_params(req.req_params, matched.path_params)
-    controller.session = ActionDispatch::Session.new
+    # Typed request object + per-request context statics. Helpers are
+    # module functions with no controller in scope; the emit rewrites
+    # their bare `request` reads to `ActionController::Current.request`
+    # and the layout reaches flash through `Current.controller`.
+    request_obj = ActionDispatch::Request.new
+    request_obj.request_method = verb
+    request_obj.path = request_path
+    qm = req.raw_path.index("?")
+    request_obj.query_string = req.raw_path[qm + 1, req.raw_path.length].to_s unless qm.nil?
+    request_obj.remote_ip = req.remote_host
+    request_obj.referer = req.req_headers.fetch("referer", "")
+    request_obj.host = req.req_headers.fetch("host", "localhost")
+    request_obj.format = request_format == :json ? "json" : "html"
+    request_obj.body = req.raw_body
+    env = {}
+    env["HTTP_USER_AGENT"] = req.req_headers.fetch("user-agent", "")
+    env["HTTP_X_REQUESTED_WITH"] = req.req_headers.fetch("x-requested-with", "")
+    request_obj.env = env
+    controller.request = request_obj
+    ActionController::Current.request = request_obj
+    ActionController::Current.controller = controller
+    # Cookie-carried session: restore the whole session from the
+    # `_session` cookie (url-encoded k=v pairs; empty when absent or
+    # garbled). Persisted below only when the encoding changed — an
+    # action that leaves the session untouched emits no Set-Cookie.
+    session_in = req.cookies.fetch("_session", "")
+    controller.session = ActionDispatch::Session.from_cookie(session_in)
     # Inbound flash: each message rides its own cookie (flash_notice /
     # flash_alert) so the value carries verbatim, no serialization. Load
     # through the constructor (NOT flash[:k]=) so to_persisted's show-once
@@ -340,6 +376,21 @@ module Main
       Main.set_flash_cookie(res, "flash_alert", pa)
     elsif req.cookies.fetch("flash_alert", "").length > 0
       Main.clear_flash_cookie(res, "flash_alert")
+    end
+
+    # Session persistence: re-encode whatever the action (or a lazy
+    # CSRF token generated during the layout render above) left in the
+    # session; Set-Cookie only on change. An emptied session
+    # (reset_session) clears the cookie. Runs after the render so
+    # lazily-created tokens are captured, and on redirects too (login
+    # sets `session[:u]` then 302s).
+    session_out = controller.session.to_cookie
+    if session_out != session_in
+      if session_out == ""
+        Main.clear_flash_cookie(res, "_session")
+      else
+        Main.set_flash_cookie(res, "_session", session_out)
+      end
     end
   end
 

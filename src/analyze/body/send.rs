@@ -1342,6 +1342,8 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         // `=~` (regex-match operator, desugars to `str.=~(re)`) → the
         // match position or nil. `match` (below) is the MatchData form.
         "=~" => Ty::Union { variants: vec![Ty::Int, Ty::Nil] },
+        // `index`/`rindex` → the substring position or nil.
+        "index" | "rindex" => Ty::Union { variants: vec![Ty::Int, Ty::Nil] },
         "chars" | "lines" | "split" | "bytes" | "scan" => Ty::Array { elem: Box::new(Ty::Str) },
         "empty?" | "blank?" | "present?" | "include?" | "start_with?"
         | "end_with?" | "match?" => Ty::Bool,
@@ -1405,6 +1407,9 @@ pub(super) fn sym_method(method: &Symbol) -> Ty {
 pub(super) fn int_method(method: &Symbol) -> Ty {
     match method.as_str() {
         "to_s" => Ty::Str,
+        // `chr` → the single-character String for the codepoint (the
+        // inverse of String#ord).
+        "chr" => Ty::Str,
         "to_i" | "abs" | "succ" | "pred" => Ty::Int,
         // Integer rounding is identity-typed: `n.ceil` / `n.floor` /
         // `n.round` / `n.truncate` with no digits arg return an Integer
