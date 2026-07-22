@@ -54,7 +54,7 @@ use super::EmittedFile;
 
 mod views;
 
-pub fn emit(app: &App, fixture: &std::path::Path) -> Vec<EmittedFile> {
+pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files: Vec<EmittedFile> = Vec::new();
     files.push(file("Gemfile", GEMFILE));
     files.push(file("config.ru", CONFIG_RU));
@@ -62,7 +62,7 @@ pub fn emit(app: &App, fixture: &std::path::Path) -> Vec<EmittedFile> {
     files.extend(emit_migrations(app));
     files.extend(emit_models(app));
     files.push(emit_app_rb(app));
-    files.extend(emit_views(app, fixture));
+    files.extend(emit_views(app));
     files
 }
 
@@ -761,10 +761,13 @@ fn emit_node(
         }
     }
 
-    // Dynamic child: an `Integer` matcher (Rails ids are integer PKs;
-    // `find` on a non-numeric id 404s, so the typed matcher preserves
-    // observable behavior).
+    // Dynamic child. Id-shaped params (`:id` / `:*_id`) become `Integer`
+    // matchers — Rails ids are integer PKs and `find` on a non-numeric
+    // id 404s, so the typed matcher preserves observable behavior.
+    // Anything else (`:username`, `:tag`) takes Roda's `String` matcher:
+    // typing those Integer would silently unroute every real request.
     if let Some((names, child)) = &node.dynamic {
+        let matcher = matcher_for(names);
         let is_leaf =
             child.stat.is_empty() && child.dynamic.is_none() && child.terminals.len() == 1;
         let var = block_var(names, is_leaf, parent_seg);
@@ -777,16 +780,28 @@ fn emit_node(
         }
         if is_leaf {
             let t = &child.terminals[0];
-            out.push_str(&format!("{pad}r.{} Integer do |{var}|\n", verb(&t.method)));
+            out.push_str(&format!("{pad}r.{} {matcher} do |{var}|\n", verb(&t.method)));
             emit_interior_loads(child, ctx, &var, names, depth + 1, out);
             emit_terminal_body(t, ctx, depth + 1, &inner, out);
             out.push_str(&format!("{pad}end\n"));
         } else {
-            out.push_str(&format!("{pad}r.on Integer do |{var}|\n"));
+            out.push_str(&format!("{pad}r.on {matcher} do |{var}|\n"));
             emit_interior_loads(child, ctx, &var, names, depth + 1, out);
             emit_node(child, ctx, depth + 1, None, &inner, out);
             out.push_str(&format!("{pad}end\n"));
         }
+    }
+}
+
+/// Roda matcher class for a dynamic node: id-shaped params get the
+/// typed `Integer` matcher; anything else (`:username`, `:tag`) gets
+/// `String` — typing those Integer would silently unroute every real
+/// request.
+fn matcher_for(names: &[String]) -> &'static str {
+    if names.iter().all(|n| n == "id" || n.ends_with("_id")) {
+        "Integer"
+    } else {
+        "String"
     }
 }
 
@@ -1558,13 +1573,13 @@ fn is_model(ctx: &EmitCtx, path: &[crate::ident::Symbol]) -> bool {
 
 /// Views: the synthesized layout + not_found, plus the translated
 /// Rails ERB (see `views::translate_views`).
-fn emit_views(app: &App, fixture: &std::path::Path) -> Vec<EmittedFile> {
+fn emit_views(app: &App) -> Vec<EmittedFile> {
     let routes = flatten_routes(app);
     let mut out = vec![
         file("views/layout.erb", LAYOUT_ERB),
         file("views/not_found.erb", "<h1>404 Not Found</h1>\n"),
     ];
-    out.extend(views::translate_views(app, fixture, &routes));
+    out.extend(views::translate_views(app, &routes));
     out
 }
 
@@ -1653,6 +1668,13 @@ mod tests {
         // the `r.post true` shape.
         assert_eq!(comments.terminals.len(), 1);
         assert!(comments.dynamic.is_some());
+    }
+
+    #[test]
+    fn matcher_picks_integer_for_ids_only() {
+        assert_eq!(matcher_for(&["id".to_string(), "article_id".to_string()]), "Integer");
+        assert_eq!(matcher_for(&["username".to_string()]), "String");
+        assert_eq!(matcher_for(&["id".to_string(), "tag".to_string()]), "String");
     }
 
     #[test]

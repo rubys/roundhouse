@@ -595,7 +595,7 @@ pub fn target_files(
         BuildTarget::Spinel => spinel_files(app, fixture).and_then(spin_shape),
         BuildTarget::Ruby => ruby_runtime_files(app, fixture),
         BuildTarget::Jruby => jruby_runtime_files(app, fixture),
-        BuildTarget::Roda => Ok(sort_files(emit::roda::emit(app, fixture))),
+        BuildTarget::Roda => Ok(sort_files(emit::roda::emit(app))),
         BuildTarget::Crystal => Ok(sort_files(emit::crystal::emit(app))),
         BuildTarget::Elixir => Ok(sort_files(emit::elixir::emit(app))),
         BuildTarget::Go => Ok(sort_files(emit::go::emit(app))),

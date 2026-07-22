@@ -119,20 +119,34 @@ fn transpile_inner(json_in: &str) -> String {
         Err(e) => return error_json(&format!("ingest: {e}")),
     };
 
-    let mut analyzer = Analyzer::new(&app);
-    analyzer.analyze(&mut app);
+    // The Roda conversion target is source-to-source from the
+    // INGEST-shape IR — same contract as the CLI (bin/roundhouse):
+    // lowering would rewrite the controller bodies into runtime
+    // vocabulary, the wrong altitude to re-idiomize into Sequel/Roda
+    // from. See `emit::roda`.
+    let is_roda = input.language.as_str() == "roda";
 
-    // Same post-analyze shared lowerings as the CLI transpile driver
-    // (bin/roundhouse): the playground emits from the same IR the CLI
-    // does. Residue joins the diagnostics below; synthetic spans drop
-    // out in the existing filter.
-    let lower_diags =
-        roundhouse::lower::apply_post_analyze_lowerings(&mut app, analyzer.class_registry());
+    // (The analyzer is constructed either way — the LAST_GOOD query
+    // snapshot at the bottom owns it; on a roda run it simply never
+    // analyzed, so completions/hover answer empty rather than stale.)
+    let mut analyzer = Analyzer::new(&app);
+    let lower_diags = if is_roda {
+        Vec::new()
+    } else {
+        analyzer.analyze(&mut app);
+
+        // Same post-analyze shared lowerings as the CLI transpile driver
+        // (bin/roundhouse): the playground emits from the same IR the CLI
+        // does. Residue joins the diagnostics below; synthetic spans drop
+        // out in the existing filter.
+        roundhouse::lower::apply_post_analyze_lowerings(&mut app, analyzer.class_registry())
+    };
 
     // Analyzer diagnostics + gap-attributed coverage notes (Info severity),
     // resolved to source positions. Synthetic spans (no source site) are
-    // dropped — there's nowhere to put a marker.
-    let mut diags = diagnose(&app);
+    // dropped — there's nowhere to put a marker. (Roda: analyze never
+    // ran, so its walker diagnostics would be all noise.)
+    let mut diags = if is_roda { Vec::new() } else { diagnose(&app) };
     roundhouse::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &gaps);
     diags.extend(parse_diags);
     diags.extend(lower_diags);
@@ -210,6 +224,10 @@ fn transpile_inner(json_in: &str) -> String {
         // Ruby/spinel's aggregate emitter is `emit_spinel` (legacy name); it
         // returns the full project (.rb + .rbs sidecars) like the others' emit().
         "ruby" | "spinel" => ruby::emit_spinel(&app),
+        // Rails → Roda + Sequel source conversion (issue #67): runs on
+        // the real roda/sequel gems, emitted from the ingest-shape IR
+        // (see the is_roda gate above).
+        "roda" => roundhouse::emit::roda::emit(&app),
         other => return error_json(&format!("unknown language: {other}")),
     };
 

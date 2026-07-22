@@ -15,8 +15,6 @@
 //! conversion rule. `.json.jbuilder` views are skipped — the html-only
 //! format asymmetry is part of the conversion ledger (see mod.rs).
 
-use std::path::Path;
-
 use crate::app::App;
 use crate::dialect::HttpMethod;
 use crate::lower::routes::FlatRoute;
@@ -29,43 +27,37 @@ pub(super) struct ViewCx<'a> {
     pub routes: &'a [FlatRoute],
 }
 
-/// Walk `<fixture>/app/views/`, translating each non-layout html.erb
-/// into `views/<dir>/<name>.erb`.
-pub(super) fn translate_views(
-    app: &App,
-    fixture: &Path,
-    routes: &[FlatRoute],
-) -> Vec<EmittedFile> {
+/// Translate every non-layout `app/views/**/*.html.erb` into
+/// `views/<dir>/<name>.erb`. The ERB text comes from `app.sources` —
+/// the ingest registry drains into the App (`ingest/app.rs`), so the
+/// raw template text is available identically on every ingest route:
+/// directory ingest on the CLI, `ingest_app_from_tree` in the wasm
+/// playground (which has no filesystem at all).
+pub(super) fn translate_views(app: &App, routes: &[FlatRoute]) -> Vec<EmittedFile> {
     let cx = ViewCx { app, routes };
     let mut out = Vec::new();
-    let views_root = fixture.join("app/views");
-    let Ok(dirs) = std::fs::read_dir(&views_root) else { return out };
-    let mut dir_names: Vec<String> = dirs
-        .filter_map(|d| d.ok())
-        .filter(|d| d.path().is_dir())
-        .map(|d| d.file_name().to_string_lossy().to_string())
-        .filter(|n| n != "layouts")
+    // Registered paths are fixture-prefixed on the CLI route
+    // (`fixtures/real-blog/app/views/…`) and tree-relative in the wasm
+    // playground — anchor on the `app/views/` marker, not a prefix.
+    let mut files: Vec<(&str, &str)> = app
+        .sources
+        .iter()
+        .filter_map(|sf| {
+            let pos = sf.path.find("app/views/")?;
+            Some((&sf.path[pos + "app/views/".len()..], sf.text.as_str()))
+        })
         .collect();
-    dir_names.sort();
-    for dir in &dir_names {
-        let Ok(files) = std::fs::read_dir(views_root.join(dir)) else { continue };
-        let mut names: Vec<String> = files
-            .filter_map(|f| f.ok())
-            .map(|f| f.file_name().to_string_lossy().to_string())
-            .filter(|n| n.ends_with(".html.erb"))
-            .collect();
-        names.sort();
-        for name in &names {
-            let src = match std::fs::read_to_string(views_root.join(dir).join(name)) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            let stem = name.trim_end_matches(".html.erb");
-            out.push(EmittedFile {
-                path: format!("views/{dir}/{stem}.erb").into(),
-                content: translate_erb(&src, &cx, dir),
-            });
+    files.sort_by(|a, b| a.0.cmp(b.0));
+    for (rel, src) in files {
+        if !rel.ends_with(".html.erb") || rel.starts_with("layouts/") {
+            continue;
         }
+        let Some((dir, name)) = rel.rsplit_once('/') else { continue };
+        let stem = name.trim_end_matches(".html.erb");
+        out.push(EmittedFile {
+            path: format!("views/{dir}/{stem}.erb").into(),
+            content: translate_erb(src, &cx, dir),
+        });
     }
     out
 }

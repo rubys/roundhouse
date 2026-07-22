@@ -49,7 +49,7 @@ fn write_conversion(scratch: &Path) {
         std::fs::remove_dir_all(scratch).expect("clean scratch");
     }
     let rails = ingest_rails();
-    let files = roundhouse::emit::roda::emit(&rails, Path::new("fixtures/real-blog"));
+    let files = roundhouse::emit::roda::emit(&rails);
     for f in files {
         let out = scratch.join(&f.path);
         if let Some(parent) = out.parent() {
@@ -89,6 +89,17 @@ fn route_rows(app: &App) -> Vec<(String, String, String, String)> {
 fn conversion_roundtrips_through_ingest() {
     let scratch = scratch_dir("roundtrip");
     write_conversion(&scratch);
+
+    // The ERB translation reads app.sources (not the filesystem — the
+    // wasm playground has none); a plumbing regression there would
+    // silently emit a tree with no views, which this ingest-shape
+    // comparison alone wouldn't catch.
+    let index = std::fs::read_to_string(scratch.join("views/articles/index.erb"))
+        .expect("translated index view present");
+    assert!(
+        index.contains("part(\"articles/_article\""),
+        "index view should render the translated collection loop"
+    );
 
     let rails = ingest_rails();
     let roda =

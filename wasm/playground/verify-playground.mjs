@@ -56,11 +56,27 @@ console.log("default target:", defaultTarget, "| options:", optionOrder.join(", 
 if (defaultTarget !== "ruby") fail(`expected default target ruby, got ${defaultTarget}`);
 if (optionOrder.join() !== [...optionOrder].sort().join())
   fail(`target options not alphabetical: ${optionOrder.join(", ")}`);
-for (const t of ["kotlin", "swift", "ruby"])
+for (const t of ["kotlin", "swift", "ruby", "roda"])
   if (!optionOrder.includes(t)) fail(`missing newly-wired target ${t}`);
 const rubyBoot = await page.evaluate(() => window.__playground.output());
 if (rubyBoot.error) fail(`ruby default transpile errored: ${rubyBoot.error}`);
 if (!rubyBoot.files?.some((f) => f.path.endsWith(".rb"))) fail("ruby default emitted no .rb files");
+
+// roda: the Rails -> Roda + Sequel source conversion (issue #67). The
+// converted app.rb carries the re-nested routing tree; the views
+// translate from app.sources (no filesystem in wasm — the regression
+// this guards).
+console.log("\n=== roda conversion ===");
+await page.evaluate(() => window.__playground.setTarget("roda"));
+const roda = await page.evaluate(() => window.__playground.output());
+if (roda.error) fail(`roda conversion errored: ${roda.error}`);
+const rodaApp = roda.files?.find((f) => f.path === "app.rb");
+if (!rodaApp?.content?.includes("class App < Roda")) fail("roda conversion emitted no Roda app class");
+if (!rodaApp?.content?.includes('r.on "articles"')) fail("roda conversion missing the routing tree");
+const rodaIndex = roda.files?.find((f) => f.path === "views/articles/index.erb");
+if (!rodaIndex?.content?.includes("part(")) fail("roda conversion missing translated views (app.sources plumbing)");
+console.log(`roda: ${roda.files.length} files, app.rb + translated views present`);
+await page.evaluate(() => window.__playground.setTarget("ruby"));
 
 // Switch to typescript for the TS-shaped assertions that follow.
 await page.evaluate(() => window.__playground.setTarget("typescript"));
