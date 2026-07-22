@@ -52,7 +52,9 @@ use crate::schema::{ColumnType, Table};
 use super::ruby::emit_expr;
 use super::EmittedFile;
 
-pub fn emit(app: &App) -> Vec<EmittedFile> {
+mod views;
+
+pub fn emit(app: &App, fixture: &std::path::Path) -> Vec<EmittedFile> {
     let mut files: Vec<EmittedFile> = Vec::new();
     files.push(file("Gemfile", GEMFILE));
     files.push(file("config.ru", CONFIG_RU));
@@ -60,7 +62,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     files.extend(emit_migrations(app));
     files.extend(emit_models(app));
     files.push(emit_app_rb(app));
-    files.extend(emit_views(app));
+    files.extend(emit_views(app, fixture));
     files
 }
 
@@ -626,10 +628,10 @@ fn emit_app_rb(app: &App) -> EmittedFile {
 
     let mut body = String::new();
     let ctx = EmitCtx { app, routes: &routes, loads: &loads };
-    emit_node(&trie, &ctx, 2, None, &mut body);
+    emit_node(&trie, &ctx, 2, None, &[], &mut body);
 
     let content = format!(
-        r#"{requires}
+        r##"{requires}
 
 # Converted from a Rails application by roundhouse (`--target roda`,
 # issue #67). Convertible constructs are emitted as idiomatic
@@ -653,8 +655,19 @@ class App < Roda
 
   route do |r|
 {body}  end
+
+  # --- view helpers ---------------------------------------------------
+
+  def truncate(text, length: 100)
+    text = text.to_s
+    text.length > length ? "#{{text[0, length]}}…" : text
+  end
+
+  def pluralize(count, singular)
+    "#{{count}} #{{count == 1 ? singular : "#{{singular}}s"}}"
+  end
 end
-"#,
+"##,
         requires = requires.join("\n"),
         body = body,
     );
@@ -681,6 +694,7 @@ fn emit_node(
     ctx: &EmitCtx,
     depth: usize,
     parent_seg: Option<&str>,
+    bindings: &[(String, String)],
     out: &mut String,
 ) {
     let pad = indent(depth);
@@ -701,7 +715,7 @@ fn emit_node(
                     ));
                 } else {
                     out.push_str(&format!("{pad}r.root do\n"));
-                    emit_terminal_body(t, ctx, depth + 1, out);
+                    emit_terminal_body(t, ctx, depth + 1, bindings, out);
                     out.push_str(&format!("{pad}end\n"));
                 }
             } else {
@@ -717,7 +731,7 @@ fn emit_node(
             out.push_str(&format!("{pad}r.is do\n"));
             for t in &node.terminals {
                 out.push_str(&format!("{}r.{} do\n", indent(depth + 1), verb(&t.method)));
-                emit_terminal_body(t, ctx, depth + 2, out);
+                emit_terminal_body(t, ctx, depth + 2, bindings, out);
                 out.push_str(&format!("{}end\n", indent(depth + 1)));
             }
             out.push_str(&format!("{pad}end\n"));
@@ -727,7 +741,7 @@ fn emit_node(
             // consumption, so longer paths fall through to the branches.
             let t = &node.terminals[0];
             out.push_str(&format!("{pad}r.{} true do\n", verb(&t.method)));
-            emit_terminal_body(t, ctx, depth + 1, out);
+            emit_terminal_body(t, ctx, depth + 1, bindings, out);
             out.push_str(&format!("{pad}end\n"));
         }
     }
@@ -738,11 +752,11 @@ fn emit_node(
         if child.stat.is_empty() && child.dynamic.is_none() && child.terminals.len() == 1 {
             let t = &child.terminals[0];
             out.push_str(&format!("{pad}r.{} \"{seg}\" do\n", verb(&t.method)));
-            emit_terminal_body(t, ctx, depth + 1, out);
+            emit_terminal_body(t, ctx, depth + 1, bindings, out);
             out.push_str(&format!("{pad}end\n"));
         } else {
             out.push_str(&format!("{pad}r.on \"{seg}\" do\n"));
-            emit_node(child, ctx, depth + 1, Some(seg), out);
+            emit_node(child, ctx, depth + 1, Some(seg), bindings, out);
             out.push_str(&format!("{pad}end\n"));
         }
     }
@@ -754,16 +768,23 @@ fn emit_node(
         let is_leaf =
             child.stat.is_empty() && child.dynamic.is_none() && child.terminals.len() == 1;
         let var = block_var(names, is_leaf, parent_seg);
+        // Every source param name at this position binds to the one
+        // block variable; later (deeper) entries shadow earlier ones,
+        // so body conversion resolves a param to its innermost binding.
+        let mut inner: Vec<(String, String)> = bindings.to_vec();
+        for n in names {
+            inner.push((n.clone(), var.clone()));
+        }
         if is_leaf {
             let t = &child.terminals[0];
             out.push_str(&format!("{pad}r.{} Integer do |{var}|\n", verb(&t.method)));
             emit_interior_loads(child, ctx, &var, names, depth + 1, out);
-            emit_terminal_body(t, ctx, depth + 1, out);
+            emit_terminal_body(t, ctx, depth + 1, &inner, out);
             out.push_str(&format!("{pad}end\n"));
         } else {
             out.push_str(&format!("{pad}r.on Integer do |{var}|\n"));
             emit_interior_loads(child, ctx, &var, names, depth + 1, out);
-            emit_node(child, ctx, depth + 1, None, out);
+            emit_node(child, ctx, depth + 1, None, &inner, out);
             out.push_str(&format!("{pad}end\n"));
         }
     }
@@ -877,7 +898,13 @@ fn canonical_static_path(routes: &[FlatRoute], root: &FlatRoute) -> Option<Strin
 
 // ── Terminal bodies (Action → handler block) ────────────────────────
 
-fn emit_terminal_body(route: &FlatRoute, ctx: &EmitCtx, depth: usize, out: &mut String) {
+fn emit_terminal_body(
+    route: &FlatRoute,
+    ctx: &EmitCtx,
+    depth: usize,
+    bindings: &[(String, String)],
+    out: &mut String,
+) {
     let pad = indent(depth);
     let Some(controller) = ctx
         .app
@@ -899,7 +926,7 @@ fn emit_terminal_body(route: &FlatRoute, ctx: &EmitCtx, depth: usize, out: &mut 
         return;
     };
 
-    match convert_get_body(route, controller, action, ctx) {
+    match convert_body(route, controller, action, ctx, bindings) {
         Some(lines) => {
             for l in lines {
                 if l.is_empty() {
@@ -934,35 +961,49 @@ fn view_dir(controller: &Controller) -> String {
     snake.strip_suffix("_controller").unwrap_or(&snake).to_string()
 }
 
-/// Day-1 conversion subset: GET actions whose bodies are (possibly
-/// empty) sequences of assignments over ActiveRecord query chains —
-/// index/show/new/edit shapes. Anything else returns None and falls to
-/// the commented-original path. The mutating verbs land next.
-fn convert_get_body(
+/// Convert a whole action body. The `respond_to` wrapper is unwrapped
+/// first (the html branch survives; json/turbo_stream branches drop —
+/// the Roda exemplar is an html app, and the format asymmetry is part
+/// of the honest conversion ledger), then each statement converts
+/// through `convert_stmt`. Any statement outside the recognized set
+/// fails the WHOLE body over to the commented-original path — partial
+/// bodies would be behaviorally wrong, not machine-shaped.
+fn convert_body(
     route: &FlatRoute,
     controller: &Controller,
     action: &Action,
     ctx: &EmitCtx,
+    bindings: &[(String, String)],
 ) -> Option<Vec<String>> {
-    if route.method != HttpMethod::Get {
-        return None;
+    let body = unwrap_respond_to(&action.body);
+    let cx = BodyCx { ctx, controller, bindings };
+    let mut lines = convert_stmts(&statements_owned(&body), &cx)?;
+    if route.method == HttpMethod::Get {
+        let template = match &action.renders {
+            RenderTarget::Template { name, .. } => name.to_string(),
+            RenderTarget::Inferred => action.name.to_string(),
+            _ => return None,
+        };
+        lines.push(format!("view \"{}/{}\"", view_dir(controller), template));
     }
-    let mut lines = Vec::new();
-    for stmt in statements(&action.body) {
-        // Statements the interior load already performs (the
-        // before_action find) never appear in ingest GET bodies — the
-        // filter is a separate method — so every statement here must
-        // convert or the whole body falls back.
-        let converted = convert_statement(stmt, ctx)?;
-        lines.push(converted);
-    }
-    let template = match &action.renders {
-        RenderTarget::Template { name, .. } => name.to_string(),
-        RenderTarget::Inferred => action.name.to_string(),
-        _ => return None,
-    };
-    lines.push(format!("view \"{}/{}\"", view_dir(controller), template));
     Some(lines)
+}
+
+/// Per-body conversion context: the controller (for `<model>_params`
+/// strong-parameter resolution) and the path-param → route-block-var
+/// bindings accumulated down the trie (innermost last).
+struct BodyCx<'a> {
+    ctx: &'a EmitCtx<'a>,
+    controller: &'a Controller,
+    bindings: &'a [(String, String)],
+}
+
+impl BodyCx<'_> {
+    /// Innermost binding for a path-param name (`:id` in a nested route
+    /// resolves to the deepest Integer block var, e.g. `comment_id`).
+    fn var_for(&self, param: &str) -> Option<&str> {
+        self.bindings.iter().rev().find(|(p, _)| p == param).map(|(_, v)| v.as_str())
+    }
 }
 
 fn statements(body: &Expr) -> Vec<&Expr> {
@@ -972,13 +1013,463 @@ fn statements(body: &Expr) -> Vec<&Expr> {
     }
 }
 
-/// Convert one ingest statement to Sequel-idiom source, or None when it
-/// isn't in the Day-1 subset.
-fn convert_statement(stmt: &Expr, ctx: &EmitCtx) -> Option<String> {
-    let ExprNode::Assign { target, value } = &*stmt.node else { return None };
-    let crate::expr::LValue::Ivar { name } = target else { return None };
-    let converted = sequelize_query(value, ctx)?;
-    Some(format!("@{name} = {converted}"))
+fn statements_owned(body: &Expr) -> Vec<Expr> {
+    match &*body.node {
+        ExprNode::Seq { exprs } => exprs.clone(),
+        _ => vec![body.clone()],
+    }
+}
+
+fn convert_stmts(stmts: &[Expr], cx: &BodyCx) -> Option<Vec<String>> {
+    let mut lines = Vec::new();
+    for s in stmts {
+        lines.extend(convert_stmt(s, cx)?);
+    }
+    Some(lines)
+}
+
+/// One statement → Roda/Sequel source lines, or None (not in the
+/// recognized conversion set).
+fn convert_stmt(stmt: &Expr, cx: &BodyCx) -> Option<Vec<String>> {
+    match &*stmt.node {
+        // Format-drop residue / nested sequences: convert recursively.
+        ExprNode::Seq { exprs } => convert_stmts(exprs, cx),
+        ExprNode::Assign { target, value } => {
+            let crate::expr::LValue::Ivar { name } = target else { return None };
+            convert_ivar_assign(name.as_str(), value, cx)
+        }
+        ExprNode::If { cond, then_branch, else_branch } => {
+            convert_if(cond, then_branch, else_branch, cx)
+        }
+        ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "redirect_to" => {
+            convert_redirect(args, cx)
+        }
+        ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "render" => {
+            convert_render(args, cx)
+        }
+        // `@article.destroy!` → `@article.destroy` (Sequel #destroy
+        // raises on hook failure already; the bang distinction is
+        // Rails-side validation semantics the blog doesn't exercise).
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if (method.as_str() == "destroy" || method.as_str() == "destroy!")
+                && args.is_empty() =>
+        {
+            let ExprNode::Ivar { name } = &*r.node else { return None };
+            Some(vec![format!("@{name}.destroy")])
+        }
+        _ => None,
+    }
+}
+
+/// `@x = <value>` shapes: strong-params construction, association
+/// build, association find-by-param, and the Day-1 query chains.
+fn convert_ivar_assign(name: &str, value: &Expr, cx: &BodyCx) -> Option<Vec<String>> {
+    // `@article = Article.new(article_params)` →
+    // `@article = Article.new.set_fields(r.params["article"], %w[title body])`
+    if let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*value.node {
+        if method.as_str() == "new" && args.len() == 1 {
+            if let ExprNode::Const { path } = &*recv.node {
+                if is_model(cx.ctx, path) {
+                    let (key, fields) = params_fields(cx, &args[0])?;
+                    return Some(vec![format!(
+                        "@{name} = {}.new.set_fields(r.params[\"{key}\"], {})",
+                        path.last().unwrap(),
+                        fields_list(&fields)
+                    )]);
+                }
+            }
+        }
+        // `@comment = @article.comments.build(comment_params)` →
+        //   `@comment = Comment.new.set_fields(r.params["comment"], %w[…])`
+        //   `@comment.article = @article`
+        // (NOT `add_comment` — Rails `build` doesn't save; the explicit
+        // association assignment + later `save` matches, and is what the
+        // exemplar does.)
+        if method.as_str() == "build" && args.len() == 1 {
+            if let ExprNode::Send { recv: Some(owner), method: assoc, args: aargs, .. } =
+                &*recv.node
+            {
+                if aargs.is_empty() {
+                    if let ExprNode::Ivar { name: owner_ivar } = &*owner.node {
+                        let target = assoc_target_model(cx.ctx, assoc.as_str())?;
+                        let belongs = belongs_to_name(cx.ctx, &target, owner_ivar.as_str())?;
+                        let (key, fields) = params_fields(cx, &args[0])?;
+                        return Some(vec![
+                            format!(
+                                "@{name} = {target}.new.set_fields(r.params[\"{key}\"], {})",
+                                fields_list(&fields)
+                            ),
+                            format!("@{name}.{belongs} = @{owner_ivar}"),
+                        ]);
+                    }
+                }
+            }
+        }
+        // `@comment = @article.comments.find(params.expect(:id))` →
+        // `next unless @comment = @article.comments_dataset.with_pk(comment_id)`
+        // Rails `find` raises RecordNotFound (→ rescued 404); with_pk
+        // returns nil and `next` abandons the route → not_found 404.
+        if method.as_str() == "find" && args.len() == 1 {
+            if let ExprNode::Send { recv: Some(owner), method: assoc, args: aargs, .. } =
+                &*recv.node
+            {
+                if aargs.is_empty() {
+                    if let ExprNode::Ivar { name: owner_ivar } = &*owner.node {
+                        let key = first_symbol_in(&args[0])?;
+                        let var = cx.var_for(&key)?;
+                        return Some(vec![format!(
+                            "next unless @{name} = @{owner_ivar}.{assoc}_dataset.with_pk({var})"
+                        )]);
+                    }
+                }
+            }
+        }
+    }
+    // Day-1 query chains (`Article.includes(...).order(...)`, `Article.new`).
+    let converted = sequelize_query(value, cx.ctx)?;
+    Some(vec![format!("@{name} = {converted}")])
+}
+
+/// `if @x.save` / `if @x.update(<params>)` conditionals. `update`
+/// splits into `set_fields` + `if save` (Sequel's #update saves
+/// immediately and raises-or-returns-self — the two-step form keeps the
+/// Rails branch semantics with validation-once, like the exemplar).
+fn convert_if(
+    cond: &Expr,
+    then_branch: &Expr,
+    else_branch: &Expr,
+    cx: &BodyCx,
+) -> Option<Vec<String>> {
+    let mut lines: Vec<String> = Vec::new();
+    let cond_str = match &*cond.node {
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if method.as_str() == "save" && args.is_empty() =>
+        {
+            let ExprNode::Ivar { name } = &*r.node else { return None };
+            format!("if @{name}.save")
+        }
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if method.as_str() == "update" && args.len() == 1 =>
+        {
+            let ExprNode::Ivar { name } = &*r.node else { return None };
+            let (key, fields) = params_fields(cx, &args[0])?;
+            lines.push(format!(
+                "@{name}.set_fields(r.params[\"{key}\"], {})",
+                fields_list(&fields)
+            ));
+            format!("if @{name}.save")
+        }
+        _ => return None,
+    };
+    lines.push(cond_str);
+    for l in convert_stmts(&statements_owned(then_branch), cx)? {
+        lines.push(format!("  {l}"));
+    }
+    let else_stmts = statements_owned(else_branch);
+    let else_empty = else_stmts.len() == 1
+        && matches!(&*else_stmts[0].node, ExprNode::Lit { value: Literal::Nil })
+        || else_stmts.is_empty();
+    if !else_empty {
+        lines.push("else".to_string());
+        for l in convert_stmts(&else_stmts, cx)? {
+            lines.push(format!("  {l}"));
+        }
+    }
+    lines.push("end".to_string());
+    Some(lines)
+}
+
+/// `redirect_to <target>, notice: "…"` → flash assignment(s) + a
+/// literal-path `r.redirect`. `status: :see_other` drops — Roda's
+/// redirect issues 302 and browsers treat both identically for
+/// post-form navigation (exemplar parity).
+fn convert_redirect(args: &[Expr], cx: &BodyCx) -> Option<Vec<String>> {
+    let target = args.first()?;
+    let mut lines = Vec::new();
+    for arg in &args[1..] {
+        if let ExprNode::Hash { entries, .. } = &*arg.node {
+            for (k, v) in entries {
+                let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
+                    return None;
+                };
+                match key.as_str() {
+                    "notice" | "alert" => {
+                        lines.push(format!("flash[\"{key}\"] = {}", emit_expr(v)));
+                    }
+                    "status" => {}
+                    _ => return None,
+                }
+            }
+        } else {
+            return None;
+        }
+    }
+    lines.push(format!("r.redirect {}", redirect_path(target, cx)?));
+    Some(lines)
+}
+
+/// The redirect target as a Ruby path expression (with surrounding
+/// quotes). `@article` → `"/articles/#{@article.id}"` via the
+/// resource's named show route; `articles_path` etc. resolve through
+/// the flat table's helper names.
+fn redirect_path(target: &Expr, cx: &BodyCx) -> Option<String> {
+    match &*target.node {
+        ExprNode::Ivar { name } => {
+            let route = named_route(cx.ctx, name.as_str())?;
+            Some(format!("\"{}\"", substitute_params(&route.path, &format!("#{{@{name}.id}}"))))
+        }
+        ExprNode::Send { recv: None, method, args, .. }
+            if method.as_str().ends_with("_path") =>
+        {
+            let as_name = method.as_str().strip_suffix("_path").unwrap();
+            let route = named_route(cx.ctx, as_name)?;
+            if route.path_params.is_empty() && args.is_empty() {
+                return Some(format!("\"{}\"", route.path));
+            }
+            if route.path_params.len() == 1 && args.len() == 1 {
+                if let ExprNode::Ivar { name } = &*args[0].node {
+                    return Some(format!(
+                        "\"{}\"",
+                        substitute_params(&route.path, &format!("#{{@{name}.id}}"))
+                    ));
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// The named flat route for a helper stem (`article` → GET show route
+/// whose as_name is `article`).
+fn named_route<'a>(ctx: &'a EmitCtx, as_name: &str) -> Option<&'a FlatRoute> {
+    ctx.routes.iter().find(|r| r.named && r.as_name == as_name && r.method == HttpMethod::Get)
+        .or_else(|| ctx.routes.iter().find(|r| r.named && r.as_name == as_name))
+}
+
+/// Replace every `:param` segment with the given interpolation.
+fn substitute_params(path: &str, interp: &str) -> String {
+    path.split('/')
+        .map(|seg| if seg.starts_with(':') { interp } else { seg })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// `render :new, status: :unprocessable_content` → `view "articles/new"`.
+/// The status drops (exemplar parity: the Roda exemplar re-renders the
+/// form at 200 — carried in the conversion ledger).
+fn convert_render(args: &[Expr], cx: &BodyCx) -> Option<Vec<String>> {
+    let first = args.first()?;
+    let ExprNode::Lit { value: Literal::Sym { value: name } } = &*first.node else {
+        return None;
+    };
+    Some(vec![format!("view \"{}/{name}\"", view_dir(cx.controller))])
+}
+
+/// Resolve a `<model>_params` strong-parameter method reference to its
+/// (params key, permitted fields). Handles both modern
+/// `params.expect(article: [:title, :body])` and classic
+/// `params.require(:article).permit(:title, :body)`.
+fn params_fields(cx: &BodyCx, call: &Expr) -> Option<(String, Vec<String>)> {
+    let ExprNode::Send { recv, method, args, .. } = &*call.node else { return None };
+    let self_recv = match recv {
+        None => true,
+        Some(r) => matches!(&*r.node, ExprNode::SelfRef),
+    };
+    if !self_recv || !args.is_empty() {
+        return None;
+    }
+    let action = find_action(cx.controller, method.as_str())?;
+    let body = single_statement(&action.body)?;
+    strong_params_shape(body)
+}
+
+fn strong_params_shape(e: &Expr) -> Option<(String, Vec<String>)> {
+    let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node else { return None };
+    match method.as_str() {
+        // params.expect(article: [:title, :body])
+        "expect" => {
+            let ExprNode::Hash { entries, .. } = &*args.first()?.node else { return None };
+            let (k, v) = entries.first()?;
+            let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
+                return None;
+            };
+            let ExprNode::Array { elements, .. } = &*v.node else { return None };
+            let fields = elements
+                .iter()
+                .map(|el| match &*el.node {
+                    ExprNode::Lit { value: Literal::Sym { value } } => Some(value.to_string()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let _ = recv;
+            Some((key.to_string(), fields))
+        }
+        // params.require(:article).permit(:title, :body)
+        "permit" => {
+            let ExprNode::Send { method: req, args: rargs, .. } = &*recv.node else {
+                return None;
+            };
+            if req.as_str() != "require" {
+                return None;
+            }
+            let ExprNode::Lit { value: Literal::Sym { value: key } } = &*rargs.first()?.node
+            else {
+                return None;
+            };
+            let fields = args
+                .iter()
+                .map(|el| match &*el.node {
+                    ExprNode::Lit { value: Literal::Sym { value } } => Some(value.to_string()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some((key.to_string(), fields))
+        }
+        _ => None,
+    }
+}
+
+fn fields_list(fields: &[String]) -> String {
+    format!("%w[{}]", fields.join(" "))
+}
+
+/// `comments` (association name) → the `Comment` model class name.
+fn assoc_target_model(ctx: &EmitCtx, assoc: &str) -> Option<String> {
+    let singular = naming::singularize(assoc);
+    ctx.app
+        .models
+        .iter()
+        .find(|m| naming::snake_case(m.name.0.as_str()) == singular)
+        .map(|m| m.name.0.to_string())
+}
+
+/// The belongs-to/many_to_one association name on `model_name` that
+/// points back at the owner ivar (`@article` → `:article` on Comment).
+fn belongs_to_name(ctx: &EmitCtx, model_name: &str, owner_ivar: &str) -> Option<String> {
+    let model = ctx.app.models.iter().find(|m| m.name.0.as_str() == model_name)?;
+    model.associations().find_map(|a| match a {
+        Association::BelongsTo { name, .. } if name.as_str() == owner_ivar => {
+            Some(name.to_string())
+        }
+        _ => None,
+    })
+}
+
+/// Strip `respond_to do |format| … end` wrappers: the `format.html`
+/// branch bodies splice in place; other formats drop. Bodies without a
+/// respond_to pass through unchanged.
+fn unwrap_respond_to(body: &Expr) -> Expr {
+    let mut out = body.clone();
+    unwrap_respond_to_mut(&mut out);
+    out
+}
+
+fn unwrap_respond_to_mut(e: &mut Expr) {
+    // Top-down, checking each statement BEFORE recursing into it —
+    // children-first would replace the respond_to at child level and
+    // leave the parent Seq unable to splice multi-statement branches.
+    if let ExprNode::Seq { exprs } = &mut *e.node {
+        let mut new_exprs: Vec<Expr> = Vec::new();
+        for mut ex in exprs.drain(..) {
+            match respond_to_html_body(&ex) {
+                Some(html) => {
+                    for mut h in statements_owned(&html) {
+                        unwrap_respond_to_mut(&mut h);
+                        new_exprs.push(h);
+                    }
+                }
+                None => {
+                    unwrap_respond_to_mut(&mut ex);
+                    new_exprs.push(ex);
+                }
+            }
+        }
+        *exprs = new_exprs;
+        return;
+    }
+    if let Some(html) = respond_to_html_body(&e.clone()) {
+        *e = html;
+        unwrap_respond_to_mut(e);
+        return;
+    }
+    e.node.for_each_child_mut(&mut unwrap_respond_to_mut);
+}
+
+/// If `e` is `respond_to do |format| … end`, return the spliced html
+/// branch (format-call selection applied through its whole subtree).
+fn respond_to_html_body(e: &Expr) -> Option<Expr> {
+    let ExprNode::Send { recv: None, method, args, block: Some(block), .. } = &*e.node else {
+        return None;
+    };
+    if method.as_str() != "respond_to" || !args.is_empty() {
+        return None;
+    }
+    let ExprNode::Lambda { params, body, .. } = &*block.node else { return None };
+    let format_var = params.first()?.as_str().to_string();
+    let mut out = body.clone();
+    select_html_format(&mut out, &format_var);
+    Some(out)
+}
+
+/// Rewrite a respond_to block body: `format.html { X }` → X,
+/// `format.json { … }` (any other format) → removed. Statements are
+/// checked BEFORE recursion (same reasoning as unwrap_respond_to_mut).
+fn select_html_format(e: &mut Expr, format_var: &str) {
+    if let ExprNode::Seq { exprs } = &mut *e.node {
+        let mut new_exprs: Vec<Expr> = Vec::new();
+        for mut ex in exprs.drain(..) {
+            match format_call_body(&ex, format_var) {
+                Some(Some(html)) => {
+                    for mut h in statements_owned(&html) {
+                        select_html_format(&mut h, format_var);
+                        new_exprs.push(h);
+                    }
+                }
+                Some(None) => {} // non-html format: dropped
+                None => {
+                    select_html_format(&mut ex, format_var);
+                    new_exprs.push(ex);
+                }
+            }
+        }
+        *exprs = new_exprs;
+        return;
+    }
+    // A bare format call in branch position (If then/else that isn't a
+    // Seq) replaces with its body — or with an empty Seq when dropped.
+    if let Some(repl) = format_call_body(&e.clone(), format_var) {
+        match repl {
+            Some(html) => {
+                *e = html;
+                select_html_format(e, format_var);
+            }
+            None => {
+                *e = Expr::new(crate::span::Span::synthetic(), ExprNode::Seq { exprs: vec![] })
+            }
+        }
+        return;
+    }
+    e.node.for_each_child_mut(&mut |c| select_html_format(c, format_var));
+}
+
+/// `format.html { X }` → Some(Some(X)); `format.<other> { … }` →
+/// Some(None); anything else → None.
+fn format_call_body(e: &Expr, format_var: &str) -> Option<Option<Expr>> {
+    let ExprNode::Send { recv: Some(recv), method, block, .. } = &*e.node else { return None };
+    let ExprNode::Var { name, .. } = &*recv.node else { return None };
+    if name.as_str() != format_var {
+        return None;
+    }
+    if method.as_str() == "html" {
+        if let Some(b) = block {
+            if let ExprNode::Lambda { body, .. } = &*b.node {
+                return Some(Some(body.clone()));
+            }
+        }
+        return Some(None);
+    }
+    Some(None)
 }
 
 /// Rails AR query chain → Sequel dataset chain, as source text.
@@ -1065,44 +1556,15 @@ fn is_model(ctx: &EmitCtx, path: &[crate::ident::Symbol]) -> bool {
 
 // ── Views (Day-1 placeholders) ──────────────────────────────────────
 
-/// Day-1 placeholder views: enough structure for the converted GET
-/// actions to render 200 on the real gems. Day 2 replaces these with
-/// translations of the Rails ERB.
-fn emit_views(app: &App) -> Vec<EmittedFile> {
+/// Views: the synthesized layout + not_found, plus the translated
+/// Rails ERB (see `views::translate_views`).
+fn emit_views(app: &App, fixture: &std::path::Path) -> Vec<EmittedFile> {
+    let routes = flatten_routes(app);
     let mut out = vec![
         file("views/layout.erb", LAYOUT_ERB),
         file("views/not_found.erb", "<h1>404 Not Found</h1>\n"),
     ];
-    let routes = flatten_routes(app);
-    for r in &routes {
-        if r.method != HttpMethod::Get {
-            continue;
-        }
-        let Some(c) = app.controllers.iter().find(|c| c.name == r.controller) else {
-            continue;
-        };
-        let Some(action) = find_action(c, r.action.as_str()) else { continue };
-        let template = match &action.renders {
-            RenderTarget::Template { name, .. } => name.to_string(),
-            RenderTarget::Inferred => action.name.to_string(),
-            _ => continue,
-        };
-        let path = format!("views/{}/{}.erb", view_dir(c), template);
-        if out.iter().any(|f| f.path.to_string_lossy() == path) {
-            continue;
-        }
-        out.push(EmittedFile {
-            path: PathBuf::from(path),
-            content: format!(
-                "<%# ROUNDHOUSE-TODO(day2): translate app/views/{}/{}.html.erb %>\n\
-                 <h1>{}/{}</h1>\n",
-                view_dir(c),
-                template,
-                view_dir(c),
-                template
-            ),
-        });
-    }
+    out.extend(views::translate_views(app, fixture, &routes));
     out
 }
 
