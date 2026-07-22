@@ -71,6 +71,12 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
 ///   All consumers are write-path (`markeddown_*` precomputed on save),
 ///   so the read benchmark never renders markdown. Real fix = a
 ///   Commonmarker façade over the gem's iterative `Node#walk`.
+/// - FlaggedCommenters computes flag statistics with MySQL-only SQL
+///   (stddev(), if()) under `Rails.cache.fetch` blocks whose bodies
+///   also carry un-modeled calls (`exec_query().first.symbolize_keys!`,
+///   select-alias readers); the lobsters-bench capture disables the
+///   feature rather than port that SQL to SQLite. Constructor and
+///   readers stay real; the statistics methods raise.
 const EXTRAS_FACADES: &[(&str, &str, &str)] = &[
     (
         "app/models/sponge",
@@ -81,6 +87,11 @@ const EXTRAS_FACADES: &[(&str, &str, &str)] = &[
         "app/models/markdowner",
         include_str!("../../../runtime/spinel/facades/markdowner.rb"),
         include_str!("../../../runtime/spinel/facades/markdowner.rbs"),
+    ),
+    (
+        "app/models/flagged_commenters",
+        include_str!("../../../runtime/spinel/facades/flagged_commenters.rb"),
+        include_str!("../../../runtime/spinel/facades/flagged_commenters.rbs"),
     ),
 ];
 
@@ -252,33 +263,120 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
         "pick", "destroy_all", "delete_all", "update_all", "klass", "where_clauses",
     ];
     let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
-    let mut names: Vec<String> = crate::lower::scope_chain::all_scope_names(&scopes)
-        .into_iter()
-        .map(|s| s.as_str().to_string())
-        .filter(|n| !RELATION_BUILTINS.contains(&n.as_str()))
-        .collect();
-    if names.is_empty() {
+    // Delegates carry each scope's EXACT parameter list, not a blanket
+    // `(*args, **kwargs)` forward: a splat through the class-value
+    // dispatch doesn't survive spinel's C stage, and the exact shape is
+    // the better contract anyway (the arity a call site gets wrong
+    // fails AT the call). That requires one consistent shape per name —
+    // plain positionals, defaults restricted to literals the delegate
+    // can replicate. A name declared with CONFLICTING shapes across
+    // models (lobsters: `recent` is zero-arg on ModNote,
+    // `(user = nil, exclude_tags = nil)` on Story) gets NO delegate: no
+    // single def can forward both, and a mid-chain call on a relation
+    // value would mis-bind positionals silently. Skipped names are
+    // listed in the generated header; an exercised one raises
+    // NoMethodError at the call site — loud, and so far unexercised.
+    let mut shapes: std::collections::BTreeMap<String, Vec<Vec<crate::dialect::Param>>> =
+        Default::default();
+    for per_model in scopes.values() {
+        for (name, params) in per_model {
+            let n = name.as_str().to_string();
+            if RELATION_BUILTINS.contains(&n.as_str()) {
+                continue;
+            }
+            let entry = shapes.entry(n).or_default();
+            if !entry.iter().any(|p| params_render_eq(p, params)) {
+                entry.push(params.clone());
+            }
+        }
+    }
+    if shapes.is_empty() {
         return None;
     }
-    names.sort();
+    let mut skipped: Vec<String> = Vec::new();
+    let mut body = String::new();
+    for (name, shape_list) in &shapes {
+        let delegate = match &shape_list[..] {
+            [params] => render_exact_delegate(name, params),
+            _ => None,
+        };
+        match delegate {
+            Some(text) => body.push_str(&text),
+            None => skipped.push(name.clone()),
+        }
+    }
     let mut s = String::from(
         "# Generated Relation scope delegation (see\n\
          # emit_relation_scope_delegates): each model scope, callable on a\n\
          # relation value mid-chain, forwarding to the model's synthesized\n\
-         # scope class method with this relation as its `__rel`.\n\
-         module ActiveRecord\n\
-         \x20\x20class Relation\n",
+         # scope class method with this relation as its `__rel`.\n",
     );
-    for name in &names {
-        writeln!(s, "\x20\x20\x20\x20def {name}(*args, **kwargs)").unwrap();
-        writeln!(s, "\x20\x20\x20\x20\x20\x20klass.{name}(*args, self, **kwargs)").unwrap();
-        writeln!(s, "\x20\x20\x20\x20end").unwrap();
+    if !skipped.is_empty() {
+        writeln!(
+            s,
+            "# No delegate (conflicting shapes across models, or params a\n\
+             # delegate can't replicate) — a mid-chain call raises\n\
+             # NoMethodError: {}",
+            skipped.join(", ")
+        )
+        .unwrap();
     }
+    s.push_str("module ActiveRecord\n\x20\x20class Relation\n");
+    s.push_str(&body);
     s.push_str("  end\nend\n");
     Some(EmittedFile {
         path: PathBuf::from("app/models/relation_scopes.rb"),
         content: s,
     })
+}
+
+/// One exact-arity delegate def, or None when the params aren't the
+/// replicable shape (plain positionals; defaults must be literals — a
+/// default expression evaluates in the MODEL's context, which the
+/// delegate can't reproduce).
+fn render_exact_delegate(name: &str, params: &[crate::dialect::Param]) -> Option<String> {
+    let mut decl_parts = Vec::new();
+    let mut fwd_parts = Vec::new();
+    for p in params {
+        if p.keyword || p.rest {
+            return None;
+        }
+        let pname = p.name.as_str();
+        match &p.default {
+            None => decl_parts.push(pname.to_string()),
+            Some(d) if matches!(&*d.node, crate::expr::ExprNode::Lit { .. }) => {
+                decl_parts.push(format!("{pname} = {}", super::emit_expr(d)))
+            }
+            Some(_) => return None,
+        }
+        fwd_parts.push(pname.to_string());
+    }
+    fwd_parts.push("self".to_string());
+    let mut s = String::new();
+    if decl_parts.is_empty() {
+        writeln!(s, "\x20\x20\x20\x20def {name}").unwrap();
+    } else {
+        writeln!(s, "\x20\x20\x20\x20def {name}({})", decl_parts.join(", ")).unwrap();
+    }
+    writeln!(s, "\x20\x20\x20\x20\x20\x20klass.{name}({})", fwd_parts.join(", ")).unwrap();
+    writeln!(s, "\x20\x20\x20\x20end").unwrap();
+    Some(s)
+}
+
+/// Two param lists that would render the same delegate — same names,
+/// same defaults, same kinds — count as one shape.
+fn params_render_eq(a: &[crate::dialect::Param], b: &[crate::dialect::Param]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b.iter()).all(|(x, y)| {
+            x.name == y.name
+                && x.keyword == y.keyword
+                && x.rest == y.rest
+                && match (&x.default, &y.default) {
+                    (None, None) => true,
+                    (Some(dx), Some(dy)) => super::emit_expr(dx) == super::emit_expr(dy),
+                    _ => false,
+                }
+        })
 }
 
 pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {

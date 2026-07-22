@@ -1223,7 +1223,66 @@ fn type_method_body(
     // Opt-in to `recv: Some(SelfRef)` rewriting on bare Sends —
     // matches the pattern view_to_library uses.
     ctx.annotate_self_dispatch = true;
-    typer.analyze_expr(&mut method.body, &ctx);
+    let body_ty = typer.analyze_expr(&mut method.body, &ctx);
+    backfill_scalar_signature(method, body_ty);
+}
+
+/// Backfill a signature for a user-defined method whose body types to a
+/// concrete scalar. User methods carry `signature: None`, so the
+/// emitted `.rbs` says `-> untyped` even when the body is trivially
+/// typed — and under spinel AOT an untyped return turns every chained
+/// call into a whole-program poly dispatch (lobsters:
+/// `User.username_regex_s[1...-1]` became a 26-class `[]` switch that
+/// doesn't C-compile). Scalars only, and only when the body has no
+/// explicit `return` (an early return of another type would make the
+/// trailing-expression type a lie — in Ruby a `return` inside a block
+/// exits the method, so the walk counts those too). If/Case bodies
+/// union their branches, so divergent shapes fail the scalar gate on
+/// their own. Param types stay untyped — this pins only the return.
+fn backfill_scalar_signature(method: &mut MethodDef, body_ty: Ty) {
+    if method.signature.is_some()
+        || method.block_param.is_some()
+        || !matches!(body_ty, Ty::Str | Ty::Int | Ty::Float | Ty::Bool)
+        || contains_return(&method.body)
+    {
+        return;
+    }
+    let params = method
+        .params
+        .iter()
+        .map(|p| crate::ty::Param {
+            name: p.name.clone(),
+            ty: Ty::Untyped,
+            kind: if p.rest {
+                crate::ty::ParamKind::Rest
+            } else if p.keyword {
+                crate::ty::ParamKind::Keyword { required: p.default.is_none() }
+            } else if p.default.is_some() {
+                crate::ty::ParamKind::Optional
+            } else {
+                crate::ty::ParamKind::Required
+            },
+        })
+        .collect();
+    method.signature = Some(Ty::Fn {
+        params,
+        block: None,
+        ret: Box::new(body_ty),
+        effects: crate::effect::EffectSet::default(),
+    });
+}
+
+fn contains_return(e: &Expr) -> bool {
+    if matches!(&*e.node, ExprNode::Return { .. }) {
+        return true;
+    }
+    let mut found = false;
+    e.node.for_each_child(&mut |child| {
+        if !found && contains_return(child) {
+            found = true;
+        }
+    });
+    found
 }
 
 // ---------------------------------------------------------------------------

@@ -48,6 +48,7 @@ pub mod and_return;
 pub mod case_lambda;
 pub mod first_or_create;
 pub mod group_count;
+pub mod bool_fold;
 pub mod dead_default;
 pub mod errors_add;
 pub mod job_class_side;
@@ -55,6 +56,7 @@ pub mod mailer_class_side;
 pub mod as_json_super;
 pub mod parameterize;
 pub mod sum_symbol;
+pub mod values_at_splat;
 pub mod request_index;
 pub mod relation_residue;
 pub mod send_dispatch;
@@ -138,6 +140,9 @@ pub(crate) fn residue_diagnostic(
 /// checked by a `debug_assert!` on entry to the pipeline and by the
 /// `post_analyze_pass_order_is_sound` unit test.
 const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
+    // Deletes provably-dead `false && …` tails before any pass can
+    // ledger residue for (or rewrite inside) code that cannot run.
+    ("bool_fold", &[]),
     ("blank", &[]),
     ("time_current", &[]),
     ("as_json_super", &[]),
@@ -145,6 +150,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `sum(:col)` → block form; no ordering constraints (rewrites a
     // literal-symbol arg shape no other pass produces or consumes).
     ("sum_symbol", &[]),
+    // `values_at(*keys)` → keys.map block form; same no-constraints
+    // rationale.
+    ("values_at_splat", &[]),
     ("request_index", &[]),
     ("transaction_ground", &[]),
     ("partial_qualify", &[]),
@@ -228,6 +236,8 @@ pub fn apply_post_analyze_lowerings(
     macro_rules! ran {
         ($name:expr) => {};
     }
+    bool_fold::apply_bool_fold_lowering(app);
+    ran!("bool_fold");
     let mut diags = blank::apply_blank_lowering(app);
     ran!("blank");
     time_current::apply_time_current_lowering(app);
@@ -238,6 +248,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("parameterize");
     sum_symbol::apply_sum_symbol_lowering(app);
     ran!("sum_symbol");
+    values_at_splat::apply_values_at_splat_lowering(app);
+    ran!("values_at_splat");
     request_index::apply_request_index_lowering(app);
     ran!("request_index");
     transaction_ground::apply_transaction_grounding(app);

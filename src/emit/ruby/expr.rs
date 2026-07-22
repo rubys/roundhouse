@@ -579,6 +579,11 @@ fn renders_as_trailing_modifier(e: &Expr) -> bool {
 fn recv_needs_parens(r: &Expr) -> bool {
     match &*r.node {
         ExprNode::BoolOp { .. } | ExprNode::Range { .. } | ExprNode::RescueModifier { .. } => true,
+        // An assignment as receiver (`(rd = session[:k]).present?`,
+        // lobsters login) MUST keep its parens: rendered bare, Ruby
+        // re-parses `rd = session[:k].present?` — the local becomes the
+        // METHOD's result (a bool handed to redirect_to), not the value.
+        ExprNode::Assign { .. } | ExprNode::OpAssign { .. } | ExprNode::MultiAssign { .. } => true,
         // Conditionals as a value (`<%= cond ? a : b %>`). A modifier-if
         // (`x if c`) flat-out mis-parses as a receiver; a full `if/else`
         // or `case/when` block parses (the `end` terminates it) but only

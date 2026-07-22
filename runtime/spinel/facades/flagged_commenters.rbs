@@ -1,0 +1,20 @@
+# Typing contract for the FlaggedCommenters façade (see
+# flagged_commenters.rb beside this file). Constructor and readers are
+# real; the statistics methods raise via GemFacade.fail! before their
+# unreachable typed tails. Returns are the real shapes consumers chain
+# on: commenters is keyed by user id with a per-user stats hash
+# (`fc.commenters.map { |_, c| c[:n_flags] }`), aggregates is the
+# symbolized stats row.
+class FlaggedCommenters
+  include IntervalHelper
+
+  attr_reader interval: untyped
+  attr_reader period: untyped
+  attr_reader cache_time: untyped
+  def initialize: (untyped interval, ?untyped cache_time) -> untyped
+  def check_list_for: (untyped showing_user) -> untyped
+  def aggregates: () -> Hash[Symbol, untyped]
+  def stddev_sum_flags: () -> Integer
+  def avg_sum_flags: () -> Integer
+  def commenters: () -> Hash[Integer, Hash[Symbol, untyped]]
+end
