@@ -293,39 +293,10 @@ module ROTP
   end
 end
 
-# BCrypt — password hashing. `has_secure_password`'s `authenticate` does
-# `BCrypt::Password.new(digest) == password`, and the login controller
-# reads `Engine::DEFAULT_COST`. LOGIN IS ON THE BENCHMARK PATH (the
-# replay harness POSTs real credentials), so this raising façade compiles
-# the tree but the login handshake raises until real bcrypt is wired
-# (crypt_blowfish via spinel `--link`; see the spinel-AOT probe notes).
-module BCrypt
-  module Engine
-    DEFAULT_COST = 12
-  end
-
-  class Password
-    def self.create(_secret, cost: nil)
-      GemFacade.fail!("BCrypt::Password.create")
-      new("")
-    end
-
-    def initialize(_digest)
-      GemFacade.fail!("BCrypt::Password.new")
-      @digest = _digest
-    end
-
-    def ==(_other)
-      GemFacade.fail!("BCrypt::Password#==")
-      false
-    end
-
-    def to_s
-      GemFacade.fail!("BCrypt::Password#to_s")
-      ""
-    end
-  end
-end
+# BCrypt façade lives in its own file — the spin-shaped spinel tree
+# swaps that FILE for `require "bcrypt"` (the spin package) when the
+# app consumes BCrypt; whole-file grain, same as every other swap.
+require_relative "bcrypt_facade"
 
 # RQRCode — QR-code rendering for 2FA enrollment. Off the read benchmark.
 module RQRCode

@@ -100,21 +100,6 @@ module ROTP
   end
 end
 
-module BCrypt
-  module Engine
-    DEFAULT_COST: Integer
-  end
-
-  class Password
-    @digest: String
-
-    def self.create: (String _secret, ?cost: Integer?) -> BCrypt::Password
-    def initialize: (String _digest) -> void
-    def ==: (String _other) -> bool
-    def to_s: () -> String
-  end
-end
-
 module RQRCode
   class QRCode
     @data: String
