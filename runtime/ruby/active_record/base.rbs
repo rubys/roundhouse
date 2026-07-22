@@ -161,6 +161,7 @@ module ActiveRecord
     def reload: () -> Base
 
     # Lifecycle hooks — no-op defaults. Subclasses override.
+    def after_initialize: () -> void
     def before_validation: () -> void
     def after_validation: () -> void
     def before_save: () -> void

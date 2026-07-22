@@ -26,7 +26,7 @@ pub use schema::col_storage_name;
 pub(crate) mod validations;
 mod associations;
 mod broadcasts;
-mod markers;
+pub(crate) mod markers;
 pub mod row;
 
 use std::collections::HashMap;
@@ -41,6 +41,7 @@ use crate::ty::{Row, Ty};
 use self::associations::{push_association_methods, push_dependent_destroy};
 pub(crate) use self::associations::model_defines_instance_method;
 pub(crate) use self::markers::attribute_api_decls;
+pub(crate) use self::markers::BLOCK_CALLBACK_HOOKS;
 
 /// Push a synthesized instance method unless the model body defines the
 /// name (custom methods win — `push_user_methods` runs after the

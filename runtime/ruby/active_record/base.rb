@@ -430,6 +430,10 @@ module ActiveRecord
 
     # ---- Lifecycle hooks (no-ops; subclasses override) --------------
 
+    # Fired by the synthesized `initialize` tail and the hydration
+    # factories (`from_row`/`from_stmt`) when a model declares it —
+    # Rails: after new AND after find.
+    def after_initialize;  end
     def before_validation; end
     def after_validation;  end
     def before_save;       end

@@ -110,7 +110,7 @@ require_relative "runtime/action_mailer"
 # svg-graph loads via its file path (the gem has no svg-graph.rb entry
 # file; lobsters' Gemfile declares `require: "SVG/Graph/TimeSeries"`).
 ["bcrypt", "htmlentities", "rotp", "markly", "nokogiri", "parslet",
- "SVG/Graph/TimeSeries"].each do |gem_name|
+ "typeid", "SVG/Graph/TimeSeries"].each do |gem_name|
   begin
     require gem_name
   rescue LoadError

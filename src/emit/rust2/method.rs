@@ -22,6 +22,15 @@ use crate::ty::Ty;
 fn strip_guarded_writer_routes(body: &crate::expr::Expr) -> crate::expr::Expr {
     use crate::expr::ExprNode;
     let is_guarded_writer = |e: &crate::expr::Expr| -> bool {
+        // The receiverless `after_initialize` tail is likewise
+        // inexpressible pre-`Self` — dropped (honest subset: rust
+        // models don't fire construction hooks).
+        if matches!(&*e.node,
+            ExprNode::Send { recv: None, method, args, .. }
+                if method.as_str() == "after_initialize" && args.is_empty())
+        {
+            return true;
+        }
         let ExprNode::If { then_branch, .. } = &*e.node else { return false };
         let head = match &*then_branch.node {
             ExprNode::Seq { exprs } => exprs.first(),

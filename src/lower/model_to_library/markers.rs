@@ -361,6 +361,68 @@ pub(super) fn push_unknown_marker_methods(methods: &mut Vec<MethodDef>, model: &
     }
 }
 
+/// `self.<col> ||= value` (string column) → `if self.<col>.blank?
+/// then self.<col> = value end` — see the call-site note in
+/// `push_block_callback`. Recursive over the whole body; only fires
+/// for `LValue::Attr` targets on `self` naming a schema string
+/// column.
+fn rewrite_column_or_assign(e: &mut Expr, model: &Model) {
+    use crate::expr::{LValue, OpAssignOp};
+    let hit = match &*e.node {
+        ExprNode::OpAssign {
+            target: LValue::Attr { recv, name },
+            op: OpAssignOp::OrOr,
+            value,
+        } if matches!(&*recv.node, ExprNode::SelfRef)
+            && matches!(model.attributes.fields.get(name), Some(crate::ty::Ty::Str)) =>
+        {
+            Some((name.clone(), value.clone()))
+        }
+        _ => None,
+    };
+    if let Some((name, value)) = hit {
+        let span = e.span;
+        let self_read = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(Expr::new(span, ExprNode::SelfRef)),
+                method: name.clone(),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let blank = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(self_read),
+                method: Symbol::from("blank?"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let assign = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(Expr::new(span, ExprNode::SelfRef)),
+                method: Symbol::from(format!("{}=", name.as_str())),
+                args: vec![value],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        *e.node = ExprNode::If {
+            cond: blank,
+            then_branch: assign,
+            else_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+        };
+        e.ty = None;
+        return;
+    }
+    e.node.for_each_child_mut(&mut |c| rewrite_column_or_assign(c, model));
+}
+
 /// Look up an existing `Method` named `hook_name` and append `call` to
 /// its body's Seq, OR push a new method with `call` as the body. The
 /// fold preserves source order; broadcasts_to runs first so its calls
@@ -394,8 +456,13 @@ pub(super) fn fold_into_or_push(methods: &mut Vec<MethodDef>, model: &Model, hoo
 /// Lifecycle hook names that appear as block-form Unknown items. Names
 /// not in this set fall through to plain Unknown (they're future
 /// lowerer or emit work). Includes the `_commit` variants Rails sugar
-/// adds beyond the raw `after_commit` hook in `CallbackHook`.
-pub(super) const BLOCK_CALLBACK_HOOKS: &[&str] = &[
+/// adds beyond the raw `after_commit` hook in `CallbackHook`, plus
+/// `after_initialize` (fires on construction AND hydration — the
+/// runtime hook call is appended by `synth_initialize` / the
+/// hydration factories when a model declares it). `pub(crate)`: the
+/// concern-items ingest keeps block-form callbacks by this list.
+pub(crate) const BLOCK_CALLBACK_HOOKS: &[&str] = &[
+    "after_initialize",
     "before_validation",
     "after_validation",
     "before_save",
@@ -558,6 +625,15 @@ fn push_block_callback(methods: &mut Vec<MethodDef>, model: &Model, expr: &Expr)
             lambda_body.clone(),
             model,
         );
+        // `self.<col> ||= v` on a string column → blank-guarded assign.
+        // Rails' new-record attributes are nil, so `||=` means "set
+        // unless set"; this runtime's storage defaults string slots to
+        // "" (strict targets assign every field), which is truthy and
+        // would starve the idiom (lobsters' Token concern generates
+        // its unique token exactly this way in after_initialize).
+        // Blank-on-"" IS the faithful reading of "unset" under the
+        // ""-default storage model.
+        rewrite_column_or_assign(&mut lambda_body, model);
         // The rewrite synthesizes wrapper nodes; whatever it left
         // span-less attributes to the hook declaration. Source subtrees
         // spliced through keep their exact spans.

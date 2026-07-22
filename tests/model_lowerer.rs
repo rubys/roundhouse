@@ -701,6 +701,83 @@ end
 }
 
 #[test]
+fn concern_included_do_dsl_splices_into_including_models() {
+    use roundhouse::ingest::ingest_app_from_tree;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    let tree: HashMap<PathBuf, Vec<u8>> = [
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "moderations", force: :cascade do |t|
+    t.string "action", null: false
+    t.string "token", null: false
+  end
+end
+"#,
+        ),
+        (
+            "app/models/concerns/token.rb",
+            r#"module Token
+  extend ActiveSupport::Concern
+
+  included do
+    after_initialize do
+      self.token ||= "generated"
+    end
+
+    validates :token, presence: true
+  end
+end
+"#,
+        ),
+        (
+            "app/models/moderation.rb",
+            r#"class Moderation < ApplicationRecord
+  include Token
+end
+"#,
+        ),
+    ]
+    .into_iter()
+    .map(|(p, c)| (PathBuf::from(p), c.as_bytes().to_vec()))
+    .collect();
+    let app = ingest_app_from_tree(tree).expect("ingest");
+    let model = app.models.iter().find(|m| m.name.0.as_str() == "Moderation").expect("model");
+
+    // The include line survives (the ruby emit re-emits it verbatim so
+    // Ruby's own include provides module constants/methods); the
+    // `included do` DSL items follow it.
+    let has_include = model.body.iter().any(|item| {
+        matches!(item, roundhouse::dialect::ModelBodyItem::Unknown { expr, .. }
+            if matches!(&*expr.node, roundhouse::ExprNode::Send { method, .. }
+                if method.as_str() == "include"))
+    });
+    assert!(has_include, "include line must be kept");
+    let validations: Vec<&roundhouse::Validation> = model.validations().collect();
+    assert!(
+        validations.iter().any(|v| v.attribute.as_str() == "token"),
+        "concern validates spliced"
+    );
+
+    // The spliced block-form after_initialize lowers to a hook
+    // override with the `||=` rewritten blank-aware (Rails' nil-attr
+    // idiom vs this runtime's ""-defaulted string slots), and the
+    // synthesized initialize gains the hook-call tail.
+    let lc = lower_model_to_library_class(model, &app.schema);
+    let hook = lc
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "after_initialize")
+        .expect("after_initialize lowered");
+    let hook_dbg = format!("{:?}", hook.body);
+    assert!(hook_dbg.contains("blank?"), "||= rewritten blank-aware: {hook_dbg}");
+    let init = lc.methods.iter().find(|m| m.name.as_str() == "initialize").expect("initialize");
+    assert!(format!("{:?}", init.body).contains("after_initialize"), "hook tail in initialize");
+}
+
+#[test]
 fn allow_blank_drops_dead_presence_check() {
     use roundhouse::dialect::ValidationRule;
     use roundhouse::ingest::ingest_model;

@@ -54,6 +54,7 @@ pub mod job_class_side;
 pub mod mailer_class_side;
 pub mod as_json_super;
 pub mod parameterize;
+pub mod sum_symbol;
 pub mod request_index;
 pub mod relation_residue;
 pub mod send_dispatch;
@@ -141,6 +142,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("time_current", &[]),
     ("as_json_super", &[]),
     ("parameterize", &[]),
+    // `sum(:col)` → block form; no ordering constraints (rewrites a
+    // literal-symbol arg shape no other pass produces or consumes).
+    ("sum_symbol", &[]),
     ("request_index", &[]),
     ("transaction_ground", &[]),
     ("partial_qualify", &[]),
@@ -232,6 +236,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("as_json_super");
     parameterize::apply_parameterize_grounding(app);
     ran!("parameterize");
+    sum_symbol::apply_sum_symbol_lowering(app);
+    ran!("sum_symbol");
     request_index::apply_request_index_lowering(app);
     ran!("request_index");
     transaction_ground::apply_transaction_grounding(app);

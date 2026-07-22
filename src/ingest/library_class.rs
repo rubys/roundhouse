@@ -732,6 +732,19 @@ pub fn ingest_concern_filters(
 /// affect the association's type); an item the classifier rejects is
 /// survey-recorded and skipped so one exotic line doesn't cost the
 /// rest of the block.
+/// True when an Unknown body item is a receiverless block-form call to
+/// a lifecycle hook the callback lowering handles.
+fn unknown_is_block_callback(item: &crate::dialect::ModelBodyItem) -> bool {
+    use crate::expr::ExprNode;
+    let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { return false };
+    let ExprNode::Send { recv: None, method, args, block: Some(_), .. } = &*expr.node else {
+        return false;
+    };
+    args.is_empty()
+        && crate::lower::model_to_library::BLOCK_CALLBACK_HOOKS
+            .contains(&method.as_str())
+}
+
 pub fn ingest_concern_model_items(
     source: &[u8],
     file: &str,
@@ -784,6 +797,17 @@ pub fn ingest_concern_model_items(
                         | ModelBodyItem::Validation { .. }
                         | ModelBodyItem::Callback { .. }),
                     ) => items.push(item),
+                    // Block-form lifecycle callbacks (`after_initialize
+                    // do … end` — lobsters' Token concern generates its
+                    // unique token there) surface as Unknown items;
+                    // keep the ones the callback lowering understands
+                    // so the concern splice carries them into each
+                    // includer. Other Unknowns stay with the module.
+                    Ok(item @ ModelBodyItem::Unknown { .. }) => {
+                        if unknown_is_block_callback(&item) {
+                            items.push(item);
+                        }
+                    }
                     Ok(_) => {}
                     Err(err) => super::survey::record(&err),
                 }

@@ -132,7 +132,7 @@ pub(super) fn push_schema_methods(
     // (typed slots from the schema), output is the persisted model. No
     // Hash flowing through. Pattern (b) from the handoff: separate
     // class-method factories rather than overloaded initialize.
-    methods.push(synth_from_row(owner, table));
+    methods.push(synth_from_row(owner, table, model_declares_after_initialize(model)));
 
     // def self.from_stmt(stmt); instance = new; instance.<col> = Db.column_*(stmt, i); ...; mark_persisted!; instance; end
     //
@@ -145,7 +145,7 @@ pub(super) fn push_schema_methods(
     // column in that order (`ColumnSpec::All`). The Arel visitor only
     // routes `All`-projection hydrate sites here; a future `Named`
     // (partial/reordered) projection stays on its own inline path.
-    methods.push(synth_from_stmt(owner, table));
+    methods.push(synth_from_stmt(owner, table, model_declares_after_initialize(model)));
 
     // def assign_from_row(row); self.<col> = row[:<col>]; ...; end
     //
@@ -866,7 +866,7 @@ pub(super) fn push_from_params_method(
 /// fresh model instance with each column copied through. The model's
 /// `initialize` runs as bare `new` here — field defaults from
 /// `synth_initialize`'s empty-Hash branch (since attrs is `{}`).
-fn synth_from_row(owner: &ClassId, table: &Table) -> MethodDef {
+fn synth_from_row(owner: &ClassId, table: &Table, fire_after_initialize: bool) -> MethodDef {
     let row = Symbol::from("row");
     let instance = Symbol::from("instance");
     let row_class = row_class_id(owner);
@@ -930,6 +930,20 @@ fn synth_from_row(owner: &ClassId, table: &Table) -> MethodDef {
         ));
     }
 
+    // Rails fires after_initialize on find/hydration too; same gate
+    // as the synthesized initialize tail.
+    if fire_after_initialize {
+        stmts.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref(instance.clone())),
+                method: Symbol::from("after_initialize"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        ));
+    }
     stmts.push(var_ref(instance));
 
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
@@ -957,7 +971,7 @@ fn synth_from_row(owner: &ClassId, table: &Table) -> MethodDef {
 /// No `Cast` wrapping (unlike `from_row`): `column_*` returns the exact
 /// non-nilable scalar each setter expects, so the types line up
 /// directly. Marks the instance persisted before returning it.
-fn synth_from_stmt(owner: &ClassId, table: &Table) -> MethodDef {
+fn synth_from_stmt(owner: &ClassId, table: &Table, fire_after_initialize: bool) -> MethodDef {
     let stmt = Symbol::from("stmt");
     let instance = Symbol::from("instance");
     let db = ClassId(Symbol::from("Db"));
@@ -1021,6 +1035,20 @@ fn synth_from_stmt(owner: &ClassId, table: &Table) -> MethodDef {
             parenthesized: false,
         },
     ));
+    // Rails fires after_initialize on find/hydration too; same gate
+    // as the synthesized initialize tail.
+    if fire_after_initialize {
+        stmts.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref(instance.clone())),
+                method: Symbol::from("after_initialize"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        ));
+    }
     stmts.push(var_ref(instance));
 
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
@@ -1178,6 +1206,28 @@ fn synth_column_prev_changed(owner: &ClassId, col: &Column) -> MethodDef {
         mutates_self: false,
         block_param: None,
     }
+}
+
+/// True when the model's body declares an `after_initialize` hook —
+/// as a block-form callback (Unknown item, possibly concern-spliced;
+/// lobsters' Token concern) or its own `def after_initialize`. Gates
+/// the hook-call tails in `synth_initialize` and the hydration
+/// factories, so hook-free models (the whole blog fixture) emit
+/// nothing new on any target.
+pub(super) fn model_declares_after_initialize(model: &Model) -> bool {
+    use crate::dialect::ModelBodyItem;
+    model.body.iter().any(|item| match item {
+        ModelBodyItem::Method { method, .. } => {
+            method.name.as_str() == "after_initialize"
+                && method.receiver == MethodReceiver::Instance
+        }
+        ModelBodyItem::Unknown { expr, .. } => matches!(
+            &*expr.node,
+            ExprNode::Send { recv: None, method, block: Some(_), .. }
+                if method.as_str() == "after_initialize"
+        ),
+        _ => false,
+    })
 }
 
 /// `self.<writer>(<lookup>) unless <lookup>.nil?` — the guarded
@@ -1518,6 +1568,23 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
                 },
             ));
         }
+    }
+
+    // `after_initialize` tail — Rails fires the hook after construction
+    // (and after find; the hydration factories append their own call).
+    // Runs LAST so the hook observes the assigned attrs (Token's
+    // generator checks `attributes.include?(:token)`).
+    if model_declares_after_initialize(model) {
+        stmts.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("after_initialize"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        ));
     }
 
     // Spinel-blog's `def initialize(attrs = {})` — empty hash default

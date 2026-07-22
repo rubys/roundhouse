@@ -602,8 +602,68 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     app.root = dir.display().to_string().trim_end_matches('/').to_string();
 
     resolve_polymorphic_targets(&mut app);
+    splice_concerns_into_models(&mut app);
 
     Ok(app)
+}
+
+/// Splice each concern's `included do` DSL items (already parsed into
+/// `App::concern_model_items` — validations, callbacks, associations,
+/// scopes, block-form lifecycle callbacks) into every model whose body
+/// has the matching `include <Concern>` line, right AFTER that line —
+/// so the model lowerer emits them exactly like the model's own
+/// declarations (lobsters' Token concern: `after_initialize` token
+/// generation + `validates :token`).
+///
+/// The `include` line itself is KEPT: the ruby-family emit re-emits it
+/// verbatim and emits the concern module as a real file, so Ruby's own
+/// include provides the module's constants (`User::VALID_USERNAME`)
+/// and instance methods at runtime — only the `included do` block is
+/// inert there (the emitted module has no ActiveSupport::Concern, so
+/// its DSL never ran; that's exactly the half this splice supplies).
+/// Strict targets get the DSL items the same way; module
+/// methods-via-include remain their separate, ledger-visible gap.
+fn splice_concerns_into_models(app: &mut App) {
+    use crate::dialect::ModelBodyItem;
+    use crate::expr::ExprNode;
+
+    for model in &mut app.models {
+        let mut i = 0;
+        while i < model.body.len() {
+            let concern_id = match &model.body[i] {
+                ModelBodyItem::Unknown { expr, .. } => match &*expr.node {
+                    ExprNode::Send { recv: None, method, args, block: None, .. }
+                        if method.as_str() == "include" && args.len() == 1 =>
+                    {
+                        match &*args[0].node {
+                            ExprNode::Const { path } => {
+                                Some(crate::ident::ClassId(crate::ident::Symbol::from(
+                                    path.iter()
+                                        .map(|s| s.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join("::"),
+                                )))
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            let items = concern_id
+                .as_ref()
+                .and_then(|id| app.concern_model_items.get(id));
+            let Some(items) = items else {
+                i += 1;
+                continue;
+            };
+            let items: Vec<ModelBodyItem> = items.clone();
+            let n = items.len();
+            model.body.splice(i + 1..i + 1, items);
+            i += n + 1;
+        }
+    }
 }
 
 /// Fill each `belongs_to …, polymorphic: true` association's target
