@@ -19,6 +19,7 @@ use super::{
 pub(super) fn push_schema_methods(
     methods: &mut Vec<MethodDef>,
     model: &Model,
+    models: &[Model],
     table: &Table,
     permitted_fields: Option<&[Symbol]>,
 ) {
@@ -157,7 +158,7 @@ pub(super) fn push_schema_methods(
     methods.push(synth_assign_from_row(owner, table));
 
     // def initialize(attrs = {}); super(); per-column self.col = attrs[:col] [|| 0 for id]; end
-    methods.push(synth_initialize(owner, table, model));
+    methods.push(synth_initialize(owner, table, model, models));
 
     // def attributes; { col: @col, ... } excluding id; end
     methods.push(synth_attributes(owner, table));
@@ -1232,7 +1233,7 @@ fn guard_unless_nil(lookup: Expr, action: Expr) -> Expr {
     )
 }
 
-fn synth_initialize(owner: &ClassId, table: &Table, model: &Model) -> MethodDef {
+fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Model]) -> MethodDef {
     let attrs = Symbol::from("attrs");
 
     let mut stmts: Vec<Expr> = Vec::new();
@@ -1460,7 +1461,15 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model) -> MethodDef 
             // `has_many :through` collection writers stage into the
             // cache and flag the join rows stale — init the flag on
             // every construction path (mirrors cache/loaded below).
-            if through.is_some() {
+            // Only when the writer itself will exist: a nested chain
+            // gets no writer (see `through_writer_join`), so no flag.
+            let writer_synthesized = through.as_ref().is_some_and(|thr_name| {
+                matches!(
+                    super::associations::through_writer_join(model, models, thr_name, target),
+                    super::associations::ThroughWriterJoin::Resolved(..)
+                )
+            });
+            if writer_synthesized {
                 let false_lit = with_ty(
                     Expr::new(
                         Span::synthetic(),

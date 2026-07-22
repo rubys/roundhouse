@@ -13,7 +13,73 @@ use crate::ty::Ty;
 
 use super::{class_const, fn_sig, lit_int, lit_sym, nil_lit, seq, var_ref};
 
-pub(super) fn push_association_methods(methods: &mut Vec<MethodDef>, model: &Model) {
+/// Join recipe for a `has_many :through` collection writer, resolved
+/// against the app's model slice.
+pub(super) enum ThroughWriterJoin {
+    /// Join class, owner-side fk, target-side fk — synthesize the
+    /// writer. The target fk comes from the join model's `belongs_to`
+    /// matching the target class when that model is in the slice
+    /// (survives `foreign_key:` overrides); a join model outside the
+    /// slice falls back to the `<target>_id` convention.
+    Resolved(ClassId, Symbol, Symbol),
+    /// The chain is nested — the join model reaches the target through
+    /// ANOTHER association rather than a `belongs_to` (`Category
+    /// has_many :stories, through: :tags` — Tag#stories itself goes
+    /// through taggings), so there is no join row to write. Rails makes
+    /// these collections read-only
+    /// (HasManyThroughNestedAssociationsAreReadonly); no writer.
+    Nested(ClassId),
+    /// No sibling has_many names the join — nothing to synthesize.
+    NoJoin,
+}
+
+/// Resolve the writer's join recipe: the sibling through association
+/// names the join class and owner-side fk; the join model's
+/// `belongs_to` supplies the target-side fk. Shared with the
+/// initialize synthesis (schema.rs), which must skip the writer's
+/// `_stale` flag when no writer will exist.
+pub(super) fn through_writer_join(
+    model: &Model,
+    models: &[Model],
+    thr_name: &Symbol,
+    target: &ClassId,
+) -> ThroughWriterJoin {
+    let Some((join_class, owner_fk, thr_through)) = model.associations().find_map(|a| match a {
+        Association::HasMany { name: n, target: jt, foreign_key: jfk, through: jthru, .. }
+            if n == thr_name =>
+        {
+            Some((jt.clone(), jfk.clone(), jthru.clone()))
+        }
+        _ => None,
+    }) else {
+        return ThroughWriterJoin::NoJoin;
+    };
+    // First hop already indirect (`through:` an association that is
+    // itself `:through`) — nested regardless of the join model's shape.
+    if thr_through.is_some() {
+        return ThroughWriterJoin::Nested(join_class);
+    }
+    let Some(join_model) = models.iter().find(|m| m.name == join_class) else {
+        let src_fk =
+            Symbol::from(format!("{}_id", crate::naming::snake_case(target.0.as_str())));
+        return ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk);
+    };
+    match join_model.associations().find_map(|a| match a {
+        Association::BelongsTo { target: t, foreign_key, .. } if t == target => {
+            Some(foreign_key.clone())
+        }
+        _ => None,
+    }) {
+        Some(src_fk) => ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk),
+        None => ThroughWriterJoin::Nested(join_class),
+    }
+}
+
+pub(super) fn push_association_methods(
+    methods: &mut Vec<MethodDef>,
+    model: &Model,
+    models: &[Model],
+) {
     let owner = &model.name;
     for (span, assoc) in model.spanned_associations() {
         let before = methods.len();
@@ -35,57 +101,79 @@ pub(super) fn push_association_methods(methods: &mut Vec<MethodDef>, model: &Mod
                 // run against synced join rows) and replaces the join
                 // rows there. Deferred-sync is an honest subset of
                 // Rails, which syncs immediately for persisted owners.
-                // Join resolution stays owner-local: the sibling
-                // through association names the join class and the
-                // owner-side fk; the target-side fk is the
-                // `<target>_id` convention (the precise recipe —
-                // consulting the join model's belongs_to — lives in
-                // scope_chain's join_tails and needs the full model
-                // slice this pass doesn't have).
+                // The sibling through association names the join class
+                // and the owner-side fk; the join model's `belongs_to`
+                // matching the target supplies the target-side fk (see
+                // `through_writer_join`). A nested chain gets no writer
+                // — Rails raises
+                // HasManyThroughNestedAssociationsAreReadonly on
+                // assignment, so a missing writer (NoMethodError /
+                // compile refusal) is the honest equivalent; the skip
+                // is ledgered as lower_residue.
                 if let Some(thr_name) = through {
                     let writer_name = Symbol::from(format!("{}=", name.as_str()));
-                    let join = model.associations().find_map(|a| match a {
-                        Association::HasMany { name: n, target: jt, foreign_key: jfk, .. }
-                            if n == thr_name =>
-                        {
-                            Some((jt.clone(), jfk.clone()))
+                    match through_writer_join(model, models, thr_name, target) {
+                        ThroughWriterJoin::Resolved(join_class, owner_fk, src_fk) => {
+                            if !model_defines_instance_method(model, &writer_name)
+                                && !methods.iter().any(|m| {
+                                    m.name == writer_name && m.receiver == MethodReceiver::Instance
+                                })
+                            {
+                                methods.push(synth_through_collection_writer(owner, name, target));
+                                methods.push(synth_through_sync(
+                                    owner,
+                                    name,
+                                    &join_class,
+                                    &owner_fk,
+                                    &src_fk,
+                                ));
+                                super::markers::fold_into_or_push(
+                                    methods,
+                                    model,
+                                    "after_save",
+                                    Expr::new(
+                                        Span::synthetic(),
+                                        ExprNode::Send {
+                                            recv: None,
+                                            method: Symbol::from(format!(
+                                                "_sync_{}",
+                                                name.as_str()
+                                            )),
+                                            args: vec![],
+                                            block: None,
+                                            parenthesized: false,
+                                        },
+                                    ),
+                                );
+                            }
                         }
-                        _ => None,
-                    });
-                    if let Some((join_class, owner_fk)) = join {
-                        if !model_defines_instance_method(model, &writer_name)
-                            && !methods.iter().any(|m| {
-                                m.name == writer_name && m.receiver == MethodReceiver::Instance
-                            })
-                        {
-                            let src_fk = Symbol::from(format!(
-                                "{}_id",
-                                crate::naming::snake_case(target.0.as_str())
-                            ));
-                            methods.push(synth_through_collection_writer(owner, name, target));
-                            methods.push(synth_through_sync(
-                                owner,
-                                name,
-                                &join_class,
-                                &owner_fk,
-                                &src_fk,
-                            ));
-                            super::markers::fold_into_or_push(
-                                methods,
-                                model,
-                                "after_save",
-                                Expr::new(
-                                    Span::synthetic(),
-                                    ExprNode::Send {
-                                        recv: None,
-                                        method: Symbol::from(format!("_sync_{}", name.as_str())),
-                                        args: vec![],
-                                        block: None,
-                                        parenthesized: false,
-                                    },
+                        ThroughWriterJoin::Nested(join_class) => {
+                            let kind = crate::diagnostic::DiagnosticKind::LowerResidue {
+                                pass: Symbol::from("through_writer"),
+                                construct: Symbol::from("has_many"),
+                                reason: Symbol::from("nested through"),
+                            };
+                            let d = crate::diagnostic::Diagnostic {
+                                span: model.span,
+                                severity: crate::diagnostic::Diagnostic::default_severity(&kind),
+                                kind,
+                                message: format!(
+                                    "`{owner}#{name}=` not synthesized: `has_many :{name}, \
+                                     through: :{thr}` is nested — `{join}` reaches `{target}` \
+                                     through another association, not a `belongs_to` — and \
+                                     Rails makes nested through collections read-only \
+                                     (HasManyThroughNestedAssociationsAreReadonly raises on \
+                                     assignment)",
+                                    owner = owner.0.as_str(),
+                                    name = name.as_str(),
+                                    thr = thr_name.as_str(),
+                                    join = join_class.0.as_str(),
+                                    target = target.0.as_str(),
                                 ),
-                            );
+                            };
+                            crate::emit::diagnostics::push(d);
                         }
+                        ThroughWriterJoin::NoJoin => {}
                     }
                 }
             }

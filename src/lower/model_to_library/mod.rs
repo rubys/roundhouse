@@ -158,7 +158,7 @@ fn lower_models_inner(
 
     let mut all_methods: Vec<(Vec<MethodDef>, ClassId, Option<&Table>, &Model)> = Vec::new();
     for model in models {
-        let methods = build_methods(model, schema, params_specs);
+        let methods = build_methods(model, models, schema, params_specs);
         let table = schema.tables.get(&model.table.0);
         all_methods.push((methods, model.name.clone(), table, model));
     }
@@ -388,7 +388,8 @@ pub fn class_info_from_library_class(lc: &LibraryClass) -> crate::analyze::Class
 /// `initialize` lowerings. Models whose table isn't in the schema (rare;
 /// abstract or virtual) get only the non-schema-driven methods.
 pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryClass {
-    let mut methods = build_methods(model, schema, &Default::default());
+    let mut methods =
+        build_methods(model, std::slice::from_ref(model), schema, &Default::default());
     let table = schema.tables.get(&model.table.0);
     let class_info = build_class_info(model, &methods, table);
     let mut classes: HashMap<ClassId, crate::analyze::ClassInfo> = HashMap::new();
@@ -620,6 +621,7 @@ fn writable_permit_fields(
 
 fn build_methods(
     model: &Model,
+    models: &[Model],
     schema: &Schema,
     params_specs: &std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>>,
 ) -> Vec<MethodDef> {
@@ -641,7 +643,7 @@ fn build_methods(
         let writable_fields =
             permitted_fields.map(|fields| writable_permit_fields(model, table, fields));
         let permitted_fields = writable_fields.as_deref();
-        push_schema_methods(&mut methods, model, table, permitted_fields);
+        push_schema_methods(&mut methods, model, models, table, permitted_fields);
         // Per-model Level-3 adapter primitives (`_adapter_find_by_id`, etc.)
         // — typed methods that go directly from SQL composition to typed
         // model instances over the `Sqlite` primitive surface. See
@@ -657,7 +659,7 @@ fn build_methods(
     }
 
     push_validate_method(&mut methods, model);
-    push_association_methods(&mut methods, model);
+    push_association_methods(&mut methods, model, models);
     push_dependent_destroy(&mut methods, model);
     push_unknown_marker_methods(&mut methods, model);
     push_attr_accessor_methods(&mut methods, model);

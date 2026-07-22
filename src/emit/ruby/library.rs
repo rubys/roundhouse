@@ -399,14 +399,17 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
 /// The through-model's `belongs_to` whose target matches the assoc's
 /// target supplies the source foreign key (works for `source:` renames —
 /// `upvoted_stories, through: :votes, source: :story` finds
-/// `Vote.belongs_to :story`). Unresolvable shapes (through-of-through,
-/// missing models) are left on the shared reader rather than guessed.
+/// `Vote.belongs_to :story`). Nested chains — the source association on
+/// the join model is itself `:through` (`Category has_many :stories,
+/// through: :tags` where `Tag#stories` goes through taggings), or the
+/// first hop is — recurse, adding one INNER JOIN per hop. Shapes a hop
+/// can't prove (missing models, no matching source) are left on the
+/// shared reader rather than guessed.
 /// KNOWN GAP: association scope-lambdas (`-> { order(...) }`, the
 /// upvoted vote-conditions) are dropped at ingest, so row order/filter
 /// can diverge from Rails until the lambda lands in the IR.
 pub(crate) fn apply_through_assoc_lowering(lcs: &mut [LibraryClass], app: &App) {
     use crate::dialect::Association;
-    use crate::naming::pluralize_snake;
 
     for lc in lcs.iter_mut() {
         let Some(model) = app.models.iter().find(|m| m.name == lc.name) else { continue };
@@ -417,35 +420,13 @@ pub(crate) fn apply_through_assoc_lowering(lcs: &mut [LibraryClass], app: &App) 
             else {
                 continue;
             };
-            // The through association on the owner (`:votes`, `:taggings`).
-            let Some(Association::HasMany {
-                target: thr_target, foreign_key: thr_fk, ..
-            }) = model.associations().find(
-                |a| matches!(a, Association::HasMany { name, .. } if name == thr_name),
-            )
+            let Some((joins, edge_table, edge_fk)) =
+                resolve_through_chain(&app.models, model, thr_name, target, 0)
             else {
                 continue;
             };
-            // The source belongs_to on the through model (`Vote.belongs_to
-            // :story`) — matched by target class, so `source:` renames
-            // resolve without a name convention.
-            let Some(thr_model) = app.models.iter().find(|m| &m.name == thr_target) else {
-                continue;
-            };
-            let Some(Association::BelongsTo { foreign_key: src_fk, .. }) =
-                thr_model.associations().find(|a| {
-                    matches!(a, Association::BelongsTo { target: t, .. } if t == target)
-                })
-            else {
-                continue;
-            };
-
-            let thr_table = pluralize_snake(thr_target.0.as_str());
-            let target_table = pluralize_snake(target.0.as_str());
-            let join_sql = format!(
-                "INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.id"
-            );
-            let where_sql = format!("{thr_table}.{thr_fk} = ?");
+            let join_sql = joins.join(" ");
+            let where_sql = format!("{edge_table}.{edge_fk} = ?");
 
             let Some(m) =
                 lc.methods.iter_mut().find(|m| {
@@ -457,6 +438,73 @@ pub(crate) fn apply_through_assoc_lowering(lcs: &mut [LibraryClass], app: &App) 
             m.body = through_reader_body(name, target, &join_sql, &where_sql, assoc_scope);
         }
     }
+}
+
+/// Resolve the SQL join chain for a `has_many :through` on `model`
+/// reaching `target` via the sibling association named `thr_name`.
+/// Returns the INNER JOIN fragments (target-nearest first, ready to
+/// `join(" ")`) plus the WHERE edge `(table, fk)` that points back at
+/// the owner's id. One recursion per indirection: a first hop that is
+/// itself `:through`, or a join-model source association that is.
+/// `None` when a hop can't be proven — missing join model, no
+/// `belongs_to`/through source matching the target class — and for
+/// pathological depth (cyclic `through:` declarations).
+fn resolve_through_chain(
+    models: &[crate::dialect::Model],
+    model: &crate::dialect::Model,
+    thr_name: &Symbol,
+    target: &ClassId,
+    depth: usize,
+) -> Option<(Vec<String>, String, Symbol)> {
+    use crate::dialect::Association;
+    use crate::naming::pluralize_snake;
+
+    if depth > 4 {
+        return None;
+    }
+    // The through association on the owner (`:votes`, `:taggings`, `:tags`).
+    let (thr_target, thr_fk, thr_through) = model.associations().find_map(|a| match a {
+        Association::HasMany { name, target, foreign_key, through, .. } if name == thr_name => {
+            Some((target, foreign_key, through))
+        }
+        _ => None,
+    })?;
+    // How the join model's rows tie back to the owner: directly by the
+    // sibling's fk, or through the sibling's own chain.
+    let (back_joins, edge_table, edge_fk) = match thr_through {
+        None => (Vec::new(), pluralize_snake(thr_target.0.as_str()), thr_fk.clone()),
+        Some(inner) => resolve_through_chain(models, model, inner, thr_target, depth + 1)?,
+    };
+    let thr_model = models.iter().find(|m| &m.name == thr_target)?;
+    let thr_table = pluralize_snake(thr_target.0.as_str());
+    let target_table = pluralize_snake(target.0.as_str());
+    // The source belongs_to on the join model (`Vote.belongs_to :story`)
+    // — matched by target class, so `source:` renames resolve without a
+    // name convention.
+    if let Some(src_fk) = thr_model.associations().find_map(|a| match a {
+        Association::BelongsTo { target: t, foreign_key, .. } if t == target => Some(foreign_key),
+        _ => None,
+    }) {
+        let mut joins =
+            vec![format!("INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.id")];
+        joins.extend(back_joins);
+        return Some((joins, edge_table, edge_fk));
+    }
+    // Nested: the join model reaches the target through its own
+    // `:through` association. Resolve that chain (phrased from the same
+    // target table), then graft the join model onto its owner edge.
+    let src_through = thr_model.associations().find_map(|a| match a {
+        Association::HasMany { target: t, through: Some(thru), .. } if t == target => Some(thru),
+        _ => None,
+    })?;
+    let (src_joins, src_edge_table, src_edge_fk) =
+        resolve_through_chain(models, thr_model, src_through, target, depth + 1)?;
+    let mut joins = src_joins;
+    joins.push(format!(
+        "INNER JOIN {thr_table} ON {thr_table}.id = {src_edge_table}.{src_edge_fk}"
+    ));
+    joins.extend(back_joins);
+    Some((joins, edge_table, edge_fk))
 }
 
 /// `return @<name>_cache if @<name>_loaded` + the joined Relation chain
