@@ -565,7 +565,69 @@ fn classify_form_with_components(
         });
     }
 
-    let plural = ctx.resource_dir.as_str();
+    // `model: [:mod, tag]` — Rails' scope-prefix array (namespace
+    // symbol(s) + record). The record is the model for fields and
+    // persistence; the symbols only prefix the route helper
+    // (`mod_tag_path`/`mod_tags_path`). Left unrecognized, the WHOLE
+    // array flowed into the plain-record machinery: `[:mod, tag]
+    // .persisted?`, `[:mod, tag].id`, and (with the namespaced view
+    // dir) a literal slash in the helper name — three refusals from
+    // one hole, found on the lobsters mod forms.
+    if let Some((record, record_singular, scope_prefix)) = scoped_record_form(&model) {
+        let record_plural = crate::naming::pluralize_snake(&record_singular);
+        let member_name = format!("{scope_prefix}_{record_singular}_path");
+        let collection_name = format!("{scope_prefix}_{record_plural}_path");
+        let persisted =
+            send(Some(record.clone()), "persisted?", Vec::new(), None, false);
+        let member_arg = if ctx.slug_models.contains(record_singular.as_str()) {
+            send(Some(record.clone()), "to_param", Vec::new(), None, false)
+        } else {
+            send(Some(record.clone()), "id", Vec::new(), None, false)
+        };
+        let member_path =
+            send(Some(route_helpers()), &member_name, vec![member_arg], None, true);
+        let collection_path =
+            send(Some(route_helpers()), &collection_name, Vec::new(), None, false);
+        let has_member = ctx.route_helper_names.is_empty()
+            || ctx.route_helper_names.contains(&member_name);
+        let has_collection = ctx.route_helper_names.is_empty()
+            || ctx.route_helper_names.contains(&collection_name);
+        let action = match (has_member, has_collection) {
+            (true, false) => member_path,
+            (false, true) => collection_path,
+            _ => Expr::new(
+                Span::synthetic(),
+                ExprNode::If {
+                    cond: persisted.clone(),
+                    then_branch: member_path,
+                    else_branch: collection_path,
+                },
+            ),
+        };
+        let method = method_expr.clone().unwrap_or_else(|| {
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::If {
+                    cond: persisted,
+                    then_branch: lit_sym(Symbol::from("patch")),
+                    else_branch: lit_sym(Symbol::from("post")),
+                },
+            )
+        });
+        return Some(FormWithComponents {
+            model: record,
+            model_name: record_singular,
+            action,
+            method,
+            opts_entries,
+        });
+    }
+
+    // Namespaced view dirs (`mod/tags`) carry their namespace with a
+    // slash; helper names join with underscores (`mod_tags_path`, never
+    // `mod/tag_path` — which reads as division in the emitted Ruby).
+    let plural_owned = ctx.resource_dir.replace('/', "_");
+    let plural = plural_owned.as_str();
     let singular = singularize(plural);
 
     // `form_with model: @edit_user, url: settings_path` — an explicit
@@ -678,6 +740,38 @@ fn classify_form_with_components(
         method,
         opts_entries,
     })
+}
+
+/// Match `model: [:scope, record]` (symbol namespace prefix(es) + an
+/// existing record — Rails' scoped-route form) and produce
+/// `(record, record_singular, scope_prefix)` where `scope_prefix` is
+/// the underscore-joined symbol chain (`[:mod, :admin]` → "mod_admin").
+/// The record must be a bare local/ivar so its singular can be read
+/// from the name; anything else returns None and falls through.
+fn scoped_record_form(model: &Expr) -> Option<(Expr, String, String)> {
+    let ExprNode::Array { elements, .. } = &*model.node else {
+        return None;
+    };
+    if elements.len() < 2 {
+        return None;
+    }
+    let (record, scopes) = elements.split_last()?;
+    let mut prefix_parts: Vec<String> = Vec::new();
+    for s in scopes {
+        let ExprNode::Lit { value: Literal::Sym { value } } = &*s.node else {
+            return None;
+        };
+        prefix_parts.push(value.as_str().to_string());
+    }
+    let record_name = match &*record.node {
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.as_str().to_string(),
+        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
+            method.as_str().to_string()
+        }
+        _ => return None,
+    };
+    let record_singular = singularize(&snake_case(&record_name));
+    Some((record.clone(), record_singular, prefix_parts.join("_")))
 }
 
 /// Match `model: [parent, Class.new(...)]` (the polymorphic-array form
