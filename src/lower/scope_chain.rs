@@ -19,7 +19,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::dialect::{Association, Model, ModelBodyItem, Param};
-use crate::expr::{BoolOpKind, BoolOpSurface, Expr, ExprNode, Literal};
+use crate::expr::{BlockStyle, Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::naming::pluralize_snake;
 
@@ -637,28 +637,62 @@ fn lower_relation_args(model: &ClassId, method: &Symbol, args: &mut [Expr], ctx:
                     };
                     let Some(fk) = ctx.assocs.belongs_to_fk(model, key) else { continue };
                     *k.node = ExprNode::Lit { value: Literal::Sym { value: fk.clone() } };
-                    if matches!(&*v.node, ExprNode::Var { .. } | ExprNode::Ivar { .. }) {
+                    // The VALUE rides through unchanged. It used to be
+                    // narrowed to `v && v.id` for plain reads, but an
+                    // untyped scope param can carry a record OR a
+                    // collection (`where(comment: comments)` — Rails'
+                    // IN-of-records form, lobsters Vote.comments_flags),
+                    // and `.id` on the collection was a compile stop
+                    // under AOT. The runtime's column_predicate now
+                    // dispatches: record → id, array → ids IN, nil →
+                    // IS NULL. One statically-known case keeps a typed
+                    // narrowing — a collection-typed value maps to ids
+                    // here so the emitted SQL shape is visible.
+                    if matches!(&*v.node, ExprNode::Var { .. } | ExprNode::Ivar { .. })
+                        && matches!(
+                            v.ty.as_ref(),
+                            Some(crate::ty::Ty::Array { .. })
+                                | Some(crate::ty::Ty::Relation { .. })
+                        )
+                    {
                         let val = std::mem::replace(
                             v,
                             syn(span, ExprNode::Lit { value: Literal::Nil }),
                         );
+                        let x = Symbol::from("__rh_rec");
                         let id_read = syn(
                             span,
                             ExprNode::Send {
-                                recv: Some(val.clone()),
+                                recv: Some(syn(
+                                    span,
+                                    ExprNode::Var {
+                                        id: crate::ident::VarId(0),
+                                        name: x.clone(),
+                                    },
+                                )),
                                 method: Symbol::from("id"),
                                 args: vec![],
                                 block: None,
                                 parenthesized: false,
                             },
                         );
+                        let block = syn(
+                            span,
+                            ExprNode::Lambda {
+                                params: vec![x],
+                                block_param: None,
+                                body: id_read,
+                                block_style: BlockStyle::Brace,
+                            },
+                        );
                         *v = syn(
                             span,
-                            ExprNode::BoolOp {
-                                op: BoolOpKind::And,
-                                surface: BoolOpSurface::Symbol,
-                                left: val,
-                                right: id_read,
+                            ExprNode::Send {
+                                recv: Some(val),
+                                method: Symbol::from("map"),
+                                args: vec![],
+                                block: Some(block),
+                                parenthesized: false,
                             },
                         );
                     }
@@ -1227,8 +1261,13 @@ mod tests {
     }
 
     #[test]
-    fn where_belongs_to_key_renames_and_narrows_var_to_id() {
-        // HiddenStory scope `by`: where(user: user) → where(user_id: user && user.id)
+    fn where_belongs_to_key_renames_and_passes_untyped_value_through() {
+        // HiddenStory scope `by`: where(user: user) → where(user_id: user).
+        // The value rides RAW: an untyped scope param can be a record or
+        // a collection (`where(comment: comments)` — lobsters
+        // Vote.comments_flags), so the runtime's column_predicate
+        // dispatches (record → id, array → ids IN). The old static
+        // `user && user.id` narrowing broke the collection case.
         let (scopes, models, assocs) = (ScopeRegistry::new(), HashSet::new(), assoc_fixture());
         let ctx = ctx_with(&scopes, &models, &assocs);
         let user_var = Expr::new(span(), ExprNode::Var { id: VarId(1), name: Symbol::from("user") });
@@ -1248,14 +1287,41 @@ mod tests {
             &*k.node,
             ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "user_id"
         ));
-        let ExprNode::BoolOp { op: BoolOpKind::And, left, right, .. } = &*v.node else {
-            panic!("expected `user && user.id`, got {:?}", v.node)
+        assert!(
+            matches!(&*v.node, ExprNode::Var { name, .. } if name.as_str() == "user"),
+            "value must pass through unchanged, got {:?}",
+            v.node
+        );
+    }
+
+    #[test]
+    fn where_belongs_to_key_maps_collection_typed_value_to_ids() {
+        // A value KNOWN to be a collection maps to ids statically —
+        // `where(comment: comments)` with `comments: Array` becomes
+        // `where(comment_id: comments.map { |r| r.id })`.
+        let (scopes, models, assocs) = (ScopeRegistry::new(), HashSet::new(), assoc_fixture());
+        let ctx = ctx_with(&scopes, &models, &assocs);
+        let mut comments_var =
+            Expr::new(span(), ExprNode::Var { id: VarId(1), name: Symbol::from("comments") });
+        comments_var.ty = Some(crate::ty::Ty::Array {
+            elem: Box::new(crate::ty::Ty::Untyped),
+        });
+        let mut args = vec![Expr::new(
+            span(),
+            ExprNode::Hash { entries: vec![(sym_lit("user"), comments_var)], kwargs: true },
+        )];
+        lower_relation_args(
+            &ClassId(Symbol::from("HiddenStory")),
+            &Symbol::from("where"),
+            &mut args,
+            &ctx,
+        );
+        let ExprNode::Hash { entries, .. } = &*args[0].node else { panic!("expected Hash") };
+        let (_, v) = &entries[0];
+        let ExprNode::Send { method, block: Some(_), .. } = &*v.node else {
+            panic!("expected `comments.map {{ ... }}`, got {:?}", v.node)
         };
-        assert!(matches!(&*left.node, ExprNode::Var { name, .. } if name.as_str() == "user"));
-        assert!(matches!(
-            &*right.node,
-            ExprNode::Send { method, .. } if method.as_str() == "id"
-        ));
+        assert_eq!(method.as_str(), "map");
     }
 
     #[test]

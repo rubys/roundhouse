@@ -580,9 +580,20 @@ module ActiveRecord
         # as its own conditions were added.
         "#{qcol} IN (#{val.to_sql})"
       elsif val.is_a?(Array)
-        "#{qcol} IN (#{escape_list(val)})"
+        # Record elements read their id — Rails' IN-of-records form
+        # (`where(comment: comments)`, lobsters Vote.comments_flags);
+        # scalar elements escape as-is.
+        ids = val.map { |x| x.is_a?(Base) ? x.id : x }
+        "#{qcol} IN (#{escape_list(ids)})"
       elsif val.nil?
         "#{qcol} IS NULL"
+      elsif val.is_a?(Base)
+        # A whole record under a (fk-renamed) key reads its id —
+        # `where(user: user)` after the key lowered to `user_id`. The
+        # static `v && v.id` narrowing was dropped in favor of this
+        # runtime dispatch: hash values from untyped scope params can
+        # be a record OR a collection, and only the runtime knows.
+        "#{qcol} = #{ActiveRecord.adapter.escape_value(val.id)}"
       else
         "#{qcol} = #{ActiveRecord.adapter.escape_value(val)}"
       end
