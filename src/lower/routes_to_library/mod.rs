@@ -258,6 +258,27 @@ fn build_helper_function(
     app: &App,
 ) -> LibraryFunction {
     let slug_id = model_overrides_to_param(route.controller.0.as_str(), helper_name, app);
+    // Slugness is PER PARAM: a nested parent's segment names its model
+    // directly (`story_id` in `/stories/:story_id/suggestions` → Story,
+    // whose to_param is a short_id slug) — the owning route's
+    // controller/helper say nothing about the parent. `<x>_id` params
+    // consult model `<x>`; bare `id` (and unmatched stems) keep the
+    // route-level heuristic. Typing a slug segment Int made every
+    // strict-target call site passing `story.short_id` a C type error.
+    let param_is_slug = |p: &str| -> bool {
+        if let Some(stem) = p.strip_suffix("_id") {
+            if !stem.is_empty() && named_model_overrides_to_param(stem, app) {
+                return true;
+            }
+        }
+        slug_id
+    };
+    let slug_params: std::collections::HashSet<String> = route
+        .path_params
+        .iter()
+        .filter(|p| param_is_slug(p.as_str()))
+        .cloned()
+        .collect();
     // A trailing `(.:format)` is Rails' OPTIONAL format suffix, not a
     // path segment: the helper takes `format = nil` last and appends
     // `.<format>` only when given (`domain_path(d)` → "/domains/d",
@@ -296,7 +317,7 @@ fn build_helper_function(
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            let base = param_ty(p, slug_id);
+            let base = param_ty(p, slug_params.contains(p.as_str()));
             let ty = if i < required {
                 base
             } else {
@@ -306,9 +327,9 @@ fn build_helper_function(
         })
         .collect();
     let mut body = if required < seg_params.len() {
-        build_optional_path_expr(path, &seg_params, required, slug_id)
+        build_optional_path_expr(path, &seg_params, required, &slug_params)
     } else {
-        build_path_expr(path, &seg_params, slug_id)
+        build_path_expr(path, &seg_params, &slug_params)
     };
     if has_format {
         let format_sym = Symbol::from("format");
@@ -376,7 +397,11 @@ fn param_ty(name: &str, slug_id: bool) -> Ty {
 /// Walk the path template and build a `StringInterp` expression with
 /// literal text segments and `Var` substitutions for `:param`s. A
 /// param-less path collapses to a plain `Lit::Str`.
-fn build_path_expr(path: &str, path_params: &[String], slug_id: bool) -> Expr {
+fn build_path_expr(
+    path: &str,
+    path_params: &[String],
+    slug_params: &std::collections::HashSet<String>,
+) -> Expr {
     if path_params.is_empty() {
         return lit_str(path.to_string());
     }
@@ -400,7 +425,7 @@ fn build_path_expr(path: &str, path_params: &[String], slug_id: bool) -> Expr {
                     parts.push(InterpPart::Text { value: std::mem::take(&mut buf) });
                 }
                 parts.push(InterpPart::Expr {
-                    expr: var_ref_slug(&ident, slug_id),
+                    expr: var_ref_slug(&ident, slug_params.contains(&ident)),
                 });
             } else {
                 buf.push(':');
@@ -431,7 +456,7 @@ fn build_optional_path_expr(
     path: &str,
     seg_params: &[String],
     required: usize,
-    slug_id: bool,
+    slug_params: &std::collections::HashSet<String>,
 ) -> Expr {
     let optional: std::collections::HashSet<&str> =
         seg_params[required..].iter().map(|s| s.as_str()).collect();
@@ -478,7 +503,7 @@ fn build_optional_path_expr(
             } else if !buf.is_empty() {
                 chunk.push(InterpPart::Text { value: buf.clone() });
             }
-            chunk.push(InterpPart::Expr { expr: var_ref_slug(&ident, slug_id) });
+            chunk.push(InterpPart::Expr { expr: var_ref_slug(&ident, slug_params.contains(&ident)) });
             chunks.push((ident.clone(), chunk));
             buf.clear();
         } else {
@@ -486,7 +511,7 @@ fn build_optional_path_expr(
             if !buf.is_empty() {
                 base_parts.push(InterpPart::Text { value: std::mem::take(&mut buf) });
             }
-            base_parts.push(InterpPart::Expr { expr: var_ref_slug(&ident, slug_id) });
+            base_parts.push(InterpPart::Expr { expr: var_ref_slug(&ident, slug_params.contains(&ident)) });
         }
     }
     if !buf.is_empty() {
