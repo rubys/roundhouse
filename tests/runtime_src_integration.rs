@@ -752,7 +752,12 @@ fn every_runtime_method_body_concretely_typed() {
     // bag's values are `untyped` by declaration (scratch keys like
     // `exception_notifier.exception_data`); +3 sites; ceiling raised
     // 199 → 202.
-    const CEILING: usize = 202;
+    // 2026-07-23 Relation#column_predicate record/collection dispatch
+    // arms (`where(comment: comments)` IN-of-records): hash values are
+    // `untyped` by declaration and the arms inspect them (`x` in the
+    // ids map, `x.id`, `val.id`) — irreducible at this seam; +3 sites;
+    // ceiling raised 202 → 205.
+    const CEILING: usize = 205;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
