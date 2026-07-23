@@ -1723,6 +1723,42 @@ pub(crate) fn render_locals_keys(
                             acc.entry(key).or_default().extend(keys);
                         }
                     }
+                } else if let ExprNode::Lit { value: Literal::Str { value: pname } } =
+                    &*args[0].node
+                {
+                    // Shorthand `render "message", message: m, is_unread: b`
+                    // — partial name as a string literal, locals as the
+                    // trailing kwargs hash. The call-site lowering has
+                    // always parsed this form; only matching the
+                    // `partial:`-keyword form here left shorthand locals
+                    // out of the def signature, so the partial's body
+                    // read them as unbound frees (lobsters inbox
+                    // partials — an AOT compile stop).
+                    let mut keys: Vec<String> = Vec::new();
+                    if let Some(h) = args.get(1) {
+                        if let ExprNode::Hash { entries, kwargs: true } = &*h.node {
+                            for (lk, _) in entries {
+                                if let ExprNode::Lit { value: Literal::Sym { value } } =
+                                    &*lk.node
+                                {
+                                    keys.push(value.as_str().to_string());
+                                }
+                            }
+                        }
+                    }
+                    if !keys.is_empty() {
+                        let resolved = match pname.rsplit_once('/') {
+                            Some((d, n)) => Some((d.to_string(), n.to_string())),
+                            None => own_dir.map(|d| (d.to_string(), pname.clone())),
+                        };
+                        if let Some((d, n)) = resolved {
+                            let key = (
+                                camelize_path(&snake_case(&d)),
+                                n.trim_start_matches('_').to_string(),
+                            );
+                            acc.entry(key).or_default().extend(keys);
+                        }
+                    }
                 }
             }
         }

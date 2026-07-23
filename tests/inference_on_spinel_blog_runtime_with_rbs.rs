@@ -417,8 +417,12 @@ fn untyped_subexpressions_with_rbs_baseline() {
 
     // Loose ceiling — current measurement plus some headroom. Tighten
     // as authoring/inference improves; failing low is good (un-pin
-    // and record the new lower bound).
-    const CEILING: usize = 500;
+    // and record the new lower bound). 2026-07-23: 500 → 520 —
+    // measurement moved to 509 when Relation#column_predicate grew the
+    // record/collection runtime-dispatch arms (`where(comment:
+    // comments)` IN-of-records support); those arms inspect untyped
+    // hash values by design.
+    const CEILING: usize = 520;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions exceeds ceiling of {CEILING}.\n\
