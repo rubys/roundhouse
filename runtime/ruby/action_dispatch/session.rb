@@ -152,8 +152,8 @@ module ActionDispatch
       session = Session.new
       raw.to_s.split("&").each do |pair|
         parts = pair.to_s.split("=")
-        k = Session.cookie_decode(parts[0].to_s)
-        v = Session.cookie_decode(parts[1].to_s)
+        k = parts.length > 0 ? Session.cookie_decode(parts[0].to_s) : ""
+        v = parts.length > 1 ? Session.cookie_decode(parts[1].to_s) : ""
         session[k] = v unless k.empty?
       end
       session
@@ -162,7 +162,10 @@ module ActionDispatch
     # Inverse of from_cookie. Deterministic (insertion order), so the
     # dispatcher can compare encodings to detect change.
     def to_cookie
-      ks = keys
+      # `to_h.keys`, not bare `keys`: the Hash receiver keeps every
+      # target's keys-intrinsic on an actual map (go templates `keys`
+      # into len/range of the receiver).
+      ks = to_h.keys
       ks.map { |k| "#{Session.cookie_encode(k)}=#{Session.cookie_encode(self[k].to_s)}" }.join("&")
     end
 
