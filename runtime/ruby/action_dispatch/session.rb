@@ -108,25 +108,53 @@ module ActionDispatch
     # sites and compares inbound-vs-outbound encodings to decide
     # whether a Set-Cookie is needed. No signing/encryption — parity
     # with Rails' encrypted CookieStore is a wire format, not a
-    # behavior, difference. Codec is hand-rolled byte-loop percent
-    # encoding so this file stays portable to every target.
+    # behavior, difference. The codec escapes a fixed set — the
+    # format's own delimiters (% & = +) plus the cookie-hostile chars
+    # (space ; , ") — via gsub-with-Hash, the same idiom as
+    # JsonBuilder's encode_string, so every target's emitter already
+    # compiles it. Decode is single-pass (gsub never rescans a
+    # replacement), so "%2525" decodes to "%25" exactly once; a code
+    # outside the set rides through verbatim — tolerant, matching
+    # from_cookie's stale-cookie stance.
+    ENCODES = {
+      "%" => "%25",
+      "&" => "%26",
+      "=" => "%3D",
+      "+" => "%2B",
+      " " => "%20",
+      ";" => "%3B",
+      "," => "%2C",
+      "\"" => "%22",
+    }.freeze
+    ENCODE_PATTERN = /[%&=+ ;,"]/.freeze
+
+    # `"+" => " "` restores the url-encoding legacy spelling on the
+    # inbound side only; our own encoder always writes %20.
+    DECODES = {
+      "%25" => "%",
+      "%26" => "&",
+      "%3D" => "=",
+      "%2B" => "+",
+      "%20" => " ",
+      "%3B" => ";",
+      "%2C" => ",",
+      "%22" => "\"",
+      "+" => " ",
+    }.freeze
+    DECODE_PATTERN = /%25|%26|%3D|%2B|%20|%3B|%2C|%22|\+/.freeze
 
     # Decode a `_session` cookie value into a Session. Tolerates a
     # missing/garbled cookie by starting empty — a stale cookie shape
-    # should mean "logged out", not a 500.
+    # should mean "logged out", not a 500. A pair whose key decodes
+    # empty is dropped; a pair with no `=` keeps its key with an empty
+    # value (our encoder always writes the `=`).
     def self.from_cookie(raw)
       session = Session.new
-      pairs = raw.to_s.split("&")
-      i = 0
-      while i < pairs.length
-        pair = pairs[i].to_s
-        eq = pair.index("=")
-        unless eq.nil?
-          k = Session.cookie_decode(pair[0, eq].to_s)
-          v = Session.cookie_decode(pair[eq + 1, pair.length].to_s)
-          session[k] = v unless k.empty?
-        end
-        i += 1
+      raw.to_s.split("&").each do |pair|
+        parts = pair.to_s.split("=")
+        k = Session.cookie_decode(parts[0].to_s)
+        v = Session.cookie_decode(parts[1].to_s)
+        session[k] = v unless k.empty?
       end
       session
     end
@@ -134,68 +162,16 @@ module ActionDispatch
     # Inverse of from_cookie. Deterministic (insertion order), so the
     # dispatcher can compare encodings to detect change.
     def to_cookie
-      out = ""
       ks = keys
-      i = 0
-      while i < ks.length
-        k = ks[i]
-        out += "&" if i > 0
-        out += Session.cookie_encode(k) + "=" + Session.cookie_encode(fetch(k, "").to_s)
-        i += 1
-      end
-      out
+      ks.map { |k| "#{Session.cookie_encode(k)}=#{Session.cookie_encode(self[k].to_s)}" }.join("&")
     end
 
     def self.cookie_encode(s)
-      hex = "0123456789ABCDEF"
-      out = ""
-      i = 0
-      while i < s.length
-        c = s[i, 1].to_s
-        o = c.ord
-        if (o >= 48 && o <= 57) || (o >= 65 && o <= 90) || (o >= 97 && o <= 122) ||
-           c == "-" || c == "_" || c == "." || c == "~"
-          out += c
-        else
-          out += "%" + hex[o / 16, 1].to_s + hex[o % 16, 1].to_s
-        end
-        i += 1
-      end
-      out
+      s.gsub(ENCODE_PATTERN, ENCODES)
     end
 
     def self.cookie_decode(s)
-      out = ""
-      i = 0
-      while i < s.length
-        c = s[i, 1].to_s
-        if c == "%" && i + 2 < s.length
-          hi = Session.hex_val(s[i + 1, 1].to_s)
-          lo = Session.hex_val(s[i + 2, 1].to_s)
-          if hi >= 0 && lo >= 0
-            out += (hi * 16 + lo).chr
-            i += 3
-          else
-            out += c
-            i += 1
-          end
-        elsif c == "+"
-          out += " "
-          i += 1
-        else
-          out += c
-          i += 1
-        end
-      end
-      out
-    end
-
-    def self.hex_val(c)
-      o = c.length > 0 ? c.ord : 0
-      return o - 48 if o >= 48 && o <= 57
-      return o - 55 if o >= 65 && o <= 70
-      return o - 87 if o >= 97 && o <= 102
-      -1
+      s.gsub(DECODE_PATTERN, DECODES)
     end
   end
 end
