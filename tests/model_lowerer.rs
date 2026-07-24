@@ -519,6 +519,84 @@ end
 }
 
 #[test]
+fn block_form_callbacks_honor_the_on_restriction() {
+    use roundhouse::ingest::ingest_model;
+    use roundhouse::schema::Schema;
+
+    // lobsters' User: the token generators run only on create, and the
+    // block form carries `on:` as an option hash where the symbol form
+    // carries it as a keyword.
+    let source = br#"class User < ApplicationRecord
+  before_validation on: :create do
+    create_rss_token
+  end
+  after_commit on: :create do
+    recreate_links
+  end
+  after_create do
+    mark_submitter
+  end
+  before_save on: :create do
+    never_lowers
+  end
+  after_validation if: :active? do
+    also_never_lowers
+  end
+end
+"#;
+    let model = ingest_model(source, "app/models/user.rb", &Schema::default())
+        .expect("ingest")
+        .expect("model");
+    let lc = lower_model_to_library_class(&model, &Schema::default());
+    let names = method_names(&lc);
+
+    // Validation hook keeps its name and gains the `new_record?` guard.
+    let bv = lc
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "before_validation")
+        .expect("before_validation");
+    match &*body_stmts(bv)[0].node {
+        roundhouse::ExprNode::If { cond, then_branch, .. } => {
+            assert_eq!(self_call_name(cond), "new_record?");
+            let then_stmts = match &*then_branch.node {
+                roundhouse::ExprNode::Seq { exprs } => exprs.clone(),
+                _ => vec![then_branch.clone()],
+            };
+            assert_eq!(
+                then_stmts.iter().map(self_call_name).collect::<Vec<_>>(),
+                vec!["create_rss_token"]
+            );
+        }
+        other => panic!("expected new_record? guard; got {other:?}"),
+    }
+
+    // after_commit retargets the per-lifecycle runtime hook.
+    let acc = lc
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "after_create_commit")
+        .expect("after_create_commit");
+    assert_eq!(
+        body_stmts(acc).iter().map(self_call_name).collect::<Vec<_>>(),
+        vec!["recreate_links"]
+    );
+    assert!(!names.contains(&"after_commit"), "{names:?}");
+
+    // Optionless block form is unchanged by this path.
+    let ac = lc.methods.iter().find(|m| m.name.as_str() == "after_create").expect("after_create");
+    assert_eq!(
+        body_stmts(ac).iter().map(self_call_name).collect::<Vec<_>>(),
+        vec!["mark_submitter"]
+    );
+
+    // Rails doesn't accept `on:` on before_save, and an `if:`
+    // condition drops the callback rather than run it unguarded.
+    assert!(!names.contains(&"before_save"), "{names:?}");
+    assert!(!names.contains(&"after_validation"), "{names:?}");
+}
+
+#[test]
 fn raw_slot_columns_route_through_writers_in_initialize_and_presence() {
     use roundhouse::ingest::{ingest_model, ingest_schema};
 

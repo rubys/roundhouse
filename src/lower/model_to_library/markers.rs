@@ -539,46 +539,64 @@ fn push_symbol_callback(
     };
 
     if matches!(cb.hook, Hook::BeforeValidation | Hook::AfterValidation) && cb.on.is_some() {
-        let new_record = Expr::new(
-            span,
-            ExprNode::Send {
-                recv: None,
-                method: Symbol::from("new_record?"),
-                args: vec![],
-                block: None,
-                parenthesized: false,
-            },
-        );
-        let cond = match cb.on {
-            Some(On::Create) => new_record,
-            Some(On::Update) => Expr::new(
-                span,
-                ExprNode::Send {
-                    recv: Some(new_record),
-                    method: Symbol::from("!"),
-                    args: vec![],
-                    block: None,
-                    parenthesized: false,
-                },
-            ),
-            // Validations never run on destroy; ingest rejects this.
-            Some(On::Destroy) | None => return,
-        };
-        let mut body = Expr::new(
-            span,
-            ExprNode::If {
-                cond,
-                then_branch: seq(cb.targets.iter().map(self_call).collect()),
-                else_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
-            },
-        );
-        body.inherit_span(span);
+        // Validations never run on destroy; ingest rejects this.
+        let Some(on) = cb.on else { return };
+        let body = seq(cb.targets.iter().map(self_call).collect());
+        let Some(body) = guard_validation_on(body, on, span) else { return };
         fold_into_or_push(methods, model, hook_name, body);
     } else {
         for target in &cb.targets {
             fold_into_or_push(methods, model, hook_name, self_call(target));
         }
     }
+}
+
+/// Wrap a validation-hook body in the `new_record?` guard its `on:`
+/// restriction lowers to — accurate at validation time, since the
+/// insert hasn't happened yet. `on: :destroy` has no reading here
+/// (validations never run on destroy) and returns None: drop the
+/// callback rather than run it in the wrong circumstances.
+fn guard_validation_on(
+    body: Expr,
+    on: crate::dialect::CallbackOn,
+    span: Span,
+) -> Option<Expr> {
+    use crate::dialect::CallbackOn as On;
+
+    let new_record = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: None,
+            method: Symbol::from("new_record?"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let cond = match on {
+        On::Create => new_record,
+        On::Update => Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(new_record),
+                method: Symbol::from("!"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        ),
+        On::Destroy => return None,
+    };
+    let mut guarded = Expr::new(
+        span,
+        ExprNode::If {
+            cond,
+            then_branch: body,
+            else_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+        },
+    );
+    guarded.inherit_span(span);
+    Some(guarded)
 }
 
 /// The runtime Base hook method a `CallbackHook` overrides when no
@@ -602,18 +620,63 @@ fn hook_method_name(hook: crate::dialect::CallbackHook) -> &'static str {
     }
 }
 
+/// The `on:` restriction from a block-form callback's option hash.
+/// None means "a shape this lowering won't run": not an `on:` hash at
+/// all, an unmodeled value, or extra options (`if:`/`unless:`) whose
+/// conditions would be silently dropped.
+fn block_callback_on(arg: &Expr) -> Option<crate::dialect::CallbackOn> {
+    use crate::dialect::CallbackOn as On;
+
+    let ExprNode::Hash { entries, .. } = &*arg.node else { return None };
+    let [(k, v)] = &entries[..] else { return None };
+    let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else { return None };
+    let ExprNode::Lit { value: Literal::Sym { value: val } } = &*v.node else { return None };
+    if key.as_str() != "on" {
+        return None;
+    }
+    match val.as_str() {
+        "create" => Some(On::Create),
+        "update" => Some(On::Update),
+        "destroy" => Some(On::Destroy),
+        // `on: [:create, :update]` array form: not modeled.
+        _ => None,
+    }
+}
+
 fn push_block_callback(methods: &mut Vec<MethodDef>, model: &Model, expr: &Expr) {
     {
         let ExprNode::Send { recv: None, method, args, block: Some(block), .. } = &*expr.node else {
             return;
         };
-        if !args.is_empty() {
-            return;
-        }
+        // `before_validation on: :create do … end` — the block form
+        // carries its restriction as an option hash where the symbol
+        // form carries it as a keyword. Anything else in that hash
+        // (`if:`/`unless:`) drops the callback, matching ingest's
+        // rejection for the symbol form.
+        let on = match &args[..] {
+            [] => None,
+            [opts] => match block_callback_on(opts) {
+                Some(on) => Some(on),
+                None => return,
+            },
+            _ => return,
+        };
         let hook = method.as_str();
         if !BLOCK_CALLBACK_HOOKS.contains(&hook) {
             return;
         }
+        // Same structural lowering as the symbol form: after_commit
+        // retargets the per-lifecycle hook, validation hooks keep
+        // their name and gain a `new_record?` guard below. Rails
+        // doesn't accept `on:` on the remaining hooks.
+        let hook_name = match (hook, on) {
+            (_, None) => hook,
+            ("after_commit", Some(crate::dialect::CallbackOn::Create)) => "after_create_commit",
+            ("after_commit", Some(crate::dialect::CallbackOn::Update)) => "after_update_commit",
+            ("after_commit", Some(crate::dialect::CallbackOn::Destroy)) => "after_destroy_commit",
+            ("before_validation" | "after_validation", Some(_)) => hook,
+            _ => return,
+        };
         let ExprNode::Lambda { body: lambda_body, .. } = &*block.node else {
             return;
         };
@@ -639,7 +702,16 @@ fn push_block_callback(methods: &mut Vec<MethodDef>, model: &Model, expr: &Expr)
         // spliced through keep their exact spans.
         lambda_body.inherit_span(expr.span);
 
-        let hook_sym = method.clone();
+        if matches!(hook, "before_validation" | "after_validation") {
+            if let Some(on) = on {
+                let Some(guarded) = guard_validation_on(lambda_body, on, expr.span) else {
+                    return;
+                };
+                lambda_body = guarded;
+            }
+        }
+
+        let hook_sym = Symbol::from(hook_name);
         if let Some(existing) = methods.iter_mut().find(|m| m.name == hook_sym) {
             // Fold this block's body into the existing method, preserving
             // source order (existing body's stmts first, then this block's).
