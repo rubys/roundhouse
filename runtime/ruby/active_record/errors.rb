@@ -8,6 +8,17 @@ module ActiveRecord
     end
   end
 
+  # Rails raises this when a value exceeds its column's declared limit;
+  # apps also construct it directly to reject over-long input before it
+  # reaches the DB (lobsters' Keystore.validate_input_key). Rails hangs
+  # it off StatementInvalid — with no statement-error hierarchy here,
+  # StandardError is the honest parent.
+  class ValueTooLong < StandardError
+    def initialize(message = "ActiveRecord::ValueTooLong")
+      super(message)
+    end
+  end
+
   class RecordInvalid < StandardError
     attr_reader :record
 

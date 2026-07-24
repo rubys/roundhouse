@@ -4,6 +4,11 @@ module ActiveRecord
     def initialize: (?String message) -> void
   end
 
+  # Raised when a value exceeds its column's declared limit.
+  class ValueTooLong < StandardError
+    def initialize: (?String message) -> void
+  end
+
   # Raised by `Base#save!` when validation fails. `record` is the
   # invalid model; `attr_reader :record` lowers to a getter at ingest.
   class RecordInvalid < StandardError

@@ -757,7 +757,12 @@ fn every_runtime_method_body_concretely_typed() {
     // `untyped` by declaration and the arms inspect them (`x` in the
     // ids map, `x.id`, `val.id`) — irreducible at this seam; +3 sites;
     // ceiling raised 202 → 205.
-    const CEILING: usize = 205;
+    // 2026-07-24 ActiveRecord::ValueTooLong (apps construct it to
+    // reject over-long input — lobsters' Keystore): same optional-
+    // message `super(...)` shape RecordNotFound already carries, whose
+    // default-argument site is untyped by the same convention; +1
+    // site; ceiling raised 205 → 206.
+    const CEILING: usize = 206;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

@@ -59,9 +59,9 @@ fn inflector_module_transpiles_to_typescript() {
     assert_eq!(emitted, EXPECTED_TS, "emitted TS mismatch");
 }
 
-/// Phase 1 second target: errors.rb has two classes (RecordNotFound,
-/// RecordInvalid), one with a synth attr_reader (`record`) and an
-/// `initialize` that calls `super(...)`. Validates parent extends
+/// Phase 1 second target: errors.rb has three classes (RecordNotFound,
+/// ValueTooLong, RecordInvalid), one with a synth attr_reader
+/// (`record`) and an `initialize` that calls `super(...)`. Validates parent extends
 /// (StandardError → Error), constructor synthesis, attr_reader-as-
 /// field detection, and `@ivar` → `this.x` in the constructor body.
 #[test]
@@ -74,7 +74,7 @@ fn errors_rb_transpiles_to_typescript_classes() {
     let classes = parse_library_with_rbs(&ruby, &rbs, "runtime/ruby/active_record/errors.rb")
         .expect("parse_library_with_rbs");
 
-    assert_eq!(classes.len(), 2, "expected 2 classes; got {}", classes.len());
+    assert_eq!(classes.len(), 3, "expected 3 classes; got {}", classes.len());
 
     let not_found = classes
         .iter()
@@ -84,6 +84,16 @@ fn errors_rb_transpiles_to_typescript_classes() {
     assert!(
         nf_ts.contains("export class RecordNotFound extends Error"),
         "RecordNotFound: {nf_ts}"
+    );
+
+    let too_long = classes
+        .iter()
+        .find(|c| c.name.0.as_str() == "ActiveRecord::ValueTooLong")
+        .expect("ActiveRecord::ValueTooLong");
+    let tl_ts = emit_library_class(too_long).expect("emit ValueTooLong");
+    assert!(
+        tl_ts.contains("export class ValueTooLong extends Error"),
+        "ValueTooLong: {tl_ts}"
     );
 
     let invalid = classes

@@ -33,18 +33,19 @@ fn errors_rb_ingests_and_emits_via_library_path() {
     let classes = ingest_library_classes(&source, &path_str)
         .expect("ingest_library_classes returned Err");
 
-    // Both classes from errors.rb should land. Names are fully-
+    // Every class from errors.rb should land. Names are fully-
     // qualified — `ingest_library_classes` walks enclosing module
     // nesting and prepends the path to each class's syntactic name.
     assert_eq!(
         classes.len(),
-        2,
-        "expected RecordNotFound + RecordInvalid; got {} ({:?})",
+        3,
+        "expected RecordNotFound + ValueTooLong + RecordInvalid; got {} ({:?})",
         classes.len(),
         classes.iter().map(|c| c.name.0.as_str().to_string()).collect::<Vec<_>>(),
     );
     let names: Vec<&str> = classes.iter().map(|c| c.name.0.as_str()).collect();
     assert!(names.contains(&"ActiveRecord::RecordNotFound"), "names: {names:?}");
+    assert!(names.contains(&"ActiveRecord::ValueTooLong"), "names: {names:?}");
     assert!(names.contains(&"ActiveRecord::RecordInvalid"), "names: {names:?}");
 
     // Both inherit from StandardError. is_module = false.
@@ -80,7 +81,7 @@ fn errors_rb_ingests_and_emits_via_library_path() {
         .iter()
         .filter(|f| f.path.extension().and_then(|e| e.to_str()) == Some("rb"))
         .count();
-    assert_eq!(rb_count, 2, "one .rb file per LibraryClass");
+    assert_eq!(rb_count, 3, "one .rb file per LibraryClass");
 
     let invalid_file = files
         .iter()
