@@ -317,10 +317,14 @@ module Main
     request_obj.host = req.req_headers.fetch("host", "localhost")
     request_obj.format = request_format == :json ? "json" : "html"
     request_obj.body = req.raw_body
-    env = {}
-    env["HTTP_USER_AGENT"] = req.req_headers.fetch("user-agent", "")
-    env["HTTP_X_REQUESTED_WITH"] = req.req_headers.fetch("x-requested-with", "")
-    request_obj.env = env
+    # Write straight into the RBS-pinned `@env` (Hash[String, untyped] ->
+    # StrPolyHash), which already owns the representation. Building a local
+    # `env = {}` here fills it with only String values, so spinel infers it
+    # StrStrHash and the `request_obj.env = env` assignment warns on the
+    # StrStr->StrPoly mismatch. Writing Strings into the poly field in place
+    # is a valid poly-member write and never constructs the competing hash.
+    request_obj.env["HTTP_USER_AGENT"] = req.req_headers.fetch("user-agent", "")
+    request_obj.env["HTTP_X_REQUESTED_WITH"] = req.req_headers.fetch("x-requested-with", "")
     controller.request = request_obj
     ActionController::Current.request = request_obj
     ActionController::Current.controller = controller
