@@ -243,7 +243,7 @@ module Tep
     # (the tep typed-empty-array idiom); non-int elements are skipped.
     def self.get_int_array(s, key)
       out = [0]
-      out.clear
+      out.pop
       pos = Json.find_value_start(s, key)
       if pos < 0
         return out

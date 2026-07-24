@@ -111,7 +111,7 @@ module Tep
       # Trims whitespace around each entry.
       def self.split_csv(s)
         out = [""]
-        out.clear
+        out.pop
         if s.length == 0
           return out
         end
@@ -151,7 +151,7 @@ module Tep
           @reason     = +""
           @accept_key = +""
           @protocols  = [""]
-          @protocols.clear
+          @protocols.pop
         end
       end
     end

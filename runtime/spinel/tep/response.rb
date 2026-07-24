@@ -15,7 +15,13 @@ module Tep
       # values into a Hash slot. Each entry here is one fully-formatted
       # Set-Cookie line, emitted verbatim by the writer.
       @set_cookies = [""]
-      @set_cookies.clear
+      # pop, not clear/delete_at: the type-seed removal idiom hits a
+      # per-(method x representation) arm matrix in spinel's shared-
+      # string machinery (matz/spinel#3306) -- pop and shift are armed
+      # on every representation this ivar takes across both entry
+      # points (main.rb / bin/blog.rb); clear and delete_at each have
+      # an unarmed cell.
+      @set_cookies.pop
       @streamer    = Streamer.new   # default no-op; only used when @streaming
       @streaming   = false
       # WebSocket upgrade slots. When @upgrading_ws is set (by
