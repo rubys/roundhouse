@@ -850,7 +850,7 @@ fn controllers_index_synthesizes_render_views_call() {
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     assert!(
-        src.contains("render(Views::Articles.index(@articles, @flash[:notice], @flash[:alert]))"),
+        src.contains("render(Views::Layouts.application(Views::Articles.index(@articles, @flash[:notice], @flash[:alert]), @flash[:notice], @flash[:alert]))"),
         "expected synthesized Views::Articles.index call; got:\n{src}",
     );
 }
@@ -863,11 +863,11 @@ fn controllers_show_views_call_pulls_ivars_from_filter_targets() {
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     assert!(
-        src.contains("render(Views::Articles.show(@article, @flash[:notice], @flash[:alert]))"),
+        src.contains("render(Views::Layouts.application(Views::Articles.show(@article, @flash[:notice], @flash[:alert]), @flash[:notice], @flash[:alert]))"),
         "expected Views::Articles.show(@article, ...flash...); got:\n{src}",
     );
     assert!(
-        src.contains("render(Views::Articles.edit(@article, @flash[:notice], @flash[:alert]))"),
+        src.contains("render(Views::Layouts.application(Views::Articles.edit(@article, @flash[:notice], @flash[:alert]), @flash[:notice], @flash[:alert]))"),
         "expected Views::Articles.edit(@article, ...flash...); got:\n{src}",
     );
 }
@@ -881,7 +881,7 @@ fn controllers_new_action_views_call_uses_action_name_not_method_name() {
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     assert!(
-        src.contains("render(Views::Articles._new(@article, @flash[:notice], @flash[:alert]))"),
+        src.contains("render(Views::Layouts.application(Views::Articles._new(@article, @flash[:notice], @flash[:alert]), @flash[:notice], @flash[:alert]))"),
         "expected Views::Articles._new(@article, ...flash...); got:\n{src}",
     );
     assert!(
@@ -903,18 +903,18 @@ fn controllers_render_symbol_in_else_branch_rewrites_to_views_call() {
     let files = lowered_real_blog_controllers();
     let src = find(&files, "articles_controller.rb");
     let create_entity =
-        "render(Views::Articles._new(@article, @flash[:notice], @flash[:alert]), status: :unprocessable_entity)";
+        "render(Views::Layouts.application(Views::Articles._new(@article, @flash[:notice], @flash[:alert]), @flash[:notice], @flash[:alert]), status: :unprocessable_entity)";
     let create_content =
-        "render(Views::Articles._new(@article, @flash[:notice], @flash[:alert]), status: :unprocessable_content)";
+        "render(Views::Layouts.application(Views::Articles._new(@article, @flash[:notice], @flash[:alert]), @flash[:notice], @flash[:alert]), status: :unprocessable_content)";
     assert!(
         src.contains(create_entity) || src.contains(create_content),
         "expected Views call in create's else branch; got:\n{src}",
     );
     // update has the parallel `render :edit, status: :unprocessable_*`.
     let update_entity =
-        "render(Views::Articles.edit(@article, @flash[:notice], @flash[:alert]), status: :unprocessable_entity)";
+        "render(Views::Layouts.application(Views::Articles.edit(@article, @flash[:notice], @flash[:alert]), @flash[:notice], @flash[:alert]), status: :unprocessable_entity)";
     let update_content =
-        "render(Views::Articles.edit(@article, @flash[:notice], @flash[:alert]), status: :unprocessable_content)";
+        "render(Views::Layouts.application(Views::Articles.edit(@article, @flash[:notice], @flash[:alert]), @flash[:notice], @flash[:alert]), status: :unprocessable_content)";
     assert!(
         src.contains(update_entity) || src.contains(update_content),
         "expected Views call in update's else branch; got:\n{src}",

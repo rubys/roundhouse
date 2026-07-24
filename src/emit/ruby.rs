@@ -372,6 +372,14 @@ pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
     library::apply_helper_lowering(&mut lcs, app);
     library::apply_nilsafe_empty_lowering(&mut lcs);
     library::apply_dynamic_render_options_lowering(&mut lcs);
+    // Layout wrap at render call sites — the seam where the @ivars a
+    // layout reads are in scope. Converged with the CRuby tree
+    // (emit_lowered_controllers_with_layout below): the scaffold
+    // dispatch ships `controller.body` verbatim on every tree, and a
+    // multi-param layout (lobsters takes its 12-14 ivar-derived
+    // params) can only be called where those ivars live. No-op for
+    // apps without an emitted Layouts/application view.
+    library::apply_layout_lowering(&mut lcs, app);
     emit_lowered_controllers_from_lcs(&lcs, app)
 }
 

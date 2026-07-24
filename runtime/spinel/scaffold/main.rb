@@ -66,6 +66,11 @@ require_relative "runtime/action_dispatch"
 # blend.
 require_relative "runtime/action_dispatch/request"
 require_relative "runtime/action_controller"
+# typed_store virtual-attribute seam (flat-YAML subset on this tree;
+# the CRuby overlay swaps in its real-YAML sibling at the same path).
+# Before app/models — the synthesized settings accessors route
+# through it.
+require_relative "runtime/typed_store"
 require_relative "runtime/broadcasts"
 require_relative "runtime/tep/tep"
 # Action Cable WebSocket glue — the /cable endpoint + the Broadcasts
@@ -357,11 +362,11 @@ module Main
     end
 
     res.status = controller.status
-    if controller.request_format == :json
-      res.body = controller.body
-    else
-      res.body = Views::Layouts.application(controller.body)
-    end
+    # The layout wrap happens at the controller's render call sites
+    # (apply_layout_lowering — the seam where the @ivars a layout reads
+    # are in scope), so the body ships verbatim here. Same contract as
+    # the CRuby overlay dispatch.
+    res.body = controller.body
     res.headers["Location"] = controller.location unless controller.location.nil?
 
     # Outbound flash: persist messages set THIS request for the NEXT one.
