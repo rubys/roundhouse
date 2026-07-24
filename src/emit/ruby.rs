@@ -23,6 +23,7 @@ const SPINEL_TEST_HELPER: &str =
 mod expr;
 mod library;
 mod rbs;
+pub mod shake;
 mod shared;
 
 /// Render a `Ty` to its RBS string form (`String`, `Array[Comment]`,

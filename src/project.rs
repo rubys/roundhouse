@@ -611,6 +611,29 @@ pub fn target_files(
         ))),
     }?;
 
+    // Ruby-family trees ship the framework runtime as verbatim text, so
+    // their tree-shake runs here, on the finished file set (after
+    // overlays — an overlay-only caller must count as a root), as a
+    // text-level pass: see emit::ruby::shake. Other targets shake in IR
+    // during emit.
+    let files = if matches!(
+        target,
+        BuildTarget::Spinel | BuildTarget::Ruby | BuildTarget::Jruby
+    ) {
+        let synth_shakeable: std::collections::HashSet<String> = app
+            .models
+            .iter()
+            .filter_map(|m| app.schema.tables.get(&m.table.0))
+            .flat_map(crate::lower::model_to_library::shakeable_synthesized_names)
+            .map(|s| s.as_str().to_string())
+            .collect();
+        let mut files = files;
+        emit::ruby::shake::shake_tree(&mut files, &synth_shakeable, target.as_str());
+        files
+    } else {
+        files
+    };
+
     // Blog is the verbatim Rails source — it ships `db/seeds.rb` and is
     // seeded by Rails, so it needs no SQL seed. Every transpile target
     // gets a language-agnostic `db/seed.sql` so the published archive is
