@@ -540,6 +540,31 @@ fn lookup_method<'a>(
 ///   - Methods precisely reachable on this class.
 ///   - Methods whose name is reachable anywhere (conservative
 ///     fallback for untyped Sends).
+/// Filter a MODEL class's lowerer-synthesized optional surface to only
+/// the methods reachable from app code. `shakeable` is the per-model
+/// name set from `lower::model_to_library::schema::
+/// shakeable_synthesized_names` — only names in that set are ever
+/// dropped, so user-written methods and the load-bearing framework
+/// contract (adapter primitives, hydration, lifecycle hooks) are
+/// untouchable by construction. A shakeable method survives if it is
+/// precisely reachable on this class OR its name is reachable anywhere
+/// (the same conservative fallback `filter_runtime_class` uses — an
+/// untyped `record.update!(...)` keeps `update!` on every model).
+pub fn filter_synthesized_model_methods(
+    class: &LibraryClass,
+    shakeable: &std::collections::HashSet<Symbol>,
+    reach: &Reachability,
+) -> LibraryClass {
+    let mut filtered = class.clone();
+    filtered.methods.retain(|m| {
+        if !shakeable.contains(&m.name) {
+            return true;
+        }
+        reach.contains(&class.name, &m.name) || reach.name_reachable(&m.name)
+    });
+    filtered
+}
+
 pub fn filter_runtime_class(class: &LibraryClass, reach: &Reachability) -> LibraryClass {
     use crate::dialect::AccessorKind;
     let mut filtered = class.clone();

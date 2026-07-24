@@ -147,15 +147,14 @@ pub(super) fn push_schema_methods(
     // (partial/reordered) projection stays on its own inline path.
     methods.push(synth_from_stmt(owner, table, model_declares_after_initialize(model)));
 
-    // def assign_from_row(row); self.<col> = row[:<col>]; ...; end
-    //
-    // Instance-level reload helper. ActiveRecord::Base#reload re-fetches
-    // the row via the adapter (returns Hash[Symbol, untyped]) and
-    // dispatches to `assign_from_row(row)` to mutate the existing
-    // instance in place. Indexing via `row[:col]` rather than typed
-    // accessors so the path stays Hash-shaped — `from_row` already
-    // covers the typed-Row construction case.
-    methods.push(synth_assign_from_row(owner, table));
+    // (No per-model `assign_from_row`: `Base#reload` dispatches to the
+    // synthesized `_adapter_reload`, which re-reads the row off a
+    // prepared statement and writes the column ivars directly. The
+    // Hash-shaped `assign_from_row` contract survives only as Base's
+    // no-op + the hand-written subclass in the framework base_test;
+    // synthesizing it per model produced a dead method on every model
+    // in every app — measured zero call sites in both the blog and
+    // lobsters emits.)
 
     // def initialize(attrs = {}); super(); per-column self.col = attrs[:col] [|| 0 for id]; end
     methods.push(synth_initialize(owner, table, model, models));
@@ -237,6 +236,39 @@ pub(super) fn push_schema_methods(
 /// local is used at up to two sites; that's the same shape Base's
 /// hand-written body already presents to the rust2 `str_color`
 /// ownership pass, so no new clone-insertion handling is needed.
+/// Names of the optional synthesized per-model surface — methods this
+/// module creates for every model that exist only in case app code
+/// calls them, and that tree-shake may therefore drop when
+/// unreachable: the per-column presence predicates (`<col>?`), the
+/// per-column dirty predicates (`<col>_previously_changed?`), and the
+/// `update!` bang variant. Everything else synthesized here is load-
+/// bearing framework contract (adapter primitives, row hydration,
+/// lifecycle hooks — called from runtime `Base` bodies via bare
+/// sends) and must never appear in this list.
+///
+/// Derives names with the same format strings the synthesizers use,
+/// against the same column set, so the list can't drift from the
+/// synthesis. Measured (blog + lobsters emits): these families are
+/// where every synthesized-but-dead model method lives.
+pub fn shakeable_synthesized_names(table: &Table) -> Vec<Symbol> {
+    let mut names: Vec<Symbol> = Vec::new();
+    for col in &table.columns {
+        // Mirrors `synth_column_predicate` (pushed for every column).
+        names.push(Symbol::from(format!("{}?", col.name.as_str())));
+        // Mirrors `synth_column_prev_changed` (skipped for `id`,
+        // which Base answers from its own flag).
+        if col.name.as_str() != "id" {
+            names.push(Symbol::from(format!(
+                "{}_previously_changed?",
+                col.name.as_str()
+            )));
+        }
+    }
+    // Mirrors `synth_update_typed(.., bang: true)`.
+    names.push(Symbol::from("update!"));
+    names
+}
+
 fn synth_fill_timestamps(owner: &ClassId, table: &Table) -> Option<MethodDef> {
     let find_col = |n: &str| table.columns.iter().find(|c| c.name.as_str() == n);
     let updated_col = find_col("updated_at");
@@ -758,8 +790,8 @@ fn synth_instantiate(owner: &ClassId) -> MethodDef {
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
     // Adapter rows are String-keyed across all targets (Crystal/TS can't
     // dynamically create Symbols at runtime; Spinel adapters skip the
-    // historical `to_sym` step). Matches `synth_row_from_raw` and
-    // `synth_assign_from_row`. Internal narrowing happens in the body.
+    // historical `to_sym` step). Matches `synth_row_from_raw`. Internal
+    // narrowing happens in the body.
     let row_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
     MethodDef {
         name: Symbol::from("instantiate"),
@@ -1075,68 +1107,6 @@ fn column_read_method(col_ty: &Ty) -> &'static str {
         Ty::Bool => "column_bool",
         Ty::Float => "column_float",
         _ => "column_text",
-    }
-}
-
-/// `def assign_from_row(row); self.<col> = row[:<col>]; ...; end`
-/// — mutates `self`, used by `ActiveRecord::Base#reload` after the
-/// adapter re-fetches the row as a `Hash[Symbol, untyped]`. The Hash
-/// stays Hash-shaped (no typed Row narrowing) since reload only
-/// touches the existing instance's slots.
-fn synth_assign_from_row(owner: &ClassId, table: &Table) -> MethodDef {
-    let row = Symbol::from("row");
-    // String-keyed row to match the SqliteAdapter row shape
-    // (mirrors `synth_row_from_raw`). Crystal/TS can't dynamically
-    // create Symbol keys at runtime; Spinel adapters skip the
-    // historical `to_sym` step, so all targets see String keys.
-    let row_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
-
-    let mut stmts: Vec<Expr> = Vec::new();
-    for col in &table.columns {
-        // row["<col>"] — Hash index lookup keyed on the column-name string.
-        let key = with_ty(
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::Lit { value: Literal::Str { value: col.name.as_str().to_string() } },
-            ),
-            Ty::Str,
-        );
-        let lookup = Expr::new(
-            Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(var_ref(row.clone())),
-                method: Symbol::from("[]"),
-                args: vec![key],
-                block: None,
-                parenthesized: false,
-            },
-        );
-        // self.<col>= = row["<col>"]  (storage setter; adapter rows carry
-        // stored text under the COLUMN name, so the key stays `<col>`)
-        stmts.push(Expr::new(
-            Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
-                method: col_storage_setter(col),
-                args: vec![lookup],
-                block: None,
-                parenthesized: false,
-            },
-        ));
-    }
-
-    MethodDef {
-        name: Symbol::from("assign_from_row"),
-        receiver: MethodReceiver::Instance,
-        params: vec![Param::positional(row.clone())],
-        body: seq(stmts),
-        signature: Some(fn_sig(vec![(row, row_ty)], Ty::Nil)),
-        effects: EffectSet::default(),
-        enclosing_class: Some(owner.0.clone()),
-        kind: AccessorKind::Method,
-        is_async: false,
-            mutates_self: false,
-            block_param: None,
     }
 }
 

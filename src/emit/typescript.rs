@@ -633,6 +633,51 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         &all_app_functions,
     );
 
+    // Shake the lowerer-synthesized optional model surface (per-column
+    // presence/dirty predicates, `update!`) down to what app code
+    // reaches. Only names in each model's derived shakeable set are
+    // candidates, so user methods and the framework contract are
+    // untouchable. Roots were computed from the UNFILTERED classes
+    // (conservative: a dead predicate's body can keep a runtime method
+    // alive, never the reverse). Row/proxy classes in `model_lcs`
+    // aren't in the map and pass through unchanged.
+    let shakeable_by_model: std::collections::HashMap<
+        crate::ident::ClassId,
+        std::collections::HashSet<crate::ident::Symbol>,
+    > = app
+        .models
+        .iter()
+        .filter_map(|m| {
+            app.schema.tables.get(&m.table.0).map(|t| {
+                (
+                    m.name.clone(),
+                    crate::lower::model_to_library::shakeable_synthesized_names(t)
+                        .into_iter()
+                        .collect(),
+                )
+            })
+        })
+        .collect();
+    let mut synth_dropped = 0usize;
+    model_lcs = model_lcs
+        .iter()
+        .map(|lc| match shakeable_by_model.get(&lc.name) {
+            Some(shakeable) => {
+                let filtered =
+                    crate::treeshake::filter_synthesized_model_methods(lc, shakeable, &reach);
+                synth_dropped += lc.methods.len() - filtered.methods.len();
+                filtered
+            }
+            None => lc.clone(),
+        })
+        .collect();
+    if synth_dropped > 0 {
+        eprintln!(
+            "roundhouse: treeshake (typescript): dropped {synth_dropped} unreachable \
+             synthesized model methods"
+        );
+    }
+
     // Snapshot the EXPANDED extern names for the runtime transform
     // closure. The closure captures by move, so the owning Vec<String>
     // is cloned once per call and dereferenced to &[&str] inside.
