@@ -615,72 +615,22 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     all_app_classes.extend(test_lcs.iter().cloned());
     all_app_classes.extend(test_inner_lcs.iter().cloned());
 
-    // First pass: reuse the runtime parse from the async-expansion
-    // step above. `typescript_units` parses + emits in one step; we
-    // need the runtime's own classes for reachability so cross-
-    // references between (e.g.) Base and Validations resolve. The
-    // expansion-step parse already paid for this, so we reuse
-    // `runtime_units_seed` rather than parsing a third time.
-    // Build the runtime alias list: each LibraryClass appears under
-    // its simple name AND its qualified name (`ActiveRecord::Base`).
-    // Two `Base` classes (one from AR, one from ActionController)
-    // would collide on the simple name; the qualified alias
-    // disambiguates parent-chain lookups from app-side classes.
-    let runtime_aliases: Vec<(crate::ident::ClassId, &crate::dialect::LibraryClass)> =
-        runtime_units_seed
-            .iter()
-            .flat_map(|u| {
-                u.classes.iter().flat_map(move |c| {
-                    // LibraryClass.name now carries the fully-qualified
-                    // path (`ActiveRecord::Base`) post the RBS scope-
-                    // tracking refactor. Register under the full path
-                    // AND under the last-segment alias — body-typer's
-                    // Const arm resolves `Const { path: ["Base"] }`
-                    // (bare app-level reference) as `ClassId("Base")`,
-                    // and treeshake needs the alias to find the class.
-                    let raw = c.name.0.as_str();
-                    let mut entries = vec![(c.name.clone(), c)];
-                    let last = raw.rsplit("::").next().unwrap_or(raw);
-                    if last != raw {
-                        entries.push((
-                            crate::ident::ClassId(crate::ident::Symbol::from(last)),
-                            c,
-                        ));
-                    }
-                    let _ = u.namespace; // namespace is now baked into c.name
-                    entries
-                })
-            })
-            .collect();
-    // Hand-written runtime files (server.ts, test_support.ts,
-    // broadcasts.ts) call into transpiled framework methods that the
-    // app-body walk wouldn't otherwise see. Each RuntimeEntry can
-    // declare its `(class, method)` pairs so treeshake keeps them.
-    let extra_roots: Vec<(crate::ident::ClassId, crate::ident::Symbol)> = runtime_units_seed
-        .iter()
-        .flat_map(|u| {
-            u.extra_roots
-                .iter()
-                .map(|(cls, method)| {
-                    (
-                        crate::ident::ClassId(crate::ident::Symbol::from(*cls)),
-                        crate::ident::Symbol::from(*method),
-                    )
-                })
-        })
-        .collect();
-    // App-side standalone functions (seeds, route helpers, schema,
-    // importmap, routes dispatch) carry app code too. Their bodies
-    // are roots — `Article.create!(...)` in seeds.rb needs to keep
+    // Reuse the runtime parse from the async-expansion step above
+    // (`typescript_units` parses + emits in one step; the expansion-
+    // step parse already paid for the classes, so we don't parse a
+    // third time). Alias registration (qualified + last-segment) and
+    // the hand-written-runtime `extra_roots` derivation live in
+    // `for_app_units` — shared with every other shaking target.
+    // App-side standalone functions (seeds, route helpers) carry app
+    // code too: `Article.create!(...)` in seeds.rb needs to keep
     // `create!` alive on Base.
     let mut all_app_functions: Vec<crate::dialect::LibraryFunction> = Vec::new();
     all_app_functions.extend(crate::lower::lower_seeds_to_library_functions(app));
     all_app_functions.extend(route_helper_funcs.clone());
-    let reach = crate::treeshake::Reachability::from_app_roots(
+    let reach = crate::treeshake::Reachability::for_app_units(
         &all_app_classes,
-        &runtime_aliases,
+        &runtime_units_seed,
         &all_app_functions,
-        &extra_roots,
     );
 
     // Snapshot the EXPANDED extern names for the runtime transform

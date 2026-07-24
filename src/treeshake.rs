@@ -18,8 +18,14 @@
 //! Untyped, fan out — mark the method name reachable on every class
 //! that defines it. Loses some shaking opportunity but never wrong.
 //!
-//! Future: extend roots to include routed controller actions, test
-//! methods, and Seeds.run() to enable app-wide tree-shake.
+//! Roots are every app-side method body the caller passes — models,
+//! views, controllers, fixtures, AND tests (the emitted test files
+//! call app/runtime methods directly, so shaking under them would
+//! break the toolchain lanes) — plus app-side standalone functions
+//! (seeds, route helpers) and each runtime unit's declared
+//! `extra_roots` (calls made by hand-written runtime siblings the
+//! body walk can't see). [`Reachability::for_app_units`] packages
+//! that contract so every emitter builds the same root set.
 
 use crate::dialect::{LibraryClass, LibraryFunction};
 use crate::expr::{Expr, ExprNode, InterpPart, LValue, RescueClause};
@@ -44,6 +50,60 @@ pub struct Reachability {
 }
 
 impl Reachability {
+    /// Build the reachable set for an app against parsed runtime
+    /// units — the shared entry point every emitter should use.
+    ///
+    /// `app_classes` must carry EVERY app-side class the target
+    /// emits (models, views, controllers, fixtures, tests, test
+    /// inner classes): each one's method bodies become roots, and
+    /// anything missing here is a class whose calls can't keep
+    /// runtime methods alive. `app_functions` carries the app-side
+    /// standalone functions (seeds, route helpers). Runtime aliases
+    /// (each class under its qualified name AND its last segment)
+    /// and the per-unit `extra_roots` are derived here so per-target
+    /// call sites can't drift from each other.
+    pub fn for_app_units(
+        app_classes: &[LibraryClass],
+        runtime_units: &[crate::runtime_loader::RuntimeUnit],
+        app_functions: &[LibraryFunction],
+    ) -> Self {
+        // Each runtime LibraryClass registers under its fully-
+        // qualified path (`ActiveRecord::Base`) for app-side parent-
+        // chain lookups AND under its last segment (`Base`) — the
+        // body-typer's Const arm resolves bare app-level references
+        // as the simple name, and in-runtime cross-references carry
+        // only the simple name. Two `Base` classes (AR and
+        // ActionController) collide on the simple name; the registry
+        // is a multi-map, so both survive and lookups try each.
+        let runtime_aliases: Vec<(ClassId, &LibraryClass)> = runtime_units
+            .iter()
+            .flat_map(|u| {
+                u.classes.iter().flat_map(|c| {
+                    let raw = c.name.0.as_str();
+                    let mut entries = vec![(c.name.clone(), c)];
+                    let last = raw.rsplit("::").next().unwrap_or(raw);
+                    if last != raw {
+                        entries.push((ClassId(Symbol::from(last)), c));
+                    }
+                    entries
+                })
+            })
+            .collect();
+        // Hand-written runtime files (server, test_support,
+        // broadcasts) call into transpiled framework methods the
+        // app-body walk can't see; each unit declares those
+        // `(class, method)` pairs as extra roots.
+        let extra_roots: Vec<(ClassId, Symbol)> = runtime_units
+            .iter()
+            .flat_map(|u| {
+                u.extra_roots
+                    .iter()
+                    .map(|(cls, method)| (ClassId(Symbol::from(*cls)), Symbol::from(*method)))
+            })
+            .collect();
+        Self::from_app_roots(app_classes, &runtime_aliases, app_functions, &extra_roots)
+    }
+
     /// Build the reachable set from app-side method bodies as roots.
     /// `app_classes` and `runtime_aliases` together form the search
     /// universe.
