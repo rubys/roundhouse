@@ -727,21 +727,28 @@ fn emit_node(
         }
     } else {
         let has_children = !node.stat.is_empty() || node.dynamic.is_some();
-        if node.terminals.len() > 1 || (node.terminals.len() == 1 && !has_children) {
+        // Group terminals by verb, preserving source order. Two routes
+        // sharing this path+verb (Rails routes distinguished only by a
+        // `constraints:` regexp — Lobsters' single- vs multi-`/t/:tag`)
+        // land in the same group; emitting one `r.<verb>` block per
+        // terminal would shadow all but the first. Each group emits ONE
+        // verb block whose body disambiguates on the constraint.
+        let groups = group_terminals_by_verb(&node.terminals);
+        if groups.len() > 1 || (groups.len() == 1 && !has_children) {
             out.push_str(&format!("{pad}r.is do\n"));
-            for t in &node.terminals {
-                out.push_str(&format!("{}r.{} do\n", indent(depth + 1), verb(&t.method)));
-                emit_terminal_body(t, ctx, depth + 2, bindings, out);
+            for (method, ts) in &groups {
+                out.push_str(&format!("{}r.{} do\n", indent(depth + 1), verb(method)));
+                emit_verb_group_body(ts, ctx, depth + 2, bindings, out);
                 out.push_str(&format!("{}end\n", indent(depth + 1)));
             }
             out.push_str(&format!("{pad}end\n"));
-        } else if node.terminals.len() == 1 {
+        } else if groups.len() == 1 {
             // Single verb terminates here but deeper branches exist:
             // `r.post true` — the argument makes Roda require full path
             // consumption, so longer paths fall through to the branches.
-            let t = &node.terminals[0];
-            out.push_str(&format!("{pad}r.{} true do\n", verb(&t.method)));
-            emit_terminal_body(t, ctx, depth + 1, bindings, out);
+            let (method, ts) = &groups[0];
+            out.push_str(&format!("{pad}r.{} true do\n", verb(method)));
+            emit_verb_group_body(ts, ctx, depth + 1, bindings, out);
             out.push_str(&format!("{pad}end\n"));
         }
     }
@@ -791,6 +798,121 @@ fn emit_node(
             out.push_str(&format!("{pad}end\n"));
         }
     }
+}
+
+/// Group a node's terminals by HTTP verb, preserving first-seen order
+/// both across verbs and within each verb's list. Routes that share a
+/// path+verb (Rails routes distinguished only by a `constraints:`
+/// regexp) collect into one group so the caller disambiguates them in
+/// a single verb block instead of emitting shadowing duplicates.
+fn group_terminals_by_verb(terminals: &[FlatRoute]) -> Vec<(HttpMethod, Vec<&FlatRoute>)> {
+    let mut groups: Vec<(HttpMethod, Vec<&FlatRoute>)> = Vec::new();
+    for t in terminals {
+        if let Some((_, ts)) = groups.iter_mut().find(|(m, _)| *m == t.method) {
+            ts.push(t);
+        } else {
+            groups.push((t.method.clone(), vec![t]));
+        }
+    }
+    groups
+}
+
+/// Emit the body of one verb block. A single terminal emits its body
+/// directly. Several terminals (same path+verb, differing only by a
+/// `constraints:` regexp — Lobsters' single- vs multi-`/t/:tag`) emit
+/// an `if <regex>.match?(var) … elsif … else …` chain in Rails route
+/// order (first match wins). The lone unconstrained route is the
+/// `else`; if every route is constrained the chain simply ends and a
+/// non-matching segment falls through to 404, exactly as in Rails.
+fn emit_verb_group_body(
+    ts: &[&FlatRoute],
+    ctx: &EmitCtx,
+    depth: usize,
+    bindings: &[(String, String)],
+    out: &mut String,
+) {
+    if ts.len() == 1 {
+        emit_terminal_body(ts[0], ctx, depth, bindings, out);
+        return;
+    }
+    let pad = indent(depth);
+    // Walk in Rails declaration order — first match wins. Each
+    // constrained route becomes an `if`/`elsif <regex>.match?` guard.
+    // The first UNCONSTRAINED route matches any segment, so it is the
+    // `else`; any route after it (or a second unconstrained one) can
+    // never be reached and is flagged rather than silently dropped.
+    // Order-preserving on purpose: an app that declares the catch-all
+    // before the constrained route has the constrained route dead in
+    // Rails too, and the converted output must reproduce that.
+    let mut guards = 0usize;
+    let mut caught_all = false;
+    for &t in ts {
+        if caught_all {
+            out.push_str(&format!(
+                "{}# ROUNDHOUSE-TODO: unreachable route {}#{} (an earlier route \
+                 with no constraint already matches every value)\n",
+                indent(depth + 1),
+                t.controller.0,
+                t.action
+            ));
+            continue;
+        }
+        match constraint_guard(t, bindings) {
+            Some(guard) => {
+                let kw = if guards == 0 { "if" } else { "elsif" };
+                out.push_str(&format!("{pad}{kw} {guard}\n"));
+                emit_terminal_body(t, ctx, depth + 1, bindings, out);
+                guards += 1;
+            }
+            None if guards == 0 => {
+                // Catch-all with no preceding guard: no distinguishing
+                // constraint (genuine duplicate, or constraint on an
+                // unbound param). Emit its body bare as the whole block.
+                emit_terminal_body(t, ctx, depth, bindings, out);
+                caught_all = true;
+            }
+            None => {
+                out.push_str(&format!("{pad}else\n"));
+                emit_terminal_body(t, ctx, depth + 1, bindings, out);
+                caught_all = true;
+            }
+        }
+    }
+    // Close the if/elsif[/else] chain. A bare catch-all body (guards ==
+    // 0) opened no `if`, so it needs no `end`. An all-constrained chain
+    // (no catch-all) ends here; a non-matching segment falls through to
+    // 404, exactly as in Rails.
+    if guards > 0 {
+        out.push_str(&format!("{pad}end\n"));
+    }
+}
+
+/// Build the Ruby guard for a route's non-digit `constraints:` —
+/// `/\A<rx>\z/.match?(<var>)`, `&&`-joined across multiple constrained
+/// params. Rails anchors constraints to the whole segment, so the
+/// emitted regex is `\A…\z`-anchored. Returns None when the route has
+/// no such constraint (or its param isn't bound here), so the caller
+/// treats it as the fallback (`else`) branch.
+fn constraint_guard(t: &FlatRoute, bindings: &[(String, String)]) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for (param, rx) in &t.constraints {
+        let var = bindings.iter().find(|(p, _)| p == param).map(|(_, v)| v.clone())?;
+        parts.push(format!("{}.match?({var})", anchored_regex_literal(rx)));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" && "))
+    }
+}
+
+/// Wrap a Rails constraint regex source in a Ruby `/\A…\z/` literal,
+/// adding the implicit full-segment anchors Rails applies unless the
+/// source already carries them.
+fn anchored_regex_literal(rx: &str) -> String {
+    let start = if rx.starts_with("\\A") || rx.starts_with('^') { "" } else { "\\A" };
+    let end = if rx.ends_with("\\z") || rx.ends_with('$') { "" } else { "\\z" };
+    format!("/{start}{rx}{end}/")
 }
 
 /// Roda matcher class for a dynamic node: id-shaped params get the
@@ -1620,7 +1742,42 @@ mod tests {
             named: false,
             format: None,
             int_params: vec![],
+            constraints: vec![],
         }
+    }
+
+    /// Two routes sharing a path+verb, distinguished only by a
+    /// `constraints:` regexp (Lobsters' single- vs multi-`/t/:tag`,
+    /// #67), must emit ONE verb block with an `if <regex>.match?`
+    /// guard — not two shadowing `r.get` blocks (the second dead).
+    #[test]
+    fn constraint_distinguished_routes_emit_guard_not_duplicate() {
+        use HttpMethod::*;
+        let mut single = flat(Get, "/t/:tag", "HomeController", "single_tag");
+        single.constraints = vec![("tag".to_string(), "[^,.\\/]+".to_string())];
+        let multi = flat(Get, "/t/:tag", "HomeController", "multi_tag");
+        let routes = vec![single, multi];
+        let trie = build_trie(&routes);
+        let app = App::default();
+        let loads: Vec<FilterLoad> = vec![];
+        let ctx = EmitCtx { app: &app, routes: &routes, loads: &loads };
+        let mut out = String::new();
+        emit_node(&trie, &ctx, 2, None, &[], &mut out);
+
+        assert_eq!(
+            out.matches("r.get").count(),
+            1,
+            "one verb block, not shadowing duplicates:\n{out}"
+        );
+        assert!(
+            out.contains("if /\\A[^,.\\/]+\\z/.match?(tag)"),
+            "anchored constraint guard emitted:\n{out}"
+        );
+        assert!(out.contains("else"), "unconstrained route is the else branch:\n{out}");
+        assert!(
+            !out.contains("unreachable duplicate"),
+            "constraint recovered — no duplicate TODO:\n{out}"
+        );
     }
 
     /// The blog's flat table re-nests into the exemplar's tree shape:

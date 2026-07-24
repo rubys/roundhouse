@@ -338,6 +338,15 @@ fn ingest_draw_route(
     Ok(Some(RouteSpec::Scope { path: None, module: None, as_prefix: None, entries }))
 }
 
+/// Raw regex-pattern source of a `/.../ ` literal value node — the text
+/// between the delimiters, verbatim (escapes like `\/` preserved so it
+/// drops straight back into a Ruby regex literal), None for non-regex
+/// values. Used for `constraints:` param restrictions (#67).
+fn regex_source(node: &Node<'_>) -> Option<String> {
+    let r = node.as_regular_expression_node()?;
+    Some(String::from_utf8_lossy(r.content_loc().as_slice()).into_owned())
+}
+
 fn ingest_explicit_route(
     call: &ruby_prism::CallNode<'_>,
     method: HttpMethod,
@@ -428,6 +437,25 @@ fn ingest_explicit_route(
                     // route still resolves to the outer verb. Other
                     // string-value options become routing constraints.
                     "via" => {}
+                    // `constraints: { id: /\d+/, tag: /[^,.\/]+/ }` —
+                    // per-param regex restrictions. Capture each param's
+                    // regex SOURCE (raw text between the delimiters, so
+                    // `\/` etc. survive back into a Ruby literal) keyed
+                    // by param name. digit-class regexes drive the runtime
+                    // router's Integer matcher; the rest let the roda
+                    // converter disambiguate two routes that share a
+                    // path+verb and differ only by the constraint (#67).
+                    "constraints" => {
+                        if let Some(h) = value.as_hash_node() {
+                            for el in h.elements().iter() {
+                                let Some(a) = el.as_assoc_node() else { continue };
+                                let Some(param) = symbol_value(&a.key()) else { continue };
+                                if let Some(src) = regex_source(&a.value()) {
+                                    constraints.insert(Symbol::from(param.as_str()), src);
+                                }
+                            }
+                        }
+                    }
                     other => {
                         if let Some(v) = string_value(value) {
                             constraints.insert(Symbol::from(other), v);

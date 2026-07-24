@@ -64,6 +64,17 @@ pub struct FlatRoute {
     /// Constraint regexes beyond the digit class aren't modeled — the
     /// runtime router is deliberately regex-free.
     pub int_params: Vec<String>,
+    /// Non-digit `constraints:` regexes, as `(param, regex_source)` for
+    /// the params this route captures. The regex-free runtime router
+    /// ignores these (digit-class ones ride `int_params`), but the
+    /// `--target roda` converter needs them: two routes that share a
+    /// path+verb and differ ONLY by such a constraint (Lobsters'
+    /// `/t/:tag` single-vs-multi tag) would otherwise collapse to
+    /// duplicate branches, the second unreachable. The converter emits
+    /// them as an `if <regex>.match?(var)` guard. `format` is excluded
+    /// (it rides `format`); digit-class regexes are excluded (they ride
+    /// `int_params` / the `Integer` matcher).
+    pub constraints: Vec<(String, String)>,
 }
 
 /// Is this constraint regex a plain digit class (`\d+` / `[0-9]+`,
@@ -257,6 +268,15 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 })
                 .map(|(name, _)| name.as_str().to_string())
                 .collect();
+            // Non-digit constraints the runtime router can't enforce but
+            // the roda converter uses to disambiguate same-path routes.
+            let other_constraints: Vec<(String, String)> = constraints
+                .iter()
+                .filter(|(name, rx)| {
+                    name.as_str() != "format" && !digit_class_regex(rx)
+                })
+                .map(|(name, rx)| (name.as_str().to_string(), rx.clone()))
+                .collect();
             for (i, vpath) in variants.into_iter().enumerate() {
                 let mut params = base_params.clone();
                 extract_path_params(&vpath, &mut params);
@@ -266,6 +286,11 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 let int_params: Vec<String> = digit_params
                     .iter()
                     .filter(|n| params.contains(n))
+                    .cloned()
+                    .collect();
+                let constraints: Vec<(String, String)> = other_constraints
+                    .iter()
+                    .filter(|(n, _)| params.contains(n))
                     .cloned()
                     .collect();
                 out.push(FlatRoute {
@@ -279,6 +304,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     format: forced_format.clone(),
                     required_params,
                     int_params,
+                    constraints,
                 });
             }
         }
@@ -311,6 +337,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 format: None,
                 required_params: 0,
                 int_params: vec![],
+                constraints: vec![],
             });
         }
         RouteSpec::Resources { name, only, except, nested, singular } => {
@@ -376,6 +403,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     named: true,
                     format: None,
                     int_params: vec![],
+                    constraints: vec![],
                 });
             }
             let child_ctx = Ctx {
@@ -642,6 +670,39 @@ mod tests {
         let (path, params) = nest_path("/login", None, ResourceScope::Nested);
         assert_eq!(path, "/login");
         assert!(params.is_empty());
+    }
+
+    #[test]
+    fn constraint_regex_survives_flatten_for_converter() {
+        // Two routes share `GET /t/:tag`, distinguished ONLY by a
+        // `constraints:` regexp (Lobsters' single- vs multi-tag, #67).
+        // The regex must reach FlatRoute.constraints so the roda
+        // converter can disambiguate; dropped, the two collapse to
+        // duplicate branches with the second unreachable.
+        let src = br#"
+Rails.application.routes.draw do
+  get "/t/:tag" => "home#single_tag", :constraints => { tag: /[^,.\/]+/ }
+  get "/t/:tag" => "home#multi_tag"
+end
+"#;
+        let table =
+            crate::ingest::ingest_routes(src, "config/routes.rb").expect("routes ingest");
+        let mut app = App::default();
+        app.routes = table;
+        let routes = flatten_routes(&app);
+
+        let single =
+            routes.iter().find(|r| r.action.as_str() == "single_tag").expect("single_tag");
+        let multi =
+            routes.iter().find(|r| r.action.as_str() == "multi_tag").expect("multi_tag");
+        assert_eq!(single.path, "/t/:tag");
+        assert_eq!(multi.path, "/t/:tag");
+        assert_eq!(
+            single.constraints,
+            vec![("tag".to_string(), "[^,.\\/]+".to_string())],
+            "constrained route carries the raw regex source (escapes preserved)"
+        );
+        assert!(multi.constraints.is_empty(), "unconstrained fallback carries no constraint");
     }
 
     #[test]
