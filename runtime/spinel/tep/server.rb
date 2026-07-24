@@ -99,7 +99,7 @@ module Tep
     # arrive — no scheduler. Replaces the C sphttp_read_request +
     # request_buf (sphttp.c retired — matz/spinel#1466). `+` is binary-safe.
     def read_request_blocking(client)
-      buf = ""
+      buf = +""
       while buf.length < 65535
         chunk = Sock.sp_net_recv_some(client, 4096)
         if chunk.length == 0

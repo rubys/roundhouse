@@ -123,7 +123,7 @@ module Tep
     def self.poll_round(timeout_ms)
       Sock.sphttp_poll_reset
       slots = [-1] # slot index parallel to sched_fibers; -1 = not polled
-      slots.delete_at(0)
+      slots.clear
       added = 0
       i = 0
       n = Tep::APP.sched_fibers.length

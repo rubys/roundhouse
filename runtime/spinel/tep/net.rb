@@ -77,7 +77,7 @@ module Sock
   # prefork server's consume_body, whose fd is blocking). `+` concat is
   # binary-safe.
   def self.sphttp_drain_body(fd, n)
-    out = ""
+    out = +""
     while out.length < n
       chunk = Sock.sp_net_recv_some(fd, n - out.length)
       if chunk.length == 0

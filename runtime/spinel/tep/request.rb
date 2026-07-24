@@ -13,9 +13,9 @@ module Tep
     attr_accessor :ivars
 
     def initialize
-      @verb         = ""
-      @path         = ""
-      @raw_path     = ""
+      @verb         = +""
+      @path         = +""
+      @raw_path     = +""
       @http_version = "HTTP/1.0"
       @req_params       = Tep.str_hash   # path captures + query + form merged
       @query        = Tep.str_hash   # raw query string only
@@ -28,8 +28,8 @@ module Tep
       @cookies      = Tep.str_hash   # parsed from Cookie: header
       # @session dropped: collides with controllers' :session via
       # poly-receiver dispatch. Roundhouse uses ActionDispatch::Session.
-      @raw_body     = ""             # same reasoning as req_headers
-      @remote_host  = ""
+      @raw_body     = +""             # same reasoning as req_headers
+      @remote_host  = +""
       @passed       = false          # `pass` flag: skip to the next matching route
       @ivars        = Tep.str_hash   # per-request bag for `@name = ...`
                                      # set by handlers and `before` filters,

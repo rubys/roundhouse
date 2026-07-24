@@ -25,7 +25,7 @@ class Article < ActiveRecord::Base
   # text_field test below uses an explicit `""` value — equivalent
   # to nil for the helper's value-omission contract (`text_field`
   # omits the `value` attribute for nil OR empty).
-  def initialize(id = 0, title = "", body = "")
+  def initialize(id = 0, title = +"", body = +"")
     super()
     # Assign the inherited `id` field via the ivar directly (`@id`)
     # rather than the inherited attr_accessor setter (`self.id = id`).

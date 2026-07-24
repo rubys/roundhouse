@@ -35,20 +35,20 @@ module Tep
       # FiberSlot array — seed with a noop-bodied slot to pin the
       # array element type, then drop it.
       @sched_fibers   = [Tep::FiberSlot.new(Fiber.new { Tep.seed_fiber_noop })]
-      @sched_fibers.delete_at(0)
+      @sched_fibers.clear
       @sched_wake_at  = [0]
-      @sched_wake_at.delete_at(0)
+      @sched_wake_at.clear
       @sched_current  = -1               # currently-running fiber idx
       @sched_io_fd    = [0]
-      @sched_io_fd.delete_at(0)
+      @sched_io_fd.clear
       @sched_io_mode  = [0]
-      @sched_io_mode.delete_at(0)
+      @sched_io_mode.clear
       @sched_io_ready = [0]
-      @sched_io_ready.delete_at(0)
+      @sched_io_ready.clear
 
       # Type-seed the Broadcast subscriber registry the same way.
       @broadcast_subs = [Tep::BroadcastSubscription.new("_", -1, 0)]
-      @broadcast_subs.delete_at(0)
+      @broadcast_subs.clear
 
       # Cable stream -> identifier-JSON map.
       @cable_identifiers = Tep.str_hash

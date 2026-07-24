@@ -49,12 +49,12 @@ module ActionView
     # version stays monomorphic.
     def self.number_with_delimiter(value)
       int = value.to_s
-      sign = ""
+      sign = +""
       if int.start_with?("-")
         sign = "-"
         int = int[1, int.length - 1].to_s
       end
-      out = ""
+      out = +""
       i = int.length
       while i > 3
         out = "," + int[i - 3, 3].to_s + out
@@ -72,7 +72,7 @@ module ActionView
     # portable and typed on every target runtime. The output alphabet
     # is attr-safe by construction, so call sites splice it unescaped.
     def self.sanitize_to_id(name)
-      out = ""
+      out = +""
       i = 0
       n = name.length
       while i < n

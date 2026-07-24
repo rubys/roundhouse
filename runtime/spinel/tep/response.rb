@@ -8,14 +8,14 @@ module Tep
     def initialize
       @status      = 200
       @headers     = Tep.str_hash
-      @body        = ""
+      @body        = +""
       @halted      = false
-      @file_path   = ""
+      @file_path   = +""
       # `Set-Cookie` is a header that can repeat; can't shove multiple
       # values into a Hash slot. Each entry here is one fully-formatted
       # Set-Cookie line, emitted verbatim by the writer.
       @set_cookies = [""]
-      @set_cookies.delete_at(0)
+      @set_cookies.clear
       @streamer    = Streamer.new   # default no-op; only used when @streaming
       @streaming   = false
       # WebSocket upgrade slots. When @upgrading_ws is set (by
@@ -24,7 +24,7 @@ module Tep
       # drives Tep::WebSocket::Connection's recv loop instead of writing
       # a normal body.
       @upgrading_ws  = false
-      @ws_accept_key = ""
+      @ws_accept_key = +""
       @ws_driver     = Tep::WebSocket::Driver.new(0)
     end
 
@@ -64,7 +64,7 @@ module Tep
 
     def send_file(path)
       @file_path = path
-      @body = ""
+      @body = +""
     end
 
     # Spinel's polymorphic-receiver write codegen emits a no-op for

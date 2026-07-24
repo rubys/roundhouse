@@ -128,7 +128,7 @@ module Main
     # req.req_params to poly, breaking unrelated String reads of it.
     sub = Tep.str_hash
     scalars = Tep.str_hash
-    outer_name = ""
+    outer_name = +""
     flat.each do |k, v|
       ob = k.index("[")
       if ob.nil?
@@ -400,7 +400,7 @@ module Main
   def self.set_flash_cookie(res, name, value)
     opts = Tep.str_hash
     opts["Path"] = "/"
-    opts["HttpOnly"] = ""
+    opts["HttpOnly"] = +""
     res.set_cookie(name, value, opts)
   end
 
@@ -408,7 +408,7 @@ module Main
     opts = Tep.str_hash
     opts["Path"] = "/"
     opts["Max-Age"] = "0"
-    opts["HttpOnly"] = ""
+    opts["HttpOnly"] = +""
     res.set_cookie(name, "", opts)
   end
 end

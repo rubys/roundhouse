@@ -49,7 +49,7 @@ module Tep
         # whole frames as the buffer holds, carrying any partial trailing
         # frame forward via byteslice. Replaces the old static recv buffer
         # + per-byte C accessor (sphttp.c is retired — matz/spinel#1466).
-        inbuf = ""
+        inbuf = +""
         while true
           ready = Tep::Scheduler.io_wait(@fd, Tep::Scheduler::READ, @idle_timeout_seconds)
           if ready == 0
@@ -83,7 +83,7 @@ module Tep
             end
             Connection.dispatch_frame(@driver, r.frame)
             if r.consumed >= inbuf.bytesize
-              inbuf = ""
+              inbuf = +""
               break
             end
             inbuf = inbuf.byteslice(r.consumed, inbuf.bytesize - r.consumed)
@@ -107,7 +107,7 @@ module Tep
           Connection.dispatch_pong(driver, frame.payload)
         elsif op == Tep::WebSocket::OPCODE_CLOSE
           code = 0
-          reason = ""
+          reason = +""
           # bytesize/getbyte/byteslice: the close payload is binary (2-byte
           # code + UTF-8 reason); char indexing misreads the code when the
           # reason opens with a multi-byte character.

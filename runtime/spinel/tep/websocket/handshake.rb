@@ -93,7 +93,7 @@ module Tep
       end
 
       def self.downcase(s)
-        out = ""
+        out = +""
         i = 0
         while i < s.length
           c = s[i]
@@ -111,7 +111,7 @@ module Tep
       # Trims whitespace around each entry.
       def self.split_csv(s)
         out = [""]
-        out.delete_at(0)
+        out.clear
         if s.length == 0
           return out
         end
@@ -148,10 +148,10 @@ module Tep
 
         def initialize
           @valid      = false
-          @reason     = ""
-          @accept_key = ""
+          @reason     = +""
+          @accept_key = +""
           @protocols  = [""]
-          @protocols.delete_at(0)
+          @protocols.clear
         end
       end
     end

@@ -41,7 +41,7 @@ module ActionDispatch
       # Kotlin, Go, and Spinel. A candidate segment that isn't all digits
       # makes the route a non-match, so `/articles/12abc` falls through
       # to 404 instead of binding `id = "12abc"`.
-      def initialize(verb, pattern, controller, action, req_format = nil, int_params = "")
+      def initialize(verb, pattern, controller, action, req_format = nil, int_params = +"")
         @verb        = verb
         @pattern     = pattern
         @controller  = controller
@@ -103,7 +103,7 @@ module ActionDispatch
     # keeps scanning and the request 404s. The check runs here on the
     # raw segment (`ap`, a non-nil String local) rather than after
     # capture so no target has to model `Hash#[]` returning nil.
-    def self.match_pattern(pattern, path, int_params = "")
+    def self.match_pattern(pattern, path, int_params = +"")
       pattern_parts = pattern.split("/")
       path_parts    = path.split("/")
       return nil if pattern_parts.length != path_parts.length

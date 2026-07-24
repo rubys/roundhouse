@@ -192,7 +192,7 @@ module Tep
       # Non-blocking request reader. Returns the accumulated blob
       # once "\r\n\r\n" is seen, or "" on timeout / EOF / oversize.
       def self.read_request_blob(fd, timeout_seconds)
-        buf = ""
+        buf = +""
         deadline = Time.now.to_i + timeout_seconds
         while buf.length < MAX_REQUEST_BYTES
           remaining = deadline - Time.now.to_i

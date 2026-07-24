@@ -53,7 +53,7 @@ module Tep
     # \u00XX. Forward slash is left unescaped (legal either way;
     # the unescaped form is more readable and shorter).
     def self.escape(s)
-      out = ""
+      out = +""
       i = 0
       n = s.length
       while i < n
@@ -88,7 +88,7 @@ module Tep
     # Two-digit lowercase hex of a byte (0..255).
     def self.hex2(n)
       hex = "0123456789abcdef"
-      out = ""
+      out = +""
       out << hex[(n / 16) % 16, 1]
       out << hex[n % 16, 1]
       out
@@ -243,7 +243,7 @@ module Tep
     # (the tep typed-empty-array idiom); non-int elements are skipped.
     def self.get_int_array(s, key)
       out = [0]
-      out.delete_at(0)
+      out.clear
       pos = Json.find_value_start(s, key)
       if pos < 0
         return out
@@ -391,7 +391,7 @@ module Tep
         return ""
       end
       pos += 1
-      out = ""
+      out = +""
       while pos < s.length
         c = s[pos]
         if c == "\""

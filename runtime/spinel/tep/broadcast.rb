@@ -165,9 +165,7 @@ module Tep
     def self.clear
       subs = Tep::APP.broadcast_subs
       n = subs.length
-      while subs.length > 0
-        subs.delete_at(0)
-      end
+      subs.clear
       n
     end
 

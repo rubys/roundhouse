@@ -3,7 +3,7 @@ module Tep
   class Url
     # "%41+b" -> "A b"
     def self.unescape(s)
-      out = ""
+      out = +""
       i = 0
       n = s.length
       while i < n
@@ -33,7 +33,7 @@ module Tep
     # strings, and similar contexts. RFC 3986 unreserved set:
     # ALPHA / DIGIT / `-._~`. Everything else gets `%XX` (uppercase hex).
     def self.escape(s)
-      out = ""
+      out = +""
       i = 0
       while i < s.length
         c = s[i]
@@ -88,11 +88,11 @@ module Tep
     # `out` narrowed to StrStrHash throughout.
     def self.split_url(u)
       out = Tep.str_hash
-      out["scheme"] = ""
-      out["host"]   = ""
-      out["port"]   = ""
+      out["scheme"] = +""
+      out["host"]   = +""
+      out["port"]   = +""
       out["path"]   = "/"
-      out["query"]  = ""
+      out["query"]  = +""
 
       rest = u
       if rest.length >= 7 && rest[0, 7] == "http://"
@@ -147,7 +147,7 @@ module Tep
         if pair.length > 0
           eq = pair.index("=")
           if eq.nil?
-            h[Url.unescape(pair)] = ""
+            h[Url.unescape(pair)] = +""
           else
             k = pair[0, eq]
             v = pair[eq + 1, pair.length - eq - 1]

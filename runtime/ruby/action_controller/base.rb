@@ -48,7 +48,7 @@ module ActionController
       @session = ActionDispatch::Session.new
       @flash   = ActionDispatch::Flash.new
       @status  = 200
-      @body    = ""
+      @body    = +""
       @location = nil
       @request_format = :html
       @content_type = "text/html; charset=utf-8"
@@ -128,7 +128,7 @@ module ActionController
     # parse it, so being explicit costs nothing.)
     def head(status, content_type: nil)
       @status = resolve_status(status)
-      @body   = ""
+      @body   = +""
       @performed = true
       @content_type = content_type unless content_type.nil?
       nil

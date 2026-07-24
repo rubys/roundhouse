@@ -87,7 +87,7 @@ end
 module OpenSSL
   module RandomSource
     def self.random_bytes(n)
-      out = ""
+      out = +""
       i = 0
       while i < n
         out = out + rand(256).chr

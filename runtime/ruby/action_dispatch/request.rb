@@ -27,12 +27,12 @@ module ActionDispatch
     def initialize
       @remote_ip = "127.0.0.1"
       @path = "/"
-      @query_string = ""
+      @query_string = +""
       @request_method = "GET"
-      @referer = ""
+      @referer = +""
       @host = "localhost"
       @format = "html"
-      @body = ""
+      @body = +""
       @env = {}
     end
 

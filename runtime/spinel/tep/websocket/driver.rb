@@ -34,7 +34,7 @@ module Tep
       def initialize(fd)
         @fd             = fd
         @max_frame_size = Tep::WebSocket::DEFAULT_MAX_FRAME
-        @subprotocol    = ""
+        @subprotocol    = +""
         @h_open    = Tep::WebSocket::Handler.new
         @h_message = Tep::WebSocket::Handler.new
         @h_close   = Tep::WebSocket::Handler.new
@@ -133,9 +133,9 @@ module Tep
       attr_accessor :data, :code, :reason
 
       def initialize
-        @data   = ""
+        @data   = +""
         @code   = 0
-        @reason = ""
+        @reason = +""
       end
     end
 

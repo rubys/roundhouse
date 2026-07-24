@@ -243,7 +243,7 @@ module Tep
       attr_accessor :outcome, :frame, :consumed, :close_code
 
       def initialize
-        @outcome    = ""
+        @outcome    = +""
         @frame      = Tep::WebSocket::Frame.new(true, 0, "")
         @consumed   = 0
         @close_code = 0

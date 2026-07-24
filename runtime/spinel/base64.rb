@@ -20,7 +20,7 @@ module Base64
   def self.strict_encode64(s)
     bytes = s.bytes
     n = bytes.length
-    out = ""
+    out = +""
     i = 0
     while i + 3 <= n
       b0 = bytes[i]
@@ -55,7 +55,7 @@ module Base64
   # Action Cable glue's signed_stream_name decode (the encode side is
   # turbo_stream_from). Returns the decoded String.
   def self.strict_decode64(s)
-    out = ""
+    out = +""
     acc = 0
     nbits = 0
     i = 0
