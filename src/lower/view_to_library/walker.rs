@@ -381,7 +381,15 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             let guarded = Expr::new(
                 inner.span,
                 ExprNode::If {
-                    cond: rewrite_helpers_in_expr(cond, ctx),
+                    // Same predicate rewrite as statement-level conds
+                    // (see the value-position If arm in
+                    // rewrite_helpers_in_expr).
+                    cond: rewrite_predicates(
+                        &rewrite_helpers_in_expr(cond, ctx),
+                        &ctx.nullable_locals,
+                        &ctx.reference_reads,
+                        &ctx.nilable_scalar_reads,
+                    ),
                     then_branch: seq(then_stmts),
                     else_branch: Expr::new(inner.span, ExprNode::Lit { value: Literal::Nil }),
                 },
@@ -723,7 +731,17 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
         // these arms the nested helper Send survives raw and the view
         // module has no method to answer it.
         ExprNode::If { cond, then_branch, else_branch } => ExprNode::If {
-            cond: rewrite_helpers_in_expr(cond, ctx),
+            // Value-position conds get the same predicate rewrite a
+            // statement-level `<% if … %>` does — `<%= (if
+            // title.present? … end) %>` (the lobsters layout <title>)
+            // otherwise ships a verbatim `present?` no non-CRuby
+            // runtime answers.
+            cond: rewrite_predicates(
+                &rewrite_helpers_in_expr(cond, ctx),
+                &ctx.nullable_locals,
+                &ctx.reference_reads,
+                &ctx.nilable_scalar_reads,
+            ),
             then_branch: rewrite_helpers_in_expr(then_branch, ctx),
             else_branch: rewrite_helpers_in_expr(else_branch, ctx),
         },
