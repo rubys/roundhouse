@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Dead-method sweep over an emitted (transpiled) Ruby tree.
+
+For every method defined in TARGET_FILE, search the whole emitted TREE
+for a call site — any non-comment, non-def line containing the name as
+a receiver-dotted or bare word. Methods with zero call sites are
+reported as dead-in-this-app.
+
+This is the measurement companion to the tree-shaking work: the
+treeshake summary line (`roundhouse: treeshake (...): kept N of M`)
+covers the runtime LibraryClasses; this script covers the app-side
+lowerer-synthesized surface (per-column presence/dirty predicates,
+bang variants, row contract) that filter_runtime_class does not see.
+
+Usage:
+    scripts/dead-method-sweep <emitted-tree-dir> <target-file.rb>
+e.g.
+    bin/rh transpile spinel
+    scripts/dead-method-sweep build/transpiled-blog-spinel \
+        build/transpiled-blog-spinel/app/models/article.rb
+
+Textual, deliberately conservative in the "alive" direction: a name
+called on ANY receiver anywhere counts as alive (matching treeshake's
+name_reachable fallback), so "dead" here means no textual call site
+exists at all. `initialize` is exempt (reached via `.new`), as are
+`[]` / `[]=` (reached syntactically).
+"""
+
+import os
+import re
+import sys
+
+
+def main() -> int:
+    if len(sys.argv) != 3:
+        print(__doc__, file=sys.stderr)
+        return 2
+    tree, target = sys.argv[1], sys.argv[2]
+
+    src = open(target, errors="replace").read()
+    defs = re.findall(r"^\s*def (?:self\.)?([\w\[\]=?!]+)", src, re.M)
+    names = sorted(
+        {
+            (n.rstrip("=") if n not in ("[]=", "==") else n)
+            for n in defs
+        }
+        - {"initialize", "[]", "[]="}
+    )
+
+    # Gather every non-def, non-comment line in the tree once.
+    lines = []
+    for root, _, files in os.walk(tree):
+        for f in files:
+            if not f.endswith(".rb"):
+                continue
+            p = os.path.join(root, f)
+            for ln in open(p, errors="replace"):
+                s = ln.strip()
+                if s.startswith("#") or re.match(r"def\s", s):
+                    continue
+                lines.append(ln)
+
+    dead, alive = [], []
+    for m in names:
+        esc = re.escape(m)
+        # Bare or dotted call; for names ending in ?/! the trailing
+        # char is part of the name, otherwise forbid a following
+        # word-char / `?` / `!` / `=` so `update` doesn't match
+        # `update!` or `updated_at`.
+        tail = "" if m.endswith(("?", "!")) else r"(?![\w?!=])"
+        pat = re.compile(r"(?<![\w@.:])" + esc + tail)
+        dot = re.compile(r"\." + esc + (tail if tail else ""))
+        if any(pat.search(l) or dot.search(l) for l in lines):
+            alive.append(m)
+        else:
+            dead.append(m)
+
+    total = len(names)
+    print(f"{target}: {total} methods (excl. initialize/[]), "
+          f"{len(alive)} alive, {len(dead)} dead")
+    for m in dead:
+        print(f"  dead: {m}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

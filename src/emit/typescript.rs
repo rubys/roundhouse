@@ -711,10 +711,57 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     .map(move |m| (cname.clone(), m.name.clone()))
             })
             .collect();
+    // Tree-shake observability: per-class (name, total, always_kept,
+    // kept) tallies recorded inside the transform closure, summarized
+    // after the units are built. `always_kept` counts the methods the
+    // filter retains unconditionally (accessors + initialize) so the
+    // summary can report precision over the genuinely eligible set.
+    let shake_stats: std::rc::Rc<std::cell::RefCell<Vec<(String, usize, usize, usize, usize)>>> =
+        Default::default();
+    let shake_stats_in = shake_stats.clone();
     let runtime_units = crate::runtime_loader::typescript_units(move |_path, classes| {
         let mut classes: Vec<_> = classes
             .into_iter()
-            .map(|c| crate::treeshake::filter_runtime_class(&c, &reach))
+            .map(|c| {
+                use crate::dialect::AccessorKind;
+                let total = c.methods.len();
+                let always = c
+                    .methods
+                    .iter()
+                    .filter(|m| {
+                        matches!(
+                            m.kind,
+                            AccessorKind::AttributeReader | AccessorKind::AttributeWriter
+                        ) || m.name.as_str() == "initialize"
+                    })
+                    .count();
+                let filtered = crate::treeshake::filter_runtime_class(&c, &reach);
+                // Of the kept eligible methods, how many were precisely
+                // reachable on this class vs rescued only by the
+                // conservative name-anywhere fallback? The fallback
+                // share bounds how much typed-receiver precision work
+                // could still shrink the output.
+                let fallback_only = filtered
+                    .methods
+                    .iter()
+                    .filter(|m| {
+                        use crate::dialect::AccessorKind;
+                        !matches!(
+                            m.kind,
+                            AccessorKind::AttributeReader | AccessorKind::AttributeWriter
+                        ) && m.name.as_str() != "initialize"
+                            && !reach.contains(&c.name, &m.name)
+                    })
+                    .count();
+                shake_stats_in.borrow_mut().push((
+                    c.name.0.as_str().to_string(),
+                    total,
+                    always,
+                    filtered.methods.len(),
+                    fallback_only,
+                ));
+                filtered
+            })
             .collect();
         // Pre-apply the async marks computed during global
         // propagation. Match by ClassId equality first, falling
@@ -752,6 +799,31 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         classes
     })
     .expect("runtime transpile failed (Ruby source error)");
+    {
+        // Summarize what the shake kept. `eligible` excludes the
+        // unconditional keeps (accessors + initialize) so the kept%
+        // reflects actual reachability precision, not the floor.
+        let stats = shake_stats.borrow();
+        let total: usize = stats.iter().map(|s| s.1).sum();
+        let always: usize = stats.iter().map(|s| s.2).sum();
+        let kept: usize = stats.iter().map(|s| s.3).sum();
+        let fallback: usize = stats.iter().map(|s| s.4).sum();
+        let eligible = total - always;
+        let kept_eligible = kept - always;
+        if total > 0 {
+            eprintln!(
+                "roundhouse: treeshake (typescript): kept {kept} of {total} runtime methods \
+                 ({always} always-kept accessors/constructors; {kept_eligible} of {eligible} \
+                 eligible = {}%, of which {fallback} only via name-fallback)",
+                if eligible > 0 { kept_eligible * 100 / eligible } else { 100 }
+            );
+        }
+        if std::env::var("ROUNDHOUSE_TREESHAKE_VERBOSE").as_deref() == Ok("1") {
+            for (name, t, a, k, f) in stats.iter() {
+                eprintln!("roundhouse: treeshake:   {name}: kept {k}/{t} ({a} always, {f} name-fallback)");
+            }
+        }
+    }
     for unit in runtime_units {
         // Datetime Stage-2: temporal-column readers yield a native `Date`,
         // which the jbuilder views pass to `JsonBuilder.encode_datetime`.
