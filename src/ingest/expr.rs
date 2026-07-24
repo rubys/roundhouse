@@ -192,6 +192,26 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 Some(block_node) => ingest_call_block(&block_node, file, &method)?,
                 None => None,
             };
+            // `+"literal"` — an unfrozen copy of a string literal, the
+            // frozen_string_literal-era mutable-builder idiom (spinel
+            // e432b19b makes fsl the default; runtime/ruby builders are
+            // written `buf = +""`). For every target that transpiles
+            // through this IR the frozen/unfrozen distinction doesn't
+            // exist — the target's string/builder is whatever it is — so
+            // unary `+@` on a string literal is the identity: lower to
+            // the literal. The ruby-family trees ship their runtime
+            // sources verbatim (never through this path), so the idiom
+            // survives where it matters.
+            if method == "+@" && args.is_empty() && block.is_none() {
+                if let Some(r) = &recv {
+                    if matches!(
+                        &*r.node,
+                        ExprNode::Lit { value: Literal::Str { .. } }
+                    ) {
+                        return Ok(recv.unwrap());
+                    }
+                }
+            }
             // ActiveSupport `recv.try(:sym[, args])` — a nil-safe method
             // call. Lower to `recv && recv.sym(args)`, the same shape as
             // the `&.` desugar below. `try` is not core Ruby, and its
