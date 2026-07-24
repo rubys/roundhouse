@@ -172,6 +172,23 @@ pub struct AssocRegistry {
     /// (model, belongs_to name) -> foreign-key column, for
     /// `where(user: user)` -> `where(user_id: user && user.id)`.
     belongs_to_fk: HashMap<(ClassId, Symbol), Symbol>,
+    /// (model, association name) -> the association target's TABLE, for
+    /// the nested-hash `where` form: `where(story: {merged_story_id:
+    /// id})` names conditions on the JOINED table, not on this model's
+    /// foreign key. Every association shape that has a join tail has
+    /// one, `:through` included (its conditions land on the far table).
+    assoc_table: HashMap<(ClassId, Symbol), Symbol>,
+    /// (model, association name) -> the join tail with the target table
+    /// ALIASED to the association name (`stories story ON story.id =
+    /// comments.story_id`). Rails switches a join to this form as soon
+    /// as a `where` hash keys off the association name rather than the
+    /// table name, and app SQL fragments are written against that alias
+    /// — lobsters' `merged_comments` ORs in `'"story"."id" = ?'`. Only
+    /// present where the names actually differ (a `has_many :comments`
+    /// on the `comments` table needs no alias) and only for the
+    /// single-hop shapes; a `:through` chain keeps its unaliased tail
+    /// and falls back to table-name qualification.
+    aliased_join_tails: HashMap<(ClassId, Symbol), String>,
     /// (model, has_many name) -> (target model, foreign-key column), for
     /// scope-on-self-association chains (`self.comments.accessible_to_user`
     /// seeds `Relation.new(Comment).where(user_id: @id)`). Direct
@@ -193,6 +210,12 @@ impl AssocRegistry {
     }
     fn belongs_to_fk(&self, model: &ClassId, assoc: &Symbol) -> Option<&Symbol> {
         self.belongs_to_fk.get(&(model.clone(), assoc.clone()))
+    }
+    fn assoc_table(&self, model: &ClassId, assoc: &Symbol) -> Option<&Symbol> {
+        self.assoc_table.get(&(model.clone(), assoc.clone()))
+    }
+    fn aliased_join_tail(&self, model: &ClassId, assoc: &Symbol) -> Option<&String> {
+        self.aliased_join_tails.get(&(model.clone(), assoc.clone()))
     }
     fn has_many_fk(&self, model: &ClassId, assoc: &Symbol) -> Option<&(ClassId, Symbol)> {
         self.has_many_fk.get(&(model.clone(), assoc.clone()))
@@ -226,6 +249,14 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     );
                     reg.belongs_to_fk
                         .insert((m.name.clone(), name.clone()), foreign_key.clone());
+                    reg.assoc_table
+                        .insert((m.name.clone(), name.clone()), Symbol::from(t.as_str()));
+                    if name.as_str() != t {
+                        reg.aliased_join_tails.insert(
+                            (m.name.clone(), name.clone()),
+                            format!("{t} {name} ON {name}.id = {own}.{foreign_key}"),
+                        );
+                    }
                 }
                 Association::HasMany { name, target, foreign_key, through: None, .. } => {
                     let t = pluralize_snake(target.0.as_str());
@@ -237,6 +268,14 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                         (m.name.clone(), name.clone()),
                         (target.clone(), foreign_key.clone()),
                     );
+                    reg.assoc_table
+                        .insert((m.name.clone(), name.clone()), Symbol::from(t.as_str()));
+                    if name.as_str() != t {
+                        reg.aliased_join_tails.insert(
+                            (m.name.clone(), name.clone()),
+                            format!("{t} {name} ON {name}.{foreign_key} = {own}.id"),
+                        );
+                    }
                     let entry = (target.clone(), foreign_key.clone());
                     reg.has_many_by_name
                         .entry(name.clone())
@@ -253,6 +292,14 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                         (m.name.clone(), name.clone()),
                         format!("{t} ON {t}.{foreign_key} = {own}.id"),
                     );
+                    reg.assoc_table
+                        .insert((m.name.clone(), name.clone()), Symbol::from(t.as_str()));
+                    if name.as_str() != t {
+                        reg.aliased_join_tails.insert(
+                            (m.name.clone(), name.clone()),
+                            format!("{t} {name} ON {name}.{foreign_key} = {own}.id"),
+                        );
+                    }
                 }
                 // `has_many :through`: two hops, owner-side direction
                 // (`Tag.joins(:stories)` → JOIN taggings ON tag_id, JOIN
@@ -288,6 +335,8 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                              INNER JOIN {target_table} ON {target_table}.id = {thr_table}.{src_fk}"
                         ),
                     );
+                    reg.assoc_table
+                        .insert((m.name.clone(), name.clone()), Symbol::from(target_table.as_str()));
                 }
                 _ => {}
             }
@@ -616,7 +665,16 @@ fn relation_new(span: crate::span::Span, model: &ClassId) -> Expr {
 /// `v && v.id` only for plain reads (Var/Ivar — evaluating twice is free);
 /// literals ride as-is, so `where(user: nil)` stays `user_id IS NULL`, and
 /// call-expression values are left alone rather than double-evaluated.
-fn lower_relation_args(model: &ClassId, method: &Symbol, args: &mut [Expr], ctx: &Ctx) {
+/// Returns the association names whose join in the RECEIVER chain must
+/// be re-emitted with its Rails alias — see the nested-hash arm.
+#[must_use]
+fn lower_relation_args(
+    model: &ClassId,
+    method: &Symbol,
+    args: &mut [Expr],
+    ctx: &Ctx,
+) -> Vec<Symbol> {
+    let mut aliases: Vec<Symbol> = Vec::new();
     match method.as_str() {
         "joins" | "left_outer_joins" => {
             let kind = if method.as_str() == "joins" { "INNER JOIN" } else { "LEFT OUTER JOIN" };
@@ -635,6 +693,27 @@ fn lower_relation_args(model: &ClassId, method: &Symbol, args: &mut [Expr], ctx:
                     let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
                         continue;
                     };
+                    // Nested-hash value: the key names conditions on the
+                    // JOINED table (`Comment.joins(:story).where(story:
+                    // {merged_story_id: id})`), not on this model's
+                    // foreign key — renaming to the fk column produced
+                    // the nonexistent `story_id.merged_story_id`. The
+                    // runtime's hash_conditions already qualifies
+                    // `<outer>.<inner>`; what the outer name must be is
+                    // Rails' choice: keying off the association name
+                    // aliases the joined table to that name, so the key
+                    // rides through unchanged and the join gains the
+                    // alias (`aliases` — applied to the receiver chain
+                    // by the caller). Shapes with no aliased tail
+                    // (`:through`) fall back to the table name.
+                    if matches!(&*v.node, ExprNode::Hash { .. }) {
+                        if ctx.assocs.aliased_join_tail(model, key).is_some() {
+                            aliases.push(key.clone());
+                        } else if let Some(table) = ctx.assocs.assoc_table(model, key) {
+                            *k.node = ExprNode::Lit { value: Literal::Sym { value: table.clone() } };
+                        }
+                        continue;
+                    }
                     let Some(fk) = ctx.assocs.belongs_to_fk(model, key) else { continue };
                     *k.node = ExprNode::Lit { value: Literal::Sym { value: fk.clone() } };
                     // The VALUE rides through unchanged. It used to be
@@ -700,6 +779,43 @@ fn lower_relation_args(model: &ClassId, method: &Symbol, args: &mut [Expr], ctx:
             }
         }
         _ => {}
+    }
+    aliases
+}
+
+/// Re-emit an already-lowered `joins(:assoc)` in the receiver chain with
+/// the association-name alias Rails uses once a `where` hash keys off
+/// that name. Both spellings come from the registry, so the match is on
+/// the exact string this pass generated — a hand-written join string
+/// (or a chain with no join at all) is left alone.
+fn alias_join_in_chain(expr: &mut Expr, plain: &str, aliased: &str) -> bool {
+    let ExprNode::Send { recv, method, args, .. } = &mut *expr.node else { return false };
+    if matches!(method.as_str(), "joins" | "left_outer_joins") {
+        let kind = if method.as_str() == "joins" { "INNER JOIN" } else { "LEFT OUTER JOIN" };
+        for a in args.iter_mut() {
+            let ExprNode::Lit { value: Literal::Str { value } } = &mut *a.node else { continue };
+            if *value == format!("{kind} {plain}") {
+                *value = format!("{kind} {aliased}");
+                return true;
+            }
+        }
+    }
+    match recv {
+        Some(r) => alias_join_in_chain(r, plain, aliased),
+        None => false,
+    }
+}
+
+/// Apply every alias `lower_relation_args` asked for to the receiver
+/// chain the `where` hangs off.
+fn apply_join_aliases(recv: &mut Expr, model: &ClassId, aliases: &[Symbol], ctx: &Ctx) {
+    for assoc in aliases {
+        let (Some(plain), Some(aliased)) =
+            (ctx.assocs.join_tail(model, assoc), ctx.assocs.aliased_join_tail(model, assoc))
+        else {
+            continue;
+        };
+        alias_join_in_chain(recv, plain, aliased);
     }
 }
 
@@ -832,7 +948,9 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     return Some(self_model.clone());
                 }
                 if is_relation_chain_method(method.as_str()) {
-                    lower_relation_args(self_model, &method, &mut args, ctx);
+                    // Receiver is the bare `__rel` param — any `joins`
+                    // sits in a separate chain link handled below.
+                    let _ = lower_relation_args(self_model, &method, &mut args, ctx);
                     *expr = put(span, Some(var_expr(span, rel)), method, args, block, parenthesized);
                     return Some(self_model.clone());
                 }
@@ -852,7 +970,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     return Some(self_model);
                 }
                 if is_relation_chain_method(method.as_str()) {
-                    lower_relation_args(&self_model, &method, &mut args, ctx);
+                    let _ = lower_relation_args(&self_model, &method, &mut args, ctx);
                     let seed = relation_new(span, &self_model);
                     *expr = put(span, Some(seed), method, args, block, parenthesized);
                     return Some(self_model);
@@ -873,7 +991,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     if method.as_str() == "all" {
                         *expr = seed;
                     } else {
-                        lower_relation_args(&m, &method, &mut args, ctx);
+                        let _ = lower_relation_args(&m, &method, &mut args, ctx);
                         *expr = put(span, Some(seed), method, args, block, parenthesized);
                     }
                     return Some(m);
@@ -1051,7 +1169,9 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     return Some(mr);
                 }
                 if is_relation_chain_method(method.as_str()) {
-                    lower_relation_args(&mr, &method, &mut args, ctx);
+                    let aliases = lower_relation_args(&mr, &method, &mut args, ctx);
+                    let mut r = r;
+                    apply_join_aliases(&mut r, &mr, &aliases, ctx);
                     *expr = put(span, Some(r), method, args, block, parenthesized);
                     return Some(mr);
                 }
@@ -1422,6 +1542,91 @@ mod tests {
             r.node
         );
         assert_eq!(args.len(), 1, "threaded seed arg expected: {:?}", args);
+    }
+
+    #[test]
+    fn nested_hash_where_key_aliases_the_join_like_rails() {
+        // lobsters' Story#merged_comments:
+        //   Comment.joins(:story).where(story: {merged_story_id: id})
+        // Rails aliases the joined table to the association name as
+        // soon as the hash keys off it — `INNER JOIN "stories" "story"
+        // … WHERE "story"."merged_story_id" = …` — and the app's own
+        // SQL fragments are written against that alias. Keying off the
+        // fk column instead produced `story_id.merged_story_id`.
+        let comment = ingest(
+            "class Comment < ApplicationRecord\n  belongs_to :story\nend\n",
+            "app/models/comment.rb",
+        );
+        let story = ingest(
+            "class Story < ApplicationRecord\n  has_many :comments\nend\n",
+            "app/models/story.rb",
+        );
+        let models_v = vec![comment, story];
+        let scopes = build_scope_registry(&models_v);
+        let models = model_set(&models_v);
+        let assocs = build_assoc_registry(&models_v);
+
+        let comment_const = Expr::new(
+            span(),
+            ExprNode::Const { path: vec![Symbol::from("Comment")] },
+        );
+        let joins = Expr::new(
+            span(),
+            ExprNode::Send {
+                recv: Some(comment_const),
+                method: Symbol::from("joins"),
+                args: vec![sym_lit("story")],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let inner = Expr::new(
+            span(),
+            ExprNode::Hash {
+                entries: vec![(
+                    sym_lit("merged_story_id"),
+                    Expr::new(span(), ExprNode::Lit { value: Literal::Int { value: 7 } }),
+                )],
+                kwargs: false,
+            },
+        );
+        let mut expr = Expr::new(
+            span(),
+            ExprNode::Send {
+                recv: Some(joins),
+                method: Symbol::from("where"),
+                args: vec![Expr::new(
+                    span(),
+                    ExprNode::Hash { entries: vec![(sym_lit("story"), inner)], kwargs: true },
+                )],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        rewrite_call_site(&mut expr, &scopes, &models, &assocs, None, None, empty_returns());
+
+        // The where key stays the association name (= the alias)…
+        let ExprNode::Send { recv: Some(r), args, .. } = &*expr.node else {
+            panic!("expected Send, got {:?}", expr.node);
+        };
+        let ExprNode::Hash { entries, .. } = &*args[0].node else {
+            panic!("expected hash arg, got {:?}", args[0].node);
+        };
+        assert!(
+            matches!(&*entries[0].0.node,
+                ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "story"),
+            "where key should stay the association name: {:?}",
+            entries[0].0.node
+        );
+
+        // …and the join underneath it gains that alias.
+        let ExprNode::Send { args: join_args, .. } = &*r.node else {
+            panic!("expected joins Send, got {:?}", r.node);
+        };
+        let ExprNode::Lit { value: Literal::Str { value } } = &*join_args[0].node else {
+            panic!("expected join SQL, got {:?}", join_args[0].node);
+        };
+        assert_eq!(value, "INNER JOIN stories story ON story.id = comments.story_id");
     }
 
     #[test]
