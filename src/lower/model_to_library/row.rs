@@ -34,7 +34,7 @@ use crate::dialect::{
     AccessorKind, LibraryClass, LibraryClassOrigin, MethodDef, MethodReceiver, Param,
 };
 use crate::effect::EffectSet;
-use crate::expr::{Expr, ExprNode, LValue};
+use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::schema::{Column, Schema, Table};
 use crate::span::Span;
@@ -187,8 +187,14 @@ fn synth_row_attr_writer(owner: &ClassId, col: &Column) -> MethodDef {
 fn synth_row_initialize(owner: &ClassId, table: &Table) -> MethodDef {
     let mut stmts: Vec<Expr> = Vec::new();
     for col in &table.columns {
-        let col_ty = ty_of_column(&col.col_type);
-        let default_lit = default_for_col_ty(&col_ty);
+        let col_ty = super::ty_of_column_slot(col);
+        // A nullable slot starts nil — the type's zero would be a value
+        // the DB never stored.
+        let default_lit = if matches!(col_ty, Ty::Union { .. }) {
+            Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil })
+        } else {
+            default_for_col_ty(&col_ty)
+        };
         let typed_default = with_ty(default_lit, col_ty.clone());
         stmts.push(Expr::new(
             Span::synthetic(),

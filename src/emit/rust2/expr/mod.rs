@@ -1207,6 +1207,27 @@ fn emit_expr_inner(e: &Expr) -> String {
         // renders it as `serde_json::Value` at the param site —
         // `value.as(i64)` then needs `.as_i64().unwrap()`.
         ExprNode::Cast { value, target_ty } => {
+            // Narrowing a nilable to its scalar (`Cast(@col, Int)` where
+            // `@col` is `Option<i64>`): the IR only emits this where a
+            // preceding `!nil?` conjunct guarantees the value, and `&&`
+            // short-circuits here as it does in Ruby. `.clone()` because
+            // the receiver is a field behind `&self`.
+            // The struct field is the authority, not the expression's
+            // `ty`: the body-typer narrows the inner read to the cast's
+            // target, so by emit time only the field table still knows
+            // the slot is an Option.
+            let nilable_field = match &*value.node {
+                ExprNode::Ivar { name } => ivar_field_ty(name.as_str())
+                    .map(|t| is_option_of(&t, target_ty))
+                    .unwrap_or(false),
+                _ => matches!(
+                    value.ty.as_ref(),
+                    Some(t) if is_option_of(t, target_ty)
+                ),
+            };
+            if nilable_field {
+                return format!("({}).clone().unwrap()", emit_expr(value));
+            }
             let coerced = coerce_arg_for_field_ty(value, target_ty);
             let raw = emit_expr(value);
             if coerced != raw {

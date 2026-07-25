@@ -374,14 +374,39 @@ fn synth_fill_timestamps(owner: &ClassId, table: &Table) -> Option<MethodDef> {
 /// cross-target).
 fn synth_column_predicate(owner: &ClassId, col: &Column) -> MethodDef {
     let col_ty = ty_of_column(&col.col_type);
+    // The ivar's real type — nullable columns hold nil, and the
+    // comparison below has to be against the value a strict target
+    // actually stores (comparing an `Option<String>` to `""` doesn't
+    // typecheck). `to_s` before the comparison keeps the Ruby reading
+    // identical (`nil.to_s == ""`) and gives strict targets a scalar.
+    let slot_ty = super::ty_of_column_slot(col);
+    let nilable = matches!(slot_ty, Ty::Union { .. });
+    // The nil-excluded value. `Cast` is the IR's narrowing bridge: the
+    // ruby family unwraps it to the bare read, Crystal renders `.as(T)`,
+    // rust2 unwraps the Option — all guarded by the `!nil?` conjunct
+    // that precedes it, which short-circuits in every target.
+    let scalar_read = |ty: Ty| {
+        let read = col_ivar(col, if nilable { slot_ty.clone() } else { ty.clone() });
+        if nilable {
+            with_ty(
+                Expr::new(Span::synthetic(), ExprNode::Cast { value: read, target_ty: ty.clone() }),
+                ty,
+            )
+        } else {
+            read
+        }
+    };
     let body = match &col_ty {
         // Boolean: the value's truthiness (`when true then true; false/nil
         // then false`).
         Ty::Bool => col_ivar(col, Ty::Bool),
         // Numeric: present AND non-zero (`!value.zero?`). `0` → false.
+        // Numeric: present AND non-zero. A nullable numeric compares
+        // its `to_s` against "0" for the same typecheck reason — the
+        // nil case is already excluded by the first conjunct.
         Ty::Int | Ty::Float => and_bool(
-            not_nil(col, &col_ty),
-            bool_send(col_ivar(col, col_ty.clone()), "!=", lit_int(0)),
+            not_nil(col, &slot_ty),
+            bool_send(scalar_read(col_ty.clone()), "!=", lit_int(0)),
         ),
         // String (and Date/DateTime/Time, which store as text →
         // `ty_of_column` Str): present AND non-empty (`!value.blank?`).
@@ -389,11 +414,11 @@ fn synth_column_predicate(owner: &ClassId, col: &Column) -> MethodDef {
         // `column_text` hydrates SQL NULL as `""`, never `nil`. The `?`
         // predicate reads the stored text, not the `Time` reader.
         Ty::Str => and_bool(
-            not_nil(col, &col_ty),
-            bool_send(col_ivar(col, Ty::Str), "!=", lit_str(String::new())),
+            not_nil(col, &slot_ty),
+            bool_send(scalar_read(Ty::Str), "!=", lit_str(String::new())),
         ),
         // Everything else (binary, json, references): present (`!nil?`).
-        _ => not_nil(col, &col_ty),
+        _ => not_nil(col, &slot_ty),
     };
     MethodDef {
         name: Symbol::from(format!("{}?", col.name.as_str())),

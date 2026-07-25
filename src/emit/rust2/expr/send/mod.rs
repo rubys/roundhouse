@@ -192,6 +192,20 @@ pub(super) fn emit_send(
         return format!("{}({})", rewritten_method, args_s.join(", "));
     }
     let r = recv.unwrap();
+    // `x.to_s` where `x` is nilable. Ruby's `nil.to_s` is `""`, so the
+    // generic `to_s` → `to_string` bridge is wrong on an Option: the
+    // method doesn't exist there, and the semantic we want is
+    // "render the value, empty for nil". The lowering leans on this —
+    // a nullable column read reaching a monomorphic `(String)` helper
+    // is coerced with `.to_s` rather than unwrapped.
+    if method == "to_s" && args.is_empty() {
+        if matches!(
+            r.ty.as_ref(),
+            Some(crate::ty::Ty::Union { variants }) if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+        ) {
+            return format!("{}.map(|v| v.to_string()).unwrap_or_default()", emit_expr(r));
+        }
+    }
     // Static-method routing: `self.method(args)` where `method` was
     // classified as not-reading-self emits as `Self::method(args)`.
     // Required inside `pub fn new` (no instance yet), and also a

@@ -419,6 +419,15 @@ pub(crate) fn cast_via_value_for_union(value: &Expr, target_ty: &crate::ty::Ty) 
         return None;
     }
     let raw = emit_expr(value);
+    if let Some(inner) = peel_nilable(target_ty) {
+        return match inner {
+            Ty::Str | Ty::Sym => Some(format!("({raw}).as_str().map(|s| s.to_string())")),
+            Ty::Int => Some(format!("({raw}).as_i64()")),
+            Ty::Float => Some(format!("({raw}).as_f64()")),
+            Ty::Bool => Some(format!("({raw}).as_bool()")),
+            _ => None,
+        };
+    }
     match target_ty {
         Ty::Str | Ty::Sym => Some(format!("({raw}).as_str().unwrap().to_string()")),
         Ty::Int => Some(format!("({raw}).as_i64().unwrap()")),
@@ -427,6 +436,23 @@ pub(crate) fn cast_via_value_for_union(value: &Expr, target_ty: &crate::ty::Ty) 
         _ => None,
     }
 }
+
+/// `Union{[T, Nil]}` → `T`. A nullable column's field/param carries
+/// that shape, and the serde_json accessors already return exactly the
+/// Option we want — `as_str()` is `Option<&str>` — so the nullable
+/// coercion is the non-nullable one minus its `.unwrap()`.
+fn peel_nilable(ty: &crate::ty::Ty) -> Option<&crate::ty::Ty> {
+    use crate::ty::Ty;
+    let Ty::Union { variants } = ty else { return None };
+    if variants.len() != 2 {
+        return None;
+    }
+    if !variants.iter().any(|v| matches!(v, Ty::Nil)) {
+        return None;
+    }
+    variants.iter().find(|v| !matches!(v, Ty::Nil))
+}
+
 
 /// Field-position coercion: variant of `coerce_arg_for_param_ty` for
 /// the constructor's `let <field> = <value>` rewrite. Two differences
@@ -443,7 +469,14 @@ pub(crate) fn coerce_arg_for_field_ty(arg: &Expr, field_ty: &crate::ty::Ty) -> S
     let raw = emit_expr(arg);
     let value_shaped = arg.ty.as_ref().map(ty_contains_untyped).unwrap_or(false);
     if value_shaped {
-        let coercion = match field_ty {
+        let coercion = match peel_nilable(field_ty).unwrap_or(field_ty) {
+            inner if peel_nilable(field_ty).is_some() => match inner {
+                Ty::Str | Ty::Sym => Some("as_str().map(|s| s.to_string())"),
+                Ty::Int => Some("as_i64()"),
+                Ty::Float => Some("as_f64()"),
+                Ty::Bool => Some("as_bool()"),
+                _ => None,
+            },
             Ty::Str | Ty::Sym => Some("as_str().unwrap().to_string()"),
             Ty::Int => Some("as_i64().unwrap()"),
             Ty::Float => Some("as_f64().unwrap()"),
