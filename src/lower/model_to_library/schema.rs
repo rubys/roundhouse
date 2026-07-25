@@ -1716,9 +1716,21 @@ fn synth_index_read(owner: &ClassId, table: &Table) -> MethodDef {
                 value: Literal::Sym { value: c.name.clone() },
             },
             guard: None,
+            // Wrap in `Cast` carrying the column's SLOT type, matching
+            // the `[]=` arms. `record[:col]` yields the value or nil,
+            // and a target that represents a nullable column as a
+            // reference (Go's `*string`) has to unbox it here — a bare
+            // read would hand the consumer a pointer. Ruby/Spinel
+            // unwrap Cast to the inner read, unchanged.
             body: Expr::new(
                 Span::synthetic(),
-                ExprNode::Ivar { name: col_storage_name(c) },
+                ExprNode::Cast {
+                    value: Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Ivar { name: col_storage_name(c) },
+                    ),
+                    target_ty: super::ty_of_column_slot(c),
+                },
             ),
         })
         .collect();

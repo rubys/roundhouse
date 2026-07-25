@@ -405,6 +405,40 @@ func OptBool(v interface{}) *bool {
 	return &b
 }
 
+// AnyString / AnyInt64 / AnyFloat64 / AnyBool unbox a nullable
+// column's pointer into an `interface{}` slot, nil staying nil. This is
+// the `record[:col]` reading — Ruby hands back the VALUE or nil, never
+// a reference — so the untyped consumers (JSON encoding, a form
+// field's optional value attribute) see what Rails would hand them
+// rather than a pointer that formats as "0xc000014870".
+func AnyString(p *string) interface{} {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+func AnyInt64(p *int64) interface{} {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+func AnyFloat64(p *float64) interface{} {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+func AnyBool(p *bool) interface{} {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
 // DerefString reads a nullable column's pointer field in a string
 // context: nil renders as "", the same reading `nil.to_s` gives in
 // Ruby (and what Rails compares against in a view or an assertion).

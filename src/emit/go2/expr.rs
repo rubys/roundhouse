@@ -727,7 +727,7 @@ pub(super) fn emit_send(
     // the rewrite doesn't accidentally widen genuine narrow-Hash
     // dispatches.
     let widen_hash_args = is_broadcasts_call(recv, method) || is_view_helpers_widen_call(recv, method);
-    let args_s: Vec<String> = if let Some(padded) = render_padded {
+    let mut args_s: Vec<String> = if let Some(padded) = render_padded {
         padded
     } else {
         args
@@ -759,6 +759,14 @@ pub(super) fn emit_send(
             })
             .collect()
     };
+    // Unbox nullable-column args at the `interface{}` seams (JSON
+    // encoding, the form's optional value attribute) — Ruby passes the
+    // value or nil, never a reference.
+    for (i, a) in args.iter().enumerate() {
+        if let Some(b) = args_s.get(i).and_then(|s| box_nullable_column_arg(method, a, s)) {
+            args_s[i] = b;
+        }
+    }
 
     // Inline `ViewHelpers.dom_id(record [, suffix])` at the call
     // site when `record`'s Ty is a concrete model (Article, Comment,
@@ -2138,6 +2146,27 @@ fn emit_cast(ctx: &EmitCtx, value: &Expr, target_ty: &Ty) -> String {
         if let ExprNode::Ivar { name } = &*value.node {
             if nullable_column_go_ty(name.as_str()).is_some() {
                 return format!("*{inner}");
+            }
+        }
+    }
+    // Reading a nullable COLUMN into an untyped slot (`record[:col]`
+    // — `get_index`/`attributes` per-column arms): unbox the pointer,
+    // nil staying nil. Ruby hands back the value, so a consumer like
+    // the form's optional-value attribute or the JSON encoder must not
+    // see a pointer (it formats as "0xc000014870").
+    if let ExprNode::Ivar { name } = &*value.node {
+        if let Some(go_ty) = nullable_column_go_ty(name.as_str()) {
+            let boxed = match go_ty.as_str() {
+                "*string" => Some("AnyString"),
+                "*int64" => Some("AnyInt64"),
+                "*float64" => Some("AnyFloat64"),
+                "*bool" => Some("AnyBool"),
+                _ => None,
+            };
+            if let (Some(b), Ty::Union { variants }) = (boxed, target_ty) {
+                if variants.iter().any(|v| matches!(v, Ty::Nil)) || variants.len() > 2 {
+                    return format!("{b}({inner})");
+                }
             }
         }
     }
@@ -3771,4 +3800,48 @@ fn nullable_column_go_ty(field_ruby: &str) -> Option<String> {
             .find(|(n, _)| n == field_ruby)
             .map(|(_, t)| t.clone())
     })
+}
+
+/// Runtime helpers whose Go signature takes `interface{}`: a nullable
+/// column argument reaches them as `*string` and would format as a
+/// pointer, so unbox it (nil stays nil). Keyed by name because these
+/// are hand-written runtime functions, not LibraryClass methods with
+/// a param table.
+const UNTYPED_ARG_HELPERS: &[&str] = &["encode_value", "optional_value_attr"];
+
+/// Unbox a nullable-column argument at an `interface{}` seam, in
+/// place — the call itself still renders through the normal path (its
+/// receiver prefix matters: `JsonBuilder_encode_value`, not
+/// `encode_value`).
+fn box_nullable_column_arg(method: &str, arg: &Expr, arg_s: &str) -> Option<String> {
+    if !UNTYPED_ARG_HELPERS.contains(&method) {
+        return None;
+    }
+    let go_ty = match &*arg.node {
+        ExprNode::Ivar { name } => nullable_column_go_ty(name.as_str()),
+        ExprNode::Send { recv: Some(inner), method: m, args: a, .. } if a.is_empty() => {
+            recv_column_go_ty(inner, m.as_str())
+        }
+        _ => None,
+    }?;
+    let f = match go_ty.as_str() {
+        "*string" => "AnyString",
+        "*int64" => "AnyInt64",
+        "*float64" => "AnyFloat64",
+        "*bool" => "AnyBool",
+        _ => return None,
+    };
+    Some(format!("{f}({arg_s})"))
+}
+
+/// The Go pointer type of `column` on the model this receiver resolves
+/// to, when the schema declares it nullable.
+fn recv_column_go_ty(recv: &Expr, column: &str) -> Option<String> {
+    if !recv_column_is_nullable(recv, column) {
+        return None;
+    }
+    // Every nullable scalar column renders as one of these; string is
+    // the overwhelmingly common case and the only one the fixtures
+    // exercise through an untyped seam.
+    Some("*string".to_string())
 }
