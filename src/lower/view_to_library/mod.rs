@@ -745,6 +745,66 @@ pub fn insert_db_stub(
             Ty::Str,
         ),
     );
+    // Nullable-column reads: NULL comes back as nil, not the type's
+    // zero. `ty_of_column_slot` types those columns the same way, so
+    // the hydration assignment lines up.
+    db_info.class_methods.insert(
+        Symbol::from("column_int_opt"),
+        fn_sig(
+            vec![(Symbol::from("stmt"), Ty::Int), (Symbol::from("i"), Ty::Int)],
+            Ty::Union { variants: vec![Ty::Int, Ty::Nil] },
+        ),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("column_float_opt"),
+        fn_sig(
+            vec![(Symbol::from("stmt"), Ty::Int), (Symbol::from("i"), Ty::Int)],
+            Ty::Union { variants: vec![Ty::Float, Ty::Nil] },
+        ),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("column_text_opt"),
+        fn_sig(
+            vec![(Symbol::from("stmt"), Ty::Int), (Symbol::from("i"), Ty::Int)],
+            Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+        ),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("column_bool_opt"),
+        fn_sig(
+            vec![(Symbol::from("stmt"), Ty::Int), (Symbol::from("i"), Ty::Int)],
+            Ty::Union { variants: vec![Ty::Bool, Ty::Nil] },
+        ),
+    );
+    // Nullable-column writes: nil renders the SQL keyword NULL.
+    db_info.class_methods.insert(
+        Symbol::from("escape_string_opt"),
+        fn_sig(
+            vec![(Symbol::from("s"), Ty::Union { variants: vec![Ty::Str, Ty::Nil] })],
+            Ty::Str,
+        ),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("escape_int_opt"),
+        fn_sig(
+            vec![(Symbol::from("n"), Ty::Union { variants: vec![Ty::Int, Ty::Nil] })],
+            Ty::Str,
+        ),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("escape_float_opt"),
+        fn_sig(
+            vec![(Symbol::from("f"), Ty::Union { variants: vec![Ty::Float, Ty::Nil] })],
+            Ty::Str,
+        ),
+    );
+    db_info.class_methods.insert(
+        Symbol::from("escape_bool_opt"),
+        fn_sig(
+            vec![(Symbol::from("b"), Ty::Union { variants: vec![Ty::Bool, Ty::Nil] })],
+            Ty::Str,
+        ),
+    );
     db_info.class_methods.insert(
         Symbol::from("finalize"),
         fn_sig(vec![(Symbol::from("stmt"), Ty::Int)], Ty::Nil),

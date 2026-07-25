@@ -14,7 +14,8 @@ use crate::lower::view::{
 };
 
 use super::attr_parts::{
-    append_attr_parts, default_form_class, default_method_sym, string_interp, take_opt,
+    append_attr_parts, default_form_class, default_method_sym, lit_str_coerce, string_interp,
+    take_opt,
 };
 use super::{
     inflector_call, lit_str, lit_sym, route_helpers_call, send, var_ref, view_helpers_call,
@@ -51,7 +52,12 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
             // (link_to / button_to / dom_id / turbo_stream_from /
             // pluralize / content_for_get) return strings that are
             // already escape-correct and pass through raw.
-            let mut args = vec![(*text).clone()];
+            // `.to_s` on the text for the same reason as link_to's
+            // label: it is routinely a nullable column read
+            // (`truncate(article.body, length: 100)`) and the runtime
+            // helper is monomorphic `(String, …) -> String`. Rails
+            // renders nil as the empty string here too.
+            let mut args = vec![lit_str_coerce((*text).clone())];
             if let Some(o) = opts {
                 args.push((*o).clone());
             }
@@ -183,7 +189,11 @@ fn emit_link_to_inline(
         value: ">".to_string(),
     });
     parts.push(InterpPart::Expr {
-        expr: view_helpers_call("html_escape", vec![text.clone()]),
+        // Same `.to_s` the bare-interpolation path applies: the label
+        // can be a nullable column read (`link_to article.title, …`),
+        // and `html_escape` is deliberately monomorphic `(String) ->
+        // String`. `nil.to_s == ""` is what Rails renders.
+        expr: view_helpers_call("html_escape", vec![lit_str_coerce(text.clone())]),
     });
     parts.push(InterpPart::Text {
         value: "</a>".to_string(),
@@ -242,7 +252,11 @@ fn emit_button_to_inline(
         value: ">".to_string(),
     });
     parts.push(InterpPart::Expr {
-        expr: view_helpers_call("html_escape", vec![text.clone()]),
+        // Same `.to_s` the bare-interpolation path applies: the label
+        // can be a nullable column read (`link_to article.title, …`),
+        // and `html_escape` is deliberately monomorphic `(String) ->
+        // String`. `nil.to_s == ""` is what Rails renders.
+        expr: view_helpers_call("html_escape", vec![lit_str_coerce(text.clone())]),
     });
     parts.push(InterpPart::Text {
         value: "</button>".to_string(),

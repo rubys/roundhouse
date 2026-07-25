@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver, Model, Param};
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
-use crate::schema::{ColumnType, Schema, Table};
+use crate::schema::{Column, ColumnType, Schema, Table};
 use crate::span::Span;
 use crate::ty::{Row, Ty};
 
@@ -815,7 +815,13 @@ fn build_class_info(
     if let Some(t) = table {
         let mut row = Row::closed();
         for col in &t.columns {
-            row.fields.insert(col.name.clone(), ty_of_column(&col.col_type));
+            // The SLOT type — a nullable column's ivar genuinely holds
+            // nil until something sets it, and the strict targets need
+            // that in the attributes row: Crystal's auto-`.not_nil!`
+            // ivar bridge, for one, keys off this type and would
+            // otherwise assert non-nil on a column that is routinely
+            // NULL.
+            row.fields.insert(col.name.clone(), ty_of_column_slot(col));
         }
         info.attributes = row;
     }
@@ -1207,7 +1213,15 @@ fn type_method_body(
                 } else {
                     col.name.clone()
                 };
-                ctx.ivar_bindings.insert(ivar_name, ty_of_column(&col.col_type));
+                // Slot type: a nullable column's ivar holds nil until
+                // something sets it. Model classes only — a Row is the
+                // raw transport whose fields the adapter always fills.
+                let ivar_ty = if model.is_some() {
+                    ty_of_column_slot(col)
+                } else {
+                    ty_of_column(&col.col_type)
+                };
+                ctx.ivar_bindings.insert(ivar_name, ivar_ty);
             }
         }
         // has_many eager-load cache ivars (`@<assoc>_cache` /
@@ -1352,6 +1366,30 @@ pub fn ty_of_column(t: &ColumnType) -> Ty {
         ColumnType::Binary => Ty::Str,
         ColumnType::Json => Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) },
         ColumnType::Reference { .. } => Ty::Int,
+    }
+}
+
+/// The column's type AS STORED IN A RECORD — `ty_of_column` widened with
+/// `Nil` when the schema says the column is nullable. Rails' unset value
+/// for such a column is NULL, not the type's zero: a nullable unique
+/// column left unset must not collide row-to-row (lobsters'
+/// `users.password_reset_token`), and `where(merged_story_id: nil)` has
+/// to match the rows that never set it — storing `0` there makes
+/// `scope :unmerged` match nothing.
+///
+/// The primary key is excluded: `id` is assigned by the INSERT and every
+/// hydration path treats it as present, so widening it would nilify
+/// every `record.id` read for no semantic gain.
+///
+/// NOT for the SQL seam — `column_read_method` and the Arel visitor pick
+/// their reader from the underlying column type, which nullability
+/// doesn't change.
+pub fn ty_of_column_slot(col: &Column) -> Ty {
+    let base = ty_of_column(&col.col_type);
+    if col.nullable && !col.primary_key {
+        Ty::Union { variants: vec![base, Ty::Nil] }
+    } else {
+        base
     }
 }
 

@@ -190,7 +190,7 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
             column: c.name.clone(),
             value: Value::Runtime {
                 expr: ivar_ref(&super::schema::col_storage_name(c)),
-                ty: value_type_for_column(&c.col_type),
+                ty: value_type_for_column(c),
             },
         })
         .collect();
@@ -227,7 +227,7 @@ fn synth_adapter_update(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
             column: c.name.clone(),
             value: Value::Runtime {
                 expr: ivar_ref(&super::schema::col_storage_name(c)),
-                ty: value_type_for_column(&c.col_type),
+                ty: value_type_for_column(c),
             },
         })
         .collect();
@@ -503,12 +503,12 @@ fn synth_adapter_reload(owner: &ClassId, table: &Table) -> MethodDef {
     // if Db.step?(stmt) ; @<col> = Db.column_<int|text>(stmt, i) ; ... ; mark_persisted! ; end
     let mut if_body: Vec<Expr> = Vec::new();
     for (i, col) in table.columns.iter().enumerate() {
-        let read_method = match ty_of_column(&col.col_type) {
-            Ty::Int => "column_int",
-            Ty::Bool => "column_bool",
-            Ty::Float => "column_float",
-            _ => "column_text",
-        };
+        // A nullable column reads through the `_opt` primitive so NULL
+        // arrives as nil instead of the type's zero — `""` for a
+        // nullable UNIQUE column would collide row-to-row, and 0 in a
+        // nullable fk would make `where(fk: nil)` miss every row that
+        // never set it.
+        let read_method = super::schema::column_read_method_for(col);
         let read_call = arel_db_call(
             &db,
             read_method,
@@ -656,10 +656,42 @@ fn var_ref(name: &Symbol) -> Expr {
     Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: name.clone() })
 }
 
-fn value_type_for_column(t: &crate::schema::ColumnType) -> ValueType {
-    match ty_of_column(t) {
-        Ty::Int => ValueType::Int,
-        Ty::Bool => ValueType::Bool,
-        _ => ValueType::Str,
+/// Which `Db.escape_*` primitive writes this column. A nullable column
+/// picks the `_opt` variant: nil has to reach the DB as the SQL keyword
+/// NULL, not as `''` / `0` — otherwise a nullable UNIQUE column
+/// collides on its second unset row and `where(fk: nil)` matches
+/// nothing. Temporal columns store ISO-8601 text, so they escape as
+/// strings like any other text column.
+fn value_type_for_column(col: &crate::schema::Column) -> ValueType {
+    let nullable = col.nullable && !col.primary_key;
+    match ty_of_column(&col.col_type) {
+        Ty::Int => {
+            if nullable {
+                ValueType::IntOpt
+            } else {
+                ValueType::Int
+            }
+        }
+        Ty::Bool => {
+            if nullable {
+                ValueType::BoolOpt
+            } else {
+                ValueType::Bool
+            }
+        }
+        Ty::Float => {
+            if nullable {
+                ValueType::FloatOpt
+            } else {
+                ValueType::Str
+            }
+        }
+        _ => {
+            if nullable {
+                ValueType::StrOpt
+            } else {
+                ValueType::Str
+            }
+        }
     }
 }

@@ -521,7 +521,9 @@ fn synth_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
             Ty::Union { variants: vec![Ty::Time, Ty::Nil] },
         )
     } else {
-        let col_ty = ty_of_column(&col.col_type);
+        // The slot type, not the bare column type: a nullable column
+        // reads back nil until something sets it.
+        let col_ty = super::ty_of_column_slot(col);
         (
             with_ty(
                 Expr::new(Span::synthetic(), ExprNode::Ivar { name: col.name.clone() }),
@@ -708,7 +710,7 @@ fn synth_attr_writer(owner: &ClassId, col: &Column) -> MethodDef {
     // `<col>=` / `@<col>` in general, `<col>_raw=` / `@<col>_raw` (Str)
     // for a temporal column. Every synthesized hydration path assigns
     // stored text, so this keeps the whole write side String-shaped.
-    let col_ty = ty_of_column(&col.col_type);
+    let col_ty = super::ty_of_column_slot(col);
     let rhs = with_ty(var_ref(value_param.clone()), col_ty.clone());
     // Assign expression evaluates to the RHS in Ruby; same in TS.
     let body = with_ty(
@@ -1031,7 +1033,7 @@ fn synth_from_stmt(owner: &ClassId, table: &Table, fire_after_initialize: bool) 
     for (i, col) in table.columns.iter().enumerate() {
         // Db.column_*(stmt, i) — read method picked from the column's
         // type, mirroring the Arel visitor's `read_method_for`.
-        let read_method = column_read_method(&ty_of_column(&col.col_type));
+        let read_method = column_read_method_for(col);
         let read_call = Expr::new(
             Span::synthetic(),
             ExprNode::Send {
@@ -1107,6 +1109,25 @@ fn column_read_method(col_ty: &Ty) -> &'static str {
         Ty::Bool => "column_bool",
         Ty::Float => "column_float",
         _ => "column_text",
+    }
+}
+
+/// The `Db.column_*` primitive that hydrates this column. A nullable
+/// column reads through the `_opt` variant so NULL arrives as nil
+/// rather than the type's zero — `""` in a nullable UNIQUE column
+/// collides row-to-row, and 0 in a nullable fk makes `where(fk: nil)`
+/// match nothing. The primary key is never nullable in practice and is
+/// excluded by `ty_of_column_slot`.
+pub(super) fn column_read_method_for(col: &Column) -> &'static str {
+    let base = ty_of_column(&col.col_type);
+    if !matches!(super::ty_of_column_slot(col), Ty::Union { .. }) {
+        return column_read_method(&base);
+    }
+    match base {
+        Ty::Int => "column_int_opt",
+        Ty::Bool => "column_bool_opt",
+        Ty::Float => "column_float_opt",
+        _ => "column_text_opt",
     }
 }
 
@@ -1287,7 +1308,17 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
         // the literal they need. The original id-specific path
         // (`|| 0` for id / `article_id`) was the precursor; this
         // generalizes the pattern to the whole column list.
+        // …except where the schema says the column is NULLABLE. Rails'
+        // unset value there is NULL, and the type's zero is a different
+        // value with different behaviour: `""` in a nullable UNIQUE
+        // column collides on the second row (lobsters'
+        // `users.password_reset_token`), and `0` in a nullable fk makes
+        // `where(merged_story_id: nil)` — `scope :unmerged` — match
+        // nothing. Those columns keep the bare lookup; the slot they
+        // assign into is `Ty::Union{[T, Nil]}` (`ty_of_column_slot`),
+        // so strict targets have somewhere to put the nil.
         let col_ty = ty_of_column(&col.col_type);
+        let nullable = matches!(super::ty_of_column_slot(col), Ty::Union { .. });
         let default = default_literal_for_ty(&col_ty);
         // is_id_column reference retained as a feature flag for
         // future per-column override hooks; today every column flows
@@ -1313,15 +1344,19 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
             // guard (let-binding constructor can't express it —
             // honest not-normalized subset); hydration is unaffected
             // (`from_row`/`from_stmt` write `<col>_raw=` directly).
-            let standard = Expr::new(
-                Span::synthetic(),
-                ExprNode::BoolOp {
-                    op: crate::expr::BoolOpKind::Or,
-                    surface: crate::expr::BoolOpSurface::Symbol,
-                    left: lookup.clone(),
-                    right: default,
-                },
-            );
+            let standard = if nullable {
+                lookup.clone()
+            } else {
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::BoolOp {
+                        op: crate::expr::BoolOpKind::Or,
+                        surface: crate::expr::BoolOpSurface::Symbol,
+                        left: lookup.clone(),
+                        right: default,
+                    },
+                )
+            };
             stmts.push(Expr::new(
                 Span::synthetic(),
                 ExprNode::Send {
@@ -1368,15 +1403,19 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
             );
             stmts.push(guard_unless_nil(lookup, raw_assign));
         } else {
-            let value = Expr::new(
-                Span::synthetic(),
-                ExprNode::BoolOp {
-                    op: crate::expr::BoolOpKind::Or,
-                    surface: crate::expr::BoolOpSurface::Symbol,
-                    left: lookup,
-                    right: default,
-                },
-            );
+            let value = if nullable {
+                lookup
+            } else {
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::BoolOp {
+                        op: crate::expr::BoolOpKind::Or,
+                        surface: crate::expr::BoolOpSurface::Symbol,
+                        left: lookup,
+                        right: default,
+                    },
+                )
+            };
             stmts.push(Expr::new(
                 Span::synthetic(),
                 ExprNode::Send {
@@ -1603,7 +1642,7 @@ fn synth_attributes(owner: &ClassId, table: &Table) -> MethodDef {
         .iter()
         .filter(|c| c.name.as_str() != "id")
         .map(|c| {
-            let col_ty = ty_of_column(&c.col_type);
+            let col_ty = super::ty_of_column_slot(c);
             (lit_sym(c.name.clone()), col_ivar(c, col_ty))
         })
         .collect();
@@ -1694,7 +1733,7 @@ fn synth_index_write(owner: &ClassId, table: &Table) -> MethodDef {
         .columns
         .iter()
         .map(|c| {
-            let col_ty = ty_of_column(&c.col_type);
+            let col_ty = super::ty_of_column_slot(c);
             let casted_value = Expr::new(
                 Span::synthetic(),
                 ExprNode::Cast {

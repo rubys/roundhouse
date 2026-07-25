@@ -1407,9 +1407,11 @@ fn lowered_article_partial_truncate_wrapped_in_html_escape() {
     // `<%= truncate(article.body, length: 100) %>` returns a plain
     // string in spinel's runtime — so the lowering wraps it in
     // html_escape. link_to / button_to / dom_id stay raw because they
-    // already return escape-correct output.
+    // already return escape-correct output. `body` is a nullable
+    // column, so the text rides through `.to_s` (nil renders "", as in
+    // Rails) before the monomorphic `(String, …)` helper.
     assert!(
-        src.contains("ActionView::ViewHelpers.html_escape(ActionView::ViewHelpers.truncate(article.body, length: 100))"),
+        src.contains("ActionView::ViewHelpers.html_escape(ActionView::ViewHelpers.truncate(article.body.to_s, length: 100))"),
         "expected html_escape-wrapped truncate; got:\n{src}",
     );
 }
@@ -1432,8 +1434,11 @@ fn lowered_article_partial_link_to_record_uses_singular_path_helper() {
         src.contains("ActionView::ViewHelpers.html_escape(RouteHelpers.article_path(article.id))"),
         "expected html_escape on article_path URL; got:\n{src}",
     );
+    // `title` is a nullable column — the label coerces with `.to_s`
+    // before the monomorphic html_escape, matching Rails' empty render
+    // for a nil interpolation.
     assert!(
-        src.contains("ActionView::ViewHelpers.html_escape(article.title)"),
+        src.contains("ActionView::ViewHelpers.html_escape(article.title.to_s)"),
         "expected html_escape on article.title link text; got:\n{src}",
     );
     // `link_to "Show", article, ...` — literal text. html_escape of a

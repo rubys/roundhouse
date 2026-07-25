@@ -205,6 +205,26 @@ pub enum ValueType {
     Str,
     /// Bool not yet supported by the runtime escape surface; reserved.
     Bool,
+    /// Nullable counterparts — the value can be nil at runtime, so it
+    /// renders through `Db.escape_<ty>_opt`, which writes the SQL
+    /// keyword NULL rather than the type's zero. The lowerer picks
+    /// these for columns the schema declares nullable. (There is no
+    /// non-nullable `Float`: a NOT NULL float column escapes as text,
+    /// which SQLite coerces on a REAL column — only the nullable case
+    /// needs its own primitive.)
+    IntOpt,
+    StrOpt,
+    FloatOpt,
+    BoolOpt,
+}
+
+impl ValueType {
+    /// True for the nullable variants. Callers that cannot express
+    /// NULL (the placeholder-bind path has no `bind_null`) route these
+    /// through inline escaping instead.
+    pub fn is_nullable(self) -> bool {
+        matches!(self, ValueType::IntOpt | ValueType::StrOpt | ValueType::FloatOpt | ValueType::BoolOpt)
+    }
 }
 
 /// `ORDER BY <col> ASC|DESC`. Reserved; no current call site builds

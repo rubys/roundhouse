@@ -76,6 +76,11 @@ fn emit_bind_calls(stmt: &Symbol, binds: &[Bind]) -> Vec<Expr> {
                 ValueType::Int => "bind_int",
                 ValueType::Str => "bind_text",
                 ValueType::Bool => "bind_bool",
+                // Nullable values never reach here: `push_value_segment`
+                // routes them through inline escaping, since the bind
+                // surface has no `bind_null`.
+                ty if ty.is_nullable() => unreachable!("nullable value in bind path: {ty:?}"),
+                _ => unreachable!(),
             };
             db_call(
                 &db,
@@ -660,7 +665,9 @@ fn push_value_segment(segments: &mut Vec<Expr>, val: &Value, param: bool, binds:
         Value::LiteralStr(s) => segments.push(lit_str(format!("'{}'", s.replace('\'', "''")))),
         Value::LiteralBool(b) => segments.push(lit_str(if *b { "1".into() } else { "0".into() })),
         Value::LiteralNull => segments.push(lit_str("NULL".into())),
-        Value::Runtime { expr, ty } if param => {
+        // A nullable value can't ride the placeholder path — there is
+        // no `bind_null` — so it always renders inline.
+        Value::Runtime { expr, ty } if param && !ty.is_nullable() => {
             segments.push(lit_str("?".to_string()));
             binds.push(Bind { expr: expr.clone(), ty: *ty });
         }
@@ -678,6 +685,13 @@ fn escape_value(db: &ClassId, val: &Value) -> Expr {
                 ValueType::Int => "escape_int",
                 ValueType::Str => "escape_string",
                 ValueType::Bool => "escape_bool",
+                // Nullable columns: nil renders the SQL keyword NULL
+                // rather than the type's zero, so a column the schema
+                // declares nullable round-trips as nil.
+                ValueType::IntOpt => "escape_int_opt",
+                ValueType::StrOpt => "escape_string_opt",
+                ValueType::FloatOpt => "escape_float_opt",
+                ValueType::BoolOpt => "escape_bool_opt",
             };
             db_call(db, method, vec![expr.clone()])
         }
