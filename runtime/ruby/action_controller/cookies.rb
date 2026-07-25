@@ -58,8 +58,16 @@ module ActionController
       ""
     end
 
-    # Pending writes, for the dispatcher's Set-Cookie serialization.
-    def to_set
+    # Pending writes, for the dispatcher's Set-Cookie serialization. NOT
+    # `to_h`: the siblings ActionDispatch::Flash and ActionDispatch::Session
+    # both spell the whole store `to_h` and the dispatcher-facing subset
+    # something intent-named (`to_persisted` / `to_cookie`), and Rails' own
+    # CookieJar#to_h yields every cookie. This is only @out, so it takes the
+    # intent name and leaves `to_h` free for the merged view `[]` reads.
+    # (Nor `to_set`, the name this carried until 2026-07-25: spinel rewrites
+    # any zero-arg `x.to_set` to `Set.new(x.to_a)` whenever a Set class is in
+    # the program, overriding the user-defined method — matz/spinel#3378.)
+    def pending
       @out
     end
   end

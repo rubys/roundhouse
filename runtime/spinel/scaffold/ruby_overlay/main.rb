@@ -313,7 +313,7 @@ module Main
     end
     # Cookies the action wrote (`cookies[:k] = v` / `cookies.permanent`)
     # ride out alongside the flash cookies.
-    controller.cookies.to_set.each { |k, v| out_cookies[k] = v }
+    controller.cookies.pending.each { |k, v| out_cookies[k] = v }
     # Session persistence: re-encode whatever the action (or a lazy
     # CSRF token generation during render) left in the session, and
     # Set-Cookie only on change. An emptied session (reset_session

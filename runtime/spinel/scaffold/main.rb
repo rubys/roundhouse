@@ -396,7 +396,7 @@ module Main
     # Outbound cookies: serialize whatever the action recorded via
     # `cookies[:k] = v` / `cookies.permanent[:k] = v` as Set-Cookie. Empty
     # on a read-only request (the common GET path), so this is a no-op there.
-    out_cookies = controller.cookies.to_set
+    out_cookies = controller.cookies.pending
     ock = out_cookies.keys
     ci = 0
     while ci < ock.length

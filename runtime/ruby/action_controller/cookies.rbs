@@ -8,7 +8,7 @@ module ActionController
     def []=: (untyped key, String value) -> String
     def permanent: () -> ActionController::CookieJar
     def delete: (untyped key) -> String
-    def to_set: () -> Hash[String, String]
+    def pending: () -> Hash[String, String]
   end
 
   class Base
