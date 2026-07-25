@@ -170,12 +170,14 @@ const errorMarkers = await page.evaluate(() => {
 console.log("monaco error markers on open file:", errorMarkers < 0 ? "(textarea fallback)" : errorMarkers);
 if (errorMarkers === 0) fail("expected an error squiggle rendered in Monaco");
 
-// --- inferred-type hovers: `title` in the edited method types as String -----
+// --- inferred-type hovers: `title` in the edited method types as String? ----
 console.log("\n=== inferred-type hovers ===");
 const titleType = await page.evaluate(() => window.__playground.typeAt(3, 6));
 const typeCount = await page.evaluate(() => window.__playground.types().length);
 console.log("type at article.rb:3:6 (`title`):", titleType, "| total inferred types:", typeCount);
-if (titleType !== "String") fail(`expected String at the \`title\` position, got ${titleType}`);
+// Nullable column (`articles.title` carries no `null: false`), so the
+// hover reports the slot type — nil until something sets it.
+if (titleType !== "String?") fail(`expected String? at the \`title\` position, got ${titleType}`);
 if (typeCount < 100) fail(`expected many inferred types, got ${typeCount}`);
 
 // --- typed completion: `article.` offers columns/associations with types ----
@@ -194,7 +196,9 @@ const completion = await page.evaluate(() => {
 const compByLabel = Object.fromEntries((completion || []).map((c) => [c.label, c.detail]));
 console.log(`completion @article.: ${(completion || []).length} items;`,
   "title:", compByLabel.title, "| comments:", compByLabel.comments);
-if (compByLabel.title !== "String") fail(`expected title → String, got ${compByLabel.title}`);
+// `articles.title` has no `null: false`, so a read can be nil — the
+// completion detail reports the slot type it actually reads.
+if (compByLabel.title !== "String?") fail(`expected title → String?, got ${compByLabel.title}`);
 if (compByLabel.comments !== "Array[Comment]")
   fail(`expected comments → Array[Comment], got ${compByLabel.comments}`);
 
