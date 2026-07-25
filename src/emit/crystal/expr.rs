@@ -711,11 +711,20 @@ fn emit_node(n: &ExprNode) -> String {
             // runtime; `.not_nil!` then re-asserts non-nil on the
             // expected branch. Wraps the value in parens so chained
             // casts and operator-precedence edges parse correctly.
-            format!(
-                "({}).as?({}).not_nil!",
-                emit_expr(value),
-                super::ty::crystal_ty(target_ty)
-            )
+            // A NILABLE target is the exception: `.not_nil!` would
+            // raise on exactly the value the cast is declaring legal.
+            // A nullable column's `[]` read (`Cast(@title,
+            // Union{[Str, Nil]})`) is nil whenever the DB stored NULL,
+            // so re-asserting non-nil there is a NilAssertionError at
+            // runtime rather than a type bridge.
+            let ty_s = super::ty::crystal_ty(target_ty);
+            if matches!(
+                target_ty,
+                crate::ty::Ty::Union { variants } if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+            ) {
+                return format!("({}).as?({ty_s})", emit_expr(value));
+            }
+            format!("({}).as?({ty_s}).not_nil!", emit_expr(value))
         }
     }
 }

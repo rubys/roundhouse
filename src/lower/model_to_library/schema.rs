@@ -1716,22 +1716,26 @@ fn synth_index_read(owner: &ClassId, table: &Table) -> MethodDef {
                 value: Literal::Sym { value: c.name.clone() },
             },
             guard: None,
-            // Wrap in `Cast` carrying the column's SLOT type, matching
-            // the `[]=` arms. `record[:col]` yields the value or nil,
-            // and a target that represents a nullable column as a
-            // reference (Go's `*string`) has to unbox it here — a bare
-            // read would hand the consumer a pointer. Ruby/Spinel
-            // unwrap Cast to the inner read, unchanged.
-            body: Expr::new(
-                Span::synthetic(),
-                ExprNode::Cast {
-                    value: Expr::new(
+            // NULLABLE columns only: wrap in `Cast` carrying the slot
+            // type so a target that represents them as a reference
+            // (Go's `*string`) can unbox — `record[:col]` yields the
+            // value or nil, never a pointer. Every other column keeps
+            // the bare read it always had; wrapping those too cost
+            // them the ivar-read `.clone()` rust2 adds, moving out of
+            // `&self`.
+            body: {
+                let read = Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Ivar { name: col_storage_name(c) },
+                );
+                match super::ty_of_column_slot(c) {
+                    slot @ Ty::Union { .. } => Expr::new(
                         Span::synthetic(),
-                        ExprNode::Ivar { name: col_storage_name(c) },
+                        ExprNode::Cast { value: read, target_ty: slot },
                     ),
-                    target_ty: super::ty_of_column_slot(c),
-                },
-            ),
+                    _ => read,
+                }
+            },
         })
         .collect();
 

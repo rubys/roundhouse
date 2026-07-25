@@ -1228,6 +1228,22 @@ fn emit_expr_inner(e: &Expr) -> String {
             if nilable_field {
                 return format!("({}).clone().unwrap()", emit_expr(value));
             }
+            // Cast INTO a nilable slot over an ivar (`[]`'s per-column
+            // arms read `Cast(@col, Union{[T, Nil]})`): the value stays
+            // an Option, but it is behind `&self`, so it has to be
+            // cloned rather than moved. Wrapping the read in a Cast
+            // bypassed the ivar-read clone the bare read would have got.
+            if let ExprNode::Ivar { name } = &*value.node {
+                if matches!(
+                    target_ty,
+                    crate::ty::Ty::Union { variants } if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+                ) && ivar_field_ty(name.as_str())
+                    .map(|t| util::is_option_ty(&t))
+                    .unwrap_or(false)
+                {
+                    return format!("{}.clone()", emit_expr(value));
+                }
+            }
             let coerced = coerce_arg_for_field_ty(value, target_ty);
             let raw = emit_expr(value);
             if coerced != raw {
