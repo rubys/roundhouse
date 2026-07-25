@@ -959,7 +959,10 @@ fn synth_from_row(owner: &ClassId, table: &Table, fire_after_initialize: bool) -
         // type into the narrower model property — Crystal renders
         // as `row.id.as(Int64)`; TS as `row.id as number`; Spinel
         // unwraps to bare `row.id`.
-        let col_ty = super::ty_of_column(&col.col_type);
+        // Slot type: for a nullable column both sides of this
+        // assignment are nilable (the Row field and the model setter),
+        // so casting to the bare type would unwrap on one side only.
+        let col_ty = super::ty_of_column_slot(col);
         let row_field = Expr::new(
             Span::synthetic(),
             ExprNode::Send {

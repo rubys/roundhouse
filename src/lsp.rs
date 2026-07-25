@@ -942,7 +942,9 @@ mod tests {
         let items = complete_after(&client, 4, &uri, &edit("    @article."), "    @article.");
         let title = items.iter().find(|(l, _)| l == "title");
         assert!(title.is_some(), "instance side offers columns; got {} items", items.len());
-        assert_eq!(title.unwrap().1, "String");
+        // Nullable column (`articles.title` has no `null: false`) — the
+        // completion detail reports the slot type it actually reads.
+        assert_eq!(title.unwrap().1, "String?");
         assert!(
             items.iter().any(|(l, _)| l == "comments"),
             "instance side offers associations"

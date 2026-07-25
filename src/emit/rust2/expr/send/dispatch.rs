@@ -38,6 +38,21 @@ pub(super) fn external_class_method_param_tys(class: &str, method: &str) -> Opti
         ("Db", "escape_string") => Some(vec![Ty::Str]),
         ("Db", "escape_int") => Some(vec![Ty::Int]),
         ("Db", "escape_bool") => Some(vec![Ty::Bool]),
+        // Nullable-column seam: nil renders the SQL keyword NULL. The
+        // param types drive the arg coercion (an owned `Option<String>`
+        // field borrows to the `Option<&str>` param via `.as_deref()`).
+        ("Db", "column_int_opt") => Some(vec![Ty::Int, Ty::Int]),
+        ("Db", "column_float_opt") => Some(vec![Ty::Int, Ty::Int]),
+        ("Db", "column_text_opt") => Some(vec![Ty::Int, Ty::Int]),
+        ("Db", "column_bool_opt") => Some(vec![Ty::Int, Ty::Int]),
+        ("Db", "escape_string_opt") => {
+            Some(vec![Ty::Union { variants: vec![Ty::Str, Ty::Nil] }])
+        }
+        ("Db", "escape_int_opt") => Some(vec![Ty::Union { variants: vec![Ty::Int, Ty::Nil] }]),
+        ("Db", "escape_float_opt") => {
+            Some(vec![Ty::Union { variants: vec![Ty::Float, Ty::Nil] }])
+        }
+        ("Db", "escape_bool_opt") => Some(vec![Ty::Union { variants: vec![Ty::Bool, Ty::Nil] }]),
         ("Db", "last_insert_rowid") => Some(vec![]),
         // `Broadcasts::method(HashMap<String, Value>)` — the lowerer
         // emits kwargs as a HashMap; the runtime shim accepts that

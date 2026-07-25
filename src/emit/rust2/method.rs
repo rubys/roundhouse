@@ -303,6 +303,19 @@ fn needs_function_tail_some_wrap(body: &crate::expr::Expr, return_ty: Option<&Ty
             }
         }
     }
+    // A bare ivar read whose FIELD is already `Option<T>` — the
+    // nullable-column reader (`def body; @body; end` over an
+    // `Option<String>` slot). The expression's own `ty` can have been
+    // narrowed to the inner type by then, so the field table is the
+    // authority, same as the `Cast` arm in expr/mod.rs.
+    if let ExprNode::Ivar { name } = &*tail.node {
+        if super::expr::ivar_field_ty(name.as_str())
+            .map(|t| matches!(t, Ty::Union { ref variants } if variants.iter().any(|v| matches!(v, Ty::Nil))))
+            .unwrap_or(false)
+        {
+            return false;
+        }
+    }
     let tail_is_option = matches!(
         tail.ty.as_ref(),
         Some(Ty::Union { variants }) if variants.iter().any(|v| matches!(v, Ty::Nil))

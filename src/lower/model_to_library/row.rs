@@ -41,7 +41,7 @@ use crate::span::Span;
 use crate::ty::Ty;
 
 use super::{
-    class_const, fn_sig, is_id_column, lit_int, lit_str, seq, ty_of_column, var_ref, with_ty,
+    class_const, fn_sig, is_id_column, lit_int, lit_str, seq, var_ref, with_ty,
 };
 
 /// Synthesize the per-model `<Model>Row` LibraryClasses for every model
@@ -120,7 +120,11 @@ fn resource_sym(model_name: &ClassId) -> Symbol {
 }
 
 fn synth_row_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
-    let col_ty = ty_of_column(&col.col_type);
+    // Slot type: a Row carries what the adapter read, and a nullable
+    // column reads NULL as nil. Keeping the Row non-nilable while the
+    // model slot is nilable puts a type error on every hydration
+    // assignment (`instance.set_body(row.body())`).
+    let col_ty = super::ty_of_column_slot(col);
     let body = with_ty(
         Expr::new(Span::synthetic(), ExprNode::Ivar { name: col.name.clone() }),
         col_ty.clone(),
@@ -142,7 +146,7 @@ fn synth_row_attr_reader(owner: &ClassId, col: &Column) -> MethodDef {
 
 fn synth_row_attr_writer(owner: &ClassId, col: &Column) -> MethodDef {
     let value_param = Symbol::from("value");
-    let col_ty = ty_of_column(&col.col_type);
+    let col_ty = super::ty_of_column_slot(col);
     let rhs = with_ty(var_ref(value_param.clone()), col_ty.clone());
     let body = with_ty(
         Expr::new(
@@ -274,7 +278,7 @@ fn synth_row_from_raw(owner: &ClassId, table: &Table) -> MethodDef {
     ));
 
     for col in &table.columns {
-        let col_ty = ty_of_column(&col.col_type);
+        let col_ty = super::ty_of_column_slot(col);
         // String-keyed lookup (`row["id"]`) instead of symbol-keyed
         // (`row[:id]`). Adapter rows arrive as `Hash[Str, _]` — Crystal
         // and TS can't dynamically create Symbols at runtime, so the

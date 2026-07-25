@@ -199,10 +199,32 @@ pub(super) fn emit_send(
     // a nullable column read reaching a monomorphic `(String)` helper
     // is coerced with `.to_s` rather than unwrapped.
     if method == "to_s" && args.is_empty() {
-        if matches!(
-            r.ty.as_ref(),
-            Some(crate::ty::Ty::Union { variants }) if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
-        ) {
+        // Only where the emitted Rust type is genuinely an Option. The
+        // expression's own `ty` is not enough: a local can carry a
+        // nilable body-typer Ty while rust2 renders it as a plain
+        // `&str` (the router's path segments), and `.map()` on that
+        // doesn't compile. Ivars answer from the field table, locals
+        // from their declared type; anything else keeps the plain
+        // `to_string` bridge it had before.
+        let recv_is_option = match &*r.node {
+            // Field table — authoritative for the struct's own slots.
+            ExprNode::Ivar { name } => super::ivar_field_ty(name.as_str())
+                .map(|t| super::util::is_option_ty(&t))
+                .unwrap_or(false),
+            // A call's `ty` comes from the callee's declared signature
+            // (`article.title()` on a nullable column reads `Option
+            // <String>`), so it is trustworthy here.
+            ExprNode::Send { .. } => r
+                .ty
+                .as_ref()
+                .map(super::util::is_option_ty)
+                .unwrap_or(false),
+            // Locals are NOT trustworthy: rust2 can render a local with
+            // a nilable body-typer Ty as a plain `&str` (the router's
+            // path segments), where `.map()` doesn't compile.
+            _ => false,
+        };
+        if recv_is_option {
             return format!("{}.map(|v| v.to_string()).unwrap_or_default()", emit_expr(r));
         }
     }

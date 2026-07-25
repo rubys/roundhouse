@@ -99,6 +99,22 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     //    that needs an inner `.to_string()` too — out of scope for
     //    this wedge.
     if is_option_ty(param_ty) {
+        // Owned `Option<String>` field → borrowed `Option<&str>` param.
+        // rust2 renders a nilable string PARAM as `Option<&str>` but a
+        // nilable string FIELD as `Option<String>`, so passing a
+        // nullable column straight into `Db::escape_string_opt` needs
+        // the borrow — and `.as_deref()` gives it without moving out of
+        // `&self`.
+        if peel_nil(param_ty).is_stringish()
+            && matches!(&*arg.node, ExprNode::Ivar { .. })
+            && arg
+                .ty
+                .as_ref()
+                .map(|t| is_option_ty(t) && peel_nil(t).is_stringish())
+                .unwrap_or(false)
+        {
+            return format!("{raw}.as_deref()");
+        }
         // Family 6 — T → Option<T> Some-wrap. The
         // `lower::ty_coerce_insertion` lowerer wraps eligible Send arg
         // positions in `Cast { value, target_ty: Option<U> }` across
@@ -119,6 +135,25 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         // the same Cast wrapper.
         if let ExprNode::Cast { value, target_ty } = &*arg.node {
             if let Some(cast_inner) = is_option_ty(target_ty).then(|| peel_nil(target_ty)) {
+                // Already nilable — a nullable column's Row reader
+                // returns `Option<T>` and the model setter takes the
+                // same, so `Some(..)` here would build `Option<Option
+                // <T>>`. The serde_json case is a different bridge:
+                // an untyped Value narrows with `as_str().map(..)`,
+                // which yields the Option directly.
+                if value.ty.as_ref().map(ty_contains_untyped).unwrap_or(false) {
+                    if let Some(c) = value_narrowing_coercion_opt(cast_inner) {
+                        return format!("({}).{c}", emit_expr(value));
+                    }
+                }
+                if value
+                    .ty
+                    .as_ref()
+                    .map(|t| is_option_ty(t) && peel_nil(t) == cast_inner)
+                    .unwrap_or(false)
+                {
+                    return emit_expr(value);
+                }
                 let inner_raw = emit_expr(value);
                 let needs_to_string = matches!(
                     &*value.node,
@@ -556,4 +591,17 @@ pub(crate) fn coerce_arg_for_field_ty(arg: &Expr, field_ty: &crate::ty::Ty) -> S
         }
     }
     raw
+}
+
+/// serde_json accessor that yields `Option<T>` directly — the nullable
+/// twin of `util::value_narrowing_coercion`, which appends `.unwrap()`.
+fn value_narrowing_coercion_opt(inner: &crate::ty::Ty) -> Option<&'static str> {
+    use crate::ty::Ty;
+    match inner {
+        Ty::Str | Ty::Sym => Some("as_str().map(|s| s.to_string())"),
+        Ty::Int => Some("as_i64()"),
+        Ty::Float => Some("as_f64()"),
+        Ty::Bool => Some("as_bool()"),
+        _ => None,
+    }
 }

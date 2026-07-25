@@ -542,6 +542,15 @@ fn unify_ivar_tys(tys: &[Ty]) -> Ty {
     let first_non_nil = tys.iter().find(|t| !matches!(t, Ty::Nil)).cloned();
     if has_nil {
         match first_non_nil {
+            // Already nilable — a nullable column's slot type is
+            // `Union{[T, Nil]}` at every write site, and observing a
+            // bare `Nil` alongside it (the initialize seed) must not
+            // wrap it again into `Option<Option<T>>`.
+            Some(t @ Ty::Union { .. })
+                if matches!(&t, Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil))) =>
+            {
+                t
+            }
             Some(t) => Ty::Union {
                 variants: vec![Ty::Nil, t],
             },

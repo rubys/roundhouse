@@ -275,6 +275,18 @@ fn inline_presence_check(attr: &Symbol, attr_ty: Option<&Ty>) -> Expr {
     let attr_ivar = ivar(attr);
     // `@attr.nil?`
     let nil_check = send(attr_ivar.clone(), "nil?", vec![]);
+    // Nullable column: the `nil?` disjunct already covers nil, so the
+    // emptiness test reads the narrowed value — `@attr.empty?` on an
+    // Option doesn't compile on a strict target.
+    let (attr_ty, nilable) = peel_nilable(attr_ty);
+    let attr_ivar = if nilable {
+        match attr_ty {
+            Some(inner) => narrowed_ivar(attr, inner),
+            None => attr_ivar,
+        }
+    } else {
+        attr_ivar
+    };
     let cond = match attr_ty {
         Some(Ty::Str) => {
             // Skip is_a?(Array) — `body : String` can never be an array.
@@ -438,7 +450,14 @@ fn inline_length_check(
     message: Option<&str>,
     attr_ty: Option<&Ty>,
 ) -> Vec<Expr> {
-    let attr_ivar = ivar(attr);
+    let (attr_ty, nilable) = peel_nilable(attr_ty);
+    // Same narrowing as the presence check: the caller guards the
+    // length computation with `!@attr.nil?`, so the read inside it is
+    // the nil-excluded value.
+    let attr_ivar = match (nilable, attr_ty) {
+        (true, Some(inner)) => narrowed_ivar(attr, inner),
+        _ => ivar(attr),
+    };
     // Compute `len`. When the attr's column type is statically known
     // (Str / Array), drop the `is_a?` discrimination — `body : String`
     // can never be an Array, and tsc narrows the dead branch to
@@ -529,8 +548,10 @@ fn inline_length_check(
     }
     let body_seq = seq(inner_stmts);
 
-    // `unless @attr.nil?` → `if !@attr.nil? then body end`.
-    let nil_check = send(attr_ivar, "nil?", vec![]);
+    // `unless @attr.nil?` → `if !@attr.nil? then body end`. Tests the
+    // RAW ivar — `attr_ivar` above may be the narrowed `Cast` read,
+    // which is exactly what this guard exists to make safe.
+    let nil_check = send(ivar(attr), "nil?", vec![]);
     let not_nil = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
@@ -933,4 +954,32 @@ mod tests {
         let expr = inline_belongs_to_check(&assoc_name, &foreign_key, &target);
         assert_eq!(collect_error_messages(&expr), vec!["Article must exist"]);
     }
+}
+
+/// `Union{[T, Nil]}` → `T`, for the nullable-column slot types the
+/// attributes row now carries. The checks below discriminate on the
+/// underlying type and narrow the read with `Cast` — the IR's
+/// nilable→scalar bridge — under a `nil?` guard that short-circuits in
+/// every target.
+fn peel_nilable(ty: Option<&Ty>) -> (Option<&Ty>, bool) {
+    match ty {
+        Some(Ty::Union { variants }) if variants.len() == 2 => {
+            let inner = variants.iter().find(|v| !matches!(v, Ty::Nil));
+            let has_nil = variants.iter().any(|v| matches!(v, Ty::Nil));
+            match (inner, has_nil) {
+                (Some(i), true) => (Some(i), true),
+                _ => (ty, false),
+            }
+        }
+        other => (other, false),
+    }
+}
+
+/// `Cast(@attr, T)` — the nil-excluded read. Callers place it only
+/// where a preceding `nil?` disjunct/conjunct guarantees the value.
+fn narrowed_ivar(attr: &Symbol, inner: &Ty) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Cast { value: ivar(attr), target_ty: inner.clone() },
+    )
 }

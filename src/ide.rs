@@ -2509,7 +2509,9 @@ mod tests {
         let find = |name: &str| instance.iter().find(|m| m.name.as_str() == name);
         let title = find("title").expect("schema column `title`");
         assert_eq!(title.kind, MemberKind::Column);
-        assert_eq!(title.display, "String");
+        // `articles.title` has no `null: false`, so a read can be nil —
+        // the attributes row carries the slot type and the hover says so.
+        assert_eq!(title.display, "String?");
         assert!(find("title=").is_some(), "writer twin for the column");
         let comments = find("comments").expect("has_many :comments");
         assert_eq!(comments.kind, MemberKind::Association);

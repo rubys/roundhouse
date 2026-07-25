@@ -757,9 +757,25 @@ fn default_habtm_table(owner: &ClassId, target_plural_sym: &str) -> String {
 pub(super) fn row_from_table(table: &Table) -> Row {
     let mut fields = IndexMap::new();
     for col in &table.columns {
-        fields.insert(col.name.clone(), ty_of_column(&col.col_type));
+        fields.insert(col.name.clone(), ty_of_column_slot(col));
     }
     Row { fields, rest: None }
+}
+
+/// The attributes-row type for a column: `ty_of_column` widened with
+/// `Nil` where the schema says the column is nullable. Rails stores
+/// NULL there until something sets it, so a read genuinely can be nil
+/// — validations and analysis both need to see that. The primary key
+/// is excluded (the INSERT assigns it and every hydration path treats
+/// it as present). Twin of `lower::model_to_library::ty_of_column_slot`;
+/// keep them in sync, same as the `ty_of_column` pair below.
+fn ty_of_column_slot(col: &crate::schema::Column) -> Ty {
+    let base = ty_of_column(&col.col_type);
+    if col.nullable && !col.primary_key {
+        Ty::Union { variants: vec![base, Ty::Nil] }
+    } else {
+        base
+    }
 }
 
 fn ty_of_column(t: &ColumnType) -> Ty {
