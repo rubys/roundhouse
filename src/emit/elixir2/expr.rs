@@ -1856,6 +1856,16 @@ fn enum_method(method: &str) -> &str {
 /// on their schema type (`record.title.empty?` → `== ""`) without the
 /// body-typer's annotations surviving lowering.
 fn effective_recv_ty(e: &Expr) -> Option<crate::ty::Ty> {
+    // A `Cast` states the type outright — it is the IR's narrowing
+    // bridge (a nullable column's `Union{[Str, Nil]}` read narrowed to
+    // `Str` under a `nil?` guard). Elixir emits the cast as identity,
+    // but the receiver-shape dispatch below still has to see the
+    // narrowed type: without it a `Cast(@title, Str).empty?` misses
+    // the string arm and falls through to struct dispatch
+    // (`record.title.__struct__.empty?(...)`, a KeyError at runtime).
+    if let ExprNode::Cast { target_ty, .. } = &*e.node {
+        return Some(target_ty.clone());
+    }
     // Field reads resolve via the field-type REGISTRY first — it's
     // authoritative for struct fields, whereas the body-typer's `ty` on a
     // field chain is unreliable (infers `Hash` for `flash`, drops `Array`

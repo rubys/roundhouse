@@ -150,6 +150,20 @@ pub(super) fn try_recv_typed_method(
                     ));
                 }
             }
+            // Ruby's `hash[k]` yields nil for a missing key; Rust's
+            // `map[k]` PANICS ("no entry found for key"). Where the map
+            // holds `serde_json::Value`, `Value::Null` is that nil, so
+            // emit the total form. Previously invisible: every emitted
+            // read of an attrs bag carried a `|| <default>` that read
+            // through `.get(...).unwrap_or(...)` instead — nullable
+            // columns dropped the default and hit the panicking index.
+            if map_holds_json_value(recv_ty) {
+                return Some(format!(
+                    "{}.get({}).cloned().unwrap_or(serde_json::Value::Null)",
+                    emit_expr(r),
+                    emit_expr(&args[0])
+                ));
+            }
             return Some(format!("{}[{}]", emit_expr(r), emit_expr(&args[0])));
         }
         // Ruby `String#[](start, length)` — byte-slice with start +
@@ -625,4 +639,17 @@ pub(super) fn try_recv_typed_method(
             }
         }
     None
+}
+
+/// True when the receiver is a map whose values render as
+/// `serde_json::Value` — the attrs/params bags. Only those have a
+/// total nil to fall back on.
+fn map_holds_json_value(recv_ty: Option<&crate::ty::Ty>) -> bool {
+    use crate::ty::Ty;
+    matches!(
+        recv_ty,
+        Some(Ty::Hash { value, .. })
+            if matches!(value.as_ref(), Ty::Untyped)
+                || matches!(value.as_ref(), Ty::Union { .. })
+    )
 }

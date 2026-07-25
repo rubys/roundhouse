@@ -164,6 +164,37 @@ pub(super) fn try_binary_operator(
             emit_expr(&args[0]),
         ));
     }
+    // `x == "lit"` where x is a nilable column read: Rust can't compare
+    // `Option<String>` with `&str`. Ruby's comparison is against the
+    // value, and nil never equals a string literal, so
+    // `unwrap_or_default()` preserves the answer on both sides.
+    if matches!(method, "==" | "!=") {
+        let is_str_lit = |e: &Expr| {
+            matches!(&*e.node, ExprNode::Lit { value: crate::expr::Literal::Str { .. } })
+        };
+        let is_nilable_str = |e: &Expr| {
+            matches!(
+                e.ty.as_ref(),
+                Some(crate::ty::Ty::Union { variants })
+                    if variants.iter().any(|v| matches!(v, crate::ty::Ty::Nil))
+                        && variants.iter().any(|v| matches!(v, crate::ty::Ty::Str))
+            )
+        };
+        if is_nilable_str(r) && is_str_lit(&args[0]) {
+            let lhs = super::super::wrap_if_needs_parens(r, emit_expr(r));
+            return Some(format!(
+                "{lhs}.clone().unwrap_or_default() {method} {}",
+                emit_expr(&args[0])
+            ));
+        }
+        if is_str_lit(r) && is_nilable_str(&args[0]) {
+            let lhs = super::super::wrap_if_needs_parens(r, emit_expr(r));
+            return Some(format!(
+                "{lhs} {method} {}.clone().unwrap_or_default()",
+                emit_expr(&args[0])
+            ));
+        }
+    }
     if matches!(method, "==" | "!=" | "<" | ">" | "<=" | ">=" | "+" | "-" | "*" | "/") {
         // Binary-op LHS is a primary-demanding position. Without
         // the wrap, `x.len() as i64 < y` parses as the start of a

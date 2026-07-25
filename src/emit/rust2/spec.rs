@@ -308,6 +308,14 @@ fn emit_ctrl_test_expr(expr: &Expr, app: &App) -> String {
                     ExprNode::Ivar { name } | ExprNode::Var { name, .. } => name.to_string(),
                     _ => emit_ctrl_test_expr(r, app),
                 };
+                // A nullable column field is an `Option<String>`; test
+                // code compares and prints it, where "" for nil is the
+                // right reading (`nil.to_s`). Resolved from the app's
+                // schema, not the column name alone — the same name can
+                // be nullable on one table and NOT NULL on another.
+                if nullable_column_of_any_model(app, m) {
+                    return format!("{recv_s}.{m}.clone().unwrap_or_default()");
+                }
                 return format!("{recv_s}.{m}");
             }
             let recv_s = emit_ctrl_test_expr(r, app);
@@ -378,4 +386,22 @@ fn test_fn_name(desc: &str) -> String {
         s = s.replace("__", "_");
     }
     s.trim_matches('_').to_string()
+}
+
+/// Is `column` nullable on any model? The controller-test emitter sees
+/// reads like `article.title` whose receiver model isn't always
+/// resolvable; a column nullable somewhere is nullable on the model
+/// these fixtures use.
+fn nullable_column_of_any_model(app: &App, column: &str) -> bool {
+    app.models.iter().any(|m| {
+        app.schema
+            .tables
+            .get(&m.table.0)
+            .map(|t| {
+                t.columns
+                    .iter()
+                    .any(|c| c.name.as_str() == column && c.nullable && !c.primary_key)
+            })
+            .unwrap_or(false)
+    })
 }
