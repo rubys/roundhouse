@@ -1434,6 +1434,13 @@ fn emit_send(
                         return format!("this.{} = {}", camel(base), emit_cast(&args[0], &ty));
                     }
                 }
+                // Nilable scalar slot (a nullable column): same coercion
+                // need as above, but it must PRESERVE null rather than
+                // substitute the type's zero — `Any?` doesn't assign to
+                // `String?` / `Long?` without one.
+                if let Some(conv) = nilable_prop_conversion(base, &args[0]) {
+                    return format!("this.{} = {}", camel(base), conv);
+                }
             }
             return format!("{}.{} = {}", emit_expr(r), camel(base), args_s[0]);
         }
@@ -1707,4 +1714,32 @@ fn emit_call_args(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
         }
     }
     args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")
+}
+
+/// Coercion for assigning an untyped value into a nilable scalar
+/// property, null preserved. `None` when the property isn't a nilable
+/// scalar or the value is already typed.
+fn nilable_prop_conversion(base: &str, value: &Expr) -> Option<String> {
+    use crate::ty::Ty;
+    let rhs_untyped = match value.ty.as_ref() {
+        None | Some(Ty::Untyped) => true,
+        Some(Ty::Union { variants }) => variants.iter().any(|v| matches!(v, Ty::Untyped)),
+        _ => false,
+    };
+    if !rhs_untyped {
+        return None;
+    }
+    let Some(Ty::Union { variants }) = instance_prop_ty(base) else { return None };
+    if !variants.iter().any(|v| matches!(v, Ty::Nil)) {
+        return None;
+    }
+    let inner = variants.iter().find(|v| !matches!(v, Ty::Nil))?;
+    let v = emit_expr(value);
+    match inner {
+        Ty::Str | Ty::Sym => Some(format!("{v}?.toString()")),
+        Ty::Int => Some(format!("{v}?.toString()?.toLong()")),
+        Ty::Float => Some(format!("{v}?.toString()?.toDouble()")),
+        Ty::Bool => Some(format!("{v}?.toString()?.toBoolean()")),
+        _ => None,
+    }
 }

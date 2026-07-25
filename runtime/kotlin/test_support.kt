@@ -137,12 +137,16 @@ open class RoundhouseTestCase {
         }
     }
 
-    fun assertSelect(selector: String, content: String) {
+    // `content` is nilable: a nullable column read (`assert_select "h1",
+    // article.title`) is `String?`, and Rails compares the element's
+    // text against it — nil reads as the empty string, matching
+    // `nil.to_s`.
+    fun assertSelect(selector: String, content: String?) {
         val nodes = Dom.select(Dom.parse(__body), selector)
         if (nodes.isEmpty()) {
             fail<Unit>("expected body to match selector $selector")
         }
-        if (nodes.none { Dom.text(it).contains(content) }) {
+        if (nodes.none { Dom.text(it).contains(content ?: "") }) {
             fail<Unit>("expected text $content under selector $selector")
         }
     }

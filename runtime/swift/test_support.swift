@@ -135,12 +135,15 @@ class RoundhouseTestCase: XCTestCase {
         }
     }
 
-    func assertSelect(_ selector: String, _ content: String) {
+    // `content` is nilable: a nullable column read (`assert_select "h1",
+    // article.title`) is `String?`, and Rails compares the element's
+    // text against it — nil reads as the empty string, as `nil.to_s`.
+    func assertSelect(_ selector: String, _ content: String?) {
         let nodes = Dom.select(Dom.parse(__body), selector)
         if nodes.isEmpty {
             XCTFail("expected body to match selector \(selector)")
         }
-        if !nodes.contains(where: { Dom.text($0).contains(content) }) {
+        if !nodes.contains(where: { Dom.text($0).contains(content ?? "") }) {
             XCTFail("expected text \(content) under selector \(selector)")
         }
     }

@@ -512,6 +512,26 @@ fn coerce_for_prop(prop_camel: &str, value: &Expr, val: String) -> String {
     if !surface_untrusted {
         return val;
     }
+    // Nilable scalar slot (a nullable column). The map read surfaces as
+    // `Any??`, so it needs a conditional downcast that PRESERVES nil
+    // rather than the forced one below — `as?` flattens both layers to
+    // the property's `String?` / `Int?`.
+    if let Ty::Union { ref variants } = ty {
+        if variants.iter().any(|v| matches!(v, Ty::Nil)) {
+            if let Some(inner) = variants.iter().find(|v| !matches!(v, Ty::Nil)) {
+                let swift_scalar = match inner {
+                    Ty::Int => Some("Int"),
+                    Ty::Float => Some("Double"),
+                    Ty::Str | Ty::Sym => Some("String"),
+                    Ty::Bool => Some("Bool"),
+                    _ => None,
+                };
+                if let Some(t) = swift_scalar {
+                    return format!("({val} as? {t})");
+                }
+            }
+        }
+    }
     match ty {
         Ty::Int => format!("({val} as! Int)"),
         Ty::Float => format!("({val} as! Double)"),

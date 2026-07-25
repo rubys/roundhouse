@@ -1287,6 +1287,15 @@ fn emit_send(
                         return format!("this.{} = {}", pascal(base), emit_cast(&args[0], &ty));
                     }
                 }
+                // Nilable scalar slot (a nullable column). The NOT NULL
+                // path above converts through `emit_cast`; here the
+                // conversion has to PRESERVE null rather than
+                // substitute the type's zero, and the untyped attrs bag
+                // (`object?`) doesn't implicitly convert to `string?` /
+                // `long?`.
+                if let Some(conv) = nilable_prop_conversion(base, &args[0]) {
+                    return format!("this.{} = {}", pascal(base), conv);
+                }
             }
             return format!("{}.{} = {}", emit_expr(r), pascal(base), args_s[0]);
         }
@@ -1826,9 +1835,19 @@ fn emit_assign(target: &LValue, value: &Expr) -> String {
             };
             format!("{}.Value = {rhs}", camel(name.as_str()))
         }
-        _ => format!("{} = {val}", lvalue_ref(target)),
+        _ => {
+            // A nullable column's slot is `string?` / `long?`, and the
+            // constructor assigns it straight from the untyped attrs
+            // bag (`attrs.GetValueOrDefault("body")` is `object?`). The
+            // NOT NULL path gets its conversion from the `|| ""`
+            // default it still carries; the nullable one has no default
+            // by design, so convert here — preserving null rather than
+            // substituting the type's zero.
+            format!("{} = {val}", lvalue_ref(target))
+        }
     }
 }
+
 
 fn lvalue_ref(target: &LValue) -> String {
     match target {
@@ -1852,5 +1871,33 @@ fn emit_op_assign(target: &LValue, op: OpAssignOp, value: &Expr) -> String {
         OpAssignOp::Div => format!("{lhs} /= {v}"),
         OpAssignOp::Mod => format!("{lhs} %= {v}"),
         _ => format!("{lhs} = {lhs} /* TODO op-assign */ {v}"),
+    }
+}
+
+/// Conversion for assigning an untyped value into a nilable scalar
+/// property, null preserved. `None` when the property isn't a nilable
+/// scalar or the value is already typed.
+fn nilable_prop_conversion(base: &str, value: &Expr) -> Option<String> {
+    use crate::ty::Ty;
+    let rhs_untyped = match value.ty.as_ref() {
+        None | Some(Ty::Untyped) => true,
+        Some(Ty::Union { variants }) => variants.iter().any(|v| matches!(v, Ty::Untyped)),
+        _ => false,
+    };
+    if !rhs_untyped {
+        return None;
+    }
+    let Some(Ty::Union { variants }) = instance_prop_ty(base) else { return None };
+    if !variants.iter().any(|v| matches!(v, Ty::Nil)) {
+        return None;
+    }
+    let inner = variants.iter().find(|v| !matches!(v, Ty::Nil))?;
+    let v = emit_expr(value);
+    match inner {
+        Ty::Str | Ty::Sym => Some(format!("Convert.ToString({v})")),
+        Ty::Int => Some(format!("({v} is null ? (long?)null : Convert.ToInt64({v}))")),
+        Ty::Float => Some(format!("({v} is null ? (double?)null : Convert.ToDouble({v}))")),
+        Ty::Bool => Some(format!("({v} is null ? (bool?)null : Convert.ToBoolean({v}))")),
+        _ => None,
     }
 }

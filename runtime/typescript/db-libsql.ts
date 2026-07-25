@@ -147,6 +147,60 @@ function column_bool(stmtId: number, i: number): boolean {
   return column_int(stmtId, i) !== 0;
 }
 
+// Nullable-column seam (see runtime/typescript/db.ts). A column the
+// schema declares nullable holds NULL until something sets it, and
+// NULL is not the type's zero: "" in a nullable UNIQUE column collides
+// row-to-row, and 0 in a nullable fk makes `where(fk: nil)` match
+// nothing.
+function currentCell(stmtId: number, i: number, caller: string): unknown {
+  const entry = _statements.get(stmtId);
+  if (entry === undefined || entry.cursor < 0 || entry.cursor >= entry.rows.length) {
+    throw new Error(`Db: ${caller} called on stmt ${stmtId} with no current row`);
+  }
+  const v = entry.rows[entry.cursor][i];
+  return v === null || v === undefined ? null : v;
+}
+
+function column_int_opt(stmtId: number, i: number): number | null {
+  const v = currentCell(stmtId, i, "column_int_opt");
+  if (v === null) return null;
+  if (typeof v === "bigint") return Number(v);
+  return typeof v === "number" ? Math.trunc(v) : Number(v) | 0;
+}
+
+function column_float_opt(stmtId: number, i: number): number | null {
+  const v = currentCell(stmtId, i, "column_float_opt");
+  return v === null ? null : Number(v);
+}
+
+function column_text_opt(stmtId: number, i: number): string | null {
+  const v = currentCell(stmtId, i, "column_text_opt");
+  return v === null ? null : String(v);
+}
+
+function column_bool_opt(stmtId: number, i: number): boolean | null {
+  const v = column_int_opt(stmtId, i);
+  return v === null ? null : v !== 0;
+}
+
+function escape_string_opt(s: unknown): string {
+  return s === null || s === undefined ? "NULL" : escape_string(s);
+}
+
+function escape_int_opt(n: unknown): string {
+  return n === null || n === undefined ? "NULL" : escape_int(n);
+}
+
+function escape_float_opt(f: unknown): string {
+  if (f === null || f === undefined) return "NULL";
+  const parsed = typeof f === "number" ? f : Number(f);
+  return Number.isFinite(parsed) ? String(parsed) : "0.0";
+}
+
+function escape_bool_opt(b: unknown): string {
+  return b === null || b === undefined ? "NULL" : escape_bool(b);
+}
+
 // Suppress an unused-import warning when InValue isn't referenced
 // directly anywhere in this file (libsql types it via `args: InValue[]`
 // inside execute; we don't bind params, only inline-compose SQL).
@@ -167,6 +221,10 @@ export const Db = {
   column_int,
   column_text,
   column_bool,
+  column_int_opt,
+  column_float_opt,
+  column_text_opt,
+  column_bool_opt,
   finalize,
   last_insert_rowid,
   changes,
@@ -174,6 +232,10 @@ export const Db = {
   escape_int,
   escape_int_list,
   escape_bool,
+  escape_string_opt,
+  escape_int_opt,
+  escape_float_opt,
+  escape_bool_opt,
 };
 
 export type DbModule = typeof Db;
