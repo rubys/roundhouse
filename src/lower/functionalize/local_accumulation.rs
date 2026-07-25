@@ -278,6 +278,7 @@ mod tests {
             parent: None,
             includes: vec![],
             methods: vec![out],
+            nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
         };
@@ -323,6 +324,7 @@ mod tests {
             parent: None,
             includes: vec![],
             methods: vec![transform_method(m)],
+            nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
         };
@@ -372,6 +374,7 @@ mod tests {
             parent: None,
             includes: vec![],
             methods: vec![transform_method(m)],
+            nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
         };
@@ -418,6 +421,7 @@ mod tests {
             parent: None,
             includes: vec![],
             methods: vec![transform_method(m)],
+            nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
         };
@@ -468,6 +472,7 @@ mod tests {
             parent: None,
             includes: vec![],
             methods: vec![transform_method(m)],
+            nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
         };
@@ -510,6 +515,7 @@ mod tests {
             parent: None,
             includes: vec![],
             methods: vec![transform_method(m)],
+            nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
         };

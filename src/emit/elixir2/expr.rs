@@ -2440,6 +2440,7 @@ mod tests {
                 parent: None,
                 includes: vec![],
                 methods: vec![],
+                nullable_columns: Vec::new(),
                 origin: None,
                 constants: Vec::new(),
             }
@@ -2558,6 +2559,7 @@ mod tests {
             parent: None,
             includes: vec![],
             methods: vec![render, resolve],
+            nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
         };
@@ -2769,6 +2771,7 @@ mod tests {
             parent: None,
             includes: vec![],
             methods: vec![truncate],
+            nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
         };

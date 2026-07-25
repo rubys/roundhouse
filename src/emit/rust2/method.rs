@@ -1016,6 +1016,7 @@ mod tests {
             parent: None,
             includes: vec![],
             methods: vec![callee, forwarder],
+            nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
         };

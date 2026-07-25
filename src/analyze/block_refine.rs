@@ -258,6 +258,7 @@ mod tests {
             parent: None,
             includes: vec![],
             methods,
+            nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
         }

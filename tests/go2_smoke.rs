@@ -133,6 +133,7 @@ fn module_singleton_shape() {
         parent: None,
         includes: vec![],
         methods: vec![reader, writer],
+        nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
     };
@@ -254,6 +255,7 @@ fn module_singleton_does_not_fire_on_plain_class() {
         parent: None,
         includes: vec![],
         methods: vec![reader],
+        nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
     };
@@ -371,6 +373,7 @@ fn raise_panic_peephole() {
         parent: None,
         includes: vec![],
         methods: vec![fail_method, abort_method],
+        nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
     };
@@ -470,6 +473,7 @@ fn time_now_utc_iso8601_peephole() {
         parent: None,
         includes: vec![],
         methods: vec![stamp],
+        nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
     };
@@ -549,6 +553,7 @@ fn include_array_recv_routes_to_slices_contains() {
         parent: None,
         includes: vec![],
         methods: vec![probe],
+        nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
     };
@@ -622,6 +627,7 @@ fn negative_index_rewrites_to_len_minus_n() {
         parent: None,
         includes: vec![],
         methods: vec![last_method],
+        nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
     };
@@ -776,6 +782,7 @@ fn class_reflection_rewrites() {
         parent: None,
         includes: vec![],
         methods: vec![lookup_cols, lookup_name, diag],
+        nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
     };
@@ -861,6 +868,7 @@ fn bare_new_in_class_method_resolves_to_constructor() {
         parent: None,
         includes: vec![],
         methods: vec![create],
+        nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
     };
@@ -996,6 +1004,7 @@ fn implicit_self_method_call_resolution() {
         parent: None,
         includes: vec![],
         methods: vec![status_reader, notify, tick],
+        nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
     };
@@ -1085,6 +1094,7 @@ fn each_array_block_shape() {
         parent: None,
         includes: vec![],
         methods: vec![method],
+        nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
     };
@@ -1164,6 +1174,7 @@ fn each_hash_block_shape() {
         parent: None,
         includes: vec![],
         methods: vec![method],
+        nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
     };
@@ -1240,6 +1251,7 @@ fn map_array_block_shape() {
         parent: None,
         includes: vec![],
         methods: vec![method],
+        nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
     };
@@ -1338,6 +1350,7 @@ fn empty_body_with_nonvoid_return_synthesizes_zero_value() {
         parent: None,
         includes: vec![],
         methods: vec![m1, m2],
+        nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
     };
@@ -1441,6 +1454,7 @@ fn typed_empty_literals_back_propagate() {
         parent: None,
         includes: vec![],
         methods: vec![errors, lookup],
+        nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
     };
@@ -1723,6 +1737,7 @@ fn nil_check_to_comma_ok_rewrites_pair() {
         parent: None,
         includes: vec![],
         methods: vec![method],
+        nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
     };
@@ -1809,6 +1824,7 @@ fn nil_check_to_comma_ok_skips_non_hash_receiver() {
         parent: None,
         includes: vec![],
         methods: vec![method],
+        nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
     };

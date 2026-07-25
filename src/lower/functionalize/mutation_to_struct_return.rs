@@ -1255,6 +1255,7 @@ mod tests {
             parent: None,
             includes: vec![],
             methods,
+            nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
         };
@@ -1479,6 +1480,7 @@ mod tests {
             parent: None,
             includes: vec![],
             methods: vec![init],
+            nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
         };

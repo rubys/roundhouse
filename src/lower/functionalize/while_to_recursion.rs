@@ -861,6 +861,7 @@ mod tests {
             parent: None,
             includes: vec![],
             methods,
+            nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
         };
@@ -950,6 +951,7 @@ mod tests {
             parent: None,
             includes: vec![],
             methods: out,
+            nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
         };
@@ -980,6 +982,7 @@ mod tests {
             parent: None,
             includes: vec![],
             methods: vec![m],
+            nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
         };
@@ -1018,6 +1021,7 @@ mod tests {
             parent: None,
             includes: vec![],
             methods: vec![m],
+            nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
         };
@@ -1069,6 +1073,7 @@ mod tests {
             parent: None,
             includes: vec![],
             methods: vec![method("each", MethodReceiver::Instance, &[], body)],
+            nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
         };
@@ -1144,6 +1149,7 @@ mod tests {
             parent: None,
             includes: vec![],
             methods: vec![initialize, key_q, del],
+            nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
         };
@@ -1255,6 +1261,7 @@ mod tests {
             parent: None,
             includes: vec![],
             methods: out,
+            nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
         };
