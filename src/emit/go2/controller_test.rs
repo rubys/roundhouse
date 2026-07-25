@@ -16,6 +16,11 @@ use super::shared::{emit_literal, go_field_name, go_method_name, pascalize_word}
 #[derive(Clone, Copy)]
 pub(super) struct GoTestCtx<'a> {
     pub(super) app: &'a App,
+    /// (model, column) pairs the DB declares nullable — the same fact
+    /// `LibraryClass::nullable_columns` carries for the model emit.
+    /// Test code builds struct literals and compares column reads, and
+    /// a nullable column is a Go pointer there too.
+    pub(super) nullable_columns: &'a [(String, String)],
     pub(super) fixture_names: &'a [crate::ident::Symbol],
     pub(super) known_models: &'a [crate::ident::Symbol],
     pub(super) model_attrs: &'a [crate::ident::Symbol],
@@ -78,7 +83,16 @@ fn emit_go_ctrl_test_stmt(stmt: &Expr, app: &App, ctx: &GoTestCtx) -> String {
             if args_s.is_empty() {
                 // Field access — Go uses bare-name access for struct
                 // fields, no parens.
-                format!("{recv_s}.{}", go_field_name(method.as_str()))
+                {
+                    // Nullable column reads render nil as "" — see the
+                    // same wrap in spec.rs.
+                    let field = format!("{recv_s}.{}", go_field_name(method.as_str()));
+                    if ctx.nullable_columns.iter().any(|(_, c)| c == method.as_str()) {
+                        format!("DerefString({field})")
+                    } else {
+                        field
+                    }
+                }
             } else {
                 format!(
                     "{recv_s}.{}({})",
@@ -295,7 +309,11 @@ fn emit_go_ctrl_test_expr(expr: &Expr, app: &App, ctx: &GoTestCtx) -> String {
                     }
                     _ => emit_go_ctrl_test_expr(r, app, ctx),
                 };
-                return format!("{recv_s}.{}", go_field_name(m));
+                let field = format!("{recv_s}.{}", go_field_name(m));
+                if ctx.nullable_columns.iter().any(|(_, c)| c == m) {
+                    return format!("DerefString({field})");
+                }
+                return field;
             }
             let recv_s = emit_go_ctrl_test_expr(r, app, ctx);
             let args_s: Vec<String> =

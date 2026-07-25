@@ -23,6 +23,7 @@
 
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
 use crate::expr::Expr;
+use crate::ident::Symbol;
 use crate::ty::{ParamKind, Ty};
 
 use super::shared::go_field_name;
@@ -94,7 +95,17 @@ pub fn emit_library_class_with_registry(
     // ivars (assigned but no reader/writer) aren't reflected as Go
     // fields yet; they'd surface as missing-symbol errors at use,
     // which is fine inventory.
-    let mut fields = collect_fields(&class.methods);
+    let mut fields = collect_fields(&class.methods, &class.nullable_columns);
+    // Hand the nullable-column set (with the Go pointer type each field
+    // ended up with) to the expression emitter, so an assignment from the
+    // untyped attrs bag routes through the null-preserving converters.
+    super::expr::set_nullable_columns(
+        fields
+            .iter()
+            .filter(|f| class.nullable_columns.iter().any(|c| c.as_str() == f.ruby_name))
+            .map(|f| (f.ruby_name.clone(), f.go_ty.clone()))
+            .collect(),
+    );
     // Q1 — when emitting `ActiveRecordBase` itself, inject a
     // back-pointer `Self Modeler` field for polymorphic dispatch.
     // Subclasses inherit the field through embedding, so writes via
@@ -386,7 +397,7 @@ struct Field {
 /// `@errors`). The signature's return type (reader) or single param
 /// type (writer) provides the Go type for accessor-backed fields;
 /// initialize-only ivars infer from the assigned value's Ty.
-fn collect_fields(methods: &[MethodDef]) -> Vec<Field> {
+fn collect_fields(methods: &[MethodDef], nullable_columns: &[Symbol]) -> Vec<Field> {
     let mut out: Vec<Field> = Vec::new();
     for m in methods {
         // Class-receiver attrs are module-singleton slots, not
@@ -399,6 +410,11 @@ fn collect_fields(methods: &[MethodDef]) -> Vec<Field> {
             continue;
         }
         let name = m.name.as_str().trim_end_matches('=').to_string();
+        // A nullable COLUMN's accessor pair backs a pointer-typed field
+        // (`*string`), so NULL and "" stay distinct values; framework
+        // `String?` slots keep go_ty_stub's empty-as-nil convention.
+        // See LibraryClass::nullable_columns.
+        let col_ptr = nullable_columns.iter().any(|c| c.as_str() == name);
         let go_ty = match m.kind {
             AccessorKind::AttributeReader => {
                 if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
@@ -413,7 +429,11 @@ fn collect_fields(methods: &[MethodDef]) -> Vec<Field> {
                     if ret.contains_time() {
                         continue;
                     }
-                    go_ty_stub(Some(ret))
+                    if col_ptr {
+                        super::ty::go_ty_ptr(Some(ret))
+                    } else {
+                        go_ty_stub(Some(ret))
+                    }
                 } else {
                     "interface{}".to_string()
                 }
@@ -422,7 +442,13 @@ fn collect_fields(methods: &[MethodDef]) -> Vec<Field> {
                 if let Some(Ty::Fn { params, .. }) = m.signature.as_ref() {
                     params
                         .first()
-                        .map(|p| go_ty_stub(Some(&p.ty)))
+                        .map(|p| {
+                            if col_ptr {
+                                super::ty::go_ty_ptr(Some(&p.ty))
+                            } else {
+                                go_ty_stub(Some(&p.ty))
+                            }
+                        })
                         .unwrap_or_else(|| "interface{}".to_string())
                 } else {
                     "interface{}".to_string()
@@ -453,7 +479,7 @@ fn collect_fields(methods: &[MethodDef]) -> Vec<Field> {
         if !matches!(m.receiver, MethodReceiver::Instance) {
             continue;
         }
-        collect_ivar_writes(&m.body, &mut out);
+        collect_ivar_writes(&m.body, &mut out, nullable_columns);
     }
     out
 }
@@ -484,12 +510,12 @@ fn is_trivial_ivar_reader(m: &MethodDef) -> bool {
 
 /// Walk an Expr tree collecting top-level `@ivar = value` writes and
 /// adding them to `fields` if not already present.
-fn collect_ivar_writes(body: &Expr, fields: &mut Vec<Field>) {
+fn collect_ivar_writes(body: &Expr, fields: &mut Vec<Field>, nullable_columns: &[Symbol]) {
     use crate::expr::{ExprNode, LValue};
     match &*body.node {
         ExprNode::Seq { exprs } => {
             for e in exprs {
-                collect_ivar_writes(e, fields);
+                collect_ivar_writes(e, fields, nullable_columns);
             }
         }
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
@@ -497,7 +523,16 @@ fn collect_ivar_writes(body: &Expr, fields: &mut Vec<Field>) {
             if fields.iter().any(|f| f.ruby_name == ruby_name) {
                 return;
             }
-            let go_ty = go_ty_stub(value.ty.as_ref());
+            let go_ty = if nullable_columns.iter().any(|c| c.as_str() == ruby_name) {
+                // Nullable COLUMN: `*string` / `*int64`, so NULL and ""
+                // stay distinct values (a nullable UNIQUE column would
+                // otherwise collide on its second unset row). Framework
+                // `String?` slots keep go_ty_stub's empty-as-nil
+                // convention — see LibraryClass::nullable_columns.
+                super::ty::go_ty_ptr(value.ty.as_ref())
+            } else {
+                go_ty_stub(value.ty.as_ref())
+            };
             fields.push(Field {
                 pascal_name: go_field_name(&ruby_name),
                 ruby_name,

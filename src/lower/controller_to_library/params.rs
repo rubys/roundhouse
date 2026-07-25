@@ -336,6 +336,7 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
         parent: None,
         includes: Vec::new(),
         methods,
+        nullable_columns: Vec::new(),
         origin: Some(LibraryClassOrigin::ResourceParams {
             resource: spec.resource.clone(),
             fields: spec.fields.clone(),

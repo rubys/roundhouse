@@ -444,6 +444,7 @@ fn build_library_class(tm: &TestModule) -> LibraryClass {
         parent: tm.parent.clone(),
         includes: tm.includes.clone(),
         methods,
+        nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
     }

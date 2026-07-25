@@ -255,6 +255,7 @@ fn lower_models_inner(
             // concern instance methods resolve under plain Ruby.
             includes: crate::analyze::model_includes(model),
             methods,
+            nullable_columns: nullable_column_names(table),
             origin: None,
             constants: collect_model_constants(model),
         });
@@ -414,6 +415,7 @@ pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryCl
         // Same concern-mixin threading as the bulk entry point above.
         includes: crate::analyze::model_includes(model),
         methods,
+        nullable_columns: nullable_column_names(table),
         origin: None,
         constants: collect_model_constants(model),
     }
@@ -1431,4 +1433,16 @@ pub(super) fn seq(exprs: Vec<Expr>) -> Expr {
 pub(super) fn is_id_column(name: &Symbol) -> bool {
     let s = name.as_str();
     s == "id" || s.ends_with("_id")
+}
+
+/// The schema columns a class stores that the DB declares nullable —
+/// the `LibraryClass::nullable_columns` payload. Same rule as
+/// `ty_of_column_slot`: nullable, primary key excluded.
+pub(crate) fn nullable_column_names(table: Option<&Table>) -> Vec<Symbol> {
+    let Some(t) = table else { return Vec::new() };
+    t.columns
+        .iter()
+        .filter(|c| c.nullable && !c.primary_key)
+        .map(|c| c.name.clone())
+        .collect()
 }

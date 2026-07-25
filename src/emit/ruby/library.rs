@@ -2229,6 +2229,7 @@ fn synthesize_module_lc(
         parent: None,
         includes: Vec::new(),
         methods,
+        nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
     }

@@ -1090,6 +1090,27 @@ pub(super) fn emit_send(
         } else {
             args_s[0].clone()
         };
+        // Nullable COLUMN slot: the field is a Go pointer and the value
+        // is the untyped attrs bag (`interface{}`), which doesn't
+        // assign to `*string`. The runtime converters keep nil as nil
+        // rather than substituting the type's zero — the whole point of
+        // the pointer field. NOT NULL columns are unaffected: they get
+        // their conversion from the `|| ""` default they still carry.
+        // `self.<col> = …` and `instance.<col> = …` (the class-side
+        // `from_params` factory builds a local of the same class) both
+        // write this class's fields; anything else targets a different
+        // class whose columns this table doesn't describe.
+        let writes_own_class = matches!(&*r.node, ExprNode::SelfRef)
+            || matches!(
+                (r.ty.as_ref(), ctx.class_name.as_deref()),
+                (Some(Ty::Class { id, .. }), Some(cls))
+                    if id.0.as_str().rsplit("::").next() == Some(cls)
+            );
+        if writes_own_class {
+            if let Some(conv) = nullable_column_converter(field_ruby, value) {
+                return format!("{recv_s}.{field_go} = {conv}({v})");
+            }
+        }
         return format!("{recv_s}.{field_go} = {v}");
     }
 
@@ -1634,6 +1655,14 @@ pub(super) fn emit_send(
     if method == "nil?" && args.is_empty() {
         if let Some(r) = recv {
             let recv_s = emit_expr(ctx, r);
+            // A nullable COLUMN field is a real Go pointer, so the test
+            // is `== nil` — NOT the empty-as-nil comparison the
+            // go_ty_stub convention uses for framework `String?` slots.
+            if let ExprNode::Ivar { name } = &*r.node {
+                if nullable_column_go_ty(name.as_str()).is_some() {
+                    return format!("{recv_s} == nil");
+                }
+            }
             return match r.ty.as_ref() {
                 Some(Ty::Str | Ty::Sym | Ty::Int | Ty::Float | Ty::Bool) => {
                     "false".to_string()
@@ -1668,6 +1697,22 @@ pub(super) fn emit_send(
     if method == "to_s" && args.is_empty() {
         if let Some(r) = recv {
             let recv_s = emit_expr(ctx, r);
+            // A nullable column read is a Go pointer: `Sprintf("%v",
+            // ptr)` would render the ADDRESS. `nil.to_s` is "", which
+            // is exactly what DerefString gives. Covers both the
+            // model's own field (`@title`) and a reader call on
+            // another record (`article.title` in a view).
+            let nilable_col = match &*r.node {
+                ExprNode::Ivar { name } => nullable_column_go_ty(name.as_str()).is_some(),
+                ExprNode::Send { recv: Some(inner), method: m, args, .. } if args.is_empty() => {
+                    nullable_column_go_ty(m.as_str()).is_some()
+                        || recv_column_is_nullable(inner, m.as_str())
+                }
+                _ => false,
+            };
+            if nilable_col {
+                return format!("DerefString({recv_s})");
+            }
             return match r.ty.as_ref() {
                 Some(Ty::Str | Ty::Sym) => recv_s,
                 Some(Ty::Int) => format!("fmt.Sprintf(\"%d\", {recv_s})"),
@@ -2085,6 +2130,43 @@ pub(super) fn emit_send(
 /// adds an arm here.
 fn emit_cast(ctx: &EmitCtx, value: &Expr, target_ty: &Ty) -> String {
     let inner = emit_expr(ctx, value);
+    // Nullable COLUMN read narrowed to its scalar (`Cast(@body, Str)`
+    // over a `*string` field): dereference. The IR only emits this
+    // where a preceding `nil?` conjunct guarantees the value, and Go's
+    // `&&` short-circuits as Ruby's does.
+    if target_ty.is_scalar() {
+        if let ExprNode::Ivar { name } = &*value.node {
+            if nullable_column_go_ty(name.as_str()).is_some() {
+                return format!("*{inner}");
+            }
+        }
+    }
+    // The other direction: an untyped value cast INTO a nullable
+    // column's slot type (`write_attribute`'s per-column arms) needs
+    // the null-preserving converter, not a bare assignment.
+    if let Ty::Union { variants } = target_ty {
+        if variants.iter().any(|v| matches!(v, Ty::Nil)) {
+            // Key off the EMITTED Go type, not the IR shape: the
+            // `[]=` value param is declared as the column union, which
+            // renders `interface{}` just like an untyped value does,
+            // and either way it needs the converter to reach `*string`.
+            let untyped_src = super::ty::go_ty_stub(value.ty.as_ref()) == "interface{}";
+            if untyped_src {
+                if let Some(inner_ty) = variants.iter().find(|v| !matches!(v, Ty::Nil)) {
+                    let conv = match inner_ty {
+                        Ty::Str | Ty::Sym => Some("OptString"),
+                        Ty::Int => Some("OptInt64"),
+                        Ty::Float => Some("OptFloat64"),
+                        Ty::Bool => Some("OptBool"),
+                        _ => None,
+                    };
+                    if let Some(c) = conv {
+                        return format!("{c}({inner})");
+                    }
+                }
+            }
+        }
+    }
     if let Ty::Hash { value: tv, .. } = target_ty {
         if matches!(tv.as_ref(), Ty::Untyped) {
             let tgt = super::ty::go_ty_stub(Some(target_ty));
@@ -3614,4 +3696,79 @@ mod predicate_naming_tests {
         assert_eq!(go_field_ident("deleted_at?"), go_field_ident("deleted_at"));
         assert_eq!(go_field_ident("deleted_at?"), "DeletedAt");
     }
+}
+
+/// Runtime converter for assigning an untyped value into a nullable
+/// COLUMN's pointer field (`interface{}` → `*string` / `*int64` / …).
+/// `None` when the field isn't one, or the value is already typed.
+fn nullable_column_converter(field_ruby: &str, value: &Expr) -> Option<&'static str> {
+    use crate::ty::Ty;
+    let go_ty = nullable_column_go_ty(field_ruby)?;
+    // Convert unless the RHS is ALREADY the field's pointer type. Two
+    // shapes need it: the untyped attrs bag (`interface{}`) and a plain
+    // scalar from a params holder (`p.Title` is `string`, since form
+    // input has no NULL). The converters copy, so the model never
+    // aliases another struct's field.
+    if super::ty::go_ty_stub(value.ty.as_ref()) == go_ty {
+        return None;
+    }
+    // Which converter follows from the column's own type, which the
+    // field's declared Go type already encodes.
+    match go_ty.as_str() {
+        "*string" => Some("OptString"),
+        "*int64" => Some("OptInt64"),
+        "*float64" => Some("OptFloat64"),
+        "*bool" => Some("OptBool"),
+        _ => None,
+    }
+}
+
+thread_local! {
+    /// Schema columns of the class being emitted that the DB declares
+    /// nullable, paired with the Go pointer type each field carries.
+    /// Straight from `LibraryClass::nullable_columns` — the marker
+    /// separating a DB column (where NULL and "" are different values)
+    /// from a framework `String?` slot (where go_ty_stub's empty-as-nil
+    /// convention is right). Set per class by `emit_library_class`,
+    /// mirroring the per-class property tables the csharp/kotlin/swift
+    /// emitters keep.
+    static NULLABLE_COLUMNS: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(super) fn set_nullable_columns(cols: Vec<(String, String)>) {
+    NULLABLE_COLUMNS.with(|c| *c.borrow_mut() = cols);
+}
+
+thread_local! {
+    /// Every model's nullable columns, app-wide: `(Model, column)`.
+    /// The per-class table above only knows the class being emitted,
+    /// but a VIEW reads another record's column (`article.title`), so
+    /// the cross-class lookup needs the whole set. Keyed by the
+    /// receiver's resolved model, never by column name alone — the
+    /// same column name can be nullable on one table and NOT NULL on
+    /// another.
+    static ALL_NULLABLE_COLUMNS: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(super) fn set_all_nullable_columns(pairs: Vec<(String, String)>) {
+    ALL_NULLABLE_COLUMNS.with(|c| *c.borrow_mut() = pairs);
+}
+
+/// Is `column` nullable on the model this expression's receiver
+/// resolves to?
+fn recv_column_is_nullable(recv: &Expr, column: &str) -> bool {
+    let Some(Ty::Class { id, .. }) = recv.ty.as_ref() else { return false };
+    let model = id.0.as_str().rsplit("::").next().unwrap_or(id.0.as_str());
+    ALL_NULLABLE_COLUMNS.with(|c| {
+        c.borrow().iter().any(|(m, col)| m == model && col == column)
+    })
+}
+
+fn nullable_column_go_ty(field_ruby: &str) -> Option<String> {
+    NULLABLE_COLUMNS.with(|c| {
+        c.borrow()
+            .iter()
+            .find(|(n, _)| n == field_ruby)
+            .map(|(_, t)| t.clone())
+    })
 }

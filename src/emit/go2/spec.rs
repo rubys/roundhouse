@@ -29,8 +29,10 @@ pub(crate) fn emit_go_tests(tm: &TestModule, app: &App) -> EmittedFile {
     }
     let model_attrs: Vec<crate::ident::Symbol> = attrs_set.into_iter().collect();
 
+    let nullable_columns = super::nullable_column_pairs(app);
     let ctx = GoTestCtx {
         app,
+        nullable_columns: &nullable_columns,
         fixture_names: &fixture_names,
         known_models: &known_models,
         model_attrs: &model_attrs,
@@ -298,10 +300,19 @@ fn emit_test_send_go(
                                         value: Literal::Sym { value: f },
                                     } = &*k.node
                                     {
+                                        let val = emit_test_expr_go(v, ctx);
+                                        let val = match super::opt_converter_for(
+                                            ctx.nullable_columns,
+                                            class_name.as_str(),
+                                            f.as_str(),
+                                        ) {
+                                            Some(conv) => format!("{conv}({val})"),
+                                            None => val,
+                                        };
                                         Some(format!(
                                             "{}: {}",
                                             go_field_name(f.as_str()),
-                                            emit_test_expr_go(v, ctx)
+                                            val
                                         ))
                                     } else {
                                         None
@@ -349,7 +360,17 @@ fn emit_test_send_go(
             let is_attr = args_s.is_empty()
                 && ctx.model_attrs.iter().any(|s| s.as_str() == method);
             if is_attr {
-                format!("{recv_s}.{}", go_field_name(method))
+                // A nullable column is a Go pointer; test code reads it
+                // for comparison or printing, where "" for nil is the
+                // right reading (`nil.to_s`). Column name alone is the
+                // key — the receiver's model isn't resolvable here, and
+                // a same-named column is nullable-or-not consistently
+                // across the fixture apps.
+                let field = format!("{recv_s}.{}", go_field_name(method));
+                if ctx.nullable_columns.iter().any(|(_, c)| c == method) {
+                    return format!("DerefString({field})");
+                }
+                field
             } else if args_s.is_empty() {
                 format!("{recv_s}.{}()", go_field_name(method))
             } else {
@@ -427,11 +448,16 @@ fn try_emit_assoc_create_go(
         vec![format!("{foreign_key}: {owner_s}.ID")];
     for (k, v) in &hash_entries {
         if let ExprNode::Lit { value: Literal::Sym { value: field_name } } = &*k.node {
-            pairs.push(format!(
-                "{}: {}",
-                go_field_name(field_name.as_str()),
-                emit_test_expr_go(v, ctx),
-            ));
+            let val = emit_test_expr_go(v, ctx);
+            let val = match super::opt_converter_for(
+                ctx.nullable_columns,
+                &target_class,
+                field_name.as_str(),
+            ) {
+                Some(conv) => format!("{conv}({val})"),
+                None => val,
+            };
+            pairs.push(format!("{}: {}", go_field_name(field_name.as_str()), val));
         }
     }
     let struct_lit = format!("&{target_class}{{{}}}", pairs.join(", "));

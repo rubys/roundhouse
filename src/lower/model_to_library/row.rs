@@ -99,6 +99,7 @@ fn build_row_class(model_name: &ClassId, table: &Table) -> LibraryClass {
         parent: None,
         includes: Vec::new(),
         methods,
+        nullable_columns: super::nullable_column_names(Some(table)),
         origin: Some(LibraryClassOrigin::ResourceRow {
             resource: resource_sym(model_name),
             fields,

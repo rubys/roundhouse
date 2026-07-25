@@ -193,3 +193,28 @@ fn is_go_interface_class(id: &str) -> bool {
         | "Roundhouse::Modeler"
     )
 }
+
+/// Nullable-COLUMN slot type: `Union{[T, Nil]}` renders as a Go pointer
+/// so nil and the zero value stay distinct. `go_ty_stub` deliberately
+/// collapses a nilable string to plain `string` (empty-as-nil, right
+/// for framework slots like Flash's `@notice`); a DB column can't use
+/// that convention, because NULL and "" are different values there.
+pub(super) fn go_ty_ptr(ty: Option<&Ty>) -> String {
+    match ty {
+        Some(Ty::Union { variants }) => {
+            let non_nil: Vec<&Ty> = variants.iter().filter(|t| !matches!(t, Ty::Nil)).collect();
+            if non_nil.len() == 1 {
+                match non_nil[0] {
+                    Ty::Str | Ty::Sym => "*string".to_string(),
+                    Ty::Int => "*int64".to_string(),
+                    Ty::Float => "*float64".to_string(),
+                    Ty::Bool => "*bool".to_string(),
+                    other => go_ty_stub(Some(other)),
+                }
+            } else {
+                go_ty_stub(ty)
+            }
+        }
+        other => go_ty_stub(other),
+    }
+}

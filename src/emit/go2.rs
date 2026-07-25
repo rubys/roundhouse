@@ -78,6 +78,10 @@ pub fn overlay_v2(files: &mut Vec<EmittedFile>, app: &App) {
 /// emission order.
 pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     let mut out = Vec::new();
+    // App-wide nullable-column set, for cross-class reads (a view
+    // renders `article.title`, whose model isn't the class being
+    // emitted). Per-class tables are set by `emit_library_class`.
+    expr::set_all_nullable_columns(nullable_column_pairs(app));
 
     // Hand-written runtime — copied verbatim under `app/v2/`.
     // Emitted FIRST so the transpiled framework runtime files can
@@ -1040,6 +1044,7 @@ fn module_funcs_to_library_class(
         parent: None,
         includes: Vec::new(),
         methods,
+        nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
     }
@@ -1168,3 +1173,33 @@ fn emit_imports(out: &mut String, imports: &[String]) {
 // the v2/ overlay" gating.
 pub use library::{emit_library_class, emit_library_class_with_registry};
 pub(crate) use library::{emit_module, format_constant, format_module_ivar};
+
+/// (Model, column) pairs the schema declares nullable, with the Go
+/// pointer type the model's field carries. Same rule as
+/// `LibraryClass::nullable_columns`; the test emitters need it too,
+/// since test code builds struct literals and compares column reads.
+pub(super) fn nullable_column_pairs(app: &crate::App) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for m in &app.models {
+        let Some(table) = app.schema.tables.get(&m.table.0) else { continue };
+        for c in &table.columns {
+            if c.nullable && !c.primary_key {
+                out.push((m.name.0.as_str().to_string(), c.name.as_str().to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// The null-preserving converter for a model column, or `None` when
+/// the column isn't nullable.
+pub(super) fn opt_converter_for(
+    pairs: &[(String, String)],
+    model: &str,
+    column: &str,
+) -> Option<&'static str> {
+    pairs
+        .iter()
+        .any(|(m, c)| m == model && c == column)
+        .then_some("OptString")
+}

@@ -144,6 +144,7 @@ pub(super) fn library_class_from_node_with_scope(
         parent,
         includes,
         methods,
+        nullable_columns: Vec::new(),
         origin: None,
         constants,
     })
@@ -175,6 +176,7 @@ fn library_class_from_module_node_with_scope(
         parent: None,
         includes,
         methods,
+        nullable_columns: Vec::new(),
         origin: None,
         constants,
     })

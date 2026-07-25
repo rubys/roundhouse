@@ -20,6 +20,7 @@ package v2
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -318,6 +319,121 @@ func Db_column_text(stmtID int64, i int64) string {
 	default:
 		return ""
 	}
+}
+
+// OptString / OptInt64 / OptFloat64 / OptBool convert a value out of
+// the untyped attrs bag into a nullable COLUMN's pointer field. nil
+// stays nil — that is the point of the pointer: for a column the DB
+// declares nullable, NULL and the type's zero are different values
+// (a nullable UNIQUE column would otherwise collide on its second
+// unset row, and `where(fk: nil)` would match nothing).
+func OptString(v interface{}) *string {
+	if v == nil {
+		return nil
+	}
+	// Already a nullable column's pointer (a Row field feeding a model
+	// field): pass it through. Formatting it would stringify the
+	// ADDRESS, which is how a hydrated record ends up holding
+	// "0x14000...".
+	if p, ok := v.(*string); ok {
+		return p
+	}
+	s := fmt.Sprintf("%v", v)
+	return &s
+}
+
+func OptInt64(v interface{}) *int64 {
+	if v == nil {
+		return nil
+	}
+	if p, ok := v.(*int64); ok {
+		return p
+	}
+	var n int64
+	switch t := v.(type) {
+	case int64:
+		n = t
+	case int:
+		n = int64(t)
+	case float64:
+		n = int64(t)
+	case string:
+		parsed, _ := strconv.ParseInt(t, 10, 64)
+		n = parsed
+	}
+	return &n
+}
+
+func OptFloat64(v interface{}) *float64 {
+	if v == nil {
+		return nil
+	}
+	if p, ok := v.(*float64); ok {
+		return p
+	}
+	var f float64
+	switch t := v.(type) {
+	case float64:
+		f = t
+	case int64:
+		f = float64(t)
+	case int:
+		f = float64(t)
+	case string:
+		parsed, _ := strconv.ParseFloat(t, 64)
+		f = parsed
+	}
+	return &f
+}
+
+func OptBool(v interface{}) *bool {
+	if v == nil {
+		return nil
+	}
+	if p, ok := v.(*bool); ok {
+		return p
+	}
+	b := false
+	switch t := v.(type) {
+	case bool:
+		b = t
+	case int64:
+		b = t != 0
+	case int:
+		b = t != 0
+	}
+	return &b
+}
+
+// DerefString reads a nullable column's pointer field in a string
+// context: nil renders as "", the same reading `nil.to_s` gives in
+// Ruby (and what Rails compares against in a view or an assertion).
+func DerefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+func DerefInt64(n *int64) int64 {
+	if n == nil {
+		return 0
+	}
+	return *n
+}
+
+func DerefFloat64(f *float64) float64 {
+	if f == nil {
+		return 0
+	}
+	return *f
+}
+
+func DerefBool(b *bool) bool {
+	if b == nil {
+		return false
+	}
+	return *b
 }
 
 // Db_column_is_null reports whether the cell is SQL NULL. A column the

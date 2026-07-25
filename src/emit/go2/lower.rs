@@ -337,7 +337,15 @@ pub mod nil_to_zero_for_string_fields {
 
     pub fn apply(mut classes: Vec<LibraryClass>) -> Vec<LibraryClass> {
         for class in classes.iter_mut() {
-            let fields = collect_string_nullable_fields(&class.methods);
+            let mut fields = collect_string_nullable_fields(&class.methods);
+            // A nullable COLUMN is exempt: its Go field is a real
+            // pointer (`*string`), so `nil` is exactly what it should
+            // be assigned — substituting "" would put back the
+            // empty-is-NULL conflation this marker exists to remove.
+            // Framework `String?` slots keep the convention.
+            for col in &class.nullable_columns {
+                fields.remove(col.as_str());
+            }
             if fields.is_empty() {
                 continue;
             }

@@ -575,6 +575,18 @@ pub struct LibraryClass {
     /// — surface form is sacrificed for downstream uniformity per the
     /// lowerer-first architecture).
     pub methods: Vec<MethodDef>,
+    /// Schema columns this class stores that the DB declares NULLABLE.
+    /// The slot types already say `Union{[T, Nil]}`, but that shape is
+    /// not by itself a column: a framework slot like Flash's `@notice`
+    /// carries the same type, and a target may legitimately represent
+    /// the two differently. Go does — its `String?` collapses to plain
+    /// `string` with "" standing in for nil, which is right for an
+    /// absent flash notice and wrong for a nullable column, where NULL
+    /// and "" are different values in the database. The lowerer knows
+    /// which is which, so it records it here rather than leaving each
+    /// emitter to re-derive it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nullable_columns: Vec<Symbol>,
     /// Provenance tag for synthesized classes. `None` for source-derived
     /// classes; populated when the lowerer creates per-resource
     /// specializations (e.g. `<Model>Row`, `<Resource>Params`) so future

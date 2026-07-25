@@ -214,6 +214,7 @@ fn synthesize_module_lc(
         parent: None,
         includes: Vec::new(),
         methods,
+        nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
     }
@@ -492,6 +493,7 @@ fn collect_imports_for_function(
         is_module: true,
         parent: None,
         includes: Vec::new(),
+        nullable_columns: Vec::new(),
         methods: vec![crate::dialect::MethodDef {
             name: func.name.clone(),
             receiver: crate::dialect::MethodReceiver::Class,

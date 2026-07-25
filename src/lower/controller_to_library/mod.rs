@@ -408,6 +408,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             parent: controller.parent.clone(),
             includes: Vec::new(),
             methods,
+            nullable_columns: Vec::new(),
             origin: None,
             constants: collect_class_constants(controller),
         });
@@ -464,6 +465,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         parent: controller.parent.clone(),
         includes: Vec::new(),
         methods,
+        nullable_columns: Vec::new(),
         origin: None,
         constants: collect_class_constants(controller),
     }
