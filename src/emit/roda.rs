@@ -1063,31 +1063,33 @@ fn emit_terminal_body(
         return;
     };
 
-    match convert_body(route, controller, action, ctx, bindings) {
-        Some(lines) => {
-            for l in lines {
-                if l.is_empty() {
-                    out.push('\n');
-                } else {
-                    out.push_str(&format!("{pad}{l}\n"));
-                }
-            }
-        }
-        None => {
-            // Not yet convertible: carry the original Rails body as a
-            // comment (Jeremy's rule) behind a 501 so the tree still
-            // routes deterministically.
-            out.push_str(&format!(
-                "{pad}# ROUNDHOUSE-TODO: convert this action body \
-                 ({}#{}, Rails original below):\n",
-                route.controller.0, route.action
-            ));
-            for l in emit_expr(&action.body).lines() {
-                let line = format!("{pad}#   {l}");
-                out.push_str(line.trim_end());
-                out.push('\n');
-            }
-            out.push_str(&format!("{pad}r.halt [501, {{}}, [\"ROUNDHOUSE-TODO: not converted yet\"]]\n"));
+    let body = convert_body(route, controller, action, ctx, bindings);
+
+    // A partially converted body is a DRAFT, not a working route:
+    // running it would serve a plausible-looking wrong result, because
+    // the statements that didn't convert are exactly the ones whose
+    // absence is invisible in the response (a dropped authorization
+    // check, an ivar the view reads unset). So the route stays honest
+    // by default — halt first, with the draft readable below it, and
+    // deleting the one halt line arms the body once the comments are
+    // filled in.
+    if !body.complete() {
+        out.push_str(&format!(
+            "{pad}# ROUNDHOUSE-TODO: {}/{} statements converted ({}#{}); the rest are\n",
+            body.converted, body.total, route.controller.0, route.action
+        ));
+        out.push_str(&format!(
+            "{pad}# commented inline below. Delete this halt once the body is complete.\n"
+        ));
+        out.push_str(&format!(
+            "{pad}r.halt [501, {{}}, [\"ROUNDHOUSE-TODO: partially converted\"]]\n"
+        ));
+    }
+    for l in body.lines {
+        if l.is_empty() {
+            out.push('\n');
+        } else {
+            out.push_str(&format!("{pad}{l}\n"));
         }
     }
 }
@@ -1111,19 +1113,58 @@ fn convert_body(
     action: &Action,
     ctx: &EmitCtx,
     bindings: &[(String, String)],
-) -> Option<Vec<String>> {
+) -> Converted {
     let body = unwrap_respond_to(&action.body);
     let cx = BodyCx { ctx, controller, bindings };
-    let mut lines = convert_stmts(&statements_owned(&body), &cx)?;
+    let mut out = convert_stmts(&statements_owned(&body), &cx);
     if route.method == HttpMethod::Get {
-        let template = match &action.renders {
-            RenderTarget::Template { name, .. } => name.to_string(),
-            RenderTarget::Inferred => action.name.to_string(),
-            _ => return None,
-        };
-        lines.push(format!("view \"{}/{}\"", view_dir(controller), template));
+        match &action.renders {
+            RenderTarget::Template { name, .. } => {
+                out.lines.push(format!("view \"{}/{}\"", view_dir(controller), name));
+            }
+            RenderTarget::Inferred => {
+                out.lines.push(format!("view \"{}/{}\"", view_dir(controller), action.name));
+            }
+            // The response itself didn't convert. Count it like a
+            // statement so the body reads as partial rather than as a
+            // complete conversion that happens to render nothing.
+            other => {
+                out.lines
+                    .push(format!("# ROUNDHOUSE-TODO: unconverted render target: {other:?}"));
+                out.total += 1;
+            }
+        }
     }
-    Some(lines)
+    out
+}
+
+/// Statement-level conversion outcome: the emitted Roda/Sequel lines
+/// plus how many of the body's statements translated. `converted ==
+/// total` holds exactly when no `ROUNDHOUSE-TODO` comment was emitted
+/// anywhere in the body, branches included — the invariant the
+/// partial-body halt keys on.
+#[derive(Default)]
+struct Converted {
+    lines: Vec<String>,
+    converted: usize,
+    total: usize,
+}
+
+impl Converted {
+    /// One statement that translated in full.
+    fn one(lines: Vec<String>) -> Self {
+        Self { lines, converted: 1, total: 1 }
+    }
+
+    fn merge(&mut self, other: Converted) {
+        self.lines.extend(other.lines);
+        self.converted += other.converted;
+        self.total += other.total;
+    }
+
+    fn complete(&self) -> bool {
+        self.converted == self.total
+    }
 }
 
 /// Per-body conversion context: the controller (for `<model>_params`
@@ -1157,32 +1198,74 @@ fn statements_owned(body: &Expr) -> Vec<Expr> {
     }
 }
 
-fn convert_stmts(stmts: &[Expr], cx: &BodyCx) -> Option<Vec<String>> {
-    let mut lines = Vec::new();
+/// Statement by statement: anything outside the recognized vocabulary
+/// becomes a comment carrying its Rails original, and the walk
+/// continues. The whole-body gate this replaces discarded every
+/// statement around a single unrecognized one — on lobsters that hid
+/// convertible code behind one unknown line in 158 actions (#67).
+fn convert_stmts(stmts: &[Expr], cx: &BodyCx) -> Converted {
+    let mut out = Converted::default();
     for s in stmts {
-        lines.extend(convert_stmt(s, cx)?);
+        // Nested sequences (respond_to splice residue) flatten, so
+        // their statements are counted and commented individually
+        // rather than as one opaque block.
+        if let ExprNode::Seq { exprs } = &*s.node {
+            let inner = convert_stmts(exprs, cx);
+            out.merge(inner);
+            continue;
+        }
+        match convert_stmt(s, cx) {
+            Some(c) => out.merge(c),
+            None => {
+                out.lines.extend(unconverted_comment(s));
+                out.total += 1;
+            }
+        }
     }
-    Some(lines)
+    out
+}
+
+/// The Rails original of a statement that didn't convert, as comment
+/// lines. Deliberately unclassified: `ROUNDHOUSE-TODO` claims only
+/// that roundhouse stopped here, which is the one thing we know —
+/// whether the construct is ours to implement, the app's to change,
+/// or has no Sequel spelling at all is a separate judgment.
+fn unconverted_comment(stmt: &Expr) -> Vec<String> {
+    let src = emit_expr(stmt);
+    let mut lines: Vec<String> = src
+        .lines()
+        .enumerate()
+        .map(|(i, l)| {
+            let line = if i == 0 {
+                format!("# ROUNDHOUSE-TODO: {l}")
+            } else {
+                format!("#   {l}")
+            };
+            line.trim_end().to_string()
+        })
+        .collect();
+    if lines.is_empty() {
+        lines.push("# ROUNDHOUSE-TODO: (empty statement)".to_string());
+    }
+    lines
 }
 
 /// One statement → Roda/Sequel source lines, or None (not in the
 /// recognized conversion set).
-fn convert_stmt(stmt: &Expr, cx: &BodyCx) -> Option<Vec<String>> {
+fn convert_stmt(stmt: &Expr, cx: &BodyCx) -> Option<Converted> {
     match &*stmt.node {
-        // Format-drop residue / nested sequences: convert recursively.
-        ExprNode::Seq { exprs } => convert_stmts(exprs, cx),
         ExprNode::Assign { target, value } => {
             let crate::expr::LValue::Ivar { name } = target else { return None };
-            convert_ivar_assign(name.as_str(), value, cx)
+            convert_ivar_assign(name.as_str(), value, cx).map(Converted::one)
         }
         ExprNode::If { cond, then_branch, else_branch } => {
             convert_if(cond, then_branch, else_branch, cx)
         }
         ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "redirect_to" => {
-            convert_redirect(args, cx)
+            convert_redirect(args, cx).map(Converted::one)
         }
         ExprNode::Send { recv: None, method, args, .. } if method.as_str() == "render" => {
-            convert_render(args, cx)
+            convert_render(args, cx).map(Converted::one)
         }
         // `@article.destroy!` → `@article.destroy` (Sequel #destroy
         // raises on hook failure already; the bang distinction is
@@ -1192,7 +1275,7 @@ fn convert_stmt(stmt: &Expr, cx: &BodyCx) -> Option<Vec<String>> {
                 && args.is_empty() =>
         {
             let ExprNode::Ivar { name } = &*r.node else { return None };
-            Some(vec![format!("@{name}.destroy")])
+            Some(Converted::one(vec![format!("@{name}.destroy")]))
         }
         _ => None,
     }
@@ -1276,7 +1359,7 @@ fn convert_if(
     then_branch: &Expr,
     else_branch: &Expr,
     cx: &BodyCx,
-) -> Option<Vec<String>> {
+) -> Option<Converted> {
     let mut lines: Vec<String> = Vec::new();
     let cond_str = match &*cond.node {
         ExprNode::Send { recv: Some(r), method, args, .. }
@@ -1299,21 +1382,39 @@ fn convert_if(
         _ => return None,
     };
     lines.push(cond_str);
-    for l in convert_stmts(&statements_owned(then_branch), cx)? {
-        lines.push(format!("  {l}"));
-    }
+
+    // The `if` itself counts as one converted statement; each branch
+    // contributes its own tally, so an unrecognized statement nested in
+    // a branch still marks the enclosing body partial.
+    let mut converted = 1;
+    let mut total = 1;
+
+    let then_c = convert_stmts(&statements_owned(then_branch), cx);
+    lines.extend(indented(&then_c.lines));
+    converted += then_c.converted;
+    total += then_c.total;
+
     let else_stmts = statements_owned(else_branch);
     let else_empty = else_stmts.len() == 1
         && matches!(&*else_stmts[0].node, ExprNode::Lit { value: Literal::Nil })
         || else_stmts.is_empty();
     if !else_empty {
         lines.push("else".to_string());
-        for l in convert_stmts(&else_stmts, cx)? {
-            lines.push(format!("  {l}"));
-        }
+        let else_c = convert_stmts(&else_stmts, cx);
+        lines.extend(indented(&else_c.lines));
+        converted += else_c.converted;
+        total += else_c.total;
     }
     lines.push("end".to_string());
-    Some(lines)
+    Some(Converted { lines, converted, total })
+}
+
+/// Branch lines, indented one level (blank lines stay blank).
+fn indented(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|l| if l.is_empty() { String::new() } else { format!("  {l}") })
+        .collect()
 }
 
 /// `redirect_to <target>, notice: "…"` → flash assignment(s) + a
