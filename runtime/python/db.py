@@ -176,6 +176,49 @@ class Db:
         return "" if v is None else str(v)
 
     @classmethod
+    def _column_raw(cls, stmt: int, i: int):
+        """Raw cell of the most recently stepped row, or None."""
+        entry = cls._statements.get(stmt)
+        if entry is None or entry["current"] is None:
+            return None
+        return entry["current"][i]
+
+    @classmethod
+    def column_int_opt(cls, stmt: int, i: int) -> "int | None":
+        """Nullable-column read. A column the schema declares nullable
+        holds NULL until something sets it, and NULL is not the type's
+        zero: 0 in a nullable fk makes `where(fk: nil)` match nothing.
+        The lowerer emits these for those columns; the readers above
+        stay as they are for NOT NULL columns."""
+        v = cls._column_raw(stmt, i)
+        if v is None:
+            return None
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 0
+
+    @classmethod
+    def column_float_opt(cls, stmt: int, i: int) -> "float | None":
+        v = cls._column_raw(stmt, i)
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @classmethod
+    def column_text_opt(cls, stmt: int, i: int) -> "str | None":
+        v = cls._column_raw(stmt, i)
+        return None if v is None else str(v)
+
+    @classmethod
+    def column_bool_opt(cls, stmt: int, i: int) -> "bool | None":
+        v = cls.column_int_opt(stmt, i)
+        return None if v is None else v != 0
+
+    @classmethod
     def finalize(cls, stmt: int) -> None:
         """Drop the statement entry. Idempotent on unknown ids."""
         cls._statements.pop(stmt, None)
@@ -195,3 +238,21 @@ class Db:
     def escape_int(n: int) -> str:
         """Render an integer for SQL inlining."""
         return str(int(n))
+
+    @staticmethod
+    def escape_string_opt(s: "str | None") -> str:
+        """Nullable-column write: None renders the SQL keyword NULL
+        rather than `''`, so a nullable column round-trips as None."""
+        return "NULL" if s is None else Db.escape_string(s)
+
+    @staticmethod
+    def escape_int_opt(n: "int | None") -> str:
+        return "NULL" if n is None else str(int(n))
+
+    @staticmethod
+    def escape_float_opt(f: "float | None") -> str:
+        return "NULL" if f is None else str(float(f))
+
+    @staticmethod
+    def escape_bool_opt(b: "bool | None") -> str:
+        return "NULL" if b is None else ("1" if b else "0")

@@ -87,6 +87,36 @@ enum Db {
         return String(cString: text)
     }
 
+    // Nullable-column reads. A column the schema declares nullable
+    // holds NULL until something sets it, and NULL is not the type's
+    // zero: "" in a nullable UNIQUE column collides row-to-row, and 0
+    // in a nullable fk makes `where(fk: nil)` match nothing. The
+    // lowerer emits these for those columns; the readers above stay as
+    // they are for NOT NULL columns.
+    private static func columnIsNull(_ stmtId: Int, _ i: Int) -> Bool {
+        let stmt = conn().statements[stmtId]!
+        return sqlite3_column_type(stmt, Int32(i)) == SQLITE_NULL
+    }
+
+    static func columnIntOpt(_ stmtId: Int, _ i: Int) -> Int? {
+        columnIsNull(stmtId, i) ? nil : columnInt(stmtId, i)
+    }
+
+    static func columnFloatOpt(_ stmtId: Int, _ i: Int) -> Double? {
+        if columnIsNull(stmtId, i) { return nil }
+        let stmt = conn().statements[stmtId]!
+        return sqlite3_column_double(stmt, Int32(i))
+    }
+
+    static func columnTextOpt(_ stmtId: Int, _ i: Int) -> String? {
+        columnIsNull(stmtId, i) ? nil : columnText(stmtId, i)
+    }
+
+    static func columnBoolOpt(_ stmtId: Int, _ i: Int) -> Bool? {
+        guard let v = columnIntOpt(stmtId, i) else { return nil }
+        return v != 0
+    }
+
     static func finalize(_ stmtId: Int) {
         if let stmt = conn().statements.removeValue(forKey: stmtId) {
             sqlite3_finalize(stmt)
@@ -101,6 +131,14 @@ enum Db {
     }
     static func escapeInt(_ n: Int) -> String { String(n) }
     static func escapeBool(_ b: Bool) -> String { b ? "1" : "0" }
+    // Nullable-column writes: nil renders the SQL keyword NULL rather
+    // than `''` / `0`, so a nullable column round-trips as nil.
+    static func escapeStringOpt(_ s: String?) -> String {
+        s.map { escapeString($0) } ?? "NULL"
+    }
+    static func escapeIntOpt(_ n: Int?) -> String { n.map { String($0) } ?? "NULL" }
+    static func escapeFloatOpt(_ f: Double?) -> String { f.map { String($0) } ?? "NULL" }
+    static func escapeBoolOpt(_ b: Bool?) -> String { b.map { $0 ? "1" : "0" } ?? "NULL" }
     static func escapeIntList(_ ids: [Int]) -> String {
         ids.map(String.init).joined(separator: ", ")
     }

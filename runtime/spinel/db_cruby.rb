@@ -277,6 +277,33 @@ module Db
     v.nil? ? "" : v.to_s
   end
 
+  # Nullable-column reads. A column the schema declares nullable holds
+  # NULL until something sets it, and NULL is not the type's zero:
+  # `column_text` collapsing it to "" makes a nullable UNIQUE column
+  # collide row-to-row, and `column_int`'s 0 makes `where(fk: nil)`
+  # match nothing. These are the reads the lowerer emits for those
+  # columns; the non-`_opt` readers stay exactly as they were for
+  # NOT NULL columns, which is most of them.
+  def self.column_int_opt(stmt_id, i)
+    v = @rows[stmt_id][:row][i]
+    v.nil? ? nil : v.to_i
+  end
+
+  def self.column_float_opt(stmt_id, i)
+    v = @rows[stmt_id][:row][i]
+    v.nil? ? nil : v.to_f
+  end
+
+  def self.column_text_opt(stmt_id, i)
+    v = @rows[stmt_id][:row][i]
+    v.nil? ? nil : v.to_s
+  end
+
+  def self.column_bool_opt(stmt_id, i)
+    v = @rows[stmt_id][:row][i]
+    v.nil? ? nil : v.to_i != 0
+  end
+
   # Raw typed column read: the value exactly as the sqlite3 gem
   # returns it — Integer for INTEGER affinity, Float for REAL, String
   # for TEXT, and crucially nil for NULL (column_text collapses NULL
@@ -396,6 +423,25 @@ module Db
 
   def self.escape_int(n)
     n.to_i.to_s
+  end
+
+  # Nullable-column writes: nil renders the SQL keyword NULL rather
+  # than `''` / `0`, so what the schema calls nullable round-trips as
+  # nil instead of coming back as the type's zero.
+  def self.escape_string_opt(s)
+    s.nil? ? "NULL" : escape_string(s)
+  end
+
+  def self.escape_int_opt(n)
+    n.nil? ? "NULL" : escape_int(n)
+  end
+
+  def self.escape_float_opt(f)
+    f.nil? ? "NULL" : f.to_f.to_s
+  end
+
+  def self.escape_bool_opt(b)
+    b.nil? ? "NULL" : escape_bool(b)
   end
 
   # Render an integer list for `IN (...)` eager-load batches (issue

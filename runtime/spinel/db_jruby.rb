@@ -225,6 +225,30 @@ module Db
     v.nil? ? "" : v.to_s
   end
 
+  # Nullable-column reads (see db_cruby.rb): NULL stays nil instead of
+  # collapsing to the type's zero. JDBC reports NULL out-of-band —
+  # `getObject` is nil, and `wasNull` after a typed get — so read the
+  # object first and only then coerce.
+  def self.column_int_opt(stmt, i)
+    v = stmt.rs.get_object(i + 1)
+    v.nil? ? nil : v.to_i
+  end
+
+  def self.column_float_opt(stmt, i)
+    v = stmt.rs.get_object(i + 1)
+    v.nil? ? nil : v.to_f
+  end
+
+  def self.column_text_opt(stmt, i)
+    v = stmt.rs.get_string(i + 1)
+    v.nil? ? nil : v.to_s
+  end
+
+  def self.column_bool_opt(stmt, i)
+    v = stmt.rs.get_object(i + 1)
+    v.nil? ? nil : v.to_i != 0
+  end
+
   # Raw typed column read (see db_cruby.rb): JDBC getObject gives the
   # driver's native value — Integer/Long for INTEGER affinity, Double
   # for REAL, String for TEXT, nil for NULL. Normalize java.lang
@@ -307,6 +331,23 @@ module Db
 
   def self.escape_int(n)
     n.to_i.to_s
+  end
+
+  # Nullable-column writes (see db_cruby.rb): nil renders NULL.
+  def self.escape_string_opt(s)
+    s.nil? ? "NULL" : escape_string(s)
+  end
+
+  def self.escape_int_opt(n)
+    n.nil? ? "NULL" : escape_int(n)
+  end
+
+  def self.escape_float_opt(f)
+    f.nil? ? "NULL" : f.to_f.to_s
+  end
+
+  def self.escape_bool_opt(b)
+    b.nil? ? "NULL" : escape_bool(b)
   end
 
   def self.escape_int_list(ids)

@@ -170,6 +170,49 @@ module Roundhouse
       end
     end
 
+    # Nullable-column reads. A column the schema declares nullable
+    # holds NULL until something sets it, and NULL is not the type's
+    # zero: "" in a nullable UNIQUE column collides row-to-row, and 0
+    # in a nullable fk makes `where(fk: nil)` match nothing. The
+    # lowerer emits these for those columns; the readers above stay as
+    # they are for NOT NULL columns.
+    def self.column_int_opt(stmt_id : Int64, i : Int64) : Int64?
+      entry = @@statements[stmt_id]
+      row = entry.current.not_nil!
+      row[i].nil? ? nil : column_int(stmt_id, i)
+    end
+
+    def self.column_float_opt(stmt_id : Int64, i : Int64) : Float64?
+      entry = @@statements[stmt_id]
+      row = entry.current.not_nil!
+      v = row[i]
+      case v
+      when Nil     then nil
+      when Float64 then v
+      when Float32 then v.to_f64
+      when Int64   then v.to_f64
+      when Int32   then v.to_f64
+      when String  then v.to_f64? || 0.0
+      else              0.0
+      end
+    end
+
+    def self.column_text_opt(stmt_id : Int64, i : Int64) : String?
+      entry = @@statements[stmt_id]
+      row = entry.current.not_nil!
+      v = row[i]
+      case v
+      when Nil    then nil
+      when String then v
+      else             v.to_s
+      end
+    end
+
+    def self.column_bool_opt(stmt_id : Int64, i : Int64) : Bool?
+      v = column_int_opt(stmt_id, i)
+      v.nil? ? nil : v != 0
+    end
+
     # Release the underlying ResultSet and drop the stmt-table entry.
     # Idempotent — finalize on an unknown stmt id is a no-op (mirrors
     # the TS shim).
@@ -201,6 +244,24 @@ module Roundhouse
     # fallback.
     def self.escape_int(n : Int) : String
       n.to_s
+    end
+
+    # Nullable-column writes: nil renders the SQL keyword NULL rather
+    # than `''` / `0`, so a nullable column round-trips as nil.
+    def self.escape_string_opt(s : String?) : String
+      s.nil? ? "NULL" : escape_string(s)
+    end
+
+    def self.escape_int_opt(n : Int?) : String
+      n.nil? ? "NULL" : escape_int(n)
+    end
+
+    def self.escape_float_opt(f : Float?) : String
+      f.nil? ? "NULL" : f.to_s
+    end
+
+    def self.escape_bool_opt(b : Bool?) : String
+      b.nil? ? "NULL" : (b ? "1" : "0")
     end
 
     # Render an integer list for `IN (...)` eager-load batches (issue

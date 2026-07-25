@@ -88,6 +88,36 @@ public static class Db
         return r.IsDBNull((int)index) ? "" : Convert.ToString(r.GetValue((int)index)) ?? "";
     }
 
+    // Nullable-column reads. A column the schema declares nullable
+    // holds NULL until something sets it, and NULL is not the type's
+    // zero: "" in a nullable UNIQUE column collides row-to-row, and 0
+    // in a nullable fk makes `where(fk: nil)` match nothing. The
+    // lowerer emits these for those columns; the readers above stay as
+    // they are for NOT NULL columns.
+    public static long? ColumnIntOpt(long stmt, long index)
+    {
+        var r = OpenReaders[stmt].reader;
+        return r.IsDBNull((int)index) ? null : Convert.ToInt64(r.GetValue((int)index));
+    }
+
+    public static double? ColumnFloatOpt(long stmt, long index)
+    {
+        var r = OpenReaders[stmt].reader;
+        return r.IsDBNull((int)index) ? null : Convert.ToDouble(r.GetValue((int)index));
+    }
+
+    public static string? ColumnTextOpt(long stmt, long index)
+    {
+        var r = OpenReaders[stmt].reader;
+        return r.IsDBNull((int)index) ? null : Convert.ToString(r.GetValue((int)index));
+    }
+
+    public static bool? ColumnBoolOpt(long stmt, long index)
+    {
+        var v = ColumnIntOpt(stmt, index);
+        return v is null ? null : v != 0L;
+    }
+
     // Dispose BOTH the reader and the command — the command owns the native
     // sqlite3_stmt, which `reader.Dispose()` only resets, not frees. Leaking
     // the command lets prepared statements pile up in native memory faster
@@ -124,6 +154,17 @@ public static class Db
     public static string EscapeString(string? value) =>
         "'" + (value ?? "").Replace("'", "''") + "'";
     public static string EscapeInt(long value) => value.ToString();
+
+    // Nullable-column writes: null renders the SQL keyword NULL rather
+    // than `''` / `0`, so a nullable column round-trips as null.
+    public static string EscapeStringOpt(string? value) =>
+        value is null ? "NULL" : EscapeString(value);
+    public static string EscapeIntOpt(long? value) =>
+        value is null ? "NULL" : value.Value.ToString();
+    public static string EscapeFloatOpt(double? value) =>
+        value is null ? "NULL" : value.Value.ToString();
+    public static string EscapeBoolOpt(bool? value) =>
+        value is null ? "NULL" : (value.Value ? "1" : "0");
 
     // Comma-joined ids for an `IN (...)` clause (the association preload).
     // Empty → `NULL` so `IN (NULL)` stays valid SQL and matches nothing.

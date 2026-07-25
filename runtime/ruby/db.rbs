@@ -18,6 +18,14 @@ module Db
   def self.column_int: (Integer, Integer) -> Integer
   def self.column_float: (Integer, Integer) -> Float
   def self.column_text: (Integer, Integer) -> String
+  # Nullable-column reads: NULL comes back as nil, not the type's zero.
+  # The lowerer emits these for columns the schema declares nullable —
+  # a nullable UNIQUE column must not read back "" for every unset row,
+  # and `where(fk: nil)` must match the rows that never set it.
+  def self.column_int_opt: (Integer, Integer) -> Integer?
+  def self.column_float_opt: (Integer, Integer) -> Float?
+  def self.column_text_opt: (Integer, Integer) -> String?
+  def self.column_bool_opt: (Integer, Integer) -> bool?
   def self.finalize: (Integer) -> void
   # Placeholder binding (roundhouse#12) — bind a `?` param (1-based) on a
   # prepared stmt before the first step?, when the ROUNDHOUSE_PARAM_BINDS
@@ -41,4 +49,11 @@ module Db
   def self.escape_string: (String) -> String
   def self.escape_int: (Integer) -> String
   def self.escape_int_list: (Array[Integer]) -> String
+  # Nullable-column writes: nil renders the SQL keyword NULL, so a
+  # column the schema calls nullable round-trips as nil rather than as
+  # the type's zero.
+  def self.escape_string_opt: (String?) -> String
+  def self.escape_int_opt: (Integer?) -> String
+  def self.escape_float_opt: (Float?) -> String
+  def self.escape_bool_opt: (bool?) -> String
 end

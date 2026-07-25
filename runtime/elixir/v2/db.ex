@@ -84,6 +84,48 @@ defmodule Db do
     end
   end
 
+  # Nullable-column reads. A column the schema declares nullable holds
+  # NULL until something sets it, and NULL is not the type's zero: ""
+  # in a nullable UNIQUE column collides row-to-row, and 0 in a
+  # nullable fk makes `where(fk: nil)` match nothing. The lowerer emits
+  # these for those columns; the readers above stay as they are for
+  # NOT NULL columns.
+  def column_int_opt(id, i) do
+    case column(id, i) do
+      nil -> nil
+      _ -> column_int(id, i)
+    end
+  end
+
+  def column_float_opt(id, i) do
+    case column(id, i) do
+      nil -> nil
+      n when is_float(n) -> n
+      n when is_integer(n) -> n / 1
+      s when is_binary(s) ->
+        case Float.parse(s) do
+          {n, _} -> n
+          :error -> 0.0
+        end
+
+      _ -> 0.0
+    end
+  end
+
+  def column_text_opt(id, i) do
+    case column(id, i) do
+      nil -> nil
+      _ -> column_text(id, i)
+    end
+  end
+
+  def column_bool_opt(id, i) do
+    case column_int_opt(id, i) do
+      nil -> nil
+      n -> n != 0
+    end
+  end
+
   # Drop a prepared statement's cursor state.
   def finalize(id) do
     put_stmts(Map.delete(stmts(), id))
@@ -98,6 +140,21 @@ defmodule Db do
 
   # Render an integer for SQL inlining.
   def escape_int(n), do: Integer.to_string(n)
+
+  # Nullable-column writes: nil renders the SQL keyword NULL rather
+  # than `''` / `0`, so a nullable column round-trips as nil.
+  def escape_string_opt(nil), do: "NULL"
+  def escape_string_opt(s), do: escape_string(s)
+
+  def escape_int_opt(nil), do: "NULL"
+  def escape_int_opt(n), do: escape_int(n)
+
+  def escape_float_opt(nil), do: "NULL"
+  def escape_float_opt(f), do: Float.to_string(f)
+
+  def escape_bool_opt(nil), do: "NULL"
+  def escape_bool_opt(true), do: "1"
+  def escape_bool_opt(false), do: "0"
 
   # ---- cursor state (process dict, per-process like Roundhouse.Db) ----
 

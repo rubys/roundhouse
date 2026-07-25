@@ -320,6 +320,93 @@ func Db_column_text(stmtID int64, i int64) string {
 	}
 }
 
+// Db_column_is_null reports whether the cell is SQL NULL. A column the
+// schema declares nullable holds NULL until something sets it, and
+// NULL is not the type's zero: "" in a nullable UNIQUE column collides
+// row-to-row, and 0 in a nullable fk makes `where(fk: nil)` match
+// nothing. The _opt readers below are what the lowerer emits for those
+// columns; the readers above stay as they are for NOT NULL columns.
+func Db_column_is_null(stmtID int64, i int64) bool {
+	stmtMu.Lock()
+	defer stmtMu.Unlock()
+	entry, ok := statements[stmtID]
+	if !ok || entry.current == nil {
+		return true
+	}
+	if int(i) >= len(entry.current) {
+		return true
+	}
+	return entry.current[i] == nil
+}
+
+func Db_column_int_opt(stmtID int64, i int64) *int64 {
+	if Db_column_is_null(stmtID, i) {
+		return nil
+	}
+	v := Db_column_int(stmtID, i)
+	return &v
+}
+
+func Db_column_float_opt(stmtID int64, i int64) *float64 {
+	if Db_column_is_null(stmtID, i) {
+		return nil
+	}
+	// No non-opt float reader exists on this shim (no emitted call site
+	// needed one yet); parse from the text form, which every driver
+	// value renders through.
+	v, _ := strconv.ParseFloat(Db_column_text(stmtID, i), 64)
+	return &v
+}
+
+func Db_column_text_opt(stmtID int64, i int64) *string {
+	if Db_column_is_null(stmtID, i) {
+		return nil
+	}
+	v := Db_column_text(stmtID, i)
+	return &v
+}
+
+func Db_column_bool_opt(stmtID int64, i int64) *bool {
+	if Db_column_is_null(stmtID, i) {
+		return nil
+	}
+	v := Db_column_int(stmtID, i) != 0
+	return &v
+}
+
+// Nullable-column writes: a nil pointer renders the SQL keyword NULL
+// rather than `''` / `0`, so a nullable column round-trips as nil.
+func Db_escape_string_opt(s *string) string {
+	if s == nil {
+		return "NULL"
+	}
+	return Db_escape_string(*s)
+}
+
+func Db_escape_int_opt(n *int64) string {
+	if n == nil {
+		return "NULL"
+	}
+	return Db_escape_int(*n)
+}
+
+func Db_escape_float_opt(f *float64) string {
+	if f == nil {
+		return "NULL"
+	}
+	return strconv.FormatFloat(*f, 'f', -1, 64)
+}
+
+func Db_escape_bool_opt(b *bool) string {
+	if b == nil {
+		return "NULL"
+	}
+	if *b {
+		return "1"
+	}
+	return "0"
+}
+
 // Db_finalize drops the stmt-table entry. Idempotent on unknown ids.
 func Db_finalize(stmtID int64) {
 	stmtMu.Lock()

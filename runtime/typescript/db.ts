@@ -213,6 +213,62 @@ function columnBool(stmtId: number, idx: number): boolean {
   return columnInt(stmtId, idx) !== 0;
 }
 
+// Nullable-column reads. A column the schema declares nullable holds
+// NULL until something sets it, and NULL is not the type's zero: ""
+// in a nullable UNIQUE column collides row-to-row, and 0 in a nullable
+// fk makes `where(fk: nil)` match nothing. The lowerer emits these for
+// those columns; the non-`_opt` readers above stay as they are for
+// NOT NULL columns.
+function columnValueOrNull(stmtId: number, i: number, caller: string): unknown {
+  const entry = _statements.get(stmtId);
+  if (entry === undefined || entry.current === undefined) {
+    throw new Error(`Db: ${caller} called on stmt ${stmtId} with no current row`);
+  }
+  const v = entry.current[i];
+  return v === null || v === undefined ? null : v;
+}
+
+function columnIntOpt(stmtId: number, i: number): number | null {
+  const v = columnValueOrNull(stmtId, i, "column_int_opt");
+  if (v === null) return null;
+  return typeof v === "number" ? Math.trunc(v) : Number(v) | 0;
+}
+
+function columnFloatOpt(stmtId: number, i: number): number | null {
+  const v = columnValueOrNull(stmtId, i, "column_float_opt");
+  return v === null ? null : Number(v);
+}
+
+function columnTextOpt(stmtId: number, i: number): string | null {
+  const v = columnValueOrNull(stmtId, i, "column_text_opt");
+  return v === null ? null : String(v);
+}
+
+function columnBoolOpt(stmtId: number, i: number): boolean | null {
+  const v = columnIntOpt(stmtId, i);
+  return v === null ? null : v !== 0;
+}
+
+// Nullable-column writes: nil renders the SQL keyword NULL rather than
+// `''` / `0`, so a nullable column round-trips as null.
+function escapeStringOpt(s: unknown): string {
+  return s === null || s === undefined ? "NULL" : escapeString(s);
+}
+
+function escapeIntOpt(n: unknown): string {
+  return n === null || n === undefined ? "NULL" : escapeInt(n);
+}
+
+function escapeFloatOpt(f: unknown): string {
+  if (f === null || f === undefined) return "NULL";
+  const parsed = typeof f === "number" ? f : Number(f);
+  return Number.isFinite(parsed) ? String(parsed) : "0.0";
+}
+
+function escapeBoolOpt(b: unknown): string {
+  return b === null || b === undefined ? "NULL" : escapeBool(b);
+}
+
 // Method names match the TypeScript emitter's Ruby→TS rename rule
 // (see `src/emit/typescript/naming.rs::ts_method_name`): Ruby's `?`
 // suffix becomes an `is_` prefix at the call site, so `Db.step?(stmt)`
@@ -228,6 +284,10 @@ export const Db = {
   column_int: columnInt,
   column_text: columnText,
   column_bool: columnBool,
+  column_int_opt: columnIntOpt,
+  column_float_opt: columnFloatOpt,
+  column_text_opt: columnTextOpt,
+  column_bool_opt: columnBoolOpt,
   finalize,
   last_insert_rowid: lastInsertRowid,
   changes,
@@ -235,6 +295,10 @@ export const Db = {
   escape_int: escapeInt,
   escape_int_list: escapeIntList,
   escape_bool: escapeBool,
+  escape_string_opt: escapeStringOpt,
+  escape_int_opt: escapeIntOpt,
+  escape_float_opt: escapeFloatOpt,
+  escape_bool_opt: escapeBoolOpt,
 };
 
 export type DbModule = typeof Db;

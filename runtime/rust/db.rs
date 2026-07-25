@@ -365,6 +365,49 @@ impl Db {
         Self::column_int(stmt_id, i) != 0
     }
 
+    /// Nullable-column reads. A column the schema declares nullable
+    /// holds NULL until something sets it, and NULL is not the type's
+    /// zero: "" in a nullable UNIQUE column collides row-to-row, and 0
+    /// in a nullable fk makes `where(fk: nil)` match nothing. The
+    /// lowerer emits these for those columns; the readers above stay
+    /// as they are for NOT NULL columns.
+    fn column_is_null(stmt_id: i64, i: i64) -> bool {
+        STATEMENTS.with(|s| {
+            let map = s.borrow();
+            let Some(entry) = map.get(&stmt_id) else { return true };
+            let Some(row) = entry.current.as_ref() else { return true };
+            matches!(row.get(i as usize), None | Some(Value::Null))
+        })
+    }
+
+    pub fn column_int_opt(stmt_id: i64, i: i64) -> Option<i64> {
+        if Self::column_is_null(stmt_id, i) {
+            None
+        } else {
+            Some(Self::column_int(stmt_id, i))
+        }
+    }
+
+    pub fn column_float_opt(stmt_id: i64, i: i64) -> Option<f64> {
+        if Self::column_is_null(stmt_id, i) {
+            None
+        } else {
+            Some(Self::column_float(stmt_id, i))
+        }
+    }
+
+    pub fn column_text_opt(stmt_id: i64, i: i64) -> Option<String> {
+        if Self::column_is_null(stmt_id, i) {
+            None
+        } else {
+            Some(Self::column_text(stmt_id, i))
+        }
+    }
+
+    pub fn column_bool_opt(stmt_id: i64, i: i64) -> Option<bool> {
+        Self::column_int_opt(stmt_id, i).map(|v| v != 0)
+    }
+
     /// Drop the stmt-table entry. Idempotent on unknown ids.
     pub fn finalize(stmt_id: i64) {
         STATEMENTS.with(|s| {
@@ -401,6 +444,37 @@ impl Db {
     /// Render an integer list for `IN (...)` eager-load batches (issue
     /// #27). An empty list yields "NULL" so `IN (NULL)` is valid SQL
     /// matching no rows — an empty `IN ()` is a syntax error.
+    /// Nullable-column writes: `None` renders the SQL keyword NULL
+    /// rather than `''` / `0`, so a nullable column round-trips as
+    /// None.
+    pub fn escape_string_opt(s: Option<&str>) -> String {
+        match s {
+            Some(v) => Self::escape_string(v),
+            None => "NULL".to_string(),
+        }
+    }
+
+    pub fn escape_int_opt(n: Option<i64>) -> String {
+        match n {
+            Some(v) => Self::escape_int(v),
+            None => "NULL".to_string(),
+        }
+    }
+
+    pub fn escape_float_opt(f: Option<f64>) -> String {
+        match f {
+            Some(v) => v.to_string(),
+            None => "NULL".to_string(),
+        }
+    }
+
+    pub fn escape_bool_opt(b: Option<bool>) -> String {
+        match b {
+            Some(v) => Self::escape_bool(v),
+            None => "NULL".to_string(),
+        }
+    }
+
     pub fn escape_int_list(ids: Vec<i64>) -> String {
         if ids.is_empty() {
             return "NULL".to_string();

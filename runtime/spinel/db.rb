@@ -55,6 +55,7 @@ module SQL
   ffi_const :OK,   0
   ffi_const :ROW,  100
   ffi_const :DONE, 101
+  ffi_const :NULL_TYPE, 5
 
   ffi_func :sqlite3_open,              [:str, :ptr],                          :int
   ffi_func :sqlite3_close,             [:ptr],                                :int
@@ -79,6 +80,11 @@ module SQL
   # spinel's test/ffi_ptr_int_literal.rb.
   ffi_func :sqlite3_bind_int64,        [:ptr, :int, :long],                   :int
   ffi_func :sqlite3_bind_text,         [:ptr, :int, :str, :int, :ptr],        :int
+  # `sqlite3_column_type` reports the storage class of a column in the
+  # current row; 5 is SQLITE_NULL. The nullable-column reads below need
+  # it because `sqlite3_column_int` cannot distinguish a stored 0 from
+  # NULL (both come back as 0).
+  ffi_func :sqlite3_column_type,       [:ptr, :int],                          :int
   ffi_func :sqlite3_column_int,        [:ptr, :int],                          :int
   ffi_func :sqlite3_column_double,     [:ptr, :int],                          :double
   ffi_func :sqlite3_column_text,       [:ptr, :int],                          :str
@@ -388,6 +394,43 @@ module Db
     end
   end
 
+  # Nullable-column reads (see db_cruby.rb): NULL stays nil rather than
+  # collapsing to "" / 0. Unlike the gem-backed shims there is no
+  # native value to inspect, so these dispatch on the column's storage
+  # class first.
+  def self.column_int_opt(stmt, i)
+    if SQL.sqlite3_column_type(stmt, i) == SQL::NULL_TYPE
+      nil
+    else
+      SQL.sqlite3_column_int(stmt, i)
+    end
+  end
+
+  def self.column_float_opt(stmt, i)
+    if SQL.sqlite3_column_type(stmt, i) == SQL::NULL_TYPE
+      nil
+    else
+      SQL.sqlite3_column_double(stmt, i)
+    end
+  end
+
+  def self.column_text_opt(stmt, i)
+    s = SQL.sqlite3_column_text(stmt, i)
+    if s.nil?
+      nil
+    else
+      s + ""
+    end
+  end
+
+  def self.column_bool_opt(stmt, i)
+    if SQL.sqlite3_column_type(stmt, i) == SQL::NULL_TYPE
+      nil
+    else
+      SQL.sqlite3_column_int(stmt, i) != 0
+    end
+  end
+
   def self.column_count(stmt)
     SQL.sqlite3_column_count(stmt)
   end
@@ -451,6 +494,23 @@ module Db
 
   def self.escape_int(n)
     n.to_i.to_s
+  end
+
+  # Nullable-column writes (see db_cruby.rb): nil renders NULL.
+  def self.escape_string_opt(s)
+    s.nil? ? "NULL" : escape_string(s)
+  end
+
+  def self.escape_int_opt(n)
+    n.nil? ? "NULL" : escape_int(n)
+  end
+
+  def self.escape_float_opt(f)
+    f.nil? ? "NULL" : f.to_f.to_s
+  end
+
+  def self.escape_bool_opt(b)
+    b.nil? ? "NULL" : escape_bool(b)
   end
 
   # Render an integer list for `IN (...)` eager-load batches (issue

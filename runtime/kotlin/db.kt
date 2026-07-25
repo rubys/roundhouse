@@ -122,6 +122,33 @@ object Db {
         return rs.getString((i + 1).toInt()) ?: ""
     }
 
+    // Nullable-column reads. A column the schema declares nullable
+    // holds NULL until something sets it, and NULL is not the type's
+    // zero: "" in a nullable UNIQUE column collides row-to-row, and 0
+    // in a nullable fk makes `where(fk: nil)` match nothing. JDBC
+    // reports NULL out of band, hence the `wasNull` checks.
+    fun columnIntOpt(stmtId: Long, i: Long): Long? {
+        val rs = tlStatements.get()[stmtId]!!
+        val v = rs.getLong((i + 1).toInt())
+        return if (rs.wasNull()) null else v
+    }
+
+    fun columnFloatOpt(stmtId: Long, i: Long): Double? {
+        val rs = tlStatements.get()[stmtId]!!
+        val v = rs.getDouble((i + 1).toInt())
+        return if (rs.wasNull()) null else v
+    }
+
+    fun columnTextOpt(stmtId: Long, i: Long): String? {
+        val rs = tlStatements.get()[stmtId]!!
+        return rs.getString((i + 1).toInt())
+    }
+
+    fun columnBoolOpt(stmtId: Long, i: Long): Boolean? {
+        val v = columnIntOpt(stmtId, i) ?: return null
+        return v != 0L
+    }
+
     // Release the ResultSet + statement. Idempotent.
     fun finalize(stmtId: Long) {
         tlStatements.get().remove(stmtId)?.close()
@@ -135,6 +162,12 @@ object Db {
     fun escapeString(s: String): String = "'" + s.replace("'", "''") + "'"
     fun escapeInt(n: Long): String = n.toString()
     fun escapeBool(b: Boolean): String = if (b) "1" else "0"
+    // Nullable-column writes: null renders the SQL keyword NULL rather
+    // than `''` / `0`, so a nullable column round-trips as null.
+    fun escapeStringOpt(s: String?): String = if (s == null) "NULL" else escapeString(s)
+    fun escapeIntOpt(n: Long?): String = n?.toString() ?: "NULL"
+    fun escapeFloatOpt(f: Double?): String = f?.toString() ?: "NULL"
+    fun escapeBoolOpt(b: Boolean?): String = if (b == null) "NULL" else if (b) "1" else "0"
     // `IN (...)` list for a preload query: comma-joined integer ids.
     fun escapeIntList(ids: MutableList<Long>): String = ids.joinToString(", ") { it.toString() }
 }
