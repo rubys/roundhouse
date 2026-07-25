@@ -1,0 +1,18 @@
+# Typing contract for cookies.rb beside this file. Getter+setter def pairs
+# per the runtime .rbs convention; keys are untyped (controllers index with
+# Symbol constants and String literals both).
+module ActionController
+  class CookieJar
+    def initialize: (?Hash[String, String] inbound) -> void
+    def []: (untyped key) -> String
+    def []=: (untyped key, String value) -> String
+    def permanent: () -> ActionController::CookieJar
+    def delete: (untyped key) -> String
+    def to_set: () -> Hash[String, String]
+  end
+
+  class Base
+    def cookies: () -> ActionController::CookieJar
+    def cookies=: (ActionController::CookieJar value) -> ActionController::CookieJar
+  end
+end

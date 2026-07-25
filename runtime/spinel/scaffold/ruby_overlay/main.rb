@@ -83,7 +83,6 @@ require_relative "runtime/active_record_arel"
 require_relative "config/schema"
 require_relative "runtime/action_dispatch"
 require_relative "runtime/action_controller"
-require_relative "runtime/action_controller_cookies"
 # After action_controller: its require chain loads the shared
 # action_view/view_helpers, and the safe-buffer overrides must win
 # that reopen (same ordering contract as action_controller_session's

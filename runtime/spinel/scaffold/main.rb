@@ -339,6 +339,12 @@ module Main
     # action that leaves the session untouched emits no Set-Cookie.
     session_in = req.cookies.fetch("_session", "")
     controller.session = ActionDispatch::Session.from_cookie(session_in)
+    # Controller-level cookie access (`cookies[:k]` reads, `cookies[:k] = v`
+    # records writes surfaced as Set-Cookie below). The inbound jar is the
+    # request's parsed cookies (String-keyed Tep.str_hash); the CookieJar
+    # normalizes keys so Symbol-constant indexing (`cookies[:tag_filters]`)
+    # resolves. Same shared ActionController::CookieJar the CRuby overlay uses.
+    controller.cookies = ActionController::CookieJar.new(req.cookies)
     # Inbound flash: each message rides its own cookie (flash_notice /
     # flash_alert) so the value carries verbatim, no serialization. Load
     # through the constructor (NOT flash[:k]=) so to_persisted's show-once
@@ -385,6 +391,20 @@ module Main
       Main.set_flash_cookie(res, "flash_alert", pa)
     elsif req.cookies.fetch("flash_alert", "").length > 0
       Main.clear_flash_cookie(res, "flash_alert")
+    end
+
+    # Outbound cookies: serialize whatever the action recorded via
+    # `cookies[:k] = v` / `cookies.permanent[:k] = v` as Set-Cookie. Empty
+    # on a read-only request (the common GET path), so this is a no-op there.
+    out_cookies = controller.cookies.to_set
+    ock = out_cookies.keys
+    ci = 0
+    while ci < ock.length
+      cname = ock[ci]
+      copts = Tep.str_hash
+      copts["Path"] = "/"
+      res.set_cookie(cname, out_cookies[cname], copts)
+      ci += 1
     end
 
     # Session persistence: re-encode whatever the action (or a lazy

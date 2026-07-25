@@ -762,7 +762,14 @@ fn every_runtime_method_body_concretely_typed() {
     // message `super(...)` shape RecordNotFound already carries, whose
     // default-argument site is untyped by the same convention; +1
     // site; ceiling raised 205 → 206.
-    const CEILING: usize = 206;
+    // 2026-07-25 ActionController::CookieJar (controller `cookies[:k]`
+    // access, ruby-family reopen replacing the CRuby-only overlay so
+    // spinel-on-lobsters can read cookies): `[]`/`[]=`/`delete` take an
+    // `untyped` key — cookies are indexed with both Symbol constants and
+    // String literals, normalized via `key.to_s` — so the three key
+    // params are untyped by declaration; +3 sites; ceiling raised
+    // 206 → 209.
+    const CEILING: usize = 209;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
