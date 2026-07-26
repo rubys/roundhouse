@@ -778,6 +778,17 @@ fn emit_node(
         let is_leaf =
             child.stat.is_empty() && child.dynamic.is_none() && child.terminals.len() == 1;
         let var = block_var(names, is_leaf, parent_seg);
+        // `/avatars/:username_size.png` puts a literal suffix inside the
+        // dynamic segment. The `String` matcher above captures the whole
+        // segment, suffix included, where Rails matched the suffix and
+        // kept it out of the param — say so rather than emit a quiet
+        // divergence.
+        if let Some(n) = names.iter().find(|n| n.contains('.')) {
+            out.push_str(&format!(
+                "{pad}# ROUNDHOUSE-TODO: `:{n}` carries a literal suffix Rails matched \
+                 separately; this matcher captures it as part of `{var}`\n"
+            ));
+        }
         // Every source param name at this position binds to the one
         // block variable; later (deeper) entries shadow earlier ones,
         // so body conversion resolves a param to its innermost binding.
@@ -937,7 +948,7 @@ fn block_var(names: &[String], is_leaf: bool, parent_seg: Option<&str>) -> Strin
     if is_leaf {
         if let Some(name) = names.first() {
             if name != "id" {
-                return name.clone();
+                return sanitize_var(name);
             }
         }
         if let Some(seg) = parent_seg {
@@ -948,7 +959,22 @@ fn block_var(names: &[String], is_leaf: bool, parent_seg: Option<&str>) -> Strin
     if names.iter().any(|n| n == "id") {
         return "id".to_string();
     }
-    names.first().cloned().unwrap_or_else(|| "id".to_string())
+    names.first().map(|n| sanitize_var(n)).unwrap_or_else(|| "id".to_string())
+}
+
+/// A path param can carry a literal suffix inside its segment
+/// (`/avatars/:username_size.png` — Rails reads the param as
+/// `username_size` and matches `.png` separately), and the raw name is
+/// not a valid Ruby local. Keep the identifier-safe head; the dropped
+/// suffix is flagged at the route site.
+fn sanitize_var(name: &str) -> String {
+    let head: String =
+        name.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    if head.is_empty() {
+        "id".to_string()
+    } else {
+        head
+    }
 }
 
 /// Interior-node loads: every recognized find-by-param filter whose
@@ -1250,9 +1276,155 @@ fn unconverted_comment(stmt: &Expr) -> Vec<String> {
     lines
 }
 
+/// Rails / ActiveRecord method vocabulary that must never carry over
+/// verbatim. Two families: persistence and query methods whose Sequel
+/// spelling differs (`save!` → `save(raise_on_failure: true)`,
+/// `find_each` → `paged_each`), and ActiveSupport surface that has no
+/// Sequel meaning at all (`blank?`, `1.week.ago`).
+///
+/// Enumerable-shaped names (`select`, `count`, `first`, `sum`) are
+/// listed even though plain Ruby uses them too. That costs coverage on
+/// genuine Array receivers, and it is the right trade: emitting a
+/// verbatim `.select` that turns out to be a relation is exactly the
+/// false positive that makes converted code look finished and be
+/// wrong.
+const RAILS_VOCABULARY: &[&str] = &[
+    // persistence
+    "save", "save!", "update", "update!", "update_attribute", "update_attributes",
+    "update_column", "update_columns", "touch", "reload", "becomes", "toggle!",
+    "increment!", "decrement!", "destroy_all", "delete_all", "record_timestamps=",
+    "valid?", "invalid?", "errors", "full_messages", "transaction",
+    // model-object surface AR overrides and Sequel does not: `dup`
+    // resets the primary key in Rails and copies it in Sequel, which
+    // is a silent divergence in exactly the "looks converted" way.
+    "dup", "clone", "attributes", "assign_attributes", "new_record?", "persisted?",
+    "destroyed?", "changed?", "changes", "previous_changes",
+    // query
+    "where", "find", "find_by", "find_by!", "find_each", "find_in_batches", "order",
+    "includes", "joins", "left_joins", "preload", "eager_load", "eager", "pluck",
+    "select", "distinct", "group", "having", "limit", "offset", "count", "sum",
+    "average", "minimum", "maximum", "exists?", "first", "last", "all", "none",
+    "unscoped", "references", "merge", "arel_table", "to_sql",
+    // Rails / ActiveSupport idioms
+    "blank?", "present?", "presence", "try", "try!", "to_param", "human_attribute_name",
+    "params", "session", "flash", "cookies", "request", "response", "headers",
+    "ago", "from_now", "beginning_of_day", "end_of_day", "days", "hours", "minutes",
+    "seconds", "weeks", "months", "years", "day", "hour", "minute", "second", "week",
+    "month", "year",
+];
+
+fn rails_vocabulary(method: &str) -> bool {
+    RAILS_VOCABULARY.contains(&method) || method.ends_with("_path") || method.ends_with("_url")
+}
+
+/// Is this statement plain Ruby — no Rails or ActiveRecord vocabulary
+/// anywhere in its tree — and therefore safe to carry over verbatim,
+/// the way model method bodies already do at the `ModelBodyItem`
+/// level? `@title = "Login"` is not a framework construct, and
+/// commenting it out taught nobody anything.
+///
+/// The walk is an ALLOWLIST, deliberately. Emitting a verbatim
+/// statement that turns out to be ActiveRecord is precisely the
+/// false positive Jeremy flagged on lobsters — `find_each`, `save!`
+/// and `record_timestamps=` reading as valid Sequel while being
+/// nothing of the kind. When a node's disposition is unclear the
+/// statement is commented, which is honest, rather than emitted,
+/// which may be wrong.
+fn plain_ruby(e: &Expr) -> bool {
+    match &*e.node {
+        // Values and pure control flow. Children are still walked below.
+        ExprNode::Lit { .. }
+        | ExprNode::Var { .. }
+        | ExprNode::Ivar { .. }
+        | ExprNode::SelfRef
+        | ExprNode::Hash { .. }
+        | ExprNode::Array { .. }
+        | ExprNode::StringInterp { .. }
+        | ExprNode::Range { .. }
+        | ExprNode::Splat { .. }
+        | ExprNode::BoolOp { .. }
+        | ExprNode::If { .. }
+        | ExprNode::Case { .. }
+        | ExprNode::Seq { .. }
+        | ExprNode::Return { .. }
+        | ExprNode::Next { .. }
+        | ExprNode::Break { .. }
+        | ExprNode::While { .. }
+        | ExprNode::Raise { .. }
+        | ExprNode::RescueModifier { .. }
+        | ExprNode::BeginRescue { .. }
+        | ExprNode::MultiAssign { .. }
+        | ExprNode::Let { .. }
+        | ExprNode::Cast { .. } => {}
+
+        ExprNode::Assign { target, .. } | ExprNode::OpAssign { target, .. } => {
+            if !plain_lvalue(target) {
+                return false;
+            }
+        }
+
+        // A call carries over only with an explicit receiver that is
+        // itself plain — a bare call would target a controller instance
+        // the Roda app doesn't have — and a method outside the Rails
+        // vocabulary. A `Const` receiver is a model or Rails namespace
+        // needing a real Sequel spelling. Blocks are refused wholesale
+        // in this pass: `each`/`map` on an ivar may be an Array or a
+        // relation, and those don't survive the same translation.
+        ExprNode::Send { recv, method, block, .. } => {
+            let Some(recv) = recv else { return false };
+            if block.is_some() || rails_vocabulary(method.as_str()) {
+                return false;
+            }
+            if matches!(&*recv.node, ExprNode::Const { .. }) {
+                return false;
+            }
+        }
+
+        // Bare `Const` reads, `Apply`, `Lambda`, `Yield`, `Super`,
+        // `Retry`, `Redo`: either a class reference that needs a Sequel
+        // spelling, or a shape this pass hasn't reasoned about.
+        _ => return false,
+    }
+
+    let mut ok = true;
+    e.node.for_each_child(&mut |c| {
+        if ok && !plain_ruby(c) {
+            ok = false;
+        }
+    });
+    ok
+}
+
+/// Assignment targets. `@story.is_deleted = true` and
+/// `@story.editor = @user` carry over because Sequel generates column
+/// and association setters with the same spelling; `flash[:error] = …`
+/// does not, because its receiver isn't plain.
+fn plain_lvalue(t: &crate::expr::LValue) -> bool {
+    use crate::expr::LValue;
+    match t {
+        LValue::Var { .. } | LValue::Ivar { .. } => true,
+        LValue::Attr { recv, name } => !rails_vocabulary(name.as_str()) && plain_ruby(recv),
+        LValue::Index { recv, index } => plain_ruby(recv) && plain_ruby(index),
+        LValue::Const { .. } => false,
+    }
+}
+
 /// One statement → Roda/Sequel source lines, or None (not in the
-/// recognized conversion set).
+/// recognized conversion set). The Rails-vocabulary translations run
+/// first; anything they don't claim falls through to plain Ruby,
+/// which carries over verbatim.
 fn convert_stmt(stmt: &Expr, cx: &BodyCx) -> Option<Converted> {
+    if let Some(c) = convert_framework_stmt(stmt, cx) {
+        return Some(c);
+    }
+    if plain_ruby(stmt) {
+        return Some(Converted::one(emit_expr(stmt).lines().map(str::to_string).collect()));
+    }
+    None
+}
+
+/// Statements whose Rails vocabulary needs a Sequel/Roda spelling.
+fn convert_framework_stmt(stmt: &Expr, cx: &BodyCx) -> Option<Converted> {
     match &*stmt.node {
         ExprNode::Assign { target, value } => {
             let crate::expr::LValue::Ivar { name } = target else { return None };
@@ -1378,6 +1550,13 @@ fn convert_if(
                 fields_list(&fields)
             ));
             format!("if @{name}.save")
+        }
+        // A plain-Ruby condition keeps the `if` frame, so the branches
+        // convert statement by statement instead of the whole
+        // conditional collapsing into one comment. Single-line only —
+        // a multi-line condition would need its own indentation pass.
+        _ if plain_ruby(cond) && !emit_expr(cond).contains('\n') => {
+            format!("if {}", emit_expr(cond))
         }
         _ => return None,
     };
@@ -1845,6 +2024,81 @@ mod tests {
             int_params: vec![],
             constraints: vec![],
         }
+    }
+
+    fn ex(node: ExprNode) -> Expr {
+        Expr::new(crate::span::Span::synthetic(), node)
+    }
+
+    fn ivar(name: &str) -> Expr {
+        ex(ExprNode::Ivar { name: Symbol::from(name) })
+    }
+
+    fn send(recv: Option<Expr>, method: &str, args: Vec<Expr>) -> Expr {
+        ex(ExprNode::Send {
+            recv,
+            method: Symbol::from(method),
+            args,
+            block: None,
+            parenthesized: true,
+        })
+    }
+
+    /// The plain-Ruby pass-through is an allowlist: a statement carries
+    /// over verbatim only when nothing in its tree needs a Sequel
+    /// spelling. Anything else is commented, which is honest, rather
+    /// than emitted, which may be wrong (#67 — the `find_each` /
+    /// `save!` / `record_timestamps=` false positives).
+    #[test]
+    fn pass_through_admits_plain_ruby_and_refuses_rails_vocabulary() {
+        let lit = || ex(ExprNode::Lit { value: Literal::Str { value: "Login".to_string() } });
+
+        // `@title = "Login"` — no framework vocabulary anywhere.
+        assert!(plain_ruby(&ex(ExprNode::Assign {
+            target: crate::expr::LValue::Ivar { name: Symbol::from("title") },
+            value: lit(),
+        })));
+
+        // `@story.is_deleted = true` — Sequel generates the setter.
+        assert!(plain_ruby(&ex(ExprNode::Assign {
+            target: crate::expr::LValue::Attr {
+                recv: ivar("story"),
+                name: Symbol::from("is_deleted"),
+            },
+            value: ex(ExprNode::Lit { value: Literal::Bool { value: true } }),
+        })));
+
+        // `@user.is_moderator?` — an app-defined model predicate, which
+        // carries over with the model class itself.
+        assert!(plain_ruby(&send(Some(ivar("user")), "is_moderator?", vec![])));
+
+        // `@comments.find_each` — AR persistence/query vocabulary.
+        assert!(!plain_ruby(&send(Some(ivar("comments")), "find_each", vec![])));
+
+        // `@user.dup` — AR resets the pk on dup, Sequel copies it.
+        assert!(!plain_ruby(&send(Some(ivar("user")), "dup", vec![])));
+
+        // `Story.where(...)` — a Const receiver needs a real spelling.
+        assert!(!plain_ruby(&send(
+            Some(ex(ExprNode::Const { path: vec![Symbol::from("Story")] })),
+            "where",
+            vec![],
+        )));
+
+        // `paginate(...)` — a bare call has no receiver in the Roda app.
+        assert!(!plain_ruby(&send(None, "paginate", vec![])));
+
+        // `story_path(@story)` — a route helper, not plain Ruby.
+        assert!(!plain_ruby(&send(Some(ivar("routes")), "story_path", vec![])));
+
+        // `flash[:error] = "…"` — the receiver is a Rails request bag.
+        assert!(!plain_ruby(&ex(ExprNode::Assign {
+            target: crate::expr::LValue::Index {
+                recv: send(None, "flash", vec![]),
+                index: lit(),
+            },
+            value: lit(),
+        })));
     }
 
     /// Two routes sharing a path+verb, distinguished only by a
