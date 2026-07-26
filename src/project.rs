@@ -1586,6 +1586,15 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         files.push(("sig/runtime/active_support_duration.rbs".to_string(), rbs));
     }
 
+    // CGI shim sidecar — spinel has no stdlib CGI; the flat walk emits
+    // runtime/cgi.rb but only .rb, so pair its typing contract (escape ->
+    // String, parse -> Hash[String, Array[String]]) here.
+    {
+        let rbs = fs::read_to_string("runtime/spinel/cgi.rbs")
+            .map_err(|e| format!("read runtime/spinel/cgi.rbs: {e}"))?;
+        files.push(("sig/runtime/cgi.rbs".to_string(), rbs));
+    }
+
     // `db_jruby.rb` is the JRuby/JDBC Db backend — it uses Java interop
     // (`java_import`, `Java::`) that the CRuby and Spinel toolchains (and
     // the spinel-subset compliance gate) must never see. It is injected

@@ -1,0 +1,7 @@
+# Typing contract for cgi.rb (spinel-only CGI shim).
+module CGI
+  def self.escape: (String s) -> String
+  def self.unescape_html: (String s) -> String
+  def self.decode_entity: (String ent) -> String?
+  def self.parse: (String qs) -> Hash[String, Array[String]]
+end

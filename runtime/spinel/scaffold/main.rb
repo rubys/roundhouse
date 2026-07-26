@@ -73,6 +73,10 @@ require_relative "runtime/action_controller"
 require_relative "runtime/typed_store"
 require_relative "runtime/broadcasts"
 require_relative "runtime/tep/tep"
+# Spinel-only CGI shim (escape/unescape_html/parse) — CRuby/JRuby use stdlib
+# `require "cgi"`. After tep so `Url` (the percent-encoder CGI.escape routes
+# to) is defined.
+require_relative "runtime/cgi"
 # Action Cable WebSocket glue — the /cable endpoint + the Broadcasts
 # transport that fans Turbo Stream fragments out to subscribers. Loaded
 # after tep (uses Tep::WebSocket / Scheduler / Broadcast) and broadcasts
