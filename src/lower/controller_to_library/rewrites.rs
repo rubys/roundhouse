@@ -240,14 +240,25 @@ pub(super) fn rewrite_render_to_views(
                             // expression, not a template name. Normalized
                             // below to the positional-body form the runtime
                             // render takes. Rails ESCAPES an html: body
-                            // unless it's an html_safe buffer — about_
-                            // controller's MissingTemplate fallback quote
-                            // carries a literal `<h1>` Rails shows
-                            // escaped. The CRuby html_escape honors the
-                            // SafeString mark, so marked bodies still
-                            // pass through.
+                            // unless it's marked safe, and lobsters'
+                            // about_controller writes BOTH in one file
+                            // (`html: ("<h1>A mystery.")` escaped,
+                            // `html: (…).html_safe` not).
+                            //
+                            // A body that says `.html_safe` right here
+                            // answers the escape question at this site, so
+                            // the pair cancels: emit the value bare. The
+                            // old form leaned on the CRuby overlay's
+                            // SafeString to make `html_escape(x.html_safe)`
+                            // a pass-through at RUNTIME, which is a
+                            // CRuby-only fact — under AOT it was two
+                            // separate bugs, `String#html_safe` raising
+                            // (every /u visit) and, had it not raised, a
+                            // body escaped that Rails leaves alone.
                             "html" => {
-                                body = Some((html_escape_call(v), None))
+                                let safe = unwrap_html_safe(v);
+                                let expr = safe.unwrap_or_else(|| html_escape_call(v));
+                                body = Some((expr, None))
                             }
                             "plain" => body = Some((v.clone(), Some("text/plain"))),
                             // Inline `render json: <expr>` — the body is
@@ -536,6 +547,30 @@ fn strip_format_kwarg(arg: &Expr) -> Option<Expr> {
 /// escape Rails applies to non-safe bodies. Runtime-dispatched (not
 /// folded) because safety is a runtime fact under the CRuby
 /// SafeString overlay.
+/// Peel a safety mark off a `render html:` body: `<e>.html_safe` and
+/// `raw(<e>)` both mean "Rails, don't escape this", and both answer it
+/// statically at the call site. Returns the inner expression, or `None`
+/// when the body carries no mark and so has to be escaped.
+///
+/// Only the mark written HERE is peeled. A method that ends in
+/// `.html_safe` (lobsters' `Hat#to_html_label`) is a value-level fact
+/// no call site can see, and stays the SafeString overlay's problem.
+fn unwrap_html_safe(value: &Expr) -> Option<Expr> {
+    match &*value.node {
+        ExprNode::Send { recv: Some(inner), method, args, block: None, .. }
+            if method.as_str() == "html_safe" && args.is_empty() =>
+        {
+            Some(inner.clone())
+        }
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if method.as_str() == "raw" && args.len() == 1 =>
+        {
+            Some(args[0].clone())
+        }
+        _ => None,
+    }
+}
+
 fn html_escape_call(value: &Expr) -> Expr {
     let recv = Expr::new(
         value.span,
