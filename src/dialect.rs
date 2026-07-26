@@ -985,6 +985,12 @@ pub enum RouteSpec {
         nested: Vec<RouteSpec>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         singular: bool,
+        /// `resources :mails, as: "mod_mails"` — renames the route
+        /// HELPERS only; the path still comes from `name` (`/mails`).
+        /// Kept separate from `name` for exactly that reason: folding it
+        /// in would move the path too.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_name: Option<Symbol>,
     },
     /// `namespace :admin do … end` / `scope … do … end` — a routing
     /// scope wrapping nested entries. `namespace :x` is `scope` with

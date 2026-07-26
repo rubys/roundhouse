@@ -372,6 +372,18 @@ fn ingest_explicit_route(
             if path.is_none() {
                 path = Some(s);
             }
+        } else if arg.as_symbol_node().is_some() && path.is_none() && to.is_none() {
+            // Positional SYMBOL arg — the same shortcut in the other
+            // spelling: `member do get :doff end` is identical to
+            // `get "doff"` in Rails, and lobsters' hats routes use it
+            // exclusively (`get :doff`, `post :doff_by_user`,
+            // `post :update_in_place`, `post :update_by_recreating`).
+            // Accepting only the String form silently dropped those four
+            // routes and their helpers. Guarded on `to.is_none()` so a
+            // symbol appearing after a target can't be mistaken for one.
+            if let Some(s) = symbol_value(&arg) {
+                path = Some(s);
+            }
         } else if let Some(kh) = arg.as_keyword_hash_node() {
             // Two shapes share KeywordHashNode here:
             //   1. Modern kwargs hash: `get "/p", to: "c#a", as: :n` —
@@ -571,6 +583,7 @@ fn ingest_resources_route(
 
     let mut only: Vec<Symbol> = Vec::new();
     let mut except: Vec<Symbol> = Vec::new();
+    let mut as_name: Option<Symbol> = None;
     for arg in iter {
         let Some(kh) = arg.as_keyword_hash_node() else { continue };
         for el in kh.elements().iter() {
@@ -580,8 +593,19 @@ fn ingest_resources_route(
             match key.as_str() {
                 "only" => only = symbol_list_value(&value),
                 "except" => except = symbol_list_value(&value),
-                // `as:`, `path:`, `controller:`, `shallow:` land when
-                // a fixture demands them.
+                // `as:` renames the HELPERS, not the path — lobsters'
+                // `namespace :mod { resources :mails, as: "mod_mails" }`
+                // is `/mod/mails` served by `mod_mod_mails_path`. Dropping
+                // it named those helpers `mod_mails_path`, which both
+                // missed every call site and collided with the top-level
+                // `resources :mod_mails`.
+                "as" => {
+                    as_name = string_value(&value)
+                        .or_else(|| symbol_value(&value))
+                        .map(|s| Symbol::from(s.as_str()))
+                }
+                // `path:`, `controller:`, `shallow:` land when a fixture
+                // demands them.
                 _ => {}
             }
         }
@@ -589,7 +613,7 @@ fn ingest_resources_route(
 
     let nested = block_entries(call, file, Some(name_str.as_str()), draws)?;
 
-    Ok(RouteSpec::Resources { name, only, except, nested, singular })
+    Ok(RouteSpec::Resources { name, only, except, nested, singular, as_name })
 }
 
 /// `"c"` / `"admin/c"` → `CController` / `Admin::CController`.

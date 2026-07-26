@@ -209,21 +209,49 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             // for consumers that key on it, but mark the route unnamed
             // so the helper generator skips it. Name derives from the
             // canonical (first, longest) variant.
+            // A member/collection child takes its name from the SCOPE,
+            // and that rule has to be consulted BEFORE the generic
+            // static-path one below: a collection path is fully static
+            // (`/comments/requested`), so the static rule would claim it
+            // and yield `comments_requested` where Rails says
+            // `requested_comments`. Member paths carry `:id` and so fall
+            // through the static rule anyway, but both are decided here
+            // to keep the scope rule in one place.
+            let scoped_name = match scope {
+                ResourceScope::Member | ResourceScope::Collection => {
+                    ctx.parent_pair().and_then(|(parent, parent_plural)| {
+                        static_path_name(path).map(|child| match scope {
+                            ResourceScope::Member => {
+                                format!("{}{child}_{parent}", ctx.name_prefix)
+                            }
+                            _ => format!("{}{child}_{parent_plural}", ctx.name_prefix),
+                        })
+                    })
+                }
+                // A bare verb in the resources block is a nested route;
+                // it keeps the parent-first order, decided below.
+                ResourceScope::Nested => None,
+            };
             let (derived_name, named) = match as_name.as_ref() {
                 Some(s) => (format!("{}{}", ctx.name_prefix, s.as_str()), true),
-                None => match static_path_name(&variants[0]) {
+                None => match scoped_name {
                     Some(n) => (n, true),
-                    // A static child path nested under a resource scope
-                    // (`get "suggest"` inside `resources :stories`) is
-                    // auto-named `<singular-parent>_<child>` by Rails
-                    // (`story_suggest_path(story_id)`) even though the
-                    // full path carries the dynamic `:story_id`.
-                    None => match ctx.parent_pair().and_then(|(parent, _)| {
-                        static_path_name(path)
-                            .map(|child| format!("{}{parent}_{child}", ctx.name_prefix))
-                    }) {
+                    None => match static_path_name(&variants[0]) {
                         Some(n) => (n, true),
-                        None => (action.as_str().to_string(), false),
+                        // A bare verb declared directly in the `resources`
+                        // block is a NESTED route, and Rails names it
+                        // `<singular-parent>_<child>` (`story_suggest_path`)
+                        // even though the full path carries the dynamic
+                        // `:story_id` that kept it out of the static rule
+                        // above. Member/collection never reach here — they
+                        // were decided by `scoped_name`.
+                        None => match ctx.parent_pair().and_then(|(parent, _)| {
+                            static_path_name(path)
+                                .map(|child| format!("{}{parent}_{child}", ctx.name_prefix))
+                        }) {
+                            Some(n) => (n, true),
+                            None => (action.as_str().to_string(), false),
+                        },
                     },
                 },
             };
@@ -340,7 +368,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 constraints: vec![],
             });
         }
-        RouteSpec::Resources { name, only, except, nested, singular } => {
+        RouteSpec::Resources { name, only, except, nested, singular, as_name } => {
             let resource_path = format!("/{name}");
             // `resource :profile` still routes to the *plural*
             // controller (`ProfilesController`), per Rails.
@@ -360,6 +388,15 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 name.as_str().to_string()
             } else {
                 naming::singularize(name.as_str())
+            };
+            // `as:` renames the HELPERS only — the path above already
+            // came from `name`. Rails still prepends the namespace, so
+            // `namespace :mod { resources :mails, as: "mod_mails" }`
+            // yields `mod_mod_mails_path` / `mod_mod_mail_path`.
+            let (helper_singular, helper_plural) = match as_name {
+                Some(a) if *singular => (a.as_str().to_string(), a.as_str().to_string()),
+                Some(a) => (naming::singularize(a.as_str()), a.as_str().to_string()),
+                None => (singular_low.clone(), name.as_str().to_string()),
             };
             let actions = if *singular {
                 singular_resource_actions()
@@ -387,8 +424,8 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 }
                 let as_name = resource_as_name(
                     action_name,
-                    &singular_low,
-                    name.as_str(),
+                    &helper_singular,
+                    &helper_plural,
                     ctx.parent_pair(),
                     &ctx.name_prefix,
                 );
