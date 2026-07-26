@@ -4,4 +4,5 @@ module Inflector
   PARAMETERIZE_EDGES: Regexp
 
   def self.parameterize: (String) -> String
+  def self.pluralize_word: (String word, untyped count) -> String
 end

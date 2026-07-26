@@ -991,6 +991,36 @@ fn rewrite_helper_calls(
         )
     });
 
+    // ActiveSupport `String#pluralize(count)` — count-aware inflection of
+    // the string ITSELF (singular when count == 1, else the inflected
+    // plural), distinct from the count-labeling `Inflector.pluralize(count,
+    // word)` grounded below. Spinel can't reopen the built-in String, so
+    // lower the String-receiver form to the ruby-family `Inflector.
+    // pluralize_word` module function. String-typed receiver only, so a
+    // model's own one-arg `pluralize` (should one exist) is left alone.
+    if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*expr.node {
+        if method.as_str() == "pluralize"
+            && args.len() == 1
+            && matches!(r.ty, Some(crate::ty::Ty::Str))
+        {
+            let span = expr.span;
+            let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
+            let ExprNode::Send { recv, args, .. } = node else { unreachable!() };
+            let count = args.into_iter().next().unwrap();
+            *expr.node = ExprNode::Send {
+                recv: Some(Expr::new(
+                    span,
+                    ExprNode::Const { path: vec![Symbol::from("Inflector")] },
+                )),
+                method: Symbol::from("pluralize_word"),
+                args: vec![recv.unwrap(), count],
+                block: None,
+                parenthesized: true,
+            };
+            return;
+        }
+    }
+
     // `X.<helper>` where X singleton-includes url_helpers (lobsters'
     // `Routes.user_url reparent_user`): a `<x>_path` retargets to the
     // generated RouteHelpers module; a `<x>_url` whose path sibling is

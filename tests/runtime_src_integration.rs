@@ -769,7 +769,12 @@ fn every_runtime_method_body_concretely_typed() {
     // String literals, normalized via `key.to_s` — so the three key
     // params are untyped by declaration; +3 sites; ceiling raised
     // 206 → 209.
-    const CEILING: usize = 209;
+    // 2026-07-25 Inflector.pluralize_word (ActiveSupport String#pluralize
+    // (count) grounded off the built-in String for spinel): `count` is
+    // untyped — Rails compares `count == 1` and call sites pass either an
+    // Integer or a whole collection (`"category".pluralize(@categories)`);
+    // +1 site; ceiling raised 209 → 210.
+    const CEILING: usize = 210;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
