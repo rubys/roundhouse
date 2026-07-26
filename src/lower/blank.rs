@@ -415,6 +415,33 @@ fn try_rewrite(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnosti
         }
         (pred, classify(r.ty.as_ref(), defs), r.ty.clone(), is_effect_free_reader(r))
     };
+    // An ASSIGNMENT receiver — lobsters' login does
+    // `if (rd = session[:redirect_to]).present?` — is not re-evaluable,
+    // but it does not need to be. The multi-occurrence groundings all
+    // short-circuit (`!x.nil? && !x.empty?`), so the assignment can run
+    // once in the FIRST position and every later position can read the
+    // name it just bound. Only when the assigned VALUE is itself an
+    // effect-free reader: `(x = save!).present?` must still refuse.
+    let assign_handle: Option<Expr> = {
+        let ExprNode::Send { recv: Some(r), .. } = &*expr.node else { return };
+        match &*r.node {
+            ExprNode::Assign { target, value } if is_effect_free_reader(value) => match target {
+                LValue::Var { id, name } => Some(mk(
+                    r.span,
+                    ExprNode::Var { id: *id, name: name.clone() },
+                    r.ty.clone().unwrap_or(Ty::Untyped),
+                )),
+                LValue::Ivar { name } => Some(mk(
+                    r.span,
+                    ExprNode::Ivar { name: name.clone() },
+                    r.ty.clone().unwrap_or(Ty::Untyped),
+                )),
+                _ => None,
+            },
+            _ => None,
+        }
+    };
+    let pure_recv = pure_recv || assign_handle.is_some();
     let method_name = match pred {
         Pred::Blank => "blank?",
         Pred::Present => "present?",
@@ -458,8 +485,11 @@ fn try_rewrite(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnosti
     let old = std::mem::replace(&mut *expr.node, ExprNode::SelfRef);
     let ExprNode::Send { recv: Some(r), .. } = old else { unreachable!() };
 
+    // Occurrences after the first read `later` — the same expression for a
+    // pure receiver, the assigned NAME for an assignment receiver.
+    let later = assign_handle.unwrap_or_else(|| r.clone());
     let replacement = match grounding {
-        Container { nilable } => rewrite_emptyable(span, r, pred, nilable),
+        Container { nilable } => rewrite_emptyable(span, r, later, pred, nilable),
         NeverBlank { nilable } => rewrite_never_blank(span, r, pred, nilable),
         BoolLike => rewrite_bool(span, r, pred),
         AlwaysNil => match pred {
@@ -477,7 +507,13 @@ fn try_rewrite(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnosti
 
 /// Shared shape for the two `empty?`-style groundings. `empty_form`
 /// builds the "is empty" test for a non-nil receiver.
-fn rewrite_emptyable(span: crate::span::Span, r: Expr, pred: Pred, nilable: bool) -> Expr {
+fn rewrite_emptyable(
+    span: crate::span::Span,
+    r: Expr,
+    later: Expr,
+    pred: Pred,
+    nilable: bool,
+) -> Expr {
     let empty_form = plain_empty;
     let value_ty = non_nil_ty(&r);
     match (pred, nilable) {
@@ -486,8 +522,8 @@ fn rewrite_emptyable(span: crate::span::Span, r: Expr, pred: Pred, nilable: bool
         (Pred::Blank, true) => bool_op(
             span,
             crate::expr::BoolOpKind::Or,
-            nil_check(span, r.clone()),
-            empty_form(span, r),
+            nil_check(span, r),
+            empty_form(span, later),
         ),
         // `!r.nil? && !r.strip.empty?` — both operands are unary
         // sends, so no `!`-around-`||` precedence hazard reaches any
@@ -495,22 +531,22 @@ fn rewrite_emptyable(span: crate::span::Span, r: Expr, pred: Pred, nilable: bool
         (Pred::Present, true) => bool_op(
             span,
             crate::expr::BoolOpKind::And,
-            not(span, nil_check(span, r.clone())),
-            not(span, empty_form(span, r)),
+            not(span, nil_check(span, r)),
+            not(span, empty_form(span, later)),
         ),
         // presence: `<blank-form> ? nil : r`
         (Pred::Presence, false) => {
-            let cond = empty_form(span, r.clone());
-            if_expr(span, cond, lit_nil(span), r, nullable(value_ty))
+            let cond = empty_form(span, r);
+            if_expr(span, cond, lit_nil(span), later, nullable(value_ty))
         }
         (Pred::Presence, true) => {
             let cond = bool_op(
                 span,
                 crate::expr::BoolOpKind::Or,
-                nil_check(span, r.clone()),
-                empty_form(span, r.clone()),
+                nil_check(span, r),
+                empty_form(span, later.clone()),
             );
-            if_expr(span, cond, lit_nil(span), r, nullable(value_ty))
+            if_expr(span, cond, lit_nil(span), later, nullable(value_ty))
         }
     }
 }
