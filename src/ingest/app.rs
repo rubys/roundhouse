@@ -334,6 +334,24 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 methods.append(&mut synth);
             }
         }
+        // `config.session_store :cookie_store, key: "..."` — the second
+        // config-DSL line the runtime is required to honor, and it lives
+        // in `config/initializers/session_store.rb` rather than here
+        // (Rails' own generator puts it there). The dispatch round-trips
+        // the session under this cookie name, so it has to be known
+        // before any app code runs; synthesized as `session_cookie_key`
+        // on the Application reopen, overriding the framework default in
+        // runtime/ruby/rails.rb. Apps that declare no session_store keep
+        // that default. Every other initializer stays un-ingested.
+        if let Ok(init) = vfs.read(&dir.join("config/initializers/session_store.rb")) {
+            if let Some(key) = extract_session_cookie_key(&init) {
+                if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
+                    "def session_cookie_key\n  {key:?}\nend\n"
+                )) {
+                    methods.append(&mut synth);
+                }
+            }
+        }
         if !methods.is_empty() {
             app.rails_application = Some(crate::dialect::LibraryClass {
                 name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
@@ -1147,6 +1165,65 @@ fn extract_autoload_lib_ignores(source: &[u8]) -> Vec<String> {
 /// every ActiveRecord temporal value in this zone). Commented lines —
 /// the `rails new` template ships `# config.time_zone = …` — don't
 /// match.
+/// `config.session_store :cookie_store, key: "lobster_trap"` → the key.
+///
+/// Line-scanned like `extract_config_time_zone` above rather than parsed:
+/// the initializer is Bundler/railtie territory that ingest deliberately
+/// doesn't model, and the declaration is conventionally spread across
+/// lines (`key:` usually sits on the line after `session_store`, at
+/// whatever indentation the generator left). Scanning forward from the
+/// `session_store` line for the first `key:` covers both the one-line and
+/// wrapped forms, and both quote styles; anything more exotic simply
+/// yields None and the framework default stands.
+fn extract_session_cookie_key(source: &[u8]) -> Option<String> {
+    let source = String::from_utf8_lossy(source);
+    let mut seen_session_store = false;
+    for line in source.lines() {
+        let t = line.trim_start();
+        if t.starts_with('#') {
+            continue;
+        }
+        if !seen_session_store {
+            if t.contains("config.session_store") {
+                seen_session_store = true;
+                // `key:` may share the line with the declaration.
+                if let Some(key) = quoted_after_key_label(t) {
+                    return Some(key);
+                }
+            }
+            continue;
+        }
+        if let Some(key) = quoted_after_key_label(t) {
+            return Some(key);
+        }
+    }
+    None
+}
+
+/// The quoted value of a `key:` label in `text`, if it has one. Anchored
+/// on the label so a `key:` inside another option's value can't match.
+fn quoted_after_key_label(text: &str) -> Option<String> {
+    let idx = text.find("key:")?;
+    // Reject `session_key:` / `secret_key:` — the label must start the
+    // option, i.e. be preceded by nothing or a separator.
+    let preceded_ok = text[..idx]
+        .chars()
+        .next_back()
+        .map(|c| c == ',' || c == '(' || c.is_whitespace())
+        .unwrap_or(true);
+    if !preceded_ok {
+        return None;
+    }
+    let rest = text[idx + "key:".len()..].trim_start();
+    let quote = rest.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let inner = &rest[1..];
+    let end = inner.find(quote)?;
+    Some(inner[..end].to_string())
+}
+
 fn extract_config_time_zone(source: &[u8]) -> Option<String> {
     let source = String::from_utf8_lossy(source);
     for line in source.lines() {

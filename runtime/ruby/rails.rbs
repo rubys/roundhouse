@@ -43,5 +43,6 @@ module Rails
   end
 
   class Application
+    def session_cookie_key: () -> String
   end
 end

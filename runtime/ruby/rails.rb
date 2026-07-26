@@ -133,9 +133,26 @@ module Rails
     def fatal(message); end
   end
 
-  # App-config stand-in (see module note). Intentionally empty — the
-  # app's real config methods aren't ingested, so they NameError rather
-  # than being silently stubbed.
+  # App-config stand-in (see module note). Otherwise empty — the app's
+  # real config methods aren't ingested, so they NameError rather than
+  # being silently stubbed.
   class Application
+    # Name of the cookie the session travels in. This is a FRAMEWORK
+    # DEFAULT, not a stub for un-ingested app config: Rails always has a
+    # session cookie name (it derives one from the app name when the app
+    # declares none), and the dispatch has to know it before any app code
+    # runs. `config/initializers/session_store.rb`'s
+    # `config.session_store :cookie_store, key: "..."` is lifted at
+    # ingest into a `session_cookie_key` def on the app's
+    # `Rails::Application` reopen, which is required right after this
+    # file and so overrides this default.
+    #
+    # Both readers must agree or login breaks: the dispatch round-trips
+    # the cookie under this name, and lobsters' `remove_unknown_cookies`
+    # deletes every cookie whose key isn't the configured one — a
+    # disagreement clears the session on every request.
+    def session_cookie_key
+      "_session"
+    end
   end
 end

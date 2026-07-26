@@ -249,12 +249,25 @@ module Main
     # its own cookie (`flash_notice`, `flash_alert`) so the cookie
     # plumbing stays format-free.
     cookies = request[:cookies] || {}
-    # Cookie-carried session: restore the whole session from the
-    # `_session` cookie (url-encoded k=v pairs; empty when absent or
-    # garbled — "logged out", never a 500). The raw inbound value is
-    # kept so the persist step below can skip Set-Cookie when the
-    # action left the session untouched.
-    session_in = cookies[:_session].to_s
+    # Cookie-carried session: restore the whole session from the session
+    # cookie (url-encoded k=v pairs; empty when absent or garbled —
+    # "logged out", never a 500). The raw inbound value is kept so the
+    # persist step below can skip Set-Cookie when the action left the
+    # session untouched.
+    #
+    # The NAME comes from `Rails.application.session_cookie_key` (see the
+    # spinel main.rb twin): apps set it with `config.session_store
+    # :cookie_store, key: "..."`, and app code that reads the same
+    # accessor — lobsters' `remove_unknown_cookies`, which deletes every
+    # cookie whose key isn't the configured one — has to agree with the
+    # dispatch or the session is cleared on every request.
+    # `.to_sym` on the read: CgiIo.parse_cookies keys the inbound hash by
+    # Symbol (`out[name.to_sym] = val`). The write side below stays a
+    # String — set_cookies keys are only ever interpolated into the
+    # header, and `controller.cookies.pending` already contributes String
+    # keys to the same hash.
+    session_cookie = Rails.application.session_cookie_key
+    session_in = cookies[session_cookie.to_sym].to_s
     controller.session = ActionDispatch::Session.from_cookie(session_in)
     # Expose the inbound cookies to the controller as a CookieJar so
     # `cookies[:k]` reads (and `cookies[:k] = v` records writes, surfaced
@@ -320,7 +333,7 @@ module Main
     # logout with no token re-added) clears the cookie.
     session_out = controller.session.to_cookie
     if session_out != session_in
-      out_cookies[:_session] = session_out.empty? ? nil : session_out
+      out_cookies[session_cookie] = session_out.empty? ? nil : session_out
     end
     is_redirect = controller.status >= 300 && controller.status < 400
     if is_redirect

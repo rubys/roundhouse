@@ -58,6 +58,7 @@ pub mod parameterize;
 pub mod sum_symbol;
 pub mod values_at_splat;
 pub mod request_index;
+pub mod session_options;
 pub mod relation_residue;
 pub mod send_dispatch;
 pub(crate) mod secure_password;
@@ -86,6 +87,7 @@ pub use mailer_class_side::apply_mailer_class_side;
 pub use as_json_super::apply_as_json_super_grounding;
 pub use parameterize::apply_parameterize_grounding;
 pub use request_index::apply_request_index_lowering;
+pub use session_options::apply_session_options_lowering;
 pub use send_dispatch::apply_send_static_dispatch;
 pub use capture_inline::apply_capture_inline;
 pub use partial_qualify::apply_partial_qualification;
@@ -154,6 +156,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // rationale.
     ("values_at_splat", &[]),
     ("request_index", &[]),
+    // `config.session_options[:key]` → `session_cookie_key`; rewrites a
+    // receiver chain no other pass produces or consumes.
+    ("session_options", &[]),
     ("transaction_ground", &[]),
     ("partial_qualify", &[]),
     ("capture_inline", &[]),
@@ -252,6 +257,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("values_at_splat");
     request_index::apply_request_index_lowering(app);
     ran!("request_index");
+    session_options::apply_session_options_lowering(app);
+    ran!("session_options");
     transaction_ground::apply_transaction_grounding(app);
     ran!("transaction_ground");
     partial_qualify::apply_partial_qualification(app);

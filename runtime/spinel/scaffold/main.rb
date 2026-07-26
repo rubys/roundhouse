@@ -337,11 +337,21 @@ module Main
     controller.request = request_obj
     ActionController::Current.request = request_obj
     ActionController::Current.controller = controller
-    # Cookie-carried session: restore the whole session from the
-    # `_session` cookie (url-encoded k=v pairs; empty when absent or
-    # garbled). Persisted below only when the encoding changed — an
-    # action that leaves the session untouched emits no Set-Cookie.
-    session_in = req.cookies.fetch("_session", "")
+    # Cookie-carried session: restore the whole session from the session
+    # cookie (url-encoded k=v pairs; empty when absent or garbled).
+    # Persisted below only when the encoding changed — an action that
+    # leaves the session untouched emits no Set-Cookie.
+    #
+    # The NAME comes from `Rails.application.session_cookie_key`, not a
+    # literal: apps declare it via `config.session_store :cookie_store,
+    # key: "..."`, which ingest lifts onto the Rails::Application reopen
+    # (framework default "_session" when they don't). App code reads the
+    # same accessor, and the two must agree — lobsters'
+    # `remove_unknown_cookies` deletes every cookie whose key isn't the
+    # configured one, so a literal here would clear the session on every
+    # request.
+    session_cookie = Rails.application.session_cookie_key
+    session_in = req.cookies.fetch(session_cookie, "")
     controller.session = ActionDispatch::Session.from_cookie(session_in)
     # Controller-level cookie access (`cookies[:k]` reads, `cookies[:k] = v`
     # records writes surfaced as Set-Cookie below). The inbound jar is the
@@ -420,9 +430,9 @@ module Main
     session_out = controller.session.to_cookie
     if session_out != session_in
       if session_out == ""
-        Main.clear_flash_cookie(res, "_session")
+        Main.clear_flash_cookie(res, session_cookie)
       else
-        Main.set_flash_cookie(res, "_session", session_out)
+        Main.set_flash_cookie(res, session_cookie, session_out)
       end
     end
   end
