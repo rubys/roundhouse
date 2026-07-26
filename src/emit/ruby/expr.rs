@@ -275,6 +275,22 @@ fn emit_node(n: &ExprNode) -> String {
     }
 }
 
+/// Is this cast target a boolean slot? A NULLABLE boolean column types
+/// as `Union{Bool, Nil}` rather than `Bool`, and the nil half is already
+/// handled by the `row["c"].nil? ? nil : …` guard the hydration wraps
+/// around the cast — so inside it the target is effectively `Bool`.
+fn is_bool_target(ty: &crate::ty::Ty) -> bool {
+    use crate::ty::Ty;
+    match ty {
+        Ty::Bool => true,
+        Ty::Union { variants } => {
+            variants.iter().any(|v| matches!(v, Ty::Bool))
+                && variants.iter().all(|v| matches!(v, Ty::Bool | Ty::Nil))
+        }
+        _ => false,
+    }
+}
+
 /// Translate an `ExprNode::Cast` to a Ruby expression.
 ///
 /// Default: identity — Ruby is dynamic and doesn't need a runtime cast
@@ -289,6 +305,16 @@ fn emit_node(n: &ExprNode) -> String {
 fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
     use crate::ty::Ty;
     let inner = emit_expr(value);
+    // The Bool coercion runs UNCONDITIONALLY, unlike the narrowing
+    // casts below. Those are semantic no-ops on an already-narrow value
+    // (`String#to_s` is self), so they are skipped when the inner value
+    // is not poly — and the row-hydration lookups this pass rewrites
+    // carry no stamped type at all, so that gate would skip them too.
+    // For a boolean, identity is not a no-op: it is the bug. See the
+    // arm below for why.
+    if is_bool_target(target_ty) {
+        return format!("![\"0\", \"\", \"false\"].include?(({inner}).to_s)");
+    }
     let value_is_poly = matches!(
         value.ty.as_ref(),
         Some(Ty::Untyped) | Some(Ty::Union { .. })
@@ -317,6 +343,26 @@ fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
         Ty::Sym => coerce("to_sym"),
         Ty::Int => coerce("to_i"),
         Ty::Float => coerce("to_f"),
+        // Ruby has no `to_b`, which is why this arm was missing — but
+        // the coercion is the load-bearing one on the row-hydration
+        // path, and leaving it as identity is a correctness bug rather
+        // than a missed narrowing.
+        //
+        // Adapters disagree about what a boolean column reads as: the
+        // gem-backed shims give `true`/`false` or `1`/`0`, while
+        // spinel's `Db.column_value` is `sqlite3_column_text`, so every
+        // value arrives as a STRING — `"0"` for false. Assigning that
+        // raw string into a slot the RBS pins `bool` makes it `true`,
+        // and lobsters' `Rack::MiniProfiler.authorize_request if @user
+        // && @user.is_admin?` then fired for a user whose `is_admin` is
+        // 0, taking the whole request down under spinel AOT.
+        //
+        // Compare the string form so one expression covers every
+        // adapter: `false`/`0`/`"0"` are the false spellings, plus `""`
+        // for an adapter that renders NULL-ish as empty. Single
+        // evaluation of `inner` — this runs per row per boolean column.
+        // NULL is already handled by the nil guard the hydration wraps
+        // around this cast, so no nil check is needed here.
         _ => inner,
     }
 }
