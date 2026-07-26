@@ -213,6 +213,9 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // avatar_img(...)` + helper modules become module-functions (no-op when
     // the app ships no non-empty helpers).
     library::apply_helper_lowering(&mut lcs, app);
+    // A record handed to a path helper becomes its slug here, not
+    // inside the helper (no-op unless a model overrides `to_param`).
+    library::apply_route_param_lowering(&mut lcs, app);
     // Dynamic `send(k)` → static `case` dispatch moved to the shared
     // post-analyze hook (`lower::apply_send_static_dispatch`) — hook
     // bodies arrive here already grounded, with duration-unit arms in
@@ -370,6 +373,9 @@ pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
     let mut lcs = lower_controllers_for_spinel(app, false);
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
+    // A record handed to a path helper becomes its slug here, not
+    // inside the helper (no-op unless a model overrides `to_param`).
+    library::apply_route_param_lowering(&mut lcs, app);
     library::apply_nilsafe_empty_lowering(&mut lcs);
     library::apply_dynamic_render_options_lowering(&mut lcs);
     // Layout wrap at render call sites — the seam where the @ivars a
@@ -401,6 +407,9 @@ pub fn emit_lowered_controllers_with_layout(app: &App) -> Vec<EmittedFile> {
     let mut lcs = lower_controllers_for_spinel(app, true);
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
+    // A record handed to a path helper becomes its slug here, not
+    // inside the helper (no-op unless a model overrides `to_param`).
+    library::apply_route_param_lowering(&mut lcs, app);
     library::apply_nilsafe_empty_lowering(&mut lcs);
     library::apply_dynamic_render_options_lowering(&mut lcs);
     library::apply_layout_lowering(&mut lcs, app);
@@ -568,6 +577,9 @@ pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
     // model, so only the call-site rewrite arm runs.
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
+    // A record handed to a path helper becomes its slug here, not
+    // inside the helper (no-op unless a model overrides `to_param`).
+    library::apply_route_param_lowering(&mut lcs, app);
     library::apply_time_current_lowering(&mut lcs);
     library::apply_duration_lowering(&mut lcs, app);
     // Nullable columns hydrate to nil on the Ruby tree — synthesized
@@ -632,45 +644,6 @@ fn jbuilder_view_output_path(view_name: &str) -> PathBuf {
 /// reliance on Minitest's at_exit autorun (which spinel can't see and
 /// which would have CRuby double-run every test if combined with the
 /// shim).
-/// True when any model carries a user-written `to_param` — the signal
-/// that route params aren't plain ids (lobsters' Domain routes on the
-/// domain name).
-fn app_defines_custom_to_param(app: &App) -> bool {
-    app.models.iter().any(|m| {
-        m.body.iter().any(|item| {
-            matches!(item, crate::dialect::ModelBodyItem::Method { method, .. }
-                if method.name.as_str() == "to_param")
-        })
-    })
-}
-
-/// Rewrite a route-helper body's segment interpolations `#{p}` →
-/// `#{p.to_param}` (the `format` suffix var stays — it's a Symbol/String
-/// the ternary already guards). See the call site for the gating.
-fn to_paramize_segments(body: &mut crate::expr::Expr) {
-    body.node.for_each_child_mut(&mut to_paramize_segments);
-    if let crate::expr::ExprNode::StringInterp { parts } = &mut *body.node {
-        for part in parts.iter_mut() {
-            let crate::expr::InterpPart::Expr { expr } = part else { continue };
-            let crate::expr::ExprNode::Var { name, .. } = &*expr.node else { continue };
-            if name.as_str() == "format" {
-                continue;
-            }
-            let inner = expr.clone();
-            *expr = crate::expr::Expr::new(
-                expr.span,
-                crate::expr::ExprNode::Send {
-                    recv: Some(inner),
-                    method: crate::ident::Symbol::from("to_param"),
-                    args: vec![],
-                    block: None,
-                    parenthesized: false,
-                },
-            );
-        }
-    }
-}
-
 pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
     files.extend(emit_lowered_schema_pair(app));
@@ -742,17 +715,14 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
     // per named route. Generated from `app.routes`; supersedes the
     // hand-written `runtime/ruby/action_view/route_helpers.rb` (which
     // is being kept for backward compat until callers migrate).
-    let mut route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
-    // Rails path helpers call `to_param` on every segment arg (that's
-    // how `domain_path(story.domain)` renders the domain's name).
-    // Applied only when the app customizes `to_param` somewhere — an
-    // id-only app (the blog) keeps its `#{id}` bodies byte-identical
-    // and no target needs a `to_param` runtime it never calls.
-    if app_defines_custom_to_param(app) {
-        for f in &mut route_helper_funcs {
-            to_paramize_segments(&mut f.body);
-        }
-    }
+    let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
+    // The segment interpolations stay bare. `to_param` used to be
+    // applied here, to every segment of every helper — which reads as
+    // Rails-faithful but isn't, because our segments are declared
+    // `String` and Rails' are untyped: under AOT the record was already
+    // coerced away by the time the body ran. It now happens at the call
+    // site, where the record still is one
+    // (`library::apply_route_param_lowering`).
     if !route_helper_funcs.is_empty() {
         files.extend(library::emit_module_file_pair(
             &route_helper_funcs,

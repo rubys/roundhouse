@@ -24,6 +24,7 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     apply_scope_lowering(&mut lcs, app);
     apply_library_partial_render_lowering(&mut lcs, app);
     apply_helper_lowering(&mut lcs, app);
+    apply_route_param_lowering(&mut lcs, app);
     // send→case grounding, update-kwargs inlining, mailer class-side
     // wrappers, and duration grounding run in the shared post-analyze
     // hook, which covers these library classes (dispatch's plural
@@ -1687,6 +1688,164 @@ pub(crate) fn apply_duration_lowering(lcs: &mut [LibraryClass], app: &App) {
         for m in &mut lc.methods {
             crate::lower::duration::apply_duration_rewrites(&mut m.body, temporal_predicates);
         }
+    }
+}
+
+/// A record handed to a path helper becomes its slug HERE, at the call
+/// site, not inside the helper.
+///
+/// Rails puts `to_param` in the helper body and gets away with it: the
+/// param is untyped, so the record arrives whole and `to_param`
+/// dispatches to the model's override. Our helpers declare their
+/// segments `String` (`routes_to_library::param_ty` — a slug segment
+/// typed Int made every strict-target call site passing `short_id` a C
+/// type error), and a declared type is a promise the caller has to
+/// keep. Under AOT it IS kept: a `Tag` handed to a `String` slot is
+/// coerced on the way in, so the helper body never saw a record at all
+/// — `tag_path(tag)` rendered `/t/` with an EMPTY segment long before
+/// `String#to_param` raised on it. The raise was the visible half of a
+/// silent wrong-URL bug.
+///
+/// So the conversion moves to where the value's identity is still
+/// known. Three signals, in order of how much they know:
+///
+///   1. the stamped type is a model that overrides `to_param` —
+///      analyzed bodies (models, controllers) answer here;
+///   2. the arg reads a SINGULAR association (`story.domain`,
+///      `showing_user.invited_by_user`) whose target overrides it —
+///      the `reference_targets` relation, rebuilt from `app.models`
+///      because view bodies reach emit with `Ty::Var` args;
+///   3. the arg is a bare name that IS a model name (`tag`, `@user`) —
+///      the same convention the view lowerer's `ivar_ty` commits to.
+///
+/// Everything else is left alone, which is the whole reason the rule is
+/// positive-signal-only: `tag.id`, `story.short_id`, `user.username`,
+/// `user[:username]`, `@params["username"]` and an already-written
+/// `story.to_param` all reach a path helper in this corpus, and every
+/// one of them is already a slug. A rule phrased as "wrap unless it
+/// looks scalar" would have to enumerate those instead, and would wrap
+/// the next unfamiliar shape by default.
+pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
+    let slug_models = models_overriding_to_param(app);
+    if slug_models.is_empty() {
+        return;
+    }
+    let assoc_targets = singular_association_targets(app);
+    for lc in lcs.iter_mut() {
+        for m in &mut lc.methods {
+            rewrite_route_params(&mut m.body, &slug_models, &assoc_targets);
+        }
+    }
+}
+
+/// Model names (`Tag`, `User`) whose class defines its own `to_param`.
+fn models_overriding_to_param(app: &App) -> std::collections::HashSet<String> {
+    app.models
+        .iter()
+        .filter(|m| {
+            m.body.iter().any(|item| matches!(item, crate::dialect::ModelBodyItem::Method { method, .. }
+                if method.name.as_str() == "to_param"))
+        })
+        .map(|m| m.name.0.as_str().to_string())
+        .collect()
+}
+
+/// Singular association reader → target model name. `belongs_to` and
+/// `has_one` only: a `has_many` reader is a collection and never lands
+/// in a path segment. An ambiguous name (two models naming the same
+/// reader at different targets) is dropped rather than guessed.
+fn singular_association_targets(app: &App) -> std::collections::HashMap<String, String> {
+    use crate::dialect::Association;
+    let mut out: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut ambiguous: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for m in &app.models {
+        for a in m.associations() {
+            let (name, target) = match a {
+                Association::BelongsTo { name, target, .. }
+                | Association::HasOne { name, target, .. } => (name, target),
+                _ => continue,
+            };
+            let key = name.as_str().to_string();
+            let val = target.0.as_str().to_string();
+            match out.get(&key) {
+                Some(existing) if existing != &val => {
+                    ambiguous.insert(key);
+                }
+                _ => {
+                    out.insert(key, val);
+                }
+            }
+        }
+    }
+    for k in ambiguous {
+        out.remove(&k);
+    }
+    out
+}
+
+fn rewrite_route_params(
+    expr: &mut Expr,
+    slug_models: &std::collections::HashSet<String>,
+    assoc_targets: &std::collections::HashMap<String, String>,
+) {
+    expr.node
+        .for_each_child_mut(&mut |e| rewrite_route_params(e, slug_models, assoc_targets));
+    let is_helper_call = matches!(
+        &*expr.node,
+        ExprNode::Send { recv: Some(r), method, block: None, .. }
+            if method.as_str().ends_with("_path")
+                && matches!(&*r.node, ExprNode::Const { path }
+                    if path.last().map(|s| s.as_str() == "RouteHelpers").unwrap_or(false))
+    );
+    if !is_helper_call {
+        return;
+    }
+    let ExprNode::Send { args, .. } = &mut *expr.node else { unreachable!() };
+    for arg in args.iter_mut() {
+        if !arg_is_slug_record(arg, slug_models, assoc_targets) {
+            continue;
+        }
+        let span = arg.span;
+        let record = std::mem::replace(arg, Expr::new(span, ExprNode::Seq { exprs: vec![] }));
+        *arg = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(record),
+                method: Symbol::from("to_param"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        arg.ty = Some(crate::ty::Ty::Str);
+    }
+}
+
+fn arg_is_slug_record(
+    arg: &Expr,
+    slug_models: &std::collections::HashSet<String>,
+    assoc_targets: &std::collections::HashMap<String, String>,
+) -> bool {
+    // (1) A stamped model type.
+    if let Some(crate::ty::Ty::Class { id, .. }) =
+        arg.ty.as_ref().map(crate::ty::Ty::peel_nilable)
+    {
+        if slug_models.contains(id.0.as_str()) {
+            return true;
+        }
+    }
+    match &*arg.node {
+        // (2) A singular association read.
+        ExprNode::Send { recv: Some(_), method, args, block: None, .. } if args.is_empty() => {
+            assoc_targets
+                .get(method.as_str())
+                .is_some_and(|target| slug_models.contains(target))
+        }
+        // (3) A bare name that IS a model name.
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => {
+            slug_models.contains(&crate::naming::camelize(name.as_str()))
+        }
+        _ => false,
     }
 }
 
