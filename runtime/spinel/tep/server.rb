@@ -17,6 +17,24 @@ module Tep
     "OK"
   end
 
+  # An exception out of the app is ONE request's failure, not the
+  # server's. Both server variants call `dispatch` bare, so anything the
+  # handler raised unwound through the connection loop and killed the
+  # process: every later request on every later connection got a refused
+  # socket, and a sweep read one defect as a hundred. Rack servers have
+  # always contained this (Puma logs the exception and answers 500 —
+  # verified against the CRuby tree, where the next request still
+  # served); tep is the peer of Puma here and owed the same contract.
+  #
+  # Logged in Puma's shape — one line, verb and path, class and message
+  # — because the operator's next question is always "which request?".
+  # stderr, not stdout: the access banner owns stdout, and a crash
+  # report interleaved into it is the thing you grep past.
+  def self.log_dispatch_error(verb, path, e)
+    $stderr.puts("[tep] 500 " + verb + " " + path + " -- " +
+                 e.class.to_s + ": " + e.message)
+  end
+
   class Server
     attr_accessor :app
 
@@ -123,7 +141,18 @@ module Tep
       end
       req.consume_body(client)
       res = Response.new
-      @app.dispatch(req, res)
+      begin
+        @app.dispatch(req, res)
+      rescue => e
+        # Nothing has been written to the socket yet — `write_response`
+        # runs after this, streaming included — so a clean 500 is still
+        # available. Close rather than keep-alive: `res` may be half
+        # configured (status set, streamer attached, body not), and the
+        # cheap way to not reason about that is to not reuse it.
+        Tep.log_dispatch_error(req.verb, req.path, e)
+        send_simple(client, 500, "internal server error")
+        return false
+      end
       keep_alive = req.keep_alive? && !res.halted_close?
       write_response(client, req, res, keep_alive)
       keep_alive

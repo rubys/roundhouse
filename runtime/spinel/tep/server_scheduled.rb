@@ -178,7 +178,17 @@ module Tep
         req.consume_body_via_scheduler(client)
 
         res = Response.new
-        Tep::APP.dispatch(req, res)
+        begin
+          Tep::APP.dispatch(req, res)
+        rescue => e
+          # Same contract as the blocking server: one request's failure
+          # is not the worker's. A fiber that unwinds here would take
+          # the whole scheduler loop with it, so every OTHER open
+          # connection dies too — strictly worse than the prefork case.
+          Tep.log_dispatch_error(req.verb, req.path, e)
+          Tep::Server::Scheduled.send_simple(client, 500, "internal server error")
+          return false
+        end
 
         # Streaming responses use chunked Connection: close (same
         # simplification as the prefork server) -- force the keep-alive
