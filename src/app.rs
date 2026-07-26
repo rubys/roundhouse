@@ -73,6 +73,21 @@ pub struct App {
     /// ships no helpers or only empty helper modules (the blog).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub helper_method_index: HashMap<Symbol, ClassId>,
+    /// Partial → local name → type, harvested by the analyzer from the
+    /// RENDER SITES that pass each local (`render partial: "form",
+    /// locals: { new_message: @new_message }` with `@new_message` typed
+    /// `Message` by the controller's `Message.new`).
+    ///
+    /// The analyzer already computed this to seed each partial's body
+    /// typing; recording it on the App is what lets the LOWERER stamp
+    /// the same fact into the emitted signature. Without it the view
+    /// lowerer can only guess a param's type from its NAME (`user` →
+    /// `User`), so a local whose name isn't a model — lobsters'
+    /// `new_message` — emits `untyped` and every read off it refuses on
+    /// the strict targets, even though the analyzer knew the type all
+    /// along. Empty for apps whose partials take no locals.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub partial_local_types: HashMap<Symbol, HashMap<Symbol, Ty>>,
     /// The app's `Rails::Application` subclass from
     /// `config/application.rb` (e.g. `Lobsters::Application`),
     /// reparented at ingest onto `Rails::Application` itself. Its
@@ -246,6 +261,7 @@ impl App {
             stylesheets: Vec::new(),
             rbs_signatures: HashMap::new(),
             helper_method_index: HashMap::new(),
+            partial_local_types: HashMap::new(),
             rails_application: None,
             concern_filters: HashMap::new(),
             concern_model_items: HashMap::new(),

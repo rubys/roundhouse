@@ -1934,6 +1934,16 @@ impl Analyzer {
             self.body_typer().analyze_expr(&mut view.body, &view_ctx);
         }
 
+        // Record the render-site local types on the App. They already
+        // seeded each partial's body typing above; persisting them is
+        // what lets the view LOWERER stamp the same fact into the
+        // emitted signature instead of re-guessing a param's type from
+        // its name. See `App::partial_local_types`.
+        app.partial_local_types = partial_locals_by_name
+            .iter()
+            .map(|(view, locals)| (view.clone(), locals.clone()))
+            .collect();
+
         // Seeds body (db/seeds.rb). Top-level Ruby: no `self`, no
         // ivars, no before-action scaffolding. Just an expression
         // that references model classes. Types so that Send effects

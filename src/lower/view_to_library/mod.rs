@@ -504,7 +504,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         });
         sig_params.push(TyParam {
             name: record.name.clone(),
-            ty: ivar_ty(&record_name, &known_models),
+            ty: declared_local_ty(view, &record_name, &known_models, lx.app),
             kind: ParamKind::Required,
         });
         for iv in &closure {
@@ -523,7 +523,11 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
             );
             sig_params.push(TyParam {
                 name: p.name.clone(),
-                ty: if is_bool_default { Ty::Bool } else { ivar_ty(p.name.as_str(), &known_models) },
+                ty: if is_bool_default {
+                    Ty::Bool
+                } else {
+                    declared_local_ty(view, p.name.as_str(), &known_models, lx.app)
+                },
                 // These are Ruby KEYWORD params (`show_story: false`), not
                 // positionals — strict targets (rust2 unpack_trailing_kwargs,
                 // TS destructured-object def) need the Keyword kind to emit
@@ -2490,6 +2494,55 @@ fn collect_read_ivars(
 /// `@article`/`@story` (singular known model) → `Model`; anything else
 /// (`@page`, `@root_path`, …) → `Untyped`. Mirrors the convention typing
 /// `build_view_signature` applies to the single arg, but per-ivar.
+/// Type for a partial's declared local: the analyzer's render-site fact
+/// when it has one, else the name-based convention guess.
+///
+/// Ordering is deliberate. `ivar_ty` resolves a NAME to a model
+/// (`user` → `User`, `stories` → `Array[Story]`), which covers the
+/// overwhelming majority of Rails locals and is what every target has
+/// been emitting. It cannot cover a local whose name isn't a model —
+/// lobsters' `new_message`, bound from a `@new_message` the controller
+/// set to `Message.new` — and those silently became `untyped`. The
+/// analyzer already knew the type from the render site, so consult it,
+/// but only where the convention yields nothing: preferring the
+/// render-site type outright would let one loosely-typed call site
+/// widen a param that the naming convention types correctly today,
+/// which is a much larger blast radius across seven targets than this
+/// gap warrants.
+fn declared_local_ty(
+    view: &View,
+    name: &str,
+    known_models: &[String],
+    app: &App,
+) -> crate::ty::Ty {
+    let by_name = ivar_ty(name, known_models);
+    if !matches!(by_name, crate::ty::Ty::Untyped) {
+        return by_name;
+    }
+    app.partial_local_types
+        .get(&view.name)
+        .and_then(|locals| locals.get(&Symbol::from(name)))
+        .filter(|t| !matches!(t, crate::ty::Ty::Untyped))
+        .filter(|t| !mentions_relation(t))
+        .cloned()
+        .unwrap_or(by_name)
+}
+
+/// Does this type mention an unspecialized `Relation`? Such a type is
+/// not emittable — a `Relation` reaching emit is the "chains must
+/// specialize to SQL first" gap, and stamping one into a signature
+/// renders a placeholder class name that no target defines. `untyped`
+/// is strictly better there, so the render-site fact is declined.
+fn mentions_relation(ty: &crate::ty::Ty) -> bool {
+    use crate::ty::Ty;
+    match ty {
+        Ty::Relation { .. } => true,
+        Ty::Array { elem } => mentions_relation(elem),
+        Ty::Union { variants } => variants.iter().any(mentions_relation),
+        _ => false,
+    }
+}
+
 fn ivar_ty(name: &str, known_models: &[String]) -> crate::ty::Ty {
     use crate::ty::Ty;
     let cam = camelize_path(&crate::naming::singularize_last(name));
