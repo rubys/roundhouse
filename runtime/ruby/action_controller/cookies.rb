@@ -70,6 +70,31 @@ module ActionController
     def pending
       @out
     end
+
+    # The whole jar as a Hash — inbound overlaid by this request's pending
+    # writes, i.e. exactly what `[]` reads, materialized. This is the name
+    # `pending` above deliberately left free, and it matches Rails, whose
+    # CookieJar#to_h also yields every cookie rather than just the writes.
+    # (`@inbound.merge(@out)` rather than an empty-literal accumulator: a
+    # bare `{}` seed types its values Untyped — the Hash-side accumulator
+    # refinement gap — and `merge` of two Hash[String, String] stays
+    # concrete, which the fully-typed runtime gate requires.)
+    def to_h
+      @inbound.merge(@out)
+    end
+
+    # Iterate the merged view, as Rails' CookieJar does (it is Enumerable
+    # over the same whole-jar view). Yielding over the fresh Hash `to_h`
+    # builds — rather than over @inbound/@out directly — is load-bearing,
+    # not incidental: the shape this exists for is lobsters'
+    # `remove_unknown_cookies`, which calls `cookies.delete(key)` from
+    # inside the block, and `delete` records a write into @out. Walking a
+    # snapshot keeps that allowed, the way `Hash#each` + `delete` on a dup
+    # is; iterating a live store would mutate the collection being walked.
+    def each
+      to_h.each { |k, v| yield k, v }
+      self
+    end
   end
 
   class Base

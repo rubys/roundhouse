@@ -143,6 +143,7 @@ require_relative "../runtime/active_record"
 require_relative "../runtime/action_view/view_helpers"
 require_relative "../runtime/action_dispatch/router"
 require_relative "../runtime/action_controller/base"
+require_relative "../runtime/action_controller/cookies"
 
 class TestBase
   def initialize
@@ -312,6 +313,19 @@ fn ac_base_test_passes_under_spinel() {
     build_and_run(
         Path::new("runtime/ruby/test/action_controller/base_test.rb"),
         "ac_base",
+    );
+}
+
+/// CookieJar (`cookies[:k]`, and the `each` walk lobsters'
+/// `remove_unknown_cookies` needs). Ruby-family lanes only — the jar is a
+/// reopen outside the strict-target runtime tables, so unlike `ac_base`
+/// this has no crystal/kotlin/swift/typescript sibling.
+#[test]
+#[ignore]
+fn ac_cookies_test_passes_under_spinel() {
+    build_and_run(
+        Path::new("runtime/ruby/test/action_controller/cookies_test.rb"),
+        "ac_cookies",
     );
 }
 

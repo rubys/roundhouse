@@ -43,6 +43,13 @@ require "action_view/slots"
 require "action_view/view_helpers"
 require "action_dispatch/router"
 require "action_controller/base"
+# The CookieJar reopen (cookies_test.rb). Safe to load here even though
+# base_test.rb is also run by the strict-target lanes: those ingest only
+# the `*_test.rb` files and supply their own per-target helper, so this
+# file is read by the ruby-family lanes alone and CookieJar stays off the
+# strict tables. Required from the helper rather than inline in the test
+# because the test-file emit drops inline requires.
+require "action_controller/cookies"
 require "inflector"
 
 # Real Db primitive (gem-backed under CRuby) + SqliteAdapter shim that

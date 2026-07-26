@@ -268,6 +268,19 @@ fn ac_base_test_passes_under_cruby() {
     );
 }
 
+/// CookieJar (`cookies[:k]`, and the `each` walk lobsters'
+/// `remove_unknown_cookies` needs). Ruby-family lanes only — the jar is a
+/// reopen outside the strict-target runtime tables, so unlike `ac_base`
+/// this has no crystal/kotlin/swift/typescript sibling.
+#[test]
+#[ignore]
+fn ac_cookies_test_passes_under_cruby() {
+    build_and_run(
+        Path::new("runtime/ruby/test/action_controller/cookies_test.rb"),
+        "ac_cookies",
+    );
+}
+
 #[test]
 #[ignore]
 fn router_test_passes_under_cruby() {

@@ -774,7 +774,17 @@ fn every_runtime_method_body_concretely_typed() {
     // untyped — Rails compares `count == 1` and call sites pass either an
     // Integer or a whole collection (`"category".pluralize(@categories)`);
     // +1 site; ceiling raised 209 → 210.
-    const CEILING: usize = 210;
+    // 2026-07-26 ActionController::CookieJar#each (+#to_h): lobsters'
+    // `remove_unknown_cookies` iterates the jar, so the typed CookieJar
+    // needs the whole-jar walk Rails' Enumerable CookieJar provides. The
+    // `yield k, v` expression is untyped — verified irreducible: the site
+    // stays Ty::Untyped whatever the RBS block return is declared to be
+    // (`-> void` and `-> String` both count), exactly as the same
+    // `x.each { |e| yield e }` shape does in Relation#each/#find_each;
+    // #to_h adds none (`@inbound.merge(@out)` stays concretely typed,
+    // which is why it isn't an empty-literal accumulator); +1 site;
+    // ceiling raised 210 → 211.
+    const CEILING: usize = 211;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
