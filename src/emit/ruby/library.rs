@@ -991,6 +991,54 @@ fn rewrite_helper_calls(
         )
     });
 
+    // Destructive `<lvalue>.<m>!(args)` on a frozen string raises under
+    // spinel (frozen literals) — lobsters' link_to_different_page does
+    // `path.sub!(/…/, "")` on a route-helper literal (`active_path` → a
+    // frozen "/active"). For the in-place string mutators whose bang form
+    // modifies self and returns self-or-nil, the non-destructive
+    // `<lvalue> = <lvalue>.<m>(args)` is equivalent when the bang return is
+    // unused (statement position) and is frozen-safe. Assignable receiver
+    // (Var/Ivar) only; `slice!` and friends (which return the removed part,
+    // not the modified string) are deliberately excluded.
+    let bang_rewrite: Option<Symbol> =
+        if let ExprNode::Send { recv: Some(r), method, block: None, .. } = &*expr.node {
+            let is_lv =
+                matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. });
+            method
+                .as_str()
+                .strip_suffix('!')
+                .filter(|base| {
+                    is_lv
+                        && matches!(
+                            *base,
+                            "sub" | "gsub" | "chomp" | "chop" | "strip" | "lstrip"
+                                | "rstrip" | "squeeze" | "upcase" | "downcase"
+                                | "capitalize" | "swapcase" | "tr" | "tr_s" | "delete"
+                                | "reverse"
+                        )
+                })
+                .map(Symbol::from)
+        } else {
+            None
+        };
+    if let Some(base) = bang_rewrite {
+        let span = expr.span;
+        let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
+        let ExprNode::Send { recv, args, parenthesized, .. } = node else { unreachable!() };
+        let r = recv.unwrap();
+        let target = match &*r.node {
+            ExprNode::Var { id, name } => LValue::Var { id: *id, name: name.clone() },
+            ExprNode::Ivar { name } => LValue::Ivar { name: name.clone() },
+            _ => unreachable!(),
+        };
+        let call = Expr::new(
+            span,
+            ExprNode::Send { recv: Some(r), method: base, args, block: None, parenthesized },
+        );
+        *expr.node = ExprNode::Assign { target, value: call };
+        return;
+    }
+
     // ActiveSupport `String#pluralize(count)` — count-aware inflection of
     // the string ITSELF (singular when count == 1, else the inflected
     // plural), distinct from the count-labeling `Inflector.pluralize(count,
