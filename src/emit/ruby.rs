@@ -569,7 +569,7 @@ pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
     library::apply_time_current_lowering(&mut lcs);
-    library::apply_duration_lowering(&mut lcs);
+    library::apply_duration_lowering(&mut lcs, app);
     // Nullable columns hydrate to nil on the Ruby tree — synthesized
     // `.empty?` predicate forms in view bodies must tolerate it.
     library::apply_nilsafe_empty_lowering(&mut lcs);

@@ -1671,15 +1671,21 @@ pub(crate) fn apply_time_current_lowering(lcs: &mut [LibraryClass]) {
 /// View-pipeline vestige of the shared duration grounding
 /// (`lower::apply_duration_lowering`): the post-analyze hook skips view
 /// bodies, so lowered view classes still take the rewrite here
-/// (lobsters' `_commentbox.html.erb` compares against
-/// `COMMENTABLE_DAYS.days.ago`). Delete when the view pipeline migrates
-/// to shared lowerings. Every other body class arrives already
-/// grounded (re-running is an idempotent no-op — the grounded form no
-/// longer matches).
-pub(crate) fn apply_duration_lowering(lcs: &mut [LibraryClass]) {
+/// (lobsters' `_commentbox.html.erb` both subtracts a Duration from a
+/// Time and calls `before?` on the result). Delete when the view
+/// pipeline migrates to shared lowerings. Every other body class
+/// arrives already grounded (re-running is an idempotent no-op — the
+/// grounded forms no longer match).
+///
+/// The Time-vs-Duration comparison rule reads a receiver type the view
+/// pipeline doesn't stamp, so in practice only the unit, predicate and
+/// arithmetic rules bite here; running the full sequence keeps the one
+/// order declaration (`lower::duration::apply_duration_rewrites`).
+pub(crate) fn apply_duration_lowering(lcs: &mut [LibraryClass], app: &App) {
+    let temporal_predicates = !crate::lower::duration::app_defines_temporal_predicates(app);
     for lc in lcs.iter_mut() {
         for m in &mut lc.methods {
-            crate::lower::duration::rewrite_durations(&mut m.body);
+            crate::lower::duration::apply_duration_rewrites(&mut m.body, temporal_predicates);
         }
     }
 }
