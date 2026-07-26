@@ -59,6 +59,7 @@ pub mod sum_symbol;
 pub mod values_at_splat;
 pub mod request_index;
 pub mod exclude_predicate;
+pub mod literal_append;
 pub mod session_options;
 pub mod relation_residue;
 pub mod send_dispatch;
@@ -89,6 +90,7 @@ pub use as_json_super::apply_as_json_super_grounding;
 pub use parameterize::apply_parameterize_grounding;
 pub use request_index::apply_request_index_lowering;
 pub use exclude_predicate::apply_exclude_predicate_lowering;
+pub use literal_append::apply_literal_append_lowering;
 pub use session_options::apply_session_options_lowering;
 pub use send_dispatch::apply_send_static_dispatch;
 pub use capture_inline::apply_capture_inline;
@@ -164,6 +166,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `x.exclude?(y)` → `!x.include?(y)`; total rewrite, no ordering
     // constraints (no other pass produces or consumes `exclude?`).
     ("exclude_predicate", &[]),
+    // `"lit" << x` → `"lit" + x`; local expression rewrite, no ordering
+    // constraints.
+    ("literal_append", &[]),
     ("transaction_ground", &[]),
     ("partial_qualify", &[]),
     ("capture_inline", &[]),
@@ -266,6 +271,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("session_options");
     exclude_predicate::apply_exclude_predicate_lowering(app);
     ran!("exclude_predicate");
+    literal_append::apply_literal_append_lowering(app);
+    ran!("literal_append");
     transaction_ground::apply_transaction_grounding(app);
     ran!("transaction_ground");
     partial_qualify::apply_partial_qualification(app);
