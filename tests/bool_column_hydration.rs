@@ -97,3 +97,67 @@ fn non_boolean_columns_keep_their_own_coercions() {
         "integer column should still use to_i:\n{src}"
     );
 }
+
+// The same hole, for every OTHER scalar. `is_bool_target` peeled
+// `Bool | Nil` so a nullable boolean reached its arm; nothing peeled
+// for `Int | Nil`, `Str | Nil`, so a nullable non-boolean column fell
+// to the identity arm and kept the adapter's raw value. Under spinel
+// that value is a String whatever the column says, so a nullable FK
+// landed as a String in an `Integer?` slot: every `belongs_to` reader
+// guarded on `@<fk>_id.nil?` read nil, and lobsters' story listings
+// silently lost every domain link (23 -> 0 on /newest, found by a
+// body-diff sweep against the CRuby oracle — no status code moved).
+const NULLABLE_SCALARS: &str = r#"ActiveRecord::Schema[7.1].define(version: 1) do
+  create_table "users", force: :cascade do |t|
+    t.integer "domain_id"
+    t.string "about"
+    t.float "score"
+    t.integer "karma", null: false
+  end
+end
+"#;
+
+#[test]
+fn a_nullable_integer_column_coerces_rather_than_passing_the_raw_value() {
+    let src = emitted_row_class(NULLABLE_SCALARS);
+    let line = src
+        .lines()
+        .find(|l| l.contains("row[\"domain_id\"]") && l.contains("to_i"))
+        .unwrap_or_else(|| panic!("no to_i coercion for a nullable integer:\n{src}"));
+    // NULL survives: nil.to_i is 0, which would make a nil FK look like
+    // a real row and (worse) make `group_by(&:fk)[nil]` find no roots.
+    assert!(
+        line.contains("nil?"),
+        "the coercion must stay nil-safe:\n{line}"
+    );
+}
+
+#[test]
+fn nullable_string_and_float_columns_coerce_too() {
+    let src = emitted_row_class(NULLABLE_SCALARS);
+    assert!(
+        src.lines().any(|l| l.contains("row[\"about\"]") && l.contains("to_s") && l.contains("nil?")),
+        "nullable string coerces nil-safely:\n{src}"
+    );
+    assert!(
+        src.lines().any(|l| l.contains("row[\"score\"]") && l.contains("to_f") && l.contains("nil?")),
+        "nullable float coerces nil-safely:\n{src}"
+    );
+}
+
+#[test]
+fn a_non_nullable_integer_keeps_its_default_form() {
+    // Not nullable, so nothing here can be nil and the guard is not
+    // just unnecessary but wrong — it would put nil in a slot the RBS
+    // pins `Integer`.
+    let src = emitted_row_class(NULLABLE_SCALARS);
+    let line = src
+        .lines()
+        .find(|l| l.contains("instance.karma"))
+        .unwrap_or_else(|| panic!("no karma hydration:\n{src}"));
+    assert!(line.contains("to_i"), "non-nullable integer still coerces: {line}");
+    assert!(
+        !line.contains("nil?"),
+        "and takes NO nil guard: {line}"
+    );
+}

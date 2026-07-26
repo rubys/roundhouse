@@ -330,7 +330,41 @@ fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
     // rather than `&.` — the spinel AOT consumer of this emit has no
     // proven safe-nav support. Effectful operands keep the plain
     // coercion (legacy behavior) rather than risk double evaluation.
-    let pure_read = matches!(&*value.node, ExprNode::Var { .. } | ExprNode::Ivar { .. });
+    // What counts as re-evaluable: a name, plus the two shapes the two
+    // hydration paths actually read a column through — `row["col"]` on
+    // the raw-hash path and `row.col` on the typed-row path. Both are
+    // side-effect-free lookups off a local, so evaluating twice costs a
+    // second lookup and nothing else. This has to cover them, because a
+    // NILABLE target now reaches a coercion arm (see the match below)
+    // and `nil.to_i` is 0 — the exact NULL-destroying shape the guard
+    // above exists to prevent. Widening the arms without widening this
+    // set collapsed lobsters' /u from 292KB to 3KB: `invited_by_user_id`
+    // read 0 instead of nil, so `group_by(&:fk)[nil]` found no roots
+    // and the whole invite tree rendered empty.
+    // A NILABLE target extends the re-evaluable set to the two shapes
+    // the hydration paths read a column through — `row["col"]` and
+    // `row.col`, both side-effect-free lookups off a local. It has to,
+    // because such a target now reaches a coercion arm (see the match
+    // below) and `nil.to_i` is 0, the exact NULL-destroying shape the
+    // guard exists to prevent. Non-nilable targets keep the original,
+    // narrower set: nothing there can be nil, and widening the guard
+    // for them wrapped `karma` — declared `null: false` — in a ternary
+    // that could assign nil into a slot the RBS pins `Integer`.
+    let target_is_nilable = matches!(
+        target_ty,
+        Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil))
+    );
+    let pure_read = match &*value.node {
+        ExprNode::Var { .. } | ExprNode::Ivar { .. } => true,
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. } if target_is_nilable => {
+            let recv_is_name = matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. });
+            let reader_or_lookup = args.is_empty()
+                || (method.as_str() == "[]"
+                    && args.iter().all(|a| matches!(&*a.node, ExprNode::Lit { .. })));
+            recv_is_name && reader_or_lookup
+        }
+        _ => false,
+    };
     let coerce = |m: &str| {
         if pure_read {
             format!("({inner}).nil? ? nil : ({inner}).{m}")
@@ -338,7 +372,13 @@ fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
             format!("({inner}).{m}")
         }
     };
-    match target_ty {
+    // Peeled, so a NULLABLE column reaches its own arm. A nullable
+    // scalar types `T | Nil`, which matched none of these and fell to
+    // the identity arm below — the same hole `is_bool_target` already
+    // peels around for `Bool | Nil`, left open for every other scalar.
+    // NULL survives it: the hydration wraps this cast in its own
+    // `.nil?` guard, and `coerce` adds a second one for pure reads.
+    match target_ty.peel_nilable() {
         Ty::Str => coerce("to_s"),
         Ty::Sym => coerce("to_sym"),
         Ty::Int => coerce("to_i"),
