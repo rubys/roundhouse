@@ -389,9 +389,18 @@ if (( ${#LANES[@]} > 0 )); then
                 # AOT: emit, compile to a native binary, then replay
                 # IN-PROCESS through the compiled driver. One lane, not a
                 # JIT pair — there is no JIT to turn off.
-                if ! command -v spinel >/dev/null 2>&1; then
-                    fail "lane spinel skipped: no spinel on PATH"
-                    lane_status "$LANE" skipped toolchain "no spinel on PATH"; continue
+                # `spin` is the one the build actually shells out to
+                # (the tree's Makefile runs `$(SPIN) build`), and it lives
+                # in the spinel checkout's bin/ — a PATH carrying only the
+                # checkout root resolves `spinel` (root symlink) but NOT
+                # `spin`, which would fail at build instead of skipping.
+                SP_MISSING=()
+                command -v spinel >/dev/null 2>&1 || SP_MISSING+=(spinel)
+                command -v spin   >/dev/null 2>&1 || SP_MISSING+=(spin)
+                if (( ${#SP_MISSING[@]} > 0 )); then
+                    fail "lane spinel skipped: not on PATH: ${SP_MISSING[*]} (add <spinel-checkout>/bin to PATH)"
+                    lane_status "$LANE" skipped toolchain \
+                        "not on PATH: ${SP_MISSING[*]} — add <spinel-checkout>/bin to PATH"; continue
                 fi
                 SP_TREE="$REPO_ROOT/build/transpiled-lobsters-spinel"
                 step "lane spinel: emit + AOT compile + in-process replay"
@@ -417,7 +426,13 @@ if (( ${#LANES[@]} > 0 )); then
                          --json "$LDIR/summary.json" --md "$LDIR/summary.md"
                          --dump "$LDIR/bodies" --warmup 5
                          --time "$TIME_ITERS" --min-time 10)
-                [[ -d "$HOME/git/spinel-bcrypt" ]] && SP_ARGS+=(--bcrypt "$HOME/git/spinel-bcrypt")
+                # bcrypt is a spin package the published index may not
+                # carry; a local checkout stands in. Look where people
+                # actually put it rather than assuming one layout.
+                for CAND in "${SPINEL_BCRYPT:-}" "$HOME/git/spinel-bcrypt" \
+                            "$HOME/spinel-bcrypt" "$(dirname "$(command -v spin)")/../../spinel-bcrypt"; do
+                    if [[ -n "$CAND" && -d "$CAND" ]]; then SP_ARGS+=(--bcrypt "$CAND"); break; fi
+                done
                 # `|| SP_RC=$?`, never a bare call: under `set -e` a failing
                 # replay would take this whole script down BEFORE the lane
                 # status is written and before aggregation runs — the page
