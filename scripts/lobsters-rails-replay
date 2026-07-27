@@ -232,18 +232,25 @@ if opts[:dump]
     "/s/#{story}",
   ]
   FileUtils.mkdir_p(opts[:dump])
-  bad = []
+  statuses = {}
   parity_routes.each do |route|
     env = Rack::MockRequest.env_for("https://localhost#{route}", method: :GET)
     st, _h, body = generator.visit(env)
     body = body.respond_to?(:each) ? body.to_a.join : body.to_s
-    bad << "#{route} -> #{st}" unless st == 200
-    File.write(File.join(opts[:dump], route.delete_prefix("/").gsub(/[^\w.-]/, "_")), body)
+    file = route.delete_prefix("/").gsub(/[^\w.-]/, "_")
+    statuses[file] = st
+    File.write(File.join(opts[:dump], file), body)
   end
+  # A non-200 reference is a BROKEN ORACLE: comparing against it would
+  # dress up an error page as the expected output. Record the statuses
+  # rather than aborting — the timing run this lane exists for is still
+  # perfectly valid, and lobsters-content-diff refuses those routes on its
+  # own (verdict "oracle-failed") instead of scoring them. Underscore-
+  # prefixed files are metadata, not bodies.
+  File.write(File.join(opts[:dump], "_status.json"), JSON.pretty_generate(statuses))
+  bad = statuses.reject { |_, st| st == 200 }
   $stderr.puts "reference bodies -> #{opts[:dump]} (#{parity_routes.size} routes)"
-  # The reference must be a CLEAN oracle. A non-200 here would silently
-  # become the thing the emit is compared against.
-  abort "lobsters-rails-replay: reference dump is not all-200: #{bad.join(', ')}" if bad.any?
+  $stderr.puts "WARNING: reference is not all-200: #{bad.map { |f, st| "#{f}=#{st}" }.join(', ')}" if bad.any?
   if opts[:dump_only]
     File.unlink(File.join(opts[:src], "log/production.log")) rescue nil
     exit 0

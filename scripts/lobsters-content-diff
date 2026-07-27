@@ -48,7 +48,12 @@
 #   --quiet       suppress per-route progress lines
 #
 # Filenames must correspond between the two dirs; both replay scripts derive
-# them the same way (route with non-word chars -> _).
+# them the same way (route with non-word chars -> _). Underscore-prefixed
+# files are metadata, not bodies: REF_DIR/_status.json, when the reference
+# producer wrote one, gives each route's reference status. A route the
+# ORACLE could not render (non-200) has no expected output, so it is scored
+# "oracle-failed" and left out of the denominator entirely — comparing
+# against an error page would let a matching error page read as parity.
 #
 # Exit code = number of routes whose content is not equivalent.
 
@@ -466,8 +471,19 @@ end
 
 # ── run ──────────────────────────────────────────────────────────────
 names = (Dir.children(REF_DIR) | Dir.children(CAND_DIR)).sort
+names.reject! { |n| n.start_with?("_") }  # metadata sidecars, not bodies
 names.reject! { |n| File.directory?(File.join(REF_DIR, n)) || File.directory?(File.join(CAND_DIR, n)) }
 abort "lobsters-content-diff: no bodies in #{REF_DIR}" if names.empty?
+
+# Per-route reference status, when the reference producer recorded one. A
+# route the ORACLE could not render has no expected output, so it cannot be
+# scored either way — comparing against an error page would let a matching
+# error page read as parity.
+REF_STATUS = begin
+  JSON.parse(File.read(File.join(REF_DIR, "_status.json")))
+rescue StandardError
+  {}
+end
 
 ledger = Hash.new(0)
 results = names.map do |name|
@@ -476,6 +492,10 @@ results = names.map do |name|
   unless File.exist?(ref_path) && File.exist?(cand_path)
     next { "route" => name, "verdict" => "missing",
            "detail" => File.exist?(ref_path) ? "absent from #{CAND_DIR}" : "absent from #{REF_DIR}" }
+  end
+  if (rs = REF_STATUS[name]) && rs != 200
+    next { "route" => name, "verdict" => "oracle-failed",
+           "detail" => "reference returned #{rs} — no expected output to compare against" }
   end
 
   ref  = File.read(ref_path)
@@ -529,6 +549,9 @@ results = names.map do |name|
   r
 end
 
+# oracle-failed is NOT counted as a failure of the candidate: the reference
+# could not render the route, so nothing was proven either way. It is
+# surfaced separately so it cannot pass for a clean comparison.
 bad = results.count { |r| %w[differs missing].include?(r["verdict"]) }
 summary = {
   "generated_at" => Time.now.utc.to_s,
@@ -539,6 +562,10 @@ summary = {
   "equivalent"   => results.count { |r| r["verdict"] == "equivalent" },
   "differs"      => results.count { |r| r["verdict"] == "differs" },
   "missing"      => results.count { |r| r["verdict"] == "missing" },
+  "oracle_failed" => results.count { |r| r["verdict"] == "oracle-failed" },
+  # Routes the reference could render — the denominator any equivalence
+  # claim is actually entitled to use.
+  "comparable"   => results.count { |r| r["verdict"] != "oracle-failed" },
   "rule_ledger"  => RULES.map { |rule|
     { "name" => rule[:name], "kind" => rule[:kind].to_s, "why" => rule[:why],
       "applications" => ledger[rule[:name]] }
@@ -551,7 +578,7 @@ File.write(opts[:json], JSON.pretty_generate(summary)) if opts[:json]
 if opts[:md]
   ok = summary["identical"] + summary["equivalent"]
   md = +"# Lobsters content parity\n\n"
-  md << "_#{ok}/#{summary['total']} routes render content equivalent to Rails "
+  md << "_#{ok}/#{summary['comparable']} routes render content equivalent to Rails "
   md << "(#{summary['identical']} byte-identical) — #{summary['generated_at']}_\n\n"
   md << "Bodies are compared as parsed token streams, so inter-element whitespace, "
   md << "attribute order, void-element spelling, and character-reference spelling "
@@ -586,8 +613,11 @@ if opts[:md]
 end
 
 ok = summary["identical"] + summary["equivalent"]
-puts "\n#{ok}/#{summary['total']} routes content-equivalent to reference " \
+puts "\n#{ok}/#{summary['comparable']} routes content-equivalent to reference " \
      "(#{summary['identical']} byte-identical, #{summary['differs']} differ)"
+if summary["oracle_failed"].positive?
+  puts "  #{summary['oracle_failed']} route(s) NOT COMPARED: the reference itself did not return 200"
+end
 summary["rule_ledger"].each do |rule|
   next if rule["applications"].zero?
   puts "  #{rule['kind'] == 'known' ? 'KNOWN' : 'mask '} #{rule['name']}: #{rule['applications']}"

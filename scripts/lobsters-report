@@ -910,9 +910,18 @@ html << "</details>\n"
 # at all, so the page states exactly what was forgiven and how often.
 if content
   ce = content['identical'] + content['equivalent']
-  diff_routes = (content['routes'] || []).reject { |r| %w[identical equivalent].include?(r['verdict']) }
-  html << "<h2>#{section_no}. Content parity vs Rails (#{ce}/#{content['total']})</h2>\n"
-  html << %(<span class="badge #{diff_routes.empty? ? 'pass' : 'fail'}">#{ce}/#{content['total']} routes render what Rails renders</span>\n)
+  # Denominator is the routes the ORACLE could render. A route Rails itself
+  # failed proves nothing either way, so it is neither credited nor charged
+  # — but it is named below, because a shrinking denominator that nobody
+  # mentions is how a parity claim quietly stops meaning anything.
+  cmp = content['comparable'] || content['total']
+  stale = (content['routes'] || []).select { |r| r['verdict'] == 'oracle-failed' }
+  diff_routes = (content['routes'] || []).reject { |r| %w[identical equivalent oracle-failed].include?(r['verdict']) }
+  html << "<h2>#{section_no}. Content parity vs Rails (#{ce}/#{cmp})</h2>\n"
+  html << %(<span class="badge #{diff_routes.empty? ? 'pass' : 'fail'}">#{ce}/#{cmp} routes render what Rails renders</span>\n)
+  if stale.any?
+    html << %(<p class="caveat"><strong>#{stale.size} route(s) not compared</strong> — Rails itself did not return 200 for #{stale.map { |r| "<code>#{esc(r['route'])}</code>" }.join(', ')}, so there was no expected output. They are excluded from the count above rather than scored against a broken oracle.</p>\n)
+  end
   html << <<~P
     <p>Every parity route is fetched from real Rails and from the emit, and both bodies are parsed into a canonical token stream and diffed there. That makes the comparison blind to four things that are not differences — indentation and formatting whitespace between block elements, attribute order, void-element spelling (<code>&lt;img&gt;</code> vs <code>&lt;img /&gt;</code>), and character-reference spelling (<code>&amp;#39;</code> vs <code>&amp;apos;</code>) — and blind to nothing else.</p>
   P
