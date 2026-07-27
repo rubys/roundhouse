@@ -58,9 +58,16 @@ lanes_mode = File.exist?(File.join(run_path, 'matrix.json'))
 if lanes_mode
   matrix = sibling(run_path, 'matrix.json') or abort "unparseable matrix.json in #{run_path}"
   prim   = %w[ruby ruby-int].find { |id| File.exist?(File.join(run_path, id, 'summary.json')) }
-  prim or abort "lane layout but no ruby lane summary under #{run_path}"
+  # A run whose emit lanes ALL died still has to render. Aborting here
+  # would leave the previously published page in place — so a lane that
+  # SEGVs would quietly go on showing yesterday's numbers as though they
+  # were today's, which is the worst outcome available. Render the page
+  # with no emit data; the trust banner and the matrix's dead rows are
+  # then the whole story, which is exactly what happened.
+  emit_missing = prim.nil?
+  prim ||= 'ruby'
   input   = File.join(run_path, prim, 'summary.json')
-  summary = JSON.parse(File.read(input))
+  summary = emit_missing ? {} : JSON.parse(File.read(input))
   # Rails baseline at the SAME JIT level as the primary emit lane.
   rails = sibling(File.join(run_path, prim == 'ruby' ? 'rails' : 'rails-int'), 'rails.json')
   # Lane env carries the interpreter (the headline's JIT label); the
@@ -70,6 +77,7 @@ if lanes_mode
   jruby     = sibling(File.join(run_path, 'jruby'), 'summary.json')
   jruby_env = jruby && sibling(File.join(run_path, 'jruby'), 'env.json')
 else
+  emit_missing = false
   prim  = nil
   input = File.directory?(arg) ? File.join(arg, 'summary.json') : arg
   File.exist?(input) or abort "no summary.json at #{input}"
@@ -103,6 +111,9 @@ run_dir  = File.basename(run_path)
 # when the run had no Rails lane to compare against — which the page must
 # say, because "not compared" and "compared and matched" are different
 # claims and only one of them is an attestation.
+# Hoisted: the trust banner reads these rows long before the matrix
+# section renders them.
+mrows    = matrix && (matrix['rows'] || [])
 content  = lanes_mode ? sibling(File.join(run_path, prim), 'content-parity.json') : nil
 jr_content = lanes_mode ? sibling(File.join(run_path, 'jruby'), 'content-parity.json') : nil
 
@@ -454,6 +465,11 @@ styles = <<~CSS
   td.no  { color: #c0392b; font-weight: 600; }
   details summary { cursor: pointer; color: #555; padding: 0.4em 0; }
   .legend { font-size: 0.85em; color: #666; }
+  .alarm { border: 2px solid #b00; background: #fff4f4; border-radius: 6px;
+           padding: 0.9em 1.1em; margin: 1.2em 0; }
+  .alarm h2 { margin: 0 0 0.4em; font-size: 1.05em; color: #b00; border: none; padding: 0; }
+  .alarm ul { margin: 0.5em 0 0; padding-left: 1.3em; }
+  .alarm .why { margin: 0.6em 0 0; font-size: 0.9em; color: #444; }
   svg { display: block; margin: 0.4em auto; max-width: 100%; }
 CSS
 
@@ -468,6 +484,51 @@ if env && env['roundhouse_commit']
   prov << %( · <code>#{env['roundhouse_commit'][0, 12]}</code>)
 end
 html << %(<div class="meta">Run <code>#{run_dir}</code>#{prov}</div>\n)
+
+# ── Trust banner ─────────────────────────────────────────────────────
+# The performance numbers on this page are a claim that work was done.
+# This banner is what makes that claim falsifiable: it appears whenever
+# any lane's output was wrong OR was never checked, and it disappears on
+# its own when every lane is verified clean. Its ABSENCE is the signal —
+# so "not checked" must raise it just as loudly as "checked and wrong",
+# or a run with no oracle would render as a clean bill of health.
+#
+# Three inputs, all already produced by the run:
+#   content parity   — does this lane render what Rails renders?
+#   failed_visits    — did the timed sequence itself see non-200s? (a lane
+#                      that answers nothing answers very fast)
+#   lane state       — did the lane die before producing anything?
+trouble = []
+(mrows || []).each do |r|
+  lane_name = "#{r['label']} #{r['jit']}".strip
+  if r['state'] && r['state'] != 'ok'
+    trouble << [lane_name, "produced no data — #{r['state']} at #{r['stage']}" +
+                      (r['detail'].to_s.empty? ? '' : ": #{r['detail']}")]
+    next
+  end
+  next if r['kind'] == 'rails'   # Rails IS the oracle; it is not compared to itself
+  if r['content_total'].nil?
+    trouble << [lane_name, 'content was never compared — no Rails lane in this run to compare against']
+  elsif r['content_differs'].to_i > 0
+    diff_names = (r['content_routes'] || []).map { |x| x['route'] }.first(6).join(', ')
+    trouble << [lane_name, "renders #{r['content_equivalent']}/#{r['content_total']} routes equivalent to Rails" +
+                      (diff_names.empty? ? '' : " — differs on #{diff_names}")]
+  end
+  if r['failed_visits'].to_i > 0
+    trouble << [lane_name, "#{r['failed_visits']} of the timed sequence's visits did not return 200 — " \
+                      'failing visits short-circuit, so this lane\'s ms/iter is faster than real work']
+  end
+end
+
+if trouble.any?
+  html << %(<div class="alarm">\n)
+  html << "<h2>The performance numbers on this page are not trustworthy</h2>\n"
+  html << "<ul>\n"
+  trouble.each { |ln, why| html << "<li><strong>#{esc(ln)}</strong> — #{esc(why)}</li>\n" }
+  html << "</ul>\n"
+  html << %(<p class="why">Timings below are still shown, and are still real measurements of what the code did — but what the code did was not what Rails does, so they do not measure the same work and must not be compared. This banner is generated from the run's own data and disappears by itself once every lane renders what Rails renders and every timed visit returns 200.</p>\n)
+  html << "</div>\n"
+end
 
 html << %(<div class="badges">)
 html << %(<span class="badge #{all_pass ? 'pass' : 'fail'}">#{pass}/#{total} routes return 200</span>\n)
@@ -530,8 +591,6 @@ end
 
 # ── Section: runtime × JIT matrix (from matrix/matrix.json) ──────────
 
-mrows = matrix && (matrix['rows'] || [])
-
 # Lane identity helpers, hoisted above the section that first uses them:
 # the memory section further down keys off the same colors and labels, and
 # a lane must not change appearance between the two.
@@ -548,8 +607,14 @@ end
 lane_jit = ->(r) { r['jit'] || (r['yjit'] ? '+YJIT' : 'no JIT') }
 
 if mrows && !mrows.empty?
-  msorted = mrows.sort_by { |r| r['ms_median'].to_f }
-  mby_key = mrows.to_h { |r| [[r['kind'], r['yjit']], r] }
+  # Rows with no ms_median are lanes that died. They are kept OUT of the
+  # chart and the derived insights (there is nothing to plot and nothing
+  # to divide) but listed under the table, so the page still says the
+  # lane was asked for and what became of it.
+  mdead   = mrows.reject { |r| r['ms_median'] }
+  mlive   = mrows.select { |r| r['ms_median'] }
+  msorted = mlive.sort_by { |r| r['ms_median'].to_f }
+  mby_key = mlive.to_h { |r| [[r['kind'], r['yjit']], r] }
 
   # In the lane layout this section IS the headline — the vs-Rails number
   # is the same-JIT pair of these rows, so it opens the section rather
@@ -582,8 +647,8 @@ if mrows && !mrows.empty?
     next unless rl && em && em['ms_median'].to_f > 0
     insights << "<strong>Roundhouse</strong> is #{fmt_dec(rl['ms_median'].to_f / em['ms_median'].to_f, 2)}× faster than Rails #{yj ? 'with YJIT' : 'without a JIT'} (#{fmt_dec(rl['ms_median'], 1)} → #{fmt_dec(em['ms_median'], 1)} ms/iter)"
   end
-  rj_row = mrows.find { |r| r['id'] == 'rails-jruby' }
-  je_row = mrows.find { |r| r['id'] == 'jruby' }
+  rj_row = mlive.find { |r| r['id'] == 'rails-jruby' }
+  je_row = mlive.find { |r| r['id'] == 'jruby' }
   if rj_row && je_row && je_row['ms_median'].to_f > 0
     insights << "On the JVM, <strong>Roundhouse</strong> is #{fmt_dec(rj_row['ms_median'].to_f / je_row['ms_median'].to_f, 2)}× faster than Rails (#{fmt_dec(rj_row['ms_median'], 1)} → #{fmt_dec(je_row['ms_median'], 1)} ms/iter)"
     rl_y = mby_key[['rails', true]]
@@ -598,7 +663,7 @@ if mrows && !mrows.empty?
   # section, folded in so it scales with the lane count.
   lane_iters = {}
   if lanes_mode
-    mrows.each do |r|
+    mlive.each do |r|
       data = sibling(File.join(run_path, r['id']), r['kind'] == 'rails' ? 'rails.json' : 'summary.json')
       t = r['kind'] == 'rails' ? data : data && data['sequence_timing']
       im = t && t['iter_ms']
@@ -626,9 +691,23 @@ if mrows && !mrows.empty?
     html << %(<td class="num">#{r['vs_rails'] ? "#{fmt_dec(r['vs_rails'], 2)}×" : '—'}</td>)
     html << "</tr>\n"
   end
+  # Lanes that were asked for and produced nothing. Listed in the same
+  # table as the ones that worked: a run where a lane died is a different
+  # run from one where it was never configured, and the table is where a
+  # reader looks to tell them apart.
+  mdead.each do |r|
+    why = "#{r['state'] || 'failed'}#{r['stage'].to_s.empty? ? '' : " at #{r['stage']}"}"
+    why << ": #{r['detail']}" unless r['detail'].to_s.empty?
+    span = 4 + (cv_col ? 1 : 0)
+    html << "<tr>"
+    html << %(<td><strong>#{esc(r['label'])}</strong></td>)
+    html << %(<td>#{lane_jit.(r)}</td>)
+    html << %(<td class="num no" colspan="#{span}"><strong>NO DATA</strong> — #{esc(why)}</td>)
+    html << "</tr>\n"
+  end
   html << "</tbody></table>\n"
-  jr_note = if mrows.any? { |r| r['id'] == 'jruby' }
-    mrows.any? { |r| r['id'] == 'rails-jruby' } ?
+  jr_note = if mlive.any? { |r| r['id'] == 'jruby' }
+    mlive.any? { |r| r['id'] == 'rails-jruby' } ?
       ' The JVM rows pair with each other: Roundhouse JRuby\'s ratio is vs Rails on JRuby.' :
       ' The JRuby row compares against Rails +YJIT — Rails\' best CRuby configuration.'
   else
@@ -636,7 +715,7 @@ if mrows && !mrows.empty?
   end
   cv_note = cv_col ? ' CV = per-lane standard deviation ÷ mean across the timed iterations.' : ''
   html << %(<p class="legend">“vs Rails” is a <strong>speed</strong> ratio — Rails' ms/iter ÷ this row's, at the same JIT level — so 3× means three times faster. Memory is a separate section below.#{jr_note}#{cv_note}</p>\n)
-  if (rjc = mrows.find { |r| r['id'] == 'rails-jruby' })
+  if (rjc = mlive.find { |r| r['id'] == 'rails-jruby' })
     html << %(<p class="caveat"><code>Rails JRuby</code> is the stock-Rails-on-the-JVM baseline: the same app from a patched fixture — Rails #{esc(rjc['rails'] || '8.0.x')} (the AR-JDBC prerelease adapter pins it one minor behind the CRuby lanes), markdown through the same commonmark-java shim the Roundhouse JRuby lane uses, and a JRuby <code>Time.new</code> call-site bug worked around in an initializer.</p>\n)
   end
 
@@ -761,7 +840,7 @@ end
 # are different ratios, and side by side they read as one. Sits before
 # the parity attestation because it is a result, not an attestation.
 
-mem_rows = (mrows || []).select { |r| r['rss_peak_kb'] || r['rss_final_kb'] }
+mem_rows = (mrows || []).select { |r| r['ms_median'] && (r['rss_peak_kb'] || r['rss_final_kb']) }
 unless mem_rows.empty?
   mb   = ->(kb) { kb.to_f / 1024.0 }
   peak = ->(r) { mb.(r['rss_peak_kb'] || r['rss_final_kb']) }

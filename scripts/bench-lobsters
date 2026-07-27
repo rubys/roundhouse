@@ -299,13 +299,30 @@ if (( ${#LANES[@]} > 0 )); then
     EMITTED_JRUBY=$SKIP_EMIT
     FAILED_LANES=0
 
+    # Every lane named on the command line leaves a status file, whether or
+    # not it produced data. A lane that dies — bundle missing, emit broken,
+    # SEGV mid-replay — must appear on the page as a lane that DIED, not
+    # vanish from it: a silently absent row reads as "never configured",
+    # which is the one thing it isn't. The aggregator builds a row from this
+    # file when there is no timing JSON to build one from.
+    lane_status() {  # lane state stage detail
+        ruby -rjson -e 'File.write(ARGV[0], JSON.pretty_generate(
+          "state" => ARGV[1], "stage" => ARGV[2], "detail" => ARGV[3]))' \
+          "$RUN_DIR/$1/lane-status.json" "$2" "$3" "$4" 2>/dev/null || true
+    }
+    # Last non-empty line of a lane log — enough to say WHY on the page
+    # without making the reader open the log.
+    lane_tail() { [[ -f "$1" ]] && grep -v '^[[:space:]]*$' "$1" | tail -1 | cut -c1-300 || echo ""; }
+
     for LANE in "${LANES[@]}"; do
         LDIR="$RUN_DIR/$LANE"
         mkdir -p "$LDIR"
+        lane_status "$LANE" running start ""
         case "$LANE" in
             rails|rails-int)
                 if (( RAILS_OK == 0 )); then
-                    fail "lane $LANE skipped: bundle not installable in $SRC"; continue
+                    fail "lane $LANE skipped: bundle not installable in $SRC"
+                    lane_status "$LANE" skipped bundle "bundle not installable in $SRC"; continue
                 fi
                 RO=--yjit; JIT_LABEL=YJIT
                 [[ "$LANE" == rails-int ]] && { RO=; JIT_LABEL="no JIT"; }
@@ -322,8 +339,10 @@ if (( ${#LANES[@]} > 0 )); then
                         fail "lane $LANE: regenerated sequence != committed frozen-sequence.json"
                     fi
                     ok "lane $LANE done"
+                    lane_status "$LANE" ok "" ""
                 else
                     fail "lane $LANE failed (see $LDIR/run.log)"; FAILED_LANES=$((FAILED_LANES + 1))
+                    lane_status "$LANE" failed replay "$(lane_tail "$LDIR/run.log")"
                 fi
                 ;;
             ruby|ruby-int)
@@ -334,16 +353,20 @@ if (( ${#LANES[@]} > 0 )); then
                 step "lane $LANE: emit replay on the frozen sequence ($JIT_LABEL)"
                 if RUBYOPT="$RO" "${CMD[@]}" >"$LDIR/run.log" 2>&1; then
                     EMITTED_CRUBY=1; ok "lane $LANE done"
+                    lane_status "$LANE" ok "" ""
                 else
                     fail "lane $LANE failed (see $LDIR/run.log)"; FAILED_LANES=$((FAILED_LANES + 1))
+                    lane_status "$LANE" failed replay "$(lane_tail "$LDIR/run.log")"
                 fi
                 ;;
             rails-jruby)
                 if (( JRUBY_OK == 0 )); then
-                    fail "lane rails-jruby skipped: no jruby on PATH"; continue
+                    fail "lane rails-jruby skipped: no jruby on PATH"
+                    lane_status "$LANE" skipped toolchain "no jruby on PATH"; continue
                 fi
                 if ! prep_rails_jruby_fixture; then
-                    FAILED_LANES=$((FAILED_LANES + 1)); continue
+                    FAILED_LANES=$((FAILED_LANES + 1))
+                    lane_status "$LANE" failed fixture "rails-jruby fixture prep failed"; continue
                 fi
                 step "lane rails-jruby: real Rails under JRuby on the frozen sequence (long warmup; many minutes)"
                 if RUBYOPT= BUNDLE_WITHOUT=development:test \
@@ -356,13 +379,16 @@ if (( ${#LANES[@]} > 0 )); then
                         fail "lane rails-jruby: regenerated sequence != committed frozen-sequence.json"
                     fi
                     ok "lane rails-jruby done"
+                    lane_status "$LANE" ok "" ""
                 else
                     fail "lane rails-jruby failed (see $LDIR/run.log)"; FAILED_LANES=$((FAILED_LANES + 1))
+                    lane_status "$LANE" failed replay "$(lane_tail "$LDIR/run.log")"
                 fi
                 ;;
             jruby)
                 if (( JRUBY_OK == 0 )); then
-                    fail "lane jruby skipped: no jruby on PATH"; continue
+                    fail "lane jruby skipped: no jruby on PATH"
+                    lane_status "$LANE" skipped toolchain "no jruby on PATH"; continue
                 fi
                 # JRuby's JIT warms slowly; an unset --warmup gets a bigger
                 # default than the CRuby lanes' canonical sequence warmup.
@@ -371,8 +397,10 @@ if (( ${#LANES[@]} > 0 )); then
                 step "lane jruby: emit replay on the frozen sequence (JRuby/JVM, long warmup)"
                 if RUBYOPT= "${CMD[@]}" >"$LDIR/run.log" 2>&1; then
                     EMITTED_JRUBY=1; ok "lane jruby done"
+                    lane_status "$LANE" ok "" ""
                 else
                     fail "lane jruby failed (see $LDIR/run.log)"; FAILED_LANES=$((FAILED_LANES + 1))
+                    lane_status "$LANE" failed replay "$(lane_tail "$LDIR/run.log")"
                 fi
                 ;;
         esac
@@ -417,10 +445,11 @@ if (( ${#LANES[@]} > 0 )); then
     # Aggregate lane artifacts into matrix.json (one row per lane) and
     # print the console table. Row fields feed scripts/lobsters-report.
     step "aggregating matrix.json"
-    ruby - "$RUN_DIR" "$TIME_ITERS" <<'AGG' || FAILED_LANES=$((FAILED_LANES + 1))
+    ruby - "$RUN_DIR" "$TIME_ITERS" "${LANES[*]}" <<'AGG' || FAILED_LANES=$((FAILED_LANES + 1))
 require "json"
 require "socket"
-run_dir, time_iters = ARGV
+run_dir, time_iters, requested = ARGV
+REQUESTED = requested.to_s.split(/\s+/).reject(&:empty?)
 META = {
   "rails"       => { label: "Rails",      kind: "rails", runtime: "cruby", yjit: true,  jit: "YJIT",   src: "rails.json"   },
   "rails-int"   => { label: "Rails",      kind: "rails", runtime: "cruby", yjit: false, jit: "no JIT", src: "rails.json"   },
@@ -429,12 +458,33 @@ META = {
   "ruby-int"    => { label: "Roundhouse", kind: "emit",  runtime: "cruby", yjit: false, jit: "no JIT", src: "summary.json" },
   "jruby"       => { label: "Roundhouse", kind: "emit",  runtime: "jruby", yjit: nil,   jit: "JRuby",  src: "summary.json" },
 }
+# A lane that produced no timing data still gets a row. Dropping it would
+# render the page as though the lane had never been asked for, which is the
+# one reading that is definitely wrong — a crashed lane must be LOUDER than
+# a slow one, not invisible.
+def lane_status(run_dir, id)
+  JSON.parse(File.read(File.join(run_dir, id, "lane-status.json")))
+rescue StandardError
+  nil
+end
+
 rows = META.filter_map do |id, m|
   path = File.join(run_dir, id, m[:src])
-  next unless File.exist?(path)
-  data = JSON.parse(File.read(path)) rescue next
-  t = m[:src] == "rails.json" ? data : data["sequence_timing"]
-  next unless t && t["ms_per_iter_median"]
+  st = lane_status(run_dir, id)
+  data = File.exist?(path) ? (JSON.parse(File.read(path)) rescue nil) : nil
+  t = data && (m[:src] == "rails.json" ? data : data["sequence_timing"])
+  unless t && t["ms_per_iter_median"]
+    # No usable timing. Emit a dead row if the lane was asked for; stay
+    # silent only for lanes nobody requested.
+    next unless REQUESTED.include?(id) || st
+    dead = st || { "state" => "failed", "stage" => "unknown",
+                   "detail" => "no timing data and no lane-status.json" }
+    dead = dead.merge("state" => "failed", "stage" => "timing",
+                      "detail" => "lane produced no timing data") if dead["state"] == "ok"
+    next { "id" => id, "label" => m[:label], "kind" => m[:kind], "runtime" => m[:runtime],
+           "yjit" => m[:yjit], "jit" => m[:jit],
+           "state" => dead["state"], "stage" => dead["stage"], "detail" => dead["detail"] }
+  end
   env = (JSON.parse(File.read(File.join(run_dir, id, "env.json"))) rescue {})
   # Content parity vs the Rails lane's rendered bodies (emit lanes only —
   # the Rails lanes ARE the reference). nil where the run had no Rails lane
@@ -442,6 +492,11 @@ rows = META.filter_map do |id, m|
   cp = (JSON.parse(File.read(File.join(run_dir, id, "content-parity.json"))) rescue nil)
   { "id" => id, "label" => m[:label], "kind" => m[:kind], "runtime" => m[:runtime],
     "yjit" => m[:yjit], "jit" => m[:jit],
+    "state" => (st && st["state"]) || "ok",
+    # Visits the frozen sequence itself saw fail. The sequence verifies all
+    # 114; a lane that answers nothing answers it very fast, so this is the
+    # direct guard against a number that is quick because it did no work.
+    "failed_visits" => t["failed_visits"],
     "ms_median" => t["ms_per_iter_median"], "ms_min" => t["ms_per_iter_min"],
     "ms_max" => t["ms_per_iter_max"], "iters" => t["iterations"], "warmup" => t["warmup"],
     "ruby" => data["ruby"] || env["ruby"], "rails" => data["rails"],
@@ -460,14 +515,15 @@ rows = META.filter_map do |id, m|
                                               .map { |r| r.slice("route", "verdict", "diff_tokens", "hunks") },
     "content_rules"      => cp && cp["rule_ledger"] }
 end
-abort "no lane produced timing data" if rows.empty?
+abort "no lane produced any result" if rows.empty?
+live = rows.select { |r| r["ms_median"] }
 # Ratio = same-configuration Rails baseline / this row. CRuby emit rows
 # pair with Rails at the same JIT level; JVM rows pair with Rails on
 # JRuby when that lane ran (same runtime), else fall back to Rails+YJIT
 # (Rails' best CRuby configuration).
-rails_cruby = rows.select { |r| r["kind"] == "rails" && r["runtime"] == "cruby" }.to_h { |r| [r["yjit"], r] }
-rails_jvm   = rows.find { |r| r["kind"] == "rails" && r["runtime"] == "jruby" }
-rows.each do |r|
+rails_cruby = live.select { |r| r["kind"] == "rails" && r["runtime"] == "cruby" }.to_h { |r| [r["yjit"], r] }
+rails_jvm   = live.find { |r| r["kind"] == "rails" && r["runtime"] == "jruby" }
+live.each do |r|
   base = r["runtime"] == "jruby" ? (rails_jvm || rails_cruby[true]) : rails_cruby[r["yjit"]]
   r["vs_rails"] = base ? (base["ms_median"] / r["ms_median"]).round(2) : nil
 end
@@ -479,14 +535,19 @@ matrix = {
   "rows"         => rows,
 }
 File.write(File.join(run_dir, "matrix.json"), JSON.pretty_generate(matrix))
-puts "\n== lobsters lanes (#{rows.size}, ms/iter, lower=better) =="
-rows.sort_by { |r| r["ms_median"] }.each do |r|
+dead = rows.reject { |r| r["ms_median"] }
+puts "\n== lobsters lanes (#{live.size}, ms/iter, lower=better) =="
+live.sort_by { |r| r["ms_median"] }.each do |r|
   rss = r["rss_peak_kb"] || r["rss_final_kb"]
   printf "  %-11s %-7s %9.2f ms/iter  %9s  %s\n", r["label"], r["jit"], r["ms_median"],
          (rss ? "#{(rss / 1024.0).round} MB" : "-"),
          (r["vs_rails"] ? "#{r["vs_rails"]}x vs Rails" : "")
 end
-content = rows.select { |r| r["content_total"] }
+dead.each do |r|
+  printf "  %-11s %-7s %9s  %s\n", r["label"], r["jit"], "NO DATA",
+         "#{r['state']} at #{r['stage']}: #{r['detail']}"
+end
+content = live.select { |r| r["content_total"] }
 if content.any?
   puts "\n== content parity vs Rails (parsed documents, not status codes) =="
   content.each do |r|
