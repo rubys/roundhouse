@@ -14,18 +14,42 @@
 #                   matches scripts/bench:
 #                     rails       real Rails, YJIT        [needs the bundle]
 #                     rails-int   real Rails, no JIT      [needs the bundle]
+#                     ruby        roundhouse emit, YJIT
+#                     ruby-int    roundhouse emit, no JIT
+#                   and, off by default (see below):
 #                     rails-jruby real Rails on JRuby, from a patched
 #                                 sibling fixture (see prep_rails_jruby_
 #                                 fixture) — list it AFTER jruby, whose
 #                                 emit tree it borrows the markly shim from
-#                     ruby        roundhouse emit, YJIT
-#                     ruby-int    roundhouse emit, no JIT
 #                     jruby       roundhouse emit, JRuby/JVM
 #                   Rails lanes are skipped (loudly) when the checkout's
 #                   bundle isn't installable; the JVM lanes when jruby
 #                   isn't on PATH. JIT is pinned per lane via RUBYOPT —
 #                   the ambient environment can't leak in. Example:
-#                     scripts/bench-lobsters rails rails-int ruby ruby-int jruby rails-jruby --time 20
+#                     scripts/bench-lobsters rails rails-int ruby ruby-int --time 20
+#
+#                   THE JVM LANES ARE OFF THE PUBLISHED MATRIX. They still
+#                   run on request — nothing here rejects them — but the
+#                   nightly no longer lists them, because this benchmark
+#                   cannot show what JRuby is good at. It is single-
+#                   threaded by construction, so JRuby's one decisive
+#                   advantage on scripts/bench (no GVL: ~5 cores against
+#                   the CRuby cells' 1, most of that page's 8.8x) is
+#                   excluded here by definition. What is left is a slow
+#                   warmup over a much larger code surface than the blog
+#                   fixture (--warmup 100 against the >=500 this file
+#                   recommends below, and a 1.67x min-max spread to show
+#                   for it) plus per-query JDBC marshalling on a
+#                   DB-heavy workload. Both JVM rows landed slower than
+#                   CRuby WITHOUT a JIT (2026-07-27: jruby 242.93 ms vs
+#                   ruby-int 165.42; rails-jruby 1314.36 vs rails-int
+#                   828.03) — a fact about the workload, not about either
+#                   stack, and not one worth a published row. Drop them
+#                   TOGETHER: the aggregator pairs JVM rows with
+#                   rails-jruby when present and silently falls back to
+#                   Rails+YJIT otherwise, so removing only the baseline
+#                   would restate the jruby row's ratio (5.41x -> 2.03x)
+#                   with no change in the measurement underneath.
 #
 #   With no LANE args this is the single-lane worker (the dev loop and
 #   the lane mode's own building block): emit + file-backed parity replay
