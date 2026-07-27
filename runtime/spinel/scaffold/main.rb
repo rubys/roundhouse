@@ -77,6 +77,10 @@ require_relative "runtime/tep/tep"
 # `require "cgi"`. After tep so `Url` (the percent-encoder CGI.escape routes
 # to) is defined.
 require_relative "runtime/cgi"
+# Spinel-only ERB::Util shim (html_escape) — CRuby/JRuby get it from the
+# stdlib Rails loads. After action_controller, whose require chain defines
+# the ActionView::ViewHelpers.html_escape this delegates to.
+require_relative "runtime/erb"
 # Action Cable WebSocket glue — the /cable endpoint + the Broadcasts
 # transport that fans Turbo Stream fragments out to subscribers. Loaded
 # after tep (uses Tep::WebSocket / Scheduler / Broadcast) and broadcasts

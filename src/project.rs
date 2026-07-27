@@ -1595,6 +1595,15 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         files.push(("sig/runtime/cgi.rbs".to_string(), rbs));
     }
 
+    // ERB::Util shim sidecar — same story as CGI: spinel has no stdlib
+    // ERB, the flat walk emits runtime/erb.rb, and the .rbs pins
+    // html_escape's String return so callers concatenating it stay typed.
+    {
+        let rbs = fs::read_to_string("runtime/spinel/erb.rbs")
+            .map_err(|e| format!("read runtime/spinel/erb.rbs: {e}"))?;
+        files.push(("sig/runtime/erb.rbs".to_string(), rbs));
+    }
+
     // `db_jruby.rb` is the JRuby/JDBC Db backend — it uses Java interop
     // (`java_import`, `Java::`) that the CRuby and Spinel toolchains (and
     // the spinel-subset compliance gate) must never see. It is injected

@@ -1,0 +1,5 @@
+module ERB
+  module Util
+    def self.html_escape: (untyped s) -> String
+  end
+end
