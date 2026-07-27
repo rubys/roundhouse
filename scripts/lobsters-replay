@@ -159,9 +159,12 @@ if opts[:memory]
   end
 end
 
-# Baseline footprint, sampled AFTER the in-memory seed: every lane
-# carries the same fixture DB in this number, so subtracting it compares
-# interpreters rather than the fixture they all share.
+# Baseline footprint, sampled AFTER the in-memory seed, so the fixture
+# DB is inside it. NOT a common floor across lanes: the first live run
+# put the emit lanes at ~87 MB here and Rails at ~184 MB, because each
+# baseline is dominated by the framework it loaded, not by the shared
+# fixture. Report it per lane; subtracting one lane's baseline from
+# another's peak says nothing.
 BOOT_RSS_KB = rss_kb
 
 # ── benchmark identity + route ids ───────────────────────────────────

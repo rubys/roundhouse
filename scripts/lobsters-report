@@ -200,6 +200,48 @@ def compare_bars(rows, left_pad: 90)
   buf
 end
 
+# ── memory footprint: boot baseline + in-run growth, stacked ─────────
+#
+# Two numbers per lane, and the SPLIT is the story. The baseline is what
+# the stack costs standing still — framework loaded, fixture DB seeded,
+# before a single visit. The growth on top is what replaying the
+# sequence retains. A lone peak bar hides which of the two a stack is
+# losing on, and they have different remedies.
+#
+# Bars are linear and share one scale: the size ratio is the point.
+
+def memory_bars(rows, left_pad: 160)
+  width  = 760
+  right  = 96
+  plot_w = width - left_pad - right
+  row_h  = 26
+  gap    = 24
+  top    = 14
+  height = top + (row_h + gap) * rows.size + 4
+
+  max_v = rows.map { |r| r[:peak].to_f }.max.to_f * 1.08
+  max_v = 1.0 unless max_v.finite? && max_v > 0
+
+  buf = +svg_open(width, height)
+  rows.each_with_index do |row, i|
+    y     = top + i * (row_h + gap)
+    bootw = [(row[:boot].to_f / max_v * plot_w).round, 1].max
+    peakw = [(row[:peak].to_f / max_v * plot_w).round, 1].max
+    groww = [peakw - bootw, 0].max
+    buf << t(left_pad - 8, y + row_h * 0.7, row[:label], anchor: 'end', weight: 'bold')
+    # Solid = baseline, translucent = growth: one hue per lane, so the
+    # split reads without a second color to decode.
+    buf << r(left_pad, y, bootw, row_h, fill: row[:color])
+    buf << r(left_pad + bootw, y, groww, row_h, fill: "#{row[:color]}59")
+    buf << t(left_pad + peakw + 8, y + row_h * 0.7, "#{fmt_int(row[:peak].round)} MB", weight: 'bold')
+    buf << t(left_pad, y + row_h + 12,
+             "#{fmt_int(row[:boot].round)} MB baseline + #{fmt_int((row[:peak] - row[:boot]).round)} MB growth",
+             fill: '#777', size: 10)
+  end
+  buf << svg_close
+  buf
+end
+
 # ── frozen-sequence stability: one column per timed iteration ─────────
 #
 # Columns are scaled within a tight band around the observed spread (not
@@ -481,19 +523,25 @@ end
 # ── Section: runtime × JIT matrix (from matrix/matrix.json) ──────────
 
 mrows = matrix && (matrix['rows'] || [])
+
+# Lane identity helpers, hoisted above the section that first uses them:
+# the memory section further down keys off the same colors and labels, and
+# a lane must not change appearance between the two.
+#
+# Colors keyed by lane id (matches the blog bench vocabulary); the
+# kind/yjit fallback covers matrix.json files that predate lane ids.
+mcolor = { 'rails' => COLOR_RAILS, 'rails-int' => '#e89c93', 'rails-jruby' => '#46707f',
+           'ruby' => COLOR_RH, 'ruby-int' => '#b9a3ea', 'jruby' => COLOR_JR }
+lane_color = ->(r) do
+  mcolor[r['id']] ||
+    (r['kind'] == 'rails' ? (r['yjit'] ? COLOR_RAILS : '#e89c93')
+                          : (r['yjit'] ? COLOR_RH    : '#b9a3ea'))
+end
+lane_jit = ->(r) { r['jit'] || (r['yjit'] ? '+YJIT' : 'no JIT') }
+
 if mrows && !mrows.empty?
   msorted = mrows.sort_by { |r| r['ms_median'].to_f }
   mby_key = mrows.to_h { |r| [[r['kind'], r['yjit']], r] }
-  # Colors keyed by lane id (matches the blog bench vocabulary); the
-  # kind/yjit fallback covers matrix.json files that predate lane ids.
-  mcolor = { 'rails' => COLOR_RAILS, 'rails-int' => '#e89c93', 'rails-jruby' => '#46707f',
-             'ruby' => COLOR_RH, 'ruby-int' => '#b9a3ea', 'jruby' => COLOR_JR }
-  lane_color = ->(r) do
-    mcolor[r['id']] ||
-      (r['kind'] == 'rails' ? (r['yjit'] ? COLOR_RAILS : '#e89c93')
-                            : (r['yjit'] ? COLOR_RH    : '#b9a3ea'))
-  end
-  lane_jit = ->(r) { r['jit'] || (r['yjit'] ? '+YJIT' : 'no JIT') }
 
   # In the lane layout this section IS the headline — the vs-Rails number
   # is the same-JIT pair of these rows, so it opens the section rather
@@ -551,14 +599,11 @@ if mrows && !mrows.empty?
   end
   cv_col = !lane_iters.empty?
 
-  # Peak RSS per lane, preferring the high-water mark (Linux) and falling
-  # back to the end-of-run sample where /proc isn't available. Column
-  # appears only once some lane actually reported one, so archived runs
-  # from before the replays sampled memory still render.
-  lane_rss = ->(r) { r['rss_peak_kb'] || r['rss_final_kb'] }
-  rss_col = mrows.any? { |r| lane_rss.(r) }
-
-  html << "<table>\n<thead><tr><th>stack</th><th>JIT</th><th>ms/iter</th><th>min–max</th>#{cv_col ? '<th>CV</th>' : ''}<th>iters</th>#{rss_col ? '<th>peak RSS</th>' : ''}<th>vs Rails</th></tr></thead>\n<tbody>\n"
+  # This table is TIME ONLY. Memory gets its own section further down —
+  # a peak-RSS column here sat directly beside "vs Rails" and invited
+  # reading that time ratio as a memory one (3.61x and 2.71x on the same
+  # row: close enough that the misreading is silent).
+  html << "<table>\n<thead><tr><th>stack</th><th>JIT</th><th>ms/iter</th><th>min–max</th>#{cv_col ? '<th>CV</th>' : ''}<th>iters</th><th>vs Rails</th></tr></thead>\n<tbody>\n"
   msorted.each do |r|
     html << "<tr>"
     html << %(<td><strong>#{esc(r['label'])}</strong></td>)
@@ -570,10 +615,6 @@ if mrows && !mrows.empty?
       html << %(<td class="num">#{cv ? "#{fmt_dec(cv, 1)}%" : '—'}</td>)
     end
     html << %(<td class="num">#{r['iters']}</td>)
-    if rss_col
-      kb = lane_rss.(r)
-      html << %(<td class="num">#{kb ? "#{fmt_int((kb / 1024.0).round)} MB" : '—'}</td>)
-    end
     html << %(<td class="num">#{r['vs_rails'] ? "#{fmt_dec(r['vs_rails'], 2)}×" : '—'}</td>)
     html << "</tr>\n"
   end
@@ -586,22 +627,7 @@ if mrows && !mrows.empty?
     ''
   end
   cv_note = cv_col ? ' CV = per-lane standard deviation ÷ mean across the timed iterations.' : ''
-  # Managed-heap lanes run under an externally fixed heap, so their RSS
-  # is a configured budget rather than a working set — say so whenever
-  # such a lane is present rather than letting the column read as a
-  # like-for-like footprint comparison.
-  rss_note = if rss_col
-    jvm = mrows.any? { |r| r['runtime'] == 'jruby' }
-    base = mrows.filter_map { |r| r['rss_boot_kb'] }.min
-    n = ' Peak RSS is the whole replay process at its high-water mark; every lane boots the same in-memory fixture DB'
-    n += ", and the lowest post-boot baseline across lanes was ~#{fmt_int((base / 1024.0).round)} MB" if base
-    n += '.'
-    n += ' The JVM lanes run under a fixed heap (<code>-Xmx</code>=<code>-Xms</code>), so their RSS is a configured budget, not an organically-grown working set.' if jvm
-    n
-  else
-    ''
-  end
-  html << %(<p class="legend">“vs Rails” compares each row to Rails at the same JIT level.#{jr_note}#{cv_note}#{rss_note}</p>\n)
+  html << %(<p class="legend">“vs Rails” is a <strong>speed</strong> ratio — Rails' ms/iter ÷ this row's, at the same JIT level — so 3× means three times faster. Memory is a separate section below.#{jr_note}#{cv_note}</p>\n)
   if (rjc = mrows.find { |r| r['id'] == 'rails-jruby' })
     html << %(<p class="caveat"><code>Rails JRuby</code> is the stock-Rails-on-the-JVM baseline: the same app from a patched fixture — Rails #{esc(rjc['rails'] || '8.0.x')} (the AR-JDBC prerelease adapter pins it one minor behind the CRuby lanes), markdown through the same commonmark-java shim the Roundhouse JRuby lane uses, and a JRuby <code>Time.new</code> call-site bug worked around in an initializer.</p>\n)
   end
@@ -719,6 +745,84 @@ if timing && timing['iter_ms'] && !lanes_mode
                        median: timing['ms_per_iter_median'],
                        min: timing['ms_per_iter_min'],
                        max: timing['ms_per_iter_max'])
+end
+
+# ── Section: memory footprint ────────────────────────────────────────
+#
+# Its own section rather than a column in the timing table: the ratios
+# are different ratios, and side by side they read as one. Sits before
+# the parity attestation because it is a result, not an attestation.
+
+mem_rows = (mrows || []).select { |r| r['rss_peak_kb'] || r['rss_final_kb'] }
+unless mem_rows.empty?
+  mb   = ->(kb) { kb.to_f / 1024.0 }
+  peak = ->(r) { mb.(r['rss_peak_kb'] || r['rss_final_kb']) }
+  boot = ->(r) { r['rss_boot_kb'] ? mb.(r['rss_boot_kb']) : nil }
+  msort = mem_rows.sort_by { |r| peak.(r) }
+
+  html << "<h2>#{section_no}. Memory footprint</h2>\n"
+  html << <<~P
+    <p>Peak resident memory of each lane's replay process — <strong>lower is better</strong>. Because the lanes replay <em>in-process</em>, each one measures itself (<code>VmHWM</code> from <code>/proc/self/status</code>), so this is the whole stack: interpreter, framework, the in-memory fixture DB, and whatever the timed run retains on top.</p>
+    <p>The bar splits at the point the sequence starts. The solid segment is the <strong>baseline</strong> — everything loaded and seeded, before a single visit. The translucent segment is <strong>growth</strong> across the timed run. The two say different things: baseline is what the stack costs to stand up, growth is what serving retains.</p>
+  P
+  html << memory_bars(msort.map { |r|
+    { label: "#{r['label']} #{lane_jit.(r)}", color: lane_color.(r),
+      boot: boot.(r) || peak.(r), peak: peak.(r) }
+  })
+
+  # Same-JIT memory pairings, mirroring the timing section's insights.
+  # Every ratio here is explicitly named as a memory ratio — the whole
+  # reason this is a separate section.
+  mem_by = mem_rows.to_h { |r| [[r['kind'], r['yjit']], r] }
+  mem_insights = []
+  %w[rails emit].each do |kind|
+    on, off = mem_by[[kind, true]], mem_by[[kind, false]]
+    next unless on && off && peak.(off) > 0
+    name  = kind == 'rails' ? 'Rails' : 'Roundhouse'
+    delta = peak.(on) - peak.(off)
+    next unless delta > 0
+    speed = off['ms_median'].to_f > 0 && on['ms_median'].to_f > 0 ? off['ms_median'].to_f / on['ms_median'] : nil
+    mem_insights << "<strong>#{name}</strong> pays #{fmt_dec(delta, 0)} MB (+#{fmt_dec(delta / peak.(off) * 100, 0)}%) in peak memory for YJIT" \
+                    "#{speed ? ", buying #{fmt_dec(speed, 2)}× the speed" : ''}"
+  end
+  [true, false].each do |yj|
+    rl, em = mem_by[['rails', yj]], mem_by[['emit', yj]]
+    next unless rl && em && peak.(em) > 0
+    line = "<strong>Roundhouse</strong> peaks #{fmt_dec(peak.(rl) / peak.(em), 2)}× lower than Rails #{yj ? 'with YJIT' : 'without a JIT'} (#{fmt_dec(peak.(rl), 0)} → #{fmt_dec(peak.(em), 0)} MB)"
+    if boot.(rl) && boot.(em) && boot.(em) > 0
+      line += ", and starts #{fmt_dec(boot.(rl) / boot.(em), 2)}× lower before serving anything (#{fmt_dec(boot.(rl), 0)} → #{fmt_dec(boot.(em), 0)} MB)"
+    end
+    mem_insights << line
+  end
+  # Growth is the number a peak-only column would have hidden.
+  rl_y, em_y = mem_by[['rails', true]], mem_by[['emit', true]]
+  if rl_y && em_y && boot.(rl_y) && boot.(em_y)
+    g_rl, g_em = peak.(rl_y) - boot.(rl_y), peak.(em_y) - boot.(em_y)
+    if g_em > 0 && g_rl > 0
+      mem_insights << "Across the timed run <strong>Rails</strong> retains #{fmt_dec(g_rl / g_em, 1)}× more than Roundhouse (#{fmt_dec(g_rl, 0)} MB of growth against #{fmt_dec(g_em, 0)} MB) — a separate fact from the baseline gap, and the one a peak-only number hides"
+    end
+  end
+  html << "<ul>\n#{mem_insights.map { |i| "<li>#{i}</li>" }.join("\n")}\n</ul>\n" unless mem_insights.empty?
+
+  boot_col = mem_rows.any? { |r| r['rss_boot_kb'] }
+  html << "<table>\n<thead><tr><th>stack</th><th>JIT</th>#{boot_col ? '<th>baseline</th>' : ''}<th>peak</th>#{boot_col ? '<th>growth</th>' : ''}<th>vs Rails (memory)</th></tr></thead>\n<tbody>\n"
+  msort.each do |r|
+    base = mem_by[['rails', r['yjit']]]
+    html << "<tr>"
+    html << %(<td><strong>#{esc(r['label'])}</strong></td>)
+    html << %(<td>#{lane_jit.(r)}</td>)
+    html << %(<td class="num">#{boot.(r) ? "#{fmt_int(boot.(r).round)} MB" : '—'}</td>) if boot_col
+    html << %(<td class="num">#{fmt_int(peak.(r).round)} MB</td>)
+    if boot_col
+      html << %(<td class="num">#{boot.(r) ? "+#{fmt_int((peak.(r) - boot.(r)).round)} MB" : '—'}</td>)
+    end
+    ratio = base && peak.(r) > 0 ? peak.(base) / peak.(r) : nil
+    html << %(<td class="num">#{ratio ? "#{fmt_dec(ratio, 2)}×" : '—'}</td>)
+    html << "</tr>\n"
+  end
+  html << "</tbody></table>\n"
+  jvm_mem = mem_rows.any? { |r| r['runtime'] == 'jruby' }
+  html << %(<p class="legend">“vs Rails (memory)” is peak RSS ÷ peak RSS at the same JIT level — <strong>not</strong> the speed ratio in the matrix table above; the two differ. Baseline is sampled after the in-memory fixture DB is seeded, and it is <em>not</em> a common floor across lanes — each stack loads its own framework, so subtracting one lane's baseline from another's peak is meaningless.#{jvm_mem ? ' JVM lanes run under a fixed heap (<code>-Xmx</code>=<code>-Xms</code>), so their numbers are a configured budget rather than an organically-grown working set.' : ''}</p>\n)
 end
 
 # ── Section: route parity ────────────────────────────────────────────
