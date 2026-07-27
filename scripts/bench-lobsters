@@ -313,6 +313,7 @@ if (( ${#LANES[@]} > 0 )); then
                 if RUBYOPT="$RO" ruby "$REPO_ROOT/scripts/lobsters-rails-replay" \
                         --src "$SRC" --warmup 15 --min-iters "$TIME_ITERS" --min-time 10 \
                         --seq-out "$LDIR/sequence.json" --json "$LDIR/rails.json" \
+                        --dump "$LDIR/bodies" \
                         >"$LDIR/run.log" 2>&1; then
                     # The rails lane regenerates the sequence; a mismatch with
                     # the committed one means the ruby-bench DB or generator
@@ -377,6 +378,33 @@ if (( ${#LANES[@]} > 0 )); then
         esac
     done
 
+    # ── content parity ───────────────────────────────────────────────
+    # Status codes attest that a route answered; they cannot attest that it
+    # answered CORRECTLY. Every lane dumped its parity-route bodies, and the
+    # Rails lane's dump is the oracle, so compare them as parsed documents.
+    # Rails on CRuby is preferred as the reference (the published baseline);
+    # any Rails lane will do, since all three render the same app.
+    REF_BODIES=""
+    for REF_LANE in rails rails-int rails-jruby; do
+        if [[ -d "$RUN_DIR/$REF_LANE/bodies" ]]; then
+            REF_BODIES="$RUN_DIR/$REF_LANE/bodies"; break
+        fi
+    done
+    if [[ -n "$REF_BODIES" ]]; then
+        for LANE in ruby ruby-int jruby; do
+            [[ -d "$RUN_DIR/$LANE/bodies" ]] || continue
+            step "content parity: $LANE vs $REF_LANE"
+            # Non-zero exit = routes that differ, which is a finding to
+            # report, not an orchestration failure.
+            ruby "$REPO_ROOT/scripts/lobsters-content-diff" \
+                "$REF_BODIES" "$RUN_DIR/$LANE/bodies" \
+                --json "$RUN_DIR/$LANE/content-parity.json" \
+                --md   "$RUN_DIR/$LANE/content-parity.md" || true
+        done
+    else
+        fail "content parity skipped: no Rails lane in this run to compare against"
+    fi
+
     # Top-level provenance: the ORIGINAL invocation (lane env.json files
     # carry each lane's interpreter; this carries the orchestration).
     ruby -rjson -rsocket -e 'puts JSON.pretty_generate({
@@ -408,6 +436,10 @@ rows = META.filter_map do |id, m|
   t = m[:src] == "rails.json" ? data : data["sequence_timing"]
   next unless t && t["ms_per_iter_median"]
   env = (JSON.parse(File.read(File.join(run_dir, id, "env.json"))) rescue {})
+  # Content parity vs the Rails lane's rendered bodies (emit lanes only —
+  # the Rails lanes ARE the reference). nil where the run had no Rails lane
+  # to compare against, which is different from "compared and matched".
+  cp = (JSON.parse(File.read(File.join(run_dir, id, "content-parity.json"))) rescue nil)
   { "id" => id, "label" => m[:label], "kind" => m[:kind], "runtime" => m[:runtime],
     "yjit" => m[:yjit], "jit" => m[:jit],
     "ms_median" => t["ms_per_iter_median"], "ms_min" => t["ms_per_iter_min"],
@@ -420,7 +452,13 @@ rows = META.filter_map do |id, m|
     # every lane's baseline; peak_kb is Linux-only (VmHWM).
     "rss_boot_kb"  => data.dig("rss", "boot_kb"),
     "rss_final_kb" => data.dig("rss", "final_kb"),
-    "rss_peak_kb"  => data.dig("rss", "peak_kb") }
+    "rss_peak_kb"  => data.dig("rss", "peak_kb"),
+    "content_total"      => cp && cp["total"],
+    "content_equivalent" => cp && (cp["identical"] + cp["equivalent"]),
+    "content_differs"    => cp && cp["differs"],
+    "content_routes"     => cp && cp["routes"].reject { |r| %w[identical equivalent].include?(r["verdict"]) }
+                                              .map { |r| r.slice("route", "verdict", "diff_tokens", "hunks") },
+    "content_rules"      => cp && cp["rule_ledger"] }
 end
 abort "no lane produced timing data" if rows.empty?
 # Ratio = same-configuration Rails baseline / this row. CRuby emit rows
@@ -447,6 +485,16 @@ rows.sort_by { |r| r["ms_median"] }.each do |r|
   printf "  %-11s %-7s %9.2f ms/iter  %9s  %s\n", r["label"], r["jit"], r["ms_median"],
          (rss ? "#{(rss / 1024.0).round} MB" : "-"),
          (r["vs_rails"] ? "#{r["vs_rails"]}x vs Rails" : "")
+end
+content = rows.select { |r| r["content_total"] }
+if content.any?
+  puts "\n== content parity vs Rails (parsed documents, not status codes) =="
+  content.each do |r|
+    printf "  %-11s %s  %d/%d routes equivalent%s\n", r["label"], r["jit"],
+           r["content_equivalent"], r["content_total"],
+           (r["content_differs"].to_i.zero? ? "" :
+             " — differs: #{r["content_routes"].map { |x| x["route"] }.join(", ")}")
+  end
 end
 AGG
 
@@ -625,7 +673,11 @@ fi
 
 # ── replay ───────────────────────────────────────────────────────────
 step "replaying benchmark routes under $RUNTIME (in-process Main.run_rack)"
-REPLAY_ARGS=(--json "$OUT_DIR/summary.json" --md "$OUT_DIR/summary.md")
+# Bodies are dumped unconditionally: 26 files, written during the parity
+# pass that runs anyway, and they are what scripts/lobsters-content-diff
+# needs to answer the question status codes cannot — does this lane RENDER
+# what Rails renders?
+REPLAY_ARGS=(--json "$OUT_DIR/summary.json" --md "$OUT_DIR/summary.md" --dump "$OUT_DIR/bodies")
 if (( TIME_ITERS > 0 )); then
     REPLAY_ARGS+=(--time "$TIME_ITERS")
     # The --vs-rails and --frozen paths time the frozen --sequence, which

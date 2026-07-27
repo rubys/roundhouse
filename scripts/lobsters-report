@@ -98,6 +98,14 @@ routes   = summary['routes'] || []
 timing   = summary['sequence_timing']
 run_dir  = File.basename(run_path)
 
+# Content parity: the primary emit lane's rendered bodies against the Rails
+# lane's, compared as parsed documents (scripts/lobsters-content-diff). nil
+# when the run had no Rails lane to compare against — which the page must
+# say, because "not compared" and "compared and matched" are different
+# claims and only one of them is an attestation.
+content  = lanes_mode ? sibling(File.join(run_path, prim), 'content-parity.json') : nil
+jr_content = lanes_mode ? sibling(File.join(run_path, 'jruby'), 'content-parity.json') : nil
+
 # ── formatting ───────────────────────────────────────────────────────
 
 def fmt_int(n)  ; n.to_i.to_s.reverse.scan(/\d{1,3}/).join(',').reverse ; end
@@ -841,8 +849,14 @@ if lanes_mode
   html << "<h2>#{section_no}. Coverage &amp; parity (#{pass}/#{total}#{jr_routes.empty? ? '' : " · jruby #{jruby_pass}/#{jruby_total}"})</h2>\n"
   if all_pass && (jr_routes.empty? || jr_all)
     html << <<~P
-      <p>What the numbers above are numbers <em>of</em>: every distinct route the benchmark exercises returns <strong>200 on every emit target</strong> — the timing sections measure a complete application, not a working subset. Response sizes are compared across runtimes as a same-output proxy (bodies differ only in CSRF token and clock; normalized body hashes are the planned upgrade). A failing cell here would invalidate that lane's rows above.</p>
+      <p>What the numbers above are numbers <em>of</em>: every distinct route the benchmark exercises returns <strong>200 on every emit target</strong> — the timing sections measure a complete application, not a working subset. A failing cell here would invalidate that lane's rows above.</p>
     P
+    html << if content
+      ce = content['identical'] + content['equivalent']
+      %(<p>Status is a weak oracle, though — a 200 that renders half a page is still a 200 — so the bodies are also compared against Rails' as parsed documents. <strong>#{ce}/#{content['total']} routes render content equivalent to Rails.</strong> See the section below for what "equivalent" is defined to mean and what the remainder are.</p>\n)
+    else
+      %(<p class="caveat">Content was <em>not</em> compared for this run — no Rails lane ran, so there was no oracle to compare against. These cells attest that each route answered, not that it answered correctly.</p>\n)
+    end
   else
     fails = []
     fails << "#{total - pass} route(s) fail on the CRuby lane" unless all_pass
@@ -884,6 +898,66 @@ if lanes_mode
   html << %(<p class="legend">ms columns are single-shot diagnostic latencies — use the medians above for performance.#{drift}</p>\n)
 end
 html << "</details>\n"
+
+# ── Section: content parity ──────────────────────────────────────────
+# The upgrade from "answered" to "answered correctly". Rails renders the
+# oracle; both sides' bodies are parsed and diffed as token streams, so the
+# comparison is blind to indentation, attribute order, void-element
+# spelling and character-reference spelling — and to nothing else.
+#
+# The normalization ledger is published rather than summarized away. A
+# comparison that quietly forgives things is worth less than no comparison
+# at all, so the page states exactly what was forgiven and how often.
+if content
+  ce = content['identical'] + content['equivalent']
+  diff_routes = (content['routes'] || []).reject { |r| %w[identical equivalent].include?(r['verdict']) }
+  html << "<h2>#{section_no}. Content parity vs Rails (#{ce}/#{content['total']})</h2>\n"
+  html << %(<span class="badge #{diff_routes.empty? ? 'pass' : 'fail'}">#{ce}/#{content['total']} routes render what Rails renders</span>\n)
+  html << <<~P
+    <p>Every parity route is fetched from real Rails and from the emit, and both bodies are parsed into a canonical token stream and diffed there. That makes the comparison blind to four things that are not differences — indentation and formatting whitespace between block elements, attribute order, void-element spelling (<code>&lt;img&gt;</code> vs <code>&lt;img /&gt;</code>), and character-reference spelling (<code>&amp;#39;</code> vs <code>&amp;apos;</code>) — and blind to nothing else.</p>
+  P
+  # Why not just compare response sizes: find the route with the widest byte
+  # gap among those the parse proved EQUIVALENT, and let it make the case.
+  # Derived, not asserted, so it stays true as the emit changes.
+  widest = (content['routes'] || [])
+             .select { |r| %w[identical equivalent].include?(r['verdict']) && r['ref_bytes'].to_i > 0 }
+             .max_by { |r| (r['cand_bytes'].to_i - r['ref_bytes'].to_i).abs / r['ref_bytes'].to_f }
+  if widest && (gap = ((widest['cand_bytes'] - widest['ref_bytes']).abs * 100.0 / widest['ref_bytes']).round) >= 5
+    html << %(<p>Comparing response <em>sizes</em> instead would be worse than weak. <code>/#{esc(widest['route'])}</code> is #{fmt_int(widest['ref_bytes'])} bytes from Rails and #{fmt_int(widest['cand_bytes'])} from the emit — a #{gap}% gap — and the two are the same document. All of the difference is whitespace.</p>\n)
+  end
+  if diff_routes.any?
+    html << "<table>\n<thead><tr><th>route</th><th>differing tokens</th><th>first difference</th></tr></thead>\n<tbody>\n"
+    diff_routes.each do |r|
+      h = (r['hunks'] || []).first
+      cell =
+        if h
+          lines = (h['ref'] || []).map { |t| "- #{esc(t)}" } + (h['cand'] || []).map { |t| "+ #{esc(t)}" }
+          "<pre>#{lines.first(4).join("\n")}</pre>"
+        else
+          '—'
+        end
+      html << %(<tr><td><code>#{esc(r['route'])}</code></td><td class="num no">#{fmt_int(r['diff_tokens'])}</td><td>#{cell}</td></tr>\n)
+    end
+    html << "</tbody></table>\n"
+    html << %(<p class="legend">Each route's first differing hunk; <code>-</code> is Rails, <code>+</code> is the emit. Full hunks in <code>#{esc(prim)}/content-parity.md</code>.</p>\n)
+  end
+  ledger = (content['rule_ledger'] || []).reject { |r| r['applications'].to_i.zero? }
+  if ledger.any?
+    html << "<details>\n<summary>Normalization ledger (what the comparison forgives, and how often)</summary>\n"
+    html << "<table>\n<thead><tr><th>rule</th><th>kind</th><th>applications</th><th>why</th></tr></thead>\n<tbody>\n"
+    ledger.each do |r|
+      html << %(<tr><td><code>#{esc(r['name'])}</code></td><td>#{esc(r['kind'])}</td>)
+      html << %(<td class="num">#{fmt_int(r['applications'])}</td><td>#{esc(r['why'])}</td></tr>\n)
+    end
+    html << "</tbody></table>\n"
+    html << %(<p class="legend"><strong>mask</strong> — varies per run or per session by construction and carries no information. <strong>known</strong> — a genuine, understood difference from Rails, folded so it does not drown the signal but counted here so it cannot be forgotten.</p>\n)
+    html << "</details>\n"
+  end
+  if jr_content
+    jce = jr_content['identical'] + jr_content['equivalent']
+    html << %(<p class="legend">jruby lane: #{jce}/#{jr_content['total']} routes content-equivalent to Rails.</p>\n)
+  end
+end
 
 # ── Section: JRuby lane (legacy layout only — in the lane layout the ──
 # jruby lane lives in the matrix / per-endpoint / parity sections) ─────

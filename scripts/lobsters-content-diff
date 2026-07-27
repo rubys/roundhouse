@@ -1,0 +1,595 @@
+#!/usr/bin/env ruby
+# scripts/lobsters-content-diff — compare two dirs of replay response bodies
+# and report CONTENT equivalence, not just status codes.
+#
+# The lobsters benchmark asserts HTTP 200 on every visit, and until now that
+# was also the whole of our parity claim: 26/26 routes return 200. Status is
+# a weak oracle — a 200 that renders half a page is still a 200 — and the
+# obvious strengthening, comparing body SIZES, is worse than weak: it is
+# actively misleading. /u is 173,576 bytes from Rails and 292,449 from the
+# emit, a 68% gap, and the two documents are the same document. All 119 KB
+# is indentation.
+#
+# So compare what a browser would see. Both bodies are parsed into a
+# canonical token stream and diffed there, which makes the comparison blind
+# to four things that are not differences:
+#
+#   * indentation, and formatting whitespace BETWEEN BLOCK ELEMENTS (the /u
+#     story above). Whitespace between INLINE elements is kept — a browser
+#     renders it, so a stray space there is a real difference.
+#   * attribute ORDER — <a class="x" href="y"> == <a href="y" class="x">
+#   * void-element spelling — <img …> == <img … />
+#   * character-reference spelling — &#39; == &apos; == '
+#
+# and blind to nothing else. Everything the parse keeps, the diff compares.
+#
+# Two more classes of difference are real but not defects, so they are
+# normalized by NAMED RULES and every application is counted, itemized, and
+# printed. A rule can never quietly absorb a regression:
+#
+#   :mask   varies per run or per session by construction, and carries no
+#           information — CSRF tokens, "3 hours ago". Masked; not a
+#           divergence.
+#   :known  a genuine, understood difference from Rails. Folded so it does
+#           not drown the signal, but reported as a standing ledger entry.
+#           Today: asset prefix (/stylesheets/ vs /assets/) and the harness's
+#           own request scheme. These SHOULD shrink over time; the report is
+#           where you notice they haven't.
+#
+# Usage:
+#   scripts/lobsters-content-diff REF_DIR CAND_DIR [options]
+#
+#   REF_DIR       reference bodies (Rails — scripts/lobsters-rails-replay --dump)
+#   CAND_DIR      candidate bodies (an emit lane — scripts/lobsters-replay --dump)
+#   --json PATH   write machine-readable summary
+#   --md PATH     write markdown summary
+#   --context N   differing token pairs to show per route (default 6)
+#   --strict      treat :known rules as differences too (no folding)
+#   --quiet       suppress per-route progress lines
+#
+# Filenames must correspond between the two dirs; both replay scripts derive
+# them the same way (route with non-word chars -> _).
+#
+# Exit code = number of routes whose content is not equivalent.
+
+require "json"
+
+opts = { context: 6 }
+dirs = []
+args = ARGV.dup
+until args.empty?
+  case (a = args.shift)
+  when "--json"    then opts[:json]    = args.shift
+  when "--md"      then opts[:md]      = args.shift
+  when "--context" then opts[:context] = Integer(args.shift)
+  when "--strict"  then opts[:strict]  = true
+  when "--quiet"   then opts[:quiet]   = true
+  when /\A--/      then abort "lobsters-content-diff: unknown arg #{a}"
+  else dirs << a
+  end
+end
+abort "usage: lobsters-content-diff REF_DIR CAND_DIR [options]" unless dirs.size == 2
+REF_DIR, CAND_DIR = dirs
+[REF_DIR, CAND_DIR].each { |d| abort "no such dir: #{d}" unless Dir.exist?(d) }
+
+# ── character references ─────────────────────────────────────────────
+# Decode to the text a DOM would hold, so escaping spelling stops being a
+# difference. Unknown named references are left alone: they are opaque on
+# both sides and compare literally.
+NAMED = {
+  "amp" => "&", "lt" => "<", "gt" => ">", "quot" => '"', "apos" => "'",
+  "nbsp" => " ", "mdash" => "—", "ndash" => "–",
+  "hellip" => "…", "copy" => "©", "raquo" => "»",
+  "laquo" => "«", "times" => "×", "middot" => "·",
+}.freeze
+
+def decode_entities(s)
+  return s unless s.include?("&")
+  s.gsub(/&(#x?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/) do
+    ref = $1
+    if ref.start_with?("#x", "#X")
+      cp = ref[2..].to_i(16)
+      cp.between?(1, 0x10FFFF) ? [cp].pack("U") : $&
+    elsif ref.start_with?("#")
+      cp = ref[1..].to_i
+      cp.between?(1, 0x10FFFF) ? [cp].pack("U") : $&
+    else
+      NAMED[ref.downcase] || $&
+    end
+  end
+end
+
+# ── markup tokenizer ─────────────────────────────────────────────────
+# Not a conformant HTML parser and does not need to be: both sides render
+# the same templates through the same escaping discipline, so the job is to
+# agree on a canonical event stream, not to recover from malformed input.
+VOID = %w[area base br col embed hr img input link meta param source track wbr].freeze
+RAWTEXT = %w[script style textarea].freeze  # content is not markup
+PRESERVE = %w[pre textarea].freeze          # content's whitespace is significant
+
+Tok = Struct.new(:kind, :name, :attrs, :text)
+
+def parse_attrs(src, xml)
+  attrs = []
+  i = 0
+  n = src.length
+  while i < n
+    i += 1 while i < n && src[i] =~ /\s/
+    break if i >= n
+    ns = i
+    i += 1 while i < n && src[i] !~ /[\s=]/
+    name = src[ns...i]
+    break if name.empty?
+    name = name.downcase unless xml
+    i += 1 while i < n && src[i] =~ /\s/
+    value = ""
+    if src[i] == "="
+      i += 1
+      i += 1 while i < n && src[i] =~ /\s/
+      if src[i] == '"' || src[i] == "'"
+        q = src[i]
+        close = src.index(q, i + 1) || n
+        value = src[(i + 1)...close]
+        i = close + 1
+      else
+        vs = i
+        i += 1 while i < n && src[i] !~ /\s/
+        value = src[vs...i]
+      end
+    else
+      # Bare boolean attribute. HTML gives it the empty string; Rails spells
+      # it out (selected="selected"), so canonicalize to the name — both
+      # spellings then agree.
+      value = name
+    end
+    attrs << [name, decode_entities(value)]
+  end
+  attrs.sort_by! { |k, _| k }
+  attrs
+end
+
+def tokenize_markup(src, xml:)
+  toks = []
+  i = 0
+  n = src.length
+  pre = 0
+  push_text = lambda do |raw|
+    return if raw.empty?
+    if pre > 0
+      toks << Tok.new(:text, nil, nil, decode_entities(raw))
+    else
+      t = decode_entities(raw).gsub(/\s+/, " ")
+      toks << Tok.new(:text, nil, nil, t) unless t.empty?
+    end
+  end
+
+  while i < n
+    lt = src.index("<", i)
+    unless lt
+      push_text.call(src[i..])
+      break
+    end
+    push_text.call(src[i...lt]) if lt > i
+
+    if src[lt, 4] == "<!--"
+      close = src.index("-->", lt) || n
+      toks << Tok.new(:comment, nil, nil, src[(lt + 4)...close].strip.gsub(/\s+/, " "))
+      i = close + 3
+    elsif src[lt, 2] == "<?"
+      close = src.index("?>", lt) || (n - 2)
+      toks << Tok.new(:decl, nil, nil, src[lt..(close + 1)].gsub(/\s+/, " "))
+      i = close + 2
+    elsif src[lt, 2] == "<!"
+      close = src.index(">", lt) || n
+      toks << Tok.new(:decl, nil, nil, src[lt..close].gsub(/\s+/, " ").downcase)
+      i = close + 1
+    elsif src[lt + 1] == "/"
+      close = src.index(">", lt) || n
+      name = src[(lt + 2)...close].strip
+      name = name.downcase unless xml
+      toks << Tok.new(:close, name, nil, nil)
+      pre -= 1 if pre > 0 && PRESERVE.include?(name)
+      i = close + 1
+    else
+      # Scan to the tag's '>' without stopping inside a quoted value.
+      j = lt + 1
+      quote = nil
+      while j < n
+        c = src[j]
+        if quote
+          quote = nil if c == quote
+        elsif c == '"' || c == "'"
+          quote = c
+        elsif c == ">"
+          break
+        end
+        j += 1
+      end
+      inner = src[(lt + 1)...j].to_s
+      self_closing = inner.end_with?("/")
+      inner = inner[0..-2] if self_closing
+      ns = inner.index(/\s/) || inner.length
+      name = inner[0...ns]
+      name = name.downcase unless xml
+      attrs = parse_attrs(inner[ns..].to_s, xml)
+      toks << Tok.new(:open, name, attrs, nil)
+      i = j + 1
+
+      # A void element is the same element whether or not it was spelled
+      # with a trailing slash: emit no close token for either spelling.
+      # In XML there are no void elements, so an explicit self-close does
+      # need its matching close event.
+      if !xml && VOID.include?(name)
+        # nothing further
+      elsif self_closing
+        toks << Tok.new(:close, name, nil, nil)
+      elsif RAWTEXT.include?(name)
+        endtag = %r{</#{Regexp.escape(name)}\s*>}i
+        m = src.index(endtag, i)
+        body = m ? src[i...m] : src[i..].to_s
+        body = body.gsub(/\s+/, " ").strip unless PRESERVE.include?(name)
+        toks << Tok.new(:text, nil, nil, PRESERVE.include?(name) ? decode_entities(body) : body) unless body.empty?
+        toks << Tok.new(:close, name, nil, nil)
+        i = m ? (src.index(">", m) + 1) : n
+      elsif PRESERVE.include?(name)
+        pre += 1
+      end
+    end
+  end
+  toks
+end
+
+# ── JSON canonicalization ────────────────────────────────────────────
+# Object key order is not information. Flatten to one token per leaf,
+# keyed by path, so a diff points at the field that moved rather than at
+# a 40 KB single line.
+def flatten_json(node, path, out)
+  case node
+  when Hash
+    if node.empty?
+      out << "#{path} = {}"
+    else
+      node.keys.sort.each { |k| flatten_json(node[k], "#{path}.#{k}", out) }
+    end
+  when Array
+    if node.empty?
+      out << "#{path} = []"
+    else
+      node.each_with_index { |v, idx| flatten_json(v, "#{path}[#{idx}]", out) }
+    end
+  else
+    out << "#{path} = #{node.inspect}"
+  end
+  out
+end
+
+# Whitespace between two block boxes generates no rendered space; whitespace
+# next to an inline element does. `pre`/`textarea` are deliberately absent —
+# their whitespace is content. Metadata elements count as block: nothing in
+# <head> renders.
+require "set"
+BLOCK_TAGS = Set.new(%w[
+  html head body div p ul ol li dl dt dd table thead tbody tfoot tr td th
+  form fieldset legend section article aside nav header footer main
+  h1 h2 h3 h4 h5 h6 hr blockquote figure figcaption
+  script style link meta title base select option optgroup
+]).freeze
+
+def drop_formatting_whitespace(toks, xml)
+  block = lambda do |t|
+    return true if t.nil?
+    case t.kind
+    when :decl, :comment then true
+    when :open, :close   then xml || BLOCK_TAGS.include?(t.name)
+    else false
+    end
+  end
+  out = []
+  toks.each_with_index do |t, idx|
+    if t.kind == :text && t.text == " " && block.call(out.last) && block.call(toks[idx + 1])
+      next
+    end
+    out << t
+  end
+  out
+end
+
+def tokenize(body)
+  head = body[0, 512].to_s.lstrip
+  if head.start_with?("{", "[")
+    begin
+      return [:json, flatten_json(JSON.parse(body), "$", []).map { |s| Tok.new(:text, nil, nil, s) }]
+    rescue JSON::ParserError
+      # fall through to markup
+    end
+  end
+  xml = head.start_with?("<?xml")
+  [xml ? :xml : :html, drop_formatting_whitespace(tokenize_markup(body, xml: xml), xml)]
+end
+
+# ── normalization rules ──────────────────────────────────────────────
+# Each rule rewrites token fields in place and counts every application.
+# :mask  — varies per run/session, carries no information.
+# :known — a real divergence from Rails, folded but itemized.
+RULES = [
+  { name: "csrf-token", kind: :mask,
+    why: "per-session token; a fresh value on every boot" },
+  { name: "relative-time", kind: :mask,
+    why: "\"3 hours ago\" is a function of when the replay ran — the COUNT is masked, the unit is not" },
+  { name: "clock-countdown", kind: :mask,
+    why: "\"stop accepting comments in N minutes\" ticks between the two replays" },
+  { name: "timestamp-value", kind: :mask,
+    why: "title=/datetime= instants differ by the gap between replays — digits are masked, the FORMAT is not" },
+  { name: "asset-prefix", kind: :known,
+    why: "emit serves /assets/NAME where Rails serves /stylesheets/ and /javascripts/" },
+  { name: "request-scheme", kind: :known,
+    why: "the Rails replay builds https:// envs, the emit replay http:// — a harness artifact, not an app difference" },
+].freeze
+
+# Mask the COUNT, keep the unit: "3 years ago" and "4 years ago" both become
+# "N years ago" (clock drift between the two replays, forgiven) while
+# "N months ago" still differs from "N years ago" (a real rendering bug,
+# caught).
+RELATIVE_TIME = /\A\s*(about |almost |over |less than |a |an )?(\d+|a|an) (second|minute|hour|day|week|month|year)s? ago\s*\z/i
+COUNTDOWN     = /\bin -?\d+ (second|minute|hour|day|week|month|year)s?\b/i
+ISO_TIMESTAMP = /\A\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/
+
+def normalize!(toks, counts, fold_known)
+  toks.each do |t|
+    case t.kind
+    when :text
+      if t.text =~ RELATIVE_TIME
+        t.text = t.text.sub(/(\d+|\ba\b|\ban\b)(?= (second|minute|hour|day|week|month|year))/i, "N")
+        counts["relative-time"] += 1
+      elsif t.text =~ COUNTDOWN
+        t.text = t.text.gsub(/\bin -?\d+ (second|minute|hour|day|week|month|year)/i, 'in N \1')
+        counts["clock-countdown"] += 1
+      end
+    when :open
+      name_attr = t.attrs.assoc("name")&.last
+      t.attrs.each do |pair|
+        k, v = pair
+        case k
+        when "content"
+          if name_attr == "csrf-token"
+            pair[1] = "«csrf»"; counts["csrf-token"] += 1
+          end
+        when "value"
+          if name_attr == "authenticity_token"
+            pair[1] = "«csrf»"; counts["csrf-token"] += 1
+          end
+        when "title", "datetime"
+          # Digits masked, punctuation kept: a wrong FORMAT (".595725" vs
+          # ".595-05:00") still differs; a few minutes of drift does not.
+          if v =~ ISO_TIMESTAMP
+            pair[1] = v.gsub(/\d/, "#"); counts["timestamp-value"] += 1
+          end
+        end
+        # :known rules describe real divergences from Rails. --strict leaves
+        # them in place so they read as the differences they are.
+        next unless fold_known
+        if %w[href src].include?(k) && v =~ %r{\A/(stylesheets|javascripts|assets)/(.+)\z}
+          pair[1] = "«asset»/#{$2}"; counts["asset-prefix"] += 1
+        elsif %w[href src action].include?(k) && v =~ %r{\Ahttps?://localhost(/.*)?\z}
+          pair[1] = "«origin»#{$1}"; counts["request-scheme"] += 1
+        end
+      end
+      t.attrs.sort_by! { |k, _| k }
+    end
+  end
+  toks
+end
+
+# ── token rendering + diff ───────────────────────────────────────────
+def render(t)
+  case t.kind
+  when :open  then "<#{t.name}#{t.attrs.map { |k, v| " #{k}=#{v.inspect}" }.join}>"
+  when :close then "</#{t.name}>"
+  when :text  then t.text.inspect
+  when :comment then "<!--#{t.text}-->"
+  else t.text.to_s
+  end
+end
+
+# Near-identical documents: walk in lockstep and, at a mismatch, look for
+# the smallest shift that resyncs both streams for RESYNC_RUN tokens. That
+# yields real hunks (and an honest count) without an O(ND) diff over 18,000
+# tokens.
+RESYNC_WINDOW = 200   # single-axis reach (a long insertion or deletion)
+COMBINED_WINDOW = 40  # reach for a mixed move — a change AND an insertion at
+                      # the same spot, which no single-axis shift can rejoin
+RESYNC_RUN = 4
+
+def matches_at?(a, i, b, j, run)
+  run.times do |k|
+    return false if a[i + k].nil? || b[j + k].nil?
+    return false unless a[i + k] == b[j + k]
+  end
+  true
+end
+
+def hunks(a, b, limit)
+  out = []
+  i = j = 0
+  changed = 0
+  while i < a.size || j < b.size
+    if i < a.size && j < b.size && a[i] == b[j]
+      i += 1; j += 1
+      next
+    end
+    if i >= a.size
+      out << [:added, [], b[j..], a[[i - 2, 0].max...i]] if out.size < limit
+      changed += b.size - j
+      break
+    elsif j >= b.size
+      out << [:removed, a[i..], [], a[[i - 2, 0].max...i]] if out.size < limit
+      changed += a.size - i
+      break
+    end
+    # Find the smallest pair of advances that resyncs both streams. Search
+    # by total shift, preferring balanced (substitution-like) moves, so a
+    # changed token that is ALSO followed by an insertion still rejoins —
+    # a single-axis search cannot express that and would read the whole
+    # remainder of the document as one enormous hunk.
+    da = db = nil
+    (1..COMBINED_WINDOW).each do |s|
+      cands = (0..s).map { |x| [x, s - x] }.sort_by { |x, y| (x - y).abs }
+      hit = cands.find { |x, y| matches_at?(a, i + x, b, j + y, RESYNC_RUN) }
+      (da, db = hit) and break if hit
+    end
+    # Still stuck: reach further, but only along one axis (a long run of
+    # inserted or deleted tokens), which stays linear.
+    if da.nil?
+      ((COMBINED_WINDOW + 1)..RESYNC_WINDOW).each do |d|
+        if matches_at?(a, i + d, b, j, RESYNC_RUN)
+          da, db = d, 0
+        elsif matches_at?(a, i, b, j + d, RESYNC_RUN)
+          da, db = 0, d
+        end
+        break if da
+      end
+    end
+    if da.nil?
+      # No resync in window: the rest is one hunk.
+      out << [:changed, a[i..], b[j..], a[[i - 2, 0].max...i]] if out.size < limit
+      changed += [a.size - i, b.size - j].max
+      break
+    end
+    op = da.zero? ? :added : (db.zero? ? :removed : :changed)
+    out << [op, a[i, da], b[j, db], a[[i - 2, 0].max...i]] if out.size < limit
+    changed += [da, db].max
+    i += da
+    j += db
+  end
+  [out, changed]
+end
+
+# ── run ──────────────────────────────────────────────────────────────
+names = (Dir.children(REF_DIR) | Dir.children(CAND_DIR)).sort
+names.reject! { |n| File.directory?(File.join(REF_DIR, n)) || File.directory?(File.join(CAND_DIR, n)) }
+abort "lobsters-content-diff: no bodies in #{REF_DIR}" if names.empty?
+
+ledger = Hash.new(0)
+results = names.map do |name|
+  ref_path  = File.join(REF_DIR, name)
+  cand_path = File.join(CAND_DIR, name)
+  unless File.exist?(ref_path) && File.exist?(cand_path)
+    next { "route" => name, "verdict" => "missing",
+           "detail" => File.exist?(ref_path) ? "absent from #{CAND_DIR}" : "absent from #{REF_DIR}" }
+  end
+
+  ref  = File.read(ref_path)
+  cand = File.read(cand_path)
+
+  ref_kind,  ref_toks  = tokenize(ref)
+  cand_kind, cand_toks = tokenize(cand)
+
+  counts = Hash.new(0)
+  normalize!(ref_toks, counts, !opts[:strict])
+  normalize!(cand_toks, counts, !opts[:strict])
+  # A rule fires on both sides of an identical pair; report pairs, not sides.
+  counts.each_key { |k| counts[k] = (counts[k] / 2.0).ceil }
+
+  a = ref_toks.map { |t| render(t) }
+  b = cand_toks.map { |t| render(t) }
+
+  counts.each { |k, v| ledger[k] += v }
+
+  hunk_list, changed = a == b ? [[], 0] : hunks(a, b, opts[:context])
+  verdict =
+    if ref == cand then "identical"
+    elsif a == b then "equivalent"
+    else "differs"
+    end
+
+  r = {
+    "route"        => name,
+    "kind"         => ref_kind.to_s,
+    "verdict"      => verdict,
+    "ref_bytes"    => ref.bytesize,
+    "cand_bytes"   => cand.bytesize,
+    "ref_tokens"   => a.size,
+    "cand_tokens"  => b.size,
+    "diff_tokens"  => changed,
+    "rules"        => counts.reject { |_, v| v.zero? },
+  }
+  if verdict == "differs"
+    r["hunks"] = hunk_list.map do |op, from, to, before|
+      { "op" => op.to_s,
+        "after" => before,
+        "ref"  => from.first(3),
+        "cand" => to.first(3) }
+    end
+  end
+  unless opts[:quiet]
+    mark = { "identical" => "==", "equivalent" => "~=", "differs" => "!=" }[verdict]
+    printf "%-28s %s %-11s %6d/%-6d tokens%s\n", name, mark, verdict,
+           a.size, b.size, changed.zero? ? "" : "  (#{changed} differing)"
+  end
+  r
+end
+
+bad = results.count { |r| %w[differs missing].include?(r["verdict"]) }
+summary = {
+  "generated_at" => Time.now.utc.to_s,
+  "ref_dir"      => REF_DIR,
+  "cand_dir"     => CAND_DIR,
+  "total"        => results.size,
+  "identical"    => results.count { |r| r["verdict"] == "identical" },
+  "equivalent"   => results.count { |r| r["verdict"] == "equivalent" },
+  "differs"      => results.count { |r| r["verdict"] == "differs" },
+  "missing"      => results.count { |r| r["verdict"] == "missing" },
+  "rule_ledger"  => RULES.map { |rule|
+    { "name" => rule[:name], "kind" => rule[:kind].to_s, "why" => rule[:why],
+      "applications" => ledger[rule[:name]] }
+  },
+  "routes"       => results,
+}
+
+File.write(opts[:json], JSON.pretty_generate(summary)) if opts[:json]
+
+if opts[:md]
+  ok = summary["identical"] + summary["equivalent"]
+  md = +"# Lobsters content parity\n\n"
+  md << "_#{ok}/#{summary['total']} routes render content equivalent to Rails "
+  md << "(#{summary['identical']} byte-identical) — #{summary['generated_at']}_\n\n"
+  md << "Bodies are compared as parsed token streams, so inter-element whitespace, "
+  md << "attribute order, void-element spelling, and character-reference spelling "
+  md << "are not differences. Everything else is.\n\n"
+  md << "| route | verdict | tokens (rails/emit) | differing | bytes (rails/emit) |\n"
+  md << "|-------|---------|--------------------:|----------:|-------------------:|\n"
+  results.each do |r|
+    v = r["verdict"] == "differs" ? "**differs**" : r["verdict"]
+    md << "| `#{r['route']}` | #{v} | #{r['ref_tokens']}/#{r['cand_tokens']} | "
+    md << "#{r['diff_tokens']} | #{r['ref_bytes']}/#{r['cand_bytes']} |\n"
+  end
+  md << "\n## Normalization ledger\n\n"
+  md << "| rule | kind | applications | why |\n|------|------|-------------:|-----|\n"
+  summary["rule_ledger"].each do |rule|
+    md << "| #{rule['name']} | #{rule['kind']} | #{rule['applications']} | #{rule['why']} |\n"
+  end
+  differing = results.select { |r| r["verdict"] == "differs" }
+  if differing.any?
+    md << "\n## Differences\n\n"
+    differing.each do |r|
+      md << "### `#{r['route']}` — #{r['diff_tokens']} differing tokens\n\n"
+      (r["hunks"] || []).each do |h|
+        md << "```\n"
+        (h["after"] || []).each { |t| md << "  #{t}\n" }
+        h["ref"].each  { |t| md << "- #{t}\n" }
+        h["cand"].each { |t| md << "+ #{t}\n" }
+        md << "```\n\n"
+      end
+    end
+  end
+  File.write(opts[:md], md)
+end
+
+ok = summary["identical"] + summary["equivalent"]
+puts "\n#{ok}/#{summary['total']} routes content-equivalent to reference " \
+     "(#{summary['identical']} byte-identical, #{summary['differs']} differ)"
+summary["rule_ledger"].each do |rule|
+  next if rule["applications"].zero?
+  puts "  #{rule['kind'] == 'known' ? 'KNOWN' : 'mask '} #{rule['name']}: #{rule['applications']}"
+end
+exit [bad, 100].min
