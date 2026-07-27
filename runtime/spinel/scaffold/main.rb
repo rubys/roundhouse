@@ -48,6 +48,9 @@ require_relative "runtime/importmap"
 # on every tree (the CRuby overlay swaps in its Time-reopen-augmented
 # sibling at the same path).
 require_relative "runtime/active_support_duration"
+# Blank-predicate helper for receivers `src/lower/blank.rs` had no static
+# type to ground on. Before anything that can hold a `present?` site.
+require_relative "runtime/active_support_ext"
 require_relative "runtime/rails"
 # Park RAILS_ENV where the typed runtime can read it (`Rails.env`
 # defaults to development when unset).

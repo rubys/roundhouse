@@ -1647,6 +1647,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         "inflector",
         "inflector_ext",
         "json_builder",
+        "active_support_ext",
     ] {
         let rb = Path::new("runtime/ruby").join(format!("{stem}.rb"));
         let content = fs::read_to_string(&rb)

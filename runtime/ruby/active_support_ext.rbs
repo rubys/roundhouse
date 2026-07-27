@@ -1,0 +1,7 @@
+module ActiveSupport
+  def self.blank?: (untyped value) -> bool
+
+  def self.present?: (untyped value) -> bool
+
+  def self.presence: (untyped value) -> untyped
+end

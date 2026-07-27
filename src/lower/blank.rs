@@ -132,6 +132,11 @@ enum Grounding {
     AlwaysNil,
     /// The class defines the predicate itself — normal dispatch.
     OwnDispatch,
+    /// No static type to ground on: hand the value to the ruby-family
+    /// runtime predicate, which branches on the value instead. The
+    /// receiver becomes an argument, so it is evaluated exactly once —
+    /// that is why this arm needs no effect-free gate.
+    Runtime,
     /// Can't ground; leave the call and report.
     Skip(&'static str),
 }
@@ -174,7 +179,7 @@ fn classify(ty: Option<&Ty>, defs: &AppDefinitions) -> Grounding {
             let has_nil = variants.iter().any(|v| matches!(v, Ty::Nil));
             let non_nil: Vec<&Ty> = variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect();
             if !has_nil || non_nil.len() != 1 {
-                return Skip("union receiver has no single non-nil grounding");
+                return Runtime;
             }
             match classify(Some(non_nil[0]), defs) {
                 Container { .. } => Container { nilable: true },
@@ -184,13 +189,15 @@ fn classify(ty: Option<&Ty>, defs: &AppDefinitions) -> Grounding {
                 // stay correct.
                 BoolLike => BoolLike,
                 AlwaysNil => AlwaysNil,
+                // The app's own predicate must keep winning; the
+                // runtime helper knows nothing about it.
                 OwnDispatch => Skip("nilable receiver of a class with its own predicate"),
+                Runtime => Runtime,
                 other @ Skip(_) => other,
             }
         }
-        Ty::Untyped => Skip("untyped receiver"),
-        Ty::Var { .. } => Skip("receiver type unresolved"),
-        _ => Skip("receiver type has no blank-predicate grounding"),
+        Ty::Untyped | Ty::Var { .. } => Runtime,
+        _ => Runtime,
     }
 }
 
@@ -454,6 +461,22 @@ fn try_rewrite(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnosti
             diags.push(unlowered(expr, recv_ty.as_ref(), method_name, reason));
             return;
         }
+        // The receiver moves into argument position, so it is read once
+        // however impure it is — the effect-free gate below does not
+        // apply and neither does the assignment-receiver handle.
+        Runtime => {
+            let span = expr.span;
+            let leading_blank_line = expr.leading_blank_line;
+            let old = std::mem::replace(&mut *expr.node, ExprNode::SelfRef);
+            let ExprNode::Send { recv: Some(r), .. } = old else { unreachable!() };
+            let ret = match pred {
+                Pred::Blank | Pred::Present => Ty::Bool,
+                Pred::Presence => nullable(non_nil_ty(&r)),
+            };
+            *expr = runtime_predicate(span, r, pred, ret);
+            expr.leading_blank_line = leading_blank_line;
+            return;
+        }
         _ => {}
     }
 
@@ -497,7 +520,7 @@ fn try_rewrite(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnosti
             Pred::Present => lit_bool(span, false),
             Pred::Presence => lit_nil(span),
         },
-        OwnDispatch | Skip(_) => unreachable!(),
+        OwnDispatch | Runtime | Skip(_) => unreachable!(),
     };
 
     *expr = replacement;
@@ -580,6 +603,33 @@ fn rewrite_bool(span: crate::span::Span, r: Expr, pred: Pred) -> Expr {
             if_expr(span, r, lit_bool(span, true), lit_nil(span), value_ty)
         }
     }
+}
+
+/// `ActiveSupport.<pred>(<recv>)` — the value-branching predicate the
+/// ruby-family runtime supplies (`runtime/ruby/active_support_ext.rb`)
+/// for receivers with no static type to ground on.
+fn runtime_predicate(span: crate::span::Span, r: Expr, pred: Pred, ret: Ty) -> Expr {
+    let name = match pred {
+        Pred::Blank => "blank?",
+        Pred::Present => "present?",
+        Pred::Presence => "presence",
+    };
+    let recv = mk(
+        span,
+        ExprNode::Const { path: vec![Symbol::new("ActiveSupport")] },
+        Ty::Untyped,
+    );
+    mk(
+        span,
+        ExprNode::Send {
+            recv: Some(recv),
+            method: Symbol::new(name),
+            args: vec![r],
+            block: None,
+            parenthesized: true,
+        },
+        ret,
+    )
 }
 
 // ---- node builders ------------------------------------------------------

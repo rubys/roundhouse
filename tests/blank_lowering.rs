@@ -122,8 +122,11 @@ end
     assert!(diags.is_empty(), "{diags:?}");
 }
 
+/// No static type to ground on, so the value goes to the runtime
+/// predicate rather than staying a dynamic `Object#present?` send that
+/// only CRuby's core_ext reopen could serve.
 #[test]
-fn untyped_receiver_survives_with_residue_diagnostic() {
+fn untyped_receiver_routes_to_the_runtime_predicate() {
     let (out, diags) = lower_and_emit(
         r#"
 class Util
@@ -134,7 +137,60 @@ class Util
 end
 "#,
     );
-    assert!(out.contains("present?"), "ungroundable site must survive verbatim:\n{out}");
+    assert!(
+        out.contains("ActiveSupport.present?(thing)"),
+        "untyped receiver should become a runtime predicate call:\n{out}"
+    );
+    assert!(
+        !out.contains("thing.present?"),
+        "the dynamic send must not survive:\n{out}"
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+/// The runtime predicate reads its argument once, so a receiver with
+/// effects grounds here where the type-directed forms must refuse it.
+#[test]
+fn impure_untyped_receiver_grounds_because_the_value_is_an_argument() {
+    let (out, diags) = lower_and_emit(
+        r#"
+class Util
+  def check(rec)
+    return "yes" if rec.save!.present?
+    "no"
+  end
+end
+"#,
+    );
+    assert!(
+        out.contains("ActiveSupport.present?(rec.save!)"),
+        "impure receiver should be evaluated once as an argument:\n{out}"
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+/// An app class that defines its own predicate keeps normal dispatch
+/// even through a nilable union — the runtime helper knows nothing
+/// about the app's definition and must not swallow it.
+#[test]
+fn nilable_own_predicate_class_still_refuses() {
+    let (_out, diags) = lower_and_emit(
+        r#"
+class Bag
+  def present?
+    true
+  end
+end
+
+class Util
+  def check(flag)
+    b = flag ? Bag.new : nil
+    return "yes" if b.present?
+    "no"
+  end
+end
+"#,
+    );
     assert_eq!(diags.len(), 1, "{diags:?}");
     assert_eq!(diags[0].code(), "blank_unlowered");
 }
