@@ -216,6 +216,9 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // A record handed to a path helper becomes its slug here, not
     // inside the helper (no-op unless a model overrides `to_param`).
     library::apply_route_param_lowering(&mut lcs, app);
+    // A helper handed `raw(x)` retargets to a `_raw` clone in which
+    // that argument's escaping comes off (no-op without such a site).
+    library::apply_raw_helper_monomorphization(&mut lcs, app);
     // Dynamic `send(k)` → static `case` dispatch moved to the shared
     // post-analyze hook (`lower::apply_send_static_dispatch`) — hook
     // bodies arrive here already grounded, with duration-unit arms in
@@ -376,6 +379,9 @@ pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
     // A record handed to a path helper becomes its slug here, not
     // inside the helper (no-op unless a model overrides `to_param`).
     library::apply_route_param_lowering(&mut lcs, app);
+    // A helper handed `raw(x)` retargets to a `_raw` clone in which
+    // that argument's escaping comes off (no-op without such a site).
+    library::apply_raw_helper_monomorphization(&mut lcs, app);
     library::apply_nilsafe_empty_lowering(&mut lcs);
     library::apply_dynamic_render_options_lowering(&mut lcs);
     // Layout wrap at render call sites — the seam where the @ivars a
@@ -410,6 +416,9 @@ pub fn emit_lowered_controllers_with_layout(app: &App) -> Vec<EmittedFile> {
     // A record handed to a path helper becomes its slug here, not
     // inside the helper (no-op unless a model overrides `to_param`).
     library::apply_route_param_lowering(&mut lcs, app);
+    // A helper handed `raw(x)` retargets to a `_raw` clone in which
+    // that argument's escaping comes off (no-op without such a site).
+    library::apply_raw_helper_monomorphization(&mut lcs, app);
     library::apply_nilsafe_empty_lowering(&mut lcs);
     library::apply_dynamic_render_options_lowering(&mut lcs);
     library::apply_layout_lowering(&mut lcs, app);
@@ -580,6 +589,9 @@ pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
     // A record handed to a path helper becomes its slug here, not
     // inside the helper (no-op unless a model overrides `to_param`).
     library::apply_route_param_lowering(&mut lcs, app);
+    // A helper handed `raw(x)` retargets to a `_raw` clone in which
+    // that argument's escaping comes off (no-op without such a site).
+    library::apply_raw_helper_monomorphization(&mut lcs, app);
     library::apply_time_current_lowering(&mut lcs);
     library::apply_duration_lowering(&mut lcs, app);
     // Nullable columns hydrate to nil on the Ruby tree — synthesized

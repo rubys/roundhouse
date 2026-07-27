@@ -25,6 +25,7 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     apply_library_partial_render_lowering(&mut lcs, app);
     apply_helper_lowering(&mut lcs, app);
     apply_route_param_lowering(&mut lcs, app);
+    apply_raw_helper_monomorphization(&mut lcs, app);
     // send→case grounding, update-kwargs inlining, mailer class-side
     // wrappers, and duration grounding run in the shared post-analyze
     // hook, which covers these library classes (dispatch's plural
@@ -3510,4 +3511,175 @@ end
     );
 
     src
+}
+
+/// Monomorphize an app helper on a `raw(...)` argument.
+///
+/// Rails carries "this string is safe" in the VALUE (SafeBuffer), so a
+/// safe label can ride a plain parameter into a helper and out to
+/// `link_to`, which then declines to escape it. Nothing survives that
+/// boundary here: the emit-time unwrap (`is_html_safe_call`) only sees
+/// producers it can name at the call site, and the AOT tree has no
+/// safe-string type at all. lobsters' layout hits it once and it shows
+/// on every page with a header —
+///
+///   link_to_different_page raw("#{user}&nbsp;<span class='karma'>…"), settings_path
+///
+/// rendered `michell_wiegand&amp;nbsp;&lt;span…` on the spinel tree, a
+/// +24B diff against Rails on THIRTEEN of the 49 benchmark routes.
+///
+/// So safety propagates statically instead: a call passing `raw(x)`
+/// retargets to a `<name>_raw` clone of the helper in which the safe
+/// parameter's escaping consumers are neutralized. This is the same
+/// exemption the `link_to(raw(x))` → `link_to_raw(x)` rewrite makes one
+/// level down, lifted through one user-defined frame.
+///
+/// Deliberately narrow. The clone rewrites only what it can prove
+/// consumes THAT parameter — `link_to` on it becomes `link_to_raw`, and
+/// an `html_escape` of it collapses — and a helper whose safe argument
+/// reaches neither is emitted as an ordinary clone rather than guessed
+/// at. Widening this is a typed-safe-string project, not a bigger match
+/// arm.
+pub(crate) fn apply_raw_helper_monomorphization(lcs: &mut [LibraryClass], app: &App) {
+    let sites = raw_helper_sites(app);
+    if sites.is_empty() {
+        return;
+    }
+    // Definition side: synthesize the `_raw` clone next to the original.
+    for lc in lcs.iter_mut() {
+        let mut synthesized: Vec<crate::dialect::MethodDef> = Vec::new();
+        for m in &lc.methods {
+            for (name, idx) in &sites {
+                if &m.name != name {
+                    continue;
+                }
+                let Some(param) = m.params.get(*idx) else { continue };
+                let mut clone = m.clone();
+                clone.name = Symbol::from(format!("{}_raw", name.as_str()));
+                let pname = param.name.clone();
+                propagate_raw_param(&mut clone.body, &pname);
+                synthesized.push(clone);
+            }
+        }
+        lc.methods.extend(synthesized);
+    }
+    // Call side: `M.helper(raw(x), …)` → `M.helper_raw(x, …)`.
+    for lc in lcs.iter_mut() {
+        for m in &mut lc.methods {
+            rewrite_raw_helper_calls(&mut m.body, &sites);
+        }
+    }
+}
+
+/// `(helper name, index of the argument passed as `raw(...)`)` for every
+/// app-helper call site that passes one. Read from `app.views` — i.e.
+/// BEFORE lowering, where both the helper call and `raw` are still bare
+/// sends — because the two sides of this rewrite are emitted in
+/// different LC groups and each needs the same answer.
+///
+/// Views only: `raw` is a view-layer marker, and a controller reaching
+/// for one would be building markup in the wrong place. Extend to
+/// controller bodies if a corpus ever does it.
+fn raw_helper_sites(app: &App) -> BTreeSet<(Symbol, usize)> {
+    let mut out = BTreeSet::new();
+    if app.helper_method_index.is_empty() {
+        return out;
+    }
+    let mut scan = |e: &Expr| {
+        collect_raw_helper_sites(e, &app.helper_method_index, &mut out);
+    };
+    for v in &app.views {
+        scan(&v.body);
+    }
+    out
+}
+
+fn collect_raw_helper_sites(
+    e: &Expr,
+    index: &std::collections::HashMap<Symbol, ClassId>,
+    out: &mut BTreeSet<(Symbol, usize)>,
+) {
+    e.node.for_each_child(&mut |c| collect_raw_helper_sites(c, index, out));
+    let ExprNode::Send { recv: None, method, args, block: None, .. } = &*e.node else {
+        return;
+    };
+    if !index.contains_key(method) {
+        return;
+    }
+    for (i, a) in args.iter().enumerate() {
+        let is_raw = matches!(&*a.node,
+            ExprNode::Send { recv: None, method: m, args: ra, .. }
+                if m.as_str() == "raw" && ra.len() == 1);
+        if is_raw {
+            out.insert((method.clone(), i));
+        }
+    }
+}
+
+/// Inside the `_raw` clone: the named parameter is already safe, so the
+/// escaping it would otherwise receive comes off.
+fn propagate_raw_param(body: &mut Expr, pname: &Symbol) {
+    body.node.for_each_child_mut(&mut |c| propagate_raw_param(c, pname));
+    // `ViewHelpers.link_to(<uses param>, …)` → `link_to_raw`.
+    if let ExprNode::Send { recv: Some(r), method, args, .. } = &mut *expr_node_mut(body) {
+        if method.as_str() == "link_to"
+            && is_view_helpers_const(r)
+            && args.first().is_some_and(|a| mentions_var(a, pname))
+        {
+            *method = Symbol::from("link_to_raw");
+            return;
+        }
+    }
+    // `ViewHelpers.html_escape(<param>)` → `<param>`.
+    let collapse = match &*body.node {
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+            if method.as_str() == "html_escape"
+                && args.len() == 1
+                && is_view_helpers_const(r)
+                && mentions_var(&args[0], pname) =>
+        {
+            Some(args[0].clone())
+        }
+        _ => None,
+    };
+    if let Some(inner) = collapse {
+        *body = inner;
+    }
+}
+
+fn expr_node_mut(e: &mut Expr) -> &mut ExprNode {
+    &mut e.node
+}
+
+/// Does `e` read `name` (directly, or through a `.to_s` the emitter
+/// added)?
+fn mentions_var(e: &Expr, name: &Symbol) -> bool {
+    match &*e.node {
+        ExprNode::Var { name: n, .. } => n == name,
+        ExprNode::Send { recv: Some(r), args, .. } if args.is_empty() => mentions_var(r, name),
+        _ => false,
+    }
+}
+
+fn rewrite_raw_helper_calls(e: &mut Expr, sites: &BTreeSet<(Symbol, usize)>) {
+    e.node.for_each_child_mut(&mut |c| rewrite_raw_helper_calls(c, sites));
+    let ExprNode::Send { recv: Some(_), method, args, block: None, .. } = &mut *e.node else {
+        return;
+    };
+    let Some((_, idx)) = sites.iter().find(|(n, i)| n == method && args.len() > *i) else {
+        return;
+    };
+    let inner = match &*args[*idx].node {
+        ExprNode::Send { recv: Some(r2), method: m2, args: a2, .. }
+            if m2.as_str() == "raw" && a2.len() == 1 && is_view_helpers_const(r2) =>
+        {
+            Some(a2[0].clone())
+        }
+        _ => None,
+    };
+    if let Some(inner) = inner {
+        let i = *idx;
+        *method = Symbol::from(format!("{}_raw", method.as_str()));
+        args[i] = inner;
+    }
 }
