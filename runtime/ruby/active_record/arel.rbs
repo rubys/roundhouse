@@ -1,6 +1,8 @@
 module Arel
   def self.sql: (String fragment) -> String
 
+  def self.star: () -> String
+
   class SelectManager
     @sql: String
 
@@ -9,5 +11,37 @@ module Arel
     def to_sql: () -> String
 
     def exists: () -> String
+  end
+
+  class Table
+    @name: String
+
+    # `attr_reader :name` lowers to a getter at ingest (same shape as
+    # RecordInvalid#record in errors.rbs).
+    def name: () -> String
+
+    def initialize: (String name) -> void
+
+    def attribute: (untyped column) -> Arel::Attribute
+
+    def project: (untyped column) -> String
+  end
+
+  class Attribute
+    @qualified: String
+
+    def initialize: (String qualified) -> void
+
+    def to_s: () -> String
+
+    def in: (untyped subquery) -> String
+
+    def not_in: (untyped subquery) -> String
+  end
+end
+
+module ActiveRecord
+  class Base
+    def self.arel_table: () -> Arel::Table
   end
 end

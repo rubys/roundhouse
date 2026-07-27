@@ -58,6 +58,7 @@ pub mod parameterize;
 pub mod sum_symbol;
 pub mod values_at_splat;
 pub mod request_index;
+pub mod arel_attribute;
 pub mod exclude_predicate;
 pub mod literal_append;
 pub mod session_options;
@@ -89,6 +90,7 @@ pub use mailer_class_side::apply_mailer_class_side;
 pub use as_json_super::apply_as_json_super_grounding;
 pub use parameterize::apply_parameterize_grounding;
 pub use request_index::apply_request_index_lowering;
+pub use arel_attribute::apply_arel_attribute_lowering;
 pub use exclude_predicate::apply_exclude_predicate_lowering;
 pub use literal_append::apply_literal_append_lowering;
 pub use session_options::apply_session_options_lowering;
@@ -166,6 +168,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `x.exclude?(y)` → `!x.include?(y)`; total rewrite, no ordering
     // constraints (no other pass produces or consumes `exclude?`).
     ("exclude_predicate", &[]),
+    ("arel_attribute", &[]),
     // `"lit" << x` → `"lit" + x`; local expression rewrite, no ordering
     // constraints.
     ("literal_append", &[]),
@@ -271,6 +274,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("session_options");
     exclude_predicate::apply_exclude_predicate_lowering(app);
     ran!("exclude_predicate");
+    arel_attribute::apply_arel_attribute_lowering(app);
+    ran!("arel_attribute");
     literal_append::apply_literal_append_lowering(app);
     ran!("literal_append");
     transaction_ground::apply_transaction_grounding(app);

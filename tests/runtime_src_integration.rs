@@ -784,7 +784,14 @@ fn every_runtime_method_body_concretely_typed() {
     // #to_h adds none (`@inbound.merge(@out)` stays concretely typed,
     // which is why it isn't an empty-literal accumulator); +1 site;
     // ceiling raised 210 → 211.
-    const CEILING: usize = 211;
+    // 2026-07-27 Arel::Table/Attribute (off the CRuby-only overlay into
+    // the shared file so spinel-on-lobsters can compile
+    // `Tag.arel_table[:id]`): `attribute`/`project` take an untyped
+    // column (call sites pass Symbols and the `Arel.star` String alike)
+    // and `in`/`not_in` an untyped subquery (anything answering
+    // `to_sql` — a SelectManager or a Relation); +6 sites; ceiling
+    // raised 211 → 217.
+    const CEILING: usize = 217;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
