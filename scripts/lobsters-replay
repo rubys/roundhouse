@@ -167,6 +167,30 @@ end
 # another's peak says nothing.
 BOOT_RSS_KB = rss_kb
 
+# ── YJIT introspection ───────────────────────────────────────────────
+# Snapshotted AROUND the timed window, never inside it. `--yjit-stats`
+# would give more detail but changes what it measures; every key below is
+# available without it, so the timed lane stays the lane we publish.
+#
+# The question these answer: is YJIT still WORKING during the measured
+# window? A lane whose ms/iter drifts upward while compiled_iseq_count
+# climbs, invalidation_count climbs, or code_gc_count goes non-zero is not
+# noisy — it is recompiling, and the median then depends on run length.
+YJIT_KEYS = %w[
+  code_region_size inline_code_size outlined_code_size
+  code_gc_count freed_code_size live_page_count freed_page_count
+  invalidation_count compiled_iseq_count compiled_block_count
+  compile_time_ns
+].freeze
+
+def yjit_snapshot
+  return nil unless defined?(RubyVM::YJIT) && RubyVM::YJIT.respond_to?(:enabled?) && RubyVM::YJIT.enabled?
+  st = RubyVM::YJIT.runtime_stats
+  YJIT_KEYS.to_h { |k| [k, st[k.to_sym]] }.compact
+rescue StandardError
+  nil
+end
+
 # ── benchmark identity + route ids ───────────────────────────────────
 # The login identity is fixed by the benchmark (route_generator.rb logs
 # in as this user before every run). Story/comment ids are sampled from
@@ -377,6 +401,7 @@ if opts[:sequence]
 
   # Verification counted as work, not warmup — start the warmups fresh.
   warmup.times { run_seq.call }
+  yjit_before = yjit_snapshot
   iters = []
   total = 0.0
   per_route = {}
@@ -387,6 +412,7 @@ if opts[:sequence]
     iters << ms
     total += ms
   end
+  yjit_after = yjit_snapshot
   sorted = iters.sort
   mid = sorted.size / 2
   median = sorted.size.odd? ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2.0
@@ -405,6 +431,16 @@ if opts[:sequence]
     "failed_visits"      => seq_fails.size,
     "partial"            => !seq_fails.empty?,
   }
+  if yjit_after
+    summary["yjit"] = {
+      "before" => yjit_before, "after" => yjit_after,
+      # What CHANGED while the clock was running. Non-zero here means the
+      # timed window was not measuring steady state.
+      "delta"  => yjit_after.to_h { |k, v|
+        [k, (yjit_before && yjit_before[k]) ? v - yjit_before[k] : v]
+      },
+    }
+  end
   summary["sequence_failures"] = seq_fails unless seq_fails.empty?
   puts "sequence: #{median.round(2)} ms/iter median over #{iters.size} iterations" \
        "#{seq_fails.any? ? " (PARTIAL: #{seq_fails.size} failing visits)" : ''}"

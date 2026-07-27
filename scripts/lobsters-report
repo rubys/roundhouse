@@ -676,7 +676,12 @@ if mrows && !mrows.empty?
   # a peak-RSS column here sat directly beside "vs Rails" and invited
   # reading that time ratio as a memory one (3.61x and 2.71x on the same
   # row: close enough that the misreading is silent).
-  html << "<table>\n<thead><tr><th>stack</th><th>JIT</th><th>ms/iter</th><th>min–max</th>#{cv_col ? '<th>CV</th>' : ''}<th>iters</th><th>vs Rails</th></tr></thead>\n<tbody>\n"
+  # Drift is a different failure from noise and needs its own column. A
+  # noisy lane's median is still its median; a DRIFTING lane's median is a
+  # function of how long the run happened to be, so the headline ratio
+  # moves with --time for no better reason.
+  drift_col = mlive.any? { |r| r['drift_pct'] }
+  html << "<table>\n<thead><tr><th>stack</th><th>JIT</th><th>ms/iter</th><th>min–max</th>#{cv_col ? '<th>CV</th>' : ''}#{drift_col ? '<th>drift</th>' : ''}<th>iters</th><th>vs Rails</th></tr></thead>\n<tbody>\n"
   msorted.each do |r|
     html << "<tr>"
     html << %(<td><strong>#{esc(r['label'])}</strong></td>)
@@ -686,6 +691,11 @@ if mrows && !mrows.empty?
     if cv_col
       cv = cv_pct(lane_iters[r['id']])
       html << %(<td class="num">#{cv ? "#{fmt_dec(cv, 1)}%" : '—'}</td>)
+    end
+    if drift_col
+      d = r['drift_pct']
+      cls = d && d.abs >= 5 ? 'num no' : 'num'
+      html << %(<td class="#{cls}">#{d ? "#{d > 0 ? '+' : ''}#{fmt_dec(d, 1)}%" : '—'}</td>)
     end
     html << %(<td class="num">#{r['iters']}</td>)
     html << %(<td class="num">#{r['vs_rails'] ? "#{fmt_dec(r['vs_rails'], 2)}×" : '—'}</td>)
@@ -698,7 +708,7 @@ if mrows && !mrows.empty?
   mdead.each do |r|
     why = "#{r['state'] || 'failed'}#{r['stage'].to_s.empty? ? '' : " at #{r['stage']}"}"
     why << ": #{r['detail']}" unless r['detail'].to_s.empty?
-    span = 4 + (cv_col ? 1 : 0)
+    span = 4 + (cv_col ? 1 : 0) + (drift_col ? 1 : 0)
     html << "<tr>"
     html << %(<td><strong>#{esc(r['label'])}</strong></td>)
     html << %(<td>#{lane_jit.(r)}</td>)
@@ -713,6 +723,41 @@ if mrows && !mrows.empty?
   else
     ''
   end
+  drifters = mlive.select { |r| r['drift_pct'] && r['drift_pct'].abs >= 5 }
+  if drifters.any?
+    html << %(<p class="caveat"><strong>Drifting lane#{drifters.size > 1 ? 's' : ''}:</strong> )
+    html << drifters.map { |r|
+      "#{esc(r['label'])} #{esc(r['jit'])} #{r['drift_pct'] > 0 ? 'slowed' : 'sped up'} " \
+      "#{fmt_dec(r['drift_pct'].abs, 1)}% between the first and last quarter of its own timed iterations"
+    }.join('; ')
+    html << %(. A drifting lane's median depends on how long the run was, so its ratio is not a stable number — read it as a range, not a point. Lanes that hold steady drift under 1%.</p>\n)
+  end
+
+  # What YJIT was doing WHILE the clock ran. Non-zero deltas mean the timed
+  # window was not steady state, which is the mechanism behind a drifting
+  # lane rather than a restatement of it.
+  yj = mlive.select { |r| r.dig('yjit_stats', 'delta') }
+  if yj.any?
+    html << "<details>\n<summary>YJIT during the timed window</summary>\n"
+    html << "<table>\n<thead><tr><th>lane</th><th>code region</th><th>iseqs compiled</th>"
+    html << "<th>invalidations</th><th>code GCs</th><th>compile time</th></tr></thead>\n<tbody>\n"
+    yj.each do |r|
+      d = r['yjit_stats']['delta']; a = r['yjit_stats']['after']
+      used = [a['inline_code_size'].to_i + a['outlined_code_size'].to_i, 0].max
+      html << "<tr><td><strong>#{esc(r['label'])} #{esc(r['jit'])}</strong></td>"
+      html << %(<td class="num">#{fmt_int(used / 1024)} KiB / #{fmt_int(a['code_region_size'].to_i / 1024)} KiB</td>)
+      %w[compiled_iseq_count invalidation_count code_gc_count].each do |k|
+        v = d[k].to_i
+        html << %(<td class="num #{v > 0 ? 'no' : ''}">#{v > 0 ? "+#{fmt_int(v)}" : '0'}</td>)
+      end
+      html << %(<td class="num">+#{fmt_dec(d['compile_time_ns'].to_i / 1_000_000.0, 1)} ms</td>)
+      html << "</tr>\n"
+    end
+    html << "</tbody></table>\n"
+    html << %(<p class="legend">Deltas across the timed iterations only — warmup is excluded, so a zero row means YJIT had finished its work before the clock started. Non-zero <code>iseqs compiled</code> means new code was still being generated while being measured; <code>invalidations</code> means compiled code was being thrown away and redone; a non-zero <code>code GCs</code> means the code region filled and YJIT reclaimed it, after which previously-compiled paths must be compiled again.</p>\n)
+    html << "</details>\n"
+  end
+
   cv_note = cv_col ? ' CV = per-lane standard deviation ÷ mean across the timed iterations.' : ''
   html << %(<p class="legend">“vs Rails” is a <strong>speed</strong> ratio — Rails' ms/iter ÷ this row's, at the same JIT level — so 3× means three times faster. Memory is a separate section below.#{jr_note}#{cv_note}</p>\n)
   if (rjc = mlive.find { |r| r['id'] == 'rails-jruby' })

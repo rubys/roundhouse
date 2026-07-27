@@ -542,6 +542,25 @@ META = {
 # render the page as though the lane had never been asked for, which is the
 # one reading that is definitely wrong — a crashed lane must be LOUDER than
 # a slow one, not invisible.
+# Drift = how much the lane slowed (or sped up) BETWEEN the first and last
+# quarter of its own timed iterations. A lane that drifts is not noisy: its
+# median is a function of how long the run happened to be, so the headline
+# ratio moves with --time for no better reason. Rails sits at +/-0.5% here;
+# a lane in double digits is doing something the others are not.
+def drift_pct(iter_ms)
+  return nil unless iter_ms.is_a?(Array) && iter_ms.size >= 8
+  q = iter_ms.size / 4
+  med = lambda do |xs|
+    a = xs.sort
+    m = a.size / 2
+    a.size.odd? ? a[m] : (a[m - 1] + a[m]) / 2.0
+  end
+  first = med.call(iter_ms[0, q])
+  last  = med.call(iter_ms[-q, q])
+  return nil if first.nil? || first.zero?
+  (((last - first) / first) * 100).round(1)
+end
+
 def lane_status(run_dir, id)
   JSON.parse(File.read(File.join(run_dir, id, "lane-status.json")))
 rescue StandardError
@@ -577,6 +596,11 @@ rows = META.filter_map do |id, m|
     # 114; a lane that answers nothing answers it very fast, so this is the
     # direct guard against a number that is quick because it did no work.
     "failed_visits" => t["failed_visits"],
+    "drift_pct" => drift_pct(t["iter_ms"]),
+    # NOT "yjit" — that key already holds the lane's JIT boolean, which the
+    # vs-Rails pairing keys off. Colliding with it silently drops one lane's
+    # ratio and pairs another against the wrong baseline.
+    "yjit_stats" => (data["yjit"] if m[:src] != "rails.json"),
     "ms_median" => t["ms_per_iter_median"], "ms_min" => t["ms_per_iter_min"],
     "ms_max" => t["ms_per_iter_max"], "iters" => t["iterations"], "warmup" => t["warmup"],
     "ruby" => data["ruby"] || env["ruby"], "rails" => data["rails"],
@@ -625,9 +649,11 @@ dead = rows.reject { |r| r["ms_median"] }
 puts "\n== lobsters lanes (#{live.size}, ms/iter, lower=better) =="
 live.sort_by { |r| r["ms_median"] }.each do |r|
   rss = r["rss_peak_kb"] || r["rss_final_kb"]
-  printf "  %-11s %-7s %9.2f ms/iter  %9s  %s\n", r["label"], r["jit"], r["ms_median"],
+  dr = r["drift_pct"]
+  printf "  %-11s %-7s %9.2f ms/iter  %9s  %-16s %s\n", r["label"], r["jit"], r["ms_median"],
          (rss ? "#{(rss / 1024.0).round} MB" : "-"),
-         (r["vs_rails"] ? "#{r["vs_rails"]}x vs Rails" : "")
+         (r["vs_rails"] ? "#{r["vs_rails"]}x vs Rails" : ""),
+         (dr && dr.abs >= 5 ? "DRIFT #{dr > 0 ? '+' : ''}#{dr}% within run" : "")
 end
 dead.each do |r|
   printf "  %-11s %-7s %9s  %s\n", r["label"], r["jit"], "NO DATA",
