@@ -277,8 +277,8 @@ if (( ${#LANES[@]} > 0 )); then
         exit 2
     fi
     for LANE in "${LANES[@]}"; do
-        case "$LANE" in rails|rails-int|ruby|ruby-int|jruby|rails-jruby) ;; *)
-            fail "unknown lane: $LANE (want rails rails-int ruby ruby-int jruby rails-jruby)"; exit 2 ;;
+        case "$LANE" in rails|rails-int|ruby|ruby-int|jruby|rails-jruby|spinel) ;; *)
+            fail "unknown lane: $LANE (want rails rails-int ruby ruby-int jruby rails-jruby spinel)"; exit 2 ;;
         esac
     done
     [[ -d "$SRC" ]] || { fail "lobsters source not found at $SRC (clone ruby-bench or pass --src)"; exit 2; }
@@ -385,6 +385,58 @@ if (( ${#LANES[@]} > 0 )); then
                     lane_status "$LANE" failed replay "$(lane_tail "$LDIR/run.log")"
                 fi
                 ;;
+            spinel)
+                # AOT: emit, compile to a native binary, then replay
+                # IN-PROCESS through the compiled driver. One lane, not a
+                # JIT pair — there is no JIT to turn off.
+                if ! command -v spinel >/dev/null 2>&1; then
+                    fail "lane spinel skipped: no spinel on PATH"
+                    lane_status "$LANE" skipped toolchain "no spinel on PATH"; continue
+                fi
+                SP_TREE="$REPO_ROOT/build/transpiled-lobsters-spinel"
+                step "lane spinel: emit + AOT compile + in-process replay"
+                # --skip-emit reuses the existing tree, as it does for the
+                # other lanes; the AOT compile behind it is ~30s, which is
+                # the whole cost of a dev-loop iteration here.
+                if (( SKIP_EMIT == 1 )) && [[ -f "$SP_TREE/main.rb" ]]; then
+                    : > "$LDIR/emit.log"
+                elif ! (cd "$REPO_ROOT" && cargo run --quiet --bin roundhouse -- \
+                        --target spinel "$SRC" -o "$SP_TREE" --allow-unsupported \
+                        >"$LDIR/emit.log" 2>&1); then
+                    fail "lane spinel: emit failed (see $LDIR/emit.log)"
+                    FAILED_LANES=$((FAILED_LANES + 1))
+                    lane_status "$LANE" failed emit "$(lane_tail "$LDIR/emit.log")"; continue
+                fi
+                mkdir -p "$SP_TREE/storage"
+                # The binary has no in-memory seeding path yet, so it serves
+                # the staged file DB. NOT the --memory shape the other lanes
+                # run; the page has to say so rather than imply parity.
+                cp "$REPO_ROOT/build/transpiled-lobsters-ruby/storage/bench.sqlite3" \
+                   "$SP_TREE/storage/bench.sqlite3" 2>/dev/null || true
+                SP_ARGS=(--tree "$SP_TREE" --sequence "$FROZEN_SEQ"
+                         --json "$LDIR/summary.json" --md "$LDIR/summary.md"
+                         --dump "$LDIR/bodies" --warmup 5
+                         --time "$TIME_ITERS" --min-time 10)
+                [[ -d "$HOME/git/spinel-bcrypt" ]] && SP_ARGS+=(--bcrypt "$HOME/git/spinel-bcrypt")
+                # `|| SP_RC=$?`, never a bare call: under `set -e` a failing
+                # replay would take this whole script down BEFORE the lane
+                # status is written and before aggregation runs — the page
+                # would then show yesterday's numbers, which is precisely
+                # the failure the dead-lane row exists to prevent.
+                SP_RC=0
+                ruby "$REPO_ROOT/scripts/lobsters-spinel-replay" "${SP_ARGS[@]}" \
+                    >"$LDIR/run.log" 2>&1 || SP_RC=$?
+                if (( SP_RC >= 100 )); then
+                    fail "lane spinel failed (see $LDIR/run.log)"
+                    FAILED_LANES=$((FAILED_LANES + 1))
+                    lane_status "$LANE" failed replay "$(lane_tail "$LDIR/run.log")"
+                else
+                    # A non-zero rc under 100 is failing ROUTES, not a dead
+                    # lane: the run produced data and the page reports it.
+                    ok "lane spinel done"
+                    lane_status "$LANE" ok "" ""
+                fi
+                ;;
             jruby)
                 if (( JRUBY_OK == 0 )); then
                     fail "lane jruby skipped: no jruby on PATH"
@@ -419,7 +471,7 @@ if (( ${#LANES[@]} > 0 )); then
         fi
     done
     if [[ -n "$REF_BODIES" ]]; then
-        for LANE in ruby ruby-int jruby; do
+        for LANE in ruby ruby-int jruby spinel; do
             [[ -d "$RUN_DIR/$LANE/bodies" ]] || continue
             step "content parity: $LANE vs $REF_LANE"
             # Non-zero exit = routes that differ, which is a finding to
@@ -457,6 +509,7 @@ META = {
   "ruby"        => { label: "Roundhouse", kind: "emit",  runtime: "cruby", yjit: true,  jit: "YJIT",   src: "summary.json" },
   "ruby-int"    => { label: "Roundhouse", kind: "emit",  runtime: "cruby", yjit: false, jit: "no JIT", src: "summary.json" },
   "jruby"       => { label: "Roundhouse", kind: "emit",  runtime: "jruby", yjit: nil,   jit: "JRuby",  src: "summary.json" },
+  "spinel"      => { label: "Roundhouse", kind: "emit",  runtime: "spinel", yjit: nil,  jit: "AOT",    src: "summary.json" },
 }
 # A lane that produced no timing data still gets a row. Dropping it would
 # render the page as though the lane had never been asked for, which is the
@@ -524,7 +577,13 @@ live = rows.select { |r| r["ms_median"] }
 rails_cruby = live.select { |r| r["kind"] == "rails" && r["runtime"] == "cruby" }.to_h { |r| [r["yjit"], r] }
 rails_jvm   = live.find { |r| r["kind"] == "rails" && r["runtime"] == "jruby" }
 live.each do |r|
-  base = r["runtime"] == "jruby" ? (rails_jvm || rails_cruby[true]) : rails_cruby[r["yjit"]]
+  base = case r["runtime"]
+         when "jruby"  then rails_jvm || rails_cruby[true]
+         # AOT has no JIT-off twin to pair with; compare against Rails'
+         # best CRuby configuration and let the page say that is what it is.
+         when "spinel" then rails_cruby[true]
+         else rails_cruby[r["yjit"]]
+         end
   r["vs_rails"] = base ? (base["ms_median"] / r["ms_median"]).round(2) : nil
 end
 matrix = {

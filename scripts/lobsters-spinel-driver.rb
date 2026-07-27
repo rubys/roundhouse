@@ -1,0 +1,224 @@
+# scripts/lobsters-spinel-driver.rb — the spinel lane's in-process replay
+# driver, COMPILED INTO the binary under test.
+#
+# The other lanes drive Main.run_rack from a Ruby script that requires the
+# emitted tree. A spinel tree is a native binary, so its driver has to be
+# compiled alongside it — but the seam is the same one Tep::Server calls,
+# `Main.dispatch(req, res)`, so this measures the same thing the CRuby
+# lanes measure: no socket, no HTTP parse, no marshalling.
+#
+# scripts/bench-lobsters copies this file into the emitted tree and splices
+# a `--bench` branch into main.rb before `make build`. It is NOT part of the
+# spinel scaffold: every emitted app would otherwise carry a benchmark
+# harness it never runs.
+#
+#   ./build/blog --bench ROUTES SEQUENCE DUMPDIR WARMUP MIN_ITERS MIN_SECONDS
+#
+# ROUTES / SEQUENCE are plain text, one "VERB PATH" per line. Output is
+# plain lines on stdout; the CRuby wrapper turns them into summary.json.
+# Deliberately no JSON on this side — every construct here is compiled, so
+# the compiled surface stays as small as the job allows.
+#
+#   PARITY <route> <status> <bytes> <ms>
+#   SEQFAIL <idx> <status> <path>
+#   ITER <ms>
+#   DONE <visits> <warmup>
+#
+# Keep the request construction in lockstep with Tep::Parser.parse — a
+# hand-built Request that skips a step the parser takes does not fail
+# loudly, it fails as a wrong measurement. The parser merges query and
+# form fields into req_params and stores DECODED cookie values; missing
+# that last one costs the session and turns every authenticated route
+# into a cheap 302.
+class BenchDriver
+  def self.cookie_header(jar)
+    out = +""
+    jar.each do |k, v|
+      out << "; " if out.length > 0
+      out << k
+      out << "="
+      out << v
+    end
+    out
+  end
+
+  # Read Set-Cookie lines with split, never index: under matz/spinel#3400
+  # a <<-built string pushed into an ivar Array[String] survives
+  # concatenation and split but not every method dispatch, and index is
+  # one of the unarmed cells.
+  def self.absorb(jar, res)
+    res.set_cookies.each do |line|
+      pair = line.split(";", 2)[0].to_s
+      kv = pair.split("=", 2)
+      next if kv.length < 2
+      jar[kv[0].to_s] = kv[1].to_s
+    end
+  end
+
+  def self.visit(jar, verb, path, body)
+    req = Tep::Request.new
+    req.verb = verb
+    req.raw_path = path
+    pq = path.split("?", 2)
+    req.path = pq[0].to_s
+    if pq.length > 1
+      req.query = Tep::Url.parse_query(pq[1].to_s)
+      req.query.each { |k, v| req.req_params[k] = v }
+    end
+
+    hdr = cookie_header(jar)
+    if hdr.length > 0
+      req.req_headers["cookie"] = hdr
+      hdr.split(";").each do |part|
+        kv = part.strip.split("=", 2)
+        # Parser stores the DECODED value; the wire form is percent-escaped.
+        req.cookies[kv[0].to_s] = Tep::Url.unescape(kv[1].to_s) if kv.length == 2
+      end
+    end
+    req.remote_host = "127.0.0.1"
+
+    if body.length > 0
+      req.raw_body = body
+      req.req_headers["content-type"] = "application/x-www-form-urlencoded"
+      req.req_headers["content-length"] = body.length.to_s
+      # What Tep::Request#consume_body does after draining the socket.
+      Tep::Url.parse_query(body).each { |k, v| req.req_params[k] = v }
+    end
+
+    res = Tep::Response.new
+    # Same contract as Tep::Server: one request's failure is not the run's.
+    # Without this a single unimplemented method (spinel currently lacks
+    # Relation#group_by, which /threads and /s/:story_id both reach) unwinds
+    # the whole driver and the lane reports NO DATA instead of reporting
+    # which routes are broken — the diagnosis being the entire point.
+    #
+    # The rescue is INSIDE with_connection deliberately. Db.with_connection
+    # leases without an `ensure`, so an exception unwinding through it never
+    # releases the lease; catching outside it leaks one connection per
+    # failing request and the pool then blocks forever in its
+    # `while @pool.available == 0` spin. Catching inside keeps the normal
+    # release path on every request, failed or not.
+    #
+    # Exception, not StandardError: the emitted gem facades raise
+    # NotImplementedError (a ScriptError), which a bare rescue misses. A
+    # measurement harness has to survive everything the app can throw or
+    # it reports "no data" for what is really "one route is broken".
+    Db.with_connection do
+      begin
+        Main.dispatch(req, res)
+      rescue Exception => e
+        res.status = 500
+        res.body = "BENCHERR " + e.class.to_s + ": " + e.message.to_s
+      end
+    end
+    absorb(jar, res)
+    res
+  end
+
+  # The layout emits <meta name="csrf-param" content="authenticity_token">
+  # BEFORE the form, so anchor on the hidden input's name+value pair.
+  def self.csrf(body)
+    parts = body.split("name=\"authenticity_token\" value=\"", 2)
+    return "" if parts.length < 2
+    parts[1].split("\"", 2)[0].to_s
+  end
+
+  def self.login!(jar)
+    res = visit(jar, "GET", "/login", "")
+    return "GET /login -> " + res.status.to_s if res.status != 200
+    token = csrf(res.body)
+    return "no authenticity_token in /login" if token.length == 0
+    form = "email=" + Tep::Url.escape("wiegand.michell@mertz-vonrueden.test") +
+           "&password=" + Tep::Url.escape("ji3W36xR") +
+           "&authenticity_token=" + Tep::Url.escape(token)
+    res = visit(jar, "POST", "/login", form)
+    return "POST /login -> " + res.status.to_s + " (expected 302)" if res.status != 302
+    ""
+  end
+
+  def self.lines(path)
+    out = [""]
+    out.pop
+    File.read(path).split("\n").each do |l|
+      s = l.strip
+      out << s if s.length > 0
+    end
+    out
+  end
+
+  def self.now_ms
+    Process.clock_gettime(Process::CLOCK_MONOTONIC) * 1000.0
+  end
+
+  def self.safe_name(route)
+    out = +""
+    i = 0
+    while i < route.length
+      c = route[i]
+      ok = (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") ||
+           (c >= "0" && c <= "9") || c == "." || c == "-" || c == "_"
+      out << (ok ? c : "_")
+      i += 1
+    end
+    # Mirrors the other lanes' rule: leading "/" is dropped, not mapped.
+    out.length > 0 && route[0] == "/" ? out[1, out.length - 1].to_s : out
+  end
+
+  def self.run(routes_file, seq_file, dump_dir, warmup, min_iters, min_seconds)
+    jar = Tep.str_hash
+    err = login!(jar)
+    if err.length > 0
+      puts "LOGINFAIL " + err
+      return 1
+    end
+
+    # ── parity pass: one visit per distinct route, bodies dumped ──────
+    lines(routes_file).each do |spec|
+      parts = spec.split(" ", 2)
+      verb = parts[0].to_s
+      route = parts[1].to_s
+      t0 = now_ms
+      res = visit(jar, verb, route, "")
+      ms = now_ms - t0
+      File.write(dump_dir + "/" + safe_name(route), res.body)
+      puts "PARITY " + route + " " + res.status.to_s + " " +
+           res.body.length.to_s + " " + ms.to_s
+      puts "PARITYERR " + route + " " + res.body if res.body.start_with?("BENCHERR")
+    end
+
+    # Buffered stdout is lost if the process dies later; the parity rows
+    # are the diagnosis, so get them out of the buffer now.
+    $stdout.flush
+
+    # ── frozen sequence: verify every visit, then time ────────────────
+    seq = lines(seq_file)
+    idx = 0
+    seq.each do |spec|
+      parts = spec.split(" ", 2)
+      res = visit(jar, parts[0].to_s, parts[1].to_s, "")
+      puts "SEQFAIL " + idx.to_s + " " + res.status.to_s + " " + parts[1].to_s if res.status != 200
+      idx += 1
+    end
+
+    $stdout.flush
+
+    w = 0
+    while w < warmup
+      seq.each { |spec| p2 = spec.split(" ", 2); visit(jar, p2[0].to_s, p2[1].to_s, "") }
+      w += 1
+    end
+
+    iters = 0
+    total = 0.0
+    while iters < min_iters || total < min_seconds * 1000.0
+      t0 = now_ms
+      seq.each { |spec| p2 = spec.split(" ", 2); visit(jar, p2[0].to_s, p2[1].to_s, "") }
+      ms = now_ms - t0
+      puts "ITER " + ms.to_s
+      total = total + ms
+      iters += 1
+    end
+    puts "DONE " + seq.length.to_s + " " + warmup.to_s
+    0
+  end
+end

@@ -1,0 +1,296 @@
+#!/usr/bin/env ruby
+# scripts/lobsters-spinel-replay — the spinel lane's wrapper.
+#
+# Stages the emitted spinel tree with an in-process replay driver, compiles
+# it, runs it, and writes the same summary.json shape the other lanes emit
+# so scripts/bench-lobsters can aggregate it and lobsters-content-diff can
+# compare its bodies.
+#
+# WHY A SEPARATE SCRIPT. The CRuby and JRuby lanes share one driver
+# (scripts/lobsters-replay) because both can `require` the emitted tree. A
+# spinel tree is a native binary: its driver has to be COMPILED IN. So the
+# division of labour is
+#
+#   scripts/lobsters-spinel-driver.rb   compiled into the binary; drives
+#                                       Main.dispatch, speaks plain text
+#   this script                         stages, builds, runs, and turns
+#                                       that text into summary.json
+#
+# Nothing on the compiled side parses or emits JSON — every construct there
+# is native code subject to the spinel subset, so the compiled surface stays
+# as small as the job allows and the fiddly formatting lives here.
+#
+# The measurement is methodologically the SAME as the CRuby lanes': the
+# driver calls Main.dispatch, the identical seam Tep::Server calls, with no
+# socket and no HTTP parse in the loop.
+#
+# Usage:
+#   scripts/lobsters-spinel-replay --tree DIR --sequence F --json OUT.json
+#                                  [--md OUT.md] [--dump DIR] [--db PATH]
+#                                  [--warmup N] [--time N] [--min-time S]
+#                                  [--bcrypt PATH] [--skip-build]
+#
+# Exit code = number of failing parity routes (0 = full parity), or 100 on
+# a staging/build/boot failure — the caller records that as a dead lane.
+
+require "json"
+require "fileutils"
+
+opts = { warmup: 5, time: 10, min_time: 10, db: nil }
+args = ARGV.dup
+until args.empty?
+  case (a = args.shift)
+  when "--tree"       then opts[:tree]     = File.expand_path(args.shift)
+  when "--sequence"   then opts[:sequence] = File.expand_path(args.shift)
+  when "--json"       then opts[:json]     = File.expand_path(args.shift)
+  when "--md"         then opts[:md]       = File.expand_path(args.shift)
+  when "--dump"       then opts[:dump]     = File.expand_path(args.shift)
+  when "--db"         then opts[:db]       = File.expand_path(args.shift)
+  when "--bcrypt"     then opts[:bcrypt]   = File.expand_path(args.shift)
+  when "--warmup"     then opts[:warmup]   = Integer(args.shift)
+  when "--time"       then opts[:time]     = Integer(args.shift)
+  when "--min-time"   then opts[:min_time] = Integer(args.shift)
+  when "--skip-build" then opts[:skip_build] = true
+  else abort "lobsters-spinel-replay: unknown arg #{a}"
+  end
+end
+%i[tree sequence json].each { |k| opts[k] or abort "lobsters-spinel-replay: --#{k} is required" }
+TREE = opts[:tree]
+File.directory?(TREE) or abort "lobsters-spinel-replay: no tree at #{TREE}"
+
+# Context FIRST, one-line reason LAST. The orchestrator records a dead
+# lane's detail by taking the last non-empty line of this log, so the
+# headline has to be the final line or the page ends up quoting whatever
+# incidental output happened to trail the failure.
+def die(stage, detail, context = nil)
+  warn context if context && !context.empty?
+  warn "lobsters-spinel-replay: #{stage}: #{detail}"
+  exit 100
+end
+
+# ── stage the driver ─────────────────────────────────────────────────
+# Copied in on EVERY run, never left behind for a re-emit to lose: the
+# tree is a build artifact and roundhouse rewrites main.rb from the
+# scaffold each time it is emitted.
+driver_src = File.join(__dir__, "lobsters-spinel-driver.rb")
+FileUtils.cp(driver_src, File.join(TREE, "bench_driver.rb"))
+# The Makefile's RUBY_SRC globs main.rb + runtime/ app/ config/ — a driver
+# at the tree root is invisible to it, so `make build` would call the binary
+# up to date and silently run the PREVIOUS driver. Touch main.rb so an
+# edited driver always reaches the binary being measured.
+FileUtils.touch(File.join(TREE, "main.rb"))
+
+main = File.join(TREE, "main.rb")
+src  = File.read(main)
+unless src.include?("BenchDriver")
+  # Two edits, both anchored on generated text. The ARGV loop rejects
+  # unknown flags, so --bench has to be accepted there AND acted on after
+  # the adapter is configured — teaching only one of the two yields
+  # "unknown option: --bench".
+  flag_anchor = %(  elsif (arg == "--port" || arg == "-p") && i + 1 < ARGV.length)
+  die("stage", "main.rb ARGV anchor not found") unless src.include?(flag_anchor)
+  # --bench swallows the REST of argv (the driver's six positional args),
+  # so the generated loop must stop rather than try to parse them.
+  src = src.sub(flag_anchor, <<~RB.chomp + "\n" + flag_anchor)
+      elsif arg == "--bench"
+        i = ARGV.length
+  RB
+
+  # The require must be TOP LEVEL and unconditional: spinel resolves
+  # requires at compile time, so one tucked inside an `if` leaves the
+  # constant undefined at run time (uninitialized constant BenchDriver).
+  req_anchor = %(require_relative "runtime/db")
+  die("stage", "main.rb require anchor not found") unless src.include?(req_anchor)
+  src = src.sub(req_anchor, %(require_relative "bench_driver"\n) + req_anchor)
+
+  boot_anchor = "Main.configure_default_adapter!"
+  die("stage", "main.rb boot anchor not found") unless src.include?(boot_anchor)
+  src = src.sub(boot_anchor, <<~RB.chomp)
+    Main.configure_default_adapter!
+
+    # Injected by scripts/lobsters-spinel-replay. The server start below is
+    # unconditional, so the bench entry has to run BEFORE it and exit.
+    if ARGV.length > 1 && ARGV[0] == "--bench"
+      BenchDriver.run(ARGV[1].to_s, ARGV[2].to_s, ARGV[3].to_s,
+                      ARGV[4].to_i, ARGV[5].to_i, ARGV[6].to_i)
+      exit(0)
+    end
+  RB
+  File.write(main, src)
+end
+
+# bcrypt is a spin package; the published index may not carry it, so a
+# local checkout can be pointed at instead. Without this the build fails
+# with "not in the index" and the lane is dead for an avoidable reason.
+if opts[:bcrypt] && File.directory?(opts[:bcrypt])
+  lock = File.join(TREE, "spin.lock")
+  toml = File.read(File.join(TREE, "spin.toml"))
+  unless toml.include?(opts[:bcrypt])
+    system("spin", "add", "bcrypt", "--path", opts[:bcrypt], chdir: TREE,
+           out: File::NULL, err: File::NULL) or die("stage", "spin add bcrypt failed")
+  end
+  File.exist?(lock) or nil
+end
+
+# ── build ────────────────────────────────────────────────────────────
+BIN = File.join(TREE, "build", "blog")
+unless opts[:skip_build] && File.executable?(BIN)
+  t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  log = File.join(TREE, "spin-build.log")
+  ok = system("make", "build", chdir: TREE, out: log, err: [log, "a"])
+  build_s = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0).round(1)
+  unless ok
+    tail = (File.readlines(log).last(15).join rescue "")
+    die("build", "spin build failed after #{build_s}s", tail)
+  end
+  BUILD_SECONDS = build_s
+  C_WARNINGS = (File.read(log).scan(/\bwarning:/).size rescue 0)
+else
+  BUILD_SECONDS = nil
+  C_WARNINGS = nil
+end
+File.executable?(BIN) or die("build", "no binary at #{BIN}")
+
+# ── route set ────────────────────────────────────────────────────────
+# The parity routes, with story/comment ids resolved the same way
+# scripts/lobsters-replay resolves them (lowest-id non-deleted row) so all
+# lanes land on the same records and their dumps line up file for file.
+DB = opts[:db] || File.join(TREE, "storage", "bench.sqlite3")
+File.exist?(DB) or die("stage", "no DB at #{DB}")
+def sqlite_one(db, sql)
+  out = `sqlite3 #{db.shellescape} #{sql.shellescape} 2>/dev/null`.strip
+  out.empty? ? nil : out.lines.first.strip
+end
+require "shellwords"
+STORY   = sqlite_one(DB, "SELECT short_id FROM stories  WHERE is_deleted = 0 ORDER BY id LIMIT 1") || "enr7ye"
+COMMENT = sqlite_one(DB, "SELECT short_id FROM comments WHERE is_deleted = 0 ORDER BY id LIMIT 1") || "6srqij"
+USERNAME = "michell_wiegand"
+
+ROUTES = [
+  "/u", "/active", "/newest", "/recent", "/hottest",
+  "/rss", "/privacy", "/about", "/settings",
+  "/top?length=1d", "/top?length=1w", "/top?length=1y",
+  "/hidden", "/saved", "/upvoted/stories",
+  "/comments", "/upvoted/comments", "/threads", "/comments/#{COMMENT}/reply",
+  "/threads/#{USERNAME}", "/u/#{USERNAME}",
+  "/replies", "/replies/comments", "/replies/stories", "/replies/unread",
+  "/s/#{STORY}",
+].freeze
+
+work = File.join(TREE, "bench-work")
+FileUtils.mkdir_p(work)
+routes_file = File.join(work, "routes.txt")
+seq_file    = File.join(work, "sequence.txt")
+File.write(routes_file, ROUTES.map { |r| "GET #{r}" }.join("\n"))
+visits = JSON.parse(File.read(opts[:sequence]))["visits"]
+File.write(seq_file, visits.map { |v| "#{v['method']} #{v['path']}" }.join("\n"))
+
+dump = opts[:dump] || File.join(work, "bodies")
+FileUtils.mkdir_p(dump)
+
+# ── run ──────────────────────────────────────────────────────────────
+out_path = File.join(work, "driver-out.txt")
+err_path = File.join(work, "driver-err.txt")
+env = { "BLOG_DB" => DB }
+
+# NO RETRY. The binary crashes intermittently (observed: 1 of 3 identical
+# invocations succeeded, the others died on SIGBUS) — the shape of
+# matz/spinel#3396, a GC sweep freeing a live string. That is a real defect,
+# so a retry would be a lie: it would turn a two-in-three crash rate into an
+# occasional green run and hide the very thing worth reporting. A crashed
+# lane is reported as a crashed lane.
+ok = system(env, BIN, "--bench", routes_file, seq_file, dump,
+            opts[:warmup].to_s, opts[:time].to_s, opts[:min_time].to_s,
+            chdir: TREE, out: out_path, err: err_path)
+raw = (File.read(out_path) rescue "")
+unless ok
+  err = (File.read(err_path) rescue "")
+  sig = $?&.termsig
+  detail = sig ? "binary terminated by signal #{sig}" : "exit #{$?&.exitstatus}"
+  die("replay", detail, err.lines.last(8).join + raw.lines.last(4).join)
+end
+if (bad = raw.lines.find { |l| l.start_with?("LOGINFAIL") })
+  die("replay", bad.strip)
+end
+
+# ── parse the driver's plain-text report ─────────────────────────────
+routes, seq_fails, iters = [], [], []
+visits_per_iter = visits.size
+warmup_used = opts[:warmup]
+raw.each_line do |line|
+  f = line.split(" ")
+  case f[0]
+  when "PARITY"
+    # route status bytes ms — route never contains a space.
+    routes << { "route" => f[1], "status" => f[2].to_i, "bytes" => f[3].to_i,
+                "ms" => f[4].to_f.round(2), "ok" => f[2].to_i == 200,
+                "thin" => f[2].to_i == 200 && f[3].to_i < 200 }
+  when "PARITYERR"
+    if (r = routes.find { |x| x["route"] == f[1] })
+      r["error"] = line.split(" ", 3)[2].to_s.strip[0, 300]
+    end
+  when "SEQFAIL"
+    seq_fails << { "idx" => f[1].to_i, "status" => f[2].to_i, "path" => f[3..].join(" ").strip }
+  when "ITER" then iters << f[1].to_f
+  when "DONE"
+    visits_per_iter = f[1].to_i
+    warmup_used = f[2].to_i
+  end
+end
+die("replay", "driver produced no parity rows") if routes.empty?
+die("replay", "driver produced no timed iterations") if iters.empty?
+
+sorted = iters.sort
+mid = sorted.size / 2
+median = sorted.size.odd? ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2.0
+fails = routes.reject { |r| r["ok"] }
+
+summary = {
+  "generated_at" => Time.now.utc.to_s,
+  "stack"        => "spinel",
+  "db"           => DB,
+  "memory"       => false,
+  "story_id"     => STORY,
+  "comment_id"   => COMMENT,
+  "total"        => routes.size,
+  "pass"         => routes.size - fails.size,
+  "thin"         => routes.count { |r| r["thin"] },
+  "routes"       => routes,
+  # Same key the CRuby/JRuby lanes use, so the aggregator, the trust
+  # banner and the report need no spinel-specific branch.
+  "sequence_timing" => {
+    "sequence"           => opts[:sequence],
+    "visits_per_iter"    => visits_per_iter,
+    "warmup"             => warmup_used,
+    "iterations"         => iters.size,
+    "ms_per_iter_median" => median.round(2),
+    "ms_per_iter_min"    => sorted.first.round(2),
+    "ms_per_iter_max"    => sorted.last.round(2),
+    "iter_ms"            => iters.map { |x| x.round(2) },
+    "per_route"          => {},
+    "failed_visits"      => seq_fails.size,
+    "partial"            => !seq_fails.empty?,
+  },
+  # AOT facts the interpreted lanes have no analogue for. Compile time is
+  # real work this lane does that the others don't; it belongs on the page
+  # rather than folded into (or hidden from) ms/iter.
+  "aot" => { "build_seconds" => BUILD_SECONDS, "c_warnings" => C_WARNINGS,
+             "binary_bytes" => (File.size(BIN) rescue nil) },
+}
+summary["sequence_failures"] = seq_fails unless seq_fails.empty?
+
+File.write(opts[:json], JSON.pretty_generate(summary))
+if opts[:md]
+  md = +"# Lobsters spinel lane\n\n_#{summary['pass']}/#{summary['total']} routes return 200_\n\n"
+  md << "| route | status | bytes | ms |\n|-------|-------:|------:|---:|\n"
+  routes.each { |r| md << "| `#{r['route']}` | #{r['ok'] ? r['status'] : "**#{r['status']}**"} | #{r['bytes']} | #{r['ms']} |\n" }
+  md << "\n#{median.round(2)} ms/iter median over #{iters.size} iterations of #{visits_per_iter} visits"
+  md << " (#{seq_fails.size} failing visits — PARTIAL)" unless seq_fails.empty?
+  md << "\n"
+  File.write(opts[:md], md)
+end
+
+puts "spinel: #{summary['pass']}/#{summary['total']} routes 200, " \
+     "#{median.round(2)} ms/iter over #{iters.size} iters" \
+     "#{seq_fails.empty? ? '' : " (PARTIAL: #{seq_fails.size}/#{visits_per_iter} failing visits)"}"
+exit [fails.size, 99].min
