@@ -63,6 +63,30 @@ unless ENV["LOBSTERS_RAILS_REPLAY_BOOTSTRAPPED"]
   end
 end
 
+# ── self-RSS ─────────────────────────────────────────────────────────
+# This process IS the measurement (in-process replay, no server to
+# sample from outside). VmHWM is the high-water mark since exec, which
+# for one-lane-per-process is this run's peak; macOS has no /proc, so
+# peak comes back nil rather than guessed. Keep in lockstep with
+# scripts/lobsters-replay — the numbers only compare if both sides
+# sample the same way, at the same points.
+def rss_kb
+  if File.exist?("/proc/self/status")
+    File.read("/proc/self/status")[/^VmRSS:\s+(\d+) kB/, 1]&.to_i
+  else
+    `ps -o rss= -p #{Process.pid}`.strip.to_i.nonzero?
+  end
+rescue StandardError
+  nil
+end
+
+def rss_peak_kb
+  return nil unless File.exist?("/proc/self/status")
+  File.read("/proc/self/status")[/^VmHWM:\s+(\d+) kB/, 1]&.to_i
+rescue StandardError
+  nil
+end
+
 # ── boot (mirrors benchmark.rb) ──────────────────────────────────────
 $stderr.puts "booting Rails lobsters (production, in-mem DB)..."
 require_relative File.join(opts[:src], "config/environment")
@@ -93,6 +117,10 @@ else
   file_db.close
   mem_db.execute("ANALYZE")
 end
+
+# Baseline footprint, sampled AFTER the in-memory seed — same point the
+# emit lanes sample, so the shared fixture is inside both baselines.
+BOOT_RSS_KB = rss_kb
 
 app = Rails.application
 generator = RouteGenerator.new(app)
@@ -200,6 +228,26 @@ summary = {
   # samples). A diagnostic breakdown — per-route medians do NOT sum to
   # ms_per_iter_median (GC/ordering don't decompose linearly).
   "per_route"          => summarize_samples(per_route),
+  # Footprint of the whole replay process. Same sample points and same
+  # shape as scripts/lobsters-replay's "rss" block, so the matrix can
+  # put the baseline and the emit lanes in one column. GC counters are
+  # CRuby-only (JRuby's GC.stat is a different shape, externally pinned).
+  "rss"                => {
+    "boot_kb"  => BOOT_RSS_KB,
+    "final_kb" => rss_kb,
+    "peak_kb"  => rss_peak_kb,
+    "engine"   => RUBY_ENGINE,
+  }.merge(
+    if RUBY_ENGINE == "ruby"
+      gc = GC.stat
+      { "gc" => { "count"                   => gc[:count],
+                  "major_count"             => gc[:major_gc_count],
+                  "heap_live_slots"         => gc[:heap_live_slots],
+                  "total_allocated_objects" => gc[:total_allocated_objects] } }
+    else
+      {}
+    end
+  ),
 }
 File.write(opts[:json], JSON.pretty_generate(summary)) if opts[:json]
 puts "rails: #{median.round(2)} ms/iter median over #{iters.size} iterations " \

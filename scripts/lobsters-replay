@@ -78,6 +78,32 @@ until args.empty?
   end
 end
 
+# ── self-RSS ─────────────────────────────────────────────────────────
+# The lobsters lanes run the benchmark IN-PROCESS, so this process IS
+# the thing under measurement — there is no server to sample from the
+# outside the way scripts/bench walks a target's process tree. Linux
+# exposes both the current working set (VmRSS) and the high-water mark
+# since exec (VmHWM); one lane is one process, so VmHWM IS this run's
+# peak. macOS has no /proc — `ps` gives the current value only, so peak
+# comes back nil there rather than guessed. Keep in lockstep with
+# scripts/lobsters-rails-replay so both sides report the same shape.
+def rss_kb
+  if File.exist?("/proc/self/status")
+    File.read("/proc/self/status")[/^VmRSS:\s+(\d+) kB/, 1]&.to_i
+  else
+    `ps -o rss= -p #{Process.pid}`.strip.to_i.nonzero?
+  end
+rescue StandardError
+  nil
+end
+
+def rss_peak_kb
+  return nil unless File.exist?("/proc/self/status")
+  File.read("/proc/self/status")[/^VmHWM:\s+(\d+) kB/, 1]&.to_i
+rescue StandardError
+  nil
+end
+
 DB_FILE = File.expand_path(opts[:db], Dir.pwd)
 abort "lobsters-replay: no DB at #{DB_FILE} (stage it first)" unless File.exist?(DB_FILE)
 
@@ -132,6 +158,11 @@ if opts[:memory]
     mem.close
   end
 end
+
+# Baseline footprint, sampled AFTER the in-memory seed: every lane
+# carries the same fixture DB in this number, so subtracting it compares
+# interpreters rather than the fixture they all share.
+BOOT_RSS_KB = rss_kb
 
 # ── benchmark identity + route ids ───────────────────────────────────
 # The login identity is fixed by the benchmark (route_generator.rb logs
@@ -403,6 +434,28 @@ elsif opts[:time] && opts[:time] > 0
   }
 end
 
+# ── memory footprint ─────────────────────────────────────────────────
+# Recorded unconditionally — a parity-only run's footprint is still a
+# useful trend line. `peak_kb` is the whole process's high-water mark
+# since exec, which for a one-lane-per-process run is this measurement's
+# peak. GC counters are CRuby-only: JRuby's GC.stat is a different shape
+# and its heap is externally pinned, so the numbers wouldn't compare.
+summary["rss"] = {
+  "boot_kb"  => BOOT_RSS_KB,
+  "final_kb" => rss_kb,
+  "peak_kb"  => rss_peak_kb,
+  "engine"   => RUBY_ENGINE,
+}
+if RUBY_ENGINE == "ruby"
+  gc = GC.stat
+  summary["rss"]["gc"] = {
+    "count"                   => gc[:count],
+    "major_count"             => gc[:major_gc_count],
+    "heap_live_slots"         => gc[:heap_live_slots],
+    "total_allocated_objects" => gc[:total_allocated_objects],
+  }
+end
+
 # ── outputs ──────────────────────────────────────────────────────────
 File.write(opts[:json], JSON.pretty_generate(summary)) if opts[:json]
 
@@ -438,6 +491,13 @@ if opts[:md]
     (summary["sequence_failures"] || []).each do |f|
       md << "- FAIL `#{f['path']}` -> #{f['status']}: `#{f['error']}`\n"
     end
+  end
+  if (m = summary["rss"]) && m["final_kb"]
+    md << "\n## Memory (RSS)\n\n"
+    md << "#{(m['final_kb'] / 1024.0).round(1)} MB at end of run"
+    md << " (peak #{(m['peak_kb'] / 1024.0).round(1)} MB)" if m["peak_kb"]
+    md << ", #{(m['boot_kb'] / 1024.0).round(1)} MB after boot + seed" if m["boot_kb"]
+    md << "\n"
   end
   File.write(opts[:md], md)
 end

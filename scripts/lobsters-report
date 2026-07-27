@@ -551,7 +551,14 @@ if mrows && !mrows.empty?
   end
   cv_col = !lane_iters.empty?
 
-  html << "<table>\n<thead><tr><th>stack</th><th>JIT</th><th>ms/iter</th><th>min–max</th>#{cv_col ? '<th>CV</th>' : ''}<th>iters</th><th>vs Rails</th></tr></thead>\n<tbody>\n"
+  # Peak RSS per lane, preferring the high-water mark (Linux) and falling
+  # back to the end-of-run sample where /proc isn't available. Column
+  # appears only once some lane actually reported one, so archived runs
+  # from before the replays sampled memory still render.
+  lane_rss = ->(r) { r['rss_peak_kb'] || r['rss_final_kb'] }
+  rss_col = mrows.any? { |r| lane_rss.(r) }
+
+  html << "<table>\n<thead><tr><th>stack</th><th>JIT</th><th>ms/iter</th><th>min–max</th>#{cv_col ? '<th>CV</th>' : ''}<th>iters</th>#{rss_col ? '<th>peak RSS</th>' : ''}<th>vs Rails</th></tr></thead>\n<tbody>\n"
   msorted.each do |r|
     html << "<tr>"
     html << %(<td><strong>#{esc(r['label'])}</strong></td>)
@@ -563,6 +570,10 @@ if mrows && !mrows.empty?
       html << %(<td class="num">#{cv ? "#{fmt_dec(cv, 1)}%" : '—'}</td>)
     end
     html << %(<td class="num">#{r['iters']}</td>)
+    if rss_col
+      kb = lane_rss.(r)
+      html << %(<td class="num">#{kb ? "#{fmt_int((kb / 1024.0).round)} MB" : '—'}</td>)
+    end
     html << %(<td class="num">#{r['vs_rails'] ? "#{fmt_dec(r['vs_rails'], 2)}×" : '—'}</td>)
     html << "</tr>\n"
   end
@@ -575,7 +586,22 @@ if mrows && !mrows.empty?
     ''
   end
   cv_note = cv_col ? ' CV = per-lane standard deviation ÷ mean across the timed iterations.' : ''
-  html << %(<p class="legend">“vs Rails” compares each row to Rails at the same JIT level.#{jr_note}#{cv_note}</p>\n)
+  # Managed-heap lanes run under an externally fixed heap, so their RSS
+  # is a configured budget rather than a working set — say so whenever
+  # such a lane is present rather than letting the column read as a
+  # like-for-like footprint comparison.
+  rss_note = if rss_col
+    jvm = mrows.any? { |r| r['runtime'] == 'jruby' }
+    base = mrows.filter_map { |r| r['rss_boot_kb'] }.min
+    n = ' Peak RSS is the whole replay process at its high-water mark; every lane boots the same in-memory fixture DB'
+    n += ", and the lowest post-boot baseline across lanes was ~#{fmt_int((base / 1024.0).round)} MB" if base
+    n += '.'
+    n += ' The JVM lanes run under a fixed heap (<code>-Xmx</code>=<code>-Xms</code>), so their RSS is a configured budget, not an organically-grown working set.' if jvm
+    n
+  else
+    ''
+  end
+  html << %(<p class="legend">“vs Rails” compares each row to Rails at the same JIT level.#{jr_note}#{cv_note}#{rss_note}</p>\n)
   if (rjc = mrows.find { |r| r['id'] == 'rails-jruby' })
     html << %(<p class="caveat"><code>Rails JRuby</code> is the stock-Rails-on-the-JVM baseline: the same app from a patched fixture — Rails #{esc(rjc['rails'] || '8.0.x')} (the AR-JDBC prerelease adapter pins it one minor behind the CRuby lanes), markdown through the same commonmark-java shim the Roundhouse JRuby lane uses, and a JRuby <code>Time.new</code> call-site bug worked around in an initializer.</p>\n)
   end
