@@ -488,6 +488,18 @@ if (( ${#LANES[@]} > 0 )); then
     if [[ -n "$REF_BODIES" ]]; then
         for LANE in ruby ruby-int jruby spinel; do
             [[ -d "$RUN_DIR/$LANE/bodies" ]] || continue
+            # A lane that DIED leaves whatever bodies it managed to dump
+            # before dying. Comparing those reports a content score for a
+            # run that never finished -- "4/26 equivalent" for a lane that
+            # crashed after 8 routes reads as a verdict on the emit when it
+            # is really a verdict on the crash. The dead-lane row already
+            # tells that story; scoring the wreckage only muddies it.
+            LSTATE="$(ruby -rjson -e 'print((JSON.parse(File.read(ARGV[0]))["state"] rescue "ok"))' \
+                      "$RUN_DIR/$LANE/lane-status.json" 2>/dev/null || echo ok)"
+            if [[ "$LSTATE" != "ok" ]]; then
+                step "content parity: $LANE SKIPPED (lane $LSTATE — its dump is partial)"
+                continue
+            fi
             step "content parity: $LANE vs $REF_LANE"
             # Non-zero exit = routes that differ, which is a finding to
             # report, not an orchestration failure.

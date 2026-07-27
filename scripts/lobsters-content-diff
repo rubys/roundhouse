@@ -615,6 +615,12 @@ end
 ok = summary["identical"] + summary["equivalent"]
 puts "\n#{ok}/#{summary['comparable']} routes content-equivalent to reference " \
      "(#{summary['identical']} byte-identical, #{summary['differs']} differ)"
+if summary["missing"].positive?
+  # Never let a partial dump masquerade as a low score: N/26 with most of
+  # the 26 absent is not "renders N correctly", it is "never produced the
+  # rest".
+  puts "  #{summary['missing']} route(s) MISSING a body on one side — not compared, not scored"
+end
 if summary["oracle_failed"].positive?
   puts "  #{summary['oracle_failed']} route(s) NOT COMPARED: the reference itself did not return 200"
 end
