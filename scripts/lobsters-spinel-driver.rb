@@ -241,15 +241,40 @@ class BenchDriver
       w += 1
     end
 
+    # Per-visit samples, keyed by raw path and ACCUMULATED IN MEMORY — the
+    # printing happens after the timed loop, because a `puts` per visit would
+    # put ~7000 writes inside the very section being measured. Templating
+    # (/u/alice -> /u/:username) and medians are the wrapper's job: it can
+    # reuse the CRuby lane's own table, so the keys join instead of being a
+    # second implementation that drifts.
+    samples = {}
     iters = 0
     total = 0.0
     while iters < min_iters || total < min_seconds * 1000.0
       t0 = now_ms
-      seq.each { |spec| p2 = spec.split(" ", 2); visit(jar, p2[0].to_s, p2[1].to_s, "") }
+      seq.each do |spec|
+        p2 = spec.split(" ", 2)
+        path = p2[1].to_s
+        v0 = now_ms
+        visit(jar, p2[0].to_s, path, "")
+        arr = samples.fetch(path, nil)
+        if arr.nil?
+          arr = []
+          samples[path] = arr
+        end
+        arr << (now_ms - v0)
+      end
       ms = now_ms - t0
       puts "ITER " + ms.to_s
       total = total + ms
       iters += 1
+    end
+    # One line per distinct path: "V <path> <ms> <ms> …". Emitted after the
+    # timed loop so it costs the measurement nothing.
+    samples.each do |path, arr|
+      line = "V " + path
+      arr.each { |x| line = line + " " + x.to_s }
+      puts line
     end
     puts "RSS " + boot_rss.to_s + " " + rss_vmrss_kb.to_s + " " + rss_vmhwm_kb.to_s
     puts "DONE " + seq.length.to_s + " " + warmup.to_s

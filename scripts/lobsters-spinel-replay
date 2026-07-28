@@ -162,6 +162,25 @@ def sqlite_one(db, sql)
   out.empty? ? nil : out.lines.first.strip
 end
 require "shellwords"
+
+# ANALYZE, for the same reason and with the same urgency as the comment in
+# scripts/lobsters-replay: "BOTH lanes must get identical stats or the
+# comparison is dishonest." The fixture ships without sqlite_stat1, and the
+# staged copy this lane serves inherits that — so without this the AOT lane
+# alone runs on a planner that misplans the hottest-stories SELECT into a
+# full-table walk plus temp-btree sort (5.1ms vs 0.05ms per query), while
+# every interpreted lane it is charted against runs with statistics. That is
+# a handicap applied to one row of a comparison table, which is worse than
+# no number at all.
+#
+# Done here rather than where the file is staged so it holds however the DB
+# arrived, including a caller-supplied --db. Idempotent, and outside every
+# timed section.
+unless sqlite_one(DB, "SELECT name FROM sqlite_master WHERE name = 'sqlite_stat1'")
+  system("sqlite3", DB, "ANALYZE", out: File::NULL, err: File::NULL) or
+    warn "lobsters-spinel-replay: ANALYZE failed on #{DB} — timings will reflect an unplanned database"
+end
+
 STORY   = sqlite_one(DB, "SELECT short_id FROM stories  WHERE is_deleted = 0 ORDER BY id LIMIT 1") || "enr7ye"
 COMMENT = sqlite_one(DB, "SELECT short_id FROM comments WHERE is_deleted = 0 ORDER BY id LIMIT 1") || "6srqij"
 USERNAME = "michell_wiegand"
@@ -214,10 +233,40 @@ if (bad = raw.lines.find { |l| l.start_with?("LOGINFAIL") })
 end
 
 # ── parse the driver's plain-text report ─────────────────────────────
+# Kept character-for-character in step with scripts/lobsters-replay: the
+# per-endpoint section joins lanes on these keys (`rh_pr.keys.select { |k|
+# rl_pr.key?(k) }`), so a template this lane spells differently is not a
+# mismatched label, it is a row that silently vanishes from the comparison.
+ROUTE_TEMPLATES = [
+  [%r{\A/comments/[^/]+/reply\z}, "/comments/:comment_id/reply"],
+  [%r{\A/threads/[^/]+\z},        "/threads/:username"],
+  [%r{\A/u/[^/]+\z},              "/u/:username"],
+  [%r{\A/s/[^/]+\z},              "/s/:story_id"],
+].freeze
+
+def route_template(path)
+  base = path.split("?", 2).first
+  ROUTE_TEMPLATES.each { |re, tmpl| return tmpl if base.match?(re) }
+  path
+end
+
+# samples: { template => [ms, …] } -> { template => {ms_median, n, …} }.
+# Same shape and rounding as the CRuby lane's summarize_samples.
+def summarize_samples(by_route)
+  by_route.sort.to_h.transform_values do |arr|
+    s = arr.sort
+    m = s.size / 2
+    med = s.size.odd? ? s[m] : (s[m - 1] + s[m]) / 2.0
+    { "ms_median" => med.round(3), "ms_min" => s.first.round(3),
+      "ms_max" => s.last.round(3), "n" => s.size }
+  end
+end
+
 routes, seq_fails, iters = [], [], []
 visits_per_iter = visits.size
 warmup_used = opts[:warmup]
 rss_boot = rss_final = rss_peak = nil
+by_template = Hash.new { |h, k| h[k] = [] }
 raw.each_line do |line|
   f = line.split(" ")
   case f[0]
@@ -233,6 +282,11 @@ raw.each_line do |line|
   when "SEQFAIL"
     seq_fails << { "idx" => f[1].to_i, "status" => f[2].to_i, "path" => f[3..].join(" ").strip }
   when "ITER" then iters << f[1].to_f
+  when "V"
+    # V <path> <ms>… — every timed visit of one path. Merged under the
+    # template, so several concrete paths sharing a template pool their
+    # samples and the median is taken over the pool, not over medians.
+    by_template[route_template(f[1].to_s)].concat(f[2..].map(&:to_f))
   when "RSS"
     # boot final peak, in kB, read by the binary from its own
     # /proc/self/status. 0 is the driver's "no /proc here" — carry it as
@@ -275,7 +329,7 @@ summary = {
     "ms_per_iter_min"    => sorted.first.round(2),
     "ms_per_iter_max"    => sorted.last.round(2),
     "iter_ms"            => iters.map { |x| x.round(2) },
-    "per_route"          => {},
+    "per_route"          => summarize_samples(by_template),
     "failed_visits"      => seq_fails.size,
     "partial"            => !seq_fails.empty?,
   },
