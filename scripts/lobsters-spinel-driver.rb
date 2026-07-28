@@ -164,7 +164,30 @@ class BenchDriver
     out.length > 0 && route[0] == "/" ? out[1, out.length - 1].to_s : out
   end
 
+  # Memory, measured the way every other lane measures it: this process
+  # reads its own /proc/self/status. One lane is one process, so VmHWM IS
+  # this run's peak. Kept deliberately identical to scripts/lobsters-replay
+  # so the two report the same statistic from the same source — the AOT lane
+  # is a different runtime, not a different measurement.
+  #
+  # 0 rather than nil when /proc is absent (macOS): the wrapper maps 0 back
+  # to null so the JSON matches the other lanes, and a peak is never guessed
+  # from a current-RSS reading.
+  def self.rss_vmrss_kb
+    return 0 if !File.exist?("/proc/self/status")
+    File.read("/proc/self/status")[/^VmRSS:\s+(\d+) kB/, 1].to_i
+  end
+
+  def self.rss_vmhwm_kb
+    return 0 if !File.exist?("/proc/self/status")
+    File.read("/proc/self/status")[/^VmHWM:\s+(\d+) kB/, 1].to_i
+  end
+
   def self.run(routes_file, seq_file, dump_dir, warmup, min_iters, min_seconds)
+    # Baseline: loaded and connected, nothing served yet — the instant the
+    # CRuby lanes take BOOT_RSS_KB.
+    boot_rss = rss_vmrss_kb
+
     jar = Tep.str_hash
     err = login!(jar)
     if err.length > 0
@@ -218,6 +241,7 @@ class BenchDriver
       total = total + ms
       iters += 1
     end
+    puts "RSS " + boot_rss.to_s + " " + rss_vmrss_kb.to_s + " " + rss_vmhwm_kb.to_s
     puts "DONE " + seq.length.to_s + " " + warmup.to_s
     0
   end

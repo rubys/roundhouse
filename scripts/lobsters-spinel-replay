@@ -217,6 +217,7 @@ end
 routes, seq_fails, iters = [], [], []
 visits_per_iter = visits.size
 warmup_used = opts[:warmup]
+rss_boot = rss_final = rss_peak = nil
 raw.each_line do |line|
   f = line.split(" ")
   case f[0]
@@ -232,6 +233,13 @@ raw.each_line do |line|
   when "SEQFAIL"
     seq_fails << { "idx" => f[1].to_i, "status" => f[2].to_i, "path" => f[3..].join(" ").strip }
   when "ITER" then iters << f[1].to_f
+  when "RSS"
+    # boot final peak, in kB, read by the binary from its own
+    # /proc/self/status. 0 is the driver's "no /proc here" — carry it as
+    # null so the page shows a gap rather than a zero-byte process.
+    rss_boot  = f[1].to_i.nonzero?
+    rss_final = f[2].to_i.nonzero?
+    rss_peak  = f[3].to_i.nonzero?
   when "DONE"
     visits_per_iter = f[1].to_i
     warmup_used = f[2].to_i
@@ -271,6 +279,16 @@ summary = {
     "failed_visits"      => seq_fails.size,
     "partial"            => !seq_fails.empty?,
   },
+  # Same shape scripts/lobsters-replay emits, so bench-lobsters flattens it
+  # to rss_boot_kb/rss_final_kb/rss_peak_kb with no spinel-specific branch
+  # and the report's memory section picks the lane up unchanged. Measured by
+  # the BINARY from its own /proc/self/status, not by this wrapper sampling a
+  # child: same source and same statistic as the other lanes, so the bars
+  # compare like with like. `engine` is "spinel" rather than a RUBY_ENGINE
+  # because the numbers describe the compiled binary. nil off Linux — the
+  # peak is never guessed from a current-RSS reading.
+  "rss" => { "boot_kb" => rss_boot, "final_kb" => rss_final,
+             "peak_kb" => rss_peak, "engine" => "spinel" },
   # AOT facts the interpreted lanes have no analogue for. Compile time is
   # real work this lane does that the others don't; it belongs on the page
   # rather than folded into (or hidden from) ms/iter.
