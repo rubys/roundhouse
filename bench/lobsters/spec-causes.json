@@ -1,0 +1,125 @@
+{
+  "_comment": [
+    "Curated root causes for scripts/lobsters-specs. Failures are clustered",
+    "mechanically by exception message; this file is what turns a cluster into",
+    "a named todo with an owner. Rules are tried in order; first match wins.",
+    "",
+    "Occurrences churn — 314 failures is a shadow. Causes are the worklist, so",
+    "they carry stable slugs you can still discuss forty upstream commits later.",
+    "",
+    "owner:",
+    "  compiler — roundhouse modeling debt. Ours to fix.",
+    "  app      — a lobsters idiom that could change upstream. Only ever a",
+    "             plain-Rails change that stands on its own merits under stock",
+    "             Rails; the port never asks for app-side divergence.",
+    "  gem      — a gem whose surface we shim.",
+    "  spinel   — upstream spinel.",
+    "  harness  — this harness's own gap, not the emit's.",
+    "",
+    "A rule matches on `match` (exception message) or `match_class` (exception",
+    "class). Anything unmatched lands in the `unclassified` bucket, whose size",
+    "is itself a todo (triage it, then add a rule). A rule matching zero",
+    "failures is reported too: the cause may be cleared, or its message moved."
+  ],
+
+  "causes": [
+    {
+      "slug": "keystore-upsert",
+      "title": "Keystore.upsert unimplemented",
+      "owner": "compiler",
+      "match": "undefined method [`']upsert' for class Keystore",
+      "note": "Needs Rails upsert with on_duplicate:/returning: and `self.primary_key = \"key\"` honored. Keystore.increment_value_for sits under Story#mark_submitter, so it fires on nearly every model that saves a story."
+    },
+    {
+      "slug": "searchparser-parslet-dsl",
+      "title": "SearchParser emits an empty class — parslet's class-body DSL is dropped",
+      "owner": "compiler",
+      "match": "for an instance of SearchParser",
+      "note": "parslet `rule(...)` calls in a class body are silently dropped though main.rb requires the gem, so SearchParser emits as a 2-line empty class. Needs verbatim class-body passthrough for non-AR classes on the ruby family, and a warning either way."
+    },
+    {
+      "slug": "symbol-into-integer",
+      "title": "Symbol used where an Integer index is expected",
+      "owner": "compiler",
+      "match": "no implicit conversion of Symbol into Integer",
+      "note": "Undiagnosed. Shape suggests a Hash emitted as an Array (or a symbol-keyed read lowered to an index) — needs a reduction before it can be ranked honestly."
+    },
+    {
+      "slug": "dirty-saved-change-alias",
+      "title": "saved_change_to_<col>? not synthesized",
+      "owner": "compiler",
+      "match": "undefined method [`']saved_change_to_\\w+\\?'",
+      "note": "The ActiveModel::Dirty subset synthesizes <col>_previously_changed? but not the saved_change_to_<col>? spelling of the same question."
+    },
+    {
+      "slug": "nil-arith-coercion",
+      "title": "nil reaching integer arithmetic",
+      "owner": "compiler",
+      "match": "nil can't be coerced into Integer",
+      "note": "A nullable read flows into arithmetic without narrowing. Sibling of the nullable-column arc that closed across all targets on 07-25 — this is the arithmetic seam that arc did not cover."
+    },
+    {
+      "slug": "kernel-bigdecimal",
+      "title": "Kernel#BigDecimal not available on models",
+      "owner": "compiler",
+      "match": "undefined method [`']BigDecimal'",
+      "note": "Kernel-level conversion function called from model bodies; the runtime exposes no BigDecimal."
+    },
+    {
+      "slug": "apppath-concat",
+      "title": "Rails::AppPath#+ unimplemented",
+      "owner": "compiler",
+      "match": "undefined method [`']\\+' for an instance of Rails::AppPath",
+      "note": "Rails.root is modeled as an AppPath value class that supports join but not +."
+    },
+    {
+      "slug": "errors-object-api",
+      "title": "errors is an Array, not an ActiveModel::Errors",
+      "owner": "compiler",
+      "match": "undefined method [`'](messages|full_messages|add|\\[\\])' for an instance of Array",
+      "note": "The runtime errors collection is Array[String]; attribute identity is lost at push, so errors[:attr] and errors.messages have nothing to answer with."
+    },
+    {
+      "slug": "update-attribute",
+      "title": "update_attribute unimplemented",
+      "owner": "compiler",
+      "match": "undefined method [`']update_attribute'",
+      "note": "Single-attribute write that skips validation."
+    },
+    {
+      "slug": "model-class-first",
+      "title": "Model.first unimplemented as a class method",
+      "owner": "compiler",
+      "match": "undefined method [`']first' for class \\w+",
+      "note": "Relation#first exists; the class-level shorthand does not forward to it. Related to the scalar-class-method forwarding gap."
+    },
+    {
+      "slug": "nested-constant-missing",
+      "title": "Nested constant not emitted",
+      "owner": "compiler",
+      "match": "uninitialized constant \\w+::\\w+",
+      "note": "Constants nested inside a model class (Hat::Mail, Notification::Notifiable) are dropped rather than emitted alongside the class."
+    },
+    {
+      "slug": "relation-pick",
+      "title": "Relation#pick unimplemented",
+      "owner": "compiler",
+      "match": "undefined method [`']pick' for an instance of ActiveRecord::Relation",
+      "note": "pick returns a single value rather than an Array; a previous fix covered the call sites that lower to SQL, not the runtime Relation."
+    },
+    {
+      "slug": "harness-time-helpers",
+      "title": "travel_to unavailable to specs",
+      "owner": "harness",
+      "match": "undefined method [`']travel_to'",
+      "note": "ActiveSupport::Testing::TimeHelpers is a spec-side helper stock Rails mixes into example groups. Ours to provide in the shim, not compiler debt."
+    },
+    {
+      "slug": "expectation-mismatch",
+      "title": "Ran, answered wrong",
+      "owner": "compiler",
+      "match_class": "RSpec::(Expectations::ExpectationNotMetError|Mocks::MockExpectationError)",
+      "note": "No exception — the emitted code executed and produced a different answer than Rails does. Each needs individual diagnosis; they cluster by message no better than by coin flip, so this bucket is a count, not a cause. Keep it visible: it is where correctness bugs hide once the crash-shaped failures clear."
+    }
+  ]
+}

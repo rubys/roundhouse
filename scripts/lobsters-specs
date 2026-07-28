@@ -1,0 +1,300 @@
+#!/usr/bin/env ruby
+# scripts/lobsters-specs — run upstream lobsters' own RSpec suite against a
+# roundhouse emit of the same checkout, and report what fails and why.
+#
+# One command, so the result is reproducible by someone who is not us:
+# emit current lobsters, run their specs against the emit, cluster the
+# failures into named causes, write JSON.
+#
+# WHAT THIS MEASURES. Not "does roundhouse compile lobsters" — the ruby
+# target is gap-tolerant and answers that with a 0 whether or not the
+# output behaves. Their suite asserts behavior, example by example, so
+# each failure names a construct we have not modeled. Their specs are the
+# worklist generator; this script is how the worklist gets read.
+#
+# CURRENT LOBSTERS, NOT A SNAPSHOT. This runs against whatever the
+# checkout is right now and records its SHA. It deliberately does not pin:
+# a ledger answers a present-tense question ("does this handle our code?")
+# and pinning it just manufactures a second fossil beside the ruby-bench
+# capture. Benchmarks pin — their numbers must be comparable across runs.
+# Ledgers don't. Record the input, don't freeze it.
+#
+# NO HISTORY. Each run stands alone: current state and what's next. There
+# will be progress and regression; a chart of it is not the point.
+#
+# Usage:
+#   scripts/lobsters-specs [options]
+#
+#   --src DIR      lobsters checkout (default $LOBSTERS_SRC, else ~/git/lobsters)
+#   --suite PATH   spec path to run, relative to the checkout
+#                  (default spec/models; repeatable)
+#   --emit DIR     reuse an existing emit tree instead of emitting fresh.
+#                  Iteration speed only — a stale tree silently reports
+#                  yesterday's compiler, so the JSON records which was used.
+#   --json PATH    write the machine-readable report
+#                  (default build/lobsters-specs/summary.json)
+#   --quiet        summary table only
+#
+# Requires: the lobsters checkout's bundle (rspec, factory_bot, faker), and
+# the Ruby its .ruby-version pins — via mise when available, since a
+# system Ruby of a different version shadows the pin and fails obscurely.
+
+require "json"
+require "fileutils"
+require "open3"
+require "time"
+
+ROOT = File.expand_path("..", __dir__)
+SHIM = File.join(ROOT, "bench", "lobsters", "spec-shim")
+CAUSES_FILE = File.join(ROOT, "bench", "lobsters", "spec-causes.json")
+
+opts = {
+  src: ENV["LOBSTERS_SRC"] || File.expand_path("~/git/lobsters"),
+  suites: [],
+  emit: nil,
+  json: File.join(ROOT, "build", "lobsters-specs", "summary.json"),
+  quiet: false,
+}
+args = ARGV.dup
+until args.empty?
+  case (a = args.shift)
+  when "--src"   then opts[:src] = File.expand_path(args.shift.to_s)
+  when "--suite" then opts[:suites] << args.shift.to_s
+  when "--emit"  then opts[:emit] = File.expand_path(args.shift.to_s)
+  when "--json"  then opts[:json] = File.expand_path(args.shift.to_s)
+  when "--quiet" then opts[:quiet] = true
+  when "-h", "--help"
+    puts File.readlines(__FILE__).drop(1).take_while { |l| l.start_with?("#") }.map { |l| l.sub(/^# ?/, "") }
+    exit 0
+  else abort "lobsters-specs: unknown argument #{a}"
+  end
+end
+opts[:suites] = ["spec/models"] if opts[:suites].empty?
+abort "lobsters-specs: no lobsters checkout at #{opts[:src]}" unless Dir.exist?(opts[:src])
+
+def sh(cmd, **kw)
+  out, err, st = Open3.capture3(*cmd, **kw)
+  [out, err, st]
+end
+
+def git(dir, *a)
+  out, _, st = sh(["git", "-C", dir, *a])
+  st.success? ? out.strip : nil
+end
+
+log = ->(msg) { warn "lobsters-specs: #{msg}" unless opts[:quiet] }
+
+# ── Provenance ───────────────────────────────────────────────────────
+# Recorded, not pinned. `dirty` matters: a report from a checkout with
+# uncommitted changes is not reproducible from its SHA, and saying so is
+# cheaper than someone discovering it.
+lob = {
+  "path" => opts[:src],
+  "sha" => git(opts[:src], "rev-parse", "HEAD"),
+  "committed_at" => git(opts[:src], "log", "-1", "--format=%cI"),
+  "dirty" => !git(opts[:src], "status", "--porcelain", "--untracked-files=no").to_s.empty?,
+}
+rh = {
+  "sha" => git(ROOT, "rev-parse", "HEAD"),
+  "dirty" => !git(ROOT, "status", "--porcelain", "--untracked-files=no").to_s.empty?,
+}
+
+# ── Emit ─────────────────────────────────────────────────────────────
+# `cargo run` rather than target/release: a release binary older than HEAD
+# reports a compiler that no longer exists, and the mtime trap is quiet.
+emit_tree = opts[:emit]
+emit_info = { "reused" => !!opts[:emit] }
+if emit_tree
+  log.("reusing emit tree #{emit_tree} (not re-emitted — may predate the current compiler)")
+  abort "lobsters-specs: no emit tree at #{emit_tree}" unless File.exist?(File.join(emit_tree, "main.rb"))
+else
+  emit_tree = File.join(ROOT, "build", "lobsters-specs", "emit")
+  FileUtils.rm_rf(emit_tree)
+  FileUtils.mkdir_p(File.dirname(emit_tree))
+  log.("emitting #{opts[:src]} → ruby")
+  _, err, st = sh(["cargo", "run", "--release", "--quiet", "--bin", "roundhouse", "--",
+                   "--target", "ruby", "--allow-unsupported", opts[:src], "-o", emit_tree],
+                  chdir: ROOT)
+  abort "lobsters-specs: emit failed\n#{err}" unless st.success?
+  diags = err.scan(/\b(error|warning)\[([a-z_]+)\]/)
+  emit_info["errors"] = diags.count { |k, _| k == "error" }
+  emit_info["warnings"] = diags.count { |k, _| k == "warning" }
+  emit_info["by_kind"] = diags.group_by { |_, k| k }.transform_values(&:size)
+                              .sort_by { |_, n| -n }.to_h
+  emit_info["files"] = err[/wrote (\d+) files/, 1]&.to_i
+end
+emit_info["path"] = emit_tree
+
+# ── Ruby selection ───────────────────────────────────────────────────
+# The checkout pins a version; a shadowing system Ruby is a known trap.
+pinned_ruby = File.read(File.join(opts[:src], ".ruby-version")).strip rescue nil
+have_mise = system("command -v mise > /dev/null 2>&1")
+runner = if pinned_ruby && have_mise then ["mise", "x", "ruby@#{pinned_ruby}", "--"] else [] end
+log.("ruby #{pinned_ruby || "(unpinned)"}#{runner.empty? ? " — mise not found, using ambient ruby" : " via mise"}")
+
+# ── Run their suite ──────────────────────────────────────────────────
+FileUtils.mkdir_p(File.dirname(opts[:json]))
+rspec_json = File.join(File.dirname(opts[:json]), "rspec.json")
+suite_paths = opts[:suites].map { |s| File.join(opts[:src], s) }
+suite_paths.each { |p| abort "lobsters-specs: no such suite path #{p}" unless File.exist?(p) }
+
+log.("running #{opts[:suites].join(", ")}")
+# cwd is a scratch dir, not the shim dir: their spec_helper starts
+# SimpleCov, which writes coverage/ into cwd. -I carries the absolute
+# shim path, so `require "rails_helper"` still resolves here.
+workdir = File.join(File.dirname(opts[:json]), "run")
+FileUtils.mkdir_p(workdir)
+canary_out = File.join(workdir, "canary.json")
+FileUtils.rm_f([canary_out, rspec_json])
+
+cmd = [*runner, "bundle", "exec", "rspec", "-I", SHIM,
+       "--format", "json", "--out", rspec_json, *suite_paths]
+env = {
+  "EMIT_TREE" => emit_tree,
+  "LOBSTERS_SRC" => opts[:src],
+  "BUNDLE_GEMFILE" => File.join(opts[:src], "Gemfile"),
+  "CANARY_OUT" => canary_out,
+}
+_, rerr, _ = sh([env, *cmd], chdir: workdir)
+
+# ── The check that matters ───────────────────────────────────────────
+# The trap this guards against is lobsters' own spec/rails_helper.rb
+# winning the `require "rails_helper"` race — real Rails boots, our shim
+# never loads, and the suite reports green while testing nothing of ours.
+# No assertion inside the shim can catch that, because in the trap the
+# shim does not run. So the evidence is the canary FILE, and its absence
+# is failure. Verified against a deliberately trapped invocation.
+unless File.exist?(canary_out)
+  abort <<~MSG
+    lobsters-specs: the shim never ran — refusing to report.
+    Something else answered `require "rails_helper"`, most likely lobsters'
+    own spec/ reaching the load path. Any results from this run would
+    describe stock Rails, not the emit.
+    #{rerr.lines.last(5).join}
+  MSG
+end
+canary = JSON.parse(File.read(canary_out))
+unless canary["ok"]
+  abort "lobsters-specs: canary failed — #{canary.inspect}"
+end
+abort "lobsters-specs: the suite produced no report\n#{rerr}" unless File.exist?(rspec_json)
+report = JSON.parse(File.read(rspec_json))
+examples = report["examples"] || []
+
+# ── Cluster failures into named causes ───────────────────────────────
+rules = JSON.parse(File.read(CAUSES_FILE))["causes"]
+failed = examples.select { |e| e["status"] == "failed" }
+buckets = Hash.new { |h, k| h[k] = [] }
+unclassified = []
+
+failed.each do |ex|
+  msg = ex.dig("exception", "message").to_s
+  klass = ex.dig("exception", "class").to_s
+  rule = rules.find { |r|
+    (r["match"] && msg =~ Regexp.new(r["match"])) ||
+      (r["match_class"] && klass =~ Regexp.new("\\A#{r["match_class"]}\\z"))
+  }
+  (rule ? buckets[rule["slug"]] : unclassified) << ex
+end
+
+causes = rules.map { |r|
+  hits = buckets[r["slug"]]
+  {
+    "slug" => r["slug"], "title" => r["title"], "owner" => r["owner"],
+    "failures" => hits.size,
+    "share" => failed.empty? ? 0.0 : (hits.size.to_f / failed.size).round(4),
+    "note" => r["note"],
+    "stale_rule" => hits.empty?,
+    "examples" => hits.first(5).map { |e| e["full_description"] },
+  }
+}.sort_by { |c| -c["failures"] }
+
+# Unclassified is a first-class todo, not a rounding error: its size is
+# how much of the failure surface nobody has looked at yet.
+if unclassified.any?
+  causes << {
+    "slug" => "unclassified", "title" => "Not yet triaged", "owner" => "unknown",
+    "failures" => unclassified.size,
+    "share" => (unclassified.size.to_f / failed.size).round(4),
+    "note" => "No rule in bench/lobsters/spec-causes.json matches these. Triage, then add a rule.",
+    "stale_rule" => false,
+    "examples" => unclassified.first(10).map { |e|
+      { "example" => e["full_description"],
+        "error" => "#{e.dig("exception", "class")}: #{e.dig("exception", "message").to_s.lines.first.to_s.strip[0, 160]}" }
+    },
+  }
+end
+
+by_file = examples.group_by { |e| e["file_path"].to_s.sub(%r{.*/spec/}, "spec/") }.map { |f, exs|
+  { "file" => f, "examples" => exs.size,
+    "passed" => exs.count { |e| e["status"] == "passed" },
+    "failed" => exs.count { |e| e["status"] == "failed" } }
+}.sort_by { |h| [-h["failed"], h["file"]] }
+
+# ── Scope, stated up front ───────────────────────────────────────────
+# A pass rate over a suite subset invites "which files did you leave out?"
+# Better to answer before being asked.
+all_spec_files = Dir.glob(File.join(opts[:src], "spec", "**", "*_spec.rb")).size
+ran_spec_files = by_file.size
+summary = report["summary"] || {}
+
+out = {
+  "generated_at" => Time.now.utc.iso8601,
+  "lobsters" => lob,
+  "roundhouse" => rh,
+  "ruby" => { "pinned" => pinned_ruby, "via_mise" => !runner.empty? },
+  "canary" => canary,
+  "emit" => emit_info,
+  "scope" => {
+    "suites" => opts[:suites],
+    "spec_files_run" => ran_spec_files,
+    "spec_files_in_suite" => all_spec_files,
+    "excluded" => "Request, feature, mailbox and routing specs are not run. Model specs " \
+                  "exercise the compiler surface most densely; the request tier is next, " \
+                  "and the capybara/mailbox tier is ledgered rather than attempted.",
+  },
+  "examples" => {
+    "total" => summary["example_count"],
+    "passed" => examples.count { |e| e["status"] == "passed" },
+    "failed" => summary["failure_count"],
+    "pending" => summary["pending_count"],
+    "errors_outside_examples" => summary["errors_outside_of_examples_count"],
+    "duration_s" => summary["duration"]&.round(1),
+  },
+  "errors_outside_examples" => report["messages"],
+  "harness_compensations" => [
+    { "what" => "require \"net/http\" in the shim", "kind" => "gap",
+      "why" => "app/models/sponge.rb references Net:: constants but the emit never requires net/http." },
+    { "what" => "Numeric duration builders in the shim", "kind" => "by_design",
+      "why" => "Specs and factories are untranspiled plain Ruby; the emit path rewrites n.days at " \
+               "transpile time, so the shared runtime never reopens Numeric." },
+  ],
+  "causes" => causes,
+  "by_file" => by_file,
+}
+File.write(opts[:json], JSON.pretty_generate(out))
+
+# ── Summary ──────────────────────────────────────────────────────────
+pass = out["examples"]["passed"].to_i
+total = out["examples"]["total"].to_i
+puts
+puts "lobsters #{lob["sha"].to_s[0, 12]}#{lob["dirty"] ? " (dirty)" : ""}" \
+     "  ·  roundhouse #{rh["sha"].to_s[0, 12]}#{rh["dirty"] ? " (dirty)" : ""}"
+puts "#{opts[:suites].join(", ")}: #{pass}/#{total} examples pass" \
+     "  ·  #{ran_spec_files} of #{all_spec_files} spec files in the suite"
+if (eo = out["examples"]["errors_outside_examples"].to_i) > 0
+  puts "#{eo} error(s) outside examples — a spec file or hook failed to run at all"
+end
+puts
+puts "todos, by failures cleared:"
+causes.reject { |c| c["failures"].zero? }.each do |c|
+  puts "  %4d  %-28s %-9s %s" % [c["failures"], c["slug"], "(#{c["owner"]})", c["title"]]
+end
+stale = causes.select { |c| c["stale_rule"] }
+unless stale.empty?
+  puts
+  puts "rules matching nothing (cause cleared, or its message moved):"
+  stale.each { |c| puts "  #{c["slug"]}" }
+end
+puts
+puts "report: #{opts[:json]}"
