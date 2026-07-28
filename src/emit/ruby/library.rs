@@ -2163,6 +2163,67 @@ pub(crate) fn apply_nilsafe_empty_lowering(lcs: &mut [LibraryClass]) {
     }
 }
 
+/// `::`-root a view body's constant references when the view's own
+/// namespace shadows the constant.
+///
+/// A view emits as `module Views\n  module Stats`, so an unqualified
+/// `Stats.get_cached_graph(:users)` inside it resolves LEXICALLY to
+/// `Views::Stats` — the view module itself — and not to the top-level
+/// `Stats` model the template meant. Ruby finds the inner constant
+/// first and raises `NoMethodError: undefined method
+/// 'get_cached_graph' for module Views::Stats`.
+///
+/// This is not a spinel-only concern: the CRuby target emits the same
+/// unqualified reference and fails the same way at runtime (GET /stats
+/// on lobsters). The AOT lane just surfaces it at compile time.
+///
+/// The rewrite is deliberately narrow — a head segment is rooted only
+/// when it BOTH collides with one of the view's own namespace segments
+/// AND names a real top-level app class. Emitted views always spell
+/// sibling views fully from the root (`Views::Stories.similar(...)`),
+/// so nothing here depends on lexical shorthand and the rooting cannot
+/// retarget a reference that was already resolving correctly.
+pub(crate) fn apply_view_constant_rooting(lcs: &mut [LibraryClass], app: &App) {
+    let top_level = |name: &str| {
+        app.models.iter().any(|m| m.name.0.as_str() == name)
+            || app.library_classes.iter().any(|c| c.name.0.as_str() == name)
+    };
+    for lc in lcs.iter_mut() {
+        let shadowing: Vec<String> = lc
+            .name
+            .0
+            .as_str()
+            .split("::")
+            .filter(|seg| top_level(seg))
+            .map(|seg| seg.to_string())
+            .collect();
+        if shadowing.is_empty() {
+            continue;
+        }
+        for m in &mut lc.methods {
+            root_shadowed_constants(&mut m.body, &shadowing);
+        }
+    }
+}
+
+fn root_shadowed_constants(expr: &mut Expr, shadowing: &[String]) {
+    expr.node
+        .for_each_child_mut(&mut |c| root_shadowed_constants(c, shadowing));
+    let ExprNode::Const { path } = &mut *expr.node else {
+        return;
+    };
+    let Some(head) = path.first_mut() else { return };
+    // Idempotent: a head already carrying the root marker is skipped, so
+    // running the pass twice can't produce `::::Stats`.
+    if head.as_str().starts_with("::") || !shadowing.iter().any(|s| s == head.as_str()) {
+        return;
+    }
+    // The path renders as `path.join("::")`, so a leading marker on the
+    // head segment is all an absolute reference needs — there is no
+    // separate "absolute" flag in the IR to set.
+    *head = Symbol::from(format!("::{}", head.as_str()));
+}
+
 /// Collapse a controller's dynamic-render-options assignment to its bare
 /// partial-name string: `@above = {partial: "stories/subnav", locals:
 /// {…}}` → `@above = "stories/subnav"`. The matching view (`<%= render

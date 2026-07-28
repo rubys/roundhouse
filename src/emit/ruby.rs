@@ -598,6 +598,11 @@ pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
     // `.empty?` predicate forms in view bodies must tolerate it.
     library::apply_nilsafe_empty_lowering(&mut lcs);
     library::apply_dynamic_render_options_lowering(&mut lcs);
+    // A view whose own namespace shadows a top-level app class
+    // (`Views::Stats` over `Stats`) must reference it absolutely, or
+    // Ruby resolves the inner module first. No-op unless a view
+    // directory shares a name with a class.
+    library::apply_view_constant_rooting(&mut lcs, app);
     html_views
         .iter()
         .zip(lcs.iter())
