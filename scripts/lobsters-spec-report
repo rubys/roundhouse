@@ -172,7 +172,7 @@ CSS
 html << "</head>\n<body>\n"
 
 html << "<h1>Lobsters conformance</h1>\n"
-html << %(<p class="lead">Upstream lobsters' own RSpec suite, run against a Roundhouse emit of the same checkout. Every failure names a Rails construct not yet modeled, which makes their tests the worklist generator — so the ranked causes below, not the pass count, are what this page is for.</p>\n)
+html << %(<p class="lead">Upstream lobsters' own RSpec suite, run against a Roundhouse emit of the same checkout. Most failures name a Rails construct not yet modeled; some are answers that came out wrong, and a few are this harness's own gaps. That makes their tests the worklist generator — so the ranked causes below, not the pass count, are what this page is for.</p>\n)
 
 prov = []
 prov << %(lobsters <code>#{esc(lob["sha"].to_s[0, 12])}</code>) if lob["sha"]
@@ -238,14 +238,19 @@ if scope["excluded"]
 end
 
 # ── The worklist ─────────────────────────────────────────────────────
-html << "<h2>Todos, by failures cleared</h2>\n"
+html << "<h2>Todos, by failures blocked</h2>\n"
 html << %(<p>Occurrences churn; causes are the unit of work, so each carries a stable slug you can still refer to after another forty upstream commits. <strong>Owner</strong> says who can act: most of this is Roundhouse's own modeling debt.</p>\n)
+# Attribution is the FIRST exception each example raised, so a count is
+# what is currently stopped by a cause — not what will pass once it
+# lands. An example blocked on Keystore never got far enough to reveal
+# whether SearchParser would have stopped it too.
+html << %(<p class="caveat">Counts are how many examples are <em>currently</em> stopped by each cause, not how many will pass when it lands: an example is attributed to the first exception it raised, so clearing one cause can reveal another behind it.</p>\n)
 
 live = causes.reject { |c| c["failures"].to_i.zero? }
       .sort_by { |c| [c["slug"] == "unclassified" ? 1 : 0, -c["failures"].to_i] }
 max_fail = live.map { |c| c["failures"].to_i }.max.to_i
 
-html << "<table>\n<tr><th class=num>Fails</th><th class=barcell></th><th>Cause</th><th>Owner</th></tr>\n"
+html << "<table>\n<tr><th class=num>Blocked</th><th class=barcell></th><th>Cause</th><th>Owner</th></tr>\n"
 live.each do |c|
   n = c["failures"].to_i
   w = max_fail.zero? ? 0 : (n.to_f / max_fail * 100).round(1)
@@ -260,7 +265,11 @@ live.each do |c|
   html << %(<tr class="cause-note"><td></td><td colspan=3>#{esc(c["note"])}\n)
   samples = Array(c["examples"])
   if samples.any?
-    html << %(<details><summary>#{samples.size} example#{samples.size == 1 ? "" : "s"}</summary><ul>)
+    # Samples are capped and deduped upstream, so say so — "5 examples"
+    # under a cause blocking 133 of them reads as if there were five.
+    shown = samples.size >= n ? "#{n} example#{n == 1 ? "" : "s"}" \
+                              : "#{samples.size} of #{fmt_int(n)} examples"
+    html << %(<details><summary>#{shown}</summary><ul>)
     samples.each do |s|
       html << if s.is_a?(Hash)
         "<li>#{esc(s["example"])}<br><code>#{esc(s["error"])}</code></li>"

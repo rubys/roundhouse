@@ -205,7 +205,10 @@ causes = rules.map { |r|
     "share" => failed.empty? ? 0.0 : (hits.size.to_f / failed.size).round(4),
     "note" => r["note"],
     "stale_rule" => hits.empty?,
-    "examples" => hits.first(5).map { |e| e["full_description"] },
+    # Distinct descriptions: RSpec gives every example in a looped or
+    # shared context the same full_description, so capping before
+    # deduping spends all five slots on two or three actual examples.
+    "examples" => hits.map { |e| e["full_description"] }.uniq.first(5),
   }
 }.sort_by { |c| -c["failures"] }
 
@@ -218,7 +221,7 @@ if unclassified.any?
     "share" => (unclassified.size.to_f / failed.size).round(4),
     "note" => "No rule in bench/lobsters/spec-causes.json matches these. Triage, then add a rule.",
     "stale_rule" => false,
-    "examples" => unclassified.first(10).map { |e|
+    "examples" => unclassified.uniq { |e| e["full_description"] }.first(10).map { |e|
       { "example" => e["full_description"],
         "error" => "#{e.dig("exception", "class")}: #{e.dig("exception", "message").to_s.lines.first.to_s.strip[0, 160]}" }
     },
