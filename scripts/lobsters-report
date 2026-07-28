@@ -76,6 +76,12 @@ if lanes_mode
   env = nil if env.empty?
   jruby     = sibling(File.join(run_path, 'jruby'), 'summary.json')
   jruby_env = jruby && sibling(File.join(run_path, 'jruby'), 'env.json')
+  # The AOT lane is an emit target like the others, so the coverage
+  # attestation has to count it. Without this the section asserted "200 on
+  # every emit target" while reading only the CRuby and JRuby lanes — a
+  # claim wider than its evidence, and false the moment the spinel lane
+  # regressed (16/26 routes 500 on spinel 0ccc3ceb).
+  spinel    = sibling(File.join(run_path, 'spinel'), 'summary.json')
 else
   emit_missing = false
   prim  = nil
@@ -91,10 +97,13 @@ else
   matrix    = sibling(File.join(run_path, 'matrix'), 'matrix.json')
   jruby     = sibling(File.join(run_path, 'jruby'),  'summary.json')
   jruby_env = jruby && sibling(File.join(run_path, 'jruby'), 'env.json')
+  spinel    = sibling(File.join(run_path, 'spinel'), 'summary.json')
 end
 
 jruby_pass = jruby && (jruby['pass'] || (jruby['routes'] || []).count { |r| r['ok'] })
 jruby_total = jruby && (jruby['total'] || (jruby['routes'] || []).size)
+spinel_pass  = spinel && (spinel['pass']  || (spinel['routes'] || []).count { |r| r['ok'] })
+spinel_total = spinel && (spinel['total'] || (spinel['routes'] || []).size)
 # In the lane layout the jruby lane runs the SAME in-memory frozen
 # sequence as everyone else — it lives in the matrix, the per-endpoint
 # table, and the parity table. The standalone file-backed section (and
@@ -539,6 +548,9 @@ end
 if jruby_total.to_i > 0
   html << %(<span class="badge #{jruby_pass == jruby_total ? 'pass' : 'fail'}">jruby #{jruby_pass}/#{jruby_total} routes</span>\n)
 end
+if spinel_total.to_i > 0
+  html << %(<span class="badge #{spinel_pass == spinel_total ? 'pass' : 'fail'}">spinel #{spinel_pass}/#{spinel_total} routes</span>\n)
+end
 html << "</div>\n"
 
 # Sibling artifacts published alongside this page.
@@ -962,6 +974,7 @@ end
 # In the lane layout the jruby lane replayed the same routes — render its
 # parity as extra columns so cross-runtime coverage reads off one table.
 jr_routes = lanes_mode && jruby ? (jruby['routes'] || []).to_h { |r| [r['route'], r] } : {}
+sp_routes = lanes_mode && spinel ? (spinel['routes'] || []).to_h { |r| [r['route'], r] } : {}
 
 if lanes_mode
   # This section is the COVERAGE ATTESTATION, not a performance chart:
@@ -970,10 +983,17 @@ if lanes_mode
   # chart invited performance readings of noisy one-shot numbers that
   # the medians above answer properly — dropped.)
   jr_all = !jr_routes.empty? && jruby_pass == jruby_total
-  html << "<h2>#{section_no}. Coverage &amp; parity (#{pass}/#{total}#{jr_routes.empty? ? '' : " · jruby #{jruby_pass}/#{jruby_total}"})</h2>\n"
-  if all_pass && (jr_routes.empty? || jr_all)
+  sp_all = !sp_routes.empty? && spinel_pass == spinel_total
+  # Name the targets actually checked. "Every emit target" is only true of
+  # the lanes this section read, so the claim is built from those lanes
+  # rather than asserted over all of them.
+  checked = ['CRuby']
+  checked << 'JRuby' unless jr_routes.empty?
+  checked << 'spinel AOT' unless sp_routes.empty?
+  html << "<h2>#{section_no}. Coverage &amp; parity (#{pass}/#{total}#{jr_routes.empty? ? '' : " · jruby #{jruby_pass}/#{jruby_total}"}#{sp_routes.empty? ? '' : " · spinel #{spinel_pass}/#{spinel_total}"})</h2>\n"
+  if all_pass && (jr_routes.empty? || jr_all) && (sp_routes.empty? || sp_all)
     html << <<~P
-      <p>What the numbers above are numbers <em>of</em>: every distinct route the benchmark exercises returns <strong>200 on every emit target</strong> — the timing sections measure a complete application, not a working subset. A failing cell here would invalidate that lane's rows above.</p>
+      <p>What the numbers above are numbers <em>of</em>: every distinct route the benchmark exercises returns <strong>200 on #{checked.size == 1 ? 'the %s emit target' % checked[0] : 'every emit target (%s)' % checked.join(', ')}</strong> — the timing sections measure a complete application, not a working subset. A failing cell here would invalidate that lane's rows above.</p>
     P
     html << if content
       ce = content['identical'] + content['equivalent']
@@ -985,6 +1005,7 @@ if lanes_mode
     fails = []
     fails << "#{total - pass} route(s) fail on the CRuby lane" unless all_pass
     fails << "#{jruby_total - jruby_pass} route(s) fail on the jruby lane" unless jr_routes.empty? || jr_all
+    fails << "#{spinel_total - spinel_pass} route(s) fail on the spinel AOT lane" unless sp_routes.empty? || sp_all
     html << %(<p><strong>Incomplete coverage:</strong> #{fails.join('; ')} — the failing routes' visits short-circuit cheaply, so treat the affected lane's timing rows above as optimistic. Details in the table.</p>\n)
   end
 else
@@ -994,7 +1015,7 @@ else
 end
 
 html << "<details open>\n<summary>Per-route table (#{routes.size} routes)</summary>\n"
-html << "<table>\n<thead><tr><th>route</th><th>status</th><th>bytes</th><th>ms</th>#{jr_routes.empty? ? '' : '<th>jruby</th><th>jruby ms</th>'}</tr></thead>\n<tbody>\n"
+html << "<table>\n<thead><tr><th>route</th><th>status</th><th>bytes</th><th>ms</th>#{jr_routes.empty? ? '' : '<th>jruby</th><th>jruby ms</th>'}#{sp_routes.empty? ? '' : '<th>spinel</th><th>spinel ms</th>'}</tr></thead>\n<tbody>\n"
 routes.each do |c|
   status_cls = c['ok'] == false ? 'no' : 'ok'
   html << "<tr>"
@@ -1010,6 +1031,18 @@ routes.each do |c|
       bytes_note = (j['bytes'].to_i - c['bytes'].to_i).abs > 64 ? %( <span class="no">(#{fmt_int(j['bytes'])} B)</span>\n) : ''
       html << %(<td class="num #{jcls}">#{j['status']}#{bytes_note}</td>)
       html << %(<td class="num">#{fmt_dec(j['ms'], 2)}</td>)
+    else
+      html << %(<td class="num">—</td><td class="num">—</td>)
+    end
+  end
+  unless sp_routes.empty?
+    if (s = sp_routes[c['route']])
+      scls = s['ok'] == false ? 'no' : 'ok'
+      # No byte-drift note: the AOT lane serves a FILE-backed DB rather than
+      # the in-memory copy the others use, so body sizes are not expected to
+      # track the CRuby lane the way JRuby's do.
+      html << %(<td class="num #{scls}">#{s['status']}</td>)
+      html << %(<td class="num">#{fmt_dec(s['ms'], 2)}</td>)
     else
       html << %(<td class="num">—</td><td class="num">—</td>)
     end
