@@ -30,6 +30,7 @@
       <a class="primary" href="../ide/?app=lobsters">Explore its types (IDE)</a>
       <a href="../playground/?app=lobsters">Transpile it (Playground)</a>
       <a href="../bench/lobsters/">Benchmark results</a>
+      <a href="../bench/lobsters-specs/">Conformance (their test suite)</a>
     </div>
 
     <h2>Why Lobsters</h2>
@@ -46,10 +47,33 @@
       turned Lobsters into a representative benchmark for YJIT precisely because
       it stresses a real Rails request the way a microbenchmark can't — see
       <a href="https://railsatscale.com/2023-08-25-we-turned-lobsters-into-a-rails-benchmark-for-yjit/">We
-      turned Lobsters into a Rails benchmark for YJIT</a>. Roundhouse ingests it
-      from that same benchmark, pinned to a fixed
-      <a href="https://github.com/ruby/ruby-bench/tree/main/benchmarks/lobsters"><code>ruby/ruby-bench</code></a>
-      commit, so what you see here tracks a well-understood reference workload.
+      turned Lobsters into a Rails benchmark for YJIT</a>.
+    </p>
+
+    <h2>Two Lobsters</h2>
+    <p>
+      There are two of them here, measured differently on purpose.
+    </p>
+    <p>
+      The <strong><a href="../bench/lobsters/">benchmark</a></strong> runs the
+      capture the Ruby core team froze into
+      <a href="https://github.com/ruby/ruby-bench/tree/main/benchmarks/lobsters"><code>ruby/ruby-bench</code></a>,
+      pinned to a fixed commit. A benchmark has to freeze its input or its
+      numbers stop being comparable between runs — so that lane stays deliberately
+      fixed, and the trade is that it describes the app as it was when the
+      snapshot was taken.
+    </p>
+    <p>
+      The <strong><a href="../bench/lobsters-specs/">conformance lane</a></strong>
+      answers the other question: does this handle the code they have
+      <em>now</em>? It tracks
+      <a href="https://github.com/lobsters/lobsters">upstream <code>HEAD</code></a>,
+      records the commit it ran against rather than pinning it, and runs
+      Lobsters' <em>own</em> RSpec suite against a Roundhouse emit of that same
+      checkout. Their tests are a much finer oracle than a route returning 200:
+      each failure names a specific Rails construct not yet modeled, which makes
+      the suite a worklist generator. That page publishes the ranked list of what
+      fails and why, including what it excludes and what the harness papers over.
     </p>
 
     <h2>The honest ledger</h2>

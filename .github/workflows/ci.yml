@@ -1463,6 +1463,36 @@ jobs:
         # The report detects the layout from the directory contents.
         run: scripts/lobsters-report _site/bench/lobsters _site/bench/lobsters/index.html
 
+      # Lobsters conformance — upstream HEAD's own RSpec suite run against
+      # an emit of the same checkout (scripts/lobsters-specs on the bench
+      # box, published to roundbench.showcase.party/lobsters-specs/). The
+      # JSON is fetched and rendered HERE rather than fetching the page the
+      # box already rendered: the renderer lives in this repo and evolves
+      # with it, so a fix to the report reaches the site on the next CI run
+      # instead of waiting for the box's next cron cycle.
+      #
+      # Deliberately ungated on content. If the box publishes a run whose
+      # canary failed or whose checkout was dirty, the page renders WITH the
+      # alarm banner that says so — suppressing it would defeat the point of
+      # having one.
+      - name: Fetch latest lobsters conformance data
+        id: fetch-lobsters-specs
+        env:
+          BENCH_URL: https://roundbench.showcase.party/lobsters-specs
+        run: |
+          mkdir -p _site/bench/lobsters-specs
+          if curl -fsSL --max-time 30 "$BENCH_URL/summary.json" -o _site/bench/lobsters-specs/summary.json; then
+            echo "specs_data=present" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::lobsters conformance data unavailable at $BENCH_URL; skipping conformance page render"
+            rm -rf _site/bench/lobsters-specs
+            rmdir _site/bench 2>/dev/null || true
+            echo "specs_data=absent" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Render lobsters conformance page
+        if: steps.fetch-lobsters-specs.outputs.specs_data == 'present'
+        run: scripts/lobsters-spec-report _site/bench/lobsters-specs _site/bench/lobsters-specs/index.html
+
       # The per-target archives, for the e2e-<target> jobs to download and
       # boot — the exact bytes published to rubys.github.io/roundhouse.
       - name: Upload browse archives
