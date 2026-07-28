@@ -7,5 +7,12 @@ module ActionView
     def self.sanitize_to_id: (String name) -> String
     def self.number_with_precision: (untyped value, ?precision: Integer) -> String
     def self.number_to_human: (Integer value, ?format: String) -> String
+    # `::Time`, not `Time` — these sigs sit inside `module ActionView`,
+    # where a bare `Time` resolves to `ActionView::Time` and types the
+    # params as an unknown class, leaving the whole body's arithmetic
+    # untyped. (Same shadowing shape the view-constant rooting fixes on
+    # the emit side.)
+    def self.time_ago_in_words: (::Time from_time, ?include_seconds: bool) -> String
+    def self.distance_of_time_in_words: (::Time from_time, ::Time to_time, ?include_seconds: bool) -> String
   end
 end

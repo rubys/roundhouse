@@ -299,6 +299,18 @@ fn view_helpers_test_passes_under_cruby() {
     );
 }
 
+// Ruby-family only (see the test file's header): the date helpers live
+// in view_helpers_ext.rb, which is deliberately outside the strict
+// tables, so this has no crystal/kotlin/swift/typescript sibling.
+#[test]
+#[ignore]
+fn date_helper_test_passes_under_cruby() {
+    build_and_run(
+        Path::new("runtime/ruby/test/action_view/date_helper_test.rb"),
+        "date_helper",
+    );
+}
+
 #[test]
 #[ignore]
 fn inflector_test_passes_under_cruby() {

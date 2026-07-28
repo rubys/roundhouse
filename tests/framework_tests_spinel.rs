@@ -141,6 +141,7 @@ require_relative "../runtime/json"
 require_relative "../runtime/inflector"
 require_relative "../runtime/active_record"
 require_relative "../runtime/action_view/view_helpers"
+require_relative "../runtime/action_view/view_helpers_ext"
 require_relative "../runtime/action_dispatch/router"
 require_relative "../runtime/action_controller/base"
 require_relative "../runtime/action_controller/cookies"
@@ -344,6 +345,19 @@ fn view_helpers_test_passes_under_spinel() {
     build_and_run(
         Path::new("runtime/ruby/test/action_view/view_helpers_test.rb"),
         "view_helpers",
+    );
+}
+
+// Ruby-family only (see the test file's header). This is the half that
+// matters most: the date helpers moved off the CRuby overlay so the
+// spinel tree could carry them, and this is what proves both runtimes
+// render the same wording.
+#[test]
+#[ignore]
+fn date_helper_test_passes_under_spinel() {
+    build_and_run(
+        Path::new("runtime/ruby/test/action_view/date_helper_test.rb"),
+        "date_helper",
     );
 }
 

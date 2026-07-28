@@ -41,6 +41,11 @@ $LOAD_PATH.unshift(File.expand_path("..", FRAMEWORK_RUBY))
 require "active_record"
 require "action_view/slots"
 require "action_view/view_helpers"
+# The ruby-family ViewHelpers reopen (date_helper_test.rb). Same
+# reasoning as the CookieJar note below: the strict-target lanes ingest
+# only the `*_test.rb` files and bring their own helper, so loading the
+# reopen here cannot leak into them.
+require "action_view/view_helpers_ext"
 require "action_dispatch/router"
 require "action_controller/base"
 # The CookieJar reopen (cookies_test.rb). Safe to load here even though
