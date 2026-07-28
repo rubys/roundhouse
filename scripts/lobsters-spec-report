@@ -1,0 +1,333 @@
+#!/usr/bin/env ruby
+# scripts/lobsters-spec-report — render a scripts/lobsters-specs run to
+# self-contained HTML.
+#
+# The counterpart to scripts/lobsters-report: where that renders the
+# benchmark's route parity and timings, this renders the conformance
+# lane — upstream lobsters' own RSpec suite run against a roundhouse emit
+# of the same checkout, and the ranked worklist of what fails and why.
+#
+# THE PAGE IS A WORKLIST, NOT A SCOREBOARD. The pass count is the least
+# interesting number on it: 314 failures is a shadow cast by a dozen
+# causes, and the causes are what anyone can act on. So the ranked cause
+# table is the body of the page and the headline is one line above it.
+#
+# NO HISTORY. Each run stands alone — current state and todos. There will
+# be progress and regression; a chart of it is not the point.
+#
+# Usage:
+#   scripts/lobsters-spec-report [PATH] [OUT.html]
+#
+#   PATH defaults to bench/results/lobsters-specs/latest. It may be the
+#   run directory or the summary.json inside it. OUT defaults to
+#   index.html alongside summary.json, so the page publishes next to the
+#   raw artifact already served at roundbench.showcase.party/lobsters-specs/.
+#
+# Pure stdlib; no JS, no CDN, no external assets. Runs anywhere a Ruby
+# does — the bench box invokes it straight after the harness, and CI
+# renders the same JSON after fetching it.
+
+require "json"
+require "time"
+
+arg = ARGV[0] || File.join(__dir__, "..", "bench", "results", "lobsters-specs", "latest")
+arg = File.expand_path(arg)
+run_path = File.directory?(arg) ? arg : File.dirname(arg)
+json_path = File.directory?(arg) ? File.join(arg, "summary.json") : arg
+out = ARGV[1] || File.join(run_path, "index.html")
+
+abort "lobsters-spec-report: no summary.json at #{json_path}" unless File.exist?(json_path)
+d = begin
+  JSON.parse(File.read(json_path))
+rescue JSON::ParserError => e
+  abort "lobsters-spec-report: unparseable #{json_path}: #{e.message}"
+end
+
+def esc(s) = s.to_s.gsub("&", "&amp;").gsub("<", "&lt;").gsub(">", "&gt;")
+def fmt_int(n) = n.to_i.to_s.reverse.scan(/\d{1,3}/).join(",").reverse
+def pct(n, of) = of.to_i.zero? ? 0.0 : (n.to_f / of * 100)
+
+COLOR_RH   = "#7d4cdb"
+COLOR_OK   = "#2e7d32"
+COLOR_FAIL = "#c0392b"
+
+# Owner is the participation axis: only some of these are addressable by
+# anyone outside this repo, and the page should not blur that.
+OWNER_LABEL = {
+  "compiler" => "roundhouse",
+  "app" => "lobsters",
+  "gem" => "gem",
+  "spinel" => "spinel",
+  "harness" => "this harness",
+  "unknown" => "untriaged",
+}.freeze
+
+lob      = d["lobsters"] || {}
+rh       = d["roundhouse"] || {}
+ex       = d["examples"] || {}
+emit     = d["emit"] || {}
+scope    = d["scope"] || {}
+canary   = d["canary"] || {}
+causes   = d["causes"] || []
+by_file  = d["by_file"] || []
+
+total  = ex["total"].to_i
+passed = ex["passed"].to_i
+failed = ex["failed"].to_i
+outside = ex["errors_outside_examples"].to_i
+
+generated = (Time.parse(d["generated_at"]) rescue nil)
+age_days = generated ? ((Time.now.utc - generated) / 86_400.0) : nil
+
+# ── Trust banner ─────────────────────────────────────────────────────
+# Generated from the run's own data and gone once the run is clean — the
+# same contract scripts/lobsters-report's banner keeps. "Not checked"
+# has to raise as loudly as "checked and wrong", so a missing canary
+# verdict is an alarm, not a blank.
+trouble = []
+if canary.empty? || canary["ok"].nil?
+  trouble << ["canary", "this run recorded no canary verdict, so nothing establishes that the suite " \
+              "exercised the emit rather than stock Rails"]
+elsif !canary["ok"]
+  trouble << ["canary", "the suite did not run against the emit — #{esc(canary.inspect)}"]
+end
+if lob["dirty"]
+  trouble << ["lobsters checkout", "had uncommitted changes, so these results cannot be reproduced " \
+              "from the recorded SHA"]
+end
+if rh["dirty"]
+  trouble << ["roundhouse checkout", "had uncommitted changes, so these results cannot be reproduced " \
+              "from the recorded SHA"]
+end
+if emit["errors"].to_i > 0
+  trouble << ["emit", "#{fmt_int(emit["errors"])} error(s) — the tree under test is incomplete, so " \
+              "failures below may be missing code rather than wrong code"]
+end
+if emit["reused"]
+  trouble << ["emit", "an existing tree was reused rather than emitted fresh, so it may predate the " \
+              "roundhouse commit named above"]
+end
+if age_days && age_days > 7
+  trouble << ["freshness", "this report is #{age_days.round} days old — the run that produces it may " \
+              "have stopped"]
+end
+
+html = +"<!doctype html>\n<html lang=en>\n<head>\n<meta charset=utf-8>\n"
+html << %(<meta name="viewport" content="width=device-width, initial-scale=1">\n)
+html << "<title>Lobsters conformance — their specs, our emit</title>\n"
+
+html << <<~CSS
+  <style>
+  body { font-family: -apple-system, system-ui, sans-serif; color: #222;
+         max-width: 880px; margin: 2em auto; padding: 0 1em; line-height: 1.5; }
+  h1 { font-size: 1.6em; margin-bottom: 0.2em; }
+  h2 { font-size: 1.2em; margin-top: 2em; border-bottom: 1px solid #ddd;
+       padding-bottom: 0.2em; }
+  .meta { color: #666; font-size: 0.9em; margin-bottom: 1em; }
+  .meta code { background: #f0f0f0; padding: 0.05em 0.3em; border-radius: 3px; }
+  .lead { font-size: 1.05em; }
+  .methodology { background: #f7f7f7; border-left: 3px solid #ccc;
+                 padding: 0.6em 1em; font-size: 0.92em; }
+  .methodology code { background: #ececec; padding: 0.05em 0.3em;
+                      border-radius: 3px; font-size: 0.9em; }
+  .caveat { color: #777; font-size: 0.9em; font-style: italic; }
+  .badges { margin: 0.8em 0; }
+  .badge { display: inline-block; padding: 0.25em 0.7em; border-radius: 999px;
+           font-size: 0.9em; font-weight: 600; margin-right: 0.5em; }
+  .badge.pass { background: #e7f4e8; color: #2e7d32; }
+  .badge.fail { background: #fdecea; color: #c0392b; }
+  .badge.info { background: #eef0f4; color: #445; }
+  .split { display: flex; height: 22px; border-radius: 4px; overflow: hidden;
+           margin: 0.6em 0 0.3em; background: #eee; }
+  .split span { display: block; }
+  .split .p { background: #2e7d32; }
+  .split .f { background: #c0392b; }
+  .split .e { background: #8a6d3b; }
+  table { border-collapse: collapse; font-size: 0.88em; margin: 0.4em 0; width: 100%; }
+  th, td { padding: 5px 10px; border-bottom: 1px solid #eee; vertical-align: top; }
+  th { text-align: left; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .cause td { border-bottom: none; padding-bottom: 0; }
+  .cause-note td { color: #555; font-size: 0.95em; padding-top: 0.2em;
+                   border-bottom: 1px solid #eee; padding-bottom: 0.7em; }
+  .bar { height: 8px; background: #7d4cdb; border-radius: 2px; min-width: 2px; }
+  .barcell { width: 22%; }
+  .owner { display: inline-block; padding: 0.1em 0.5em; border-radius: 3px;
+           font-size: 0.8em; font-weight: 600; white-space: nowrap; }
+  .owner.compiler { background: #efe9fb; color: #5b32b0; }
+  .owner.harness  { background: #fdf3e0; color: #8a6d3b; }
+  .owner.app      { background: #e6f0fb; color: #1c5d99; }
+  .owner.gem      { background: #eee; color: #555; }
+  .owner.spinel   { background: #e8f4f4; color: #256; }
+  .owner.unknown  { background: #fdecea; color: #c0392b; }
+  details summary { cursor: pointer; color: #555; padding: 0.3em 0; font-size: 0.9em; }
+  details ul { margin: 0.2em 0 0.6em; font-size: 0.88em; color: #555; }
+  .alarm { border: 2px solid #b00; background: #fff4f4; border-radius: 6px;
+           padding: 0.9em 1.1em; margin: 1.2em 0; }
+  .alarm h2 { margin: 0 0 0.4em; font-size: 1.05em; color: #b00; border: none; padding: 0; }
+  .alarm ul { margin: 0.5em 0 0; padding-left: 1.3em; }
+  .alarm .why { margin: 0.6em 0 0; font-size: 0.9em; color: #444; }
+  </style>
+CSS
+html << "</head>\n<body>\n"
+
+html << "<h1>Lobsters conformance</h1>\n"
+html << %(<p class="lead">Upstream lobsters' own RSpec suite, run against a Roundhouse emit of the same checkout. Every failure names a Rails construct not yet modeled, which makes their tests the worklist generator — so the ranked causes below, not the pass count, are what this page is for.</p>\n)
+
+prov = []
+prov << %(lobsters <code>#{esc(lob["sha"].to_s[0, 12])}</code>) if lob["sha"]
+prov << %(roundhouse <code>#{esc(rh["sha"].to_s[0, 12])}</code>) if rh["sha"]
+prov << esc(d["generated_at"]) if d["generated_at"]
+prov << "#{age_days.round} days old" if age_days && age_days >= 1
+html << %(<div class="meta">#{prov.join(" · ")}</div>\n)
+
+if trouble.any?
+  html << %(<div class="alarm">\n<h2>These results do not describe what they claim to</h2>\n<ul>\n)
+  trouble.each { |what, why| html << "<li><strong>#{esc(what)}</strong> — #{why}</li>\n" }
+  html << "</ul>\n"
+  html << %(<p class="why">Generated from the run's own data; it disappears by itself once a run is clean. Absence of this box is the signal, which is why a missing check raises it just as loudly as a failed one.</p>\n)
+  html << "</div>\n"
+end
+
+# ── Headline ─────────────────────────────────────────────────────────
+html << %(<div class="badges">)
+html << %(<span class="badge #{passed == total && total > 0 ? "pass" : "fail"}">#{fmt_int(passed)}/#{fmt_int(total)} examples pass</span>)
+html << %(<span class="badge info">#{scope["spec_files_run"]} of #{scope["spec_files_in_suite"]} spec files</span>)
+if emit["files"]
+  html << %(<span class="badge #{emit["errors"].to_i.zero? ? "pass" : "fail"}">emit #{fmt_int(emit["files"])} files, #{fmt_int(emit["errors"])} errors</span>)
+end
+html << "</div>\n"
+
+if total > 0
+  html << %(<div class="split">)
+  html << %(<span class="p" style="width:#{pct(passed, total).round(2)}%"></span>)
+  html << %(<span class="f" style="width:#{pct(failed, total).round(2)}%"></span>)
+  html << "</div>\n"
+  html << %(<div class="meta">#{fmt_int(passed)} passing · #{fmt_int(failed)} failing)
+  html << " · #{fmt_int(outside)} error(s) outside examples" if outside > 0
+  html << "</div>\n"
+end
+
+# ── Methodology ──────────────────────────────────────────────────────
+ruby = d["ruby"] || {}
+html << <<~METHOD
+  <div class="methodology">
+    <strong>What this measures.</strong> Not whether Roundhouse <em>compiles</em> lobsters — the Ruby
+    target is gap-tolerant and answers that with a zero whether or not the output behaves. Their suite
+    asserts behavior example by example, so a failure here names a construct that was emitted but is
+    wrong or missing. The emit is produced fresh from the same checkout the specs come from, and runs
+    on #{ruby["pinned"] ? "Ruby <code>#{esc(ruby["pinned"])}</code>, the version their <code>.ruby-version</code> pins" : "the ambient Ruby"}.
+    <p><strong>Current lobsters, not a snapshot.</strong> This tracks whatever upstream HEAD is and
+    records its SHA; it deliberately does not pin. A benchmark must freeze its input or its numbers stop
+    being comparable — but this answers a present-tense question, and pinning it would only manufacture
+    a second fossil beside the <code>ruby-bench</code> capture the
+    <a href="../lobsters/">benchmark page</a> measures.</p>
+    <p class="caveat">Each run stands alone. There is no history here and no comparison to previous
+    runs: numbers move when their code moves as well as when ours does, so a delta would attribute
+    upstream's changes to us.</p>
+  </div>
+METHOD
+
+# ── Scope ────────────────────────────────────────────────────────────
+# Stated before anyone counts the files themselves. A pass rate over a
+# subset invites "which ones did you leave out?", and the answer should
+# not be something a reader has to discover.
+if scope["excluded"]
+  html << "<h2>Scope</h2>\n"
+  html << %(<p>#{fmt_int(scope["spec_files_run"])} of #{fmt_int(scope["spec_files_in_suite"])} spec files in their suite are run here — <code>#{esc(Array(scope["suites"]).join(", "))}</code>. #{esc(scope["excluded"])}</p>\n)
+end
+
+# ── The worklist ─────────────────────────────────────────────────────
+html << "<h2>Todos, by failures cleared</h2>\n"
+html << %(<p>Occurrences churn; causes are the unit of work, so each carries a stable slug you can still refer to after another forty upstream commits. <strong>Owner</strong> says who can act: most of this is Roundhouse's own modeling debt.</p>\n)
+
+live = causes.reject { |c| c["failures"].to_i.zero? }
+      .sort_by { |c| [c["slug"] == "unclassified" ? 1 : 0, -c["failures"].to_i] }
+max_fail = live.map { |c| c["failures"].to_i }.max.to_i
+
+html << "<table>\n<tr><th class=num>Fails</th><th class=barcell></th><th>Cause</th><th>Owner</th></tr>\n"
+live.each do |c|
+  n = c["failures"].to_i
+  w = max_fail.zero? ? 0 : (n.to_f / max_fail * 100).round(1)
+  owner = c["owner"].to_s
+  html << %(<tr class="cause">)
+  html << %(<td class="num"><strong>#{fmt_int(n)}</strong></td>)
+  html << %(<td class="barcell"><div class="bar" style="width:#{w}%"></div></td>)
+  html << %(<td><strong>#{esc(c["title"])}</strong><br><code>#{esc(c["slug"])}</code></td>)
+  html << %(<td><span class="owner #{esc(owner)}">#{esc(OWNER_LABEL[owner] || owner)}</span></td>)
+  html << "</tr>\n"
+
+  html << %(<tr class="cause-note"><td></td><td colspan=3>#{esc(c["note"])}\n)
+  samples = Array(c["examples"])
+  if samples.any?
+    html << %(<details><summary>#{samples.size} example#{samples.size == 1 ? "" : "s"}</summary><ul>)
+    samples.each do |s|
+      html << if s.is_a?(Hash)
+        "<li>#{esc(s["example"])}<br><code>#{esc(s["error"])}</code></li>"
+      else
+        "<li>#{esc(s)}</li>"
+      end
+    end
+    html << "</ul></details>"
+  end
+  html << "</td></tr>\n"
+end
+html << "</table>\n"
+
+# A rule that matches nothing is information: either the cause is cleared
+# or its message moved and the count above is quietly understating.
+stale = causes.select { |c| c["stale_rule"] }
+if stale.any?
+  html << %(<p class="caveat">Rules matching nothing this run — either cleared, or the failure's message changed and is now counted as untriaged: #{stale.map { |c| "<code>#{esc(c["slug"])}</code>" }.join(", ")}.</p>\n)
+end
+
+# ── Per-file ─────────────────────────────────────────────────────────
+if by_file.any?
+  html << "<h2>By spec file</h2>\n"
+  html << "<table>\n<tr><th>File</th><th class=num>Examples</th><th class=num>Pass</th><th class=num>Fail</th></tr>\n"
+  by_file.each do |f|
+    html << "<tr><td><code>#{esc(f["file"])}</code></td>"
+    html << %(<td class="num">#{f["examples"]}</td>)
+    html << %(<td class="num">#{f["passed"]}</td>)
+    html << %(<td class="num">#{f["failed"]}</td></tr>\n)
+  end
+  html << "</table>\n"
+end
+
+# ── Harness compensations ────────────────────────────────────────────
+# A number propped up by the harness is not a number about the emit.
+comps = d["harness_compensations"] || []
+if comps.any?
+  html << "<h2>What the harness compensates for</h2>\n"
+  html << %(<p>The shim that boots the emit in place of Rails does these things on the emit's behalf. Listed because a pass rate achieved by propping up the subject is not a pass rate about the subject.</p>\n)
+  html << "<table>\n<tr><th>Compensation</th><th>Kind</th><th>Why</th></tr>\n"
+  comps.each do |c|
+    kind = c["kind"] == "gap" ? %(<span class="owner unknown">emit gap</span>) : %(<span class="owner gem">by design</span>)
+    html << "<tr><td><code>#{esc(c["what"])}</code></td><td>#{kind}</td><td>#{esc(c["why"])}</td></tr>\n"
+  end
+  html << "</table>\n"
+end
+
+if outside > 0 && (msgs = d["errors_outside_examples"]) && Array(msgs).any?
+  html << "<h2>Errors outside examples</h2>\n"
+  html << %(<p>A spec file or hook that failed to run at all. These are not counted as failures above, so the denominator understates by however many examples they would have contributed.</p>\n)
+  Array(msgs).each { |m| html << "<pre style='background:#f7f7f7;padding:0.6em;overflow-x:auto;font-size:0.85em'>#{esc(m)}</pre>\n" }
+end
+
+# ── Emit diagnostics ─────────────────────────────────────────────────
+if (kinds = emit["by_kind"]) && kinds.any?
+  html << "<h2>Emit diagnostics</h2>\n"
+  html << %(<p>From the transpile that produced the tree under test: #{fmt_int(emit["files"])} files, <strong>#{fmt_int(emit["errors"])} errors</strong>, #{fmt_int(emit["warnings"])} warnings. Warnings are a modeling-debt ledger rather than a failure — the Ruby target emits through its gaps — so they are not comparable to the spec failures above.</p>\n)
+  html << "<table>\n<tr><th>Diagnostic</th><th class=num>Count</th></tr>\n"
+  kinds.sort_by { |_, n| -n.to_i }.each do |k, n|
+    html << "<tr><td><code>#{esc(k)}</code></td><td class=num>#{fmt_int(n)}</td></tr>\n"
+  end
+  html << "</table>\n"
+end
+
+rel = File.basename(json_path)
+html << %(<div class="meta" style="margin-top:2em">Artifact: <a href="#{esc(rel)}"><code>#{esc(rel)}</code></a> — every number on this page comes from it.</div>\n)
+html << "</body>\n</html>\n"
+
+File.write(out, html)
+warn "lobsters-spec-report: wrote #{out} (#{fmt_int(File.size(out))} bytes)"
