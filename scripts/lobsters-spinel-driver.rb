@@ -173,15 +173,25 @@ class BenchDriver
   # 0 rather than nil when /proc is absent (macOS): the wrapper maps 0 back
   # to null so the JSON matches the other lanes, and a peak is never guessed
   # from a current-RSS reading.
-  def self.rss_vmrss_kb
+  # readlines, NOT File.read: spinel sizes File.read's buffer from stat(),
+  # and every /proc entry reports st_size 0, so the read comes back "" and
+  # the match finds nothing — silently, which is how this shipped a page of
+  # null memory before it was noticed (matz/spinel#3411). readlines on the
+  # same file is correct. Move back to the single File.read once that lands.
+  def self.rss_field_kb(field)
     return 0 if !File.exist?("/proc/self/status")
-    File.read("/proc/self/status")[/^VmRSS:\s+(\d+) kB/, 1].to_i
+    kb = 0
+    File.readlines("/proc/self/status").each do |line|
+      next if !line.start_with?(field)
+      # "VmHWM:\t  204800 kB" — take the numeric field between tag and unit.
+      parts = line.split(" ")
+      kb = parts[parts.length - 2].to_i
+    end
+    kb
   end
 
-  def self.rss_vmhwm_kb
-    return 0 if !File.exist?("/proc/self/status")
-    File.read("/proc/self/status")[/^VmHWM:\s+(\d+) kB/, 1].to_i
-  end
+  def self.rss_vmrss_kb ; rss_field_kb("VmRSS:") ; end
+  def self.rss_vmhwm_kb ; rss_field_kb("VmHWM:") ; end
 
   def self.run(routes_file, seq_file, dump_dir, warmup, min_iters, min_seconds)
     # Baseline: loaded and connected, nothing served yet — the instant the
