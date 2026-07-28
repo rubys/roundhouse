@@ -849,10 +849,23 @@ fn walk_scope(
     // current scope get promoted — nested class bodies (e.g. a
     // FormBuilder class inside the same module) carry their own
     // method-receiver decisions through the recursive walk.
+    // The `module_function :a, :b` form names its methods instead of
+    // flipping a mode. Ruby requires those methods to already be
+    // defined (it copies the existing definition, and raises NameError
+    // otherwise), so the promotion is retroactive — collected here and
+    // applied once the whole scope has been walked, which makes it
+    // order-independent and keeps the two forms from interleaving
+    // awkwardly.
+    let scope_start = out.len();
+    let mut named: Vec<String> = Vec::new();
     let mut module_function_active = false;
     let mut visit = |stmt: &Node<'_>, out: &mut Vec<MethodDef>| -> Result<(), String> {
         if is_module_function_marker(stmt) {
             module_function_active = true;
+            return Ok(());
+        }
+        if let Some(names) = module_function_arg_names(stmt) {
+            named.extend(names);
             return Ok(());
         }
         let is_direct_def = stmt.as_def_node().is_some();
@@ -872,6 +885,16 @@ fn walk_scope(
     } else if let Some(stmts) = node.as_statements_node() {
         for stmt in stmts.body().iter() {
             visit(&stmt, out)?;
+        }
+    }
+    // Only this scope's own methods: `out` carries earlier siblings and
+    // nested-scope results, and a name collision across scopes must not
+    // promote someone else's method.
+    if !named.is_empty() {
+        for m in &mut out[scope_start..] {
+            if named.iter().any(|n| n == m.name.as_str()) {
+                m.receiver = MethodReceiver::Class;
+            }
         }
     }
     Ok(())
@@ -895,6 +918,31 @@ fn is_module_function_marker(node: &Node<'_>) -> bool {
         return false;
     };
     name == "module_function"
+}
+
+/// The method names in a `module_function :a, :b` call, or `None` when
+/// `node` isn't that shape.
+///
+/// Symbol arguments only. Ruby also allows `module_function def x; end`
+/// (the def node evaluates to the symbol), which no corpus source uses;
+/// it returns `None` here and so falls through to the ordinary
+/// instance-method path rather than being silently mis-promoted.
+pub(crate) fn module_function_arg_names(node: &Node<'_>) -> Option<Vec<String>> {
+    let call = node.as_call_node()?;
+    if call.receiver().is_some() || call.block().is_some() {
+        return None;
+    }
+    if std::str::from_utf8(call.name().as_slice()).ok()? != "module_function" {
+        return None;
+    }
+    let args = call.arguments()?;
+    let mut names = Vec::new();
+    for arg in args.arguments().iter() {
+        let sym = arg.as_symbol_node()?;
+        let unescaped = sym.unescaped();
+        names.push(std::str::from_utf8(unescaped).ok()?.to_string());
+    }
+    if names.is_empty() { None } else { Some(names) }
 }
 
 fn collect_from_stmt(

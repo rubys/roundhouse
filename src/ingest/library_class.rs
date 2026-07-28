@@ -210,6 +210,13 @@ fn walk_decl_body<'pr>(
     // receiver to Class. Doesn't affect nested `class`/`module` bodies
     // — they get their own walk_decl_body recursion.
     let mut module_function_active = false;
+    // Names from the `module_function :a, :b` form, plus the positions
+    // of the direct `def`s in this body they may promote. Tracking
+    // positions (rather than searching `methods` by name at the end)
+    // keeps a `class << self` block's methods out of reach — those are
+    // appended to the same vec but belong to a different scope.
+    let mut module_function_named: Vec<String> = Vec::new();
+    let mut direct_def_positions: Vec<usize> = Vec::new();
 
     let Some(b) = body else {
         return Ok((includes, methods, constants));
@@ -245,6 +252,7 @@ fn walk_decl_body<'pr>(
             if force_class_receiver || module_function_active {
                 m.receiver = MethodReceiver::Class;
             }
+            direct_def_positions.push(methods.len());
             methods.push(m);
             continue;
         }
@@ -339,11 +347,20 @@ fn walk_decl_body<'pr>(
                     "module_function" => {
                         // Bare `module_function` (no args) — flip the
                         // flag for every subsequent direct `def` in
-                        // this body. The arg-bearing form
-                        // (`module_function :foo, :bar`) isn't yet
-                        // handled; add when a runtime file uses it.
+                        // this body.
                         if call.arguments().is_none() {
                             module_function_active = true;
+                        } else if let Some(names) =
+                            crate::runtime_src::module_function_arg_names(&stmt)
+                        {
+                            // `module_function :foo, :bar` names its
+                            // methods rather than flipping a mode. Ruby
+                            // requires them to be defined already (it
+                            // copies the existing definition), so the
+                            // promotion is retroactive — recorded here
+                            // and applied after the body walk, which
+                            // also makes it order-independent.
+                            module_function_named.extend(names);
                         }
                     }
                     _ => {
@@ -365,6 +382,40 @@ fn walk_decl_body<'pr>(
     // Instance-method bodies are left alone: `@X` there would be
     // instance storage, a different variable — a verbatim `@@X` failing
     // loudly at runtime beats silently splitting the storage.
+    // `module_function :a, :b` promotions, applied before the classvar
+    // normalization below so a named method gets exactly what the bare
+    // form's methods get (the flag there is set before the def is even
+    // pushed, so it is already Class by this point).
+    //
+    // Ruby keeps BOTH copies — a module method plus a private instance
+    // method — and lobsters uses both spellings of the same name
+    // (`EmailBlocklistValidation.email_on_blocklist?` from a mailer and
+    // a view; a bare `email_on_blocklist?(email)` from the sibling
+    // validation method that runs on an includer instance). We emit one
+    // method per name, so promoting alone would just move the breakage
+    // from the module spelling to the instance one. Retarget the
+    // sibling bare calls to the module spelling instead, which keeps a
+    // single definition and leaves both call sites resolving.
+    if !module_function_named.is_empty() {
+        let mut promoted: Vec<Symbol> = Vec::new();
+        for pos in &direct_def_positions {
+            if module_function_named
+                .iter()
+                .any(|n| n == methods[*pos].name.as_str())
+            {
+                methods[*pos].receiver = MethodReceiver::Class;
+                promoted.push(methods[*pos].name.clone());
+            }
+        }
+        if !promoted.is_empty() {
+            for m in &mut methods {
+                // The promoted method's own body is included: a
+                // self-recursive call needs the same retarget.
+                retarget_module_function_calls(&mut m.body, owner, &promoted);
+            }
+        }
+    }
+
     for m in &mut methods {
         if m.receiver == MethodReceiver::Class {
             normalize_classvars_to_ivars(&mut m.body);
@@ -445,6 +496,29 @@ fn synth_attr_reader(owner: &ClassId, name: &Symbol, receiver: MethodReceiver) -
             mutates_self: false,
             block_param: None,
     }
+}
+
+/// Rewrite receiver-less calls to a `module_function`-promoted name
+/// into `<Owner>.name(...)`.
+///
+/// Only bare sends match, so an explicit receiver (`other.foo`) is left
+/// alone. A local variable shadowing the name would be a `Var` node,
+/// not a `Send`, so it can't be caught here either.
+fn retarget_module_function_calls(expr: &mut Expr, owner: &ClassId, promoted: &[Symbol]) {
+    expr.node
+        .for_each_child_mut(&mut |c| retarget_module_function_calls(c, owner, promoted));
+    let ExprNode::Send { recv, method, .. } = &mut *expr.node else {
+        return;
+    };
+    if recv.is_some() || !promoted.iter().any(|p| p == method) {
+        return;
+    }
+    *recv = Some(Expr::new(
+        expr.span,
+        ExprNode::Const {
+            path: vec![owner.0.clone()],
+        },
+    ));
 }
 
 /// Synthesize the writer pair for `attr_writer` / `attr_accessor`,
