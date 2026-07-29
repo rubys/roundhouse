@@ -180,7 +180,10 @@ module Tep
         res = Response.new
         begin
           Tep::APP.dispatch(req, res)
-        rescue => e
+        # Both names, as in the blocking server: a stubbed gem facade
+        # raises NotImplementedError, a ScriptError, which a bare
+        # `rescue` does not catch.
+        rescue StandardError, ScriptError => e
           # Same contract as the blocking server: one request's failure
           # is not the worker's. A fiber that unwinds here would take
           # the whole scheduler loop with it, so every OTHER open

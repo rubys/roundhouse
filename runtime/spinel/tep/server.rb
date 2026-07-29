@@ -143,7 +143,14 @@ module Tep
       res = Response.new
       begin
         @app.dispatch(req, res)
-      rescue => e
+      # `StandardError` alone is not the whole of what an app raises. A
+      # stubbed gem facade raises NotImplementedError, which is a
+      # ScriptError, so a bare `rescue` let it unwind past here and kill
+      # the process — one unimplemented gem on one route took down every
+      # later request, which is the exact failure this rescue exists to
+      # prevent. Both names, so the contract holds for the raise a
+      # facade makes as well as the raise a bug makes.
+      rescue StandardError, ScriptError => e
         # Nothing has been written to the socket yet — `write_response`
         # runs after this, streaming included — so a clean 500 is still
         # available. Close rather than keep-alive: `res` may be half
