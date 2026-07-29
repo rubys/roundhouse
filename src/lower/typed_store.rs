@@ -206,14 +206,35 @@ pub(crate) fn push_typed_store_methods(methods: &mut Vec<MethodDef>, model: &Mod
                 AccessorKind::Method,
                 false,
             );
+            // A boolean attribute's writer is a COERCION BOUNDARY, and
+            // typing it `bool` was a declaration the program
+            // contradicts: form values arrive as `"0"`/`"1"` strings
+            // (lobsters' settings form assigns straight from its params
+            // object, whose fields are String), so the writer took a
+            // String, stored it verbatim, and the `bool`-typed reader
+            // then read a String back. Under CRuby that survives — the
+            // predicate compares `== true || == 1` — but a compiler
+            // that trusts the signature reinterprets the slot. Rails
+            // cast on the way in (`s.boolean` is an
+            // ActiveRecord::Type::Boolean attribute); so do we now, and
+            // the reader's `bool` becomes true rather than aspirational.
+            //
+            // The parameter is `untyped` for the same reason Rails'
+            // own is: what a cast accepts is not one type. The body
+            // narrows it immediately, so nothing downstream stays wide.
+            let (writer_ty, writer_value) = if a.is_bool {
+                (Ty::Untyped, bool_cast(value_ref()))
+            } else {
+                (attr_ty, value_ref())
+            };
             let value = Symbol::from("value");
             push_synth_instance_method(
                 methods,
                 model,
                 Symbol::from(format!("{}=", a.name.as_str())),
                 vec![Param::positional(value.clone())],
-                write_body(col, a),
-                Some(super::model_to_library::fn_sig(vec![(value, attr_ty)], Ty::Nil)),
+                write_body(col, a, writer_value),
+                Some(super::model_to_library::fn_sig(vec![(value, writer_ty)], Ty::Nil)),
                 AccessorKind::Method,
                 true,
             );
@@ -250,8 +271,58 @@ fn read_body(col: &Symbol, a: &TypedStoreAttr) -> Expr {
     })
 }
 
-/// `@<col> = TypedStore.write(@<col>, "<name>", value)`.
-fn write_body(col: &Symbol, a: &TypedStoreAttr) -> Expr {
+/// The writer's `value` parameter.
+fn value_ref() -> Expr {
+    sp_expr(ExprNode::Var { id: VarId(0), name: Symbol::from("value") })
+}
+
+/// Ruby's boolean cast for a form value, spelled so every target can
+/// read it: `v.to_s != "0" && v.to_s != "" && v.to_s != "false"`.
+///
+/// Same false-set as the Bool arm of the ruby emitter's column
+/// hydration, deliberately — a setting written through the form and a
+/// column read out of the database should not disagree about what
+/// `"0"` means. Written as `String#==` chains rather than
+/// `["0", "", "false"].include?(v.to_s)`: a literal-receiver `include?`
+/// does not survive the strict targets, and this lowering is shared by
+/// all of them.
+///
+/// `nil` casts to false rather than staying nil (where Rails keeps
+/// nil): these attributes all read through a `bool` signature, and a
+/// stored nil would put the reader right back to describing something
+/// it isn't. Every corpus attribute defaults to false, so the value is
+/// the same one an unset read produces.
+fn bool_cast(value: Expr) -> Expr {
+    let ne = |lit: &str| {
+        sp_expr(ExprNode::Send {
+            recv: Some(sp_expr(ExprNode::Send {
+                recv: Some(value.clone()),
+                method: Symbol::from("to_s"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            })),
+            method: Symbol::from("!="),
+            args: vec![sp_expr(ExprNode::Lit {
+                value: Literal::Str { value: lit.to_string() },
+            })],
+            block: None,
+            parenthesized: false,
+        })
+    };
+    let and = |left: Expr, right: Expr| {
+        sp_expr(ExprNode::BoolOp {
+            op: crate::expr::BoolOpKind::And,
+            surface: Default::default(),
+            left,
+            right,
+        })
+    };
+    and(and(ne("0"), ne("")), ne("false"))
+}
+
+/// `@<col> = TypedStore.write(@<col>, "<name>", <value>)`.
+fn write_body(col: &Symbol, a: &TypedStoreAttr, value: Expr) -> Expr {
     let write = sp_expr(ExprNode::Send {
         recv: Some(sp_expr(ExprNode::Const { path: vec![Symbol::from("TypedStore")] })),
         method: Symbol::from("write"),
@@ -260,7 +331,7 @@ fn write_body(col: &Symbol, a: &TypedStoreAttr) -> Expr {
             sp_expr(ExprNode::Lit {
                 value: Literal::Str { value: a.name.as_str().to_string() },
             }),
-            sp_expr(ExprNode::Var { id: VarId(0), name: Symbol::from("value") }),
+            value,
         ],
         block: None,
         parenthesized: true,

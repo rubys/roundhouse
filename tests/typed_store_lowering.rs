@@ -112,7 +112,18 @@ fn typed_store_accessors_render_on_the_ruby_tree() {
         "reader body must render the overlay call: {user_src}",
     );
     assert!(
-        user_src.contains(r#"@settings = TypedStore.write(@settings, "email_notifications", value)"#),
+        user_src
+            .contains(r#"@settings = TypedStore.write(@settings, "prefers_color_scheme", value)"#),
         "writer body must render the assign-back form: {user_src}",
+    );
+    // A BOOLEAN attr's writer is the coercion boundary: the settings
+    // form assigns `"0"`/`"1"` strings, and the reader beside it is
+    // declared `bool`. Storing the String verbatim made that signature
+    // a lie — Rails casts here, and so do we.
+    assert!(
+        user_src.contains(
+            r#"TypedStore.write(@settings, "email_notifications", value.to_s != "0" && value.to_s != "" && value.to_s != "false")"#
+        ),
+        "boolean writer must cast rather than store the form value verbatim: {user_src}",
     );
 }
