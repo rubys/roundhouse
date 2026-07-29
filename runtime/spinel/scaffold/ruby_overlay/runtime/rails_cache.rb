@@ -46,6 +46,14 @@ module Rails
       value
     end
 
+    # The typed seam `src/lower/rails_cache.rs` rewrites provably-String
+    # fetch sites to, so one lowering serves every ruby-family target.
+    # Here it is a thin delegate: this store already holds any value and
+    # dups Strings on both sides, which is what the typed half gives up.
+    def fetch_str(key, ttl, &block)
+      fetch(key, ttl.to_i > 0 ? { expires_in: ttl.to_i } : {}, &block)
+    end
+
     def read(key)
       @mutex.synchronize do
         entry = @data[key.to_s]

@@ -27,7 +27,11 @@ module Rails
   end
 
   class Cache
+    @entries: Hash[String, String]
+    @expires_at: Hash[String, Integer]
+    def initialize: () -> void
     def fetch: (untyped key, ?Hash[untyped, untyped] opts) { () -> untyped } -> untyped
+    def fetch_str: (String key, Integer ttl) { () -> String } -> String
     def read: (untyped key) -> untyped
     def write: (untyped key, untyped value) -> untyped
     def delete: (untyped key) -> untyped

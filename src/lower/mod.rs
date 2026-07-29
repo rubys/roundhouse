@@ -62,6 +62,7 @@ pub mod request_index;
 pub mod arel_attribute;
 pub mod exclude_predicate;
 pub mod literal_append;
+pub mod rails_cache;
 pub mod session_options;
 pub mod relation_residue;
 pub mod send_dispatch;
@@ -95,6 +96,7 @@ pub use request_index::apply_request_index_lowering;
 pub use arel_attribute::apply_arel_attribute_lowering;
 pub use exclude_predicate::apply_exclude_predicate_lowering;
 pub use literal_append::apply_literal_append_lowering;
+pub use rails_cache::apply_rails_cache_lowering;
 pub use session_options::apply_session_options_lowering;
 pub use send_dispatch::apply_send_static_dispatch;
 pub use capture_inline::apply_capture_inline;
@@ -174,6 +176,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `"lit" << x` → `"lit" + x`; local expression rewrite, no ordering
     // constraints.
     ("literal_append", &[]),
+    // `Rails.cache.fetch(k, expires_in: t) { <String> }` → `fetch_str`;
+    // must run BEFORE the render lowering, whose rewrite of
+    // `render_to_string` into a `Views::` call is the tail this gates on.
+    ("rails_cache", &[]),
     ("transaction_ground", &[]),
     ("partial_qualify", &[]),
     ("capture_inline", &[]),
@@ -284,6 +290,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("arel_attribute");
     literal_append::apply_literal_append_lowering(app);
     ran!("literal_append");
+    rails_cache::apply_rails_cache_lowering(app);
+    ran!("rails_cache");
     transaction_ground::apply_transaction_grounding(app);
     ran!("transaction_ground");
     partial_qualify::apply_partial_qualification(app);

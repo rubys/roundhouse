@@ -65,8 +65,10 @@ module Rails
     end
   end
 
+  # One store per process. A fresh `Cache.new` per call would make every
+  # `fetch_str` a miss, which is the no-op this used to be.
   def self.cache
-    Cache.new
+    @cache_store ||= Cache.new
   end
 
   def self.logger
@@ -101,10 +103,49 @@ module Rails
     end
   end
 
-  # No-op cache: `fetch` always recomputes via its block.
+  # `Rails.cache`, in two halves.
+  #
+  # `fetch` stays the recompute-every-call no-op it has always been. Its
+  # value is whatever the block returns — an Integer count, a Relation, a
+  # rendered fragment — and one store holding all of those needs the
+  # heterogeneous box this runtime deliberately doesn't have.
+  #
+  # `fetch_str` is the typed half: String keys, String values, expiry at
+  # second granularity. `src/lower/rails_cache.rs` routes the fetch sites
+  # whose block provably yields a String — the rendered fragments — here,
+  # and those are where the cost is. Lobsters caches its users tree for
+  # 24h; recomputing that ~292KB fragment on every request is 15 of the
+  # 114 visits in the benchmark sequence and most of the spinel lane's
+  # iteration time.
+  #
+  # Process-local and unsynchronized, matching the serving shape (one
+  # request at a time per process). ActiveSupport::Cache::MemoryStore
+  # holds a Mutex because Puma runs threads; a threaded server here needs
+  # the same before this is safe.
   class Cache
+    def initialize
+      @entries = {}
+      @expires_at = {}
+    end
+
     def fetch(key, opts = {})
       yield
+    end
+
+    # `ttl` is a whole number of seconds; 0 never expires. Expiry is
+    # checked lazily on read, as MemoryStore does.
+    def fetch_str(key, ttl)
+      k = key.to_s
+      if @entries.key?(k)
+        due = @expires_at[k]
+        return @entries[k] if due == 0 || due > Time.now.to_i
+        @entries.delete(k)
+        @expires_at.delete(k)
+      end
+      value = yield
+      @entries[k] = value
+      @expires_at[k] = ttl > 0 ? Time.now.to_i + ttl : 0
+      value
     end
 
     def read(key)
@@ -115,7 +156,14 @@ module Rails
       value
     end
 
+    # Invalidation reaches the typed store — lobsters deletes
+    # `user:<id>:unread_replies` on write paths, and a stale fragment
+    # surviving its explicit delete would be a behaviour change, not a
+    # missing optimization.
     def delete(key)
+      k = key.to_s
+      @entries.delete(k)
+      @expires_at.delete(k)
       nil
     end
 
