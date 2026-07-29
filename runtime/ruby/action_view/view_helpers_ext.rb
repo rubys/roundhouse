@@ -141,15 +141,29 @@ module ActionView
     end
 
     def self.distance_of_time_in_words(from_time, to_time, include_seconds: false)
-      from_time, to_time = to_time, from_time if from_time > to_time
-      # `to_f` rather than Rails' bare `to_time - from_time`: `Time#-`
+      # Rails writes this as `from_time, to_time = to_time, from_time if
+      # from_time > to_time`, reassigning its own parameters through a
+      # multiple assignment. Bound to fresh locals instead: with the
+      # params RBS-pinned to `::Time`, that swap emitted an `sp_RbVal`
+      # into an `sp_Time` slot and the C stage refused it — but only
+      # once the whole app tree was in the picture (the method compiles
+      # standalone, and with a call site, and with none). Two ordinary
+      # assignments are clearer than the swap anyway, and not
+      # reassigning a parameter is the better habit regardless.
+      earlier = from_time
+      later = to_time
+      if from_time > to_time
+        earlier = to_time
+        later = from_time
+      end
+      # `to_f` rather than Rails' bare `later - earlier`: `Time#-`
       # already RETURNS float seconds, so the arithmetic is identical,
       # but receiver-only dispatch can't tell a Duration argument (→
       # Time) from a Time one (→ Float) and so types `Time - x` as
       # untyped. Taking the epoch floats first keeps every expression
       # below concretely Float/Integer, which is what the framework
       # runtime's fully-typed invariant requires.
-      elapsed = to_time.to_f - from_time.to_f
+      elapsed = later.to_f - earlier.to_f
       distance_in_minutes = (elapsed / 60.0).round
       distance_in_seconds = elapsed.round
 
@@ -176,10 +190,10 @@ module ActionView
         months == 1 ? "about 1 month" : "about #{months} months"
       when 86400...525600 then "#{(distance_in_minutes.to_f / 43200.0).round} months"
       else
-        from_year = from_time.year
-        from_year += 1 if from_time.month >= 3
-        to_year = to_time.year
-        to_year -= 1 if to_time.month < 3
+        from_year = earlier.year
+        from_year += 1 if earlier.month >= 3
+        to_year = later.year
+        to_year -= 1 if later.month < 3
 
         leap_years =
           if from_year > to_year
