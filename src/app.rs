@@ -88,6 +88,22 @@ pub struct App {
     /// along. Empty for apps whose partials take no locals.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub partial_local_types: HashMap<Symbol, HashMap<Symbol, Ty>>,
+    /// View → ivar name → type: the CONTROLLER-side ivar context each
+    /// view renders against (`settings/index` sees `@edit_user: User`
+    /// because the action assigns `@user.dup`), propagated transitively
+    /// onto partials.
+    ///
+    /// The naming convention gets an ivar's type right whenever the name
+    /// IS the model (`@user` → User) and cannot possibly get it right
+    /// otherwise. `form_with model: @edit_user` is the case that bites:
+    /// Rails names its fields from the RECORD's `param_key`
+    /// (`user[username]`), and with no type for `@edit_user` the lowerer
+    /// falls back to the view directory (`setting[username]`) — every
+    /// field name and id on /settings wrong. The analyzer already
+    /// computed this context to type each view body; recording it is
+    /// what lets the lowerer name the form after the record.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub view_ivar_types: HashMap<Symbol, HashMap<Symbol, Ty>>,
     /// Methods whose result Rails would treat as an html-safe buffer,
     /// because their body ends in `<e>.html_safe` (lobsters'
     /// `Hat#to_html_label`). The mark is a VALUE-level fact in Rails,
@@ -272,6 +288,7 @@ impl App {
             rbs_signatures: HashMap::new(),
             helper_method_index: HashMap::new(),
             partial_local_types: HashMap::new(),
+            view_ivar_types: HashMap::new(),
             html_safe_methods: BTreeSet::new(),
             rails_application: None,
             concern_filters: HashMap::new(),

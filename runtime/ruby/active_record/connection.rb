@@ -150,14 +150,32 @@ module ActiveRecord
     # Rails' `Base#as_json(only:)` attribute serializer, monomorphized:
     # the corpus reaches it only as `super(only: attrs)` inside a
     # model's own `as_json`, which the as_json_super lowering rewrites
-    # to this call. String-keyed like Rails; values are the raw
-    # attribute reads via the `[]` indexer (temporal columns therefore
-    # render in DB format, not Rails' ISO8601(3) — the JSON endpoints
-    # are off-replay; tighten when a replay route locks bytes).
+    # to this call. String-keyed like Rails.
+    #
+    # `only:` NARROWS the attribute set — it does not define it. Rails
+    # intersects it with the record's real attributes, so a name in the
+    # list that isn't a column contributes nothing. lobsters' User
+    # pushes `:homepage` (a typed_store attribute living inside the
+    # `settings` column) beside `:about` (a real column); Rails emits
+    # only `about`, and echoing the list verbatim added a
+    # `"homepage": null` to every user in /hottest's JSON.
+    #
+    # Values come from the `[]` indexer, which hands back the STORED
+    # text — right for every column except a temporal one, which Rails
+    # renders as ISO8601 with three fractional digits in the app's zone.
+    # `schema_time_columns` is the emitted fact that says which those
+    # are.
     def _as_json_only(only)
       h = {}
+      columns = self.class.schema_columns
+      time_columns = self.class.schema_time_columns
       only.each do |k|
-        h[k.to_s] = self[k]
+        next unless columns.include?(k)
+        h[k.to_s] = if time_columns.include?(k)
+          ActiveSupport.json_time(self[k])
+        else
+          self[k]
+        end
       end
       h
     end

@@ -64,6 +64,15 @@ module ActiveRecord
       raise NotImplementedError, "#{name}.schema_columns must be overridden"
     end
 
+    # The temporal subset of `schema_columns`. Unlike its siblings this
+    # one does NOT raise unoverridden: a model with no temporal column
+    # legitimately has none, and the lowering emits the (possibly empty)
+    # list for every schema-backed model. `_as_json_only` reads it to
+    # decide which values need Rails' ISO8601 JSON form.
+    def self.schema_time_columns
+      []
+    end
+
     def self.instantiate(_row)
       raise NotImplementedError, "#{name}.instantiate must be overridden"
     end

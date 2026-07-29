@@ -53,6 +53,10 @@ pub(super) fn append_attr_parts(parts: &mut Vec<InterpPart>, opts: &[(Expr, Expr
             }
             continue;
         }
+        if let Some(decided) = tag_option_parts(key.as_str(), v) {
+            parts.extend(decided);
+            continue;
+        }
         let simplified = if key.as_str() == "class" {
             super::form_builder::simplify_class_array_pub(v)
         } else {
@@ -68,6 +72,106 @@ pub(super) fn append_attr_parts(parts: &mut Vec<InterpPart>, opts: &[(Expr, Expr
             value: "\"".to_string(),
         });
     }
+}
+
+/// The part of Rails' `tag_options` that decides whether an attribute
+/// renders at all, and how. `Some(parts)` means the rule OWNS this
+/// attribute's rendering (possibly to nothing); `None` means render it
+/// the ordinary `key="value"` way.
+///
+/// Two rules, both about attributes that are not name/value pairs:
+///
+///   * a BOOLEAN attribute renders as `key="key"` when truthy and is
+///     OMITTED when falsy — never `disabled="false"`, which a browser
+///     reads as disabled. lobsters' comment box passes
+///     `disabled: !@user` on its textarea, submit and preview button,
+///     so a logged-in reply page shipped three dead controls.
+///   * a literal `nil` value is Rails' "no such attribute" (`next
+///     unless value`). Rendered as `key=""` it can mean the opposite:
+///     `open=""` opens a `<details>`.
+///
+/// Lives here, called from both attribute loops (this file's and
+/// form_builder's) — the rule is Rails' and belongs in one place even
+/// while the two loops keep their own `data:`-hash handling.
+pub(super) fn tag_option_parts(key: &str, v: &Expr) -> Option<Vec<InterpPart>> {
+    if is_boolean_attr(key) {
+        return Some(match &*v.node {
+            ExprNode::Lit { value: Literal::Bool { value: true } } => {
+                vec![InterpPart::Text { value: format!(" {key}=\"{key}\"") }]
+            }
+            ExprNode::Lit { value: Literal::Bool { value: false } }
+            | ExprNode::Lit { value: Literal::Nil } => Vec::new(),
+            _ => vec![InterpPart::Expr {
+                expr: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If {
+                        cond: v.clone(),
+                        then_branch: lit_str(format!(" {key}=\"{key}\"")),
+                        else_branch: lit_str(String::new()),
+                    },
+                ),
+            }],
+        });
+    }
+    if matches!(&*v.node, ExprNode::Lit { value: Literal::Nil }) {
+        return Some(Vec::new());
+    }
+    None
+}
+
+/// Rails' `BOOLEAN_ATTRIBUTES` (ActionView's TagHelper): attributes
+/// whose mere presence is the value. Kept verbatim so the rendering
+/// rule matches Rails for any of them, not just the ones a fixture
+/// happens to use.
+fn is_boolean_attr(key: &str) -> bool {
+    matches!(
+        key,
+        "allowfullscreen"
+            | "allowpaymentrequest"
+            | "async"
+            | "autofocus"
+            | "autoplay"
+            | "checked"
+            | "compact"
+            | "controls"
+            | "declare"
+            | "default"
+            | "defaultchecked"
+            | "defaultmuted"
+            | "defaultselected"
+            | "defer"
+            | "disabled"
+            | "enabled"
+            | "formnovalidate"
+            | "hidden"
+            | "indeterminate"
+            | "inert"
+            | "ismap"
+            | "itemscope"
+            | "loop"
+            | "multiple"
+            | "muted"
+            | "nohref"
+            | "nomodule"
+            | "noresize"
+            | "noshade"
+            | "novalidate"
+            | "nowrap"
+            | "open"
+            | "pauseonexit"
+            | "playsinline"
+            | "pubdate"
+            | "readonly"
+            | "required"
+            | "reversed"
+            | "scoped"
+            | "seamless"
+            | "selected"
+            | "sortable"
+            | "truespeed"
+            | "typemustmatch"
+            | "visible"
+    )
 }
 
 /// Wrap non-String-literal opts values in `.to_s` so html_escape's

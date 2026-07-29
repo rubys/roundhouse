@@ -39,6 +39,26 @@ module ActiveSupport
     )
   end
 
+  # A temporal column as JSON: Rails serializes one through
+  # `TimeWithZone#as_json` → `xmlschema(3)`, i.e. ISO8601 with exactly
+  # three fractional digits and the app zone's offset
+  # (`2023-05-08T05:28:49.595-05:00`), NOT the stored TEXT.
+  #
+  # This spinel-subset version is second-granularity UTC, because
+  # `parse_db_time` above is: no sub-second read, no local-zone
+  # conversion. That is the gap to close when spinel's Time grows those
+  # — not something for the JSON serializer to work around. Nothing
+  # exercises it yet: the spinel tree emits controllers with
+  # `format_breadth=false`, so its rss/json respond_to arms don't
+  # render. The CRuby/JRuby overlay's sibling file shadows this one
+  # (dedupe last-wins) with the exact implementation, and that IS the
+  # lane the /hottest parity route measures.
+  def self.json_time(str)
+    t = parse_db_time(str)
+    return nil if t.nil?
+    "#{t.strftime("%Y-%m-%dT%H:%M:%S")}.000+00:00"
+  end
+
   # Normalize a temporal-writer value into the canonical storage form.
   # Time → stamped (same shape as db_now); nil → nil (nullable column
   # cleared: `self.banned_at = nil`); String passes through untouched.

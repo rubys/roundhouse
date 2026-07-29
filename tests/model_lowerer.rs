@@ -132,11 +132,13 @@ fn article_lowers_with_schema_methods() {
         "id writer should be synthesized: {names:?}",
     );
 
-    // The non-attr scaffold: table_name, schema_columns, instantiate,
-    // initialize, attributes, [], []=, update.
+    // The non-attr scaffold: table_name, schema_columns,
+    // schema_time_columns, instantiate, initialize, attributes, [], []=,
+    // update.
     for expected in [
         "table_name",
         "schema_columns",
+        "schema_time_columns",
         "instantiate",
         "initialize",
         "attributes",
@@ -156,6 +158,7 @@ fn article_lowers_with_schema_methods() {
     let class_methods = [
         "table_name",
         "schema_columns",
+        "schema_time_columns",
         "instantiate",
         "from_row",
         "from_stmt",

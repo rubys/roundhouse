@@ -431,19 +431,37 @@ pub fn emit_library_class(lc: &LibraryClass) -> String {
     // record's actual class. Only classes that define a companion
     // `schema_columns` get one (so abstract ApplicationRecord, with none, is
     // skipped and inherits the base's open stub).
-    if lc.methods.iter().any(|m| {
-        m.receiver == MethodReceiver::Class && m.name.as_str() == "schema_columns"
-    }) {
+    // `schema_time_columns` (the temporal subset, read by the JSON
+    // serializer) has the same companion-isn't-virtual problem, so it
+    // gets the same instance shadow. Its base is an empty list rather
+    // than a raise — a model with no temporal column has none.
+    for (snake, camel, base_body) in [
+        (
+            "schema_columns",
+            "schemaColumns",
+            "throw NotImplementedError(\"ActiveRecord::Base.schema_columns must be overridden\")"
+                .to_string(),
+        ),
+        (
+            "schema_time_columns",
+            "schemaTimeColumns",
+            "return mutableListOf()".to_string(),
+        ),
+    ] {
+        if !lc
+            .methods
+            .iter()
+            .any(|m| m.receiver == MethodReceiver::Class && m.name.as_str() == snake)
+        {
+            continue;
+        }
         let (modifier, body) = if lc.parent.is_none() {
-            (
-                "open",
-                "throw NotImplementedError(\"ActiveRecord::Base.schema_columns must be overridden\")".to_string(),
-            )
+            ("open", base_body)
         } else {
-            ("override", format!("return {class_name}.schemaColumns()"))
+            ("override", format!("return {class_name}.{camel}()"))
         };
         out.push_str(&format!(
-            "    {modifier} fun schemaColumns(): MutableList<String> {{ {body} }}\n\n"
+            "    {modifier} fun {camel}(): MutableList<String> {{ {body} }}\n\n"
         ));
     }
 

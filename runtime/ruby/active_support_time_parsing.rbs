@@ -1,0 +1,30 @@
+# Typing contract for ActiveSupport's temporal intrinsics — the
+# `runtime/ruby/db.rbs` pattern: a declaration with NO paired `.rb`
+# here, because the implementation ships PER TREE.
+#
+# Two implementations satisfy this signature. The spinel-subset
+# `runtime/spinel/active_support_time_parsing.rb` avoids everything
+# spinel's Time lacks (no `require "time"`, no `Time.parse`, no `usec`);
+# the CRuby/JRuby overlay's sibling shadows it (dedupe last-wins) with
+# the stdlib-backed exact version. Neither lives under `runtime/ruby/`,
+# so without this file the framework runtime has no signature for them
+# and a call site types as an unresolved variable.
+#
+# `parse_db_time` hydrates the sqlite3 adapter's bare
+# "YYYY-MM-DD HH:MM:SS[.ffffff]" TEXT (implicitly UTC) and presents it
+# in the app's `config.time_zone`. `json_time` is its JSON-rendering
+# sibling: Rails serializes a temporal attribute through
+# `TimeWithZone#as_json` = `xmlschema(3)`, not as the stored text.
+# `format_db_time` is the write-side inverse.
+#
+# All three are nil-safe: an absent column reads as nil / "" and the
+# synthesized accessors call them unguarded.
+module ActiveSupport
+  def self.parse_db_time: (String? str) -> Time?
+
+  def self.json_time: (String? str) -> String?
+
+  def self.format_db_time: (untyped value) -> String?
+
+  def self.db_now: () -> String
+end

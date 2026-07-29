@@ -140,10 +140,13 @@ fn emit_check_box(
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text {
         value: format!(
-            "<input name=\"{mn}[{f}]\" type=\"hidden\" value=\"0\" autocomplete=\"off\"><input type=\"checkbox\" value=\"1\"{nid}",
+            // The unchecked-value companion carries no `autocomplete`
+            // attribute — Rails renders exactly
+            // `<input name="user[f]" type="hidden" value="0">`.
+            "<input name=\"{mn}[{f}]\" type=\"hidden\" value=\"0\"><input type=\"checkbox\" value=\"1\"{nid}",
             mn = model_name,
             f = field_str,
-            nid = name_id_attrs(model_name, field_str),
+            nid = name_id_attrs_for(binding, field_str, opts),
         ),
     });
     // Checked state, typed instead of the runtime `checked_box_attr`
@@ -178,7 +181,7 @@ fn emit_check_box(
             },
         )
     } else {
-        let value_read = field_value_read(binding, field_sym.clone());
+        let value_read = field_value_read(binding, field_sym.clone(), ctx);
         let eq = |s: &str| {
             send(
                 Some(to_s(value_read.clone())),
@@ -249,7 +252,7 @@ fn emit_radio_button(
     let cond = match explicit_checked {
         Some(c) => c,
         None => {
-            let value_read = field_value_read(binding, field_sym.clone());
+            let value_read = field_value_read(binding, field_sym.clone(), ctx);
             send(
                 Some(to_s(value_read)),
                 "==",
@@ -269,8 +272,13 @@ fn emit_radio_button(
             },
         ),
     });
+    // Rails suffixes a radio's id with its VALUE (one input per choice,
+    // ids must differ): `edit_user_user_prefers_color_scheme_dark`.
     parts.push(InterpPart::Text {
-        value: format!(" name=\"{model_name}[{field_str}]\" id=\"{model_name}_{field_str}_"),
+        value: format!(
+            " name=\"{model_name}[{field_str}]\" id=\"{}_",
+            super::field_id(&binding.id_prefix, model_name, field_str)
+        ),
     });
     parts.push(InterpPart::Expr {
         expr: view_helpers_call("html_escape", vec![to_s(value.clone())]),
@@ -305,9 +313,8 @@ fn emit_select(
     let (Some(field_sym), Some(choices)) = (field_symbol(field), choices) else {
         return vec![accumulator_append_call(lit_str(String::new()), ctx)];
     };
-    let model_name = &binding.model_name;
     let field_str = field_sym.as_str();
-    let value_read = field_value_read(binding, field_sym.clone());
+    let value_read = field_value_read(binding, field_sym.clone(), ctx);
     // `include_blank:` is select BEHAVIOR, not an HTML attribute — pull
     // it out before the attr expansion (previously it leaked into the
     // tag as `include_blank="true"`).
@@ -334,7 +341,7 @@ fn emit_select(
         .collect();
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text {
-        value: format!("<select{}", name_id_attrs(model_name, field_str)),
+        value: format!("<select{}", name_id_attrs_for(binding, field_str, opts)),
     });
     if multiple {
         parts.push(InterpPart::Text { value: " multiple=\"multiple\"".to_string() });
@@ -1037,12 +1044,11 @@ fn emit_typed_input_field(
     let Some(field_sym) = field_symbol(field) else {
         return vec![accumulator_append_call(lit_str(String::new()), ctx)];
     };
-    let model_name = &binding.model_name;
     let field_str = field_sym.as_str();
-    let value_read = field_value_read(binding, field_sym.clone());
+    let value_read = field_value_read(binding, field_sym.clone(), ctx);
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text {
-        value: format!("<input type=\"{ty}\"{}", name_id_attrs(model_name, field_str)),
+        value: format!("<input type=\"{ty}\"{}", name_id_attrs_for(binding, field_str, opts)),
     });
     parts.push(InterpPart::Expr {
         expr: view_helpers_call("optional_value_attr", vec![value_read]),
@@ -1084,7 +1090,7 @@ fn emit_password_field(
     parts.push(InterpPart::Text {
         value: format!(
             "<input type=\"password\"{}",
-            name_id_attrs(&binding.model_name, field_sym.as_str())
+            name_id_attrs_for(binding, field_sym.as_str(), opts)
         ),
     });
     append_attr_parts(&mut parts, opts);
@@ -1110,14 +1116,14 @@ fn emit_hidden_field(
     parts.push(InterpPart::Text {
         value: format!(
             "<input type=\"hidden\"{}",
-            name_id_attrs(&binding.model_name, field_sym.as_str())
+            name_id_attrs_for(binding, field_sym.as_str(), opts)
         ),
     });
     if !opts_have_value(opts) {
         parts.push(InterpPart::Expr {
             expr: view_helpers_call(
                 "optional_value_attr",
-                vec![field_value_read(binding, field_sym.clone())],
+                vec![field_value_read(binding, field_sym.clone(), ctx)],
             ),
         });
     }
@@ -1151,33 +1157,69 @@ fn split_args(args: &[Expr]) -> (Vec<&Expr>, Vec<(Expr, Expr)>) {
 /// nests the field under the model prefix (`user[email]` / `user_email`);
 /// a non-resource form (`form_with url:` — empty `model_name`) names the
 /// field bare (`email` / `email`), matching Rails' non-model form output.
-fn name_id_attrs(model_name: &str, field: &str) -> String {
-    if model_name.is_empty() {
-        format!(" name=\"{field}\" id=\"{field}\"")
+fn name_id_attrs(binding: &FormBuilderBinding, field: &str) -> String {
+    let id = super::field_id(&binding.id_prefix, &binding.model_name, field);
+    if binding.model_name.is_empty() {
+        format!(" name=\"{field}\" id=\"{id}\"")
     } else {
-        format!(" name=\"{model_name}[{field}]\" id=\"{model_name}_{field}\"")
+        format!(" name=\"{}[{field}]\" id=\"{id}\"", binding.model_name)
     }
+}
+
+/// Same, minus any attribute the call site set explicitly. Rails' field
+/// helpers OVERRIDE the generated `name`/`id` from the options rather
+/// than emitting both — `options.fetch("name") { tag_name(...) }`.
+/// lobsters' settings form does exactly this
+/// (`f.password_field :current_password, name: "current_password"`,
+/// so the controller reads it outside `user[...]`), and emitting both
+/// produced a duplicate `name=` attribute — the browser keeps the
+/// FIRST, so the field posted under the wrong key.
+fn name_id_attrs_for(binding: &FormBuilderBinding, field: &str, opts: &[(Expr, Expr)]) -> String {
+    let has = |key: &str| {
+        opts.iter().any(|(k, _)| {
+            matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+                if value.as_str() == key)
+        })
+    };
+    let full = name_id_attrs(binding, field);
+    if !has("name") && !has("id") {
+        return full;
+    }
+    // Rebuild keeping only the halves the call site did NOT set.
+    let id = super::field_id(&binding.id_prefix, &binding.model_name, field);
+    let name = if binding.model_name.is_empty() {
+        field.to_string()
+    } else {
+        format!("{}[{field}]", binding.model_name)
+    };
+    let mut out = String::new();
+    if !has("name") {
+        out.push_str(&format!(" name=\"{name}\""));
+    }
+    if !has("id") {
+        out.push_str(&format!(" id=\"{id}\""));
+    }
+    out
 }
 
 /// The `<label for="...">` open fragment, prefixed for resource forms and
 /// bare for non-resource forms (see `name_id_attrs`).
-fn label_for_attr(model_name: &str, field: &str) -> String {
-    if model_name.is_empty() {
-        format!("<label for=\"{field}\"")
-    } else {
-        format!("<label for=\"{model_name}_{field}\"")
-    }
+fn label_for_attr(binding: &FormBuilderBinding, field: &str) -> String {
+    format!(
+        "<label for=\"{}\"",
+        super::field_id(&binding.id_prefix, &binding.model_name, field)
+    )
 }
 
 /// The value expression a field reads: the record's attribute for a
 /// resource form, or `nil` for a non-resource form (no record to read —
 /// `optional_value_attr(nil)` then omits the `value=` attr, matching Rails
 /// rendering an empty non-model field).
-fn field_value_read(binding: &FormBuilderBinding, field: Symbol) -> Expr {
+fn field_value_read(binding: &FormBuilderBinding, field: Symbol, ctx: &ViewCtx) -> Expr {
     if binding.model_name.is_empty() {
         Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil })
     } else {
-        record_field_read(binding, field)
+        record_field_read(binding, field, ctx)
     }
 }
 
@@ -1206,10 +1248,9 @@ fn emit_label(
     let Some(field_sym) = field_symbol(field) else {
         return vec![accumulator_append_call(lit_str(String::new()), ctx)];
     };
-    let model_name = &binding.model_name;
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text {
-        value: label_for_attr(model_name, field_sym.as_str()),
+        value: label_for_attr(binding, field_sym.as_str()),
     });
     append_attr_parts(&mut parts, opts);
     parts.push(InterpPart::Text { value: ">".to_string() });
@@ -1248,12 +1289,11 @@ fn emit_text_field(
     let Some(field_sym) = field_symbol(field) else {
         return vec![accumulator_append_call(lit_str(String::new()), ctx)];
     };
-    let model_name = &binding.model_name;
     let field_str = field_sym.as_str();
-    let value_read = field_value_read(binding, field_sym.clone());
+    let value_read = field_value_read(binding, field_sym.clone(), ctx);
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text {
-        value: format!("<input type=\"text\"{}", name_id_attrs(model_name, field_str)),
+        value: format!("<input type=\"text\"{}", name_id_attrs_for(binding, field_str, opts)),
     });
     parts.push(InterpPart::Expr {
         expr: view_helpers_call("optional_value_attr", vec![value_read]),
@@ -1263,6 +1303,33 @@ fn emit_text_field(
         value: ">".to_string(),
     });
     vec![accumulator_append_call(string_interp(parts), ctx)]
+}
+
+/// A textarea has no `size` attribute. Rails splits `size: "100x5"`
+/// into `cols="100" rows="5"` and drops the `size` key (a bare
+/// `size: 100` sets cols only). lobsters' settings page writes
+/// `f.text_area :about, size: "100x5"`, which reached the page as a
+/// literal `size="100x5"` — an attribute no browser acts on, so the
+/// About box rendered at its default dimensions.
+fn expand_textarea_size(opts: &mut Vec<(Expr, Expr)>) {
+    let Some(size) = super::attr_parts::take_opt(opts, "size") else {
+        return;
+    };
+    let Some(spec) = str_or_sym_lit(&size) else {
+        // A computed size can't be split at compile time. Rails would,
+        // at request time; putting the un-split value back keeps the
+        // old behavior rather than dropping the author's intent.
+        opts.push((lit_sym(Symbol::from("size")), size));
+        return;
+    };
+    let (cols, rows) = match spec.split_once('x') {
+        Some((c, r)) => (c.to_string(), Some(r.to_string())),
+        None => (spec, None),
+    };
+    opts.push((lit_sym(Symbol::from("cols")), lit_str(cols)));
+    if let Some(rows) = rows {
+        opts.push((lit_sym(Symbol::from("rows")), lit_str(rows)));
+    }
 }
 
 /// `<textarea name="<model_name>[<field>]" id="<model_name>_<field>"<opts>><escaped_body></textarea>`
@@ -1280,19 +1347,30 @@ fn emit_text_area(
     let Some(field_sym) = field_symbol(field) else {
         return vec![accumulator_append_call(lit_str(String::new()), ctx)];
     };
-    let model_name = &binding.model_name;
     let field_str = field_sym.as_str();
-    let value_read = field_value_read(binding, field_sym.clone());
+    // A textarea has no `value` ATTRIBUTE — Rails deletes `value:` from
+    // the options and renders it as the element's body instead, so an
+    // explicit `value:` overrides the record read. lobsters' comment box
+    // relies on this (`f.text_area "comment", value: comment.comment`);
+    // rendered as an attribute it produced an empty box carrying a
+    // stray `value=""`.
+    let mut opts = opts.to_vec();
+    let body_value = super::attr_parts::take_opt(&mut opts, "value")
+        .unwrap_or_else(|| field_value_read(binding, field_sym.clone(), ctx));
+    expand_textarea_size(&mut opts);
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text {
-        value: format!("<textarea{}", name_id_attrs(model_name, field_str)),
+        value: format!("<textarea{}", name_id_attrs_for(binding, field_str, &opts)),
     });
-    append_attr_parts(&mut parts, opts);
+    append_attr_parts(&mut parts, &opts);
+    // Rails opens a textarea's content with a newline (the HTML spec
+    // lets a parser swallow one, so it protects a body that itself
+    // starts with one).
     parts.push(InterpPart::Text {
-        value: ">".to_string(),
+        value: ">\n".to_string(),
     });
     parts.push(InterpPart::Expr {
-        expr: view_helpers_call("escape_or_empty", vec![value_read]),
+        expr: view_helpers_call("escape_or_empty", vec![body_value]),
     });
     parts.push(InterpPart::Text {
         value: "</textarea>".to_string(),
@@ -1460,6 +1538,10 @@ fn append_attr_parts(parts: &mut Vec<InterpPart>, opts: &[(Expr, Expr)]) {
                 continue;
             }
         }
+        if let Some(decided) = super::attr_parts::tag_option_parts(key.as_str(), v) {
+            parts.extend(decided);
+            continue;
+        }
         let simplified = if key.as_str() == "class" {
             simplify_class_array(v)
         } else {
@@ -1509,7 +1591,7 @@ fn lit_str_coerce(e: Expr) -> Expr {
 /// — restoring the prior runtime FormBuilder's parity behavior. The
 /// `optional_value_attr` / `escape_or_empty` runtime helpers accept
 /// the resulting nullable / untyped value uniformly.
-fn record_field_read(binding: &FormBuilderBinding, field: Symbol) -> Expr {
+fn record_field_read(binding: &FormBuilderBinding, field: Symbol, ctx: &ViewCtx) -> Expr {
     let record_ref = Expr::new(
         Span::synthetic(),
         ExprNode::Var {
@@ -1517,6 +1599,18 @@ fn record_field_read(binding: &FormBuilderBinding, field: Symbol) -> Expr {
             name: binding.record_var.clone(),
         },
     );
+    // A non-column attribute (typed_store, `attribute` DSL) has no entry
+    // in the record's `[]` indexer — that reads back nil and the field
+    // renders with no `value=`. Its synthesized reader is the only way
+    // to the value. Columns keep the indexer, which is where their cast
+    // lives.
+    let is_store_read = ctx
+        .store_readers
+        .get(binding.model_name.as_str())
+        .is_some_and(|names| names.contains(field.as_str()));
+    if is_store_read {
+        return send(Some(record_ref), field.as_str(), Vec::new(), None, false);
+    }
     send(
         Some(record_ref),
         "[]",

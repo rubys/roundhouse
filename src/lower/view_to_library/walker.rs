@@ -893,12 +893,14 @@ mod tests {
             model_singulars: Default::default(),
             slug_models: Default::default(),
             bool_readers: Default::default(),
+            store_readers: Default::default(),
             route_helper_names: Default::default(),
             stylesheets: Vec::new(),
             partial_ivars: Default::default(),
             dyn_pools: Default::default(),
             partial_extras: Default::default(),
             strict_locals: Default::default(),
+            ivar_models: Default::default(),
         }
     }
 

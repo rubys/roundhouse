@@ -66,6 +66,22 @@ module ActiveSupport
     t.getlocal
   end
 
+  # A temporal column as JSON. Rails serializes an AR temporal value
+  # through `TimeWithZone#as_json`, which is `xmlschema(3)` — ISO8601
+  # with exactly three fractional digits and the app zone's offset
+  # (`2023-05-08T05:28:49.595-05:00`). The stored TEXT is neither
+  # (`2023-05-08 10:28:49.595725`, UTC, six digits), so serializing the
+  # raw column value is a different document; /hottest's JSON is a
+  # parity route and locks these bytes.
+  #
+  # `parse_db_time` above already lands the instant in the app's zone,
+  # so `xmlschema(3)` is the whole formatting rule.
+  def self.json_time(str)
+    t = parse_db_time(str)
+    return nil if t.nil?
+    t.xmlschema(3)
+  end
+
   # Write-side sibling of `parse_db_time`: current UTC time in Rails'
   # exact storage form — "YYYY-MM-DD HH:MM:SS.ffffff", space separator,
   # zero-padded 6-digit fractional seconds, no zone marker (implicitly

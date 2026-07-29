@@ -1876,6 +1876,27 @@ impl Analyzer {
             }
         }
 
+        // Record the ivar context every view renders against — the
+        // action's own seed for a view, the propagated union for a
+        // partial. Both were just computed to type the bodies; persisting
+        // them lets the LOWERER name a `form_with model: @ivar` after the
+        // record's own model instead of the view directory. See
+        // `App::view_ivar_types`.
+        let view_ivar_types: HashMap<Symbol, HashMap<Symbol, Ty>> = app
+            .views
+            .iter()
+            .map(|view| {
+                let ivars = if is_partial_view_name(&view.name) {
+                    partial_ivars_by_name.get(&view.name).cloned().unwrap_or_default()
+                } else {
+                    view_ivar_seed(&view.name)
+                };
+                (view.name.clone(), ivars)
+            })
+            .filter(|(_, ivars)| !ivars.is_empty())
+            .collect();
+        app.view_ivar_types = view_ivar_types;
+
         // Close `view_feeders` over the same renderer→partial edges: a
         // partial is fed by whoever feeds its renderers, transitively
         // (same depth-capped fixpoint shape as the ivar propagation

@@ -218,7 +218,199 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
         }
         funcs.push(build_helper_function(&module_path, &helper, route, app));
     }
+    // Hash-form `url_for` resolvers ride along here rather than at each
+    // target's call site: every emitter that wants route helpers wants
+    // these too, and a per-target wiring is nine places to forget one.
+    funcs.extend(lower_url_option_helpers(app));
     funcs
+}
+
+/// The generated resolver for a hash-form `url_for`. `extras` are the
+/// option keys beside `controller:`/`action:`, sorted — one function per
+/// distinct set, so each keeps TYPED params instead of taking a
+/// `Hash[Symbol, untyped]` bag. Shared with the view lowerer, which
+/// emits the call.
+pub fn url_options_helper_name(extras: &[String]) -> String {
+    if extras.is_empty() {
+        "path_for_controller_action".to_string()
+    } else {
+        format!("path_for_controller_action_{}", extras.join("_"))
+    }
+}
+
+/// Resolvers for the hash-form `url_for` — `link_to text, {controller:
+/// controller_name, action: action_name, page: @page + 1}`, which is how
+/// every lobsters index paginates.
+///
+/// Rails resolves that against the route set at render time. A compile-
+/// time resolution is impossible here for the reason the shape exists at
+/// all: `controller_name`/`action_name` are runtime reads, and the view
+/// holding them (`home/index`) is rendered by eight different actions.
+/// So generate the LOOKUP instead — a function per extra-key set,
+/// carrying the table of every route whose dynamic segments are exactly
+/// those extras, keyed on `"controller#action"`.
+///
+/// Left unresolved, the options hash reached the tag renderer and each
+/// key became an HTML attribute: `<a href-controller="home"
+/// href-action="newest" href-page="2">`, i.e. no href at all — a dead
+/// "Page 2 >>" link on /, /newest, /recent, /comments, /replies and
+/// /moderations.
+pub fn lower_url_option_helpers(app: &App) -> Vec<LibraryFunction> {
+    let mut extra_sets: Vec<Vec<String>> = Vec::new();
+    for view in &app.views {
+        collect_url_option_key_sets(&view.body, &mut extra_sets);
+    }
+    extra_sets.sort();
+    extra_sets.dedup();
+    if extra_sets.is_empty() {
+        return Vec::new();
+    }
+    let flat = flatten_routes(app);
+    let module_path = vec![Symbol::from("RouteHelpers")];
+    extra_sets
+        .iter()
+        .map(|extras| build_url_options_function(&module_path, extras, &flat))
+        .collect()
+}
+
+/// Every Hash literal in a view whose keys are all Symbols and include
+/// both `controller` and `action` — Rails' url-options form. Yields the
+/// remaining keys, sorted.
+fn collect_url_option_key_sets(e: &Expr, out: &mut Vec<Vec<String>>) {
+    if let ExprNode::Hash { entries, .. } = &*e.node {
+        let keys: Option<Vec<String>> = entries
+            .iter()
+            .map(|(k, _)| match &*k.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => {
+                    Some(value.as_str().to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        if let Some(keys) = keys {
+            if keys.iter().any(|k| k == "controller") && keys.iter().any(|k| k == "action") {
+                let mut extras: Vec<String> = keys
+                    .into_iter()
+                    .filter(|k| k != "controller" && k != "action")
+                    .collect();
+                extras.sort();
+                out.push(extras);
+            }
+        }
+    }
+    e.node.for_each_child(&mut |c| collect_url_option_key_sets(c, out));
+}
+
+/// One resolver: `path_for_controller_action_page(controller, action,
+/// page)`. Body is an if-chain over `"#{controller}##{action}"` — an
+/// if-chain rather than a `case` so every target's expression emitter
+/// renders it without pattern-match support. The fall-through raises,
+/// which is what Rails does for an unroutable `url_for`
+/// (`ActionController::UrlGenerationError`); returning some invented
+/// path would ship a wrong link instead of reporting the gap.
+fn build_url_options_function(
+    module_path: &[Symbol],
+    extras: &[String],
+    flat: &[FlatRoute],
+) -> LibraryFunction {
+    let no_slugs = std::collections::HashSet::new();
+    let key_expr = Expr::new(
+        Span::synthetic(),
+        ExprNode::StringInterp {
+            parts: vec![
+                InterpPart::Expr { expr: var_ref("controller") },
+                InterpPart::Text { value: "#".to_string() },
+                InterpPart::Expr { expr: var_ref("action") },
+            ],
+        },
+    );
+    // Candidate routes: a GET whose dynamic segments are exactly the
+    // extras. `/newest/:user/page/:page` is not a candidate for the
+    // `page`-only set — its `:user` has no value to fill.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut arms: Vec<(String, Expr)> = Vec::new();
+    for route in flat {
+        if route.method != HttpMethod::Get {
+            continue;
+        }
+        let mut params = route.path_params.clone();
+        params.sort();
+        if params != extras {
+            continue;
+        }
+        let key = format!(
+            "{}#{}",
+            controller_symbol(route.controller.0.as_str()),
+            route.action.as_str()
+        );
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        arms.push((key, build_path_expr(&route.path, &route.path_params, &no_slugs)));
+    }
+    // Innermost else. `raise` reads as a Send on every target that
+    // emits this module.
+    let unroutable = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: None,
+            method: Symbol::from("raise"),
+            args: vec![Expr::new(
+                Span::synthetic(),
+                ExprNode::StringInterp {
+                    parts: vec![
+                        InterpPart::Text { value: "no route matches ".to_string() },
+                        InterpPart::Expr { expr: key_expr.clone() },
+                    ],
+                },
+            )],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    // Fold the arms into a nested if/else, last arm outermost-last.
+    let mut body = unroutable;
+    for (key, path) in arms.into_iter().rev() {
+        body = Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(key_expr.clone()),
+                        method: Symbol::from("=="),
+                        args: vec![lit_str(key)],
+                        block: None,
+                        parenthesized: false,
+                    },
+                ),
+                then_branch: path,
+                else_branch: body,
+            },
+        );
+    }
+    let names: Vec<String> = std::iter::once("controller".to_string())
+        .chain(std::iter::once("action".to_string()))
+        .chain(extras.iter().cloned())
+        .collect();
+    LibraryFunction {
+        module_path: module_path.to_vec(),
+        name: Symbol::from(url_options_helper_name(extras)),
+        params: names
+            .iter()
+            .map(|n| Param::positional(Symbol::from(n.clone())))
+            .collect(),
+        body,
+        signature: Some(fn_sig(
+            names
+                .iter()
+                .map(|n| (Symbol::from(n.clone()), Ty::Str))
+                .collect(),
+            Ty::Str,
+        )),
+        effects: EffectSet::default(),
+        is_async: false,
+    }
 }
 
 /// Does the route's resource model override `to_param`? Rails feeds a

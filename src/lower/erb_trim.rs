@@ -161,6 +161,13 @@ fn is_non_output_erb_stmt(stmt: &Expr) -> bool {
         {
             false
         }
+        // Any OTHER assignment is a `<% x = … %>` tag — a non-output tag
+        // like `<% if %>` or a bare call, and erubi trims its line the
+        // same way. lobsters' comment partial opens with
+        // `<% flagged = comment.current_vote && … %>`; untrimmed, its
+        // newline survived as the partial's first byte and every
+        // rendered comment carried a leading space Rails doesn't have.
+        ExprNode::Assign { .. } => true,
         ExprNode::If { .. } => true,
         ExprNode::Send { recv: None, .. } => true,
         _ => false,

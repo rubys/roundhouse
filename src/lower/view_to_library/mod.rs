@@ -208,6 +208,8 @@ pub struct ViewLowerCtx<'a> {
     model_singulars: std::rc::Rc<std::collections::HashSet<String>>,
     slug_models: std::rc::Rc<std::collections::HashSet<String>>,
     bool_readers: std::rc::Rc<std::collections::HashMap<String, std::collections::HashSet<String>>>,
+    store_readers:
+        std::rc::Rc<std::collections::HashMap<String, std::collections::HashSet<String>>>,
     partial_form_bindings: std::collections::HashMap<ViewKey, PartialFormBinding>,
     route_helper_names: std::rc::Rc<std::collections::HashSet<String>>,
     /// Partials with a `<%# locals: (…) -%>` header, keyed by ViewKey →
@@ -256,6 +258,7 @@ impl<'a> ViewLowerCtx<'a> {
                     .collect(),
             ),
             bool_readers: std::rc::Rc::new(bool_reader_names(app)),
+            store_readers: std::rc::Rc::new(store_reader_names(app)),
             partial_form_bindings: partial_form_bindings(&app.views),
             route_helper_names: std::rc::Rc::new(
                 crate::lower::lower_routes_to_library_functions(app)
@@ -588,12 +591,14 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         model_singulars: lx.model_singulars.clone(),
         slug_models: lx.slug_models.clone(),
         bool_readers: lx.bool_readers.clone(),
+        store_readers: lx.store_readers.clone(),
         route_helper_names: lx.route_helper_names.clone(),
         stylesheets: app.stylesheets.clone(),
         partial_ivars: closures.clone(),
         dyn_pools: dyn_pools.clone(),
         partial_extras: lx.partial_extras.clone(),
         strict_locals: lx.strict_locals.clone(),
+        ivar_models: std::rc::Rc::new(view_ivar_models(app, &view.name)),
     };
 
     // A partial that receives a form builder as a local re-derives the
@@ -621,6 +626,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
             model_name: binding.model_name.clone(),
             record_var: record_var.clone(),
             form_method_var: form_method_var.clone(),
+            id_prefix: binding.id_prefix.clone(),
         });
         let record_ref = Expr::new(
             Span::synthetic(),
@@ -863,6 +869,45 @@ pub fn insert_db_stub(
         ),
     );
     classes.insert(ClassId(Symbol::from("Db")), db_info);
+
+    // ActiveSupport's temporal intrinsics — the same situation as Db:
+    // one contract, an implementation PER TREE (the spinel Time subset
+    // vs the CRuby/JRuby overlay's stdlib-backed sibling), so neither
+    // implementation sits under `runtime/ruby/` where the framework
+    // runtime's own typing could find it. The synthesized temporal
+    // column readers call `parse_db_time`, `Base#save`'s fill_timestamps
+    // calls `db_now`, the temporal writers call `format_db_time`, and
+    // `_as_json_only` calls `json_time`. See
+    // runtime/ruby/active_support_time_parsing.rbs, which states the
+    // same signatures for a human reader.
+    // Merged into whatever `ActiveSupport` surface is already
+    // registered (`active_support_ext.rbs` contributes blank?/present?/
+    // presence) rather than replacing it — the two halves of one module.
+    let as_info = classes
+        .entry(ClassId(Symbol::from("ActiveSupport")))
+        .or_default();
+    let str_or_nil = || Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+    let time_or_nil = || Ty::Union {
+        variants: vec![
+            Ty::Class { id: ClassId(Symbol::from("Time")), args: vec![] },
+            Ty::Nil,
+        ],
+    };
+    as_info.class_methods.insert(
+        Symbol::from("parse_db_time"),
+        fn_sig(vec![(Symbol::from("str"), str_or_nil())], time_or_nil()),
+    );
+    as_info.class_methods.insert(
+        Symbol::from("json_time"),
+        fn_sig(vec![(Symbol::from("str"), str_or_nil())], str_or_nil()),
+    );
+    as_info.class_methods.insert(
+        Symbol::from("format_db_time"),
+        fn_sig(vec![(Symbol::from("value"), Ty::Untyped)], str_or_nil()),
+    );
+    as_info
+        .class_methods
+        .insert(Symbol::from("db_now"), fn_sig(vec![], Ty::Str));
 }
 
 
@@ -1551,6 +1596,9 @@ pub(crate) struct PartialFormBinding {
     pub(crate) form_local: String,
     pub(crate) record_local: String,
     pub(crate) model_name: String,
+    /// The defining `form_with`'s `namespace:` — a partial's fields
+    /// belong to that form, so they carry its id prefix too.
+    pub(crate) id_prefix: String,
 }
 
 pub(crate) fn partial_form_bindings(
@@ -1588,6 +1636,7 @@ pub(crate) fn partial_form_bindings(
         own_dir: Option<&str>,
         form_param: &str,
         record_refs: &HashSet<String>,
+        id_prefix: &str,
         out: &mut Vec<(ViewKey, PartialFormBinding)>,
     ) {
         if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
@@ -1651,15 +1700,21 @@ pub(crate) fn partial_form_bindings(
                             let model_name = record_local.clone();
                             out.push((
                                 key,
-                                PartialFormBinding { form_local, record_local, model_name },
+                                PartialFormBinding {
+                                    form_local,
+                                    record_local,
+                                    model_name,
+                                    id_prefix: id_prefix.to_string(),
+                                },
                             ));
                         }
                     }
                 }
             }
         }
-        e.node
-            .for_each_child(&mut |c| render_edges(c, own_dir, form_param, record_refs, out));
+        e.node.for_each_child(&mut |c| {
+            render_edges(c, own_dir, form_param, record_refs, id_prefix, out)
+        });
     }
 
     /// Find `form_with ... do |f|` scopes and collect their render
@@ -1670,21 +1725,41 @@ pub(crate) fn partial_form_bindings(
                 if let ExprNode::Lambda { params, body, .. } = &*block.node {
                     if let Some(form_param) = params.first() {
                         let mut record_refs: HashSet<String> = HashSet::new();
+                        let mut id_prefix = String::new();
                         for arg in args {
                             if let ExprNode::Hash { entries, .. } = &*arg.node {
                                 for (k, v) in entries {
-                                    if matches!(&*k.node,
-                                        ExprNode::Lit { value: Literal::Sym { value } }
-                                            if value.as_str() == "model")
-                                    {
-                                        if let Some(r) = simple_ref(v) {
-                                            record_refs.insert(r);
+                                    let ExprNode::Lit { value: Literal::Sym { value: key } } =
+                                        &*k.node
+                                    else {
+                                        continue;
+                                    };
+                                    match key.as_str() {
+                                        "model" => {
+                                            if let Some(r) = simple_ref(v) {
+                                                record_refs.insert(r);
+                                            }
                                         }
+                                        "namespace" => {
+                                            if let Some(ns) =
+                                                self::form_with::str_or_sym_literal(v)
+                                            {
+                                                id_prefix = ns;
+                                            }
+                                        }
+                                        _ => {}
                                     }
                                 }
                             }
                         }
-                        render_edges(body, own_dir, form_param.as_str(), &record_refs, out);
+                        render_edges(
+                            body,
+                            own_dir,
+                            form_param.as_str(),
+                            &record_refs,
+                            &id_prefix,
+                            out,
+                        );
                     }
                 }
             }
@@ -1730,7 +1805,16 @@ pub(crate) fn partial_form_bindings(
                 let own = (!dir.is_empty()).then_some(dir);
                 let mut refs: HashSet<String> = HashSet::new();
                 refs.insert(binding.record_local.clone());
-                render_edges(&v.body, own, &binding.form_local, &refs, &mut next);
+                // A forwarded partial inherits the defining form's id
+                // prefix along with its builder.
+                render_edges(
+                    &v.body,
+                    own,
+                    &binding.form_local,
+                    &refs,
+                    &binding.id_prefix,
+                    &mut next,
+                );
             }
         }
         pending = next;
@@ -2548,6 +2632,27 @@ fn mentions_relation(ty: &crate::ty::Ty) -> bool {
     }
 }
 
+/// This view's ivar name → model snake-singular, for every ivar the
+/// analyzer typed as a model class (`App::view_ivar_types`). The
+/// singular is what Rails' `param_key` yields, so a form built on
+/// `@edit_user` names its fields `user[...]` the way Rails does. Ivars
+/// whose type is anything else (a collection, a scalar, untyped) are
+/// left out — the caller falls back to its own convention.
+fn view_ivar_models(app: &App, view_name: &Symbol) -> std::collections::HashMap<String, String> {
+    let Some(ivars) = app.view_ivar_types.get(view_name) else {
+        return std::collections::HashMap::new();
+    };
+    ivars
+        .iter()
+        .filter_map(|(name, ty)| match ty {
+            crate::ty::Ty::Class { id, .. } => {
+                Some((name.as_str().to_string(), snake_case(id.0.as_str())))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn ivar_ty(name: &str, known_models: &[String]) -> crate::ty::Ty {
     use crate::ty::Ty;
     let cam = camelize_path(&crate::naming::singularize_last(name));
@@ -2961,6 +3066,26 @@ pub(super) struct FormBuilderBinding {
     /// `form.submit`'s default-text expansion reads this to choose
     /// "Update X" (patch) vs "Create X" (post).
     pub(super) form_method_var: Symbol,
+    /// `form_with namespace:` — Rails prefixes every generated id with
+    /// it (`edit_user_user_username`) so two forms for the same record
+    /// on one page don't collide. Field NAMES are untouched. Empty for
+    /// the common un-namespaced form.
+    pub(super) id_prefix: String,
+}
+
+/// The `id` Rails generates for a form field: the namespace prefix (when
+/// the form declared one), the object name, and the field, joined by
+/// underscores. A model-less form ids by field alone.
+pub(super) fn field_id(id_prefix: &str, model_name: &str, field: &str) -> String {
+    let mut parts: Vec<&str> = Vec::with_capacity(3);
+    if !id_prefix.is_empty() {
+        parts.push(id_prefix);
+    }
+    if !model_name.is_empty() {
+        parts.push(model_name);
+    }
+    parts.push(field);
+    parts.join("_")
 }
 
 // ── ViewCtx ──────────────────────────────────────────────────────
@@ -3034,6 +3159,12 @@ pub(super) struct ViewCtx {
     /// runtime `checked_box_attr` seam).
     pub(super) bool_readers:
         std::rc::Rc<std::collections::HashMap<String, std::collections::HashSet<String>>>,
+    /// Per-model NON-COLUMN attribute readers (`store_reader_names`):
+    /// typed_store + `attribute`-DSL names. A form field's value read
+    /// routes through the synthesized reader for these instead of the
+    /// record's `[]` indexer, which knows only schema columns.
+    pub(super) store_readers:
+        std::rc::Rc<std::collections::HashMap<String, std::collections::HashSet<String>>>,
     /// Generated RouteHelpers function names. The form-action
     /// persisted?-ternary emits only the arms whose helper EXISTS
     /// (lobsters' domains has a member route but no collection —
@@ -3074,6 +3205,14 @@ pub(super) struct ViewCtx {
     /// bound by name.
     pub(super) strict_locals:
         std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Param>>>,
+    /// THIS view's ivar/local name → model snake-singular, from
+    /// `App::view_ivar_types` (`edit_user` → `user`). `form_with model:
+    /// @edit_user` names its fields after the record's model exactly as
+    /// Rails' `param_key` does; without the fact the name convention
+    /// yields nothing and the form falls back to the view directory.
+    /// Only names whose type is a KNOWN MODEL appear.
+    pub(super) ivar_models:
+        std::rc::Rc<std::collections::HashMap<String, String>>,
 }
 
 /// Every `belongs_to`/`has_one` association name across the app's models
@@ -3126,6 +3265,40 @@ fn bool_reader_names(
         for (name, ty) in crate::lower::model_to_library::attribute_api_decls(&m.body) {
             if ty.as_str() == "boolean" {
                 set.insert(name.as_str().to_string());
+            }
+        }
+        out.insert(crate::naming::snake_case(m.name.0.as_str()), set);
+    }
+    out
+}
+
+/// Per-model NON-COLUMN attribute readers: `typed_store` attributes
+/// (lobsters' `User` keeps `homepage`, `github_username` and a dozen
+/// more inside its serialized `settings` column) plus `attribute`-DSL
+/// names. A form field reads its value through the record's `[]`
+/// indexer, which only knows schema columns — one of these reads back
+/// nil there, so the field renders with no `value=` and the settings
+/// page showed every stored preference as blank. These go through the
+/// synthesized READER instead.
+fn store_reader_names(
+    app: &App,
+) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
+    let mut out = std::collections::HashMap::new();
+    for m in &app.models {
+        let mut set = std::collections::HashSet::new();
+        for (_store, attrs) in crate::lower::typed_store::typed_store_decls(&m.body) {
+            for a in attrs {
+                set.insert(a.name.as_str().to_string());
+            }
+        }
+        for (name, _ty) in crate::lower::model_to_library::attribute_api_decls(&m.body) {
+            set.insert(name.as_str().to_string());
+        }
+        // A real column of the same name wins — the indexer knows it,
+        // and the indexer is what applies the column's cast.
+        if let Some(table) = app.schema.tables.get(&m.table.0) {
+            for col in &table.columns {
+                set.remove(col.name.as_str());
             }
         }
         out.insert(crate::naming::snake_case(m.name.0.as_str()), set);

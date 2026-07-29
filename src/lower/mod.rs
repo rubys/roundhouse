@@ -451,6 +451,7 @@ pub use importmap_to_library::lower_importmap_to_library_functions;
 pub use library_extras::{extras_from_funcs, extras_from_lcs};
 pub use routes_to_library::{
     lower_routes_to_dispatch_functions, lower_routes_to_library_functions,
+    url_options_helper_name,
 };
 pub use schema_to_library::lower_schema_to_library_functions;
 pub use seeds_to_library::lower_seeds_to_library_functions;

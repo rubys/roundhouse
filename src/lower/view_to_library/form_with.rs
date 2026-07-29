@@ -36,6 +36,8 @@ pub(super) struct FormWithComponents {
     pub(super) action: Expr,
     pub(super) method: Expr,
     pub(super) opts_entries: Vec<(Expr, Expr)>,
+    /// `namespace:` — Rails' generated-id prefix. Empty when absent.
+    pub(super) id_prefix: String,
 }
 
 /// Inline-expand `<%= form_tag(action, opts) do ...inner... %>` — the
@@ -78,6 +80,7 @@ pub(super) fn emit_form_tag_inline(args: &[Expr], block: &Expr, ctx: &ViewCtx) -
         // the components struct carries it for shape parity.
         method: lit_sym(Symbol::from("post")),
         opts_entries,
+        id_prefix: String::new(),
     };
     let mut out: Vec<Expr> = Vec::new();
     out.push(emit_open_form_tag(&comps, ctx));
@@ -194,6 +197,7 @@ pub(super) fn emit_form_with_inline(
         model_name: comps.model_name.clone(),
         record_var: record_var.clone(),
         form_method_var,
+        id_prefix: comps.id_prefix.clone(),
     });
     // `f.object` is the one FormBuilder method used in EXPRESSION
     // position (`errors_for f.object`) — substitute the record local
@@ -470,6 +474,7 @@ fn classify_form_with_components(
     let mut model_expr: Option<Expr> = None;
     let mut url_expr: Option<Expr> = None;
     let mut method_expr: Option<Expr> = None;
+    let mut namespace: Option<String> = None;
     let mut opts_entries: Vec<(Expr, Expr)> = Vec::new();
 
     for arg in args {
@@ -510,10 +515,15 @@ fn classify_form_with_components(
                         }
                         // form_with's generated-id prefix option, not an
                         // HTML attribute — left in opts it rendered a
-                        // bogus namespace="…" attr on /settings. The id
-                        // prefixing itself (edit_user_user_username)
-                        // rides the typed-record param_key follow-up.
+                        // bogus namespace="…" attr on /settings. Captured
+                        // as the id prefix: Rails ids every field in a
+                        // namespaced form `<namespace>_<object>_<field>`
+                        // (`edit_user_user_username`) while field NAMES
+                        // stay un-prefixed (`user[username]`).
                         "namespace" => {
+                            if let Some(ns) = str_or_sym_literal(v) {
+                                namespace = Some(ns);
+                            }
                             continue;
                         }
                         _ => {}
@@ -549,6 +559,7 @@ fn classify_form_with_components(
                 action: route_helperize(url, &route_helpers, ctx),
                 method: method_expr.clone().unwrap_or_else(default_post),
                 opts_entries,
+                id_prefix: namespace.clone().unwrap_or_default(),
             });
         }
     };
@@ -562,6 +573,7 @@ fn classify_form_with_components(
             action: nested_action,
             method: method_expr.clone().unwrap_or_else(default_post),
             opts_entries,
+            id_prefix: namespace.clone().unwrap_or_default(),
         });
     }
 
@@ -620,6 +632,7 @@ fn classify_form_with_components(
             action,
             method,
             opts_entries,
+            id_prefix: namespace.clone().unwrap_or_default(),
         });
     }
 
@@ -640,11 +653,12 @@ fn classify_form_with_components(
         // `method:` steers the form verb (captured out of opts above);
         // default POST like the url-only branch.
         return Some(FormWithComponents {
+            model_name: record_model_name(&model, ctx, &singular),
             model,
-            model_name: singular,
             action: route_helperize(url, &route_helpers, ctx),
             method: method_expr.clone().unwrap_or_else(default_post),
             opts_entries,
+            id_prefix: namespace.clone().unwrap_or_default(),
         });
     }
 
@@ -734,12 +748,48 @@ fn classify_form_with_components(
     });
 
     Some(FormWithComponents {
+        model_name: record_model_name(&model, ctx, &singular),
         model,
-        model_name: singular,
         action,
         method,
         opts_entries,
+        id_prefix: namespace.unwrap_or_default(),
     })
+}
+
+/// The form's object name — what Rails calls `param_key`. Rails names
+/// fields after the RECORD's model (`user[username]` for a User), never
+/// after the view directory; the two agree for a conventional resource
+/// form and diverge whenever the ivar's name isn't the model's
+/// (lobsters' `form_with model: @edit_user` under `settings/`, which
+/// Rails names `user[...]`). Consults the analyzer's ivar types and
+/// falls back to the directory singular when the record's type isn't a
+/// known model — that fallback is the whole pre-existing behavior, so an
+/// untyped record is no worse off than before.
+fn record_model_name(model: &Expr, ctx: &ViewCtx, fallback: &str) -> String {
+    let name = match &*model.node {
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.as_str(),
+        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
+            method.as_str()
+        }
+        _ => return fallback.to_string(),
+    };
+    ctx.ivar_models
+        .get(name)
+        .cloned()
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// A `namespace:`/`scope:`-style option's literal value — Rails accepts
+/// either a String or a Symbol there. A computed value can't prefix
+/// compile-time ids, so it yields None and the option is ignored (the
+/// pre-existing behavior).
+pub(super) fn str_or_sym_literal(e: &Expr) -> Option<String> {
+    match &*e.node {
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        _ => None,
+    }
 }
 
 /// Match `model: [:scope, record]` (symbol namespace prefix(es) + an

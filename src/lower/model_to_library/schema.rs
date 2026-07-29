@@ -118,6 +118,41 @@ pub(super) fn push_schema_methods(
             block_param: None,
     });
 
+    // def self.schema_time_columns — the temporal subset of the above.
+    // JSON serialization is the consumer: Rails renders a temporal
+    // attribute as ISO8601-with-offset while every other column renders
+    // as its raw value, and the `[]` indexer hands back the STORED text
+    // for both. Only the schema knows which is which, so the fact is
+    // emitted rather than sniffed from the value at runtime.
+    let time_column_array = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Array {
+                elements: table
+                    .columns
+                    .iter()
+                    .filter(|c| is_temporal_col(c))
+                    .map(|c| lit_sym(c.name.clone()))
+                    .collect(),
+                style: ArrayStyle::Brackets,
+            },
+        ),
+        Ty::Array { elem: Box::new(Ty::Sym) },
+    );
+    methods.push(MethodDef {
+        name: Symbol::from("schema_time_columns"),
+        receiver: MethodReceiver::Class,
+        params: Vec::new(),
+        body: time_column_array,
+        signature: Some(fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Sym) })),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    });
+
     // def self.instantiate(row); instance = from_row(<Model>Row.from_raw(row)); instance.mark_persisted!; instance; end
     //
     // The adapter shim returns Hash[Symbol, untyped]; the framework Ruby

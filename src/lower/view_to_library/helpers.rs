@@ -17,6 +17,7 @@ use super::attr_parts::{
     append_attr_parts, default_form_class, default_method_sym, lit_str_coerce, string_interp,
     take_opt,
 };
+use super::walker::rewrite_helpers_in_expr;
 use super::{
     inflector_call, lit_str, lit_sym, route_helpers_call, send, var_ref, view_helpers_call,
     ViewCtx,
@@ -291,6 +292,36 @@ fn hash_entries(opts: Option<&Expr>) -> Vec<(Expr, Expr)> {
 /// to `RouteHelpers.<singular>_path(name.id)`. Nested arrays defer
 /// to a later slice (form_with's nested-resource fixture forces them).
 fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
+    // A CONDITIONAL url (`@root_path ? "/page/#{n}" : {controller: …}`
+    // — every lobsters index's pagination link) is two urls, not one.
+    // Resolve each branch on its own; the classifier below sees only the
+    // whole `If` and gives up on it, which is how the options-hash
+    // branch reached the tag renderer as attributes.
+    if let ExprNode::If { cond, then_branch, else_branch } = &*url.node {
+        let then_url = emit_url_arg(then_branch, ctx)?;
+        let else_url = emit_url_arg(else_branch, ctx)?;
+        return Some(Expr::new(
+            url.span,
+            ExprNode::If {
+                cond: cond.clone(),
+                then_branch: then_url,
+                else_branch: else_url,
+            },
+        ));
+    }
+    // An INTERPOLATED literal path (`"/page/#{@page - 1}"`) is already
+    // the url — there is nothing to resolve. The classifier only knows
+    // the plain-`Lit::Str` case, so this shape fell all the way through
+    // to the runtime `link_to`, taking its ternary sibling with it.
+    if matches!(&*url.node, ExprNode::StringInterp { .. }) {
+        return Some(rewrite_helpers_in_expr(url, ctx));
+    }
+    // `{controller: …, action: …, page: …}` — Rails' url-options hash.
+    // Resolves through the generated route-table lookup (see
+    // `lower_url_option_helpers`).
+    if let Some(resolved) = emit_url_options_hash(url, ctx) {
+        return Some(resolved);
+    }
     // Association-reader record URL (`link_to text,
     // showing_user.invited_by_user`) — Rails resolves the record
     // polymorphically through its named route. The reader's target
@@ -362,6 +393,52 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
             Some(route_helpers_call(&path_name, path_args))
         }
     }
+}
+
+/// `{controller: controller_name, action: action_name, page: @page + 1}`
+/// → `RouteHelpers.path_for_controller_action_page(controller_name,
+/// action_name, (@page + 1).to_s)`. The resolver is generated from the
+/// app's own route table (`lower_url_option_helpers`), keyed on the same
+/// extra-key set, so the two sides agree by construction.
+///
+/// Every value goes through `.to_s`: the resolver's params are String
+/// (a path segment is text) while `page:` arrives as an Integer
+/// expression. Returns None for any hash that isn't this form, so an
+/// ordinary opts hash in url position still falls through.
+fn emit_url_options_hash(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
+    let ExprNode::Hash { entries, .. } = &*url.node else {
+        return None;
+    };
+    let mut by_key: Vec<(String, Expr)> = Vec::new();
+    for (k, v) in entries {
+        let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node else {
+            return None;
+        };
+        by_key.push((value.as_str().to_string(), v.clone()));
+    }
+    let take = |name: &str| -> Option<Expr> {
+        by_key.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+    };
+    let controller = take("controller")?;
+    let action = take("action")?;
+    let mut extras: Vec<(String, Expr)> = by_key
+        .iter()
+        .filter(|(k, _)| k != "controller" && k != "action")
+        .cloned()
+        .collect();
+    extras.sort_by(|a, b| a.0.cmp(&b.0));
+    let extra_names: Vec<String> = extras.iter().map(|(k, _)| k.clone()).collect();
+    let to_s = |e: Expr| send(Some(e), "to_s", Vec::new(), None, false);
+    let mut args = vec![to_s(controller), to_s(action)];
+    args.extend(extras.into_iter().map(|(_, v)| to_s(v)));
+    let args = args
+        .into_iter()
+        .map(|a| rewrite_helpers_in_expr(&a, ctx))
+        .collect();
+    Some(route_helpers_call(
+        &crate::lower::url_options_helper_name(&extra_names),
+        args,
+    ))
 }
 
 /// Each element of a nested URL array resolves to `(singular, id_expr)`.
