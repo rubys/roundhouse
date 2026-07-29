@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -88,6 +88,16 @@ pub struct App {
     /// along. Empty for apps whose partials take no locals.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub partial_local_types: HashMap<Symbol, HashMap<Symbol, Ty>>,
+    /// Methods whose result Rails would treat as an html-safe buffer,
+    /// because their body ends in `<e>.html_safe` (lobsters'
+    /// `Hat#to_html_label`). The mark is a VALUE-level fact in Rails,
+    /// carried by a String subclass the shared runtime cannot have, so
+    /// `lower::html_safe` records it here and erases the call. The view
+    /// lowerer consults it before wrapping an interpolation in
+    /// `html_escape` — escaping a marked result ships literal
+    /// `&lt;span&gt;` markup to the page.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub html_safe_methods: BTreeSet<Symbol>,
     /// The app's `Rails::Application` subclass from
     /// `config/application.rb` (e.g. `Lobsters::Application`),
     /// reparented at ingest onto `Rails::Application` itself. Its
@@ -262,6 +272,7 @@ impl App {
             rbs_signatures: HashMap::new(),
             helper_method_index: HashMap::new(),
             partial_local_types: HashMap::new(),
+            html_safe_methods: BTreeSet::new(),
             rails_application: None,
             concern_filters: HashMap::new(),
             concern_model_items: HashMap::new(),

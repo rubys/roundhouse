@@ -204,6 +204,7 @@ pub struct ViewLowerCtx<'a> {
     reference_reads: std::rc::Rc<std::collections::HashSet<String>>,
     reference_targets: std::rc::Rc<std::collections::HashMap<String, String>>,
     nilable_scalar_reads: std::rc::Rc<std::collections::HashSet<String>>,
+    html_safe_methods: std::rc::Rc<std::collections::HashSet<String>>,
     model_singulars: std::rc::Rc<std::collections::HashSet<String>>,
     slug_models: std::rc::Rc<std::collections::HashSet<String>>,
     bool_readers: std::rc::Rc<std::collections::HashMap<String, std::collections::HashSet<String>>>,
@@ -232,6 +233,9 @@ impl<'a> ViewLowerCtx<'a> {
             reference_reads: std::rc::Rc::new(reference_reader_names(app)),
             reference_targets: std::rc::Rc::new(reference_target_names(app)),
             nilable_scalar_reads: std::rc::Rc::new(nilable_scalar_reader_names(app)),
+            html_safe_methods: std::rc::Rc::new(
+                app.html_safe_methods.iter().map(|m| m.as_str().to_string()).collect(),
+            ),
             model_singulars: std::rc::Rc::new(
                 app.models
                     .iter()
@@ -580,6 +584,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         reference_reads: lx.reference_reads.clone(),
         reference_targets: lx.reference_targets.clone(),
         nilable_scalar_reads: lx.nilable_scalar_reads.clone(),
+        html_safe_methods: lx.html_safe_methods.clone(),
         model_singulars: lx.model_singulars.clone(),
         slug_models: lx.slug_models.clone(),
         bool_readers: lx.bool_readers.clone(),
@@ -2998,6 +3003,12 @@ pub(super) struct ViewCtx {
     /// `RouteHelpers.user_path(story.user)` through this.
     pub(super) reference_targets:
         std::rc::Rc<std::collections::HashMap<String, String>>,
+    /// Method names whose result is html-safe by construction —
+    /// their body ends in `.html_safe` (`App::html_safe_methods`,
+    /// recorded by `lower::html_safe`). A bare interpolation of one
+    /// skips the auto-escape wrap; escaping it would ship literal
+    /// `&lt;span&gt;` markup, which is what `hat.to_html_label` does.
+    pub(super) html_safe_methods: std::rc::Rc<std::collections::HashSet<String>>,
     /// Nilable-scalar reader names through a record: typed_store
     /// attributes with no default (nil when unset). Emptiness
     /// predicates on these get the nil-safe forms (see

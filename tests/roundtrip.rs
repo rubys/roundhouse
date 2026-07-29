@@ -123,6 +123,7 @@ fn tiny_blog_round_trips() {
         rbs_signatures: std::collections::HashMap::new(),
         helper_method_index: std::collections::HashMap::new(),
         partial_local_types: std::collections::HashMap::new(),
+        html_safe_methods: std::collections::BTreeSet::new(),
         rails_application: None,
         concern_filters: std::collections::HashMap::new(),
         concern_model_items: std::collections::HashMap::new(),

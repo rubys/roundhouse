@@ -62,6 +62,7 @@ pub mod request_index;
 pub mod arel_attribute;
 pub mod exclude_predicate;
 pub mod literal_append;
+pub mod html_safe;
 pub mod rails_cache;
 pub mod session_options;
 pub mod relation_residue;
@@ -96,6 +97,7 @@ pub use request_index::apply_request_index_lowering;
 pub use arel_attribute::apply_arel_attribute_lowering;
 pub use exclude_predicate::apply_exclude_predicate_lowering;
 pub use literal_append::apply_literal_append_lowering;
+pub use html_safe::apply_html_safe_lowering;
 pub use rails_cache::apply_rails_cache_lowering;
 pub use session_options::apply_session_options_lowering;
 pub use send_dispatch::apply_send_static_dispatch;
@@ -180,6 +182,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // must run BEFORE the render lowering, whose rewrite of
     // `render_to_string` into a `Views::` call is the tail this gates on.
     ("rails_cache", &[]),
+    // `<e>.html_safe` → `<e>`, recording the producing method on the
+    // App. No ordering constraints among the lowerings; the view
+    // lowerer reads what it records, and that runs later, at emit.
+    ("html_safe", &[]),
     ("transaction_ground", &[]),
     ("partial_qualify", &[]),
     ("capture_inline", &[]),
@@ -292,6 +298,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("literal_append");
     rails_cache::apply_rails_cache_lowering(app);
     ran!("rails_cache");
+    html_safe::apply_html_safe_lowering(app);
+    ran!("html_safe");
     transaction_ground::apply_transaction_grounding(app);
     ran!("transaction_ground");
     partial_qualify::apply_partial_qualification(app);

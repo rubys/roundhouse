@@ -619,8 +619,34 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     // `html_escape(ViewHelpers.content_for_get(:title) || "Real
     // Blog")` rather than carrying the raw `content_for` Send.
     let rewritten = rewrite_helpers_in_expr(inner, ctx);
+    // A marked value skips the wrap. `<%= x.html_safe %>` says so right
+    // here; a call to a method whose body ends in `.html_safe` says it
+    // one level down, and `lower::html_safe` recorded that on the App so
+    // this side can see it. Escaping either one ships literal
+    // `&lt;span&gt;` markup where the author asked for markup —
+    // lobsters' `hat.to_html_label` renders a whole element.
+    if let Some(safe) = html_safe_value(&rewritten, ctx) {
+        return vec![accumulator_append_call(coerce_to_s(safe), ctx)];
+    }
     let escaped = view_helpers_call("html_escape", vec![coerce_to_s(rewritten)]);
     vec![accumulator_append_call(escaped, ctx)]
+}
+
+/// The value behind an html-safe interpolation, or `None` when the
+/// expression has to be escaped. `<e>.html_safe` yields `<e>` (the mark
+/// is answered here rather than left for a runtime that has no
+/// safe-string type); a call to a recorded producer yields itself.
+fn html_safe_value(e: &Expr, ctx: &ViewCtx) -> Option<Expr> {
+    let ExprNode::Send { recv, method, args, block: None, .. } = &*e.node else {
+        return None;
+    };
+    if method.as_str() == "html_safe" && args.is_empty() {
+        return recv.clone();
+    }
+    if recv.is_some() && ctx.html_safe_methods.contains(method.as_str()) {
+        return Some(e.clone());
+    }
+    None
 }
 
 /// Re-add the `.to_s` coercion that `unwrap_to_s` stripped, so the
@@ -863,6 +889,7 @@ mod tests {
             reference_reads: Default::default(),
             reference_targets: Default::default(),
             nilable_scalar_reads: Default::default(),
+            html_safe_methods: Default::default(),
             model_singulars: Default::default(),
             slug_models: Default::default(),
             bool_readers: Default::default(),
@@ -907,6 +934,55 @@ mod tests {
                 parenthesized: false,
             },
         )
+    }
+
+    /// `recv.<method>` — a no-arg send with an explicit receiver.
+    fn send0(recv: Expr, method: &str) -> Expr {
+        Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: Some(recv),
+                method: Symbol::from(method),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        )
+    }
+
+    #[test]
+    fn interpolating_a_marked_value_skips_the_escape() {
+        // `<%= x.html_safe %>` says "do not escape this" at the call
+        // site. Wrapping it ships `&lt;b&gt;` to the page; and the mark
+        // itself has to go, since no target's String answers it.
+        let stmts = walk_body(&buf_append(send_to_s(send0(var("x"), "html_safe"))), &test_ctx());
+        let emitted = stmts.iter().map(crate::emit::ruby::emit_expr).collect::<Vec<_>>().join("\n");
+        assert!(!emitted.contains("html_escape"), "marked value must not be escaped:\n{emitted}");
+        assert!(!emitted.contains("html_safe"), "the mark itself must not survive:\n{emitted}");
+        assert!(emitted.contains("io << x.to_s"), "value still appended:\n{emitted}");
+    }
+
+    #[test]
+    fn interpolating_a_recorded_producer_skips_the_escape() {
+        // One level down: `hat.to_html_label` ends in `.html_safe`, so
+        // `lower::html_safe` recorded the method name and this side
+        // must not escape the element it returns.
+        let mut ctx = test_ctx();
+        ctx.html_safe_methods =
+            std::rc::Rc::new(["to_html_label".to_string()].into_iter().collect());
+        let stmts = walk_body(&buf_append(send_to_s(send0(var("hat"), "to_html_label"))), &ctx);
+        let emitted = stmts.iter().map(crate::emit::ruby::emit_expr).collect::<Vec<_>>().join("\n");
+        assert!(!emitted.contains("html_escape"), "recorded producer must not be escaped:\n{emitted}");
+        assert!(emitted.contains("hat.to_html_label"), "call preserved:\n{emitted}");
+    }
+
+    #[test]
+    fn an_ordinary_read_is_still_escaped() {
+        // The default has to survive the exception: a plain attribute
+        // read is user text and Rails escapes it.
+        let stmts = walk_body(&buf_append(send_to_s(send0(var("user"), "about"))), &test_ctx());
+        let emitted = stmts.iter().map(crate::emit::ruby::emit_expr).collect::<Vec<_>>().join("\n");
+        assert!(emitted.contains("html_escape"), "ordinary read stays escaped:\n{emitted}");
     }
 
     #[test]
