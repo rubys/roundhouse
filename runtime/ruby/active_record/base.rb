@@ -195,6 +195,21 @@ module ActiveRecord
       raise NotImplementedError, "[]= must be overridden by subclass"
     end
 
+    # `record.has_attribute?(:token)` — does this model carry that
+    # column? Answered from `schema_columns` rather than the
+    # `attributes` hash, which is what Rails consults: the emitted
+    # `attributes` omits `id`, so asking it would deny an attribute
+    # every model has. The column list is also the honest answer here —
+    # this runtime has no partial-select mode, so a loaded record
+    # always carries every column.
+    #
+    # Monomorphic on Symbol ([[feedback_monomorphize_polymorphic_apis]]).
+    # Rails also accepts a String; a String call site should coerce at
+    # the lowering rather than widen this signature.
+    def has_attribute?(name)
+      self.class.schema_columns.include?(name)
+    end
+
     # Subclasses MUST override to mutate state from a row hash. Empty
     # base body (rather than `raise NotImplementedError`) so spinel-AOT
     # generates a class-id switch at call sites — a concrete base body
@@ -396,6 +411,27 @@ module ActiveRecord
 
     def saved_changes
       {}
+    end
+
+    # The argument-taking half of the ActiveModel::Dirty read surface,
+    # for call sites that name the attribute at runtime rather than in
+    # the method name (`saved_change_to_attribute?(:url)`,
+    # `cols.map { |c| record.saved_change_to_attribute(c) }`). The
+    # per-column `saved_change_to_<col>?` / `<col>_previously_changed?`
+    # spellings are synthesized by the lowering instead, since a static
+    # runtime cannot answer a name it only learns at emit time.
+    #
+    # Defined against `saved_changes` rather than the tracking ivar, so
+    # they inherit whichever implementation the target has: the real
+    # snapshot diff on the ruby-family trees (the connection.rb reopen)
+    # and the empty-Hash subset on the strict lanes, where every Dirty
+    # predicate already answers false by design.
+    def saved_change_to_attribute?(name)
+      !saved_changes[name].nil?
+    end
+
+    def saved_change_to_attribute(name)
+      saved_changes[name]
     end
 
     # `id` never appears in the subclass `attributes` hash, so the

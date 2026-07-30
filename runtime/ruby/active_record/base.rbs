@@ -91,6 +91,8 @@ module ActiveRecord
     # Saved-change tracking (ActiveModel::Dirty subset) — see save.
     def __track_saved_changes: (bool was_new) -> void
     def saved_changes: () -> Hash[Symbol, untyped]
+    def saved_change_to_attribute?: (Symbol name) -> bool
+    def saved_change_to_attribute: (Symbol name) -> untyped
     def id_previously_changed?: () -> bool
 
     # Per-model DOM prefix (`"article"`, `"comment"`). Used by
@@ -110,6 +112,7 @@ module ActiveRecord
     # Crystal — the static type needs the method to exist.
     def []: (Symbol name) -> untyped
     def []=: (Symbol name, untyped value) -> untyped
+    def has_attribute?: (Symbol name) -> bool
 
     # Persistence state — backed by `@persisted` / `@destroyed`.
     def persisted?: () -> bool

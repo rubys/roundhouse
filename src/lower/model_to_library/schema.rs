@@ -65,12 +65,20 @@ pub(super) fn push_schema_methods(
         }
         methods.push(synth_attr_writer(owner, col));
         methods.push(synth_column_predicate(owner, col));
-        // `<col>_previously_changed?` (ActiveModel::Dirty subset) —
-        // reads the runtime Base's `saved_changes` diff of the last
-        // save. `id` is answered by Base's own flag (it never appears
-        // in the attributes hash the diff is built from).
+        // `<col>_previously_changed?` and `saved_change_to_<col>?`
+        // (ActiveModel::Dirty subset) — both read the runtime Base's
+        // `saved_changes` diff of the last save, and Rails documents
+        // them as the same question, so they share one body builder
+        // rather than drifting apart. Both spellings are synthesized
+        // because the name is per-column: nothing static can answer
+        // `saved_change_to_title?` from a single method, and
+        // method_missing is off the table
+        // ([[feedback_runtime_must_be_statically_resolvable]]).
+        // `id` is answered by Base's own flag (it never appears in the
+        // attributes hash the diff is built from).
         if col.name.as_str() != "id" {
-            methods.push(synth_column_prev_changed(owner, col));
+            methods.push(synth_column_dirty_pred(owner, col, prev_changed_name(col)));
+            methods.push(synth_column_dirty_pred(owner, col, saved_change_name(col)));
         }
     }
 
@@ -309,13 +317,13 @@ pub fn shakeable_synthesized_names(table: &Table) -> Vec<Symbol> {
     for col in &table.columns {
         // Mirrors `synth_column_predicate` (pushed for every column).
         names.push(Symbol::from(format!("{}?", col.name.as_str())));
-        // Mirrors `synth_column_prev_changed` (skipped for `id`,
-        // which Base answers from its own flag).
+        // Mirrors the two `synth_column_dirty_pred` spellings (both
+        // skipped for `id`, which Base answers from its own flag).
+        // Shares the synthesizers' own name helpers, so a rename can't
+        // silently strand one of them here.
         if col.name.as_str() != "id" {
-            names.push(Symbol::from(format!(
-                "{}_previously_changed?",
-                col.name.as_str()
-            )));
+            names.push(prev_changed_name(col));
+            names.push(saved_change_name(col));
         }
     }
     // Mirrors `synth_update_typed(.., bang: true)`.
@@ -1213,11 +1221,25 @@ pub(super) fn column_read_method_for(col: &Column) -> &'static str {
     }
 }
 
-/// `def <col>_previously_changed?; saved_changes.key?(:<col>); end` —
-/// the per-attribute ActiveModel::Dirty predicate, answered from the
-/// runtime Base's last-save diff (lobsters:
+/// `<col>_previously_changed?` — the ActiveModel::Dirty spelling that
+/// reads as a property of the column (lobsters:
 /// `merged_story_id_previously_changed?` in Story#log_moderations).
-fn synth_column_prev_changed(owner: &ClassId, col: &Column) -> MethodDef {
+fn prev_changed_name(col: &Column) -> Symbol {
+    Symbol::from(format!("{}_previously_changed?", col.name.as_str()))
+}
+
+/// `saved_change_to_<col>?` — the spelling that reads as a property of
+/// the save (lobsters: `saved_change_to_selector?` in Domain). Rails
+/// documents the two as the same question.
+fn saved_change_name(col: &Column) -> Symbol {
+    Symbol::from(format!("saved_change_to_{}?", col.name.as_str()))
+}
+
+/// `def <name>; !saved_changes[:<col>].nil?; end` — the per-attribute
+/// ActiveModel::Dirty predicate, answered from the runtime Base's
+/// last-save diff. `name` selects which of the two equivalent spellings
+/// above this instance carries; the body is identical either way.
+fn synth_column_dirty_pred(owner: &ClassId, col: &Column, name: Symbol) -> MethodDef {
     // `!saved_changes[:<col>].nil?` rather than `.key?` — the diff's
     // values are always [prev, value] pairs so nil-of-missing-key IS
     // key absence, and the indexed read + nil-check renders natively
@@ -1267,7 +1289,7 @@ fn synth_column_prev_changed(owner: &ClassId, col: &Column) -> MethodDef {
         },
     );
     MethodDef {
-        name: Symbol::from(format!("{}_previously_changed?", col.name.as_str())),
+        name,
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
         body,

@@ -45,11 +45,25 @@
       "note": "Undiagnosed. Shape suggests a Hash emitted as an Array (or a symbol-keyed read lowered to an index) — needs a reduction before it can be ranked honestly."
     },
     {
+      "slug": "scope-not-on-relation",
+      "title": "a model scope does not chain off a Relation",
+      "owner": "compiler",
+      "match": "undefined method [`']\\w+' for an instance of ActiveRecord::Relation",
+      "note": "Scopes lower to class methods on the model, so Model.scope resolves but relation.scope does not — lobsters reaches them through associations (user.comments.active, where :active is scope :active on Comment). Matches the whole family rather than one scope name, since which scope surfaces first is an accident of call order. Sibling of the residual noted in the Relation[T] work: scalar class methods deliberately do not forward."
+    },
+    {
+      "slug": "has-attribute-predicate",
+      "title": "has_attribute? unimplemented on the model surface",
+      "owner": "compiler",
+      "match": "undefined method [`']has_attribute\\?'",
+      "note": "Arrived with lobsters c7dce360 (#2164), which rewrote the Token concern's after_initialize to guard on has_attribute?(:token). The concern is included widely, so it fires on nearly every model factory — it briefly accounted for 140 of 354 examples as the first exception, sitting in front of the dirty-alias cause behind it."
+    },
+    {
       "slug": "dirty-saved-change-alias",
-      "title": "saved_change_to_<col>? not synthesized",
+      "title": "saved_change_to_* read surface incomplete",
       "owner": "compiler",
       "match": "undefined method [`']saved_change_to_\\w+\\?'",
-      "note": "The ActiveModel::Dirty subset synthesizes <col>_previously_changed? but not the saved_change_to_<col>? spelling of the same question."
+      "note": "This regex spans TWO shapes, which is why its count did not move when only one was fixed: the per-column saved_change_to_<col>? (synthesized by the lowering, since a static runtime cannot answer a name it learns at emit time) and the argument-taking saved_change_to_attribute?(:col) (a runtime Base method). The generic form was the dominant one — 133 of the 149 examples."
     },
     {
       "slug": "nil-arith-coercion",
