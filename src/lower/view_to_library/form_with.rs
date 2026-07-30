@@ -413,8 +413,28 @@ fn route_helperize(url: Expr, route_helpers: &impl Fn() -> Expr, ctx: &ViewCtx) 
         ExprNode::Var { name, .. } | ExprNode::Ivar { name } => Some(name.as_str()),
         _ => None,
     };
+    // The record's MODEL, not the binding's name. `model_singulars` alone
+    // asks whether the identifier happens to be spelled like a model, which
+    // holds for `form_with url: comment` and fails for any binding named
+    // anything else — lobsters' `url: new_message` is a partial local holding
+    // a `Message`, so the name misses, the record falls through to the runtime
+    // `url_for` below, and that fallback is CRuby-overlay-only: under spinel
+    // AOT the record reaches a `(String) -> String` signature and the C
+    // compiler reinterprets the struct pointer as a char pointer, which is a
+    // silent wrong-output miscompile rather than a refusal.
+    //
+    // `ivar_models` is the analyzer's name → model map, already consulted by
+    // the sibling `model:` option through `record_model_name` (which is why
+    // that same form names its fields `message[...]` correctly). Consulting it
+    // here too keeps one source of truth for "is this binding a record, and of
+    // what model" and makes the `url:` arm agree with the `model:` arm.
     if let Some(name) = bare_name {
-        if ctx.model_singulars.contains(name) {
+        let model = if ctx.model_singulars.contains(name) {
+            Some(name.to_string())
+        } else {
+            ctx.ivar_models.get(name).cloned()
+        };
+        if let Some(name) = model.as_deref() {
             let plural = crate::naming::pluralize_snake(name);
             let member = super::route_helpers_call(&format!("{name}_path"), vec![url.clone()]);
             let collection = super::route_helpers_call(&format!("{plural}_path"), Vec::new());
@@ -1074,5 +1094,113 @@ pub(super) fn form_param_ref_name(e: &Expr) -> Option<&str> {
             Some(method.as_str())
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+    use std::rc::Rc;
+
+    fn ctx_with(model_singulars: &[&str], ivar_models: &[(&str, &str)]) -> ViewCtx {
+        ViewCtx {
+            locals: Vec::new(),
+            arg_name: String::new(),
+            resource_dir: String::new(),
+            accumulator: "io".to_string(),
+            form_records: Vec::new(),
+            nullable_locals: Default::default(),
+            reference_reads: Default::default(),
+            reference_targets: Default::default(),
+            nilable_scalar_reads: Default::default(),
+            html_safe_methods: Default::default(),
+            model_singulars: Rc::new(
+                model_singulars.iter().map(|s| s.to_string()).collect::<HashSet<_>>(),
+            ),
+            slug_models: Default::default(),
+            bool_readers: Default::default(),
+            store_readers: Default::default(),
+            route_helper_names: Default::default(),
+            stylesheets: Vec::new(),
+            partial_ivars: Default::default(),
+            dyn_pools: Default::default(),
+            partial_extras: Default::default(),
+            strict_locals: Default::default(),
+            ivar_models: Rc::new(
+                ivar_models
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect::<HashMap<_, _>>(),
+            ),
+        }
+    }
+
+    fn route_helpers() -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Const { path: vec![Symbol::from("RouteHelpers")] },
+        )
+    }
+
+    fn bare_local(name: &str) -> Expr {
+        Expr::new(Span::synthetic(), ExprNode::Var { id: VarId(0), name: Symbol::from(name) })
+    }
+
+    /// The shape of the lowering: a `persisted?` ternary over the model's
+    /// member and collection path helpers, with the record riding WHOLE
+    /// into the member arm.
+    fn assert_persisted_ternary(out: &Expr, member: &str, collection: &str) {
+        let ExprNode::If { cond, then_branch, else_branch } = &*out.node else {
+            panic!("expected a persisted? If, got {:?}", out.node);
+        };
+        let ExprNode::Send { method, .. } = &*cond.node else {
+            panic!("expected persisted? cond");
+        };
+        assert_eq!(method.as_str(), "persisted?");
+        for (arm, want) in [(then_branch, member), (else_branch, collection)] {
+            let ExprNode::Send { method, .. } = &*arm.node else {
+                panic!("expected a RouteHelpers call, got {:?}", arm.node);
+            };
+            assert_eq!(method.as_str(), want);
+        }
+    }
+
+    #[test]
+    fn form_url_bare_record_named_like_its_model_resolves_at_compile_time() {
+        // The pre-existing path: `form_with url: comment`, where the binding
+        // is spelled exactly like the model.
+        let out = route_helperize(bare_local("comment"), &route_helpers, &ctx_with(&["comment"], &[]));
+        assert_persisted_ternary(&out, "comment_path", "comments_path");
+    }
+
+    #[test]
+    fn form_url_bare_record_named_anything_else_still_resolves_at_compile_time() {
+        // lobsters `messages/_form`: `form_with url: new_message`, where the
+        // binding is a partial local holding a Message. The NAME is not a
+        // model singular, so a name-only gate defers to the runtime
+        // `url_for` — whose signature is `(String) -> String`, making this a
+        // silent wrong-output miscompile under spinel AOT rather than a
+        // refusal. The analyzer's name → model map is what makes it typed.
+        let ctx = ctx_with(&["message"], &[("new_message", "message")]);
+        let out = route_helperize(bare_local("new_message"), &route_helpers, &ctx);
+        assert_persisted_ternary(&out, "message_path", "messages_path");
+    }
+
+    #[test]
+    fn form_url_bare_non_record_still_defers_to_the_runtime_url_for() {
+        // A String `url:` must keep the passthrough — the runtime helper's
+        // declared signature is exactly this case, and widening the gate
+        // must not swallow it.
+        let ctx = ctx_with(&["message"], &[("new_message", "message")]);
+        let out = route_helperize(bare_local("some_path_string"), &route_helpers, &ctx);
+        let ExprNode::Send { method, recv, .. } = &*out.node else {
+            panic!("expected a url_for send, got {:?}", out.node);
+        };
+        assert_eq!(method.as_str(), "url_for");
+        let ExprNode::Const { path } = &*recv.as_ref().expect("receiver").node else {
+            panic!("expected ActionView::ViewHelpers receiver");
+        };
+        assert_eq!(path.last().map(|s| s.as_str()), Some("ViewHelpers"));
     }
 }
