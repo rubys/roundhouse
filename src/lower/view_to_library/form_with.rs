@@ -436,7 +436,26 @@ fn route_helperize(url: Expr, route_helpers: &impl Fn() -> Expr, ctx: &ViewCtx) 
         };
         if let Some(name) = model.as_deref() {
             let plural = crate::naming::pluralize_snake(name);
-            let member = super::route_helpers_call(&format!("{name}_path"), vec![url.clone()]);
+            // The `:id` SEGMENT, not the record. A member helper takes the
+            // param Rails would interpolate — `to_param` for a model that
+            // overrides it, `id` otherwise — which is what the two sibling
+            // arms (the scoped-record form and `model:`) already pass, and
+            // what the generated helper is typed for: `message_path` is
+            // `(String id) -> String`. Handing it the whole record is the
+            // same struct-pointer-as-char-pointer miscompile this arm was
+            // reached to avoid, just one call deeper.
+            //
+            // Keyed on the resolved MODEL rather than the binding name for
+            // the same reason the arm is entered that way: `new_message`
+            // holds a Message, and Message defines `to_param` (short_id), so
+            // a name-keyed lookup would miss the override and pass an
+            // Integer `id` into a String param.
+            let member_arg = if ctx.slug_models.contains(name) {
+                send(Some(url.clone()), "to_param", Vec::new(), None, false)
+            } else {
+                send(Some(url.clone()), "id", Vec::new(), None, false)
+            };
+            let member = super::route_helpers_call(&format!("{name}_path"), vec![member_arg]);
             let collection = super::route_helpers_call(&format!("{plural}_path"), Vec::new());
             let has_member = ctx.route_helper_names.is_empty()
                 || ctx.route_helper_names.contains(&format!("{name}_path"));
@@ -1103,6 +1122,17 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::rc::Rc;
 
+    fn ctx_with_slugs(
+        model_singulars: &[&str],
+        ivar_models: &[(&str, &str)],
+        slug_models: &[&str],
+    ) -> ViewCtx {
+        let mut ctx = ctx_with(model_singulars, ivar_models);
+        ctx.slug_models =
+            Rc::new(slug_models.iter().map(|s| s.to_string()).collect::<HashSet<_>>());
+        ctx
+    }
+
     fn ctx_with(model_singulars: &[&str], ivar_models: &[(&str, &str)]) -> ViewCtx {
         ViewCtx {
             locals: Vec::new(),
@@ -1150,7 +1180,10 @@ mod tests {
     /// The shape of the lowering: a `persisted?` ternary over the model's
     /// member and collection path helpers, with the record riding WHOLE
     /// into the member arm.
-    fn assert_persisted_ternary(out: &Expr, member: &str, collection: &str) {
+    /// `member_arg` is the `:id` segment reader the member helper is typed
+    /// for — never the record itself, which is the miscompile this whole
+    /// arm exists to avoid.
+    fn assert_persisted_ternary(out: &Expr, member: &str, member_arg: &str, collection: &str) {
         let ExprNode::If { cond, then_branch, else_branch } = &*out.node else {
             panic!("expected a persisted? If, got {:?}", out.node);
         };
@@ -1164,14 +1197,33 @@ mod tests {
             };
             assert_eq!(method.as_str(), want);
         }
+        let ExprNode::Send { args, .. } = &*then_branch.node else { unreachable!() };
+        let arg = args.first().expect("member helper takes the :id segment");
+        let ExprNode::Send { method, .. } = &*arg.node else {
+            panic!("member arg must be a reader off the record, got {:?}", arg.node);
+        };
+        assert_eq!(method.as_str(), member_arg);
+        let ExprNode::Send { args, .. } = &*else_branch.node else { unreachable!() };
+        assert!(args.is_empty(), "collection helper takes no argument");
     }
 
     #[test]
     fn form_url_bare_record_named_like_its_model_resolves_at_compile_time() {
         // The pre-existing path: `form_with url: comment`, where the binding
         // is spelled exactly like the model.
-        let out = route_helperize(bare_local("comment"), &route_helpers, &ctx_with(&["comment"], &[]));
-        assert_persisted_ternary(&out, "comment_path", "comments_path");
+        // Comment overrides to_param (short_id), so the segment is to_param.
+        let ctx = ctx_with_slugs(&["comment"], &[], &["comment"]);
+        let out = route_helperize(bare_local("comment"), &route_helpers, &ctx);
+        assert_persisted_ternary(&out, "comment_path", "to_param", "comments_path");
+    }
+
+    #[test]
+    fn form_url_bare_record_without_to_param_passes_id() {
+        // No to_param override — Rails interpolates `id`, and the helper's
+        // param is the scalar rather than a slug String.
+        let ctx = ctx_with_slugs(&["widget"], &[], &[]);
+        let out = route_helperize(bare_local("widget"), &route_helpers, &ctx);
+        assert_persisted_ternary(&out, "widget_path", "id", "widgets_path");
     }
 
     #[test]
@@ -1182,9 +1234,12 @@ mod tests {
         // `url_for` — whose signature is `(String) -> String`, making this a
         // silent wrong-output miscompile under spinel AOT rather than a
         // refusal. The analyzer's name → model map is what makes it typed.
-        let ctx = ctx_with(&["message"], &[("new_message", "message")]);
+        // Message defines to_param (short_id), so the slug lookup must key on
+        // the resolved MODEL — keying on the binding name would miss the
+        // override and pass an Integer id into a `(String id)` helper.
+        let ctx = ctx_with_slugs(&["message"], &[("new_message", "message")], &["message"]);
         let out = route_helperize(bare_local("new_message"), &route_helpers, &ctx);
-        assert_persisted_ternary(&out, "message_path", "messages_path");
+        assert_persisted_ternary(&out, "message_path", "to_param", "messages_path");
     }
 
     #[test]
