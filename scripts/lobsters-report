@@ -1367,8 +1367,11 @@ aot_rows = [
                    "#{(aot['binary_bytes'] / 1024.0 / 1024.0).round(1)} MiB"],
   # Surfaced, not hidden: a C warning in generated code is a signal about the
   # emitter or the compiler, and a count that only ever sat in JSON was a
-  # signal nobody read.
-  ['C warnings',   aot['c_warnings']],
+  # signal nobody read. Kept apart from spinel's own analysis warnings, which
+  # are modeling debt and run one per model — folding the two together buries
+  # the handful that describe the generated C.
+  ['C warnings',      aot['c_warnings']],
+  ['spinel warnings', aot['spinel_warnings']],
 ]
 if aot_rows.any? { |_, v| !v.nil? && !v.to_s.empty? }
   html << "<h3>AOT toolchain</h3>\n"

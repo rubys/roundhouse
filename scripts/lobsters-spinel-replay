@@ -165,10 +165,21 @@ unless opts[:skip_build] && File.executable?(BIN)
     die("build", "spin build failed after #{build_s}s", tail)
   end
   BUILD_SECONDS = build_s
-  C_WARNINGS = (File.read(log).scan(/\bwarning:/).size rescue 0)
+  # TWO PRODUCERS WRITE "warning:" INTO THIS LOG AND THEY MEAN DIFFERENT
+  # THINGS. A `spinel: warning:` line is spinel talking about its own
+  # analysis of the Ruby (`--rbs ivar pin @id dropped on Story`) — modeling
+  # debt, one per model, expected. A `file:line:col: warning:` line is cc
+  # talking about the C spinel GENERATED, which is the one that can be a
+  # latent miscompile. Counting both as one number reported "29 C warnings"
+  # for a build with 23 of the former and 6 of the latter, which reads as
+  # far worse generated code than it is while hiding the six that matter.
+  txt = (File.read(log) rescue "")
+  SPINEL_WARNINGS = txt.scan(/^spinel: warning:/).size
+  C_WARNINGS      = txt.scan(/^\S+:\d+:\d+: warning:/).size
 else
   BUILD_SECONDS = nil
   C_WARNINGS = nil
+  SPINEL_WARNINGS = nil
 end
 File.executable?(BIN) or die("build", "no binary at #{BIN}")
 
@@ -368,6 +379,7 @@ summary = {
   # real work this lane does that the others don't; it belongs on the page
   # rather than folded into (or hidden from) ms/iter.
   "aot" => { "build_seconds" => BUILD_SECONDS, "c_warnings" => C_WARNINGS,
+             "spinel_warnings" => SPINEL_WARNINGS,
              "binary_bytes" => (File.size(BIN) rescue nil),
              "spinel" => SPINEL_VERSION, "cc" => CC_VERSION },
 }
