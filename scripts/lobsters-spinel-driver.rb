@@ -12,7 +12,12 @@
 # spinel scaffold: every emitted app would otherwise carry a benchmark
 # harness it never runs.
 #
-#   ./build/blog --bench ROUTES SEQUENCE DUMPDIR WARMUP MIN_ITERS MIN_SECONDS
+#   ./build/blog --bench ROUTES SEQUENCE DUMPDIR WARMUP MIN_ITERS MIN_SECONDS SEED
+#
+# SEED is the fixture file to page-copy into the (in-memory) database BLOG_DB
+# names, or "" to serve BLOG_DB as it stands. The interpreted lanes get this
+# from scripts/lobsters-replay through the sqlite3 gem; a compiled binary has
+# no gem to borrow, so the same seed rides in here.
 #
 # ROUTES / SEQUENCE are plain text, one "VERB PATH" per line. Output is
 # plain lines on stdout; the CRuby wrapper turns them into summary.json.
@@ -199,9 +204,25 @@ class BenchDriver
     File.read("/proc/self/status")[/^VmHWM:\s+(\d+) kB/, 1].to_i
   end
 
-  def self.run(routes_file, seq_file, dump_dir, warmup, min_iters, min_seconds)
+  def self.run(routes_file, seq_file, dump_dir, warmup, min_iters, min_seconds,
+               seed_file)
+    # In-memory seed, BEFORE the baseline reading and before anything is
+    # served. main.rb has already opened BLOG_DB and run the schema DDL; the
+    # page-level backup replaces that empty database with the fixture, which
+    # is the same order scripts/lobsters-replay uses for the CRuby lanes
+    # (boot, then seed, then sample RSS).
+    #
+    # Seeding here rather than in the emitted app on purpose: an in-memory
+    # copy of a file database is a BENCHMARK shape, not something every
+    # emitted app should do at boot. The CRuby lane makes the same split —
+    # its harness owns the seed, the app owns nothing about it.
+    if seed_file.length > 0
+      Db.seed_from_file(seed_file)
+    end
+
     # Baseline: loaded and connected, nothing served yet — the instant the
-    # CRuby lanes take BOOT_RSS_KB.
+    # CRuby lanes take BOOT_RSS_KB. Sampled AFTER the seed so the fixture is
+    # inside it, matching the CRuby lanes' baseline.
     boot_rss = rss_vmrss_kb
 
     jar = Tep.str_hash

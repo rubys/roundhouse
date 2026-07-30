@@ -426,9 +426,13 @@ if (( ${#LANES[@]} > 0 )); then
                     lane_status "$LANE" failed emit "$(lane_tail "$LDIR/emit.log")"; continue
                 fi
                 mkdir -p "$SP_TREE/storage"
-                # The binary has no in-memory seeding path yet, so it serves
-                # the staged file DB. NOT the --memory shape the other lanes
-                # run; the page has to say so rather than imply parity.
+                # The staged file is now the SEED, not what gets served: the
+                # binary page-copies it into the same
+                # `file:lobsters_bench?mode=memory&cache=shared` database the
+                # interpreted lanes serve (Db.seed_from_file, invoked by the
+                # bench driver). Serving the file directly is what made this
+                # lane pay ~400 pread64 syscalls per query-heavy request that
+                # no other lane paid.
                 cp "$REPO_ROOT/build/transpiled-lobsters-ruby/storage/bench.sqlite3" \
                    "$SP_TREE/storage/bench.sqlite3" 2>/dev/null || true
                 SP_ARGS=(--tree "$SP_TREE" --sequence "$FROZEN_SEQ"

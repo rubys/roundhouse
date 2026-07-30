@@ -112,7 +112,8 @@ unless src.include?("BenchDriver")
     # unconditional, so the bench entry has to run BEFORE it and exit.
     if ARGV.length > 1 && ARGV[0] == "--bench"
       BenchDriver.run(ARGV[1].to_s, ARGV[2].to_s, ARGV[3].to_s,
-                      ARGV[4].to_i, ARGV[5].to_i, ARGV[6].to_i)
+                      ARGV[4].to_i, ARGV[5].to_i, ARGV[6].to_i,
+                      ARGV.length > 7 ? ARGV[7].to_s : "")
       exit(0)
     end
   RB
@@ -242,7 +243,23 @@ FileUtils.mkdir_p(dump)
 # ── run ──────────────────────────────────────────────────────────────
 out_path = File.join(work, "driver-out.txt")
 err_path = File.join(work, "driver-err.txt")
-env = { "BLOG_DB" => DB }
+
+# THE SHAPE THE OTHER LANES RUN. Every interpreted lane serves
+# `file:lobsters_bench?mode=memory&cache=shared` seeded from the fixture, which
+# is what the ruby-bench lobsters benchmark measures; this lane served the
+# staged FILE, and paid ~400 `pread64` syscalls per query-heavy request that the
+# lanes it is charted against did not. That is not a small correction — /top
+# profiled at 75% inside libsqlite3 and under 6% in compiled code, so the
+# AOT-vs-CRuby gap on query-heavy routes was mostly this asymmetry being read as
+# the compiler being slower.
+#
+# Same URI string as scripts/lobsters-replay's MEM_URI, and for the same
+# reason: a NAMED shared-cache database, because Db.configure opens a POOL of
+# connections and plain ":memory:" would give each its own empty one. The
+# fixture rides in as the driver's SEED argument, page-copied over the schema
+# DDL boot just created.
+MEM_URI = "file:lobsters_bench?mode=memory&cache=shared"
+env = { "BLOG_DB" => MEM_URI }
 
 # NO RETRY. The binary crashes intermittently (observed: 1 of 3 identical
 # invocations succeeded, the others died on SIGBUS) — the shape of
@@ -251,7 +268,7 @@ env = { "BLOG_DB" => DB }
 # occasional green run and hide the very thing worth reporting. A crashed
 # lane is reported as a crashed lane.
 ok = system(env, BIN, "--bench", routes_file, seq_file, dump,
-            opts[:warmup].to_s, opts[:time].to_s, opts[:min_time].to_s,
+            opts[:warmup].to_s, opts[:time].to_s, opts[:min_time].to_s, DB,
             chdir: TREE, out: out_path, err: err_path)
 raw = (File.read(out_path) rescue "")
 unless ok
@@ -342,8 +359,14 @@ fails = routes.reject { |r| r["ok"] }
 summary = {
   "generated_at" => Time.now.utc.to_s,
   "stack"        => "spinel",
-  "db"           => DB,
-  "memory"       => false,
+  # What was SERVED, and what it was seeded from. `memory` is the flag the
+  # report and the trust banner read to decide whether this lane ran the same
+  # database shape as the lanes beside it; it was false, and the page said so
+  # rather than implying parity. It is now true because the shape changed, not
+  # because the caveat became inconvenient.
+  "db"           => MEM_URI,
+  "seeded_from"  => DB,
+  "memory"       => true,
   "story_id"     => STORY,
   "comment_id"   => COMMENT,
   "total"        => routes.size,
