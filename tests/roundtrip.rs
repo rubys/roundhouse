@@ -53,6 +53,7 @@ fn tiny_blog_round_trips() {
         name: ClassId(Symbol::from("Post")),
         parent: None,
         table: TableRef(Symbol::from("posts")),
+        primary_key: None,
         attributes: Row { fields: attrs, rest: None },
         body: vec![],
         span: Span::synthetic(),

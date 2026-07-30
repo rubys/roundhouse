@@ -425,8 +425,19 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // to 521 when `Arel::Table`/`Attribute` came off the CRuby overlay
     // into the shared file (this harness does not apply the sidecar RBS
     // to a nested class, so their `initialize` params read untyped the
-    // same way `SelectManager`'s already did).
-    const CEILING: usize = 535;
+    // same way `SelectManager`'s already did). 2026-07-30: 535 → 610 —
+    // measurement moved to 595 with `Base.upsert`/`upsert_all`
+    // (connection.rb 71 → 124) and `Relation#pick` (304 → 311). The upsert
+    // builder is untyped for the same reason `update_counters` and
+    // `build_where` beside it are: it assembles SQL text out of a
+    // heterogeneous `Hash[Symbol, untyped]` row, and `unique_by` /
+    // `on_duplicate` are Rails-shaped options that arrive as a String, a
+    // Symbol, or an Array. The sidecar RBS does not reach it — this
+    // harness skips nested classes, and `ActiveRecord::Base` here is a
+    // reopen. `Base.primary_key` added 0: it returns a literal. NOTE the
+    // pre-existing headroom was already spent — the tree measured exactly
+    // 535 before this change, so the next author gets 15, not 74.
+    const CEILING: usize = 610;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions exceeds ceiling of {CEILING}.\n\

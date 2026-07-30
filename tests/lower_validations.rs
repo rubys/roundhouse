@@ -42,6 +42,7 @@ fn length_rule_fans_out_into_min_and_max_checks() {
         name: ClassId(Symbol::from("Widget")),
         parent: None,
         table: TableRef(Symbol::from("widgets")),
+        primary_key: None,
         attributes: Row::closed(),
         span: roundhouse::span::Span::synthetic(),
         body: vec![ModelBodyItem::Validation {
@@ -70,6 +71,7 @@ fn multiple_rules_on_one_attribute_stay_grouped() {
         name: ClassId(Symbol::from("Widget")),
         parent: None,
         table: TableRef(Symbol::from("widgets")),
+        primary_key: None,
         attributes: Row::closed(),
         span: roundhouse::span::Span::synthetic(),
         body: vec![ModelBodyItem::Validation {

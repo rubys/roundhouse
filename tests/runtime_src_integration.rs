@@ -797,7 +797,17 @@ fn every_runtime_method_body_concretely_typed() {
     // point is a predicate that branches on a value nothing typed — and
     // it is read across three entry points; +8 sites; ceiling raised
     // 217 → 232.
-    const CEILING: usize = 232;
+    // 2026-07-30 Base.upsert/upsert_all + Relation#pick (lobsters'
+    // Keystore reads and writes every counter through them): the row
+    // values are untyped BY CONTRACT — an upsert row is a
+    // `Hash[Symbol, untyped]` whose values reach `escape_value`, the
+    // same seam `update_counters` and `build_where` already sit on —
+    // and `unique_by`/`on_duplicate` are Rails-shaped options arriving
+    // as a String, a Symbol, or an Array. `pick` adds the one site
+    // `pluck` beside it already has (the projected column's value).
+    // `Base.primary_key` adds none: it returns a literal. +7 sites;
+    // ceiling raised 232 → 245.
+    const CEILING: usize = 245;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

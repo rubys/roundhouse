@@ -63,6 +63,7 @@ module ActiveRecord
     def delete_all: () -> Integer
     def update_all: (untyped updates) -> Integer
     def pluck: (untyped col) -> Array[String]
+    def pick: (untyped col) -> String?
     def ids: () -> Array[Integer]
     def find: (Integer id) -> untyped
     def find_by: (untyped conditions) -> untyped

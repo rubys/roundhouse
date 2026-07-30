@@ -125,6 +125,62 @@ module ActiveRecord
       ActiveRecord.adapter.changes
     end
 
+    # `Model.upsert(attrs, …)` — INSERT that folds into an UPDATE when it
+    # collides, in one statement. Rails routes the single-row form
+    # through `upsert_all`; so does this.
+    def self.upsert(attrs, unique_by: nil, on_duplicate: nil, returning: nil)
+      upsert_all([attrs], unique_by: unique_by, on_duplicate: on_duplicate, returning: returning)
+    end
+
+    # `Model.upsert_all(rows, …)` → SQLite's
+    # `INSERT … ON CONFLICT (target) DO UPDATE SET …`.
+    #
+    # The conflict target is `unique_by` when given, else the model's
+    # `primary_key` — which is why that had to become a real per-model
+    # value rather than an assumed `id`. Lobsters' Keystore is the case
+    # in point: conflicting on `id` would insert a fresh autoincrement
+    # row every call and then trip the UNIQUE index on `key`.
+    #
+    # `on_duplicate:` replaces the generated SET clause with a raw
+    # fragment (`Arel.sql("value = value + 1")` — Arel.sql is the
+    # identity here, so it arrives as a String). Otherwise every
+    # non-conflict column is assigned from `excluded`, matching Rails.
+    #
+    # NOT Rails-complete, deliberately: no RETURNING (asking for it
+    # raises rather than quietly handing back nothing) and no
+    # `record_timestamps` stamping — no corpus model upserts a table
+    # that has timestamps. Returns the affected-row count, the same
+    # currency `update_counters` deals in.
+    def self.upsert_all(rows, unique_by: nil, on_duplicate: nil, returning: nil)
+      return 0 if rows.length == 0
+      if returning
+        raise NotImplementedError, "#{name}.upsert_all: RETURNING is not supported"
+      end
+
+      cols = rows[0].keys
+      target = unique_by.nil? ? primary_key : unique_by
+      target_names = target.is_a?(Array) ? target.map { |c| c.to_s } : [target.to_s]
+
+      tuples = rows.map do |row|
+        "(" + cols.map { |c| ActiveRecord.adapter.escape_value(row[c]) }.join(", ") + ")"
+      end
+
+      assigns = on_duplicate
+      if assigns.nil?
+        updatable = cols.reject { |c| target_names.include?(c.to_s) }
+        # Every column IS the conflict target: there is nothing left to
+        # assign, and `DO UPDATE SET` with an empty list is a syntax
+        # error. Rails degrades to a no-op insert here too.
+        assigns = updatable.length == 0 ? nil : updatable.map { |c| "#{c} = excluded.#{c}" }.join(", ")
+      end
+      action = assigns.nil? ? "DO NOTHING" : "DO UPDATE SET #{assigns}"
+
+      sql = "INSERT INTO #{table_name} (#{cols.join(", ")}) VALUES #{tuples.join(", ")}" \
+            " ON CONFLICT (#{target_names.join(", ")}) #{action}"
+      ActiveRecord.adapter.execute_ddl(sql)
+      ActiveRecord.adapter.changes
+    end
+
     # `self.record_timestamps=` — Rails class-attribute toggling auto
     # timestamp stamping around a bulk write. `fill_timestamps` always
     # stamps (the toggle only matters on write paths); accept and ignore

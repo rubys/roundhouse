@@ -87,6 +87,9 @@ pub fn ingest_sequel_model(
         // `Sequel::Model` plays the role `ApplicationRecord` does there.
         parent: Some(ClassId(Symbol::from("ApplicationRecord"))),
         table: TableRef(Symbol::from(table_name)),
+        // Sequel's own override (`set_primary_key`) is not yet
+        // recognized; models declaring one keep the `id` default.
+        primary_key: None,
         attributes,
         body,
         span: Span {

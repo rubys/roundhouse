@@ -125,6 +125,7 @@ pub fn ingest_roda_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestR
         name: ClassId(Symbol::from("ApplicationRecord")),
         parent: Some(ClassId(Symbol::from("ActiveRecord::Base"))),
         table: crate::ident::TableRef(Symbol::from("application_records")),
+        primary_key: None,
         attributes: Row::closed(),
         body: Vec::new(),
         span: Span::synthetic(),

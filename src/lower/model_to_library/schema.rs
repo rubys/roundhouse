@@ -89,6 +89,25 @@ pub(super) fn push_schema_methods(
             block_param: None,
     });
 
+    // def self.primary_key — emitted ONLY when the model overrode
+    // Rails' default, so the runtime Base's `"id"` answers for everyone
+    // else and no target pays a per-model method for the common case.
+    if let Some(pk) = &model.primary_key {
+        methods.push(MethodDef {
+            name: Symbol::from("primary_key"),
+            receiver: MethodReceiver::Class,
+            params: Vec::new(),
+            body: lit_str(pk.as_str().to_string()),
+            signature: Some(fn_sig(vec![], Ty::Str)),
+            effects: EffectSet::default(),
+            enclosing_class: Some(owner.0.clone()),
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        });
+    }
+
     // def self.schema_columns
     let column_array = with_ty(
         Expr::new(

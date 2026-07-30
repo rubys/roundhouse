@@ -34,6 +34,19 @@ pub struct Model {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<ClassId>,
     pub table: TableRef,
+    /// The column named by `self.primary_key = "…"`, when the model
+    /// overrides Rails' `id` default. `None` means `id`.
+    ///
+    /// Recorded rather than re-derived from the schema, because the two
+    /// genuinely disagree: `create_table` still gives the table an `id`
+    /// column marked `primary_key: true`, and only this declaration says
+    /// that the identity the app treats as unique — and therefore the
+    /// conflict target an `upsert` must name — is a different column.
+    /// lobsters' `Keystore` is the case in hand: PK `key`, plus an `id`
+    /// column it validates by hand precisely because it is no longer the
+    /// key ([[feedback_self_describing_ir]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_key: Option<Symbol>,
     pub attributes: Row,
     /// Source-ordered class body. The Ruby emitter re-emits entries in
     /// order, so the preserved sequence is what determines byte-for-byte

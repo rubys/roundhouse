@@ -491,6 +491,15 @@ module ActiveRecord
       rows.map { |row| row["v"] }
     end
 
+    # `pick(col)` — Rails' `limit(1).pluck(col).first`: the single value
+    # from the first row, or nil when the relation matches nothing.
+    # Lobsters reads every Keystore counter through it.
+    def pick(col)
+      @limit = 1
+      rows = pluck(col)
+      rows.length == 0 ? nil : rows[0]
+    end
+
     # `ids` — primary keys, as integers.
     def ids
       @select_sql = "#{@table}.id AS v"

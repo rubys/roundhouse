@@ -64,6 +64,15 @@ module ActiveRecord
       raise NotImplementedError, "#{name}.schema_columns must be overridden"
     end
 
+    # The column this model treats as its identity. Unlike its
+    # neighbours this one does NOT raise unoverridden: Rails' default is
+    # `id` and almost every model takes it, so the lowering emits an
+    # override only for the models that declared `self.primary_key =`.
+    # Read by the upsert builder to name its conflict target.
+    def self.primary_key
+      "id"
+    end
+
     # The temporal subset of `schema_columns`. Unlike its siblings this
     # one does NOT raise unoverridden: a model with no temporal column
     # legitimately has none, and the lowering emits the (possibly empty)

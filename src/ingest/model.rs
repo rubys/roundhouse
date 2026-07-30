@@ -17,7 +17,7 @@ use crate::{ClassId, Symbol, TableRef};
 use super::expr::ingest_expr;
 use super::util::{
     class_name_path, collect_comments, constant_id_str, constant_path_of, drain_comments_before,
-    find_first_class, flatten_statements, source_has_blank_line, symbol_value,
+    find_first_class, flatten_statements, source_has_blank_line, string_value, symbol_value,
 };
 use super::{IngestError, IngestResult};
 
@@ -67,9 +67,21 @@ pub fn ingest_model(
     // naturally attach to the first body item below.
     drain_comments_before(&mut comments, class.location().start_offset());
     let mut body: Vec<ModelBodyItem> = Vec::new();
+    let mut primary_key: Option<Symbol> = None;
     if let Some(class_body) = class.body() {
         let mut prev_end: Option<usize> = None;
         for stmt in flatten_statements(class_body) {
+            // `self.primary_key = "key"` is recognized into
+            // `Model::primary_key` instead of being kept as a body item:
+            // the lowering synthesizes a reader from it, and re-emitting
+            // the assignment verbatim would call a writer no target's
+            // runtime defines. Comments above it fall through to the
+            // next statement.
+            if let Some(pk) = parse_primary_key_decl(&stmt) {
+                primary_key = Some(pk);
+                prev_end = Some(stmt.location().end_offset());
+                continue;
+            }
             let stmt_start = stmt.location().start_offset();
             let leading_area_start =
                 comments.first().map(|(off, _)| *off).filter(|off| *off < stmt_start)
@@ -109,6 +121,7 @@ pub fn ingest_model(
         name: owner,
         parent,
         table: TableRef(Symbol::from(table_name)),
+        primary_key,
         attributes,
         body,
         span: Span {
@@ -735,6 +748,22 @@ fn parse_association(
         }),
         _ => None,
     }
+}
+
+/// `self.primary_key = "key"` / `self.primary_key = :key` — Rails'
+/// per-model override of the `id` default. Prism parses it as a call to
+/// `primary_key=` on an explicit `self` receiver, which would otherwise
+/// land in `ModelBodyItem::Unknown` and be dropped.
+fn parse_primary_key_decl(stmt: &Node<'_>) -> Option<Symbol> {
+    let call = stmt.as_call_node()?;
+    call.receiver()?.as_self_node()?;
+    if constant_id_str(&call.name()) != "primary_key=" {
+        return None;
+    }
+    let args = call.arguments()?;
+    let first = args.arguments().iter().next()?;
+    let name = string_value(&first).or_else(|| symbol_value(&first))?;
+    Some(Symbol::from(name.as_str()))
 }
 
 fn dependent_from_sym(s: &str) -> Option<crate::dialect::Dependent> {

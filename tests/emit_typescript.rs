@@ -193,6 +193,7 @@ fn optional_belongs_to_emits_ternary_guard() {
         name: ClassId(Symbol::from("Article")),
         parent: None,
         table: TableRef(Symbol::from("articles")),
+        primary_key: None,
         attributes: Row::closed(),
         body: vec![ModelBodyItem::Association {
             assoc: Association::BelongsTo {
@@ -288,6 +289,7 @@ fn length_validation_emits_with_options_object() {
         name: ClassId(Symbol::from("Article")),
         parent: None,
         table: TableRef(Symbol::from("articles")),
+        primary_key: None,
         attributes: Row::closed(),
         body: vec![ModelBodyItem::Validation {
             validation: Validation {
@@ -501,6 +503,7 @@ fn custom_action_body_walks_through_sendkind_dispatch() {
         name: ClassId(Symbol::from("Article")),
         parent: None,
         table: TableRef(Symbol::from("articles")),
+        primary_key: None,
         attributes: Row::closed(),
         body: vec![],
     });
@@ -593,6 +596,7 @@ fn walker_passes_last_bound_local_to_view_fn() {
         name: ClassId(Symbol::from("Article")),
         parent: None,
         table: TableRef(Symbol::from("articles")),
+        primary_key: None,
         attributes: Row::closed(),
         body: vec![],
     });
@@ -701,6 +705,7 @@ fn custom_action_with_respond_to_flattens_to_html_branch() {
         name: ClassId(Symbol::from("Article")),
         parent: None,
         table: TableRef(Symbol::from("articles")),
+        primary_key: None,
         attributes: Row::closed(),
         body: vec![],
     });
@@ -760,6 +765,7 @@ fn custom_action_without_terminal_gets_implicit_render() {
         name: ClassId(Symbol::from("Article")),
         parent: None,
         table: TableRef(Symbol::from("articles")),
+        primary_key: None,
         attributes: Row::closed(),
         body: vec![],
     });

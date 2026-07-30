@@ -262,6 +262,7 @@ mod tests {
             name: cid(name),
             parent: None,
             table: TableRef(sym(&name.to_lowercase())),
+            primary_key: None,
             attributes: Row::default(),
             body,
             span: crate::span::Span::synthetic(),

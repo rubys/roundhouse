@@ -73,6 +73,7 @@ module ActiveRecord
     # one. The body-typer treats `raise` as divergent; it doesn't
     # contradict the declared return type.
     def self.table_name: () -> String
+    def self.primary_key: () -> String
     def self.schema_columns: () -> Array[Symbol]
     def self.schema_time_columns: () -> Array[Symbol]
     def self.instantiate: (Hash[String, untyped] _row) -> Base
