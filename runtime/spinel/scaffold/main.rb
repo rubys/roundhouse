@@ -258,6 +258,21 @@ module Main
     end
   end
 
+  # The composed dispatch table, built once — the sibling of
+  # ruby_overlay/main.rb's `route_table`, which this file went without.
+  #
+  # `RouteTable.table` is an emitted def that CONSTRUCTS every Route
+  # object on each call, so calling it per request rebuilt ~200 of them
+  # plus the concatenated array. On the CRuby lane that was filed as
+  # allocation hygiene rather than a measured win. On the AOT lane it is
+  # measured: a `sample` of a /u-only replay put `sp_PolyArray_scan` — the
+  # GC marking that freshly-built route array — among the largest costs in
+  # the profile, because /u allocates enough per request to trigger several
+  # collections and every one of them re-marked the table.
+  def self.route_table
+    @route_table ||= [RouteTable.root] + RouteTable.table
+  end
+
   # Tep::Server callback. Routes, runs the controller, copies
   # status/body/location back, and persists per-request flash via
   # cookies (flash_notice / flash_alert) so a `redirect_to … notice:`
@@ -305,8 +320,7 @@ module Main
       end
     end
 
-    matched = ActionDispatch::Router.match(verb, request_path,
-                           [RouteTable.root] + RouteTable.table)
+    matched = ActionDispatch::Router.match(verb, request_path, Main.route_table)
     if matched.nil?
       res.status = 404
       res.body = "<h1>404 Not Found</h1>"
