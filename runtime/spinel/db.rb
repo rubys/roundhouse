@@ -56,9 +56,30 @@ module SQL
   ffi_const :ROW,  100
   ffi_const :DONE, 101
   ffi_const :NULL_TYPE, 5
+  # open_v2 flags: READWRITE | CREATE | URI. The first two are what plain
+  # `sqlite3_open` uses, so a non-URI path opens identically either way.
+  ffi_const :OPEN_URI_RWC, 70
 
   ffi_func :sqlite3_open,              [:str, :ptr],                          :int
+  # `sqlite3_open` honors a `file:` URI only on a build compiled with
+  # SQLITE_USE_URI; Ubuntu's is, but that is a property of the distro's sqlite
+  # and not of this program. `open_v2` takes the flag explicitly, so a URI path
+  # means the same thing on every build — and getting it wrong is quiet in the
+  # worst way: without URI handling sqlite treats the whole
+  # `file:x?mode=memory&cache=shared` string as a FILENAME and cheerfully
+  # creates a file with that name, so the process serves a fresh empty database
+  # from disk while every log line says it opened the one that was asked for.
+  ffi_func :sqlite3_open_v2,           [:str, :ptr, :int, :str],              :int
   ffi_func :sqlite3_close,             [:ptr],                                :int
+  # Online backup — copies one open database over another at the PAGE level.
+  # Used to seed an in-memory database from a file: it replaces the whole
+  # destination, so schema DDL already run against the empty destination is
+  # simply superseded rather than conflicting. `step(-1)` means "all remaining
+  # pages in one call", which is what a boot-time seed wants (the incremental
+  # form exists to avoid holding a lock, and at boot nothing else is reading).
+  ffi_func :sqlite3_backup_init,       [:ptr, :str, :ptr, :str],              :ptr
+  ffi_func :sqlite3_backup_step,       [:ptr, :int],                          :int
+  ffi_func :sqlite3_backup_finish,     [:ptr],                                :int
   ffi_func :sqlite3_exec,              [:ptr, :str, :ptr, :ptr, :ptr],        :int
   ffi_func :sqlite3_prepare_v2,        [:ptr, :str, :int, :ptr, :ptr],        :int
   ffi_func :sqlite3_step,              [:ptr],                                :int
@@ -98,6 +119,9 @@ module SQL
   # writes the stmt handle. 8 bytes is enough for a 64-bit pointer.
   ffi_buffer :db_out,   8
   ffi_buffer :stmt_out, 8
+  # Separate from db_out: the seed source is opened while the pool's handles
+  # already exist, and reusing db_out would overwrite a live one.
+  ffi_buffer :seed_out, 8
   ffi_read_ptr :read_ptr, 0
 end
 
@@ -248,19 +272,61 @@ end
 # keep their tag, unlike the generic ConnectionPool's int slot), @free is
 # an IntArray stack of available indices into @conns.
 class DbPool
+  # PRAGMAs ARE PER-CONNECTION, so they run on every handle the pool opens,
+  # not once on the first. (The same reason runtime/go/v2/db.go sets them in
+  # the DSN rather than with a one-shot Exec.)
+  #
+  # WHY THESE, MEASURED. This runtime was the only one setting no pragmas at
+  # all — kotlin, csharp, go and typescript each set theirs — and a file-backed
+  # server pays for that on every request. SQLite's default page cache is 2 MB;
+  # the lobsters fixture is 42 MB, so a long-lived process re-reads the same
+  # pages from the OS on every visit instead of keeping the working set. On the
+  # bench that showed up as ~400 `pread64` syscalls per /top visit, with 75% of
+  # the profile inside libsqlite3 and under 6% in compiled code. One query
+  # repeated six times on one connection against that fixture: 1,762 preads at
+  # the default, 516 with a large cache — the rest was re-reading what it had
+  # already read.
+  #
+  # cache_size is NEGATIVE on purpose: sqlite reads a positive value as a page
+  # COUNT and a negative one as a KiB budget, so -65536 is 64 MiB regardless of
+  # page_size, while 65536 would be 64k PAGES — 256 MiB at the 4 KiB default,
+  # and silently different again on a fixture built with another page size.
+  #
+  # An in-memory database ignores all three (its pages are already the heap),
+  # which is harmless: this is a fixed cost at boot on a path that then does
+  # nothing.
+  PRAGMAS = [
+    "PRAGMA cache_size=-65536",
+    # Read pages straight out of the page cache by mapping the file, which
+    # drops the read() syscall and its copy for everything that fits.
+    "PRAGMA mmap_size=268435456",
+    # WAL for readers-alongside-writer, and a bounded wait rather than an
+    # immediate SQLITE_BUSY when a write does overlap — what the sibling
+    # runtimes set, and what a pool of connections on one file needs.
+    "PRAGMA journal_mode=WAL",
+    "PRAGMA busy_timeout=5000",
+  ].freeze
+
   def initialize(path, n)
     @conns = []
     @free  = []
     i = 0
     while i < n
-      rc = SQL.sqlite3_open(path, SQL.db_out)
+      rc = SQL.sqlite3_open_v2(path, SQL.db_out, SQL::OPEN_URI_RWC, nil)
       if rc != SQL::OK
         # Best-effort error surface — sqlite3_errmsg requires a valid db
         # handle, which we don't have on open failure. The numeric rc +
         # path are the only signals we can raise pre-handle.
         raise "Db.configure: sqlite3_open(" + path + ") failed (" + rc.to_s + ")"
       end
-      @conns.push(DbConn.new(SQL.read_ptr(SQL.db_out)))
+      dbh = SQL.read_ptr(SQL.db_out)
+      # Deliberately not raising on a refused pragma. Every one of these is an
+      # optimization or a politeness; none changes a query's RESULT. A build of
+      # sqlite that declines one (journal_mode=WAL on a read-only mount, say)
+      # should still serve, slower, rather than fail to boot — and a pragma
+      # that silently did nothing is what the numbers above would reveal.
+      PRAGMAS.each { |p| SQL.sqlite3_exec(dbh, p, nil, nil, nil) }
+      @conns.push(DbConn.new(dbh))
       @free.push(i)
       i += 1
     end
@@ -334,6 +400,58 @@ module Db
       n = ev.to_i
     end
     @pool = DbPool.new(path, n)
+  end
+
+  # Replace this database's contents with those of the file at `src_path`,
+  # page for page, then leave planner statistics behind.
+  #
+  # WHAT IT IS FOR. An in-memory database is the shape the ruby-bench lobsters
+  # benchmark measures, and the shape every interpreted lane here already runs
+  # (`file:lobsters_bench?mode=memory&cache=shared`, seeded by
+  # scripts/lobsters-replay through the sqlite3 gem's Backup). This is the same
+  # seed for a compiled binary, which cannot borrow the harness's gem: without
+  # it the AOT lane serves from disk while the lanes it is charted against serve
+  # from RAM, and pays ~400 `pread64` syscalls per query-heavy request that they
+  # do not — a difference read off the profile as the compiler being slower.
+  #
+  # A page-level backup, not table-by-table SQL: it copies indexes and
+  # sqlite_stat1 as they are, needs no list of tables, and cannot get insertion
+  # order wrong against foreign keys. It REPLACES the destination, so schema DDL
+  # already run against the empty database is superseded rather than conflicting
+  # — the same reason the CRuby lane can seed after boot.
+  #
+  # Runs on the pool's first connection. With a shared-cache in-memory database
+  # every pooled handle sees one database, so seeding through one seeds all;
+  # with a file database it is the same file. Boot-time only — a live reader
+  # would hold a lock the backup has to wait for.
+  def self.seed_from_file(src_path)
+    dest = current_conn.dbh
+    rc = SQL.sqlite3_open_v2(src_path, SQL.seed_out, SQL::OPEN_URI_RWC, nil)
+    if rc != SQL::OK
+      raise "Db.seed_from_file: cannot open " + src_path + " (" + rc.to_s + ")"
+    end
+    src = SQL.read_ptr(SQL.seed_out)
+    bk = SQL.sqlite3_backup_init(dest, "main", src, "main")
+    if bk.nil?
+      # errmsg lives on the DESTINATION handle for a failed backup_init.
+      msg = SQL.sqlite3_errmsg(dest)
+      SQL.sqlite3_close(src)
+      raise "Db.seed_from_file: backup_init failed: " + msg
+    end
+    step_rc = SQL.sqlite3_backup_step(bk, -1)
+    SQL.sqlite3_backup_finish(bk)
+    SQL.sqlite3_close(src)
+    # DONE, not OK, is success for a completed step(-1); OK means pages remain,
+    # which for -1 would mean it did not finish.
+    if step_rc != SQL::DONE
+      raise "Db.seed_from_file: backup_step(" + src_path + ") -> " + step_rc.to_s
+    end
+    # The fixture ships without sqlite_stat1, and an unplanned database
+    # misplans the hottest-stories SELECT into a full-table walk plus a
+    # temp-btree sort instead of reading hotness_idx to the LIMIT. Every other
+    # lane ANALYZEs its seeded copy for exactly this reason; skipping it here
+    # would hand one lane a planner accident the others do not have.
+    exec("ANALYZE")
   end
 
   # The DbConn this fiber should read/write through. Set by
