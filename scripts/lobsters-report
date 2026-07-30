@@ -125,6 +125,13 @@ run_dir  = File.basename(run_path)
 mrows    = matrix && (matrix['rows'] || [])
 content  = lanes_mode ? sibling(File.join(run_path, prim), 'content-parity.json') : nil
 jr_content = lanes_mode ? sibling(File.join(run_path, 'jruby'), 'content-parity.json') : nil
+# The AOT lane's content parity. bench-lobsters diffs every emit lane
+# against the Rails oracle and publishes one of these per lane, but the
+# page used to render only the primary lane's — so the AOT lane's fidelity
+# existed as a file on the server and as one line in the trust banner,
+# with no route list, no token counts and no hunks anywhere. Which is the
+# lane whose fidelity is least settled.
+sp_content = lanes_mode ? sibling(File.join(run_path, 'spinel'), 'content-parity.json') : nil
 
 # ── formatting ───────────────────────────────────────────────────────
 
@@ -180,6 +187,11 @@ end
 COLOR_RH    = '#7d4cdb'   # roundhouse (matches spinel/violet family in bench-report)
 COLOR_RAILS = '#cc342d'   # Rails (ruby red)
 COLOR_JR    = '#5382a1'   # JRuby (steel blue, matches bench-report's jruby)
+COLOR_SP    = '#1f8a70'   # Roundhouse AOT / spinel (teal — a different
+                          # HUE from roundhouse's violet, not a shade of
+                          # it: the two are the same emit on different
+                          # runtimes, and the chart's job is telling them
+                          # apart at a glance
 COLOR_OK    = '#2e7d32'
 COLOR_FAIL  = '#c0392b'
 
@@ -321,13 +333,25 @@ end
 # Rails ms descending so the endpoints that dominate the sequence sit on
 # top. Log scale because endpoint latencies span 0.1–30+ ms.
 
-def paired_hbar(rows, jr: false)
-  vals = rows.flat_map { |r| [r[:rails], r[:rh], (r[:jr] if jr)] }.compact.select { |v| v > 0 }
+# One entry per lane the chart can draw, in draw order. A series list
+# rather than a keyword per lane: the AOT lane was the second addition and
+# a third boolean would have meant threading `nbars` arithmetic through
+# five more places.
+PAIRED_SERIES = [
+  [:rails, COLOR_RAILS, 'rails'],
+  [:rh,    COLOR_RH,    'roundhouse'],
+  [:sp,    COLOR_SP,    'roundhouse AOT'],
+  [:jr,    COLOR_JR,    'jruby'],
+].freeze
+
+def paired_hbar(rows, keys)
+  series = PAIRED_SERIES.select { |k, _, _| keys.include?(k) }
+  vals = rows.flat_map { |r| series.map { |k, _, _| r[k] } }.compact.select { |v| v > 0 }
   return '' if vals.empty?
   min_dec = [Math.log10(vals.min).floor, 0].min
   max_dec = [Math.log10(vals.max).ceil, min_dec + 1].max
 
-  nbars    = jr ? 3 : 2
+  nbars    = series.size
   width    = 760
   left_pad = 190
   right    = 70
@@ -341,14 +365,13 @@ def paired_hbar(rows, jr: false)
   height   = top + group_h * rows.size + bot
 
   buf = +svg_open(width, height)
-  # legend
-  buf << r(left_pad, 6, 12, 10, fill: COLOR_RAILS)
-  buf << t(left_pad + 16, 15, 'rails', fill: '#333', size: 11)
-  buf << r(left_pad + 70, 6, 12, 10, fill: COLOR_RH)
-  buf << t(left_pad + 86, 15, 'roundhouse', fill: '#333', size: 11)
-  if jr
-    buf << r(left_pad + 170, 6, 12, 10, fill: COLOR_JR)
-    buf << t(left_pad + 186, 15, 'jruby', fill: '#333', size: 11)
+  # legend — laid out from each label's own width so a longer lane name
+  # can't overlap the next swatch.
+  lx = left_pad
+  series.each do |_, color, label|
+    buf << r(lx, 6, 12, 10, fill: color)
+    buf << t(lx + 16, 15, label, fill: '#333', size: 11)
+    lx += 16 + label.length * 6 + 18
   end
 
   (min_dec..max_dec).each do |d|
@@ -367,14 +390,10 @@ def paired_hbar(rows, jr: false)
     y = top + i * group_h
     label_y = y + (barh * nbars + inner * (nbars - 1)) / 2.0 + 3
     buf << t(left_pad - 6, label_y, row[:key], anchor: 'end', size: 10, fill: '#333')
-    if row[:rails]
-      buf << r(left_pad, y, scale.call(row[:rails]), barh, fill: COLOR_RAILS)
-    end
-    if row[:rh]
-      buf << r(left_pad, y + barh + inner, scale.call(row[:rh]), barh, fill: COLOR_RH)
-    end
-    if jr && row[:jr] && row[:jr] > 0
-      buf << r(left_pad, y + (barh + inner) * 2, scale.call(row[:jr]), barh, fill: COLOR_JR)
+    series.each_with_index do |(key, color, _), s|
+      v = row[key]
+      next unless v && v > 0
+      buf << r(left_pad, y + (barh + inner) * s, scale.call(v), barh, fill: color)
     end
     if row[:ratio]
       buf << t(width - right + 4, label_y, "#{fmt_dec(row[:ratio], 1)}×",
@@ -817,6 +836,10 @@ jr_pr = jruby_seq && jruby_seq['per_route']
 rl_int_pr = prim == 'ruby' ? sibling(File.join(run_path, 'rails-int'), 'rails.json')&.dig('per_route') : nil
 rh_int_pr = prim == 'ruby' ? sibling(File.join(run_path, 'ruby-int'), 'summary.json')&.dig('sequence_timing', 'per_route') : nil
 rl_jvm_pr = lanes_mode ? sibling(File.join(run_path, 'rails-jruby'), 'rails.json')&.dig('per_route') : nil
+# The AOT lane, as a CHART series rather than a table-only column: it is a
+# different runtime for the same emit, and where it wins and loses is not
+# uniform — the whole point of a per-endpoint view.
+sp_pr = lanes_mode ? sibling(File.join(run_path, 'spinel'), 'summary.json')&.dig('sequence_timing', 'per_route') : nil
 if rh_pr && rl_pr && !rh_pr.empty?
   shared = rh_pr.keys.select { |k| rl_pr.key?(k) }
   rh_iters = timing['iterations'].to_i
@@ -825,6 +848,7 @@ if rh_pr && rl_pr && !rh_pr.empty?
     rh = rh_pr[k]['ms_median'].to_f
     { key: k, rails: rl, rh: rh,
       jr: jr_pr&.dig(k, 'ms_median')&.to_f,
+      sp: sp_pr&.dig(k, 'ms_median')&.to_f,
       rails_int: rl_int_pr&.dig(k, 'ms_median')&.to_f,
       rh_int:    rh_int_pr&.dig(k, 'ms_median')&.to_f,
       rails_jvm: rl_jvm_pr&.dig(k, 'ms_median')&.to_f,
@@ -832,25 +856,44 @@ if rh_pr && rl_pr && !rh_pr.empty?
       per_iter: rh_iters > 0 ? (rh_pr[k]['n'].to_f / rh_iters).round : nil }
   end.sort_by { |r| -r[:rails] }
 
+  sp_col  = sp_pr && breakdown.any? { |b| b[:sp] }
   jr_col  = jr_pr && breakdown.any? { |b| b[:jr] }
   rli_col = rl_int_pr && breakdown.any? { |b| b[:rails_int] }
   rhi_col = rh_int_pr && breakdown.any? { |b| b[:rh_int] }
   rjv_col = rl_jvm_pr && breakdown.any? { |b| b[:rails_jvm] }
-  chart_note = if jr_col
-    ' The chart shows each stack\'s <strong>best configuration</strong> — Rails +YJIT, Roundhouse +YJIT, Roundhouse on JRuby' \
+  drawn = [:rails, :rh]
+  drawn << :sp if sp_col
+  drawn << :jr if jr_col
+  chart_note = if drawn.size > 2
+    lanes = drawn.map { |k| PAIRED_SERIES.find { |s| s[0] == k }[2] }
+    " The chart draws #{lanes.join(', ')}" \
       "#{rli_col || rhi_col ? '; the no-JIT lanes appear as extra columns in the table below' : ''}."
   else
     ''
   end
   html << "<h2>#{section_no}. Per-endpoint breakdown</h2>\n"
   html << <<~P
-    <p>Where the overall #{speedup ? "#{fmt_dec(speedup, 2)}× " : ''}win comes from — each endpoint's median latency over every timed visit of the frozen sequence#{jr_col ? ', per lane' : ', Rails vs roundhouse'}. Bars are log-scaled; the <strong>ratio</strong> at the right is Rails ÷ roundhouse#{jr_col ? ' (both CRuby +YJIT)' : ''} (green = roundhouse faster).#{chart_note}</p>
+    <p>Where the overall #{speedup ? "#{fmt_dec(speedup, 2)}× " : ''}win comes from — each endpoint's median latency over every timed visit of the frozen sequence#{drawn.size > 2 ? ', per lane' : ', Rails vs roundhouse'}. Bars are log-scaled; the <strong>ratio</strong> at the right is Rails ÷ roundhouse#{drawn.size > 2 ? ' (both CRuby +YJIT)' : ''} (green = roundhouse faster).#{chart_note}</p>
     <p class="caveat">A diagnostic breakdown, not a re-derivation: per-endpoint medians don't sum to the sequence median (GC and ordering don't decompose linearly), and the sub-millisecond rows sit near clock resolution — trust the ranking, not the third decimal.</p>
   P
-  html << paired_hbar(breakdown, jr: jr_col)
+  # The AOT lane's per-endpoint numbers need the parity caveat attached
+  # HERE, not left to a later section: on a route it renders incompletely
+  # it is fast at less work, and a bar is exactly the shape that hides
+  # that. Named routes rather than a general warning, so the reader knows
+  # which bars to discount and which are honest.
+  if sp_col && sp_content
+    sp_diff = (sp_content['routes'] || [])
+                .reject { |r| %w[identical equivalent oracle-failed].include?(r['verdict']) }
+                .sort_by { |r| -r['diff_tokens'].to_i }
+    unless sp_diff.empty?
+      worst = sp_diff.first(4).map { |r| "<code>#{esc(r['route'])}</code>" }.join(', ')
+      html << %(<p class="caveat"><strong>Read the AOT bars against #{sp_content['identical'] + sp_content['equivalent']}/#{sp_content['comparable'] || sp_content['total']} content parity, not in isolation.</strong> #{sp_diff.size} of its routes render something other than what Rails renders (worst by differing tokens: #{worst}), and a route that renders less is faster for a reason that is not speed. The lanes drawn beside it are at full parity. Per-route detail in the content-parity section below.</p>\n)
+    end
+  end
+  html << paired_hbar(breakdown, drawn)
 
   html << "<details>\n<summary>Per-endpoint table (#{breakdown.size} endpoints)</summary>\n"
-  html << "<table>\n<thead><tr><th>endpoint</th><th>rails</th>#{rli_col ? '<th>rails no-JIT</th>' : ''}#{rjv_col ? '<th>rails JRuby</th>' : ''}<th>roundhouse</th>#{rhi_col ? '<th>roundhouse no-JIT</th>' : ''}#{jr_col ? '<th>jruby</th>' : ''}<th>ratio</th><th>visits/iter</th></tr></thead>\n<tbody>\n"
+  html << "<table>\n<thead><tr><th>endpoint</th><th>rails</th>#{rli_col ? '<th>rails no-JIT</th>' : ''}#{rjv_col ? '<th>rails JRuby</th>' : ''}<th>roundhouse</th>#{rhi_col ? '<th>roundhouse no-JIT</th>' : ''}#{sp_col ? '<th>AOT</th>' : ''}#{jr_col ? '<th>jruby</th>' : ''}<th>ratio</th><th>visits/iter</th></tr></thead>\n<tbody>\n"
   breakdown.each do |b|
     rcls = b[:ratio].nil? ? '' : (b[:ratio] >= 1 ? 'ok' : 'no')
     html << "<tr>"
@@ -860,14 +903,15 @@ if rh_pr && rl_pr && !rh_pr.empty?
     html << %(<td class="num">#{b[:rails_jvm] ? fmt_dec(b[:rails_jvm], 2) : '—'}</td>) if rjv_col
     html << %(<td class="num">#{fmt_dec(b[:rh], 2)}</td>)
     html << %(<td class="num">#{b[:rh_int] ? fmt_dec(b[:rh_int], 2) : '—'}</td>) if rhi_col
+    html << %(<td class="num">#{b[:sp] ? fmt_dec(b[:sp], 2) : '—'}</td>) if sp_col
     html << %(<td class="num">#{b[:jr] ? fmt_dec(b[:jr], 2) : '—'}</td>) if jr_col
     html << %(<td class="num #{rcls}">#{b[:ratio] ? "#{fmt_dec(b[:ratio], 2)}×" : '—'}</td>)
     html << %(<td class="num">#{b[:per_iter]}</td>)
     html << "</tr>\n"
   end
   html << "</tbody></table>\n"
-  if jr_col || rli_col || rhi_col || rjv_col
-    html << %(<p class="legend">All lane columns are median ms per visit; ratio = rails ÷ roundhouse (the +YJIT pair).</p>\n)
+  if sp_col || jr_col || rli_col || rhi_col || rjv_col
+    html << %(<p class="legend">All lane columns are median ms per visit; ratio = rails ÷ roundhouse (the +YJIT pair)#{sp_col ? '. The AOT column is the spinel-compiled binary — same emit, different runtime, and not at full content parity (see above)' : ''}.</p>\n)
   end
   html << "</details>\n"
 end
@@ -1015,7 +1059,7 @@ else
 end
 
 html << "<details open>\n<summary>Per-route table (#{routes.size} routes)</summary>\n"
-html << "<table>\n<thead><tr><th>route</th><th>status</th><th>bytes</th><th>ms</th>#{jr_routes.empty? ? '' : '<th>jruby</th><th>jruby ms</th>'}#{sp_routes.empty? ? '' : '<th>spinel</th><th>spinel ms</th>'}</tr></thead>\n<tbody>\n"
+html << "<table>\n<thead><tr><th>route</th><th>status</th><th>bytes</th><th>ms</th>#{jr_routes.empty? ? '' : '<th>jruby</th><th>jruby ms</th>'}#{sp_routes.empty? ? '' : '<th>AOT</th><th>AOT bytes</th><th>AOT ms</th>'}</tr></thead>\n<tbody>\n"
 routes.each do |c|
   status_cls = c['ok'] == false ? 'no' : 'ok'
   html << "<tr>"
@@ -1042,9 +1086,17 @@ routes.each do |c|
       # the in-memory copy the others use, so body sizes are not expected to
       # track the CRuby lane the way JRuby's do.
       html << %(<td class="num #{scls}">#{s['status']}</td>)
+      # Bytes, not just status. A route can answer 200 and render a
+      # fraction of the page — the AOT lane's /threads is 2.5 KB against
+      # the oracle's 58 — and a status-only column is blind to exactly
+      # that. Flagged when it falls short of the CRuby lane by more than
+      # a tenth, which is far outside the DB-shape noise.
+      sbytes = s['bytes'].to_i
+      thin = c['bytes'].to_i > 0 && sbytes < c['bytes'].to_i * 0.9
+      html << %(<td class="num#{thin ? ' no' : ''}">#{fmt_int(sbytes)}</td>)
       html << %(<td class="num">#{fmt_dec(s['ms'], 2)}</td>)
     else
-      html << %(<td class="num">—</td><td class="num">—</td>)
+      html << %(<td class="num">—</td><td class="num">—</td><td class="num">—</td>)
     end
   end
   html << "</tr>\n"
@@ -1052,9 +1104,89 @@ end
 html << "</tbody></table>\n"
 if lanes_mode
   drift = jr_routes.empty? ? '' : ' jruby cells flag a response size that drifts more than 64 bytes from the CRuby lane\'s.'
-  html << %(<p class="legend">ms columns are single-shot diagnostic latencies — use the medians above for performance.#{drift}</p>\n)
+  spn = sp_routes.empty? ? '' : ' An AOT byte count is flagged when it falls more than 10% short of the CRuby lane\'s — a 200 that renders a fraction of the page.'
+  html << %(<p class="legend">ms columns are single-shot diagnostic latencies — use the medians above for performance.#{drift}#{spn}</p>\n)
+end
+# WHY a route failed, not just that it did. The lane summaries carry the
+# reason on the route (`BENCHERR NotImplementedError: gem facade:
+# Markdowner.to_html is stubbed`), and the page used to drop it — so it
+# reported a failure whose cause was one field away, and a reader had to
+# open the JSON to learn that all of them are one root.
+failing = []
+routes.each do |c|
+  failing << ['CRuby', c['route'], c['error']] if c['ok'] == false
+end
+sp_routes.each_value do |s|
+  failing << ['AOT', s['route'], s['error']] if s['ok'] == false
+end
+jr_routes.each_value do |j|
+  failing << ['jruby', j['route'], j['error']] if j['ok'] == false
+end
+failing.reject! { |_, _, e| e.to_s.strip.empty? }
+unless failing.empty?
+  # Grouped by reason: several failing routes sharing one cause is the
+  # useful shape (six /u/:username visits, one stubbed gem), and a list
+  # repeating the same sentence hides it.
+  html << "<p class=\"caveat\"><strong>Why they fail</strong> — grouped by reason, because a shared cause is one fix:</p>\n"
+  html << "<table>\n<thead><tr><th>lane</th><th>route(s)</th><th>reason</th></tr></thead>\n<tbody>\n"
+  failing.group_by { |lane, _, err| [lane, err] }.each do |(lane, err), group|
+    rs = group.map { |_, route, _| "<code>#{esc(route)}</code>" }.join(', ')
+    html << %(<tr><td>#{esc(lane)}</td><td>#{rs}</td><td><code>#{esc(err.to_s.sub(/\ABENCHERR /, ''))}</code></td></tr>\n)
+  end
+  html << "</tbody></table>\n"
 end
 html << "</details>\n"
+
+# One non-primary emit lane's content parity, as an <h3> inside the
+# content-parity section: count, the routes that differ (token counts +
+# first hunk), and the lane's OWN normalization ledger.
+#
+# The ledger is per-lane on purpose. It differs between lanes — the AOT
+# lane masks 31 CSRF tokens where the CRuby lane masks 29, because the
+# lanes serve different numbers of forms — and this file's standing rule
+# is that a comparison states what it forgave. Reusing the primary lane's
+# ledger here would be stating the wrong one.
+def content_lane_block(content, lane_label, lane_dir)
+  ce  = content['identical'] + content['equivalent']
+  cmp = content['comparable'] || content['total']
+  diff_routes = (content['routes'] || [])
+                  .reject { |r| %w[identical equivalent oracle-failed].include?(r['verdict']) }
+                  .sort_by { |r| -r['diff_tokens'].to_i }
+  out = +"<h3>#{esc(lane_label)} — #{ce}/#{cmp}</h3>\n"
+  out << %(<span class="badge #{diff_routes.empty? ? 'pass' : 'fail'}">#{ce}/#{cmp} routes render what Rails renders</span>\n)
+  if diff_routes.empty?
+    out << %(<p>Same oracle, same token-stream comparison, same result as the lane above.</p>\n)
+    return out
+  end
+  # Ordered by differing tokens, biggest first — the page's job here is to
+  # say where the work is, and token count is the closest thing to a size
+  # for "how wrong".
+  out << %(<p>Compared against the same Rails oracle, by the same token-stream rules. Ordered by size of difference.</p>\n)
+  out << "<table>\n<thead><tr><th>route</th><th>differing tokens</th><th>first difference</th></tr></thead>\n<tbody>\n"
+  diff_routes.each do |r|
+    h = (r['hunks'] || []).first
+    cell =
+      if h
+        lines = (h['ref'] || []).map { |t| "- #{esc(t)}" } + (h['cand'] || []).map { |t| "+ #{esc(t)}" }
+        "<pre>#{lines.first(4).join("\n")}</pre>"
+      else
+        '—'
+      end
+    out << %(<tr><td><code>#{esc(r['route'])}</code></td><td class="num no">#{fmt_int(r['diff_tokens'])}</td><td>#{cell}</td></tr>\n)
+  end
+  out << "</tbody></table>\n"
+  out << %(<p class="legend"><code>-</code> is Rails, <code>+</code> is the emit. Full hunks in <code>#{esc(lane_dir)}/content-parity.md</code>.</p>\n)
+  ledger = (content['rule_ledger'] || []).reject { |r| r['applications'].to_i.zero? }
+  if ledger.any?
+    out << "<details>\n<summary>Normalization ledger — #{esc(lane_label)}</summary>\n"
+    out << "<table>\n<thead><tr><th>rule</th><th>kind</th><th>applications</th></tr></thead>\n<tbody>\n"
+    ledger.each do |r|
+      out << %(<tr><td><code>#{esc(r['name'])}</code></td><td>#{esc(r['kind'])}</td><td class="num">#{fmt_int(r['applications'])}</td></tr>\n)
+    end
+    out << "</tbody></table>\n</details>\n"
+  end
+  out
+end
 
 # ── Section: content parity ──────────────────────────────────────────
 # The upgrade from "answered" to "answered correctly". Rails renders the
@@ -1074,7 +1206,14 @@ if content
   cmp = content['comparable'] || content['total']
   stale = (content['routes'] || []).select { |r| r['verdict'] == 'oracle-failed' }
   diff_routes = (content['routes'] || []).reject { |r| %w[identical equivalent oracle-failed].include?(r['verdict']) }
-  html << "<h2>#{section_no}. Content parity vs Rails (#{ce}/#{cmp})</h2>\n"
+  # The heading names its LANE. This section scores the primary emit lane,
+  # and it used to say a bare "(26/26)" directly under a coverage heading
+  # advertising "spinel 25/26" — so a reader could carry the primary lane's
+  # parity onto a lane that was at 17/26.
+  prim_label = (mrows.find { |r| r['id'] == prim } || {})
+                 .then { |r| [r['label'], r['jit']].compact.join(' ') }
+  prim_label = prim if prim_label.strip.empty?
+  html << "<h2>#{section_no}. Content parity vs Rails — #{esc(prim_label)} (#{ce}/#{cmp})</h2>\n"
   html << %(<span class="badge #{diff_routes.empty? ? 'pass' : 'fail'}">#{ce}/#{cmp} routes render what Rails renders</span>\n)
   if stale.any?
     html << %(<p class="caveat"><strong>#{stale.size} route(s) not compared</strong> — Rails itself did not return 200 for #{stale.map { |r| "<code>#{esc(r['route'])}</code>" }.join(', ')}, so there was no expected output. They are excluded from the count above rather than scored against a broken oracle.</p>\n)
@@ -1119,9 +1258,15 @@ if content
     html << %(<p class="legend"><strong>mask</strong> — varies per run or per session by construction and carries no information. <strong>known</strong> — a genuine, understood difference from Rails, folded so it does not drown the signal but counted here so it cannot be forgotten.</p>\n)
     html << "</details>\n"
   end
-  if jr_content
-    jce = jr_content['identical'] + jr_content['equivalent']
-    html << %(<p class="legend">jruby lane: #{jce}/#{jr_content['total']} routes content-equivalent to Rails.</p>\n)
+  # Every OTHER emit lane's parity, each with the same detail the primary
+  # lane gets: the count, the differing routes with their token counts and
+  # first hunk, and its own normalization ledger. A one-line "jruby lane:
+  # N/M" was all this used to be, and the AOT lane didn't even get that —
+  # its 9 differing routes lived only in a published file nothing read.
+  [[sp_content, 'Roundhouse AOT', 'spinel'],
+   [jr_content, 'Roundhouse JRuby', 'jruby']].each do |lane_content, lane_label, lane_dir|
+    next unless lane_content
+    html << content_lane_block(lane_content, lane_label, lane_dir)
   end
 end
 
@@ -1162,8 +1307,12 @@ if legacy_jruby
 end
 
 # ── environment appendix ─────────────────────────────────────────────
+# Numbered like every other section. As an unheaded <details> its inner
+# <h3>Run/Stacks/Sequence followed the content-parity section directly, so
+# the page read as though provenance were part of the parity discussion.
 
-html << %(<details id="environment">\n<summary>Environment</summary>\n)
+html << "<h2>#{section_no}. Environment &amp; provenance</h2>\n"
+html << %(<details id="environment">\n<summary>Run, stacks, sequence</summary>\n)
 html << "<h3>Run</h3>\n"
 html << kv_table([
   ['command',    env&.dig('command') && "<code>#{esc(env['command'])}</code>"],
