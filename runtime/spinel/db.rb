@@ -116,6 +116,39 @@ end
 # ids reuses one entry. With the gate off the lowerer inlines literals
 # (`WHERE id = 1`) and id-bearing queries key per-id; the CAP below
 # bounds growth in that mode.
+#
+# CAP bounds the CACHE. Until 2026-07-29 it did NOT bound the prepared
+# STATEMENTS, and the difference was the AOT lane's whole memory story.
+# Past the cap `prepare_cached` still prepared a stmt and returned it
+# UNCACHED, and `Db.finalize` — which resets rather than closes, correct
+# for a cached stmt that must survive for its next use — never finalized
+# it. Nothing held a reference, so every query past the cap leaked one
+# sqlite3 stmt and its compiled program. With the bind gate OFF (the
+# default) keys are per-VALUE, so the cap is reached almost immediately
+# and effectively every query leaked: measured at ~8 MB per 114-visit
+# benchmark iteration, growing linearly to the 535 MB peak the published
+# page reports — the worst cell on it, and above Rails.
+#
+# What made that hard to see from outside: it is invisible to the obvious
+# probes. Replaying ONE route is flat however many times (its few shapes
+# fit under the cap), and it is indifferent to page size — 4560 renders of
+# the 292 KB /u tree retain the same ~27 MB as 4560 renders of the 2 KB
+# /about. Only a MIX of routes overflows the cap, so the growth looked
+# like it tracked route variety rather than the cap it actually tracked.
+#
+# The fix is the CRuby shim's (db_cruby.rb): never hand back an uncached
+# stmt — bound the cache by EVICTING, and finalize what's evicted. The
+# one hazard is closing a stmt some open cursor still holds; lobsters'
+# comment tree nests cursors, and an outer one can stay open across many
+# inner queries. CRuby can check directly (it hands out an index into a
+# @rows table and can ask whether an entry still holds a stmt); this shim
+# hands back the raw ptr, so it has no such table to consult.
+#
+# So eviction runs at the REQUEST BOUNDARY instead, where no cursor is
+# open by construction — `with_connection` returns only after the whole
+# request body has run. Within a request the cache is a soft bound; at
+# every boundary it comes back down to CAP and the excess is finalized.
+# Bounded, and it can never close a live stmt.
 # One cache entry: the composed SQL and its prepared stmt ptr. A concrete
 # user class (not a raw ptr) so an Array of these types concretely the way
 # ConnectionPool's @free does — spinel infers the element type from the
@@ -149,8 +182,13 @@ class DbConn
   end
 
   # Return a cached prepared stmt for `sql`, preparing+caching on miss.
-  # Linear scan — the query set is ~8 shapes, so a scan beats a ptr-keyed
-  # hash and avoids spinel hash-of-ptr typing.
+  # Linear scan over a ptr-keyed structure spinel would not type; the hit
+  # rate is what matters here, not the lookup's constant.
+  #
+  # EVERY prepared stmt goes into @entries, with no cap check. That is
+  # what makes `Db.finalize`'s reset-don't-close correct for all of them:
+  # a stmt this method hands back is always reachable for reuse, and
+  # always finalizable at `trim!`. Capping HERE is what leaked.
   def prepare_cached(sql)
     i = 0
     while i < @entries.length
@@ -163,8 +201,36 @@ class DbConn
       raise "Db.prepare failed (" + rc.to_s + "): " + SQL.sqlite3_errmsg(@dbh) + " — sql: " + sql
     end
     st = SQL.read_ptr(SQL.stmt_out)
-    @entries.push(Stmt.new(sql, st)) if @entries.length < CAP
+    @entries.push(Stmt.new(sql, st))
     st
+  end
+
+  # Bring the cache back to CAP, finalizing what's dropped. Called at the
+  # request boundary (`Db.with_connection`), never mid-request: a stmt an
+  # open cursor still holds must not be closed, and between requests there
+  # are none.
+  #
+  # Keeps the CAP most-recent entries — the tail, since `prepare_cached`
+  # appends. With per-value keys (bind gate off) recency is the best
+  # available proxy for reuse; with shapes the whole set fits and this
+  # never fires. Rebuilds the array rather than deleting in place: a fresh
+  # Array whose first push is a Stmt types concretely, which is the same
+  # reason `Stmt` is a class and not a bare ptr.
+  def trim!
+    return nil if @entries.length <= CAP
+    keep = []
+    drop_before = @entries.length - CAP
+    i = 0
+    while i < @entries.length
+      if i < drop_before
+        SQL.sqlite3_finalize(@entries[i].ptr)
+      else
+        keep.push(@entries[i])
+      end
+      i += 1
+    end
+    @entries = keep
+    nil
   end
 
   # Real finalize of every cached stmt — pool-shutdown path only.
@@ -298,8 +364,14 @@ module Db
       Tep::Scheduler.pause(0.001)
     end
     idx = @pool.lease
-    Fiber[:db_conn] = @pool.conn(idx)
+    conn = @pool.conn(idx)
+    Fiber[:db_conn] = conn
     result = yield
+    # Every cursor this request opened is closed by now, so trimming the
+    # stmt cache here can't close a live one. This is the only place the
+    # cache is bounded — `prepare_cached` deliberately caps nothing, since
+    # a stmt it refused to cache is a stmt nothing can ever finalize.
+    conn.trim!
     Fiber[:db_conn] = nil
     @pool.release(idx)
     result
