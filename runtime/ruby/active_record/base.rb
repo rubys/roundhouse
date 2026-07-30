@@ -207,7 +207,15 @@ module ActiveRecord
     # Rails also accepts a String; a String call site should coerce at
     # the lowering rather than widen this signature.
     def has_attribute?(name)
-      self.class.schema_columns.include?(name)
+      # Bound to a local before the `include?`, matching
+      # `fill_timestamps` below rather than chaining straight off
+      # `self.class`. Not style: elixir2's receiver typing does not see
+      # through the class-method send, so the direct chain lowers
+      # `include?` as a struct-field access (`schema_columns().__struct__`)
+      # and fails the warnings-as-errors gate. The local gives the
+      # body-typer the Array it needs.
+      cols = self.class.schema_columns
+      cols.include?(name)
     end
 
     # Subclasses MUST override to mutate state from a row hash. Empty
@@ -426,12 +434,36 @@ module ActiveRecord
     # snapshot diff on the ruby-family trees (the connection.rb reopen)
     # and the empty-Hash subset on the strict lanes, where every Dirty
     # predicate already answers false by design.
+    # Two shapes here are load-bearing, both learned from strict lanes
+    # going red — neither is style, and neither is visible to
+    # `compare ruby` or the unit tests:
+    #
+    # (1) `key?`, not `!saved_changes[name].nil?`. rust2 lowers an
+    #     untyped map read to the total
+    #     `.get().cloned().unwrap_or(Value::Null)`, and `.nil?` on that
+    #     renders as `is_none()` — an Option method
+    #     `serde_json::Value` does not have (E0599). The per-column
+    #     synthesis CAN use the nil-test, because it runs against the
+    #     model's own typed slot table rather than a json bag.
+    #     Presence and non-nil are the same question here anyway:
+    #     `__track_saved_changes` inserts a key only when the value
+    #     actually changed, and always as a [prev, value] pair.
+    #
+    # (2) Bind the collection to a local before calling a collection
+    #     method on it. elixir2's receiver typing does not see through
+    #     a method-call receiver, so `saved_changes.key?(name)` lowers
+    #     the `key?` as a struct-field access
+    #     (`saved_changes(record).__struct__`) and fails the
+    #     warnings-as-errors gate. `has_attribute?` above and
+    #     `fill_timestamps` below take the same precaution.
     def saved_change_to_attribute?(name)
-      !saved_changes[name].nil?
+      changes = saved_changes
+      changes.key?(name)
     end
 
     def saved_change_to_attribute(name)
-      saved_changes[name]
+      changes = saved_changes
+      changes[name]
     end
 
     # `id` never appears in the subclass `attributes` hash, so the

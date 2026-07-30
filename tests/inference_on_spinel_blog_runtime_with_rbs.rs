@@ -437,7 +437,16 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // reopen. `Base.primary_key` added 0: it returns a literal. NOTE the
     // pre-existing headroom was already spent — the tree measured exactly
     // 535 before this change, so the next author gets 15, not 74.
-    const CEILING: usize = 610;
+    // 2026-07-30 (second bump, same day): 610 -> 625 — measurement moved
+    // to 613 when `has_attribute?` and the two `saved_change_to_attribute`
+    // readers each bound their collection to a local before calling a
+    // collection method on it. That binding is not style: elixir2's
+    // receiver typing does not see through a method-call receiver, so the
+    // direct chain lowers `include?`/`key?` as a struct-field access
+    // (`saved_changes(record).__struct__`) and fails mix's
+    // warnings-as-errors gate. Each local is one more untyped site here —
+    // the cost of keeping the elixir lane compiling.
+    const CEILING: usize = 625;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions exceeds ceiling of {CEILING}.\n\
