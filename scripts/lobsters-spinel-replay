@@ -134,6 +134,27 @@ end
 
 # ── build ────────────────────────────────────────────────────────────
 BIN = File.join(TREE, "build", "blog")
+
+# WHO COMPILED THIS. An interpreted lane names its runtime in every artifact
+# (RUBY_DESCRIPTION), so a row on the page can always be tied back to the
+# thing that ran it. The AOT lane named nothing: the binary's timings were
+# reported with no record of the compiler that produced them. That is not a
+# cosmetic gap — a spinel fix landing between two runs shows up as a large
+# unexplained movement in this lane, and without these two strings there is
+# nothing in the data to attribute it to.
+#
+# `spinel --version` reports the commit the BINARY WAS BUILT FROM, which is
+# what compiled this run — deliberately not the checkout's current HEAD,
+# which may have moved on since that binary was built. Captured next to the
+# build, not at boot, so it names the compiler this tree was actually built
+# with even under --skip-build.
+def tool_version(cmd)
+  out = `#{cmd} 2>/dev/null`
+  $?.success? && !out.strip.empty? ? out.lines.first.strip : nil
+end
+SPINEL_VERSION = tool_version("#{ENV['SPINEL'] || 'spinel'} --version")
+CC_VERSION     = tool_version("#{ENV['CC'] || 'cc'} --version")
+
 unless opts[:skip_build] && File.executable?(BIN)
   t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   log = File.join(TREE, "spin-build.log")
@@ -347,7 +368,8 @@ summary = {
   # real work this lane does that the others don't; it belongs on the page
   # rather than folded into (or hidden from) ms/iter.
   "aot" => { "build_seconds" => BUILD_SECONDS, "c_warnings" => C_WARNINGS,
-             "binary_bytes" => (File.size(BIN) rescue nil) },
+             "binary_bytes" => (File.size(BIN) rescue nil),
+             "spinel" => SPINEL_VERSION, "cc" => CC_VERSION },
 }
 summary["sequence_failures"] = seq_fails unless seq_fails.empty?
 

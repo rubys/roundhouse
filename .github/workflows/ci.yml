@@ -1426,7 +1426,11 @@ jobs:
           fetch() { curl -fsSL --max-time 30 "$1" -o "$2" || { rm -f "$2"; return 1; }; }
           if fetch "$BENCH_URL/matrix.json" _site/bench/lobsters/matrix.json; then
             fetch "$BENCH_URL/env.json" _site/bench/lobsters/env.json || true
-            for lane in rails rails-int rails-jruby ruby ruby-int jruby; do
+            # spinel included: the AOT lane is rendered on the bench box's own
+            # page, and without its summary.json here the mirrored page drops
+            # the AOT bars, the spinel parity badge and the AOT toolchain
+            # provenance — a quieter page that reads as a complete one.
+            for lane in rails rails-int rails-jruby ruby ruby-int jruby spinel; do
               mkdir -p "_site/bench/lobsters/$lane"
               for f in summary.json rails.json env.json summary.md; do
                 fetch "$BENCH_URL/$lane/$f" "_site/bench/lobsters/$lane/$f" || true

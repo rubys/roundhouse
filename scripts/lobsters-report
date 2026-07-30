@@ -510,6 +510,15 @@ prov = ''
 prov << " · #{summary['generated_at']}" if summary['generated_at']
 if env && env['roundhouse_commit']
   prov << %( · <code>#{env['roundhouse_commit'][0, 12]}</code>)
+  prov << ' <strong>+dirty</strong>' if env['roundhouse_dirty']
+end
+# The AOT lane is drawn on the headline charts, so the compiler that built it
+# belongs in the headline too — not only behind the provenance <details>. An
+# AOT bar that moved because spinel moved is otherwise indistinguishable from
+# one that moved because the emit did.
+sp_ver = (spinel && spinel.dig('aot', 'spinel')) || env&.dig('spinel')
+if sp_ver && (sp_hash = sp_ver.split(/\s+/).last)
+  prov << %( · spinel <code>#{esc(sp_hash[0, 12])}</code>)
 end
 html << %(<div class="meta">Run <code>#{run_dir}</code>#{prov}</div>\n)
 
@@ -1313,11 +1322,22 @@ end
 
 html << "<h2>#{section_no}. Environment &amp; provenance</h2>\n"
 html << %(<details id="environment">\n<summary>Run, stacks, sequence</summary>\n)
+# A commit is the truth only when the tree that produced it was clean, so an
+# uncommitted-changes flag is shown beside the hash rather than left in the
+# JSON for someone to notice.
+def commit_cell(hash, dirty)
+  return nil unless hash
+  cell = +"<code>#{hash}</code>"
+  cell << ' <strong>+ uncommitted changes</strong>' if dirty
+  cell
+end
+
 html << "<h3>Run</h3>\n"
 html << kv_table([
   ['command',    env&.dig('command') && "<code>#{esc(env['command'])}</code>"],
   ['source',     env&.dig('src') && "<code>#{esc(env['src'])}</code>"],
-  ['commit',     env&.dig('roundhouse_commit') && "<code>#{env['roundhouse_commit']}</code>"],
+  ['commit',     commit_cell(env&.dig('roundhouse_commit'), env&.dig('roundhouse_dirty'))],
+  ['fixture commit', commit_cell(env&.dig('lobsters_commit'), env&.dig('lobsters_dirty'))],
   ['captured',   env&.dig('generated_at') || summary['generated_at']],
   ['database',   db && "<code>#{esc(db)}</code>"],
   ['seed',       summary['seed']],
@@ -1329,6 +1349,42 @@ html << kv_table([
   ['rails ruby',      rails&.dig('ruby') && "<code>#{esc(rails['ruby'])}</code>"],
   ['rails',           rails&.dig('rails')],
 ])
+
+# The AOT lane's toolchain and build facts. Both were already recorded and
+# neither was ever rendered, so the page reported spinel-compiled timings
+# without naming the compiler, and swallowed the C warning count entirely.
+# Prefer the spinel lane's own reading — it is captured next to that lane's
+# build, so it names the compiler that produced the binary being timed —
+# and fall back to the run-level probe.
+aot = (spinel && spinel['aot']) || {}
+aot_rows = [
+  ['spinel (AOT)', (aot['spinel'] || env&.dig('spinel')) &&
+                   "<code>#{esc(aot['spinel'] || env['spinel'])}</code>"],
+  ['C compiler',   (aot['cc'] || env&.dig('cc')) &&
+                   "<code>#{esc(aot['cc'] || env['cc'])}</code>"],
+  ['AOT compile',  aot['build_seconds'] && "#{aot['build_seconds']} s"],
+  ['binary',       aot['binary_bytes'] &&
+                   "#{(aot['binary_bytes'] / 1024.0 / 1024.0).round(1)} MiB"],
+  # Surfaced, not hidden: a C warning in generated code is a signal about the
+  # emitter or the compiler, and a count that only ever sat in JSON was a
+  # signal nobody read.
+  ['C warnings',   aot['c_warnings']],
+]
+if aot_rows.any? { |_, v| !v.nil? && !v.to_s.empty? }
+  html << "<h3>AOT toolchain</h3>\n"
+  html << kv_table(aot_rows)
+end
+
+host_rows = [
+  ['host',   env&.dig('host') && "<code>#{esc(env['host'])}</code>"],
+  ['cpu',    env&.dig('cpu') && esc(env['cpu'])],
+  ['cores',  env&.dig('cpu_cores')],
+  ['kernel', env&.dig('kernel') && "<code>#{esc(env['kernel'])}</code>"],
+]
+if host_rows.any? { |_, v| !v.nil? && !v.to_s.empty? }
+  html << "<h3>Host</h3>\n"
+  html << kv_table(host_rows)
+end
 if timing || rails
   html << "<h3>Sequence</h3>\n"
   html << kv_table([

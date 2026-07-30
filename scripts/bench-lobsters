@@ -103,7 +103,16 @@
 #   bench/results/lobsters/<timestamp>/summary.json   # per-route parity + timing
 #   bench/results/lobsters/<timestamp>/summary.md     # rendered table + failures
 #   bench/results/lobsters/<timestamp>/emit.log       # transpile diagnostics
+#   bench/results/lobsters/<timestamp>/env.json       # run provenance (below)
 #   bench/results/lobsters/latest                     # symlink to newest run
+#
+# env.json names everything that produced the numbers, so a run's timings
+# stay attributable after the fact: the emitter (roundhouse commit + dirty
+# flag), the fixture (lobsters commit + dirty flag), the AOT toolchain
+# (`spinel --version` and `cc --version`), and the host (CPU, cores,
+# kernel) that ms/iter is measured against. Fields are omitted rather than
+# blanked when a tool or checkout is absent, and the report drops the rows
+# it has no data for — so an older archived run still renders.
 #
 # When a previous run exists, the console output ends with a comparison
 # against it: pass-count delta, regressed/fixed routes, and changed
@@ -514,12 +523,67 @@ if (( ${#LANES[@]} > 0 )); then
 
     # Top-level provenance: the ORIGINAL invocation (lane env.json files
     # carry each lane's interpreter; this carries the orchestration).
-    ruby -rjson -rsocket -e 'puts JSON.pretty_generate({
-      generated_at: Time.now.utc.strftime("%FT%TZ"),
-      command: "scripts/bench-lobsters #{ARGV[0]}".strip,
-      src: ARGV[1], host: Socket.gethostname,
-      roundhouse_commit: `git -C #{ARGV[2]} rev-parse HEAD`.strip,
-    })' "$ORIG_ARGS" "$SRC" "$REPO_ROOT" > "$RUN_DIR/env.json" || true
+    #
+    # WHY MORE THAN THE ROUNDHOUSE COMMIT. A ms/iter number is only worth
+    # keeping if everything that produced it can be named. Recording only the
+    # emitter's commit left three things unattributable:
+    #
+    #   the AOT compiler  spinel compiles this lane and cc compiles its
+    #                     output; neither appeared anywhere in a run's
+    #                     artifacts, so an AOT row could not be tied to the
+    #                     compiler that built it, and a spinel fix landing
+    #                     between two runs read as an unexplained movement
+    #   the fixture       the lobsters checkout defines the workload and the
+    #                     seeded DB, so it dates a comparison as surely as
+    #                     the emitter does
+    #   the host          ms/iter is host-bound; two runs' numbers cannot be
+    #                     compared across machines without the CPU
+    #
+    # A commit is also only the truth when the tree is clean, so the dirty
+    # flags are recorded rather than assumed.
+    ruby - "$ORIG_ARGS" "$SRC" "$REPO_ROOT" <<'ENVJSON' > "$RUN_DIR/env.json" || true
+require "json"
+require "socket"
+require "shellwords"
+orig_args, src, repo = ARGV
+
+# nil, never "", for anything absent: kv_table in scripts/lobsters-report
+# drops nil rows, so a tool that is not installed leaves no row at all rather
+# than a blank one that reads as "measured, and empty".
+def sh(cmd)
+  out = `#{cmd} 2>/dev/null`
+  $?.success? && !out.strip.empty? ? out.strip : nil
+end
+
+def git_commit(dir)
+  sh("git -C #{dir.to_s.shellescape} rev-parse HEAD")
+end
+
+# nil when the directory is not a git checkout — distinct from false, which
+# is a checkout that is genuinely clean.
+def git_dirty(dir)
+  st = `git -C #{dir.to_s.shellescape} status --porcelain 2>/dev/null`
+  $?.success? ? !st.strip.empty? : nil
+end
+
+puts JSON.pretty_generate({
+  generated_at: Time.now.utc.strftime("%FT%TZ"),
+  command: "scripts/bench-lobsters #{orig_args}".strip,
+  src: src,
+  host: Socket.gethostname,
+  roundhouse_commit: git_commit(repo),
+  roundhouse_dirty: git_dirty(repo),
+  lobsters_commit: git_commit(src),
+  lobsters_dirty: git_dirty(src),
+  # AOT toolchain. Absent unless spinel is on PATH, which is exactly when
+  # the spinel lane could have run.
+  spinel: sh("spinel --version")&.lines&.first&.strip,
+  cc: sh("cc --version")&.lines&.first&.strip,
+  cpu: sh(%(grep -m1 "^model name" /proc/cpuinfo))&.split(":", 2)&.last&.strip,
+  cpu_cores: sh("nproc")&.to_i,
+  kernel: sh("uname -sr"),
+}.compact)
+ENVJSON
 
     # Aggregate lane artifacts into matrix.json (one row per lane) and
     # print the console table. Row fields feed scripts/lobsters-report.
