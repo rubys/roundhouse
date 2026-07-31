@@ -67,6 +67,25 @@ module ActionDispatch
       fullpath
     end
 
+    # Scheme + host, no path — what Rails builds absolute URLs from.
+    # The scheme is a read of the one env key that carries it; a
+    # transport that terminates TLS elsewhere (every lane here) reports
+    # http, which is what the CRuby tree's overlay Request reports too.
+    def base_url
+      if @env.fetch("HTTPS", "").to_s == "on"
+        "https://" + @host
+      else
+        "http://" + @host
+      end
+    end
+
+    # Absolute URL of this request. Feed templates interpolate it as
+    # the channel link (lobsters' home/rss.rbuilder), which is why the
+    # spinel tree needs it and not just the CRuby overlay's twin.
+    def original_url
+      base_url + fullpath
+    end
+
     def referrer
       @referer
     end

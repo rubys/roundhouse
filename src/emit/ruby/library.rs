@@ -40,6 +40,7 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     apply_boolean_lowering(&mut lcs, app);
     apply_hydration_nil_lowering(&mut lcs, app);
     apply_nilsafe_empty_lowering(&mut lcs);
+    apply_time_format_lowering(&mut lcs);
     lcs.iter()
         .flat_map(|lc| {
             // `underscore`, not `snake_case`: a namespaced reopen
@@ -94,6 +95,11 @@ const EXTRAS_FACADES: &[(&str, &str, &str)] = &[
         "app/models/flagged_commenters",
         include_str!("../../../runtime/spinel/facades/flagged_commenters.rb"),
         include_str!("../../../runtime/spinel/facades/flagged_commenters.rbs"),
+    ),
+    (
+        "app/models/html_encoder",
+        include_str!("../../../runtime/spinel/facades/html_encoder.rb"),
+        include_str!("../../../runtime/spinel/facades/html_encoder.rbs"),
     ),
 ];
 
@@ -2155,6 +2161,55 @@ fn widen_fk_zero_guards(expr: &mut Expr, fks: &BTreeSet<Symbol>) {
 /// evaluation, transparent for arrays/strings that are never nil, and
 /// nil reads get Rails' blank-when-nil semantics. Only the
 /// zero-arg `empty?` shape is touched.
+/// `<time>.rfc2822` → `ActiveSupport.rfc2822(<time>)`.
+///
+/// `Time#rfc2822` is stdlib `time`, not core Ruby — `require "time"`
+/// installs it. CRuby has it because the overlay requires that stdlib;
+/// spinel has no `time` package, and the method cannot be supplied by
+/// reopening `Time` (a reopened built-in loses its own method table for
+/// self-calls, so even `self.strftime` inside the reopen is undefined).
+/// So the call grounds to the module function every ruby-family tree
+/// ships — the same posture `lower::duration` takes for `Integer#days`,
+/// and for the same reason: no built-in reopening.
+///
+/// Both trees satisfy the one `active_support_time_parsing.rbs`
+/// contract. The CRuby/JRuby overlay's implementation delegates
+/// straight back to `t.rfc2822`, so grounding the call site cannot move
+/// that lane's bytes; the spinel twin composes the same string from
+/// strftime.
+///
+/// Zero-arg receiver sends only. Ruby-emit-path pass: the module
+/// function it names is ruby-family runtime, so this must not run from
+/// shared `lower/`.
+pub(crate) fn apply_time_format_lowering(lcs: &mut [LibraryClass]) {
+    for lc in lcs.iter_mut() {
+        for m in &mut lc.methods {
+            rewrite_rfc2822(&mut m.body);
+        }
+    }
+}
+
+fn rewrite_rfc2822(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut |c| rewrite_rfc2822(c));
+    let ExprNode::Send { recv: Some(r), method, args, .. } = &mut *expr.node else {
+        return;
+    };
+    if method.as_str() != "rfc2822" || !args.is_empty() {
+        return;
+    }
+    let recv = r.clone();
+    *expr.node = ExprNode::Send {
+        recv: Some(Expr::new(
+            Span::synthetic(),
+            ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
+        )),
+        method: Symbol::from("rfc2822"),
+        args: vec![recv],
+        block: None,
+        parenthesized: true,
+    };
+}
+
 pub(crate) fn apply_nilsafe_empty_lowering(lcs: &mut [LibraryClass]) {
     for lc in lcs.iter_mut() {
         for m in &mut lc.methods {

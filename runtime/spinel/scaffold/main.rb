@@ -326,6 +326,26 @@ module Main
       res.body = "<h1>404 Not Found</h1>"
       return
     end
+    # A route-forced format (`get "/rss" => "home#index", :format => "rss"`)
+    # overrides the path-suffix sniff above — the URL carries no extension
+    # but the route pins the response format. Without it every route-pinned
+    # entry fell through to :html and lobsters' /rss and /hottest served the
+    # HTML home page.
+    #
+    # The CRuby overlay writes this as a one-line `request_format =
+    # matched.req_format unless matched.req_format.nil?`. That shape does
+    # not compile here, and neither does binding the read to a guarded
+    # local: `req_format` is `Symbol?`, which spinel stores as a poly
+    # RbVal, while a local seeded from a Symbol literal is a bare `sp_sym`
+    # — the assignment is a type error whatever the nil guard looks like.
+    # COMPARING the poly against literals never materializes a nilable
+    # Symbol, so the supported formats are named here instead. The set
+    # matches the response types the tail of this method can stamp.
+    if matched.req_format == :rss
+      request_format = :rss
+    elsif matched.req_format == :json
+      request_format = :json
+    end
 
     controller = Main.instantiate_controller(matched.controller)
     # Build the nested Rails-style params (params["article"]["title"])
@@ -345,7 +365,10 @@ module Main
     request_obj.remote_ip = req.remote_host
     request_obj.referer = req.req_headers.fetch("referer", "")
     request_obj.host = req.req_headers.fetch("host", "localhost")
-    request_obj.format = request_format == :json ? "json" : "html"
+    fmt_name = "html"
+    fmt_name = "json" if request_format == :json
+    fmt_name = "rss" if request_format == :rss
+    request_obj.format = fmt_name
     request_obj.body = req.raw_body
     # Write straight into the RBS-pinned `@env` (Hash[String, untyped] ->
     # StrPolyHash), which already owns the representation. Building a local
@@ -409,6 +432,17 @@ module Main
     # the CRuby overlay dispatch.
     res.body = controller.body
     res.headers["Location"] = controller.location unless controller.location.nil?
+    # Content-Type for the non-html formats. Tep stamps
+    # `text/html; charset=utf-8` on any inline body that names no type
+    # (server_scheduled.rb), so the html path stays a no-op here. JSON
+    # takes the controller's own type — a jbuilder-lowered action sets it
+    # through `render content_type:` — and RSS the fixed feed type, which
+    # is what the CRuby overlay's dispatch returns for the same routes.
+    if request_format == :json
+      res.headers["Content-Type"] = controller.content_type
+    elsif request_format == :rss
+      res.headers["Content-Type"] = "application/rss+xml; charset=utf-8"
+    end
 
     # Outbound flash: persist messages set THIS request for the NEXT one.
     # `to_persisted` returns only notice/alert that differ from the

@@ -1,0 +1,8 @@
+# Typing contract for the HtmlEncoder façade (html_encoder.rb beside
+# this file). Both directions are String -> String; `type` is the
+# gem's instruction symbol, defaulted and only honored as :decimal.
+module HtmlEncoder
+  def self.encode: (untyped string, ?Symbol type) -> String
+  def self.entity?: (Integer n) -> bool
+  def self.decode: (untyped encoded_string) -> String
+end

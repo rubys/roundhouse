@@ -107,6 +107,15 @@ module ActiveSupport
   # give the column). The synthesized model writers (`banned_at=`)
   # route every store through this so column TEXT stays homogeneous
   # and lexicographically ordered.
+  # Stdlib is the authority here (this tree already requires "time"),
+  # so the overlay delegates rather than re-derives — the CRuby lane's
+  # feed bytes are exactly what they were before the call site was
+  # grounded to a module function.
+  def self.rfc2822(t)
+    return nil if t.nil?
+    t.rfc2822
+  end
+
   def self.format_db_time(value)
     return nil if value.nil?
     if value.is_a?(Time)

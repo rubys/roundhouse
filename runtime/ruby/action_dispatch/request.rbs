@@ -37,6 +37,8 @@ module ActionDispatch
     def xhr?: () -> bool
     def fullpath: () -> String
     def original_fullpath: () -> String
+    def base_url: () -> String
+    def original_url: () -> String
     def referrer: () -> String
   end
 end

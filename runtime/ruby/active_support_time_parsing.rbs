@@ -17,7 +17,13 @@
 # `TimeWithZone#as_json` = `xmlschema(3)`, not as the stored text.
 # `format_db_time` is the write-side inverse.
 #
-# All three are nil-safe: an absent column reads as nil / "" and the
+# `rfc2822` is the RSS-feed formatter: `Time#rfc2822` is stdlib `time`
+# (NOT core Ruby — `require "time"` installs it), so a `<time>.rfc2822`
+# call site can only ground to a module function, the same posture
+# `lower::duration` takes for `Integer#days`. See
+# `emit::ruby::library::apply_time_format_lowering` for the rewrite.
+#
+# All of them are nil-safe: an absent column reads as nil / "" and the
 # synthesized accessors call them unguarded.
 module ActiveSupport
   def self.parse_db_time: (String? str) -> Time?
@@ -27,4 +33,6 @@ module ActiveSupport
   def self.format_db_time: (untyped value) -> String?
 
   def self.db_now: () -> String
+
+  def self.rfc2822: (Time? t) -> String?
 end

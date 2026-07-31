@@ -31,7 +31,41 @@ use super::util::{is_format_binding, unwrap_lambda};
 /// preserves the json branch as a `request_format == :json`
 /// conditional.
 pub fn unwrap_respond_to(expr: &Expr) -> Expr {
-    unwrap_respond_to_inner(expr, /*with_format_dispatch=*/ false, /*breadth=*/ false)
+    unwrap_respond_to_inner(expr, /*with_format_dispatch=*/ false, FormatBreadth::NARROW)
+}
+
+/// Which non-html `respond_to` arms an emit path can carry. The two
+/// widenings are independent because they cost different things:
+///
+/// `json_any` preserves `format.json` branches of ANY shape — inline
+/// `render json: <expr>` normalizes downstream to an
+/// `ActionController::JsonRender.encode` body render, and JsonRender
+/// is a CRuby-overlay module (`respond_to?`-dispatching, heterogeneous
+/// containers) that the AOT compile cannot type. CRuby/JRuby only.
+/// With it off, the pre-existing narrow rule still admits the simple
+/// `render :sym` json arms, which route to an emitted `<sym>_json`
+/// view and need no encoder.
+///
+/// `rss` preserves `format.rss` branches under a `request_format ==
+/// :rss` arm (lobsters' /rss feed). Everything such an arm reaches is
+/// already on every ruby-family tree — the emitted `Views::<X>.rss`
+/// template and the shared `Rails.cache.fetch_str` — so the spinel
+/// tree carries this one too. Without it the route-pinned rss entries
+/// fall through to the html arm and the feed serves the HTML page.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FormatBreadth {
+    pub json_any: bool,
+    pub rss: bool,
+}
+
+impl FormatBreadth {
+    /// html only (plus the simple-`render :sym` json arms) — the emit
+    /// paths that don't recognize `request_format` at all.
+    pub const NARROW: Self = Self { json_any: false, rss: false };
+    /// The spinel/AOT tree: rss dispatch, no JsonRender.
+    pub const RSS_ONLY: Self = Self { json_any: false, rss: true };
+    /// The CRuby/JRuby trees, whose overlay answers the full surface.
+    pub const FULL: Self = Self { json_any: true, rss: true };
 }
 
 /// Format-dispatching variant of `unwrap_respond_to`.
@@ -46,13 +80,10 @@ pub fn unwrap_respond_to(expr: &Expr) -> Expr {
 /// branches — we fall back to html-only flattening so the HTTP-HTML
 /// paths every emitter targets stay lossless.
 ///
-/// `breadth: true` (the CRuby emit path, whose overlay runtime can
-/// answer the extra surface) widens the dispatch: `format.json`
-/// branches of ANY shape are preserved (inline `render json: <expr>`
-/// normalizes downstream to a `JsonRender.encode` body render), and
-/// `format.rss` branches are preserved under a `request_format ==
-/// :rss` arm (lobsters' /rss private feed). Non-breadth callers keep
-/// the narrow behavior so their emit stays byte-identical.
+/// `breadth` widens the dispatch, one format at a time, because the
+/// two widenings have different runtime costs (see `FormatBreadth`).
+/// A fully-narrow breadth keeps the legacy behavior so an emit that
+/// asks for nothing stays byte-identical.
 ///
 /// Handles both scaffold shapes:
 ///   - Simple:    `respond_to { format.html { a }; format.json { b } }` → `if c; b' else a end`
@@ -64,11 +95,11 @@ pub fn unwrap_respond_to(expr: &Expr) -> Expr {
 /// bottom-up, and non-respond_to sub-expressions pass through their
 /// structural variants so anything already at the top level is
 /// preserved.
-pub fn unwrap_respond_to_with_format_dispatch(expr: &Expr, breadth: bool) -> Expr {
+pub fn unwrap_respond_to_with_format_dispatch(expr: &Expr, breadth: FormatBreadth) -> Expr {
     unwrap_respond_to_inner(expr, /*with_format_dispatch=*/ true, breadth)
 }
 
-fn unwrap_respond_to_inner(expr: &Expr, with_format_dispatch: bool, breadth: bool) -> Expr {
+fn unwrap_respond_to_inner(expr: &Expr, with_format_dispatch: bool, breadth: FormatBreadth) -> Expr {
     // Top-level `respond_to` with a block — replace the whole Send
     // with its flattened body. This short-circuits the structural
     // recursion so we don't re-enter the respond_to's Send/Lambda
@@ -163,7 +194,7 @@ fn unwrap_respond_to_inner(expr: &Expr, with_format_dispatch: bool, breadth: boo
 /// `with_format_dispatch=false` keeps just the html branch (legacy
 /// behavior, used by Group 2 emit paths). `true` emits the
 /// `if request_format == :json; …; else; …; end` shape.
-fn flatten_respond_to_body(body: &Expr, with_format_dispatch: bool, breadth: bool) -> Expr {
+fn flatten_respond_to_body(body: &Expr, with_format_dispatch: bool, breadth: FormatBreadth) -> Expr {
     let recurse_outer = |e: &Expr| unwrap_respond_to_inner(e, with_format_dispatch, breadth);
     match &*body.node {
         ExprNode::Seq { exprs } => {
@@ -187,12 +218,12 @@ fn flatten_respond_to_body(body: &Expr, with_format_dispatch: bool, breadth: boo
                         // `request_format`), so we drop unconditionally
                         // when `with_format_dispatch=false`.
                         if with_format_dispatch
-                            && (breadth || is_simple_render_sym(&branch_body))
+                            && (breadth.json_any || is_simple_render_sym(&branch_body))
                         {
                             json = Some(recurse_outer(&branch_body));
                         }
                     }
-                    Some((fmt, branch_body)) if fmt.as_str() == "rss" && breadth => {
+                    Some((fmt, branch_body)) if fmt.as_str() == "rss" && breadth.rss => {
                         rss = Some(recurse_outer(&branch_body));
                     }
                     Some(_) => {} // unknown format (e.g. format.xml) — drop
@@ -217,7 +248,7 @@ fn flatten_respond_to_body(body: &Expr, with_format_dispatch: bool, breadth: boo
             Some((fmt, branch_body))
                 if fmt.as_str() == "json"
                     && with_format_dispatch
-                    && (breadth || is_simple_render_sym(&branch_body)) =>
+                    && (breadth.json_any || is_simple_render_sym(&branch_body)) =>
             {
                 build_format_dispatch(
                     None,
@@ -227,7 +258,7 @@ fn flatten_respond_to_body(body: &Expr, with_format_dispatch: bool, breadth: boo
                     body.span,
                 )
             }
-            Some((fmt, branch_body)) if fmt.as_str() == "rss" && breadth => {
+            Some((fmt, branch_body)) if fmt.as_str() == "rss" && breadth.rss => {
                 build_format_dispatch(
                     None,
                     None,

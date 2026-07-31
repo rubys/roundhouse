@@ -37,7 +37,7 @@ use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 use crate::lower::controller::body::{
-    synthesize_implicit_render, unwrap_respond_to_with_format_dispatch,
+    synthesize_implicit_render, unwrap_respond_to_with_format_dispatch, FormatBreadth,
 };
 
 use self::params::ParamsSpec;
@@ -198,7 +198,7 @@ pub struct LowerControllerOptions<'a> {
     pub routed_by_controller:
         Option<&'a std::collections::HashMap<ClassId, std::collections::HashSet<Symbol>>>,
     /// Whether to synthesize the full format-dispatch breadth.
-    pub format_breadth: bool,
+    pub format_breadth: FormatBreadth,
 }
 
 pub fn lower_controllers_with_arel_views_assocs_and_routes(
@@ -457,7 +457,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         None,
         &view_ivars,
         &partials,
-        false,
+        FormatBreadth::NARROW,
     );
     LibraryClass {
         name: controller.name.clone(),
@@ -507,7 +507,7 @@ fn build_methods(
     // JsonRender, which the spinel AOT compile (same emit family,
     // routed-aware too) cannot resolve. Everyone else keeps the narrow
     // html(+simple-json) flatten, emit unchanged.
-    format_breadth: bool,
+    format_breadth: FormatBreadth,
 ) -> Vec<MethodDef> {
     let mut methods: Vec<MethodDef> = Vec::new();
 
@@ -1026,7 +1026,7 @@ fn action_to_method(
     json_actions: &std::collections::HashSet<Symbol>,
     view_ivars: &ViewIvarMap,
     partials: &PartialMap,
-    format_breadth: bool,
+    format_breadth: FormatBreadth,
 ) -> MethodDef {
     let method_name = method_name_for_action(a.name.as_str());
     // Required positionals first, then optional positionals with their
@@ -1159,7 +1159,7 @@ fn lower_action_body(
     has_json_variant: bool,
     view_ivars: &ViewIvarMap,
     partials: &PartialMap,
-    format_breadth: bool,
+    format_breadth: FormatBreadth,
 ) -> Expr {
     let unwrapped = unwrap_respond_to_with_format_dispatch(body, format_breadth);
     let with_render = if is_public {

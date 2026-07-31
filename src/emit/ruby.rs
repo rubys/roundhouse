@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use super::EmittedFile;
 use crate::App;
 use crate::dialect::{LibraryClass, MethodDef, MethodReceiver};
+use crate::lower::controller::body::FormatBreadth;
 
 /// Canonical spinel test bootstrap. Single source of truth for what
 /// the emitted spinel project's `test/test_helper.rb` should contain.
@@ -248,6 +249,7 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // model bodies tolerate the nil.
     library::apply_hydration_nil_lowering(&mut lcs, app);
     library::apply_nilsafe_empty_lowering(&mut lcs);
+    library::apply_time_format_lowering(&mut lcs);
     library::apply_dynamic_render_options_lowering(&mut lcs);
     // Runtime-Relation eager loading: per-model `preload_associations`
     // machinery + belongs_to reader cache guards, so `includes(...)`
@@ -369,11 +371,13 @@ pub fn emit_lowered_routes(app: &App) -> EmittedFile {
 /// `app/models/<name>.rb` because they're plain holders, not request
 /// handlers.
 pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
-    // format_breadth=false: the spinel tree compiles these — rss/inline-
-    // json respond_to arms reference the CRuby-overlay JsonRender and
-    // don't type under the AOT compile (CI caught `render(JsonRender.
-    // encode(...))` as sp_RbVal-vs-char* in articles_controller).
-    let mut lcs = lower_controllers_for_spinel(app, false);
+    // RSS_ONLY: the spinel tree compiles these, so the inline-json arms
+    // stay out — they reference the CRuby-overlay JsonRender and don't
+    // type under the AOT compile (CI caught `render(JsonRender.encode
+    // (...))` as sp_RbVal-vs-char* in articles_controller). The rss arm
+    // reaches only the emitted `Views::<X>.rss` template and the shared
+    // `Rails.cache.fetch_str`, both of which this tree already carries.
+    let mut lcs = lower_controllers_for_spinel(app, FormatBreadth::RSS_ONLY);
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
     // A record handed to a path helper becomes its slug here, not
@@ -383,6 +387,7 @@ pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
     // that argument's escaping comes off (no-op without such a site).
     library::apply_raw_helper_monomorphization(&mut lcs, app);
     library::apply_nilsafe_empty_lowering(&mut lcs);
+    library::apply_time_format_lowering(&mut lcs);
     library::apply_dynamic_render_options_lowering(&mut lcs);
     // Layout wrap at render call sites — the seam where the @ivars a
     // layout reads are in scope. Converged with the CRuby tree
@@ -407,10 +412,10 @@ pub fn emit_lowered_controllers(app: &App) -> Vec<EmittedFile> {
 /// re-emit controllers through this and dedupe last-wins over the
 /// spinel-shape files.
 pub fn emit_lowered_controllers_with_layout(app: &App) -> Vec<EmittedFile> {
-    // format_breadth=true: the CRuby/JRuby trees ship the overlay
-    // (JsonRender + rss dispatch) so the widened respond_to arms
-    // resolve; these files dedupe last-wins over the spinel-shape ones.
-    let mut lcs = lower_controllers_for_spinel(app, true);
+    // FULL: the CRuby/JRuby trees ship the overlay (JsonRender) so the
+    // widened respond_to arms all resolve; these files dedupe last-wins
+    // over the spinel-shape ones.
+    let mut lcs = lower_controllers_for_spinel(app, FormatBreadth::FULL);
     library::apply_scope_lowering(&mut lcs, app);
     library::apply_helper_lowering(&mut lcs, app);
     // A record handed to a path helper becomes its slug here, not
@@ -420,6 +425,7 @@ pub fn emit_lowered_controllers_with_layout(app: &App) -> Vec<EmittedFile> {
     // that argument's escaping comes off (no-op without such a site).
     library::apply_raw_helper_monomorphization(&mut lcs, app);
     library::apply_nilsafe_empty_lowering(&mut lcs);
+    library::apply_time_format_lowering(&mut lcs);
     library::apply_dynamic_render_options_lowering(&mut lcs);
     library::apply_layout_lowering(&mut lcs, app);
     emit_lowered_controllers_from_lcs(&lcs, app)
@@ -433,7 +439,7 @@ pub fn emit_lowered_controllers_with_layout(app: &App) -> Vec<EmittedFile> {
 /// controller lowerer's registry as extras — the Arel pass needs
 /// them to resolve `Article.includes(...).order(...)` chain
 /// receivers to a TableRef.
-fn lower_controllers_for_spinel(app: &App, format_breadth: bool) -> Vec<LibraryClass> {
+fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth) -> Vec<LibraryClass> {
     // Use lower_models_with_registry (not lower_models_to_library_classes
     // + class_info_from_library_class) because the former returns
     // ClassInfo with `table` set — the Arel pass needs `info.table`
@@ -597,6 +603,7 @@ pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
     // Nullable columns hydrate to nil on the Ruby tree — synthesized
     // `.empty?` predicate forms in view bodies must tolerate it.
     library::apply_nilsafe_empty_lowering(&mut lcs);
+    library::apply_time_format_lowering(&mut lcs);
     library::apply_dynamic_render_options_lowering(&mut lcs);
     // A view whose own namespace shadows a top-level app class
     // (`Views::Stats` over `Stats`) must reference it absolutely, or

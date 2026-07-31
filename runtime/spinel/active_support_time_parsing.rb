@@ -65,6 +65,30 @@ module ActiveSupport
   # The synthesized model writers (`banned_at=`) route every store
   # through this so column TEXT stays homogeneous and lexicographically
   # ordered.
+  # RFC 2822 date, the shape stdlib `time` gives `Time#rfc2822` — which
+  # spinel has no `time` package to provide and which cannot be added by
+  # reopening `Time` (a reopened built-in loses its own method table for
+  # self-calls). Composed from strftime instead, whose `%a`/`%b` are the
+  # English abbreviations RFC 2822 requires on every locale.
+  #
+  # The zone tail is the CONSTANT "-0000" here, not stdlib's
+  # `utc? ? "-0000" : <offset>` conditional, because spinel's Time
+  # carries no zone model to branch on: `utc?`, `zone` and `utc_offset`
+  # are all undefined on it, and there is no `getlocal`. Every Time on
+  # this tree is therefore the UTC one `parse_db_time` built, and
+  # "-0000" — RFC 2822's "UTC, no local zone information" marker — is
+  # what stdlib renders for exactly that. The overlay twin keeps the
+  # conditional, since CRuby's Time does carry a zone.
+  #
+  # This is the same missing zone model that leaves the AOT lane's
+  # rendered timestamps at +0000 where the CRuby lane applies the app's
+  # `config.time_zone`; when spinel grows one, this reverts to the
+  # stdlib rule and both follow from the same fix.
+  def self.rfc2822(t)
+    return nil if t.nil?
+    t.strftime("%a, %d %b %Y %H:%M:%S ") + "-0000"
+  end
+
   def self.format_db_time(value)
     return nil if value.nil?
     if value.is_a?(Time)
