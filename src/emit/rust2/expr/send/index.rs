@@ -445,18 +445,30 @@ pub(super) fn try_recv_typed_method(
         }
         // `str.split(sep)` — Ruby returns an Array; Rust returns a
         // lazy `Split` iterator that doesn't support `.len()` or
-        // indexing. Eagerly collect to Vec<&str> so downstream
-        // `parts.length` / `parts[i]` (the typical router-table
-        // walking pattern) compiles. Recv-type-aware: only fires on
-        // Ty::Str receivers; user-defined `split` on other types
-        // stays intact.
+        // indexing. Eagerly collect so downstream `parts.length` /
+        // `parts[i]` (the typical router-table walking pattern)
+        // compiles. Recv-type-aware: only fires on Ty::Str receivers;
+        // user-defined `split` on other types stays intact.
+        //
+        // OWNED `Vec<String>`, not `Vec<&str>`: the type side already
+        // calls this `Array[String]` and declares every field, param
+        // and local that holds it `Vec<String>`. Borrowed slices agreed
+        // with that only as long as the value never left the expression
+        // that produced it — the moment a split result is stored on a
+        // struct or passed to a function (a router that splits its
+        // patterns once at construction rather than once per request)
+        // the two spellings meet and it is an E0308. Owning the
+        // segments is also what the borrow checker requires to put them
+        // in a field, and it is what Ruby's own `split` does.
         if method == "split"
             && args.len() == 1
             && matches!(r.ty.as_ref(), Some(crate::ty::Ty::Str))
         {
             let recv_s = emit_expr(r);
             let sep_s = emit_expr(&args[0]);
-            return Some(format!("{recv_s}.split({sep_s}).collect::<Vec<&str>>()"));
+            return Some(format!(
+                "{recv_s}.split({sep_s}).map(|s| s.to_string()).collect::<Vec<String>>()"
+            ));
         }
         // `s.gsub(pattern, table)` with a `Ty::Class { Regexp }` first
         // arg and a `Ty::Hash` second arg — the canonical Ruby idiom

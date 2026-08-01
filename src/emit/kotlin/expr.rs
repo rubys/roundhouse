@@ -1484,6 +1484,16 @@ fn emit_send(
             "end_with?" => return format!("{}.endsWith({})", emit_expr(r), args_s[0]),
             "include?" => return format!("{}.contains({})", emit_expr(r), args_s[0]),
             "join" => return format!("{}.joinToString({})", emit_expr(r), args_s[0]),
+            // Kotlin's own `String.split` returns a read-only `List<String>`,
+            // but `Array[String]` is declared `MutableList<String>` — Ruby
+            // arrays are mutable, and every field/param/local holding one is
+            // spelled that way. The two agreed only while a split result was
+            // consumed in the expression that produced it; store one on an
+            // object or pass it to a function (a router that splits its
+            // patterns once at construction rather than once per request) and
+            // it is an assignment-type mismatch. `toMutableList()` makes the
+            // value match the type the rest of the emit already assumes.
+            "split" => return format!("{}.split({}).toMutableList()", emit_expr(r), args_s[0]),
             _ => {}
         }
     }
