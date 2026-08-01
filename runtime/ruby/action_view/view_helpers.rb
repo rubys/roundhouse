@@ -322,35 +322,10 @@ module ActionView
 
     # `<img>` tag for a source path + attribute opts. The source flows
     # through `image_path` (verbatim for absolute/skip-pipeline avatars),
-    # alongside the caller's attrs (srcset/class/alt/...).
-    #
-    # `size:` is EXPANDED, not passed through. Rails turns `size: "16x16"`
-    # into `width="16" height="16"`, and a bare `size: "16"` into a square,
-    # so merging it verbatim ships a `size=` attribute that no browser
-    # reads and no Rails render contains. Attribute order mirrors Rails'
-    # own assembly — caller opts, then src, then width/height last.
-    #
-    # Built as a fresh hash rather than merge-then-delete: the typed
-    # runtime has no untyped-hash mutation, and the strict targets have no
-    # destructuring, so the split lands through explicit indexing rather
-    # than `w, h = size.split("x")`.
+    # then merges the caller's attrs (srcset/class/size/alt/...).
     def self.image_tag(source, opts = {})
-      attrs = {}
-      size = nil
-      opts.to_h.each do |k, v|
-        if k == :size
-          size = v
-        else
-          attrs[k] = v
-        end
-      end
-      attrs[:src] = image_path(source)
-      if !size.nil?
-        parts = size.to_s.split("x")
-        attrs[:width] = parts[0]
-        attrs[:height] = parts.length > 1 ? parts[1] : parts[0]
-      end
-      "<img#{render_attrs(attrs)}>"
+      attrs = render_attrs({ src: image_path(source) }.merge(opts.to_h))
+      "<img#{attrs}>"
     end
 
     # `content_tag :span, text, title: "..."` → `<span title="...">text</span>`.

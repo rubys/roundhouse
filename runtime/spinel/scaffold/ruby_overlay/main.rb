@@ -95,6 +95,7 @@ require_relative "runtime/action_controller"
 # must redefine it for CRuby's residual dynamic sites.
 require_relative "runtime/action_view_safe_buffer"
 require_relative "runtime/action_view_url_for"
+require_relative "runtime/action_view_image_tag"
 require_relative "runtime/action_view_missing_template"
 require_relative "runtime/action_dispatch_request"
 require_relative "runtime/action_controller_session"
