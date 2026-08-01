@@ -59,36 +59,42 @@ module ActiveSupport
     "#{t.strftime("%Y-%m-%dT%H:%M:%S")}.000+00:00"
   end
 
-  # Normalize a temporal-writer value into the canonical storage form.
-  # Time → stamped (same shape as db_now); nil → nil (nullable column
-  # cleared: `self.banned_at = nil`); String passes through untouched.
-  # The synthesized model writers (`banned_at=`) route every store
-  # through this so column TEXT stays homogeneous and lexicographically
-  # ordered.
   # RFC 2822 date, the shape stdlib `time` gives `Time#rfc2822` — which
   # spinel has no `time` package to provide and which cannot be added by
   # reopening `Time` (a reopened built-in loses its own method table for
   # self-calls). Composed from strftime instead, whose `%a`/`%b` are the
   # English abbreviations RFC 2822 requires on every locale.
   #
-  # The zone tail is the CONSTANT "-0000" here, not stdlib's
-  # `utc? ? "-0000" : <offset>` conditional, because spinel's Time
-  # carries no zone model to branch on: `utc?`, `zone` and `utc_offset`
-  # are all undefined on it, and there is no `getlocal`. Every Time on
-  # this tree is therefore the UTC one `parse_db_time` built, and
-  # "-0000" — RFC 2822's "UTC, no local zone information" marker — is
-  # what stdlib renders for exactly that. The overlay twin keeps the
-  # conditional, since CRuby's Time does carry a zone.
+  # The zone tail is the CONSTANT "-0000" — RFC 2822's "UTC, no local zone
+  # information" marker — because every Time on this tree IS the UTC one
+  # `parse_db_time` built, so stdlib's `utc? ? "-0000" : <offset>`
+  # conditional has only one reachable arm here.
   #
-  # This is the same missing zone model that leaves the AOT lane's
-  # rendered timestamps at +0000 where the CRuby lane applies the app's
-  # `config.time_zone`; when spinel grows one, this reverts to the
-  # stdlib rule and both follow from the same fix.
+  # That is NOT a spinel limitation. `utc?`, `zone`, `utc_offset` and
+  # `getlocal(off)` all exist, and sp_Time carries a 3-state zone kind
+  # (0 host-local / 1 UTC / 2 fixed offset), added 2026-07 in matz/spinel
+  # 1a7c3597 + fb6e6685. What is missing is on OUR side: nothing resolves
+  # the app's `config.time_zone` to an offset, which is why the AOT lane
+  # renders every timestamp at +0000 where the CRuby lane applies the zone.
+  # Closing that wants a tzinfo equivalent in runtime/ruby (zone name →
+  # offset, with DST) feeding `getlocal`; when it lands, this reverts to the
+  # stdlib rule. The overlay twin already keeps the conditional, since
+  # CRuby's Time does carry a zone.
+  #
+  # matz/spinel#3492 is a prerequisite: strftime and iso8601 currently
+  # render UTC clock fields for a fixed-offset Time, so `getlocal` output is
+  # not trustworthy until it merges.
   def self.rfc2822(t)
     return nil if t.nil?
     t.strftime("%a, %d %b %Y %H:%M:%S ") + "-0000"
   end
 
+  # Normalize a temporal-writer value into the canonical storage form.
+  # Time → stamped (same shape as db_now); nil → nil (nullable column
+  # cleared: `self.banned_at = nil`); String passes through untouched.
+  # The synthesized model writers (`banned_at=`) route every store
+  # through this so column TEXT stays homogeneous and lexicographically
+  # ordered.
   def self.format_db_time(value)
     return nil if value.nil?
     if value.is_a?(Time)
