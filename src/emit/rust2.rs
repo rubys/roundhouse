@@ -1077,6 +1077,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     nullable_columns: Vec::new(),
                     origin: None,
                     constants: Vec::new(),
+                    unknown_calls: Vec::new(),
                 });
                 let _ = stem;
             }
@@ -2197,5 +2198,6 @@ fn module_funcs_to_library_class(
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     }
 }

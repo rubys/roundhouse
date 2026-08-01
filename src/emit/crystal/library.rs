@@ -80,6 +80,7 @@ fn synthesize_module_lc(funcs: &[LibraryFunction]) -> LibraryClass {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     }
 }
 

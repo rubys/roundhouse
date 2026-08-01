@@ -2592,6 +2592,7 @@ fn synthesize_module_lc(
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     }
 }
 
@@ -2797,6 +2798,30 @@ pub(super) fn emit_library_class_decl_with_synthesized(
         writeln!(s).unwrap();
     }
 
+    // Class-body calls the ingest didn't model (`LibraryClass::
+    // unknown_calls`), replayed verbatim when — and only when — the
+    // class extends a base we don't model at all. See
+    // `replays_foreign_class_body`. After the constants (a captured
+    // call may reference one) and before the methods.
+    if replays_foreign_class_body(lc, app) {
+        for call in &lc.unknown_calls {
+            for line in super::emit_expr(call).lines() {
+                if line.is_empty() {
+                    writeln!(s).unwrap();
+                } else {
+                    writeln!(s, "{body_pad}{line}").unwrap();
+                }
+            }
+        }
+        if !lc.unknown_calls.is_empty() && !lc.methods.is_empty() {
+            writeln!(s).unwrap();
+        }
+    } else {
+        for call in &lc.unknown_calls {
+            report_dropped_class_body_call(lc, call);
+        }
+    }
+
     let mut first = true;
     for m in &lc.methods {
         if !first {
@@ -2842,6 +2867,68 @@ fn runtime_reopen_anchor(name: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// Whether this class's captured `unknown_calls` should be replayed
+/// into the emitted class body.
+///
+/// The test is "does the class extend a base we model at all?".
+/// `require_path_for_parent` already answers that — it resolves every
+/// framework base (`ActiveJob::Base`, `ActionMailer::Base`, …) and
+/// every app-local parent to a require target, and returns `None` only
+/// for a superclass that is neither. `SearchParser < Parslet::Parser`
+/// lands in that `None` case: the base comes from a gem, the gem is in
+/// the app's bundle, and its class-body DSL is the class. Replaying is
+/// the only way to emit it, and it is safe because the DSL's receiver
+/// is the gem's own class.
+///
+/// Everything else deliberately stays dropped, because a call we don't
+/// recognize on a base we DO model is already the lowering's business
+/// and replaying it would be wrong twice over:
+///
+///   - a concern's `included do … end` is spliced into each includer by
+///     `splice_concerns_into_models`; replaying it here would apply the
+///     callbacks a second time, on a module the runtime gives no
+///     `included` hook to,
+///   - `queue_as` / `rescue_from` / `default from:` / `delegate` are
+///     framework macros whose receiver is our own runtime base class.
+///     Where the runtime doesn't define one, replaying turns a silent
+///     modelling gap into a NoMethodError at class-definition time,
+///     i.e. an app that won't boot.
+///
+/// A dropped call is no longer silent either way — see
+/// `report_dropped_class_body_call`.
+fn replays_foreign_class_body(lc: &LibraryClass, app: &App) -> bool {
+    if lc.is_module {
+        return false;
+    }
+    lc.parent.as_ref().is_some_and(|p| {
+        require_path_for_parent(p, app).is_none() && !is_core_class_name(p.0.as_str())
+    })
+}
+
+/// Ledger a class-body call we captured but chose not to replay. The
+/// emit diagnostic sink is live here (ingest's is not — it runs before
+/// any `diagnostics::scope`), which is why the judgment happens at emit
+/// rather than where the call was captured.
+fn report_dropped_class_body_call(lc: &LibraryClass, call: &Expr) {
+    let name = match &*call.node {
+        ExprNode::Send { method, .. } => method.as_str().to_string(),
+        _ => "call".to_string(),
+    };
+    crate::emit::diagnostics::push(crate::lower::residue_diagnostic(
+        "library_class_body",
+        &name,
+        call.span,
+        "not modelled",
+        format!(
+            "`{}` in the body of `{}` is not modelled and is dropped; only a class \
+             extending a base roundhouse does NOT model (a gem's, whose DSL is the \
+             class) replays its class body verbatim",
+            name,
+            lc.name.0.as_str(),
+        ),
+    ));
 }
 
 fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {

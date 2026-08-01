@@ -105,6 +105,7 @@ fn build_row_class(model_name: &ClassId, table: &Table) -> LibraryClass {
             fields,
         }),
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     }
 }
 

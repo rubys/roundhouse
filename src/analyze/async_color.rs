@@ -716,6 +716,7 @@ mod tests {
             nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
+            unknown_calls: Vec::new(),
         }
     }
 

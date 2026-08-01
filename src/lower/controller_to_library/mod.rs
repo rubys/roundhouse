@@ -411,6 +411,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             nullable_columns: Vec::new(),
             origin: None,
             constants: collect_class_constants(controller),
+            unknown_calls: Vec::new(),
         });
     }
     // Type-check synthesized Params class method bodies with a per-class
@@ -468,6 +469,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         nullable_columns: Vec::new(),
         origin: None,
         constants: collect_class_constants(controller),
+        unknown_calls: Vec::new(),
     }
 }
 

@@ -447,6 +447,7 @@ fn build_library_class(tm: &TestModule) -> LibraryClass {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     }
 }
 

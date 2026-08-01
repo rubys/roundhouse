@@ -616,6 +616,29 @@ pub struct LibraryClass {
     /// Most synthesized classes have none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub constants: Vec<(Symbol, Expr)>,
+    /// Class-body calls the ingest doesn't model, in source order — a
+    /// gem's class-body DSL (lobsters' `SearchParser < Parslet::Parser`
+    /// is 60 lines of `rule(:name) { … }`) or any other bare call that
+    /// isn't `include` / `attr_*` / `module_function`. Previously
+    /// dropped on the floor, which emitted the parser as a two-line
+    /// empty class and failed every one of its 78 specs with no
+    /// diagnostic to show for it.
+    ///
+    /// Same contract as `ControllerBodyItem::Unknown`: captured as
+    /// `Expr` rather than source text, so it stays real IR — the
+    /// Ruby-family emitters replay it (the gem is present and runs),
+    /// and a strict target that cannot express a runtime class-body DSL
+    /// ignores the field and reports the class unsupported. Ingest
+    /// ledgers each captured call as `lower_residue` either way, so the
+    /// modelling debt is visible without waiting for a spec run.
+    ///
+    /// LIMITATION: interleaving with `methods` is not preserved (a
+    /// `LibraryClass` has no source-ordered body the way `Controller`
+    /// does), so these replay ahead of the method definitions. That
+    /// makes position-sensitive markers unsafe to capture — see the
+    /// visibility deny-list at the ingest site.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unknown_calls: Vec<Expr>,
 }
 
 /// What synthesized a `LibraryClass`. Used by per-target collapsers to

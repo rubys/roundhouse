@@ -1258,6 +1258,7 @@ mod tests {
             nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
+            unknown_calls: Vec::new(),
         };
         crate::emit::elixir2::emit_library_class(&class).expect("emit")
     }
@@ -1483,6 +1484,7 @@ mod tests {
             nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
+            unknown_calls: Vec::new(),
         };
         let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
         eprintln!("--- ctor ---\n{ex}\n------------");

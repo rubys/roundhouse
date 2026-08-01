@@ -2443,6 +2443,7 @@ mod tests {
                 nullable_columns: Vec::new(),
                 origin: None,
                 constants: Vec::new(),
+                unknown_calls: Vec::new(),
             }
         }
         fn const_ref(path: &[&str]) -> Expr {
@@ -2562,6 +2563,7 @@ mod tests {
             nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
+            unknown_calls: Vec::new(),
         };
         let class = crate::lower::functionalize::functionalize(vec![class]).pop().unwrap();
         let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
@@ -2774,6 +2776,7 @@ mod tests {
             nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
+            unknown_calls: Vec::new(),
         };
         clear_modules();
         register_modules(std::iter::once(&vh));

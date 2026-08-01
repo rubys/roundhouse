@@ -60,7 +60,24 @@ module Rails
       AppPath.new(@base + "/" + part)
     end
 
+    # `Rails.root + "storage/x"` — Pathname#+ is a path join, not string
+    # concatenation, so it is `join` under another name.
+    def +(part)
+      AppPath.new(@base + "/" + part)
+    end
+
     def to_s
+      @base
+    end
+
+    # The implicit path conversion `File.read` / `IO.read` / `File.open`
+    # look for. Rails.root is a Pathname there, and Pathname answers
+    # `to_path` (NOT `to_str` — it deliberately does not pose as a
+    # String). Without this, `File.read(Rails.root.join(…))` raises
+    # `TypeError: no implicit conversion of Rails::AppPath into String`
+    # — which is what SearchParser hit through
+    # `FetchIanaTldsJob.tlds`, once its rules were emitted at all.
+    def to_path
       @base
     end
   end

@@ -362,6 +362,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 nullable_columns: Vec::new(),
                 origin: None,
                 constants: Vec::new(),
+                unknown_calls: Vec::new(),
             });
         }
     }

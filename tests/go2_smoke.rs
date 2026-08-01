@@ -136,6 +136,7 @@ fn module_singleton_shape() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit module singleton");
@@ -258,6 +259,7 @@ fn module_singleton_does_not_fire_on_plain_class() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit plain class");
@@ -376,6 +378,7 @@ fn raise_panic_peephole() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit crasher class");
@@ -476,6 +479,7 @@ fn time_now_utc_iso8601_peephole() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit clock class");
@@ -556,6 +560,7 @@ fn include_array_recv_routes_to_slices_contains() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit colcheck class");
@@ -630,6 +635,7 @@ fn negative_index_rewrites_to_len_minus_n() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit tailer class");
@@ -785,6 +791,7 @@ fn class_reflection_rewrites() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit reflect class");
@@ -871,6 +878,7 @@ fn bare_new_in_class_method_resolves_to_constructor() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit widget class");
@@ -1007,6 +1015,7 @@ fn implicit_self_method_call_resolution() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit worker class");
@@ -1097,6 +1106,7 @@ fn each_array_block_shape() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit each-block class");
@@ -1177,6 +1187,7 @@ fn each_hash_block_shape() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit each hash-block class");
@@ -1254,6 +1265,7 @@ fn map_array_block_shape() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit map-block class");
@@ -1353,6 +1365,7 @@ fn empty_body_with_nonvoid_return_synthesizes_zero_value() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit empty-body class");
@@ -1457,6 +1470,7 @@ fn typed_empty_literals_back_propagate() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     };
 
     let emitted = go2::emit_library_class(&class).expect("emit typed-literal class");
@@ -1740,6 +1754,7 @@ fn nil_check_to_comma_ok_rewrites_pair() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     };
 
     let out = lower_for_go(vec![class]);
@@ -1827,6 +1842,7 @@ fn nil_check_to_comma_ok_skips_non_hash_receiver() {
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     };
 
     let out = lower_for_go(vec![class]);

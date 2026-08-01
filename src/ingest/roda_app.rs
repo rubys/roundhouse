@@ -350,6 +350,7 @@ fn ingest_roda_class(source: &[u8], file: &str, app: &mut App) -> IngestResult<S
             nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
+            unknown_calls: Vec::new(),
         });
     }
 

@@ -87,8 +87,42 @@ require "faker"
 FactoryBot.definition_file_paths = [File.join(LOBSTERS, "spec", "factories")]
 FactoryBot.find_definitions
 
+# HARNESS COMPENSATION (by design): minitest's assertions, which
+# `rspec-rails` mixes into every example group in a stock Rails app.
+# A spec calling `assert` is reaching for its test framework, not for
+# anything about the transpiled app, so this is ours to provide.
+#
+# DELIBERATELY NOT the same treatment for `travel_to`: the obvious fix,
+# `require "active_support/testing/time_helpers"`, drags REAL
+# ActiveSupport in behind it and it reopens `ActiveSupport::Duration`
+# on top of the emitted runtime's — measured, 6 "already initialized
+# constant" collisions where the baseline has 0. That is the shim
+# testing Rails instead of the emit, which is the one thing this
+# harness exists to prevent (see the canary above). `travel_to` stays
+# an open harness gap until it can be provided without loading Rails.
+#
+# minitest is safe by contrast: it is a test framework, and it defines
+# no constant the emitted tree also defines.
+require "minitest/assertions"
+
+module MinitestAssertionsForRSpec
+  include Minitest::Assertions
+  # Minitest::Assertions counts every assertion through this accessor
+  # (`self.assertions += 1`). RSpec has no equivalent and nothing reads
+  # the total, so lazy-init it rather than hooking each example group's
+  # constructor to zero it.
+  def assertions
+    @assertions ||= 0
+  end
+
+  def assertions=(n)
+    @assertions = n
+  end
+end
+
 RSpec.configure do |config|
   config.include FactoryBot::Syntax::Methods
+  config.include MinitestAssertionsForRSpec
 
   # Fresh in-memory DB per example (stand-in for transactional fixtures):
   # reopen :memory: and replay the schema DDL, mirroring

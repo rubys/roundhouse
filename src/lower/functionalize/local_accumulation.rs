@@ -281,6 +281,7 @@ mod tests {
             nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
+            unknown_calls: Vec::new(),
         };
         let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
         eprintln!("--- accumulation ---\n{ex}\n--------------------");
@@ -327,6 +328,7 @@ mod tests {
             nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
+            unknown_calls: Vec::new(),
         };
         let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
         assert!(ex.contains("acc = acc ++ [v]"), "`<<` → append rebind:\n{ex}");
@@ -377,6 +379,7 @@ mod tests {
             nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
+            unknown_calls: Vec::new(),
         };
         let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
         eprintln!("--- string builder ---\n{ex}\n----------------------");
@@ -424,6 +427,7 @@ mod tests {
             nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
+            unknown_calls: Vec::new(),
         };
         let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
         assert!(ex.contains("r = %{r | notice: v}"), "attr setter → struct update:\n{ex}");
@@ -475,6 +479,7 @@ mod tests {
             nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
+            unknown_calls: Vec::new(),
         };
         let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
         eprintln!("--- block reduce ---\n{ex}\n--------------------");
@@ -518,6 +523,7 @@ mod tests {
             nullable_columns: Vec::new(),
             origin: None,
             constants: Vec::new(),
+            unknown_calls: Vec::new(),
         };
         let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
         assert!(

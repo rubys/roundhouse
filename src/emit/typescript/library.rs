@@ -217,6 +217,7 @@ fn synthesize_module_lc(
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     }
 }
 
@@ -515,6 +516,7 @@ fn collect_imports_for_function(
         }],
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     };
     collect_imports(&synthetic_lc, app, out_path)
 }

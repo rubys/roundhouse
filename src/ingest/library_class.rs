@@ -65,6 +65,49 @@ pub fn ingest_library_classes(
             &module, &scope, file,
         )?);
     }
+    // Constants written at FILE level, outside any class — lobsters'
+    // `search_parser.rb` opens with `MYISAM_STOPWORDS = %w[…]` and the
+    // parser's `rule(:stopword)` reads it. Ruby puts these on Object,
+    // so every class in the file sees them; we hoist them into the
+    // first class instead, ahead of its own constants.
+    //
+    // That is an approximation in exactly one direction: a file-level
+    // constant read UNQUALIFIED from a different file would resolve
+    // under Ruby and won't here. Reading it from inside the owning
+    // class — including from inside a block in its body, which is what
+    // a class-body DSL is — resolves either way, because a block
+    // carries the lexical scope it was written in. The corpus has no
+    // cross-file reader; a new one surfaces as a NameError naming the
+    // constant, not as a silent wrong answer.
+    if let Some(first) = out.first_mut() {
+        let mut file_constants = file_level_constants(&root, file)?;
+        if !file_constants.is_empty() {
+            file_constants.extend(std::mem::take(&mut first.constants));
+            first.constants = file_constants;
+        }
+    }
+    Ok(out)
+}
+
+/// `NAME = <expr>` statements at the top level of a file, in source
+/// order. Only direct program-body statements — anything inside a
+/// class or module body is that declaration's own constant and is
+/// collected by `walk_decl_body`.
+fn file_level_constants(
+    root: &ruby_prism::Node<'_>,
+    file: &str,
+) -> IngestResult<Vec<(Symbol, Expr)>> {
+    let mut out = Vec::new();
+    let Some(prog) = root.as_program_node() else {
+        return Ok(out);
+    };
+    for stmt in prog.statements().body().iter() {
+        let Some(cw) = stmt.as_constant_write_node() else { continue };
+        out.push((
+            Symbol::from(constant_id_str(&cw.name())),
+            ingest_expr(&cw.value(), file)?,
+        ));
+    }
     Ok(out)
 }
 
@@ -107,7 +150,8 @@ pub fn ingest_rails_application_singleton_methods(
         if path.join("::") != "Rails" {
             continue;
         }
-        let (_includes, methods, _constants) = walk_decl_body(sc.body(), &owner, file, false)?;
+        let (_includes, methods, _constants, _unknown) =
+            walk_decl_body(sc.body(), &owner, file, false)?;
         out.extend(methods);
     }
     Ok(out)
@@ -137,7 +181,8 @@ pub(super) fn library_class_from_node_with_scope(
         constant_path_of(&n).map(|p| ClassId(Symbol::from(p.join("::"))))
     });
 
-    let (includes, methods, constants) = walk_decl_body(class.body(), &owner, file, false)?;
+    let (includes, methods, constants, unknown_calls) =
+        walk_decl_body(class.body(), &owner, file, false)?;
     Ok(LibraryClass {
         name: owner,
         is_module: false,
@@ -147,6 +192,7 @@ pub(super) fn library_class_from_node_with_scope(
         nullable_columns: Vec::new(),
         origin: None,
         constants,
+        unknown_calls,
     })
 }
 
@@ -169,7 +215,8 @@ fn library_class_from_module_node_with_scope(
     full_path.extend(name_path);
     let owner = ClassId(Symbol::from(full_path.join("::")));
 
-    let (includes, methods, constants) = walk_decl_body(module.body(), &owner, file, false)?;
+    let (includes, methods, constants, unknown_calls) =
+        walk_decl_body(module.body(), &owner, file, false)?;
     Ok(LibraryClass {
         name: owner,
         is_module: true,
@@ -179,20 +226,46 @@ fn library_class_from_module_node_with_scope(
         nullable_columns: Vec::new(),
         origin: None,
         constants,
+        unknown_calls,
     })
 }
 
 /// Walk a class or module body, collecting `include` directives and
 /// method definitions (with `attr_*` lowered to synthesized methods).
-/// Other top-level calls (alias_method, etc.) and nested class/module
-/// declarations are dropped — those surface separately via the plural
-/// ingest entry points.
+/// Receiverless calls the walk doesn't recognize (`rule(:x) { … }`,
+/// `alias_method`, …) are captured into the fourth slot rather than
+/// dropped — see `LibraryClass::unknown_calls`. Nested class/module
+/// declarations are still dropped; those surface separately via the
+/// plural ingest entry points.
 ///
 /// `force_class_receiver` is true when we're recursing into a
 /// `class << self` block; it overrides every synthesized method's
 /// receiver to `Class`, so e.g. `attr_accessor :adapter` inside
 /// `class << self` produces class-level getter/setter pairs.
-type DeclBody = (Vec<ClassId>, Vec<MethodDef>, Vec<(Symbol, Expr)>);
+type DeclBody = (Vec<ClassId>, Vec<MethodDef>, Vec<(Symbol, Expr)>, Vec<Expr>);
+
+/// Receiverless class-body calls that are NOT safe to capture into
+/// `unknown_calls`, because their meaning depends on where they sit
+/// relative to the method definitions around them — and a
+/// `LibraryClass` has no source-ordered body, so a captured call
+/// replays ahead of every method. `private` replayed at the top of the
+/// class body would make the whole class private rather than its tail.
+///
+/// `require` / `require_relative` are here for a different reason: the
+/// emitted tree builds its own require graph (spinel's AOT stage
+/// resolves it statically), so replaying a source require inside a
+/// class body would point at a path that doesn't exist in the output.
+const POSITION_SENSITIVE_MARKERS: &[&str] = &[
+    "private",
+    "public",
+    "protected",
+    "private_class_method",
+    "public_class_method",
+    "private_constant",
+    "public_constant",
+    "require",
+    "require_relative",
+];
 
 fn walk_decl_body<'pr>(
     body: Option<ruby_prism::Node<'pr>>,
@@ -203,6 +276,7 @@ fn walk_decl_body<'pr>(
     let mut includes: Vec<ClassId> = Vec::new();
     let mut methods: Vec<MethodDef> = Vec::new();
     let mut constants: Vec<(Symbol, Expr)> = Vec::new();
+    let mut unknown_calls: Vec<Expr> = Vec::new();
     // `module_function` (called bare inside a module body) marks every
     // subsequent direct `def` as a module-function — both an instance
     // method AND a class method. For our targets (which call these as
@@ -219,7 +293,7 @@ fn walk_decl_body<'pr>(
     let mut direct_def_positions: Vec<usize> = Vec::new();
 
     let Some(b) = body else {
-        return Ok((includes, methods, constants));
+        return Ok((includes, methods, constants, unknown_calls));
     };
 
     for stmt in flatten_statements(b) {
@@ -259,11 +333,12 @@ fn walk_decl_body<'pr>(
         // `class << self ... end` — singleton class block. Body
         // defines class-level methods on the enclosing scope.
         if let Some(sc) = stmt.as_singleton_class_node() {
-            let (inner_includes, inner_methods, inner_constants) =
+            let (inner_includes, inner_methods, inner_constants, inner_unknown) =
                 walk_decl_body(sc.body(), owner, file, true)?;
             includes.extend(inner_includes);
             methods.extend(inner_methods);
             constants.extend(inner_constants);
+            unknown_calls.extend(inner_unknown);
             continue;
         }
         if let Some(call) = stmt.as_call_node() {
@@ -276,11 +351,12 @@ fn walk_decl_body<'pr>(
                 // registry's concern fold copies them onto includers.
                 if kw == "class_methods" {
                     if let Some(block) = call.block().and_then(|blk| blk.as_block_node()) {
-                        let (inner_includes, inner_methods, inner_constants) =
+                        let (inner_includes, inner_methods, inner_constants, inner_unknown) =
                             walk_decl_body(block.body(), owner, file, true)?;
                         includes.extend(inner_includes);
                         methods.extend(inner_methods);
                         constants.extend(inner_constants);
+                        unknown_calls.extend(inner_unknown);
                         continue;
                     }
                 }
@@ -364,8 +440,24 @@ fn walk_decl_body<'pr>(
                         }
                     }
                     _ => {
-                        // Other top-level calls (alias_method, etc.) —
-                        // drop on the floor for now.
+                        // A call this walk doesn't model. Capture it so
+                        // the targets that CAN replay a class-body DSL
+                        // do (`LibraryClass::unknown_calls`); the
+                        // position-sensitive markers stay dropped
+                        // because a capture would replay them in the
+                        // wrong place.
+                        //
+                        // An expression we can't even ingest is left
+                        // dropped rather than failing the whole class:
+                        // the class still has its methods, and the emit
+                        // side reports the gap. That keeps a single
+                        // exotic call in one library class from taking
+                        // the app's ingest down.
+                        if !POSITION_SENSITIVE_MARKERS.contains(&kw) {
+                            if let Ok(e) = ingest_expr(&stmt, file) {
+                                unknown_calls.push(e);
+                            }
+                        }
                     }
                 }
             }
@@ -422,7 +514,7 @@ fn walk_decl_body<'pr>(
         }
     }
 
-    Ok((includes, methods, constants))
+    Ok((includes, methods, constants, unknown_calls))
 }
 
 /// Rewrite `@@X` (ingested as a sigil-verbatim `Var`) to `Ivar { X }`,

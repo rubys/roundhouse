@@ -97,6 +97,7 @@ fn build_fixture_class(f: &LoweredFixture, all: &LoweredFixtureSet) -> LibraryCl
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     }
 }
 

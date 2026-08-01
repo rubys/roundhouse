@@ -258,6 +258,7 @@ fn lower_models_inner(
             nullable_columns: nullable_column_names(table),
             origin: None,
             constants: collect_model_constants(model),
+            unknown_calls: Vec::new(),
         });
     }
     // Type-check Row class method bodies too so the strict typing residual
@@ -418,6 +419,7 @@ pub fn lower_model_to_library_class(model: &Model, schema: &Schema) -> LibraryCl
         nullable_columns: nullable_column_names(table),
         origin: None,
         constants: collect_model_constants(model),
+        unknown_calls: Vec::new(),
     }
 }
 

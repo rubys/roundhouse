@@ -213,6 +213,7 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         nullable_columns: Vec::new(),
         origin: None,
         constants: Vec::new(),
+        unknown_calls: Vec::new(),
     }
 }
 
