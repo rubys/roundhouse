@@ -11,6 +11,9 @@ module ActionDispatch
       def action: () -> Symbol
       def req_format: () -> Symbol?
       def int_params: () -> String
+      # The pattern split on "/" once at construction, so a `Router.match`
+      # table walk never re-splits it per request.
+      def pattern_parts: () -> Array[String]
 
       def initialize: (String verb, String pattern, Symbol controller, Symbol action, ?Symbol? req_format, ?String int_params) -> void
     end
@@ -48,6 +51,15 @@ module ActionDispatch
     def self.match_pattern: (
       String pattern,
       String path,
+      ?String int_params
+    ) -> Hash[String, String]?
+
+    # The same segment loop over already-split parts — what `Router.match`
+    # calls with the route's precomputed `pattern_parts`, so a table walk
+    # allocates no segment arrays per candidate.
+    def self.match_parts: (
+      Array[String] pattern_parts,
+      Array[String] path_parts,
       ?String int_params
     ) -> Hash[String, String]?
 

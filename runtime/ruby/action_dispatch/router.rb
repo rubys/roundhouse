@@ -24,7 +24,8 @@ module ActionDispatch
     # call sites; positional avoids the asymmetry on internal classes
     # like this one.
     class Route
-      attr_reader :verb, :pattern, :controller, :action, :req_format, :int_params
+      attr_reader :verb, :pattern, :controller, :action, :req_format, :int_params,
+                  :pattern_parts
 
       # `req_format` — the route-forced response format (Rails'
       # `get "/rss" => "home#index", :format => "rss"`), nil for the
@@ -48,6 +49,14 @@ module ActionDispatch
         @action      = action
         @req_format  = req_format
         @int_params  = int_params
+        # Split ONCE, at table-construction time. `Router.match` is a linear
+        # scan, so splitting the pattern inside the match loop charged every
+        # request two fresh segment arrays per candidate route it walked past
+        # — profiled at 43% of a lobsters `/about` request (112 candidates
+        # deep in the table) and ~2.7 array allocations per candidate. The
+        # table is built once at boot; the request path is the only thing
+        # that has to be split per request.
+        @pattern_parts = pattern.split("/")
       end
     end
 
@@ -76,11 +85,12 @@ module ActionDispatch
     # silently strip the early-return.
     def self.match(method, path, table)
       method_upcase = method.to_s.upcase
+      path_parts = path.split("/")
       i = 0
       while i < table.length
         route = table[i]
         if route.verb.to_s == method_upcase
-          params = match_pattern(route.pattern.to_s, path, route.int_params)
+          params = match_parts(route.pattern_parts, path_parts, route.int_params)
           unless params.nil?
             return MatchResult.new(route.controller, route.action, params, route.req_format)
           end
@@ -104,8 +114,16 @@ module ActionDispatch
     # raw segment (`ap`, a non-nil String local) rather than after
     # capture so no target has to model `Hash#[]` returning nil.
     def self.match_pattern(pattern, path, int_params = +"")
-      pattern_parts = pattern.split("/")
-      path_parts    = path.split("/")
+      match_parts(pattern.split("/"), path.split("/"), int_params)
+    end
+
+    # The segment loop, over already-split parts. `Router.match` feeds it the
+    # route's precomputed `pattern_parts` and the request path split once for
+    # the whole scan, so a table walk allocates nothing per candidate.
+    # `match_pattern` above keeps the split-here-from-two-strings signature —
+    # it is the shape the runtime tests and the per-target smoke tests call,
+    # and a tree-shake root in src/runtime_loader.rs.
+    def self.match_parts(pattern_parts, path_parts, int_params = +"")
       return nil if pattern_parts.length != path_parts.length
       params = {}
       i = 0
