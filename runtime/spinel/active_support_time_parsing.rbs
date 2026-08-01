@@ -6,4 +6,10 @@ module ActiveSupport
   def self.json_time: (String? str) -> String?
   def self.db_now: () -> String
   def self.format_db_time: (untyped value) -> String?
+  # The RSS feed's `<pubDate>`. Absent from this file until 2026-08-01,
+  # which is why every pubDate rendered EMPTY on this tree: the call site
+  # is `ActiveSupport.rfc2822(story.created_at).to_s`, and with no
+  # signature the result had no type to carry a String back through.
+  # The sibling runtime/ruby/.rbs has always declared it.
+  def self.rfc2822: (Time? t) -> String?
 end

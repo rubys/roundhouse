@@ -60,6 +60,18 @@ Rails.env_name = ENV["RAILS_ENV"]
 # stub reopen when the source app has none); loads right after the
 # runtime shim it reopens.
 require_relative "config/application"
+# Pin the process zone to the app's config.time_zone before anything
+# renders. Rails presents every AR temporal value in that zone
+# REGARDLESS of the host's — `parse_db_time` hydrates the stored UTC
+# instant and lands it here with `.getlocal`, so strftime/iso8601/pubDate
+# offsets match Rails on any host. `config_time_zone` is a framework
+# default in runtime/rails.rb that the app's reopen (required just above)
+# overrides when ingest found a `config.time_zone` line, so this call
+# resolves statically — no respond_to? guard, which the strict target
+# could not take anyway. Twin of the overlay main.rb's pin.
+ENV["TZ"] = ActiveSupport::RAILS_TZ_TO_IANA.fetch(
+  Rails.application.config_time_zone, Rails.application.config_time_zone
+)
 require_relative "runtime/active_record"
 require_relative "config/schema"
 require_relative "runtime/action_dispatch"

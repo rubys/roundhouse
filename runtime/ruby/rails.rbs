@@ -50,5 +50,6 @@ module Rails
 
   class Application
     def session_cookie_key: () -> String
+    def config_time_zone: () -> String
   end
 end

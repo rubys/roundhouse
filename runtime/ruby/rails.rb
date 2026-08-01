@@ -219,5 +219,19 @@ module Rails
     def session_cookie_key
       "_session"
     end
+
+    # The zone every ActiveRecord temporal value is PRESENTED in. Same
+    # framework-default shape as `session_cookie_key` above: Rails always
+    # has one (`config.time_zone` defaults to "UTC"), ingest lifts an
+    # app's `config.time_zone = "..."` into an override on the app's
+    # reopen, and this stands in when the app declares none — so a
+    # strict target can call it without a `respond_to?` guard.
+    #
+    # The value is a Rails zone NAME ("Central Time (US & Canada)"), not
+    # an IANA identifier; `ActiveSupport::RAILS_TZ_TO_IANA` translates,
+    # and main.rb pins ENV["TZ"] from the result before any render.
+    def config_time_zone
+      "UTC"
+    end
   end
 end
