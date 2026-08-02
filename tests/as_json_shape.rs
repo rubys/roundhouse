@@ -195,3 +195,156 @@ fn an_unrecognized_body_is_declined_rather_than_guessed() {
     assert!(as_json_pairs(&as_json_body(&app, "Widget")).is_err());
 }
 
+
+// ── call-site specialization ───────────────────────────────────────
+
+use roundhouse::lower::as_json_shape::as_json_pairs_for_no_arg_call;
+
+/// Pull `<Model>#as_json`'s params and body together.
+fn as_json_method(
+    app: &roundhouse::App,
+    model_name: &str,
+) -> (Vec<roundhouse::dialect::Param>, roundhouse::expr::Expr) {
+    let model = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == model_name)
+        .unwrap_or_else(|| panic!("no model {model_name}"));
+    for item in &model.body {
+        if let roundhouse::dialect::ModelBodyItem::Method { method, .. } = item {
+            if method.name.as_str() == "as_json" {
+                return (method.params.clone(), method.body.clone());
+            }
+        }
+    }
+    panic!("{model_name} has no as_json");
+}
+
+/// The lobsters Story body, verbatim in shape: an options-guarded push
+/// is what makes the per-model analysis decline it.
+fn story_app() -> roundhouse::App {
+    app_from(vec![(
+        "app/models/story.rb",
+        "class Story < ApplicationRecord\n\
+         \x20 def as_json(options = {})\n\
+         \x20   h = [ :short_id, :title, { :comment_count => :comments_count } ]\n\
+         \x20   h.push(:comments => options[:with_comments]) if options && options[:with_comments]\n\
+         \x20   js = {}\n\
+         \x20   h.each do |k|\n\
+         \x20     js[k] = self.send(k)\n\
+         \x20   end\n\
+         \x20   js\n\
+         \x20 end\n\
+         end\n",
+    )])
+}
+
+#[test]
+fn specializing_to_a_bare_call_recovers_the_body_the_model_pass_declined() {
+    let app = story_app();
+    let (params, body) = as_json_method(&app, "Story");
+
+    // Unspecialized, this is exactly the body committed as "declined".
+    assert!(as_json_pairs(&body).is_err(), "per-model analysis still declines it");
+
+    // `render json: @stories` calls as_json with NO arguments, so
+    // `options` is its `{}` default, `options[:with_comments]` is nil,
+    // and the guarded push is unreachable.
+    let pairs = as_json_pairs_for_no_arg_call(&params, &body).expect("specialized");
+    assert_eq!(keys(&pairs), ["short_id", "title", "comment_count"]);
+
+    // The opt-in key must NOT appear: Rails would not emit it for a
+    // bare `as_json` either.
+    assert!(pairs.iter().all(|p| p.key.as_str() != "comments"));
+}
+
+#[test]
+fn a_guard_the_binding_cannot_decide_is_left_alone() {
+    // The guard reads `self`, not the options parameter, so the empty
+    // -hash binding settles nothing. Folding it would be a guess, and a
+    // guess here silently emits the wrong key set — decline instead.
+    let app = app_from(vec![(
+        "app/models/story.rb",
+        "class Story < ApplicationRecord\n\
+         \x20 def as_json(options = {})\n\
+         \x20   h = [ :short_id ]\n\
+         \x20   h.push(:secret) if self.is_admin?\n\
+         \x20   js = {}\n\
+         \x20   h.each do |k|\n\
+         \x20     js[k] = self.send(k)\n\
+         \x20   end\n\
+         \x20   js\n\
+         \x20 end\n\
+         end\n",
+    )]);
+    let (params, body) = as_json_method(&app, "Story");
+    let err = as_json_pairs_for_no_arg_call(&params, &body).expect_err("still declined");
+    assert!(err.contains("push"), "got: {err}");
+}
+
+#[test]
+fn an_options_parameter_without_an_empty_hash_default_is_declined() {
+    // Nothing tells us what a bare call binds here, so the guard cannot
+    // be decided and the specialization must not run.
+    let app = app_from(vec![(
+        "app/models/story.rb",
+        "class Story < ApplicationRecord\n\
+         \x20 def as_json(options)\n\
+         \x20   h = [ :short_id ]\n\
+         \x20   h.push(:extra) if options[:extra]\n\
+         \x20   js = {}\n\
+         \x20   h.each do |k|\n\
+         \x20     js[k] = self.send(k)\n\
+         \x20   end\n\
+         \x20   js\n\
+         \x20 end\n\
+         end\n",
+    )]);
+    let (params, body) = as_json_method(&app, "Story");
+    let err = as_json_pairs_for_no_arg_call(&params, &body).expect_err("declined");
+    assert!(err.contains("default"), "got: {err}");
+}
+
+#[test]
+fn specialization_leaves_a_row_dependent_key_conditional() {
+    // Specializing the options binding must not disturb a guard that
+    // depends on the ROW. User's `karma` has to survive as a condition.
+    let app = app_from(vec![(
+        "app/models/user.rb",
+        "class User < ApplicationRecord\n\
+         \x20 def as_json(_options = {})\n\
+         \x20   attrs = [ :username ]\n\
+         \x20   attrs.push :karma if !self.is_admin?\n\
+         \x20   h = super(:only => attrs)\n\
+         \x20   h\n\
+         \x20 end\n\
+         end\n",
+    )]);
+    let (params, body) = as_json_method(&app, "User");
+    let pairs = as_json_pairs_for_no_arg_call(&params, &body).expect("recognized");
+    assert_eq!(keys(&pairs), ["username", "karma"]);
+    assert!(find(&pairs, "karma").cond.is_some(), "karma stays row-dependent");
+}
+
+#[test]
+fn a_key_listed_twice_collapses_the_way_the_hash_would() {
+    // lobsters Story really does list `:score` twice. The Hash the walk
+    // builds holds ONE score entry — first position, last value — so a
+    // pair list with two would emit a duplicate JSON key Rails never
+    // sends.
+    let app = app_from(vec![(
+        "app/models/story.rb",
+        "class Story < ApplicationRecord\n\
+         \x20 def as_json(_options = {})\n\
+         \x20   h = [ :short_id, :score, :flags, :score ]\n\
+         \x20   js = {}\n\
+         \x20   h.each do |k|\n\
+         \x20     js[k] = self.send(k)\n\
+         \x20   end\n\
+         \x20   js\n\
+         \x20 end\n\
+         end\n",
+    )]);
+    let pairs = as_json_pairs(&as_json_body(&app, "Story")).expect("recognized");
+    assert_eq!(keys(&pairs), ["short_id", "score", "flags"]);
+}

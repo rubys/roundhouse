@@ -78,6 +78,37 @@ pub type ShapeError = &'static str;
 
 /// Recognize `body` as an ordered pair list, or explain why not.
 pub fn as_json_pairs(body: &Expr) -> Result<Vec<JsonPair>, ShapeError> {
+    dedupe_keys(as_json_pairs_raw(body)?)
+}
+
+/// Collapse repeated keys the way the Hash these statements build
+/// would. lobsters `Story#as_json` lists `:score` TWICE; Ruby's
+/// `js[:score] = …` runs twice and leaves ONE entry — at the FIRST
+/// insertion's position, holding the LAST assignment's value. Emitting
+/// both would put a duplicate key in the JSON, which is not what Rails
+/// sends.
+///
+/// A repeat involving a CONDITIONAL pair is declined rather than
+/// merged: which value survives then depends on which guards fire, and
+/// that is not a question this analysis can answer.
+fn dedupe_keys(pairs: Vec<JsonPair>) -> Result<Vec<JsonPair>, ShapeError> {
+    let mut out: Vec<JsonPair> = Vec::new();
+    for p in pairs {
+        match out.iter_mut().find(|q| q.key == p.key) {
+            None => out.push(p),
+            Some(prev) => {
+                if prev.cond.is_some() || p.cond.is_some() {
+                    return Err("a repeated key is conditional");
+                }
+                // Keep the earlier position, take the later value.
+                prev.value = p.value;
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn as_json_pairs_raw(body: &Expr) -> Result<Vec<JsonPair>, ShapeError> {
     let stmts = seq_stmts(body);
     if stmts.is_empty() {
         return Err("empty as_json body");
@@ -370,4 +401,139 @@ fn assign_target_local(stmt: &Expr) -> Option<Symbol> {
         ExprNode::Assign { target: LValue::Var { name, .. }, .. } => Some(name.clone()),
         _ => None,
     }
+}
+
+// ── call-site specialization ───────────────────────────────────────
+
+/// Recognize `as_json` AS CALLED WITH NO ARGUMENTS.
+///
+/// `render json: <expr>` serializes through a bare `as_json`, so the
+/// options parameter is bound to its default. Rails bodies branch on
+/// that parameter to offer opt-in extras — lobsters `Story#as_json`
+/// carries
+///
+/// ```text
+/// h.push(comments: options[:with_comments]) if options && options[:with_comments]
+/// ```
+///
+/// which makes its key set argument-dependent, so the per-model
+/// [`as_json_pairs`] declines it. Bound to `{}` the guard is decidably
+/// false, the push is unreachable, and the remaining body is the plain
+/// entry-list idiom. Specializing to the ACTUAL call is what turns
+/// "argument-dependent" back into "known".
+///
+/// Deliberately narrow. Only guards whose value is settled by the
+/// options binding alone are folded; a guard reading anything else
+/// (`self.is_admin?`) is left exactly where it is, to be preserved as a
+/// runtime condition by the recognizer. Folding a guard we cannot
+/// actually decide would silently emit the wrong key set, which is
+/// worse than declining — so `Unknown` never folds.
+pub fn as_json_pairs_for_no_arg_call(
+    params: &[crate::dialect::Param],
+    body: &Expr,
+) -> Result<Vec<JsonPair>, ShapeError> {
+    // Zero params: nothing to bind, the body is already the specialized
+    // one. More than one: not the `as_json(options = {})` shape.
+    let opts = match params {
+        [] => return as_json_pairs(body),
+        [p] => p,
+        _ => return Err("as_json takes more than one parameter"),
+    };
+    match opts.default.as_ref().map(|d| is_empty_hash(d)) {
+        Some(true) => {}
+        // No default, or a default we cannot read as the empty hash: we
+        // do not know what a bare call binds, so do not pretend to.
+        _ => return Err("options parameter has no `= {}` default"),
+    }
+    as_json_pairs(&drop_statements_guarded_false(body, &opts.name))
+}
+
+/// Truthiness of an expression under `<opts> = {}`, when decidable.
+#[derive(Clone, Copy, PartialEq)]
+enum Truth {
+    True,
+    False,
+    Unknown,
+}
+
+/// Rebuild `body` without the statements whose guard is decidably false
+/// under the empty-hash binding.
+fn drop_statements_guarded_false(body: &Expr, opts: &Symbol) -> Expr {
+    let stmts = seq_stmts(body);
+    let kept: Vec<Expr> = stmts
+        .iter()
+        .filter(|s| {
+            let (_, cond) = split_guard(s);
+            match cond {
+                Some(c) => eval_under_empty_hash(c, opts) != Truth::False,
+                None => true,
+            }
+        })
+        .map(|s| (*s).clone())
+        .collect();
+    Expr::new(body.span, ExprNode::Seq { exprs: kept })
+}
+
+/// Evaluate `e`'s truthiness given `<opts>` is an empty Hash. Anything
+/// this does not model answers `Unknown`, which never folds.
+fn eval_under_empty_hash(e: &Expr, opts: &Symbol) -> Truth {
+    // A bare `options` read. An empty Hash is TRUTHY in Ruby — only nil
+    // and false are falsy — so `options && options[:k]` hinges on the
+    // index, not on the hash.
+    if is_named_local(e, opts) {
+        return Truth::True;
+    }
+    match &*e.node {
+        ExprNode::Lit { value: Literal::Nil } => Truth::False,
+        ExprNode::Lit { value: Literal::Bool { value } } => {
+            if *value { Truth::True } else { Truth::False }
+        }
+        ExprNode::BoolOp { op, left, right, .. } => {
+            let (l, r) = (
+                eval_under_empty_hash(left, opts),
+                eval_under_empty_hash(right, opts),
+            );
+            match op {
+                // `a && b` is false if EITHER side is; true only if both
+                // are known true.
+                crate::expr::BoolOpKind::And => match (l, r) {
+                    (Truth::False, _) | (_, Truth::False) => Truth::False,
+                    (Truth::True, Truth::True) => Truth::True,
+                    _ => Truth::Unknown,
+                },
+                crate::expr::BoolOpKind::Or => match (l, r) {
+                    (Truth::True, _) | (_, Truth::True) => Truth::True,
+                    (Truth::False, Truth::False) => Truth::False,
+                    _ => Truth::Unknown,
+                },
+            }
+        }
+        ExprNode::Send { recv, method, args, .. } => {
+            let recv_is_opts = recv.as_ref().map(|r| is_named_local(r, opts)).unwrap_or(false);
+            match method.as_str() {
+                // `options[:k]` on an empty hash is nil — the whole
+                // point of the specialization.
+                "[]" if recv_is_opts && args.len() == 1 => Truth::False,
+                "empty?" if recv_is_opts => Truth::True,
+                "any?" | "present?" if recv_is_opts => Truth::False,
+                // `nil?` on the hash itself, not on a lookup.
+                "nil?" if recv_is_opts => Truth::False,
+                "!" if args.is_empty() => match recv
+                    .as_ref()
+                    .map(|r| eval_under_empty_hash(r, opts))
+                    .unwrap_or(Truth::Unknown)
+                {
+                    Truth::True => Truth::False,
+                    Truth::False => Truth::True,
+                    Truth::Unknown => Truth::Unknown,
+                },
+                _ => Truth::Unknown,
+            }
+        }
+        _ => Truth::Unknown,
+    }
+}
+
+fn is_empty_hash(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Hash { entries, .. } if entries.is_empty())
 }
