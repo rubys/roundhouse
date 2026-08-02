@@ -14,6 +14,7 @@
 //!
 //! Per-target ivar/params rewrites run AFTER this pipeline.
 
+use crate::diagnostic::{Diagnostic, DiagnosticKind};
 use crate::dialect::Controller;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::Symbol;
@@ -217,16 +218,28 @@ fn flatten_respond_to_body(body: &Expr, with_format_dispatch: bool, breadth: For
                         // dispatch (its emitters don't recognize
                         // `request_format`), so we drop unconditionally
                         // when `with_format_dispatch=false`.
-                        if with_format_dispatch
-                            && (breadth.json_any || is_simple_render_sym(&branch_body))
-                        {
-                            json = Some(recurse_outer(&branch_body));
+                        match json_arm_drop_reason(&branch_body, with_format_dispatch, breadth) {
+                            None => json = Some(recurse_outer(&branch_body)),
+                            Some(reason) => report_dropped_format_arm("json", e.span, reason),
                         }
                     }
-                    Some((fmt, branch_body)) if fmt.as_str() == "rss" && breadth.rss => {
-                        rss = Some(recurse_outer(&branch_body));
+                    Some((fmt, branch_body)) if fmt.as_str() == "rss" => {
+                        if breadth.rss {
+                            rss = Some(recurse_outer(&branch_body));
+                        } else {
+                            report_dropped_format_arm(
+                                "rss",
+                                e.span,
+                                "this tree does not carry the rss dispatch",
+                            );
+                        }
                     }
-                    Some(_) => {} // unknown format (e.g. format.xml) — drop
+                    // Unknown format (e.g. format.xml) — no lowering
+                    // models it, so it drops. Ledgered so the gap is
+                    // visible rather than inferred from a parity diff.
+                    Some((fmt, _)) => {
+                        report_dropped_format_arm(fmt.as_str(), e.span, "format not modeled")
+                    }
                     None => other.push(recurse_outer(e)),
                 }
             }
@@ -247,8 +260,7 @@ fn flatten_respond_to_body(body: &Expr, with_format_dispatch: bool, breadth: For
             Some((fmt, branch_body)) if fmt.as_str() == "html" => recurse_outer(&branch_body),
             Some((fmt, branch_body))
                 if fmt.as_str() == "json"
-                    && with_format_dispatch
-                    && (breadth.json_any || is_simple_render_sym(&branch_body)) =>
+                    && json_arm_drop_reason(&branch_body, with_format_dispatch, breadth).is_none() =>
             {
                 build_format_dispatch(
                     None,
@@ -267,10 +279,75 @@ fn flatten_respond_to_body(body: &Expr, with_format_dispatch: bool, breadth: For
                     body.span,
                 )
             }
-            Some(_) => Expr::new(body.span, ExprNode::Seq { exprs: vec![] }),
+            // Lone arm that survived none of the gates above. Same
+            // ledger as the Seq path — a `respond_to` whose only arm is
+            // json/rss/xml drops to an empty body, which is the most
+            // silent shape of all.
+            Some((fmt, branch_body)) => {
+                let reason = if fmt.as_str() == "json" {
+                    json_arm_drop_reason(&branch_body, with_format_dispatch, breadth)
+                        .unwrap_or("dropped")
+                } else if fmt.as_str() == "rss" {
+                    "this tree does not carry the rss dispatch"
+                } else {
+                    "format not modeled"
+                };
+                report_dropped_format_arm(fmt.as_str(), body.span, reason);
+                Expr::new(body.span, ExprNode::Seq { exprs: vec![] })
+            }
             None => recurse_outer(body),
         },
     }
+}
+
+/// Ledger a `respond_to` arm that the flattening discarded.
+///
+/// Dropping an arm is SILENT otherwise, and silence here is expensive:
+/// the only downstream evidence is a parity report showing HTML where
+/// Rails sent JSON, which reads like a routing bug and sends you to the
+/// route ingester. `/hottest` cost exactly that detour — it is
+/// `get "/hottest" => "home#index", :format => "json"`, so Rails serves
+/// JSON and the emit served the HTML arm, with nothing in the emit log
+/// naming the discarded branch.
+///
+/// Warning, not error: a dropped arm is modeling debt, not a broken
+/// build — the html arm still answers the request. The span points at
+/// the `respond_to` body, which is enough to name the action.
+fn report_dropped_format_arm(format: &str, span: Span, reason: &'static str) {
+    let kind = DiagnosticKind::LowerResidue {
+        pass: Symbol::from("respond_to_flatten"),
+        construct: Symbol::from(format!("format.{format}")),
+        reason: Symbol::from(reason),
+    };
+    let d = Diagnostic {
+        span,
+        severity: Diagnostic::default_severity(&kind),
+        kind,
+        message: format!(
+            "`respond_to` arm `format.{format}` dropped ({reason}) — this action answers \
+             every format with its html branch, so a request that negotiates `{format}` \
+             (including a route pinned with `:format => \"{format}\"`) gets HTML back"
+        ),
+    };
+    crate::emit::diagnostics::push(d);
+}
+
+/// Which `reason` string a json arm was dropped for, or `None` when it
+/// survives. Keeping the gate in one place is what stops the predicate
+/// and the diagnostic drifting apart — they must agree exactly, or the
+/// ledger reports drops that did not happen (or misses ones that did).
+fn json_arm_drop_reason(
+    branch_body: &Expr,
+    with_format_dispatch: bool,
+    breadth: FormatBreadth,
+) -> Option<&'static str> {
+    if !with_format_dispatch {
+        return Some("this emit path does not dispatch on request_format");
+    }
+    if breadth.json_any || is_simple_render_sym(branch_body) {
+        return None;
+    }
+    Some("inline `render json: <expr>` needs an encoder this tree has none for")
 }
 
 /// Pull `(format_name, block_body)` out of a `format.<x> { body }`
