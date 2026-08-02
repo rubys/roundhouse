@@ -53,6 +53,7 @@ pub mod errors_add;
 pub mod errors_full_messages;
 pub mod job_class_side;
 pub mod mailer_class_side;
+pub mod as_json_shape;
 pub mod as_json_super;
 pub mod parameterize;
 pub mod sum_symbol;
