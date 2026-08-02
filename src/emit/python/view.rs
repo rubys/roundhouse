@@ -359,10 +359,10 @@ fn emit_view_file_pass2_py(
         flash_locals,
     };
 
-    // Apply the shared erubi-trim pass so `<% %>` tags drop their
-    // trailing newline + leading indent the same way Rails does.
-    let trimmed_body = crate::lower::erb_trim::trim_view(&view.body);
-    let body_lines = emit_py_view_body(&trimmed_body, &ctx);
+    // No trim pass: erubi's `<% %>`-on-its-own-line rule is applied
+    // lexically in `src/erb.rs`, so the body's text chunks already
+    // carry Rails' rendered whitespace.
+    let body_lines = emit_py_view_body(&view.body, &ctx);
     for line in body_lines {
         writeln!(out, "    {line}").unwrap();
     }

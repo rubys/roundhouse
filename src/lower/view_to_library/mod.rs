@@ -299,15 +299,13 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // emitted body. Mirrors the controller-side ivar-to-local pass.
     let rewritten = rewrite_ivars_to_locals(&view.body);
 
-    // Apply erubi's `<% %>`-on-its-own-line trim before walking, so the
-    // text-chunk literals that survive into the spinel-shape body
-    // already match Rails' rendered whitespace. Other targets call
-    // `trim_view` from their per-target view emitter; the spinel emit
-    // path goes through this lowerer directly, so the trim has to
-    // happen here too. (Compare-spinel's `<main>` whitespace diff
-    // surfaced this gap: untrimmed bodies left an extra `\n` after
-    // every non-output ERB tag.)
-    let rewritten = crate::lower::erb_trim::trim_view(&rewritten);
+    // (No trim pass here: erubi's `<% %>`-on-its-own-line rule is
+    // applied lexically in `src/erb.rs`, where the tag's own line is
+    // still visible. It used to be reconstructed from the text-append
+    // statements by `lower::erb_trim`, which could only recognize the
+    // shapes it enumerated — enough for real-blog, not for lobsters,
+    // whose deeper bodies kept the whitespace. Two implementations of
+    // one rule also double-trimmed once the lexical one landed.)
 
     // Collect free names other than the inferred arg → those become
     // additional positional params. Today this picks up `notice`,
@@ -1978,7 +1976,6 @@ pub(crate) fn partial_call_contracts(
         let stem = base.trim_start_matches('_');
         let record = singularize(last_segment(dir));
         let rewritten = rewrite_ivars_to_locals(&view.body);
-        let rewritten = crate::lower::erb_trim::trim_view(&rewritten);
         let mut extras = collect_extra_params(&rewritten, &record);
         let key = (camelize_path(&snake_case(dir)), stem.to_string());
         let closure: Vec<String> = closures
@@ -2102,7 +2099,6 @@ pub(super) fn partial_extras_map(
         let stem = base.trim_start_matches('_');
         let arg_name = infer_view_arg(stem, dir, true, &known_models);
         let rewritten = rewrite_ivars_to_locals(&view.body);
-        let rewritten = crate::lower::erb_trim::trim_view(&rewritten);
         let mut extras = collect_extra_params(&rewritten, &arg_name);
         let key = (camelize_path(&snake_case(dir)), stem.to_string());
         // locals-key params — mirrors the def site's append exactly.
