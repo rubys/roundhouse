@@ -635,6 +635,37 @@ rescue StandardError
   nil
 end
 
+# ── parity-restricted timing ─────────────────────────────────────────
+# A lane's ms/iter counts every visit in the frozen sequence, including
+# routes it renders WRONG. A route that renders a fraction of the page is
+# fast for a reason that is not speed, so a lane below full content parity
+# has a headline ratio that is not measuring the same work as its baseline.
+# The restricted ratio re-runs the arithmetic over only the routes that lane
+# renders equivalently to Rails, on both sides of the division.
+#
+# The join is the reason `body`/`template` exist on each summary route:
+# content parity is keyed by the dumped body's FILE name and per_route by
+# the route TEMPLATE, and neither derives from the other.
+PARITY_DETAIL = {}
+
+def ok_templates(data, cp)
+  return nil unless cp && data["routes"]
+  by_body = {}
+  data["routes"].each { |r| by_body[r["body"]] = r["template"] if r["body"] && r["template"] }
+  cp["routes"].select { |r| %w[identical equivalent].include?(r["verdict"]) }
+              .filter_map { |r| by_body[r["route"]] }.uniq
+end
+
+# Weighted per-iteration cost over `keep`, using each route's own visit
+# count so the frozen sequence's weighting survives the restriction.
+def restricted_ms(detail, keep)
+  return nil unless detail && detail[:pr] && detail[:iters] > 0
+  keep.sum do |k|
+    e = detail[:pr][k]
+    e ? e["ms_median"].to_f * e["n"].to_f / detail[:iters] : 0.0
+  end
+end
+
 rows = META.filter_map do |id, m|
   path = File.join(run_dir, id, m[:src])
   st = lane_status(run_dir, id)
@@ -657,6 +688,11 @@ rows = META.filter_map do |id, m|
   # the Rails lanes ARE the reference). nil where the run had no Rails lane
   # to compare against, which is different from "compared and matched".
   cp = (JSON.parse(File.read(File.join(run_dir, id, "content-parity.json"))) rescue nil)
+  # Kept OUT of matrix.json (per_route is already published under the lane's
+  # own summary) but needed below to restrict the vs-Rails ratio to the
+  # routes a lane actually renders correctly.
+  PARITY_DETAIL[id] = { pr: t["per_route"], iters: t["iterations"].to_i,
+                        ok: ok_templates(data, cp) }
   { "id" => id, "label" => m[:label], "kind" => m[:kind], "runtime" => m[:runtime],
     "yjit" => m[:yjit], "jit" => m[:jit],
     "state" => (st && st["state"]) || "ok",
@@ -704,6 +740,25 @@ live.each do |r|
          else rails_cruby[r["yjit"]]
          end
   r["vs_rails"] = base ? (base["ms_median"] / r["ms_median"]).round(2) : nil
+  # Restricted ratio, only when this lane is BELOW full parity — at full
+  # parity it would equal the headline and the extra column would be noise.
+  # Both sides are restricted to the SAME route set (this lane's passing
+  # routes, intersected with what the baseline timed), or the division
+  # compares different work again.
+  mine = PARITY_DETAIL[r["id"]]
+  ok   = mine && mine[:ok]
+  if base && ok && r["content_total"] && ok.size < r["content_total"].to_i
+    theirs = PARITY_DETAIL[base["id"]]
+    keep = ok.select { |k| mine[:pr]&.key?(k) && theirs&.dig(:pr)&.key?(k) }
+    a = restricted_ms(mine, keep)
+    b = restricted_ms(theirs, keep)
+    if a && b && a > 0
+      r["parity_routes"]     = keep.size
+      r["parity_ms_median"]  = a.round(2)
+      r["parity_base_ms"]    = b.round(2)
+      r["vs_rails_parity"]   = (b / a).round(2)
+    end
+  end
 end
 matrix = {
   "generated_at" => Time.now.utc.strftime("%FT%TZ"),

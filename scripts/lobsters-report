@@ -721,7 +721,15 @@ if mrows && !mrows.empty?
   # function of how long the run happened to be, so the headline ratio
   # moves with --time for no better reason.
   drift_col = mlive.any? { |r| r['drift_pct'] }
-  html << "<table>\n<thead><tr><th>stack</th><th>JIT</th><th>ms/iter</th><th>min–max</th>#{cv_col ? '<th>CV</th>' : ''}#{drift_col ? '<th>drift</th>' : ''}<th>iters</th><th>vs Rails</th></tr></thead>\n<tbody>\n"
+  # A lane below full content parity has a headline ratio that is not
+  # measuring the same work as its baseline: a route it renders as a
+  # fraction of the page is fast for a reason that is not speed. The
+  # restricted column re-runs the ratio over only the routes that lane
+  # renders equivalently to Rails, on BOTH sides of the division. Present
+  # only when some lane is below parity — at full parity it would just
+  # restate the column beside it.
+  par_col = mlive.any? { |r| r['vs_rails_parity'] }
+  html << "<table>\n<thead><tr><th>stack</th><th>JIT</th><th>ms/iter</th><th>min–max</th>#{cv_col ? '<th>CV</th>' : ''}#{drift_col ? '<th>drift</th>' : ''}<th>iters</th><th>vs Rails</th>#{par_col ? '<th>vs Rails<br>(parity only)</th>' : ''}</tr></thead>\n<tbody>\n"
   msorted.each do |r|
     html << "<tr>"
     html << %(<td><strong>#{esc(r['label'])}</strong></td>)
@@ -739,6 +747,13 @@ if mrows && !mrows.empty?
     end
     html << %(<td class="num">#{r['iters']}</td>)
     html << %(<td class="num">#{r['vs_rails'] ? "#{fmt_dec(r['vs_rails'], 2)}×" : '—'}</td>)
+    if par_col
+      if (vp = r['vs_rails_parity'])
+        html << %(<td class="num"><strong>#{fmt_dec(vp, 2)}×</strong><br><span class="legend">#{r['parity_routes']} routes</span></td>)
+      else
+        html << %(<td class="num">—</td>)
+      end
+    end
     html << "</tr>\n"
   end
   # Lanes that were asked for and produced nothing. Listed in the same
@@ -748,7 +763,7 @@ if mrows && !mrows.empty?
   mdead.each do |r|
     why = "#{r['state'] || 'failed'}#{r['stage'].to_s.empty? ? '' : " at #{r['stage']}"}"
     why << ": #{r['detail']}" unless r['detail'].to_s.empty?
-    span = 4 + (cv_col ? 1 : 0) + (drift_col ? 1 : 0)
+    span = 4 + (cv_col ? 1 : 0) + (drift_col ? 1 : 0) + (par_col ? 1 : 0)
     html << "<tr>"
     html << %(<td><strong>#{esc(r['label'])}</strong></td>)
     html << %(<td>#{lane_jit.(r)}</td>)
@@ -762,6 +777,18 @@ if mrows && !mrows.empty?
       ' The JRuby row compares against Rails +YJIT — Rails\' best CRuby configuration.'
   else
     ''
+  end
+  if par_col
+    below = mlive.select { |r| r['vs_rails_parity'] }
+    html << %(<p class="caveat"><strong>Two ratios, because one lane is not rendering what Rails renders.</strong> )
+    html << below.map { |r|
+      "#{esc(r['label'])} #{esc(r['jit'])} is at #{r['content_equivalent']}/#{r['content_total']} content parity; " \
+      "over the #{r['parity_routes']} routes it renders equivalently it is " \
+      "<strong>#{fmt_dec(r['vs_rails_parity'], 2)}×</strong> " \
+      "(#{fmt_dec(r['parity_ms_median'], 1)} ms/iter vs #{fmt_dec(r['parity_base_ms'], 1)}), " \
+      "against #{fmt_dec(r['vs_rails'], 2)}× over the whole sequence"
+    }.join('; ')
+    html << %(. Both sides of the restricted division cover the same routes. The unrestricted number is not wrong, but part of it is earned by rendering less.</p>\n)
   end
   drifters = mlive.select { |r| r['drift_pct'] && r['drift_pct'].abs >= 5 }
   if drifters.any?
@@ -862,6 +889,16 @@ if rh_pr && rl_pr && !rh_pr.empty?
       rh_int:    rh_int_pr&.dig(k, 'ms_median')&.to_f,
       rails_jvm: rl_jvm_pr&.dig(k, 'ms_median')&.to_f,
       ratio: rh > 0 ? rl / rh : nil,
+      # OWN WORK: a low percentile of this route's own visits — the ones
+      # where no collection landed inside the timing window. The median
+      # includes whatever cleanup fired during the visit no matter whose
+      # garbage it reclaimed, and since collection arrival is roughly
+      # uniform while its cost is heap-proportional and route-independent,
+      # that bias scales as 1/own-cost. On lobsters it inflates the cheapest
+      # routes by over 100% and the most expensive by 1%.
+      rails_own: rl_pr[k]['ms_p25']&.to_f,
+      rh_own:    rh_pr[k]['ms_p25']&.to_f,
+      sp_own:    sp_pr&.dig(k, 'ms_p25')&.to_f,
       per_iter: rh_iters > 0 ? (rh_pr[k]['n'].to_f / rh_iters).round : nil }
   end.sort_by { |r| -r[:rails] }
 
@@ -901,18 +938,30 @@ if rh_pr && rl_pr && !rh_pr.empty?
   end
   html << paired_hbar(breakdown, drawn)
 
+  # Show own-work only where it CHANGES the reading. A row whose median is
+  # within 10% of its own work is dominated by its own cost and the extra
+  # number is clutter; the annotation then appears on exactly the rows a
+  # reader should discount, which is the whole point of having it.
+  ms_cell = lambda do |med, own|
+    return '—' unless med
+    if own && med > 0 && (med - own) / med > 0.10
+      %(#{fmt_dec(med, 2)}<br><span class="legend">own #{fmt_dec(own, 2)}</span>)
+    else
+      fmt_dec(med, 2)
+    end
+  end
   html << "<details>\n<summary>Per-endpoint table (#{breakdown.size} endpoints)</summary>\n"
   html << "<table>\n<thead><tr><th>endpoint</th><th>rails</th>#{rli_col ? '<th>rails no-JIT</th>' : ''}#{rjv_col ? '<th>rails JRuby</th>' : ''}<th>roundhouse</th>#{rhi_col ? '<th>roundhouse no-JIT</th>' : ''}#{sp_col ? '<th>AOT</th>' : ''}#{jr_col ? '<th>jruby</th>' : ''}<th>ratio</th><th>visits/iter</th></tr></thead>\n<tbody>\n"
   breakdown.each do |b|
     rcls = b[:ratio].nil? ? '' : (b[:ratio] >= 1 ? 'ok' : 'no')
     html << "<tr>"
     html << %(<td><code>#{esc(b[:key])}</code></td>)
-    html << %(<td class="num">#{fmt_dec(b[:rails], 2)}</td>)
+    html << %(<td class="num">#{ms_cell.(b[:rails], b[:rails_own])}</td>)
     html << %(<td class="num">#{b[:rails_int] ? fmt_dec(b[:rails_int], 2) : '—'}</td>) if rli_col
     html << %(<td class="num">#{b[:rails_jvm] ? fmt_dec(b[:rails_jvm], 2) : '—'}</td>) if rjv_col
-    html << %(<td class="num">#{fmt_dec(b[:rh], 2)}</td>)
+    html << %(<td class="num">#{ms_cell.(b[:rh], b[:rh_own])}</td>)
     html << %(<td class="num">#{b[:rh_int] ? fmt_dec(b[:rh_int], 2) : '—'}</td>) if rhi_col
-    html << %(<td class="num">#{b[:sp] ? fmt_dec(b[:sp], 2) : '—'}</td>) if sp_col
+    html << %(<td class="num">#{b[:sp] ? ms_cell.(b[:sp], b[:sp_own]) : '—'}</td>) if sp_col
     html << %(<td class="num">#{b[:jr] ? fmt_dec(b[:jr], 2) : '—'}</td>) if jr_col
     html << %(<td class="num #{rcls}">#{b[:ratio] ? "#{fmt_dec(b[:ratio], 2)}×" : '—'}</td>)
     html << %(<td class="num">#{b[:per_iter]}</td>)
@@ -920,7 +969,7 @@ if rh_pr && rl_pr && !rh_pr.empty?
   end
   html << "</tbody></table>\n"
   if sp_col || jr_col || rli_col || rhi_col || rjv_col
-    html << %(<p class="legend">All lane columns are median ms per visit; ratio = rails ÷ roundhouse (the +YJIT pair)#{sp_col ? '. The AOT column is the spinel-compiled binary — same emit, different runtime, and not at full content parity (see above)' : ''}.</p>\n)
+    html << %(<p class="legend">All lane columns are median ms per visit; ratio = rails ÷ roundhouse (the +YJIT pair)#{sp_col ? '. The AOT column is the spinel-compiled binary — same emit, different runtime, and not at full content parity (see above)' : ''}. An <strong>own</strong> figure appears where a route's median runs more than 10% above its own work (p25 of its visits) — the gap is collection triggered during that visit but caused by the heap the whole sequence built, so it belongs to the lane rather than to the route. It is largest on the cheapest routes, which is where the median is least trustworthy as a per-route cost.</p>\n)
   end
   html << "</details>\n"
 end

@@ -293,6 +293,13 @@ ROUTE_TEMPLATES = [
   [%r{\A/s/[^/]+\z},              "/s/:story_id"],
 ].freeze
 
+# The dumped body's file name for a route. Mirrors the compiled driver's
+# `safe_name` character for character: content parity is keyed by it, and a
+# lane that spells it differently drops out of the join silently.
+def body_name(route)
+  route.delete_prefix("/").gsub(/[^\w.-]/, "_")
+end
+
 def route_template(path)
   base = path.split("?", 2).first
   ROUTE_TEMPLATES.each { |re, tmpl| return tmpl if base.match?(re) }
@@ -306,7 +313,17 @@ def summarize_samples(by_route)
     s = arr.sort
     m = s.size / 2
     med = s.size.odd? ? s[m] : (s[m - 1] + s[m]) / 2.0
+    # ms_p25 is the OWN-WORK estimate: a low percentile of this route's own
+    # visits, i.e. the ones where no collection happened to land inside the
+    # timing window. The median includes whatever cleanup fired during the
+    # visit regardless of whose garbage it reclaimed, and because collection
+    # arrival is roughly uniform while its cost is heap-proportional and
+    # route-independent, that bias scales as 1/own-cost: measured on lobsters
+    # it inflates the cheapest routes by >100% and the most expensive by 1%.
+    # Named for the percentile rather than called "own" so the estimator's
+    # one free choice stays visible in the data.
     { "ms_median" => med.round(3), "ms_min" => s.first.round(3),
+      "ms_p25" => s[(0.25 * s.size).floor.clamp(0, s.size - 1)].round(3),
       "ms_max" => s.last.round(3), "n" => s.size }
   end
 end
@@ -323,7 +340,13 @@ raw.each_line do |line|
     # route status bytes ms — route never contains a space.
     routes << { "route" => f[1], "status" => f[2].to_i, "bytes" => f[3].to_i,
                 "ms" => f[4].to_f.round(2), "ok" => f[2].to_i == 200,
-                "thin" => f[2].to_i == 200 && f[3].to_i < 200 }
+                "thin" => f[2].to_i == 200 && f[3].to_i < 200,
+                # Join keys — see the note in scripts/lobsters-replay.
+                # Content parity is keyed by the dumped body's file name,
+                # the timing tables by the route template, and only the raw
+                # path they are both made from can produce the pair.
+                "body" => body_name(f[1].to_s),
+                "template" => route_template(f[1].to_s) }
   when "PARITYERR"
     if (r = routes.find { |x| x["route"] == f[1] })
       r["error"] = line.split(" ", 3)[2].to_s.strip[0, 300]

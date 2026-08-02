@@ -283,12 +283,29 @@ def route_template(path)
 end
 
 # samples: { template => [ms, …] } -> { template => {ms_median, n, …} }.
+# The dumped body's file name for a route — kept identical to the write
+# below (and to the AOT driver's `safe_name`), because content parity is
+# keyed by it.
+def body_name(route)
+  route.delete_prefix("/").gsub(/[^\w.-]/, "_")
+end
+
 def summarize_samples(by_route)
   by_route.sort.to_h.transform_values do |arr|
     s = arr.sort
     m = s.size / 2
     med = s.size.odd? ? s[m] : (s[m - 1] + s[m]) / 2.0
+    # ms_p25 is the OWN-WORK estimate: a low percentile of this route's own
+    # visits, i.e. the ones where no collection happened to land inside the
+    # timing window. The median includes whatever cleanup fired during the
+    # visit regardless of whose garbage it reclaimed, and because collection
+    # arrival is roughly uniform while its cost is heap-proportional and
+    # route-independent, that bias scales as 1/own-cost: measured on lobsters
+    # it inflates the cheapest routes by >100% and the most expensive by 1%.
+    # Named for the percentile rather than called "own" so the estimator's
+    # one free choice stays visible in the data.
     { "ms_median" => med.round(3), "ms_min" => s.first.round(3),
+      "ms_p25" => s[(0.25 * s.size).floor.clamp(0, s.size - 1)].round(3),
       "ms_max" => s.last.round(3), "n" => s.size }
   end
 end
@@ -333,7 +350,7 @@ results = ROUTES.map do |route|
   st, _h, body = req("GET", route)
   ms = now_ms - t0
   if opts[:dump] && st != :EXC
-    File.write(File.join(opts[:dump], route.delete_prefix("/").gsub(/[^\w.-]/, "_")), body.to_s)
+    File.write(File.join(opts[:dump], body_name(route)), body.to_s)
   end
   exc = st == :EXC
   bytes = exc ? 0 : body.to_s.bytesize
@@ -345,6 +362,14 @@ results = ROUTES.map do |route|
     "ms"     => ms.round(2),
     "ok"     => ok,
     "thin"   => ok && bytes < THIN_BYTES,
+    # The JOIN KEYS. Content parity is keyed by the dumped body's FILE
+    # name and the timing tables by the ROUTE TEMPLATE, and neither can be
+    # derived from the other (`threads_michell_wiegand` vs
+    # `/threads/:username`). This loop is the one place that holds the raw
+    # path both are made from, so it records both rather than leaving the
+    # report to guess a mapping it cannot reconstruct.
+    "body"     => body_name(route),
+    "template" => route_template(route),
   }
   r["error"] = body.lines.first(4).join.strip if exc
   r["error"] = body.to_s[0, 300] if !ok && !exc

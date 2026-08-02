@@ -177,7 +177,17 @@ def summarize_samples(by_route)
     s = arr.sort
     m = s.size / 2
     med = s.size.odd? ? s[m] : (s[m - 1] + s[m]) / 2.0
+    # ms_p25 is the OWN-WORK estimate: a low percentile of this route's own
+    # visits, i.e. the ones where no collection happened to land inside the
+    # timing window. The median includes whatever cleanup fired during the
+    # visit regardless of whose garbage it reclaimed, and because collection
+    # arrival is roughly uniform while its cost is heap-proportional and
+    # route-independent, that bias scales as 1/own-cost: measured on lobsters
+    # it inflates the cheapest routes by >100% and the most expensive by 1%.
+    # Named for the percentile rather than called "own" so the estimator's
+    # one free choice stays visible in the data.
     { "ms_median" => med.round(3), "ms_min" => s.first.round(3),
+      "ms_p25" => s[(0.25 * s.size).floor.clamp(0, s.size - 1)].round(3),
       "ms_max" => s.last.round(3), "n" => s.size }
   end
 end
