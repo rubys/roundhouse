@@ -211,11 +211,40 @@ fn empty_hash_return_ty(value: &Expr) -> Option<crate::ty::Ty> {
     if !is_empty_hash {
         return None;
     }
-    match current_return_ty() {
+    let from_return = match current_return_ty() {
         Some(crate::ty::Ty::Hash { key, value }) => Some(crate::ty::Ty::Hash { key, value }),
         Some(crate::ty::Ty::Union { variants }) => variants
             .into_iter()
             .find(|v| matches!(v, crate::ty::Ty::Hash { .. })),
+        _ => None,
+    };
+    if from_return.is_some() {
+        return from_return;
+    }
+    // The enclosing return type is only a proxy for "what does this
+    // accumulator hold" — it says nothing when the method returns
+    // something else entirely (`image_tag` builds a Hash and returns a
+    // String). The analyzer retro-stamps the `{}` seed from the writes
+    // it actually observed (`nil_seed`/hash refinement in
+    // `analyze/body/mod.rs`), so prefer that evidence over inferring
+    // from the first `.insert`, which picks up borrowed shapes
+    // (`HashMap<&String, &Value>`) that the next insert contradicts.
+    //
+    // An open (`Var`) key is the un-refined half of that stamp — the
+    // refinement widens the value and leaves the key alone. Commit it
+    // to `String`, the shape every Ruby hash key emits as.
+    match value.ty.as_ref() {
+        Some(crate::ty::Ty::Hash { key, value: v }) if !v.is_open() => {
+            let k = if key.is_open() {
+                crate::ty::Ty::Str
+            } else {
+                (**key).clone()
+            };
+            Some(crate::ty::Ty::Hash {
+                key: Box::new(k),
+                value: v.clone(),
+            })
+        }
         _ => None,
     }
 }

@@ -13,6 +13,26 @@
 
 use crate::ty::Ty;
 
+/// The Go zero value for a rendered `go_ty_stub` type, as the
+/// initializer for a declaration that has no meaningful starting value
+/// (the `x = nil` accumulator seed).
+///
+/// `nil` is only valid for Go's reference types. The value types
+/// `go_ty_stub` can produce — `string` (which carries the empty-as-nil
+/// convention), the numerics, `bool`, and `time.Time` — reject it, so
+/// each needs its own zero. Slices/maps/pointers/interfaces keep `nil`,
+/// which is both valid and the absent-marker their `nil?` test reads.
+pub fn go_zero_value(ty_str: &str) -> &'static str {
+    match ty_str {
+        "string" => "\"\"",
+        "int64" | "int" => "0",
+        "float64" => "0",
+        "bool" => "false",
+        "time.Time" => "time.Time{}",
+        _ => "nil",
+    }
+}
+
 pub fn go_ty_stub(ty: Option<&Ty>) -> String {
     match ty {
         Some(Ty::Str) => "string".to_string(),

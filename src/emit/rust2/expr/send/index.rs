@@ -311,6 +311,21 @@ pub(super) fn try_recv_typed_method(
                         Some(crate::ty::Ty::Str | crate::ty::Ty::Sym) => {
                             format!("({raw}).to_string()")
                         }
+                        // A heterogeneous slot renders as
+                        // `serde_json::Value` (the untyped-hash carrier),
+                        // so a `String`-producing arg needs lifting into
+                        // it. `Value::from` is the same idiom the
+                        // untyped-hash bridge uses at call boundaries,
+                        // and it is identity on an arg that is already a
+                        // Value — so this stays correct for the mixed
+                        // accumulator where some writes are Strings and
+                        // others are already Values.
+                        Some(t)
+                            if super::super::super::ty::rust_ty(t)
+                                == "serde_json::Value" =>
+                        {
+                            format!("serde_json::Value::from({raw})")
+                        }
                         _ => raw,
                     }
                 };
@@ -323,7 +338,16 @@ pub(super) fn try_recv_typed_method(
                     ),
                     None => (k, v),
                 };
-                return Some(format!("{{ {}.insert({kk}, {vv}); }}", emit_expr(r)));
+                // The receiver is a PLACE here, not a value: a defensive
+                // `.clone()` (added because this isn't the var's last
+                // use) would make the insert land on a temporary and be
+                // dropped — the same silent-write-loss as roundhouse#40's
+                // each-block case. Strip it; `emit_expr` renders a Var
+                // read as exactly `name.clone()`, so the suffix match is
+                // precise rather than a guess.
+                let recv_s = emit_expr(r);
+                let place = recv_s.strip_suffix(".clone()").unwrap_or(&recv_s);
+                return Some(format!("{{ {place}.insert({kk}, {vv}); }}"));
             }
             return Some(format!("{}[{}] = {}", emit_expr(r), emit_expr(&args[0]), emit_expr(&args[1])));
         }

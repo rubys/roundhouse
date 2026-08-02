@@ -689,6 +689,28 @@ impl<'a> BodyTyper<'a> {
                 // refinement retro-stamp the seed. A later reassignment
                 // of the name retires its entry.
                 let mut array_seed_idx: HashMap<(bool, Symbol), usize> = HashMap::new();
+                // Statement index + accumulated type of each live
+                // nil-seeded LOCAL (`size = nil`). The scalar analog of
+                // `array_seed_idx`, and the same decl-site hazard: a
+                // later `size = v` (typically nested in a block, so the
+                // Seq walk never sees it as a statement) refines the
+                // binding, but the seed keeps `Ty::Nil` — and a stale
+                // `Ty::Nil` is worse here than a stale element type,
+                // because `nil?` const-folds on it. Go's `nil?` arm
+                // maps `Some(Ty::Nil) => "true"`, so `if !size.nil?`
+                // emitted `if !(true)` and the guarded branch became
+                // DEAD CODE — a silent miscompile, not a type error.
+                // Accumulating the union here keeps the seed, the decl
+                // and every `.nil?` read in agreement.
+                //
+                // Locals only: the hazard is Go's `var x T = nil` decl
+                // path (`emit/go2/expr.rs`, LValue::Var), and ivars emit
+                // through package vars / struct fields that never take a
+                // seed-derived decl type.
+                let mut nil_seed: HashMap<Symbol, (usize, Ty)> = HashMap::new();
+                // Statement index of each live empty-hash seed (`attrs =
+                // {}`) — the Hash counterpart of `array_seed_idx`.
+                let mut hash_seed_idx: HashMap<(bool, Symbol), usize> = HashMap::new();
                 for i in 0..exprs.len() {
                     let e = &mut exprs[i];
                     last = self.analyze_expr(e, &local_ctx);
@@ -711,9 +733,36 @@ impl<'a> BodyTyper<'a> {
                                 && matches!(e.ty.as_ref(),
                                     Some(Ty::Array { elem }) if matches!(&**elem, Ty::Var { .. }));
                             if empty_seed {
-                                array_seed_idx.insert((is_ivar, name), i);
+                                array_seed_idx.insert((is_ivar, name.clone()), i);
                             } else {
-                                array_seed_idx.remove(&(is_ivar, name));
+                                array_seed_idx.remove(&(is_ivar, name.clone()));
+                            }
+                            // Same bookkeeping for the `h = {}` seed.
+                            let empty_hash_seed = matches!(&*value.node,
+                                    ExprNode::Hash { entries, .. } if entries.is_empty())
+                                && matches!(e.ty.as_ref(),
+                                    Some(Ty::Hash { value, .. })
+                                        if matches!(&**value, Ty::Var { .. }));
+                            if empty_hash_seed {
+                                hash_seed_idx.insert((is_ivar, name.clone()), i);
+                            } else {
+                                hash_seed_idx.remove(&(is_ivar, name.clone()));
+                            }
+                            // `x = nil` opens a scalar accumulator.
+                            // Unlike the array seed, a later top-level
+                            // reassignment does NOT retire it: `x = nil;
+                            // x = "s"` still needs a decl type spanning
+                            // both, and the refinement below unions the
+                            // reassignment in (it walks this statement's
+                            // subtree, which includes the statement
+                            // itself). Only locals participate.
+                            if !is_ivar
+                                && matches!(&*value.node,
+                                    ExprNode::Lit { value: Literal::Nil })
+                                && matches!(e.ty.as_ref(), Some(Ty::Nil))
+                                && !nil_seed.contains_key(&name)
+                            {
+                                nil_seed.insert(name, (i, Ty::Nil));
                             }
                         }
                     }
@@ -787,44 +836,20 @@ impl<'a> BodyTyper<'a> {
                     // reveals the element type at the write. The `{}` is
                     // bound on the recv ivar/local; a computed recv
                     // (`a.b[k]`) has no binding to refine, so skip it.
-                    let elem_write = match &*e.node {
-                        ExprNode::Assign { target: LValue::Index { recv, .. }, value }
-                        | ExprNode::OpAssign {
-                            target: LValue::Index { recv, .. }, value, ..
-                        } => value.ty.clone().map(|t| (recv, t)),
-                        _ => None,
-                    };
-                    if let Some((recv, rhs)) = elem_write {
-                        if !rhs.is_open() {
-                            let slot = match &*recv.node {
-                                ExprNode::Ivar { name } => Some((true, name.clone())),
-                                ExprNode::Var { name, .. } => Some((false, name.clone())),
-                                _ => None,
-                            };
-                            if let Some((is_ivar, name)) = slot {
-                                let bindings = if is_ivar {
-                                    &mut local_ctx.ivar_bindings
-                                } else {
-                                    &mut local_ctx.local_bindings
-                                };
-                                if let Some(Ty::Hash { key, value }) = bindings.get(&name) {
-                                    // A Var value is the empty-literal
-                                    // placeholder — replace it; otherwise
-                                    // union the observed element in.
-                                    let new_value = if matches!(**value, Ty::Var { .. }) {
-                                        rhs
-                                    } else {
-                                        union_of((**value).clone(), rhs)
-                                    };
-                                    let widened = Ty::Hash {
-                                        key: key.clone(),
-                                        value: Box::new(new_value),
-                                    };
-                                    bindings.insert(name, widened);
-                                }
-                            }
-                        }
-                    }
+                    //
+                    // Subtree-wide, for the reason spelled out on the
+                    // array block below: the accumulator's writes live
+                    // in a nested block (`opts.each { |k, v| attrs[k] =
+                    // v }`) while its `{}` seed sits at statement level.
+                    // A same-level match saw only the top-level writes,
+                    // which is worse than seeing none — the visible
+                    // `attrs[:src] = <Str>` monomorphized the hash while
+                    // the invisible `attrs[k] = <Untyped>` still emitted
+                    // against it (`interface{}` into `map[string]string`).
+                    // Partial write visibility is unsound; whole-subtree
+                    // visibility is what makes the refinement a fact.
+                    let mut hash_writes: Vec<(bool, Symbol, Ty)> = Vec::new();
+                    collect_hash_index_writes(e, &mut hash_writes);
                     // Array accumulator writes anywhere in this statement —
                     // `arr << x` / `arr.push(x)`, including nested in a loop,
                     // branch, or block (`while { acc << x }`, `items.each {
@@ -840,6 +865,80 @@ impl<'a> BodyTyper<'a> {
                     // bindings that already exist as `Array[_]` are touched.
                     let mut pushes: Vec<(bool, Symbol, Ty)> = Vec::new();
                     collect_array_pushes(e, &mut pushes);
+                    // Apply the hash writes collected above. Deferred to
+                    // here so both collections finish while the `&mut
+                    // exprs[i]` borrow is live, leaving it dead before
+                    // the seed retro-stamps reach back into `exprs`.
+                    for (is_ivar, name, rhs) in hash_writes {
+                        let bindings = if is_ivar {
+                            &mut local_ctx.ivar_bindings
+                        } else {
+                            &mut local_ctx.local_bindings
+                        };
+                        if let Some(Ty::Hash { key, value }) = bindings.get(&name) {
+                            // A Var value is the empty-literal
+                            // placeholder — replace it; otherwise
+                            // union the observed element in.
+                            let new_value = if matches!(**value, Ty::Var { .. }) {
+                                rhs
+                            } else {
+                                union_of((**value).clone(), rhs)
+                            };
+                            // Key stays as-is: the observed index
+                            // expressions mix `:src` (Sym) with a block
+                            // param (Untyped), and unioning those buys
+                            // nothing — every target renders Ruby hash
+                            // keys as strings regardless.
+                            let refined = Ty::Hash {
+                                key: key.clone(),
+                                value: Box::new(new_value),
+                            };
+                            bindings.insert(name.clone(), refined.clone());
+                            // Retro-stamp the `{}` seed, same as the
+                            // array case below. This is the gap the
+                            // array fix (b79e7fd5) called out as still
+                            // latent for hashes: without it the seed
+                            // keeps `Hash[Var, Var]`, and Go's empty-
+                            // literal fallback guesses `map[string]
+                            // string` — a guess that silently disagrees
+                            // with every non-string write.
+                            //
+                            // …but only for a NON-nilable observation.
+                            // `params[name] = path_parts[i]` observes
+                            // `Str | Nil` because Ruby's `Array#[]` can
+                            // return nil — a fact the emitted code does
+                            // not share (Crystal's `Array(String)#[]`
+                            // raises rather than returning nil, and the
+                            // other targets index the same way). Stamping
+                            // that onto the seed contradicts the emit
+                            // instead of describing it, and outranks the
+                            // author's declared `Hash[String, String]`
+                            // return: Crystal rejected `match_parts` for
+                            // returning `Hash(String, String | Nil)`.
+                            // The placeholder is the better answer there
+                            // — it lets each target's own declaration or
+                            // default stand.
+                            let nilable = match &refined {
+                                Ty::Hash { value, .. } => match &**value {
+                                    Ty::Nil => true,
+                                    Ty::Union { variants } => {
+                                        variants.iter().any(|t| matches!(t, Ty::Nil))
+                                    }
+                                    _ => false,
+                                },
+                                _ => false,
+                            };
+                            if let Some(&si) = hash_seed_idx.get(&(is_ivar, name)) {
+                                if !nilable {
+                                    let seed = &mut exprs[si];
+                                    if let ExprNode::Assign { value, .. } = &mut *seed.node {
+                                        value.ty = Some(refined.clone());
+                                    }
+                                    seed.ty = Some(refined);
+                                }
+                            }
+                        }
+                    }
                     for (is_ivar, name, elem) in pushes {
                         let bindings = if is_ivar {
                             &mut local_ctx.ivar_bindings
@@ -868,6 +967,37 @@ impl<'a> BodyTyper<'a> {
                                 }
                                 seed.ty = Some(refined);
                             }
+                        }
+                    }
+                    // Nil-seeded scalar refinement — the `size = nil` …
+                    // `size = v` pair, where the write is usually nested
+                    // in a block and so invisible to this statement walk.
+                    // Subtree-wide for the same reason `collect_array_
+                    // pushes` is. Each observed write unions into the
+                    // seed's running type and retro-stamps the seed
+                    // (Assign + literal), so the decl, the binding and
+                    // every later `.nil?` read all resolve to the same
+                    // `Union[Nil, T]` instead of the seed's bare `Nil`.
+                    if !nil_seed.is_empty() {
+                        let mut writes: Vec<(Symbol, Ty)> = Vec::new();
+                        collect_local_assignment_tys(&exprs[i], &mut writes);
+                        for (name, ty) in writes {
+                            let Some((si, acc)) = nil_seed.get(&name) else {
+                                continue;
+                            };
+                            let (si, merged) = (*si, union_of(acc.clone(), ty));
+                            if &merged == acc {
+                                continue;
+                            }
+                            nil_seed.insert(name.clone(), (si, merged.clone()));
+                            local_ctx
+                                .local_bindings
+                                .insert(name.clone(), merged.clone());
+                            let seed = &mut exprs[si];
+                            if let ExprNode::Assign { value, .. } = &mut *seed.node {
+                                value.ty = Some(merged.clone());
+                            }
+                            seed.ty = Some(merged);
                         }
                     }
                     let e = &exprs[i];
@@ -1186,6 +1316,74 @@ fn collect_array_pushes(expr: &Expr, out: &mut Vec<(bool, Symbol, Ty)>) {
         }
     }
     expr.node.for_each_child(&mut |child| collect_array_pushes(child, out));
+}
+
+/// Every container index-write in `expr`'s subtree whose receiver is a
+/// plain ivar/local binding, as `(is_ivar, name, written_ty)`. Covers
+/// both `h[k] = v` and `h[k] ||= v`.
+///
+/// A computed receiver (`a.b[k] = v`) has no binding to refine and is
+/// skipped. Open written types are skipped for the same reason as in
+/// [`collect_array_pushes`] — they carry nothing to union in.
+fn collect_hash_index_writes(expr: &Expr, out: &mut Vec<(bool, Symbol, Ty)>) {
+    let write = match &*expr.node {
+        ExprNode::Assign { target: LValue::Index { recv, .. }, value }
+        | ExprNode::OpAssign { target: LValue::Index { recv, .. }, value, .. } => {
+            value.ty.clone().map(|t| (recv, t))
+        }
+        // `h[k] = v` reaches the analyzer as a two-arg `[]=` send, NOT
+        // as an `LValue::Index` assign — the LValue shape only survives
+        // for the compound `h[k] ||= v`. Matching just the LValue (as
+        // this refinement originally did) therefore missed the plain
+        // write, which is the form the accumulator idiom actually uses.
+        ExprNode::Send { recv: Some(r), method, args, .. }
+            if matches!(method.as_str(), "[]=" | "store") && args.len() == 2 =>
+        {
+            args[1].ty.clone().map(|t| (r, t))
+        }
+        _ => None,
+    };
+    if let Some((recv, rhs)) = write {
+        if !rhs.is_open() {
+            let slot = match &*recv.node {
+                ExprNode::Ivar { name } => Some((true, name.clone())),
+                ExprNode::Var { name, .. } => Some((false, name.clone())),
+                _ => None,
+            };
+            if let Some((is_ivar, name)) = slot {
+                out.push((is_ivar, name, rhs));
+            }
+        }
+    }
+    expr.node.for_each_child(&mut |child| collect_hash_index_writes(child, out));
+}
+
+/// Every local-variable assignment in `expr`'s subtree that carries a
+/// usable stamped type, as `(name, assigned_ty)`. The scalar counterpart
+/// of [`collect_array_pushes`]: the nil-accumulator idiom writes from
+/// inside a block (`opts.each { |k, v| size = v }`) while the `size =
+/// nil` seed sits at the enclosing statement level, so a same-level
+/// match would never see the write.
+///
+/// Distinct from [`collect_var_assignments_into`], which walks only the
+/// condition-expression node shapes and keeps the LAST write per name;
+/// this one is a full subtree walk and reports EVERY write, because the
+/// caller unions them rather than overwriting.
+///
+/// Open types (`Var` / `Bottom`) are skipped — an unresolved write
+/// carries no information to union in, and folding it would erase a
+/// good type. `Untyped` is deliberately NOT skipped: it is an
+/// author-signed "no constraint here", and a hash value flowing into
+/// the accumulator must widen the seed rather than leave it narrow.
+fn collect_local_assignment_tys(expr: &Expr, out: &mut Vec<(Symbol, Ty)>) {
+    if let ExprNode::Assign { target: LValue::Var { name, .. }, value } = &*expr.node {
+        if let Some(t) = value.ty.clone() {
+            if !t.is_open() {
+                out.push((name.clone(), t));
+            }
+        }
+    }
+    expr.node.for_each_child(&mut |child| collect_local_assignment_tys(child, out));
 }
 
 fn collect_var_assignments_into(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {
@@ -1775,6 +1973,142 @@ mod tests {
         assert_eq!(exprs[0].ty.as_ref(), Some(&expected));
         let ExprNode::Assign { value, .. } = &*exprs[0].node else { panic!("assign") };
         assert_eq!(value.ty.as_ref(), Some(&expected));
+    }
+
+    #[test]
+    fn nil_seeded_local_refined_by_nested_write() {
+        // `size = nil; [..].each { size = <Str> }` must leave `size`
+        // reading `Str | Nil`, NOT the seed's bare `Nil`. A stale
+        // `Ty::Nil` is not merely imprecise: Go's `nil?` emit folds a
+        // `Ty::Nil` receiver to the literal `true`, so a following
+        // `if !size.nil?` became `if !(true)` and its body was dropped
+        // as dead code — a silent miscompile, not a type error.
+        let seed = synth(ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: Symbol::from("size") },
+            value: nil_lit(),
+        });
+        let str_lit = synth(ExprNode::Lit {
+            value: Literal::Str { value: "16x16".into() },
+        });
+        let inner = synth(ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: Symbol::from("size") },
+            value: str_lit,
+        });
+        // The write is nested inside a block, which is exactly why a
+        // statement-level-only walk missed it.
+        let each = send(Some(var("items")), "each", vec![lambda(vec!["x"], inner)]);
+        let read = var("size");
+        let mut seq = synth(ExprNode::Seq { exprs: vec![seed, each, read] });
+
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        let ctx = Ctx::default();
+        let ty = typer.analyze_expr(&mut seq, &ctx);
+
+        let expected = union_of(Ty::Nil, Ty::Str);
+        assert_eq!(ty, expected, "read of the refined local");
+        // …and the SEED must agree, so decl-site emitters don't declare
+        // from a type the rest of the body contradicts.
+        let ExprNode::Seq { exprs } = &*seq.node else { panic!("seq") };
+        assert_eq!(exprs[0].ty.as_ref(), Some(&expected), "seed stmt");
+        let ExprNode::Assign { value, .. } = &*exprs[0].node else { panic!("assign") };
+        assert_eq!(value.ty.as_ref(), Some(&expected), "seed literal");
+    }
+
+    #[test]
+    fn hash_accumulator_refined_by_nested_index_write() {
+        // `attrs = {}; [..].each { attrs[k] = <Untyped> }; attrs[:src] =
+        // <Str>` must widen the seed to hold BOTH writes. The nested one
+        // arrives as a two-arg `[]=` send (not an `LValue::Index`), and
+        // missing it was worse than seeing nothing: the visible String
+        // write alone monomorphized the hash to `map[string]string`,
+        // which the invisible untyped write then failed to satisfy.
+        let seed = synth(ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: Symbol::from("attrs") },
+            value: synth(ExprNode::Hash { entries: vec![], kwargs: false }),
+        });
+        // The block params take their types from the iterated hash, so
+        // `v` reads `Untyped` the way `opts.to_h.each` does in the real
+        // helper. `opts` has to be a real ctx binding — a ty stamped on
+        // the node is overwritten by the Var lookup during analysis.
+        let nested_write = send(Some(var("attrs")), "[]=", vec![var("k"), var("v")]);
+        let each = synth(ExprNode::Send {
+            recv: Some(var("opts")),
+            method: Symbol::from("each"),
+            args: vec![],
+            block: Some(lambda(vec!["k", "v"], nested_write)),
+            parenthesized: true,
+        });
+        let str_val = synth(ExprNode::Lit {
+            value: Literal::Str { value: "/a.png".into() },
+        });
+        let sym_key = synth(ExprNode::Lit {
+            value: Literal::Sym { value: "src".into() },
+        });
+        let top_write = send(Some(var("attrs")), "[]=", vec![sym_key, str_val]);
+        let read = var("attrs");
+        let mut seq = synth(ExprNode::Seq {
+            exprs: vec![seed, each, top_write, read],
+        });
+
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        let ctx = ctx_with_local(
+            "opts",
+            Ty::Hash {
+                key: Box::new(Ty::Str),
+                value: Box::new(Ty::Untyped),
+            },
+        );
+        typer.analyze_expr(&mut seq, &ctx);
+
+        let ExprNode::Seq { exprs } = &*seq.node else { panic!("seq") };
+        let Some(Ty::Hash { value, .. }) = exprs[0].ty.as_ref() else {
+            panic!("seed stamped as a Hash, got {:?}", exprs[0].ty)
+        };
+        // Both writes are represented — the value is no longer the
+        // placeholder, and it is not the String write alone.
+        assert!(
+            !matches!(**value, Ty::Var { .. }),
+            "seed value still the placeholder: {value:?}"
+        );
+        assert_ne!(**value, Ty::Str, "monomorphized to the visible write only");
+    }
+
+    #[test]
+    fn nilable_hash_write_leaves_seed_placeholder() {
+        // The counterweight to the test above: `params = {}; params[k] =
+        // <Str | Nil>` must NOT stamp the seed. Ruby's `Array#[]` types
+        // as `Str | Nil`, but no target emits it that way (Crystal's
+        // `Array(String)#[]` raises rather than returning nil), so
+        // stamping it contradicts the emit and outranks the author's
+        // declared `Hash[String, String]` return — Crystal rejected
+        // `Router.match_parts` for returning `Hash(String, String | Nil)`.
+        let seed = synth(ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: Symbol::from("params") },
+            value: synth(ExprNode::Hash { entries: vec![], kwargs: false }),
+        });
+        let nilable = {
+            let mut e = var("ap");
+            e.ty = Some(optional_str());
+            e
+        };
+        let write = send(Some(var("params")), "[]=", vec![var("name"), nilable]);
+        let mut seq = synth(ExprNode::Seq { exprs: vec![seed, write] });
+
+        let classes = empty_classes();
+        let typer = BodyTyper::new(&classes);
+        let ctx = Ctx::default();
+        typer.analyze_expr(&mut seq, &ctx);
+
+        let ExprNode::Seq { exprs } = &*seq.node else { panic!("seq") };
+        let Some(Ty::Hash { value, .. }) = exprs[0].ty.as_ref() else {
+            panic!("seed is a Hash, got {:?}", exprs[0].ty)
+        };
+        assert!(
+            matches!(**value, Ty::Var { .. }),
+            "nilable write must leave the placeholder, got {value:?}"
+        );
     }
 
     #[test]

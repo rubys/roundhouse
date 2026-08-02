@@ -356,18 +356,33 @@ pub(super) fn emit_expr(ctx: &EmitCtx, e: &Expr) -> String {
             // position (e.g. inline literal expressions whose Ty
             // wasn't propagated by the analyzer).
             if let Some(Ty::Hash { key, value }) = e.ty.as_ref() {
-                let k_ty = super::ty::go_ty_stub(Some(key));
+                let k_raw = super::ty::go_ty_stub(Some(key));
                 let v_ty = super::ty::go_ty_stub(Some(value));
-                // Fire when at least one side maps to a concrete Go
-                // type. `Hash[Var, Var]` (unresolved by analyzer) and
-                // `Hash[Untyped, Untyped]` (declared catchall) both
-                // resolve to interface{}/interface{} — those carry
-                // less signal than the heuristic below, which assumes
-                // string keys (the dominant Ruby Hash shape). Fire
-                // when EITHER side is concrete so `Hash[Sym, Untyped]`
-                // pins the key and lets the heuristic-equivalent
-                // value default kick in.
-                if k_ty != "interface{}" || v_ty != "interface{}" {
+                // A HETEROGENEOUS value type wins even though it renders
+                // as `interface{}`. `go_ty_stub` flattens three very
+                // different states onto that one string: "analyzer had
+                // no idea" (`Var`), "author opted out" (`Untyped`), and
+                // "analyzer observed mixed writes" (`Union[Untyped,
+                // Str]`). Only the last is a conclusion worth outranking
+                // the literal heuristic — deferring it to that
+                // heuristic's `map[string]string` guess is what let an
+                // `interface{}` write land in a string-valued map.
+                //
+                // `Untyped` deliberately does NOT qualify: it is exactly
+                // as uninformative as the heuristic, and promoting it
+                // would retype every `params = {}` accumulator in the
+                // router away from the `map[string]string` its declared
+                // return needs.
+                let value_informative = !value.is_open()
+                    && !matches!(&**value, Ty::Untyped);
+                if k_raw != "interface{}" || v_ty != "interface{}" || value_informative {
+                    // An open key with an informative value is the
+                    // refined-accumulator shape: the analyzer widens the
+                    // value from the writes it observed and leaves the
+                    // key alone. Default it to `string`, the same
+                    // assumption the heuristic makes and the shape every
+                    // Ruby hash key emits as.
+                    let k_ty = if key.is_open() { "string".to_string() } else { k_raw };
                     return format!("map[{k_ty}]{v_ty}{{{}}}", parts.join(", "));
                 }
             }
@@ -2644,12 +2659,35 @@ fn emit_assign(ctx: &EmitCtx, target: &crate::expr::LValue, value: &Expr) -> Str
                 // mismatch — kept as visible failure rather than
                 // silent corruption).
                 if matches!(&*value.node, ExprNode::Lit { value: Literal::Nil }) {
-                    let ty_str = ctx
-                        .return_ty
+                    // Prefer the analyzer's refined seed type. The Seq
+                    // walk retro-stamps a nil-seeded local with
+                    // `Union[Nil, T]` once it sees the write that fills
+                    // it (`src/analyze/body/mod.rs`, `nil_seed`), which
+                    // is a fact about THIS variable — `ctx.return_ty` is
+                    // only a guess that happens to hold for the
+                    // lowerer's return accumulators. Reading the guess
+                    // first mistyped every other nil-seeded local in a
+                    // scalar-returning method: `image_tag` returns
+                    // String, so its `size = nil` declared `var size
+                    // string`.
+                    let refined = value
+                        .ty
                         .as_ref()
+                        .filter(|t| !matches!(t, Ty::Nil) && !t.is_open());
+                    let ty_str = refined
+                        .or(ctx.return_ty.as_ref())
                         .map(|t| super::ty::go_ty_stub(Some(t)))
                         .unwrap_or_else(|| "interface{}".to_string());
-                    return format!("var {name_s} {ty_str} = nil");
+                    // …and initialize with that type's ZERO value, not a
+                    // bare `nil`. go_ty_stub renders `Union[Str, Nil]`
+                    // as `string` under the empty-as-nil convention, so
+                    // `= nil` was never valid for it (`cannot use nil as
+                    // string value`); `""` is the same absent-marker the
+                    // convention's `nil?` test (`s == ""`) reads back.
+                    return format!(
+                        "var {name_s} {ty_str} = {}",
+                        super::ty::go_zero_value(&ty_str)
+                    );
                 }
                 if matches!(value.ty, Some(Ty::Int)) {
                     format!("var {name_s} int64 = {v}")

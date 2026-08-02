@@ -1511,8 +1511,26 @@ fn emit_send(
                 if params.len() == 2 {
                     let k = camel(params[0].as_str());
                     let v = camel(params[1].as_str());
+                    // `opts.to_h.each` is the same iteration as
+                    // `opts.each`: `to_h` on a Hash emits as identity
+                    // (the receiver renders as the bare param), so the
+                    // wrapper must not cost the typed form. Without
+                    // peeling it, the Send node fails the Var/Ivar match
+                    // and the loop falls back to non-generic
+                    // `DictionaryEntry`, whose `object` Key then can't
+                    // index a `Dictionary<string, …>` (CS1503).
+                    let mut recv_base = &*r.node;
+                    while let ExprNode::Send { recv: Some(inner), method: m, args, .. } =
+                        recv_base
+                    {
+                        if m.as_str() == "to_h" && args.is_empty() {
+                            recv_base = &*inner.node;
+                        } else {
+                            break;
+                        }
+                    }
                     let typed = recv_hash
-                        && match &*r.node {
+                        && match recv_base {
                             ExprNode::Var { name, .. } => is_param(name.as_str()),
                             ExprNode::Ivar { .. } => true,
                             _ => false,
