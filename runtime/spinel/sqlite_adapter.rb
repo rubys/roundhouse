@@ -92,8 +92,9 @@ module SqliteAdapter
   # keyed by column name. Values read through `Db.column_value` — the
   # driver's NATIVE types (Integer/Float/String, nil for NULL), which
   # is what ActiveRecord hands the app: `group_by(&:fk)[nil]` finds
-  # root rows, integer columns compare as integers. (The FFI Db shim
-  # still returns text values, nil-for-NULL aside — see db.rb.) Each
+  # root rows, integer columns compare as integers, and `pluck(:fk)`
+  # returns keys that match the ones model attributes carry. All three
+  # shims answer this now, the FFI one by storage-class dispatch. Each
   # row is its own Hash so the caller gets a stable copy after
   # `finalize`.
   def self.select_rows(sql)

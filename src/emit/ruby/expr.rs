@@ -389,13 +389,16 @@ fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
         // than a missed narrowing.
         //
         // Adapters disagree about what a boolean column reads as: the
-        // gem-backed shims give `true`/`false` or `1`/`0`, while
-        // spinel's `Db.column_value` is `sqlite3_column_text`, so every
-        // value arrives as a STRING — `"0"` for false. Assigning that
-        // raw string into a slot the RBS pins `bool` makes it `true`,
-        // and lobsters' `Rack::MiniProfiler.authorize_request if @user
-        // && @user.is_admin?` then fired for a user whose `is_admin` is
-        // 0, taking the whole request down under spinel AOT.
+        // gem-backed shims give `true`/`false` or `1`/`0`, and spinel's
+        // `Db.column_value` gives the `0`/`1` of the INTEGER storage
+        // class (it used to give the STRING `"0"`, before storage-class
+        // dispatch landed in runtime/spinel/db.rb — the string spelling
+        // stays covered below because nothing guarantees a future
+        // adapter won't reintroduce it). Assigning a raw `"0"` into a
+        // slot the RBS pins `bool` makes it `true`, and lobsters'
+        // `Rack::MiniProfiler.authorize_request if @user &&
+        // @user.is_admin?` then fired for a user whose `is_admin` is 0,
+        // taking the whole request down under spinel AOT.
         //
         // Compare the string form so one expression covers every
         // adapter: `false`/`0`/`"0"` are the false spellings, plus `""`

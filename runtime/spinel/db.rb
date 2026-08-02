@@ -55,6 +55,13 @@ module SQL
   ffi_const :OK,   0
   ffi_const :ROW,  100
   ffi_const :DONE, 101
+  # sqlite3_column_type storage classes. NULL is the one the nullable
+  # reads have always needed; the rest let `column_value` hand back the
+  # driver's native type instead of everything-as-text.
+  ffi_const :INTEGER_TYPE, 1
+  ffi_const :FLOAT_TYPE, 2
+  ffi_const :TEXT_TYPE, 3
+  ffi_const :BLOB_TYPE, 4
   ffi_const :NULL_TYPE, 5
   # open_v2 flags: READWRITE | CREATE | URI. The first two are what plain
   # `sqlite3_open` uses, so a non-URI path opens identically either way.
@@ -569,18 +576,48 @@ module Db
     end
   end
 
-  # Raw typed column read — the gem-backed shims (db_cruby/db_jruby)
-  # return the driver's native value (Integer/Float/String/nil). The
-  # FFI shim keeps the text representation until per-column
-  # `sqlite3_column_type` dispatch is wired; NULL at least maps to nil
-  # (not "") so nil-keyed grouping and truthiness behave. Same
-  # copy-out as column_text (the buffer dies at the next step).
+  # Raw typed column read — the driver's native value, the same contract
+  # the gem-backed shims (db_cruby/db_jruby) answer: Integer for an
+  # INTEGER storage class, Float for REAL, String for TEXT, nil for NULL.
+  #
+  # Dispatches on the STORAGE CLASS of the value in THIS row, not on the
+  # column's declared type. SQLite is dynamically typed and both gem
+  # shims report what is actually stored, so storage class is what keeps
+  # the AOT tree's hydration in step with the CRuby lane. Caching
+  # `sqlite3_column_decltype` once per statement would save the probe
+  # below, but it would diverge from the shims exactly when storage class
+  # and declaration disagree — and it cannot detect NULL at all, which is
+  # the whole reason the nullable reads need a per-row probe.
+  #
+  # Costs one `sqlite3_column_type` call per column per row on top of the
+  # value read. That is the same price `column_int_opt` and friends
+  # already pay, and it is unavoidable: `sqlite3_column_int` cannot tell
+  # a stored 0 from NULL. Before this, every value arrived as text, so
+  # `pluck(:thread_id)` handed back `"19948"` where the model attribute
+  # held `19948` and every Hash lookup between them missed.
+  #
+  # Integers read through `sqlite3_column_int` (32-bit), matching
+  # `column_int` and the `from_stmt` hydration path; a corpus with keys
+  # past 2^31 would need `sqlite3_column_int64` wired for all of them
+  # together, not just here. BLOB falls to the text read — no corpus
+  # caller stores one, and text is a more useful stand-in than raising.
   def self.column_value(stmt, i)
-    s = SQL.sqlite3_column_text(stmt, i)
-    if s.nil?
+    t = SQL.sqlite3_column_type(stmt, i)
+    if t == SQL::NULL_TYPE
       nil
+    elsif t == SQL::INTEGER_TYPE
+      SQL.sqlite3_column_int(stmt, i)
+    elsif t == SQL::FLOAT_TYPE
+      SQL.sqlite3_column_double(stmt, i)
     else
-      s + ""
+      # Same copy-out as column_text — the libsqlite3 buffer is
+      # invalidated by the next step or finalize on this stmt.
+      s = SQL.sqlite3_column_text(stmt, i)
+      if s.nil?
+        nil
+      else
+        s + ""
+      end
     end
   end
 
