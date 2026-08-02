@@ -1232,12 +1232,18 @@ if content
   P
   # Why not just compare response sizes: find the route with the widest byte
   # gap among those the parse proved EQUIVALENT, and let it make the case.
-  # Derived, not asserted, so it stays true as the emit changes.
+  # Derived, not asserted, so it stays true as the emit changes — which it
+  # has. This used to read "all of the difference is whitespace", true when
+  # the ERB compiler kept the indentation and newline that erubi's trim mode
+  # drops from every `<% %>` line (`/u` was 292,443 bytes against Rails'
+  # 173,576, a 68% gap). That is fixed, so the residual gap is no longer
+  # attributable to any one cause and the copy no longer names one; the
+  # 5% floor means this paragraph simply disappears once the emit converges.
   widest = (content['routes'] || [])
              .select { |r| %w[identical equivalent].include?(r['verdict']) && r['ref_bytes'].to_i > 0 }
              .max_by { |r| (r['cand_bytes'].to_i - r['ref_bytes'].to_i).abs / r['ref_bytes'].to_f }
   if widest && (gap = ((widest['cand_bytes'] - widest['ref_bytes']).abs * 100.0 / widest['ref_bytes']).round) >= 5
-    html << %(<p>Comparing response <em>sizes</em> instead would be worse than weak. <code>/#{esc(widest['route'])}</code> is #{fmt_int(widest['ref_bytes'])} bytes from Rails and #{fmt_int(widest['cand_bytes'])} from the emit — a #{gap}% gap — and the two are the same document. All of the difference is whitespace.</p>\n)
+    html << %(<p>Comparing response <em>sizes</em> instead would be weaker than it looks. <code>/#{esc(widest['route'])}</code> is #{fmt_int(widest['ref_bytes'])} bytes from Rails and #{fmt_int(widest['cand_bytes'])} from the emit — a #{gap}% gap — and the two are the same document, differing only in the formatting the token stream is deliberately blind to.</p>\n)
   end
   if diff_routes.any?
     html << "<table>\n<thead><tr><th>route</th><th>differing tokens</th><th>first difference</th></tr></thead>\n<tbody>\n"

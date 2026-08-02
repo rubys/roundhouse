@@ -159,6 +159,10 @@ pub fn compile_erb_mapped(source: &str) -> (String, Vec<ErbSegment>) {
 
     let bytes = source.as_bytes();
     let mut cursor = 0usize;
+    // Erubi's `is_bol`: did the PREVIOUS tag end its line? Seeds the
+    // `lspace` test for a tag whose preceding text chunk is empty.
+    // Starts true — the template's first byte is a line start.
+    let mut is_bol = true;
 
     while cursor < bytes.len() {
         match find_at(bytes, cursor, b"<%") {
@@ -197,28 +201,74 @@ pub fn compile_erb_mapped(source: &str) -> (String, Vec<ErbSegment>) {
                 let close = find_at(bytes, body_start, b"%>")
                     .expect("unterminated ERB tag");
                 let body = &source[body_start..close];
+                // Erubi's `tailch` — the `-`/`=` before `%>`. Only an
+                // OUTPUT tag acts on it (`<%= x -%>` drops the newline);
+                // for a code tag the trim decision is lspace/rspace
+                // alone, so `<% x -%>` mid-line keeps its newline.
+                let had_tail_dash = body.ends_with('-');
                 let body = body.strip_suffix('-').unwrap_or(body);
                 let ruby = body.trim();
+
+                // Erubi's `rspace`: the optional `[ \t]*\r?\n` right
+                // after `%>`. Absent (None) when the tag has trailing
+                // non-whitespace on its line.
+                let after_tag = close + 2;
+                let rspace_len = {
+                    let mut j = after_tag;
+                    while matches!(bytes.get(j), Some(b' ') | Some(b'\t')) {
+                        j += 1;
+                    }
+                    if bytes.get(j) == Some(&b'\r') {
+                        j += 1;
+                    }
+                    if bytes.get(j) == Some(&b'\n') {
+                        Some(j + 1 - after_tag)
+                    } else {
+                        None
+                    }
+                };
+                // Erubi's `lspace`: the run between the last newline and
+                // this tag, when it is entirely spaces/tabs. Never
+                // computed for output tags — `<%= %>` keeps its indent.
+                let lspace_len: Option<usize> = if is_output {
+                    None
+                } else if pending.text.is_empty() {
+                    is_bol.then_some(0)
+                } else if pending.text.ends_with('\n') {
+                    Some(0)
+                } else {
+                    let ws = |s: &str| s.bytes().all(|b| b == b' ' || b == b'\t');
+                    match pending.text.rfind('\n') {
+                        Some(p) => {
+                            let tail = &pending.text[p + 1..];
+                            ws(tail).then(|| tail.len())
+                        }
+                        None => (is_bol && ws(&pending.text))
+                            .then(|| pending.text.len()),
+                    }
+                };
+                // THE trim rule (erubi's `nil`/`-`/`#` arms): a code or
+                // comment tag alone on its line contributes nothing to
+                // the output — its indentation AND its newline both
+                // vanish. This is what Rails renders, and not doing it
+                // leaked `indent + "\n"` per control-flow tag into every
+                // page: lobsters `/u` came out 292,443 bytes against
+                // Rails' 173,576, a 68% gap that was entirely this.
+                let trims = lspace_len.is_some() && rspace_len.is_some();
+                if trims {
+                    let keep = pending.text.len() - lspace_len.unwrap();
+                    pending.text.truncate(keep);
+                    if pending.text.is_empty() {
+                        pending.range = None;
+                    }
+                }
+                is_bol = rspace_len.is_some();
                 if is_comment {
                     // Comment tag — intentionally drop without flushing, so
                     // surrounding text chunks merge into one string literal.
-                    //
-                    // Rails' erubi trim mode also strips the leading
-                    // horizontal whitespace on the comment's line (the
-                    // `    ` indent before `<%# ... %>`). Strip the tail
-                    // of pending_text back to the last newline when the
-                    // intervening bytes are only spaces/tabs — effectively
-                    // making the whole comment line disappear from output.
-                    let trim_start = pending.text.rfind('\n').map(|p| p + 1).unwrap_or(0);
-                    if pending.text[trim_start..]
-                        .bytes()
-                        .all(|b| b == b' ' || b == b'\t')
-                    {
-                        pending.text.truncate(trim_start);
-                        if pending.text.is_empty() {
-                            pending.range = None;
-                        }
-                    }
+                    // Its line-level whitespace was already handled by the
+                    // shared `trims` rule above, which erubi applies to
+                    // comment and code tags identically.
                 } else if is_output {
                     pending.flush(&mut out, &mut map);
                     if is_block_expr(ruby) {
@@ -272,20 +322,14 @@ pub fn compile_erb_mapped(source: &str) -> (String, Vec<ErbSegment>) {
                         stack.push(BlockKind::Pass);
                     }
                 }
-                cursor = close + 2;
-                // ERB comment tags (`<%# ... %>`) consume their
-                // trailing newline when rendered by Rails' erubi.
-                // The rationale: a comment line contributes nothing
-                // visible, and leaving the newline behind would
-                // produce a stray blank where the comment was. Non-
-                // comment tags (`<% code %>`, `<%= expr %>`) don't
-                // trim here — their newlines are significant
-                // whitespace between the surrounding text chunks.
-                // Matching erubi's behavior for `<% %>` tags
-                // happens at target-emit time (`erubi_trim_body`)
-                // so the Ruby round-trip preserves source fidelity.
-                if is_comment && bytes.get(cursor) == Some(&b'\n') {
-                    cursor += 1;
+                cursor = after_tag;
+                // Consume the tag's trailing newline when the trim rule
+                // fired (code/comment tag alone on its line), or when an
+                // OUTPUT tag closed with `-%>` — erubi's
+                // `rspace = nil if tailch`, the one case where the tail
+                // marker does the work rather than lspace/rspace.
+                if trims || (is_output && had_tail_dash) {
+                    cursor += rspace_len.unwrap_or(0);
                 }
             }
         }
@@ -401,6 +445,70 @@ mod tests {
             "trim markers stripped from tag body:\n{compiled}"
         );
         assert!(!compiled.contains("- raise"), "leading `-` must not survive:\n{compiled}");
+    }
+
+    /// Concatenate just the TEXT chunks of a compiled template — the
+    /// `_buf = _buf + "..."` literals, unescaped. This is the rendered
+    /// output minus every `<%= %>` substitution, which is exactly the
+    /// surface the trim rule governs.
+    fn static_text(src: &str) -> String {
+        let compiled = compile_erb(src);
+        let mut out = String::new();
+        for line in compiled.lines() {
+            let Some(rest) = line.strip_prefix("_buf = _buf + \"") else {
+                continue;
+            };
+            let Some(body) = rest.strip_suffix('"') else { continue };
+            let mut it = body.chars();
+            while let Some(c) = it.next() {
+                if c != '\\' {
+                    out.push(c);
+                    continue;
+                }
+                match it.next() {
+                    Some('n') => out.push('\n'),
+                    Some('t') => out.push('\t'),
+                    Some(other) => out.push(other),
+                    None => {}
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn code_tag_alone_on_a_line_leaves_no_whitespace() {
+        // Erubi's trim rule: a `<% %>` tag whose line holds nothing else
+        // contributes NOTHING — its indentation and its newline both go.
+        // Verified byte-for-byte against erubi 1.13.1, which renders
+        // this template as exactly `<div>\n    <p>hi</p>\n</div>\n`.
+        //
+        // Not doing this leaked `indent + "\n"` per control-flow tag
+        // into every rendered page; across lobsters' 89 templates it was
+        // 4,261 bytes of static text, and it multiplies by iteration
+        // count inside loops — lobsters `/u` rendered 292,443 bytes
+        // against Rails' 173,576, a 68% gap that was entirely this.
+        let src = "<div>\n  <% if true %>\n    <p>hi</p>\n  <% end %>\n</div>\n";
+        assert_eq!(static_text(src), "<div>\n    <p>hi</p>\n</div>\n");
+    }
+
+    #[test]
+    fn mid_line_code_tag_keeps_its_whitespace() {
+        // The counterweight: trimming needs BOTH a whitespace-only left
+        // side and a newline on the right. A tag with real text beside
+        // it has neither, so every byte around it survives — erubi
+        // renders this as `<p>a  b</p>\n`.
+        assert_eq!(static_text("<p>a <% x = 1 %> b</p>\n"), "<p>a  b</p>\n");
+    }
+
+    #[test]
+    fn output_tag_keeps_indent_but_honors_tail_dash() {
+        // `<%= %>` never left-trims (erubi computes no lspace for it),
+        // so the indent before it is real output. The `-%>` marker is
+        // the one case where the tail does the work: it drops the
+        // trailing newline on its own.
+        assert_eq!(static_text("  <%= v %>\nx\n"), "  \nx\n");
+        assert_eq!(static_text("x<%= 7 -%>\ny\n"), "xy\n");
     }
 
     #[test]
