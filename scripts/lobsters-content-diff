@@ -5,10 +5,14 @@
 # The lobsters benchmark asserts HTTP 200 on every visit, and until now that
 # was also the whole of our parity claim: 26/26 routes return 200. Status is
 # a weak oracle — a 200 that renders half a page is still a 200 — and the
-# obvious strengthening, comparing body SIZES, is worse than weak: it is
-# actively misleading. /u is 173,576 bytes from Rails and 292,449 from the
-# emit, a 68% gap, and the two documents are the same document. All 119 KB
-# is indentation.
+# obvious strengthening, comparing body SIZES, is weaker than it looks: two
+# documents can agree on length and differ in content, or differ in length
+# and be the same document. This example used to make the second half of
+# that case vividly — /u was 173,576 bytes from Rails against 292,449 from
+# the emit, a 68% gap that was entirely indentation, because the ERB
+# compiler kept the whitespace erubi's trim mode drops from every `<% %>`
+# line. That is fixed (see src/erb.rs) and /u now matches Rails to the
+# byte, so the example is retired; the reasoning it illustrated is not.
 #
 # So compare what a browser would see. Both bodies are parsed into a
 # canonical token stream and diffed there, which makes the comparison blind
