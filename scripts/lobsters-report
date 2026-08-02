@@ -567,17 +567,45 @@ if trouble.any?
   html << "</div>\n"
 end
 
+# Badges are what gets skimmed and quoted, so they carry the STRONG
+# oracle and name their lanes. They used to do neither: two of the three
+# counted HTTP 200s — which this page's own methodology calls a weak
+# oracle, "a 200 that renders half a page is still a 200" — and the speed
+# badge named neither side of its own division. A run whose AOT lane was
+# at 21/26 content parity advertised "spinel 25/26 routes" directly under
+# a banner saying the numbers were not trustworthy. Status coverage still
+# exists; it lives in the coverage section, which is about coverage.
+mlanes = (mrows || []).select { |r| r['ms_median'] }
+prim_row  = mlanes.find { |r| r['id'] == prim } || mlanes.find { |r| r['kind'] != 'rails' }
+rails_row = mlanes.find { |r| r['kind'] == 'rails' && r['yjit'] == prim_row&.dig('yjit') } ||
+            mlanes.find { |r| r['kind'] == 'rails' }
 html << %(<div class="badges">)
-html << %(<span class="badge #{all_pass ? 'pass' : 'fail'}">#{pass}/#{total} routes return 200</span>\n)
+compared = mlanes.select { |r| r['kind'] != 'rails' && r['content_total'] }
+if compared.any?
+  compared.each do |r|
+    ok = r['content_equivalent'].to_i == r['content_total'].to_i
+    html << %(<span class="badge #{ok ? 'pass' : 'fail'}">#{esc(r['label'])} #{esc(r['jit'])} )
+    html << %(#{r['content_equivalent']}/#{r['content_total']} content parity</span>\n)
+  end
+else
+  # No oracle in this run. The badge has to say that rather than showing a
+  # 200-count that reads like a clean bill of health.
+  html << %(<span class="badge #{all_pass ? 'pass' : 'fail'}">#{pass}/#{total} return 200 — content never compared</span>\n)
+end
 html << %(<span class="badge fail">#{thin} thin</span>\n) if thin.to_i > 0
 if speedup
-  html << %(<span class="badge speed">#{fmt_dec(speedup, 2)}× faster than Rails</span>\n)
+  # Name both sides. This is roundhouse's primary emit lane against Rails
+  # at the SAME JIT level, which the prose said and the badge did not.
+  lhs = prim_row ? "#{prim_row['label']} #{prim_row['jit']}" : 'roundhouse'
+  rhs = rails_row ? "Rails #{rails_row['jit']}" : 'Rails'
+  html << %(<span class="badge speed">#{fmt_dec(speedup, 2)}× — #{esc(lhs)} vs #{esc(rhs)}</span>\n)
 end
-if jruby_total.to_i > 0
-  html << %(<span class="badge #{jruby_pass == jruby_total ? 'pass' : 'fail'}">jruby #{jruby_pass}/#{jruby_total} routes</span>\n)
-end
-if spinel_total.to_i > 0
-  html << %(<span class="badge #{spinel_pass == spinel_total ? 'pass' : 'fail'}">spinel #{spinel_pass}/#{spinel_total} routes</span>\n)
+# A lane below full parity gets its RESTRICTED ratio here, not its
+# headline one: the headline is partly earned by rendering less, and this
+# row is exactly where that distinction is most likely to be missed.
+mlanes.select { |r| r['vs_rails_parity'] }.each do |r|
+  html << %(<span class="badge speed">#{esc(r['label'])} #{esc(r['jit'])} )
+  html << %(#{fmt_dec(r['vs_rails_parity'], 2)}× over the #{r['parity_routes']} routes it renders correctly</span>\n)
 end
 html << "</div>\n"
 
@@ -660,8 +688,40 @@ if mrows && !mrows.empty?
   # is the same-JIT pair of these rows, so it opens the section rather
   # than duplicating as a chart of its own.
   if lanes_mode && speedup
+    # Say which rows carry the claims. Five lanes in one table reads as
+    # five equal results; they are not. Rails +YJIT is the baseline, the
+    # primary emit lane is the like-for-like comparison against it, and
+    # AOT is a different runtime for the same emit. The no-JIT pair is
+    # there to size the JIT's contribution, not to be quoted.
     html << "<h2>#{section_no}. Roundhouse vs Rails — runtime × JIT</h2>\n"
+    aot_row = mlanes.find { |r| r['runtime'] == 'spinel' }
+    nojit   = mlanes.count { |r| r['yjit'] == false }
+    # "three of them the claim" only when there ARE extra rows to set aside;
+    # with exactly the three it is a contradiction.
+    html << %(<p class="legend"><strong>#{mlanes.size} lanes#{nojit > 0 ? ', three of them the claim' : ''}.</strong> )
+    html << %(<em>#{esc(rails_row ? "Rails #{rails_row['jit']}" : 'Rails +YJIT')}</em> is the baseline; )
+    html << %(<em>#{esc(prim_row ? "#{prim_row['label']} #{prim_row['jit']}" : 'roundhouse +YJIT')}</em> is the like-for-like comparison against it — same runtime, same JIT, so the only variable is the code; )
+    html << if aot_row
+      %(<em>#{esc("#{aot_row['label']} #{aot_row['jit']}")}</em> is the same emit through a different runtime, and is#{aot_row['content_differs'].to_i > 0 ? ' not at full content parity' : ' at full content parity'}. )
+    else
+      %(the AOT lane did not run. )
+    end
+    html << %(The #{nojit} no-JIT row#{nojit == 1 ? '' : 's'} size the JIT's contribution and are not the headline.</p>\n) if nojit > 0
+
     html << %(<p><strong>#{fmt_dec(speedup, 2)}× faster than Rails</strong> — #{fmt_dec(timing['ms_per_iter_median'], 1)} ms/iter vs Rails' #{fmt_dec(rails['ms_per_iter_median'], 1)}, both stacks CRuby with YJIT. The full field:</p>\n)
+    # A drifting lane's ms/iter is a function of how long the run happened
+    # to be, so any ratio drawn from it moves with --time. The drift column
+    # already reports this; the CLAIM needs it too, because that is where a
+    # number gets quoted away from its column.
+    drifty = mlanes.select { |r| r['drift_pct'] && r['drift_pct'].abs >= 5 }
+    if drifty.any?
+      html << %(<p class="caveat"><strong>These ratios depend on run length.</strong> )
+      html << drifty.map { |r|
+        d = r['drift_pct']
+        "#{esc(r['label'])} #{esc(r['jit'])} #{d > 0 ? 'slowed' : 'sped up'} #{fmt_dec(d.abs, 1)}% across its own timed run"
+      }.join('; ')
+      html << %(, so its ms/iter — and every multiplier drawn from it — would read differently at a different <code>--time</code>. Upward drift on the AOT lane is live-heap growth raising mark cost; downward drift on a JIT lane is warmup that has not finished.</p>\n)
+    end
   else
     html << "<h2>#{section_no}. Runtime × JIT matrix</h2>\n"
   end
@@ -1011,6 +1071,19 @@ unless mem_rows.empty?
     <p>Peak resident memory of each lane's replay process — <strong>lower is better</strong>. Because the lanes replay <em>in-process</em>, each one measures itself (<code>VmHWM</code> from <code>/proc/self/status</code>), so this is the whole stack: interpreter, framework, the in-memory fixture DB, and whatever the timed run retains on top.</p>
     <p>The bar splits at the point the sequence starts. The solid segment is the <strong>baseline</strong> — everything loaded and seeded, before a single visit. The translucent segment is <strong>growth</strong> across the timed run. The two say different things: baseline is what the stack costs to stand up, growth is what serving retains.</p>
   P
+  # Same unearned-advantage problem the timing bars have, and until now
+  # the only one of the two with no caveat anywhere on the page: a lane
+  # that does not render five routes also does not RETAIN their objects,
+  # so part of its footprint advantage is the missing work rather than a
+  # leaner stack. Named lanes, so a reader knows which bars to discount.
+  mem_unver = msort.select { |r| r['kind'] != 'rails' && r['content_differs'].to_i > 0 }
+  if mem_unver.any?
+    html << %(<p class="caveat"><strong>)
+    html << mem_unver.map { |r|
+      "#{esc(r['label'])} #{esc(r['jit'])} is at #{r['content_equivalent']}/#{r['content_total']} content parity"
+    }.join('; ')
+    html << %(.</strong> Peak memory is measured over the same sequence as the timings, so a lane that renders less also allocates and retains less — read its bar the way you read its ms/iter, not as a like-for-like footprint.</p>\n)
+  end
   html << memory_bars(msort.map { |r|
     { label: "#{r['label']} #{lane_jit.(r)}", color: lane_color.(r),
       boot: boot.(r) || peak.(r), peak: peak.(r) }
@@ -1092,7 +1165,13 @@ if lanes_mode
   checked = ['CRuby']
   checked << 'JRuby' unless jr_routes.empty?
   checked << 'spinel AOT' unless sp_routes.empty?
-  html << "<h2>#{section_no}. Coverage &amp; parity (#{pass}/#{total}#{jr_routes.empty? ? '' : " · jruby #{jruby_pass}/#{jruby_total}"}#{sp_routes.empty? ? '' : " · spinel #{spinel_pass}/#{spinel_total}"})</h2>\n"
+  # "Coverage", not "parity": these are HTTP 200s. The content-parity
+  # section further down uses the same word for document equivalence, and
+  # the two numbers differ — a lane can return 200 on every route and
+  # render five of them wrong. Two adjacent headings using one word for
+  # two oracles put the weaker number first and made it look like the
+  # stronger one.
+  html << "<h2>#{section_no}. Coverage — HTTP 200 (#{pass}/#{total}#{jr_routes.empty? ? '' : " · jruby #{jruby_pass}/#{jruby_total}"}#{sp_routes.empty? ? '' : " · spinel #{spinel_pass}/#{spinel_total}"})</h2>\n"
   if all_pass && (jr_routes.empty? || jr_all) && (sp_routes.empty? || sp_all)
     html << <<~P
       <p>What the numbers above are numbers <em>of</em>: every distinct route the benchmark exercises returns <strong>200 on #{checked.size == 1 ? 'the %s emit target' % checked[0] : 'every emit target (%s)' % checked.join(', ')}</strong> — the timing sections measure a complete application, not a working subset. A failing cell here would invalidate that lane's rows above.</p>
@@ -1271,7 +1350,14 @@ if content
   prim_label = (mrows.find { |r| r['id'] == prim } || {})
                  .then { |r| [r['label'], r['jit']].compact.join(' ') }
   prim_label = prim if prim_label.strip.empty?
-  html << "<h2>#{section_no}. Content parity vs Rails — #{esc(prim_label)} (#{ce}/#{cmp})</h2>\n"
+  # Every compared lane in the heading, not just the primary one. With the
+  # AOT lane at 21/26 the old heading still read "(26/26)", putting the
+  # best lane's number where the section's number goes.
+  other_parity = (mrows || []).select { |r| r['ms_median'] && r['kind'] != 'rails' &&
+                                            r['content_total'] && r['id'] != prim }
+                              .map { |r| ", #{esc(r['label'])} #{esc(r['jit'])} #{r['content_equivalent']}/#{r['content_total']}" }
+                              .join
+  html << "<h2>#{section_no}. Content parity vs Rails — #{esc(prim_label)} #{ce}/#{cmp}#{other_parity}</h2>\n"
   html << %(<span class="badge #{diff_routes.empty? ? 'pass' : 'fail'}">#{ce}/#{cmp} routes render what Rails renders</span>\n)
   if stale.any?
     html << %(<p class="caveat"><strong>#{stale.size} route(s) not compared</strong> — Rails itself did not return 200 for #{stale.map { |r| "<code>#{esc(r['route'])}</code>" }.join(', ')}, so there was no expected output. They are excluded from the count above rather than scored against a broken oracle.</p>\n)
