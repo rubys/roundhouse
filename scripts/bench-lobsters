@@ -478,6 +478,17 @@ if (( ${#LANES[@]} > 0 )); then
                          --json "$LDIR/summary.json" --md "$LDIR/summary.md"
                          --dump "$LDIR/bodies" --warmup 15
                          --time "$TIME_ITERS" --min-time 10)
+                # Align the AOT link to the bundle's SQLite (see
+                # ensure_sqlite_vendor above). Degrades loudly: without the
+                # bundle or the download, the lane links system libsqlite3
+                # and the page's per-lane sqlite attestation says so.
+                SQ_VER="$(bundle_sqlite_version || true)"
+                if [[ -n "$SQ_VER" ]] && SQ_DIR="$(ensure_sqlite_vendor "$SQ_VER")"; then
+                    SP_ARGS+=(--sqlite-lib "$SQ_DIR")
+                    step "lane spinel: linking vendored SQLite $SQ_VER (the bundle's version)"
+                else
+                    warn "lane spinel: no vendored SQLite (bundle or download unavailable) — linking system libsqlite3"
+                fi
                 # bcrypt is a spin package the published index may not
                 # carry; a local checkout stands in. Look where people
                 # actually put it rather than assuming one layout.
@@ -909,6 +920,39 @@ if content.any?
 end
 AGG
 
+# ── vendored SQLite for the AOT link ─────────────────────────────────
+# Every interpreted lane queries the sqlite3 GEM's bundled SQLite; the AOT
+# binary links `-lsqlite3`, which resolves to the SYSTEM library — on this
+# box ~18 months older. /top runs ~94% inside libsqlite3, so that gap is a
+# library delta wearing a runtime delta's clothes (spinel#3513). The fix:
+# build the amalgamation at the BUNDLE's version (the canonical one —
+# ruby-bench's Gemfile.lock is the methodology) into a cache dir holding
+# only libsqlite3.a, and hand the dir to the spinel wrapper, which puts it
+# on LIBRARY_PATH for the link — the emitted tree itself is not touched,
+# so the published tarball still builds anywhere with `-lsqlite3`.
+# Compile flags are the amalgamation defaults (+THREADSAFE), not the gem's
+# exact extconf set — version is the lever that moves plans and btree
+# code; the flag residue is noted, not hidden.
+ensure_sqlite_vendor() {
+    local ver="$1" dir="$REPO_ROOT/build/sqlite-vendor/$1"
+    [[ -f "$dir/libsqlite3.a" ]] && { echo "$dir"; return 0; }
+    local maj min pat num yr got=""
+    IFS=. read -r maj min pat <<<"$ver"
+    num=$(printf '%d%02d%02d00' "$maj" "$min" "${pat:-0}") || return 1
+    mkdir -p "$dir"
+    for yr in 2026 2025 2024 2023; do
+        curl -fsSL --max-time 120 -o "$dir/amalgamation.zip"             "https://sqlite.org/$yr/sqlite-amalgamation-$num.zip" 2>/dev/null && { got=1; break; }
+    done
+    [[ -n "$got" ]] || { rm -rf "$dir"; return 1; }
+    (cd "$dir" && unzip -oq amalgamation.zip         && mv "sqlite-amalgamation-$num/sqlite3.c" "sqlite-amalgamation-$num/sqlite3.h" .         && rm -rf "sqlite-amalgamation-$num" amalgamation.zip         && cc -O2 -DSQLITE_THREADSAFE=1 -c sqlite3.c -o sqlite3.o         && ar rcs libsqlite3.a sqlite3.o) >/dev/null 2>&1 || { rm -rf "$dir"; return 1; }
+    echo "$dir"
+}
+
+# The version every lane should be on: whatever the ruby-bench bundle pins.
+bundle_sqlite_version() {
+    (cd "$SRC" && BUNDLE_GEMFILE="$SRC/Gemfile" bundle exec ruby         -e 'require "sqlite3"; print SQLite3::SQLITE_VERSION' 2>/dev/null)
+}
+
 # ── emitted-tree tarballs ────────────────────────────────────────────
 # Publish the trees the lanes actually ran, so a compiler author can pick up
 # a lane's numbers without a roundhouse checkout. The AOT lane's headline is
@@ -950,6 +994,14 @@ pack_tree() {
 
     # needs spinel + spin on PATH
     rm -f build/bin/blog && spin build
+
+The published lane did NOT link your system libsqlite3: the bench box puts
+a vendored SQLite static library — built at the same version the ruby-bench
+bundle pins, so every lane queries one build — on LIBRARY_PATH for this
+link. A plain build here uses your system library instead, which is fine
+for exploring the codegen; just know that query-heavy timings move with
+the SQLite version, and the lane summary's `sqlite` field records what the
+published binary actually queried.
 EOS
 )
         run_section=$(cat <<'EOS'
@@ -1008,7 +1060,11 @@ root:
 
 `RUBYOPT=--yjit` is the published `ruby` row; drop it for `ruby-int`. The
 --defer file removes the same 8 visits every published lane defers — a run
-without it does more work than the page and is not comparable to it.
+without it does more work than the page and is not comparable to it. The
+published lanes run this under the ruby-bench checkout's bundle
+(`BUNDLE_GEMFILE=<ruby-bench>/benchmarks/lobsters/Gemfile bundle exec`),
+so the sqlite3 gem — and the SQLite build inside it — matches the Rails
+lanes; the summary's `sqlite` field records what was actually queried.
 EOS
 )
         bcrypt_section=""
@@ -1271,7 +1327,16 @@ fi
 (( FROZEN == 1 ))    && REPLAY_ARGS+=(--sequence "$FROZEN_SEQ")
 
 status=0
-(cd "$OUT_TREE" && "$RUBY_BIN" "$REPO_ROOT/scripts/lobsters-replay" "${REPLAY_ARGS[@]}") || status=$?
+# Same gem universe as the Rails lanes: the ruby-bench bundle pins sqlite3
+# (and bcrypt/htmlentities/rotp), so running the emit replay under it makes
+# every interpreted lane query the same SQLite build instead of whatever
+# the ambient gem env carries. Falls back to plain ruby when the bundle
+# isn't usable — the per-lane sqlite attestation on the page then says so.
+RUN_RUBY=("$RUBY_BIN")
+if [[ "$RUNTIME" == cruby ]] && (cd "$SRC" 2>/dev/null && bundle check >/dev/null 2>&1); then
+    RUN_RUBY=(env "BUNDLE_GEMFILE=$SRC/Gemfile" bundle exec "$RUBY_BIN")
+fi
+(cd "$OUT_TREE" && "${RUN_RUBY[@]}" "$REPO_ROOT/scripts/lobsters-replay" "${REPLAY_ARGS[@]}") || status=$?
 
 # ── compare against the previous run ─────────────────────────────────
 # Resolve the runtime's own `latest` BEFORE repointing it (cruby keeps the

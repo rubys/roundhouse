@@ -48,6 +48,7 @@ until args.empty?
   when "--dump"       then opts[:dump]     = File.expand_path(args.shift)
   when "--db"         then opts[:db]       = File.expand_path(args.shift)
   when "--bcrypt"     then opts[:bcrypt]   = File.expand_path(args.shift)
+  when "--sqlite-lib" then opts[:sqlite_lib] = File.expand_path(args.shift)
   when "--warmup"     then opts[:warmup]   = Integer(args.shift)
   when "--time"       then opts[:time]     = Integer(args.shift)
   when "--min-time"   then opts[:min_time] = Integer(args.shift)
@@ -160,7 +161,19 @@ CC_VERSION     = tool_version("#{ENV['CC'] || 'cc'} --version")
 unless opts[:skip_build] && File.executable?(BIN)
   t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
   log = File.join(TREE, "spin-build.log")
-  ok = system("make", "build", chdir: TREE, out: log, err: [log, "a"])
+  # --sqlite-lib DIR: a directory holding ONLY libsqlite3.a (the vendored
+  # amalgamation at the bundle's version — scripts/bench-lobsters builds
+  # it). LIBRARY_PATH puts it ahead of the system search path, so the
+  # tree's own `ffi_lib "sqlite3"` link line resolves to it — no file in
+  # the tree changes, and the published tarball still builds anywhere
+  # against a stock -lsqlite3. The lane's summary records which build the
+  # binary actually queried, so this is attested, not assumed.
+  build_env = {}
+  if opts[:sqlite_lib] && File.exist?(File.join(opts[:sqlite_lib], "libsqlite3.a"))
+    build_env["LIBRARY_PATH"] =
+      [opts[:sqlite_lib], ENV["LIBRARY_PATH"]].compact.join(File::PATH_SEPARATOR)
+  end
+  ok = system(build_env, "make", "build", chdir: TREE, out: log, err: [log, "a"])
   build_s = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0).round(1)
   unless ok
     tail = (File.readlines(log).last(15).join rescue "")
