@@ -1426,6 +1426,15 @@ jobs:
           fetch() { curl -fsSL --max-time 30 "$1" -o "$2" || { rm -f "$2"; return 1; }; }
           if fetch "$BENCH_URL/matrix.json" _site/bench/lobsters/matrix.json; then
             fetch "$BENCH_URL/env.json" _site/bench/lobsters/env.json || true
+            # Emitted-tree tarballs (~390 KB + ~820 KB). Mirrored so Pages is
+            # the download source: the bench box is timing runs, and serving a
+            # multi-megabyte download mid-measurement perturbs the very numbers
+            # the archive is evidence for. The report links them relatively, so
+            # this copy links to this copy. `|| true` — runs predating the
+            # tarballs still render, they just have nothing to link.
+            for f in spinel-tree.tgz ruby-tree.tgz; do
+              fetch "$BENCH_URL/$f" "_site/bench/lobsters/$f" || true
+            done
             # spinel included: the AOT lane is rendered on the bench box's own
             # page, and without its summary.json here the mirrored page drops
             # the AOT bars, the spinel parity badge and the AOT toolchain
