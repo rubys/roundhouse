@@ -183,9 +183,19 @@ end
 # committed frozen-sequence.json and its drift check are untouched; only what
 # gets timed is narrowed.
 def load_deferred(path)
-  return [] if path.nil? || path.empty?
+  # Announce either way. A lane that silently times the full sequence while
+  # its siblings time a deferred one produces ratios that divide different
+  # work, and the only trace is a visit count nobody reads. Three runs were
+  # spent on exactly that, unable to tell "the flag never arrived" from "the
+  # flag arrived and matched nothing" -- one line of log distinguishes them.
+  if path.nil? || path.empty?
+    $stderr.puts "deferral: no --defer given; timing the FULL sequence"
+    return []
+  end
   abort "deferred ledger not found at #{path.inspect}" unless File.exist?(path)
-  (JSON.parse(File.read(path))["declared_gaps"] || []).map { |g| g["route"] }
+  routes = (JSON.parse(File.read(path))["declared_gaps"] || []).map { |g| g["route"] }
+  $stderr.puts "deferral: #{path} -> #{routes.size} route(s): #{routes.join(", ")}"
+  routes
 end
 
 # samples: { template => [ms, …] } -> { template => {ms_median, n, …} }.
