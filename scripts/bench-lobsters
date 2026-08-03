@@ -206,9 +206,18 @@ warn() { printf '\033[33m!\033[0m %s\n' "$*" >&2; }
 # Compile flags are the amalgamation defaults (+THREADSAFE), not the gem's
 # exact extconf set — version is the lever that moves plans and btree
 # code; the flag residue is noted, not hidden.
+# Compile flags: -fPIC because the objects land inside a PIE-linked
+# binary; the feature defines are the ones both the gem's build and the
+# distro builds enable, so the vendored library is not a stripped-down
+# cousin of the ones it replaces. The flags are part of the cache key
+# (.flags stamp): a flag change rebuilds, a stale cache never lingers.
+SQLITE_VENDOR_CFLAGS="-O2 -fPIC -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_COLUMN_METADATA -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_RTREE"
 ensure_sqlite_vendor() {
     local ver="$1" dir="$REPO_ROOT/build/sqlite-vendor/$1"
-    [[ -f "$dir/libsqlite3.a" ]] && { echo "$dir"; return 0; }
+    if [[ -f "$dir/libsqlite3.a" ]] && [[ "$(cat "$dir/.flags" 2>/dev/null)" == "$SQLITE_VENDOR_CFLAGS" ]]; then
+        echo "$dir"; return 0
+    fi
+    rm -rf "$dir"
     local maj min pat num yr got=""
     IFS=. read -r maj min pat <<<"$ver"
     num=$(printf '%d%02d%02d00' "$maj" "$min" "${pat:-0}") || return 1
@@ -217,7 +226,7 @@ ensure_sqlite_vendor() {
         curl -fsSL --max-time 120 -o "$dir/amalgamation.zip"             "https://sqlite.org/$yr/sqlite-amalgamation-$num.zip" 2>/dev/null && { got=1; break; }
     done
     [[ -n "$got" ]] || { rm -rf "$dir"; return 1; }
-    (cd "$dir" && unzip -oq amalgamation.zip         && mv "sqlite-amalgamation-$num/sqlite3.c" "sqlite-amalgamation-$num/sqlite3.h" .         && rm -rf "sqlite-amalgamation-$num" amalgamation.zip         && cc -O2 -DSQLITE_THREADSAFE=1 -c sqlite3.c -o sqlite3.o         && ar rcs libsqlite3.a sqlite3.o) >/dev/null 2>&1 || { rm -rf "$dir"; return 1; }
+    (cd "$dir" && unzip -oq amalgamation.zip         && mv "sqlite-amalgamation-$num/sqlite3.c" "sqlite-amalgamation-$num/sqlite3.h" .         && rm -rf "sqlite-amalgamation-$num" amalgamation.zip         && cc $SQLITE_VENDOR_CFLAGS -c sqlite3.c -o sqlite3.o         && ar rcs libsqlite3.a sqlite3.o         && printf '%s' "$SQLITE_VENDOR_CFLAGS" > .flags) >/dev/null 2>&1 || { rm -rf "$dir"; return 1; }
     echo "$dir"
 }
 
