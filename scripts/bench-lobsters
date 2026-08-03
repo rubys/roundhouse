@@ -902,13 +902,100 @@ AGG
 #
 # The seed database is deliberately NOT included. It is 40 MB, it changes
 # only when ruby-bench does, and frozen-sequence.json's drift check already
-# fails loudly if it moves — REPRODUCE.md says where to get it.
+# fails loudly if it moves — REPRODUCE.md carries the exact rebuild recipe
+# (ruby-bench is public; the DB is a .backup of its fixture plus ANALYZE).
 pack_tree() {
     local name="$1" dir="$2"
     [[ -d "$dir" ]] || { warn "no $name tree at $dir — not packed"; return 0; }
     local rh sp
     rh="$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
     sp="$(command -v spinel >/dev/null 2>&1 && spinel --version 2>/dev/null || echo 'not on PATH')"
+
+    # The AOT archive carries the exact workload its lane timed — the
+    # driver's route list and the deferral-applied visit sequence — staged
+    # to the tree root so REPRODUCE.md's command runs as written from an
+    # unpacked archive. The CRuby tree ships no driver inputs: it is
+    # replayed by scripts/lobsters-replay from this repo, so its
+    # REPRODUCE.md points there instead of at files it cannot use.
+    local staged=""
+    local build_section run_section bcrypt_section
+    if [[ "$name" == spinel ]]; then
+        local wf
+        for wf in routes.txt sequence.txt; do
+            if [[ -f "$dir/bench-work/$wf" ]]; then
+                cp "$dir/bench-work/$wf" "$dir/$wf"
+                staged="$staged $wf"
+            else
+                warn "no bench-work/$wf in the $name tree — archive ships without the timed workload"
+            fi
+        done
+        build_section=$(cat <<'EOS'
+## Build it
+
+    # needs spinel + spin on PATH
+    rm -f build/bin/blog && spin build
+EOS
+)
+        run_section=$(cat <<'EOS'
+## Run the benchmark sequence
+
+`routes.txt` and `sequence.txt` at the tree root are the exact inputs the
+published lane ran: the parity route list, and the frozen sequence with the
+declared gaps already deferred — 106 of ruby-bench's 114 visits. Both
+deferred routes are roundhouse-side gaps, not spinel's; the ledger is
+`bench/lobsters/declared-gaps.json` in the roundhouse repo.
+
+    BLOG_DB="file:lobsters_bench?mode=memory&cache=shared" \
+      ./build/bin/blog --bench routes.txt sequence.txt bodies 0 10 10 storage/bench.sqlite3
+
+Positional args after the two files: a directory for response-body dumps,
+then WARMUP MIN_ITERS MIN_TIME (iterations discarded, minimum timed
+iterations, minimum timed seconds), and last the seed database, page-copied
+into the named in-memory DB at boot so the timed loop never touches disk.
+EOS
+)
+        bcrypt_section=$(cat <<'EOS'
+## bcrypt
+
+`spin.lock` is deliberately omitted: it pinned bcrypt to an absolute path on
+the machine that ran the benchmark, so shipping it would fail here with
+"not in the index: bcrypt". The app needs it for password hashing on the
+login path. Either:
+
+    spin add bcrypt --git https://github.com/rubys/spinel-bcrypt
+
+or point at a local checkout and let spin re-lock. Nothing the benchmark
+measures goes through bcrypt — the frozen sequence is authenticated once at
+setup, not per visit.
+EOS
+)
+    else
+        build_section=$(cat <<'EOS'
+## Build it
+
+Nothing to build — plain CRuby. `ruby -e 'require "./main"'` boots the
+server; the native gems it needs are `sqlite3` and `bcrypt`.
+EOS
+)
+        run_section=$(cat <<'EOS'
+## Run the benchmark sequence
+
+The CRuby lanes have no --bench driver; this tree is replayed in-process by
+`scripts/lobsters-replay` from a roundhouse checkout, run at this tree's
+root:
+
+    RUBYOPT=--yjit ruby ROUNDHOUSE/scripts/lobsters-replay --memory \
+      --sequence ROUNDHOUSE/bench/lobsters/frozen-sequence.json \
+      --defer ROUNDHOUSE/bench/lobsters/declared-gaps.json
+
+`RUBYOPT=--yjit` is the published `ruby` row; drop it for `ruby-int`. The
+--defer file removes the same 8 visits every published lane defers — a run
+without it does more work than the page and is not comparable to it.
+EOS
+)
+        bcrypt_section=""
+    fi
+
     cat > "$dir/REPRODUCE.md" <<REPRO
 # lobsters — $name tree, as benchmarked
 
@@ -919,40 +1006,28 @@ tree the published numbers were measured on, minus build output.
     spinel     : $sp
     packed     : $(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-## Build it
+$build_section
 
-    # AOT (needs spinel + spin on PATH)
-    rm -f build/bin/blog && spin build
+$run_section
 
-    # CRuby
-    ruby -e 'require "./main"'
+## The seed database
 
-## Run the benchmark sequence
+\`storage/bench.sqlite3\` is NOT in this archive (40 MB). It is ruby-bench's
+public lobsters fixture plus planner statistics — rebuild it exactly:
 
-The 106-visit frozen sequence is \`bench/lobsters/frozen-sequence.json\` in the
-roundhouse repo. Two routes are deferred out of it and out of the parity
-score — see \`bench/lobsters/declared-gaps.json\`; both are roundhouse-side
-gaps, not spinel's.
+    git clone --depth 1 https://github.com/ruby/ruby-bench /tmp/ruby-bench
+    mkdir -p storage
+    sqlite3 /tmp/ruby-bench/benchmarks/lobsters/db/production.sqlite3 \\
+      ".backup storage/bench.sqlite3"
+    sqlite3 storage/bench.sqlite3 "ANALYZE"
 
-    BLOG_DB="file:lobsters_bench?mode=memory&cache=shared" \\
-      ./build/bin/blog --bench routes.txt sequence.txt bodies 0 10 10 storage/bench.sqlite3
+The ANALYZE is load-bearing: the fixture ships without \`sqlite_stat1\`,
+every published lane ran with statistics (the harness applies them outside
+the timed section), and without them the planner turns the hottest-stories
+SELECT into a table walk. The tree is fully inspectable without any of
+this; only running the sequence needs the DB.
 
-\`storage/bench.sqlite3\` is NOT in this archive (40 MB). Rebuild it from
-ruby-bench's lobsters fixture, or ask for a copy. The binary builds and the
-codegen is fully inspectable without it; only running the sequence needs it.
-
-## bcrypt
-
-\`spin.lock\` is deliberately omitted: it pinned bcrypt to an absolute path on
-the machine that ran the benchmark, so shipping it would fail here with
-"not in the index: bcrypt". The app needs it for password hashing on the
-login path. Either:
-
-    spin add bcrypt --git https://github.com/rubys/spinel-bcrypt
-
-or point at a local checkout and let spin re-lock. Nothing the benchmark
-measures goes through bcrypt — the frozen sequence is authenticated once at
-setup, not per visit.
+$bcrypt_section
 
 ## What the numbers say
 
@@ -970,6 +1045,8 @@ REPRO
       && ok "packed $name tree -> $RUN_DIR/$name-tree.tgz ($(du -h "$RUN_DIR/$name-tree.tgz" | cut -f1))" \
       || fail "could not pack $name tree"
     rm -f "$dir/REPRODUCE.md"
+    local sf
+    for sf in $staged; do rm -f "$dir/$sf"; done
 }
 pack_tree spinel "$REPO_ROOT/build/transpiled-lobsters-spinel"
 pack_tree ruby   "$REPO_ROOT/build/transpiled-lobsters-ruby"
