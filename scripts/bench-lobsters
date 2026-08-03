@@ -362,11 +362,19 @@ if (( ${#LANES[@]} > 0 )); then
                 RO=--yjit; JIT_LABEL=YJIT
                 [[ "$LANE" == rails-int ]] && { RO=; JIT_LABEL="no JIT"; }
                 step "lane $LANE: real Rails on the frozen sequence ($JIT_LABEL; boots Rails, minutes)"
+                # Built as an array and echoed into the lane log. The lane
+                # reported "no --defer given" for three runs while this call
+                # site demonstrably passed it, and a backslash-continued
+                # command leaves no record of what was actually run — so the
+                # log now carries the argv, and the array removes the
+                # continuation from the equation entirely.
+                RAILS_ARGS=(--src "$SRC" --warmup 15 --min-iters "$TIME_ITERS" --min-time 10
+                            --seq-out "$LDIR/sequence.json" --json "$LDIR/rails.json"
+                            --dump "$LDIR/bodies" --defer "$GAPS_JSON")
+                printf '$ RUBYOPT=%s ruby scripts/lobsters-rails-replay %s\n\n' \
+                    "$RO" "${RAILS_ARGS[*]}" > "$LDIR/run.log"
                 if RUBYOPT="$RO" ruby "$REPO_ROOT/scripts/lobsters-rails-replay" \
-                        --src "$SRC" --warmup 15 --min-iters "$TIME_ITERS" --min-time 10 \
-                        --seq-out "$LDIR/sequence.json" --json "$LDIR/rails.json" \
-                        --dump "$LDIR/bodies" --defer "$GAPS_JSON" \
-                        >"$LDIR/run.log" 2>&1; then
+                        "${RAILS_ARGS[@]}" >>"$LDIR/run.log" 2>&1; then
                     # The rails lane regenerates the sequence; a mismatch with
                     # the committed one means the ruby-bench DB or generator
                     # changed — rows are NOT comparable across that boundary.
