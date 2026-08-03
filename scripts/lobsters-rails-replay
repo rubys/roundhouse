@@ -65,6 +65,7 @@ unless ENV["LOBSTERS_RAILS_REPLAY_BOOTSTRAPPED"]
   argv = ["--src", opts[:src], "--warmup", opts[:warmup].to_s,
           "--min-iters", opts[:min_iters].to_s, "--min-time", opts[:min_time].to_s]
   argv += ["--seq-out", opts[:seq_out]] if opts[:seq_out]
+  argv += ["--defer", opts[:defer]] if opts[:defer]
   argv += ["--json", opts[:json]] if opts[:json]
   argv += ["--dump", opts[:dump]] if opts[:dump]
   argv << "--dump-only" if opts[:dump_only]
