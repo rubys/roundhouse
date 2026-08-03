@@ -592,10 +592,10 @@ ENVJSON
     # Aggregate lane artifacts into matrix.json (one row per lane) and
     # print the console table. Row fields feed scripts/lobsters-report.
     step "aggregating matrix.json"
-    ruby - "$RUN_DIR" "$TIME_ITERS" "${LANES[*]}" <<'AGG' || FAILED_LANES=$((FAILED_LANES + 1))
+    ruby - "$RUN_DIR" "$TIME_ITERS" "${LANES[*]}" "$REPO_ROOT/bench/lobsters/declared-gaps.json" <<'AGG' || FAILED_LANES=$((FAILED_LANES + 1))
 require "json"
 require "socket"
-run_dir, time_iters, requested = ARGV
+run_dir, time_iters, requested, gaps_file = ARGV
 REQUESTED = requested.to_s.split(/\s+/).reject(&:empty?)
 
 # Routes we KNOW the emit does not render, declared in a file rather than
@@ -603,16 +603,21 @@ REQUESTED = requested.to_s.split(/\s+/).reject(&:empty?)
 # denominator, the badge and the red banner are all computed from the same
 # numbers as before -- an entry only lets the page say "declared gap" where
 # it would otherwise say nothing and leave a reader to assume a defect.
-GAPS_FILE = File.expand_path("../bench/lobsters/declared-gaps.json", __dir__)
+#
+# The path is PASSED IN, not derived. This block is fed to `ruby -` on
+# stdin, where __dir__ is the working directory rather than scripts/, so
+# deriving it here resolved to a file that does not exist and the ledger
+# loaded silently empty -- every declared gap then read as an undiagnosed
+# difference. A ledger that quietly declares nothing is the exact failure
+# this file exists to prevent, so a missing one is fatal: to run without a
+# ledger, commit one whose `declared_gaps` is [].
+GAPS_FILE = gaps_file.to_s
+abort "declared-gaps ledger not found at #{GAPS_FILE.inspect}" unless File.exist?(GAPS_FILE)
 DECLARED_GAPS =
-  if File.exist?(GAPS_FILE)
-    (JSON.parse(File.read(GAPS_FILE))["declared_gaps"] || []).each do |g|
-      %w[route reason owner since closes_with].each do |k|
-        abort "declared-gaps.json: entry #{g["route"].inspect} has no #{k}" if g[k].to_s.empty?
-      end
+  (JSON.parse(File.read(GAPS_FILE))["declared_gaps"] || []).each do |g|
+    %w[route reason owner since closes_with].each do |k|
+      abort "declared-gaps.json: entry #{g["route"].inspect} has no #{k}" if g[k].to_s.empty?
     end
-  else
-    []
   end
 GAP_ROUTES = DECLARED_GAPS.map { |g| g["route"] }
 META = {
