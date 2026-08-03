@@ -123,6 +123,14 @@ run_dir  = File.basename(run_path)
 # Hoisted: the trust banner reads these rows long before the matrix
 # section renders them.
 mrows    = matrix && (matrix['rows'] || [])
+# The declared-gap ledger, read from the same file scripts/bench-lobsters
+# stamps into matrix.json. Rendering it here rather than trusting the matrix
+# keeps the REASONS (which the matrix does not carry) beside the routes.
+GAPS_FILE = File.expand_path("../bench/lobsters/declared-gaps.json", __dir__)
+DECLARED_GAPS = (File.exist?(GAPS_FILE) ?
+  (JSON.parse(File.read(GAPS_FILE))["declared_gaps"] || []) : [])
+GAP_BY_ROUTE = DECLARED_GAPS.to_h { |g| [g["route"], g] }
+
 content  = lanes_mode ? sibling(File.join(run_path, prim), 'content-parity.json') : nil
 jr_content = lanes_mode ? sibling(File.join(run_path, 'jruby'), 'content-parity.json') : nil
 # The AOT lane's content parity. bench-lobsters diffs every emit lane
@@ -496,6 +504,13 @@ styles = <<~CSS
   .alarm { border: 2px solid #b00; background: #fff4f4; border-radius: 6px;
            padding: 0.9em 1.1em; margin: 1.2em 0; }
   .alarm h2 { margin: 0 0 0.4em; font-size: 1.05em; color: #b00; border: none; padding: 0; }
+  .gaps { border: 1px solid #d8d8d8; background: #fafafa; border-radius: 6px;
+          padding: 0.9em 1.1em; margin: 1.2em 0; }
+  .gaps h2 { margin: 0 0 0.4em; font-size: 1.05em; color: #555; border: none; padding: 0; }
+  .gaps table { font-size: 0.86em; }
+  .gaps .why { margin: 0.6em 0 0; font-size: 0.9em; color: #444; }
+  .gapmark { font-size: 0.78em; color: #7a5c00; background: #fdf4dc;
+             border-radius: 3px; padding: 0.05em 0.4em; white-space: nowrap; }
   .alarm ul { margin: 0.5em 0 0; padding-left: 1.3em; }
   .alarm .why { margin: 0.6em 0 0; font-size: 0.9em; color: #444; }
   svg { display: block; margin: 0.4em auto; max-width: 100%; }
@@ -547,9 +562,26 @@ trouble = []
   if r['content_total'].nil?
     trouble << [lane_name, 'content was never compared — no Rails lane in this run to compare against']
   elsif r['content_differs'].to_i > 0
-    diff_names = (r['content_routes'] || []).map { |x| x['route'] }.first(6).join(', ')
-    trouble << [lane_name, "renders #{r['content_equivalent']}/#{r['content_total']} routes equivalent to Rails" +
-                      (diff_names.empty? ? '' : " — differs on #{diff_names}")]
+    # Declared gaps are known missing capability, not an unexplained
+    # difference. They still cost the lane its parity score -- the counts
+    # below are untouched -- but listing them here would say the numbers
+    # are untrustworthy for a reason we already understand and have
+    # written down. Undeclared differences are exactly that alarm.
+    undeclared = r['content_undeclared']
+    declared   = r['content_gaps'] || []
+    if undeclared.nil?
+      # matrix.json predates the declared-gap fields. Fall back to the old
+      # undifferentiated message: an absent key means "not classified", and
+      # treating that as "nothing undeclared" would silently drop the alarm
+      # on exactly the runs that have no ledger to justify dropping it.
+      diff_names = (r['content_routes'] || []).map { |x| x['route'] }.first(6).join(', ')
+      trouble << [lane_name, "renders #{r['content_equivalent']}/#{r['content_total']} routes equivalent to Rails" +
+                        (diff_names.empty? ? '' : " — differs on #{diff_names}")]
+    elsif undeclared.any?
+      trouble << [lane_name, "renders #{r['content_equivalent']}/#{r['content_total']} routes equivalent to Rails" +
+                        " — differs on #{undeclared.first(6).join(', ')}" +
+                        (declared.empty? ? '' : " (plus #{declared.size} declared gap#{declared.size == 1 ? '' : 's'})")]
+    end
   end
   if r['failed_visits'].to_i > 0
     trouble << [lane_name, "#{r['failed_visits']} of the timed sequence's visits did not return 200 — " \
@@ -564,6 +596,26 @@ if trouble.any?
   trouble.each { |ln, why| html << "<li><strong>#{esc(ln)}</strong> — #{esc(why)}</li>\n" }
   html << "</ul>\n"
   html << %(<p class="why">Timings below are still shown, and are still real measurements of what the code did — but what the code did was not what Rails does, so they do not measure the same work and must not be compared. This banner is generated from the run's own data and disappears by itself once every lane renders what Rails renders and every timed visit returns 200.</p>\n)
+  html << "</div>\n"
+end
+
+# The declared-gap ledger. Deliberately NOT inside the red banner and
+# deliberately not a substitute for it: these routes are still counted as
+# failures everywhere else on the page. This says only which failures are
+# understood, so an unimplemented capability stops looking like a defect
+# nobody has diagnosed.
+if DECLARED_GAPS.any?
+  html << %(<div class="gaps">\n)
+  html << "<h2>#{DECLARED_GAPS.size} route#{DECLARED_GAPS.size == 1 ? '' : 's'} the AOT lane is known not to render</h2>\n"
+  html << "<table>\n<thead><tr><th>route</th><th>why</th><th>closes with</th><th>since</th></tr></thead>\n<tbody>\n"
+  DECLARED_GAPS.each do |g|
+    html << "<tr><td><code>#{esc(g['route'])}</code></td>"
+    html << "<td>#{esc(g['reason'])}</td>"
+    html << "<td>#{esc(g['closes_with'])}</td>"
+    html << "<td class=\"num\">#{esc(g['since'])}</td></tr>\n"
+  end
+  html << "</tbody>\n</table>\n"
+  html << %(<p class="why">These are counted as failures in every number on this page — the parity badge above still reads them as not rendering what Rails renders. Listing them here separates a capability we have not built from a difference nobody has explained; both are failures, and only one is a surprise.</p>\n)
   html << "</div>\n"
 end
 
@@ -1200,7 +1252,8 @@ html << "<table>\n<thead><tr><th>route</th><th>status</th><th>bytes</th><th>ms</
 routes.each do |c|
   status_cls = c['ok'] == false ? 'no' : 'ok'
   html << "<tr>"
-  html << %(<td><code>#{esc(c['route'])}</code>#{c['thin'] ? ' <span class="no">(thin)</span>' : ''}</td>)
+  gap_note = GAP_BY_ROUTE[c['route']] ? ' <span class="gapmark" title="declared gap — see the ledger above">declared gap</span>' : ''
+  html << %(<td><code>#{esc(c['route'])}</code>#{c['thin'] ? ' <span class="no">(thin)</span>' : ''}#{gap_note}</td>)
   html << %(<td class="num #{status_cls}">#{c['status']}</td>)
   html << %(<td class="num">#{fmt_int(c['bytes'])}</td>)
   html << %(<td class="num">#{fmt_dec(c['ms'], 2)}</td>)

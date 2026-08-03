@@ -597,6 +597,24 @@ require "json"
 require "socket"
 run_dir, time_iters, requested = ARGV
 REQUESTED = requested.to_s.split(/\s+/).reject(&:empty?)
+
+# Routes we KNOW the emit does not render, declared in a file rather than
+# inferred from the failure. This classifies; it never subtracts. The
+# denominator, the badge and the red banner are all computed from the same
+# numbers as before -- an entry only lets the page say "declared gap" where
+# it would otherwise say nothing and leave a reader to assume a defect.
+GAPS_FILE = File.expand_path("../bench/lobsters/declared-gaps.json", __dir__)
+DECLARED_GAPS =
+  if File.exist?(GAPS_FILE)
+    (JSON.parse(File.read(GAPS_FILE))["declared_gaps"] || []).each do |g|
+      %w[route reason owner since closes_with].each do |k|
+        abort "declared-gaps.json: entry #{g["route"].inspect} has no #{k}" if g[k].to_s.empty?
+      end
+    end
+  else
+    []
+  end
+GAP_ROUTES = DECLARED_GAPS.map { |g| g["route"] }
 META = {
   "rails"       => { label: "Rails",      kind: "rails", runtime: "cruby", yjit: true,  jit: "YJIT",   src: "rails.json"   },
   "rails-int"   => { label: "Rails",      kind: "rails", runtime: "cruby", yjit: false, jit: "no JIT", src: "rails.json"   },
@@ -648,6 +666,22 @@ end
 # the route TEMPLATE, and neither derives from the other.
 PARITY_DETAIL = {}
 
+# Templates whose content DIFFERS from the oracle, by the same body->template
+# mapping ok_templates uses.
+def differing_templates(data, cp)
+  return [] unless cp && data["routes"]
+  by_body = {}
+  data["routes"].each { |r| by_body[r["body"]] = r["template"] if r["body"] && r["template"] }
+  cp["routes"].reject { |r| %w[identical equivalent].include?(r["verdict"]) }
+              .filter_map { |r| by_body[r["route"]] }.uniq
+end
+
+def gap_templates(data, cp) = differing_templates(data, cp)
+
+def all_templates(data)
+  (data && data["routes"] || []).filter_map { |r| r["template"] }.uniq
+end
+
 def ok_templates(data, cp)
   return nil unless cp && data["routes"]
   by_body = {}
@@ -692,7 +726,7 @@ rows = META.filter_map do |id, m|
   # own summary) but needed below to restrict the vs-Rails ratio to the
   # routes a lane actually renders correctly.
   PARITY_DETAIL[id] = { pr: t["per_route"], iters: t["iterations"].to_i,
-                        ok: ok_templates(data, cp) }
+                        ok: ok_templates(data, cp), templates: all_templates(data) }
   { "id" => id, "label" => m[:label], "kind" => m[:kind], "runtime" => m[:runtime],
     "yjit" => m[:yjit], "jit" => m[:jit],
     "state" => (st && st["state"]) || "ok",
@@ -721,9 +755,27 @@ rows = META.filter_map do |id, m|
     "content_differs"    => cp && cp["differs"],
     "content_routes"     => cp && cp["routes"].reject { |r| %w[identical equivalent].include?(r["verdict"]) }
                                               .map { |r| r.slice("route", "verdict", "diff_tokens", "hunks") },
-    "content_rules"      => cp && cp["rule_ledger"] }
+    "content_rules"      => cp && cp["rule_ledger"],
+    # Which of this lane's differing routes were declared, and which were
+    # not. `content_undeclared` is the number the red banner keys off: a
+    # declared gap is a known missing capability, an undeclared one is a
+    # defect nobody has looked at.
+    "content_gaps"       => cp && (gap_templates(data, cp) & GAP_ROUTES),
+    "content_undeclared" => cp && (differing_templates(data, cp) - GAP_ROUTES) }
 end
 abort "no lane produced any result" if rows.empty?
+
+# A declared route that matches nothing in this run is a hard error. A typo
+# that silently declares nothing is worse than no file at all, because the
+# page then reads as if the gap were accounted for.
+if (known = rows.filter_map { |r| r["content_gaps"] }.any?)
+  all_templates = rows.filter_map { |r| PARITY_DETAIL[r["id"]]&.fetch(:templates, nil) }.flatten.uniq
+  unless all_templates.empty?
+    unknown = GAP_ROUTES - all_templates
+    abort "declared-gaps.json names #{unknown.join(", ")}, which no route in this run matches" unless unknown.empty?
+  end
+end
+_ = known
 live = rows.select { |r| r["ms_median"] }
 # Ratio = same-configuration Rails baseline / this row. CRuby emit rows
 # pair with Rails at the same JIT level; JVM rows pair with Rails on

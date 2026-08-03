@@ -1,0 +1,49 @@
+{
+  "//": [
+    "Routes the AOT lane is KNOWN not to render, with the reason and the work",
+    "that would close each one. Read by scripts/bench-lobsters (which stamps",
+    "the classification into matrix.json) and scripts/lobsters-report (which",
+    "renders it).",
+    "",
+    "WHAT THIS FILE DOES NOT DO. It does not remove a route from the",
+    "denominator, silence the parity badge, or clear the red banner. A lane",
+    "that renders 24 of 26 routes still reads 24/26 with this file in place.",
+    "The only thing an entry changes is that the difference is labelled as",
+    "declared rather than left looking like an undiagnosed defect -- an",
+    "unimplemented capability and a mystery are both failures, but they are",
+    "not the same kind of failure, and the page could not tell them apart.",
+    "",
+    "An entry whose `route` matches no route in the run is a hard error, not",
+    "a warning: a typo that silently declares nothing is worse than no file,",
+    "because it reads as coverage.",
+    "",
+    "`route` is the route TEMPLATE as the per-route table spells it, not a",
+    "concrete path -- the bench username and story/comment short_ids are",
+    "fixture-derived and change when the fixture does.",
+    "",
+    "Entries are expected to be REMOVED, not accumulated. Each one names the",
+    "work that closes it; if that work is not happening, the honest move is",
+    "to say so in `status`, not to leave the entry looking pending."
+  ],
+
+  "declared_gaps": [
+    {
+      "route": "/hottest",
+      "since": "2026-08-03",
+      "owner": "roundhouse",
+      "reason": "inline `render json:` is not lowered for strict targets, so the emit answers this route with its html arm",
+      "detail": "config/routes.rb pins `get \"/hottest\" => \"home#index\", :format => \"json\"`, so Rails serves JSON here and the AOT lane serves the HTML page. The respond_to flattening ledgers the dropped arm as a lower_residue warning (src/lower/controller/body.rs).",
+      "closes_with": "the render-json monomorphizer: src/lower/as_json_shape.rs and as_json_writer.rs are committed; remaining is type inference for Computed pair values, nested-record and Array[String] encoding, the datetime offset format, and widening FormatBreadth",
+      "status": "in progress"
+    },
+    {
+      "route": "/u/:username",
+      "since": "2026-08-03",
+      "owner": "roundhouse",
+      "reason": "Markdowner.to_html is a raising facade -- the AOT tree ships no CommonMark renderer",
+      "detail": "User#linkified_about renders markdown at REQUEST time, so unlike the markeddown_* columns it cannot be precomputed. The facade raises rather than returning wrong HTML, which is why this route answers 500 instead of a wrong 200.",
+      "closes_with": "a Commonmarker/Markly facade over an iterative Node#walk plus the DOM surgery Markdowner does (h1-h6 to strong, images to links, rel=ugc, @mention linkifier); scripts/markly-conformance already carries vectors generated from the real gem",
+      "status": "not started"
+    }
+  ]
+}
