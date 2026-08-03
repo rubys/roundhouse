@@ -188,6 +188,45 @@ done
 step() { printf '\033[36m→\033[0m %s\n' "$*"; }
 ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
 fail() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; }
+# warn was CALLED (pack_tree, the spinel lane) but never defined — under
+# `set -e` each call was a 127 that killed the whole run, which is how the
+# 2026-08-03 alignment run died mid-lane. Defined here, beside its siblings.
+warn() { printf '\033[33m!\033[0m %s\n' "$*" >&2; }
+
+# ── vendored SQLite for the AOT link ─────────────────────────────────
+# Every interpreted lane queries the sqlite3 GEM's bundled SQLite; the AOT
+# binary links `-lsqlite3`, which resolves to the SYSTEM library — on this
+# box ~18 months older. /top runs ~94% inside libsqlite3, so that gap is a
+# library delta wearing a runtime delta's clothes (spinel#3513). The fix:
+# build the amalgamation at the BUNDLE's version (the canonical one —
+# ruby-bench's Gemfile.lock is the methodology) into a cache dir holding
+# only libsqlite3.a, and hand the dir to the spinel wrapper, which puts it
+# on LIBRARY_PATH for the link — the emitted tree itself is not touched,
+# so the published tarball still builds anywhere with `-lsqlite3`.
+# Compile flags are the amalgamation defaults (+THREADSAFE), not the gem's
+# exact extconf set — version is the lever that moves plans and btree
+# code; the flag residue is noted, not hidden.
+ensure_sqlite_vendor() {
+    local ver="$1" dir="$REPO_ROOT/build/sqlite-vendor/$1"
+    [[ -f "$dir/libsqlite3.a" ]] && { echo "$dir"; return 0; }
+    local maj min pat num yr got=""
+    IFS=. read -r maj min pat <<<"$ver"
+    num=$(printf '%d%02d%02d00' "$maj" "$min" "${pat:-0}") || return 1
+    mkdir -p "$dir"
+    for yr in 2026 2025 2024 2023; do
+        curl -fsSL --max-time 120 -o "$dir/amalgamation.zip"             "https://sqlite.org/$yr/sqlite-amalgamation-$num.zip" 2>/dev/null && { got=1; break; }
+    done
+    [[ -n "$got" ]] || { rm -rf "$dir"; return 1; }
+    (cd "$dir" && unzip -oq amalgamation.zip         && mv "sqlite-amalgamation-$num/sqlite3.c" "sqlite-amalgamation-$num/sqlite3.h" .         && rm -rf "sqlite-amalgamation-$num" amalgamation.zip         && cc -O2 -DSQLITE_THREADSAFE=1 -c sqlite3.c -o sqlite3.o         && ar rcs libsqlite3.a sqlite3.o) >/dev/null 2>&1 || { rm -rf "$dir"; return 1; }
+    echo "$dir"
+}
+
+# The version every lane should be on: whatever the ruby-bench bundle pins.
+bundle_sqlite_version() {
+    (cd "$SRC" && BUNDLE_GEMFILE="$SRC/Gemfile" bundle exec ruby         -e 'require "sqlite3"; print SQLite3::SQLITE_VERSION' 2>/dev/null)
+}
+
+
 
 # Route-parity trend vs a previous run: pass-count delta, regressed/fixed
 # routes, changed failure signatures. PARITY REGRESSION lines print loudly
@@ -919,39 +958,6 @@ if content.any?
   end
 end
 AGG
-
-# ── vendored SQLite for the AOT link ─────────────────────────────────
-# Every interpreted lane queries the sqlite3 GEM's bundled SQLite; the AOT
-# binary links `-lsqlite3`, which resolves to the SYSTEM library — on this
-# box ~18 months older. /top runs ~94% inside libsqlite3, so that gap is a
-# library delta wearing a runtime delta's clothes (spinel#3513). The fix:
-# build the amalgamation at the BUNDLE's version (the canonical one —
-# ruby-bench's Gemfile.lock is the methodology) into a cache dir holding
-# only libsqlite3.a, and hand the dir to the spinel wrapper, which puts it
-# on LIBRARY_PATH for the link — the emitted tree itself is not touched,
-# so the published tarball still builds anywhere with `-lsqlite3`.
-# Compile flags are the amalgamation defaults (+THREADSAFE), not the gem's
-# exact extconf set — version is the lever that moves plans and btree
-# code; the flag residue is noted, not hidden.
-ensure_sqlite_vendor() {
-    local ver="$1" dir="$REPO_ROOT/build/sqlite-vendor/$1"
-    [[ -f "$dir/libsqlite3.a" ]] && { echo "$dir"; return 0; }
-    local maj min pat num yr got=""
-    IFS=. read -r maj min pat <<<"$ver"
-    num=$(printf '%d%02d%02d00' "$maj" "$min" "${pat:-0}") || return 1
-    mkdir -p "$dir"
-    for yr in 2026 2025 2024 2023; do
-        curl -fsSL --max-time 120 -o "$dir/amalgamation.zip"             "https://sqlite.org/$yr/sqlite-amalgamation-$num.zip" 2>/dev/null && { got=1; break; }
-    done
-    [[ -n "$got" ]] || { rm -rf "$dir"; return 1; }
-    (cd "$dir" && unzip -oq amalgamation.zip         && mv "sqlite-amalgamation-$num/sqlite3.c" "sqlite-amalgamation-$num/sqlite3.h" .         && rm -rf "sqlite-amalgamation-$num" amalgamation.zip         && cc -O2 -DSQLITE_THREADSAFE=1 -c sqlite3.c -o sqlite3.o         && ar rcs libsqlite3.a sqlite3.o) >/dev/null 2>&1 || { rm -rf "$dir"; return 1; }
-    echo "$dir"
-}
-
-# The version every lane should be on: whatever the ruby-bench bundle pins.
-bundle_sqlite_version() {
-    (cd "$SRC" && BUNDLE_GEMFILE="$SRC/Gemfile" bundle exec ruby         -e 'require "sqlite3"; print SQLite3::SQLITE_VERSION' 2>/dev/null)
-}
 
 # ── emitted-tree tarballs ────────────────────────────────────────────
 # Publish the trees the lanes actually ran, so a compiler author can pick up
