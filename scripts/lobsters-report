@@ -476,9 +476,16 @@ total = summary['total'] || routes.size
 thin  = summary['thin']  || routes.count { |r| r['thin'] }
 all_pass = pass == total && total > 0
 
+# Headline per-iteration statistic: the mean when the lane recorded one
+# (ruby-bench's own reported number — "Average of last N, non-warmup
+# iters"), the median for lanes measured before ms_per_iter_mean existed.
+# Distribution detail (min–max, iteration columns) and per-route medians
+# keep their own labelled statistics.
+hl_seq = ->(t) { t && (t['ms_per_iter_mean'] || t['ms_per_iter_median'])&.to_f }
+hl_row = ->(r) { r && (r['ms_mean'] || r['ms_median'])&.to_f }
 speedup = nil
-if rails && timing && rails['ms_per_iter_median'].to_f > 0 && timing['ms_per_iter_median'].to_f > 0
-  speedup = rails['ms_per_iter_median'].to_f / timing['ms_per_iter_median'].to_f
+if rails && timing && hl_seq.(rails).to_f > 0 && hl_seq.(timing).to_f > 0
+  speedup = hl_seq.(rails) / hl_seq.(timing)
 end
 
 # Sections are numbered in render order but the timing/comparison ones
@@ -726,7 +733,7 @@ db    = summary['db']
 memnote = summary['memory'] ? 'an in-memory SQLite seeded at boot' : 'a file-backed SQLite'
 html << <<~METHOD
   <div class="methodology">
-    <strong>Methodology.</strong> The route table replays each distinct lobsters route once against the Roundhouse emit and records status, response bytes, and single-shot first-visit latency — recorded before the warmup and timed passes, so each route's own code runs cold, though routes later in the pass benefit from what earlier ones warmed. #{vpi ? "The stability and comparison numbers replay a <strong>frozen #{vpi}-visit sequence</strong> (versioned at <code>bench/lobsters/frozen-sequence.json</code>) so every run — and the Rails baseline — walks the identical path." : ''} Both stacks serve from #{memnote}#{db ? " (<code>#{esc(db)}</code>)" : ''}, the shape the ruby-bench lobsters benchmark runs. Median of the timed iterations is reported.
+    <strong>Methodology — ruby-bench's, deliberately.</strong> Every lane times under the ruby-bench harness rule: 15 full-sequence warmup iterations discarded from the stats, then more until at least the minimum timed iterations are recorded AND total wall clock — warmup included, as upstream counts it — reaches the minimum seconds. The reported figure is the <strong>average ms per iteration over the non-warmup iterations</strong>, the statistic ruby-bench itself prints; the median stays in each lane's JSON as a robustness cross-check. #{vpi ? "The stability and comparison numbers replay a <strong>frozen #{vpi}-visit sequence</strong> (versioned at <code>bench/lobsters/frozen-sequence.json</code>) so every run — and the Rails baseline — walks the identical path." : ''} Both stacks serve from #{memnote}#{db ? " (<code>#{esc(db)}</code>)" : ''}, the shape the ruby-bench lobsters benchmark runs. The per-route table further down replays each distinct route once, before warmup, to verify status, bytes and content — it publishes no latency; each lane's pre-warmup single shot stays in its summary JSON as a diagnostic.
     #{matrix ? %(<p>The <strong>runtime × JIT matrix</strong> section re-runs the same frozen sequence once per interpreter × JIT lane — in-process, in-memory, single-threaded — so its rows differ only in the runtime under test.</p>) : ''}
     #{legacy_jruby ? %(<p>The <strong>JRuby lane</strong> replays the JRuby-emitted app in its own run: file-backed (no in-memory backup on the JDBC adapter) and timing the full route set — its numbers trend against earlier JRuby runs, not against the in-memory sections.</p>) : ''}
     <p>Every lane runs <code>ANALYZE</code> once after seeding its in-memory copy (a departure from stock ruby-bench, whose fixture DB carries no <code>sqlite_stat1</code>): without planner statistics SQLite misplans the hottest-stories SELECT under /rss, /hottest, and /recent — a full-table walk plus sort instead of reading <code>hotness_idx</code> to the LIMIT, ~100× the query cost — and both stacks pay that same planner accident. Statistics restore the plan a production database would have; both lanes get identical stats, so the comparison is unchanged in kind and fairer in degree.</p>
@@ -742,15 +749,15 @@ if rails && timing && !lanes_mode
   html << %(<p>Milliseconds per iteration of the frozen #{vpi}-visit sequence — <strong>lower is better</strong>. The whisker spans each stack's min–max across its timed iterations.</p>\n)
   html << compare_bars([
     { label: ["rails #{rails['rails']}", jit_label(rails['ruby'])].compact.join(' '), color: COLOR_RAILS,
-      median: rails['ms_per_iter_median'], min: rails['ms_per_iter_min'],
+      median: hl_seq.(rails), min: rails['ms_per_iter_min'],
       max: rails['ms_per_iter_max'], iters: rails['iterations'] },
     { label: ['roundhouse', jit_label(env&.dig('ruby'))].compact.join(' '), color: COLOR_RH,
-      median: timing['ms_per_iter_median'], min: timing['ms_per_iter_min'],
+      median: hl_seq.(timing), min: timing['ms_per_iter_min'],
       max: timing['ms_per_iter_max'], iters: timing['iterations'] },
   ], left_pad: 160)
   if speedup
     html << %(<p><strong>#{fmt_dec(speedup, 2)}× faster than Rails</strong> — )
-    html << %(#{fmt_dec(timing['ms_per_iter_median'], 1)} ms/iter vs Rails' #{fmt_dec(rails['ms_per_iter_median'], 1)} ms/iter.</p>\n)
+    html << %(#{fmt_dec(hl_seq.(timing), 1)} ms/iter#{timing['ms_per_iter_mean'] ? ' (avg)' : ''} vs Rails' #{fmt_dec(hl_seq.(rails), 1)} ms/iter.</p>\n)
   end
 end
 
@@ -778,7 +785,7 @@ if mrows && !mrows.empty?
   # lane was asked for and what became of it.
   mdead   = mrows.reject { |r| r['ms_median'] }
   mlive   = mrows.select { |r| r['ms_median'] }
-  msorted = mlive.sort_by { |r| r['ms_median'].to_f }
+  msorted = mlive.sort_by { |r| hl_row.(r) }
   mby_key = mlive.to_h { |r| [[r['kind'], r['yjit']], r] }
 
   # In the lane layout this section IS the headline — the vs-Rails number
@@ -805,7 +812,7 @@ if mrows && !mrows.empty?
     end
     html << %(The #{nojit} no-JIT row#{nojit == 1 ? '' : 's'} size the JIT's contribution and are not the headline.</p>\n) if nojit > 0
 
-    html << %(<p><strong>#{fmt_dec(speedup, 2)}× faster than Rails</strong> — #{fmt_dec(timing['ms_per_iter_median'], 1)} ms/iter vs Rails' #{fmt_dec(rails['ms_per_iter_median'], 1)}, both stacks CRuby with YJIT. The full field:</p>\n)
+    html << %(<p><strong>#{fmt_dec(speedup, 2)}× faster than Rails</strong> — #{fmt_dec(hl_seq.(timing), 1)} ms/iter#{timing['ms_per_iter_mean'] ? ' (avg)' : ''} vs Rails' #{fmt_dec(hl_seq.(rails), 1)}, both stacks CRuby with YJIT. The full field:</p>\n)
     # A drifting lane's ms/iter is a function of how long the run happened
     # to be, so any ratio drawn from it moves with --time. The drift column
     # already reports this; the CLAIM needs it too, because that is where a
@@ -827,7 +834,7 @@ if mrows && !mrows.empty?
   P
   html << compare_bars(msorted.map { |r|
     { label: "#{r['label']} #{lane_jit.(r)}", color: lane_color.(r),
-      median: r['ms_median'], min: r['ms_min'], max: r['ms_max'],
+      median: hl_row.(r), min: r['ms_min'], max: r['ms_max'],
       iters: r['iters'],
       note: (r['vs_rails'] && r['kind'] != 'rails' ? "#{fmt_dec(r['vs_rails'], 2)}× vs Rails" : nil) }
   }, left_pad: 160)
@@ -835,22 +842,22 @@ if mrows && !mrows.empty?
   insights = []
   %w[rails emit].each do |kind|
     on, off = mby_key[[kind, true]], mby_key[[kind, false]]
-    next unless on && off && on['ms_median'].to_f > 0
+    next unless on && off && hl_row.(on).to_f > 0
     name = kind == 'rails' ? 'Rails' : 'Roundhouse'
-    insights << "<strong>#{name}</strong> gains #{fmt_dec(off['ms_median'].to_f / on['ms_median'].to_f, 2)}× from YJIT (#{fmt_dec(off['ms_median'], 1)} → #{fmt_dec(on['ms_median'], 1)} ms/iter)"
+    insights << "<strong>#{name}</strong> gains #{fmt_dec(hl_row.(off) / hl_row.(on), 2)}× from YJIT (#{fmt_dec(hl_row.(off), 1)} → #{fmt_dec(hl_row.(on), 1)} ms/iter)"
   end
   [true, false].each do |yj|
     rl, em = mby_key[['rails', yj]], mby_key[['emit', yj]]
-    next unless rl && em && em['ms_median'].to_f > 0
-    insights << "<strong>Roundhouse</strong> is #{fmt_dec(rl['ms_median'].to_f / em['ms_median'].to_f, 2)}× faster than Rails #{yj ? 'with YJIT' : 'without a JIT'} (#{fmt_dec(rl['ms_median'], 1)} → #{fmt_dec(em['ms_median'], 1)} ms/iter)"
+    next unless rl && em && hl_row.(em).to_f > 0
+    insights << "<strong>Roundhouse</strong> is #{fmt_dec(hl_row.(rl) / hl_row.(em), 2)}× faster than Rails #{yj ? 'with YJIT' : 'without a JIT'} (#{fmt_dec(hl_row.(rl), 1)} → #{fmt_dec(hl_row.(em), 1)} ms/iter)"
   end
   rj_row = mlive.find { |r| r['id'] == 'rails-jruby' }
   je_row = mlive.find { |r| r['id'] == 'jruby' }
-  if rj_row && je_row && je_row['ms_median'].to_f > 0
-    insights << "On the JVM, <strong>Roundhouse</strong> is #{fmt_dec(rj_row['ms_median'].to_f / je_row['ms_median'].to_f, 2)}× faster than Rails (#{fmt_dec(rj_row['ms_median'], 1)} → #{fmt_dec(je_row['ms_median'], 1)} ms/iter)"
+  if rj_row && je_row && hl_row.(je_row).to_f > 0
+    insights << "On the JVM, <strong>Roundhouse</strong> is #{fmt_dec(hl_row.(rj_row) / hl_row.(je_row), 2)}× faster than Rails (#{fmt_dec(hl_row.(rj_row), 1)} → #{fmt_dec(hl_row.(je_row), 1)} ms/iter)"
     rl_y = mby_key[['rails', true]]
-    if rl_y && rl_y['ms_median'].to_f > 0
-      insights << "<strong>Rails itself</strong> runs #{fmt_dec(rj_row['ms_median'].to_f / rl_y['ms_median'].to_f, 2)}× slower on JRuby than on CRuby+YJIT (#{fmt_dec(rl_y['ms_median'], 1)} → #{fmt_dec(rj_row['ms_median'], 1)} ms/iter)"
+    if rl_y && hl_row.(rl_y).to_f > 0
+      insights << "<strong>Rails itself</strong> runs #{fmt_dec(hl_row.(rj_row) / hl_row.(rl_y), 2)}× slower on JRuby than on CRuby+YJIT (#{fmt_dec(hl_row.(rl_y), 1)} → #{fmt_dec(hl_row.(rj_row), 1)} ms/iter)"
     end
   end
   html << "<ul>\n#{insights.map { |i| "<li>#{i}</li>" }.join("\n")}\n</ul>\n" unless insights.empty?
@@ -886,12 +893,12 @@ if mrows && !mrows.empty?
   # only when some lane is below parity — at full parity it would just
   # restate the column beside it.
   par_col = mlive.any? { |r| r['vs_rails_parity'] }
-  html << "<table>\n<thead><tr><th>stack</th><th>JIT</th><th>ms/iter</th><th>min–max</th>#{cv_col ? '<th>CV</th>' : ''}#{drift_col ? '<th>drift</th>' : ''}<th>iters</th><th>vs Rails</th>#{par_col ? '<th>vs Rails<br>(parity only)</th>' : ''}</tr></thead>\n<tbody>\n"
+  html << "<table>\n<thead><tr><th>stack</th><th>JIT</th><th>#{mlive.any? { |r| r['ms_mean'] } ? 'avg ms/iter' : 'ms/iter'}</th><th>min–max</th>#{cv_col ? '<th>CV</th>' : ''}#{drift_col ? '<th>drift</th>' : ''}<th>iters</th><th>vs Rails</th>#{par_col ? '<th>vs Rails<br>(parity only)</th>' : ''}</tr></thead>\n<tbody>\n"
   msorted.each do |r|
     html << "<tr>"
     html << %(<td><strong>#{esc(r['label'])}</strong></td>)
     html << %(<td>#{lane_jit.(r)}</td>)
-    html << %(<td class="num">#{fmt_dec(r['ms_median'], 2)}</td>)
+    html << %(<td class="num">#{fmt_dec(hl_row.(r), 2)}</td>)
     html << %(<td class="num">#{fmt_dec(r['ms_min'], 1)}–#{fmt_dec(r['ms_max'], 1)}</td>)
     if cv_col
       cv = cv_pct(lane_iters[r['id']])
@@ -1033,6 +1040,29 @@ rl_jvm_pr = lanes_mode ? sibling(File.join(run_path, 'rails-jruby'), 'rails.json
 # different runtime for the same emit, and where it wins and loses is not
 # uniform — the whole point of a per-endpoint view.
 sp_pr = lanes_mode ? sibling(File.join(run_path, 'spinel'), 'summary.json')&.dig('sequence_timing', 'per_route') : nil
+# Route templates whose timed visits are served from an APPLICATION-level
+# cache — lobsters' users#tree wraps its whole page body in
+# Rails.cache.fetch with a 24h TTL, so every lane's steady-state medians
+# for /u measure cache hits, and a reader comparing them to any full
+# render is comparing different work. Detection is data-driven, from the
+# AOT lane: with no JIT to warm, its pre-warmup single shot (the parity
+# pass, kept in the lane summary as a diagnostic) and its sequence median
+# agree on every route (measured <= 3.1x, first-touch effects) except
+# where an app cache intervenes (measured 43x) — 10x sits in the wide gap
+# between those bands. The CRuby lane cannot detect this: its single shot
+# also pays YJIT warmup, a 20-50x gap on routes that cache nothing.
+cache_served_tmpl = {}
+if spinel && sp_pr
+  (spinel['routes'] || []).each do |r|
+    t = r['template'] || r['route']
+    seq = sp_pr.dig(t, 'ms_median')&.to_f
+    cache_served_tmpl[t] = true if seq && seq > 0 && r['ms'].to_f / seq > 10
+  end
+end
+cached_mark = lambda do |tmpl|
+  next '' unless cache_served_tmpl[tmpl]
+  %( <span class="gapmark" title="every lane's timed visits to this route serve from a cache in the app itself (Rails.cache, 24h TTL) — these medians measure cache hits, in every lane; the one cache-miss render is far costlier">cached</span>)
+end
 if rh_pr && rl_pr && !rh_pr.empty?
   shared = rh_pr.keys.select { |k| rl_pr.key?(k) }
   rh_iters = timing['iterations'].to_i
@@ -1080,8 +1110,8 @@ if rh_pr && rl_pr && !rh_pr.empty?
   aot_delta_note = begin
     rh_row = (mrows || []).find { |x| x['kind'] == 'emit' && x['runtime'] == 'cruby' && x['yjit'] }
     sp_row = (mrows || []).find { |x| x['runtime'] == 'spinel' }
-    if rh_row && sp_row && rh_row['ms_median'].to_f > 0 && sp_row['ms_median'].to_f > 0
-      d = rh_row['ms_median'].to_f / sp_row['ms_median'].to_f
+    if rh_row && sp_row && hl_row.(rh_row).to_f > 0 && hl_row.(sp_row).to_f > 0
+      d = hl_row.(rh_row) / hl_row.(sp_row)
       %(<p class="caveat">Both headline ratios include the transpile. Isolating the two: transpiling accounts for the bulk of the win, and AOT compilation adds a further <strong>#{fmt_dec(d, 2)}×</strong> over the same emit running on CRuby+YJIT — in aggregate only, since AOT is faster on the heavy routes and slower on the cheap ones, where per-request fixed costs dominate.</p>)
     else
       ''
@@ -1125,7 +1155,7 @@ if rh_pr && rl_pr && !rh_pr.empty?
   breakdown.each do |b|
     rcls = b[:ratio].nil? ? '' : (b[:ratio] >= 1 ? 'ok' : 'no')
     html << "<tr>"
-    html << %(<td><code>#{esc(b[:key])}</code></td>)
+    html << %(<td><code>#{esc(b[:key])}</code>#{cached_mark.(b[:key])}</td>)
     html << %(<td class="num">#{ms_cell.(b[:rails], b[:rails_own])}</td>)
     html << %(<td class="num">#{b[:rails_int] ? fmt_dec(b[:rails_int], 2) : '—'}</td>) if rli_col
     html << %(<td class="num">#{b[:rails_jvm] ? fmt_dec(b[:rails_jvm], 2) : '—'}</td>) if rjv_col
@@ -1139,7 +1169,7 @@ if rh_pr && rl_pr && !rh_pr.empty?
   end
   html << "</tbody></table>\n"
   if sp_col || jr_col || rli_col || rhi_col || rjv_col
-    html << %(<p class="legend">All lane columns are median ms per visit; ratio = rails ÷ roundhouse (the +YJIT pair)#{sp_col ? '. The AOT column is the spinel-compiled binary — same emit, different runtime, and not at full content parity (see above)' : ''}. An <strong>own</strong> figure appears where a route's median runs more than 10% above its own work (p25 of its visits) — the gap is collection triggered during that visit but caused by the heap the whole sequence built, so it belongs to the lane rather than to the route. It is largest on the cheapest routes, which is where the median is least trustworthy as a per-route cost.</p>\n)
+    html << %(<p class="legend">All lane columns are median ms per visit; ratio = rails ÷ roundhouse (the +YJIT pair)#{sp_col ? '. The AOT column is the spinel-compiled binary — same emit, different runtime, and not at full content parity (see above)' : ''}. A route marked <strong>cached</strong> serves its timed visits from a cache in the app itself (lobsters keeps some whole pages for 24h), in every lane — those medians price a cache hit, not the render. An <strong>own</strong> figure appears where a route's median runs more than 10% above its own work (p25 of its visits) — the gap is collection triggered during that visit but caused by the heap the whole sequence built, so it belongs to the lane rather than to the route. It is largest on the cheapest routes, which is where the median is least trustworthy as a per-route cost.</p>\n)
   end
   html << "</details>\n"
 end
@@ -1210,7 +1240,7 @@ unless mem_rows.empty?
     name  = kind == 'rails' ? 'Rails' : 'Roundhouse'
     delta = peak.(on) - peak.(off)
     next unless delta > 0
-    speed = off['ms_median'].to_f > 0 && on['ms_median'].to_f > 0 ? off['ms_median'].to_f / on['ms_median'] : nil
+    speed = hl_row.(off).to_f > 0 && hl_row.(on).to_f > 0 ? hl_row.(off) / hl_row.(on) : nil
     mem_insights << "<strong>#{name}</strong> pays #{fmt_dec(delta, 0)} MB (+#{fmt_dec(delta / peak.(off) * 100, 0)}%) in peak memory for YJIT" \
                     "#{speed ? ", buying #{fmt_dec(speed, 2)}× the speed" : ''}"
   end
@@ -1305,50 +1335,20 @@ else
   html << route_hbar(routes, metric: 'ms', unit: 'ms', fmt: ->(v) { "#{fmt_dec(v, 1)} ms" })
 end
 
-# Routes whose timed visits are served from an APPLICATION-level cache —
-# lobsters' users#tree wraps its whole page body in Rails.cache.fetch with a
-# 24h TTL, so the sequence's steady state is a hash lookup plus the layout
-# while this table's single-shot is the one cache-miss render. On /u the two
-# disagree 43x, which reads as a mystery (or an AOT loss) unless labelled.
-#
-# The AOT lane is the detector, not the CRuby lane, and not a static list:
-# with no JIT to warm up, its cold shot and its sequence median agree on
-# every route (measured <= 3.1x, first-touch effects) except where an app
-# cache intervenes (measured 43x) — 10x sits in the wide gap between those
-# bands. The CRuby lane's cold shot also pays YJIT warmup, which reads as a
-# 20-50x gap on routes that cache nothing.
-seq_med = lambda do |pr, c|
-  pr&.dig(c['template'] || c['route'], 'ms_median')&.to_f
-end
-cache_served = {}
-unless sp_routes.empty?
-  routes.each do |c|
-    sp = sp_routes[c['route']]
-    seq = seq_med.(sp_pr, c)
-    cache_served[c['route']] = true if sp && seq && seq > 0 && sp['ms'].to_f / seq > 10
-  end
-end
-# The cold figure and the lane's own steady-state figure, in one cell —
-# the qualification lives where the misreading happens, not in a legend.
-cold_cell = lambda do |ms, seq, flagged|
-  return %(<td class="num">—</td>) unless ms
-  if flagged && seq && seq > 0
-    %(<td class="num">#{fmt_dec(ms, 2)}<br><span class="legend">seq #{fmt_dec(seq, 2)}</span></td>)
-  else
-    %(<td class="num">#{fmt_dec(ms, 2)}</td>)
-  end
-end
+# The parity table's job is parity — what each route answered and how much
+# of it — not latency. The pre-warmup single shot each lane records for
+# these rows stays in the lane summary JSON as a diagnostic (and feeds the
+# cache detector above), but publishing it beside the ruby-bench-rule
+# numbers invited reading it as a per-visit cost, which it is not.
 html << "<details open>\n<summary>Per-route table (#{routes.size} routes)</summary>\n"
-html << "<table>\n<thead><tr><th>route</th><th>status</th><th>bytes</th><th>ms (1st visit)</th>#{jr_routes.empty? ? '' : '<th>jruby</th><th>jruby ms</th>'}#{sp_routes.empty? ? '' : '<th>AOT</th><th>AOT bytes</th><th>AOT ms (1st visit)</th>'}</tr></thead>\n<tbody>\n"
+html << "<table>\n<thead><tr><th>route</th><th>status</th><th>bytes</th>#{jr_routes.empty? ? '' : '<th>jruby</th>'}#{sp_routes.empty? ? '' : '<th>AOT</th><th>AOT bytes</th>'}</tr></thead>\n<tbody>\n"
 routes.each do |c|
   status_cls = c['ok'] == false ? 'no' : 'ok'
   html << "<tr>"
   gap_note = GAP_BY_ROUTE[c['route']] ? ' <span class="gapmark" title="declared gap — see the ledger above">declared gap</span>' : ''
-  cache_note = cache_served[c['route']] ? ' <span class="gapmark" title="timed sequence visits serve from an app-level cache (Rails.cache in the app itself); the 1st-visit ms is the one cache-miss render, seq is the steady-state median per visit">cached</span>' : ''
-  html << %(<td><code>#{esc(c['route'])}</code>#{c['thin'] ? ' <span class="no">(thin)</span>' : ''}#{gap_note}#{cache_note}</td>)
+  html << %(<td><code>#{esc(c['route'])}</code>#{c['thin'] ? ' <span class="no">(thin)</span>' : ''}#{gap_note}#{cached_mark.(c['template'] || c['route'])}</td>)
   html << %(<td class="num #{status_cls}">#{c['status']}</td>)
   html << %(<td class="num">#{fmt_int(c['bytes'])}</td>)
-  html << cold_cell.(c['ms'], seq_med.(rh_pr, c), cache_served[c['route']])
   unless jr_routes.empty?
     if (j = jr_routes[c['route']])
       jcls = j['ok'] == false ? 'no' : 'ok'
@@ -1356,9 +1356,8 @@ routes.each do |c|
       # identical mod CSRF token + clock); flag drift beyond noise.
       bytes_note = (j['bytes'].to_i - c['bytes'].to_i).abs > 64 ? %( <span class="no">(#{fmt_int(j['bytes'])} B)</span>\n) : ''
       html << %(<td class="num #{jcls}">#{j['status']}#{bytes_note}</td>)
-      html << %(<td class="num">#{fmt_dec(j['ms'], 2)}</td>)
     else
-      html << %(<td class="num">—</td><td class="num">—</td>)
+      html << %(<td class="num">—</td>)
     end
   end
   unless sp_routes.empty?
@@ -1376,9 +1375,8 @@ routes.each do |c|
       sbytes = s['bytes'].to_i
       thin = c['bytes'].to_i > 0 && sbytes < c['bytes'].to_i * 0.9
       html << %(<td class="num#{thin ? ' no' : ''}">#{fmt_int(sbytes)}</td>)
-      html << cold_cell.(s['ms'], seq_med.(sp_pr, c), cache_served[c['route']])
     else
-      html << %(<td class="num">—</td><td class="num">—</td><td class="num">—</td>)
+      html << %(<td class="num">—</td><td class="num">—</td>)
     end
   end
   html << "</tr>\n"
@@ -1387,8 +1385,8 @@ html << "</tbody></table>\n"
 if lanes_mode
   drift = jr_routes.empty? ? '' : ' jruby cells flag a response size that drifts more than 64 bytes from the CRuby lane\'s.'
   spn = sp_routes.empty? ? '' : ' An AOT byte count is flagged when it falls more than 10% short of the CRuby lane\'s — a 200 that renders a fraction of the page.'
-  cachen = cache_served.empty? ? '' : ' A route marked <strong>cached</strong> serves its timed visits from a cache in the app itself (lobsters keeps some whole pages for 24h), in every lane — its first-visit figure is the one cache-miss render, and the <em>seq</em> figure beside it is that lane\'s steady-state median per visit.'
-  html << %(<p class="legend">ms columns are each route's FIRST visit, taken before the warmup and timed passes: the route's own code is cold — for the first row the whole process is — but the pass is one process in table order, so later rows run with the JIT and page cache the rows above already warmed. A diagnostic, not a per-visit cost; the per-endpoint medians above are the performance numbers.#{cachen}#{drift}#{spn}</p>\n)
+  cachen = cache_served_tmpl.empty? ? '' : ' A route marked <strong>cached</strong> serves its timed visits from a cache in the app itself (lobsters keeps some whole pages for 24h), in every lane.'
+  html << %(<p class="legend">This table verifies parity — what each route answered and how much of it — not speed; the timing sections above are the performance numbers.#{cachen}#{drift}#{spn}</p>\n)
 end
 # WHY a route failed, not just that it did. The lane summaries carry the
 # reason on the route (`BENCHERR NotImplementedError: gem facade:

@@ -429,6 +429,9 @@ die("replay", "driver produced no timed iterations") if iters.empty?
 sorted = iters.sort
 mid = sorted.size / 2
 median = sorted.size.odd? ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2.0
+# The mean is ruby-bench's reported statistic ("Average of last N,
+# non-warmup iters"); the median stays as a robustness cross-check.
+mean = iters.sum / iters.size
 fails = routes.reject { |r| r["ok"] }
 
 summary = {
@@ -455,6 +458,7 @@ summary = {
     "visits_per_iter"    => visits_per_iter,
     "warmup"             => warmup_used,
     "iterations"         => iters.size,
+    "ms_per_iter_mean"   => mean.round(2),
     "ms_per_iter_median" => median.round(2),
     "ms_per_iter_min"    => sorted.first.round(2),
     "ms_per_iter_max"    => sorted.last.round(2),
@@ -495,6 +499,6 @@ if opts[:md]
 end
 
 puts "spinel: #{summary['pass']}/#{summary['total']} routes 200, " \
-     "#{median.round(2)} ms/iter over #{iters.size} iters" \
+     "#{mean.round(2)} ms/iter (avg) over #{iters.size} iters" \
      "#{seq_fails.empty? ? '' : " (PARTIAL: #{seq_fails.size}/#{visits_per_iter} failing visits)"}"
 exit [fails.size, 99].min

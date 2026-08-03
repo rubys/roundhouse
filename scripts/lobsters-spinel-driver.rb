@@ -262,9 +262,15 @@ class BenchDriver
 
     $stdout.flush
 
+    # Warmup wall time feeds the stop clock below — ruby-bench's rule
+    # (harness/harness.rb) counts total_time from iteration 1 while
+    # discarding the warmup iterations from the stats.
     w = 0
+    warmup_ms = 0.0
     while w < warmup
+      w0 = now_ms
       seq.each { |spec| p2 = spec.split(" ", 2); visit(jar, p2[0].to_s, p2[1].to_s, "") }
+      warmup_ms = warmup_ms + (now_ms - w0)
       w += 1
     end
 
@@ -277,7 +283,7 @@ class BenchDriver
     samples = {}
     iters = 0
     total = 0.0
-    while iters < min_iters || total < min_seconds * 1000.0
+    while iters < min_iters || (warmup_ms + total) < min_seconds * 1000.0
       t0 = now_ms
       seq.each do |spec|
         p2 = spec.split(" ", 2)

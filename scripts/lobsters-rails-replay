@@ -7,9 +7,12 @@
 # 0x1be52551fc152997 — 114 authenticated GET visits), then replays it with
 # the ruby-bench timing rule:
 #
-#   WARMUP_ITRS full-sequence iterations, discarded, then keep iterating
-#   until >= MIN_BENCH_ITRS timed iterations AND >= MIN_BENCH_TIME seconds
-#   of timed wall clock. Metric = ms per full-sequence iteration.
+#   WARMUP_ITRS full-sequence iterations, discarded from the stats, then
+#   keep iterating until >= MIN_BENCH_ITRS timed iterations AND the TOTAL
+#   wall clock (warmup included, as upstream counts it) >= MIN_BENCH_TIME
+#   seconds. Metric = mean ms per full-sequence iteration over the
+#   non-warmup iterations — the statistic ruby-bench itself reports;
+#   the median rides along as a robustness cross-check.
 #
 # scripts/lobsters-replay --sequence replays the SAME frozen JSON with the
 # SAME rule against the roundhouse emit; keep the two loops in sync.
@@ -312,13 +315,22 @@ if opts[:dump]
 end
 
 $stderr.puts "warmup x#{opts[:warmup]}..."
-opts[:warmup].times { run_sequence!(generator, routes) }
+# Warmup iterations are discarded from the stats but their wall time counts
+# toward the stop clock — ruby-bench's rule exactly (harness/harness.rb:
+# `until num_itrs >= WARMUP_ITRS + MIN_BENCH_ITRS and total_time >=
+# MIN_BENCH_TIME`, with total_time cumulative from iteration 1).
+warmup_ms = 0.0
+opts[:warmup].times do
+  t0 = now_ms
+  run_sequence!(generator, routes)
+  warmup_ms += (now_ms - t0)
+end
 
-$stderr.puts "timing (>= #{opts[:min_iters]} iters and >= #{opts[:min_time]}s)..."
+$stderr.puts "timing (>= #{opts[:min_iters]} iters and >= #{opts[:min_time]}s incl. warmup)..."
 iters = []
 total = 0.0
 per_route = {}
-until iters.size >= opts[:min_iters] && total >= opts[:min_time] * 1000.0
+until iters.size >= opts[:min_iters] && (warmup_ms + total) >= opts[:min_time] * 1000.0
   t0 = now_ms
   run_sequence!(generator, routes, timings: per_route)
   ms = now_ms - t0
@@ -329,6 +341,9 @@ end
 sorted = iters.sort
 mid = sorted.size / 2
 median = sorted.size.odd? ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2.0
+# The mean is ruby-bench's reported statistic ("Average of last N,
+# non-warmup iters"); the median stays as a robustness cross-check.
+mean = iters.sum / iters.size
 
 summary = {
   "stack"              => "rails",
@@ -338,6 +353,7 @@ summary = {
   "visits_per_iter"    => routes.size,
   "warmup"             => opts[:warmup],
   "iterations"         => iters.size,
+  "ms_per_iter_mean"   => mean.round(2),
   "ms_per_iter_median" => median.round(2),
   "ms_per_iter_min"    => sorted.first.round(2),
   "ms_per_iter_max"    => sorted.last.round(2),
@@ -368,7 +384,7 @@ summary = {
   ),
 }
 File.write(opts[:json], JSON.pretty_generate(summary)) if opts[:json]
-puts "rails: #{median.round(2)} ms/iter median over #{iters.size} iterations " \
+puts "rails: #{mean.round(2)} ms/iter (avg) over #{iters.size} iterations " \
      "(min #{sorted.first.round(2)}, max #{sorted.last.round(2)})"
 
 # benchmark.rb's disk-hygiene: production.log grows on every request.

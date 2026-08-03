@@ -28,11 +28,14 @@
 #   --sequence F  P6 mode: after the parity pass, replay the frozen
 #                 114-visit sequence in F (scripts/lobsters-rails-replay
 #                 --seq-out dumps it) under the ruby-bench timing rule:
-#                 --warmup N iterations discarded (default 15), then
-#                 iterate until >= --time N iters (default 10) AND
-#                 >= --min-time S seconds (default 10). Keep the loop in
-#                 sync with scripts/lobsters-rails-replay — the numbers
-#                 are only comparable if both sides do identical work.
+#                 --warmup N iterations discarded from the stats (default
+#                 15), then iterate until >= --time N timed iters (default
+#                 10) AND total wall clock INCLUDING warmup >= --min-time S
+#                 seconds (default 10) — upstream counts total_time from
+#                 iteration 1. Headline = mean over the timed iters, the
+#                 statistic ruby-bench reports. Keep the loop in sync with
+#                 scripts/lobsters-rails-replay — the numbers are only
+#                 comparable if both sides do identical work.
 #   --warmup N    warmup iterations discarded before timing, for both
 #                 --sequence (default 15) and --time (default 0). Give
 #                 JRuby a nonzero warmup — its JIT needs it before the
@@ -473,12 +476,21 @@ if opts[:sequence]
   end
 
   # Verification counted as work, not warmup — start the warmups fresh.
-  warmup.times { run_seq.call }
+  # Warmup iterations are discarded from the stats but their wall time
+  # counts toward the stop clock — ruby-bench's rule exactly
+  # (harness/harness.rb: `until num_itrs >= WARMUP_ITRS + MIN_BENCH_ITRS
+  # and total_time >= MIN_BENCH_TIME`, total_time cumulative from itr 1).
+  warmup_ms = 0.0
+  warmup.times do
+    t0 = now_ms
+    run_seq.call
+    warmup_ms += (now_ms - t0)
+  end
   yjit_before = yjit_snapshot
   iters = []
   total = 0.0
   per_route = {}
-  until iters.size >= min_iters && total >= min_time_ms
+  until iters.size >= min_iters && (warmup_ms + total) >= min_time_ms
     t0 = now_ms
     run_seq.call(per_route)
     ms = now_ms - t0
@@ -489,11 +501,15 @@ if opts[:sequence]
   sorted = iters.sort
   mid = sorted.size / 2
   median = sorted.size.odd? ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2.0
+  # The mean is ruby-bench's reported statistic ("Average of last N,
+  # non-warmup iters"); the median stays as a robustness cross-check.
+  mean = iters.sum / iters.size
   summary["sequence_timing"] = {
     "sequence"           => opts[:sequence],
     "visits_per_iter"    => visits.size,
     "warmup"             => warmup,
     "iterations"         => iters.size,
+    "ms_per_iter_mean"   => mean.round(2),
     "ms_per_iter_median" => median.round(2),
     "ms_per_iter_min"    => sorted.first.round(2),
     "ms_per_iter_max"    => sorted.last.round(2),
@@ -515,7 +531,7 @@ if opts[:sequence]
     }
   end
   summary["sequence_failures"] = seq_fails unless seq_fails.empty?
-  puts "sequence: #{median.round(2)} ms/iter median over #{iters.size} iterations" \
+  puts "sequence: #{mean.round(2)} ms/iter (avg) over #{iters.size} iterations" \
        "#{seq_fails.any? ? " (PARTIAL: #{seq_fails.size} failing visits)" : ''}"
 
 # ── optional timed iterations ────────────────────────────────────────

@@ -470,9 +470,13 @@ if (( ${#LANES[@]} > 0 )); then
                 # no other lane paid.
                 cp "$REPO_ROOT/build/transpiled-lobsters-ruby/storage/bench.sqlite3" \
                    "$SP_TREE/storage/bench.sqlite3" 2>/dev/null || true
+                # --warmup 15 even though AOT has no JIT: ruby-bench's
+                # harness warms every engine identically (WARMUP_ITRS=15),
+                # and a lane that warms differently is running a different
+                # methodology, not a cheaper one.
                 SP_ARGS=(--tree "$SP_TREE" --sequence "$FROZEN_SEQ" --defer "$GAPS_JSON"
                          --json "$LDIR/summary.json" --md "$LDIR/summary.md"
-                         --dump "$LDIR/bodies" --warmup 5
+                         --dump "$LDIR/bodies" --warmup 15
                          --time "$TIME_ITERS" --min-time 10)
                 # bcrypt is a spin package the published index may not
                 # carry; a local checkout stands in. Look where people
@@ -779,7 +783,11 @@ rows = META.filter_map do |id, m|
     # vs-Rails pairing keys off. Colliding with it silently drops one lane's
     # ratio and pairs another against the wrong baseline.
     "yjit_stats" => (data["yjit"] if m[:src] != "rails.json"),
-    "ms_median" => t["ms_per_iter_median"], "ms_min" => t["ms_per_iter_min"],
+    # ms_mean is the headline (ruby-bench reports the mean of non-warmup
+    # iters); ms_median stays as the robustness cross-check and as the
+    # fallback when re-aggregating a run that predates the mean.
+    "ms_mean" => t["ms_per_iter_mean"], "ms_median" => t["ms_per_iter_median"],
+    "ms_min" => t["ms_per_iter_min"],
     "ms_max" => t["ms_per_iter_max"], "iters" => t["iterations"], "warmup" => t["warmup"],
     "ruby" => data["ruby"] || env["ruby"], "rails" => data["rails"],
     "visits" => t["visits_per_iter"], "partial" => t["partial"],
@@ -823,6 +831,9 @@ if (known = rows.filter_map { |r| r["content_gaps"] }.any?)
 end
 _ = known
 live = rows.select { |r| r["ms_median"] }
+# Headline stat: the mean when the lane recorded one (the statistic
+# ruby-bench itself reports), the median for runs that predate it.
+hl = ->(r) { r["ms_mean"] || r["ms_median"] }
 # Ratio = same-configuration Rails baseline / this row. CRuby emit rows
 # pair with Rails at the same JIT level; JVM rows pair with Rails on
 # JRuby when that lane ran (same runtime), else fall back to Rails+YJIT
@@ -837,7 +848,7 @@ live.each do |r|
          when "spinel" then rails_cruby[true]
          else rails_cruby[r["yjit"]]
          end
-  r["vs_rails"] = base ? (base["ms_median"] / r["ms_median"]).round(2) : nil
+  r["vs_rails"] = base ? (hl.(base) / hl.(r)).round(2) : nil
   # Restricted ratio, only when this lane is BELOW full parity — at full
   # parity it would equal the headline and the extra column would be noise.
   # Both sides are restricted to the SAME route set (this lane's passing
@@ -868,11 +879,11 @@ matrix = {
 }
 File.write(File.join(run_dir, "matrix.json"), JSON.pretty_generate(matrix))
 dead = rows.reject { |r| r["ms_median"] }
-puts "\n== lobsters lanes (#{live.size}, ms/iter, lower=better) =="
-live.sort_by { |r| r["ms_median"] }.each do |r|
+puts "\n== lobsters lanes (#{live.size}, avg ms/iter, lower=better) =="
+live.sort_by { |r| hl.(r) }.each do |r|
   rss = r["rss_peak_kb"] || r["rss_final_kb"]
   dr = r["drift_pct"]
-  printf "  %-11s %-7s %9.2f ms/iter  %9s  %-16s %s\n", r["label"], r["jit"], r["ms_median"],
+  printf "  %-11s %-7s %9.2f ms/iter  %9s  %-16s %s\n", r["label"], r["jit"], hl.(r),
          (rss ? "#{(rss / 1024.0).round} MB" : "-"),
          (r["vs_rails"] ? "#{r["vs_rails"]}x vs Rails" : ""),
          (dr && dr.abs >= 5 ? "DRIFT #{dr > 0 ? '+' : ''}#{dr}% within run" : "")
@@ -946,12 +957,14 @@ deferred routes are roundhouse-side gaps, not spinel's; the ledger is
 `bench/lobsters/declared-gaps.json` in the roundhouse repo.
 
     BLOG_DB="file:lobsters_bench?mode=memory&cache=shared" \
-      ./build/bin/blog --bench routes.txt sequence.txt bodies 0 10 10 storage/bench.sqlite3
+      ./build/bin/blog --bench routes.txt sequence.txt bodies 15 10 10 storage/bench.sqlite3
 
 Positional args after the two files: a directory for response-body dumps,
-then WARMUP MIN_ITERS MIN_TIME (iterations discarded, minimum timed
-iterations, minimum timed seconds), and last the seed database, page-copied
-into the named in-memory DB at boot so the timed loop never touches disk.
+then WARMUP MIN_ITERS MIN_TIME — ruby-bench's harness rule (15 discarded
+warmup iterations; iterate until the minimum timed iterations AND the
+minimum seconds of total wall clock, warmup included, are both met) — and
+last the seed database, page-copied into the named in-memory DB at boot so
+the timed loop never touches disk.
 EOS
 )
         bcrypt_section=$(cat <<'EOS'
