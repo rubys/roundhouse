@@ -291,6 +291,13 @@ class BenchDriver
       idx += 1
     end
 
+    # Phase markers, flushed at each boundary. The driver's stdout is a
+    # block-buffered file: without these, a crash after the post-parity
+    # flush loses everything in the buffer and the log cannot say which
+    # phase died — the 2026-08-03 signal-11 run could only be located to
+    # "somewhere in verify, warmup, or the timed loop". One flush per
+    # PHASE costs the measurement nothing; per-visit output would.
+    puts "VERIFYDONE"
     $stdout.flush
 
     # Warmup wall time feeds the stop clock below — ruby-bench's rule
@@ -304,6 +311,8 @@ class BenchDriver
       warmup_ms = warmup_ms + (now_ms - w0)
       w += 1
     end
+    puts "WARMUPDONE " + warmup_ms.to_s
+    $stdout.flush
 
     # Per-visit samples, keyed by raw path and ACCUMULATED IN MEMORY — the
     # printing happens after the timed loop, because a `puts` per visit would
