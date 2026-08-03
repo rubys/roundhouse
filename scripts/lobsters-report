@@ -601,6 +601,30 @@ trouble = []
   end
 end
 
+# EVERY ratio on this page divides one lane's ms/iter by another's. That is
+# only meaningful if the lanes replayed the SAME visits. When a deferral
+# reaches some lanes and not others -- a stale checkout on the bench box, a
+# lane that ran before a fix landed -- the counts diverge and the ratio
+# silently absorbs the difference as speed.
+#
+# Not hypothetical: a run published 4.26x while Rails replayed 114 visits
+# against the emit lanes' 106. The eight extra were the two deferred routes,
+# worth 38 ms/iter of Rails work the emit never did -- 8% of Rails' total.
+# The honest figure was 3.93x. Nothing on the page said so.
+#
+# This cannot be repaired at render time (the lanes are already measured),
+# so it is reported rather than corrected, and it is deliberately loud.
+visit_counts = (mrows || []).select { |r| r['ms_median'] }.filter_map { |r|
+  ["#{r['label']} #{r['jit']}".strip, r['visits'].to_i] if r['visits']
+}.uniq
+if visit_counts.map(&:last).uniq.size > 1
+  spread = visit_counts.map { |n, v| "#{n} #{v}" }.join(', ')
+  trouble << ['All lanes', "replayed DIFFERENT visit counts (#{spread}) — every ratio on this " \
+              'page divides lanes that did not do the same work, so the speed figures are ' \
+              'invalid, not merely noisy. A lane most likely ran before a deferral change ' \
+              'reached it; re-run with every lane on the same commit.']
+end
+
 if trouble.any?
   html << %(<div class="alarm">\n)
   html << "<h2>The performance numbers on this page are not trustworthy</h2>\n"
