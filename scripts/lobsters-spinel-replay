@@ -384,6 +384,7 @@ routes, seq_fails, iters = [], [], []
 visits_per_iter = visits.size
 warmup_used = opts[:warmup]
 rss_boot = rss_final = rss_peak = nil
+sqlite_version = nil
 by_template = Hash.new { |h, k| h[k] = [] }
 raw.each_line do |line|
   f = line.split(" ")
@@ -411,6 +412,7 @@ raw.each_line do |line|
     # template, so several concrete paths sharing a template pool their
     # samples and the median is taken over the pool, not over medians.
     by_template[route_template(f[1].to_s)].concat(f[2..].map(&:to_f))
+  when "SQLITE" then sqlite_version = f[1]
   when "RSS"
     # boot final peak, in kB, read by the binary from its own
     # /proc/self/status. 0 is the driver's "no /proc here" — carry it as
@@ -443,6 +445,10 @@ summary = {
   # rather than implying parity. It is now true because the shape changed, not
   # because the caveat became inconvenient.
   "db"           => MEM_URI,
+  # The SQLite build the binary itself reported (`select sqlite_version()`
+  # through its own linked library) — see the SQLITE line in the driver.
+  # The interpreted lanes record theirs the same way; the report compares.
+  "sqlite"       => sqlite_version,
   "seeded_from"  => DB,
   "memory"       => true,
   "story_id"     => STORY,

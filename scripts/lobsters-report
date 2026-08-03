@@ -935,6 +935,22 @@ if mrows && !mrows.empty?
     html << "</tr>\n"
   end
   html << "</tbody></table>\n"
+  # Which SQLite build each lane queried, from the lane's own runtime
+  # (`select sqlite_version()` through its own linked library). SQLite is
+  # "the same C code in every lane" only if the versions say so: the
+  # interpreted lanes run the sqlite3 gem's bundled build while the AOT
+  # binary links the system one, and /top — the purest query route —
+  # profiled at ~94% inside libsqlite3. A version gap there is a library
+  # delta wearing a runtime delta's clothes, so a match is attested and a
+  # mismatch is named where the ratios are read.
+  sqlv = mlive.filter_map { |r| r['sqlite'] }.uniq
+  if sqlv.size > 1
+    per = mlive.map { |r| "#{r['label']} #{lane_jit.(r)}: #{r['sqlite'] || 'unrecorded'}" }.join(' · ')
+    html << %(<p class="caveat"><strong>The lanes did not query the same SQLite build</strong> — #{esc(per)}. On query-heavy routes a cross-lane delta is partly a SQLite-version difference, not a runtime difference: /top runs ~94% inside libsqlite3, and on identical builds its AOT-vs-YJIT gap disappears. Ratios on render-dominated routes are unaffected.</p>\n)
+  elsif sqlv.size == 1
+    missing = mlive.count { |r| !r['sqlite'] }
+    html << %(<p class="legend">Every lane#{missing > 0 ? " that recorded it (#{mlive.size - missing}/#{mlive.size})" : ''} queried SQLite #{esc(sqlv.first)} at runtime.</p>\n)
+  end
   jr_note = if mlive.any? { |r| r['id'] == 'jruby' }
     mlive.any? { |r| r['id'] == 'rails-jruby' } ?
       ' The JVM rows pair with each other: Roundhouse JRuby\'s ratio is vs Rails on JRuby.' :

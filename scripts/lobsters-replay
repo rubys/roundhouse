@@ -163,6 +163,22 @@ if opts[:memory]
   end
 end
 
+# The SQLite build this lane actually queries — the sqlite3 gem's bundled
+# library (or the system one, if the gem was built against it), asked at
+# runtime via its own linked code. The AOT lane links a DIFFERENT build
+# and records its own the same way; the report compares the two, because
+# a version gap between them lands entirely on the query-heavy routes
+# (/top profiled at ~94% inside libsqlite3). nil under JRuby (JDBC path).
+SQLITE_RUNTIME = begin
+  require "sqlite3"
+  d = SQLite3::Database.new(DB_FILE, readonly: true)
+  v = d.execute("select sqlite_version()")[0][0].to_s
+  d.close
+  v
+rescue StandardError, LoadError
+  nil
+end
+
 # Baseline footprint, sampled AFTER the in-memory seed, so the fixture
 # DB is inside it. NOT a common floor across lanes: the first live run
 # put the emit lanes at ~87 MB here and Rails at ~184 MB, because each
@@ -376,6 +392,7 @@ end
 summary = {
   "generated_at" => Time.now.utc.iso8601,
   "db"           => ENV["BLOG_DB"],
+  "sqlite"       => SQLITE_RUNTIME,
   "memory"       => !!opts[:memory],
   "story_id"     => STORY,
   "comment_id"   => COMMENT,

@@ -220,6 +220,21 @@ class BenchDriver
       Db.seed_from_file(seed_file)
     end
 
+    # The SQLite build actually linked into THIS binary, asked at runtime.
+    # The interpreted lanes run the sqlite3 gem's bundled build; this lane
+    # links the system library, and a version gap between the two lands
+    # entirely on query-heavy routes (/top profiled at ~94% inside
+    # libsqlite3 — matz/spinel#3513). Recorded per lane so the report can
+    # attest the lanes queried the same engine, or say loudly that they
+    # did not.
+    # Low-level statement API on purpose: Db.select_rows lives in the
+    # ruby-family adapter layer, which the spinel build does not compile.
+    stmt = Db.prepare("select sqlite_version()")
+    sqlv = "unknown"
+    sqlv = Db.column_value(stmt, 0).to_s if Db.step?(stmt)
+    Db.finalize(stmt)
+    puts "SQLITE " + sqlv
+
     # Baseline: loaded and connected, nothing served yet — the instant the
     # CRuby lanes take BOOT_RSS_KB. Sampled AFTER the seed so the fixture is
     # inside it, matching the CRuby lanes' baseline.

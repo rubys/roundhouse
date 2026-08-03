@@ -140,6 +140,15 @@ end
 # emit lanes sample, so the shared fixture is inside both baselines.
 BOOT_RSS_KB = rss_kb
 
+# The SQLite build behind ActiveRecord, asked at runtime — the sqlite3
+# gem's bundled library on CRuby, the JDBC driver's on JRuby. Recorded so
+# the report can compare it against the AOT lane's system-linked build.
+SQLITE_RUNTIME = begin
+  ActiveRecord::Base.connection.select_value("select sqlite_version()").to_s
+rescue StandardError
+  nil
+end
+
 app = Rails.application
 generator = RouteGenerator.new(app)
 routes = generator.routes # generates the frozen sequence; logs in as a side effect
@@ -350,6 +359,7 @@ summary = {
   "generated_at"       => Time.now.utc.iso8601,
   "ruby"               => RUBY_DESCRIPTION,
   "rails"              => Rails::VERSION::STRING,
+  "sqlite"             => SQLITE_RUNTIME,
   "visits_per_iter"    => routes.size,
   "warmup"             => opts[:warmup],
   "iterations"         => iters.size,

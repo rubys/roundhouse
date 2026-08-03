@@ -790,6 +790,11 @@ rows = META.filter_map do |id, m|
     "ms_min" => t["ms_per_iter_min"],
     "ms_max" => t["ms_per_iter_max"], "iters" => t["iterations"], "warmup" => t["warmup"],
     "ruby" => data["ruby"] || env["ruby"], "rails" => data["rails"],
+    # The SQLite build the lane itself queried at runtime (`select
+    # sqlite_version()` through its own linked library). The interpreted
+    # lanes run the gem's bundled build; the AOT binary links the system
+    # one — the report attests a match or names the mismatch.
+    "sqlite" => data["sqlite"],
     "visits" => t["visits_per_iter"], "partial" => t["partial"],
     # Footprint of each lane's replay process, sampled by the replay
     # itself (see the "rss" block in scripts/lobsters-replay). boot_kb is
