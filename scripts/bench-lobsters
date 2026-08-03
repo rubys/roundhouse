@@ -885,6 +885,88 @@ if content.any?
 end
 AGG
 
+# ── emitted-tree tarballs ────────────────────────────────────────────
+# Publish the trees the lanes actually ran, so a compiler author can pick up
+# a lane's numbers without a roundhouse checkout. The AOT lane's headline is
+# a ratio against the CRuby lane, and the two trees are ~90% byte-identical
+# Ruby, so shipping only one would leave the other side of that ratio
+# unverifiable. Small enough not to think about: ~390 KB and ~820 KB.
+#
+# The seed database is deliberately NOT included. It is 40 MB, it changes
+# only when ruby-bench does, and frozen-sequence.json's drift check already
+# fails loudly if it moves — REPRODUCE.md says where to get it.
+pack_tree() {
+    local name="$1" dir="$2"
+    [[ -d "$dir" ]] || { warn "no $name tree at $dir — not packed"; return 0; }
+    local rh sp
+    rh="$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    sp="$(command -v spinel >/dev/null 2>&1 && spinel --version 2>/dev/null || echo 'not on PATH')"
+    cat > "$dir/REPRODUCE.md" <<REPRO
+# lobsters — $name tree, as benchmarked
+
+Emitted by roundhouse \`$rh\` from ruby-bench's lobsters fixture. This is the
+tree the published numbers were measured on, minus build output.
+
+    roundhouse : $rh
+    spinel     : $sp
+    packed     : $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+## Build it
+
+    # AOT (needs spinel + spin on PATH)
+    rm -f build/bin/blog && spin build
+
+    # CRuby
+    ruby -e 'require "./main"'
+
+## Run the benchmark sequence
+
+The 106-visit frozen sequence is \`bench/lobsters/frozen-sequence.json\` in the
+roundhouse repo. Two routes are deferred out of it and out of the parity
+score — see \`bench/lobsters/declared-gaps.json\`; both are roundhouse-side
+gaps, not spinel's.
+
+    BLOG_DB="file:lobsters_bench?mode=memory&cache=shared" \\
+      ./build/bin/blog --bench routes.txt sequence.txt bodies 0 10 10 storage/bench.sqlite3
+
+\`storage/bench.sqlite3\` is NOT in this archive (40 MB). Rebuild it from
+ruby-bench's lobsters fixture, or ask for a copy. The binary builds and the
+codegen is fully inspectable without it; only running the sequence needs it.
+
+## bcrypt
+
+\`spin.lock\` is deliberately omitted: it pinned bcrypt to an absolute path on
+the machine that ran the benchmark, so shipping it would fail here with
+"not in the index: bcrypt". The app needs it for password hashing on the
+login path. Either:
+
+    spin add bcrypt --git https://github.com/rubys/spinel-bcrypt
+
+or point at a local checkout and let spin re-lock. Nothing the benchmark
+measures goes through bcrypt — the frozen sequence is authenticated once at
+setup, not per visit.
+
+## What the numbers say
+
+Per-lane timings, per-route medians and visit counts are in the run's
+\`matrix.json\` and each lane's \`summary.json\`, published beside this
+archive. The comparison that matters here is the AOT lane against the CRuby
++YJIT lane: same emitter, same route table, and \`runtime/action_dispatch/router.rb\`
+byte-identical between the two.
+REPRO
+    tar czf "$RUN_DIR/$name-tree.tgz" -C "$(dirname "$dir")" \
+        --exclude=build --exclude=bench-work --exclude=storage \
+        --exclude='*.sqlite3' --exclude='*.o' --exclude='*.log' \
+        --exclude=spin.lock \
+        "$(basename "$dir")" 2>/dev/null \
+      && ok "packed $name tree -> $RUN_DIR/$name-tree.tgz ($(du -h "$RUN_DIR/$name-tree.tgz" | cut -f1))" \
+      || fail "could not pack $name tree"
+    rm -f "$dir/REPRODUCE.md"
+}
+pack_tree spinel "$REPO_ROOT/build/transpiled-lobsters-spinel"
+pack_tree ruby   "$REPO_ROOT/build/transpiled-lobsters-ruby"
+
+
     # Per-lane parity trend vs the previous run (resolve BEFORE repointing
     # latest). Older layouts kept the cruby summary at the run root — the
     # ruby lane falls back to it so the trend survives the layout change.

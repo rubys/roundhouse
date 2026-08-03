@@ -679,7 +679,12 @@ html << "</div>\n"
 
 # Sibling artifacts published alongside this page.
 artifact_names = if lanes_mode
-  %w[matrix.json env.json] +
+  # The emitted trees ride along as tarballs so a compiler author can
+  # reproduce a lane's numbers without a roundhouse checkout: the AOT tree
+  # is what spinel compiled, and the CRuby tree is the lane it is being
+  # compared against. Each carries a REPRODUCE.md with the SHAs and the
+  # exact commands. Existence-filtered below, so a run without them is fine.
+  %w[matrix.json env.json spinel-tree.tgz ruby-tree.tgz] +
     (matrix['rows'] || []).map { |r| File.join(r['id'], r['kind'] == 'rails' ? 'rails.json' : 'summary.json') }
 else
   %w[summary.json summary.md rails.json sequence.json env.json emit.log
