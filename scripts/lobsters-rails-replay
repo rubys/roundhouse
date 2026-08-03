@@ -44,6 +44,7 @@ until args.empty?
   case (a = args.shift)
   when "--src"       then opts[:src]       = File.expand_path(args.shift)
   when "--seq-out"   then opts[:seq_out]   = File.expand_path(args.shift)
+  when "--defer"     then opts[:defer]     = File.expand_path(args.shift)
   when "--json"      then opts[:json]      = File.expand_path(args.shift)
   when "--warmup"    then opts[:warmup]    = Integer(args.shift)
   when "--min-iters" then opts[:min_iters] = Integer(args.shift)
@@ -152,6 +153,18 @@ if opts[:seq_out]
   $stderr.puts "sequence written to #{opts[:seq_out]}"
 end
 
+# Narrow what gets TIMED, after the full sequence has been written above.
+DEFERRED = load_deferred(opts[:defer])
+unless DEFERRED.empty?
+  before = routes.size
+  unmatched = DEFERRED.reject do |t|
+    routes.any? { |env| route_template(env["PATH_INFO"]) == t }
+  end
+  abort "deferred route(s) #{unmatched.join(", ")} match no visit in the sequence" unless unmatched.empty?
+  routes = routes.reject { |env| DEFERRED.include?(route_template(env["PATH_INFO"])) }
+  $stderr.puts "deferred #{before - routes.size} visit(s) of #{DEFERRED.size} route(s): #{DEFERRED.join(", ")}"
+end
+
 # Bucket a concrete visit path under its route template so per-route
 # samples aggregate across the sequence's parameterized visits — every
 # /s/<short_id> lands under /s/:story_id. Ordered most-specific first;
@@ -169,6 +182,21 @@ def route_template(path)
   base = path.split("?", 2).first
   ROUTE_TEMPLATES.each { |re, tmpl| return tmpl if base.match?(re) }
   path
+end
+
+# Routes DEFERRED out of the timed sequence (bench/lobsters/declared-gaps.json).
+# The oracle has to drop exactly what the emit lanes drop: Rails renders these
+# routes perfectly, so leaving them in HERE while the emit lanes skip them
+# would credit the emit with not doing work Rails still pays for -- the ratio
+# would move for a reason that is not speed.
+#
+# The sequence is still GENERATED whole and still written by --seq-out, so the
+# committed frozen-sequence.json and its drift check are untouched; only what
+# gets timed is narrowed.
+def load_deferred(path)
+  return [] if path.nil? || path.empty?
+  abort "deferred ledger not found at #{path.inspect}" unless File.exist?(path)
+  (JSON.parse(File.read(path))["declared_gaps"] || []).map { |g| g["route"] }
 end
 
 # samples: { template => [ms, …] } -> { template => {ms_median, n, …} }.

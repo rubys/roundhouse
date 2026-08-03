@@ -41,6 +41,7 @@ args = ARGV.dup
 until args.empty?
   case (a = args.shift)
   when "--tree"       then opts[:tree]     = File.expand_path(args.shift)
+  when "--defer"      then opts[:defer]    = File.expand_path(args.shift)
   when "--sequence"   then opts[:sequence] = File.expand_path(args.shift)
   when "--json"       then opts[:json]     = File.expand_path(args.shift)
   when "--md"         then opts[:md]       = File.expand_path(args.shift)
@@ -235,6 +236,7 @@ routes_file = File.join(work, "routes.txt")
 seq_file    = File.join(work, "sequence.txt")
 File.write(routes_file, ROUTES.map { |r| "GET #{r}" }.join("\n"))
 visits = JSON.parse(File.read(opts[:sequence]))["visits"]
+visits, DEFERRED_VISITS = drop_deferred(visits, load_deferred(opts[:defer]))
 File.write(seq_file, visits.map { |v| "#{v['method']} #{v['path']}" }.join("\n"))
 
 dump = opts[:dump] || File.join(work, "bodies")
@@ -292,6 +294,39 @@ ROUTE_TEMPLATES = [
   [%r{\A/u/[^/]+\z},              "/u/:username"],
   [%r{\A/s/[^/]+\z},              "/s/:story_id"],
 ].freeze
+
+
+# Routes DEFERRED out of the timed sequence, declared in
+# bench/lobsters/declared-gaps.json. A deferred route is one the emit is
+# known not to render; timing it measures an exception or the wrong
+# document, and leaving it in makes ms/iter faster than real work for a
+# reason that has nothing to do with speed.
+#
+# The filter keys off route_template, so it drops every concrete visit of a
+# deferred route (the sequence visits /u/:username six times, with six
+# different usernames). EVERY lane must apply the same list or the lanes
+# time different work and the ratio between them stops meaning anything --
+# which is why the orchestrator passes the same file to all of them.
+#
+# A declared route matching no visit is fatal: a deferral that silently
+# defers nothing leaves the failing visits in the timing while the page
+# claims they were excluded.
+def load_deferred(path)
+  return [] if path.nil? || path.empty?
+  abort "deferred ledger not found at #{path.inspect}" unless File.exist?(path)
+  (JSON.parse(File.read(path))["declared_gaps"] || []).map { |g| g["route"] }
+end
+
+def drop_deferred(visits, deferred, label = "sequence")
+  return [visits, 0] if deferred.empty?
+  kept = visits.reject { |v| deferred.include?(route_template(v["path"])) }
+  dropped = visits.size - kept.size
+  unmatched = deferred.reject { |t| visits.any? { |v| route_template(v["path"]) == t } }
+  unless unmatched.empty?
+    abort "deferred route(s) #{unmatched.join(", ")} match no visit in the #{label}"
+  end
+  [kept, dropped]
+end
 
 # The dumped body's file name for a route. Mirrors the compiled driver's
 # `safe_name` character for character: content parity is keyed by it, and a

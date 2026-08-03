@@ -130,7 +130,19 @@ GAPS_FILE = File.expand_path("../bench/lobsters/declared-gaps.json", __dir__)
 DECLARED_GAPS = (File.exist?(GAPS_FILE) ?
   (JSON.parse(File.read(GAPS_FILE))["declared_gaps"] || []) : [])
 GAP_BY_ROUTE = DECLARED_GAPS.to_h { |g| [g["route"], g] }
+# content-parity.json keys routes by DUMPED BODY NAME; the ledger keys them
+# by template. Map one to the other through any lane summary that carries
+# both, so the two files can each stay in their own vocabulary.
+def deferred_body_names(run_path)
+  Dir[File.join(run_path, "*", "summary.json")].each do |f|
+    routes = (JSON.parse(File.read(f))["routes"] rescue nil) or next
+    names = routes.select { |r| GAP_BY_ROUTE.key?(r["template"]) }.filter_map { |r| r["body"] }
+    return names unless names.empty?
+  end
+  []
+end
 
+DEFERRED_BODIES = lanes_mode ? deferred_body_names(run_path) : []
 content  = lanes_mode ? sibling(File.join(run_path, prim), 'content-parity.json') : nil
 jr_content = lanes_mode ? sibling(File.join(run_path, 'jruby'), 'content-parity.json') : nil
 # The AOT lane's content parity. bench-lobsters diffs every emit lane
@@ -595,7 +607,7 @@ if trouble.any?
   html << "<ul>\n"
   trouble.each { |ln, why| html << "<li><strong>#{esc(ln)}</strong> — #{esc(why)}</li>\n" }
   html << "</ul>\n"
-  html << %(<p class="why">Timings below are still shown, and are still real measurements of what the code did — but what the code did was not what Rails does, so they do not measure the same work and must not be compared. This banner is generated from the run's own data and disappears by itself once every lane renders what Rails renders and every timed visit returns 200.</p>\n)
+  html << %(<p class="why">Timings below are still shown, and are still real measurements of what the code did — but what the code did was not what Rails does, so they do not measure the same work and must not be compared. This banner is generated from the run's own data and disappears by itself once every lane renders what Rails renders on every route IN SCOPE, and every timed visit returns 200. Routes deferred out of scope are listed below with the reason; they are excluded from the timed sequence in every lane, including Rails, so the lanes still measure the same work.</p>\n)
   html << "</div>\n"
 end
 
@@ -636,8 +648,12 @@ compared = mlanes.select { |r| r['kind'] != 'rails' && r['content_total'] }
 if compared.any?
   compared.each do |r|
     ok = r['content_equivalent'].to_i == r['content_total'].to_i
+    scope    = r['content_scope'] || r['content_total']
+    deferred = r['content_deferred'].to_i
     html << %(<span class="badge #{ok ? 'pass' : 'fail'}">#{esc(r['label'])} #{esc(r['jit'])} )
-    html << %(#{r['content_equivalent']}/#{r['content_total']} content parity</span>\n)
+    html << %(#{r['content_equivalent']}/#{scope} content parity)
+    html << %( · #{deferred} deferred) if deferred > 0
+    html << %(</span>\n)
   end
 else
   # No oracle in this run. The badge has to say that rather than showing a
@@ -1029,9 +1045,22 @@ if rh_pr && rl_pr && !rh_pr.empty?
   else
     ''
   end
+  # What AOT compilation buys OVER the transpiled-Ruby lane, as opposed to
+  # over Rails. Both vs-Rails ratios include the transpile, so the reader
+  # cannot separate the two without dividing them.
+  aot_delta_note = begin
+    rh_row = (mrows || []).find { |x| x['kind'] == 'emit' && x['runtime'] == 'cruby' && x['yjit'] }
+    sp_row = (mrows || []).find { |x| x['runtime'] == 'spinel' }
+    if rh_row && sp_row && rh_row['ms_median'].to_f > 0 && sp_row['ms_median'].to_f > 0
+      d = rh_row['ms_median'].to_f / sp_row['ms_median'].to_f
+      %(<p class="caveat">Both headline ratios include the transpile. Isolating the two: transpiling accounts for the bulk of the win, and AOT compilation adds a further <strong>#{fmt_dec(d, 2)}×</strong> over the same emit running on CRuby+YJIT — in aggregate only, since AOT is faster on the heavy routes and slower on the cheap ones, where per-request fixed costs dominate.</p>)
+    else
+      ''
+    end
+  end
   html << "<h2>#{section_no}. Per-endpoint breakdown</h2>\n"
   html << <<~P
-    <p>Where the overall #{speedup ? "#{fmt_dec(speedup, 2)}× " : ''}win comes from — each endpoint's median latency over every timed visit of the frozen sequence#{drawn.size > 2 ? ', per lane' : ', Rails vs roundhouse'}. Bars are log-scaled; the <strong>ratio</strong> at the right is Rails ÷ roundhouse#{drawn.size > 2 ? ' (both CRuby +YJIT)' : ''} (green = roundhouse faster).#{chart_note}</p>
+    <p>Where the overall #{speedup ? "#{fmt_dec(speedup, 2)}× " : ''}win comes from — each endpoint's median latency over every timed visit of the frozen sequence#{drawn.size > 2 ? ', per lane' : ', Rails vs roundhouse'}. Bars are log-scaled; the <strong>ratio</strong> at the right is Rails ÷ roundhouse#{drawn.size > 2 ? ' (both CRuby +YJIT)' : ''} (green = roundhouse faster).#{chart_note}</p>#{aot_delta_note}
     <p class="caveat">A diagnostic breakdown, not a re-derivation: per-endpoint medians don't sum to the sequence median (GC and ordering don't decompose linearly), and the sub-millisecond rows sit near clock resolution — trust the ranking, not the third decimal.</p>
   P
   # The AOT lane's per-endpoint numbers need the parity caveat attached
@@ -1338,10 +1367,14 @@ html << "</details>\n"
 # ledger here would be stating the wrong one.
 def content_lane_block(content, lane_label, lane_dir)
   ce  = content['identical'] + content['equivalent']
-  cmp = content['comparable'] || content['total']
-  diff_routes = (content['routes'] || [])
-                  .reject { |r| %w[identical equivalent oracle-failed].include?(r['verdict']) }
-                  .sort_by { |r| -r['diff_tokens'].to_i }
+  all_diff = (content['routes'] || [])
+               .reject { |r| %w[identical equivalent oracle-failed].include?(r['verdict']) }
+               .sort_by { |r| -r['diff_tokens'].to_i }
+  # Deferred routes leave this count for the same reason they leave the
+  # badge: they are out of scope, not failing. They are still listed below
+  # under their own heading so the section shows what they actually do.
+  deferred_here, diff_routes = all_diff.partition { |r| DEFERRED_BODIES.include?(r['route']) }
+  cmp = (content['comparable'] || content['total']).to_i - deferred_here.size
   out = +"<h3>#{esc(lane_label)} — #{ce}/#{cmp}</h3>\n"
   out << %(<span class="badge #{diff_routes.empty? ? 'pass' : 'fail'}">#{ce}/#{cmp} routes render what Rails renders</span>\n)
   if diff_routes.empty?
@@ -1393,9 +1426,15 @@ if content
   # failed proves nothing either way, so it is neither credited nor charged
   # — but it is named below, because a shrinking denominator that nobody
   # mentions is how a parity claim quietly stops meaning anything.
-  cmp = content['comparable'] || content['total']
   stale = (content['routes'] || []).select { |r| r['verdict'] == 'oracle-failed' }
-  diff_routes = (content['routes'] || []).reject { |r| %w[identical equivalent oracle-failed].include?(r['verdict']) }
+  # Deferred routes come out of BOTH the differing list and the denominator,
+  # the same subtraction content_lane_block makes. Computed inline here, so
+  # leaving it out made this heading contradict the badge at the top of the
+  # page — the one place a reader is most likely to notice and least likely
+  # to be able to explain.
+  diff_all = (content['routes'] || []).reject { |r| %w[identical equivalent oracle-failed].include?(r['verdict']) }
+  deferred_here, diff_routes = diff_all.partition { |r| DEFERRED_BODIES.include?(r['route']) }
+  cmp = (content['comparable'] || content['total']).to_i - deferred_here.size
   # The heading names its LANE. This section scores the primary emit lane,
   # and it used to say a bare "(26/26)" directly under a coverage heading
   # advertising "spinel 25/26" — so a reader could carry the primary lane's
@@ -1408,7 +1447,7 @@ if content
   # best lane's number where the section's number goes.
   other_parity = (mrows || []).select { |r| r['ms_median'] && r['kind'] != 'rails' &&
                                             r['content_total'] && r['id'] != prim }
-                              .map { |r| ", #{esc(r['label'])} #{esc(r['jit'])} #{r['content_equivalent']}/#{r['content_total']}" }
+                              .map { |r| ", #{esc(r['label'])} #{esc(r['jit'])} #{r['content_equivalent']}/#{r['content_scope'] || r['content_total']}" }
                               .join
   html << "<h2>#{section_no}. Content parity vs Rails — #{esc(prim_label)} #{ce}/#{cmp}#{other_parity}</h2>\n"
   html << %(<span class="badge #{diff_routes.empty? ? 'pass' : 'fail'}">#{ce}/#{cmp} routes render what Rails renders</span>\n)

@@ -128,6 +128,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# The deferred-route ledger. Read here by every path that times a sequence,
+# and again by the aggregation block below for parity classification.
+GAPS_JSON="$REPO_ROOT/bench/lobsters/declared-gaps.json"
 SRC="${LOBSTERS_SRC:-$HOME/git/ruby-bench/benchmarks/lobsters}"
 OUT_DIR=""
 EXPLICIT_OUT=0
@@ -293,6 +296,11 @@ if (( ${#LANES[@]} > 0 )); then
     [[ -d "$SRC" ]] || { fail "lobsters source not found at $SRC (clone ruby-bench or pass --src)"; exit 2; }
     FROZEN_SEQ="$REPO_ROOT/bench/lobsters/frozen-sequence.json"
     [[ -f "$FROZEN_SEQ" ]] || { fail "no committed frozen sequence at $FROZEN_SEQ"; exit 2; }
+    # Deferred routes leave the TIMED sequence in EVERY lane, including the
+    # Rails oracle. Skipping them in the emit lanes alone would stop the emit
+    # paying for work Rails still pays for, and the ratio would improve for a
+    # reason that is not speed. One variable, passed everywhere.
+    [[ -f "$GAPS_JSON" ]] || { fail "no declared-gaps ledger at $GAPS_JSON"; exit 2; }
     (( TIME_ITERS > 0 )) || TIME_ITERS=10
 
     RUN_TS="$(date +%Y%m%d-%H%M%S)"
@@ -339,7 +347,7 @@ if (( ${#LANES[@]} > 0 )); then
                 if RUBYOPT="$RO" ruby "$REPO_ROOT/scripts/lobsters-rails-replay" \
                         --src "$SRC" --warmup 15 --min-iters "$TIME_ITERS" --min-time 10 \
                         --seq-out "$LDIR/sequence.json" --json "$LDIR/rails.json" \
-                        --dump "$LDIR/bodies" \
+                        --dump "$LDIR/bodies" --defer "$GAPS_JSON" \
                         >"$LDIR/run.log" 2>&1; then
                     # The rails lane regenerates the sequence; a mismatch with
                     # the committed one means the ruby-bench DB or generator
@@ -383,6 +391,7 @@ if (( ${#LANES[@]} > 0 )); then
                         jruby "$REPO_ROOT/scripts/lobsters-rails-replay" \
                         --src "$FIXTURE" --warmup "${WARMUP:-100}" --min-iters "$TIME_ITERS" --min-time 10 \
                         --seq-out "$LDIR/sequence.json" --json "$LDIR/rails.json" \
+                        --defer "$GAPS_JSON" \
                         >"$LDIR/run.log" 2>&1; then
                     if ! diff -q "$FROZEN_SEQ" "$LDIR/sequence.json" >/dev/null; then
                         fail "lane rails-jruby: regenerated sequence != committed frozen-sequence.json"
@@ -435,7 +444,7 @@ if (( ${#LANES[@]} > 0 )); then
                 # no other lane paid.
                 cp "$REPO_ROOT/build/transpiled-lobsters-ruby/storage/bench.sqlite3" \
                    "$SP_TREE/storage/bench.sqlite3" 2>/dev/null || true
-                SP_ARGS=(--tree "$SP_TREE" --sequence "$FROZEN_SEQ"
+                SP_ARGS=(--tree "$SP_TREE" --sequence "$FROZEN_SEQ" --defer "$GAPS_JSON"
                          --json "$LDIR/summary.json" --md "$LDIR/summary.md"
                          --dump "$LDIR/bodies" --warmup 5
                          --time "$TIME_ITERS" --min-time 10)
@@ -766,7 +775,13 @@ rows = META.filter_map do |id, m|
     # declared gap is a known missing capability, an undeclared one is a
     # defect nobody has looked at.
     "content_gaps"       => cp && (gap_templates(data, cp) & GAP_ROUTES),
-    "content_undeclared" => cp && (differing_templates(data, cp) - GAP_ROUTES) }
+    "content_undeclared" => cp && (differing_templates(data, cp) - GAP_ROUTES),
+    # Denominator with the deferred routes removed. A deferred route that
+    # starts rendering correctly is NOT in content_gaps, so it re-enters both
+    # numerator and denominator on its own -- the ledger entry going stale
+    # shows up as a score that stops moving, not as a silently inflated one.
+    "content_scope"      => cp && (cp["total"].to_i - (gap_templates(data, cp) & GAP_ROUTES).size),
+    "content_deferred"   => cp && (gap_templates(data, cp) & GAP_ROUTES).size }
 end
 abort "no lane produced any result" if rows.empty?
 
@@ -804,7 +819,8 @@ live.each do |r|
   # compares different work again.
   mine = PARITY_DETAIL[r["id"]]
   ok   = mine && mine[:ok]
-  if base && ok && r["content_total"] && ok.size < r["content_total"].to_i
+  scope = r["content_scope"] || r["content_total"]
+  if base && ok && scope && ok.size < scope.to_i
     theirs = PARITY_DETAIL[base["id"]]
     keep = ok.select { |k| mine[:pr]&.key?(k) && theirs&.dig(:pr)&.key?(k) }
     a = restricted_ms(mine, keep)
@@ -1042,6 +1058,9 @@ if (( TIME_ITERS > 0 )); then
         REPLAY_ARGS+=(--warmup "$WARMUP")
     fi
 fi
+# Deferred routes leave the timed sequence here too — this is the path the
+# ruby/ruby-int/jruby emit lanes reach by recursion.
+[[ -f "$GAPS_JSON" ]] && REPLAY_ARGS+=(--defer "$GAPS_JSON")
 (( MEMORY == 1 ))    && REPLAY_ARGS+=(--memory)
 (( VS_RAILS == 1 ))  && REPLAY_ARGS+=(--sequence "$OUT_DIR/sequence.json")
 # --frozen replays the COMMITTED frozen sequence (no Rails boot, no per-run

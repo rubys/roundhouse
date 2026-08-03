@@ -69,6 +69,7 @@ until args.empty?
   when "--time"  then opts[:time]  = Integer(args.shift)
   when "--db"    then opts[:db]    = args.shift
   when "--memory" then opts[:memory] = true
+  when "--defer"     then opts[:defer]     = File.expand_path(args.shift)
   when "--sequence" then opts[:sequence] = args.shift
   when "--warmup"   then opts[:warmup]   = Integer(args.shift)
   when "--min-time" then opts[:min_time] = Integer(args.shift)
@@ -282,6 +283,39 @@ def route_template(path)
   path
 end
 
+
+# Routes DEFERRED out of the timed sequence, declared in
+# bench/lobsters/declared-gaps.json. A deferred route is one the emit is
+# known not to render; timing it measures an exception or the wrong
+# document, and leaving it in makes ms/iter faster than real work for a
+# reason that has nothing to do with speed.
+#
+# The filter keys off route_template, so it drops every concrete visit of a
+# deferred route (the sequence visits /u/:username six times, with six
+# different usernames). EVERY lane must apply the same list or the lanes
+# time different work and the ratio between them stops meaning anything --
+# which is why the orchestrator passes the same file to all of them.
+#
+# A declared route matching no visit is fatal: a deferral that silently
+# defers nothing leaves the failing visits in the timing while the page
+# claims they were excluded.
+def load_deferred(path)
+  return [] if path.nil? || path.empty?
+  abort "deferred ledger not found at #{path.inspect}" unless File.exist?(path)
+  (JSON.parse(File.read(path))["declared_gaps"] || []).map { |g| g["route"] }
+end
+
+def drop_deferred(visits, deferred, label = "sequence")
+  return [visits, 0] if deferred.empty?
+  kept = visits.reject { |v| deferred.include?(route_template(v["path"])) }
+  dropped = visits.size - kept.size
+  unmatched = deferred.reject { |t| visits.any? { |v| route_template(v["path"]) == t } }
+  unless unmatched.empty?
+    abort "deferred route(s) #{unmatched.join(", ")} match no visit in the #{label}"
+  end
+  [kept, dropped]
+end
+
 # samples: { template => [ms, …] } -> { template => {ms_median, n, …} }.
 # The dumped body's file name for a route — kept identical to the write
 # below (and to the AOT driver's `safe_name`), because content parity is
@@ -391,7 +425,11 @@ summary.merge!(
 # ── P6: frozen-sequence replay (ruby-bench timing rule) ──────────────
 if opts[:sequence]
   visits = JSON.parse(File.read(opts[:sequence]))["visits"]
-  puts "\nreplaying frozen sequence (#{visits.size} visits)" unless opts[:quiet]
+  visits, deferred_visits = drop_deferred(visits, load_deferred(opts[:defer]))
+  unless opts[:quiet]
+    puts "\nreplaying frozen sequence (#{visits.size} visits" \
+         "#{deferred_visits.zero? ? '' : ", #{deferred_visits} deferred"})"
+  end
 
   # Verification pass: every visit must be 200 (the benchmark raises on
   # anything else). Collect failures instead of raising so the report
