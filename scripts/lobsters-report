@@ -1345,7 +1345,11 @@ html << "<table>\n<thead><tr><th>route</th><th>status</th><th>bytes</th>#{jr_rou
 routes.each do |c|
   status_cls = c['ok'] == false ? 'no' : 'ok'
   html << "<tr>"
-  gap_note = GAP_BY_ROUTE[c['route']] ? ' <span class="gapmark" title="declared gap — see the ledger above">declared gap</span>' : ''
+  # The ledger keys by TEMPLATE; this table's rows are concrete paths.
+  # /hottest matched by string luck, /u/michell_wiegand never matched
+  # /u/:username — so the one row whose 500 the ledger exists to explain
+  # was the one row it left unlabelled.
+  gap_note = GAP_BY_ROUTE[c['template'] || c['route']] ? ' <span class="gapmark" title="declared gap — see the ledger above">declared gap</span>' : ''
   html << %(<td><code>#{esc(c['route'])}</code>#{c['thin'] ? ' <span class="no">(thin)</span>' : ''}#{gap_note}#{cached_mark.(c['template'] || c['route'])}</td>)
   html << %(<td class="num #{status_cls}">#{c['status']}</td>)
   html << %(<td class="num">#{fmt_int(c['bytes'])}</td>)
