@@ -225,6 +225,22 @@ class BenchDriver
     # inside it, matching the CRuby lanes' baseline.
     boot_rss = rss_vmrss_kb
 
+    # BALLAST: N retained small objects the request loop never touches, for
+    # the mark-cost experiment from matz/spinel#3513 — if collection cost
+    # tracks the live heap rather than a request's own allocation, the
+    # cheap routes' medians rise with this knob while their code is
+    # untouched. 0 (the default, and the published configuration) allocates
+    # nothing. The BALLAST line printed after the timed loop is also the
+    # read that keeps this array live across the whole run — without it,
+    # liveness-based rooting could collect the ballast mid-experiment.
+    ballast = []
+    bn = (ENV["BENCH_BALLAST"] || "0").to_i
+    bi = 0
+    while bi < bn
+      ballast << ("b" + bi.to_s)
+      bi += 1
+    end
+
     jar = Tep.str_hash
     err = login!(jar)
     if err.length > 0
@@ -310,6 +326,7 @@ class BenchDriver
       puts line
     end
     puts "RSS " + boot_rss.to_s + " " + rss_vmrss_kb.to_s + " " + rss_vmhwm_kb.to_s
+    puts "BALLAST " + ballast.length.to_s
     puts "DONE " + seq.length.to_s + " " + warmup.to_s
     0
   end
