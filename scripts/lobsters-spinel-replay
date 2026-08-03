@@ -163,17 +163,31 @@ unless opts[:skip_build] && File.executable?(BIN)
   log = File.join(TREE, "spin-build.log")
   # --sqlite-lib DIR: a directory holding ONLY libsqlite3.a (the vendored
   # amalgamation at the bundle's version — scripts/bench-lobsters builds
-  # it). LIBRARY_PATH puts it ahead of the system search path, so the
-  # tree's own `ffi_lib "sqlite3"` link line resolves to it — no file in
-  # the tree changes, and the published tarball still builds anywhere
-  # against a stock -lsqlite3. The lane's summary records which build the
-  # binary actually queried, so this is attested, not assumed.
+  # it). The first aligned box run proved LIBRARY_PATH is not enough:
+  # clang honored it (macOS attested 3.50.3) but the box's gcc link still
+  # resolved -lsqlite3 to the system .so (the run attested 3.45.1 while
+  # the harness announced the vendored version — the per-lane attestation
+  # is the instrument that caught it). So put -L on the link line itself:
+  # ffi_cflags reaches spin's link invocation, and a -L dir holding only
+  # libsqlite3.a wins deterministically under both linkers. The edit is
+  # REVERTED the moment the build finishes — the packed tarball never
+  # carries a machine-local path. LIBRARY_PATH stays as belt to the
+  # braces; the summary's runtime `sqlite` field remains the only truth.
   build_env = {}
+  db_rb = File.join(TREE, "runtime", "db.rb")
+  db_rb_orig = nil
   if opts[:sqlite_lib] && File.exist?(File.join(opts[:sqlite_lib], "libsqlite3.a"))
+    src0 = File.read(db_rb)
+    anchor = %(  ffi_lib "sqlite3")
+    die("stage", "runtime/db.rb ffi_lib anchor not found") unless src0.include?(anchor)
+    db_rb_orig = src0
+    File.write(db_rb, src0.sub(anchor, %(#{anchor}
+  ffi_cflags "-L#{opts[:sqlite_lib]}")))
     build_env["LIBRARY_PATH"] =
       [opts[:sqlite_lib], ENV["LIBRARY_PATH"]].compact.join(File::PATH_SEPARATOR)
   end
   ok = system(build_env, "make", "build", chdir: TREE, out: log, err: [log, "a"])
+  File.write(db_rb, db_rb_orig) if db_rb_orig
   build_s = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0).round(1)
   unless ok
     tail = (File.readlines(log).last(15).join rescue "")
