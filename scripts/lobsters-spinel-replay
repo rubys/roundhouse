@@ -236,6 +236,60 @@ routes_file = File.join(work, "routes.txt")
 seq_file    = File.join(work, "sequence.txt")
 File.write(routes_file, ROUTES.map { |r| "GET #{r}" }.join("\n"))
 visits = JSON.parse(File.read(opts[:sequence]))["visits"]
+# These definitions sit above their first call ON PURPOSE. A top-level `def`
+# binds only when execution reaches it, so calling one from earlier in the
+# file raises NoMethodError at run time while `ruby -c` reports nothing --
+# which is exactly how a broken lane reached the published page.
+# ── parse the driver's plain-text report ─────────────────────────────
+# Kept character-for-character in step with scripts/lobsters-replay: the
+# per-endpoint section joins lanes on these keys (`rh_pr.keys.select { |k|
+# rl_pr.key?(k) }`), so a template this lane spells differently is not a
+# mismatched label, it is a row that silently vanishes from the comparison.
+ROUTE_TEMPLATES = [
+  [%r{\A/comments/[^/]+/reply\z}, "/comments/:comment_id/reply"],
+  [%r{\A/threads/[^/]+\z},        "/threads/:username"],
+  [%r{\A/u/[^/]+\z},              "/u/:username"],
+  [%r{\A/s/[^/]+\z},              "/s/:story_id"],
+].freeze
+
+def route_template(path)
+  base = path.split("?", 2).first
+  ROUTE_TEMPLATES.each { |re, tmpl| return tmpl if base.match?(re) }
+  path
+end
+
+# Routes DEFERRED out of the timed sequence, declared in
+# bench/lobsters/declared-gaps.json. A deferred route is one the emit is
+# known not to render; timing it measures an exception or the wrong
+# document, and leaving it in makes ms/iter faster than real work for a
+# reason that has nothing to do with speed.
+#
+# The filter keys off route_template, so it drops every concrete visit of a
+# deferred route (the sequence visits /u/:username six times, with six
+# different usernames). EVERY lane must apply the same list or the lanes
+# time different work and the ratio between them stops meaning anything --
+# which is why the orchestrator passes the same file to all of them.
+#
+# A declared route matching no visit is fatal: a deferral that silently
+# defers nothing leaves the failing visits in the timing while the page
+# claims they were excluded.
+def load_deferred(path)
+  return [] if path.nil? || path.empty?
+  abort "deferred ledger not found at #{path.inspect}" unless File.exist?(path)
+  (JSON.parse(File.read(path))["declared_gaps"] || []).map { |g| g["route"] }
+end
+
+def drop_deferred(visits, deferred, label = "sequence")
+  return [visits, 0] if deferred.empty?
+  kept = visits.reject { |v| deferred.include?(route_template(v["path"])) }
+  dropped = visits.size - kept.size
+  unmatched = deferred.reject { |t| visits.any? { |v| route_template(v["path"]) == t } }
+  unless unmatched.empty?
+    abort "deferred route(s) #{unmatched.join(", ")} match no visit in the #{label}"
+  end
+  [kept, dropped]
+end
+
 visits, DEFERRED_VISITS = drop_deferred(visits, load_deferred(opts[:defer]))
 File.write(seq_file, visits.map { |v| "#{v['method']} #{v['path']}" }.join("\n"))
 
@@ -283,50 +337,8 @@ if (bad = raw.lines.find { |l| l.start_with?("LOGINFAIL") })
   die("replay", bad.strip)
 end
 
-# ── parse the driver's plain-text report ─────────────────────────────
-# Kept character-for-character in step with scripts/lobsters-replay: the
-# per-endpoint section joins lanes on these keys (`rh_pr.keys.select { |k|
-# rl_pr.key?(k) }`), so a template this lane spells differently is not a
-# mismatched label, it is a row that silently vanishes from the comparison.
-ROUTE_TEMPLATES = [
-  [%r{\A/comments/[^/]+/reply\z}, "/comments/:comment_id/reply"],
-  [%r{\A/threads/[^/]+\z},        "/threads/:username"],
-  [%r{\A/u/[^/]+\z},              "/u/:username"],
-  [%r{\A/s/[^/]+\z},              "/s/:story_id"],
-].freeze
 
 
-# Routes DEFERRED out of the timed sequence, declared in
-# bench/lobsters/declared-gaps.json. A deferred route is one the emit is
-# known not to render; timing it measures an exception or the wrong
-# document, and leaving it in makes ms/iter faster than real work for a
-# reason that has nothing to do with speed.
-#
-# The filter keys off route_template, so it drops every concrete visit of a
-# deferred route (the sequence visits /u/:username six times, with six
-# different usernames). EVERY lane must apply the same list or the lanes
-# time different work and the ratio between them stops meaning anything --
-# which is why the orchestrator passes the same file to all of them.
-#
-# A declared route matching no visit is fatal: a deferral that silently
-# defers nothing leaves the failing visits in the timing while the page
-# claims they were excluded.
-def load_deferred(path)
-  return [] if path.nil? || path.empty?
-  abort "deferred ledger not found at #{path.inspect}" unless File.exist?(path)
-  (JSON.parse(File.read(path))["declared_gaps"] || []).map { |g| g["route"] }
-end
-
-def drop_deferred(visits, deferred, label = "sequence")
-  return [visits, 0] if deferred.empty?
-  kept = visits.reject { |v| deferred.include?(route_template(v["path"])) }
-  dropped = visits.size - kept.size
-  unmatched = deferred.reject { |t| visits.any? { |v| route_template(v["path"]) == t } }
-  unless unmatched.empty?
-    abort "deferred route(s) #{unmatched.join(", ")} match no visit in the #{label}"
-  end
-  [kept, dropped]
-end
 
 # The dumped body's file name for a route. Mirrors the compiled driver's
 # `safe_name` character for character: content parity is keyed by it, and a
@@ -335,11 +347,6 @@ def body_name(route)
   route.delete_prefix("/").gsub(/[^\w.-]/, "_")
 end
 
-def route_template(path)
-  base = path.split("?", 2).first
-  ROUTE_TEMPLATES.each { |re, tmpl| return tmpl if base.match?(re) }
-  path
-end
 
 # samples: { template => [ms, …] } -> { template => {ms_median, n, …} }.
 # Same shape and rounding as the CRuby lane's summarize_samples.

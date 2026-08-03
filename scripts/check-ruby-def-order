@@ -1,0 +1,69 @@
+#!/usr/bin/env ruby
+# scripts/check-ruby-def-order — catch a top-level call placed above the
+# `def` it calls.
+#
+# WHY THIS EXISTS. Ruby binds a top-level `def` when execution REACHES it, so
+# a script that calls a helper from a line above the definition raises
+# NoMethodError at run time. `ruby -c` reports nothing, because the file is
+# syntactically perfect. That is not a hypothetical: a deferral filter added
+# to scripts/lobsters-rails-replay sat 39 lines above its helper, passed
+# `ruby -c` on three scripts, and took both Rails lanes and the AOT lane down
+# on the published benchmark — the run produced no data at all.
+#
+# The check is deliberately narrow. It only looks at TOP-LEVEL executable
+# lines (nesting depth zero, outside any def/class/module/block), because a
+# call inside a method body is resolved when that method runs, which is
+# almost always after every definition has been read. Narrow means it has
+# very few false positives, which is what makes it usable as a gate.
+#
+# Usage: scripts/check-ruby-def-order FILE...
+#        exit 0 = clean, 1 = at least one call precedes its definition
+
+OPENERS = /^\s*(def|class|module|if|unless|case|while|until|begin|for)\b/
+DO_END  = /\bdo\b\s*(\|[^|]*\|)?\s*$/
+
+def scan(path)
+  src = File.readlines(path, chomp: true)
+
+  # Definition line of each top-level `def`. Only depth-0 defs matter: a
+  # method inside a class is reached through its own receiver, not by the
+  # bare-name call this checks for.
+  defs, depth = {}, 0
+  src.each_with_index do |line, i|
+    code = line.sub(/#.*\z/, "")
+    defs[$1] = i + 1 if depth.zero? && code =~ /^def ([a-z_][\w]*[?!]?)/ && !defs.key?($1)
+    depth += 1 if code =~ OPENERS || code =~ DO_END
+    depth -= 1 if code =~ /^\s*end\b/
+    depth = 0 if depth.negative?
+  end
+  return [] if defs.empty?
+
+  bad, depth = [], 0
+  src.each_with_index do |line, i|
+    code = line.sub(/#.*\z/, "")
+    was = depth
+    depth += 1 if code =~ OPENERS || code =~ DO_END
+    depth -= 1 if code =~ /^\s*end\b/
+    depth = 0 if depth.negative?
+    next unless was.zero?                       # top-level execution only
+    next if code =~ /^def /                     # the definition itself
+    defs.each do |name, defline|
+      next if i + 1 >= defline                  # defined at or above: fine
+      next unless code =~ /(?<![\w.:@$])#{Regexp.escape(name)}\s*[( ]/
+      next if code =~ /(?<![\w.:@$])#{Regexp.escape(name)}\s*[:=]/  # a key or an assignment
+      bad << [i + 1, name, defline, line.strip]
+    end
+  end
+  bad
+end
+
+status = 0
+ARGV.each do |path|
+  scan(path).each do |line, name, defline, text|
+    status = 1
+    warn "#{path}:#{line}: calls `#{name}` but it is defined at line #{defline}"
+    warn "    #{text}"
+  end
+end
+puts "def-order: clean (#{ARGV.size} file(s))" if status.zero?
+exit status

@@ -131,6 +131,24 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # The deferred-route ledger. Read here by every path that times a sequence,
 # and again by the aggregation block below for parity classification.
 GAPS_JSON="$REPO_ROOT/bench/lobsters/declared-gaps.json"
+
+# Pre-flight: a top-level call placed above the `def` it calls is a runtime
+# NoMethodError that `ruby -c` cannot see. That exact mistake took both Rails
+# lanes and the AOT lane down on a published run — every lane reported "no
+# data" after minutes of booting. One second here, before anything boots.
+if ! ruby "$REPO_ROOT/scripts/check-ruby-def-order" \
+        "$REPO_ROOT/scripts/lobsters-replay" \
+        "$REPO_ROOT/scripts/lobsters-spinel-replay" \
+        "$REPO_ROOT/scripts/lobsters-rails-replay" \
+        "$REPO_ROOT/scripts/lobsters-report" >/dev/null; then
+    echo "bench-lobsters: replay script calls a helper before defining it (see above)" >&2
+    ruby "$REPO_ROOT/scripts/check-ruby-def-order" \
+        "$REPO_ROOT/scripts/lobsters-replay" \
+        "$REPO_ROOT/scripts/lobsters-spinel-replay" \
+        "$REPO_ROOT/scripts/lobsters-rails-replay" \
+        "$REPO_ROOT/scripts/lobsters-report" >&2 || true
+    exit 2
+fi
 SRC="${LOBSTERS_SRC:-$HOME/git/ruby-bench/benchmarks/lobsters}"
 OUT_DIR=""
 EXPLICIT_OUT=0

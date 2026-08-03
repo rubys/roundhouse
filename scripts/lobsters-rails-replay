@@ -153,17 +153,6 @@ if opts[:seq_out]
   $stderr.puts "sequence written to #{opts[:seq_out]}"
 end
 
-# Narrow what gets TIMED, after the full sequence has been written above.
-DEFERRED = load_deferred(opts[:defer])
-unless DEFERRED.empty?
-  before = routes.size
-  unmatched = DEFERRED.reject do |t|
-    routes.any? { |env| route_template(env["PATH_INFO"]) == t }
-  end
-  abort "deferred route(s) #{unmatched.join(", ")} match no visit in the sequence" unless unmatched.empty?
-  routes = routes.reject { |env| DEFERRED.include?(route_template(env["PATH_INFO"])) }
-  $stderr.puts "deferred #{before - routes.size} visit(s) of #{DEFERRED.size} route(s): #{DEFERRED.join(", ")}"
-end
 
 # Bucket a concrete visit path under its route template so per-route
 # samples aggregate across the sequence's parameterized visits — every
@@ -200,6 +189,22 @@ def load_deferred(path)
 end
 
 # samples: { template => [ms, …] } -> { template => {ms_median, n, …} }.
+# Narrow what gets TIMED. Placed AFTER route_template and load_deferred:
+# both are plain top-level defs, so this call has to sit below them or it
+# raises NoMethodError at run time — which `ruby -c` does not catch.
+# The full sequence has already been written by --seq-out above, so the
+# committed frozen-sequence.json and its drift check are unaffected.
+DEFERRED = load_deferred(opts[:defer])
+unless DEFERRED.empty?
+  before = routes.size
+  unmatched = DEFERRED.reject do |t|
+    routes.any? { |env| route_template(env["PATH_INFO"]) == t }
+  end
+  abort "deferred route(s) #{unmatched.join(", ")} match no visit in the sequence" unless unmatched.empty?
+  routes = routes.reject { |env| DEFERRED.include?(route_template(env["PATH_INFO"])) }
+  $stderr.puts "deferred #{before - routes.size} visit(s) of #{DEFERRED.size} route(s): #{DEFERRED.join(", ")}"
+end
+
 def summarize_samples(by_route)
   by_route.sort.to_h.transform_values do |arr|
     s = arr.sort
