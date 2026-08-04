@@ -993,7 +993,8 @@ pack_tree() {
     # replayed by scripts/lobsters-replay from this repo, so its
     # REPRODUCE.md points there instead of at files it cannot use.
     local staged=""
-    local build_section run_section bcrypt_section
+    local build_section run_section bcrypt_section gc_section
+    gc_section=""
     if [[ "$name" == spinel ]]; then
         local wf
         for wf in routes.txt sequence.txt; do
@@ -1037,6 +1038,39 @@ warmup iterations; iterate until the minimum timed iterations AND the
 minimum seconds of total wall clock, warmup included, are both met) — and
 last the seed database, page-copied into the named in-memory DB at boot so
 the timed loop never touches disk.
+EOS
+)
+        gc_section=$(cat <<'EOS'
+## Reproducing the #3513 minor-mark failure
+
+As of spinel 4b099a1a (2026-08-04) the opt-in generational mark still
+loses objects on this app — matz/spinel#3513. To see it, add
+`SPINEL_GC_MINOR=1` to the benchmark command above. Expect a SIGBUS or
+SIGABRT partway through the sequence, but NOT on every run: the lost
+object only kills the process if its memory is reused before its last
+read, and that is decided by address-space layout. Measured here: 2
+crashes in 24 full-sequence runs at spinel 576e3f06, 14 in 20 at
+4b099a1a — same tree both times, so a single clean run is luck, not
+resolution. Loop it; on macOS every crash leaves a symbolized backtrace
+in `~/Library/Logs/DiagnosticReports/blog-*.ips`.
+
+Three levers, all measured on this app:
+
+- **Deterministic repro:** with matz/spinel#3519 (GC stress pins the
+  threshold it seeds), `SPINEL_GC_MINOR=1 SPINEL_GC_STRESS=1` failed at
+  the first collections during boot in every measured run (3/3), about
+  a second in; add `SPINEL_GC_VERIFY=1 SPINEL_GC_VERIFY_GEN=1` for the
+  collector's own corrupt-object report. Without that change stress is
+  a no-op at this heap size — its 2 KB threshold is a base the
+  live-size retune floats away from after the first collection, so it
+  collects no more often than the default.
+- **`--profile` (frame-pointer) builds mask the failure entirely**;
+  only the default `-O2` build shows it, and the rate moves between
+  spinel versions as register allocation reshuffles which temps
+  survive a collection.
+- **The default collector is clean** under every configuration above,
+  including pinned stress over the full sequence — the loss is on the
+  minor-mark path.
 EOS
 )
         bcrypt_section=$(cat <<'EOS'
@@ -1115,6 +1149,8 @@ every published lane ran with statistics (the harness applies them outside
 the timed section), and without them the planner turns the hottest-stories
 SELECT into a table walk. The tree is fully inspectable without any of
 this; only running the sequence needs the DB.
+
+$gc_section
 
 $bcrypt_section
 
