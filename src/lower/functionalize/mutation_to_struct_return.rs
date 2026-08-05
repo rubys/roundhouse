@@ -111,13 +111,21 @@ pub fn compute_registry(methods: &[MethodDef]) -> Registry {
     // dual method is itself dual — `update`'s body ends in `save`, so it
     // returns save's `{record, bool}` tuple, not just the record. Iterate
     // to a fixpoint (chains: `a` tail-calls `b` tail-calls `save`).
+    //
+    // Eligibility is NOT limited to directly-mutating methods: a method
+    // whose only mutation is delegated — base.rb's `save`, whose whole
+    // mutating half lives in `save_after_validation` so the ruby-family
+    // `update_attribute` can enter past validation — has no ivar write
+    // of its own, but its tail self-call returns the callee's threaded
+    // record all the same. Classifying by direct mutation alone dropped
+    // `save` from the registry and every elixir call site stopped
+    // destructuring the `{record, ok}` tuple.
     let eligible: Vec<&MethodDef> = methods
         .iter()
         .filter(|m| {
             m.receiver != MethodReceiver::Class
                 && m.name.as_str() != "initialize"
                 && !m.name.as_str().ends_with("__loop")
-                && mutates_record(&m.body)
         })
         .collect();
     loop {
@@ -131,6 +139,17 @@ pub fn compute_registry(methods: &[MethodDef]) -> Registry {
                 if recv == RECORD && reg.is_dual(callee) {
                     reg.record_returning.remove(&name);
                     reg.dual_return.insert(name);
+                    changed = true;
+                } else if recv == RECORD
+                    && reg.record_returning.contains(callee)
+                    && !reg.record_returning.contains(&name)
+                    && !mutates_record(&m.body)
+                {
+                    // Pure delegation to a record-returning callee: the
+                    // method's value IS the threaded record. (A directly-
+                    // mutating method was already classified above by its
+                    // own body shape — don't reclassify it here.)
+                    reg.record_returning.insert(name);
                     changed = true;
                 }
             }
@@ -1626,6 +1645,46 @@ mod tests {
         eprintln!("--- save! ---\n{ex}\n-------------");
         assert!(ex.contains("{record, ok} = save(record)"), "bool-cond destructures:\n{ex}");
         assert!(ex.contains("if ok do"), "tests the captured boolean:\n{ex}");
+    }
+
+    #[test]
+    fn delegating_save_inherits_dual_from_its_extracted_half() {
+        // base.rb's save delegates its whole mutating half so the
+        // ruby-family update_attribute can enter past validation:
+        //   def save; before_validation; save_after_validation; end
+        //   def save_after_validation; @id = 1; true; end
+        // Classification by direct mutation alone dropped `save` from
+        // the registry — no ivar write of its own — and every call
+        // site stopped destructuring the {record, ok} tuple.
+        let after = instance_method(
+            "save_after_validation",
+            &[],
+            syn(ExprNode::Seq {
+                exprs: vec![
+                    assign_ivar("id", syn(ExprNode::Lit { value: Literal::Int { value: 1 } })),
+                    syn(ExprNode::Lit { value: Literal::Bool { value: true } }),
+                ],
+            }),
+        );
+        let save = instance_method(
+            "save",
+            &[],
+            syn(ExprNode::Seq {
+                exprs: vec![
+                    send(None, "before_validation", vec![]),
+                    send(None, "save_after_validation", vec![]),
+                ],
+            }),
+        );
+        let reg = compute_registry(&[after.clone(), save.clone()]);
+        assert!(
+            reg.dual_return.contains("save_after_validation"),
+            "the extracted half mutates and returns a value"
+        );
+        assert!(
+            reg.dual_return.contains("save"),
+            "tail delegation to a dual method makes the delegator dual"
+        );
     }
 
     #[test]

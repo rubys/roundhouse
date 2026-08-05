@@ -139,13 +139,17 @@ fn assignment_receiver_keeps_parens() {
 }
 
 #[test]
-fn relation_scope_delegates_are_exact_arity_and_skip_conflicts() {
-    // The blanket `(*args, **kwargs)` forward didn't survive spinel's C
-    // stage (splat through the class-value dispatch) and hid arity
-    // errors; delegates now carry each scope's own params. `recent` is
-    // declared with two shapes (zero-arg vs two optionals) — no single
-    // def can forward both, so it gets no delegate, ledgered in the
-    // header.
+fn relation_scope_delegates_dispatch_fixed_arity_entries() {
+    // Spinel's class-value dispatch is exact-positional-arity-only
+    // (matz/spinel#3526): no splats, no kwargs, no defaulting omitted
+    // optionals through the dispatch. Every delegate arm therefore
+    // calls a fixed-full-arity `__scope_<name>__<n>` entry on the
+    // model, with SCOPE_UNSET sentinels detecting how many positionals
+    // the caller supplied. `recent` is declared with two shapes
+    // (zero-arg on User vs two optionals on Story) — previously
+    // skipped as unforwardable, now served by the same sentinel def:
+    // each model defines only the arities it accepts, and a wrong
+    // arity raises at the call.
     let app = ingest_app_from_tree(tree(&[
         ("db/schema.rb", SCHEMA),
         (
@@ -168,12 +172,46 @@ end
     .expect("ingest");
     let files = ruby::emit_spinel(&app);
     let src = emitted(&files, "relation_scopes.rb");
-    assert!(src.contains("def active\n      klass.active(self)"), "{src}");
+    assert!(src.contains("SCOPE_UNSET = Object.new"), "{src}");
     assert!(
-        src.contains("def low_scoring(max = 5)\n      klass.low_scoring(max, self)"),
+        src.contains("def active\n      return klass.__scope_active__0(self)"),
         "{src}"
     );
-    assert!(!src.contains("def recent"), "conflicting shapes get no delegate:\n{src}");
-    assert!(src.contains("NoMethodError: recent"), "skip must be ledgered:\n{src}");
+    assert!(
+        src.contains(
+            "return klass.__scope_low_scoring__0(self) if SCOPE_UNSET.equal?(max)"
+        ),
+        "{src}"
+    );
+    assert!(
+        src.contains("return klass.__scope_low_scoring__1(self, max)"),
+        "{src}"
+    );
+    // The multi-shape name renders now, one sentinel def spanning both
+    // models' arities.
+    assert!(
+        src.contains("def recent(user = SCOPE_UNSET, exclude_tags = SCOPE_UNSET)"),
+        "conflicting shapes share one sentinel delegate:\n{src}"
+    );
+    assert!(
+        src.contains("return klass.__scope_recent__2(self, user, exclude_tags)"),
+        "{src}"
+    );
     assert!(!src.contains("*args"), "no splat forwarding:\n{src}");
+    // Model side: each entry has one exact arity, and the padded
+    // arities bind the scope's own defaults in the model's context.
+    let story = emitted(&files, "story.rb");
+    assert!(
+        story.contains("def self.__scope_recent__0(__rel)\n    Story.recent(nil, nil, __rel)"),
+        "{story}"
+    );
+    let user = emitted(&files, "user.rb");
+    assert!(
+        user.contains("def self.__scope_recent__0(__rel)\n    User.recent(__rel)"),
+        "{user}"
+    );
+    assert!(
+        !user.contains("__scope_recent__1"),
+        "User only accepts arity 0:\n{user}"
+    );
 }

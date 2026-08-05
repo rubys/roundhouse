@@ -278,7 +278,7 @@ module ActiveRecord
     # extracted post-validation half directly.
     def update_attribute(name, value)
       self[name] = value
-      __save_after_validation
+      save_after_validation
     end
 
     # Saved-change tracking (ActiveModel::Dirty subset) — the real
