@@ -45,6 +45,13 @@
       "note": "Undiagnosed. Shape suggests a Hash emitted as an Array (or a symbol-keyed read lowered to an index) — needs a reduction before it can be ranked honestly."
     },
     {
+      "slug": "binary-column-text-escape",
+      "title": "binary columns inline-escape as text — NUL bytes truncate the SQL",
+      "owner": "compiler",
+      "match": "SQLite3::SQLException: unrecognized token",
+      "note": "comments.confidence_order is t.binary holding pack()ed bytes; Db.escape_string doubles quotes but a NUL byte ends the statement at the C level, so the INSERT dies at that column. Needs a blob ValueType through the column mapping (X'hex' literals + column_blob reads) across the adapter shims. Sits under the comment factory's save, so it gates most of the comment/story cluster."
+    },
+    {
       "slug": "scope-not-on-relation",
       "title": "a model scope does not chain off a Relation",
       "owner": "compiler",

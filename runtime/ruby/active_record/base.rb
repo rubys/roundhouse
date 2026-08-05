@@ -373,6 +373,15 @@ module ActiveRecord
       after_validation
       return false unless ok
 
+      __save_after_validation
+    end
+
+    # The post-validation half of `save`, extracted so Rails'
+    # validation-skipping writes (`update_attribute`, in the
+    # ruby-family connection.rb reopen) can enter here directly:
+    # validations and their callbacks skipped, save callbacks run —
+    # Rails' documented contract for those writes.
+    def __save_after_validation
       before_save
       was_new = new_record?
       if was_new

@@ -161,6 +161,7 @@ module ActiveRecord
     # validity; `save!` returns self or raises; `destroy` returns
     # self either way (idempotent on already-destroyed records).
     def save: () -> bool
+    def __save_after_validation: () -> bool
     def save!: () -> Base
     def destroy: () -> Base
     def reload: () -> Base

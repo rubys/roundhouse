@@ -260,6 +260,27 @@ module ActiveRecord
       ActiveRecord::Relation.new(self)
     end
 
+    # Rails-shape `first` fallback, same story as `where`/`all` above:
+    # spec/dynamic call sites reach the class method directly
+    # (`Category.first` in lobsters' specs); lowered call sites don't
+    # land here. `last` lives in base.rb over `_adapter_last` — this
+    # one is ruby-family-only because Relation#first already carries
+    # the ORDER BY <pk> ASC LIMIT 1 shape.
+    def self.first
+      ActiveRecord::Relation.new(self).first
+    end
+
+    # Rails' `update_attribute`: one writer, then save WITHOUT
+    # validations (validation callbacks skipped too) — save callbacks
+    # still run. Specs use it to construct records a validation would
+    # reject (lobsters' username-change history), so validating here
+    # would break exactly the sites that reach for it. Enters save's
+    # extracted post-validation half directly.
+    def update_attribute(name, value)
+      self[name] = value
+      __save_after_validation
+    end
+
     # Saved-change tracking (ActiveModel::Dirty subset) — the real
     # implementation behind base.rb's compile-surface stubs; see the
     # note there for why the diff is ruby-family-only. The snapshot

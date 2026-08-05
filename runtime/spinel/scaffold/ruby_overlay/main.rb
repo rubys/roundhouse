@@ -30,6 +30,13 @@ require "cgi"
 # stdlib ERB for app code that escapes explicitly (`ERB::Util.html_escape`
 # in lobsters' Hat#to_html_label) — the util module, not the templating.
 require "erb"
+# stdlib BigDecimal for app code doing exact decimal math (lobsters'
+# Comment#calculated_confidence — its own comment says the Float
+# version accumulates enough error to go out of range, so a Float
+# shim is not a substitute). Spinel warns-and-ignores this require;
+# BigDecimal call sites remain a compile gap there, tree-shaken off
+# the served routes today.
+require "bigdecimal"
 
 # SqliteAdapter is hoisted to top-level so the spinel-AOT compile
 # can statically resolve the `SqliteAdapter` constant referenced
