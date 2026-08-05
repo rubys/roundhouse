@@ -781,6 +781,114 @@ pub(crate) fn push_scope_methods(
     }
 }
 
+/// Fixed-full-arity relation entry points for every registered scope /
+/// relation-taking class method on a model:
+///
+///   def self.__scope_<name>__<k>(__rel, p0..p<k-1>)          # k supplied positionals
+///   def self.__scope_<name>__<k>__kw_<names>(__rel, …, kw:)  # + a keyword subset
+///
+/// Each body forwards to the primary scope method with the omitted
+/// optional positionals padded from the primary's OWN default
+/// expressions — cloned here, inside the model class, where those
+/// expressions still mean what the author wrote (`saved`'s
+/// `exclude_tags = []`, constant reads, …). The generated
+/// `ActiveRecord::Relation` delegates (`emit_relation_scope_delegates`)
+/// dispatch mid-chain calls to these instead of the primary because the
+/// primary's `__rel` sits AFTER the optional positionals (unreachable
+/// without supplying them) and because spinel's class-value dispatch
+/// requires each call to supply a method's exact full positional arity:
+/// it neither defaults omitted optionals through the dispatch nor binds
+/// kwargs correctly past an omitted optional. A fixed-arity entry per
+/// supplied shape sidesteps all of it. Ruby-emit seam only, same as the
+/// scope methods themselves; invoked AFTER all scope-chain rewriting so
+/// these bodies are never re-threaded.
+pub(crate) fn push_scope_variants(
+    methods: &mut Vec<MethodDef>,
+    model_name: &ClassId,
+    registered: &std::collections::HashMap<Symbol, Vec<crate::dialect::Param>>,
+) {
+    use crate::dialect::{AccessorKind, Param};
+    use crate::lower::scope_chain::{delegable_name, scope_variant_name, DelegableShape};
+    let rel = Symbol::from("__rel");
+    let mut names: Vec<&Symbol> = registered.keys().collect();
+    names.sort_by_key(|n| n.as_str());
+    for name in names {
+        if !delegable_name(name) {
+            continue;
+        }
+        let Some(shape) = DelegableShape::of(&registered[name]) else { continue };
+        for k in shape.min_required..=shape.positionals.len() {
+            for subset in shape.keyword_subsets() {
+                let vname = scope_variant_name(name, k, &subset);
+                if methods
+                    .iter()
+                    .any(|m| m.name == vname && m.receiver == MethodReceiver::Class)
+                {
+                    continue;
+                }
+                let mut params = vec![Param::positional(rel.clone())];
+                for p in &shape.positionals[..k] {
+                    params.push(Param::positional(p.name.clone()));
+                }
+                for p in &subset {
+                    params.push(Param::keyword(p.name.clone(), None));
+                }
+                let mut args: Vec<Expr> = shape.positionals[..k]
+                    .iter()
+                    .map(|p| var_ref(p.name.clone()))
+                    .collect();
+                for p in &shape.positionals[k..] {
+                    args.push(p.default.clone().expect("optional tail past min_required"));
+                }
+                args.push(var_ref(rel.clone()));
+                if !subset.is_empty() {
+                    let entries = subset
+                        .iter()
+                        .map(|p| {
+                            (
+                                Expr::new(
+                                    Span::synthetic(),
+                                    ExprNode::Lit {
+                                        value: crate::expr::Literal::Sym { value: p.name.clone() },
+                                    },
+                                ),
+                                var_ref(p.name.clone()),
+                            )
+                        })
+                        .collect();
+                    args.push(Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Hash { entries, kwargs: true },
+                    ));
+                }
+                let body = Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(class_const(model_name)),
+                        method: name.clone(),
+                        args,
+                        block: None,
+                        parenthesized: true,
+                    },
+                );
+                methods.push(MethodDef {
+                    name: vname,
+                    receiver: MethodReceiver::Class,
+                    params,
+                    body,
+                    signature: None,
+                    effects: crate::effect::EffectSet::default(),
+                    enclosing_class: Some(model_name.0.clone()),
+                    kind: AccessorKind::Method,
+                    is_async: false,
+                    mutates_self: false,
+                    block_param: None,
+                });
+            }
+        }
+    }
+}
+
 /// `ActiveRecord::Relation.new(self)` — the default relation a scope class
 /// method starts from when called on the class rather than chained.
 pub(crate) fn relation_new_self() -> Expr {

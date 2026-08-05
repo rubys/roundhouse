@@ -248,16 +248,26 @@ fn rewrite_library_partial_render(
 /// rendering. A strict no-op for scope-free apps (the blog).
 /// Generate `app/models/relation_scopes.rb` — an
 /// `ActiveRecord::Relation` reopen delegating each declared model
-/// scope to its class method with `self` threaded as `__rel`, so a
-/// scope chained on a relation VALUE (lobsters' StoriesPaginator:
-/// `@scope.limit(n).for_presentation` where `@scope` is an untyped
-/// ctor param) resolves without static receiver-type knowledge.
-/// `klass` dispatch keeps one def per scope NAME correct for every
-/// model sharing it; `self` lands positionally where
-/// `push_scope_methods` inserts `__rel` (after positionals, before
-/// keywords). Statically resolvable — explicit defs, no
-/// method_missing. Emitted under app/models/ so the aggregator loads
-/// it. None when the app declares no scopes.
+/// scope to the model's fixed-arity `__scope_` relation entry points
+/// (`push_scope_variants`), so a scope chained on a relation VALUE
+/// (lobsters' StoriesPaginator: `@scope.limit(n).for_presentation`
+/// where `@scope` is an untyped ctor param) resolves without static
+/// receiver-type knowledge. One def per scope NAME serves every model
+/// sharing it, whatever their arities: SCOPE_UNSET sentinels detect
+/// how many positionals the caller supplied, and each arm forwards
+/// that exact shape. Positional-only arms dispatch through `klass` —
+/// every model's `__scope_<name>__<n>` entry has the same full arity
+/// by construction, which is what spinel's class-value dispatch
+/// requires (it neither defaults omitted optionals through the
+/// dispatch nor accepts kwargs). Keyword-carrying arms dispatch
+/// through `case klass.name` constant receivers instead. An argument
+/// shape no model accepts raises ArgumentError at the call, as Rails
+/// would. Statically resolvable — explicit defs, no method_missing,
+/// no splats. Emitted under app/models/ so the aggregator loads it.
+/// None when the app declares no scopes. A name that can't render
+/// (rest param, too many keywords, non-tail optional positionals,
+/// `?`/`!` name) is skipped with a `lower_residue` diagnostic and a
+/// mid-chain call raises NoMethodError.
 pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
     // Names Relation itself defines never delegate — a scope named
     // like a builtin would already dispatch to the builtin under
@@ -271,65 +281,63 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
         "pick", "destroy_all", "delete_all", "update_all", "klass", "where_clauses",
     ];
     let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
-    // Delegates carry each scope's EXACT parameter list, not a blanket
-    // `(*args, **kwargs)` forward: a splat through the class-value
-    // dispatch doesn't survive spinel's C stage, and the exact shape is
-    // the better contract anyway (the arity a call site gets wrong
-    // fails AT the call). That requires one consistent shape per name —
-    // plain positionals, defaults restricted to literals the delegate
-    // can replicate. A name declared with CONFLICTING shapes across
-    // models (lobsters: `recent` is zero-arg on ModNote,
-    // `(user = nil, exclude_tags = nil)` on Story) gets NO delegate: no
-    // single def can forward both, and a mid-chain call on a relation
-    // value would mis-bind positionals silently. Skipped names are
-    // listed in the generated header; an exercised one raises
-    // NoMethodError at the call site — loud, and so far unexercised.
-    let mut shapes: std::collections::BTreeMap<String, Vec<Vec<crate::dialect::Param>>> =
-        Default::default();
-    for per_model in scopes.values() {
-        for (name, params) in per_model {
-            let n = name.as_str().to_string();
+    // name -> [(model, params)] in app-model order, names sorted — the
+    // generated file must be byte-stable across runs.
+    let mut by_name: std::collections::BTreeMap<
+        String,
+        Vec<(&crate::ident::ClassId, &[crate::dialect::Param])>,
+    > = Default::default();
+    for model in &app.models {
+        let Some(per) = scopes.get(&model.name) else { continue };
+        let mut names: Vec<&Symbol> = per.keys().collect();
+        names.sort_by_key(|n| n.as_str());
+        for n in names {
             if RELATION_BUILTINS.contains(&n.as_str()) {
                 continue;
             }
-            let entry = shapes.entry(n).or_default();
-            if !entry.iter().any(|p| params_render_eq(p, params)) {
-                entry.push(params.clone());
-            }
+            by_name
+                .entry(n.as_str().to_string())
+                .or_default()
+                .push((&model.name, per[n].as_slice()));
         }
     }
-    if shapes.is_empty() {
+    if by_name.is_empty() {
         return None;
     }
     let mut skipped: Vec<String> = Vec::new();
     let mut body = String::new();
-    for (name, shape_list) in &shapes {
-        let delegate = match &shape_list[..] {
-            [params] => render_exact_delegate(name, params),
-            _ => None,
-        };
-        match delegate {
-            Some(text) => body.push_str(&text),
-            None => skipped.push(name.clone()),
+    for (name, decls) in &by_name {
+        match render_scope_delegate(name, decls) {
+            Ok(text) => body.push_str(&text),
+            Err(reason) => {
+                push_delegate_skip_diagnostic(name, &reason, decls);
+                skipped.push(name.clone());
+            }
         }
     }
     let mut s = String::from(
         "# Generated Relation scope delegation (see\n\
          # emit_relation_scope_delegates): each model scope, callable on a\n\
-         # relation value mid-chain, forwarding to the model's synthesized\n\
-         # scope class method with this relation as its `__rel`.\n",
+         # relation value mid-chain, forwarding the caller's exact argument\n\
+         # shape to the model's fixed-arity __scope_ entry — SCOPE_UNSET\n\
+         # sentinels detect how many positionals were supplied.\n",
     );
     if !skipped.is_empty() {
         writeln!(
             s,
-            "# No delegate (conflicting shapes across models, or params a\n\
-             # delegate can't replicate) — a mid-chain call raises\n\
-             # NoMethodError: {}",
+            "# No delegate (see the lower_residue diagnostics) — a mid-chain\n\
+             # call raises NoMethodError: {}",
             skipped.join(", ")
         )
         .unwrap();
     }
     s.push_str("module ActiveRecord\n\x20\x20class Relation\n");
+    s.push_str(
+        "\x20\x20\x20\x20# Argument-omitted sentinel for the delegates below:\n\
+         \x20\x20\x20\x20# distinguishes an omitted optional from every real value\n\
+         \x20\x20\x20\x20# including nil. Compared with equal?, never ==.\n\
+         \x20\x20\x20\x20SCOPE_UNSET = Object.new\n",
+    );
     s.push_str(&body);
     s.push_str("  end\nend\n");
     Some(EmittedFile {
@@ -338,53 +346,257 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
     })
 }
 
-/// One exact-arity delegate def, or None when the params aren't the
-/// replicable shape (plain positionals; defaults must be literals — a
-/// default expression evaluates in the MODEL's context, which the
-/// delegate can't reproduce).
-fn render_exact_delegate(name: &str, params: &[crate::dialect::Param]) -> Option<String> {
-    let mut decl_parts = Vec::new();
-    let mut fwd_parts = Vec::new();
-    for p in params {
-        if p.keyword || p.rest {
-            return None;
-        }
-        let pname = p.name.as_str();
-        match &p.default {
-            None => decl_parts.push(pname.to_string()),
-            Some(d) if matches!(&*d.node, crate::expr::ExprNode::Lit { .. }) => {
-                decl_parts.push(format!("{pname} = {}", super::emit_expr(d)))
-            }
-            Some(_) => return None,
-        }
-        fwd_parts.push(pname.to_string());
-    }
-    fwd_parts.push("self".to_string());
-    let mut s = String::new();
-    if decl_parts.is_empty() {
-        writeln!(s, "\x20\x20\x20\x20def {name}").unwrap();
-    } else {
-        writeln!(s, "\x20\x20\x20\x20def {name}({})", decl_parts.join(", ")).unwrap();
-    }
-    writeln!(s, "\x20\x20\x20\x20\x20\x20klass.{name}({})", fwd_parts.join(", ")).unwrap();
-    writeln!(s, "\x20\x20\x20\x20end").unwrap();
-    Some(s)
+/// Everything the arm renderers need about one delegate name.
+struct DelegateCtx<'a> {
+    name: &'a Symbol,
+    /// Display names for the delegate's positional params.
+    pos_names: &'a [String],
+    /// Every model declaring the name, with its admissible shape.
+    shapes: &'a [(&'a crate::ident::ClassId, crate::lower::scope_chain::DelegableShape<'a>)],
+    /// Max positional count across the shapes.
+    n_max: usize,
 }
 
-/// Two param lists that would render the same delegate — same names,
-/// same defaults, same kinds — count as one shape.
-fn params_render_eq(a: &[crate::dialect::Param], b: &[crate::dialect::Param]) -> bool {
-    a.len() == b.len()
-        && a.iter().zip(b.iter()).all(|(x, y)| {
-            x.name == y.name
-                && x.keyword == y.keyword
-                && x.rest == y.rest
-                && match (&x.default, &y.default) {
-                    (None, None) => true,
-                    (Some(dx), Some(dy)) => super::emit_expr(dx) == super::emit_expr(dy),
-                    _ => false,
-                }
+/// One delegate def for `name` across every model declaring it, or the
+/// reason it can't render (fed to the skip diagnostic).
+fn render_scope_delegate(
+    name: &str,
+    decls: &[(&crate::ident::ClassId, &[crate::dialect::Param])],
+) -> Result<String, String> {
+    use crate::lower::scope_chain::{delegable_name, DelegableShape, MAX_DELEGATE_KEYWORDS};
+    let name_sym = Symbol::from(name);
+    if !delegable_name(&name_sym) {
+        return Err("`?`/`!` names take no __scope_ arity mangling".into());
+    }
+    let mut shapes: Vec<(&crate::ident::ClassId, DelegableShape)> = Vec::new();
+    for (model, params) in decls {
+        let Some(shape) = DelegableShape::of(params) else {
+            return Err(format!(
+                "shape on {} has a rest param, more than {MAX_DELEGATE_KEYWORDS} keywords, \
+                 or optional positionals not forming a tail",
+                model.0.as_str()
+            ));
+        };
+        shapes.push((*model, shape));
+    }
+    let n_max = shapes
+        .iter()
+        .map(|(_, s)| s.positionals.len())
+        .max()
+        .unwrap_or(0);
+    // Keyword union across models, sorted by name — subset and variant
+    // naming must line up with keyword_subsets/scope_variant_name.
+    let mut kw_union: Vec<&crate::dialect::Param> = Vec::new();
+    for (_, s) in &shapes {
+        for kw in &s.keywords {
+            if !kw_union.iter().any(|k| k.name == kw.name) {
+                kw_union.push(kw);
+            }
+        }
+    }
+    kw_union.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
+    if kw_union.len() > MAX_DELEGATE_KEYWORDS {
+        return Err(format!(
+            "keyword union across models exceeds {MAX_DELEGATE_KEYWORDS}"
+        ));
+    }
+    if kw_union.iter().any(|k| k.name.as_str() == "klass") {
+        return Err("a keyword named `klass` would shadow Relation#klass".into());
+    }
+    // Positional display names: the models' own param name where every
+    // shape agrees at that position, `a<i>` otherwise (or when the name
+    // would shadow Relation#klass in the forward).
+    let pos_names: Vec<String> = (0..n_max)
+        .map(|i| {
+            let mut names = shapes
+                .iter()
+                .filter_map(|(_, s)| s.positionals.get(i).map(|p| p.name.as_str()));
+            let n = match names.next() {
+                Some(first) if names.all(|other| other == first) => first.to_string(),
+                _ => format!("a{i}"),
+            };
+            if n == "klass" { format!("a{i}") } else { n }
         })
+        .collect();
+    let mut s = String::new();
+    let mut decl: Vec<String> = pos_names
+        .iter()
+        .map(|n| format!("{n} = SCOPE_UNSET"))
+        .collect();
+    for kw in &kw_union {
+        decl.push(format!("{}: SCOPE_UNSET", kw.name.as_str()));
+    }
+    if decl.is_empty() {
+        writeln!(s, "\x20\x20\x20\x20def {name}").unwrap();
+    } else {
+        writeln!(s, "\x20\x20\x20\x20def {name}({})", decl.join(", ")).unwrap();
+    }
+    let ctx = DelegateCtx { name: &name_sym, pos_names: &pos_names, shapes: &shapes, n_max };
+    render_kw_tree(&mut s, 3, &kw_union, &mut Vec::new(), &ctx);
+    writeln!(s, "\x20\x20\x20\x20end").unwrap();
+    Ok(s)
+}
+
+/// Branch on which of the delegate's keywords the caller supplied
+/// (each independently sentinel-checked), then render the arity arms
+/// for that exact keyword subset at the leaf.
+fn render_kw_tree<'a>(
+    out: &mut String,
+    level: usize,
+    remaining: &[&'a crate::dialect::Param],
+    selected: &mut Vec<&'a crate::dialect::Param>,
+    ctx: &DelegateCtx,
+) {
+    let pad = "\x20\x20".repeat(level);
+    match remaining.split_first() {
+        None => {
+            let mut subset = selected.clone();
+            subset.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
+            render_arity_arms(out, level, &subset, ctx);
+        }
+        Some((kw, rest)) => {
+            writeln!(out, "{pad}if SCOPE_UNSET.equal?({})", kw.name.as_str()).unwrap();
+            render_kw_tree(out, level + 1, rest, selected, ctx);
+            writeln!(out, "{pad}else").unwrap();
+            selected.push(kw);
+            render_kw_tree(out, level + 1, rest, selected, ctx);
+            selected.pop();
+            writeln!(out, "{pad}end").unwrap();
+        }
+    }
+}
+
+/// The supplied-arity arms for one keyword subset: arm `n` fires when
+/// `a<n>` is the first unset positional (guards run in ascending order,
+/// each returning or raising). Positional-only arms go through `klass`;
+/// keyword arms need constant receivers (`case klass.name`) because
+/// kwargs don't survive spinel's class-value dispatch.
+fn render_arity_arms(
+    out: &mut String,
+    level: usize,
+    subset: &[&crate::dialect::Param],
+    ctx: &DelegateCtx,
+) {
+    use crate::lower::scope_chain::scope_variant_name;
+    let pad = "\x20\x20".repeat(level);
+    let kw_list = subset
+        .iter()
+        .map(|k| format!("{}:", k.name.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    for n in 0..=ctx.n_max {
+        // Models whose shape accepts exactly this call: arity within
+        // the positional range, subset within the declared keywords,
+        // every required keyword supplied.
+        let eligible: Vec<&crate::ident::ClassId> = ctx
+            .shapes
+            .iter()
+            .filter(|(_, s)| {
+                n >= s.min_required
+                    && n <= s.positionals.len()
+                    && subset
+                        .iter()
+                        .all(|kw| s.keywords.iter().any(|d| d.name == kw.name))
+                    && s.required_keywords()
+                        .iter()
+                        .all(|r| subset.iter().any(|kw| &kw.name == *r))
+            })
+            .map(|(m, _)| *m)
+            .collect();
+        let guard = (n < ctx.n_max)
+            .then(|| format!(" if SCOPE_UNSET.equal?({})", ctx.pos_names[n]))
+            .unwrap_or_default();
+        let pos_args: String = ctx.pos_names[..n]
+            .iter()
+            .map(|p| format!(", {p}"))
+            .collect();
+        if subset.is_empty() {
+            let line = if eligible.is_empty() {
+                format!(
+                    "raise ArgumentError, \"scope {} does not accept {n} positional argument(s)\"",
+                    ctx.name.as_str()
+                )
+            } else {
+                format!(
+                    "return klass.{}(self{pos_args})",
+                    scope_variant_name(ctx.name, n, &[]).as_str()
+                )
+            };
+            writeln!(out, "{pad}{line}{guard}").unwrap();
+        } else if eligible.is_empty() {
+            writeln!(
+                out,
+                "{pad}raise ArgumentError, \"scope {} does not accept ({kw_list}) with {n} \
+                 positional argument(s)\"{guard}",
+                ctx.name.as_str()
+            )
+            .unwrap();
+        } else {
+            let kw_args: String = subset
+                .iter()
+                .map(|kw| format!(", {0}: {0}", kw.name.as_str()))
+                .collect();
+            let variant = scope_variant_name(ctx.name, n, subset);
+            let inner = if n < ctx.n_max {
+                writeln!(out, "{pad}if SCOPE_UNSET.equal?({})", ctx.pos_names[n]).unwrap();
+                level + 1
+            } else {
+                level
+            };
+            let ipad = "\x20\x20".repeat(inner);
+            writeln!(out, "{ipad}case klass.name").unwrap();
+            for m in &eligible {
+                writeln!(
+                    out,
+                    "{ipad}when \"{0}\" then return {0}.{1}(self{pos_args}{kw_args})",
+                    m.0.as_str(),
+                    variant.as_str()
+                )
+                .unwrap();
+            }
+            writeln!(
+                out,
+                "{ipad}else raise ArgumentError, \"scope {} with ({kw_list}) unavailable on \
+                 #{{klass.name}}\"",
+                ctx.name.as_str()
+            )
+            .unwrap();
+            writeln!(out, "{ipad}end").unwrap();
+            if n < ctx.n_max {
+                writeln!(out, "{pad}end").unwrap();
+            }
+        }
+    }
+}
+
+/// Ledger a name the delegate emitter skipped: modeling debt, not an
+/// app error — `lower_residue`, Warning severity, one per name.
+fn push_delegate_skip_diagnostic(
+    name: &str,
+    reason: &str,
+    decls: &[(&crate::ident::ClassId, &[crate::dialect::Param])],
+) {
+    use crate::diagnostic::{Diagnostic, DiagnosticKind};
+    let models = decls
+        .iter()
+        .map(|(m, _)| m.0.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let kind = DiagnosticKind::LowerResidue {
+        pass: Symbol::from("relation_scope_delegates"),
+        construct: Symbol::from(name),
+        reason: Symbol::from(reason),
+    };
+    let d = Diagnostic {
+        span: crate::span::Span::synthetic(),
+        severity: Diagnostic::default_severity(&kind),
+        kind,
+        message: format!(
+            "scope `{name}` (on {models}) gets no ActiveRecord::Relation mid-chain \
+             delegate: {reason}; a mid-chain call raises NoMethodError"
+        ),
+    };
+    crate::emit::diagnostics::push(d);
 }
 
 pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
@@ -462,6 +674,12 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
         // additionally seed bare implicit-self roots (`where(key: key)`
         // in `Keystore.value_for`), signalled via `class_self`.
         for m in &mut lc.methods {
+            // A `__scope_` entry's forward body already carries `__rel`
+            // exactly once — never re-thread it (re-entrancy guard for
+            // a second apply_scope_lowering over the same lcs).
+            if m.name.as_str().starts_with("__scope_") {
+                continue;
+            }
             let class_self = (is_model && m.receiver == MethodReceiver::Class)
                 .then(|| lc.name.clone());
             // A model's own INSTANCE methods know their self model too —
@@ -483,6 +701,22 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                     class_self.as_ref(),
                     instance_self.as_ref(),
                     &user_returns,
+                );
+            }
+        }
+    }
+    // Fixed-arity relation entry points, generated AFTER every body
+    // rewrite above: their forward bodies mention scope names on model
+    // constants, which `rewrite_call_site` would re-thread if it saw
+    // them. Placement here (not inside push_scope_methods) is
+    // load-bearing for the same reason.
+    for lc in lcs.iter_mut() {
+        if let Some(per_model) = scopes.get(&lc.name) {
+            if !per_model.is_empty() {
+                crate::lower::model_to_library::push_scope_variants(
+                    &mut lc.methods,
+                    &lc.name,
+                    per_model,
                 );
             }
         }

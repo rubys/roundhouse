@@ -69,6 +69,103 @@ pub fn model_set(models: &[Model]) -> HashSet<ClassId> {
     models.iter().map(|m| m.name.clone()).collect()
 }
 
+/// Keyword-count cap for the fixed-arity relation entry points: each
+/// keyword doubles the subset variants a scope generates, so a scope
+/// declaring more keywords than this gets no mid-chain delegate.
+pub const MAX_DELEGATE_KEYWORDS: usize = 2;
+
+/// A registered scope's user params, split the way the fixed-arity
+/// relation entry points (`push_scope_variants`) and the Relation
+/// delegate emitter (`emit_relation_scope_delegates`) both need them —
+/// one admissibility judgment so the two can't drift. `None` when the
+/// shape can't take fixed-arity entries: a rest param (no fixed arity
+/// covers it), more than [`MAX_DELEGATE_KEYWORDS`] keywords, or
+/// optional positionals that don't form a contiguous tail (a
+/// supplied-prefix arity can't express `def f(a = 1, b)` binding).
+pub struct DelegableShape<'a> {
+    /// Positional params in declaration order.
+    pub positionals: Vec<&'a Param>,
+    /// Count of leading required positionals — the minimum arity a
+    /// call can supply; everything past it carries a default.
+    pub min_required: usize,
+    /// Keyword params in declaration order.
+    pub keywords: Vec<&'a Param>,
+}
+
+impl<'a> DelegableShape<'a> {
+    pub fn of(params: &'a [Param]) -> Option<DelegableShape<'a>> {
+        if params.iter().any(|p| p.rest) {
+            return None;
+        }
+        let positionals: Vec<&Param> = params.iter().filter(|p| !p.keyword).collect();
+        let keywords: Vec<&Param> = params.iter().filter(|p| p.keyword).collect();
+        if keywords.len() > MAX_DELEGATE_KEYWORDS {
+            return None;
+        }
+        let min_required = positionals
+            .iter()
+            .position(|p| p.default.is_some())
+            .unwrap_or(positionals.len());
+        if positionals[min_required..].iter().any(|p| p.default.is_none()) {
+            return None;
+        }
+        Some(DelegableShape { positionals, min_required, keywords })
+    }
+
+    /// Keywords a call site MUST supply (declared without a default).
+    pub fn required_keywords(&self) -> Vec<&Symbol> {
+        self.keywords
+            .iter()
+            .filter(|p| p.default.is_none())
+            .map(|p| &p.name)
+            .collect()
+    }
+
+    /// The keyword subsets a call site can supply — every subset of the
+    /// declared keywords that includes all required ones, empty subset
+    /// first, each sorted by name. These are exactly the `__kw_` entry
+    /// variants a model generates.
+    pub fn keyword_subsets(&self) -> Vec<Vec<&Param>> {
+        let mut subsets: Vec<Vec<&Param>> = vec![vec![]];
+        for kw in &self.keywords {
+            for i in 0..subsets.len() {
+                let mut with = subsets[i].clone();
+                with.push(kw);
+                subsets.push(with);
+            }
+        }
+        let required = self.required_keywords();
+        subsets.retain(|s| required.iter().all(|r| s.iter().any(|p| &p.name == *r)));
+        for s in &mut subsets {
+            s.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
+        }
+        subsets.sort_by_key(|s| (s.len(), s.iter().map(|p| p.name.as_str().to_string()).collect::<Vec<_>>()));
+        subsets
+    }
+}
+
+/// Whether a registered name can carry the `__scope_<name>__<k>` entry
+/// mangling: `?`/`!` are only legal at the END of a Ruby method name,
+/// so a predicate-named scope gets no mid-chain delegate.
+pub fn delegable_name(name: &Symbol) -> bool {
+    name.as_str().chars().all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// The fixed-arity relation entry point name for `k` supplied
+/// positionals and the given keyword subset: `__scope_<name>__<k>`,
+/// plus `__kw_<names>` (sorted) when keywords are supplied.
+pub fn scope_variant_name(name: &Symbol, k: usize, subset: &[&Param]) -> Symbol {
+    let mut s = format!("__scope_{}__{k}", name.as_str());
+    if !subset.is_empty() {
+        s.push_str("__kw");
+        for p in subset {
+            s.push('_');
+            s.push_str(p.name.as_str());
+        }
+    }
+    Symbol::from(s)
+}
+
 /// method name -> the model its relation chain returns, for user-written
 /// INSTANCE methods whose body tail is a query chain rooted at a model
 /// constant (`Story#merged_comments` ends in `Comment.where(...)` →
