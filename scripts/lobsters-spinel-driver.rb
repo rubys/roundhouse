@@ -194,6 +194,19 @@ class BenchDriver
   #
   # Nothing here changes when #3411 lands: File.read starts returning the file,
   # the regex starts matching, and the numbers appear on their own.
+  # Cumulative collection counters at a phase boundary, one plain line per
+  # phase; the wrapper turns consecutive lines into per-phase deltas. This is
+  # the same-work guard for any GC-configuration comparison: a ratio between
+  # two lanes whose timed loops ran different collection counts is measuring
+  # the trigger regime, not the mark (matz/spinel#3513 — a floating-trigger
+  # comparison once read -2.8% where the pinned one read -61%). Printed at
+  # boundaries the driver already flushes, so a crashed run keeps every
+  # completed phase's counters.
+  def self.gcstat(phase)
+    g = GC.stat
+    puts "GCSTAT " + phase + " " + g["cycle"].to_s + " " + g["full_runs"].to_s
+  end
+
   def self.rss_vmrss_kb
     return 0 if !File.exist?("/proc/self/status")
     File.read("/proc/self/status")[/^VmRSS:\s+(\d+) kB/, 1].to_i
@@ -234,6 +247,15 @@ class BenchDriver
     sqlv = Db.column_value(stmt, 0).to_s if Db.step?(stmt)
     Db.finalize(stmt)
     puts "SQLITE " + sqlv
+
+    # The GC configuration the binary actually ran under, self-reported the
+    # way the SQLite build is: the runtime's own truthiness for the env var
+    # (set, non-empty, not "0" — mirroring sp_alloc's parse), not the
+    # harness's belief about what it exported. The summary's `gc` field and
+    # the report's labeling read this line and nothing else.
+    gm = ENV["SPINEL_GC_MINOR"]
+    puts "GCCONFIG " + ((!gm.nil? && gm.length > 0 && gm != "0") ? "minor" : "default")
+    gcstat("boot")
 
     # Baseline: loaded and connected, nothing served yet — the instant the
     # CRuby lanes take BOOT_RSS_KB. Sampled AFTER the seed so the fixture is
@@ -279,6 +301,7 @@ class BenchDriver
 
     # Buffered stdout is lost if the process dies later; the parity rows
     # are the diagnosis, so get them out of the buffer now.
+    gcstat("parity")
     $stdout.flush
 
     # ── frozen sequence: verify every visit, then time ────────────────
@@ -298,6 +321,7 @@ class BenchDriver
     # "somewhere in verify, warmup, or the timed loop". One flush per
     # PHASE costs the measurement nothing; per-visit output would.
     puts "VERIFYDONE"
+    gcstat("verify")
     $stdout.flush
 
     # Warmup wall time feeds the stop clock below — ruby-bench's rule
@@ -312,6 +336,7 @@ class BenchDriver
       w += 1
     end
     puts "WARMUPDONE " + warmup_ms.to_s
+    gcstat("warmup")
     $stdout.flush
 
     # Per-visit samples, keyed by raw path and ACCUMULATED IN MEMORY — the
@@ -349,6 +374,7 @@ class BenchDriver
       arr.each { |x| line = line + " " + x.to_s }
       puts line
     end
+    gcstat("timed")
     puts "RSS " + boot_rss.to_s + " " + rss_vmrss_kb.to_s + " " + rss_vmhwm_kb.to_s
     puts "BALLAST " + ballast.length.to_s
     puts "DONE " + seq.length.to_s + " " + warmup.to_s

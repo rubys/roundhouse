@@ -854,6 +854,11 @@ rows = META.filter_map do |id, m|
     # lanes run the gem's bundled build; the AOT binary links the system
     # one — the report attests a match or names the mismatch.
     "sqlite" => data["sqlite"],
+    # The GC configuration the lane self-reported (spinel's GCCONFIG line;
+    # absent on interpreted lanes and on trees predating it). The report
+    # names any non-default value beside the numbers it shaped.
+    "gc" => data["gc"],
+    "gc_stat" => data.dig("sequence_timing", "gc_stat"),
     "visits" => t["visits_per_iter"], "partial" => t["partial"],
     # Footprint of each lane's replay process, sampled by the replay
     # itself (see the "rss" block in scripts/lobsters-replay). boot_kb is

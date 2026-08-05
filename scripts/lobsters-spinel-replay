@@ -412,6 +412,8 @@ visits_per_iter = visits.size
 warmup_used = opts[:warmup]
 rss_boot = rss_final = rss_peak = nil
 sqlite_version = nil
+gc_config = nil
+gc_marks = []
 by_template = Hash.new { |h, k| h[k] = [] }
 raw.each_line do |line|
   f = line.split(" ")
@@ -440,6 +442,13 @@ raw.each_line do |line|
     # samples and the median is taken over the pool, not over medians.
     by_template[route_template(f[1].to_s)].concat(f[2..].map(&:to_f))
   when "SQLITE" then sqlite_version = f[1]
+  when "GCCONFIG" then gc_config = f[1]
+  when "GCSTAT"
+    # GCSTAT <phase> <cycle> <full_runs> — cumulative counters at each phase
+    # boundary, in emission order. Deltas are computed after the parse so a
+    # phase's count is what IT ran, and a crashed run keeps every phase the
+    # driver flushed before dying.
+    gc_marks << { "phase" => f[1], "cycle" => f[2].to_i, "full" => f[3].to_i }
   when "RSS"
     # boot final peak, in kB, read by the binary from its own
     # /proc/self/status. 0 is the driver's "no /proc here" — carry it as
@@ -454,6 +463,21 @@ raw.each_line do |line|
 end
 die("replay", "driver produced no parity rows") if routes.empty?
 die("replay", "driver produced no timed iterations") if iters.empty?
+
+# Per-phase collection counts from the cumulative GCSTAT boundary lines:
+# each phase's delta against the line before it ("boot" is absolute — its
+# predecessor is process start at zero). Nil on trees whose driver predates
+# the GCSTAT lines, and the summary key is simply absent there.
+gc_stat = nil
+unless gc_marks.empty?
+  gc_stat = {}
+  prev = { "cycle" => 0, "full" => 0 }
+  gc_marks.each do |m|
+    gc_stat[m["phase"]] = { "cycles" => m["cycle"] - prev["cycle"],
+                            "full"   => m["full"] - prev["full"] }
+    prev = m
+  end
+end
 
 sorted = iters.sort
 mid = sorted.size / 2
@@ -476,6 +500,12 @@ summary = {
   # through its own linked library) — see the SQLITE line in the driver.
   # The interpreted lanes record theirs the same way; the report compares.
   "sqlite"       => sqlite_version,
+  # The GC configuration the binary self-reported (GCCONFIG line): "minor"
+  # when the run had SPINEL_GC_MINOR enabled by the runtime's own parse,
+  # "default" otherwise, nil for a driver that predates the line. Non-default
+  # configurations must be named where readers look — the report renders a
+  # caveat off this field, the same contract as `sqlite`.
+  "gc"           => gc_config,
   "seeded_from"  => DB,
   "memory"       => true,
   "story_id"     => STORY,
@@ -499,6 +529,10 @@ summary = {
     "per_route"          => summarize_samples(by_template),
     "failed_visits"      => seq_fails.size,
     "partial"            => !seq_fails.empty?,
+    # Collections per phase (GCSTAT deltas). The timed phase's count is the
+    # one comparisons hang off: two lanes' ms/iter ratio is a same-work
+    # claim only when their timed loops collected in the same regime.
+    "gc_stat"            => gc_stat,
   },
   # Same shape scripts/lobsters-replay emits, so bench-lobsters flattens it
   # to rss_boot_kb/rss_final_kb/rss_peak_kb with no spinel-specific branch

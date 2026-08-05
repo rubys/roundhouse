@@ -951,6 +951,18 @@ if mrows && !mrows.empty?
     missing = mlive.count { |r| !r['sqlite'] }
     html << %(<p class="legend">Every lane#{missing > 0 ? " that recorded it (#{mlive.size - missing}/#{mlive.size})" : ''} queried SQLite #{esc(sqlv.first)} at runtime.</p>\n)
   end
+  # A lane that ran a non-default GC configuration says so HERE, beside the
+  # numbers it shaped — a caveat elsewhere doesn't qualify this table. The
+  # value is the lane's own runtime parse of SPINEL_GC_MINOR (GCCONFIG line),
+  # not the harness's environment, so the label can't drift from the run.
+  gc_nondefault = mlive.select { |r| r['gc'] && r['gc'] != 'default' }
+  unless gc_nondefault.empty?
+    per = gc_nondefault.map { |r|
+      tc = r.dig('gc_stat', 'timed', 'cycles')
+      "#{r['label']} #{lane_jit.(r)}: SPINEL_GC_MINOR=1#{tc ? " (#{tc} collections in the timed loop)" : ''}"
+    }.join(' · ')
+    html << %(<p class="caveat"><strong>Non-default GC configuration</strong> — #{esc(per)}. spinel's generational (minor) mark is opt-in while matz/spinel#3513's remaining gates close; these numbers describe that configuration, not the default collector. Same-binary default-GC numbers appear only when a lane ran them.</p>\n)
+  end
   jr_note = if mlive.any? { |r| r['id'] == 'jruby' }
     mlive.any? { |r| r['id'] == 'rails-jruby' } ?
       ' The JVM rows pair with each other: Roundhouse JRuby\'s ratio is vs Rails on JRuby.' :
