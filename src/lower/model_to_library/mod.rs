@@ -871,12 +871,48 @@ pub(crate) fn push_scope_variants(
                         parenthesized: true,
                     },
                 );
+                // The signature types `__rel` as the runtime Relation
+                // class — it IS one by construction, and this is
+                // load-bearing under spinel's --rbs seed: an `untyped
+                // __rel` here widens the primaries' `__rel` and every
+                // `__rel.order(…)` receiver inside scope bodies to
+                // untyped, and spinel's untyped-receiver path drops a
+                // kwargs hash into `*rest` (the #3503 shape — /newest
+                // lost its ORDER BY and the AOT lane lost parity).
+                // User params and the return stay honest untyped.
+                let mut sig_params = vec![crate::ty::Param {
+                    name: rel.clone(),
+                    ty: Ty::Class {
+                        id: ClassId(Symbol::from("ActiveRecord::Relation")),
+                        args: vec![],
+                    },
+                    kind: crate::ty::ParamKind::Required,
+                }];
+                for p in &shape.positionals[..k] {
+                    sig_params.push(crate::ty::Param {
+                        name: p.name.clone(),
+                        ty: Ty::Untyped,
+                        kind: crate::ty::ParamKind::Required,
+                    });
+                }
+                for p in &subset {
+                    sig_params.push(crate::ty::Param {
+                        name: p.name.clone(),
+                        ty: Ty::Untyped,
+                        kind: crate::ty::ParamKind::Keyword { required: true },
+                    });
+                }
                 methods.push(MethodDef {
                     name: vname,
                     receiver: MethodReceiver::Class,
                     params,
                     body,
-                    signature: None,
+                    signature: Some(Ty::Fn {
+                        params: sig_params,
+                        block: None,
+                        ret: Box::new(Ty::Untyped),
+                        effects: crate::effect::EffectSet::default(),
+                    }),
                     effects: crate::effect::EffectSet::default(),
                     enclosing_class: Some(model_name.0.clone()),
                     kind: AccessorKind::Method,
