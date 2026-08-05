@@ -30,8 +30,8 @@ use std::collections::HashSet;
 
 use crate::app::App;
 use crate::diagnostic::Diagnostic;
-use crate::expr::{Expr, ExprNode, LValue, Literal};
-use crate::ident::{ClassId, Symbol};
+use crate::expr::{BoolOpKind, Expr, ExprNode, LValue, Literal};
+use crate::ident::{ClassId, Symbol, VarId};
 use crate::ty::Ty;
 
 /// Inline kwargs-form `update`/`update!` sends across every hook body.
@@ -58,28 +58,107 @@ fn residue(expr: &Expr, reason: &str) -> Diagnostic {
     )
 }
 
-fn rewrite(expr: &mut Expr, models: &HashSet<ClassId>, diags: &mut Vec<Diagnostic>) {
-    expr.node.for_each_child_mut(&mut |c| rewrite(c, models, diags));
-    let recognized = matches!(
-        &*expr.node,
+/// The kwargs-form `update`/`update!` send shape this pass inlines.
+fn recognized_update(e: &Expr) -> bool {
+    matches!(
+        &*e.node,
         ExprNode::Send { recv: Some(_), method, args, block: None, .. }
             if matches!(method.as_str(), "update" | "update!")
                 && args.len() == 1
                 && matches!(&*args[0].node, ExprNode::Hash { entries, .. }
                     if !entries.is_empty() && entries.iter().all(|(k, _)| matches!(
                         &*k.node, ExprNode::Lit { value: Literal::Sym { .. } })))
+    )
+}
+
+fn rewrite(expr: &mut Expr, models: &HashSet<ClassId>, diags: &mut Vec<Diagnostic>) {
+    // The `try(:update!, …)`-desugared guarded form — `recv &&
+    // recv.update!(…)` — rewrites as a UNIT, before child recursion
+    // would turn the right operand into a Seq: a BoolOp operand is a
+    // VALUE slot, and the writer sequence is a statement shape (the
+    // ruby emitter renders a Seq newline-joined, which silently
+    // unnests the guard — `save!` escaped it and crashed on nil).
+    // Ground to an If, and bind the receiver ONCE: association
+    // readers re-query per call, so assigning through the raw reader
+    // would write one instance and save another, losing every write.
+    // Value divergence vs `&&` (nil where the falsy operand was) is
+    // the class and_return already accepts — and `try`'s own
+    // nil-receiver value IS nil, so the If is the closer model.
+    let guarded = matches!(
+        &*expr.node,
+        ExprNode::BoolOp { op: BoolOpKind::And, right, .. } if recognized_update(right)
     );
-    if !recognized {
+    if guarded {
+        let (is_model, _, pure) = {
+            let ExprNode::BoolOp { right, .. } = &*expr.node else { unreachable!() };
+            send_gates(right, models)
+        };
+        // Gate failures fall through untouched: the Send arm below
+        // sees the same gates and pushes the one residue note.
+        if is_model && pure {
+            let span = expr.span;
+            let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
+            let ExprNode::BoolOp { left, right, .. } = node else { unreachable!() };
+            let ExprNode::Send { recv: Some(r), method, args, .. } = *right.node else {
+                unreachable!()
+            };
+            let ExprNode::Hash { entries, .. } = &*args[0].node else { unreachable!() };
+            let local = Symbol::from("__update_rcv");
+            let bind = Expr::new(
+                span,
+                ExprNode::Assign {
+                    target: LValue::Var { id: VarId(0), name: local.clone() },
+                    value: r,
+                },
+            );
+            let mut stmts = vec![bind];
+            for (k, v) in entries {
+                let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
+                    unreachable!()
+                };
+                stmts.push(Expr::new(
+                    span,
+                    ExprNode::Assign {
+                        target: LValue::Attr {
+                            recv: Expr::new(
+                                span,
+                                ExprNode::Var { id: VarId(0), name: local.clone() },
+                            ),
+                            name: key.clone(),
+                        },
+                        value: v.clone(),
+                    },
+                ));
+            }
+            let save = if method.as_str() == "update!" { "save!" } else { "save" };
+            let mut save_call = Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(Expr::new(
+                        span,
+                        ExprNode::Var { id: VarId(0), name: local },
+                    )),
+                    method: Symbol::from(save),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            save_call.ty = Some(Ty::Bool);
+            stmts.push(save_call);
+            *expr.node = ExprNode::If {
+                cond: left,
+                then_branch: Expr::new(span, ExprNode::Seq { exprs: stmts }),
+                else_branch: Expr::new(span, ExprNode::Seq { exprs: vec![] }),
+            };
+            expr.ty = Some(Ty::Union { variants: vec![Ty::Bool, Ty::Nil] });
+        }
+    }
+    expr.node.for_each_child_mut(&mut |c| rewrite(c, models, diags));
+    if !recognized_update(expr) {
         return;
     }
-    let (is_model, ty_unknown, pure) = {
-        let ExprNode::Send { recv: Some(r), .. } = &*expr.node else { unreachable!() };
-        (
-            recv_is_model(r, models),
-            recv_ty_is_unknown(r),
-            super::blank::is_effect_free_reader(r),
-        )
-    };
+    let (is_model, ty_unknown, pure) = send_gates(expr, models);
     if !is_model {
         // A receiver positively typed to a non-model (a Hash whose
         // `update` is `merge!`) is correct in source shape — no note.
@@ -131,6 +210,19 @@ fn rewrite(expr: &mut Expr, models: &HashSet<ClassId>, diags: &mut Vec<Diagnosti
     exprs.push(save_call);
     *expr.node = ExprNode::Seq { exprs };
     expr.ty = Some(Ty::Bool);
+}
+
+/// The three per-site gates, read off a recognized update send:
+/// receiver types to a model, receiver type is unknown (residue
+/// note), receiver is an effect-free reader chain (safe to
+/// re-evaluate once more for the guard/bind).
+fn send_gates(e: &Expr, models: &HashSet<ClassId>) -> (bool, bool, bool) {
+    let ExprNode::Send { recv: Some(r), .. } = &*e.node else { unreachable!() };
+    (
+        recv_is_model(r, models),
+        recv_ty_is_unknown(r),
+        super::blank::is_effect_free_reader(r),
+    )
 }
 
 /// True when the receiver types to an app model — directly
