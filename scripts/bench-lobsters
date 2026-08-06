@@ -22,6 +22,20 @@
 #                                 fixture) — list it AFTER jruby, whose
 #                                 emit tree it borrows the markly shim from
 #                     jruby       roundhouse emit, JRuby/JVM
+#                   and the heap-sensitivity cells, all AOT, all the same
+#                   binary — only the runtime GC configuration differs:
+#                     spinel              default GC, no ballast
+#                     spinel-gc           generational (SPINEL_GC_MINOR=1)
+#                     spinel-ballast      default GC + retained ballast
+#                     spinel-gc-ballast   generational + retained ballast
+#                   The *-ballast cells hold BENCH_BALLAST_N (default
+#                   300000) objects live for the whole timed loop, which is
+#                   work no other lane does — so they carry NO vs-Rails
+#                   ratio, and the report pairs each only against its own
+#                   zero-ballast twin under "Heap sensitivity". Run all four
+#                   to get that block; any one alone still produces a row.
+#                     scripts/bench-lobsters spinel spinel-gc \
+#                       spinel-ballast spinel-gc-ballast --time 20
 #                   Rails lanes are skipped (loudly) when the checkout's
 #                   bundle isn't installable; the JVM lanes when jruby
 #                   isn't on PATH. JIT is pinned per lane via RUBYOPT —
@@ -355,8 +369,8 @@ if (( ${#LANES[@]} > 0 )); then
         exit 2
     fi
     for LANE in "${LANES[@]}"; do
-        case "$LANE" in rails|rails-int|ruby|ruby-int|jruby|rails-jruby|spinel) ;; *)
-            fail "unknown lane: $LANE (want rails rails-int ruby ruby-int jruby rails-jruby spinel)"; exit 2 ;;
+        case "$LANE" in rails|rails-int|ruby|ruby-int|jruby|rails-jruby|spinel|spinel-gc|spinel-ballast|spinel-gc-ballast) ;; *)
+            fail "unknown lane: $LANE (want rails rails-int ruby ruby-int jruby rails-jruby spinel spinel-gc spinel-ballast spinel-gc-ballast)"; exit 2 ;;
         esac
     done
     [[ -d "$SRC" ]] || { fail "lobsters source not found at $SRC (clone ruby-bench or pass --src)"; exit 2; }
@@ -368,6 +382,12 @@ if (( ${#LANES[@]} > 0 )); then
     # reason that is not speed. One variable, passed everywhere.
     [[ -f "$GAPS_JSON" ]] || { fail "no declared-gaps ledger at $GAPS_JSON"; exit 2; }
     (( TIME_ITERS > 0 )) || TIME_ITERS=10
+    # Retained-heap ballast for the *-ballast cells: objects the request loop
+    # allocates once and never touches again, so they are live for every
+    # collection and cost a whole-heap mark exactly what a real retained
+    # working set would. 300k is the size the #3513 measurements used, kept
+    # here so the published cells and that thread quote the same number.
+    BALLAST_N=${BENCH_BALLAST_N:-300000}
 
     RUN_TS="$(date +%Y%m%d-%H%M%S)"
     RUN_DIR="${OUT_DIR:-$REPO_ROOT/bench/results/lobsters/$RUN_TS}"
@@ -380,6 +400,12 @@ if (( ${#LANES[@]} > 0 )); then
 
     EMITTED_CRUBY=$SKIP_EMIT
     EMITTED_JRUBY=$SKIP_EMIT
+    # The spinel lanes share ONE emit and ONE compiled binary. After the first
+    # spinel lane this is 1, and the rest replay the binary that already
+    # exists — see the note in the lane body about why a rebuild between
+    # heap-sensitivity cells would make them differ in two variables.
+    EMITTED_SPINEL=$SKIP_EMIT
+    BUILT_SPINEL=0
     FAILED_LANES=0
 
     # Every lane named on the command line leaves a status file, whether or
@@ -477,10 +503,24 @@ if (( ${#LANES[@]} > 0 )); then
                     lane_status "$LANE" failed replay "$(lane_tail "$LDIR/run.log")"
                 fi
                 ;;
-            spinel)
+            spinel|spinel-gc|spinel-ballast|spinel-gc-ballast)
                 # AOT: emit, compile to a native binary, then replay
                 # IN-PROCESS through the compiled driver. One lane, not a
                 # JIT pair — there is no JIT to turn off.
+                #
+                # The four spinel lanes are the SAME binary under different
+                # runtime configuration: GC (default vs generational) crossed
+                # with retained-heap ballast (0 vs BALLAST_N). Only the first
+                # one to run emits and compiles; the rest reuse the tree, so
+                # the cells differ in the variable under test and nothing
+                # else. A rebuild between cells would reshuffle codegen
+                # layout and make the comparison a two-variable one.
+                LANE_GC=default; LANE_BALLAST=0
+                case "$LANE" in
+                    spinel-gc)         LANE_GC=minor ;;
+                    spinel-ballast)    LANE_BALLAST=$BALLAST_N ;;
+                    spinel-gc-ballast) LANE_GC=minor; LANE_BALLAST=$BALLAST_N ;;
+                esac
                 # `spin` is the one the build actually shells out to
                 # (the tree's Makefile runs `$(SPIN) build`), and it lives
                 # in the spinel checkout's bin/ — a PATH carrying only the
@@ -495,19 +535,20 @@ if (( ${#LANES[@]} > 0 )); then
                         "not on PATH: ${SP_MISSING[*]} — add <spinel-checkout>/bin to PATH"; continue
                 fi
                 SP_TREE="$REPO_ROOT/build/transpiled-lobsters-spinel"
-                step "lane spinel: emit + AOT compile + in-process replay"
+                step "lane $LANE: emit + AOT compile + in-process replay (gc=$LANE_GC ballast=$LANE_BALLAST)"
                 # --skip-emit reuses the existing tree, as it does for the
                 # other lanes; the AOT compile behind it is ~30s, which is
                 # the whole cost of a dev-loop iteration here.
-                if (( SKIP_EMIT == 1 )) && [[ -f "$SP_TREE/main.rb" ]]; then
+                if (( SKIP_EMIT == 1 || EMITTED_SPINEL == 1 )) && [[ -f "$SP_TREE/main.rb" ]]; then
                     : > "$LDIR/emit.log"
                 elif ! (cd "$REPO_ROOT" && cargo run --quiet --bin roundhouse -- \
                         --target spinel "$SRC" -o "$SP_TREE" --allow-unsupported \
                         >"$LDIR/emit.log" 2>&1); then
-                    fail "lane spinel: emit failed (see $LDIR/emit.log)"
+                    fail "lane $LANE: emit failed (see $LDIR/emit.log)"
                     FAILED_LANES=$((FAILED_LANES + 1))
                     lane_status "$LANE" failed emit "$(lane_tail "$LDIR/emit.log")"; continue
                 fi
+                EMITTED_SPINEL=1
                 mkdir -p "$SP_TREE/storage"
                 # The staged file is now the SEED, not what gets served: the
                 # binary page-copies it into the same
@@ -525,7 +566,15 @@ if (( ${#LANES[@]} > 0 )); then
                 SP_ARGS=(--tree "$SP_TREE" --sequence "$FROZEN_SEQ" --defer "$GAPS_JSON"
                          --json "$LDIR/summary.json" --md "$LDIR/summary.md"
                          --dump "$LDIR/bodies" --warmup 15
-                         --time "$TIME_ITERS" --min-time 10)
+                         --time "$TIME_ITERS" --min-time 10
+                         --gc "$LANE_GC" --ballast "$LANE_BALLAST")
+                # Every spinel lane after the first replays the binary the
+                # first one compiled. Measured: recompiling the same sources
+                # is byte-deterministic (same md5 across rebuilds), so this
+                # buys time rather than comparability — but it also means a
+                # mid-run tree edit cannot silently give one cell of a
+                # heap-sensitivity pair a different binary from its twin.
+                (( BUILT_SPINEL == 1 )) && SP_ARGS+=(--skip-build)
                 # Align the AOT link to the bundle's SQLite (see
                 # ensure_sqlite_vendor above). Degrades loudly: without the
                 # bundle or the download, the lane links system libsqlite3
@@ -533,9 +582,9 @@ if (( ${#LANES[@]} > 0 )); then
                 SQ_VER="$(bundle_sqlite_version || true)"
                 if [[ -n "$SQ_VER" ]] && SQ_DIR="$(ensure_sqlite_vendor "$SQ_VER")"; then
                     SP_ARGS+=(--sqlite-lib "$SQ_DIR")
-                    step "lane spinel: linking vendored SQLite $SQ_VER (the bundle's version)"
+                    step "lane $LANE: linking vendored SQLite $SQ_VER (the bundle's version)"
                 else
-                    warn "lane spinel: no vendored SQLite (bundle or download unavailable) — linking system libsqlite3"
+                    warn "lane $LANE: no vendored SQLite (bundle or download unavailable) — linking system libsqlite3"
                 fi
                 # bcrypt is a spin package the published index may not
                 # carry; a local checkout stands in. Look where people
@@ -553,13 +602,15 @@ if (( ${#LANES[@]} > 0 )); then
                 ruby "$REPO_ROOT/scripts/lobsters-spinel-replay" "${SP_ARGS[@]}" \
                     >"$LDIR/run.log" 2>&1 || SP_RC=$?
                 if (( SP_RC >= 100 )); then
-                    fail "lane spinel failed (see $LDIR/run.log)"
+                    fail "lane $LANE failed (see $LDIR/run.log)"
                     FAILED_LANES=$((FAILED_LANES + 1))
                     lane_status "$LANE" failed replay "$(lane_tail "$LDIR/run.log")"
                 else
                     # A non-zero rc under 100 is failing ROUTES, not a dead
                     # lane: the run produced data and the page reports it.
-                    ok "lane spinel done"
+                    # The binary exists and ran, so later spinel cells reuse it.
+                    BUILT_SPINEL=1
+                    ok "lane $LANE done"
                     lane_status "$LANE" ok "" ""
                 fi
                 ;;
@@ -726,6 +777,15 @@ META = {
   "ruby-int"    => { label: "Roundhouse", kind: "emit",  runtime: "cruby", yjit: false, jit: "no JIT", src: "summary.json" },
   "jruby"       => { label: "Roundhouse", kind: "emit",  runtime: "jruby", yjit: nil,   jit: "JRuby",  src: "summary.json" },
   "spinel"      => { label: "Roundhouse", kind: "emit",  runtime: "spinel", yjit: nil,  jit: "AOT",    src: "summary.json" },
+  # Heap-sensitivity cells. Same binary, same sequence, same everything except
+  # the GC configuration and the retained-heap ballast — the two variables the
+  # generational collector is supposed to be sensitive to. `jit` carries the
+  # configuration because that column is what distinguishes rows on the page
+  # ("no JIT"/"JRuby"/"AOT" are already configurations, not JIT names), and
+  # four rows all reading "AOT" would be four indistinguishable rows.
+  "spinel-gc"          => { label: "Roundhouse", kind: "emit", runtime: "spinel", yjit: nil, jit: "AOT gen-GC",          src: "summary.json" },
+  "spinel-ballast"     => { label: "Roundhouse", kind: "emit", runtime: "spinel", yjit: nil, jit: "AOT +ballast",        src: "summary.json" },
+  "spinel-gc-ballast"  => { label: "Roundhouse", kind: "emit", runtime: "spinel", yjit: nil, jit: "AOT gen-GC +ballast", src: "summary.json" },
 }
 # A lane that produced no timing data still gets a row. Dropping it would
 # render the page as though the lane had never been asked for, which is the
@@ -858,6 +918,12 @@ rows = META.filter_map do |id, m|
     # absent on interpreted lanes and on trees predating it). The report
     # names any non-default value beside the numbers it shaped.
     "gc" => data["gc"],
+    # Retained-heap ballast the lane held for the whole timed loop, counted by
+    # the binary itself. nil on every non-spinel lane and on trees predating
+    # the field; 0 on an ordinary spinel lane. Above 0 means the lane did work
+    # no other lane did, and the report keeps it out of the cross-runtime
+    # ratios for exactly that reason.
+    "ballast" => data["ballast"],
     "gc_stat" => data.dig("sequence_timing", "gc_stat"),
     "visits" => t["visits_per_iter"], "partial" => t["partial"],
     # Footprint of each lane's replay process, sampled by the replay
@@ -917,6 +983,13 @@ live.each do |r|
          when "spinel" then rails_cruby[true]
          else rails_cruby[r["yjit"]]
          end
+  # A ballast lane is deliberately holding a retained working set no other
+  # lane holds, so a Rails ratio for it would divide unequal work and read on
+  # the page as "the AOT lane got slower". Its ONLY honest comparison is
+  # against its own zero-ballast twin, which is what the heap-sensitivity
+  # block pairs. Left nil so the ratio column shows an em dash.
+  ballast = r["ballast"].to_i
+  base = nil if ballast > 0
   r["vs_rails"] = base ? (hl.(base) / hl.(r)).round(2) : nil
   # Restricted ratio, only when this lane is BELOW full parity — at full
   # parity it would equal the headline and the extra column would be noise.

@@ -961,7 +961,47 @@ if mrows && !mrows.empty?
       tc = r.dig('gc_stat', 'timed', 'cycles')
       "#{r['label']} #{lane_jit.(r)}: SPINEL_GC_MINOR=1#{tc ? " (#{tc} collections in the timed loop)" : ''}"
     }.join(' · ')
-    html << %(<p class="caveat"><strong>Non-default GC configuration</strong> — #{esc(per)}. spinel's generational (minor) mark is opt-in while matz/spinel#3513's remaining gates close; these numbers describe that configuration, not the default collector. Same-binary default-GC numbers appear only when a lane ran them.</p>\n)
+    html << %(<p class="caveat"><strong>Non-default GC configuration</strong> — #{esc(per)}. spinel's generational (minor) mark is opt-in; these numbers describe that configuration, not the default collector. Same-binary default-GC numbers appear only when a lane ran them.</p>\n)
+  end
+  # ── heap sensitivity ───────────────────────────────────────────────
+  # The generational collector's claim is not that it makes this workload
+  # faster — at lobsters' baseline live heap a whole-heap mark is cheap and
+  # the two configurations tie. Its claim is that cost stops scaling with
+  # RETAINED heap. That is only visible by pairing a lane against its own
+  # zero-ballast twin, same binary, same sequence, one variable; a ratio
+  # against Rails would divide unequal work, which is why the aggregator
+  # leaves vs_rails nil on these rows.
+  ballast_rows = mlive.select { |r| r['ballast'].to_i > 0 }
+  unless ballast_rows.empty?
+    pairs = ballast_rows.filter_map do |b|
+      base = mlive.find { |r| r['runtime'] == b['runtime'] && r['gc'] == b['gc'] && r['ballast'].to_i.zero? }
+      next unless base && hl_row.(base)&.positive? && hl_row.(b)
+      { gc: b['gc'], n: b['ballast'].to_i, base_ms: hl_row.(base), ms: hl_row.(b),
+        pct: 100.0 * (hl_row.(b) - hl_row.(base)) / hl_row.(base) }
+    end
+    unless pairs.empty?
+      n = pairs.map { |p| p[:n] }.uniq
+      # Thousands separators, built here rather than inside the interpolation:
+      # a regex written inline in a %() literal has its backslashes eaten by
+      # the literal before it ever reaches Regexp, and the count silently
+      # renders as an empty string.
+      n_label = n.size == 1 ? n.first.to_s.gsub(/(\d)(?=(\d{3})+\z)/, '\1,') : 'varying'
+      html << %(<h3>Heap sensitivity</h3>\n)
+      html << %(<p>Same binary and same sequence, with a retained working set of #{esc(n_label)} objects the request loop never touches. This is the comparison the generational collector is for — at baseline heap the two configurations tie, so a throughput number alone would say nothing.</p>\n)
+      html << %(<table class="matrix"><thead><tr><th>GC</th><th class="num">baseline</th><th class="num">+retained</th><th class="num">cost of the retained heap</th></tr></thead><tbody>\n)
+      pairs.sort_by { |p| p[:gc].to_s }.each do |p|
+        html << %(<tr><td>#{esc(p[:gc] == 'minor' ? 'generational (minor)' : p[:gc])}</td>)
+        html << %(<td class="num">#{fmt_dec(p[:base_ms], 2)} ms</td>)
+        html << %(<td class="num">#{fmt_dec(p[:ms], 2)} ms</td>)
+        html << %(<td class="num"><strong>#{p[:pct] >= 0 ? '+' : ''}#{fmt_dec(p[:pct], 1)}%</strong></td></tr>\n)
+      end
+      html << %(</tbody></table>\n)
+      d = pairs.find { |p| p[:gc] == 'default' }
+      m = pairs.find { |p| p[:gc] == 'minor' }
+      if d && m && m[:pct].abs > 0.05
+        html << %(<p class="legend">The retained heap costs the default collector #{fmt_dec(d[:pct], 1)}% and the generational one #{fmt_dec(m[:pct], 1)}% — #{fmt_dec(d[:pct] / m[:pct], 1)}× less sensitive. Both figures are this binary against itself; neither is a comparison with Rails.</p>\n)
+      end
+    end
   end
   jr_note = if mlive.any? { |r| r['id'] == 'jruby' }
     mlive.any? { |r| r['id'] == 'rails-jruby' } ?
