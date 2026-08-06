@@ -648,7 +648,14 @@ if (( ${#LANES[@]} > 0 )); then
         fi
     done
     if [[ -n "$REF_BODIES" ]]; then
-        for LANE in ruby ruby-int jruby spinel; do
+        # Derived from the lanes that actually RAN, not a hand-kept list
+        # beside the lane vocabulary: a second list is a list that drifts, and
+        # when it did, three new lanes published ms/iter and a vs-Rails ratio
+        # with content parity never computed at all — the fastest row on the
+        # page attesting nothing about what it rendered. Rails lanes are the
+        # oracle and are not compared against themselves.
+        for LANE in "${LANES[@]}"; do
+            case "$LANE" in rails|rails-int|rails-jruby) continue ;; esac
             [[ -d "$RUN_DIR/$LANE/bodies" ]] || continue
             # A lane that DIED leaves whatever bodies it managed to dump
             # before dying. Comparing those reports a content score for a
