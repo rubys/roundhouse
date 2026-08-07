@@ -84,6 +84,39 @@ cells.each { |c| by[c['endpoint']][c['target']] = c }
 endpoints = ENDPOINT_ORDER & by.keys
 targets   = TARGET_ORDER & cells.map { |c| c['target'] }.uniq
 
+# A cell with a nil req_sec was never measured: wrk found nothing serving,
+# which is what a server that died mid-run leaves behind for every cell
+# after it. nil is NOT zero, and `.to_f` erases the difference — a dead
+# lane then draws a real-looking 0 bar, ranked last, indistinguishable
+# from a runtime that was measured and is simply slow. Everything below
+# reads metrics through `cell_metric`, which keeps the nil.
+def measured?(cell) ; cell && !cell['req_sec'].nil? ; end
+
+# Metric read that propagates "unmeasured". The req_sec nil is the
+# authority for the whole cell: an unmeasured cell's RSS is 0 only
+# because the sampler found no process to sample, and its rps_per_gb is
+# nil for the same reason. Also normalizes the pre-08-07 summary shape,
+# where those two arrived as literal zeros rather than nils.
+def cell_metric(cell, key)
+  return nil unless measured?(cell)
+  cell[key]
+end
+
+measured_targets = targets.select { |t| endpoints.any? { |ep| measured?(by[ep][t]) } }
+dead_targets     = targets - measured_targets
+
+# Per-target timed-run accounting, for the no-data banner. per-run.json is
+# the only artifact that distinguishes "never recorded a run" from
+# "recorded some runs and then stopped" — the second shape is a server
+# that died partway through its cells, and saying which one happened is
+# the difference between a bug report and a shrug.
+run_tally = Hash.new { |h, k| h[k] = { measured: 0, total: 0 } }
+(per_run || []).each do |row|
+  t = row['target'] or next
+  run_tally[t][:total] += 1
+  run_tally[t][:measured] += 1 unless row['req_sec'].nil?
+end
+
 run_dir   = File.basename(File.dirname(File.expand_path(input)))
 total     = cells.size
 runs      = cells.first['runs']
@@ -137,8 +170,8 @@ end
 # ── log-scale horizontal bar chart (one per endpoint) ────────────────
 
 def hbar_log(rows, metric:, unit:, min_decade: 2, max_decade: nil)
-  values = rows.map { |c| c[metric].to_f }
-  max_decade ||= [Math.log10(values.max).ceil, min_decade + 1].max
+  values = rows.filter_map { |c| cell_metric(c, metric)&.to_f }
+  max_decade ||= [Math.log10([values.max || 1, 1].max).ceil, min_decade + 1].max
 
   width      = 760
   left_pad   = 110
@@ -162,21 +195,30 @@ def hbar_log(rows, metric:, unit:, min_decade: 2, max_decade: nil)
   end
   buf << t(width - 4, height - bottom + 14, unit, anchor: 'end', fill: '#999', size: 10)
 
-  # Sort rows by metric desc for visual ranking
-  ranked = rows.sort_by { |c| -c[metric].to_f }
+  # Sort rows by metric desc for visual ranking; unmeasured rows sort to
+  # the bottom as a group rather than mixing in at the zero end, where
+  # they would read as the slowest measured cells.
+  ranked = rows.sort_by { |c| v = cell_metric(c, metric); [v ? 0 : 1, -v.to_f] }
 
   ranked.each_with_index do |c, i|
     y = top + i * (row_h + gap)
-    v = c[metric].to_f
-    lv = Math.log10([v, 1].max)
-    bar = ((lv - min_decade) / (max_decade - min_decade) * plot_w).round
-    bar = [bar, 1].max
+    v = cell_metric(c, metric)
 
     target = c['target']
     buf << t(left_pad - 8, y + row_h * 0.7, target, anchor: 'end', weight: 'bold')
+
+    # No bar at all for an unmeasured cell. A zero-width bar would still
+    # read as a measurement of ~0; the words say what actually happened.
+    if v.nil?
+      buf << t(left_pad, y + row_h * 0.7, 'no data — server not answering', fill: '#999')
+      next
+    end
+
+    lv = Math.log10([v.to_f, 1].max)
+    bar = ((lv - min_decade) / (max_decade - min_decade) * plot_w).round
+    bar = [bar, 1].max
     buf << r(left_pad, y, bar, row_h, fill: COLOR[target])
-    label = metric == 'req_sec' ? fmt_int(v) : fmt_int(v)
-    buf << t(left_pad + bar + 6, y + row_h * 0.7, label, fill: '#222')
+    buf << t(left_pad + bar + 6, y + row_h * 0.7, fmt_int(v), fill: '#222')
   end
 
   buf << svg_close
@@ -343,10 +385,43 @@ html << <<~METHOD
   <div class="methodology">
     <strong>Methodology.</strong> #{machine}. Toolchains pinned via <a href="https://mise.jdx.dev">mise</a>. Harness: <code>scripts/bench</code> — #{harness}; the median of the #{runs} runs is reported#{spread_ref}. Quiet machine throughout. The managed-heap cells run under a fixed heap budget so their RSS is comparable to the other cells' working sets rather than the runtime's default share of host RAM: the JVM cells (<code>jruby</code>, <code>kotlin</code>) via <code>-Xmx512m=-Xms512m</code>, and the .NET cells (<code>csharp</code>, <code>csharp-aot</code>) via the equivalent <code>DOTNET_GCHeapHardLimit</code> (512&nbsp;MB).#{appendix_ref}
     <p class="caveat">These numbers measure one specific Rails reference app — not arbitrary Rails workloads. See <a href="https://github.com/rubys/roundhouse/issues/16">#16</a> for the fixture-fragility caveats.</p>
-    #{(targets.include?('rails-jruby') ? %(<p class="caveat"><code>rails-jruby</code> is the stock-Rails-on-the-JVM baseline — the same blog, pinned to <strong>Rails 8.0</strong> (one minor behind the others' 8.1) on a <strong>prerelease</strong> AR-JDBC adapter (<code>activerecord-jdbcsqlite3-adapter 80.0.pre1</code>), the only combination that drives ActiveRecord on JRuby 10 today.</p>) : '')}
-    #{(targets.include?('spinel') ? %(<p class="caveat"><code>spinel</code> runs the <em>same</em> Roundhouse-emitted framework as the CRuby <code>ruby</code> cell, but on the <a href="https://github.com/matz/spinel">Spinel</a> VM behind the Tep fiber server rather than CRuby + Puma — so the <code>ruby</code> → <code>spinel</code> gap is a runtime swap, not a framework or source change.</p>) : '')}
+    #{(measured_targets.include?('rails-jruby') ? %(<p class="caveat"><code>rails-jruby</code> is the stock-Rails-on-the-JVM baseline — the same blog, pinned to <strong>Rails 8.0</strong> (one minor behind the others' 8.1) on a <strong>prerelease</strong> AR-JDBC adapter (<code>activerecord-jdbcsqlite3-adapter 80.0.pre1</code>), the only combination that drives ActiveRecord on JRuby 10 today.</p>) : '')}
+    #{(measured_targets.include?('spinel') ? %(<p class="caveat"><code>spinel</code> runs the <em>same</em> Roundhouse-emitted framework as the CRuby <code>ruby</code> cell, but on the <a href="https://github.com/matz/spinel">Spinel</a> VM behind the Tep fiber server rather than CRuby + Puma — so the <code>ruby</code> → <code>spinel</code> gap is a runtime swap, not a framework or source change.</p>) : '')}
   </div>
 METHOD
+
+# ── Banner: lanes that produced no numbers ───────────────────────────
+
+# Stated up here, above the first chart, rather than left for a reader to
+# infer from a missing bar. A lane can fail two ways and they mean
+# different things: never measured at all (never started, or died on its
+# first cell), versus measured some cells and then stopped — which is a
+# server that died partway through the run and took every later cell with
+# it. per-run.json is what tells them apart.
+partial = measured_targets.select do |t|
+  tally = run_tally[t]
+  tally[:total] > 0 && tally[:measured] < tally[:total]
+end
+
+unless dead_targets.empty? && partial.empty?
+  items = (dead_targets + partial).map do |t|
+    tally = run_tally[t]
+    counted = tally[:total] > 0 ? " (#{tally[:measured]} of #{tally[:total]} timed runs recorded)" : ''
+    verb = dead_targets.include?(t) ? 'recorded no measurements' :
+           'stopped answering partway through its cells'
+    "<li><code>#{t}</code> #{verb}#{counted}</li>"
+  end.join("\n")
+
+  html << <<~BANNER
+    <div class="methodology" style="border-left-color:#c0392b;background:#fdf3f2">
+      <strong>Incomplete run.</strong> Not every requested target produced numbers:
+      <ul>
+      #{items}
+      </ul>
+      <p class="caveat">Their cells are shown as <em>no data</em>, not as zero — an unmeasured cell means <code>wrk</code> found nothing serving, which is a different claim from a runtime that was measured and is slow. They are left out of the derived charts (multipliers, RSS ranking) for the same reason.</p>
+    </div>
+  BANNER
+end
 
 # ── Section: throughput per endpoint ─────────────────────────────────
 
@@ -363,7 +438,7 @@ end
 # Cross-language comparison: only meaningful when both ruby and rails
 # were measured this run. Skip the whole section otherwise so a partial
 # run (e.g. spinel-only) still produces a report.
-if (%w[ruby rails] - targets).empty?
+if (%w[ruby rails] - measured_targets).empty?
   html << "<h2>2. Lowerer dividend (ruby vs rails)</h2>\n"
   html << <<~P
     <p>Same Ruby interpreter, same YJIT, same Puma — the only variable is whether the framework runtime is Rails or Roundhouse-emitted. The multiplier above each pair is the lift from the lowerer pipeline.</p>
@@ -382,7 +457,7 @@ if (%w[ruby rails] - targets).empty?
 
   # The same swap on the JVM, reported as the measured ratio when both
   # JRuby cells ran.
-  if (%w[jruby rails-jruby] - targets).empty?
+  if (%w[jruby rails-jruby] - measured_targets).empty?
     jr   = by['/articles']['jruby']&.dig('req_sec').to_f
     rjr  = by['/articles']['rails-jruby']&.dig('req_sec').to_f
     rb   = by['/articles']['ruby']&.dig('req_sec').to_f
@@ -397,7 +472,7 @@ end
 
 # Restrict to the JIT/interp variants that were actually measured; skip
 # the section if none of them ran.
-yjit_series = %w[ruby ruby-int rails rails-int] & targets
+yjit_series = %w[ruby ruby-int rails rails-int] & measured_targets
 unless yjit_series.empty?
   html << "<h2>3. YJIT contribution</h2>\n"
   html << <<~P
@@ -432,9 +507,9 @@ html << <<~P
   <p>Per-target lift going from <code>/articles</code> (HTML) to <code>/articles.json</code> (JSON). The asymmetry isn't JSON-escape vs HTML-escape — both paths concatenate and escape strings. What JSON skips is the <em>layout chain</em> (csrf_meta_tag, importmap, asset-manifest scan, content_for slots) and the <em>per-row view helpers</em> (link_to, button_to, dom_id, tag.*) that the HTML index template invokes for every record. The chart below shows the multiplier per target.</p>
 P
 
-if targets.include?('rails-jruby')
-  rjr_html = by['/articles']['rails-jruby']&.dig('req_sec').to_f
-  rjr_json = by['/articles.json']['rails-jruby']&.dig('req_sec').to_f
+if measured_targets.include?('rails-jruby')
+  rjr_html = cell_metric(by['/articles']['rails-jruby'], 'req_sec').to_f
+  rjr_json = cell_metric(by['/articles.json']['rails-jruby'], 'req_sec').to_f
   if rjr_html > 0 && rjr_json > 0 && rjr_json < rjr_html
     html << %(<p><code>rails-jruby</code>'s multiplier falls below 1× (#{fmt_dec(rjr_json / rjr_html, 1)}×): its JSON endpoint measures slower than its HTML one.</p>\n)
   end
@@ -443,11 +518,14 @@ end
 # Collapse the JIT/non-JIT variants, compute each target's HTML→JSON
 # multiplier, then rank by it (like the other bar charts) so the chart
 # reads as an ordering rather than canonical target order.
-mult_values = (targets - %w[ruby-int rails-int]).each_with_object({}) do |t, h|
-  html_v = by['/articles'][t]&.dig('req_sec').to_f
-  json_v = by['/articles.json'][t]&.dig('req_sec').to_f
-  h[t] = html_v > 0 ? (json_v / html_v) : 0
+mult_values = (measured_targets - %w[ruby-int rails-int]).each_with_object({}) do |t, h|
+  html_v = cell_metric(by['/articles'][t], 'req_sec').to_f
+  json_v = cell_metric(by['/articles.json'][t], 'req_sec').to_f
+  # Both ends must be measured — a lane that died between the HTML and
+  # JSON endpoints has no multiplier, and a 0× bar would invent one.
+  h[t] = (html_v > 0 && json_v > 0) ? (json_v / html_v) : nil
 end
+mult_values.reject! { |_, v| v.nil? }
 mult_targets = mult_values.keys.sort_by { |t| -mult_values[t] }
 # Single-group chart looks silly; redraw as per-target bars
 html << <<~SVG
@@ -475,13 +553,16 @@ SVG
 html << "<h2>6. Memory footprint (RSS)</h2>\n"
 html << "<p>Max RSS observed across all endpoints, per target, sorted low to high. The field spans more than two orders of magnitude. The managed-heap cells (the JVM and .NET targets) run under a fixed heap budget rather than an organically-grown working set — see the note below the chart.</p>\n"
 
-mem_rows = targets.map do |tgt|
-  max_rss = endpoints.map { |ep| by[ep][tgt]&.dig('rss_mb').to_f }.max
-  { 'target' => tgt, 'rss_mb' => max_rss }
+# Only lanes that measured: an unmeasured cell's RSS reads 0 because the
+# sampler had no process to sample, and a 0 MB bar would put a dead lane
+# at the top of a chart whose whole point is "lower is better".
+mem_rows = measured_targets.map do |tgt|
+  max_rss = endpoints.filter_map { |ep| cell_metric(by[ep][tgt], 'rss_mb')&.to_f }.max
+  { 'target' => tgt, 'rss_mb' => max_rss || 0.0 }
 end
 mem_rows.sort_by! { |r| r['rss_mb'] }
 
-mem_max = mem_rows.map { |r| r['rss_mb'] }.max
+mem_max = [mem_rows.map { |r| r['rss_mb'] }.max || 0.0, 1.0].max
 mem_svg_h = 30 + 28 * mem_rows.size
 html << svg_open(760, mem_svg_h)
 mem_rows.each_with_index do |row, i|
@@ -521,10 +602,12 @@ lat_order.each do |tgt|
   html << "<tr><td><strong>#{tgt}</strong></td>"
   endpoints.each do |ep|
     c = by[ep][tgt]
-    if c
-      html << %(<td class="num">#{fmt_dec(c['p50_ms'], 1)}</td><td class="num">#{fmt_dec(c['p99_ms'], 1)}</td>)
+    p50 = cell_metric(c, 'p50_ms')
+    p99 = cell_metric(c, 'p99_ms')
+    if p50 || p99
+      html << %(<td class="num">#{p50 ? fmt_dec(p50, 1) : '—'}</td><td class="num">#{p99 ? fmt_dec(p99, 1) : '—'}</td>)
     else
-      html << "<td>-</td><td>-</td>"
+      html << "<td>—</td><td>—</td>"
     end
   end
   html << "</tr>\n"
@@ -604,11 +687,16 @@ cells.sort_by { |c| [TARGET_ORDER.index(c['target']) || 99, ENDPOINT_ORDER.index
   html << "<tr>"
   html << "<td>#{c['target']}</td>"
   html << "<td>#{c['endpoint']}</td>"
-  html << %(<td class="num">#{fmt_int(c['req_sec'])}</td>)
-  html << %(<td class="num">#{fmt_dec(c['p50_ms'], 2)}</td>)
-  html << %(<td class="num">#{fmt_dec(c['p99_ms'], 2)}</td>)
-  html << %(<td class="num">#{fmt_int(c['rss_mb'])}</td>)
-  html << %(<td class="num">#{fmt_int(c['rps_per_gb'])}</td>)
+  req = cell_metric(c, 'req_sec')
+  html << %(<td class="num">#{req ? fmt_int(req) : '—'}</td>)
+  %w[p50_ms p99_ms].each do |k|
+    v = cell_metric(c, k)
+    html << %(<td class="num">#{v ? fmt_dec(v, 2) : '—'}</td>)
+  end
+  %w[rss_mb rps_per_gb].each do |k|
+    v = cell_metric(c, k)
+    html << %(<td class="num">#{v ? fmt_int(v) : '—'}</td>)
+  end
   html << "</tr>\n"
 end
 html << "</tbody></table>\n</details>\n"
@@ -639,7 +727,7 @@ if env
 
   h = env['harness'] || {}
   requested  = Array(h['targets'])
-  unmeasured = requested - targets
+  unmeasured = requested - measured_targets
   html << "<h3>Harness</h3>\n"
   html << kv_table([
     ['command',     h['command'] && "<code>#{h['command']}</code>"],
@@ -649,7 +737,7 @@ if env
     ['wrk threads', h['wrk_threads']],
     ['endpoints',   Array(h['endpoints']).map { |e| "<code>#{e}</code>" }.join(' ')],
     ['targets',     requested.join(', ')],
-    ['not measured', unmeasured.empty? ? nil : "#{unmeasured.join(', ')} (requested but produced no cells)"],
+    ['not measured', unmeasured.empty? ? nil : "#{unmeasured.join(', ')} (requested but produced no measurements)"],
   ])
 
   g = env['git'] || {}

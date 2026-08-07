@@ -1187,7 +1187,11 @@ cells = records.group_by { |r| [r["target"], r["workers"], r["endpoint"]] }.map 
   req_sec = median(runs.map { |r| r["req_sec"] })
   p50     = median(runs.map { |r| r["p50_ms"] })
   p99     = median(runs.map { |r| r["p99_ms"] })
-  rss_kb  = median(runs.map { |r| r["rss_kb"] })
+  # A zero RSS is never a measurement — it means the sampler's `kill -0`
+  # found no process, which is what a server that died mid-run leaves
+  # behind. Kept as nil so the renderers can say "no data" instead of
+  # charting a lane at 0 MB, which reads as an impossibly lean one.
+  rss_kb  = median(runs.map { |r| r["rss_kb"] }.reject { |v| v.to_i.zero? })
   rss_gb  = rss_kb ? rss_kb / 1024.0 / 1024.0 : nil
   rps_per_gb = (req_sec && rss_gb && rss_gb > 0) ? req_sec / rss_gb : nil
   {
@@ -1211,11 +1215,15 @@ by_endpoint.each do |endpoint, eg_cells|
   md << "## `#{endpoint}`\n\n"
   md << "| target | workers | req/sec | p50 (ms) | p99 (ms) | RSS (MB) | req/sec/GB |\n"
   md << "|--------|--------:|--------:|---------:|---------:|---------:|-----------:|\n"
+  # `—` rather than 0 for a cell that was never measured: a 0 in a
+  # req/sec column is a claim about the runtime, and this table has no
+  # other way to say the server wasn't answering when wrk ran.
+  cell = ->(v, places) { v.nil? ? "—" : ("%.#{places}f" % v) }
   eg_cells.sort_by { |c| [c[:target], c[:workers]] }.each do |c|
-    md << "| %s | %d | %.0f | %.2f | %.2f | %.0f | %.0f |\n" % [
+    md << "| %s | %d | %s | %s | %s | %s | %s |\n" % [
       c[:target], c[:workers],
-      c[:req_sec] || 0, c[:p50_ms] || 0, c[:p99_ms] || 0,
-      c[:rss_mb] || 0, c[:rps_per_gb] || 0,
+      cell.(c[:req_sec], 0), cell.(c[:p50_ms], 2), cell.(c[:p99_ms], 2),
+      cell.(c[:rss_mb], 0), cell.(c[:rps_per_gb], 0),
     ]
   end
   md << "\n"
