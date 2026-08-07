@@ -202,9 +202,19 @@ class BenchDriver
   # comparison once read -2.8% where the pinned one read -61%). Printed at
   # boundaries the driver already flushes, so a crashed run keeps every
   # completed phase's counters.
+  # `remembered`/`remembered_peak` (spinel a02ffd70) are appended AFTER the two
+  # counters the wrapper has always parsed, so an older wrapper reading fields
+  # 1..3 is unaffected and an older binary that does not carry the keys prints
+  # zeros rather than failing. A minor collection walks every entry in that set
+  # and runs its scan, so on a store-heavy route with a large old heap the minor
+  # can end up doing the full mark's work plus the bookkeeping — the peak
+  # against the live set is the first thing to check on a route where the
+  # generational configuration LOSES (matz/spinel#3513, /recent).
   def self.gcstat(phase)
     g = GC.stat
-    puts "GCSTAT " + phase + " " + g["cycle"].to_s + " " + g["full_runs"].to_s
+    puts "GCSTAT " + phase + " " + g["cycle"].to_s + " " + g["full_runs"].to_s +
+         " " + g["remembered"].to_s + " " + g["remembered_peak"].to_s +
+         " " + g["bytes"].to_s + " " + g["old_bytes"].to_s + " " + g["str_count"].to_s
   end
 
   def self.rss_vmrss_kb
@@ -346,6 +356,16 @@ class BenchDriver
     # reuse the CRuby lane's own table, so the keys join instead of being a
     # second implementation that drifts.
     samples = {}
+    # DIAGNOSTIC ONLY, off unless BENCH_REM_PROBE is set: the remembered set's
+    # size around each visit, so a per-route figure exists at all. GC.stat's
+    # `remembered_peak` is a process-wide high-water mark, which cannot say
+    # WHICH route filled the set, and a route run in isolation does not
+    # reproduce the mixed sequence's behaviour — so the only way to attribute
+    # it is to sample inside the real sequence. This allocates a hash per
+    # visit and therefore PERTURBS the timing: runs with it on are for the
+    # remembered numbers, never for ms/iter (matz/spinel#3513).
+    rem_probe = (ENV["BENCH_REM_PROBE"] || "") != ""
+    rem_max = {}
     iters = 0
     total = 0.0
     while iters < min_iters || (warmup_ms + total) < min_seconds * 1000.0
@@ -355,6 +375,21 @@ class BenchDriver
         path = p2[1].to_s
         v0 = now_ms
         visit(jar, p2[0].to_s, path, "")
+        if rem_probe
+          # Current size, sampled per visit. This UNDERCOUNTS: a minor
+          # collection clears the set and on this workload collections run
+          # about once per visit, so the sample sees only what accumulated
+          # since the last clear. It is a lower bound, and it is the same
+          # bound for every route, so the cross-route comparison is fair even
+          # though the absolute numbers are not. (`remembered_peak` cannot
+          # substitute here — it is a monotonic process-wide high-water mark,
+          # so "the peak after visiting X" only grows with time and
+          # attributes nothing to X. For a true per-route upper bound, run
+          # the route as its own single-route sequence and read the peak.)
+          r = GC.stat["remembered"]
+          prev = rem_max.fetch(path, 0)
+          rem_max[path] = r if r > prev
+        end
         arr = samples.fetch(path, nil)
         if arr.nil?
           arr = []
@@ -373,6 +408,9 @@ class BenchDriver
       line = "V " + path
       arr.each { |x| line = line + " " + x.to_s }
       puts line
+    end
+    if rem_probe
+      rem_max.each { |path, r| puts "REM " + path + " " + r.to_s }
     end
     gcstat("timed")
     puts "RSS " + boot_rss.to_s + " " + rss_vmrss_kb.to_s + " " + rss_vmhwm_kb.to_s
