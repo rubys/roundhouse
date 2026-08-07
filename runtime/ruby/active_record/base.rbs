@@ -63,6 +63,17 @@ module ActiveRecord
     # `validate` body. Phase 2.5(a) inlines every `validates :x, …`
     # declaration so the runtime `ActiveRecord::Validations` mixin no
     # longer ships; `errors` lives on Base directly.
+    #
+    # The ivar is declared as well as the reader. Our own emitters infer
+    # it from the reader (a pure reader donates its return type to the
+    # ivar — see kotlin/library.rs's infer_body_ivar_types), but a
+    # consumer that only reads signatures seeds `@errors` from the bare
+    # `[]` in `initialize` instead, which carries no element type. Under
+    # spinel that produced `sp_IntArray *iv_errors` behind a reader typed
+    # `sp_StrArray *`, so a `validate` body's `errors << "..."` pushed a
+    # `const char *` into int storage — where the scan hook does not mark
+    # it as a pointer and the message is swept while the array holds it.
+    @errors: Array[String]
     def errors: () -> Array[String]
 
     def initialize: (?Hash[Symbol, untyped] attrs) -> void

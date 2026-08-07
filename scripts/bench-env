@@ -133,6 +133,14 @@ env['clock'] = clk.compact unless clk.compact.empty?
 TOOLCHAINS = {
   'ruby'    => '--version',
   'jruby'   => '--version',
+  # spinel prints its build revision (a git sha) rather than a release
+  # number. It is the only compiler here that the nightly rebuilds from
+  # source on every run, so it is the one whose version a result cannot
+  # be reconstructed without: mise doesn't manage it and there is no
+  # package version to fall back on. Recording it is what turns "which
+  # spinel produced this number" from a git-log-by-date correlation into
+  # a lookup.
+  'spinel'  => '--version',
   'rustc'   => '--version',
   'cargo'   => '--version',
   'go'      => 'version',

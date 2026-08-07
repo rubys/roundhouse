@@ -1141,8 +1141,11 @@ fn is_empty_body(e: &Expr) -> bool {
 /// they don't all collapse to `Any?`. Two signals, strongest first:
 ///   1. A pure reader method whose body *is* the ivar (`def errors;
 ///      @errors; end`) donates its declared return type — this is how
-///      `@errors`/`@persisted`/`@destroyed` get `Array[String]`/`bool`
-///      from `base.rbs` without an ivar-declaration syntax in RBS.
+///      `@persisted`/`@destroyed` get `bool` from `base.rbs` without
+///      needing an ivar declaration of their own. (`@errors` now carries
+///      an explicit `@errors: Array[String]` there as well: a consumer
+///      that reads only signatures, as spinel does, otherwise seeds it
+///      from the bare `[]` in `initialize` and lands on an int array.)
 ///   2. Otherwise, the literal an ivar is assigned (`@persisted = false`).
 /// Same shape works for flash/session's `@data` once they're wired.
 fn infer_body_ivar_types(methods: &[MethodDef]) -> BTreeMap<String, Ty> {
