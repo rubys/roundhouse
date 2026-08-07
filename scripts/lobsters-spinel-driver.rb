@@ -366,6 +366,9 @@ class BenchDriver
     # remembered numbers, never for ms/iter (matz/spinel#3513).
     rem_probe = (ENV["BENCH_REM_PROBE"] || "") != ""
     rem_max = {}
+    cyc_n = {}
+    ful_n = {}
+    vis_n = {}
     iters = 0
     total = 0.0
     while iters < min_iters || (warmup_ms + total) < min_seconds * 1000.0
@@ -373,8 +376,22 @@ class BenchDriver
       seq.each do |spec|
         p2 = spec.split(" ", 2)
         path = p2[1].to_s
+        if rem_probe
+          g0 = GC.stat
+          c0 = g0["cycle"]
+          f0 = g0["full_runs"]
+        end
         v0 = now_ms
         visit(jar, p2[0].to_s, path, "")
+        if rem_probe
+          g1 = GC.stat
+          cyc = cyc_n.fetch(path, 0)
+          cyc_n[path] = cyc + (g1["cycle"] - c0)
+          ful = ful_n.fetch(path, 0)
+          ful_n[path] = ful + (g1["full_runs"] - f0)
+          vis = vis_n.fetch(path, 0)
+          vis_n[path] = vis + 1
+        end
         if rem_probe
           # Current size, sampled per visit. This UNDERCOUNTS: a minor
           # collection clears the set and on this workload collections run
@@ -411,6 +428,7 @@ class BenchDriver
     end
     if rem_probe
       rem_max.each { |path, r| puts "REM " + path + " " + r.to_s }
+      vis_n.each { |path, n| puts "GCV " + path + " " + n.to_s + " " + cyc_n.fetch(path, 0).to_s + " " + ful_n.fetch(path, 0).to_s }
     end
     gcstat("timed")
     puts "RSS " + boot_rss.to_s + " " + rss_vmrss_kb.to_s + " " + rss_vmhwm_kb.to_s
