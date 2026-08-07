@@ -1154,6 +1154,16 @@ if rh_pr && rl_pr && !rh_pr.empty?
       rails_own: rl_pr[k]['ms_p25']&.to_f,
       rh_own:    rh_pr[k]['ms_p25']&.to_f,
       sp_own:    sp_pr&.dig(k, 'ms_p25')&.to_f,
+      # THE FLOOR: the fastest visit this route recorded. p25 corrects for
+      # collection arrival only when fewer than a quarter of a route's visits
+      # collect, and on this workload that does not hold everywhere — /replies
+      # sits at p25 0.217 against a floor of 0.099, because MORE than a
+      # quarter of its visits eat a mark. Where the floor is far below p25,
+      # p25 is still pricing collections and the floor is the better estimate
+      # of what the code costs (matz/spinel#3513).
+      rails_floor: rl_pr[k]['ms_min']&.to_f,
+      rh_floor:    rh_pr[k]['ms_min']&.to_f,
+      sp_floor:    sp_pr&.dig(k, 'ms_min')&.to_f,
       per_iter: rh_iters > 0 ? (rh_pr[k]['n'].to_f / rh_iters).round : nil }
   end.sort_by { |r| -r[:rails] }
 
@@ -1210,13 +1220,19 @@ if rh_pr && rl_pr && !rh_pr.empty?
   # within 10% of its own work is dominated by its own cost and the extra
   # number is clutter; the annotation then appears on exactly the rows a
   # reader should discount, which is the whole point of having it.
-  ms_cell = lambda do |med, own|
+  # The floor gets the same treatment one level down: it is printed only when
+  # it is materially below p25, i.e. only where p25 is ITSELF still pricing
+  # collections. On a route whose visits mostly run clean the three numbers
+  # collapse to one, which is the reading "this median is the route's cost".
+  ms_cell = lambda do |med, own, floor|
     return '—' unless med
-    if own && med > 0 && (med - own) / med > 0.10
-      %(#{fmt_dec(med, 2)}<br><span class="legend">own #{fmt_dec(own, 2)}</span>)
-    else
-      fmt_dec(med, 2)
-    end
+    return fmt_dec(med, 2) unless own && med > 0 && (med - own) / med > 0.10
+    extra = if floor && own > 0 && (own - floor) / own > 0.10
+              %(<br><span class="legend">floor #{fmt_dec(floor, 2)}</span>)
+            else
+              ''
+            end
+    %(#{fmt_dec(med, 2)}<br><span class="legend">own #{fmt_dec(own, 2)}</span>#{extra})
   end
   html << "<details>\n<summary>Per-endpoint table (#{breakdown.size} endpoints)</summary>\n"
   html << "<table>\n<thead><tr><th>endpoint</th><th>rails</th>#{rli_col ? '<th>rails no-JIT</th>' : ''}#{rjv_col ? '<th>rails JRuby</th>' : ''}<th>roundhouse</th>#{rhi_col ? '<th>roundhouse no-JIT</th>' : ''}#{sp_col ? '<th>AOT</th>' : ''}#{jr_col ? '<th>jruby</th>' : ''}<th>ratio</th><th>visits/iter</th></tr></thead>\n<tbody>\n"
@@ -1224,20 +1240,51 @@ if rh_pr && rl_pr && !rh_pr.empty?
     rcls = b[:ratio].nil? ? '' : (b[:ratio] >= 1 ? 'ok' : 'no')
     html << "<tr>"
     html << %(<td><code>#{esc(b[:key])}</code>#{cached_mark.(b[:key])}</td>)
-    html << %(<td class="num">#{ms_cell.(b[:rails], b[:rails_own])}</td>)
+    html << %(<td class="num">#{ms_cell.(b[:rails], b[:rails_own], b[:rails_floor])}</td>)
     html << %(<td class="num">#{b[:rails_int] ? fmt_dec(b[:rails_int], 2) : '—'}</td>) if rli_col
     html << %(<td class="num">#{b[:rails_jvm] ? fmt_dec(b[:rails_jvm], 2) : '—'}</td>) if rjv_col
-    html << %(<td class="num">#{ms_cell.(b[:rh], b[:rh_own])}</td>)
+    html << %(<td class="num">#{ms_cell.(b[:rh], b[:rh_own], b[:rh_floor])}</td>)
     html << %(<td class="num">#{b[:rh_int] ? fmt_dec(b[:rh_int], 2) : '—'}</td>) if rhi_col
-    html << %(<td class="num">#{b[:sp] ? ms_cell.(b[:sp], b[:sp_own]) : '—'}</td>) if sp_col
+    html << %(<td class="num">#{b[:sp] ? ms_cell.(b[:sp], b[:sp_own], b[:sp_floor]) : '—'}</td>) if sp_col
     html << %(<td class="num">#{b[:jr] ? fmt_dec(b[:jr], 2) : '—'}</td>) if jr_col
     html << %(<td class="num #{rcls}">#{b[:ratio] ? "#{fmt_dec(b[:ratio], 2)}×" : '—'}</td>)
     html << %(<td class="num">#{b[:per_iter]}</td>)
     html << "</tr>\n"
   end
   html << "</tbody></table>\n"
+  # AOT-vs-YJIT counted twice: by median, and on own work. These disagree, and
+  # the disagreement is the point — a route's median is set partly by where it
+  # sits in the frozen sequence relative to collection boundaries, so counting
+  # "routes where AOT is slower" off medians counts arrival as if it were code.
+  # Reordering the sequence would move rows without a line of code changing.
+  # Both numbers are shown because they answer different questions: the median
+  # is what the route costs in a running server, the floor is what its code
+  # costs (matz/spinel#3513).
+  if sp_col
+    cmp = breakdown.select { |b| b[:sp]&.positive? && b[:rh]&.positive? }
+    slow_med = cmp.count { |b| b[:sp] > b[:rh] }
+    fl = cmp.select { |b| b[:sp_floor]&.positive? && b[:rh_floor]&.positive? }
+    slow_floor = fl.count { |b| b[:sp_floor] > b[:rh_floor] }
+    flipped = fl.select { |b| b[:sp] > b[:rh] && b[:sp_floor] <= b[:rh_floor] }
+                .sort_by { |b| -(b[:sp] / b[:rh]) }
+    # A run whose per_route rows predate ms_min has NO floor data, and the
+    # own-work half then reads "0 of 0", i.e. "nothing is genuinely slower" —
+    # a far stronger claim than the absence of data supports. Say the median
+    # count alone there.
+    if cmp.any? && fl.empty?
+      html << %(<p class="caveat"><strong>AOT is slower than the same emit on CRuby+YJIT on #{slow_med} of #{cmp.size} endpoints by median.</strong> This run predates the per-route floor, so how much of that is collection arrival rather than code cannot be separated here.</p>\n)
+    elsif cmp.any?
+      html << %(<p class="caveat"><strong>AOT is slower than the same emit on CRuby+YJIT on #{slow_med} of #{cmp.size} endpoints by median, but only #{slow_floor} of #{fl.size} on own work.</strong> )
+      if flipped.any?
+        names = flipped.first(5).map { |b|
+          "<code>#{esc(b[:key])}</code> #{fmt_dec(b[:sp] / b[:rh], 2)}×&nbsp;→&nbsp;#{fmt_dec(b[:sp_floor] / b[:rh_floor], 2)}×" }.join(', ')
+        html << %(The difference is collection arrival, not code — #{names}#{flipped.size > 5 ? ", and #{flipped.size - 5} more" : ''} lose on the median and win on the floor. )
+      end
+      html << %(Routes that lose on <em>both</em> are the ones where the emitted code is genuinely behind.</p>\n)
+    end
+  end
   if sp_col || jr_col || rli_col || rhi_col || rjv_col
-    html << %(<p class="legend">All lane columns are median ms per visit; ratio = rails ÷ roundhouse (the +YJIT pair)#{sp_col ? '. The AOT column is the spinel-compiled binary — same emit, different runtime, and not at full content parity (see above)' : ''}. A route marked <strong>cached</strong> serves its timed visits from a cache in the app itself (lobsters keeps some whole pages for 24h), in every lane — those medians price a cache hit, not the render. An <strong>own</strong> figure appears where a route's median runs more than 10% above its own work (p25 of its visits) — the gap is collection triggered during that visit but caused by the heap the whole sequence built, so it belongs to the lane rather than to the route. It is largest on the cheapest routes, which is where the median is least trustworthy as a per-route cost.</p>\n)
+    html << %(<p class="legend">All lane columns are median ms per visit; ratio = rails ÷ roundhouse (the +YJIT pair)#{sp_col ? '. The AOT column is the spinel-compiled binary — same emit, different runtime, and not at full content parity (see above)' : ''}. A route marked <strong>cached</strong> serves its timed visits from a cache in the app itself (lobsters keeps some whole pages for 24h), in every lane — those medians price a cache hit, not the render. An <strong>own</strong> figure appears where a route's median runs more than 10% above its own work (p25 of its visits) — the gap is collection triggered during that visit but caused by the heap the whole sequence built, so it belongs to the lane rather than to the route. It is largest on the cheapest routes, which is where the median is least trustworthy as a per-route cost. A <strong>floor</strong> figure appears below that where p25 is <em>itself</em> more than 10% above the fastest visit recorded: p25 only removes collection cost when fewer than a quarter of a route's visits collect, and where more than a quarter do, p25 is still pricing marks. The floor is one sample and therefore noisy downward — read it as a bound, not a measurement.</p>\n)
   end
   html << "</details>\n"
 end
