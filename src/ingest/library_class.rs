@@ -61,6 +61,15 @@ pub fn ingest_library_classes(
         out.push(library_class_from_node_with_scope(&class, &scope, file)?);
     }
     for (scope, module) in find_all_modules_with_scope(&root) {
+        // A nested `ClassMethods` is not a namespace of its own — it's
+        // ActiveSupport::Concern's class-side carrier, already folded
+        // into its parent as Class-receiver methods by `walk_decl_body`.
+        // Emitting it separately would define every method twice.
+        if !scope.is_empty()
+            && module_name_path(&module).as_deref() == Some(&["ClassMethods".to_string()])
+        {
+            continue;
+        }
         out.push(library_class_from_module_node_with_scope(
             &module, &scope, file,
         )?);
@@ -340,6 +349,26 @@ fn walk_decl_body<'pr>(
             constants.extend(inner_constants);
             unknown_calls.extend(inner_unknown);
             continue;
+        }
+        // `module ClassMethods … end` — ActiveSupport::Concern's OTHER
+        // spelling for the class side, and the one campfire's
+        // `User::Bot` uses for `create_bot!`/`authenticate_bot`.
+        // `class_methods do` (below) is sugar that Concern turns into
+        // exactly this module, so both have to arrive at the same
+        // place: Class-receiver methods of the enclosing module, which
+        // the registry's concern fold copies onto every includer.
+        // `ingest_library_classes` skips the nested module for this
+        // reason — otherwise the same defs would emit twice.
+        if let Some(m) = stmt.as_module_node() {
+            if module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()]) {
+                let (inner_includes, inner_methods, inner_constants, inner_unknown) =
+                    walk_decl_body(m.body(), owner, file, true)?;
+                includes.extend(inner_includes);
+                methods.extend(inner_methods);
+                constants.extend(inner_constants);
+                unknown_calls.extend(inner_unknown);
+                continue;
+            }
         }
         if let Some(call) = stmt.as_call_node() {
             if call.receiver().is_none() {
