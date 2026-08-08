@@ -7,7 +7,7 @@ use ruby_prism::Node;
 
 use crate::dialect::{Comment, Model, ModelBodyItem};
 use crate::effect::EffectSet;
-use crate::expr::{Expr, ExprNode};
+use crate::expr::{Expr, ExprNode, Literal};
 use crate::naming::{camelize, pluralize_snake, singularize_camelize, snake_case};
 use crate::schema::{ColumnType, Schema, Table};
 use crate::span::Span;
@@ -90,6 +90,29 @@ pub fn ingest_model(
             let leading_blank = prev_end
                 .map(|pe| source_has_blank_line(source, pe, leading_area_start))
                 .unwrap_or(false);
+            // `enum :status, %i[…]` — one statement standing for a
+            // scope + predicate + bang writer per label, so it expands
+            // in the walk loop for the same reason `class << self` does.
+            if let Some(call) = stmt.as_call_node() {
+                match expand_enum_decl(&call, file, &leading) {
+                    Ok(Some(expanded)) => {
+                        let mut blank = leading_blank;
+                        for mut item in expanded {
+                            item.set_leading_blank_line(std::mem::take(&mut blank));
+                            body.push(item);
+                        }
+                        prev_end = Some(stmt.location().end_offset());
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(err) if super::survey::is_active() => {
+                        super::survey::record(&err);
+                        prev_end = Some(stmt.location().end_offset());
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
             // `class << self … end` — the singleton block's defs are
             // class methods of the model (`Room.create_for`). A model's
             // IR body is one item per statement, so expand the block in
@@ -255,6 +278,250 @@ pub(super) fn ingest_model_body_item(
         leading_comments,
         leading_blank_line: false,
     })
+}
+
+/// Expand `enum :status, %i[active deactivated banned]` into the DSL it
+/// stands for: one scope, one predicate and one bang writer per label.
+///
+/// Returns `None` when the statement isn't an `enum` call, so callers
+/// can fall through to the normal classifier.
+///
+/// Desugaring into `Scope` + `Method` items — rather than adding a
+/// `ModelBodyItem::Enum` and teaching thirteen emitters to expand it —
+/// buys the whole existing pipeline for free: scopes already lower to
+/// relation-returning class methods (with `__scope_` delegates), and
+/// predicate bodies are ordinary column comparisons.
+///
+/// **Stored values, not labels.** The generated bodies compare and
+/// query against what the column holds (`status == 0`), which is what
+/// makes them correct without an enum type at runtime. The divergence
+/// from Rails is the attribute reader: `user.status` yields `0` here
+/// and `"active"` there. Rails' own `enum` maps at every boundary; that
+/// mapping (for hand-written `where(role: :bot)` and `update!(status:
+/// :deactivated)` sites) is a separate, type-aware pass.
+pub(super) fn expand_enum_decl(
+    call: &ruby_prism::CallNode<'_>,
+    file: &str,
+    leading_comments: &[crate::dialect::Comment],
+) -> IngestResult<Option<Vec<ModelBodyItem>>> {
+    use crate::dialect::{MethodDef, MethodReceiver, Scope};
+    use crate::effect::EffectSet;
+
+    if call.receiver().is_some() || constant_id_str(&call.name()) != "enum" {
+        return Ok(None);
+    }
+    let Some(args) = call.arguments() else { return Ok(None) };
+    let all_args = args.arguments();
+    let mut iter = all_args.iter();
+    let Some(first) = iter.next() else { return Ok(None) };
+
+    // Two spellings: `enum :status, <mapping>, **opts` (Rails 7) and the
+    // older `enum status: <mapping>, **opts`, where the column and its
+    // mapping are the first pair of one keyword hash.
+    let (column, mapping_node, prefix, suffix) = match symbol_value(&first) {
+        Some(col) => {
+            let column: String = col;
+            let mapping = iter.next();
+            let opts = iter.next();
+            let (prefix, suffix) = match opts.as_ref().and_then(|o| o.as_keyword_hash_node()) {
+                Some(kh) => enum_affixes(&kh.elements(), &column),
+                None => (String::new(), String::new()),
+            };
+            (column, mapping, prefix, suffix)
+        }
+        None => {
+            let Some(kh) = first.as_keyword_hash_node() else { return Ok(None) };
+            let elements = kh.elements();
+            let Some(pair) = elements.iter().next().and_then(|e| e.as_assoc_node()) else {
+                return Ok(None);
+            };
+            let Some(column) = symbol_value(&pair.key()) else { return Ok(None) };
+            let (prefix, suffix) = enum_affixes(&elements, &column);
+            (column, Some(pair.value()), prefix, suffix)
+        }
+    };
+    let Some(mapping_node) = mapping_node else { return Ok(None) };
+
+    let labels = enum_label_values(&mapping_node).ok_or_else(|| IngestError::Unsupported {
+        file: file.into(),
+        message: format!(
+            "enum :{} mapping must be an array or hash literal (or `%w[…].index_by(&:itself)`)",
+            column
+        ),
+    })?;
+
+    let span = Span::synthetic();
+    let sym = |s: &str| Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from(s) } });
+    let column_read = || {
+        Expr::new(
+            span,
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from(column.as_str()),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        )
+    };
+    let mut items = Vec::new();
+    for (label, value) in labels {
+        let base = format!("{prefix}{label}{suffix}");
+        let pair = Expr::new(
+            span,
+            ExprNode::Hash {
+                entries: vec![(sym(&column), Expr::new(span, ExprNode::Lit { value: value.clone() }))],
+                kwargs: true,
+            },
+        );
+        let call_with_pair = |method: &str| {
+            Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from(method),
+                    args: vec![pair.clone()],
+                    block: None,
+                    parenthesized: true,
+                },
+            )
+        };
+        let method_def = |name: String, body: Expr| ModelBodyItem::Method {
+            method: MethodDef {
+                name: Symbol::from(name),
+                receiver: MethodReceiver::Instance,
+                params: Vec::new(),
+                block_param: None,
+                body,
+                signature: None,
+                effects: EffectSet::pure(),
+                enclosing_class: None,
+                kind: crate::dialect::AccessorKind::Method,
+                is_async: false,
+                mutates_self: false,
+            },
+            leading_comments: Vec::new(),
+            leading_blank_line: false,
+        };
+
+        items.push(ModelBodyItem::Scope {
+            scope: Scope {
+                name: Symbol::from(base.as_str()),
+                params: Vec::new(),
+                body: call_with_pair("where"),
+            },
+            // The declaration's own comments ride the first item it
+            // expands to, so a documented `enum` keeps its docs.
+            leading_comments: if items.is_empty() {
+                leading_comments.to_vec()
+            } else {
+                Vec::new()
+            },
+            leading_blank_line: false,
+        });
+        items.push(method_def(
+            format!("{base}?"),
+            Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(column_read()),
+                    method: Symbol::from("=="),
+                    args: vec![Expr::new(span, ExprNode::Lit { value })],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+        ));
+        items.push(method_def(format!("{base}!"), call_with_pair("update!")));
+    }
+    Ok(Some(items))
+}
+
+/// Label → stored value for an `enum` mapping. An array literal maps by
+/// index the way Rails does (`%i[active deactivated]` → 0, 1); a hash
+/// literal carries its own values; `%w[…].index_by(&:itself)` — the
+/// idiom for a string-backed column — maps each label to itself.
+/// `None` for anything else (a constant reference, a computed hash),
+/// which the caller reports as a gap rather than guessing at storage.
+fn enum_label_values(node: &Node<'_>) -> Option<Vec<(String, Literal)>> {
+    if let Some(arr) = node.as_array_node() {
+        return arr
+            .elements()
+            .iter()
+            .enumerate()
+            .map(|(i, el)| {
+                symbol_value(&el)
+                    .or_else(|| string_value(&el))
+                    .map(|label| (label, Literal::Int { value: i as i64 }))
+            })
+            .collect();
+    }
+    if let Some(hash) = node.as_hash_node() {
+        return hash
+            .elements()
+            .iter()
+            .map(|el| {
+                let assoc = el.as_assoc_node()?;
+                let label = symbol_value(&assoc.key()).or_else(|| string_value(&assoc.key()))?;
+                let value = assoc.value();
+                let lit = if let Some(s) = string_value(&value) {
+                    Literal::Str { value: s }
+                } else {
+                    let raw = value.as_integer_node()?;
+                    let v: i32 = raw.value().try_into().ok()?;
+                    Literal::Int { value: v as i64 }
+                };
+                Some((label, lit))
+            })
+            .collect();
+    }
+    // `%w[ invisible nothing mentions ].index_by(&:itself)` — the labels
+    // ARE the stored strings.
+    let call = node.as_call_node()?;
+    if constant_id_str(&call.name()) != "index_by" {
+        return None;
+    }
+    let arr = call.receiver()?;
+    let arr = arr.as_array_node()?;
+    arr.elements()
+        .iter()
+        .map(|el| {
+            let label = symbol_value(&el).or_else(|| string_value(&el))?;
+            Some((label.clone(), Literal::Str { value: label }))
+        })
+        .collect()
+}
+
+/// `prefix:`/`suffix:` from an `enum`'s option hash. `true` means "use
+/// the column name" (Rails' own convention); a symbol or string names
+/// the affix directly. Returns the strings to splice around each label,
+/// already carrying their separating underscore.
+fn enum_affixes(elements: &ruby_prism::NodeList<'_>, column: &str) -> (String, String) {
+    let mut prefix = String::new();
+    let mut suffix = String::new();
+    for el in elements.iter() {
+        let Some(assoc) = el.as_assoc_node() else { continue };
+        let Some(key) = symbol_value(&assoc.key()) else { continue };
+        // `_prefix`/`_suffix` are the pre-Rails-7 spellings.
+        let which = key.trim_start_matches('_');
+        if which != "prefix" && which != "suffix" {
+            continue;
+        }
+        let value = assoc.value();
+        let affix = if value.as_true_node().is_some() {
+            column.to_string()
+        } else if let Some(s) = symbol_value(&value).or_else(|| string_value(&value)) {
+            s
+        } else {
+            continue;
+        };
+        if which == "prefix" {
+            prefix = format!("{affix}_");
+        } else {
+            suffix = format!("_{affix}");
+        }
+    }
+    (prefix, suffix)
 }
 
 /// Expand a model's `class << self … end` into the class methods it

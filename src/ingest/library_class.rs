@@ -958,6 +958,24 @@ pub fn ingest_concern_model_items(
             let mut stmts = Vec::new();
             walk_dsl_stmts(block_body, &mut stmts);
             for inner in stmts {
+                // `enum` inside `included do` belongs to every includer
+                // exactly like an association does — campfire declares
+                // `enum :role, %i[member administrator bot]` in
+                // User::Role. Expanded here for the same reason the
+                // model walk expands it: one statement, many items.
+                if let Some(call) = inner.as_call_node() {
+                    match super::model::expand_enum_decl(&call, file, &[]) {
+                        Ok(Some(expanded)) => {
+                            items.extend(expanded);
+                            continue;
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            super::survey::record(&err);
+                            continue;
+                        }
+                    }
+                }
                 match super::model::ingest_model_body_item(&inner, &id, file, Vec::new()) {
                     Ok(
                         item @ (ModelBodyItem::Association { .. }
