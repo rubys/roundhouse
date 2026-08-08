@@ -181,6 +181,32 @@ fn ingest_route_call(
             }
             Ok(None)
         }
+        // `direct :fresh_user_avatar do |user, options| … end` — a
+        // custom URL helper, not a route: it adds no path to the table,
+        // it names a `<name>_path`/`_url` builder whose body is
+        // arbitrary Ruby. No `RouteSpec` variant can hold that, and
+        // generating the helper needs both a typed signature for the
+        // block's params and query-string support in the emitted
+        // helpers (`route_for :user_avatar, token, v: …` →
+        // "/users/…/avatar?v=…"), which the segment-interpolation
+        // builder has no notion of. Dropped here with the helper NAME
+        // in the ledger line, so the hole reads as "`x_path` is
+        // missing" rather than "some DSL was skipped".
+        "direct" => {
+            if super::survey::is_active() {
+                let name = call
+                    .arguments()
+                    .and_then(|args| args.arguments().iter().next().and_then(|a| symbol_value(&a)))
+                    .unwrap_or_else(|| "?".to_string());
+                super::survey::record(&IngestError::Unsupported {
+                    file: file.into(),
+                    message: format!(
+                        "url helper dropped: `direct :{name}` — {name}_path/_url not generated"
+                    ),
+                });
+            }
+            Ok(None)
+        }
         // Unknown DSL — `concern`, `devise_for`,
         // `use_doorkeeper`, `authenticate`, etc. land here. Strict
         // ingest fails loud so the fixture that introduces them forces
