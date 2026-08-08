@@ -722,19 +722,13 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
         }
         n if n.as_hash_node().is_some() => {
             let hn = n.as_hash_node().unwrap();
-            ExprNode::Hash {
-                entries: hash_entries_from(&hn.elements(), file)?,
-                kwargs: false,
-            }
+            return ingest_hash_literal(&hn.elements(), false, span, file);
         }
         n if n.as_keyword_hash_node().is_some() => {
             // Bare keyword args `foo(a: 1)` arrive here when the arg list
             // is passed through generic expression ingest. No braces in source.
             let kh = n.as_keyword_hash_node().unwrap();
-            ExprNode::Hash {
-                entries: hash_entries_from(&kh.elements(), file)?,
-                kwargs: true,
-            }
+            return ingest_hash_literal(&kh.elements(), true, span, file);
         }
         n if n.as_instance_variable_write_node().is_some() => {
             let w = n.as_instance_variable_write_node().unwrap();
@@ -1586,12 +1580,13 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             let case = n.as_case_node().unwrap();
             let scrutinee = match case.predicate() {
                 Some(p) => ingest_expr(&p, file)?,
-                None => {
-                    return Err(IngestError::Unsupported {
-                        file: file.into(),
-                        message: "case without scrutinee not yet supported".into(),
-                    });
-                }
+                // Scrutinee-less `case / when <cond> / else / end` — the
+                // Ruby idiom for a condition ladder. There is no value to
+                // dispatch on, so `Pattern`/`Arm` can't model it; desugar
+                // to the equivalent `if / elsif / else` chain instead.
+                // Every target already emits `If`, so this costs no
+                // emitter work.
+                None => return ingest_condition_ladder(&case, span, file),
             };
             let mut arms: Vec<Arm> = Vec::new();
             for cond in case.conditions().iter() {
@@ -1967,22 +1962,156 @@ fn bool_op_surface(op_bytes: &[u8]) -> BoolOpSurface {
     }
 }
 
-fn hash_entries_from(
-    elements: &ruby_prism::NodeList<'_>,
+fn nil_expr() -> Expr {
+    Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil })
+}
+
+/// Desugar a scrutinee-less `case` (`case / when <cond> / … / end`)
+/// into the `if / elsif / else` chain it is shorthand for. Folds the
+/// `when` clauses back-to-front so the first one ends up outermost;
+/// a multi-condition `when a, b` ORs its conditions, as Ruby does.
+fn ingest_condition_ladder(
+    case: &ruby_prism::CaseNode<'_>,
+    span: Span,
     file: &str,
-) -> IngestResult<Vec<(Expr, Expr)>> {
-    let mut out = Vec::new();
+) -> IngestResult<Expr> {
+    // Innermost fallback: the `else` body, or `nil` — a scrutinee-less
+    // `case` with no matching `when` and no `else` evaluates to nil.
+    let mut chain = match case.else_clause().and_then(|e| e.statements()) {
+        Some(s) => ingest_expr(&s.as_node(), file)?,
+        None => nil_expr(),
+    };
+    let clauses: Vec<_> = case.conditions().iter().collect();
+    for clause in clauses.iter().rev() {
+        let when = clause.as_when_node().ok_or_else(|| IngestError::Unsupported {
+            file: file.into(),
+            message: format!("unsupported case condition (expected when): {clause:?}"),
+        })?;
+        let body = match when.statements() {
+            Some(s) => ingest_expr(&s.as_node(), file)?,
+            None => nil_expr(),
+        };
+        let mut test: Option<Expr> = None;
+        for c in when.conditions().iter() {
+            let e = ingest_expr(&c, file)?;
+            test = Some(match test {
+                None => e,
+                Some(left) => Expr::new(
+                    Span::synthetic(),
+                    ExprNode::BoolOp {
+                        op: BoolOpKind::Or,
+                        surface: BoolOpSurface::Symbol,
+                        left,
+                        right: e,
+                    },
+                ),
+            });
+        }
+        chain = Expr::new(
+            span,
+            ExprNode::If {
+                cond: test.unwrap_or_else(nil_expr),
+                then_branch: body,
+                else_branch: chain,
+            },
+        );
+    }
+    Ok(chain)
+}
+
+/// Ingest a hash literal (`{ … }`) or a bare keyword-argument list
+/// (`foo(a: 1)`) into one Expr.
+///
+/// The common all-`key => value` case yields `ExprNode::Hash` exactly
+/// as before. A double splat (`{ a: 1, **rest }`, `link_to url,
+/// **attributes, data: …`) has no slot in `Hash`'s `Vec<(Expr, Expr)>`,
+/// so it desugars into the `merge` chain it is defined to be —
+/// left-to-right, later keys winning. That keeps the double splat out
+/// of the IR entirely: no new `ExprNode` variant, no match arm in any
+/// of the thirteen emitters.
+///
+/// A merge chain is a `Send`, not a `Hash`, so it loses the `kwargs`
+/// flag and renders as a positional hash argument. That matches the
+/// receiving end: `ingest_method_def` already models a `**rest`
+/// parameter as a trailing *positional* param.
+fn ingest_hash_literal(
+    elements: &ruby_prism::NodeList<'_>,
+    kwargs: bool,
+    span: Span,
+    file: &str,
+) -> IngestResult<Expr> {
+    // Split into runs: consecutive `key => value` pairs collapse into one
+    // Hash literal, each `**expr` becomes its own chain link.
+    let mut chain: Option<Expr> = None;
+    let mut pending: Vec<(Expr, Expr)> = Vec::new();
+    let mut saw_splat = false;
+
     for el in elements.iter() {
-        let Some(assoc) = el.as_assoc_node() else {
-            // Splats and other non-assoc elements: lift when a fixture demands.
+        if let Some(assoc) = el.as_assoc_node() {
+            let k = ingest_expr(&assoc.key(), file)?;
+            let v = ingest_expr(&assoc.value(), file)?;
+            pending.push((k, v));
+            continue;
+        }
+        let Some(splat) = el.as_assoc_splat_node() else {
             return Err(IngestError::Unsupported {
                 file: file.into(),
-                message: "non-assoc hash element (splat?) not yet supported".into(),
+                message: format!("unsupported hash element: {el:?}"),
             });
         };
-        let k = ingest_expr(&assoc.key(), file)?;
-        let v = ingest_expr(&assoc.value(), file)?;
-        out.push((k, v));
+        // Anonymous `**` forwarding (`def f(**) ; g(**) ; end`) has no
+        // value to merge, and the declaration side drops the unnamed
+        // parameter — fail loud rather than emit a silently empty hash.
+        let Some(value) = splat.value() else {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: "anonymous `**` keyword forwarding not yet supported".into(),
+            });
+        };
+        saw_splat = true;
+        let value = ingest_expr(&value, file)?;
+        chain = Some(merge_into(chain, std::mem::take(&mut pending), span, value));
     }
-    Ok(out)
+
+    if !saw_splat {
+        return Ok(Expr::new(span, ExprNode::Hash { entries: pending, kwargs }));
+    }
+    let mut chain = chain.expect("saw_splat implies at least one link");
+    if !pending.is_empty() {
+        chain = merge_call(chain, Expr::new(span, ExprNode::Hash { entries: pending, kwargs: false }), span);
+    }
+    Ok(chain)
+}
+
+/// Append one `**value` link to a merge chain, first folding in any
+/// literal pairs that preceded it.
+fn merge_into(chain: Option<Expr>, pending: Vec<(Expr, Expr)>, span: Span, value: Expr) -> Expr {
+    let base = match (chain, pending.is_empty()) {
+        // Leading `**value` with nothing before it: the value *is* the
+        // base. `{ **h }` copies in Ruby where this aliases; the copy
+        // only matters if the callee mutates its options hash, which
+        // no roundhouse runtime helper does.
+        (None, true) => return value,
+        (None, false) => Expr::new(span, ExprNode::Hash { entries: pending, kwargs: false }),
+        (Some(chain), true) => return merge_call(chain, value, span),
+        (Some(chain), false) => merge_call(
+            chain,
+            Expr::new(span, ExprNode::Hash { entries: pending, kwargs: false }),
+            span,
+        ),
+    };
+    merge_call(base, value, span)
+}
+
+fn merge_call(recv: Expr, arg: Expr, span: Span) -> Expr {
+    Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(recv),
+            method: Symbol::from("merge"),
+            args: vec![arg],
+            block: None,
+            parenthesized: true,
+        },
+    )
 }
