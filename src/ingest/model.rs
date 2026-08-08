@@ -90,6 +90,37 @@ pub fn ingest_model(
             let leading_blank = prev_end
                 .map(|pe| source_has_blank_line(source, pe, leading_area_start))
                 .unwrap_or(false);
+            // `class << self … end` — the singleton block's defs are
+            // class methods of the model (`Room.create_for`). A model's
+            // IR body is one item per statement, so expand the block in
+            // place; `ingest_model_body_item` returns a single item and
+            // can't. Library classes get the same treatment one level
+            // down, in `walk_decl_body`.
+            if let Some(sc) = stmt.as_singleton_class_node() {
+                match ingest_singleton_class_methods(&sc, file) {
+                    Ok(methods) => {
+                        let mut leading = leading;
+                        let mut blank = leading_blank;
+                        for method in methods {
+                            let mut item = ModelBodyItem::Method {
+                                method,
+                                leading_comments: std::mem::take(&mut leading),
+                                leading_blank_line: false,
+                            };
+                            item.set_leading_blank_line(std::mem::take(&mut blank));
+                            body.push(item);
+                        }
+                        prev_end = Some(stmt.location().end_offset());
+                        continue;
+                    }
+                    Err(err) if super::survey::is_active() => {
+                        super::survey::record(&err);
+                        prev_end = Some(stmt.location().end_offset());
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
             // Survey mode: an unsupported *item* (an exotic scope form, a
             // DSL shape the classifier rejects) costs itself, not the
             // whole class — record the gap and keep walking, mirroring
@@ -224,6 +255,33 @@ pub(super) fn ingest_model_body_item(
         leading_comments,
         leading_blank_line: false,
     })
+}
+
+/// Expand a model's `class << self … end` into the class methods it
+/// declares. Only `def`s are recognized: a visibility marker or an
+/// `attr_accessor` in there means something about the *singleton*
+/// scope that a flattened list of methods can't carry, so refuse it
+/// loudly rather than silently apply it to the instance side.
+fn ingest_singleton_class_methods(
+    sc: &ruby_prism::SingletonClassNode<'_>,
+    file: &str,
+) -> IngestResult<Vec<crate::dialect::MethodDef>> {
+    use crate::dialect::MethodReceiver;
+
+    let Some(body) = sc.body() else { return Ok(Vec::new()) };
+    let mut methods = Vec::new();
+    for stmt in super::util::flatten_statements(body) {
+        let Some(def) = stmt.as_def_node() else {
+            return Err(IngestError::Unsupported {
+                file: file.into(),
+                message: format!("unsupported statement inside `class << self`: {stmt:?}"),
+            });
+        };
+        let mut method = ingest_method(&def, file)?;
+        method.receiver = MethodReceiver::Class;
+        methods.push(method);
+    }
+    Ok(methods)
 }
 
 pub(super) fn ingest_method(
