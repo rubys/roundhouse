@@ -636,6 +636,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     app.root = dir.display().to_string().trim_end_matches('/').to_string();
 
     resolve_polymorphic_targets(&mut app);
+    // Before the splice: it (and every later consumer) looks concerns up
+    // by ClassId, so the lexical-scope resolution has to have happened.
+    qualify_relative_model_includes(&mut app);
     splice_concerns_into_models(&mut app);
 
     Ok(app)
@@ -664,38 +667,101 @@ fn splice_concerns_into_models(app: &mut App) {
     for model in &mut app.models {
         let mut i = 0;
         while i < model.body.len() {
-            let concern_id = match &model.body[i] {
+            // `include Attachment, Broadcasts, Mentionee` is one
+            // statement mixing in three modules, and Rails runs their
+            // `included do` blocks left to right — so collect every
+            // arg's items in that order and splice them as one run.
+            // Matching only single-arg includes skipped campfire's
+            // models entirely: every one of them writes the list form.
+            let concern_ids: Vec<crate::ident::ClassId> = match &model.body[i] {
                 ModelBodyItem::Unknown { expr, .. } => match &*expr.node {
                     ExprNode::Send { recv: None, method, args, block: None, .. }
-                        if method.as_str() == "include" && args.len() == 1 =>
+                        if method.as_str() == "include" =>
                     {
-                        match &*args[0].node {
-                            ExprNode::Const { path } => {
-                                Some(crate::ident::ClassId(crate::ident::Symbol::from(
-                                    path.iter()
-                                        .map(|s| s.as_str())
-                                        .collect::<Vec<_>>()
-                                        .join("::"),
-                                )))
-                            }
-                            _ => None,
-                        }
+                        args.iter()
+                            .filter_map(|arg| match &*arg.node {
+                                ExprNode::Const { path } => {
+                                    Some(crate::ident::ClassId(crate::ident::Symbol::from(
+                                        path.iter()
+                                            .map(|s| s.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join("::"),
+                                    )))
+                                }
+                                _ => None,
+                            })
+                            .collect()
                     }
-                    _ => None,
+                    _ => Vec::new(),
                 },
-                _ => None,
+                _ => Vec::new(),
             };
-            let items = concern_id
-                .as_ref()
-                .and_then(|id| app.concern_model_items.get(id));
-            let Some(items) = items else {
+            let items: Vec<ModelBodyItem> = concern_ids
+                .iter()
+                .filter_map(|id| app.concern_model_items.get(id))
+                .flatten()
+                .cloned()
+                .collect();
+            if items.is_empty() {
                 i += 1;
                 continue;
-            };
-            let items: Vec<ModelBodyItem> = items.clone();
+            }
             let n = items.len();
             model.body.splice(i + 1..i + 1, items);
             i += n + 1;
+        }
+    }
+}
+
+/// Resolve a model's `include <Const>` against Ruby's lexical scope:
+/// inside `class User`, `include Avatar` names `User::Avatar` when such
+/// a module exists, and only falls back to a top-level `Avatar`.
+///
+/// Campfire keeps every model concern that way —
+/// `app/models/user/{avatar,bannable,bot,mentionable,role,transferable}.rb`
+/// each declare `module User::Avatar` and friends — so the unqualified
+/// ClassId matched no ingested module and the whole mixed-in surface
+/// (`ban`, `create_bot!`, `active_bots`, `from_avatar_token`) dispatched
+/// into nothing.
+///
+/// Rewrites the IR node rather than resolving at each consumer:
+/// `model_includes` (analyze), `splice_concerns_into_models` above, and
+/// every emitter that re-emits the line then read one qualified path.
+/// Narrow trigger — only when `<Model>::<Const>` actually names an
+/// ingested module, so apps whose concerns live at the top level
+/// (`app/models/concerns/…`) are untouched.
+fn qualify_relative_model_includes(app: &mut App) {
+    use crate::dialect::ModelBodyItem;
+    use crate::expr::ExprNode;
+
+    let known: std::collections::HashSet<crate::ident::ClassId> = app
+        .library_classes
+        .iter()
+        .map(|lc| lc.name.clone())
+        .chain(app.concern_model_items.keys().cloned())
+        .collect();
+
+    for model in &mut app.models {
+        let model_name = model.name.0.as_str().to_string();
+        for item in &mut model.body {
+            let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+            let ExprNode::Send { recv: None, method, args, .. } = &mut *expr.node else {
+                continue;
+            };
+            if method.as_str() != "include" {
+                continue;
+            }
+            for arg in args.iter_mut() {
+                let ExprNode::Const { path } = &mut *arg.node else { continue };
+                let [segment] = &path[..] else { continue };
+                let qualified = crate::ident::ClassId(crate::ident::Symbol::from(format!(
+                    "{model_name}::{}",
+                    segment.as_str()
+                )));
+                if known.contains(&qualified) {
+                    *path = vec![crate::ident::Symbol::from(model_name.as_str()), segment.clone()];
+                }
+            }
         }
     }
 }
