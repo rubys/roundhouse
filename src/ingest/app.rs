@@ -56,6 +56,14 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     }
     super::sources::reset();
     let mut app = App::new();
+    // `enum` columns declared inside a concern's `included do`, keyed by
+    // the module. Local rather than a field on `App`: they exist only
+    // until the splice folds them into each including model's own
+    // `enums` table, and nothing downstream reads them by module.
+    let mut concern_enums: Vec<(
+        crate::ident::ClassId,
+        Vec<(crate::ident::Symbol, Vec<(String, crate::expr::Literal)>)>,
+    )> = Vec::new();
 
     let schema_path = dir.join("db/schema.rb");
     if vfs.exists(&schema_path) {
@@ -117,8 +125,10 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         // and model DSL (associations/scopes).
                         app.concern_filters
                             .extend(ingest_concern_filters(&source, &path_str));
-                        app.concern_model_items
-                            .extend(ingest_concern_model_items(&source, &path_str));
+                        let (concern_items, concern_enum_decls) =
+                            ingest_concern_model_items(&source, &path_str);
+                        app.concern_model_items.extend(concern_items);
+                        concern_enums.extend(concern_enum_decls);
                     }
                 }
             }
@@ -404,8 +414,10 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         app.library_classes.extend(classes);
                         app.concern_filters
                             .extend(ingest_concern_filters(&source, &path_str));
-                        app.concern_model_items
-                            .extend(ingest_concern_model_items(&source, &path_str));
+                        let (concern_items, concern_enum_decls) =
+                            ingest_concern_model_items(&source, &path_str);
+                        app.concern_model_items.extend(concern_items);
+                        concern_enums.extend(concern_enum_decls);
                     }
                 }
             }
@@ -640,6 +652,10 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // by ClassId, so the lexical-scope resolution has to have happened.
     qualify_relative_model_includes(&mut app);
     splice_concerns_into_models(&mut app);
+    fold_concern_enums_into_models(&mut app, &concern_enums);
+    // Last: needs every model's complete `enums` table, including the
+    // columns an included concern declared.
+    map_enum_labels(&mut app);
 
     Ok(app)
 }
@@ -711,6 +727,125 @@ fn splice_concerns_into_models(app: &mut App) {
             i += n + 1;
         }
     }
+}
+
+/// Copy each concern's `enum` columns onto the models that include it,
+/// the same way the DSL splice copies its `included do` items. Campfire
+/// declares `enum :role` in `User::Role`, and `User::Bot` — a different
+/// concern — queries it with `where(role: :bot)`, so the table has to be
+/// whole before any label can be mapped.
+fn fold_concern_enums_into_models(
+    app: &mut App,
+    concern_enums: &[(
+        crate::ident::ClassId,
+        Vec<(crate::ident::Symbol, Vec<(String, crate::expr::Literal)>)>,
+    )],
+) {
+    if concern_enums.is_empty() {
+        return;
+    }
+    for model in &mut app.models {
+        let includes = crate::analyze::model_includes(model);
+        for (module, decls) in concern_enums {
+            if !includes.contains(module) {
+                continue;
+            }
+            for (column, mapping) in decls {
+                model.enums.entry(column.clone()).or_insert_with(|| mapping.clone());
+            }
+        }
+    }
+}
+
+/// Replace enum LABELS with the values their columns store, at the
+/// hand-written sites Rails' own enum type would have mapped:
+/// `where(role: :bot)` → `where(role: 2)`, `update!(status:
+/// :deactivated)` → `update!(status: 1)`.
+///
+/// The `enum` declaration itself expands into scopes and predicates
+/// that already carry stored values (see `expand_enum_decl`); what's
+/// left is code the app wrote by hand. Two rules decide which model a
+/// hash belongs to, neither needing type inference:
+///
+///   * inside a model's own body — including everything a concern
+///     spliced in — a key naming one of THAT model's enum columns is
+///     that column (campfire: `active.where(role: :bot)`, and
+///     `update! status: :deactivated` on self);
+///   * anywhere at all, an explicit `Model.…` receiver names the model
+///     (`User.create!(attributes.merge(role: :bot))`).
+///
+/// Both walk the whole argument subtree rather than just a top-level
+/// hash argument, because the double-splat desugar buries the literal
+/// pairs inside a `merge` chain.
+///
+/// A value that isn't a literal (`involvement: params[:involvement]`)
+/// stays put: it's a runtime string that already holds what the column
+/// holds. A label with no matching enum entry also stays put — the
+/// mapping only fires on an exact label match, so a same-named column
+/// on another model can't be caught by rule one.
+fn map_enum_labels(app: &mut App) {
+    use crate::dialect::ModelBodyItem;
+    use crate::expr::{Expr, ExprNode, Literal};
+    use crate::ident::{ClassId, Symbol};
+
+    type EnumTable = indexmap::IndexMap<Symbol, Vec<(String, Literal)>>;
+
+    /// Rewrite every hash entry in this subtree whose key names a column
+    /// in `table` and whose value is a label of that column.
+    fn map_in_subtree(expr: &mut Expr, table: &EnumTable) {
+        expr.node.for_each_child_mut(&mut |child| map_in_subtree(child, table));
+        let ExprNode::Hash { entries, .. } = &mut *expr.node else { return };
+        for (key, value) in entries.iter_mut() {
+            let ExprNode::Lit { value: Literal::Sym { value: column } } = &*key.node else {
+                continue;
+            };
+            let Some(mapping) = table.get(column) else { continue };
+            let label = match &*value.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+                ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+                _ => continue,
+            };
+            let Some((_, stored)) = mapping.iter().find(|(l, _)| *l == label) else { continue };
+            *value.node = ExprNode::Lit { value: stored.clone() };
+        }
+    }
+
+    /// Rule two: `Model.method(…)` anywhere in the app.
+    fn map_const_receiver_sites(expr: &mut Expr, tables: &HashMap<ClassId, EnumTable>) {
+        expr.node.for_each_child_mut(&mut |child| map_const_receiver_sites(child, tables));
+        let ExprNode::Send { recv: Some(recv), args, .. } = &mut *expr.node else { return };
+        let ExprNode::Const { path } = &*recv.node else { return };
+        let id = ClassId(Symbol::from(
+            path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"),
+        ));
+        let Some(table) = tables.get(&id) else { return };
+        for arg in args.iter_mut() {
+            map_in_subtree(arg, table);
+        }
+    }
+
+    let tables: HashMap<ClassId, EnumTable> = app
+        .models
+        .iter()
+        .filter(|m| !m.enums.is_empty())
+        .map(|m| (m.name.clone(), m.enums.clone()))
+        .collect();
+    if tables.is_empty() {
+        return;
+    }
+
+    for model in &mut app.models {
+        let Some(table) = tables.get(&model.name).cloned() else { continue };
+        for item in &mut model.body {
+            match item {
+                ModelBodyItem::Method { method, .. } => map_in_subtree(&mut method.body, &table),
+                ModelBodyItem::Scope { scope, .. } => map_in_subtree(&mut scope.body, &table),
+                ModelBodyItem::Unknown { expr, .. } => map_in_subtree(expr, &table),
+                _ => {}
+            }
+        }
+    }
+    crate::lower::for_each_hook_body(app, &mut |expr| map_const_receiver_sites(expr, &tables));
 }
 
 /// Resolve a model's `include <Const>` against Ruby's lexical scope:

@@ -129,6 +129,7 @@ pub fn ingest_roda_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestR
         attributes: Row::closed(),
         body: Vec::new(),
         span: Span::synthetic(),
+        enums: indexmap::IndexMap::new(),
     });
     let models_dir = dir.join("models");
     if vfs.is_dir(&models_dir) {

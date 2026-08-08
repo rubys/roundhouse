@@ -59,6 +59,16 @@ pub struct Model {
     /// primitives, `dom_prefix`).
     #[serde(default, skip_serializing_if = "Span::is_synthetic")]
     pub span: Span,
+    /// `enum` columns: label → the value the column actually stores
+    /// (`status` → [("active", 0), ("deactivated", 1), …]). The
+    /// declaration itself expands at ingest into scopes/predicates/bang
+    /// writers, which need no runtime enum type; this table is what
+    /// remains of it, and it's the only thing that can tell a
+    /// hand-written `where(role: :bot)` which integer `:bot` means
+    /// ([[feedback_self_describing_ir]]). Includes columns declared in
+    /// an included concern, folded in by the concern splice.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub enums: IndexMap<Symbol, Vec<(String, crate::expr::Literal)>>,
 }
 
 impl Model {

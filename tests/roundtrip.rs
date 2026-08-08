@@ -56,6 +56,7 @@ fn tiny_blog_round_trips() {
         primary_key: None,
         attributes: Row { fields: attrs, rest: None },
         body: vec![],
+        enums: Default::default(),
         span: Span::synthetic(),
     };
 

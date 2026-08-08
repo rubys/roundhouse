@@ -265,6 +265,7 @@ mod tests {
             primary_key: None,
             attributes: Row::default(),
             body,
+            enums: indexmap::IndexMap::new(),
             span: crate::span::Span::synthetic(),
         }
     }

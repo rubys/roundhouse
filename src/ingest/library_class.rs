@@ -913,10 +913,16 @@ fn unknown_is_block_callback(item: &crate::dialect::ModelBodyItem) -> bool {
             .contains(&method.as_str())
 }
 
-pub fn ingest_concern_model_items(
-    source: &[u8],
-    file: &str,
-) -> Vec<(ClassId, Vec<crate::dialect::ModelBodyItem>)> {
+/// Second return value: `enum` columns declared inside an `included
+/// do`, keyed by the concern module. They belong to every includer
+/// exactly as the DSL items do; the splice folds them into each
+/// including model's own `enums` table.
+pub type ConcernModelItems = (
+    Vec<(ClassId, Vec<crate::dialect::ModelBodyItem>)>,
+    Vec<(ClassId, Vec<(Symbol, Vec<(String, crate::expr::Literal)>)>)>,
+);
+
+pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItems {
     use crate::dialect::ModelBodyItem;
 
     fn walk_dsl_stmts<'pr>(body: ruby_prism::Node<'pr>, out: &mut Vec<ruby_prism::Node<'pr>>) {
@@ -940,6 +946,7 @@ pub fn ingest_concern_model_items(
     let result = parse(source);
     let root = result.node();
     let mut out = Vec::new();
+    let mut enums_out = Vec::new();
     for (scope, module) in find_all_modules_with_scope(&root) {
         let Some(name_path) = module_name_path(&module) else { continue };
         let mut full_path: Vec<String> = scope.clone();
@@ -948,6 +955,7 @@ pub fn ingest_concern_model_items(
 
         let Some(body) = module.body() else { continue };
         let mut items: Vec<ModelBodyItem> = Vec::new();
+        let mut enums: Vec<(Symbol, Vec<(String, crate::expr::Literal)>)> = Vec::new();
         for stmt in flatten_statements(body) {
             let Some(call) = stmt.as_call_node() else { continue };
             if call.receiver().is_some() || constant_id_str(&call.name()) != "included" {
@@ -966,7 +974,8 @@ pub fn ingest_concern_model_items(
                 if let Some(call) = inner.as_call_node() {
                     match super::model::expand_enum_decl(&call, file, &[]) {
                         Ok(Some(expanded)) => {
-                            items.extend(expanded);
+                            enums.push((expanded.column, expanded.mapping));
+                            items.extend(expanded.items);
                             continue;
                         }
                         Ok(None) => {}
@@ -999,9 +1008,12 @@ pub fn ingest_concern_model_items(
                 }
             }
         }
+        if !enums.is_empty() {
+            enums_out.push((id.clone(), enums));
+        }
         if !items.is_empty() {
             out.push((id, items));
         }
     }
-    out
+    (out, enums_out)
 }

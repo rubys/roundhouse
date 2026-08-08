@@ -67,6 +67,7 @@ pub fn ingest_model(
     // naturally attach to the first body item below.
     drain_comments_before(&mut comments, class.location().start_offset());
     let mut body: Vec<ModelBodyItem> = Vec::new();
+    let mut enums: IndexMap<Symbol, Vec<(String, Literal)>> = IndexMap::new();
     let mut primary_key: Option<Symbol> = None;
     if let Some(class_body) = class.body() {
         let mut prev_end: Option<usize> = None;
@@ -96,8 +97,9 @@ pub fn ingest_model(
             if let Some(call) = stmt.as_call_node() {
                 match expand_enum_decl(&call, file, &leading) {
                     Ok(Some(expanded)) => {
+                        enums.insert(expanded.column, expanded.mapping);
                         let mut blank = leading_blank;
-                        for mut item in expanded {
+                        for mut item in expanded.items {
                             item.set_leading_blank_line(std::mem::take(&mut blank));
                             body.push(item);
                         }
@@ -178,6 +180,7 @@ pub fn ingest_model(
         primary_key,
         attributes,
         body,
+        enums,
         span: Span {
             file: super::sources::file_id(file),
             start: class_loc.start_offset() as u32,
@@ -299,11 +302,18 @@ pub(super) fn ingest_model_body_item(
 /// and `"active"` there. Rails' own `enum` maps at every boundary; that
 /// mapping (for hand-written `where(role: :bot)` and `update!(status:
 /// :deactivated)` sites) is a separate, type-aware pass.
+pub(super) struct EnumExpansion {
+    pub column: Symbol,
+    /// Label → stored value, in declaration order.
+    pub mapping: Vec<(String, Literal)>,
+    pub items: Vec<ModelBodyItem>,
+}
+
 pub(super) fn expand_enum_decl(
     call: &ruby_prism::CallNode<'_>,
     file: &str,
     leading_comments: &[crate::dialect::Comment],
-) -> IngestResult<Option<Vec<ModelBodyItem>>> {
+) -> IngestResult<Option<EnumExpansion>> {
     use crate::dialect::{MethodDef, MethodReceiver, Scope};
     use crate::effect::EffectSet;
 
@@ -365,7 +375,7 @@ pub(super) fn expand_enum_decl(
         )
     };
     let mut items = Vec::new();
-    for (label, value) in labels {
+    for (label, value) in labels.iter().cloned() {
         let base = format!("{prefix}{label}{suffix}");
         let pair = Expr::new(
             span,
@@ -434,7 +444,7 @@ pub(super) fn expand_enum_decl(
         ));
         items.push(method_def(format!("{base}!"), call_with_pair("update!")));
     }
-    Ok(Some(items))
+    Ok(Some(EnumExpansion { column: Symbol::from(column.as_str()), mapping: labels, items }))
 }
 
 /// Label → stored value for an `enum` mapping. An array literal maps by
