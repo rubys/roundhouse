@@ -187,11 +187,33 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
                 Some(r) => Some(ingest_expr(&r, file)?),
                 None => None,
             };
-            let parenthesized = c.opening_loc().is_some();
             let block = match c.block() {
                 Some(block_node) => ingest_call_block(&block_node, file, &method)?,
                 None => None,
             };
+            // Two shapes a paren-less call can't hold once lowered, both
+            // of which the emitter can only fix here — by the time it
+            // has a rendered `base` string it can't tell where the
+            // argument list began:
+            //
+            //   * a first argument rendering with a leading `{`. The
+            //     brace parses as a block. Source can't write that (a
+            //     bare hash first arg always carries parens), but the
+            //     double-splat desugar produces it: `form_with model: …,
+            //     **params` → `form_with({model: …}.merge(params))`.
+            //   * a proc-forward block beside arguments. `emit_do_block`
+            //     re-attaches `&blk` inside the parens when there are
+            //     any, and appends `(&blk)` when there aren't — which
+            //     lands after the bare args (`tag.div id: "x"(&__blk)`).
+            //     campfire writes `tag.div id: …, data: …, &` all over
+            //     its helpers.
+            let proc_forward_block = !args.is_empty()
+                && block
+                    .as_ref()
+                    .is_some_and(|b| !matches!(&*b.node, ExprNode::Lambda { .. }));
+            let parenthesized = c.opening_loc().is_some()
+                || proc_forward_block
+                || args.first().is_some_and(starts_with_brace_literal);
             // `+"literal"` — an unfrozen copy of a string literal, the
             // frozen_string_literal-era mutable-builder idiom (spinel
             // e432b19b makes fsl the default; runtime/ruby builders are
@@ -1964,6 +1986,18 @@ fn bool_op_surface(op_bytes: &[u8]) -> BoolOpSurface {
 
 fn nil_expr() -> Expr {
     Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil })
+}
+
+/// Does this expression render with a leading `{`? True for a braced
+/// hash literal and for anything whose receiver chain bottoms out in
+/// one (`{a: 1}.merge(rest)`). Bare keyword args (`kwargs: true`)
+/// render as `k: v`, so they're safe unparenthesized.
+fn starts_with_brace_literal(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Hash { kwargs, .. } => !*kwargs,
+        ExprNode::Send { recv: Some(recv), .. } => starts_with_brace_literal(recv),
+        _ => false,
+    }
 }
 
 /// Desugar a scrutinee-less `case` (`case / when <cond> / … / end`)
