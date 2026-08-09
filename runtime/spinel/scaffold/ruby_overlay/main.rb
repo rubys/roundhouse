@@ -96,10 +96,6 @@ require_relative "runtime/active_record_serialization"
 require_relative "runtime/active_record_relation_ext"
 require_relative "config/schema"
 require_relative "runtime/action_dispatch"
-# Keyed digests (HMAC, PBKDF2) — the per-target primitive behind
-# ActionController::MessageVerifier, so it loads before the
-# action_controller aggregator that pulls the verifier in.
-require_relative "runtime/message_digest"
 require_relative "runtime/action_controller"
 # After action_controller: its require chain loads the shared
 # action_view/view_helpers, and the safe-buffer overrides must win

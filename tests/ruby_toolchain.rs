@@ -129,6 +129,14 @@ fn generate_project(fixture: &Path, scratch: &Path) {
     // resolves to the CRuby-runnable shim. The FFI variant
     // (`runtime/spinel/db.rb`) is reserved for a future Spinel-AOT
     // target's tree; not shipped to the Ruby target.
+    // Keyed digests behind ActionController::MessageVerifier — the same
+    // per-target swap as db below: this target gets the OpenSSL variant
+    // materialized at the shared path the aggregator requires.
+    std::fs::copy(
+        runtime_spinel.join("message_digest_cruby.rb"),
+        scratch.join("runtime").join("message_digest.rb"),
+    )
+    .expect("copy message_digest_cruby.rb -> runtime/message_digest.rb");
     std::fs::copy(
         runtime_spinel.join("db_cruby.rb"),
         scratch.join("runtime").join("db.rb"),

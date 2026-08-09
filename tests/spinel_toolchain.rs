@@ -125,6 +125,9 @@ fn generate_project(fixture: &Path, scratch: &Path) {
         "cgi_io.rb",
         "broadcasts.rb",
         "base64.rb",
+        // Keyed digests behind ActionController::MessageVerifier;
+        // runtime/action_controller.rb requires it.
+        "message_digest.rb",
         "json.rb",
         "importmap.rb",
         // Temporal intrinsics (parse_db_time/db_now) — chained off db.rb.

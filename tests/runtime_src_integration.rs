@@ -807,7 +807,16 @@ fn every_runtime_method_body_concretely_typed() {
     // `pluck` beside it already has (the projected column's value).
     // `Base.primary_key` adds none: it returns a literal. +7 sites;
     // ceiling raised 232 → 245.
-    const CEILING: usize = 245;
+    // 2026-08-09 SignedCookieJar (`cookies.signed`, campfire's session
+    // token): the KEY of every jar method is untyped by the same
+    // contract the plain jar already documents — controllers index with
+    // Symbol constants and String literals both — and `value_of`'s
+    // parameter is genuinely poly, since Rails takes either a bare
+    // value or an options Hash whose values are String, bool and Symbol
+    // together. Confining that read to one class method is what keeps
+    // it off the jar's own String-typed surface. +10 sites; ceiling
+    // raised 245 → 255.
+    const CEILING: usize = 255;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

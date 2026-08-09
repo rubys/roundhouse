@@ -84,10 +84,6 @@ require_relative "runtime/action_dispatch"
 # at runtime/action_dispatch_request.rb and the two shapes must not
 # blend.
 require_relative "runtime/action_dispatch/request"
-# Keyed digests (HMAC, PBKDF2) — the per-target primitive behind
-# ActionController::MessageVerifier, so it loads before the
-# action_controller aggregator that pulls the verifier in.
-require_relative "runtime/message_digest"
 require_relative "runtime/action_controller"
 # typed_store virtual-attribute seam (flat-YAML subset on this tree;
 # the CRuby overlay swaps in its real-YAML sibling at the same path).

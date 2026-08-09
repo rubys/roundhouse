@@ -120,7 +120,7 @@ fn build_and_run(test_file: &Path, tag: &str) {
     // .turbo_stream_from), JSON (used by the same). Same pattern the
     // real-blog scaffold uses.
     let runtime_spinel = Path::new("runtime/spinel");
-    for entry in ["base64.rb", "json.rb"] {
+    for entry in ["base64.rb", "json.rb", "message_digest.rb"] {
         let src = runtime_spinel.join(entry);
         if src.exists() {
             std::fs::copy(&src, scratch_runtime.join(entry))
