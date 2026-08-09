@@ -832,6 +832,12 @@ pub(super) fn emit_send_base(
     // setter sends so emit_send_base's setter arm picks it up.
     if matches!(recv, Some(r) if matches!(&*r.node, ExprNode::SelfRef))
         && !is_setter_method(m)
+        // Operators are infix, not messages, in Ruby's surface: dropping
+        // the receiver from `self == other` leaves `== other`, which
+        // doesn't parse. Both the operator arm below and the `[]` arm
+        // want the explicit receiver.
+        && !is_binary_operator(m)
+        && m != "[]"
         // A method whose name is a Ruby keyword (`self.class`, `self.then`)
         // can't drop to the implicit form — bare `class` parses as the
         // keyword. Keep the explicit `self.class` (falls to the Some(r) arm).

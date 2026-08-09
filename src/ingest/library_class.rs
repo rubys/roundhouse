@@ -731,6 +731,20 @@ pub(super) fn ingest_library_method(
                 params.push(Param::positional(Symbol::from(constant_id_str(&pp.name()))));
             }
         }
+        // An optional keyword can only take the positional-with-default
+        // approximation below when nothing else in the signature forces
+        // Ruby's ordering rules. Two shapes do, and campfire has one of
+        // each: a REQUIRED keyword beside it (`def initialize(name:,
+        // text: nil)` → `(name:, text = nil)`, Sound::Image) and a rest
+        // param before it (`def f(*messages, count: 1)` → `(*messages,
+        // count = 1)`). Neither parses. Keep the keyword group honest
+        // in those defs; elsewhere the approximation stands, because
+        // the trailing-kwargs normalize path depends on it.
+        let keeps_keywords = params.iter().any(|p| p.rest)
+            || pn
+                .keywords()
+                .iter()
+                .any(|kw| kw.as_required_keyword_parameter_node().is_some());
         for kw in pn.keywords().iter() {
             if let Some(rkp) = kw.as_required_keyword_parameter_node() {
                 if let Ok(s) = std::str::from_utf8(rkp.name().as_slice()) {
@@ -757,7 +771,11 @@ pub(super) fn ingest_library_method(
                     // without the default, every redirect loses
                     // its 302 status and the test client sees 200.
                     let default = ingest_expr(&okp.value(), file)?;
-                    params.push(Param::with_default(Symbol::from(s), default));
+                    params.push(if keeps_keywords {
+                        Param::keyword(Symbol::from(s), Some(default))
+                    } else {
+                        Param::with_default(Symbol::from(s), default)
+                    });
                 }
             }
         }
