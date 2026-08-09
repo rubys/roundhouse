@@ -1415,6 +1415,17 @@ fn jruby_runtime_files(
 ) -> Result<Vec<(String, String)>, String> {
     let mut files = spinel_files(app, fixture)?;
 
+    // Keyed digests: JRuby has OpenSSL, so it takes the same swap the
+    // CRuby target does — drop the spinel stub and promote the OpenSSL
+    // backend. Without this the JVM tree got a `raise`-only
+    // MessageDigest and the boot died where the aggregator requires it.
+    files.retain(|(p, _)| p != "runtime/message_digest.rb");
+    for (path, _) in files.iter_mut() {
+        if path == "runtime/message_digest_cruby.rb" {
+            *path = "runtime/message_digest.rb".to_string();
+        }
+    }
+
     // Db shim swap: drop the FFI `runtime/db.rb` and the CRuby gem
     // backend, then promote the JDBC backend into `runtime/db.rb`.
     // `db_jruby.rb` is excluded from `spinel_files`' base set, so read
