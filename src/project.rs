@@ -1015,6 +1015,12 @@ fn ruby_runtime_files(
 
     files.retain(|(p, _)| p != "runtime/db.rb");
 
+    // Same swap as db.rb below: the flat walk picked up BOTH halves of
+    // the keyed-digest split, and the CRuby/JRuby trees want the OpenSSL
+    // one at the shared path. The spinel half reaches sp_crypto through
+    // FFI declarations these trees can't compile.
+    files.retain(|(p, _)| p != "runtime/message_digest.rb");
+
     // The scaffold's tailwind seed only belongs in trees whose SOURCE
     // app has stylesheets to build (real-blog's Propshaft setup). A
     // no-stylesheet app (the Roda + Sequel exemplar renders
@@ -1025,6 +1031,9 @@ fn ruby_runtime_files(
         files.retain(|(p, _)| p != "app/assets/tailwind.css");
     }
     for (path, content) in files.iter_mut() {
+        if path == "runtime/message_digest_cruby.rb" {
+            *path = "runtime/message_digest.rb".to_string();
+        }
         if path == "runtime/db_cruby.rb" {
             *path = "runtime/db.rb".to_string();
             // The CRuby/JRuby trees resolve the temporal intrinsics

@@ -39,6 +39,7 @@ module ActionDispatch
     def original_fullpath: () -> String
     def base_url: () -> String
     def original_url: () -> String
+    def url: () -> String
     def referrer: () -> String
   end
 end

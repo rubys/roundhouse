@@ -19,6 +19,20 @@ module Rails
     # typing gate doesn't model `ENV[]`, so the read lives in the
     # scaffold). Same global-slot idiom as `ActiveRecord.adapter`.
     attr_accessor :env_name
+
+    # SECRET_KEY_BASE, parked the same way and for the same reason. The
+    # app's own operator tooling is what produces it — campfire's
+    # `script/admin/generate-secrets` prints `SECRET_KEY_BASE=<64 hex
+    # bytes>` for the deployment to export, and Rails reads that same
+    # variable — so keeping the contract means the emitted binary drops
+    # into the same deployment rather than introducing config of its own.
+    #
+    # Unset reads as "". That is a loud failure, not a fallback: every
+    # signature then verifies only against others made with the empty
+    # key, so a cookie from a configured Rails will not validate and the
+    # request reads as signed out. Generating one at boot would be worse
+    # — it would look like it worked until the process restarted.
+    attr_accessor :secret_key_base
   end
 
   # Rails-faithful: the parked RAILS_ENV wins, development is the
@@ -218,6 +232,13 @@ module Rails
     # disagreement clears the session on every request.
     def session_cookie_key
       "_session"
+    end
+
+    # The key every signed message derives from — see the parked slot
+    # on `Rails` itself, which the scaffold fills from the environment.
+    def secret_key_base
+      key = Rails.secret_key_base
+      key.nil? ? "" : key
     end
 
     # The zone every ActiveRecord temporal value is PRESENTED in. Same

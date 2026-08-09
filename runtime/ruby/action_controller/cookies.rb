@@ -34,13 +34,42 @@ module ActionController
     # null array). Rails returns nil here; "" is equivalent under `.to_s`.
     def [](key)
       k = key.to_s
-      return @out[k] if @out.key?(k)
-      return @inbound[k] if @inbound.key?(k)
-      ""
+      # @out wins whenever the KEY is present, not whenever its value is
+      # non-empty: `delete` records a cleared write as "", and falling
+      # through on emptiness would read the deleted cookie's inbound
+      # value straight back (the shape cookies_test's
+      # delete-from-inside-each guards).
+      raw = ""
+      if @out.key?(k)
+        raw = @out[k]
+      elsif @inbound.key?(k)
+        raw = @inbound[k]
+      end
+      return raw if !signing?
+      return "" if raw == ""
+      ActionController::MessageVerifier.verified(
+        Rails.application.secret_key_base,
+        ActionController::MessageVerifier::SIGNED_COOKIE_SALT,
+        raw, "cookie." + k, true
+      )
     end
 
+    # Rails accepts either a bare value or an options Hash carrying
+    # `value:` alongside `httponly:`/`same_site:` — campfire writes the
+    # latter. The transport attributes aren't modeled (the dispatcher
+    # emits Path=/ + HttpOnly for every cookie it writes), so the value
+    # is what survives.
     def []=(key, value)
-      @out[key.to_s] = value
+      k = key.to_s
+      v = value.is_a?(Hash) ? value[:value].to_s : value.to_s
+      if signing?
+        v = ActionController::MessageVerifier.generate(
+          Rails.application.secret_key_base,
+          ActionController::MessageVerifier::SIGNED_COOKIE_SALT,
+          v, "cookie." + k, true
+        )
+      end
+      @out[k] = v
       value
     end
 
@@ -48,6 +77,37 @@ module ActionController
     # no-op returning the same jar so the index-assign lands on `[]=`.
     def permanent
       self
+    end
+
+    # `cookies.signed[:k]` — the same jar, in signing mode. Rails hands
+    # back a distinct SignedKeyRotatingCookieJar here; one jar with a
+    # flag keeps @out a plain String→String map (the strict typer's
+    # requirement, same reason `delete` records "" rather than a
+    # tombstone type) and keeps `cookies.signed.permanent[:k] = v` —
+    # campfire's spelling — landing on this object's `[]=`.
+    #
+    # Signing is per-jar state rather than per-key because the chain is
+    # built fresh at each call site: `cookies.signed` returns a jar whose
+    # subsequent `[]`/`[]=` sign, and the plain `cookies[...]` on Base
+    # always returns the unsigned one.
+    def signed
+      jar = ActionController::CookieJar.new
+      jar.adopt(@inbound, @out, true)
+      jar
+    end
+
+    # Share this jar's stores with `other` rather than copying them, so a
+    # write through the signed view lands in the same pending map the
+    # dispatcher serializes.
+    def adopt(inbound, out, signing)
+      @inbound = inbound
+      @out = out
+      @signing = signing
+      self
+    end
+
+    def signing?
+      @signing == true
     end
 
     # Removing a cookie is recorded as an empty write; the dispatcher emits a

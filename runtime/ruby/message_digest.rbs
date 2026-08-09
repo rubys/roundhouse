@@ -1,0 +1,14 @@
+# Typing contract for the keyed-digest primitive surface — the same
+# split as db.rbs beside it: this file is the contract, and each
+# ruby-family target ships its own implementation at
+# `runtime/message_digest.rb` (OpenSSL for CRuby/JRuby via
+# runtime/spinel/message_digest_cruby.rb, sp_crypto FFI for the spinel
+# binary via runtime/spinel/message_digest.rb).
+#
+# `pbkdf2_sha256` returns RAW BYTES, not hex or base64: the derived key
+# is an HMAC key, and HMAC keys are bytes.
+module MessageDigest
+  def self.hmac_sha1_hex: (String key, String msg) -> String
+  def self.hmac_sha256_hex: (String key, String msg) -> String
+  def self.pbkdf2_sha256: (String secret, String salt, Integer iters, Integer dklen) -> String
+end

@@ -50,6 +50,9 @@ module ActionDispatch
     def original_fullpath = fullpath
 
     def original_url = "#{base_url}#{fullpath}"
+    # Rails' own name for the same string; app code reaches for `url`
+    # (campfire stores it as the post-login return path).
+    def url = original_url
 
     def base_url
       scheme = @env["HTTPS"] == "on" ? "https" : "http"

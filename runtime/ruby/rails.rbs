@@ -2,6 +2,8 @@ module Rails
   def self.env: () -> Env
   def self.env_name: () -> String?
   def self.env_name=: (String? name) -> String?
+  def self.secret_key_base: () -> String?
+  def self.secret_key_base=: (String? key) -> String?
   def self.root: () -> AppPath
   def self.public_path: () -> AppPath
   def self.cache: () -> Cache
@@ -50,6 +52,7 @@ module Rails
 
   class Application
     def session_cookie_key: () -> String
+    def secret_key_base: () -> String
     def config_time_zone: () -> String
   end
 end

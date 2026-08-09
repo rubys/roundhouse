@@ -55,6 +55,10 @@ require_relative "runtime/rails"
 # Park RAILS_ENV where the typed runtime can read it (`Rails.env`
 # defaults to development when unset).
 Rails.env_name = ENV["RAILS_ENV"]
+# The key every signed message derives from (signed cookies, signed ids).
+# Read here rather than in the framework runtime for the same reason
+# RAILS_ENV is: the runtime typing gate doesn't model `ENV[]`.
+Rails.secret_key_base = ENV["SECRET_KEY_BASE"]
 # Per-app Rails::Application reopen — the app's real config methods
 # (`Rails.application.name` in layouts). Emitted unconditionally (a
 # stub reopen when the source app has none); loads right after the
@@ -80,6 +84,10 @@ require_relative "runtime/action_dispatch"
 # at runtime/action_dispatch_request.rb and the two shapes must not
 # blend.
 require_relative "runtime/action_dispatch/request"
+# Keyed digests (HMAC, PBKDF2) — the per-target primitive behind
+# ActionController::MessageVerifier, so it loads before the
+# action_controller aggregator that pulls the verifier in.
+require_relative "runtime/message_digest"
 require_relative "runtime/action_controller"
 # typed_store virtual-attribute seam (flat-YAML subset on this tree;
 # the CRuby overlay swaps in its real-YAML sibling at the same path).

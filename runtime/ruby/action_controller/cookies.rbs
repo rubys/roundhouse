@@ -7,6 +7,9 @@ module ActionController
     def []: (untyped key) -> String
     def []=: (untyped key, String value) -> String
     def permanent: () -> ActionController::CookieJar
+    def signed: () -> ActionController::CookieJar
+    def adopt: (Hash[String, String] inbound, Hash[String, String] out, bool signing) -> ActionController::CookieJar
+    def signing?: () -> bool
     def delete: (untyped key) -> String
     def pending: () -> Hash[String, String]
     def to_h: () -> Hash[String, String]

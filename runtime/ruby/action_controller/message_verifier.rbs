@@ -1,0 +1,20 @@
+# Typing contract for message_verifier.rb beside this file.
+#
+# `sha1` selects the digest: Rails signs cookies with HMAC-SHA1 and
+# signed ids with HMAC-SHA256, so the caller says which. `secret` is the
+# app's secret_key_base and `salt` the per-purpose derivation salt
+# ("signed cookie", "active_record/signed_id"); `derive_key` memoizes
+# the PBKDF2 result, which is 2**16 iterations of HMAC and must not run
+# per request.
+module ActionController
+  module MessageVerifier
+    def self.derived_keys: () -> Hash[String, String]
+    def self.derive_key: (String secret, String salt) -> String
+    def self.generate: (String secret, String salt, String value, String purpose, bool sha1) -> String
+    def self.verified: (String secret, String salt, String signed, String purpose, bool sha1) -> String
+    def self.digest_for: (String secret, String salt, String payload, bool sha1) -> String
+    def self.extract: (String envelope, String prefix) -> String
+    def self.json_string: (String value) -> String
+    def self.json_value: (String json) -> String
+  end
+end

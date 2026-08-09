@@ -778,7 +778,15 @@ fn build_filter_preamble(
         };
         preamble.push(PreambleStmt::Call {
             filter: f.clone(),
-            halt_check: can_respond(&target.body),
+            // Follows receiverless calls into the same controller's own
+            // methods — `find_target` is the resolver the chain already
+            // uses, so a filter that delegates its redirect (campfire's
+            // `require_authentication`) still halts the chain.
+            halt_check: can_respond_within(
+                &target.body,
+                &|name| find_target(name).map(|a| a.body),
+                &mut std::collections::BTreeSet::new(),
+            ),
         });
     };
 
@@ -835,20 +843,62 @@ fn ancestor_chain<'a>(controller: &Controller, all: &'a [Controller]) -> Vec<&'a
 /// halting check to filters that need it — pure-assignment filters
 /// (and every blog controller) add no dispatch noise.
 fn can_respond(body: &Expr) -> bool {
-    fn walk(e: &Expr, found: &mut bool) {
+    can_respond_within(body, &|_| None, &mut std::collections::BTreeSet::new())
+}
+
+/// Whether this body can render/redirect/head — DIRECTLY, or through a
+/// method it calls that can.
+///
+/// The one-level answer is not enough for the shape Rails apps actually
+/// write: campfire's `require_authentication` is
+/// `restore_authentication || bot_authentication || request_authentication`,
+/// and only that third method redirects. Reading one level deep said the
+/// filter cannot respond, so the preamble emitted no `return if
+/// performed?` after it and every later filter — and then the action —
+/// ran on an unauthenticated request that had already been sent a
+/// redirect.
+///
+/// `resolve` maps a receiverless call to the body it names, when the
+/// controller (or an ancestor) defines it; `seen` stops a cycle. Only
+/// receiverless sends are followed: a call on another object is that
+/// object's business, and Rails' halting is about THIS controller's
+/// filter chain.
+fn can_respond_within(
+    body: &Expr,
+    resolve: &dyn Fn(&Symbol) -> Option<Expr>,
+    seen: &mut std::collections::BTreeSet<Symbol>,
+) -> bool {
+    fn walk(
+        e: &Expr,
+        found: &mut bool,
+        resolve: &dyn Fn(&Symbol) -> Option<Expr>,
+        seen: &mut std::collections::BTreeSet<Symbol>,
+    ) {
         if *found {
             return;
         }
-        if let ExprNode::Send { method, .. } = &*e.node {
+        if let ExprNode::Send { recv, method, .. } = &*e.node {
             if matches!(method.as_str(), "render" | "redirect_to" | "head" | "render_404") {
                 *found = true;
                 return;
             }
+            let self_call = match recv {
+                None => true,
+                Some(r) => matches!(&*r.node, ExprNode::SelfRef),
+            };
+            if self_call && seen.insert(method.clone()) {
+                if let Some(callee) = resolve(method) {
+                    walk(&callee, found, resolve, seen);
+                    if *found {
+                        return;
+                    }
+                }
+            }
         }
-        e.node.for_each_child(&mut |c| walk(c, found));
+        e.node.for_each_child(&mut |c| walk(c, found, resolve, seen));
     }
     let mut found = false;
-    walk(body, &mut found);
+    walk(body, &mut found, resolve, seen);
     found
 }
 

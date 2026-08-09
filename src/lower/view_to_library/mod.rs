@@ -869,6 +869,37 @@ pub fn insert_db_stub(
     );
     classes.insert(ClassId(Symbol::from("Db")), db_info);
 
+    // MessageDigest — the keyed-digest primitive surface, same
+    // per-target-shim situation as Db above: OpenSSL under CRuby/JRuby,
+    // sp_crypto FFI in the spinel binary, one contract typed here so
+    // action_controller/message_verifier.rb's bodies resolve. See
+    // runtime/ruby/message_digest.rbs. `pbkdf2_sha256` answers RAW
+    // BYTES (an HMAC key is bytes), which is why it types Str and not
+    // some digest-shaped wrapper.
+    let mut digest_info = crate::analyze::ClassInfo::default();
+    for name in ["hmac_sha1_hex", "hmac_sha256_hex"] {
+        digest_info.class_methods.insert(
+            Symbol::from(name),
+            fn_sig(
+                vec![(Symbol::from("key"), Ty::Str), (Symbol::from("msg"), Ty::Str)],
+                Ty::Str,
+            ),
+        );
+    }
+    digest_info.class_methods.insert(
+        Symbol::from("pbkdf2_sha256"),
+        fn_sig(
+            vec![
+                (Symbol::from("secret"), Ty::Str),
+                (Symbol::from("salt"), Ty::Str),
+                (Symbol::from("iters"), Ty::Int),
+                (Symbol::from("dklen"), Ty::Int),
+            ],
+            Ty::Str,
+        ),
+    );
+    classes.insert(ClassId(Symbol::from("MessageDigest")), digest_info);
+
     // ActiveSupport's temporal intrinsics — the same situation as Db:
     // one contract, an implementation PER TREE (the spinel Time subset
     // vs the CRuby/JRuby overlay's stdlib-backed sibling), so neither

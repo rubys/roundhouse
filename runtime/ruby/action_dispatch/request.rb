@@ -86,6 +86,14 @@ module ActionDispatch
       base_url + fullpath
     end
 
+    # Rails' `request.url` is `original_url` — same string, and the name
+    # app code reaches for (campfire's `request_authentication` stores it
+    # as the post-login return path). Kept as its own method rather than
+    # an alias so the strict targets see a real definition.
+    def url
+      original_url
+    end
+
     def referrer
       @referer
     end
