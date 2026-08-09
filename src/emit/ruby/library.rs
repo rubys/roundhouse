@@ -2874,6 +2874,20 @@ pub(super) fn emit_library_class_decl_with_synthesized(
             }
         }
     }
+    // A namespaced file reopens its outer segments (`class Account`
+    // around `module Joinable`), and the header names their superclass
+    // to survive either load order — so this file needs THAT class's
+    // parent loaded too, exactly as if it were its own.
+    let outer_segments: Vec<&str> = name.split("::").collect();
+    for i in 0..outer_segments.len().saturating_sub(1) {
+        let qualified = outer_segments[..=i].join("::");
+        let Some(outer_parent) = outer_class_parent(&qualified, app) else { continue };
+        if let Some(anchor) = require_path_for_parent(&outer_parent, app) {
+            if anchor != self_anchor {
+                requires.push(relpath(&out_dir, &anchor));
+            }
+        }
+    }
     // A reopen of a runtime framework class (lobsters' `module
     // ActiveRecord; class Base; def q ...`) must load the runtime's
     // definition first — under plain Ruby a bare reopen would otherwise
@@ -2973,25 +2987,42 @@ pub(super) fn emit_library_class_decl_with_synthesized(
     // `ShortId` model, and `module ShortId` after the model file loaded
     // is a TypeError under Ruby. (Aggregator order guarantees the owner
     // file loads first: `x.rb` sorts before `x/y.rb` because '.' < '/'.)
-    let outer_kw = |seg: &str| {
-        let is_class = app.models.iter().any(|m| m.name.0.as_str() == seg)
-            || app
-                .library_classes
-                .iter()
-                .any(|c| c.name.0.as_str() == seg && !c.is_module);
-        if is_class { "class" } else { "module" }
+    // …and it must reopen with the SAME superclass, because the load
+    // order the aggregator guarantees is not the only one: `account.rb`
+    // requires `account/joinable` at its top so the `include` resolves,
+    // which runs the nested file FIRST. A bare `class Account` there
+    // creates it under Object, and the real `class Account <
+    // ApplicationRecord` then dies with "superclass mismatch". Naming
+    // the parent in both places makes the order irrelevant.
+    //
+    // Resolution is by QUALIFIED prefix, not bare segment:
+    // `Opengraph::Fetch::RedirectDeniedError` nests inside the CLASS
+    // `Opengraph::Fetch`, and looking up a bare `Fetch` finds nothing
+    // ("Fetch is not a module" at load).
+    let outer_header = |i: usize, seg: &str| {
+        let qualified = segments[..=i].join("::");
+        let parent = outer_class_parent(&qualified, app);
+        match (is_app_class(&qualified, app), parent) {
+            (true, Some(p)) => format!("class {seg} < {}", p.0.as_str()),
+            (true, None) => format!("class {seg}"),
+            (false, _) => format!("module {seg}"),
+        }
     };
 
     if lc.is_module {
         // Modules don't take a parent; ingest already enforces this.
         for (i, seg) in segments.iter().enumerate() {
-            let kw = if i < depth - 1 { outer_kw(seg) } else { "module" };
-            writeln!(s, "{}{kw} {seg}", "  ".repeat(i)).unwrap();
+            let header = if i < depth - 1 {
+                outer_header(i, seg)
+            } else {
+                format!("module {seg}")
+            };
+            writeln!(s, "{}{header}", "  ".repeat(i)).unwrap();
         }
     } else {
         // Outer segments (if any) are namespace modules; the last is the class.
         for (i, seg) in segments.iter().take(depth - 1).enumerate() {
-            writeln!(s, "{}{} {seg}", "  ".repeat(i), outer_kw(seg)).unwrap();
+            writeln!(s, "{}{}", "  ".repeat(i), outer_header(i, seg)).unwrap();
         }
         let last = segments[depth - 1];
         let pad = "  ".repeat(depth - 1);
@@ -3165,6 +3196,28 @@ fn report_dropped_class_body_call(lc: &LibraryClass, call: &Expr) {
     ));
 }
 
+/// Is this name one of the app's own CLASSES (not a module)? Namespace
+/// segments that name one must reopen as `class`, not `module`.
+fn is_app_class(name: &str, app: &App) -> bool {
+    app.models.iter().any(|m| m.name.0.as_str() == name)
+        || app
+            .library_classes
+            .iter()
+            .any(|c| c.name.0.as_str() == name && !c.is_module)
+}
+
+/// The declared superclass of an app class named by a namespace
+/// segment, so a nested file can reopen it with the same parent.
+fn outer_class_parent(name: &str, app: &App) -> Option<ClassId> {
+    if let Some(m) = app.models.iter().find(|m| m.name.0.as_str() == name) {
+        return m.parent.clone();
+    }
+    app.library_classes
+        .iter()
+        .find(|c| c.name.0.as_str() == name && !c.is_module)
+        .and_then(|c| c.parent.clone())
+}
+
 fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {
     let raw = parent.0.as_str();
     if raw == "ActiveRecord::Base" {
@@ -3199,7 +3252,7 @@ fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {
         return Some(format!("app/models/{}", crate::naming::underscore(raw)));
     }
     if app.controllers.iter().any(|c| c.name.0.as_str() == raw) {
-        return Some(format!("app/controllers/{}", snake_case(raw)));
+        return Some(format!("app/controllers/{}", crate::naming::underscore(raw)));
     }
     None
 }
@@ -3256,10 +3309,10 @@ fn require_path_for_body_const(
             .iter()
             .any(|lc| lc.name.0.as_str() == first.as_str())
     {
-        return Some(format!("app/models/{}", snake_case(first)));
+        return Some(format!("app/models/{}", crate::naming::underscore(first)));
     }
     if app.controllers.iter().any(|c| c.name.0.as_str() == first.as_str()) {
-        return Some(format!("app/controllers/{}", snake_case(first)));
+        return Some(format!("app/controllers/{}", crate::naming::underscore(first)));
     }
     match first.as_str() {
         // `Views::*` refs always go through the per-app aggregator at

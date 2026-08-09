@@ -268,19 +268,19 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
         .filter(|lc| lc.origin.is_some())
         .map(|lc| {
             let name = lc.name.0.as_str().to_string();
-            let stem = crate::naming::snake_case(&name);
+            let stem = crate::naming::underscore(&name);
             (name, format!("app/models/{stem}"))
         })
         .collect();
     for spec in params_specs_full.values() {
         let name = spec.class_id.0.as_str().to_string();
-        let stem = crate::naming::snake_case(&name);
+        let stem = crate::naming::underscore(&name);
         synthesized.push((name, format!("app/models/{stem}")));
     }
 
     lcs.iter()
         .flat_map(|lc| {
-            let stem = crate::naming::snake_case(lc.name.0.as_str());
+            let stem = crate::naming::underscore(lc.name.0.as_str());
             let out_path = PathBuf::from(format!("app/models/{stem}.rb"));
             library::emit_library_class_pair_with_synthesized(
                 lc,
@@ -350,7 +350,7 @@ pub fn emit_lowered_routes(app: &App) -> EmittedFile {
     let mut seen: Vec<String> = vec!["application_controller".to_string()];
     for r in &flat {
         let class_name = r.controller.0.as_str();
-        let stem = crate::naming::snake_case(class_name);
+        let stem = crate::naming::underscore(class_name);
         if seen.contains(&stem) {
             continue;
         }
@@ -492,14 +492,14 @@ fn emit_lowered_controllers_from_lcs(
         .filter(|lc| lc.origin.is_some())
         .map(|lc| {
             let name = lc.name.0.as_str().to_string();
-            let stem = crate::naming::snake_case(&name);
+            let stem = crate::naming::underscore(&name);
             (name, format!("app/models/{stem}"))
         })
         .collect();
 
     lcs.iter()
         .flat_map(|lc| {
-            let file_stem = crate::naming::snake_case(lc.name.0.as_str());
+            let file_stem = crate::naming::underscore(lc.name.0.as_str());
             let out_path = if lc.origin.is_some() {
                 PathBuf::from(format!("app/models/{file_stem}.rb"))
             } else {
