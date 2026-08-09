@@ -302,6 +302,7 @@ fn filter_item(
     roundhouse::dialect::ControllerBodyItem::Filter {
         filter: Filter {
             kind: FilterKind::Before,
+            from_concern: None,
             target: Symbol::from(target),
             only: only.iter().map(|s| Symbol::from(*s)).collect(),
             except: vec![],
@@ -396,6 +397,7 @@ fn resolve_before_actions_respects_except_list() {
     let filter_with_except = ControllerBodyItem::Filter {
         filter: Filter {
             kind: FilterKind::Before,
+            from_concern: None,
             target: Symbol::from("set_x"),
             only: vec![],
             except: vec![Symbol::from("index")],

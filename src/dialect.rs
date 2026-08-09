@@ -879,6 +879,16 @@ impl ControllerBodyItem {
 pub struct Filter {
     pub kind: FilterKind,
     pub target: Symbol,
+    /// The concern module this filter was DECLARED in, when it reached
+    /// the controller through an `include` (`splice_concerns_into_
+    /// controllers` sets it as it copies the module's `included do`
+    /// filters into the including controller's body). `None` for a
+    /// filter written in the controller itself. Provenance the chain
+    /// resolution reports as `defined_in`, and the reason the splice can
+    /// own the copy without analyze having to redo it
+    /// ([[feedback_self_describing_ir]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_concern: Option<ClassId>,
     pub only: Vec<Symbol>,
     pub except: Vec<Symbol>,
     /// Surface style of `only: [...]` — brackets (`[:a, :b]`) vs

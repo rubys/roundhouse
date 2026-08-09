@@ -652,6 +652,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // by ClassId, so the lexical-scope resolution has to have happened.
     qualify_relative_model_includes(&mut app);
     splice_concerns_into_models(&mut app);
+    splice_concerns_into_controllers(&mut app);
     fold_concern_enums_into_models(&mut app, &concern_enums);
     // Last: needs every model's complete `enums` table, including the
     // columns an included concern declared.
@@ -726,6 +727,145 @@ fn splice_concerns_into_models(app: &mut App) {
             model.body.splice(i + 1..i + 1, items);
             i += n + 1;
         }
+    }
+}
+
+/// Splice a controller concern's surface into every controller that
+/// includes it: the `included do` filters join the filter chain, and the
+/// module's instance methods become private methods of the controller.
+///
+/// Rails does this with `include` at class-definition time. Nothing in
+/// the emitted trees can: the ruby-family targets would need Ruby's own
+/// mixin semantics (which strict targets have no equivalent for), and
+/// the filter chain is built at LOWERING time from `Controller::filters`
+/// — a concern's filters were invisible to it. campfire's
+/// ApplicationController is nothing BUT
+/// `include AllowBrowser, Authentication, …`, so it emitted as an empty
+/// class: no `before_action :require_authentication`, no
+/// `restore_authentication` to call, every action running
+/// unauthenticated.
+///
+/// Splicing (rather than emitting `include`) is the same choice the
+/// model side already made, and for the same reason: it lands once, in
+/// the IR, for all thirteen targets.
+///
+/// Closes transitively — `Authentication` includes `SessionLookup`, and
+/// `find_session_by_cookie` has to arrive with it. A name the controller
+/// (or an earlier concern) already defines wins, matching Ruby's
+/// ancestor order.
+fn splice_concerns_into_controllers(app: &mut App) {
+    use crate::dialect::{Action, ControllerBodyItem, MethodReceiver, RenderTarget};
+    use crate::ty::{Row, Ty};
+
+    // Instance methods per concern module, and the modules it includes.
+    let mut module_methods: HashMap<crate::ident::ClassId, Vec<crate::dialect::MethodDef>> =
+        HashMap::new();
+    let mut module_includes: HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>> =
+        HashMap::new();
+    for lc in &app.library_classes {
+        module_methods.insert(
+            lc.name.clone(),
+            lc.methods
+                .iter()
+                .filter(|m| matches!(m.receiver, MethodReceiver::Instance))
+                .cloned()
+                .collect(),
+        );
+        module_includes.insert(lc.name.clone(), lc.includes.clone());
+    }
+
+    for controller in &mut app.controllers {
+        let includes = crate::analyze::controller_includes(controller);
+        if includes.is_empty() {
+            continue;
+        }
+        // Transitive closure, in include order.
+        let mut queue = includes;
+        let mut seen: std::collections::BTreeSet<crate::ident::ClassId> =
+            queue.iter().cloned().collect();
+        let mut qi = 0;
+        while qi < queue.len() {
+            let m = queue[qi].clone();
+            qi += 1;
+            for nested in module_includes.get(&m).into_iter().flatten() {
+                if seen.insert(nested.clone()) {
+                    queue.push(nested.clone());
+                }
+            }
+        }
+
+        let mut defined: std::collections::HashSet<crate::ident::Symbol> = controller
+            .body
+            .iter()
+            .filter_map(|item| match item {
+                ControllerBodyItem::Action { action, .. } => Some(action.name.clone()),
+                _ => None,
+            })
+            .collect();
+
+        let mut filters: Vec<ControllerBodyItem> = Vec::new();
+        let mut methods: Vec<ControllerBodyItem> = Vec::new();
+        for module in &queue {
+            for filter in app.concern_filters.get(module).into_iter().flatten() {
+                let mut filter = filter.clone();
+                // Provenance for the chain view: `defined_in` is the
+                // module, not the controller that included it.
+                filter.from_concern = Some(module.clone());
+                filters.push(ControllerBodyItem::Filter {
+                    filter,
+                    leading_comments: Vec::new(),
+                    leading_blank_line: false,
+                });
+            }
+            for method in module_methods.get(module).into_iter().flatten() {
+                if !defined.insert(method.name.clone()) {
+                    continue;
+                }
+                let mut params = Row::closed();
+                let mut opt_params = Vec::new();
+                for p in &method.params {
+                    match &p.default {
+                        Some(d) => opt_params.push((p.name.clone(), d.clone())),
+                        None => {
+                            params.fields.insert(p.name.clone(), Ty::Untyped);
+                        }
+                    }
+                }
+                methods.push(ControllerBodyItem::Action {
+                    action: Action {
+                        name: method.name.clone(),
+                        params,
+                        opt_params,
+                        block_param: method.block_param.as_ref().map(|p| p.name.clone()),
+                        body: method.body.clone(),
+                        renders: RenderTarget::Inferred,
+                        effects: crate::effect::EffectSet::pure(),
+                    },
+                    leading_comments: Vec::new(),
+                    leading_blank_line: false,
+                });
+            }
+        }
+        if filters.is_empty() && methods.is_empty() {
+            continue;
+        }
+        // Filters first (Rails runs an included filter ahead of the
+        // includer's own), then the methods behind a private marker —
+        // they're helpers, never routable actions.
+        let has_private_marker = controller
+            .body
+            .iter()
+            .any(|i| matches!(i, ControllerBodyItem::PrivateMarker { .. }));
+        let mut body = std::mem::take(&mut controller.body);
+        filters.extend(body.drain(..));
+        if !methods.is_empty() && !has_private_marker {
+            filters.push(ControllerBodyItem::PrivateMarker {
+                leading_comments: Vec::new(),
+                leading_blank_line: true,
+            });
+        }
+        filters.extend(methods);
+        controller.body = filters;
     }
 }
 

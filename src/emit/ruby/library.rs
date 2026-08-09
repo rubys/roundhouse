@@ -16,7 +16,6 @@ use crate::App;
 use crate::dialect::{AccessorKind, LibraryClass, MethodReceiver};
 use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
-use crate::naming::snake_case;
 use crate::span::Span;
 
 pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
@@ -2863,6 +2862,14 @@ pub(super) fn emit_library_class_decl_with_synthesized(
     let self_anchor = out_path.with_extension("").to_string_lossy().into_owned();
     let mut s = String::new();
 
+    // A constant whose initializer runs this class's own methods at load
+    // time (see `partition_deferred_constants`) drags those method
+    // bodies' constant refs into LOAD time with it — `Sound::BUILTIN`
+    // calls `initialize`, which reads `Sound::Image`. Those refs would
+    // otherwise be classified body-only and left to the aggregator.
+    let (eager, deferred) = partition_deferred_constants(lc);
+    let load_time_bodies = !deferred.is_empty();
+
     // Parent + body-derived `require_relative` headers. Helpers return
     // project-root-anchored paths; we relpath each one against `out_dir`
     // so emit works correctly from any output directory.
@@ -2957,7 +2964,7 @@ pub(super) fn emit_library_class_decl_with_synthesized(
             .map(|(_, a)| a.clone())
             .or_else(|| require_path_for_body_const(path, app, name));
         let Some(anchor) = anchor else { continue };
-        if !load_time && anchor.starts_with("app/models/") {
+        if !load_time && !load_time_bodies && anchor.starts_with("app/models/") {
             continue;
         }
         if anchor != self_anchor {
@@ -3042,24 +3049,35 @@ pub(super) fn emit_library_class_decl_with_synthesized(
     // Class-level constants (`NAME = <expr>`), emitted before methods so
     // refs in method bodies resolve. A multi-line value (proc/array) keeps
     // its continuation lines indented to the class body.
-    for (cname, value) in &lc.constants {
-        let rendered = super::emit_expr(value);
-        let mut lines = rendered.lines();
-        match lines.next() {
-            Some(first_line) => {
-                writeln!(s, "{body_pad}{} = {first_line}", cname.as_str()).unwrap();
-                for line in lines {
-                    if line.is_empty() {
-                        writeln!(s).unwrap();
-                    } else {
-                        writeln!(s, "{body_pad}{line}").unwrap();
+    //
+    // EXCEPT one whose initializer CALLS this class — campfire's
+    // `Sound::BUILTIN = [ new(name: "56k", …), … ]` builds a table of
+    // instances, and a class body runs top to bottom, so `new` there
+    // reaches Object#initialize and raises. Those (and any constant
+    // reading them) emit after the methods, which is where the source
+    // had them. `emit_deferred_constants` renders that tail.
+    let render_constants = |s: &mut String, which: &[usize]| {
+        for &i in which {
+            let (cname, value) = &lc.constants[i];
+            let rendered = super::emit_expr(value);
+            let mut lines = rendered.lines();
+            match lines.next() {
+                Some(first_line) => {
+                    writeln!(s, "{body_pad}{} = {first_line}", cname.as_str()).unwrap();
+                    for line in lines {
+                        if line.is_empty() {
+                            writeln!(s).unwrap();
+                        } else {
+                            writeln!(s, "{body_pad}{line}").unwrap();
+                        }
                     }
                 }
+                None => writeln!(s, "{body_pad}{} = nil", cname.as_str()).unwrap(),
             }
-            None => writeln!(s, "{body_pad}{} = nil", cname.as_str()).unwrap(),
         }
-    }
-    if !lc.constants.is_empty() && !lc.methods.is_empty() {
+    };
+    render_constants(&mut s, &eager);
+    if !eager.is_empty() && !lc.methods.is_empty() {
         writeln!(s).unwrap();
     }
 
@@ -3103,11 +3121,67 @@ pub(super) fn emit_library_class_decl_with_synthesized(
         }
     }
 
+    if !deferred.is_empty() {
+        if !lc.methods.is_empty() {
+            writeln!(s).unwrap();
+        }
+        render_constants(&mut s, &deferred);
+    }
+
     for i in (0..depth).rev() {
         writeln!(s, "{}end", "  ".repeat(i)).unwrap();
     }
 
     EmittedFile { path: out_path, content: s }
+}
+
+/// Split a class's constants into the ones that can be initialized
+/// before its methods exist and the ones that can't. A constant defers
+/// when its initializer dispatches to this class — a bare `new(…)` or a
+/// receiverless call naming one of its own methods — or when it reads a
+/// constant that already deferred. Returns index lists so both groups
+/// keep source order.
+fn partition_deferred_constants(lc: &LibraryClass) -> (Vec<usize>, Vec<usize>) {
+    fn calls_self(expr: &Expr, own: &std::collections::HashSet<&str>, deferred_names: &std::collections::HashSet<String>) -> bool {
+        let mut hit = false;
+        match &*expr.node {
+            ExprNode::Send { recv: None, method, .. }
+                if method.as_str() == "new" || own.contains(method.as_str()) =>
+            {
+                hit = true;
+            }
+            ExprNode::Const { path } if path.len() == 1 => {
+                if deferred_names.contains(path[0].as_str()) {
+                    hit = true;
+                }
+            }
+            _ => {}
+        }
+        if hit {
+            return true;
+        }
+        let mut found = false;
+        expr.node.for_each_child(&mut |child| {
+            if !found && calls_self(child, own, deferred_names) {
+                found = true;
+            }
+        });
+        found
+    }
+
+    let own: std::collections::HashSet<&str> =
+        lc.methods.iter().map(|m| m.name.as_str()).collect();
+    let mut deferred_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let (mut eager, mut deferred) = (Vec::new(), Vec::new());
+    for (i, (name, value)) in lc.constants.iter().enumerate() {
+        if calls_self(value, &own, &deferred_names) {
+            deferred_names.insert(name.as_str().to_string());
+            deferred.push(i);
+        } else {
+            eager.push(i);
+        }
+    }
+    (eager, deferred)
 }
 
 /// Project-root-anchored require target for a parent class, if one is needed.
@@ -3291,6 +3365,17 @@ fn require_path_for_body_const(
     self_name: &str,
 ) -> Option<String> {
     let first = path.first()?;
+    // A nested class of THIS class is still a different file:
+    // `Sound::Image` lives at app/models/sound/image.rb even though the
+    // reference's first segment is `Sound`. Resolve the full path before
+    // the self-reference short-circuit below.
+    let joined = path.join("::");
+    if joined != self_name
+        && (app.models.iter().any(|m| m.name.0.as_str() == joined)
+            || app.library_classes.iter().any(|lc| lc.name.0.as_str() == joined))
+    {
+        return Some(format!("app/models/{}", crate::naming::underscore(&joined)));
+    }
     if first == self_name {
         return None;
     }

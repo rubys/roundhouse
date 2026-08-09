@@ -858,7 +858,7 @@ impl Analyzer {
             // `after_action` runs after rendering. Block-form filters'
             // bodies were already typed by the Phase 0 pass above.
             let (sourced_filters, block_filter_bindings) =
-                build_sourced_filter_chain(controller, &concern_filters_map, &module_includes);
+                build_sourced_filter_chain(controller);
 
             // Pass A: analyze every action body once. Helper-method
             // params (`period(query)`) are seeded from the inferred-
@@ -2702,38 +2702,16 @@ fn merged_before_seed(
 /// form is rare and a missing guard only over-seeds an unread ivar.
 fn build_sourced_filter_chain(
     controller: &Controller,
-    concern_filters: &HashMap<ClassId, Vec<Filter>>,
-    module_includes: &HashMap<ClassId, Vec<ClassId>>,
 ) -> (Vec<(Filter, ClassId)>, Vec<(Symbol, HashMap<Symbol, Ty>)>) {
-    fn splice_concern(
-        module_id: &ClassId,
-        concern_filters: &HashMap<ClassId, Vec<Filter>>,
-        module_includes: &HashMap<ClassId, Vec<ClassId>>,
-        spliced: &mut BTreeSet<ClassId>,
-        chain: &mut Vec<(Filter, ClassId)>,
-    ) {
-        if !spliced.insert(module_id.clone()) {
-            return;
-        }
-        if let Some(nested) = module_includes.get(module_id) {
-            for n in nested {
-                splice_concern(n, concern_filters, module_includes, spliced, chain);
-            }
-        }
-        if let Some(fs) = concern_filters.get(module_id) {
-            chain.extend(fs.iter().map(|f| (f.clone(), module_id.clone())));
-        }
-    }
-
     let own_id = controller.name.clone();
     let mut chain: Vec<(Filter, ClassId)> = Vec::new();
     let mut block_bindings: Vec<(Symbol, HashMap<Symbol, Ty>)> = Vec::new();
-    let mut spliced: BTreeSet<ClassId> = BTreeSet::new();
 
     for (idx, item) in controller.body.iter().enumerate() {
         match item {
             ControllerBodyItem::Filter { filter, .. } => {
-                chain.push((filter.clone(), own_id.clone()));
+                let source = filter.from_concern.clone().unwrap_or_else(|| own_id.clone());
+                chain.push((filter.clone(), source));
             }
             ControllerBodyItem::Unknown { expr, .. } => {
                 let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node
@@ -2741,24 +2719,11 @@ fn build_sourced_filter_chain(
                     continue;
                 };
                 match method.as_str() {
-                    "include" => {
-                        for arg in args {
-                            if let ExprNode::Const { path } = &*arg.node {
-                                let joined = path
-                                    .iter()
-                                    .map(|s| s.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join("::");
-                                splice_concern(
-                                    &ClassId(Symbol::from(joined)),
-                                    concern_filters,
-                                    module_includes,
-                                    &mut spliced,
-                                    &mut chain,
-                                );
-                            }
-                        }
-                    }
+                    // `include` needs no arm: ingest's
+                    // `splice_concerns_into_controllers` already copied the
+                    // module's `included do` filters into this body, each
+                    // tagged with `from_concern` for provenance. Splicing
+                    // again here would double every concern filter.
                     "before_action" | "around_action" => {
                         let Some(block) = block else { continue };
                         let kind = if method.as_str() == "before_action" {
@@ -2783,6 +2748,7 @@ fn build_sourced_filter_chain(
                             Filter {
                                 kind,
                                 target: target.clone(),
+                                from_concern: None,
                                 only: Vec::new(),
                                 except: Vec::new(),
                                 only_style: crate::expr::ArrayStyle::default(),

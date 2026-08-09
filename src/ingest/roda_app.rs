@@ -876,6 +876,7 @@ impl<'f> RouteWalker<'f> {
                     filter: Filter {
                         kind: FilterKind::Before,
                         target,
+                        from_concern: None,
                         only,
                         except: Vec::new(),
                         only_style: Default::default(),

@@ -410,6 +410,7 @@ pub(super) fn parse_filter_call(
             .map(|target| Filter {
                 kind: kind.clone(),
                 target,
+                from_concern: None,
                 only: only.clone(),
                 except: except.clone(),
                 only_style,
