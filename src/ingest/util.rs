@@ -262,6 +262,19 @@ fn body_has_direct_method_decl(body: Option<Node<'_>>) -> bool {
                 return true;
             }
         }
+        // The other Concern spelling: `module ClassMethods … end`.
+        // `walk_decl_body` folds its defs onto THIS module as class
+        // methods, so a concern whose only content is that module
+        // (campfire's Opengraph::Metadata::Fetching) still declares
+        // methods — and skipping it would drop them entirely, since the
+        // nested module is deliberately not surfaced on its own.
+        if let Some(m) = stmt.as_module_node() {
+            if module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()])
+                && body_has_direct_method_decl(m.body())
+            {
+                return true;
+            }
+        }
     }
     false
 }

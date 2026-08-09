@@ -899,6 +899,29 @@ fn qualify_relative_model_includes(app: &mut App) {
             }
         }
     }
+
+    // Same rule for a module's own includes. campfire's
+    // `Authentication` concern opens with `include SessionLookup`,
+    // which is `Authentication::SessionLookup` — under Ruby's lexical
+    // lookup, and on disk at
+    // app/controllers/concerns/authentication/session_lookup.rb.
+    // Unqualified, the emitted `include SessionLookup` raises NameError
+    // at load time (and nothing pulls the file into the require graph).
+    for lc in &mut app.library_classes {
+        let owner = lc.name.0.as_str().to_string();
+        for inc in &mut lc.includes {
+            if inc.0.as_str().contains("::") {
+                continue;
+            }
+            let qualified = crate::ident::ClassId(crate::ident::Symbol::from(format!(
+                "{owner}::{}",
+                inc.0.as_str()
+            )));
+            if known.contains(&qualified) {
+                *inc = qualified;
+            }
+        }
+    }
 }
 
 /// Fill each `belongs_to …, polymorphic: true` association's target
