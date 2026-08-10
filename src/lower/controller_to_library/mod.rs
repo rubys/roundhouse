@@ -744,13 +744,18 @@ fn build_filter_preamble(
 ) -> Vec<PreambleStmt> {
     let chain = ancestor_chain(controller, all_controllers);
 
-    let skipped: std::collections::HashSet<Symbol> = chain
+    // Skips, kept whole rather than reduced to a set of names: a skip
+    // carries `only:`/`except:` of its own, and campfire's
+    // `allow_unauthenticated_access only: %i[new create]` means the
+    // filter still runs everywhere else. Dropping the filter outright
+    // would sign every other action out of its own authentication —
+    // `destroy` (sign OUT) among them.
+    let skips: Vec<&Filter> = chain
         .iter()
         .copied()
         .chain(std::iter::once(controller))
         .flat_map(|c| c.filters())
         .filter(|f| matches!(f.kind, FilterKind::Skip))
-        .map(|f| f.target.clone())
         .collect();
 
     // Resolve a filter target's body — self first, then nearest ancestor
@@ -770,9 +775,34 @@ fn build_filter_preamble(
 
     let mut preamble: Vec<PreambleStmt> = Vec::new();
     let push_call = |f: &Filter, preamble: &mut Vec<PreambleStmt>| {
-        if skipped.contains(&f.target) {
-            return;
+        // Apply every skip naming this target. An unscoped skip removes
+        // the filter; a scoped one narrows where it still runs, which
+        // the dispatcher already enforces per action (`filter_dispatch_stmt`
+        // emits the only/except guard).
+        let mut f = f.clone();
+        for skip in skips.iter().filter(|s| s.target == f.target) {
+            if skip.only.is_empty() && skip.except.is_empty() {
+                return;
+            }
+            for a in &skip.only {
+                if !f.except.contains(a) {
+                    f.except.push(a.clone());
+                }
+            }
+            // `skip … except: [:x]` skips everywhere BUT x, so what
+            // survives runs only for x.
+            if !skip.except.is_empty() {
+                f.only = if f.only.is_empty() {
+                    skip.except.clone()
+                } else {
+                    f.only.iter().filter(|a| skip.except.contains(a)).cloned().collect()
+                };
+                if f.only.is_empty() {
+                    return;
+                }
+            }
         }
+        let f = &f;
         let Some(target) = find_target(&f.target) else {
             return;
         };

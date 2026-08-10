@@ -653,6 +653,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     qualify_relative_model_includes(&mut app);
     splice_concerns_into_models(&mut app);
     splice_concerns_into_controllers(&mut app);
+    // After the splice: a macro has to resolve against the concern's
+    // class-side methods, and its expansion joins the same filter chain.
+    expand_class_body_macros(&mut app);
     fold_concern_enums_into_models(&mut app, &concern_enums);
     // Last: needs every model's complete `enums` table, including the
     // columns an included concern declared.
@@ -867,6 +870,276 @@ fn splice_concerns_into_controllers(app: &mut App) {
         filters.extend(methods);
         controller.body = filters;
     }
+}
+
+/// Run a controller's class-body macros at compile time.
+///
+/// A concern that exports a filter macro is ordinary modern Rails —
+/// Rails 8 ships `allow_browser` that way, and campfire's Authentication
+/// concern exports three (`allow_unauthenticated_access`,
+/// `allow_bot_access`, `require_unauthenticated_access`). Each is a
+/// `class_methods do` method whose whole body is filter DSL:
+///
+/// ```text
+/// def self.allow_unauthenticated_access(options)
+///   skip_before_action :require_authentication, options
+/// end
+/// ```
+///
+/// Rails runs that at class-definition time with literal arguments, so
+/// the compiler can run it symbolically: bind the call's arguments to
+/// the macro's parameters, substitute, and recognize what comes out as
+/// the filters it is. `allow_unauthenticated_access only: %i[new create]`
+/// folds to `skip_before_action :require_authentication, only: [:new,
+/// :create]`, which every consumer of the chain already understands.
+/// Left unexpanded, campfire's sign-in page demanded sign-in.
+///
+/// ALL-OR-NOTHING, and the reason is the failure direction, not
+/// tidiness. Dropping the whole macro fails CLOSED — a page asks for
+/// authentication it shouldn't. Expanding half of
+/// `require_unauthenticated_access` — taking its `skip_before_action`
+/// and losing the `before_action :restore_authentication,
+/// :redirect_signed_in_user_to_root` behind it — fails OPEN. So a macro
+/// whose body holds one statement this can't read stays Unknown, whole,
+/// and is recorded as a gap.
+fn expand_class_body_macros(app: &mut App) {
+    use crate::dialect::{ControllerBodyItem, MethodReceiver};
+    use crate::expr::ExprNode;
+
+    // Class-side methods of every module, by name — the macro table.
+    // Populated from library classes because that is where a concern's
+    // `class_methods do` / `module ClassMethods` bodies land.
+    let mut macros: HashMap<crate::ident::ClassId, Vec<crate::dialect::MethodDef>> = HashMap::new();
+    for lc in &app.library_classes {
+        let class_side: Vec<crate::dialect::MethodDef> = lc
+            .methods
+            .iter()
+            .filter(|m| matches!(m.receiver, MethodReceiver::Class))
+            .cloned()
+            .collect();
+        if !class_side.is_empty() {
+            macros.insert(lc.name.clone(), class_side);
+        }
+    }
+    if macros.is_empty() {
+        return;
+    }
+
+    // Includes reachable from each controller, ITS ANCESTORS INCLUDED:
+    // campfire's SessionsController includes nothing itself and calls a
+    // macro its parent's Authentication concern exports, which is the
+    // normal arrangement — the base controller mixes the concern in and
+    // the subclasses use what it gave them.
+    let mut reachable: HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>> = HashMap::new();
+    for controller in &app.controllers {
+        let mut acc: Vec<crate::ident::ClassId> = Vec::new();
+        let mut cur = Some(controller);
+        let mut seen: std::collections::BTreeSet<crate::ident::ClassId> =
+            std::collections::BTreeSet::new();
+        while let Some(c) = cur {
+            if !seen.insert(c.name.clone()) {
+                break;
+            }
+            for inc in crate::analyze::controller_includes(c) {
+                if !acc.contains(&inc) {
+                    acc.push(inc);
+                }
+            }
+            cur = c
+                .parent
+                .as_ref()
+                .and_then(|p| app.controllers.iter().find(|o| &o.name == p));
+        }
+        reachable.insert(controller.name.clone(), acc);
+    }
+
+    for controller in &mut app.controllers {
+        let includes = reachable.get(&controller.name).cloned().unwrap_or_default();
+        if includes.is_empty() {
+            continue;
+        }
+        let mut expanded: Vec<ControllerBodyItem> = Vec::new();
+        for item in std::mem::take(&mut controller.body) {
+            let ControllerBodyItem::Unknown { expr, leading_comments, leading_blank_line } = &item
+            else {
+                expanded.push(item);
+                continue;
+            };
+            let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
+                expanded.push(item);
+                continue;
+            };
+            // The macro has to come from a module this controller
+            // includes; a same-named method elsewhere is not it.
+            let found = includes.iter().find_map(|inc| {
+                macros
+                    .get(inc)
+                    .and_then(|ms| ms.iter().find(|m| &m.name == method))
+                    .map(|m| (inc.clone(), m.clone()))
+            });
+            let Some((module, macro_def)) = found else {
+                expanded.push(item);
+                continue;
+            };
+            let body = substitute_params(&macro_def, args);
+            match filters_from_macro_body(&body, &module) {
+                Some(filters) => {
+                    let mut comments = leading_comments.clone();
+                    let mut blank = *leading_blank_line;
+                    for filter in filters {
+                        expanded.push(ControllerBodyItem::Filter {
+                            filter,
+                            leading_comments: std::mem::take(&mut comments),
+                            leading_blank_line: std::mem::take(&mut blank),
+                        });
+                    }
+                }
+                None => {
+                    survey::record(&IngestError::Unsupported {
+                        file: format!("{}", controller.name.0.as_str()),
+                        message: format!(
+                            "class-body macro not expanded: `{}` from {} holds a statement that is not filter DSL",
+                            method.as_str(),
+                            module.0.as_str()
+                        ),
+                    });
+                    expanded.push(item);
+                }
+            }
+        }
+        controller.body = expanded;
+    }
+}
+
+/// The macro's body with its parameters replaced by the call's
+/// arguments. Positional binding, which is all these macros need: the
+/// `**options` a concern macro forwards arrives here as a trailing
+/// positional (see `ingest_hash_literal`), so the substitution is a
+/// straight variable replacement.
+fn substitute_params(
+    macro_def: &crate::dialect::MethodDef,
+    args: &[crate::expr::Expr],
+) -> crate::expr::Expr {
+    use crate::expr::ExprNode;
+
+    fn replace(expr: &mut crate::expr::Expr, bindings: &[(crate::ident::Symbol, crate::expr::Expr)]) {
+        if let ExprNode::Var { name, .. } = &*expr.node {
+            if let Some((_, value)) = bindings.iter().find(|(n, _)| n == name) {
+                *expr = value.clone();
+                return;
+            }
+        }
+        expr.node.for_each_child_mut(&mut |child| replace(child, bindings));
+    }
+
+    let bindings: Vec<(crate::ident::Symbol, crate::expr::Expr)> = macro_def
+        .params
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| args.get(i).map(|a| (p.name.clone(), a.clone())))
+        .collect();
+    let mut body = macro_def.body.clone();
+    replace(&mut body, &bindings);
+    body
+}
+
+/// Every filter the macro body declares, or None if any statement in it
+/// is something else. The IR twin of `parse_filter_call`, which reads
+/// prism nodes — by this point the concern's body is already lowered.
+fn filters_from_macro_body(
+    body: &crate::expr::Expr,
+    module: &crate::ident::ClassId,
+) -> Option<Vec<crate::dialect::Filter>> {
+    use crate::expr::ExprNode;
+
+    let mut out = Vec::new();
+    let statements: Vec<&crate::expr::Expr> = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.iter().collect(),
+        _ => vec![body],
+    };
+    for stmt in statements {
+        out.extend(filter_from_send(stmt, module)?);
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+fn filter_from_send(
+    expr: &crate::expr::Expr,
+    module: &crate::ident::ClassId,
+) -> Option<Vec<crate::dialect::Filter>> {
+    use crate::dialect::{Filter, FilterKind};
+    use crate::expr::{ExprNode, Literal};
+
+    let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
+        return None;
+    };
+    let kind = match method.as_str() {
+        "before_action" => FilterKind::Before,
+        "around_action" => FilterKind::Around,
+        "after_action" => FilterKind::After,
+        "skip_before_action" => FilterKind::Skip,
+        _ => return None,
+    };
+
+    let sym_of = |e: &crate::expr::Expr| match &*e.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+        _ => None,
+    };
+    let sym_list = |e: &crate::expr::Expr| -> Vec<crate::ident::Symbol> {
+        match &*e.node {
+            ExprNode::Array { elements, .. } => elements.iter().filter_map(&sym_of).collect(),
+            _ => sym_of(e).into_iter().collect(),
+        }
+    };
+
+    let mut targets: Vec<crate::ident::Symbol> = Vec::new();
+    let mut only: Vec<crate::ident::Symbol> = Vec::new();
+    let mut except: Vec<crate::ident::Symbol> = Vec::new();
+    for arg in args {
+        if let Some(sym) = sym_of(arg) {
+            targets.push(sym);
+            continue;
+        }
+        let ExprNode::Hash { entries, .. } = &*arg.node else {
+            // An argument that is neither a target nor an options hash
+            // (a forwarded parameter the call site never supplied, say)
+            // means this macro was written for a shape not modeled here.
+            return None;
+        };
+        for (key, value) in entries {
+            match sym_of(key).as_ref().map(|k| k.as_str().to_string()).as_deref() {
+                Some("only") => only = sym_list(value),
+                Some("except") => except = sym_list(value),
+                // if:/unless: guards on a macro-expanded filter would
+                // need the predicate to resolve in the INCLUDER; not
+                // modeled, and silently dropping a guard changes when a
+                // filter fires.
+                Some("if") | Some("unless") => return None,
+                _ => {}
+            }
+        }
+    }
+    if targets.is_empty() {
+        return None;
+    }
+    Some(
+        targets
+            .into_iter()
+            .map(|target| Filter {
+                kind: kind.clone(),
+                target,
+                from_concern: Some(module.clone()),
+                only: only.clone(),
+                except: except.clone(),
+                only_style: crate::expr::ArrayStyle::default(),
+                except_style: crate::expr::ArrayStyle::default(),
+                if_cond: None,
+                unless_cond: None,
+                if_cond_expr: None,
+                unless_cond_expr: None,
+            })
+            .collect(),
+    )
 }
 
 /// Copy each concern's `enum` columns onto the models that include it,
