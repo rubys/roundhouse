@@ -652,6 +652,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // by ClassId, so the lexical-scope resolution has to have happened.
     qualify_relative_model_includes(&mut app);
     splice_concerns_into_models(&mut app);
+    // After the splice, so a class method a concern contributed gets
+    // the same treatment as one written in the model.
+    qualify_model_class_method_ar_calls(&mut app);
     splice_concerns_into_controllers(&mut app);
     // After the splice: a macro has to resolve against the concern's
     // class-side methods, and its expansion joins the same filter chain.
@@ -869,6 +872,71 @@ fn splice_concerns_into_controllers(app: &mut App) {
         }
         filters.extend(methods);
         controller.body = filters;
+    }
+}
+
+/// Give a model's own class methods their implicit receiver.
+///
+/// `def self.banned?(ip) exists?(ip_address: ip) end` means
+/// `Ban.exists?(…)` — inside a class method, self IS the model. Written
+/// bare, the arel builder never sees it: its base arm needs a Const
+/// receiver to resolve a table from, so the call fell through to the
+/// runtime's `Base.exists?`, which takes an ID and got a Hash
+/// (`Db.escape_int: undefined method 'to_i' for an instance of Hash`).
+///
+/// Naming the receiver here rather than teaching arel about an
+/// enclosing class keeps the knowledge where it is certain — the walk
+/// already knows which model owns the method — and pays off for every
+/// consumer: the analyzer types the call through the model, and the
+/// scope/relation machinery downstream sees the same shape a
+/// `Model.where(…)` site has.
+///
+/// Only the base AR class methods, and only when the model does not
+/// define that name itself: a model with its own `count` means its own.
+fn qualify_model_class_method_ar_calls(app: &mut App) {
+    use crate::dialect::{MethodReceiver, ModelBodyItem};
+    use crate::expr::{Expr, ExprNode};
+
+    /// The base-arm shapes `lower::arel::build` resolves from a Const
+    /// receiver. `find`/`first`/`last` are deliberately absent: they
+    /// take an id or no argument and already work receiverless through
+    /// the runtime.
+    const AR_CLASS_METHODS: &[&str] = &["all", "count", "where", "find_by", "exists?"];
+
+    for model in &mut app.models {
+        let own: std::collections::HashSet<String> = model
+            .methods()
+            .map(|m| m.name.as_str().to_string())
+            .collect();
+        let recv = Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Const { path: vec![model.name.0.clone()] },
+        );
+        let qualify = |expr: &mut Expr| {
+            fn walk(
+                expr: &mut Expr,
+                recv: &Expr,
+                own: &std::collections::HashSet<String>,
+                ar: &[&str],
+            ) {
+                expr.node.for_each_child_mut(&mut |c| walk(c, recv, own, ar));
+                let ExprNode::Send { recv: r @ None, method, .. } = &mut *expr.node else {
+                    return;
+                };
+                if !ar.contains(&method.as_str()) || own.contains(method.as_str()) {
+                    return;
+                }
+                *r = Some(recv.clone());
+            }
+            walk(expr, &recv, &own, AR_CLASS_METHODS);
+        };
+        for item in &mut model.body {
+            let ModelBodyItem::Method { method, .. } = item else { continue };
+            if !matches!(method.receiver, MethodReceiver::Class) {
+                continue;
+            }
+            qualify(&mut method.body);
+        }
     }
 }
 

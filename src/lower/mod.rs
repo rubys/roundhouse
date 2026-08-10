@@ -62,6 +62,7 @@ pub mod values_at_splat;
 pub mod request_index;
 pub mod arel_attribute;
 pub mod exclude_predicate;
+pub mod exists_conditions;
 pub mod inquiry;
 pub mod literal_append;
 pub mod html_safe;
@@ -98,6 +99,7 @@ pub use parameterize::apply_parameterize_grounding;
 pub use request_index::apply_request_index_lowering;
 pub use arel_attribute::apply_arel_attribute_lowering;
 pub use exclude_predicate::apply_exclude_predicate_lowering;
+pub use exists_conditions::apply_exists_conditions_lowering;
 pub use inquiry::apply_inquiry_lowering;
 pub use literal_append::apply_literal_append_lowering;
 pub use html_safe::apply_html_safe_lowering;
@@ -180,6 +182,11 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `x.inquiry` / `x.<name>?` → equality against the label; total
     // rewrite of a name no other pass produces or consumes.
     ("inquiry", &[]),
+    // `Model.exists?(col: v)` → `Model.where(col: v).exists?`, so the
+    // conditions form reaches the Relation instead of the by-id
+    // primitive. Before the emit-time arel rewrite, which then folds
+    // the chain when the values are literal.
+    ("exists_conditions", &[]),
     ("arel_attribute", &[]),
     // `"lit" << x` → `"lit" + x`; local expression rewrite, no ordering
     // constraints.
@@ -300,6 +307,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("exclude_predicate");
     inquiry::apply_inquiry_lowering(app);
     ran!("inquiry");
+    exists_conditions::apply_exists_conditions_lowering(app);
+    ran!("exists_conditions");
     arel_attribute::apply_arel_attribute_lowering(app);
     ran!("arel_attribute");
     literal_append::apply_literal_append_lowering(app);
