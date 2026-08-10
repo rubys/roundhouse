@@ -69,7 +69,15 @@ pub(super) fn emit_form_builder_inline(
             binding,
             ctx,
         ),
-        FormBuilderMethod::PasswordField => emit_password_field(
+        FormBuilderMethod::PasswordField => emit_valueless_input_field(
+            "password",
+            positional.first().copied(),
+            opts.as_slice(),
+            binding,
+            ctx,
+        ),
+        FormBuilderMethod::FileField => emit_valueless_input_field(
+            "file",
             positional.first().copied(),
             opts.as_slice(),
             binding,
@@ -1072,12 +1080,16 @@ fn to_s(e: Expr) -> Expr {
     )
 }
 
-/// `<input type="password" name="..." id="..."<opts>>` — inline expansion
-/// of `form.password_field :field [, opts]`. Rails omits the `value=` attr
-/// for password fields (it never echoes a password back), so — unlike
-/// `text_field` — no `optional_value_attr` is emitted; a caller-supplied
-/// `value:` opt still flows through `append_attr_parts`.
-fn emit_password_field(
+/// `<input type="<ty>" name="..." id="..."<opts>>` — a typed input that
+/// carries NO `value=` attribute, unlike [`emit_typed_input_field`].
+///
+/// Two field types want this, for different reasons that land on the
+/// same shape: Rails never echoes a password back, and a file input
+/// cannot hold a value at all (the browser rejects it — a page can't
+/// pre-fill a user's filesystem path). A caller-supplied `value:` opt
+/// still flows through `append_attr_parts` either way.
+fn emit_valueless_input_field(
+    ty: &str,
     field: Option<&Expr>,
     opts: &[(Expr, Expr)],
     binding: &FormBuilderBinding,
@@ -1089,7 +1101,7 @@ fn emit_password_field(
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text {
         value: format!(
-            "<input type=\"password\"{}",
+            "<input type=\"{ty}\"{}",
             name_id_attrs_for(binding, field_sym.as_str(), opts)
         ),
     });

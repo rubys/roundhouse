@@ -397,6 +397,7 @@ pub enum FormBuilderMethod {
     Button,
     UrlField,
     EmailField,
+    FileField,
 }
 
 /// Method name for a view template stem. A digit-leading stem
@@ -433,6 +434,12 @@ pub fn classify_form_builder_method(method: &str) -> Option<FormBuilderMethod> {
         "button" => Some(FormBuilderMethod::Button),
         "url_field" => Some(FormBuilderMethod::UrlField),
         "email_field" => Some(FormBuilderMethod::EmailField),
+        // The INPUT TAG only. Receiving the upload is Active Storage,
+        // which is deferred by design — but rendering `<input
+        // type="file">` needs none of it, and without this the call
+        // survives into the emit as a literal `form.file_field(…)` with
+        // `form` unbound, taking the whole page down at render.
+        "file_field" => Some(FormBuilderMethod::FileField),
         _ => None,
     }
 }

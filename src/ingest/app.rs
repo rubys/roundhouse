@@ -1123,6 +1123,25 @@ fn expand_class_body_macros(app: &mut App) {
 /// `**options` a concern macro forwards arrives here as a trailing
 /// positional (see `ingest_hash_literal`), so the substitution is a
 /// straight variable replacement.
+///
+/// A parameter the call site does NOT supply still has to bind, or the
+/// body keeps a free variable and `filters_from_macro_body` rejects the
+/// whole macro — which is how the bare `allow_unauthenticated_access`
+/// (no arguments at all, campfire's FirstRunsController) silently kept
+/// `require_authentication` and made `/first_run` redirect to
+/// `/session/new`, which redirects back.
+///
+/// What an unsupplied parameter binds to is DERIVED, not guessed. In
+/// valid Ruby a trailing parameter the caller may omit is exactly one of
+/// three things, and the IR distinguishes all three:
+///   * it declares a default        → bind the default
+///   * `*rest` (`Param::rest`)      → bind an empty Array
+///   * otherwise it can only be `**rest`, which ingest models as a plain
+///     trailing positional          → bind an empty Hash
+///
+/// The empty Hash is what makes the bare call mean what Ruby means:
+/// `skip_before_action :require_authentication, **{}` is an UNSCOPED
+/// skip, so the filter comes off every action rather than none.
 fn substitute_params(
     macro_def: &crate::dialect::MethodDef,
     args: &[crate::expr::Expr],
@@ -1139,11 +1158,26 @@ fn substitute_params(
         expr.node.for_each_child_mut(&mut |child| replace(child, bindings));
     }
 
+    let span = macro_def.body.span;
     let bindings: Vec<(crate::ident::Symbol, crate::expr::Expr)> = macro_def
         .params
         .iter()
         .enumerate()
-        .filter_map(|(i, p)| args.get(i).map(|a| (p.name.clone(), a.clone())))
+        .map(|(i, p)| {
+            let value = match args.get(i) {
+                Some(a) => a.clone(),
+                None if p.default.is_some() => p.default.clone().expect("checked"),
+                None if p.rest => crate::expr::Expr::new(
+                    span,
+                    ExprNode::Array { elements: vec![], style: Default::default() },
+                ),
+                None => crate::expr::Expr::new(
+                    span,
+                    ExprNode::Hash { entries: vec![], kwargs: false },
+                ),
+            };
+            (p.name.clone(), value)
+        })
         .collect();
     let mut body = macro_def.body.clone();
     replace(&mut body, &bindings);
