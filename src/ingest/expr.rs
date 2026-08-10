@@ -2068,6 +2068,14 @@ fn ingest_condition_ladder(
 /// flag and renders as a positional hash argument. That matches the
 /// receiving end: `ingest_method_def` already models a `**rest`
 /// parameter as a trailing *positional* param.
+///
+/// It does NOT match a callee declaring explicit keywords, which needs
+/// the `**` to distribute the hash across them — erasing it hands the
+/// callee one positional argument and it raises. Whether the erasure is
+/// safe is thus a property of the CALLEE, which this purely local
+/// desugar never sees; [`crate::lower::kwsplat`] runs post-analyze,
+/// where the signature is resolvable, and puts the splat back as the
+/// keywords it stood for.
 fn ingest_hash_literal(
     elements: &ruby_prism::NodeList<'_>,
     kwargs: bool,

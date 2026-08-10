@@ -65,6 +65,8 @@ pub mod exclude_predicate;
 pub mod config_reader;
 pub mod exists_conditions;
 pub mod inquiry;
+pub mod byte_size;
+pub mod kwsplat;
 pub mod literal_append;
 pub mod html_safe;
 pub mod rails_cache;
@@ -197,6 +199,14 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `"lit" << x` → `"lit" + x`; local expression rewrite, no ordering
     // constraints.
     ("literal_append", &[]),
+    // `5.megabytes` → `5 * 1048576`; local expression rewrite of a name
+    // no other pass produces or consumes.
+    ("byte_size", &[]),
+    // `f(**h)` (erased to `f(h)` at ingest) → `f(k: h[:k], …)` when the
+    // callee declares explicit keywords. Reads the arg count against the
+    // callee's signature, so it must see the argument list as ingested —
+    // before any pass that appends or drops a positional argument.
+    ("kwsplat", &[]),
     // `Rails.cache.fetch(k, expires_in: t) { <String> }` → `fetch_str`;
     // must run BEFORE the render lowering, whose rewrite of
     // `render_to_string` into a `Views::` call is the tail this gates on.
@@ -321,6 +331,10 @@ pub fn apply_post_analyze_lowerings(
     ran!("arel_attribute");
     literal_append::apply_literal_append_lowering(app);
     ran!("literal_append");
+    byte_size::apply_byte_size_lowering(app);
+    ran!("byte_size");
+    diags.extend(kwsplat::apply_kwsplat_expansion(app));
+    ran!("kwsplat");
     rails_cache::apply_rails_cache_lowering(app);
     ran!("rails_cache");
     html_safe::apply_html_safe_lowering(app);
@@ -384,9 +398,19 @@ pub fn apply_post_analyze_lowerings(
 /// own) exactly as much as a body site; defaults were the one
 /// reachable-expr position the hook skipped (lobsters'
 /// FlaggedCommenters left an ungrounded `Integer#minutes` send whose
-/// untyped result every downstream consumer inherited). The one
-/// definition of the hook's scope — passes iterate through here so
-/// they can't drift. View bodies are deliberately excluded (each
+/// untyped result every downstream consumer inherited).
+///
+/// Class-body CONSTANT INITIALIZERS ride along for the same reason, one
+/// step earlier: `CONNECTION_TTL = 60.seconds` is code that runs at
+/// load time, and left ungrounded it reaches the emit as a literal
+/// `Integer#seconds` send that dies the moment the file is required
+/// (campfire's `Membership::Connectable`). A library class's
+/// `unknown_calls` join them — the model side already visits its
+/// `Unknown` class-body exprs on exactly that argument, and the two
+/// fields hold the same kind of replayed class-body code.
+///
+/// The one definition of the hook's scope — passes iterate through here
+/// so they can't drift. View bodies are deliberately excluded (each
 /// target's view pipeline still has its own working walkers over
 /// source shapes — see the note in [`blank::apply_blank_lowering`];
 /// views rejoin when the view pipeline migrates to shared lowerings).
@@ -434,6 +458,12 @@ pub(crate) fn for_each_hook_body(
         for method in &mut lc.methods {
             visit_param_defaults(&mut method.params, f);
             f(&mut method.body);
+        }
+        for (_name, value) in &mut lc.constants {
+            f(value);
+        }
+        for call in &mut lc.unknown_calls {
+            f(call);
         }
     }
     for controller in &mut app.controllers {
