@@ -24,10 +24,15 @@
 //!     as a String and `<name>?` is not a method a String actually has.
 //!
 //! That second condition is what keeps the pass honest. `empty?`,
-//! `start_with?`, `frozen?` and their siblings are real String methods
-//! and are left alone; the registry is consulted rather than a list
-//! kept here, so a method the runtime grows is covered without editing
-//! this file. What remains — a predicate no String answers — has
+//! `present?`, `start_with?` and their siblings are real String methods
+//! and are left alone — asked of `analyze::string_answers`, which is
+//! the body-typer's own catalog and the only thing that knows the
+//! ActiveSupport core_ext predicates are there. Asking the CLASS
+//! registry instead, as this pass first did, answers "String has no
+//! methods at all": every predicate looked unknown and
+//! `notice.present?` became `notice == "present"`, wrong output that
+//! compare never sees because a page without a flash renders the same
+//! either way. What remains — a predicate no String answers — has
 //! exactly one meaning in Ruby, and it is this one: on a plain String
 //! it is a NoMethodError, and on the inquirer it is the comparison.
 //!
@@ -36,38 +41,23 @@
 //! name would then mean something the app chose, and a receiver type
 //! rarely names the class that defined it.
 
-use std::collections::HashMap;
-
-use crate::analyze::ClassInfo;
 use crate::app::App;
 use crate::expr::{Expr, ExprNode, Literal};
-use crate::ident::{ClassId, Symbol};
+use crate::ident::Symbol;
 use crate::ty::Ty;
 
-pub fn apply_inquiry_lowering(app: &mut App, registry: &HashMap<ClassId, ClassInfo>) {
+pub fn apply_inquiry_lowering(app: &mut App) {
     if app_defines_inquiry(app) {
         return;
     }
-    let known = string_methods(registry);
-    super::for_each_hook_body(app, &mut |e| rewrite(e, &known));
+    super::for_each_hook_body(app, &mut rewrite);
     for view in &mut app.views {
-        rewrite(&mut view.body, &known);
+        rewrite(&mut view.body);
     }
 }
 
-/// Instance-method names String answers, from the analyzer's registry.
-/// Empty when String isn't registered, which makes the predicate arm
-/// inert rather than wrong — no rewrite is better than one that eats a
-/// real method.
-fn string_methods(registry: &HashMap<ClassId, ClassInfo>) -> Vec<Symbol> {
-    registry
-        .get(&ClassId(Symbol::from("String")))
-        .map(|info| info.instance_methods.keys().cloned().collect())
-        .unwrap_or_default()
-}
-
-fn rewrite(expr: &mut Expr, known: &[Symbol]) {
-    expr.node.for_each_child_mut(&mut |c| rewrite(c, known));
+fn rewrite(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut rewrite);
 
     let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node else {
         return;
@@ -85,7 +75,7 @@ fn rewrite(expr: &mut Expr, known: &[Symbol]) {
 
     // `<recv>.<name>?` on a String the registry doesn't answer that for.
     let Some(label) = method.as_str().strip_suffix('?') else { return };
-    if label.is_empty() || known.iter().any(|m| m.as_str() == method.as_str()) {
+    if label.is_empty() || crate::analyze::string_answers(method) {
         return;
     }
     if !matches!(recv.ty, Some(Ty::Str)) {

@@ -23,6 +23,7 @@ use crate::ty::{Row, Ty};
 mod diagnostic;
 mod narrowing;
 mod send;
+pub(crate) use send::string_answers;
 
 /// Recursion context — what `self` is, what locals/ivars are in scope.
 /// Immutable during descent; clone to enter a new scope (Let body,

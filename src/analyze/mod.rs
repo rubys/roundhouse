@@ -24,6 +24,7 @@
 //! Each of those comes when a fixture forces it.
 
 mod body;
+pub(crate) use body::string_answers;
 pub mod async_color;
 pub mod attribution;
 pub mod preload;

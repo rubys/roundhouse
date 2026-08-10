@@ -298,7 +298,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("session_options");
     exclude_predicate::apply_exclude_predicate_lowering(app);
     ran!("exclude_predicate");
-    inquiry::apply_inquiry_lowering(app, registry);
+    inquiry::apply_inquiry_lowering(app);
     ran!("inquiry");
     arel_attribute::apply_arel_attribute_lowering(app);
     ran!("arel_attribute");

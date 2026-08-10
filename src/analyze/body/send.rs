@@ -1322,6 +1322,17 @@ pub(super) fn hash_method(
     }
 }
 
+/// Does String answer `method`? The table below is the authority — it
+/// carries the ActiveSupport core_ext predicates (`present?`, `blank?`,
+/// `in?`) as well as the core ones, and no class-registry entry does.
+/// `lower::inquiry` asks before folding an unknown `foo?` into an
+/// equality against the label; consulting the class registry instead
+/// answered "String has no methods at all", and the pass rewrote
+/// `notice.present?` to `notice == "present"`.
+pub(crate) fn string_answers(method: &Symbol) -> bool {
+    !matches!(str_method(method), Ty::Var { .. })
+}
+
 pub(super) fn str_method(method: &Symbol) -> Ty {
     match method.as_str() {
         "length" | "size" | "bytesize" => Ty::Int,
