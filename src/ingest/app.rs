@@ -362,6 +362,45 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 }
             }
         }
+        // App-defined config keys — `config.app_version = …` in
+        // application.rb or an initializer, read back as
+        // `Rails.application.config.app_version`. Rails' config object
+        // takes arbitrary keys, so the assignment IS the definition;
+        // each becomes a reader on this reopen and `lower::config_reader`
+        // rewrites the reads. Framework keys are skipped: they either
+        // already have a synthesized reader above (`time_zone`) or are
+        // the railtie noise ingest deliberately does not model.
+        {
+            let mut sources: Vec<(String, Vec<u8>)> = vec![(
+                dir.join("config/application.rb").display().to_string(),
+                source.clone(),
+            )];
+            let init_dir = dir.join("config/initializers");
+            if vfs.is_dir(&init_dir) {
+                for entry in read_rb_files(vfs, &init_dir)? {
+                    if let Ok(bytes) = vfs.read(&entry) {
+                        sources.push((entry.display().to_string(), bytes));
+                    }
+                }
+            }
+            for (path, bytes) in sources {
+                for (name, value) in extract_config_assignments(&bytes, &path) {
+                    if FRAMEWORK_CONFIG_KEYS.contains(&name.as_str())
+                        || methods.iter().any(|m| m.name.as_str() == name)
+                    {
+                        continue;
+                    }
+                    // The value rides verbatim: it is app code, and
+                    // campfire's reads `ENV` — which nothing here can
+                    // fold and nothing needs to.
+                    if let Ok(mut synth) = crate::runtime_src::parse_methods(&format!(
+                        "def {name}\n  {value}\nend\n"
+                    )) {
+                        methods.append(&mut synth);
+                    }
+                }
+            }
+        }
         if !methods.is_empty() {
             app.rails_application = Some(crate::dialect::LibraryClass {
                 name: crate::ident::ClassId(crate::ident::Symbol::from("Rails::Application")),
@@ -1895,6 +1934,113 @@ fn extract_autoload_lib_ignores(source: &[u8]) -> Vec<String> {
 /// `session_store` line for the first `key:` covers both the one-line and
 /// wrapped forms, and both quote styles; anything more exotic simply
 /// yields None and the framework default stands.
+/// App-defined `config.<name> = <expr>` assignments, as (name, the
+/// value's SOURCE TEXT).
+///
+/// Rails' config object takes arbitrary keys — campfire's
+/// `config/initializers/version.rb` writes `Rails.application.config
+/// .app_version = ENV["APP_VERSION"].presence || … || "0"` and two call
+/// sites read it back. There is nothing to model structurally: the
+/// assignment IS the definition, and the read is a method call on the
+/// application. So each becomes a method on the `Rails::Application`
+/// reopen, carrying the value expression verbatim — the config object
+/// is a compile-time fiction, and `lower::config_reader` rewrites the
+/// reads to match.
+///
+/// Only assignments whose receiver chain is `config` or
+/// `Rails.application.config`, and only a leaf name (`config.i18n
+/// .fallbacks` is a framework namespace, not an app key). Names Rails
+/// itself defines are left to the railtie noise they are: the caller
+/// filters against what it already synthesized.
+/// Rails' own config surface. An assignment to one of these is
+/// railtie configuration the emitted app has no use for — either a
+/// reader is synthesized for it explicitly (`time_zone`) or it
+/// configures machinery that does not exist here.
+const FRAMEWORK_CONFIG_KEYS: &[&str] = &[
+    "time_zone",
+    "session_store",
+    "load_defaults",
+    "eager_load",
+    "cache_classes",
+    "autoload_lib",
+    "active_record",
+    "action_controller",
+    "action_view",
+    "action_mailer",
+    "active_job",
+    "active_storage",
+    "action_cable",
+    "active_support",
+    "action_dispatch",
+    "i18n",
+    "assets",
+    "generators",
+    "hosts",
+    "logger",
+    "log_level",
+    "force_ssl",
+    "consider_all_requests_local",
+];
+
+fn extract_config_assignments(source: &[u8], file: &str) -> Vec<(String, String)> {
+    fn walk(stmts: Vec<ruby_prism::Node<'_>>, src: &str, out: &mut Vec<(String, String)>) {
+        for stmt in stmts {
+            // Config lines sit at the top level of an initializer and
+            // inside the Application class body; descend through both
+            // rather than the whole expression tree, which is where
+            // every other config reader in this file draws the line.
+            if let Some(class) = stmt.as_class_node() {
+                walk(class.body().map(super::util::flatten_statements).unwrap_or_default(), src, out);
+                continue;
+            }
+            if let Some(module) = stmt.as_module_node() {
+                walk(module.body().map(super::util::flatten_statements).unwrap_or_default(), src, out);
+                continue;
+            }
+            let Some(call) = stmt.as_call_node() else { continue };
+            // `x.y = v` parses as a call named `y=`.
+            let name = super::util::constant_id_str(&call.name()).to_string();
+            let Some(base) = name.strip_suffix('=') else { continue };
+            if !is_config_receiver(&call.receiver()) {
+                continue;
+            }
+            let Some(args) = call.arguments() else { continue };
+            let Some(value) = args.arguments().iter().next() else { continue };
+            let loc = value.location();
+            out.push((base.to_string(), src[loc.start_offset()..loc.end_offset()].to_string()));
+        }
+    }
+
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let src = String::from_utf8_lossy(source).into_owned();
+    let mut out = Vec::new();
+    let stmts = root
+        .as_program_node()
+        .map(|p| p.statements().body().iter().collect::<Vec<_>>())
+        .unwrap_or_default();
+    walk(stmts, &src, &mut out);
+    out
+}
+
+/// `config` or `Rails.application.config` — the two spellings an app
+/// uses depending on whether it is inside the Application class body or
+/// an initializer.
+fn is_config_receiver(recv: &Option<ruby_prism::Node<'_>>) -> bool {
+    let Some(recv) = recv else { return false };
+    let Some(call) = recv.as_call_node() else { return false };
+    if super::util::constant_id_str(&call.name()) != "config" {
+        return false;
+    }
+    match call.receiver() {
+        None => true,
+        Some(inner) => {
+            let Some(app_call) = inner.as_call_node() else { return false };
+            super::util::constant_id_str(&app_call.name()) == "application"
+        }
+    }
+}
+
 fn extract_session_cookie_key(source: &[u8]) -> Option<String> {
     let source = String::from_utf8_lossy(source);
     let mut seen_session_store = false;
