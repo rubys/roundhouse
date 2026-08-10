@@ -432,6 +432,14 @@ module ActiveRecord
       count > 0
     end
 
+    # Rails reaches Enumerable#none? through the relation, and without a
+    # block it is `any?` inverted. Spelled against `empty?` rather than
+    # `!any?` so the loaded case answers from the cache the way `empty?`
+    # does instead of paying a COUNT round-trip.
+    def none?
+      empty?
+    end
+
     # Block form of Enumerable#all? over the materialized rows (the
     # runtime `Base.where` fallback returns a Relation, and dynamic
     # call-sites treat it as the array Rails hands back).

@@ -312,6 +312,21 @@ module ActiveRecord
       _adapter_exists_by_id?(id)
     end
 
+    # Rails delegates the Enumerable predicates from the class to `all`,
+    # so `User.none?` asks whether the table has any row at all —
+    # campfire's first-run check. Answered from COUNT rather than by
+    # materializing: `none?`/`any?` on the class carry no conditions, so
+    # there is nothing for the Relation to hold that the count doesn't.
+    # The scoped forms (`User.where(…).none?`) go through Relation#none?
+    # beside it.
+    def self.none?
+      count == 0
+    end
+
+    def self.any?
+      count > 0
+    end
+
     # Bulk DELETE without instantiating records or running callbacks —
     # ActiveRecord's `Model.delete_all` (used by seeds/tests for table
     # resets; `Relation#delete_all` covers the scoped form).
