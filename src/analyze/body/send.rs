@@ -1357,6 +1357,13 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         // return String? (nil if out-of-range). Keep as Str for
         // simplicity; the nil-or-Str distinction can refine later.
         "[]" | "slice" => Ty::Str,
+        // ActiveSupport's `inquiry` answers a StringInquirer — a String
+        // subclass that exists only to host `method_missing` predicates.
+        // Typed as the String it is, which is also what
+        // `lower::inquiry` rewrites it to; without the entry the value
+        // reads Untyped and that pass can't see a String receiver to
+        // fold the predicate against.
+        "inquiry" => Ty::Str,
         // Operators. `+` concats; `<<` mutates in place but still returns self.
         // `*` is repetition ("a" * 3); `%` is sprintf (returns Str). Comparisons
         // uniformly return Bool.

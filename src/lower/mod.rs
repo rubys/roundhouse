@@ -62,6 +62,7 @@ pub mod values_at_splat;
 pub mod request_index;
 pub mod arel_attribute;
 pub mod exclude_predicate;
+pub mod inquiry;
 pub mod literal_append;
 pub mod html_safe;
 pub mod rails_cache;
@@ -97,6 +98,7 @@ pub use parameterize::apply_parameterize_grounding;
 pub use request_index::apply_request_index_lowering;
 pub use arel_attribute::apply_arel_attribute_lowering;
 pub use exclude_predicate::apply_exclude_predicate_lowering;
+pub use inquiry::apply_inquiry_lowering;
 pub use literal_append::apply_literal_append_lowering;
 pub use html_safe::apply_html_safe_lowering;
 pub use rails_cache::apply_rails_cache_lowering;
@@ -175,6 +177,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `x.exclude?(y)` → `!x.include?(y)`; total rewrite, no ordering
     // constraints (no other pass produces or consumes `exclude?`).
     ("exclude_predicate", &[]),
+    // `x.inquiry` / `x.<name>?` → equality against the label; total
+    // rewrite of a name no other pass produces or consumes.
+    ("inquiry", &[]),
     ("arel_attribute", &[]),
     // `"lit" << x` → `"lit" + x`; local expression rewrite, no ordering
     // constraints.
@@ -293,6 +298,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("session_options");
     exclude_predicate::apply_exclude_predicate_lowering(app);
     ran!("exclude_predicate");
+    inquiry::apply_inquiry_lowering(app, registry);
+    ran!("inquiry");
     arel_attribute::apply_arel_attribute_lowering(app);
     ran!("arel_attribute");
     literal_append::apply_literal_append_lowering(app);
