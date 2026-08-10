@@ -1,45 +1,45 @@
-# Keyed-digest primitives for the spinel binary — the stub half of the
-# two-layer split (message_digest_cruby.rb is the OpenSSL half, which
-# `ruby_runtime_files`/`jruby_runtime_files` swap in at this path).
+# Keyed-digest primitives for the spinel binary — the sp_crypto half of
+# the two-layer split (message_digest_cruby.rb is the OpenSSL half, and
+# `ruby_runtime_files` swaps it in at this path for the CRuby/JRuby
+# trees). The framework Ruby above this — action_controller/
+# message_verifier.rb — calls only the three functions below and so
+# compiles unchanged for every ruby-family target.
 #
-# The real implementation is `message_digest_sp_crypto.rb` beside this
-# file, and it is not wired up yet: it calls
-# `sp_crypto_hmac_sha1_hex` and `sp_crypto_pbkdf2_sha256_b64url_len`,
-# both of which are on matz/spinel#3770 and not in spinel master. A
-# binary declaring FFI entry points the linked sp_crypto doesn't export
-# fails at `ld`, so shipping it would take the whole spinel target down
-# — signed cookies or not.
+# sp_crypto ships with spinel (lib/sp_crypto.c, always linked). Two of
+# the three entry points landed for exactly this use — reading a Rails
+# signed cookie — in matz/spinel#3770 (merged 2026-08-10, spinel
+# 6fa33d8c), filed as matz/spinel#3769:
 #
-# So the spinel binary raises here rather than silently mis-signing.
-# Nothing in the blog fixture reaches these (it signs nothing), which is
-# why the target still builds and serves; an app that does reach them —
-# campfire's session cookie — gets a loud, named failure instead of a
-# cookie no Rails would accept.
+#   * `_len` on PBKDF2, because Rails derives at dkLen 64 and the one-
+#     block helper topped out at 32.
+#   * HMAC-SHA1 at all, because that is the digest Rails signs cookies
+#     with, and SHA-1 was previously exposed only as a whole-protocol
+#     helper (the WebSocket handshake).
 #
-# WHEN #3770 LANDS: delete this file and rename
-# message_digest_sp_crypto.rb over it. The framework Ruby above calls
-# only these three functions, so nothing else changes.
-# Each body ends in a `""` the raise makes unreachable: a method that
-# only raises types as `void`, and the verifier above needs these to
-# carry String (the shared-runtime rule that non-void methods END in a
-# read — spinel's C emit otherwise returns void into a `const char *`).
-module MessageDigest
-  UNAVAILABLE = "keyed digests need matz/spinel#3770 (sp_crypto_hmac_sha1_hex " \
-                "+ sp_crypto_pbkdf2_sha256_b64url_len); see " \
-                "runtime/message_digest_sp_crypto.rb"
+# Static-buffer contract: every sp_crypto return points at a per-function
+# static that the next call to the same function clobbers, so each result
+# is copied (`+ ""`) before it can outlive the next call.
+module SpCrypto
+  ffi_func :sp_crypto_hmac_sha1_hex,            [:str, :str],             :str
+  ffi_func :sp_crypto_hmac_sha256_hex,          [:str, :str],             :str
+  ffi_func :sp_crypto_pbkdf2_sha256_b64url_len, [:str, :str, :int, :int], :str
+  ffi_func :sp_crypto_b64url_decode,            [:str],                   :str
+end
 
+module MessageDigest
   def self.hmac_sha1_hex(key, msg)
-    raise UNAVAILABLE
-    ""
+    SpCrypto.sp_crypto_hmac_sha1_hex(key, msg) + ""
   end
 
   def self.hmac_sha256_hex(key, msg)
-    raise UNAVAILABLE
-    ""
+    SpCrypto.sp_crypto_hmac_sha256_hex(key, msg) + ""
   end
 
+  # sp_crypto returns the derived key base64url-encoded; the callers want
+  # the raw bytes (an HMAC key is bytes), so decode on the way out. Both
+  # results copy off the static buffer before the next FFI call.
   def self.pbkdf2_sha256(secret, salt, iters, dklen)
-    raise UNAVAILABLE
-    ""
+    b64 = SpCrypto.sp_crypto_pbkdf2_sha256_b64url_len(secret, salt, iters, dklen) + ""
+    SpCrypto.sp_crypto_b64url_decode(b64) + ""
   end
 end

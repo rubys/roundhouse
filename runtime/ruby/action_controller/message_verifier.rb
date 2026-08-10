@@ -38,20 +38,22 @@ module ActionController
     KEY_SIZE = 64
     SIGNED_COOKIE_SALT = "signed cookie"
 
-    # PBKDF2 is deliberately expensive (2**16 iterations), so derive once
-    # per (secret, salt) and keep it. A request that reads and then writes
-    # the session cookie would otherwise pay for it twice.
+    # PBKDF2 is deliberately expensive (2**16 iterations of HMAC), so a
+    # derived key is worth keeping: a request that reads the session
+    # cookie and then writes it back would otherwise pay twice.
     def self.derived_keys
       @derived_keys ||= {}
     end
 
     def self.derive_key(secret, salt)
-      # Salt and secret both, keyed by a separator neither contains: the
-      # salts are framework constants ("signed cookie",
-      # "active_record/signed_id") and the secret is hex.
+      # Keyed by a separator neither part contains: the salts are
+      # framework constants ("signed cookie", "active_record/signed_id")
+      # and the secret is hex.
       cache_key = salt + "|" + secret
-      cached = derived_keys[cache_key]
-      return cached if !cached.nil?
+      # `key?` then read, rather than binding the read and testing it
+      # for nil — the same idiom the cookie jar uses, and it keeps a
+      # nilable local off spinel's `const char *` path.
+      return derived_keys[cache_key] if derived_keys.key?(cache_key)
       key = MessageDigest.pbkdf2_sha256(secret, salt, ITERATIONS, KEY_SIZE)
       derived_keys[cache_key] = key
       key
