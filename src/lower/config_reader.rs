@@ -97,23 +97,13 @@ fn is_cable_mount_path(expr: &Expr) -> bool {
 fn rewrite(expr: &mut Expr, lifted: &[crate::ident::Symbol]) {
     expr.node.for_each_child_mut(&mut |c| rewrite(c, lifted));
 
-    let ExprNode::Send { recv: Some(config_call), method: key, args, .. } = &*expr.node else {
+    let Some((application, segments)) = peel_config_chain(expr) else {
         return;
     };
-    if !args.is_empty() || !lifted.contains(key) {
+    let key = crate::ident::Symbol::from(segments.join("_"));
+    if !lifted.contains(&key) {
         return;
     }
-    // The receiver has to be the `config` hop itself.
-    let ExprNode::Send { recv: Some(app_call), method: config, args: cargs, .. } =
-        &*config_call.node
-    else {
-        return;
-    };
-    if config.as_str() != "config" || !cargs.is_empty() {
-        return;
-    }
-    let application = app_call.clone();
-    let key = key.clone();
     let span = expr.span;
     let ty = expr.ty.clone();
     *expr = Expr::new(
@@ -127,4 +117,56 @@ fn rewrite(expr: &mut Expr, lifted: &[crate::ident::Symbol]) {
         },
     );
     expr.ty = ty;
+}
+
+/// Peel a config READ back to its anchor, returning the
+/// `Rails.application` expression and the key segments below `config`.
+///
+/// `Rails.application.config.app_version` → `(Rails.application,
+/// ["app_version"])`; `Rails.configuration.x.vapid.public_key` →
+/// `(Rails.application, ["x", "vapid", "public_key"])`. The caller joins
+/// the segments with `_`, which is exactly how `config_receiver_path`
+/// names the reader it lifted — the two halves meet at one name.
+///
+/// `Rails.configuration` is Rails' own alias for
+/// `Rails.application.config`, so it anchors the same chain and the
+/// `application` hop is synthesized to match.
+fn peel_config_chain(expr: &Expr) -> Option<(Expr, Vec<String>)> {
+    let mut segments: Vec<String> = Vec::new();
+    let mut cur = expr;
+    // Bounded so a pathological chain cannot spin; Rails' `x` namespace
+    // is arbitrarily deep in principle but two levels in practice.
+    for _ in 0..8 {
+        let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*cur.node else {
+            return None;
+        };
+        if !args.is_empty() {
+            return None;
+        }
+        match method.as_str() {
+            "config" => {
+                segments.reverse();
+                return Some((r.clone(), segments));
+            }
+            "configuration" => {
+                segments.reverse();
+                let app = Expr::new(
+                    r.span,
+                    ExprNode::Send {
+                        recv: Some(r.clone()),
+                        method: crate::ident::Symbol::from("application"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    },
+                );
+                return Some((app, segments));
+            }
+            _ => {
+                segments.push(method.as_str().to_string());
+                cur = r;
+            }
+        }
+    }
+    None
 }

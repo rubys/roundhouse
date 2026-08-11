@@ -2031,17 +2031,38 @@ fn extract_config_assignments(source: &[u8], file: &str) -> Vec<(String, String)
                 walk(module.body().map(super::util::flatten_statements).unwrap_or_default(), src, out);
                 continue;
             }
+            // The third home, and the one Rails' own generator writes:
+            // `Rails.application.configure do … end`. Descending into the
+            // block keeps the same discipline as the two above — named
+            // containers only, not the whole expression tree.
+            if let Some(call) = stmt.as_call_node() {
+                if super::util::constant_id_str(&call.name()) == "configure" {
+                    if let Some(body) = call
+                        .block()
+                        .and_then(|b| b.as_block_node())
+                        .and_then(|b| b.body())
+                    {
+                        walk(super::util::flatten_statements(body), src, out);
+                        continue;
+                    }
+                }
+            }
             let Some(call) = stmt.as_call_node() else { continue };
             // `x.y = v` parses as a call named `y=`.
             let name = super::util::constant_id_str(&call.name()).to_string();
             let Some(base) = name.strip_suffix('=') else { continue };
-            if !is_config_receiver(&call.receiver()) {
+            let Some(prefix) = config_receiver_path(&call.receiver()) else {
                 continue;
-            }
+            };
             let Some(args) = call.arguments() else { continue };
             let Some(value) = args.arguments().iter().next() else { continue };
             let loc = value.location();
-            out.push((base.to_string(), src[loc.start_offset()..loc.end_offset()].to_string()));
+            let mut reader = prefix;
+            reader.push(base.to_string());
+            out.push((
+                reader.join("_"),
+                src[loc.start_offset()..loc.end_offset()].to_string(),
+            ));
         }
     }
 
@@ -2057,22 +2078,68 @@ fn extract_config_assignments(source: &[u8], file: &str) -> Vec<(String, String)
     out
 }
 
-/// `config` or `Rails.application.config` — the two spellings an app
-/// uses depending on whether it is inside the Application class body or
-/// an initializer.
-fn is_config_receiver(recv: &Option<ruby_prism::Node<'_>>) -> bool {
-    let Some(recv) = recv else { return false };
-    let Some(call) = recv.as_call_node() else { return false };
-    if super::util::constant_id_str(&call.name()) != "config" {
-        return false;
+/// The receiver chain of a config assignment, as the segments BETWEEN
+/// `config` and the assigned key — or `None` when this is not a config
+/// assignment at all.
+///
+/// `config.app_version = …` and `Rails.application.config.app_version =
+/// …` (the two spellings, depending on whether the line sits in the
+/// Application class body or an initializer) both yield `[]`.
+///
+/// `config.x.vapid.public_key = …` yields `["x", "vapid"]`. Rails' `x`
+/// is an open namespace of nested OrderedOptions — arbitrarily deep, and
+/// every level springs into existence on read. Modelling that as objects
+/// would mean a nested dynamic bag; FLATTENING the path into one reader
+/// name (`x_vapid_public_key`) keeps the lift's whole premise intact —
+/// an assignment IS the definition, and every application-level value
+/// reads back the same way, as a plain method on `Rails::Application`.
+/// `config_reader` flattens the read side identically, so the two halves
+/// meet at the same name.
+fn config_receiver_path(recv: &Option<ruby_prism::Node<'_>>) -> Option<Vec<String>> {
+    let path = config_path_of(recv.as_ref()?, 0)?;
+    // Only `config.<key>` and the `x` namespace. A deeper chain that is
+    // NOT `x` is a framework subsection (`config.action_mailer.
+    // delivery_method`, `config.active_record.*`), and lifting those
+    // would contradict this lift's premise: `x` is the namespace Rails
+    // documents as the app's own, where an assignment IS the definition.
+    // Framework config stays unlifted so a read of it fails visibly
+    // rather than resolving to a reader we invented — the same rule
+    // `lower::config_reader` states for the read side.
+    if path.first().is_some_and(|s| s != "x") {
+        return None;
     }
-    match call.receiver() {
-        None => true,
-        Some(inner) => {
-            let Some(app_call) = inner.as_call_node() else { return false };
-            super::util::constant_id_str(&app_call.name()) == "application"
-        }
+    Some(path)
+}
+
+/// Recursive because prism's `Node` is not `Clone` — each hop's receiver
+/// is a fresh owned node, so the walk borrows down the stack rather than
+/// reassigning a cursor. Depth-bounded; Rails' `x` namespace is
+/// arbitrarily deep in principle, two levels in practice.
+fn config_path_of(node: &ruby_prism::Node<'_>, depth: usize) -> Option<Vec<String>> {
+    if depth > 8 {
+        return None;
     }
+    let call = node.as_call_node()?;
+    let name = super::util::constant_id_str(&call.name()).to_string();
+    if name == "config" {
+        // Anchored: bare `config`, or `<recv>.application.config`.
+        let anchored = match call.receiver() {
+            None => true,
+            Some(inner) => inner
+                .as_call_node()
+                .is_some_and(|c| super::util::constant_id_str(&c.name()) == "application"),
+        };
+        return anchored.then(Vec::new);
+    }
+    // A non-`config` hop counts only if the chain below it reaches
+    // `config` — and only as a bare reader, never a call with arguments.
+    if call.arguments().is_some_and(|a| a.arguments().iter().count() > 0) {
+        return None;
+    }
+    let inner = call.receiver()?;
+    let mut segments = config_path_of(&inner, depth + 1)?;
+    segments.push(name);
+    Some(segments)
 }
 
 fn extract_session_cookie_key(source: &[u8]) -> Option<String> {

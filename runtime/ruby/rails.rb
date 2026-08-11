@@ -241,6 +241,26 @@ module Rails
       key.nil? ? "" : key
     end
 
+    # Rails' encrypted credentials store, as an EMPTY one.
+    #
+    # Not a stub standing in for work not done: the store lives in
+    # `config/credentials.yml.enc` and only the master key opens it. That
+    # key is deliberately not in the repo, so a transpiler cannot read
+    # the values — and should not want to, since baking decrypted secrets
+    # into an emitted tree is exactly the wrong place for them. The
+    # secrets that DO reach the binary ride the environment (see the
+    # parked `Rails.secret_key_base` slot above).
+    #
+    # Empty rather than absent because `dig` is how apps read it, and
+    # Rails' own answer for an unconfigured key is nil: campfire writes
+    # `ENV.fetch("VAPID_PUBLIC_KEY", Rails.application.credentials.dig(
+    # :vapid, :public_key))`, which then falls back to the env var and,
+    # unset, drops the meta tag — the same page Rails renders without
+    # credentials configured.
+    def credentials
+      {}
+    end
+
     # The zone every ActiveRecord temporal value is PRESENTED in. Same
     # framework-default shape as `session_cookie_key` above: Rails always
     # has one (`config.time_zone` defaults to "UTC"), ingest lifts an
