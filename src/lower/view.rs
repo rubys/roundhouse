@@ -165,6 +165,23 @@ pub fn classify_render_partial<'a>(
                     method: m.as_str(),
                 })
             }
+            // `render "layouts/lightbox"` — a named partial with NO
+            // locals. In a view a bare string is always a partial (the
+            // template form is controller-side, and no controller calls
+            // this classifier). The two-argument spelling below is the
+            // same shape WITH locals; only the hash-less one was missing,
+            // because both fixtures write `render "form", article: @a`.
+            //
+            // Unclassified it fell through to the generic helper
+            // rewriter, which bound the bare `render` to whatever app
+            // module happened to define a method by that name —
+            // campfire's layout emitted
+            // `Messages::AttachmentPresentation.render("layouts/lightbox")`.
+            ExprNode::Lit { value: Literal::Str { value } } => Some(RenderPartial::Named {
+                partial: value,
+                arg: None,
+                locals: None,
+            }),
             // Explicit kwarg form: `render partial: "x/y", collection: c,
             // as: :item` / `render partial: "x/y", item: rec`.
             ExprNode::Hash { entries, .. } => classify_render_kwargs(entries),
@@ -1033,6 +1050,25 @@ mod tests {
 
     fn hash(entries: Vec<(Expr, Expr)>) -> Expr {
         Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: true })
+    }
+
+    #[test]
+    fn render_bare_string_is_a_named_partial() {
+        // `render "layouts/lightbox"` — a partial with NO locals. Both
+        // fixtures write the two-argument form (`render "form", article:
+        // @a`), so the hash-less spelling had no arm and fell through to
+        // the generic helper rewriter, which bound the bare `render` to
+        // whatever app module defined a method by that name.
+        let args = vec![str_lit("layouts/lightbox")];
+        let rp =
+            classify_render_partial(None, "render", &args, None, &|_| true, &|_| false).unwrap();
+        match rp {
+            RenderPartial::Named { partial, arg, locals } => {
+                assert_eq!(partial, "layouts/lightbox");
+                assert!(arg.is_none() && locals.is_none());
+            }
+            other => panic!("expected Named, got {other:?}"),
+        }
     }
 
     #[test]

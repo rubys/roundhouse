@@ -1558,7 +1558,17 @@ fn append_attr_parts(parts: &mut Vec<InterpPart>, opts: &[(Expr, Expr)]) {
                     else {
                         continue;
                     };
-                    let attr_name = format!(" data-{}=\"", dkey.as_str());
+                    // Rails DASHERIZES the inner key —
+                    // `data: { upload_preview_target: … }` renders as
+                    // `data-upload-preview-target`, which is what a
+                    // Stimulus controller binds to. This loop is
+                    // form_builder's own copy of the `data:` rule (see
+                    // `attr_parts`, which kebab-cases and which the tag
+                    // builder uses); it kept the underscores, so every
+                    // multi-word Stimulus target on a form input was
+                    // silently inert.
+                    let attr_name =
+                        format!(" data-{}=\"", dkey.as_str().replace('_', "-"));
                     if matches!(&*dv.node, ExprNode::Lit { value: Literal::Str { .. } }) {
                         parts.push(InterpPart::Text { value: attr_name });
                         parts.push(InterpPart::Expr {
