@@ -12,11 +12,11 @@ use crate::lower::view::{
 };
 
 use super::form_builder::{
-    emit_button_tag, emit_check_box_tag, emit_form_builder_inline, emit_label_tag,
+    emit_button_tag, emit_check_box_tag, emit_form_builder_block_inline, emit_form_builder_inline, emit_label_tag,
     emit_submit_tag,
 };
 use super::form_with::{
-    emit_form_tag_inline, emit_form_with_inline, emit_tag_builder_inline, is_errors_each,
+    emit_form_tag_inline, emit_form_with_inline, emit_tag_builder_inline, emit_tag_builder_void_or_content, is_errors_each,
     rewrite_errors_each_body,
 };
 use super::helpers::emit_view_helper_call;
@@ -487,6 +487,28 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         }
     }
 
+    // The same dispatch for the BLOCK form — `<%= form.button(opts) do
+    // %> … <% end %>`, where the label is markup rather than a string
+    // argument (campfire's sign-in page and message composer).
+    if let ExprNode::Send {
+        recv: Some(r),
+        method,
+        args: sa,
+        block: Some(block),
+        ..
+    } = &*inner.node
+    {
+        if let Some(name) = super::form_with::form_param_ref_name(r) {
+            if ctx.form_records.iter().any(|b| b.form_param == name) {
+                if let Some(fb) = classify_form_builder_method(method.as_str()) {
+                    if let Some(out) = emit_form_builder_block_inline(fb, sa, block, ctx) {
+                        return out;
+                    }
+                }
+            }
+        }
+    }
+
     // Render-partial classifier: `render @articles` / `render
     // @article.comments` / `render "x", k: v` → spinel-shape iteration
     // or named-partial dispatch. Wins over the helper classifier
@@ -540,6 +562,30 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         );
         if is_bare_tag && !ctx.is_local("tag") {
             return emit_tag_builder_inline(method.as_str(), sa, block, ctx);
+        }
+    }
+
+    // The same builder WITHOUT a block: `<%= tag.meta name: "…", content:
+    // "…" %>` / `<%= tag.img src: … %>` (campfire's application layout
+    // writes five of these, so every page depends on it). Without this
+    // arm the call falls to the auto-escape default below, which is
+    // wrong twice over — `tag` is unbound at run time, and even bound,
+    // Rails' builder returns a SafeBuffer that must not be escaped.
+    if let ExprNode::Send {
+        recv: Some(r),
+        method,
+        args: sa,
+        block: None,
+        ..
+    } = &*inner.node
+    {
+        let is_bare_tag = matches!(
+            &*r.node,
+            ExprNode::Send { recv: None, method: m, args, block: None, .. }
+                if m.as_str() == "tag" && args.is_empty()
+        );
+        if is_bare_tag && !ctx.is_local("tag") {
+            return emit_tag_builder_void_or_content(method.as_str(), sa, ctx);
         }
     }
 

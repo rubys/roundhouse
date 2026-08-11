@@ -17,6 +17,11 @@ module ActionDispatch
     attr_accessor :remote_ip
     attr_accessor :path
     attr_accessor :query_string
+    # Rack's SCRIPT_NAME — the prefix the app is mounted under, "" at
+    # the root. Campfire's cable helper joins it with Action Cable's
+    # mount path to build the socket URL, so every page that renders
+    # the layout reads it.
+    attr_accessor :script_name
     attr_accessor :request_method
     attr_accessor :referer
     attr_accessor :host
@@ -28,6 +33,7 @@ module ActionDispatch
       @remote_ip = "127.0.0.1"
       @path = "/"
       @query_string = +""
+      @script_name = +""
       @request_method = "GET"
       @referer = +""
       @host = "localhost"

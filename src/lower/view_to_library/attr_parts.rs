@@ -21,7 +21,7 @@ use super::{lit_str, send, view_helpers_call};
 /// Rails-style `["base", {cond: pred, ...}]` arrays collapse to
 /// `"base <first_key>"` literal — same byte-for-byte behavior as
 /// the prior runtime FormBuilder + the prior runtime render_attrs.
-pub(super) fn append_attr_parts(parts: &mut Vec<InterpPart>, opts: &[(Expr, Expr)]) {
+pub(crate) fn append_attr_parts(parts: &mut Vec<InterpPart>, opts: &[(Expr, Expr)]) {
     for (k, v) in opts {
         let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
             continue;
@@ -93,7 +93,7 @@ pub(super) fn append_attr_parts(parts: &mut Vec<InterpPart>, opts: &[(Expr, Expr
 /// Lives here, called from both attribute loops (this file's and
 /// form_builder's) — the rule is Rails' and belongs in one place even
 /// while the two loops keep their own `data:`-hash handling.
-pub(super) fn tag_option_parts(key: &str, v: &Expr) -> Option<Vec<InterpPart>> {
+pub(crate) fn tag_option_parts(key: &str, v: &Expr) -> Option<Vec<InterpPart>> {
     if is_boolean_attr(key) {
         return Some(match &*v.node {
             ExprNode::Lit { value: Literal::Bool { value: true } } => {
@@ -179,7 +179,7 @@ fn is_boolean_attr(key: &str) -> bool {
 /// Numeric `rows: 4`, Symbol `method: :delete`, and similar lower
 /// to `4.to_s` / `:delete.to_s` at the call site; the body-typer
 /// resolves to_s on each per its primitive table.
-pub(super) fn lit_str_coerce(e: Expr) -> Expr {
+pub(crate) fn lit_str_coerce(e: Expr) -> Expr {
     let is_str_lit = matches!(
         &*e.node,
         ExprNode::Lit { value: Literal::Str { .. } },
@@ -195,7 +195,7 @@ pub(super) fn lit_str_coerce(e: Expr) -> Expr {
 /// collapsing adjacent Text segments so the emitted body reads as
 /// one literal where the static prefix/suffix would otherwise chain
 /// through multiple no-op InterpParts.
-pub(super) fn string_interp(parts: Vec<InterpPart>) -> Expr {
+pub(crate) fn string_interp(parts: Vec<InterpPart>) -> Expr {
     let mut merged: Vec<InterpPart> = Vec::new();
     for p in parts {
         match (&p, merged.last_mut()) {

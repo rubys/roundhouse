@@ -30,7 +30,7 @@ mod helpers;
 mod partial;
 mod form_with;
 mod form_builder;
-mod attr_parts;
+pub(crate) mod attr_parts;
 
 use crate::App;
 use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver, Param, View};
@@ -3465,7 +3465,7 @@ pub(super) fn accumulator_result_ref(name: &str) -> Expr {
     e
 }
 
-pub(super) fn view_helpers_call(method: &str, args: Vec<Expr>) -> Expr {
+pub(crate) fn view_helpers_call(method: &str, args: Vec<Expr>) -> Expr {
     // Constant-fold `html_escape("literal")`. The escape is deterministic
     // and the literal never changes, so escaping static class strings and
     // button labels on every request is pure waste — the spinel profile
@@ -3563,7 +3563,7 @@ pub(super) fn send(
     )
 }
 
-pub(super) fn lit_str(s: String) -> Expr {
+pub(crate) fn lit_str(s: String) -> Expr {
     Expr::new(
         Span::synthetic(),
         ExprNode::Lit { value: Literal::Str { value: s } },

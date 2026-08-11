@@ -66,6 +66,7 @@ pub mod config_reader;
 pub mod exists_conditions;
 pub mod inquiry;
 pub mod byte_size;
+pub mod tag_builder;
 pub mod kwsplat;
 pub mod literal_append;
 pub mod html_safe;
@@ -176,6 +177,13 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `values_at(*keys)` → keys.map block form; same no-constraints
     // rationale.
     ("values_at_splat", &[]),
+    // `tag.div(…)` → the HTML string it builds. BEFORE `html_safe`
+    // (whose fold would erase the `.html_safe` marker it reads on
+    // content, and which must SEE the marker this pass writes so the
+    // enclosing helper registers as safe) and before `capture_inline`
+    // (which flattens the `capture { … }` this pass synthesizes for the
+    // block form).
+    ("tag_builder", &[]),
     ("request_index", &[]),
     // `config.session_options[:key]` → `session_cookie_key`; rewrites a
     // receiver chain no other pass produces or consumes.
@@ -214,10 +222,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `<e>.html_safe` → `<e>`, recording the producing method on the
     // App. No ordering constraints among the lowerings; the view
     // lowerer reads what it records, and that runs later, at emit.
-    ("html_safe", &[]),
+    ("html_safe", &["tag_builder"]),
     ("transaction_ground", &[]),
     ("partial_qualify", &[]),
-    ("capture_inline", &[]),
+    ("capture_inline", &["tag_builder"]),
     ("and_return", &[]),
     ("case_lambda", &[]),
     ("first_or_create", &[]),
@@ -315,6 +323,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("sum_symbol");
     values_at_splat::apply_values_at_splat_lowering(app);
     ran!("values_at_splat");
+    diags.extend(tag_builder::apply_tag_builder_lowering(app));
+    ran!("tag_builder");
     request_index::apply_request_index_lowering(app);
     ran!("request_index");
     session_options::apply_session_options_lowering(app);

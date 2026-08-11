@@ -42,6 +42,14 @@ module ActionDispatch
       @env["QUERY_STRING"] || ""
     end
 
+    # Rack's SCRIPT_NAME — the prefix the app is mounted under, "" at
+    # the root. Campfire's cable helper joins it with Action Cable's
+    # mount path to build the socket URL, so every page that renders
+    # the layout reads it.
+    def script_name
+      @env["SCRIPT_NAME"] || ""
+    end
+
     def fullpath
       query_string.empty? ? path : "#{path}?#{query_string}"
     end

@@ -983,11 +983,11 @@ fn sanitize_to_id_static(name: &str) -> String {
         .collect()
 }
 
-fn emit_button(
-    text: Option<&Expr>,
-    opts: &[(Expr, Expr)],
-    ctx: &ViewCtx,
-) -> Vec<Expr> {
+/// The opening `<button …>` tag. Rails names the control `button` and
+/// defaults its type to `submit` unless the caller gave one. Shared by
+/// the inline form and the BLOCK form below so the two spellings can't
+/// drift in their attribute rendering.
+fn button_open_parts(opts: &[(Expr, Expr)]) -> Vec<InterpPart> {
     let has_type = opts.iter().any(|(k, _)| {
         matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
             if value.as_str() == "type")
@@ -1002,6 +1002,53 @@ fn emit_button(
     });
     append_attr_parts(&mut parts, opts);
     parts.push(InterpPart::Text { value: ">".to_string() });
+    parts
+}
+
+/// Inline-expand `<%= form.button(opts) do %> … <% end %>` — the BLOCK
+/// form, where the button's label is template markup rather than a
+/// string argument.
+///
+/// Campfire writes this everywhere a button holds an icon beside its
+/// text, including the sign-in page and the message composer. Without
+/// it the call falls past the form-builder dispatch (which matches
+/// `block: None`) and survives into the emit as a literal
+/// `form.button(…) do … end` with `form` unbound.
+///
+/// Same open/walk/close splice as the tag builder's block form: the
+/// block body is template buffer ops, so it is WALKED against the outer
+/// accumulator rather than captured.
+pub(super) fn emit_form_builder_block_inline(
+    kind: FormBuilderMethod,
+    args: &[Expr],
+    block: &Expr,
+    ctx: &ViewCtx,
+) -> Option<Vec<Expr>> {
+    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+        return None;
+    };
+    let (_positional, opts) = split_args(args);
+    match kind {
+        FormBuilderMethod::Button => {
+            let mut out =
+                vec![accumulator_append_call(string_interp(button_open_parts(opts.as_slice())), ctx)];
+            let inner = ctx.with_locals(params.iter().map(|p| p.as_str().to_string()));
+            out.extend(walk_body(body, &inner));
+            out.push(accumulator_append_call(lit_str("</button>".to_string()), ctx));
+            Some(out)
+        }
+        // Other builder methods take no block in the corpus; `fields_for`
+        // does but needs a nested BINDING, not just nested markup.
+        _ => None,
+    }
+}
+
+fn emit_button(
+    text: Option<&Expr>,
+    opts: &[(Expr, Expr)],
+    ctx: &ViewCtx,
+) -> Vec<Expr> {
+    let mut parts = button_open_parts(opts);
     if let Some(t) = text {
         // `raw("Fetch&nbsp;Title")` content is html_safe by contract —
         // unwrap and emit verbatim (a literal folds to static text)

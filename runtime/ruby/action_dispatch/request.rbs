@@ -6,6 +6,7 @@ module ActionDispatch
     @remote_ip: String
     @path: String
     @query_string: String
+    @script_name: String
     @request_method: String
     @referer: String
     @host: String
@@ -19,6 +20,8 @@ module ActionDispatch
     def path=: (String) -> String
     def query_string: () -> String
     def query_string=: (String) -> String
+    def script_name: () -> String
+    def script_name=: (String) -> String
     def request_method: () -> String
     def request_method=: (String) -> String
     def referer: () -> String

@@ -327,6 +327,69 @@ pub(super) fn emit_tag_builder_inline(
     out
 }
 
+/// The block-less tag builder: `<%= tag.meta name: "x" %>` (a VOID
+/// element, no closing tag) and `<%= tag.span "text", class: "y" %>` (a
+/// leading positional is the content, escaped as Rails escapes it).
+///
+/// Shares `emit_open_builder_tag` with the block form above, so the two
+/// spellings render attributes identically; only what follows the `>`
+/// differs.
+pub(super) fn emit_tag_builder_void_or_content(
+    element: &str,
+    args: &[Expr],
+    ctx: &ViewCtx,
+) -> Vec<Expr> {
+    let mut opts: Vec<(Expr, Expr)> = Vec::new();
+    let mut content: Option<Expr> = None;
+    for arg in args {
+        match &*arg.node {
+            ExprNode::Hash { entries, .. } => {
+                for (k, v) in entries {
+                    opts.push((k.clone(), v.clone()));
+                }
+            }
+            _ if content.is_none() => content = Some(arg.clone()),
+            _ => {}
+        }
+    }
+
+    let mut out: Vec<Expr> = vec![emit_open_builder_tag(element, &opts, ctx)];
+    if is_void_element(element) {
+        return out;
+    }
+    if let Some(c) = content {
+        let escaped = view_helpers_call(
+            "html_escape",
+            vec![send(Some(rewrite_helpers_in_expr(&c, ctx)), "to_s", Vec::new(), None, false)],
+        );
+        out.push(accumulator_append_call(escaped, ctx));
+    }
+    out.push(accumulator_append_call(lit_str(format!("</{element}>")), ctx));
+    out
+}
+
+/// Rails' `TagBuilder::VOID_ELEMENTS` — elements that never take
+/// content, so they render with no closing tag.
+fn is_void_element(name: &str) -> bool {
+    matches!(
+        name,
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "keygen"
+            | "link"
+            | "meta"
+            | "source"
+            | "track"
+            | "wbr"
+    )
+}
+
 /// Build the opening `<element ...attrs...>` tag for the dynamic tag
 /// builder as one accumulator append. Per Rails' `tag_options`: a
 /// literal `true` value → bare ` key`; literal `false`/`nil` → omitted;
