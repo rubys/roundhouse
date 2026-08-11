@@ -3139,34 +3139,66 @@ pub(super) fn emit_library_class_decl_with_synthesized(
 /// before its methods exist and the ones that can't. A constant defers
 /// when its initializer dispatches to this class — a bare `new(…)` or a
 /// receiverless call naming one of its own methods — or when it reads a
-/// constant that already deferred. Returns index lists so both groups
-/// keep source order.
+/// constant that already deferred. A self-dispatch inside a STORED
+/// closure doesn't count: that body runs on call, not on load. Returns
+/// index lists so both groups keep source order.
 fn partition_deferred_constants(lc: &LibraryClass) -> (Vec<usize>, Vec<usize>) {
     fn calls_self(expr: &Expr, own: &std::collections::HashSet<&str>, deferred_names: &std::collections::HashSet<String>) -> bool {
-        let mut hit = false;
         match &*expr.node {
-            ExprNode::Send { recv: None, method, .. }
-                if method.as_str() == "new" || own.contains(method.as_str()) =>
-            {
-                hit = true;
-            }
-            ExprNode::Const { path } if path.len() == 1 => {
-                if deferred_names.contains(path[0].as_str()) {
-                    hit = true;
+            // A closure that is STORED rather than run — `proc { … }`,
+            // `lambda { … }`, `Proc.new { … }`, `->() { … }` — executes
+            // its body when something CALLS it, not when the constant
+            // initializes. lobsters' `CACHE_PAGE = proc { …
+            // clear_session_cookie? }` otherwise reads as a self-dispatch,
+            // and deferring it marks the whole class load-time-bodies,
+            // which pulls every method-body const ref into the require
+            // header: that closed a cycle (application_controller →
+            // user → avatars_controller → application_controller) and
+            // left the emitted tree unable to load at all.
+            //
+            // Blocks that DO run now (`map`, `each`) are descended into
+            // at the Send arm below, so a Lambda reaching this arm is a
+            // stored literal.
+            ExprNode::Lambda { .. } => false,
+            ExprNode::Send { recv, method, args, block, .. } => {
+                if recv.is_none()
+                    && (method.as_str() == "new" || own.contains(method.as_str()))
+                {
+                    return true;
                 }
+                let stores_block = matches!(method.as_str(), "proc" | "lambda")
+                    || (method.as_str() == "new"
+                        && matches!(
+                            recv.as_ref().map(|r| &*r.node),
+                            Some(ExprNode::Const { path })
+                                if path.len() == 1 && path[0].as_str() == "Proc"
+                        ));
+                recv.iter()
+                    .chain(args.iter())
+                    .any(|e| calls_self(e, own, deferred_names))
+                    || (!stores_block
+                        && block.as_ref().is_some_and(|b| match &*b.node {
+                            ExprNode::Lambda { body, .. } => {
+                                calls_self(body, own, deferred_names)
+                            }
+                            _ => calls_self(b, own, deferred_names),
+                        }))
             }
-            _ => {}
-        }
-        if hit {
-            return true;
-        }
-        let mut found = false;
-        expr.node.for_each_child(&mut |child| {
-            if !found && calls_self(child, own, deferred_names) {
-                found = true;
+            ExprNode::Const { path }
+                if path.len() == 1 && deferred_names.contains(path[0].as_str()) =>
+            {
+                true
             }
-        });
-        found
+            _ => {
+                let mut found = false;
+                expr.node.for_each_child(&mut |child| {
+                    if !found && calls_self(child, own, deferred_names) {
+                        found = true;
+                    }
+                });
+                found
+            }
+        }
     }
 
     let own: std::collections::HashSet<&str> =

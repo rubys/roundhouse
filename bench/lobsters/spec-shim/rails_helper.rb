@@ -31,6 +31,22 @@ require "json"
 EMIT = ENV["EMIT_TREE"] or abort "rails_helper shim: EMIT_TREE must point at an emitted lobsters tree"
 LOBSTERS = ENV["LOBSTERS_SRC"] || File.expand_path("~/git/lobsters")
 
+# ── Stage 1 of the canary: "this file ran" ───────────────────────────
+# Written BEFORE the emit is touched, because absence of the canary has
+# to mean ONE thing. If the only write happened after `require main`,
+# then an emitted tree that raises on load would leave exactly the same
+# no-file evidence as the load-path trap above — and the caller would
+# report the trap, sending the reader to search the load path for a
+# problem that is in the compiler. (Observed: a require cycle through
+# app/models/user.rb, misreported as "the shim never ran".)
+#
+# `require` only registers a file once it COMPLETES, so a shim that
+# raises here is re-executed by the next spec file's `require
+# "rails_helper"` — which is why that failure fills the log with
+# already-initialized-constant warnings and buries the real error at
+# the top.
+File.write(ENV["CANARY_OUT"], JSON.generate({ "entered" => true, "loaded" => false, "ok" => false })) if ENV["CANARY_OUT"]
+
 # lobsters' own spec_helper, by absolute path — see the load-path note above.
 require File.join(LOBSTERS, "spec", "spec_helper")
 
@@ -48,10 +64,14 @@ Main.configure_default_adapter!
 # Fatal, not advisory. The whole suite is meaningless if it ran against
 # real Rails, and that mistake is one stray -I away at any time.
 #
-# Writing $CANARY_OUT is the load-bearing half: it is the only evidence
-# the caller has that this file ran at all.
+# Stage 2 of the $CANARY_OUT record, and the load-bearing half: it is
+# the only evidence the caller has that this file ran to completion
+# against the emit. Stage 1 above separates "never ran" from "ran and
+# the emit would not load".
 valid_from = Story.instance_method(:valid?).source_location&.first.to_s
 CANARY = {
+  "entered" => true,
+  "loaded" => true,
   "rails_booted" => !!defined?(Rails::Engine),
   "valid_source" => valid_from,
   "valid_from_emit" => valid_from.start_with?(File.expand_path(EMIT)),

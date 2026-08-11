@@ -155,7 +155,7 @@ env = {
   "BUNDLE_GEMFILE" => File.join(opts[:src], "Gemfile"),
   "CANARY_OUT" => canary_out,
 }
-_, rerr, _ = sh([env, *cmd], chdir: workdir)
+rout, rerr, _ = sh([env, *cmd], chdir: workdir)
 
 # ── The check that matters ───────────────────────────────────────────
 # The trap this guards against is lobsters' own spec/rails_helper.rb
@@ -164,17 +164,70 @@ _, rerr, _ = sh([env, *cmd], chdir: workdir)
 # No assertion inside the shim can catch that, because in the trap the
 # shim does not run. So the evidence is the canary FILE, and its absence
 # is failure. Verified against a deliberately trapped invocation.
-unless File.exist?(canary_out)
+#
+# The shim writes that file in two stages (see its stage-1 comment), so
+# "never ran" stays distinguishable from "ran, and the emitted tree
+# would not load" — which is the far more common failure and looks
+# identical from outside.
+
+# The FIRST error, not the last. When the shim raises, `require` leaves
+# it unregistered and every remaining spec file re-runs it, so stderr is
+# a wall of already-initialized-constant warnings from the retries and
+# the cause scrolled off the top.
+#
+# And the cause isn't on either stream: a spec file that fails to LOAD is
+# the FORMATTER's to report, so with `--out` it lands in the JSON's
+# `messages` and never reaches stdout at all. Read it from there, drop
+# the echoed source block (the `Failure/Error:` listing is the emitted
+# file, which says nothing the backtrace doesn't), and keep the
+# exception with its require chain — that chain IS the diagnosis.
+first_error = lambda { |n|
+  msg = begin
+    JSON.parse(File.read(rspec_json))["messages"].to_a.first.to_s
+  rescue StandardError
+    ""
+  end
+  keep, skipping = [], false
+  msg.lines.map(&:rstrip).each do |l|
+    if l.start_with?("Failure/Error:")
+      skipping = true
+      next
+    end
+    # The echo ends where the exception header (`NameError:`) or the
+    # backtrace (`# path:line`) begins — not at a blank line, since the
+    # echo reprints the blank lines in the file it is quoting.
+    if skipping && (l.start_with?("# ") || l.match?(/\A[A-Z][A-Za-z0-9_:]*:\z/))
+      skipping = false
+    end
+    next if skipping || l.empty?
+    keep << l
+  end
+  if keep.empty?
+    keep = (rerr.lines + rout.lines).reject { |l| l.include?(": warning: ") }
+    keep = rerr.lines if keep.empty?
+  end
+  keep.first(n).map { |l| l.chomp + "\n" }.join
+}
+
+canary = File.exist?(canary_out) ? JSON.parse(File.read(canary_out)) : nil
+if canary.nil?
   abort <<~MSG
     lobsters-specs: the shim never ran — refusing to report.
     Something else answered `require "rails_helper"`, most likely lobsters'
     own spec/ reaching the load path. Any results from this run would
     describe stock Rails, not the emit.
-    #{rerr.lines.last(5).join}
+    #{first_error.(10)}
   MSG
-end
-canary = JSON.parse(File.read(canary_out))
-unless canary["ok"]
+elsif !canary["loaded"]
+  abort <<~MSG
+    lobsters-specs: the shim ran, but the emitted tree would not load —
+    refusing to report. `require "#{File.join(emit_tree, "main")}"` raised,
+    so nothing here describes the emit's behavior; this is a compiler bug
+    ahead of any spec. First error:
+
+    #{first_error.(12)}
+  MSG
+elsif !canary["ok"]
   abort "lobsters-specs: canary failed — #{canary.inspect}"
 end
 abort "lobsters-specs: the suite produced no report\n#{rerr}" unless File.exist?(rspec_json)
