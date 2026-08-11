@@ -290,18 +290,13 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // matching the permitted-fields list. The same specs feed the
     // controller lowerer below — both call sites need the same view
     // of the controller-derived metadata.
-    let params_specs_full =
+    let params_specs =
         crate::lower::controller_to_library::params::collect_specs(&app.controllers);
-    let params_specs_simple: std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>> =
-        params_specs_full
-            .iter()
-            .map(|(r, s)| (r.clone(), s.fields.clone()))
-            .collect();
     let (mut model_lcs, model_registry) = crate::lower::lower_models_with_registry_and_params(
         &app.models,
         &app.schema,
         view_extras,
-        &params_specs_simple,
+        &params_specs,
     );
 
     let mut view_lower_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =

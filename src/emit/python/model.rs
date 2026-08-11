@@ -8,12 +8,10 @@ use std::path::PathBuf;
 
 use super::super::EmittedFile;
 use crate::App;
-use crate::ident::Symbol;
 
 // Models ---------------------------------------------------------------
 
 pub(super) fn emit_models(app: &App) -> EmittedFile {
-    use std::collections::BTreeMap;
     // Lowered-IR path (mirrors `emit::typescript`): each model lowers to a
     // LibraryClass extending ApplicationRecord -> Base, carrying per-model
     // `_adapter_*` SQL over the `Db` primitive, and is rendered by the
@@ -28,11 +26,8 @@ pub(super) fn emit_models(app: &App) -> EmittedFile {
         .map(|v| vctx.lower(v))
         .collect();
     let view_extras = crate::lower::extras_from_lcs(&preliminary_views);
-    let params_specs: BTreeMap<Symbol, Vec<Symbol>> =
-        crate::lower::controller_to_library::params::collect_specs(&app.controllers)
-            .iter()
-            .map(|(r, s)| (r.clone(), s.fields.clone()))
-            .collect();
+    let params_specs =
+        crate::lower::controller_to_library::params::collect_specs(&app.controllers);
     let (model_lcs, _registry) = crate::lower::lower_models_with_registry_and_params(
         &app.models,
         &app.schema,

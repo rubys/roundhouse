@@ -21,11 +21,10 @@ fn for_each_expr(e: &mut Expr, f: &mut impl FnMut(&Expr)) {
 /// rewrite + body-typing included), with a params spec so the
 /// `from_params` factory synthesis is exercised too.
 fn lowered_models(app: &roundhouse::App) -> Vec<roundhouse::dialect::LibraryClass> {
-    let mut params_specs = std::collections::BTreeMap::new();
-    params_specs.insert(
+    let params_specs = roundhouse::lower::controller_to_library::params::specs_from_lists(&[(
         roundhouse::Symbol::from("article"),
         vec![roundhouse::Symbol::from("title"), roundhouse::Symbol::from("body")],
-    );
+    )]);
     roundhouse::lower::lower_models_to_library_classes_with_params(
         &app.models,
         &app.schema,

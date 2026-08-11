@@ -166,13 +166,8 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // Collect controller `permit(...)` declarations so the model lowerer
     // can synthesize `from_params(p: <Resource>Params)` factories sized
     // to the permitted-fields list. See `controller_to_library/params.rs`.
-    let params_specs_full =
+    let params_specs =
         crate::lower::controller_to_library::params::collect_specs(&app.controllers);
-    let params_specs: std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>> =
-        params_specs_full
-            .iter()
-            .map(|(r, s)| (r.clone(), s.fields.clone()))
-            .collect();
 
     // Bulk lower so per-resource synthesized siblings (`<Model>Row`)
     // ride alongside the model class. Each returned `LibraryClass`
@@ -272,7 +267,7 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
             (name, format!("app/models/{stem}"))
         })
         .collect();
-    for spec in params_specs_full.values() {
+    for spec in params_specs.iter() {
         let name = spec.class_id.0.as_str().to_string();
         let stem = crate::naming::underscore(&name);
         synthesized.push((name, format!("app/models/{stem}")));

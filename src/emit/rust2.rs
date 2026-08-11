@@ -454,15 +454,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // `Model.from_params(...)` by `rewrite_model_new_to_from_params`,
     // and the model needs the matching factory for those to resolve.
     // Mirrors typescript.rs / crystal.rs.
-    let params_specs_full =
+    let params_specs =
         crate::lower::controller_to_library::params::collect_specs(&app.controllers);
-    let params_specs_simple: std::collections::BTreeMap<
-        crate::ident::Symbol,
-        Vec<crate::ident::Symbol>,
-    > = params_specs_full
-        .iter()
-        .map(|(r, s)| (r.clone(), s.fields.clone()))
-        .collect();
 
     // Use `lower_models_with_registry_and_params` (not the simpler
     // `lower_models_with_registry`) so the per-class ClassInfo +
@@ -480,7 +473,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             &app.models,
             &app.schema,
             vec![],
-            &params_specs_simple,
+            &params_specs,
         );
         let str_color_registry = crate::emit::rust2::decide::str_color::build_registry(&lcs, &[]);
         crate::emit::rust2::decide::str_color::color_classes(&mut lcs, &str_color_registry);

@@ -40,11 +40,11 @@ use crate::lower::controller::body::{
     synthesize_implicit_render, unwrap_respond_to_with_format_dispatch, FormatBreadth,
 };
 
-use self::params::ParamsSpec;
+use self::params::ParamsSpecs;
 use self::process_action::{synthesize_process_action, PreambleStmt};
 use self::rewrites::{
     rewrite_assoc_through_parent_typed, rewrite_destroy_bang,
-    rewrite_model_new_to_from_params, rewrite_params,
+    rewrite_model_new_to_from_params, rewrite_update_to_typed_variant, rewrite_params,
     rewrite_redirect_to, rewrite_render_location_kwarg, rewrite_render_to_views,
     rewrite_route_helpers,
 };
@@ -81,8 +81,6 @@ fn json_actions_for(
     }
     out
 }
-
-use std::collections::BTreeMap;
 
 /// `(view-module, action-stem) -> ViewArgs` for the render rewrite.
 /// Built once from the app's views; see `action_view_ivar_map`.
@@ -498,7 +496,7 @@ fn collect_class_constants(controller: &Controller) -> Vec<(Symbol, Expr)> {
 fn build_methods(
     controller: &Controller,
     all_controllers: &[Controller],
-    params_specs: &BTreeMap<Symbol, ParamsSpec>,
+    params_specs: &ParamsSpecs,
     json_actions: &std::collections::HashSet<Symbol>,
     routed: Option<&std::collections::HashSet<Symbol>>,
     view_ivars: &ViewIvarMap,
@@ -1104,7 +1102,7 @@ fn action_to_method(
     controller: &Controller,
     privs: &[Action],
     is_public: bool,
-    params_specs: &BTreeMap<Symbol, ParamsSpec>,
+    params_specs: &ParamsSpecs,
     json_actions: &std::collections::HashSet<Symbol>,
     view_ivars: &ViewIvarMap,
     partials: &PartialMap,
@@ -1145,18 +1143,21 @@ fn action_to_method(
     //   - Public actions terminate in render/redirect (synthesized or
     //     explicit) → Nil.
     //   - Private `_params` helpers return the typed `<Resource>Params`
-    //     class (callers do `Model.from_params(comment_params)`); the
-    //     resource is derived by stripping the `_params` suffix.
+    //     class (callers do `Model.from_params(comment_params)`). The
+    //     class comes from the permit list in the helper's OWN BODY, not
+    //     from stripping `_params` off its name: campfire's `bot_params`
+    //     permits `:user`, and one resource can carry several lists.
     //   - Other private actions default to Nil; refine when a
     //     forcing fixture surfaces.
     let ret_ty = if !is_public && method_name.ends_with("_params") {
-        let resource = Symbol::from(method_name.trim_end_matches("_params"));
-        if let Some(spec) = params_specs.get(&resource) {
+        let spec = self::params::first_permit_in(&a.body)
+            .and_then(|(resource, fields)| params_specs.find(&resource, &fields));
+        if let Some(spec) = spec {
             Ty::Class { id: spec.class_id.clone(), args: vec![] }
         } else {
-            // Fallback for helpers whose resource we didn't recognize
-            // (shouldn't happen for source-derived helpers, but stays
-            // typed-coarse rather than panicking).
+            // Fallback for helpers whose permit list we didn't recognize
+            // (campfire's `role_params` builds a bare Hash) — stays
+            // typed-coarse rather than panicking.
             Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) }
         }
     } else if is_public {
@@ -1237,7 +1238,7 @@ fn lower_action_body(
     action_name: &str,
     privs: &[Action],
     is_public: bool,
-    params_specs: &BTreeMap<Symbol, ParamsSpec>,
+    params_specs: &ParamsSpecs,
     has_json_variant: bool,
     view_ivars: &ViewIvarMap,
     partials: &PartialMap,
@@ -1279,6 +1280,10 @@ fn lower_action_body(
     // up the typed factory shape rather than the legacy attrs-Hash.
     let with_from_params =
         rewrite_model_new_to_from_params(&with_redirects, privs, params_specs);
+    // `@user.update user_params` where that helper's list isn't the
+    // resource's canonical one — retarget to the matching typed method.
+    let with_from_params =
+        rewrite_update_to_typed_variant(&with_from_params, privs, params_specs);
     let with_assoc =
         rewrite_assoc_through_parent_typed(&with_from_params, privs, params_specs);
     // The legacy chain rewrites (`rewrite_drop_includes` +

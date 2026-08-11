@@ -36,6 +36,10 @@
 //! Recognition runs on the *source-shape* controller body (not after
 //! `rewrite_params`) so we collect specs once before any rewrites fire.
 //!
+//! One class per distinct `(resource, fields)` pair, NOT per resource:
+//! an app may permit the same resource differently in different
+//! controllers, and each list is its own mass-assignment boundary.
+//!
 //! Tagged with `LibraryClassOrigin::ResourceParams { resource, fields }`
 //! so per-target collapsers can group / fold (see
 //! `project_specialization_strategy.md`).
@@ -60,67 +64,317 @@ use super::util::map_expr;
 #[derive(Clone, Debug)]
 pub struct ParamsSpec {
     /// Resource symbol from the source (e.g. `:article`). Single-word,
-    /// snake_case — used as the registry key.
+    /// snake_case.
     pub resource: Symbol,
     /// Permitted fields in source order. Values become `attr_accessor`
     /// declarations on the synthesized class.
     pub fields: Vec<Symbol>,
-    /// Synthesized class name (`ArticleParams` for resource `:article`).
+    /// Synthesized class name (`ArticleParams` for resource `:article`;
+    /// controller-qualified when one resource carries several lists —
+    /// see `assign_class_ids`).
     pub class_id: ClassId,
     /// Span of the `permit(...)` / `expect(...)` call this spec was
     /// recognized from — the enclosing source span for everything the
     /// synthesized class contains.
     pub span: Span,
-    /// Some call site chains `.except(:key)` off this resource's
-    /// permit — synthesize the `except` method. Demand-gated because
-    /// its nil-writes widen the class's fields to nilable on
-    /// inferring targets; classes nobody excepts keep tight types.
+    /// Some call site chains `.except(:key)` off this permit —
+    /// synthesize the `except` method. Demand-gated because its
+    /// nil-writes widen the class's fields to nilable on inferring
+    /// targets; classes nobody excepts keep tight types.
     pub wants_except: bool,
+    /// Controllers whose bodies declared this exact permit list, in
+    /// source order. Two controllers permitting the same fields share
+    /// one class (campfire's `FirstRunsController` and `UsersController`
+    /// both permit `:user` × name/avatar/email_address/password); the
+    /// first entry names the class when it needs qualifying.
+    pub declaring: Vec<ClassId>,
+    /// This spec owns the unqualified `<Resource>Params` name — and with
+    /// it the model's plain `from_params` / `update` / `update!`
+    /// surface. Exactly one spec per resource can, and a resource whose
+    /// lists all come from off-resource controllers has none.
+    pub is_canonical: bool,
+}
+
+/// Every distinct `(resource, fields)` permit list in the app, deduped.
+///
+/// Keying by the PAIR (rather than by resource alone) is what keeps
+/// per-controller permit lists apart. campfire permits `:user` four
+/// times — three distinct lists — and folding them to one class silently
+/// dropped `email_address` / `password` from the first-run signup.
+/// Taking the union instead is not an option: it would let
+/// `Accounts::BotsController` mass-assign `password`.
+#[derive(Clone, Debug, Default)]
+pub struct ParamsSpecs {
+    specs: Vec<ParamsSpec>,
+}
+
+impl ParamsSpecs {
+    pub fn iter(&self) -> std::slice::Iter<'_, ParamsSpec> {
+        self.specs.iter()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.specs.is_empty()
+    }
+
+    /// The spec a call site's own `(resource, fields)` names — the exact
+    /// lookup every rewrite wants, since `match_permit_call` returns
+    /// both halves of the key.
+    pub fn find(&self, resource: &Symbol, fields: &[Symbol]) -> Option<&ParamsSpec> {
+        self.specs
+            .iter()
+            .find(|s| &s.resource == resource && s.fields == fields)
+    }
+
+    pub fn for_resource<'a>(
+        &'a self,
+        resource: &'a Symbol,
+    ) -> impl Iterator<Item = &'a ParamsSpec> + 'a {
+        self.specs.iter().filter(move |s| &s.resource == resource)
+    }
+
+    /// The spec holding the unqualified `<Resource>Params` name, if any.
+    pub fn canonical<'a>(&'a self, resource: &Symbol) -> Option<&'a ParamsSpec> {
+        self.specs
+            .iter()
+            .find(|s| &s.resource == resource && s.is_canonical)
+    }
 }
 
 /// Walk every controller's action bodies and collect one ParamsSpec per
-/// unique resource. If two controllers permit the same resource with
-/// different field sets, the first one wins (silently — collisions in
-/// practice don't appear in real-blog; if they ever do we can promote
-/// to per-controller naming or take field unions).
-pub fn collect_specs(controllers: &[Controller]) -> BTreeMap<Symbol, ParamsSpec> {
-    let mut out: BTreeMap<Symbol, ParamsSpec> = BTreeMap::new();
+/// distinct `(resource, fields)` pair.
+pub fn collect_specs(controllers: &[Controller]) -> ParamsSpecs {
+    let mut index: BTreeMap<(Symbol, Vec<Symbol>), usize> = BTreeMap::new();
+    let mut specs: Vec<ParamsSpec> = Vec::new();
     for c in controllers {
         for action in c.actions() {
-            collect_from_expr(&action.body, &mut out);
+            collect_from_expr(&action.body, &c.name, &mut index, &mut specs);
         }
     }
-    out
+    assign_class_ids(&mut specs);
+    ParamsSpecs { specs }
 }
 
-fn collect_from_expr(expr: &Expr, out: &mut BTreeMap<Symbol, ParamsSpec>) {
+/// Build specs straight from `(resource, fields)` pairs, for callers
+/// with no controller bodies to scan (tests, synthetic apps). Each
+/// resource gets one list, so every spec keeps the unqualified name.
+pub fn specs_from_lists(lists: &[(Symbol, Vec<Symbol>)]) -> ParamsSpecs {
+    ParamsSpecs {
+        specs: lists
+            .iter()
+            .map(|(resource, fields)| ParamsSpec {
+                class_id: params_class_id(resource),
+                resource: resource.clone(),
+                fields: fields.clone(),
+                span: Span::synthetic(),
+                wants_except: false,
+                declaring: Vec::new(),
+                is_canonical: true,
+            })
+            .collect(),
+    }
+}
+
+/// Record one recognized permit list, folding it into an existing spec
+/// when an identical `(resource, fields)` pair was already seen.
+fn record(
+    resource: Symbol,
+    fields: Vec<Symbol>,
+    controller: &ClassId,
+    span: Span,
+    wants_except: bool,
+    index: &mut BTreeMap<(Symbol, Vec<Symbol>), usize>,
+    specs: &mut Vec<ParamsSpec>,
+) {
+    let key = (resource.clone(), fields.clone());
+    match index.get(&key) {
+        Some(&i) => {
+            specs[i].wants_except |= wants_except;
+            if !specs[i].declaring.contains(controller) {
+                specs[i].declaring.push(controller.clone());
+            }
+        }
+        None => {
+            index.insert(key, specs.len());
+            specs.push(ParamsSpec {
+                // Filled in by `assign_class_ids` once every list is
+                // known — a name can't be chosen until we know whether
+                // the resource carries one list or several.
+                class_id: ClassId(Symbol::from("")),
+                resource,
+                fields,
+                span,
+                wants_except,
+                declaring: vec![controller.clone()],
+                is_canonical: false,
+            });
+        }
+    }
+}
+
+fn collect_from_expr(
+    expr: &Expr,
+    controller: &ClassId,
+    index: &mut BTreeMap<(Symbol, Vec<Symbol>), usize>,
+    specs: &mut Vec<ParamsSpec>,
+) {
     // `<permit-chain>.except(:key)` — mark the spec before the walk
-    // reaches the inner chain, so the flag survives or_insert.
+    // reaches the inner chain, so the flag survives the fold in `record`.
     if let ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node {
         if method.as_str() == "except" {
             if let Some((resource, fields)) = match_permit_call(recv) {
-                out.entry(resource.clone())
-                    .and_modify(|s| s.wants_except = true)
-                    .or_insert_with(|| ParamsSpec {
-                        class_id: params_class_id(&resource),
-                        resource,
-                        fields,
-                        span: expr.span,
-                        wants_except: true,
-                    });
+                record(resource, fields, controller, expr.span, true, index, specs);
             }
         }
     }
     if let Some((resource, fields)) = match_permit_call(expr) {
-        out.entry(resource.clone()).or_insert_with(|| ParamsSpec {
-            class_id: params_class_id(&resource),
-            resource,
-            fields,
-            span: expr.span,
-            wants_except: false,
-        });
+        record(resource, fields, controller, expr.span, false, index, specs);
+        // Stop here. The merge form (`permit(...).merge(k: v)`) matched
+        // this node with the WIDER field set; recursing would reach the
+        // inner bare permit and — now that specs key on the field list —
+        // register a second, narrower class for the same call site.
+        return;
     }
-    walk_children(expr, &mut |c| collect_from_expr(c, out));
+    walk_children(expr, &mut |c| collect_from_expr(c, controller, index, specs));
+}
+
+/// Name each spec, and decide which one owns the unqualified name.
+///
+/// A resource with a single permit list keeps `<Resource>Params`, so
+/// nothing about a one-list-per-resource app changes. When a resource
+/// carries several lists, the unqualified name goes to the list declared
+/// by the controller the resource is named for (`UsersController` for
+/// `:user`) — not to whichever controller sorted first, which in
+/// campfire would have handed `UserParams` (and `User.from_params`) to
+/// the bot-shaped list. The rest take their first declaring
+/// controller's name as a prefix: `Accounts::BotsController` →
+/// `AccountsBotsUserParams`. If no controller is named for the resource,
+/// every list is qualified and the model keeps its untyped `update`.
+fn assign_class_ids(specs: &mut [ParamsSpec]) {
+    let mut by_resource: BTreeMap<Symbol, Vec<usize>> = BTreeMap::new();
+    for (i, spec) in specs.iter().enumerate() {
+        by_resource.entry(spec.resource.clone()).or_default().push(i);
+    }
+    for (resource, idxs) in &by_resource {
+        let canonical = if idxs.len() == 1 {
+            Some(idxs[0])
+        } else {
+            idxs.iter().copied().find(|&i| {
+                specs[i]
+                    .declaring
+                    .iter()
+                    .any(|c| controller_names_resource(c, resource))
+            })
+        };
+        for &i in idxs {
+            if Some(i) == canonical {
+                specs[i].class_id = params_class_id(resource);
+                specs[i].is_canonical = true;
+            } else {
+                let owner = specs[i].declaring[0].clone();
+                specs[i].class_id = qualified_params_class_id(&owner, resource);
+            }
+        }
+    }
+    // Backstop: one controller declaring two different lists for the
+    // same resource would qualify to the same name. Rare enough that a
+    // positional suffix is a better answer than another naming rule.
+    let mut taken: std::collections::HashSet<ClassId> = std::collections::HashSet::new();
+    for spec in specs.iter_mut() {
+        if taken.insert(spec.class_id.clone()) {
+            continue;
+        }
+        for n in 2.. {
+            let candidate = ClassId(Symbol::from(format!("{}{n}", spec.class_id.0.as_str())));
+            if taken.insert(candidate.clone()) {
+                spec.class_id = candidate;
+                break;
+            }
+        }
+    }
+}
+
+/// Is `controller` the one this resource is named for? `UsersController`
+/// and `Accounts::UsersController` both answer yes for `:user`; the
+/// namespace doesn't change what the controller is about.
+fn controller_names_resource(controller: &ClassId, resource: &Symbol) -> bool {
+    let last = crate::naming::last_segment(controller.0.as_str());
+    let stem = crate::naming::snake_case(last.strip_suffix("Controller").unwrap_or(last));
+    stem == resource.as_str() || crate::naming::singularize(&stem) == resource.as_str()
+}
+
+/// `Accounts::BotsController` + `:user` → `AccountsBotsUserParams`.
+pub fn qualified_params_class_id(controller: &ClassId, resource: &Symbol) -> ClassId {
+    let name = controller.0.as_str();
+    let stem = name.strip_suffix("Controller").unwrap_or(name).replace("::", "");
+    ClassId(Symbol::from(format!(
+        "{stem}{}Params",
+        camelize(resource.as_str())
+    )))
+}
+
+/// The model factory a spec's class feeds. The canonical spec keeps
+/// `from_params`; the rest name their class, since a strict target has
+/// no overloading to lean on and the two classes are unrelated types.
+pub fn model_from_params_name(spec: &ParamsSpec) -> Symbol {
+    if spec.is_canonical {
+        Symbol::from("from_params")
+    } else {
+        Symbol::from(format!(
+            "from_{}",
+            crate::naming::snake_case(spec.class_id.0.as_str())
+        ))
+    }
+}
+
+/// Same rule for the typed `update` / `update!` pair.
+pub fn model_update_name(spec: &ParamsSpec, bang: bool) -> Symbol {
+    let bang = if bang { "!" } else { "" };
+    if spec.is_canonical {
+        Symbol::from(format!("update{bang}"))
+    } else {
+        Symbol::from(format!(
+            "update_from_{}{bang}",
+            crate::naming::snake_case(spec.class_id.0.as_str())
+        ))
+    }
+}
+
+/// First permit list in `expr`, in the same pre-order the collector
+/// uses — the way a `<resource>_params` helper body names its spec.
+pub fn first_permit_in(expr: &Expr) -> Option<(Symbol, Vec<Symbol>)> {
+    if let Some(found) = match_permit_call(expr) {
+        return Some(found);
+    }
+    let mut found = None;
+    walk_children(expr, &mut |c| {
+        if found.is_none() {
+            found = first_permit_in(c);
+        }
+    });
+    found
+}
+
+/// Map each `<x>_params`-shaped helper to the spec its body declares.
+/// Call-site rewrites (`Model.new(user_params)`, `@user.update
+/// user_params`) see only the helper name, so this is how they reach
+/// the right class when a resource carries several.
+pub fn helper_spec_map<'a>(
+    actions: &[crate::dialect::Action],
+    specs: &'a ParamsSpecs,
+) -> BTreeMap<Symbol, &'a ParamsSpec> {
+    let mut out = BTreeMap::new();
+    for a in actions {
+        if !a.name.as_str().ends_with("_params") {
+            continue;
+        }
+        if let Some((resource, fields)) = first_permit_in(&a.body) {
+            if let Some(spec) = specs.find(&resource, &fields) {
+                out.insert(a.name.clone(), spec);
+            }
+        }
+    }
+    out
 }
 
 /// Match either of the two source forms:
@@ -307,8 +561,8 @@ pub fn params_class_id(resource: &Symbol) -> ClassId {
 /// emitted alongside the controller LCs into `app/models/` (the
 /// universal-class location); routing it elsewhere is a per-target
 /// emit-time choice.
-pub fn synthesize_params_classes(specs: &BTreeMap<Symbol, ParamsSpec>) -> Vec<LibraryClass> {
-    specs.values().map(build_params_class).collect()
+pub fn synthesize_params_classes(specs: &ParamsSpecs) -> Vec<LibraryClass> {
+    specs.iter().map(build_params_class).collect()
 }
 
 fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
@@ -925,10 +1179,7 @@ pub fn params_class_info(lc: &LibraryClass) -> crate::analyze::ClassInfo {
 /// `specs` carries the (resource, class_id) mapping; expressions whose
 /// resource isn't in `specs` (shouldn't happen — we collected from
 /// these same bodies) fall through unchanged.
-pub fn rewrite_to_from_raw(
-    expr: &Expr,
-    specs: &BTreeMap<Symbol, ParamsSpec>,
-) -> Expr {
+pub fn rewrite_to_from_raw(expr: &Expr, specs: &ParamsSpecs) -> Expr {
     map_expr(expr, &|e| {
         // Merge form first — the bare-permit arm below would match the
         // same node (Form 3 delegates) and drop the merged values.
@@ -937,14 +1188,14 @@ pub fn rewrite_to_from_raw(
                 && args.len() == 1
                 && match_permit_call(recv).is_some()
             {
-                let (resource, _) = match_permit_call(e)?;
-                let spec = specs.get(&resource)?;
+                let (resource, fields) = match_permit_call(e)?;
+                let spec = specs.find(&resource, &fields)?;
                 let ExprNode::Hash { entries, .. } = &*args[0].node else { return None };
                 return Some(build_from_raw_merge(&spec.class_id, entries, e.span));
             }
         }
-        let (resource, _fields) = match_permit_call(e)?;
-        let spec = specs.get(&resource)?;
+        let (resource, fields) = match_permit_call(e)?;
+        let spec = specs.find(&resource, &fields)?;
         Some(build_from_raw_call(&spec.class_id, e.span))
     })
 }
@@ -1019,10 +1270,7 @@ fn build_from_raw_call(class_id: &ClassId, span: Span) -> Expr {
 /// synthesized class API; this stage closes the loop so existing
 /// `permitted[:title]`-shape call sites in test bodies / view
 /// bodies dispatch through the typed accessor.
-pub fn rewrite_typed_bracket_to_field(
-    expr: &Expr,
-    specs: &BTreeMap<Symbol, ParamsSpec>,
-) -> Expr {
+pub fn rewrite_typed_bracket_to_field(expr: &Expr, specs: &ParamsSpecs) -> Expr {
     use crate::ty::Ty;
     // Build a quick `class_id -> permitted-fields-set` lookup so the
     // walker can validate the literal key is one of the permitted
@@ -1031,7 +1279,7 @@ pub fn rewrite_typed_bracket_to_field(
         ClassId,
         std::collections::HashSet<String>,
     > = std::collections::HashMap::new();
-    for spec in specs.values() {
+    for spec in specs.iter() {
         let mut set = std::collections::HashSet::new();
         for f in &spec.fields {
             set.insert(f.as_str().to_string());

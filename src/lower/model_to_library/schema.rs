@@ -21,7 +21,7 @@ pub(super) fn push_schema_methods(
     model: &Model,
     models: &[Model],
     table: &Table,
-    permitted_fields: Option<&[Symbol]>,
+    permitted: Option<(&ClassId, &[Symbol])>,
 ) {
     let owner = &model.name;
 
@@ -238,16 +238,20 @@ pub(super) fn push_schema_methods(
     // every permitted field). When no spec applies (rare; model not
     // exposed by any controller), falls back to the Hash-shaped variant
     // for backward compatibility.
-    methods.push(match permitted_fields {
-        Some(fields) => synth_update_typed(owner, fields, table, false),
+    methods.push(match permitted {
+        Some((params_class, fields)) => synth_update_typed(
+            owner, fields, table, params_class, Symbol::from("update"),
+        ),
         None => synth_update(owner, table),
     });
 
     // `update!` — same typed assignment, `save!` tail (raises on
     // invalid via Base). Only the typed variant: the corpus bang
     // sites all go through permitted resources.
-    if let Some(fields) = permitted_fields {
-        methods.push(synth_update_typed(owner, fields, table, true));
+    if let Some((params_class, fields)) = permitted {
+        methods.push(synth_update_typed(
+            owner, fields, table, params_class, Symbol::from("update!"),
+        ));
     }
 
     // def fill_timestamps(creating); now = ActiveSupport.db_now; @updated_at = now; @created_at = now if creating; end
@@ -908,15 +912,12 @@ pub(super) fn push_from_params_method(
     model: &crate::dialect::Model,
     fields: &[Symbol],
     table: &Table,
+    params_class_id: &ClassId,
+    name: Symbol,
 ) {
     let owner = &model.name;
     let p = Symbol::from("p");
     let instance = Symbol::from("instance");
-    let resource = Symbol::from(crate::naming::snake_case(owner.0.as_str()));
-    let params_class_id = ClassId(Symbol::from(format!(
-        "{}Params",
-        crate::naming::camelize(resource.as_str())
-    )));
 
     let new_call = Expr::new(
         Span::synthetic(),
@@ -964,9 +965,9 @@ pub(super) fn push_from_params_method(
     stmts.push(var_ref(instance));
 
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
-    let params_ty = Ty::Class { id: params_class_id, args: vec![] };
+    let params_ty = Ty::Class { id: params_class_id.clone(), args: vec![] };
     methods.push(MethodDef {
-        name: Symbol::from("from_params"),
+        name,
         receiver: MethodReceiver::Class,
         params: vec![Param::positional(p.clone())],
         body: seq(stmts),
@@ -978,6 +979,31 @@ pub(super) fn push_from_params_method(
             mutates_self: false,
             block_param: None,
     });
+}
+
+/// The `update` / `update!` pair for a NON-canonical permit list —
+/// same bodies as the plain pair, named for the params class they take
+/// (`update_from_users_profiles_user_params`). Two permit lists for one
+/// resource are unrelated types on every strict target, so they can't
+/// share a method name; the call-site rewrite
+/// (`rewrite_update_to_typed_variant`) retargets the controller.
+pub(super) fn push_update_typed_variants(
+    methods: &mut Vec<MethodDef>,
+    owner: &ClassId,
+    fields: &[Symbol],
+    table: &Table,
+    spec: &crate::lower::controller_to_library::params::ParamsSpec,
+) {
+    use crate::lower::controller_to_library::params::model_update_name;
+    for bang in [false, true] {
+        methods.push(synth_update_typed(
+            owner,
+            fields,
+            table,
+            &spec.class_id,
+            model_update_name(spec, bang),
+        ));
+    }
 }
 
 /// `def self.from_row(row); instance = new; instance.col = row.col; ...; instance; end`
@@ -2006,13 +2032,15 @@ fn column_union_ty(table: &Table) -> Ty {
 ///     (`record.update(title: "Renamed")` doesn't clobber body).
 ///
 /// Save, return Bool.
-fn synth_update_typed(owner: &ClassId, fields: &[Symbol], table: &Table, bang: bool) -> MethodDef {
+fn synth_update_typed(
+    owner: &ClassId,
+    fields: &[Symbol],
+    table: &Table,
+    params_class_id: &ClassId,
+    name: Symbol,
+) -> MethodDef {
     let p = Symbol::from("p");
-    let resource = Symbol::from(crate::naming::snake_case(owner.0.as_str()));
-    let params_class_id = ClassId(Symbol::from(format!(
-        "{}Params",
-        crate::naming::camelize(resource.as_str())
-    )));
+    let bang = name.as_str().ends_with('!');
 
     let mut stmts: Vec<Expr> = Vec::new();
     for field in fields {
@@ -2075,10 +2103,10 @@ fn synth_update_typed(owner: &ClassId, fields: &[Symbol], table: &Table, bang: b
         stmts.push(Expr::new(Span::synthetic(), ExprNode::SelfRef));
     }
 
-    let params_ty = Ty::Class { id: params_class_id, args: vec![] };
+    let params_ty = Ty::Class { id: params_class_id.clone(), args: vec![] };
     let ret_ty = if bang { Ty::Class { id: owner.clone(), args: vec![] } } else { Ty::Bool };
     MethodDef {
-        name: Symbol::from(if bang { "update!" } else { "update" }),
+        name,
         receiver: MethodReceiver::Instance,
         params: vec![Param::positional(p.clone())],
         body: seq(stmts),

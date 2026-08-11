@@ -11,7 +11,7 @@ use crate::expr::{ArrayStyle, Expr, ExprNode, LValue, Literal};
 use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 
-use super::params::ParamsSpec;
+use super::params::{ParamsSpec, ParamsSpecs};
 use super::util::map_expr;
 
 // ---------------------------------------------------------------------------
@@ -677,13 +677,9 @@ fn merge_or_append_kwarg(args: &mut Vec<Expr>, key: &str, value: &str, span: Spa
 pub(super) fn rewrite_assoc_through_parent_typed(
     expr: &Expr,
     privs: &[Action],
-    params_specs: &BTreeMap<Symbol, ParamsSpec>,
+    params_specs: &ParamsSpecs,
 ) -> Expr {
-    let helper_names: Vec<Symbol> = privs
-        .iter()
-        .map(|p| p.name.clone())
-        .filter(|n| n.as_str().ends_with("_params"))
-        .collect();
+    let helper_specs = super::params::helper_spec_map(privs, params_specs);
     map_expr(expr, &|e| {
         let ExprNode::Assign { target, value } = &*e.node else {
             return None;
@@ -747,17 +743,16 @@ pub(super) fn rewrite_assoc_through_parent_typed(
                 if outer_args.is_empty() {
                     return Some(expand_build_bare(&model_class, &fk, parent_name, lhs, e.span));
                 }
-                if let Some(resource) = match_params_helper(&outer_args[0], &helper_names) {
-                    if params_specs.contains_key(&resource) {
-                        return Some(expand_build_typed(
-                            &model_class,
-                            &fk,
-                            parent_name,
-                            lhs,
-                            &outer_args[0],
-                            e.span,
-                        ));
-                    }
+                if let Some(spec) = match_params_helper(&outer_args[0], &helper_specs) {
+                    return Some(expand_build_typed(
+                        &model_class,
+                        &fk,
+                        parent_name,
+                        lhs,
+                        &outer_args[0],
+                        super::params::model_from_params_name(spec),
+                        e.span,
+                    ));
                 }
                 expand_build(&model_class, &fk, parent_name, lhs, &outer_args[0], e.span)
             }
@@ -817,21 +812,22 @@ pub(super) fn rewrite_assoc_through_parent_typed(
     })
 }
 
-/// True-when-Some: `arg` is a bare call to a `<x>_params` helper. Returns
-/// the resource symbol (`<x>` minus the `_params` suffix) so callers can
-/// look up the corresponding `ParamsSpec`.
-fn match_params_helper(arg: &Expr, helper_names: &[Symbol]) -> Option<Symbol> {
+/// True-when-Some: `arg` is a bare call to one of this controller's
+/// `<x>_params` helpers, and that helper's body declared a permit list.
+/// Returns the spec, so the caller reaches the right class even when the
+/// helper's name doesn't match its resource (`bot_params` permits
+/// `:user`) or when the resource carries several lists.
+fn match_params_helper<'a>(
+    arg: &Expr,
+    helper_specs: &BTreeMap<Symbol, &'a ParamsSpec>,
+) -> Option<&'a ParamsSpec> {
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &*arg.node else {
         return None;
     };
     if !args.is_empty() {
         return None;
     }
-    if !helper_names.iter().any(|h| h == method) {
-        return None;
-    }
-    let stem = method.as_str().trim_end_matches("_params");
-    Some(Symbol::from(stem))
+    helper_specs.get(method).copied()
 }
 
 enum AssocKind {
@@ -857,13 +853,14 @@ pub(super) fn expand_build_typed(
     parent: &Symbol,
     lhs: &Symbol,
     arg: &Expr,
+    factory: Symbol,
     span: Span,
 ) -> Expr {
     let from_params_call = Expr::new(
         span,
         ExprNode::Send {
             recv: Some(const_path(&[model_class], span)),
-            method: Symbol::from("from_params"),
+            method: factory,
             args: vec![arg.clone()],
             block: None,
             parenthesized: true,
@@ -1138,14 +1135,10 @@ pub(super) fn expand_find(
 pub(super) fn rewrite_model_new_to_from_params(
     expr: &Expr,
     privs: &[Action],
-    params_specs: &BTreeMap<Symbol, ParamsSpec>,
+    params_specs: &ParamsSpecs,
 ) -> Expr {
-    let helper_names: Vec<Symbol> = privs
-        .iter()
-        .map(|p| p.name.clone())
-        .filter(|n| n.as_str().ends_with("_params"))
-        .collect();
-    if helper_names.is_empty() {
+    let helper_specs = super::params::helper_spec_map(privs, params_specs);
+    if helper_specs.is_empty() {
         return expr.clone();
     }
     map_expr(expr, &|e| {
@@ -1167,24 +1160,64 @@ pub(super) fn rewrite_model_new_to_from_params(
         let ExprNode::Const { .. } = &*model_recv.node else {
             return None;
         };
-        let resource = match &*args[0].node {
-            ExprNode::Send { recv: None, method: helper_method, args: helper_args, block: None, .. }
-                if helper_args.is_empty()
-                    && helper_names.iter().any(|h| h == helper_method) =>
-            {
-                let stem = helper_method.as_str().trim_end_matches("_params");
-                Symbol::from(stem)
-            }
+        let spec = match_params_helper(&args[0], &helper_specs)?;
+        Some(Expr::new(
+            e.span,
+            ExprNode::Send {
+                recv: Some(model_recv.clone()),
+                method: super::params::model_from_params_name(spec),
+                args: vec![args[0].clone()],
+                block: None,
+                parenthesized: *parenthesized,
+            },
+        ))
+    })
+}
+
+// ---------------------------------------------------------------------------
+// `<record>.update(<resource>_params)` → `<record>.update_from_<class>(...)`
+// when the helper's permit list is NOT the resource's canonical one.
+//
+// The model's typed `update` / `update!` are sized to one permit list —
+// the canonical `<Resource>Params`. A controller permitting the same
+// resource differently (campfire's `Users::ProfilesController` adds
+// `:bio` to the four fields `UsersController` permits) gets its own
+// params class, so its `update` call needs the matching typed method.
+// Canonical call sites are left exactly as they were.
+// ---------------------------------------------------------------------------
+
+pub(super) fn rewrite_update_to_typed_variant(
+    expr: &Expr,
+    privs: &[Action],
+    params_specs: &ParamsSpecs,
+) -> Expr {
+    let helper_specs = super::params::helper_spec_map(privs, params_specs);
+    if helper_specs.is_empty() {
+        return expr.clone();
+    }
+    map_expr(expr, &|e| {
+        let ExprNode::Send { recv: Some(recv), method, args, block: None, parenthesized } =
+            &*e.node
+        else {
+            return None;
+        };
+        let bang = match method.as_str() {
+            "update" => false,
+            "update!" => true,
             _ => return None,
         };
-        if !params_specs.contains_key(&resource) {
+        if args.len() != 1 {
+            return None;
+        }
+        let spec = match_params_helper(&args[0], &helper_specs)?;
+        if spec.is_canonical {
             return None;
         }
         Some(Expr::new(
             e.span,
             ExprNode::Send {
-                recv: Some(model_recv.clone()),
-                method: Symbol::from("from_params"),
+                recv: Some(recv.clone()),
+                method: super::params::model_update_name(spec, bang),
                 args: vec![args[0].clone()],
                 block: None,
                 parenthesized: *parenthesized,

@@ -251,21 +251,17 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         // article_params)` call sites rewrite to it). Empty when
         // controllers aren't being emitted, but harmless to always
         // collect. Mirrors go2.rs:260-268.
-        let specs: std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>> =
-            crate::lower::controller_to_library::params::collect_specs(&app.controllers)
-                .into_iter()
-                .map(|(r, s)| (r, s.fields))
-                .collect();
+        let specs = crate::lower::controller_to_library::params::collect_specs(&app.controllers);
         // Register each synthesized `<Resource>Params` struct's fields up
         // front — the model `from_params(p)` reads `p.title`/`p.body`, and
         // without the field registry those typed-local reads mis-route to
         // a `p.__struct__.title(p)` method dispatch (an undefined fn). The
         // model emit runs before the controllers block, so this can't wait
         // for the controller field registration there.
-        for (resource, fields) in &specs {
-            let class_name = format!("{}Params", crate::naming::camelize(resource.as_str()));
+        for spec in specs.iter() {
+            let class_name = spec.class_id.0.as_str().to_string();
             let field_names: Vec<String> =
-                fields.iter().map(|f| f.as_str().to_string()).collect();
+                spec.fields.iter().map(|f| f.as_str().to_string()).collect();
             expr::register_field_names(&class_name, &field_names);
         }
         let (model_lcs, model_registry) =

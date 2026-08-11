@@ -1109,12 +1109,8 @@ fn lowered_real_blog_typing_residual() {
     // synthesize `from_params(p: <Resource>Params)` factories. Without
     // this, the controller body's `Article.from_params(article_params)`
     // call has no signature in the registry and types as `TyVar(0)`.
-    let params_specs_full =
+    let params_specs =
         roundhouse::lower::controller_to_library::params::collect_specs(&app.controllers);
-    let params_specs: std::collections::BTreeMap<Symbol, Vec<Symbol>> = params_specs_full
-        .iter()
-        .map(|(r, s)| (r.clone(), s.fields.clone()))
-        .collect();
 
     // Models go through the registry-returning bulk entry so
     // controllers and views can reuse the SAME registry — keeps the

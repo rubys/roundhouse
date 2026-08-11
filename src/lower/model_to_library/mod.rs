@@ -124,7 +124,7 @@ pub fn lower_models_with_registry_and_params(
     models: &[Model],
     schema: &Schema,
     extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
-    params_specs: &std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>>,
+    params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     lower_models_inner(models, schema, extra_class_infos, params_specs)
 }
@@ -141,7 +141,7 @@ pub fn lower_models_to_library_classes_with_params(
     models: &[Model],
     schema: &Schema,
     extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
-    params_specs: &std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>>,
+    params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
 ) -> Vec<LibraryClass> {
     lower_models_inner(models, schema, extra_class_infos, params_specs).0
 }
@@ -150,7 +150,7 @@ fn lower_models_inner(
     models: &[Model],
     schema: &Schema,
     extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
-    params_specs: &std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>>,
+    params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     // Synthesize per-model `<Model>Row` LibraryClasses up front. These
     // need to appear in the class registry before model body-typing so
@@ -183,13 +183,10 @@ fn lower_models_inner(
     // is emitted by the controller lowerer). Needed so the model's
     // `from_params` body's `p.<field>` Send dispatches to the
     // `<Resource>Params` attr_reader signature.
-    for (resource, fields) in params_specs {
-        let class_id = ClassId(Symbol::from(format!(
-            "{}Params",
-            crate::naming::camelize(resource.as_str())
-        )));
+    for spec in params_specs.iter() {
+        let class_id = spec.class_id.clone();
         let mut info = crate::analyze::ClassInfo::default();
-        for field in fields {
+        for field in &spec.fields {
             info.instance_methods
                 .insert(field.clone(), fn_sig(vec![], Ty::Str));
             info.instance_method_kinds
@@ -629,7 +626,7 @@ fn build_methods(
     model: &Model,
     models: &[Model],
     schema: &Schema,
-    params_specs: &std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>>,
+    params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
 ) -> Vec<MethodDef> {
     // No-op outside an emit diagnostics scope, so the many direct
     // test callers of the lowering entries are unaffected.
@@ -639,17 +636,29 @@ fn build_methods(
 
     if let Some(table) = schema.tables.get(&model.table.0) {
         let resource = crate::ident::Symbol::from(crate::naming::snake_case(model.name.0.as_str()));
-        let permitted_fields = params_specs.get(&resource).map(|v| v.as_slice());
+        // The canonical permit list — the one holding the unqualified
+        // `<Resource>Params` name — sizes the plain `update` / `update!`
+        // / `from_params`. Other lists for the same resource get their
+        // own named methods below, since their params class is an
+        // unrelated type on every strict target.
+        let canonical = params_specs.canonical(&resource);
+        let permitted_fields = canonical.map(|s| s.fields.as_slice());
         // A controller's permit list is wider than the model's writer
         // surface (lobsters permits lookup keys like `tag[tag_name]`
         // that no writer backs) — filter to assignable names before
         // sizing `update`/`from_params`. The `<Resource>Params` class
-        // itself keeps every permitted field (registration below uses
+        // itself keeps every permitted field (registration above uses
         // the unfiltered spec); only the assignment synthesis narrows.
         let writable_fields =
             permitted_fields.map(|fields| writable_permit_fields(model, table, fields));
         let permitted_fields = writable_fields.as_deref();
-        push_schema_methods(&mut methods, model, models, table, permitted_fields);
+        push_schema_methods(
+            &mut methods,
+            model,
+            models,
+            table,
+            permitted_fields.and_then(|f| canonical.map(|s| (&s.class_id, f))),
+        );
         // Per-model Level-3 adapter primitives (`_adapter_find_by_id`, etc.)
         // — typed methods that go directly from SQL composition to typed
         // model instances over the `Sqlite` primitive surface. See
@@ -659,8 +668,28 @@ fn build_methods(
         // (resource, fields) tuple a controller's `permit(...)` declared.
         // Skipped silently when the model isn't permitted by any
         // controller.
-        if let Some(fields) = permitted_fields {
-            self::schema::push_from_params_method(&mut methods, model, fields, table);
+        if let (Some(fields), Some(spec)) = (permitted_fields, canonical) {
+            self::schema::push_from_params_method(
+                &mut methods, model, fields, table, &spec.class_id,
+                crate::lower::controller_to_library::params::model_from_params_name(spec),
+            );
+        }
+        // One typed factory + update pair per NON-canonical permit list
+        // of this resource. campfire permits `:user` three different
+        // ways; `Users::ProfilesController`'s list (which adds `:bio`)
+        // can't reach a plain `update` sized to another list's fields.
+        for spec in params_specs.for_resource(&resource) {
+            if spec.is_canonical {
+                continue;
+            }
+            let writable = writable_permit_fields(model, table, &spec.fields);
+            self::schema::push_from_params_method(
+                &mut methods, model, &writable, table, &spec.class_id,
+                crate::lower::controller_to_library::params::model_from_params_name(spec),
+            );
+            self::schema::push_update_typed_variants(
+                &mut methods, &model.name, &writable, table, spec,
+            );
         }
     }
 

@@ -192,11 +192,8 @@ fn emit_jbuilder_view_functions(app: &App) -> (Vec<String>, Vec<(String, String,
     let view_extras = crate::lower::extras_from_lcs(&preliminary_views);
     let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
     let route_helper_extras = crate::lower::extras_from_funcs(&route_helper_funcs);
-    let params_specs: std::collections::BTreeMap<Symbol, Vec<Symbol>> =
-        crate::lower::controller_to_library::params::collect_specs(&app.controllers)
-            .iter()
-            .map(|(r, s)| (r.clone(), s.fields.clone()))
-            .collect();
+    let params_specs =
+        crate::lower::controller_to_library::params::collect_specs(&app.controllers);
     let (_lcs, model_registry) = crate::lower::lower_models_with_registry_and_params(
         &app.models,
         &app.schema,

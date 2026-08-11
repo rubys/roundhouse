@@ -263,15 +263,8 @@ func main() {\n\
         // controller lowerer's `rewrite_model_new_to_from_params`; without
         // the factory those calls would land on an undefined symbol.
         // Mirrors rust2.rs / typescript.rs / crystal.rs.
-        let params_specs_full =
+        let params_specs =
             crate::lower::controller_to_library::params::collect_specs(&app.controllers);
-        let params_specs_simple: std::collections::BTreeMap<
-            crate::ident::Symbol,
-            Vec<crate::ident::Symbol>,
-        > = params_specs_full
-            .iter()
-            .map(|(r, s)| (r.clone(), s.fields.clone()))
-            .collect();
 
         // `lower_models_with_registry_and_params` returns both the
         // lowered model LCs and the FULL class registry — the registry
@@ -289,7 +282,7 @@ func main() {\n\
                 &app.models,
                 &app.schema,
                 vec![],
-                &params_specs_simple,
+                &params_specs,
             );
         let lowered_models = lower::lower_for_go(model_lcs);
 

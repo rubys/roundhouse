@@ -48,7 +48,7 @@ fn update_and_from_params_skip_writerless_permitted_fields() {
     // The permit spec a TagsController would declare: `tag_name` is a
     // lookup key with NO writer; every other name has one (column,
     // user-defined `def category_name=`, attr_accessor virtual).
-    let params_specs: std::collections::BTreeMap<Symbol, Vec<Symbol>> = [(
+    let params_specs = roundhouse::lower::controller_to_library::params::specs_from_lists(&[(
         Symbol::from("tag"),
         vec![
             Symbol::from("tag_name"),
@@ -57,9 +57,7 @@ fn update_and_from_params_skip_writerless_permitted_fields() {
             Symbol::from("tag"),
             Symbol::from("description"),
         ],
-    )]
-    .into_iter()
-    .collect();
+    )]);
 
     let (lcs, _registry) =
         lower_models_with_registry_and_params(&app.models, &app.schema, vec![], &params_specs);

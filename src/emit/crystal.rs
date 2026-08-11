@@ -192,13 +192,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // controller/view lowerers extend so cross-class dispatch
     // (`Article.find(...)`, `Views::Articles.index(...)`) types
     // through.
-    let params_specs_full =
+    let params_specs =
         crate::lower::controller_to_library::params::collect_specs(&app.controllers);
-    let params_specs: std::collections::BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>> =
-        params_specs_full
-            .iter()
-            .map(|(r, s)| (r.clone(), s.fields.clone()))
-            .collect();
 
     let vctx = crate::lower::ViewLowerCtx::new(app);
     let preliminary_views: Vec<crate::dialect::LibraryClass> = app
@@ -227,7 +222,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             (name, format!("src/models/{stem}"))
         })
         .collect();
-    for spec in params_specs_full.values() {
+    for spec in params_specs.iter() {
         let name = spec.class_id.0.as_str().to_string();
         let stem = crate::naming::snake_case(&name);
         synthesized_siblings.push((name, format!("src/models/{stem}")));

@@ -16,7 +16,6 @@
 //! reference view modules); controllers + the transpiled framework runtime
 //! land in Phase 3. See `docs/csharp-migration-plan.md`.
 
-use std::collections::BTreeMap;
 
 use super::EmittedFile;
 use crate::App;
@@ -73,10 +72,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     let view_extras = crate::lower::extras_from_lcs(&preliminary_views);
 
     // Permitted-params specs → each model gains a typed `from_params`.
-    let params_specs_full =
+    let params_specs =
         crate::lower::controller_to_library::params::collect_specs(&app.controllers);
-    let params_specs: BTreeMap<crate::ident::Symbol, Vec<crate::ident::Symbol>> =
-        params_specs_full.iter().map(|(r, s)| (r.clone(), s.fields.clone())).collect();
 
     let (model_lcs, model_registry) = crate::lower::lower_models_with_registry_and_params(
         &app.models,

@@ -105,18 +105,13 @@ fn dump_propagation_marks_real_blog() {
             })
             .collect();
     let mut route_helper_funcs = roundhouse::lower::lower_routes_to_library_functions(&app);
-    let params_specs_full =
+    let params_specs =
         roundhouse::lower::controller_to_library::params::collect_specs(&app.controllers);
-    let params_specs_simple: std::collections::BTreeMap<roundhouse::ident::Symbol, Vec<roundhouse::ident::Symbol>> =
-        params_specs_full
-            .iter()
-            .map(|(r, s)| (r.clone(), s.fields.clone()))
-            .collect();
     let (mut model_lcs, model_registry) = roundhouse::lower::lower_models_with_registry_and_params(
         &app.models,
         &app.schema,
         view_extras,
-        &params_specs_simple,
+        &params_specs,
     );
 
     let view_lower_extras: Vec<(roundhouse::ident::ClassId, roundhouse::analyze::ClassInfo)> =
