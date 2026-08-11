@@ -137,13 +137,48 @@ struct Ctx {
     module_prefix: String,
     /// Helper-name prefix: `admin_`.
     name_prefix: String,
-    /// Enclosing `resources` (singular, plural), reset by Scope.
-    parent: Option<(String, String)>,
+    /// Enclosing `resources`/`resource` blocks, OUTERMOST FIRST.
+    ///
+    /// A stack rather than one pair because Rails accumulates every
+    /// level, in both the path and the helper name: `resource :account`
+    /// wrapping `resources :bots` wrapping `resource :key` is
+    /// `account_bot_key_path` at `/account/bots/:bot_id/key`. Holding
+    /// only the innermost lost `account` from both.
+    parents: Vec<Nesting>,
+}
+
+/// One enclosing resource.
+#[derive(Clone, Debug, PartialEq)]
+struct Nesting {
+    /// Helper-name segment (`user`, `account`); accumulates into the
+    /// prefix in declaration order.
+    singular: String,
+    /// Path segment, which is the name as written (`users`, `account`).
+    plural: String,
+    /// Whether this level contributes a `/:<singular>_id` segment.
+    ///
+    /// FALSE for a singular `resource :account`: Rails routes its
+    /// children at `/account/…` with no `:account_id`, because there is
+    /// only ever one. Getting this wrong put a phantom id in the middle
+    /// of every path under a singular parent (`/account/:account_id/logo`).
+    has_id: bool,
 }
 
 impl Ctx {
+    /// The innermost enclosing resource — what controller inference and
+    /// the bare-verb shortcuts key off.
     fn parent_pair(&self) -> Option<(&str, &str)> {
-        self.parent.as_ref().map(|(a, b)| (a.as_str(), b.as_str()))
+        self.parents
+            .last()
+            .map(|n| (n.singular.as_str(), n.plural.as_str()))
+    }
+
+    /// `account_bot_` — every enclosing level's singular, in order.
+    fn parent_name_prefix(&self) -> String {
+        self.parents
+            .iter()
+            .map(|n| format!("{}_", n.singular))
+            .collect()
     }
 }
 
@@ -193,7 +228,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
             let forced_format = constraints
                 .get(&Symbol::from("format"))
                 .map(|f| Symbol::from(f.as_str()));
-            let (nested, base_params) = nest_path(path, ctx.parent_pair(), *scope);
+            let (nested, base_params) = nest_path(path, &ctx.parents, *scope);
             let full_path = prefix_path(&ctx.ns_path, &nested);
             // Rails optional `(…)` segments (`get "/s/:id/(:title)"`) match
             // whether or not the segment is present; expand them into
@@ -233,7 +268,37 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 ResourceScope::Nested => None,
             };
             let (derived_name, named) = match as_name.as_ref() {
-                Some(s) => (format!("{}{}", ctx.name_prefix, s.as_str()), true),
+                // Where an explicit `as:` sits relative to the enclosing
+                // resource depends on the scope, and the two go OPPOSITE
+                // ways. Measured against Rails 8.1 inside
+                // `resources :rooms`:
+                //
+                //   get "@:id", as: :at_message        → room_at_message
+                //   get :preview, on: :member, as: :peek → peek_room
+                //   get :recent, on: :collection, as: :fresh → fresh_rooms
+                //
+                // A nested route reads parent-first (it is a thing
+                // BELONGING to the room); a member/collection route reads
+                // verb-first (it is an ACTION on the room). Prefixing
+                // unconditionally — which this did — cost campfire
+                // `room_at_message` and `room_bot_messages`.
+                Some(s) => {
+                    let s = s.as_str();
+                    let n = match (scope, ctx.parent_pair()) {
+                        (ResourceScope::Member, Some((parent, _))) => {
+                            format!("{}{s}_{parent}", ctx.name_prefix)
+                        }
+                        (ResourceScope::Collection, Some((_, plural))) => {
+                            format!("{}{s}_{plural}", ctx.name_prefix)
+                        }
+                        (ResourceScope::Nested, _) => {
+                            format!("{}{}{s}", ctx.name_prefix, ctx.parent_name_prefix())
+                        }
+                        // No enclosing resource — the name stands alone.
+                        _ => format!("{}{s}", ctx.name_prefix),
+                    };
+                    (n, true)
+                }
                 None => match scoped_name {
                     Some(n) => (n, true),
                     None => match static_path_name(&variants[0]) {
@@ -417,7 +482,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 }
                 let path = format!("{resource_path}{suffix}");
                 let (nested_path, mut params) =
-                    nest_path(&path, ctx.parent_pair(), ResourceScope::Nested);
+                    nest_path(&path, &ctx.parents, ResourceScope::Nested);
                 let full_path = prefix_path(&ctx.ns_path, &nested_path);
                 if suffix.contains(":id") && !params.iter().any(|p| p == "id") {
                     params.push("id".to_string());
@@ -426,7 +491,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     action_name,
                     &helper_singular,
                     &helper_plural,
-                    ctx.parent_pair(),
+                    &ctx.parent_name_prefix(),
                     &ctx.name_prefix,
                 );
                 out.push(FlatRoute {
@@ -444,7 +509,15 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 });
             }
             let child_ctx = Ctx {
-                parent: Some((singular_low.clone(), name.as_str().to_string())),
+                parents: {
+                    let mut p = ctx.parents.clone();
+                    p.push(Nesting {
+                        singular: singular_low.clone(),
+                        plural: name.as_str().to_string(),
+                        has_id: !*singular,
+                    });
+                    p
+                },
                 ..ctx.clone()
             };
             for child in nested {
@@ -453,9 +526,27 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
         }
         RouteSpec::Scope { path, module, as_prefix, entries } => {
             let mut child = ctx.clone();
-            // Scope boundaries reset the resources-nesting context —
-            // mirrors the ingester's controller-inference reset.
-            child.parent = None;
+            // Resource nesting SURVIVES a scope/namespace boundary —
+            // measured against Rails 8.1, which is the only authority
+            // here:
+            //
+            //   resources :users do
+            //     scope module: "users" { resource :avatar }   # /users/:user_id/avatar
+            //     namespace :admin     { resources :notes }    # /users/:user_id/admin/notes
+            //     scope :extra         { resource :badge }     # /extra/users/:user_id/badge
+            //   end
+            //
+            // all keep the `user_` name prefix and the `:user_id`
+            // segment. Resetting it here (which this did, by analogy
+            // with the INGESTER's reset — a different question, about
+            // inferring a controller for a bare verb) cost campfire 35
+            // of its 78 route helpers: `account_logo` came out `logo` at
+            // `/logo`, `user_avatar` came out `avatar` at `/avatar`, and
+            // every page linking to one of them 404'd.
+            //
+            // Note the third line: a scope PATH prefixes outside the
+            // parent nesting, which `prefix_path(ns_path, nested_path)`
+            // below already gets right.
             if let Some(p) = path {
                 child.ns_path = prefix_path(&ctx.ns_path, &format!("/{}", p.trim_matches('/')));
             }
@@ -510,11 +601,39 @@ fn qualify_controller(module_prefix: &str, controller: &ClassId) -> ClassId {
 /// declaration order (parent first).
 fn nest_path(
     path: &str,
-    scope: Option<(&str, &str)>,
+    parents: &[Nesting],
     rscope: ResourceScope,
 ) -> (String, Vec<String>) {
-    let Some((parent, parent_plural)) = scope else {
+    let Some((innermost, outer)) = parents.split_last() else {
         return (path.to_string(), vec![]);
+    };
+    // Every level ABOVE the innermost contributes its segment and, if it
+    // has one, its id — identically for all three scopes. Only the
+    // innermost differs, which is what the match below is about.
+    let mut prefix = String::new();
+    let mut params: Vec<String> = Vec::new();
+    for frame in outer {
+        prefix.push('/');
+        prefix.push_str(&frame.plural);
+        if frame.has_id {
+            prefix.push_str(&format!("/:{}_id", frame.singular));
+            params.push(format!("{}_id", frame.singular));
+        }
+    }
+    let (parent, parent_plural) = (innermost.singular.as_str(), innermost.plural.as_str());
+    let prefix = &prefix;
+    // Rails joins route segments with `/` unconditionally. A bare-verb
+    // shortcut arrives here already slash-prefixed (`/reply`), but an
+    // explicit path string is verbatim source — campfire writes
+    // `get "@:message_id"` inside `resources :rooms`, which Rails serves
+    // at `/rooms/:room_id/@:message_id`. Concatenating raw glued it onto
+    // the id (`/rooms/:room_id@:message_id`) and the route never matched.
+    let owned_path;
+    let path: &str = if path.starts_with('/') {
+        path
+    } else {
+        owned_path = format!("/{path}");
+        &owned_path
     };
     match rscope {
         // `member do get "reply" end` → `/comments/:id/reply` (`:id`, the
@@ -524,7 +643,8 @@ fn nest_path(
         // used verbatim, matching Rails' escape from the nesting.
         ResourceScope::Member => {
             if is_bare_child_segment(path) {
-                (format!("/{parent_plural}/:id{path}"), vec!["id".to_string()])
+                params.push("id".to_string());
+                (format!("{prefix}/{parent_plural}/:id{path}"), params)
             } else {
                 (path.to_string(), vec![])
             }
@@ -532,16 +652,22 @@ fn nest_path(
         // `collection do get "search" end` → `/photos/search` (no id).
         ResourceScope::Collection => {
             if is_bare_child_segment(path) {
-                (format!("/{parent_plural}{path}"), vec![])
+                (format!("{prefix}/{parent_plural}{path}"), params)
             } else {
                 (path.to_string(), vec![])
             }
         }
         // Bare verb declared directly in the block, or a nested resource's
-        // own actions: Rails nests under the parent's `/:<singular>_id`.
+        // own actions: Rails nests under the parent's `/:<singular>_id`
+        // — unless the parent is SINGULAR, which has no id to nest under.
         ResourceScope::Nested => {
-            let full = format!("/{parent_plural}/:{parent}_id{path}");
-            (full, vec![format!("{parent}_id")])
+            let mut full = format!("{prefix}/{parent_plural}");
+            if innermost.has_id {
+                full.push_str(&format!("/:{parent}_id"));
+                params.push(format!("{parent}_id"));
+            }
+            full.push_str(path);
+            (full, params)
         }
     }
 }
@@ -645,12 +771,9 @@ fn resource_as_name(
     action: &str,
     singular_low: &str,
     plural: &str,
-    scope: Option<(&str, &str)>,
+    parent_prefix: &str,
     ns_prefix: &str,
 ) -> String {
-    let parent_prefix = scope
-        .map(|(p, _)| format!("{p}_"))
-        .unwrap_or_default();
     match action {
         "index" | "create" => format!("{ns_prefix}{parent_prefix}{plural}"),
         "new" => format!("new_{ns_prefix}{parent_prefix}{singular_low}"),
@@ -663,12 +786,21 @@ fn resource_as_name(
 mod tests {
     use super::*;
 
+    /// A plural-resource nesting frame, the common test shape.
+    fn plural(singular: &str, plural: &str) -> Vec<Nesting> {
+        vec![Nesting {
+            singular: singular.to_string(),
+            plural: plural.to_string(),
+            has_id: true,
+        }]
+    }
+
     #[test]
     fn member_route_nests_under_id() {
         // `member do get "reply" end` in `resources :comments` — the
         // record's own key, so `find_comment` reads `params[:id]`.
         let (path, params) =
-            nest_path("/reply", Some(("comment", "comments")), ResourceScope::Member);
+            nest_path("/reply", &plural("comment", "comments"), ResourceScope::Member);
         assert_eq!(path, "/comments/:id/reply");
         assert_eq!(params, vec!["id".to_string()]);
     }
@@ -678,7 +810,7 @@ mod tests {
         // `get "/comments/:id" => …` inside a member block escapes nesting.
         let (path, params) = nest_path(
             "/comments/:id",
-            Some(("comment", "comments")),
+            &plural("comment", "comments"),
             ResourceScope::Member,
         );
         assert_eq!(path, "/comments/:id");
@@ -688,7 +820,7 @@ mod tests {
     #[test]
     fn collection_route_has_no_id_segment() {
         let (path, params) =
-            nest_path("/search", Some(("photo", "photos")), ResourceScope::Collection);
+            nest_path("/search", &plural("photo", "photos"), ResourceScope::Collection);
         assert_eq!(path, "/photos/search");
         assert!(params.is_empty());
     }
@@ -697,14 +829,14 @@ mod tests {
     fn bare_verb_in_resources_keeps_parent_id() {
         // `post "upvote"` directly in `resources :stories` → `:story_id`.
         let (path, params) =
-            nest_path("/upvote", Some(("story", "stories")), ResourceScope::Nested);
+            nest_path("/upvote", &plural("story", "stories"), ResourceScope::Nested);
         assert_eq!(path, "/stories/:story_id/upvote");
         assert_eq!(params, vec!["story_id".to_string()]);
     }
 
     #[test]
     fn top_level_route_is_unnested() {
-        let (path, params) = nest_path("/login", None, ResourceScope::Nested);
+        let (path, params) = nest_path("/login", &[], ResourceScope::Nested);
         assert_eq!(path, "/login");
         assert!(params.is_empty());
     }

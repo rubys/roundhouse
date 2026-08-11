@@ -390,6 +390,12 @@ fn ingest_explicit_route(
     let mut to_is_unsupported = false;
     let mut as_name: Option<Symbol> = None;
     let mut action_kwarg: Option<String> = None;
+    // The INLINE spelling of `member do … end` / `collection do … end`.
+    // Rails accepts both, and campfire writes `delete :clear, on:
+    // :collection`; only the block form was recognized, so the route was
+    // nested as `/searches/:search_id/clear` (named `search_clear`)
+    // where Rails serves `/searches/clear` (named `clear_searches`).
+    let mut on_scope: Option<ResourceScope> = None;
     let mut constraints: IndexMap<Symbol, String> = IndexMap::new();
 
     for arg in args_node.arguments().iter() {
@@ -463,6 +469,13 @@ fn ingest_explicit_route(
                         as_name = symbol_value(value)
                             .map(Symbol::from)
                             .or_else(|| string_value(value).map(Symbol::from));
+                    }
+                    "on" => {
+                        on_scope = match symbol_value(value).as_deref() {
+                            Some("member") => Some(ResourceScope::Member),
+                            Some("collection") => Some(ResourceScope::Collection),
+                            _ => None,
+                        };
                     }
                     // `post "suggest", :action => "submit_suggestions"` —
                     // the action override for a resource-scoped shortcut.
@@ -546,9 +559,10 @@ fn ingest_explicit_route(
         action: Symbol::from(action),
         as_name,
         constraints,
-        // Default; a `member do`/`collection do` wrapper (handled in
-        // `ingest_route_body`) overwrites this on the returned entry.
-        scope: ResourceScope::Nested,
+        // The inline `on:` kwarg wins; otherwise Nested is the default
+        // and a `member do`/`collection do` wrapper (handled in
+        // `ingest_route_body`) overwrites it on the returned entry.
+        scope: on_scope.unwrap_or(ResourceScope::Nested),
     }))
 }
 
