@@ -42,6 +42,7 @@ pub mod schema_to_library;
 pub mod seeds_to_library;
 pub mod test_module_to_library;
 pub mod create_block;
+pub mod params_merge;
 pub mod duration;
 pub mod and_return;
 pub mod case_lambda;
@@ -237,6 +238,12 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // and the `errors` receiver it matches is left untouched).
     ("errors_full_messages", &[]),
     ("create_block", &[]),
+    // `<params>.merge(k: v)` written a method away from the permit
+    // chain → `Model.from_params(p)` + per-key setters, hoisted above
+    // the enclosing statement. AFTER `create_block`, whose inlining
+    // turns `Model.create!(p.merge(...)) { }` into the `Model.new(...)`
+    // shape this pass matches.
+    ("params_merge", &["create_block"]),
     ("update_kwargs", &[]),
     ("mailer_class_side", &[]),
     ("job_class_side", &[]),
@@ -371,6 +378,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("errors_full_messages");
     diags.extend(create_block::apply_create_block_inline(app));
     ran!("create_block");
+    diags.extend(params_merge::apply_params_merge_lowering(app));
+    ran!("params_merge");
     diags.extend(update_kwargs::apply_update_kwargs_inline(app));
     ran!("update_kwargs");
     diags.extend(mailer_class_side::apply_mailer_class_side(app));

@@ -545,6 +545,52 @@ fn writable_permit_fields(
     fields: &[crate::ident::Symbol],
 ) -> Vec<crate::ident::Symbol> {
     use crate::diagnostic::{Diagnostic, DiagnosticKind};
+    use crate::ident::Symbol;
+
+    let writable = writable_field_set(model, table);
+
+    fields
+        .iter()
+        .filter(|field| {
+            if writable.contains(*field) || model_defines_writer(model, field) {
+                return true;
+            }
+            let kind = DiagnosticKind::LowerResidue {
+                pass: Symbol::from("permit_writer_filter"),
+                construct: Symbol::from("permit"),
+                reason: Symbol::from("no writer"),
+            };
+            let d = Diagnostic {
+                span: model.span,
+                severity: Diagnostic::default_severity(&kind),
+                kind,
+                message: format!(
+                    "permitted field `{field}` has no writer on `{model_name}` (not a \
+                     column, attr_writer, belongs_to, typed_store, has_secure_password, \
+                     or `def {field}=`) — dropped from the synthesized update/from_params; \
+                     Rails would raise UnknownAttributeError if a request submitted it",
+                    field = field.as_str(),
+                    model_name = model.name.0.as_str(),
+                ),
+            };
+            crate::emit::diagnostics::push(d);
+            false
+        })
+        .cloned()
+        .collect()
+}
+
+/// Every name this model can be assigned through, EXCEPT the per-field
+/// `def <field>=` check (which needs the field name — see
+/// `model_defines_writer`). Split out of `writable_permit_fields` so
+/// other passes can ask the same question without its ledger side
+/// effect: `params_merge` has to know whether a merged key has a writer
+/// before it synthesizes a setter, and a second copy of this scan would
+/// drift.
+pub(crate) fn writable_field_set(
+    model: &Model,
+    table: &crate::schema::Table,
+) -> std::collections::BTreeSet<crate::ident::Symbol> {
     use crate::dialect::{Association, ModelBodyItem};
     use crate::expr::{ExprNode, Literal};
     use crate::ident::Symbol;
@@ -586,40 +632,14 @@ fn writable_permit_fields(
     for (name, _ty) in self::markers::attribute_api_decls(&model.body) {
         writable.insert(name);
     }
+    writable
+}
 
-    fields
-        .iter()
-        .filter(|field| {
-            if writable.contains(*field) {
-                return true;
-            }
-            let writer = Symbol::from(format!("{}=", field.as_str()));
-            if model_defines_instance_method(model, &writer) {
-                return true;
-            }
-            let kind = DiagnosticKind::LowerResidue {
-                pass: Symbol::from("permit_writer_filter"),
-                construct: Symbol::from("permit"),
-                reason: Symbol::from("no writer"),
-            };
-            let d = Diagnostic {
-                span: model.span,
-                severity: Diagnostic::default_severity(&kind),
-                kind,
-                message: format!(
-                    "permitted field `{field}` has no writer on `{model_name}` (not a \
-                     column, attr_writer, belongs_to, typed_store, has_secure_password, \
-                     or `def {field}=`) — dropped from the synthesized update/from_params; \
-                     Rails would raise UnknownAttributeError if a request submitted it",
-                    field = field.as_str(),
-                    model_name = model.name.0.as_str(),
-                ),
-            };
-            crate::emit::diagnostics::push(d);
-            false
-        })
-        .cloned()
-        .collect()
+/// The per-field half of the writable question: a hand-written
+/// `def <field>=` in the model body.
+pub(crate) fn model_defines_writer(model: &Model, field: &crate::ident::Symbol) -> bool {
+    let writer = crate::ident::Symbol::from(format!("{}=", field.as_str()));
+    model_defines_instance_method(model, &writer)
 }
 
 fn build_methods(

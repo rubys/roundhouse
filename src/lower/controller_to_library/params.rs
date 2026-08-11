@@ -126,6 +126,10 @@ impl ParamsSpecs {
             .find(|s| &s.resource == resource && s.fields == fields)
     }
 
+    pub fn by_class(&self, class_id: &ClassId) -> Option<&ParamsSpec> {
+        self.specs.iter().find(|s| &s.class_id == class_id)
+    }
+
     pub fn for_resource<'a>(
         &'a self,
         resource: &'a Symbol,
