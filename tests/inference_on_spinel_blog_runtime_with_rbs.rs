@@ -446,7 +446,16 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // (`saved_changes(record).__struct__`) and fails mix's
     // warnings-as-errors gate. Each local is one more untyped site here —
     // the cost of keeping the elixir lane compiling.
-    const CEILING: usize = 625;
+    // 2026-08-11: 625 -> 626 — `ActiveRecord::RecordNotUnique` joined
+    // errors.rb so campfire's `rescue ActiveRecord::RecordNotUnique`
+    // resolves (without the constant, the rescue clause raises NameError
+    // when EVALUATED, taking the happy path down with it). Its one
+    // untyped node is the `super(message)` call, identical in shape to
+    // the `RecordNotFound` and `ValueTooLong` bodies already counted
+    // here — `super` has no signature for the typer to resolve. A
+    // like-for-like +1 from a corpus that grew by one class, not a
+    // typing regression.
+    const CEILING: usize = 626;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions exceeds ceiling of {CEILING}.\n\

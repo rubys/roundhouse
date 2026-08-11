@@ -38,14 +38,15 @@ fn errors_rb_ingests_and_emits_via_library_path() {
     // nesting and prepends the path to each class's syntactic name.
     assert_eq!(
         classes.len(),
-        3,
-        "expected RecordNotFound + ValueTooLong + RecordInvalid; got {} ({:?})",
+        4,
+        "expected RecordNotFound + ValueTooLong + RecordNotUnique + RecordInvalid; got {} ({:?})",
         classes.len(),
         classes.iter().map(|c| c.name.0.as_str().to_string()).collect::<Vec<_>>(),
     );
     let names: Vec<&str> = classes.iter().map(|c| c.name.0.as_str()).collect();
     assert!(names.contains(&"ActiveRecord::RecordNotFound"), "names: {names:?}");
     assert!(names.contains(&"ActiveRecord::ValueTooLong"), "names: {names:?}");
+    assert!(names.contains(&"ActiveRecord::RecordNotUnique"), "names: {names:?}");
     assert!(names.contains(&"ActiveRecord::RecordInvalid"), "names: {names:?}");
 
     // Both inherit from StandardError. is_module = false.
@@ -81,7 +82,7 @@ fn errors_rb_ingests_and_emits_via_library_path() {
         .iter()
         .filter(|f| f.path.extension().and_then(|e| e.to_str()) == Some("rb"))
         .count();
-    assert_eq!(rb_count, 3, "one .rb file per LibraryClass");
+    assert_eq!(rb_count, 4, "one .rb file per LibraryClass");
 
     let invalid_file = files
         .iter()

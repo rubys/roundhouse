@@ -59,8 +59,8 @@ fn inflector_module_transpiles_to_typescript() {
     assert_eq!(emitted, EXPECTED_TS, "emitted TS mismatch");
 }
 
-/// Phase 1 second target: errors.rb has three classes (RecordNotFound,
-/// ValueTooLong, RecordInvalid), one with a synth attr_reader
+/// Phase 1 second target: errors.rb has four classes (RecordNotFound,
+/// ValueTooLong, RecordNotUnique, RecordInvalid), one with a synth attr_reader
 /// (`record`) and an `initialize` that calls `super(...)`. Validates parent extends
 /// (StandardError → Error), constructor synthesis, attr_reader-as-
 /// field detection, and `@ivar` → `this.x` in the constructor body.
@@ -74,7 +74,7 @@ fn errors_rb_transpiles_to_typescript_classes() {
     let classes = parse_library_with_rbs(&ruby, &rbs, "runtime/ruby/active_record/errors.rb")
         .expect("parse_library_with_rbs");
 
-    assert_eq!(classes.len(), 3, "expected 3 classes; got {}", classes.len());
+    assert_eq!(classes.len(), 4, "expected 4 classes; got {}", classes.len());
 
     let not_found = classes
         .iter()
@@ -94,6 +94,16 @@ fn errors_rb_transpiles_to_typescript_classes() {
     assert!(
         tl_ts.contains("export class ValueTooLong extends Error"),
         "ValueTooLong: {tl_ts}"
+    );
+
+    let not_unique = classes
+        .iter()
+        .find(|c| c.name.0.as_str() == "ActiveRecord::RecordNotUnique")
+        .expect("ActiveRecord::RecordNotUnique");
+    let nu_ts = emit_library_class(not_unique).expect("emit RecordNotUnique");
+    assert!(
+        nu_ts.contains("export class RecordNotUnique extends Error"),
+        "RecordNotUnique: {nu_ts}"
     );
 
     let invalid = classes

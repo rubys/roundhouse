@@ -816,7 +816,14 @@ fn every_runtime_method_body_concretely_typed() {
     // together. Confining that read to one class method is what keeps
     // it off the jar's own String-typed surface. +10 sites; ceiling
     // raised 245 → 255.
-    const CEILING: usize = 255;
+    // 2026-08-11 ActiveRecord::RecordNotUnique (campfire's first-run
+    // screen rescues it to turn a lost race into a redirect): the one
+    // site is the `super(message)` call in its constructor, the same
+    // shape `RecordNotFound` and `ValueTooLong` already contribute here
+    // — `super` has no signature for the typer to resolve. +1 site;
+    // ceiling raised 255 -> 256. Growth from one more class in the
+    // corpus, not from typing getting worse.
+    const CEILING: usize = 256;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

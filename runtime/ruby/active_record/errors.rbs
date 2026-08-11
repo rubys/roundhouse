@@ -9,6 +9,13 @@ module ActiveRecord
     def initialize: (?String message) -> void
   end
 
+  # Raised when an INSERT/UPDATE trips a unique index. Defined so a
+  # `rescue ActiveRecord::RecordNotUnique` clause resolves; see the .rb
+  # for why the adapters do not raise it yet.
+  class RecordNotUnique < StandardError
+    def initialize: (?String message) -> void
+  end
+
   # Raised by `Base#save!` when validation fails. `record` is the
   # invalid model; `attr_reader :record` lowers to a getter at ingest.
   class RecordInvalid < StandardError
