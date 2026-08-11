@@ -643,7 +643,7 @@ pub fn target_files(
     let files = if target == BuildTarget::Blog {
         files
     } else {
-        let files = ensure_seed_sql(files)?;
+        let files = ensure_seed_sql(files, app)?;
         let files = ensure_storage_keep(files, target);
         let files = ensure_static_assets(files, target);
         ensure_e2e(files, target)
@@ -2165,22 +2165,34 @@ fn vpath_rel(from_dir: &str, to: &str) -> String {
     rel.join("/")
 }
 
-/// Canonical path of the language-agnostic SQL seed. Single source of
-/// truth — spinel/ruby/jruby ship it via the scaffold walk, every other
-/// target gets it injected by `ensure_seed_sql`.
-const SEED_SQL_SRC: &str = "runtime/spinel/scaffold/db/seed.sql";
-
 /// Ensure the file set carries `db/seed.sql` (the self-contained,
-/// Ruby-free seed applied with `sqlite3 <db> < db/seed.sql`). No-op when
-/// the set already includes it (spinel/ruby/jruby, via the scaffold);
-/// otherwise reads the canonical file and inserts it in sorted position.
-fn ensure_seed_sql(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, String> {
-    if files.iter().any(|(p, _)| p == "db/seed.sql") {
+/// Ruby-free seed applied with `sqlite3 <db> < db/seed.sql`).
+///
+/// THE APP'S OWN DATA, ALWAYS. `db/seeds.rb` renders to SQL
+/// (`emit::shared::seed_sql`); an app without one gets its SCHEMA and no
+/// rows. Either way this replaces whatever is in the set, including the
+/// scaffold's copy that spinel/ruby/jruby pick up by directory walk.
+///
+/// What this retired: a hand-maintained transcription of the blog's rows
+/// living in the compiler, injected into every archive whose emit
+/// produced no seed — which was all of them. The blog shipped the same
+/// data twice, derived and transcribed, with nothing keeping them in
+/// sync; and every other app shipped the BLOG's rows. tiny-blog and
+/// roda-blog have `posts`, campfire has fifteen chat tables, and all
+/// three got `INSERT INTO articles`, which created a stray table and
+/// left the real ones empty — so their Setup step appeared to succeed
+/// against an empty database.
+fn ensure_seed_sql(
+    files: Vec<(String, String)>,
+    app: &App,
+) -> Result<Vec<(String, String)>, String> {
+    let Some(content) = emit::shared::seed_sql::render_seed_sql(app)
+        .or_else(|| emit::shared::seed_sql::render_schema_only_sql(app))
+    else {
         return Ok(files);
-    }
-    let content = fs::read_to_string(SEED_SQL_SRC)
-        .map_err(|e| format!("read {SEED_SQL_SRC}: {e}"))?;
-    let mut files = files;
+    };
+    let mut files: Vec<(String, String)> =
+        files.into_iter().filter(|(p, _)| p != "db/seed.sql").collect();
     files.push(("db/seed.sql".to_string(), content));
     files.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(files)
@@ -2579,28 +2591,63 @@ mod tests {
         assert!(strip_cable_from_config_ru("run app\n").is_err());
     }
 
-    #[test]
-    fn ensure_seed_sql_injects_when_absent() {
-        let files = vec![("app/main.go".to_string(), "package main".to_string())];
-        let out = ensure_seed_sql(files).unwrap();
-        let seed = out.iter().find(|(p, _)| p == "db/seed.sql");
-        assert!(seed.is_some(), "db/seed.sql should be injected");
-        // Content is the canonical file — sanity-check it carries the seed rows.
-        assert!(seed.unwrap().1.contains("INSERT INTO articles"));
-        // Result stays sorted by path.
-        assert!(out.windows(2).all(|w| w[0].0 <= w[1].0));
+    /// A fixture through the SAME pipeline the emitter uses — ingest
+    /// then analyze+lower. Raw ingest is not enough: `rewrite_assoc_create`
+    /// (which turns `article.comments.create!` into the explicit
+    /// `Comment.create!(article_id: …)` the seed renderer reads) needs the
+    /// types analyze attaches.
+    fn lowered_app(fixture: &str) -> App {
+        let mut app = ingest_app(std::path::Path::new(fixture)).expect("ingest");
+        let _ = crate::session::analyze_and_lower(&mut app);
+        app
     }
 
     #[test]
-    fn ensure_seed_sql_is_idempotent_when_present() {
+    fn seed_sql_is_generated_from_the_apps_own_seeds() {
+        let files = vec![("app/main.go".to_string(), "package main".to_string())];
+        let out = ensure_seed_sql(files, &lowered_app("fixtures/real-blog")).unwrap();
+        let seed = &out.iter().find(|(p, _)| p == "db/seed.sql").expect("seed shipped").1;
+        assert!(seed.contains("generated from the app's own db/seeds.rb"), "{seed}");
+        // The blog's three articles and three comments, from db/seeds.rb.
+        assert_eq!(seed.matches("INSERT INTO articles").count(), 3, "{seed}");
+        assert_eq!(seed.matches("INSERT INTO comments").count(), 3, "{seed}");
+        // Schema first, so the file is self-sufficient against a fresh DB.
+        assert!(
+            seed.find("CREATE TABLE").unwrap() < seed.find("INSERT INTO").unwrap(),
+            "DDL must precede the rows:\n{seed}"
+        );
+        assert!(out.windows(2).all(|w| w[0].0 <= w[1].0), "stays sorted");
+    }
+
+    #[test]
+    fn a_stale_seed_file_is_REPLACED_not_preserved() {
+        // The inverse of the old contract, and the point of the change:
+        // spinel/ruby/jruby pick up the scaffold's copy by directory
+        // walk, and that copy held the BLOG's rows for every app.
         let files = vec![
-            ("db/seed.sql".to_string(), "-- already here".to_string()),
+            ("db/seed.sql".to_string(), "-- stale scaffold copy".to_string()),
             ("app/main.go".to_string(), "package main".to_string()),
         ];
-        let out = ensure_seed_sql(files).unwrap();
+        let out = ensure_seed_sql(files, &lowered_app("fixtures/real-blog")).unwrap();
         let seeds: Vec<_> = out.iter().filter(|(p, _)| p == "db/seed.sql").collect();
         assert_eq!(seeds.len(), 1, "no duplicate db/seed.sql");
-        assert_eq!(seeds[0].1, "-- already here", "existing content preserved");
+        assert!(
+            !seeds[0].1.contains("stale scaffold copy"),
+            "the app's own data must win:\n{}",
+            seeds[0].1
+        );
+    }
+
+    #[test]
+    fn an_app_without_seeds_ships_its_schema_and_no_rows() {
+        // tiny-blog has no `db/seeds.rb`. It must NOT inherit another
+        // app's rows — its tables are `posts`/`comments`, and it was
+        // being handed `INSERT INTO articles`.
+        let out = ensure_seed_sql(Vec::new(), &lowered_app("fixtures/tiny-blog")).unwrap();
+        let seed = &out.iter().find(|(p, _)| p == "db/seed.sql").expect("seed shipped").1;
+        assert!(seed.contains("CREATE TABLE IF NOT EXISTS posts"), "{seed}");
+        assert!(!seed.contains("INSERT INTO"), "no rows to invent:\n{seed}");
+        assert!(!seed.contains("articles"), "no other app's tables:\n{seed}");
     }
 
     #[test]
