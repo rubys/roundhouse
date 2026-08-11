@@ -107,6 +107,7 @@ fn tiny_blog_round_trips() {
             constraints: IndexMap::new(),
             scope: roundhouse::ResourceScope::Nested,
         }],
+        direct_helpers: vec![],
     };
 
     let app = App {

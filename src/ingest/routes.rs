@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use indexmap::IndexMap;
 use ruby_prism::Node;
 
-use crate::dialect::{HttpMethod, ResourceScope, RouteSpec, RouteTable};
+use crate::dialect::{DirectHelper, HttpMethod, ResourceScope, RouteSpec, RouteTable};
 use crate::naming::camelize;
 use crate::{ClassId, Symbol};
 
@@ -57,8 +57,103 @@ pub fn ingest_routes_with_draws(
         Some(body) => ingest_route_body(body, file, None, draws)?,
         None => Vec::new(),
     };
+    // Collected by a second walk rather than threaded through the
+    // recursive entry ingest: a `direct` is not a RouteSpec (it adds no
+    // path), so it has nowhere to ride in the `entries` return, and
+    // every recursive arm would otherwise need a mutable accumulator
+    // for a construct that appears a handful of times per app.
+    let direct_helpers = match block.body() {
+        Some(body) => collect_direct_helpers(&body, file)?,
+        None => Vec::new(),
+    };
 
-    Ok(RouteTable { entries })
+    Ok(RouteTable { entries, direct_helpers })
+}
+
+/// Every `direct :name do |…| … end` in the draw block, at any nesting
+/// depth (Rails accepts one inside a `namespace`/`scope` too).
+///
+/// The block's parameters become the helper's, and its body is ingested
+/// as an ordinary Expr — the whole point is that a `direct` body is
+/// arbitrary Ruby, so nothing here tries to interpret it. The
+/// `route_for` call it evaluates to is resolved later, at lowering,
+/// where the flattened route table is available.
+fn collect_direct_helpers(node: &Node<'_>, file: &str) -> IngestResult<Vec<DirectHelper>> {
+    let mut out = Vec::new();
+    collect_direct_helpers_into(node, file, &mut out)?;
+    Ok(out)
+}
+
+fn collect_direct_helpers_into(
+    node: &Node<'_>,
+    file: &str,
+    out: &mut Vec<DirectHelper>,
+) -> IngestResult<()> {
+    if let Some(call) = node.as_call_node() {
+        if constant_id_str(&call.name()) == "direct" {
+            if let Some(helper) = ingest_direct_helper(&call, file)? {
+                out.push(helper);
+                // Don't descend into a `direct` body — a `route_for`
+                // inside it is the helper's content, not another route.
+                return Ok(());
+            }
+        }
+    }
+    // Explicit descent, matching how every other walk in this tree
+    // recurses (prism's Node exposes no generic child visitor). Inside a
+    // routes file a `direct` can only be nested in another block-taking
+    // DSL call — `namespace`, `scope`, `resources` — so statements and
+    // call blocks are the whole path.
+    if let Some(stmts) = node.as_statements_node() {
+        for stmt in stmts.body().iter() {
+            collect_direct_helpers_into(&stmt, file, out)?;
+        }
+        return Ok(());
+    }
+    if let Some(call) = node.as_call_node() {
+        if let Some(body) = call
+            .block()
+            .and_then(|b| b.as_block_node())
+            .and_then(|b| b.body())
+        {
+            collect_direct_helpers_into(&body, file, out)?;
+        }
+    }
+    Ok(())
+}
+
+fn ingest_direct_helper(
+    call: &ruby_prism::CallNode<'_>,
+    file: &str,
+) -> IngestResult<Option<DirectHelper>> {
+    let Some(name) = call
+        .arguments()
+        .and_then(|args| args.arguments().iter().next().and_then(|a| symbol_value(&a)))
+    else {
+        return Ok(None);
+    };
+    let Some(block) = call.block().and_then(|b| b.as_block_node()) else {
+        return Ok(None);
+    };
+    let params: Vec<Symbol> = block
+        .parameters()
+        .and_then(|p| p.as_block_parameters_node())
+        .and_then(|p| p.parameters())
+        .map(|pn| {
+            pn.requireds()
+                .iter()
+                .filter_map(|r| {
+                    r.as_required_parameter_node()
+                        .map(|rp| Symbol::from(constant_id_str(&rp.name())))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let Some(body) = block.body() else {
+        return Ok(None);
+    };
+    let body = super::expr::ingest_expr(&body, file)?;
+    Ok(Some(DirectHelper { name: Symbol::from(name), params, body }))
 }
 
 /// Walk the statements inside a `routes.draw do ... end` block (or a
@@ -192,21 +287,10 @@ fn ingest_route_call(
         // builder has no notion of. Dropped here with the helper NAME
         // in the ledger line, so the hole reads as "`x_path` is
         // missing" rather than "some DSL was skipped".
-        "direct" => {
-            if super::survey::is_active() {
-                let name = call
-                    .arguments()
-                    .and_then(|args| args.arguments().iter().next().and_then(|a| symbol_value(&a)))
-                    .unwrap_or_else(|| "?".to_string());
-                super::survey::record(&IngestError::Unsupported {
-                    file: file.into(),
-                    message: format!(
-                        "url helper dropped: `direct :{name}` — {name}_path/_url not generated"
-                    ),
-                });
-            }
-            Ok(None)
-        }
+        // Collected out-of-band by `collect_direct_helpers` — it is a
+        // custom URL helper, not a route, so it contributes no entry
+        // here.
+        "direct" => Ok(None),
         // Unknown DSL — `concern`, `devise_for`,
         // `use_doorkeeper`, `authenticate`, etc. land here. Strict
         // ingest fails loud so the fixture that introduces them forces

@@ -967,6 +967,35 @@ pub enum RenderTarget {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RouteTable {
     pub entries: Vec<RouteSpec>,
+    /// `direct :name do |…| … end` — a custom URL helper, not a route.
+    /// It adds nothing to the dispatch table; it names a
+    /// `<name>_path`/`_url` builder whose body is arbitrary Ruby. Kept
+    /// beside `entries` rather than in them because no `RouteSpec`
+    /// variant can hold a body, and the flattener must not see it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub direct_helpers: Vec<DirectHelper>,
+}
+
+/// A `direct` custom URL helper.
+///
+/// Rails calls the block with the helper's arguments PLUS a trailing
+/// options hash, always — `fresh_account_logo_path` invokes
+/// `direct :fresh_account_logo do |options|` with `({})`, and
+/// `fresh_user_avatar_path(user)` invokes
+/// `direct :fresh_user_avatar do |user, options|` with `(user, {})`.
+/// So the last block parameter is the options hash and the rest are the
+/// helper's real parameters; the lowering gives the options param a `{}`
+/// default, which is what makes the no-argument call sites work.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DirectHelper {
+    /// Helper stem — `fresh_user_avatar`, yielding `fresh_user_avatar_path`.
+    pub name: Symbol,
+    /// Block parameters in declaration order; the last is the options
+    /// hash (see above). Empty is possible and means the block takes
+    /// only the options hash implicitly — not a shape the corpus writes.
+    pub params: Vec<Symbol>,
+    /// The block body, which evaluates to a `route_for` call.
+    pub body: Expr,
 }
 
 /// How a custom route nested inside a `resources` block attaches to the

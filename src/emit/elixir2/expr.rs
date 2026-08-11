@@ -3051,7 +3051,8 @@ fn emit_str_literal(value: &str) -> String {
 /// source text (backslash escapes preserved). Ruby's `m` flag (dotall)
 /// maps to Elixir's `s`; `i`/`x` carry over.
 fn emit_regex(pattern: &str, flags: &str) -> String {
-    let escaped = pattern.replace('/', "\\/");
+    // Escape-aware: a source `\/` must not become `\\/`.
+    let escaped = crate::emit::shared::regex_literal::escape_regex_delimiters(pattern);
     let ex_flags: String = flags
         .chars()
         .filter_map(|f| match f {

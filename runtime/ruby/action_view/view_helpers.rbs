@@ -38,6 +38,8 @@ module ActionView
     # backend compiler (V8, YJIT, ZJIT, Spinel, rustc) can specialize
     # against.
     def self.html_escape: (String s) -> String
+    # Percent-encoding for a query-string value; ASCII-only (see the .rb).
+    def self.url_encode: (String s) -> String
 
     # Same monomorphization rationale as html_escape: callers handle
     # nil/non-String coercion explicitly. Real-blog's only caller

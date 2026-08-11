@@ -1096,23 +1096,9 @@ pub(super) fn emit_literal(l: &Literal) -> String {
         // wrapping in `/.../` delimiters, or it terminates the literal early
         // and breaks parsing. Already-escaped `\/` is left alone.
         Literal::Regex { pattern, flags } => {
-            format!("/{}/{flags}", escape_regex_delimiters(pattern))
+            format!("/{}/{flags}", crate::emit::shared::regex_literal::escape_regex_delimiters(pattern))
         }
     }
-}
-
-/// Escape unescaped `/` so the pattern can sit inside `/.../` delimiters.
-fn escape_regex_delimiters(pattern: &str) -> String {
-    let mut out = String::with_capacity(pattern.len() + 4);
-    let mut prev_backslash = false;
-    for c in pattern.chars() {
-        if c == '/' && !prev_backslash {
-            out.push('\\');
-        }
-        out.push(c);
-        prev_backslash = c == '\\' && !prev_backslash;
-    }
-    out
 }
 
 fn emit_lvalue(lv: &LValue) -> String {

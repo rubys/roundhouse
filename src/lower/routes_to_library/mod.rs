@@ -14,6 +14,8 @@
 //! Module-shaped (no inheritance, no instance state) so it emits the
 //! same way under every target's class-vs-module distinction.
 
+pub mod direct;
+
 use crate::App;
 use crate::dialect::{HttpMethod, LibraryFunction, Param};
 use crate::effect::EffectSet;
@@ -222,6 +224,10 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
     // target's call site: every emitter that wants route helpers wants
     // these too, and a per-target wiring is nine places to forget one.
     funcs.extend(lower_url_option_helpers(app));
+    // `direct :name do … end` helpers — not routes, so they never reach
+    // `flat`; they ride here because they live in the same module and
+    // their `route_for` bodies need the flattened table to resolve.
+    funcs.extend(direct::lower_direct_helpers(&module_path, app, &flat));
     funcs
 }
 

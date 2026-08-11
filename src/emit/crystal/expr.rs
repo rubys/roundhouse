@@ -1683,7 +1683,10 @@ pub(super) fn emit_literal(l: &Literal) -> String {
         }
         Literal::Str { value } => format!("{value:?}"),
         Literal::Sym { value } => format!(":{value}"),
-        Literal::Regex { pattern, flags } => format!("/{pattern}/{flags}"),
+        Literal::Regex { pattern, flags } => format!(
+            "/{}/{flags}",
+            crate::emit::shared::regex_literal::escape_regex_delimiters(pattern)
+        ),
     }
 }
 

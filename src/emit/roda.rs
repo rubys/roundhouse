@@ -457,7 +457,10 @@ fn literal_src(l: &Literal) -> String {
         Literal::Float { value } => value.to_string(),
         Literal::Str { value } => format!("{value:?}"),
         Literal::Sym { value } => format!(":{value}"),
-        Literal::Regex { pattern, flags } => format!("/{pattern}/{flags}"),
+        Literal::Regex { pattern, flags } => format!(
+            "/{}/{flags}",
+            crate::emit::shared::regex_literal::escape_regex_delimiters(pattern)
+        ),
     }
 }
 

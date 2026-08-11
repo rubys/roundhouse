@@ -97,6 +97,47 @@ module ActionView
       s.gsub(HTML_ESCAPE_PATTERN, HTML_ESCAPES)
     end
 
+    # Percent-encoding for a QUERY-STRING VALUE — what Rails' `url_for`
+    # applies to the options it turns into a query (`?v=…&size=…`), and
+    # what the generated `direct` URL helpers call.
+    #
+    # Same hand-rolled shape as `html_escape` above and for the same
+    # reason: spinel ships no `cgi`, and a gsub-with-hash transpiles to
+    # every target while a block-form gsub does not.
+    #
+    # ONE PASS, deliberately: this runs per generated URL helper call,
+    # and campfire's `fresh_user_avatar_path` fires once per message row
+    # and per sidebar entry — hundreds of times on a busy room render.
+    # A chain of single-character `gsub`s would be that many full scans
+    # and intermediate Strings per call.
+    #
+    # LIMIT, stated because it is invisible at the call site: the table
+    # covers ASCII. A non-ASCII value passes through unencoded, where
+    # Rails emits per-BYTE escapes (`ä` → `%C3%A4`) — correct for every
+    # value the corpus builds (timestamps, integers, tokens), wrong for a
+    # UTF-8 one, which needs a byte walk this substitution cannot express.
+    # Table + pattern MEASURED against Rails 8.1: `Hash#to_query` runs
+    # each value through `CGI.escape`, which keeps only `A-Za-z0-9.-_~`,
+    # renders space as `+` (NOT `%20` — that is `ERB::Util.url_encode`,
+    # a different helper), and percent-encodes the rest.
+    URL_ESCAPES = {
+      " " => "+",   "!" => "%21", "\"" => "%22", "#" => "%23",
+      "$" => "%24", "%" => "%25", "&" => "%26", "'" => "%27",
+      "(" => "%28", ")" => "%29", "*" => "%2A", "+" => "%2B",
+      "," => "%2C", "/" => "%2F", ":" => "%3A", ";" => "%3B",
+      "<" => "%3C", "=" => "%3D", ">" => "%3E", "?" => "%3F",
+      "@" => "%40", "[" => "%5B", "\\" => "%5C", "]" => "%5D",
+      "^" => "%5E", "`" => "%60", "{" => "%7B", "|" => "%7C",
+      "}" => "%7D",
+    }.freeze
+
+    URL_ESCAPE_PATTERN = /[ !"\#$%&'()*+,\/:;<=>?@\[\\\]^`{|}]/.freeze
+
+    # Monomorphic: param typed String, like `html_escape`.
+    def self.url_encode(s)
+      s.gsub(URL_ESCAPE_PATTERN, URL_ESCAPES)
+    end
+
     def self.truncate(s, length: 30, omission: "...")
       return s if s.length <= length
       cutoff = length - omission.length
