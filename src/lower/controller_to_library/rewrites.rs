@@ -704,6 +704,14 @@ pub(super) fn rewrite_assoc_through_parent_typed(
         };
         let kind = match outer_method.as_str() {
             "build" => AssocKind::Build,
+            // Rails' `create` on an association is `build` + save, over
+            // an attribute HASH. A typed params object handed to the
+            // runtime's `create` would be indexed like a Hash and
+            // NoMethodError, so recognize the composition here — the
+            // same reason `<Model>.create(<params>)` needs its own
+            // typed factory.
+            "create" => AssocKind::Create { bang: false },
+            "create!" => AssocKind::Create { bang: true },
             "find" => AssocKind::Find,
             "find_by" => AssocKind::FindBy,
             _ => return None,
@@ -755,6 +763,23 @@ pub(super) fn rewrite_assoc_through_parent_typed(
                     ));
                 }
                 expand_build(&model_class, &fk, parent_name, lhs, &outer_args[0], e.span)
+            }
+            // Only the TYPED arm is recognized. An attribute-Hash
+            // `create` already works through the runtime, and turning it
+            // into build+save here would only restate it.
+            AssocKind::Create { bang } => {
+                let lhs = lhs.expect("checked above");
+                let spec = match_params_helper(&outer_args[0], &helper_specs)?;
+                expand_create_typed(
+                    &model_class,
+                    &fk,
+                    parent_name,
+                    lhs,
+                    &outer_args[0],
+                    super::params::model_from_params_name(spec),
+                    bang,
+                    e.span,
+                )
             }
             AssocKind::Find => {
                 let lhs = lhs.expect("checked above");
@@ -832,6 +857,9 @@ fn match_params_helper<'a>(
 
 enum AssocKind {
     Build,
+    /// `@parent.<assoc>.create!(<params>)` — `Build` plus the save it
+    /// composes to. `bang` picks `save!` over `save`.
+    Create { bang: bool },
     Find,
     FindBy,
 }
@@ -896,6 +924,38 @@ pub(super) fn expand_build_typed(
     );
 
     Expr::new(span, ExprNode::Seq { exprs: vec![lhs_assign, fk_setter] })
+}
+
+/// `@<lhs> = @<parent>.<assoc>.create!(<params>)` — the typed build,
+/// then the save `create` composes. Statement-shaped: this replaces an
+/// `Assign` statement, and `flatten_seqs` splices the Seq into the
+/// action body (a Seq left in expression position renders as
+/// newline-joined lines and binds the wrong value).
+#[allow(clippy::too_many_arguments)]
+fn expand_create_typed(
+    model_class: &str,
+    fk: &str,
+    parent: &Symbol,
+    lhs: &Symbol,
+    arg: &Expr,
+    factory: Symbol,
+    bang: bool,
+    span: Span,
+) -> Expr {
+    let built = expand_build_typed(model_class, fk, parent, lhs, arg, factory, span);
+    let ExprNode::Seq { exprs } = &*built.node else { unreachable!("build expands to a Seq") };
+    let mut exprs = exprs.clone();
+    exprs.push(Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(ivar(lhs.as_str(), span)),
+            method: Symbol::from(if bang { "save!" } else { "save" }),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    ));
+    Expr::new(span, ExprNode::Seq { exprs })
 }
 
 /// Zero-arg build expansion (`@comment = @story.comments.build`):
@@ -1127,9 +1187,17 @@ pub(super) fn expand_find(
 // typed instance and assigns each permitted field through the named
 // accessor.
 //
-// Match shape: `<Const>.new(<bare _params helper call>)` where the
-// helper's name is in `privs` and ends with `_params`. Any other
-// argument shape (Hash literal, Array, …) flows through unchanged.
+// `create` / `create!` ride the same rewrite. Rails composes them as
+// `new(attrs)` + save over an attribute HASH, so a typed params object
+// reaching the runtime's `create` would be indexed like a Hash and
+// NoMethodError. `create_from_params` is that composition over the typed
+// factory (`model_to_library::schema::push_create_from_params_method`).
+//
+// Match shape: `<Const>.new|create|create!(<bare _params helper call>)`
+// where the helper's name is in `privs` and ends with `_params`, and
+// `<Const>` is the model the helper's resource names — the condition the
+// model lowerer synthesizes the factory under. Any other argument shape
+// (Hash literal, Array, …) flows through unchanged.
 // ---------------------------------------------------------------------------
 
 pub(super) fn rewrite_model_new_to_from_params(
@@ -1152,20 +1220,32 @@ pub(super) fn rewrite_model_new_to_from_params(
         else {
             return None;
         };
-        if method.as_str() != "new" || args.len() != 1 {
+        if args.len() != 1 {
             return None;
         }
-        // Only rewrite `<Const>.new(...)` shapes — leaves `instance.new(...)`
+        // Only rewrite `<Const>.…` shapes — leaves `instance.new(...)`
         // (rare but legal) untouched.
-        let ExprNode::Const { .. } = &*model_recv.node else {
+        let ExprNode::Const { path } = &*model_recv.node else {
             return None;
         };
         let spec = match_params_helper(&args[0], &helper_specs)?;
+        // The typed factories live on the model whose resource this list
+        // permits; `Membership.create(boost_params)` has none to reach.
+        let model = path.last()?;
+        if crate::naming::snake_case(model.as_str()) != spec.resource.as_str() {
+            return None;
+        }
+        let target = match method.as_str() {
+            "new" => super::params::model_from_params_name(spec),
+            "create" => super::params::model_create_from_params_name(spec, false),
+            "create!" => super::params::model_create_from_params_name(spec, true),
+            _ => return None,
+        };
         Some(Expr::new(
             e.span,
             ExprNode::Send {
                 recv: Some(model_recv.clone()),
-                method: super::params::model_from_params_name(spec),
+                method: target,
                 args: vec![args[0].clone()],
                 block: None,
                 parenthesized: *parenthesized,

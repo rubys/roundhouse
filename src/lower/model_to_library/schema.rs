@@ -1006,6 +1006,79 @@ pub(super) fn push_update_typed_variants(
     }
 }
 
+/// `def self.create_from_params(p); instance = <Model>.from_params(p);
+/// instance.save; instance; end` — and the `!` variant with `save!`.
+///
+/// Rails' `create` is `new(attrs)` + save, and the runtime keeps that
+/// shape over an attribute HASH. A call site handing it a typed params
+/// object would reach `initialize(attrs)` and index a class with no
+/// `[]`. This is the same call composed over the typed factory instead.
+///
+/// Why a method rather than rewriting the call site to
+/// `<Model>.from_params(p).save!`: `save!` is declared on the runtime
+/// Base and returns Base, so the chain's value types as the base class
+/// and every downstream `@user.email_address` fails on a strict target.
+/// The explicit `instance` tail keeps the concrete type — the same
+/// reason `update!` ends in a `self` read rather than `save!`'s return.
+pub(super) fn push_create_from_params_method(
+    methods: &mut Vec<MethodDef>,
+    owner: &ClassId,
+    params_class_id: &ClassId,
+    factory: Symbol,
+    name: Symbol,
+    bang: bool,
+) {
+    let p = Symbol::from("p");
+    let instance = Symbol::from("instance");
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
+
+    let from_params_call = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(class_const(owner)),
+            method: factory,
+            args: vec![var_ref(p.clone())],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    let stmts = vec![
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Assign {
+                target: LValue::Var { id: VarId(0), name: instance.clone() },
+                value: from_params_call,
+            },
+        ),
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref(instance.clone())),
+                method: Symbol::from(if bang { "save!" } else { "save" }),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        ),
+        var_ref(instance),
+    ];
+
+    let params_ty = Ty::Class { id: params_class_id.clone(), args: vec![] };
+    methods.push(MethodDef {
+        name,
+        receiver: MethodReceiver::Class,
+        params: vec![Param::positional(p.clone())],
+        body: seq(stmts),
+        signature: Some(fn_sig(vec![(p, params_ty)], owner_ty)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    });
+}
+
 /// `def self.from_row(row); instance = new; instance.col = row.col; ...; instance; end`
 ///
 /// The typed counterpart to the (still-existing) Hash-receiving

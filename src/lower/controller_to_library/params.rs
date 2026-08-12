@@ -82,6 +82,13 @@ pub struct ParamsSpec {
     /// nil-writes widen the class's fields to nilable on inferring
     /// targets; classes nobody excepts keep tight types.
     pub wants_except: bool,
+    /// Some call site writes `<Model>.create(<helper>)` / `.create!` on
+    /// the model this list's resource names — synthesize the matching
+    /// typed factory. Demand-gated like `wants_except`: the runtime's
+    /// `create` takes an attribute Hash, so every params-permitted model
+    /// in every app would otherwise carry two methods nobody calls.
+    pub wants_create: bool,
+    pub wants_create_bang: bool,
     /// Controllers whose bodies declared this exact permit list, in
     /// source order. Two controllers permitting the same fields share
     /// one class (campfire's `FirstRunsController` and `UsersController`
@@ -156,7 +163,72 @@ pub fn collect_specs(controllers: &[Controller]) -> ParamsSpecs {
         }
     }
     assign_class_ids(&mut specs);
-    ParamsSpecs { specs }
+    let mut specs = ParamsSpecs { specs };
+    scan_create_demand(controllers, &mut specs);
+    specs
+}
+
+/// Second phase: which specs a `<Model>.create(<helper>)` call site
+/// actually asks for. Can't ride the first walk — resolving `<helper>`
+/// to a spec needs every spec named first.
+///
+/// Only a receiver naming THIS list's own model counts, which is the
+/// same condition the model lowerer synthesizes under: `Boost.from_params`
+/// exists on `Boost` because `:boost` is its resource, and
+/// `Membership.create(boost_params)` has no typed factory to reach.
+fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
+    let mut demand: Vec<(ClassId, bool)> = Vec::new();
+    for c in controllers {
+        let actions: Vec<crate::dialect::Action> = c.actions().cloned().collect();
+        let helpers = helper_spec_map(&actions, specs);
+        if helpers.is_empty() {
+            continue;
+        }
+        for action in &actions {
+            walk_all(&action.body, &mut |e| {
+                let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node else {
+                    return;
+                };
+                let bang = match method.as_str() {
+                    "create" => false,
+                    "create!" => true,
+                    _ => return,
+                };
+                if args.len() != 1 {
+                    return;
+                }
+                let ExprNode::Const { path } = &*recv.node else { return };
+                let Some(model) = path.last() else { return };
+                let ExprNode::Send { recv: None, method: h, args: hargs, block: None, .. } =
+                    &*args[0].node
+                else {
+                    return;
+                };
+                if !hargs.is_empty() {
+                    return;
+                }
+                let Some(spec) = helpers.get(h) else { return };
+                if crate::naming::snake_case(model.as_str()) != spec.resource.as_str() {
+                    return;
+                }
+                demand.push((spec.class_id.clone(), bang));
+            });
+        }
+    }
+    for (class_id, bang) in demand {
+        if let Some(spec) = specs.specs.iter_mut().find(|s| s.class_id == class_id) {
+            if bang {
+                spec.wants_create_bang = true;
+            } else {
+                spec.wants_create = true;
+            }
+        }
+    }
+}
+
+fn walk_all<'a>(expr: &'a Expr, f: &mut impl FnMut(&'a Expr)) {
+    f(expr);
+    expr.node.for_each_child(&mut |c| walk_all(c, f));
 }
 
 /// Build specs straight from `(resource, fields)` pairs, for callers
@@ -172,6 +244,8 @@ pub fn specs_from_lists(lists: &[(Symbol, Vec<Symbol>)]) -> ParamsSpecs {
                 fields: fields.clone(),
                 span: Span::synthetic(),
                 wants_except: false,
+                wants_create: false,
+                wants_create_bang: false,
                 declaring: Vec::new(),
                 is_canonical: true,
             })
@@ -209,6 +283,8 @@ fn record(
                 fields,
                 span,
                 wants_except,
+                wants_create: false,
+                wants_create_bang: false,
                 declaring: vec![controller.clone()],
                 is_canonical: false,
             });
@@ -329,6 +405,16 @@ pub fn model_from_params_name(spec: &ParamsSpec) -> Symbol {
             crate::naming::snake_case(spec.class_id.0.as_str())
         ))
     }
+}
+
+/// `create` / `create!` taking this spec's class — `from_params` plus a
+/// save, named off the factory it wraps.
+pub fn model_create_from_params_name(spec: &ParamsSpec, bang: bool) -> Symbol {
+    Symbol::from(format!(
+        "create_{}{}",
+        model_from_params_name(spec).as_str(),
+        if bang { "!" } else { "" }
+    ))
 }
 
 /// Same rule for the typed `update` / `update!` pair.

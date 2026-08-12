@@ -711,6 +711,30 @@ fn build_methods(
                 &mut methods, &model.name, &writable, table, spec,
             );
         }
+        // `create_from_params(p)` / `create_from_params!(p)` — the typed
+        // factory plus a save, one per permit list that a call site
+        // actually creates through. Demand-gated on the spec (like
+        // `wants_except`) so a model nobody creates this way keeps the
+        // surface it had.
+        for spec in params_specs.for_resource(&resource) {
+            use crate::lower::controller_to_library::params::{
+                model_create_from_params_name, model_from_params_name,
+            };
+            for bang in [false, true] {
+                let wanted = if bang { spec.wants_create_bang } else { spec.wants_create };
+                if !wanted {
+                    continue;
+                }
+                self::schema::push_create_from_params_method(
+                    &mut methods,
+                    &model.name,
+                    &spec.class_id,
+                    model_from_params_name(spec),
+                    model_create_from_params_name(spec, bang),
+                    bang,
+                );
+            }
+        }
     }
 
     push_validate_method(&mut methods, model);
