@@ -798,13 +798,29 @@ fn splice_concerns_into_models(app: &mut App) {
 /// `find_session_by_cookie` has to arrive with it. A name the controller
 /// (or an earlier concern) already defines wins, matching Ruby's
 /// ancestor order.
+///
+/// A copied body carries its module's lexical scope with it, so a bare
+/// constant reference is qualified on the way in: lobsters'
+/// `IntervalHelper#time_interval` reads `TIME_INTERVALS`, which under
+/// Ruby resolves against the module the `def` was written in and, once
+/// spliced, resolves against the CONTROLLER — `uninitialized constant
+/// HomeController::TIME_INTERVALS`, ten of the twenty-six benchmark
+/// routes. The constant stays where it was defined (the module still
+/// emits) and the reference becomes `IntervalHelper::TIME_INTERVALS`,
+/// which is what Ruby's lexical lookup means and what every strict
+/// target can resolve.
 fn splice_concerns_into_controllers(app: &mut App) {
     use crate::dialect::{Action, ControllerBodyItem, MethodReceiver, RenderTarget};
     use crate::ty::{Row, Ty};
 
-    // Instance methods per concern module, and the modules it includes.
+    // Instance methods per concern module, the constants those bodies
+    // resolve lexically, and the modules it includes.
     let mut module_methods: HashMap<crate::ident::ClassId, Vec<crate::dialect::MethodDef>> =
         HashMap::new();
+    let mut module_constants: HashMap<
+        crate::ident::ClassId,
+        std::collections::HashSet<crate::ident::Symbol>,
+    > = HashMap::new();
     let mut module_includes: HashMap<crate::ident::ClassId, Vec<crate::ident::ClassId>> =
         HashMap::new();
     for lc in &app.library_classes {
@@ -816,6 +832,8 @@ fn splice_concerns_into_controllers(app: &mut App) {
                 .cloned()
                 .collect(),
         );
+        module_constants
+            .insert(lc.name.clone(), lc.constants.iter().map(|(n, _)| n.clone()).collect());
         module_includes.insert(lc.name.clone(), lc.includes.clone());
     }
 
@@ -866,6 +884,10 @@ fn splice_concerns_into_controllers(app: &mut App) {
                 if !defined.insert(method.name.clone()) {
                     continue;
                 }
+                let mut body = method.body.clone();
+                if let Some(consts) = module_constants.get(module) {
+                    qualify_lexical_consts(&mut body, module, consts);
+                }
                 let mut params = Row::closed();
                 let mut opt_params = Vec::new();
                 for p in &method.params {
@@ -882,7 +904,7 @@ fn splice_concerns_into_controllers(app: &mut App) {
                         params,
                         opt_params,
                         block_param: method.block_param.as_ref().map(|p| p.name.clone()),
-                        body: method.body.clone(),
+                        body,
                         renders: RenderTarget::Inferred,
                         effects: crate::effect::EffectSet::pure(),
                     },
@@ -911,6 +933,37 @@ fn splice_concerns_into_controllers(app: &mut App) {
         }
         filters.extend(methods);
         controller.body = filters;
+    }
+}
+
+/// Qualify the bare constant references in a body being lifted out of
+/// `owner`'s lexical scope: `TIME_INTERVALS` -> `IntervalHelper::TIME_INTERVALS`.
+///
+/// Only names `owner` actually defines are touched, so a concern method
+/// reading one of the INCLUDER's constants — or any global one — is left
+/// alone to resolve where it always did. Already-qualified paths are
+/// left alone too: a single segment is the only form whose meaning
+/// changes when the `def` moves.
+fn qualify_lexical_consts(
+    expr: &mut crate::expr::Expr,
+    owner: &crate::ident::ClassId,
+    consts: &std::collections::HashSet<crate::ident::Symbol>,
+) {
+    use crate::expr::ExprNode;
+
+    expr.node.for_each_child_mut(&mut |child| qualify_lexical_consts(child, owner, consts));
+    if let ExprNode::Const { path } = &mut *expr.node {
+        if let [segment] = &path[..] {
+            if consts.contains(segment) {
+                *path = owner
+                    .0
+                    .as_str()
+                    .split("::")
+                    .map(crate::ident::Symbol::from)
+                    .chain(std::iter::once(segment.clone()))
+                    .collect();
+            }
+        }
     }
 }
 

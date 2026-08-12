@@ -2636,6 +2636,99 @@ end
 }
 
 #[test]
+fn spliced_concern_method_keeps_its_own_lexical_constant() {
+    // lobsters' IntervalHelper shape: the module defines a constant and
+    // reads it bare from an instance method. Splicing the method into the
+    // includer moves it out of the scope that made the bare name mean
+    // anything — unqualified, `TIME_INTERVALS` looks up under
+    // WidgetsController and raises NameError at the first call, which is
+    // how ten of the twenty-six lobsters benchmark routes broke. The
+    // constant stays on the module; the reference is qualified to it.
+    //
+    // A constant the module does NOT define is left alone: it still means
+    // whatever it meant at the call site (here, the includer's own).
+    let app = app_from_files(&[
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\nend\n",
+        ),
+        (
+            "app/controllers/concerns/interval_concern.rb",
+            r#"module IntervalConcern
+  TIME_INTERVALS = { "d" => "Day", "w" => "Week" }
+
+  def interval_name(key)
+    TIME_INTERVALS[key] || DEFAULT_INTERVAL
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/widgets_controller.rb",
+            r#"class WidgetsController < ApplicationController
+  include IntervalConcern
+
+  DEFAULT_INTERVAL = "Week"
+
+  def show
+  end
+end
+"#,
+        ),
+        ("app/views/widgets/show.html.erb", "<p>ok</p>\n"),
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema[7.1].define(version: 1) do
+  create_table "widgets", force: :cascade do |t|
+    t.string "name"
+  end
+end
+"#,
+        ),
+    ]);
+
+    // The constant is still the module's — splicing copies methods, not
+    // constants, so nothing should have moved it onto the controller.
+    let module = app
+        .library_classes
+        .iter()
+        .find(|lc| lc.name.0.as_str() == "IntervalConcern")
+        .expect("concern module registers as a library class");
+    assert!(
+        module.constants.iter().any(|(n, _)| n.as_str() == "TIME_INTERVALS"),
+        "TIME_INTERVALS stays defined on IntervalConcern"
+    );
+
+    let controller = app
+        .controllers
+        .iter()
+        .find(|c| c.name.0.as_str() == "WidgetsController")
+        .expect("WidgetsController");
+    let spliced = controller
+        .actions()
+        .find(|a| a.name.as_str() == "interval_name")
+        .expect("the concern's instance method is spliced into the includer");
+
+    let mut consts = Vec::new();
+    collect_const_paths(&spliced.body, &mut consts);
+    assert!(
+        consts.iter().any(|p| p == &["IntervalConcern", "TIME_INTERVALS"]),
+        "the module's own constant is qualified to it; got {consts:?}"
+    );
+    assert!(
+        consts.iter().any(|p| p == &["DEFAULT_INTERVAL"]),
+        "a constant the module does not define is left bare; got {consts:?}"
+    );
+}
+
+fn collect_const_paths(expr: &roundhouse::expr::Expr, out: &mut Vec<Vec<String>>) {
+    if let ExprNode::Const { path } = &*expr.node {
+        out.push(path.iter().map(|s| s.as_str().to_string()).collect());
+    }
+    expr.node.for_each_child(&mut |child| collect_const_paths(child, out));
+}
+
+#[test]
 fn model_concern_included_do_dsl_registers_on_the_includer() {
     // The Account::Associations shape: a model concern declares
     // associations (inside `with_options` wrappers) and scopes in its
