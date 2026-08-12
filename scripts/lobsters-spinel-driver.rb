@@ -259,34 +259,21 @@ class BenchDriver
     puts "SQLITE " + sqlv
 
     # The GC configuration the binary actually ran under, self-reported the
-    # way the SQLite build is: the runtime's own truthiness for the env var
-    # (set, non-empty, not "0" — mirroring sp_alloc's parse), not the
-    # harness's belief about what it exported. The summary's `gc` field and
-    # the report's labeling read this line and nothing else.
+    # way the SQLite build is: the runtime's own reading of the env var, not
+    # the harness's belief about what it exported. Mirrors sp_gc's parse
+    # since matz/spinel@d3b1400d, which made the generational mark the
+    # DEFAULT — minor unless SPINEL_GC_MINOR is set to something starting
+    # with "0". The published lane runs the default, so this line is the
+    # attestation that no ambient SPINEL_GC_MINOR=0 turned it back into a
+    # whole-heap mark; the replay refuses a run that reports otherwise.
     gm = ENV["SPINEL_GC_MINOR"]
-    puts "GCCONFIG " + ((!gm.nil? && gm.length > 0 && gm != "0") ? "minor" : "default")
+    puts "GCCONFIG " + ((!gm.nil? && gm.length > 0 && gm[0] == "0") ? "whole-heap" : "minor")
     gcstat("boot")
 
     # Baseline: loaded and connected, nothing served yet — the instant the
     # CRuby lanes take BOOT_RSS_KB. Sampled AFTER the seed so the fixture is
     # inside it, matching the CRuby lanes' baseline.
     boot_rss = rss_vmrss_kb
-
-    # BALLAST: N retained small objects the request loop never touches, for
-    # the mark-cost experiment from matz/spinel#3513 — if collection cost
-    # tracks the live heap rather than a request's own allocation, the
-    # cheap routes' medians rise with this knob while their code is
-    # untouched. 0 (the default, and the published configuration) allocates
-    # nothing. The BALLAST line printed after the timed loop is also the
-    # read that keeps this array live across the whole run — without it,
-    # liveness-based rooting could collect the ballast mid-experiment.
-    ballast = []
-    bn = (ENV["BENCH_BALLAST"] || "0").to_i
-    bi = 0
-    while bi < bn
-      ballast << ("b" + bi.to_s)
-      bi += 1
-    end
 
     jar = Tep.str_hash
     err = login!(jar)
@@ -432,7 +419,6 @@ class BenchDriver
     end
     gcstat("timed")
     puts "RSS " + boot_rss.to_s + " " + rss_vmrss_kb.to_s + " " + rss_vmhwm_kb.to_s
-    puts "BALLAST " + ballast.length.to_s
     puts "DONE " + seq.length.to_s + " " + warmup.to_s
     0
   end

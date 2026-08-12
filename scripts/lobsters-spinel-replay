@@ -36,19 +36,10 @@
 require "json"
 require "fileutils"
 
-opts = { warmup: 5, time: 10, min_time: 10, db: nil, gc: "default", ballast: 0 }
+opts = { warmup: 5, time: 10, min_time: 10, db: nil }
 args = ARGV.dup
 until args.empty?
   case (a = args.shift)
-  when "--gc"
-    # The GC configuration to RUN UNDER, set here rather than inherited from
-    # the caller's environment: a lane that describes itself by what it asked
-    # for, and then checks the binary's own report against it (below), cannot
-    # silently publish numbers from a configuration nobody chose.
-    opts[:gc] = args.shift
-    %w[default minor].include?(opts[:gc]) or
-      abort "lobsters-spinel-replay: --gc wants default|minor, got #{opts[:gc].inspect}"
-  when "--ballast"    then opts[:ballast]  = Integer(args.shift)
   when "--tree"       then opts[:tree]     = File.expand_path(args.shift)
   when "--defer"      then opts[:defer]    = File.expand_path(args.shift)
   when "--sequence"   then opts[:sequence] = File.expand_path(args.shift)
@@ -362,13 +353,12 @@ err_path = File.join(work, "driver-err.txt")
 # DDL boot just created.
 MEM_URI = "file:lobsters_bench?mode=memory&cache=shared"
 env = { "BLOG_DB" => MEM_URI }
-# GC configuration and retained-heap ballast are set EXPLICITLY, and both are
-# also cleared when not asked for: inheriting either from the caller's shell
-# would let an exported SPINEL_GC_MINOR turn a "default" lane into a minor one
-# whose summary still said "default". The binary self-reports both (GCCONFIG,
-# BALLAST) and the parse below refuses a run whose report disagrees.
-env["SPINEL_GC_MINOR"] = (opts[:gc] == "minor" ? "1" : nil)
-env["BENCH_BALLAST"]   = opts[:ballast].to_s
+# The lane runs spinel's DEFAULT collector, which since matz/spinel@d3b1400d
+# marks generationally. SPINEL_GC_MINOR is cleared rather than left alone: an
+# exported =0 in the caller's shell would silently put the published lane back
+# on a whole-heap mark. The binary self-reports what it ran (GCCONFIG) and the
+# parse below refuses a run whose report disagrees.
+env["SPINEL_GC_MINOR"] = nil
 
 # NO RETRY. The binary crashes intermittently (observed: 1 of 3 identical
 # invocations succeeded, the others died on SIGBUS) — the shape of
@@ -429,7 +419,6 @@ warmup_used = opts[:warmup]
 rss_boot = rss_final = rss_peak = nil
 sqlite_version = nil
 gc_config = nil
-ballast_reported = nil
 gc_marks = []
 by_template = Hash.new { |h, k| h[k] = [] }
 raw.each_line do |line|
@@ -460,11 +449,6 @@ raw.each_line do |line|
     by_template[route_template(f[1].to_s)].concat(f[2..].map(&:to_f))
   when "SQLITE" then sqlite_version = f[1]
   when "GCCONFIG" then gc_config = f[1]
-  when "BALLAST"
-    # Retained objects the request loop never touches, counted by the driver
-    # from the array it is still holding at the end — so this is liveness
-    # proven at print time, not the number we asked for.
-    ballast_reported = f[1].to_i
   when "GCSTAT"
     # GCSTAT <phase> <cycle> <full_runs> — cumulative counters at each phase
     # boundary, in emission order. Deltas are computed after the parse so a
@@ -486,19 +470,6 @@ end
 die("replay", "driver produced no parity rows") if routes.empty?
 die("replay", "driver produced no timed iterations") if iters.empty?
 
-# The lane asked for a configuration; the binary reported what it actually
-# ran. A disagreement is a dead lane, not a footnote — the whole point of the
-# heap-sensitivity cells is that two rows differ in ONE variable, and a row
-# that quietly ran the other setting would invert the conclusion while looking
-# perfectly ordinary on the page. Only checked when the driver reports at all,
-# so trees predating either line still replay.
-if gc_config && gc_config != opts[:gc]
-  die("replay", "lane asked for --gc #{opts[:gc]} but the binary reported GCCONFIG #{gc_config}")
-end
-if ballast_reported && ballast_reported != opts[:ballast]
-  die("replay", "lane asked for --ballast #{opts[:ballast]} but the binary retained #{ballast_reported}")
-end
-
 # Per-phase collection counts from the cumulative GCSTAT boundary lines:
 # each phase's delta against the line before it ("boot" is absolute — its
 # predecessor is process start at zero). Nil on trees whose driver predates
@@ -512,6 +483,28 @@ unless gc_marks.empty?
                             "full"   => m["full"] - prev["full"] }
     prev = m
   end
+end
+
+# THE COLLECTOR IS ATTESTED BY WHAT IT DID, not by what the environment said.
+# Since matz/spinel@d3b1400d the generational mark is spinel's default, so the
+# env var this lane clears no longer distinguishes anything: a binary predating
+# that commit reads the same empty SPINEL_GC_MINOR and marks whole-heap anyway.
+# GCCONFIG is the env parse and can only catch an ambient =0; the counters are
+# the behaviour. A minor mark runs at most one whole-heap pass per
+# SP_GC_FULL_INTERVAL cycles (8, adaptive upward), so a timed loop whose every
+# cycle was full did not mark generationally, whatever the environment claimed.
+# Publishing that as the AOT lane's speed would quietly cost the number the
+# ~2x this workload's retained heap charges a whole-heap mark, on a page that
+# no longer carries the other configuration to compare it against.
+timed_gc = gc_stat && gc_stat["timed"]
+if gc_config == "whole-heap"
+  die("replay", "the binary reported GCCONFIG whole-heap — this lane publishes spinel's " \
+                "generational default, so something exported SPINEL_GC_MINOR=0")
+elsif timed_gc && timed_gc["cycles"] > 1 && timed_gc["full"] >= timed_gc["cycles"]
+  die("replay", "every one of the #{timed_gc['cycles']} collections in the timed loop was a " \
+                "whole-heap mark — this lane publishes spinel's generational default, so the " \
+                "binary is a spinel predating d3b1400d (rebuild it) or the remembered set " \
+                "overflowed on every cycle")
 end
 
 sorted = iters.sort
@@ -535,19 +528,12 @@ summary = {
   # through its own linked library) — see the SQLITE line in the driver.
   # The interpreted lanes record theirs the same way; the report compares.
   "sqlite"       => sqlite_version,
-  # The GC configuration the binary self-reported (GCCONFIG line): "minor"
-  # when the run had SPINEL_GC_MINOR enabled by the runtime's own parse,
-  # "default" otherwise, nil for a driver that predates the line. Non-default
-  # configurations must be named where readers look — the report renders a
-  # caveat off this field, the same contract as `sqlite`.
+  # Which collector the binary self-reported (GCCONFIG line): "minor" — the
+  # generational default — for every published run, "whole-heap" only if
+  # something exported SPINEL_GC_MINOR=0, nil for a driver predating the line.
+  # The check above refuses to write a summary saying anything but "minor";
+  # the field is carried so the page can attest it rather than assume it.
   "gc"           => gc_config,
-  # Retained-heap ballast the lane ran under, as COUNTED BY THE BINARY at the
-  # end of the timed loop (the driver prints the length of the array it is
-  # still holding). A lane at 0 is the ordinary workload; a lane above 0 is
-  # deliberately doing work no other lane does, which is why the report keeps
-  # it out of the cross-runtime ratios and pairs it only against its own
-  # zero-ballast twin.
-  "ballast"      => ballast_reported,
   "seeded_from"  => DB,
   "memory"       => true,
   "story_id"     => STORY,
