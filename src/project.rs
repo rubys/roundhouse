@@ -1840,6 +1840,54 @@ fn trim_gemfile(content: &str, has_js: bool, has_cable: bool) -> String {
 /// once pinned, was rejected/segfaulted. matz's #1827 fix (spinel
 /// 70581d31) honors the typed-array return pin by unboxing at the
 /// boundary, so the test now compiles + runs green in the lane.
+/// True where `konst` is named in code position: `Set.new`, `JSON[`,
+/// `ERB(`, `Digest::SHA256`. The sigil is what separates a constant from
+/// the prose the emitted runtime is full of — "Set-Cookie", "Set New
+/// Password", "Set by tick()" all fail it — and a preceding identifier
+/// character or colon rules out `HashSet` and `Foo::Set`. Whole-line
+/// comments are skipped: the cookie jar explains a `Set.new` rewrite in
+/// one, and that is not a use.
+fn names_constant(src: &str, konst: &str) -> bool {
+    src.lines().any(|line| {
+        if line.trim_start().starts_with('#') {
+            return false;
+        }
+        let b = line.as_bytes();
+        let mut i = 0;
+        while let Some(off) = line[i..].find(konst) {
+            let at = i + off;
+            let head_ok = at == 0
+                || !matches!(b[at - 1],
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b':');
+            let tail = at + konst.len();
+            let tail_ok = matches!(b.get(tail), Some(b'.' | b'[' | b'('))
+                || (b.get(tail) == Some(&b':') && b.get(tail + 1) == Some(&b':'));
+            if head_ok && tail_ok {
+                return true;
+            }
+            i = tail;
+        }
+        false
+    })
+}
+
+/// True where the emitted program defines the constant itself, in which
+/// case the bundled library is not what the name refers to.
+fn defines_constant(src: &str, konst: &str) -> bool {
+    src.lines().any(|line| {
+        let trimmed = line.trim_start();
+        ["class ", "module "].iter().any(|kw| {
+            trimmed.strip_prefix(kw).is_some_and(|rest| {
+                let name = rest
+                    .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .next()
+                    .unwrap_or("");
+                name == konst
+            })
+        })
+    })
+}
+
 fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, String> {
     use std::collections::HashSet;
 
@@ -1952,6 +2000,58 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
                     require \"bcrypt\"\n"
             .to_string();
         files.retain(|(p, _)| p != "runtime/bcrypt_facade.rbs");
+    }
+
+    // Bundled-library requires. spinel resolves `Set`, `StringIO` and
+    // their siblings only when the program requires the library by name.
+    // CRuby autoloads two of them outright — `Set.new` and `Pathname.new`
+    // work in a bare script, the other eight raise NameError — and Rails
+    // loads several more as a side effect of booting, so an app carried
+    // over from Rails names them with no require anywhere and spinel
+    // refuses the build: "X is provided by the bundled Y library, which
+    // this program does not require" (matz/spinel 83658c1e). Write the
+    // require the app never had to.
+    //
+    // The three conditions mirror spinel's own check: the constant is
+    // named in code, the program does not define it itself (runtime/erb.rb
+    // and runtime/base64.rb define theirs), and nothing requires it yet.
+    // Sorted by constant so a tree that needs two requires gets them in a
+    // stable order.
+    const BUNDLED: [(&str, &str); 10] = [
+        ("Base64", "base64"),
+        ("CSV", "csv"),
+        ("Digest", "digest"),
+        ("ERB", "erb"),
+        ("JSON", "json"),
+        ("OptionParser", "optparse"),
+        ("Pathname", "pathname"),
+        ("Set", "set"),
+        ("StringIO", "stringio"),
+        ("StringScanner", "strscan"),
+    ];
+    // Per FILE, not per tree: spin compiles bin/blog.rb and each entry of
+    // SPINEL_TESTS as separate programs, and `test/cruby/` is compiled by
+    // neither, so "something in the tree requires it" does not mean the
+    // program being built does. `require` is idempotent, so the file that
+    // names the constant carries the require, the way a Ruby author would
+    // write it. (A tree-wide check let `test/cruby/cgi_io_test.rb`'s
+    // `require "stringio"` mask a missing one in `app/models/story.rb`.)
+    for (konst, feature) in BUNDLED {
+        let require_line = format!("require {feature:?}");
+        if files
+            .iter()
+            .any(|(p, c)| p.ends_with(".rb") && defines_constant(c, konst))
+        {
+            continue;
+        }
+        for (path, content) in files.iter_mut() {
+            if path.ends_with(".rb")
+                && names_constant(content, konst)
+                && !content.contains(&require_line)
+            {
+                content.insert_str(0, &format!("{require_line}\n"));
+            }
+        }
     }
 
     // 6. Package manifest + compile root.
@@ -2823,5 +2923,87 @@ mod tests {
         assert!(mk.contains("SPIN   ?= spin"), "{mk}");
         assert!(mk.contains("\t$(SPIN) build\n\tcp build/bin/blog $@"), "{mk}");
         assert!(!mk.contains("$(SPINEL) main.rb"), "{mk}");
+    }
+
+    /// spinel will not resolve `Set` or `StringIO` without the require,
+    /// and a Rails app never writes one. Add it — but only where the
+    /// constant is really named, not where a header name or a page title
+    /// happens to start with those letters, and not where the emitted
+    /// runtime defines the constant itself.
+    #[test]
+    fn spin_shape_requires_the_bundled_libraries_the_app_names() {
+        let makefile = "SPINEL ?= spinel\n\
+             RBS_SRC  := $(shell find sig -type f -name '*.rbs' 2>/dev/null)\n\
+             RBS_FLAG := $(if $(wildcard sig),--rbs sig)\n\
+             $(BUILD)/blog: $(RUBY_SRC) $(RBS_SRC)\n\
+             \t@mkdir -p $(BUILD)\n\
+             \t$(SPINEL) main.rb $(RBS_FLAG) -o $@\n\
+             $(BUILD)/test/%: test/%.rb $(RUBY_SRC)\n\
+             \t$(SPINEL) --rbs sig $< -o $@\n\
+             SPINEL_TESTS := \\\n\
+             \ttest/models/article_test \\\n\
+             \ttest/models/comment_test \\\n\
+             \ttest/controllers/articles_controller_test \\\n\
+             \ttest/controllers/comments_controller_test\n";
+        let files = vec![
+            ("Makefile".to_string(), makefile.to_string()),
+            ("main.rb".to_string(), "Main.run\n".to_string()),
+            (
+                "app/models/comment.rb".to_string(),
+                "require_relative \"application_record\"\n\
+                 class Comment\n  def followers\n    Set.new\n  end\nend\n"
+                    .to_string(),
+            ),
+            (
+                "app/controllers/login_controller.rb".to_string(),
+                "class LoginController\n  def edit\n    @title = \"Set New Password\"\n  end\nend\n"
+                    .to_string(),
+            ),
+            (
+                "runtime/tep/response.rb".to_string(),
+                "# Set-Cookie can repeat.\nclass Response\nend\n".to_string(),
+            ),
+            (
+                "app/models/story.rb".to_string(),
+                "class Story\n  def pdf(body)\n    StringIO.new(body)\n  end\n\
+                 \n  def digest(s)\n    Digest::SHA256.hexdigest(s)\n  end\nend\n"
+                    .to_string(),
+            ),
+            // Already carries its own — one require, not two.
+            (
+                "test/cruby/cgi_io_test.rb".to_string(),
+                "require \"stringio\"\nStringIO.new(\"x\")\n".to_string(),
+            ),
+            // The emitted runtime defines this one, so the bundled erb is
+            // not what `ERB.new` refers to.
+            ("runtime/erb.rb".to_string(), "module ERB\nend\n".to_string()),
+            (
+                "app/views/show.rb".to_string(),
+                "ERB.new(src).result(b)\n".to_string(),
+            ),
+        ];
+        let out = spin_shape(files).unwrap();
+        let get = |p: &str| &out.iter().find(|(q, _)| q == p).unwrap().1;
+
+        let comment = get("app/models/comment.rb");
+        assert!(comment.starts_with("require \"set\"\n"), "{comment}");
+        // Still loads its parent — the require goes above, not instead.
+        assert!(comment.contains("require_relative \"application_record\""), "{comment}");
+
+        // `Digest::SHA256` is a use even though no `.`/`(` follows the name.
+        let story = get("app/models/story.rb");
+        assert!(story.contains("require \"stringio\""), "{story}");
+        assert!(story.contains("require \"digest\""), "{story}");
+
+        // A require in test/cruby/ — compiled by no spin program — must not
+        // stand in for the one app/models/story.rb needs.
+        let carved = get("test/cruby/cgi_io_test.rb");
+        assert_eq!(carved.matches("require \"stringio\"").count(), 1, "{carved}");
+
+        assert!(!get("app/views/show.rb").contains("require \"erb\""), "program defines ERB");
+
+        for prose in ["app/controllers/login_controller.rb", "runtime/tep/response.rb"] {
+            assert!(!get(prose).contains("require \"set\""), "{prose}");
+        }
     }
 }
