@@ -550,8 +550,15 @@ end
 # belongs in the headline too — not only behind the provenance <details>. An
 # AOT bar that moved because spinel moved is otherwise indistinguishable from
 # one that moved because the emit did.
+# Pull the SHA out by SHAPE, not by position. `spinel --version` was
+# "spinel <sha>" and this took the last token; matz/spinel fd0bc35e (PR
+# #3798) appended the C compiler, so it became "spinel <sha> [cc (Ubuntu
+# 13.3.0-6ubuntu2~24.04.1) 13.3.0]" and the headline started stamping the
+# run with "spinel 13.3.0]" — the gcc version, wearing the spinel label,
+# in the one line every reader sees. It degraded silently because a
+# version-shaped string in a version-shaped slot looks right.
 sp_ver = (spinel && spinel.dig('aot', 'spinel')) || env&.dig('spinel')
-if sp_ver && (sp_hash = sp_ver.split(/\s+/).last)
+if sp_ver && (sp_hash = sp_ver[/\b[0-9a-f]{7,40}\b/] || sp_ver.split(/\s+/)[1])
   prov << %( · spinel <code>#{esc(sp_hash[0, 12])}</code>)
 end
 html << %(<div class="meta">Run <code>#{run_dir}</code>#{prov}</div>\n)
