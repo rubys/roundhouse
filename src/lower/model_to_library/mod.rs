@@ -186,18 +186,32 @@ fn lower_models_inner(
     for spec in params_specs.iter() {
         let class_id = spec.class_id.clone();
         let mut info = crate::analyze::ClassInfo::default();
-        for field in &spec.fields {
-            info.instance_methods
-                .insert(field.clone(), fn_sig(vec![], Ty::Str));
+        // MUST match what `build_params_class` actually synthesizes. A
+        // registry that disagrees is worse than none: the coercion pass
+        // reads these signatures to decide whether a value needs
+        // wrapping for a nullable column, so claiming `String | nil`
+        // where the class returns `String` silently drops the `Some(…)`
+        // rust2 needs.
+        let mut register = |name: Symbol, ty: Ty| {
+            info.instance_methods.insert(name.clone(), fn_sig(vec![], ty.clone()));
             info.instance_method_kinds
-                .insert(field.clone(), crate::dialect::AccessorKind::AttributeReader);
-            let setter_name = Symbol::from(format!("{}=", field.as_str()));
+                .insert(name.clone(), crate::dialect::AccessorKind::AttributeReader);
+            let setter_name = Symbol::from(format!("{}=", name.as_str()));
             info.instance_methods.insert(
                 setter_name.clone(),
-                fn_sig(vec![(Symbol::from("value"), Ty::Str)], Ty::Str),
+                fn_sig(vec![(Symbol::from("value"), ty.clone())], ty),
             );
             info.instance_method_kinds
                 .insert(setter_name, crate::dialect::AccessorKind::AttributeWriter);
+        };
+        for field in &spec.fields {
+            register(field.clone(), Ty::Str);
+            if spec.wants_compact {
+                register(
+                    crate::lower::controller_to_library::params::provided_field(field),
+                    Ty::Bool,
+                );
+            }
         }
         info.class_methods.insert(
             Symbol::from("from_raw"),
@@ -677,7 +691,7 @@ fn build_methods(
             model,
             models,
             table,
-            permitted_fields.and_then(|f| canonical.map(|s| (&s.class_id, f))),
+            permitted_fields.and_then(|f| canonical.map(|s| (&s.class_id, f, s.wants_compact))),
         );
         // Per-model Level-3 adapter primitives (`_adapter_find_by_id`, etc.)
         // — typed methods that go directly from SQL composition to typed
@@ -692,6 +706,7 @@ fn build_methods(
             self::schema::push_from_params_method(
                 &mut methods, model, fields, table, &spec.class_id,
                 crate::lower::controller_to_library::params::model_from_params_name(spec),
+                spec.wants_compact,
             );
         }
         // One typed factory + update pair per NON-canonical permit list
@@ -706,6 +721,7 @@ fn build_methods(
             self::schema::push_from_params_method(
                 &mut methods, model, &writable, table, &spec.class_id,
                 crate::lower::controller_to_library::params::model_from_params_name(spec),
+                spec.wants_compact,
             );
             self::schema::push_update_typed_variants(
                 &mut methods, &model.name, &writable, table, spec,

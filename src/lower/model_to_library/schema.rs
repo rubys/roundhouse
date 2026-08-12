@@ -21,7 +21,7 @@ pub(super) fn push_schema_methods(
     model: &Model,
     models: &[Model],
     table: &Table,
-    permitted: Option<(&ClassId, &[Symbol])>,
+    permitted: Option<(&ClassId, &[Symbol], bool)>,
 ) {
     let owner = &model.name;
 
@@ -239,8 +239,8 @@ pub(super) fn push_schema_methods(
     // exposed by any controller), falls back to the Hash-shaped variant
     // for backward compatibility.
     methods.push(match permitted {
-        Some((params_class, fields)) => synth_update_typed(
-            owner, fields, table, params_class, Symbol::from("update"),
+        Some((params_class, fields, presence)) => synth_update_typed(
+            owner, fields, table, params_class, Symbol::from("update"), presence,
         ),
         None => synth_update(owner, table),
     });
@@ -248,9 +248,9 @@ pub(super) fn push_schema_methods(
     // `update!` — same typed assignment, `save!` tail (raises on
     // invalid via Base). Only the typed variant: the corpus bang
     // sites all go through permitted resources.
-    if let Some((params_class, fields)) = permitted {
+    if let Some((params_class, fields, presence)) = permitted {
         methods.push(synth_update_typed(
-            owner, fields, table, params_class, Symbol::from("update!"),
+            owner, fields, table, params_class, Symbol::from("update!"), presence,
         ));
     }
 
@@ -914,6 +914,7 @@ pub(super) fn push_from_params_method(
     table: &Table,
     params_class_id: &ClassId,
     name: Symbol,
+    skip_nil: bool,
 ) {
     let owner = &model.name;
     let p = Symbol::from("p");
@@ -950,16 +951,41 @@ pub(super) fn push_from_params_method(
                 parenthesized: false,
             },
         );
-        stmts.push(Expr::new(
+        let assign = Expr::new(
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(var_ref(instance.clone())),
                 method: field_storage_setter(table, field),
-                args: vec![p_field],
+                args: vec![p_field.clone()],
                 block: None,
                 parenthesized: false,
             },
-        ));
+        );
+        // A presence-aware params class carries a `<field>_provided`
+        // flag. Rails' `new(attrs)` never sees an absent key, so
+        // assigning one here would write `""` over the column default.
+        stmts.push(if skip_nil {
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::If {
+                    cond: Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Send {
+                            recv: Some(var_ref(p.clone())),
+                            method:
+                                crate::lower::controller_to_library::params::provided_field(field),
+                            args: Vec::new(),
+                            block: None,
+                            parenthesized: false,
+                        },
+                    ),
+                    then_branch: assign,
+                    else_branch: nil_lit(),
+                },
+            )
+        } else {
+            assign
+        });
     }
 
     stmts.push(var_ref(instance));
@@ -1002,6 +1028,7 @@ pub(super) fn push_update_typed_variants(
             table,
             &spec.class_id,
             model_update_name(spec, bang),
+            spec.wants_compact,
         ));
     }
 }
@@ -2111,6 +2138,7 @@ fn synth_update_typed(
     table: &Table,
     params_class_id: &ClassId,
     name: Symbol,
+    presence: bool,
 ) -> MethodDef {
     let p = Symbol::from("p");
     let bang = name.as_str().ends_with('!');
@@ -2127,16 +2155,43 @@ fn synth_update_typed(
                 parenthesized: false,
             },
         );
-        let nil_check = Expr::new(
-            Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(p_field.clone()),
-                method: Symbol::from("nil?"),
-                args: Vec::new(),
-                block: None,
-                parenthesized: false,
-            },
-        );
+        // Presence-aware classes answer "did the request provide this"
+        // with their own flag; the rest use the nil convention that
+        // `<Params>.new` + selective setters produces.
+        let skip_check = if presence {
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Send {
+                            recv: Some(var_ref(p.clone())),
+                            method:
+                                crate::lower::controller_to_library::params::provided_field(field),
+                            args: Vec::new(),
+                            block: None,
+                            parenthesized: false,
+                        },
+                    )),
+                    method: Symbol::from("!"),
+                    args: Vec::new(),
+                    block: None,
+                    parenthesized: false,
+                },
+            )
+        } else {
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(p_field.clone()),
+                    method: Symbol::from("nil?"),
+                    args: Vec::new(),
+                    block: None,
+                    parenthesized: false,
+                },
+            )
+        };
+        let nil_check = skip_check;
         let assign_call = Expr::new(
             Span::synthetic(),
             ExprNode::Send {
