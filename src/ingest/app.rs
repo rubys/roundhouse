@@ -21,7 +21,8 @@ use super::expr::ingest_ruby_program;
 use super::fixture::ingest_fixture_file;
 use super::jbuilder::ingest_jbuilder;
 use super::library_class::{
-    ClassKind, classify_class_file, ingest_concern_filters, ingest_concern_model_items,
+    ClassKind, classify_class_file, ingest_concern_class_method_names,
+    ingest_concern_filters, ingest_concern_model_items,
     ingest_library_classes, ingest_rails_application_singleton_methods,
 };
 use super::model::ingest_model;
@@ -63,6 +64,14 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     let mut concern_enums: Vec<(
         crate::ident::ClassId,
         Vec<(crate::ident::Symbol, Vec<(String, crate::expr::Literal)>)>,
+    )> = Vec::new();
+    // Which of a concern's class-side methods came from its
+    // `ClassMethods` carrier — the only ones an includer inherits. Local
+    // for the same reason as `concern_enums`: read once, by the splice
+    // that copies them onto each including model.
+    let mut concern_class_method_names: Vec<(
+        crate::ident::ClassId,
+        Vec<crate::ident::Symbol>,
     )> = Vec::new();
 
     let schema_path = dir.join("db/schema.rb");
@@ -128,6 +137,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         let (concern_items, concern_enum_decls) =
                             ingest_concern_model_items(&source, &path_str);
                         app.concern_model_items.extend(concern_items);
+                        concern_class_method_names
+                            .extend(ingest_concern_class_method_names(&source));
                         concern_enums.extend(concern_enum_decls);
                     }
                 }
@@ -456,6 +467,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         let (concern_items, concern_enum_decls) =
                             ingest_concern_model_items(&source, &path_str);
                         app.concern_model_items.extend(concern_items);
+                        concern_class_method_names
+                            .extend(ingest_concern_class_method_names(&source));
                         concern_enums.extend(concern_enum_decls);
                     }
                 }
@@ -691,6 +704,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // by ClassId, so the lexical-scope resolution has to have happened.
     qualify_relative_model_includes(&mut app);
     splice_concerns_into_models(&mut app);
+    splice_concern_class_methods_into_models(&mut app, &concern_class_method_names);
     // After the splice, so a class method a concern contributed gets
     // the same treatment as one written in the model.
     qualify_model_class_method_ar_calls(&mut app);
@@ -772,6 +786,134 @@ fn splice_concerns_into_models(app: &mut App) {
             model.body.splice(i + 1..i + 1, items);
             i += n + 1;
         }
+    }
+}
+
+/// Copy a model concern's CLASS-side methods onto every model that
+/// includes it.
+///
+/// `include` never carries them. A concern writes its class side as
+/// `class_methods do` / `module ClassMethods`, both of which
+/// `ingest_library_classes` flattens into the module as `def self.…` —
+/// and Ruby's `include` brings instance methods across, never singleton
+/// ones (`C.respond_to?(:x)` is false; verified). Rails only gets away
+/// with it because ActiveSupport::Concern's `append_features` runs
+/// `base.extend ClassMethods`, and the emitted modules have no Concern.
+///
+/// So `Message.create_with_attachment!` — campfire's entire message
+/// POST — resolved in analyze (the registry fold already copies the
+/// class side onto includers) and NoMethodError'd at runtime. Analyze
+/// agreeing with Rails while the emit disagreed is what kept it hidden.
+///
+/// COPY rather than emit `extend Message::Attachment::ClassMethods`:
+/// the same call the model side already made for `included do` items and
+/// the controller side made for filters, and for the same reason — a
+/// mixin is a Ruby-family-only mechanism, and this lands once in the IR
+/// for all thirteen targets.
+///
+/// Precedence follows Ruby's ancestor order for the LIST form campfire
+/// writes (`include Attachment, Broadcasts, Mentionee`), where
+/// `Module#include` inserts left to right so the EARLIER argument wins;
+/// the model's own definition beats every concern. Transitive, so a
+/// concern that includes another concern contributes both.
+///
+/// The module keeps its copy: it still emits as a real file, and the
+/// copy is unreachable there rather than wrong (nothing calls
+/// `Message::Attachment.create_with_attachment!`). Removing it would
+/// mean rewriting library-class emit for no behavioural gain.
+fn splice_concern_class_methods_into_models(
+    app: &mut App,
+    carriers: &[(crate::ident::ClassId, Vec<crate::ident::Symbol>)],
+) {
+    use crate::dialect::{MethodReceiver, ModelBodyItem};
+    use crate::ident::{ClassId, Symbol};
+    use std::collections::{HashMap, HashSet};
+
+    // Class side + own constant names, per module. The constants come
+    // along because a lifted body's bare `THUMBNAIL_MAX_WIDTH` resolves
+    // against the module it was written in and would resolve against the
+    // MODEL once moved — the same lexical trap the controller splice
+    // hit with lobsters' `TIME_INTERVALS`.
+    let carried: HashMap<&ClassId, HashSet<&Symbol>> = carriers
+        .iter()
+        .map(|(id, names)| (id, names.iter().collect()))
+        .collect();
+    if carried.is_empty() {
+        return;
+    }
+    let mut class_side: HashMap<ClassId, (Vec<crate::dialect::MethodDef>, HashSet<Symbol>)> =
+        HashMap::new();
+    let mut module_includes: HashMap<ClassId, Vec<ClassId>> = HashMap::new();
+    for lc in &app.library_classes {
+        module_includes.insert(lc.name.clone(), lc.includes.clone());
+        let Some(names) = carried.get(&lc.name) else { continue };
+        let methods: Vec<crate::dialect::MethodDef> = lc
+            .methods
+            .iter()
+            .filter(|m| m.receiver == MethodReceiver::Class && names.contains(&m.name))
+            .cloned()
+            .collect();
+        if methods.is_empty() {
+            continue;
+        }
+        let consts: HashSet<Symbol> = lc.constants.iter().map(|(n, _)| n.clone()).collect();
+        class_side.insert(lc.name.clone(), (methods, consts));
+    }
+    if class_side.is_empty() {
+        return;
+    }
+
+    for model in &mut app.models {
+        // Transitive closure of the model's includes, in ancestor order.
+        let mut order: Vec<ClassId> = Vec::new();
+        let mut seen: HashSet<ClassId> = HashSet::new();
+        let mut queue: Vec<ClassId> = crate::analyze::model_includes(model);
+        while !queue.is_empty() {
+            let id = queue.remove(0);
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            order.push(id.clone());
+            if let Some(nested) = module_includes.get(&id) {
+                queue.extend(nested.iter().cloned());
+            }
+        }
+        if order.is_empty() {
+            continue;
+        }
+
+        let mut taken: HashSet<Symbol> = model
+            .body
+            .iter()
+            .filter_map(|i| match i {
+                ModelBodyItem::Method { method, .. }
+                    if method.receiver == MethodReceiver::Class =>
+                {
+                    Some(method.name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+
+        let mut added: Vec<ModelBodyItem> = Vec::new();
+        for concern in &order {
+            let Some((methods, consts)) = class_side.get(concern) else { continue };
+            for m in methods {
+                if !taken.insert(m.name.clone()) {
+                    continue;
+                }
+                let mut m = m.clone();
+                if !consts.is_empty() {
+                    qualify_lexical_consts(&mut m.body, concern, consts);
+                }
+                added.push(ModelBodyItem::Method {
+                    method: m,
+                    leading_comments: Vec::new(),
+                    leading_blank_line: true,
+                });
+            }
+        }
+        model.body.extend(added);
     }
 }
 

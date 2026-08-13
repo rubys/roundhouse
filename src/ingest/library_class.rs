@@ -899,6 +899,76 @@ pub enum ClassKind {
 /// chain. Modules without an `included do`, and `included do` statements
 /// that aren't filter calls, contribute nothing here (the module's
 /// method defs are captured separately by [`ingest_library_classes`]).
+/// Per module, the names its ActiveSupport::Concern CLASS-SIDE CARRIER
+/// declares — `module ClassMethods … end` or `class_methods do … end`.
+///
+/// `walk_decl_body` flattens both into the parent module as
+/// Class-receiver methods, which is right for resolution and loses the
+/// one fact an includer needs: whether a given class-side method is
+/// inherited. Concern's `append_features` runs `base.extend
+/// ClassMethods` and nothing else, so ONLY these cross. A module's own
+/// singletons — `module_function :x`, `class << self` — are also
+/// Class-receiver methods after the flatten and are NOT inherited.
+///
+/// Without the distinction, the model concern splice invented
+/// `User.email_on_blocklist?` on three lobsters models, from
+/// `EmailBlocklistValidation`'s `module_function :email_on_blocklist?`.
+///
+/// Read with its own parse, like `ingest_concern_filters` and
+/// `ingest_concern_model_items` beside it, rather than widening
+/// `DeclBody` — that tuple reaches 25 `LibraryClass` construction
+/// sites, nearly all of them synthesizing classes that can never have a
+/// concern carrier.
+pub fn ingest_concern_class_method_names(source: &[u8]) -> Vec<(ClassId, Vec<Symbol>)> {
+    fn defs_in(body: Option<ruby_prism::Node<'_>>, out: &mut Vec<Symbol>) {
+        let Some(body) = body else { return };
+        for stmt in flatten_statements(body) {
+            if let Some(def) = stmt.as_def_node() {
+                out.push(Symbol::from(constant_id_str(&def.name())));
+            }
+        }
+    }
+
+    let result = parse(source);
+    let root = result.node();
+    let mut out = Vec::new();
+    for (scope, module) in find_all_modules_with_scope(&root) {
+        let Some(name_path) = module_name_path(&module) else { continue };
+        // A nested `ClassMethods` is reported under its PARENT, which is
+        // the module an app actually includes.
+        if name_path.as_slice() == ["ClassMethods".to_string()] && !scope.is_empty() {
+            continue;
+        }
+        let mut full_path: Vec<String> = scope.clone();
+        full_path.extend(name_path);
+        let id = ClassId(Symbol::from(full_path.join("::")));
+
+        let Some(body) = module.body() else { continue };
+        let mut names: Vec<Symbol> = Vec::new();
+        for stmt in flatten_statements(body) {
+            if let Some(m) = stmt.as_module_node() {
+                if module_name_path(&m).as_deref() == Some(&["ClassMethods".to_string()]) {
+                    defs_in(m.body(), &mut names);
+                }
+                continue;
+            }
+            if let Some(call) = stmt.as_call_node() {
+                if call.receiver().is_none()
+                    && constant_id_str(&call.name()) == "class_methods"
+                {
+                    if let Some(block) = call.block().and_then(|b| b.as_block_node()) {
+                        defs_in(block.body(), &mut names);
+                    }
+                }
+            }
+        }
+        if !names.is_empty() {
+            out.push((id, names));
+        }
+    }
+    out
+}
+
 pub fn ingest_concern_filters(
     source: &[u8],
     file: &str,
