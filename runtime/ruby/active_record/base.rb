@@ -38,6 +38,22 @@ module ActiveRecord
     # Body ignores attrs — subclass override is the place that
     # populates the column slots from the hash.
     def initialize(_attrs = {})
+      # `0`, NOT `nil` — the UNSAVED SENTINEL, and a deliberate
+      # divergence from Rails, which answers `Article.new.id == nil`
+      # (measured). See docs/pipeline/runtime.md § Deliberate
+      # divergences from Rails.
+      #
+      # It exists for the strict targets: a nullable primary key means
+      # `Option<i64>` in Rust and `Int?` in Kotlin/Swift/C#, with an
+      # unwrap at every foreign-key comparison, path helper and join.
+      # The sentinel keeps ids plain machine integers across all
+      # thirteen, and foreign keys use the same convention (the
+      # synthesized `belongs_to` readers test `@creator_id == 0`).
+      #
+      # It is never the thing that answers "is this saved" — `@persisted`
+      # below is. `form_with` picks its action from `persisted?`, and so
+      # does `dom_id`; app code that reads `id` on an unsaved record is
+      # where the divergence becomes visible.
       @id = 0
       @errors = []
       @id_previously_changed = false
