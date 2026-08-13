@@ -161,46 +161,6 @@ function is a compile failure in the generated project.
 | `src/emit/<target>.rs` | Emitter side that reads + embeds the runtime |
 | `src/runtime_src.rs` | Framework-Ruby ingestion + transpile pipeline |
 
-## Deliberate divergences from Rails
-
-Places where the runtime knowingly answers differently from Rails. Each
-is a decision, not a gap — a gap belongs in the diagnostics ledger
-instead. **A divergence must be recorded here when it is chosen**: an
-undocumented one reads as intent to the next session precisely because
-it is applied consistently, and the emit gives no signal that anyone
-weighed it.
-
-### `id` is `0` before save, not `nil`
-
-`ActiveRecord::Base#initialize` seeds `@id = 0`. Rails answers
-`Article.new.id == nil` (measured against Rails 8.1).
-
-**Why.** A nullable primary key means `Option<i64>` in Rust and `Int?`
-in Kotlin/Swift/C#, with an unwrap at every foreign-key comparison, path
-helper and join. The sentinel keeps ids plain machine integers across
-all thirteen targets. Foreign keys follow the same convention — the
-synthesized `belongs_to` readers test `@creator_id == 0`.
-
-**What depends on it.** `ty_of_column_slot` excludes the primary key
-from nullability, so the RBS declares `id: Integer` (non-null) while a
-genuinely nullable column declares `String?`. The two must agree: a
-write of `nil` into `@id` contradicts both the sentinel and the
-signature, and spinel widens the slot on the *possibility* — one
-unreachable nil arm in `[]=` boxed `@id` on every model in the corpus.
-
-**Where it is visible.** Only where app code reads `id` on an unsaved
-record. The framework never does: `form_with` picks its action from
-`persisted?`, and so does `dom_id`. `record.id.nil?` is `false` here
-where Rails says `true`.
-
-### An enum attribute reader yields the STORED value
-
-`user.status` answers `0` where Rails answers `"active"`. The generated
-predicates and scopes carry the stored value too, which is what makes
-them correct with no enum type at runtime. Fixing the reader means
-mapping at every read; do it only if an app is found that reads the raw
-attribute.
-
 ## Related docs
 
 - [`emit.md`](emit.md) — the universal IR contract; the consumers of
