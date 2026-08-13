@@ -6,11 +6,11 @@
 # loaded the constant — both implementations produce the same RFC
 # 4648 strict (no-line-wrap) encoding.
 #
-# Currently only `strict_encode64` is needed (turbo-stream signed-name
-# encoding from `runtime/ruby/action_view/view_helpers.rb`). The
-# broader stdlib surface (encode64 with line wrapping, decode64,
-# urlsafe_*, etc.) is omitted because no caller exists; add on
-# demand.
+# Grown on demand, as the header always said it would be:
+# `strict_encode64` for turbo-stream signed names, `strict_decode64` for
+# the Action Cable glue, and the `urlsafe_*` pair for campfire's QR-code
+# helper (`Base64.urlsafe_encode64(url)` / the controller's decode).
+# `encode64`'s line-wrapping form still has no caller and stays out.
 module Base64
   ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
@@ -88,5 +88,54 @@ module Base64
       idx = idx + 1
     end
     -1
+  end
+
+  # RFC 4648 §5 — the URL-safe alphabet is the standard one with `+` and
+  # `/` swapped for `-` and `_`. Implemented as a translation over the
+  # standard encoder's output rather than by parameterizing it: the
+  # encoder is the verified path for turbo-stream signed names and is
+  # left untouched. `String#tr` would say this in one line, but the
+  # explicit loop uses only the shapes the rest of this file already
+  # does, which is what keeps it compiling on every ruby-family target.
+  #
+  # Padding is KEPT, matching Rails' `urlsafe_encode64(bin,
+  # padding: true)` default — campfire calls it with no keyword.
+  def self.urlsafe_encode64(s)
+    std = strict_encode64(s)
+    out = +""
+    i = 0
+    n = std.length
+    while i < n
+      c = std[i]
+      if c == "+"
+        out << "-"
+      elsif c == "/"
+        out << "_"
+      else
+        out << c.to_s
+      end
+      i = i + 1
+    end
+    out
+  end
+
+  # The inverse: map the URL-safe pair back and hand off to the standard
+  # decoder, which already skips padding and any stray byte.
+  def self.urlsafe_decode64(s)
+    std = +""
+    i = 0
+    n = s.length
+    while i < n
+      c = s[i]
+      if c == "-"
+        std << "+"
+      elsif c == "_"
+        std << "/"
+      else
+        std << c.to_s
+      end
+      i = i + 1
+    end
+    strict_decode64(std)
   end
 end
