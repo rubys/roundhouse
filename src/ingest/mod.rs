@@ -21,6 +21,7 @@ pub mod expr;
 pub mod fixture;
 pub mod jbuilder;
 pub mod library_class;
+pub mod current_attributes;
 pub mod model;
 pub mod prism;
 pub mod roda_app;

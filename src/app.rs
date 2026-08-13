@@ -148,6 +148,13 @@ pub struct App {
     /// item provenance) can follow when emission needs it.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub concern_model_items: HashMap<ClassId, Vec<ModelBodyItem>>,
+    /// Classes that were `ActiveSupport::CurrentAttributes` subclasses
+    /// before `ingest::current_attributes` flattened them. Recorded
+    /// because that pass CLEARS the parent — nothing downstream could
+    /// recognize them afterwards — and the dispatch scaffold needs the
+    /// names to emit a per-request `reset`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub current_attribute_classes: Vec<ClassId>,
     /// Renderer view → the partial views it renders (`articles/show` →
     /// [`articles/_form`]), harvested from actual render sites as views
     /// are analyzed. The other half of the render graph that
@@ -293,6 +300,7 @@ impl App {
             rails_application: None,
             concern_filters: HashMap::new(),
             concern_model_items: HashMap::new(),
+            current_attribute_classes: Vec::new(),
             render_edges: HashMap::new(),
             view_feeders: HashMap::new(),
             controller_resolutions: HashMap::new(),

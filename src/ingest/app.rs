@@ -703,6 +703,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // Before the splice: it (and every later consumer) looks concerns up
     // by ClassId, so the lexical-scope resolution has to have happened.
     qualify_relative_model_includes(&mut app);
+    // Before the concern splices: they read `library_classes`, and this
+    // turns `Current`'s metaprogrammed surface into real methods first.
+    super::current_attributes::lower_current_attributes(&mut app);
     splice_concerns_into_models(&mut app);
     splice_concern_class_methods_into_models(&mut app, &concern_class_method_names);
     // After the splice, so a class method a concern contributed gets

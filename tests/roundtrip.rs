@@ -115,6 +115,7 @@ fn tiny_blog_round_trips() {
         schema,
         models: vec![post_model],
         library_classes: vec![],
+        current_attribute_classes: vec![],
         controllers: vec![posts_controller],
         routes,
         views: vec![],

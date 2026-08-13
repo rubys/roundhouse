@@ -1341,6 +1341,7 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
 
     let flat = crate::lower::flatten_routes(app);
     let mut seen = std::collections::HashSet::new();
+    let current_classes = &app.current_attribute_classes;
     let mut arms = String::new();
     // Same rule as the routes.rb require header: a route may name a
     // controller the app never defines (campfire's `resource :settings`
@@ -1388,6 +1389,23 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
     for (path, content) in files.iter_mut() {
         if path.ends_with("main.rb") && content.contains(HARDCODED) {
             *content = content.replace(HARDCODED, &generated);
+        }
+        // Per-request reset for the app's `ActiveSupport::CurrentAttributes`
+        // subclass. `Current.instance` memoizes on the CLASS, so without
+        // this a long-running process carries one request's `Current.user`
+        // into the next — and an UNAUTHENTICATED request would read the
+        // previous visitor's user, which is an auth bypass rather than a
+        // staleness bug. Rails resets it per request through an executor
+        // hook the emitted trees have no equivalent of.
+        if path.ends_with("main.rb") {
+            for class in current_classes {
+                let marker = "    ActionController::Current.controller = controller";
+                let with_reset =
+                    format!("{marker}\n    {}.reset", class.0.as_str());
+                if content.contains(marker) && !content.contains(&with_reset) {
+                    *content = content.replace(marker, &with_reset);
+                }
+            }
         }
         // Drop the eager `require_relative "../app/controllers/<x>"` header
         // from routes.rb — controllers now load lazily via
