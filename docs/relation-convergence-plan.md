@@ -273,9 +273,9 @@ Relation objects — 0 residue sites means nothing ever reaches the runtime Rela
 confirmed at the allocator. Lobsters allocates 5,857 (≈8.8 per request). But the
 poly-container tax is not there: untyped containers are 1.09% of objects / 0.57% of bytes
 on lobsters against 0.39% / 0.43% on blog, a delta of 0.7 points of objects and 0.14
-points of bytes. The whole dynamic-relation footprint — poly containers plus the Relation
-objects themselves — is ~1.4% of objects and ~1.1% of bytes. Nothing that small moves a
-lane ratio from 2.9× to 1.26×.
+points of bytes. Untyped SHAPES — the part of the dynamic path that AOT specifically
+cannot specialize and YJIT recovers by observing runtime types — are that 0.57% of bytes,
+and nothing that small moves a lane ratio from 2.9× to 1.26×.
 
 What the report shows instead is **scale**: lobsters allocates 8× the objects and 10× the
 bytes per request, at essentially the *same* amplification per byte of output (6.2× vs
@@ -289,11 +289,6 @@ Limits of this measurement, in decreasing order of how much they could change th
 - **Allocation, not live heap.** Mark cost tracks the live set; these are cumulative
   allocation counters. Relation objects are per-request and short-lived, so they are
   unlikely to be over-represented in the live set, but the report cannot show that.
-- **Strings are unattributed.** 68.6% of lobsters bytes are `String`, and
-  `SPINEL_ALLOC_SITES` does not attribute String allocations at all. The runtime Relation
-  builds SQL by concatenation, so some of that mass is relation work and is invisible
-  here. Probably not *differential*, since the folded path concatenates SQL too
-  (`"… WHERE " + Db.escape_int(id)`).
 - **55 unnamed `scan_0x…` rows** on lobsters (7.5% obj, 1.5% byt) — cross-TU scan
   callbacks, unresolvable without a `--profile` symbol map (`nm` on the shipped binary
   does not line up: the report's runtime addresses land in libsqlite3 text). Even if all
@@ -302,7 +297,61 @@ Limits of this measurement, in decreasing order of how much they could change th
   These are composition numbers, not throughput numbers, and must not be quoted against
   the published page — see [[feedback_pin_benchmarks_not_ledgers]].
 
-**Consequence for the recommendation above:** the un-defer trigger for per-model
-monomorphization is a strict target becoming a driven lane, NOT lobsters performance. A
-lobsters AOT/YJIT push should go at the 95 MB of `String` and the 178K `Array(String)`
-allocations, not at the 50 relation chains.
+### Per-SITE attribution — the dynamic path is ~10% of bytes, not ~1%
+
+The by-TYPE table above answers the AOT-vs-YJIT question but is the wrong denominator for
+"what does the dynamic path cost at all": it counts only what the path allocates *of
+distinctive types* (Relation objects, poly containers) and misses everything it allocates
+of ordinary ones. `Array(String)` alone is 10.7% of lobsters objects, and the obvious
+question — where does it come from — is what forced this pass.
+
+Re-run with `SPINEL_ALLOC_SITES=1` (~346 dispatches: parity + verify + 1 warmup + 1 timed;
+per-request composition matches the longer run, 2,578 vs 2,503 obj/req, so the two are
+consistent). Of 96,244 `Array(String)` allocations: `sp_Relation_to_a` 18.6%,
+`sp_User_s_instantiate` 9.6%, the `_preload_dispatch`/`_preload_batch_*` family ~17%,
+`sp_Relation_where` 2.3% — **over 40% from the dynamic relation path.** The preload family
+counts as dynamic-only: the static arel path lowers `includes` into inline preload
+statements, so those per-model methods exist solely for chains reaching `Relation#to_a`.
+
+Aggregated by frame across all types (892,137 objects / 73.6 MB):
+
+| band | objects | bytes |
+|---|---|---|
+| runtime Relation + preload frames | 10.47% | 7.88% |
+| `select_rows` row Hashes | 3.36% | 0.44% |
+| `*Row` intermediates (UserRow, StoryRow, …) | 0.95% | 1.63% |
+| **directly attributable to the dynamic path** | **~15%** | **~10%** |
+| static hydration (`from_stmt`), for comparison | 1.21% | 1.84% |
+
+Plus part of the 10.31% of bytes under `instantiate`/`from_raw` — though some of that is
+the model objects themselves, which either path allocates.
+
+The mechanism is a clean dichotomy in the emitted code, and it is the specialization
+difference made concrete:
+- **folded**: `User.from_stmt(stmt)` — `Db.column_int(stmt, 0)`, `Db.column_text_opt(stmt,
+  1)`, … straight into typed fields. One object per row.
+- **dynamic**: `select_rows(sql)` → a `Hash[String, untyped]` per row →
+  `UserRow.from_raw(row)` → `User.from_row(...)`. Three objects per row plus a per-column
+  reparse.
+
+On blog the query IS the controller: `Article` allocations attribute to
+`sp_ArticlesController_index` with the hydrate loop inlined, and no `from_stmt` frame
+exists at all. That also means blog cannot be compared band-for-band here — its zeros in
+these bands are an inlining artifact. (The zero *Relation objects* in the by-type table is
+not an artifact; it is solid.) Frame attribution also folds inlined callees into the
+caller, so "under `Relation#to_a`" includes its inlined `to_sql` fragment assembly and the
+Relation's own six accumulator-array ivars.
+
+**Correction to the earlier "Strings are unattributed" caveat** (which came from a
+2026-07-31 profiling note): this spinel build DOES attribute String allocations per site —
+822 String site rows. The caveat is retired.
+
+**Consequence for the recommendation above — one half stands, one half does not.** The
+un-defer trigger for per-model monomorphization is still a strict target becoming a driven
+lane, NOT lobsters performance: the dynamic path's cost is paid identically by the same
+emitted Ruby on CRuby+YJIT and on spinel AOT, so removing it helps both lanes and does not
+move the ratio. What does NOT stand is the footprint claim: the dynamic path is ~10% of
+allocated bytes, not ~1%, so specializing it (by folding more chains or by monomorphizing
+the Relation) is a real LANE-SHARED win of the same family as the 2026-07-16 `to_a`
+memoization fix that took the sequence down 20%. Priced as an optimization it is worth
+more than the first pass said; priced as an AOT-gap closer it is still worth nothing.
