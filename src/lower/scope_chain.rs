@@ -299,6 +299,33 @@ pub struct AssocRegistry {
     /// even though the receiver's class is statically unknown; ambiguous
     /// names are never tracked.
     has_many_by_name: HashMap<Symbol, Option<(ClassId, Symbol)>>,
+    /// `(model, has_many name)` pairs the FK seed CANNOT reproduce, so
+    /// the rewriter declines them and the chain keeps its source shape.
+    ///
+    /// The seed is exactly `Relation.new(Target).where(fk => owner.id)`.
+    /// Two declarations make that an under-constrained query rather than
+    /// the association Rails would hand back, and both fail SILENTLY —
+    /// extra rows, not an exception:
+    ///
+    ///   * `as: :notifiable` — the rows are keyed by `<as>_id` AND
+    ///     `<as>_type`; seeding only the id half reaches every other
+    ///     implementor's rows too.
+    ///   * a scope lambda that can change the ROW SET
+    ///     (`-> { where(...) }`, `-> { joins(...) }`) —
+    ///     `synth_has_many_reader` grafts it onto the reader; nothing
+    ///     grafts it here.
+    ///
+    /// A scope built only from preload directives is NOT listed:
+    /// `has_many :stories, -> { includes :user }` selects exactly the
+    /// same rows either way, and `includes` is an eager-load hint whose
+    /// loss costs a query, not an answer — the reader's own eager-load
+    /// path already doesn't apply scopes (see `synth_has_many_reader`).
+    /// Declining it would have turned lobsters'
+    /// `author.stories.not_deleted(nil)` from slow into broken.
+    ///
+    /// Declining leaves the pre-existing NoMethodError-on-Array, which is
+    /// loud and locatable. Wrong rows are neither.
+    has_many_unseedable: std::collections::HashSet<(ClassId, Symbol)>,
 }
 
 impl AssocRegistry {
@@ -327,6 +354,41 @@ impl AssocRegistry {
     fn has_many_by_name(&self, assoc: &Symbol) -> Option<&(ClassId, Symbol)> {
         self.has_many_by_name.get(assoc).and_then(|o| o.as_ref())
     }
+    /// See `has_many_unseedable`. Checked against every model declaring
+    /// the name, not just the resolved owner: the by-NAME rung answers
+    /// without an owner, so a name that is unseedable ANYWHERE has to be
+    /// declined there too.
+    fn is_unseedable(&self, owner: Option<&ClassId>, assoc: &Symbol) -> bool {
+        match owner {
+            Some(m) => self.has_many_unseedable.contains(&(m.clone(), assoc.clone())),
+            None => self.has_many_unseedable.iter().any(|(_, a)| a == assoc),
+        }
+    }
+}
+
+/// Does this association-scope lambda select the same rows the bare
+/// foreign-key query would?
+///
+/// True only for a chain built entirely from eager-load directives —
+/// those name what to LOAD ALONGSIDE, never which rows to return, so a
+/// seed that drops them answers identically and just costs the extra
+/// queries. Anything else (`where`, `joins`, `merge`, `limit`, and also
+/// `order`, which decides what `.first`/`.last` mean) is treated as
+/// row-changing: the list is an allowlist so an unrecognized method
+/// declines rather than being assumed harmless.
+fn scope_is_row_preserving(scope: &Expr) -> bool {
+    fn walk(e: &Expr) -> bool {
+        match &*e.node {
+            ExprNode::Send { recv, method, .. } => {
+                matches!(method.as_str(), "includes" | "preload" | "eager_load")
+                    && recv.as_ref().is_none_or(|r| walk(r))
+            }
+            // The chain root a receiver-less lambda body lowers to.
+            ExprNode::SelfRef => true,
+            _ => false,
+        }
+    }
+    walk(scope)
 }
 
 /// Build the association registry. Table names use the same
@@ -355,7 +417,20 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                         );
                     }
                 }
-                Association::HasMany { name, target, foreign_key, through: None, .. } => {
+                Association::HasMany {
+                    name,
+                    target,
+                    foreign_key,
+                    through: None,
+                    as_interface,
+                    scope,
+                    ..
+                } => {
+                    if as_interface.is_some()
+                        || scope.as_ref().is_some_and(|s| !scope_is_row_preserving(s))
+                    {
+                        reg.has_many_unseedable.insert((m.name.clone(), name.clone()));
+                    }
                     let t = pluralize_snake(target.0.as_str());
                     reg.join_tails.insert(
                         (m.name.clone(), name.clone()),
@@ -682,8 +757,42 @@ fn is_relation_terminal(name: &str) -> bool {
     )
 }
 
-/// Name-keyed association resolution for the seed arm: `(target, fk,
-/// <owner>.id)` when `aname` is a unique has_many across models.
+/// `@room` names the model `Room` — the naming convention
+/// `apply_route_param_lowering`'s third signal and the view lowerer's
+/// `ivar_ty` already commit to, used here as the middle rung between a
+/// stamped owner type and the by-assoc-name fallback.
+///
+/// It is the rung that carries real apps. The by-NAME map answers only
+/// when ONE model declares the association, and two models declaring the
+/// same collection is ordinary Rails, not an exotic shape: campfire has
+/// `has_many :messages` on both Room (`room_id`) and User (`creator_id`),
+/// and `has_many :memberships` on both. That collision maps both names to
+/// None, so every `@room.messages.<scope>` chain in the app silently kept
+/// the arel-folded Array and NoMethodError'd at runtime.
+///
+/// Only consulted when the owner carries no stamped type — a Var owner
+/// (no name in the IR) and a Send owner still fall through. The guard is
+/// two-sided: the name must be an ingested model AND that model must
+/// declare this association, so `@room.messages` resolves to
+/// (Message, room_id) while `@user.messages` resolves to
+/// (Message, creator_id) — each right, neither guessed.
+fn owner_model_from_name(owner: &Expr, ctx: &Ctx) -> Option<ClassId> {
+    let name = match &*owner.node {
+        ExprNode::Ivar { name } => name.as_str(),
+        // The zero-arg receiver-less bareword a template local parses as
+        // (see the owner-form note at the call site).
+        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
+            method.as_str()
+        }
+        _ => return None,
+    };
+    let id = ClassId(Symbol::from(crate::naming::camelize(name).as_str()));
+    ctx.models.contains(&id).then_some(id)
+}
+
+/// Association resolution for the seed arm: `(target, fk, <owner>.id)`,
+/// from the owner's stamped type, else the owner's NAME, else the assoc
+/// name when it is a unique has_many across models.
 fn assoc_owner_seed(
     ctx: &Ctx,
     aname: &Symbol,
@@ -700,15 +809,27 @@ fn assoc_owner_seed(
     // `find_by` owners arrive as `Story | Nil` — peel the nilable
     // wrapper before matching (the nil case raises at the `.id` read
     // either way, same as Rails).
+    //
+    // Each rung carries the OWNER it resolved through so the seedability
+    // check below can ask about that exact declaration; the by-NAME rung
+    // has no owner and is checked against every declarer.
     let typed = match owner.ty.as_ref().map(|t| t.peel_nilable()) {
-        Some(crate::ty::Ty::Class { id, .. }) => {
-            ctx.assocs.has_many_fk(id, aname).cloned()
-        }
+        Some(crate::ty::Ty::Class { id, .. }) => ctx
+            .assocs
+            .has_many_fk(id, aname)
+            .cloned()
+            .map(|hit| (Some(id.clone()), hit)),
         _ => None,
     };
     typed
-        .or_else(|| ctx.assocs.has_many_by_name(aname).cloned())
-        .map(|(target, fk)| {
+        .or_else(|| {
+            owner_model_from_name(owner, ctx).and_then(|m| {
+                ctx.assocs.has_many_fk(&m, aname).cloned().map(|hit| (Some(m), hit))
+            })
+        })
+        .or_else(|| ctx.assocs.has_many_by_name(aname).cloned().map(|hit| (None, hit)))
+        .filter(|(owner_model, _)| !ctx.assocs.is_unseedable(owner_model.as_ref(), aname))
+        .map(|(_, (target, fk))| {
             let owner_id = syn(
                 span,
                 ExprNode::Send {
@@ -1114,6 +1235,9 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     // (target, fk, owner-id expression)
                     let resolved: Option<(ClassId, Symbol, Expr)> = match &*ir.node {
                         ExprNode::SelfRef => ctx.instance_self.clone().and_then(|self_model| {
+                            if ctx.assocs.is_unseedable(Some(&self_model), aname) {
+                                return None;
+                            }
                             ctx.assocs.has_many_fk(&self_model, aname).cloned().map(
                                 |(target, fk)| {
                                     (target, fk, syn(span, ExprNode::Ivar { name: Symbol::from("id") }))
