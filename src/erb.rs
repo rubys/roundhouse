@@ -130,6 +130,26 @@ pub fn compile_erb(source: &str) -> String {
     compile_erb_mapped(source).0
 }
 
+/// `Some("")` for a bare `end` tag, `Some("if cond")` for a block closed
+/// by a trailing modifier, `None` for anything else.
+///
+/// Only the modifiers that can legally follow a block's `end` — the same
+/// set Ruby accepts as statement modifiers.
+fn end_tag_modifier(ruby: &str) -> Option<&str> {
+    if ruby == "end" {
+        return Some("");
+    }
+    let rest = ruby.strip_prefix("end")?;
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let is_modifier = ["if ", "unless ", "while ", "until "]
+        .iter()
+        .any(|kw| rest.starts_with(kw));
+    is_modifier.then_some(rest)
+}
+
 /// As [`compile_erb`], plus the segment table that maps compiled-Ruby
 /// byte ranges back to template byte ranges (see [`ErbSegment`]).
 /// View ingest uses it to translate spans so diagnostics and source
@@ -290,12 +310,28 @@ pub fn compile_erb_mapped(source: &str) -> (String, Vec<ErbSegment>) {
                         out.push_str(ruby);
                         out.push_str(").to_s\n");
                     }
-                } else if ruby == "end" {
+                } else if let Some(modifier) = end_tag_modifier(ruby) {
+                    // `<% end %>`, and `<% end if cond %>` — a block
+                    // closed by a trailing modifier. Matching `"end"`
+                    // exactly sent the modifier form down the passthrough
+                    // arm, which never popped the block stack and never
+                    // emitted an Output block's `).to_s` close, so the
+                    // translation didn't parse (prism `MissingNode`).
+                    //
+                    // The modifier rides INSIDE the parens: `(expr if
+                    // cond)` is nil when the condition is false and
+                    // `nil.to_s` is "", which is what Rails renders for a
+                    // skipped block.
                     pending.flush(&mut out, &mut map);
                     record_code(&mut map, out.len(), ruby, body_start, body);
+                    let tail = if modifier.is_empty() {
+                        "end".to_string()
+                    } else {
+                        format!("end {modifier}")
+                    };
                     match stack.pop() {
-                        Some(BlockKind::Output) => out.push_str("end).to_s\n"),
-                        _ => out.push_str("end\n"),
+                        Some(BlockKind::Output) => out.push_str(&format!("{tail}).to_s\n")),
+                        _ => out.push_str(&format!("{tail}\n")),
                     }
                 } else {
                     // `<% code %>` — passthrough. Track block openers so
@@ -630,6 +666,41 @@ mod tests {
         // Should emit plain `end`, not `end).to_s`.
         assert!(out.contains("\nend\n"), "compiled:\n{out}");
         assert!(!out.contains("end).to_s"), "compiled:\n{out}");
+    }
+
+    #[test]
+    fn end_with_a_trailing_modifier_still_closes_its_block() {
+        // `<% end if cond %>` — a block closed by a statement modifier.
+        // Matching the tag against `"end"` EXACTLY sent this down the
+        // passthrough arm: the block stack never popped and the output
+        // block's `).to_s` close was never emitted, so the translation
+        // didn't parse at all (prism `MissingNode`).
+        let src = "<%= wrap(x) do %>hi<% end if cond %>";
+        let out = compile_erb(src);
+        // The modifier rides INSIDE the parens: `(expr if cond)` is nil
+        // when the condition is false, and `nil.to_s` is "" — which is
+        // what Rails renders for a skipped block.
+        assert!(out.contains("end if cond).to_s"), "compiled:\n{out}");
+    }
+
+    #[test]
+    fn end_with_a_modifier_on_a_passthrough_block_stays_a_plain_end() {
+        let src = "<% items.each do |i| %>x<% end unless skip %>";
+        let out = compile_erb(src);
+        assert!(out.contains("end unless skip"), "compiled:\n{out}");
+        assert!(!out.contains(").to_s"), "compiled:\n{out}");
+    }
+
+    #[test]
+    fn a_method_named_ending_is_not_an_end_tag() {
+        // The prefix test needs the whitespace check — `ending` and
+        // `end_of_day` both start with "end".
+        assert_eq!(end_tag_modifier("ending"), None);
+        assert_eq!(end_tag_modifier("end_of_day"), None);
+        assert_eq!(end_tag_modifier("end"), Some(""));
+        assert_eq!(end_tag_modifier("end if cond"), Some("if cond"));
+        // Only real statement modifiers — `end foo` is not one.
+        assert_eq!(end_tag_modifier("end foo"), None);
     }
 
     #[test]
