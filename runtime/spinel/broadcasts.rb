@@ -87,7 +87,17 @@ module Broadcasts
   # log — used by tests and (eventually) by transport layers that
   # need to ship the fragment over the wire.
   def self.render_fragment(action:, target:, html: "")
-    if action == :remove
+    turbo_stream_fragment(action.to_s, target, html)
+  end
+
+  # Compose the `<turbo-stream>` element for a `turbo_stream.<action>`
+  # call in a `.turbo_stream.erb` template. Positional and String-typed
+  # on purpose: it is the ONE shape the view lowerer emits on every
+  # target. `render_fragment` above (keyword args, Symbol action) is the
+  # model-broadcast spelling and now delegates here, so the markup has a
+  # single owner per target.
+  def self.turbo_stream_fragment(action, target, html)
+    if action == "remove"
       %(<turbo-stream action="remove" target="#{target}"></turbo-stream>)
     else
       %(<turbo-stream action="#{action}" target="#{target}"><template>#{html}</template></turbo-stream>)

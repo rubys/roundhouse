@@ -530,6 +530,42 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         }
     }
 
+    // `turbo_stream.<action>(...)` in a `.turbo_stream.erb` template.
+    // Needs the RECEIVER (turbo_stream is a builder object, not a bare
+    // helper), so it can't ride the classifier below.
+    // Matched WITHOUT the `block: None` constraint so the block form
+    // (`turbo_stream.append target do … end`) reaches the residue arm
+    // below instead of falling through unmentioned.
+    if let ExprNode::Send { recv, method, args: sa, block, .. } = &*inner.node {
+        let classified = block.is_none().then(|| {
+            crate::lower::view::classify_turbo_stream_call(recv.as_ref(), method.as_str(), sa)
+        }).flatten();
+        if let Some(ts) = &classified {
+            if let Some(call) = super::helpers::emit_turbo_stream_fragment(ts, ctx) {
+                return vec![accumulator_append_call(call, ctx)];
+            }
+        }
+        // Recognized the builder but not this spelling — the option form
+        // (`partial:`/`collection:`/`locals:`) or the block form. Left in
+        // source shape, where `turbo_stream` resolves to nothing, so say
+        // so rather than emitting a call that silently won't run.
+        if super::helpers::is_turbo_stream_builder(recv.as_ref()) {
+            crate::emit::diagnostics::push(crate::lower::residue_diagnostic(
+                "turbo_stream_builder",
+                "turbo_stream.<action>",
+                inner.span,
+                "only the positional `target[, record]` spelling is lowered",
+                format!(
+                    "`turbo_stream.{}` left in source shape — the option form \
+                     (partial:/collection:/locals:) and the block form need the \
+                     partial machinery a `render` call site gets, so this \
+                     template will not render",
+                    method.as_str()
+                ),
+            ));
+        }
+    }
+
     // View-helper classifier: `link_to`, `dom_id`, `pluralize`,
     // `truncate`, `turbo_stream_from`, `content_for(:slot)`, …. The
     // classifier matches bare Sends (no recv, no block) only.

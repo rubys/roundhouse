@@ -59,6 +59,14 @@ module Broadcasts
   # log — used by tests and transport layers that need to ship the
   # fragment over the wire.
   def self.render_fragment(action : String, target : String, html : String = "") : String
+    turbo_stream_fragment(action, target, html)
+  end
+
+  # Compose the `<turbo-stream>` element for a `turbo_stream.<action>`
+  # call in a `.turbo_stream.erb` template. The ONE shape the view
+  # lowerer emits on every target; `render_fragment` delegates so the
+  # markup has a single owner.
+  def self.turbo_stream_fragment(action : String, target : String, html : String) : String
     if action == "remove"
       %(<turbo-stream action="remove" target="#{target}"></turbo-stream>)
     else

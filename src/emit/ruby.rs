@@ -576,7 +576,7 @@ pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
     let html_views: Vec<&crate::dialect::View> = app
         .views
         .iter()
-        .filter(|v| v.format.as_str() == "html")
+        .filter(|v| crate::lower::view::renders_through_view_path(v.format.as_str()))
         .collect();
     let mut lcs: Vec<LibraryClass> = html_views.iter().map(|v| vctx.lower(v)).collect();
     // Normalize scope chains opened in the template itself — lobsters'

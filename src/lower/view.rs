@@ -309,6 +309,64 @@ fn classify_render_kwargs(entries: &[(Expr, Expr)]) -> Option<RenderPartial<'_>>
 /// Recognize a bare `Send { recv: None, args, block: None }` as
 /// a Rails view helper. Returns `None` for unrecognized method
 /// names or arities that don't match any variant.
+/// One recognized `turbo_stream.<action>(...)` call in a
+/// `.turbo_stream.erb` template.
+pub struct TurboStreamCall<'a> {
+    /// `append`, `remove`, … — the `<turbo-stream action="…">` value.
+    pub action: &'a str,
+    /// What the action targets. A record here means "its dom_id".
+    pub target: &'a Expr,
+    /// The fragment's content. `None` for `remove`, which carries no
+    /// `<template>`.
+    pub content: Option<&'a Expr>,
+}
+
+/// Classify `turbo_stream.<action>(target[, content])`.
+///
+/// Unlike `classify_view_helper` this needs the RECEIVER: `turbo_stream`
+/// is a builder object, not a bare helper. Only the two positional
+/// spellings are recognized; the `partial:`/`collection:`/`locals:`
+/// option form and the block form are left alone (they need the partial
+/// machinery a `render` call site gets, and no fixture drives them yet).
+pub fn classify_turbo_stream_call<'a>(
+    recv: Option<&'a Expr>,
+    method: &'a str,
+    args: &'a [Expr],
+) -> Option<TurboStreamCall<'a>> {
+    let recv = recv?;
+    let is_builder = match &*recv.node {
+        ExprNode::Send { recv: None, method: m, args, block: None, .. } => {
+            m.as_str() == "turbo_stream" && args.is_empty()
+        }
+        ExprNode::Var { name, .. } => name.as_str() == "turbo_stream",
+        _ => false,
+    };
+    if !is_builder {
+        return None;
+    }
+    if !matches!(
+        method,
+        "append" | "prepend" | "replace" | "update" | "remove" | "before" | "after"
+    ) {
+        return None;
+    }
+    match args {
+        // `turbo_stream.remove @message` — target only, no template.
+        [target] if method == "remove" => Some(TurboStreamCall {
+            action: "remove",
+            target,
+            content: None,
+        }),
+        // `turbo_stream.append dom_id(...), @message`. A Hash second
+        // argument is the option form (`partial:`/`collection:`), which
+        // this doesn't handle.
+        [target, content] if !matches!(&*content.node, ExprNode::Hash { .. }) => {
+            Some(TurboStreamCall { action: method, target, content: Some(content) })
+        }
+        _ => None,
+    }
+}
+
 pub fn classify_view_helper<'a>(
     method: &str,
     args: &'a [Expr],
@@ -427,6 +485,31 @@ pub enum FormBuilderMethod {
 /// Def site (view_to_library), render call sites (controller
 /// rewrites), and the partial/template dispatch arms share this so
 /// they can't drift.
+/// Formats whose templates render through the ERB view path.
+///
+/// `html` is the default. `turbo_stream` joins it because a Turbo form
+/// submission negotiates `text/vnd.turbo-stream.html` and Rails renders
+/// `<action>.turbo_stream.erb` for it — same ERB, different response
+/// format. Other explicit formats (`.text.erb` mailer variants,
+/// `manifest.json.erb`, `show.svg.erb`) stay skipped: their bodies
+/// aren't typed and nothing dispatches to them yet.
+pub fn renders_through_view_path(format: &str) -> bool {
+    matches!(format, "html" | "turbo_stream")
+}
+
+/// The lowered method name for a view, format-qualified when the view
+/// is not the html one: `messages/create.turbo_stream.erb` becomes
+/// `create_turbo_stream`, sitting BESIDE `create` rather than colliding
+/// with it. Same shape jbuilder's `_json` variants already use, which is
+/// what answers the stem-collision objection that kept non-html ERB out
+/// of the view path.
+pub fn view_method_name_for(stem: &str, format: &str) -> crate::ident::Symbol {
+    if format == "html" {
+        return view_method_name(stem);
+    }
+    view_method_name(&format!("{stem}_{format}"))
+}
+
 pub fn view_method_name(stem: &str) -> crate::ident::Symbol {
     if stem.chars().next().is_some_and(|c| c.is_ascii_digit()) || stem == "new" {
         crate::ident::Symbol::from(format!("_{stem}"))

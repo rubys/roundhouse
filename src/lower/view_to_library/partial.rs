@@ -35,98 +35,9 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
         // convention; additional hash entries get dropped today —
         // matches existing classifier policy).
         RenderPartial::Named { partial, arg, locals } => {
-            let (module_dir, base_name) = match partial.rsplit_once('/') {
-                Some((dir, name)) => (dir.to_string(), name.to_string()),
-                None => (ctx.resource_dir.clone(), (*partial).to_string()),
-            };
-            if module_dir.is_empty() {
-                return None;
-            }
-            let module_camel = camelize_path(&snake_case(&module_dir));
-            let method_sym = base_name.trim_start_matches('_').to_string();
-
-            // An explicit `locals:` hash binds by NAME: the entry matching
-            // the partial's record-arg convention (singular of its dir)
-            // becomes the record; remaining entries land at their matching
-            // trailing extra-param positions (nil-filled gaps). Without
-            // `locals:`, the single bare `name: rec` value stays the record
-            // (historical behavior).
-            let lookup_local = |name: &str| -> Option<Expr> {
-                locals.and_then(|entries| {
-                    entries.iter().find_map(|(k, v)| match &*k.node {
-                        ExprNode::Lit { value: Literal::Sym { value } }
-                            if value.as_str() == name =>
-                        {
-                            Some(v.clone())
-                        }
-                        _ => None,
-                    })
-                })
-            };
-            let record_name = singularize(&snake_case(last_segment(&module_camel)));
-            let strict_key = (module_camel.clone(), method_sym.clone());
-            let strict_decl = ctx.strict_locals.get(&strict_key);
-            // A strict-locals partial's positional record is its FIRST
-            // declared local (the def side builds the signature from the
-            // header, not the dir convention — `messages/_form` declares
-            // `new_message:`, not `message:`), so bind it by the DECLARED
-            // name; an omitted record falls to the header default. The
-            // dir-convention singular governs only convention-inferred
-            // partials.
-            let arg_expr = match (strict_decl, locals.is_some()) {
-                (Some(decl), true) => lookup_local(decl[0].name.as_str())
-                    .or_else(|| decl[0].default.clone())
-                    .unwrap_or_else(nil_lit),
-                (Some(decl), false) => arg
-                    .cloned()
-                    .or_else(|| decl[0].default.clone())
-                    .unwrap_or_else(nil_lit),
-                (None, true) => lookup_local(&record_name).unwrap_or_else(nil_lit),
-                (None, false) => arg.cloned().unwrap_or_else(nil_lit),
-            };
-            let mut call_args = vec![arg_expr];
-            call_args.extend(partial_extra_args(ctx, &module_camel, &method_sym));
-            if let Some(decl) = strict_decl {
-                // Strict-locals partial: bind each PROVIDED keyword local by
-                // name (`render "comments/comment", comment: c, show_story:
-                // true` → `Views::Comments.comment(c, show_story: true)`);
-                // the record (index 0) rode positionally as `arg_expr` and
-                // the closure ivars followed. Omitted optionals fall to the
-                // header defaults.
-                if let Some(hash) = strict_kwargs(&decl[1..], &lookup_local) {
-                    call_args.push(hash);
-                }
-            } else if locals.is_some() {
-                if let Some(extras) = ctx
-                    .partial_extras
-                    .get(&(module_camel.clone(), method_sym.clone()))
-                {
-                    // Only emit up to the LAST extra actually provided —
-                    // wholly-absent tails keep the short call.
-                    let bound: Vec<Option<Expr>> =
-                        extras.iter().map(|e| lookup_local(e)).collect();
-                    if let Some(last) = bound.iter().rposition(|b| b.is_some()) {
-                        for b in bound.into_iter().take(last + 1) {
-                            call_args.push(b.unwrap_or_else(nil_lit));
-                        }
-                    }
-                }
-            }
-            let render_call = send(
-                Some(Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Const {
-                        path: vec![Symbol::from("Views"), Symbol::from(module_camel)],
-                    },
-                )),
-                &method_sym,
-                call_args,
-                None,
-                true,
-            );
-            Some(accumulator_append_call(render_call, ctx))
-        }
-        // `render @article.comments` — has_many association iteration.
+            let call = named_partial_call(partial, *arg, *locals, ctx)?;
+            Some(accumulator_append_call(call, ctx))
+        }        // `render @article.comments` — has_many association iteration.
         // The `receiver` is the post-ivar-rewrite `Var(article)` (or a
         // bareword `Send`); `method` is the assoc name, plural. We
         // build `receiver.method.each { |c| io << Views::<Plural>
@@ -441,4 +352,111 @@ pub(super) fn emit_yield(args: &[Expr], ctx: &ViewCtx) -> Expr {
         ctx.arg_name.clone()
     };
     var_ref(Symbol::from(local_name))
+}
+
+/// Build the `Views::<Module>.<partial>(record, …)` call for a named
+/// partial, WITHOUT appending it to the accumulator.
+///
+/// Split out of `emit_render_partial`'s `Named` arm so a caller that
+/// needs the rendered fragment as a VALUE can reuse the same module /
+/// method / extra-arg resolution. `turbo_stream.append target, record`
+/// is one: the record's partial is the fragment's html, not a statement
+/// appended to `io`.
+pub(super) fn named_partial_call(
+    partial: &str,
+    arg: Option<&Expr>,
+    locals: Option<&[(Expr, Expr)]>,
+    ctx: &ViewCtx,
+) -> Option<Expr> {
+
+            let (module_dir, base_name) = match partial.rsplit_once('/') {
+                Some((dir, name)) => (dir.to_string(), name.to_string()),
+                None => (ctx.resource_dir.clone(), (*partial).to_string()),
+            };
+            if module_dir.is_empty() {
+                return None;
+            }
+            let module_camel = camelize_path(&snake_case(&module_dir));
+            let method_sym = base_name.trim_start_matches('_').to_string();
+
+            // An explicit `locals:` hash binds by NAME: the entry matching
+            // the partial's record-arg convention (singular of its dir)
+            // becomes the record; remaining entries land at their matching
+            // trailing extra-param positions (nil-filled gaps). Without
+            // `locals:`, the single bare `name: rec` value stays the record
+            // (historical behavior).
+            let lookup_local = |name: &str| -> Option<Expr> {
+                locals.and_then(|entries| {
+                    entries.iter().find_map(|(k, v)| match &*k.node {
+                        ExprNode::Lit { value: Literal::Sym { value } }
+                            if value.as_str() == name =>
+                        {
+                            Some(v.clone())
+                        }
+                        _ => None,
+                    })
+                })
+            };
+            let record_name = singularize(&snake_case(last_segment(&module_camel)));
+            let strict_key = (module_camel.clone(), method_sym.clone());
+            let strict_decl = ctx.strict_locals.get(&strict_key);
+            // A strict-locals partial's positional record is its FIRST
+            // declared local (the def side builds the signature from the
+            // header, not the dir convention — `messages/_form` declares
+            // `new_message:`, not `message:`), so bind it by the DECLARED
+            // name; an omitted record falls to the header default. The
+            // dir-convention singular governs only convention-inferred
+            // partials.
+            let arg_expr = match (strict_decl, locals.is_some()) {
+                (Some(decl), true) => lookup_local(decl[0].name.as_str())
+                    .or_else(|| decl[0].default.clone())
+                    .unwrap_or_else(nil_lit),
+                (Some(decl), false) => arg
+                    .cloned()
+                    .or_else(|| decl[0].default.clone())
+                    .unwrap_or_else(nil_lit),
+                (None, true) => lookup_local(&record_name).unwrap_or_else(nil_lit),
+                (None, false) => arg.cloned().unwrap_or_else(nil_lit),
+            };
+            let mut call_args = vec![arg_expr];
+            call_args.extend(partial_extra_args(ctx, &module_camel, &method_sym));
+            if let Some(decl) = strict_decl {
+                // Strict-locals partial: bind each PROVIDED keyword local by
+                // name (`render "comments/comment", comment: c, show_story:
+                // true` → `Views::Comments.comment(c, show_story: true)`);
+                // the record (index 0) rode positionally as `arg_expr` and
+                // the closure ivars followed. Omitted optionals fall to the
+                // header defaults.
+                if let Some(hash) = strict_kwargs(&decl[1..], &lookup_local) {
+                    call_args.push(hash);
+                }
+            } else if locals.is_some() {
+                if let Some(extras) = ctx
+                    .partial_extras
+                    .get(&(module_camel.clone(), method_sym.clone()))
+                {
+                    // Only emit up to the LAST extra actually provided —
+                    // wholly-absent tails keep the short call.
+                    let bound: Vec<Option<Expr>> =
+                        extras.iter().map(|e| lookup_local(e)).collect();
+                    if let Some(last) = bound.iter().rposition(|b| b.is_some()) {
+                        for b in bound.into_iter().take(last + 1) {
+                            call_args.push(b.unwrap_or_else(nil_lit));
+                        }
+                    }
+                }
+            }
+            let render_call = send(
+                Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const {
+                        path: vec![Symbol::from("Views"), Symbol::from(module_camel)],
+                    },
+                )),
+                &method_sym,
+                call_args,
+                None,
+                true,
+            );
+            Some(render_call)
 }

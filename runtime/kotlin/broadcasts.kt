@@ -6,6 +6,19 @@
 package roundhouse
 
 object Broadcasts {
+    // Compose the `<turbo-stream>` element for a `turbo_stream.<action>`
+    // call in a `.turbo_stream.erb` template. Positional and String-typed on
+    // purpose: it is the ONE shape the view lowerer emits on every target
+    // (the older keyword/Symbol `render_fragment` spellings had drifted
+    // apart between targets).
+    @JvmStatic
+    fun turbo_stream_fragment(action: String, target: String, html: String): String =
+        if (action == "remove") {
+            "<turbo-stream action=\"remove\" target=\"$target\"></turbo-stream>"
+        } else {
+            "<turbo-stream action=\"$action\" target=\"$target\"><template>$html</template></turbo-stream>"
+        }
+
     fun append(opts: MutableMap<String, Any?>) = record("append", opts)
     fun prepend(opts: MutableMap<String, Any?>) = record("prepend", opts)
     fun replace(opts: MutableMap<String, Any?>) = record("replace", opts)

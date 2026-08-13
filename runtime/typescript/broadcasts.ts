@@ -50,6 +50,18 @@ function emit(action: string, opts: BroadcastOpts): void {
  *  Remove) — adding methods here without a matching variant there
  *  produces dead code. */
 export class Broadcasts {
+  // Compose the `<turbo-stream>` element for a `turbo_stream.<action>`
+  // call in a `.turbo_stream.erb` template. Positional and String-typed on
+  // purpose: it is the ONE shape the view lowerer emits on every target
+  // (the older keyword/Symbol `render_fragment` spellings had drifted
+  // apart between targets).
+  static turbo_stream_fragment(action: string, target: string, html: string): string {
+    if (action === "remove") {
+      return `<turbo-stream action="remove" target="${target}"></turbo-stream>`;
+    }
+    return `<turbo-stream action="${action}" target="${target}"><template>${html}</template></turbo-stream>`;
+  }
+
   static prepend(opts: BroadcastOpts): void {
     emit("prepend", opts);
   }

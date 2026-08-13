@@ -23,6 +23,88 @@ use super::{
     ViewCtx,
 };
 
+/// `turbo_stream.<action>(target[, record])` → `Broadcasts
+/// .turbo_stream_fragment("<action>", <target>, <html>)`.
+///
+/// The markup itself stays in each target's hand-written `Broadcasts`
+/// (the same composer the model-side `broadcast_append_to` path uses),
+/// so a change to the `<turbo-stream>` element has one owner rather than
+/// a second copy here.
+///
+/// TARGET: a bare record is its `dom_id`, which is what Rails does — a
+/// Symbol or String is the id verbatim, and anything else (typically an
+/// explicit `dom_id(...)`) is already a String.
+///
+/// HTML: a bare record renders ITS partial, by the same dir/singular
+/// convention `render @record` uses — `@message` → `Views::Messages
+/// .message(message)`. `remove` carries no `<template>`, so it gets "".
+/// Is this receiver the `turbo_stream` builder? Used to tell "not a
+/// turbo_stream call at all" from "a turbo_stream call we don't lower",
+/// so only the latter files a residue line.
+pub(super) fn is_turbo_stream_builder(recv: Option<&Expr>) -> bool {
+    match recv.map(|r| &*r.node) {
+        Some(ExprNode::Send { recv: None, method, args, block: None, .. }) => {
+            method.as_str() == "turbo_stream" && args.is_empty()
+        }
+        Some(ExprNode::Var { name, .. }) => name.as_str() == "turbo_stream",
+        _ => false,
+    }
+}
+
+pub(super) fn emit_turbo_stream_fragment(
+    ts: &crate::lower::view::TurboStreamCall<'_>,
+    ctx: &ViewCtx,
+) -> Option<Expr> {
+    use crate::expr::Literal;
+    use crate::naming::pluralize_snake;
+
+    let record_name = |e: &Expr| match &*e.node {
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => Some(name.as_str().to_string()),
+        _ => None,
+    };
+
+    let target = match &*ts.target.node {
+        // `turbo_stream.replace :next_page_container` — the id verbatim.
+        ExprNode::Lit { value: Literal::Sym { value } } => lit_str(value.as_str().to_string()),
+        _ => match record_name(ts.target) {
+            Some(_) => view_helpers_call(
+                "dom_id",
+                vec![rewrite_helpers_in_expr(ts.target, ctx)],
+            ),
+            None => rewrite_helpers_in_expr(ts.target, ctx),
+        },
+    };
+
+    let html = match ts.content {
+        None => lit_str(String::new()),
+        Some(content) => {
+            // Only the render-this-record form. Anything else (a literal
+            // string, a nested call) would need the partial machinery a
+            // `render` call site gets, so decline and leave the source
+            // shape for the residue ledger.
+            let name = record_name(content)?;
+            let partial = format!("{}/{}", pluralize_snake(&name), name);
+            super::partial::named_partial_call(
+                &partial,
+                Some(&rewrite_helpers_in_expr(content, ctx)),
+                None,
+                ctx,
+            )?
+        }
+    };
+
+    Some(send(
+        Some(Expr::new(
+            Span::synthetic(),
+            ExprNode::Const { path: vec![Symbol::from("Broadcasts")] },
+        )),
+        "turbo_stream_fragment",
+        vec![lit_str(ts.action.to_string()), target, html],
+        None,
+        true,
+    ))
+}
+
 pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) -> Option<Expr> {
     use ViewHelperKind::*;
     match kind {

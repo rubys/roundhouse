@@ -69,7 +69,7 @@ pub fn lower_views_to_library_classes(
     let vctx = ViewLowerCtx::new(app);
     let mut lcs: Vec<LibraryClass> = views
         .iter()
-        .filter(|v| v.format.as_str() == "html")
+        .filter(|v| crate::lower::view::renders_through_view_path(v.format.as_str()))
         .map(|v| vctx.lower_untyped(v))
         .collect();
 
@@ -289,7 +289,8 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     let stem = base.trim_start_matches('_');
 
     let module_id = view_module_id(dir);
-    let method_name = crate::lower::view::view_method_name(stem);
+    let method_name =
+        crate::lower::view::view_method_name_for(stem, view.format.as_str());
 
     let known_models: &[String] = &lx.known_models;
     let arg_name = infer_view_arg(stem, dir, base.starts_with('_'), known_models);
@@ -1269,6 +1270,21 @@ pub(crate) fn insert_framework_stubs(
     for name in ["prepend", "replace", "remove", "append"] {
         bc.class_methods.insert(Symbol::from(name), bc_sig.clone());
     }
+    // `turbo_stream_fragment(action, target, html) -> String` — the
+    // `<turbo-stream>` composer a `.turbo_stream.erb` template lowers
+    // onto. Hand-written per target beside the broadcast methods, so
+    // the markup has one owner rather than a second copy in the lowerer.
+    bc.class_methods.insert(
+        Symbol::from("turbo_stream_fragment"),
+        crate::lower::typing::fn_sig(
+            vec![
+                (Symbol::from("action"), Ty::Str),
+                (Symbol::from("target"), Ty::Str),
+                (Symbol::from("html"), Ty::Str),
+            ],
+            Ty::Str,
+        ),
+    );
     tag_all_method(&mut bc);
     classes.insert(ClassId(Symbol::from("Broadcasts")), bc);
 
@@ -2105,7 +2121,7 @@ pub(crate) fn action_view_ivar_map(
         if dir == "layouts" || base.starts_with('_') {
             continue;
         }
-        if v.format.as_str() != "html" {
+        if !crate::lower::view::renders_through_view_path(v.format.as_str()) {
             continue;
         }
         // Top-level templates (`views/not_found.erb`-style trees) key
@@ -2310,7 +2326,7 @@ pub(crate) fn view_ivar_closures(
     let mut closure: HashMap<ViewKey, BTreeSet<Symbol>> = HashMap::new();
     let mut edges: HashMap<ViewKey, Vec<ViewKey>> = HashMap::new();
     for v in views {
-        if v.format.as_str() != "html" {
+        if !crate::lower::view::renders_through_view_path(v.format.as_str()) {
             continue;
         }
         let Some(key) = view_key_of(v) else { continue };

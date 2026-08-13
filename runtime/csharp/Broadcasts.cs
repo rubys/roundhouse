@@ -9,6 +9,20 @@ namespace Roundhouse;
 // out to /cable subscribers via `Cable`. Mirrors runtime/kotlin/broadcasts.kt.
 public static class Broadcasts
 {
+    // Compose the `<turbo-stream>` element for a `turbo_stream.<action>`
+    // call in a `.turbo_stream.erb` template. Positional and String-typed on
+    // purpose: it is the ONE shape the view lowerer emits on every target
+    // (the older keyword/Symbol `render_fragment` spellings had drifted
+    // apart between targets).
+    public static string Turbo_stream_fragment(string action, string target, string html)
+    {
+        if (action == "remove")
+        {
+            return $"<turbo-stream action=\"remove\" target=\"{target}\"></turbo-stream>";
+        }
+        return $"<turbo-stream action=\"{action}\" target=\"{target}\"><template>{html}</template></turbo-stream>";
+    }
+
     public static void Append(Dictionary<string, object?> opts) => Record("append", opts);
     public static void Prepend(Dictionary<string, object?> opts) => Record("prepend", opts);
     public static void Replace(Dictionary<string, object?> opts) => Record("replace", opts);

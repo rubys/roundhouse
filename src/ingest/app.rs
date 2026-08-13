@@ -1885,7 +1885,17 @@ fn walk_erb<V: Vfs + ?Sized>(
                 let stem = file_name
                     .strip_suffix(&format!(".{e}"))
                     .unwrap_or(&file_name);
-                if stem.ends_with(".html") || !stem.contains('.') {
+                // `.turbo_stream.erb` also renders through the view path.
+                // The stem-collision worry above is answered by naming:
+                // a non-html format's lowered method carries the format
+                // suffix (`create_turbo_stream`), the same shape the
+                // jbuilder `_json` variants already use, so it sits
+                // beside `create` rather than on top of it.
+                let format = stem.rsplit_once('.').map(|(_, f)| f);
+                if stem.ends_with(".html")
+                    || !stem.contains('.')
+                    || format == Some("turbo_stream")
+                {
                     out.push((path, engine));
                 } else {
                     record_skipped_view(&path, &format!("{e} (non-html format)"));

@@ -20,6 +20,19 @@
 # across the calls in one request and can be asserted/reset by tests.
 
 defmodule Broadcasts do
+  @doc false
+  # Compose the `<turbo-stream>` element for a `turbo_stream.<action>`
+  # call in a `.turbo_stream.erb` template. Positional and String-typed
+  # on purpose: it is the ONE shape the view lowerer emits on every
+  # target.
+  def turbo_stream_fragment(action, target, html) do
+    if action == "remove" do
+      ~s(<turbo-stream action="remove" target="#{target}"></turbo-stream>)
+    else
+      ~s(<turbo-stream action="#{action}" target="#{target}"><template>#{html}</template></turbo-stream>)
+    end
+  end
+
   @moduledoc false
 
   def append(attrs), do: record(:append, attrs)

@@ -37,6 +37,20 @@ thread_local! {
 pub struct Broadcasts;
 
 impl Broadcasts {
+    // Compose the `<turbo-stream>` element for a `turbo_stream.<action>`
+    // call in a `.turbo_stream.erb` template. Positional and String-typed on
+    // purpose: it is the ONE shape the view lowerer emits on every target
+    // (the older keyword/Symbol `render_fragment` spellings had drifted
+    // apart between targets).
+    pub fn turbo_stream_fragment(action: &str, target: &str, html: &str) -> String {
+        if action == "remove" {
+            return format!("<turbo-stream action=\"remove\" target=\"{target}\"></turbo-stream>");
+        }
+        format!(
+            "<turbo-stream action=\"{action}\" target=\"{target}\"><template>{html}</template></turbo-stream>"
+        )
+    }
+
     /// Reset the in-memory log. Framework tests call this between
     /// assertions; production typically doesn't.
     pub fn reset_log_bang() {

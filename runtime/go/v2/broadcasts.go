@@ -104,3 +104,15 @@ func anyToString(v any) string {
 	}
 	return fmt.Sprintf("%v", v)
 }
+
+// Compose the `<turbo-stream>` element for a `turbo_stream.<action>`
+// call in a `.turbo_stream.erb` template. Positional and string-typed on
+// purpose: it is the ONE shape the view lowerer emits on every target
+// (the older keyword/Symbol `render_fragment` spellings had drifted
+// apart between targets).
+func Broadcasts_turbo_stream_fragment(action string, target string, html string) string {
+	if action == "remove" {
+		return "<turbo-stream action=\"remove\" target=\"" + target + "\"></turbo-stream>"
+	}
+	return "<turbo-stream action=\"" + action + "\" target=\"" + target + "\"><template>" + html + "</template></turbo-stream>"
+}
