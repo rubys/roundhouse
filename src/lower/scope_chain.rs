@@ -568,6 +568,20 @@ pub fn mentions_assoc_constructor(expr: &Expr, assocs: &AssocRegistry) -> bool {
             return;
         }
         if let ExprNode::Send { recv: Some(r), method, .. } = &*e.node {
+            // NOTE (measured, deliberately NOT widened): the seed arm
+            // also handles chain methods and terminals on a has_many
+            // read, so a body whose only relation surface is
+            // `@room.messages.first(3)` — naming no scope, tripping no
+            // other gate — never reaches the rewriter and calls a
+            // relation method on the reader's folded Array.
+            //
+            // Widening this to match costs more than it fixes TODAY:
+            // it moves 9 lobsters files, and the ones that move are
+            // `domain.origins.count` in a per-row VIEW, where the folded
+            // Array's `count` is correct AND rides the reader's preload
+            // cache. Turning those into a fresh `SELECT COUNT(*)` is an
+            // N+1 on the benchmark app. Doing it right means teaching the
+            // seed to reuse a loaded cache, which is its own commit.
             if matches!(method.as_str(), "build" | "create" | "create!") {
                 if let ExprNode::Send { method: aname, args, .. } = &*r.node {
                     if args.is_empty() && assocs.is_has_many_name(aname) {
@@ -755,6 +769,32 @@ fn is_relation_terminal(name: &str) -> bool {
         "ids" | "pluck" | "count" | "first" | "last" | "exists?" | "any?" | "empty?" | "size"
             | "length"
     )
+}
+
+/// `first(n)` / `last(n)` on a relation are DIFFERENT METHODS from the
+/// bare forms — they answer an Array of up to n records where `first`
+/// answers one record or nil. The runtime splits them (`first_n` /
+/// `last_n`) instead of overloading on arity, because one method cannot
+/// carry both return types on a strict target; this renames the call
+/// site to match.
+///
+/// Only ever called where the receiver has already been proven to be a
+/// relation. That gate is the whole point: `Array#first(n)` and
+/// `String#split.last(n)` mean the same thing Rails does and must be
+/// left alone — lobsters' `parsed.to_html.split.first(words * 2)` is
+/// exactly the shape a receiver-blind rename would corrupt.
+///
+/// A block form is excluded: `first { … }` is Enumerable#detect, a
+/// different method again.
+fn counted_terminal(method: &Symbol, args: &[Expr], block: Option<&Expr>) -> Option<Symbol> {
+    if args.len() != 1 || block.is_some() {
+        return None;
+    }
+    match method.as_str() {
+        "first" => Some(Symbol::from("first_n")),
+        "last" => Some(Symbol::from("last_n")),
+        _ => None,
+    }
 }
 
 /// `@room` names the model `Room` — the naming convention
@@ -1360,6 +1400,8 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                             // Chain method or terminal: stays on the seeded
                             // receiver. Chains keep the model; terminals end it.
                             let keeps_model = is_chain;
+                            let method = counted_terminal(&method, &args, block.as_ref())
+                                .unwrap_or(method);
                             *expr = put(span, Some(seed), method, args, block, parenthesized);
                             return keeps_model.then_some(target);
                         }
@@ -1383,6 +1425,10 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
             });
 
             if let Some(mr) = r_model {
+                if let Some(counted) = counted_terminal(&method, &args, block.as_ref()) {
+                    *expr = put(span, Some(r), counted, args, block, parenthesized);
+                    return None;
+                }
                 if ctx.scope_of(&mr, &method) {
                     let leading = ctx.scope_params(&mr, &method);
                     let new_args = thread_rel(args, r, leading, span);

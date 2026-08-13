@@ -51,6 +51,8 @@ module ActiveRecord
     def first: () -> untyped
     def first!: () -> untyped
     def last: () -> untyped
+    def first_n: (Integer n) -> Array[untyped]
+    def last_n: (Integer n) -> Array[untyped]
     def count: () -> Integer
     def sum: (untyped expr) -> Float
     def group_count: () -> Hash[untyped, Integer]

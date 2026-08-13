@@ -455,7 +455,19 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // here — `super` has no signature for the typer to resolve. A
     // like-for-like +1 from a corpus that grew by one class, not a
     // typing regression.
-    const CEILING: usize = 626;
+    // 2026-08-13: 626 -> 633 — `Relation#first_n` / `#last_n`, the
+    // COUNTED forms of `first`/`last`. They are separate methods because
+    // the counted forms answer an Array where the bare forms answer one
+    // record, and one method cannot carry both return types on a strict
+    // target. The 7 nodes are the same shapes already counted all over
+    // this file: an `@limit = n` assign plus its `n` read, a `to_a` call,
+    // and a `to_a.last(n)` send with its receiver and argument. Nothing
+    // here is newly untypable — RBS parameter types do not reach this
+    // runtime's body typer for ANY method (see the `SelectManager
+    // #initialize` / `Table#initialize` entries in the dump, whose `sql`
+    // and `name` params are untyped the same way). A like-for-like
+    // addition of two small methods, not a typing regression.
+    const CEILING: usize = 633;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions exceeds ceiling of {CEILING}.\n\

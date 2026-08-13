@@ -385,6 +385,32 @@ module ActiveRecord
       rows.length == 0 ? nil : rows[rows.length - 1]
     end
 
+    # Rails' `first(n)` / `last(n)` — the COUNTED forms, which answer an
+    # Array of up to n records where the bare forms answer one record or
+    # nil. Split into their own names rather than overloaded onto
+    # `first`/`last` with an optional arg: the return type differs by
+    # arity, which a strict target cannot express on one method (see the
+    # monomorphize-polymorphic-APIs rule). `scope_chain` renames the call
+    # site once it has PROVEN the receiver is a relation, so an Array
+    # receiver keeps `Array#first(n)` — lobsters' `split.first(words * 2)`
+    # must not be rewritten.
+    def first_n(n)
+      @limit = n
+      to_a
+    end
+
+    # The last n IN RELATION ORDER — Rails does not reverse them
+    # (campfire's `ordered.last(PAGE_SIZE)` is the oldest-to-newest tail
+    # of a room's messages, which is the order the page renders).
+    #
+    # Materializes the whole relation, exactly as the bare `last` above
+    # already does: reversing the ORDER BY to push the tail into SQL
+    # would have to rewrite every `@order` entry's direction, and no
+    # caller in the corpus is on a table where that pays yet.
+    def last_n(n)
+      to_a.last(n)
+    end
+
     def count
       rows = ActiveRecord.adapter.select_rows(count_sql)
       rows.length == 0 ? 0 : rows[0]["n"].to_i
