@@ -102,6 +102,49 @@ fn an_explicit_target_expression_is_used_verbatim() {
     assert!(body.contains("messages"), "got {body}");
 }
 
+fn create_action_body(app: &App) -> String {
+    let lcs = roundhouse::lower::lower_controllers_with_arel_and_views(
+        &app.controllers,
+        Vec::new(),
+        None,
+        &app.views,
+    );
+    let lc = lcs
+        .iter()
+        .find(|lc| lc.name.0.as_str() == "ThingsController")
+        .expect("ThingsController");
+    let m = lc.methods.iter().find(|m| m.name.as_str() == "create").expect("create");
+    format!("{:?}", m.body)
+}
+
+#[test]
+fn the_action_dispatches_on_the_request_format() {
+    let app = app_with_template("<%= turbo_stream.append \"things\", @thing %>\n");
+    let body = create_action_body(&app);
+    assert!(body.contains("turbo_stream"), "expected a format branch: {body}");
+    assert!(
+        body.contains("create_turbo_stream"),
+        "the turbo_stream branch renders the format-qualified view: {body}"
+    );
+    assert!(
+        body.contains("text/vnd.turbo-stream.html"),
+        "Turbo ignores a response typed text/html: {body}"
+    );
+}
+
+#[test]
+fn the_html_branch_raises_missing_template_when_there_is_no_html_view() {
+    // The action has ONLY a turbo_stream template, which is exactly
+    // campfire's `MessagesController#create`. Rails raises
+    // MissingTemplate for an html request there; emitting a call to a
+    // `Views::Things.create` that was never generated would NameError
+    // instead. Letting turbo_stream views into the contract map under
+    // the bare stem is what used to cause that.
+    let app = app_with_template("<%= turbo_stream.append \"things\", @thing %>\n");
+    let body = create_action_body(&app);
+    assert!(body.contains("MissingTemplate"), "got {body}");
+}
+
 #[test]
 fn the_option_form_is_left_alone_rather_than_half_lowered() {
     // `partial:`/`collection:`/`locals:` needs the partial machinery a

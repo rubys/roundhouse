@@ -244,6 +244,14 @@ module Main
       request_format = :json
       request_path = request_path[0...-5]
     end
+    # Turbo Stream is negotiated by the Accept header, not by a path
+    # suffix — a Turbo-driven form POST asks for
+    # `text/vnd.turbo-stream.html`. Checked after the suffix so an
+    # explicit `.json` still wins.
+    if request_format == :html &&
+       request.fetch(:accept, "").to_s.include?("text/vnd.turbo-stream.html")
+      request_format = :turbo_stream
+    end
     # Prepend ROOT so a GET / request matches before falling through
     # to TABLE. ROOT is kept as a separate constant in routes.rb for
     # legibility (it's the only literal-pattern entry); the dispatch
@@ -366,7 +374,12 @@ module Main
       # are statically in scope. JSON responses ship with their own
       # Content-Type; `controller.location` (set by `render …
       # location: @article`) flows through as the Location header.
-      if controller.request_format == :json
+      # json and turbo_stream both carry their own Content-Type from the
+      # render call site (`render …, content_type:`), so the controller's
+      # value ships as-is. Turbo REQUIRES `text/vnd.turbo-stream.html`
+      # here — it ignores a response typed text/html.
+      if controller.request_format == :json ||
+         controller.request_format == :turbo_stream
         [controller.status, controller.body,
          controller.content_type, controller.location, out_cookies]
       elsif controller.request_format == :rss
@@ -471,6 +484,11 @@ if __FILE__ == $PROGRAM_NAME
     "CONTENT_LENGTH" => ENV["CONTENT_LENGTH"],
     "CONTENT_TYPE"   => ENV["CONTENT_TYPE"],
     "HTTP_COOKIE"    => ENV["HTTP_COOKIE"],
+    # Response-format negotiation reads this — a Turbo-driven form POST
+    # asks for `text/vnd.turbo-stream.html`. The Rack path forwards the
+    # whole env; this one-shot CGI path builds an allowlist, so a header
+    # dispatch depends on has to be named here.
+    "HTTP_ACCEPT"    => ENV["HTTP_ACCEPT"],
   }
   Main.run(env, $stdin, $stdout)
 end

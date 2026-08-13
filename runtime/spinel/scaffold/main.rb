@@ -330,6 +330,14 @@ module Main
       request_format = :json
       request_path = request_path[0...-5]
     end
+    # Turbo Stream is negotiated by the Accept header, not by a path
+    # suffix — a Turbo-driven form POST asks for
+    # `text/vnd.turbo-stream.html`. Checked after the suffix so an
+    # explicit `.json` still wins.
+    if request_format == :html &&
+       req.req_headers.fetch("accept", "").include?("text/vnd.turbo-stream.html")
+      request_format = :turbo_stream
+    end
 
     # Rails-style method override: destroy/update forms POST a hidden
     # `_method=delete|patch|put` (browsers can't emit those verbs from a
@@ -390,6 +398,7 @@ module Main
     fmt_name = "html"
     fmt_name = "json" if request_format == :json
     fmt_name = "rss" if request_format == :rss
+    fmt_name = "turbo_stream" if request_format == :turbo_stream
     request_obj.format = fmt_name
     request_obj.body = req.raw_body
     # Write straight into the RBS-pinned `@env` (Hash[String, untyped] ->
@@ -460,7 +469,10 @@ module Main
     # takes the controller's own type — a jbuilder-lowered action sets it
     # through `render content_type:` — and RSS the fixed feed type, which
     # is what the CRuby overlay's dispatch returns for the same routes.
-    if request_format == :json
+    if request_format == :json || request_format == :turbo_stream
+      # Both carry their own type from the render call site. Turbo
+      # REQUIRES `text/vnd.turbo-stream.html` — it ignores a response
+      # typed text/html.
       res.headers["Content-Type"] = controller.content_type
     elsif request_format == :rss
       res.headers["Content-Type"] = "application/rss+xml; charset=utf-8"

@@ -547,6 +547,9 @@ fn mark_render_format(body: &Expr, fmt: &str) -> Expr {
 fn mime_for_format(fmt: &str) -> &'static str {
     match fmt {
         "json" => "application/json",
+        // What Turbo sends in `Accept` and expects back on a form
+        // submission it drives.
+        "turbo_stream" => "text/vnd.turbo-stream.html",
         _ => "text/html; charset=utf-8",
     }
 }
@@ -664,25 +667,29 @@ fn add_format_kwarg(args: &[Expr], fmt: &str, span: Span) -> Vec<Expr> {
 /// terminal that `classify_controller_send` resolves to `Render`.
 /// Before this pass, each scaffold template synthesized the terminal
 /// ad-hoc at emit time; after, the walker path needs no special case.
-pub fn synthesize_implicit_render(body: &Expr, action_name: &str, has_json_variant: bool) -> Expr {
+/// `variants` are the NON-html formats this action has a template for,
+/// in the order they should be tested. Each becomes a
+/// `request_format == :<fmt>` arm ahead of the html fallback, so an
+/// action with both a jbuilder and a `.turbo_stream.erb` template gets
+/// both. Empty means html only.
+pub fn synthesize_implicit_render(body: &Expr, action_name: &str, variants: &[&str]) -> Expr {
     if has_toplevel_terminal(body) {
         return body.clone();
     }
-    let render = render_symbol_send(action_name, body.span);
-    let terminal = if has_json_variant {
-        let json_render = render_symbol_send(action_name, body.span);
-        let json_branch = mark_render_format(&json_render, "json");
-        Expr::new(
+    // Build the chain inside-out so the FIRST variant ends up as the
+    // outermost test.
+    let mut terminal = render_symbol_send(action_name, body.span);
+    for fmt in variants.iter().rev() {
+        let branch = mark_render_format(&render_symbol_send(action_name, body.span), fmt);
+        terminal = Expr::new(
             body.span,
             ExprNode::If {
-                cond: request_format_eq(body.span, "json"),
-                then_branch: json_branch,
-                else_branch: render,
+                cond: request_format_eq(body.span, fmt),
+                then_branch: branch,
+                else_branch: terminal,
             },
-        )
-    } else {
-        render
-    };
+        );
+    }
     // A body with SOME response terminal that isn't guaranteed at top
     // level (a render inside begin/rescue, or behind a condition the
     // detector can't prove) may already have responded by the time the
@@ -818,7 +825,7 @@ pub fn normalize_action_body(
 ) -> Expr {
     let with_callbacks = resolve_before_actions(controller, action_name, body);
     let flattened = unwrap_respond_to(&with_callbacks);
-    synthesize_implicit_render(&flattened, action_name, /*has_json_variant=*/ false)
+    synthesize_implicit_render(&flattened, action_name, /*variants=*/ &[])
 }
 
 /// True when `body` is an empty `Seq` or a `nil` literal — the two

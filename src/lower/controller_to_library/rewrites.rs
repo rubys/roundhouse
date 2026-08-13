@@ -339,8 +339,16 @@ pub(super) fn rewrite_render_to_views(
             // (before the `_json` rename below). Falls back to the
             // controller's in-scope ivars when the view isn't in the map
             // (json/jbuilder views, or a render with no matching template).
-            let contract =
-                view_ivars.get(&(render_module.clone(), view_method.as_str().to_string()));
+            // The turbo_stream marker has to be read BEFORE the lookup:
+            // its contract is keyed by the format-qualified stem
+            // (`create_turbo_stream`), the same name the view lowers to.
+            let is_turbo_stream = render_kwargs_have_format(args, "turbo_stream");
+            let contract_stem = if is_turbo_stream {
+                format!("{}_turbo_stream", view_method.as_str())
+            } else {
+                view_method.as_str().to_string()
+            };
+            let contract = view_ivars.get(&(render_module.clone(), contract_stem));
             // Peek ahead for the jbuilder marker (also computed below):
             // json renders resolve to `<stem>_json` view methods that are
             // deliberately absent from the html-view contract map, so a
@@ -386,15 +394,30 @@ pub(super) fn rewrite_render_to_views(
             // render with `content_type: "application/json"`. The
             // marker drops out of the rewritten kwargs so it doesn't
             // leak past the lowerer.
+            // Format marker planted by the respond_to flattener /
+            // implicit-render synthesis. Routes to the format-qualified
+            // view method and tags the outer render's content type. The
+            // marker drops out of the rewritten kwargs so it doesn't leak
+            // past the lowerer.
+            // jbuilder templates never reference notice/alert, so the
+            // `_json` variant skips the flash extras below. A
+            // turbo_stream template is an ordinary ERB view lowered
+            // through the normal path, so it takes them like html does.
             let json_format = render_kwargs_have_format(args, "json");
-            let (view_method, content_type) = if json_format {
-                (
-                    Symbol::from(format!("{}_json", view_method.as_str())),
-                    Some("application/json"),
-                )
-            } else {
-                (view_method, None)
-            };
+            let (view_method, content_type) =
+                if is_turbo_stream {
+                    (
+                        Symbol::from(format!("{}_turbo_stream", view_method.as_str())),
+                        Some("text/vnd.turbo-stream.html"),
+                    )
+                } else if json_format {
+                    (
+                        Symbol::from(format!("{}_json", view_method.as_str())),
+                        Some("application/json"),
+                    )
+                } else {
+                    (view_method, None)
+                };
             let mut view_args: Vec<Expr> = resolved_ivars
                 .iter()
                 .map(|n| ivar(n.as_str(), e.span))

@@ -133,7 +133,7 @@ fn emit_py_action(
     let normalized = crate::lower::synthesize_implicit_render(
         &flattened,
         la.name.as_str(),
-        has_json_variant,
+        if has_json_variant { &["json"] } else { &[] },
     );
     let mut emitter = PyEmitter {
         ctx: crate::lower::WalkCtx {

@@ -73,7 +73,13 @@ module CgiIo
 
     cookies = parse_cookies(env["HTTP_COOKIE"])
 
-    { method: method, path: path, params: params, cookies: cookies }
+    # Accept rides along so dispatch can negotiate the response format.
+    # Turbo sends `text/vnd.turbo-stream.html` on a form submission it
+    # drives, which is the only way to tell that request apart from the
+    # same URL typed into the address bar.
+    accept = env.fetch("HTTP_ACCEPT", "").to_s
+
+    { method: method, path: path, params: params, cookies: cookies, accept: accept }
   end
 
   # Write a CGI response to the given writable IO. `set_cookies` is

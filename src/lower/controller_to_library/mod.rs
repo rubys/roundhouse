@@ -82,6 +82,37 @@ fn json_actions_for(
     out
 }
 
+/// Actions with a `<action>.turbo_stream.erb` template, the same scan
+/// `json_actions_for` does for jbuilder. Turbo negotiates
+/// `text/vnd.turbo-stream.html` on a form submission and Rails renders
+/// that template for it; without the dispatch, an action whose ONLY
+/// template is the turbo_stream one falls through to the html branch and
+/// raises MissingTemplate (campfire's `MessagesController#create` has no
+/// `create.html.erb` at all).
+fn turbo_stream_actions_for(
+    controller: &Controller,
+    views: &[crate::dialect::View],
+) -> std::collections::HashSet<Symbol> {
+    let mut out: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
+    let module = match views_module_name(controller) {
+        Some(m) => m,
+        None => return out,
+    };
+    let dir = crate::naming::snake_case(&module);
+    let prefix = format!("{dir}/");
+    for v in views {
+        if v.format.as_str() != "turbo_stream" {
+            continue;
+        }
+        if let Some(stem) = v.name.as_str().strip_prefix(&prefix) {
+            if !stem.starts_with('_') {
+                out.insert(Symbol::from(stem));
+            }
+        }
+    }
+    out
+}
+
 /// `(view-module, action-stem) -> ViewArgs` for the render rewrite.
 /// Built once from the app's views; see `action_view_ivar_map`.
 type PartialMap = std::collections::HashMap<
@@ -231,12 +262,13 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
     let mut all_methods: Vec<(Vec<MethodDef>, &Controller)> = Vec::new();
     for controller in controllers {
         let json_actions = json_actions_for(controller, views);
+        let turbo_stream_actions = turbo_stream_actions_for(controller, views);
         // `Some(map)` → this controller's routed actions (empty set if it
         // has no routes, e.g. a base controller → all publics are helpers).
         // `None` → legacy: every public method is an action.
         let routed = routed_by_controller
             .map(|m| m.get(&controller.name).cloned().unwrap_or_default());
-        let methods = build_methods(controller, controllers, &params_specs, &json_actions, routed.as_ref(), &view_ivars, &partials, format_breadth);
+        let methods = build_methods(controller, controllers, &params_specs, &json_actions, &turbo_stream_actions, routed.as_ref(), &view_ivars, &partials, format_breadth);
         all_methods.push((methods, controller));
     }
 
@@ -455,6 +487,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         std::slice::from_ref(controller),
         &specs,
         &std::collections::HashSet::new(),
+        &std::collections::HashSet::new(),
         None,
         &view_ivars,
         &partials,
@@ -500,6 +533,7 @@ fn build_methods(
     all_controllers: &[Controller],
     params_specs: &ParamsSpecs,
     json_actions: &std::collections::HashSet<Symbol>,
+    turbo_stream_actions: &std::collections::HashSet<Symbol>,
     routed: Option<&std::collections::HashSet<Symbol>>,
     view_ivars: &ViewIvarMap,
     partials: &PartialMap,
@@ -577,13 +611,15 @@ fn build_methods(
 
     for a in &publics_inlined {
         methods.push(action_to_method(
-            a, controller, &privs, /*is_public=*/ true, params_specs, json_actions, view_ivars,
+            a, controller, &privs, /*is_public=*/ true, params_specs, json_actions,
+            turbo_stream_actions, view_ivars,
             partials, format_breadth,
         ));
     }
     for a in &privs_kept {
         methods.push(action_to_method(
-            a, controller, &privs, /*is_public=*/ false, params_specs, json_actions, view_ivars,
+            a, controller, &privs, /*is_public=*/ false, params_specs, json_actions,
+            turbo_stream_actions, view_ivars,
             partials, format_breadth,
         ));
     }
@@ -593,7 +629,8 @@ fn build_methods(
     // the filter-chain work, not here.)
     for a in &helper_publics {
         methods.push(action_to_method(
-            a, controller, &privs, /*is_public=*/ false, params_specs, json_actions, view_ivars,
+            a, controller, &privs, /*is_public=*/ false, params_specs, json_actions,
+            turbo_stream_actions, view_ivars,
             partials, format_breadth,
         ));
     }
@@ -1106,6 +1143,7 @@ fn action_to_method(
     is_public: bool,
     params_specs: &ParamsSpecs,
     json_actions: &std::collections::HashSet<Symbol>,
+    turbo_stream_actions: &std::collections::HashSet<Symbol>,
     view_ivars: &ViewIvarMap,
     partials: &PartialMap,
     format_breadth: FormatBreadth,
@@ -1123,7 +1161,15 @@ fn action_to_method(
     for (n, default) in &a.opt_params {
         params.push(Param::with_default(n.clone(), default.clone()));
     }
-    let has_json_variant = json_actions.contains(&a.name);
+    // Order matters: turbo_stream is tested before json, so an action
+    // with both templates picks the one the request actually asked for.
+    let mut variants: Vec<&str> = Vec::new();
+    if turbo_stream_actions.contains(&a.name) {
+        variants.push("turbo_stream");
+    }
+    if json_actions.contains(&a.name) {
+        variants.push("json");
+    }
     let body = lower_action_body(
         &a.body,
         controller,
@@ -1131,7 +1177,7 @@ fn action_to_method(
         privs,
         is_public,
         params_specs,
-        has_json_variant,
+        &variants,
         view_ivars,
         partials,
         format_breadth,
@@ -1241,14 +1287,14 @@ fn lower_action_body(
     privs: &[Action],
     is_public: bool,
     params_specs: &ParamsSpecs,
-    has_json_variant: bool,
+    variants: &[&str],
     view_ivars: &ViewIvarMap,
     partials: &PartialMap,
     format_breadth: FormatBreadth,
 ) -> Expr {
     let unwrapped = unwrap_respond_to_with_format_dispatch(body, format_breadth);
     let with_render = if is_public {
-        let synth = synthesize_implicit_render(&unwrapped, action_name, has_json_variant);
+        let synth = synthesize_implicit_render(&unwrapped, action_name, variants);
         let ivars = ivars_in_scope(controller, action_name, &synth, privs);
         let module_name = views_module_name(controller);
         rewrite_render_to_views(

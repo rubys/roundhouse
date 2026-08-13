@@ -2133,7 +2133,24 @@ pub(crate) fn action_view_ivar_map(
         } else {
             camelize_path(&snake_case(dir))
         };
-        let key = (module, base.to_string());
+        // Key by the FORMAT-QUALIFIED stem, matching the lowered method
+        // name. Keying a `.turbo_stream.erb` under the bare stem would
+        // make the html render's contract lookup find it — and the html
+        // branch would then emit a call to a `Views::X.<action>` that
+        // doesn't exist, instead of the MissingTemplate raise Rails
+        // gives for an html request to a turbo_stream-only action.
+        // Key by the RAW stem, format-qualified for a non-html view.
+        // NOT `view_method_name_for` — that also applies the reserved-word
+        // `_` prefix (`new` → `_new`), and the render rewrite looks this
+        // up by the raw action name, so prefixing here turns every
+        // `new`/`edit`-shaped action into a contract miss and a spurious
+        // MissingTemplate raise.
+        let stem = if v.format.as_str() == "html" {
+            base.to_string()
+        } else {
+            format!("{base}_{}", v.format.as_str())
+        };
+        let key = (module, stem);
         let ivars = closures
             .get(&key)
             .cloned()
