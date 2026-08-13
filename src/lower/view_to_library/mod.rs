@@ -3706,8 +3706,32 @@ pub(super) fn seq(exprs: Vec<Expr>) -> Expr {
 /// has none in scope, so it falls back to the default `io` accumulator.
 /// Acceptable since today's gaps either land at the top level or
 /// inside scopes that still have an `io` shadow at runtime.
-pub(super) fn todo_io_append(tag: &str) -> Expr {
-    let _ = tag;
+/// The view walker's catch-all: a template statement it cannot lower
+/// becomes an empty append, so the emitted view still parses.
+///
+/// It also FILES the drop. The `tag` used to be discarded (`let _ =
+/// tag`), which made this the one place in the pipeline where modeling
+/// debt left no ledger line: campfire's `<% turbo_page_requires_reload
+/// %>` — a turbo-rails helper that adds a `<meta name="turbo-visit-
+/// control">` to the page head — vanished from `sessions/new` with the
+/// emit reporting nothing at all. A page that silently loses a tag is
+/// worse than one that fails, because nothing points at it.
+///
+/// Warning, not Error: the surrounding template still renders, and
+/// every one of these has rendered for as long as the walker has had a
+/// catch-all. The invariant this restores is that the count is
+/// VISIBLE.
+pub(super) fn todo_io_append(tag: &str, span: crate::span::Span) -> Expr {
+    crate::emit::diagnostics::push(crate::lower::residue_diagnostic(
+        "view_walker",
+        tag,
+        span,
+        "statement shape not lowered",
+        format!(
+            "template statement dropped ({tag}) — it contributes no output and \
+             runs no side effect in the emitted view"
+        ),
+    ));
     send(
         Some(var_ref(Symbol::from("io"))),
         "<<",

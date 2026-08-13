@@ -84,7 +84,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             // Unrecognized `_buf = …` shape — emit as TODO comment-style
             // io append so the file still parses; the test asserts on
             // recognized shapes only.
-            vec![todo_io_append("unknown _buf shape")]
+            vec![todo_io_append("unknown _buf shape", stmt.span)]
         }
         // Epilogue `_buf` read — drop; the explicit trailing `io` is
         // appended once at method-body construction.
@@ -160,6 +160,27 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 },
             )]
         }
+        // `<% cache <key> do %> … <% end %>` — Rails fragment caching.
+        // The block is a pure OPTIMIZATION wrapper: its body is what the
+        // page renders, served from the store on a hit and evaluated on
+        // a miss. With no fragment store, evaluating it every time is
+        // the correct output and only forgoes the cache.
+        //
+        // Transparent rather than dropped, because dropped is what it
+        // was: `cache` fell through to the catch-all and took the whole
+        // BODY with it, so lobsters' `users/tree.html.erb` (44 lines,
+        // entirely wrapped) and `users/list.html.erb` each emitted
+        // `io << ""` — two blank pages, reported by nothing. The
+        // residue ledger this commit adds to `todo_io_append` is what
+        // surfaced them.
+        ExprNode::Send { recv: None, method, block: Some(block), .. }
+            if method.as_str() == "cache" =>
+        {
+            match &*block.node {
+                ExprNode::Lambda { body, .. } => walk_body(body, ctx),
+                _ => vec![todo_io_append("cache block shape", stmt.span)],
+            }
+        }
         // Block-form `<% content_for :subnav do %> … <% end %>` —
         // slot capture (lobsters' subnav pattern: pages and partials
         // deposit nav markup, the layout gates on `content_for? :subnav`
@@ -172,10 +193,10 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             if method.as_str() == "content_for" && args.len() == 1 =>
         {
             let Some(slot) = extract_sym_or_str(&args[0]) else {
-                return vec![todo_io_append("dynamic content_for slot")];
+                return vec![todo_io_append("dynamic content_for slot", stmt.span)];
             };
             let ExprNode::Lambda { body, .. } = &*block.node else {
-                return vec![todo_io_append("content_for block shape")];
+                return vec![todo_io_append("content_for block shape", stmt.span)];
             };
             let cap = format!("_cf_{slot}");
             let cap_ctx = ViewCtx { accumulator: cap.clone(), ..ctx.clone() };
@@ -223,7 +244,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                     return vec![assign_accumulator_string_new(disc), stmt];
                 }
             }
-            vec![todo_io_append("unknown stmt")]
+            vec![todo_io_append("unknown stmt", stmt.span)]
         }
         // `<% case action_name when "all" %>…<% when … %>…<% end %>` at
         // the template level (lobsters' replies help text switches copy
@@ -289,7 +310,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             ..
         } if method.as_str() == "each" && args.is_empty() => {
             let ExprNode::Lambda { params, body, block_style, .. } = &*block.node else {
-                return vec![todo_io_append("each block shape")];
+                return vec![todo_io_append("each block shape", stmt.span)];
             };
             let var_name = params
                 .first()
@@ -338,7 +359,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         // genuinely a statement (the prior TODO-append swallowed the
         // side effect and broke stack-walking templates).
         ExprNode::Send { recv: Some(_), block: None, .. } => vec![stmt.clone()],
-        _ => vec![todo_io_append("unknown stmt")],
+        _ => vec![todo_io_append("unknown stmt", stmt.span)],
     }
 }
 
