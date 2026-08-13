@@ -478,7 +478,9 @@ footer a:hover {
 
 .app-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  /* 16rem is the width that makes four cards land 2×2 in the content column
+     rather than 3-then-1; narrower viewports still collapse to one. */
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
   gap: 1.5rem;
   text-align: left;
   margin: 2.5rem 0;
@@ -508,6 +510,7 @@ footer a:hover {
 }
 .app-card.blog     { --card-accent: var(--accent-ruby); }
 .app-card.lobsters { --card-accent: var(--accent-rust); }
+.app-card.campfire { --card-accent: var(--accent-go); }
 .app-card.mastodon { --card-accent: var(--accent-crystal); }
 
 .app-card h2 {
@@ -544,6 +547,7 @@ footer a:hover {
 
 body.app-blog     { --card-accent: var(--accent-ruby); }
 body.app-lobsters { --card-accent: var(--accent-rust); }
+body.app-campfire { --card-accent: var(--accent-go); }
 body.app-mastodon { --card-accent: var(--accent-crystal); }
 
 body.doc header h1 a,

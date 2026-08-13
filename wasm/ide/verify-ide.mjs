@@ -149,12 +149,16 @@ if (appNames.length >= 2) {
       title: document.title,
     }));
   }
-  check("app manifest lists blog + lobsters + mastodon",
-    ["blog", "lobsters", "mastodon"].every((n) => appNames.includes(n)), appNames.join(","));
+  check("app manifest lists blog + lobsters + campfire + mastodon",
+    ["blog", "lobsters", "campfire", "mastodon"].every((n) => appNames.includes(n)), appNames.join(","));
   const blog = await switchTo("blog", "app/models/article.rb");
   check("switch → blog re-ingests", blog.files > 5 && /blog/.test(blog.title), `${blog.files} files`);
   const lob = await switchTo("lobsters", "app/models/story.rb");
   check("switch → lobsters re-ingests", lob.files > 30 && /lobsters/.test(lob.title), `${lob.files} files`);
+  if (appNames.includes("campfire")) {
+    const cf = await switchTo("campfire", "app/models/message.rb");
+    check("switch → campfire re-ingests", cf.files > 100 && /campfire/.test(cf.title), `${cf.files} files`);
+  }
   const mast = await switchTo("mastodon", "app/controllers/statuses_controller.rb");
   check("switch → mastodon re-ingests (round-trip)", mast.files > 100 && /mastodon/.test(mast.title), `${mast.files} files`);
 

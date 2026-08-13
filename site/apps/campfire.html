@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Roundhouse — Campfire (the live axis)</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body class="doc app-campfire">
+  <header>
+    <h1><a href="../">Roundhouse</a></h1>
+    <p class="tagline">Campfire — the app that pushes, not just responds</p>
+  </header>
+
+  <main class="doc-main">
+    <p class="lead">
+      <a href="https://github.com/basecamp/once-campfire">ONCE Campfire</a> is
+      Basecamp's chat app: a small, MIT-licensed Rails application you can read
+      whole. It's here because of what it does <em>after</em> the response —
+      seven Action Cable channels, model-side broadcasts, turbo_stream
+      templates. Blog, Lobsters, and Mastodon are all request-in, HTML-out.
+      Campfire is the axis none of them test.
+    </p>
+
+    <p class="status-line">
+      Status: <strong>work in progress</strong> — deep analysis and partial
+      transpilation work today, in the browser. The milestone being built
+      toward is "two tabs, one room, one live message": an emitted binary
+      serving a signed-in room, with a posted message fanning out over the
+      cable to the other tab.
+    </p>
+
+    <div class="cta-row">
+      <a class="primary" href="../ide/?app=campfire">Explore its types (IDE)</a>
+      <a href="../playground/?app=campfire">Transpile it (Playground)</a>
+    </div>
+
+    <h2>Why Campfire</h2>
+    <p>
+      Feature-dense where Roundhouse is thin, and small enough to hold in your
+      head: roughly 3,700 lines of application Ruby across seventeen models,
+      forty-odd controllers, and eighty views. That combination is the point.
+      Mastodon proves the analysis scales; Campfire pushes it sideways into
+      constructs a read-heavy app never reaches for —
+      <code>broadcast_append_to</code> and friends firing from model callbacks,
+      <code>turbo_stream_from</code> in views, channels authorizing their own
+      streams, a <code>.turbo_stream.erb</code> response picked by the
+      <code>Accept</code> header.
+    </p>
+    <p>
+      It is also the sharpest version of the deployment argument. Campfire
+      ships as a Docker image that wants Ruby, Redis, and a job runner beside
+      it. The thing Roundhouse is aiming at is one static binary that holds the
+      WebSockets itself — same app, same behavior, none of the runtime around
+      it. That's a claim worth being held to, which is why it's a milestone
+      here rather than a bullet point.
+    </p>
+
+    <h2>What works today</h2>
+    <p>
+      Open it in the <a href="../ide/?app=campfire">IDE</a>: the whole app
+      ingests, and hover types, completion, request traceroute, and the
+      coverage ledger answer across it — client-side, no app boot, no database.
+      Open it in the <a href="../playground/?app=campfire">Playground</a> and it
+      transpiles to any target, emitting what it can and leaving a diagnostic on
+      every construct not yet modeled.
+    </p>
+    <p>
+      The unmodeled constructs are the interesting part, and they are on
+      screen rather than in a footnote: each one is a diagnostic on its exact
+      line. That ledger is the worklist — the same bar the blog already meets
+      perfectly, Lobsters is close to, and Mastodon is climbing toward. Serving
+      a live room is the next rung, not a finished claim.
+    </p>
+
+    <h2>Further reading</h2>
+    <ul class="reading">
+      <li><a href="https://once.com/campfire">ONCE Campfire</a> — the product, and its self-hosted deployment story</li>
+      <li><a href="https://intertwingly.net/blog/2026/06/27/Conformance-vs-Comprehension.html">Conformance vs Comprehension</a> — the project and its oracle</li>
+    </ul>
+    <p class="note" style="margin-top:1rem;">
+      Source: <a href="https://github.com/basecamp/once-campfire"><code>basecamp/once-campfire</code></a>
+      (MIT), pinned to a fixed commit; the shipped bundle embeds its LICENSE and
+      that commit.
+    </p>
+  </main>
+
+  <footer>
+    <a href="../">Home</a>
+    <a href="blog.html">Blog</a>
+    <a href="lobsters.html">Lobsters</a>
+    <a href="mastodon.html">Mastodon</a>
+    <a href="https://github.com/rubys/roundhouse">GitHub</a>
+  </footer>
+</body>
+</html>

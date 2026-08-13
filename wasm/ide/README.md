@@ -16,7 +16,7 @@ no server, no app boot, no annotations:
   conventions
 - **coverage** button — the ingest-gap punch list
 - **app** selector — switch the analyzed Rails app in place (the published
-  site offers blog · Lobsters · Mastodon)
+  site offers blog · Lobsters · Campfire · Mastodon)
 
 Edits re-analyze in the worker (~2.5s for Mastodon, debounced); queries
 answer from the previous snapshot meanwhile.
@@ -31,6 +31,7 @@ page reads an optional `apps.json` manifest listing the shipped bundles:
 { "default": "mastodon", "apps": [
   { "name": "blog", "label": "Rails blog", "src": "app-blog.json" },
   { "name": "lobsters", "label": "Lobsters", "src": "app-lobsters.json" },
+  { "name": "campfire", "label": "Campfire", "src": "app-campfire.json" },
   { "name": "mastodon", "label": "Mastodon", "src": "app-src.json" } ] }
 ```
 
@@ -51,12 +52,13 @@ open http://localhost:8099/ide/
 
 Any Rails app works as the bundle; the published site ships Mastodon at
 the SHA pinned in `.github/workflows/ci.yml` (`MASTODON_SHA`), plus the
-Lobsters benchmark app (`RUBY_BENCH_SHA`) and the blog fixture, with each
-app's LICENSE and commit embedded in its bundle (Mastodon's AGPL source
-redistribution, the compliant kind). All three run on `/playground/` too:
-its transpile ingests in the same survey-tolerant mode this analyzer uses,
-and runs in the shared worker (`../lib/wasm-client.mjs`) so a multi-second
-Mastodon pass doesn't freeze the tab.
+Lobsters benchmark app (`RUBY_BENCH_SHA`), ONCE Campfire (`CAMPFIRE_SHA`),
+and the blog fixture, with each app's LICENSE and commit embedded in its
+bundle (Mastodon's AGPL source redistribution, the compliant kind). All
+four run on `/playground/` too: its transpile ingests in the same
+survey-tolerant mode this analyzer uses, and runs in the shared worker
+(`../lib/wasm-client.mjs`) so a multi-second Mastodon pass doesn't freeze
+the tab.
 
 ## Verifying
 

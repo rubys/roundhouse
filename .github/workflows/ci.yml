@@ -443,7 +443,8 @@ jobs:
           node wasm/ide/bundle-src.mjs fixtures/roda-blog wasm/lib/app-roda.json \
             --name roda-blog --open app.rb
           cp /tmp/app-lobsters.json wasm/ide/app-lobsters.json
-          printf '%s\n' '{"default":"mastodon","apps":[{"name":"blog","label":"Rails blog","src":"app-blog.json"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json"},{"name":"mastodon","label":"Mastodon","src":"app-src.json"}]}' > wasm/ide/apps.json
+          cp /tmp/app-campfire.json wasm/ide/app-campfire.json
+          printf '%s\n' '{"default":"mastodon","apps":[{"name":"blog","label":"Rails blog","src":"app-blog.json"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json"},{"name":"campfire","label":"Campfire","src":"app-campfire.json"},{"name":"mastodon","label":"Mastodon","src":"app-src.json"}]}' > wasm/ide/apps.json
           # Playground picker (lib/): lobsters + mastodon alongside the committed
           # blog fixture, so verify-playground exercises the app switch + the
           # off-thread Mastodon transpile.
@@ -1403,6 +1404,7 @@ jobs:
           # broadcast_*_to, turbo_stream views) and the current climb — the
           # picker's fourth app, transpiling partially with the gap ledger.
           cp /tmp/app-campfire.json _site/lib/app-campfire.json
+          cp /tmp/app-campfire.json _site/ide/app-campfire.json
           # Mastodon ships to BOTH now: /ide/ analyzes it, and /playground/
           # transpiles it off the main thread (partial output + gap diagnostics —
           # the emit runs in the shared worker, so the multi-second pass never
@@ -1414,8 +1416,8 @@ jobs:
             --name roda-blog --open app.rb
           # Playground manifest: blog + roda (clean) + lobsters + campfire + mastodon (partial → honest ledger).
           printf '%s\n' '{"default":"blog","apps":[{"name":"blog","label":"Rails blog","src":"fixture.json","open":"app/models/article.rb"},{"name":"roda","label":"Roda + Sequel blog","src":"app-roda.json","open":"app.rb"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json","open":"app/models/story.rb"},{"name":"campfire","label":"Campfire","src":"app-campfire.json","open":"app/models/message.rb"},{"name":"mastodon","label":"Mastodon","src":"app-mastodon.json","open":"app/models/status.rb"}]}' > _site/lib/apps.json
-          # IDE manifest: all three (analysis is gap-tolerant; Mastodon default).
-          printf '%s\n' '{"default":"mastodon","apps":[{"name":"blog","label":"Rails blog","src":"app-blog.json"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json"},{"name":"mastodon","label":"Mastodon","src":"app-src.json"}]}' > _site/ide/apps.json
+          # IDE manifest: all four (analysis is gap-tolerant; Mastodon default).
+          printf '%s\n' '{"default":"mastodon","apps":[{"name":"blog","label":"Rails blog","src":"app-blog.json"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json"},{"name":"campfire","label":"Campfire","src":"app-campfire.json"},{"name":"mastodon","label":"Mastodon","src":"app-src.json"}]}' > _site/ide/apps.json
           echo "lib app bundles:"; ls -1 _site/lib/*.json | sort
           echo "ide app bundles:"; ls -1 _site/ide/*.json | sort
 
