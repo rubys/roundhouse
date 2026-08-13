@@ -1342,8 +1342,18 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
     let flat = crate::lower::flatten_routes(app);
     let mut seen = std::collections::HashSet::new();
     let mut arms = String::new();
+    // Same rule as the routes.rb require header: a route may name a
+    // controller the app never defines (campfire's `resource :settings`
+    // under `scope module: "rooms"`). Rails resolves lazily and fails
+    // only on request; an eager `require_relative` for a missing file
+    // takes the whole process down at boot.
+    let defined: std::collections::HashSet<&str> =
+        app.controllers.iter().map(|c| c.name.0.as_str()).collect();
     for r in &flat {
         let class = r.controller.0.as_str();
+        if lazy_requires && !defined.contains(class) {
+            continue;
+        }
         let sym = crate::lower::routes_to_library::controller_symbol(class);
         if !seen.insert(sym.clone()) {
             continue;
@@ -2076,8 +2086,22 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         manifest.push_str(
             "\n[dependencies]\n\
              # Real password hashing for has_secure_password / login —\n\
-             # crypt_blowfish in carried C (github.com/rubys/spinel-bcrypt).\n\
-             bcrypt = \"~> 0.1\"\n",
+             # crypt_blowfish in carried C.\n\
+             #\n\
+             # The GIT form, not `bcrypt = \"~> 0.1\"`: that is the index\n\
+             # form, and bcrypt is not in the published index\n\
+             # (github.com/matz/spin-index carries pg, redis, spinel_kit).\n\
+             # `spin build` on this tree failed out of the box with\n\
+             # `not in the index: bcrypt` for anyone without a local\n\
+             # checkout to `spin add --path`. Registration is filed as\n\
+             # matz/spin-index#5 — switch this back to the version\n\
+             # constraint once that merges.\n\
+             #\n\
+             # `ref` is a clone `--branch`, so it takes a branch or tag,\n\
+             # never a commit SHA (`git clone --branch <sha>` fails with\n\
+             # `Remote branch ... not found`). spinel-bcrypt publishes no\n\
+             # tags today, so this tracks `main`.\n\
+             bcrypt = { git = \"https://github.com/rubys/spinel-bcrypt\", ref = \"main\" }\n",
         );
     }
     files.push(("spin.toml".to_string(), manifest));

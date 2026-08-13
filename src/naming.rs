@@ -101,63 +101,240 @@ pub fn last_segment(name: &str) -> &str {
     name.rsplit(['/', ':']).next().unwrap_or(name)
 }
 
-pub fn pluralize_snake(class_name: &str) -> String {
-    let snake = snake_case(class_name);
-    if snake.ends_with('s') {
-        format!("{snake}es")
-    } else if let Some(stem) = snake.strip_suffix('y').filter(|st| y_takes_ies(st)) {
-        format!("{stem}ies")
-    } else {
-        format!("{snake}s")
-    }
+/// Rails' inflection rules, ported from
+/// `activesupport/lib/active_support/inflections.rb` (verified identical
+/// between the 8.1.2 gem and today's rails/rails main).
+///
+/// PORTED, not derived. The hand-rolled approximation this replaces was
+/// wrong on **39 of 86 plurals and 47 of 86 singulars** in Rails' OWN
+/// test vocabulary (`activesupport/test/inflector_test_cases.rb`): every
+/// irregular (person/people, child/children, man/men), every Latin
+/// plural (datum/data, analysis/analyses, index/indices), the f→ves
+/// family (wife/wives, half/halves) and every uncountable (fish, news,
+/// series, money, jeans). The corpus happened to contain none of them,
+/// which is exactly why it survived — and its two errors that DID show
+/// up (`key`→`keies`, `custom_styles`→`custom_styleses`) each shipped a
+/// `require` naming a file the emit never wrote, invisible until
+/// campfire arrived.
+///
+/// Rules are stored in Rails' registration order and applied in
+/// REVERSE: `inflect.plural` prepends, so the last registered rule wins
+/// and `/$/ => "s"` is the fallback.
+///
+/// Every rule in Rails' table is suffix-anchored, so no regex engine is
+/// needed. A rule is `(alternatives, replacement)`; `|` separates the
+/// alternatives of a captured group. Replacement mini-language: `{}`
+/// keeps the matched text, `{-x}` keeps it minus a trailing `x`, `{-2}`
+/// minus its last two characters, and a bare literal replaces it. The
+/// handful of rules needing a character class are named pseudo-patterns
+/// handled in `apply_rule`.
+const PLURAL_RULES: &[(&str, &str)] = &[
+    ("", "{}s"),
+    ("s", "s"),
+    ("^axis|^testis", "{-is}es"),
+    ("octopus|virus", "{-us}i"),
+    ("octopi|viri", "{}"),
+    ("alias|status", "{}es"),
+    ("bus", "{-s}ses"),
+    ("buffalo|tomato", "{}es"),
+    ("tum|ium", "{-um}a"),
+    ("ta|ia", "{}"),
+    ("sis", "{-sis}ses"),
+    ("FE_VES", ""),
+    ("hive", "{}s"),
+    ("CONSONANT_Y", ""),
+    ("x|ch|ss|sh", "{}es"),
+    ("matrix|vertix|indix|matrex|vertex|index", "{-2}ices"),
+    ("^mouse|^louse", "{-ouse}ice"),
+    ("^mice|^lice", "{}"),
+    ("^ox", "{}en"),
+    ("^oxen", "{}"),
+    ("quiz", "{}zes"),
+];
+
+const SINGULAR_RULES: &[(&str, &str)] = &[
+    ("s", "{-s}"),
+    ("ss", "{}"),
+    ("news", "{}"),
+    ("ta|ia", "{-a}um"),
+    ("SIS_FAMILY", ""),
+    ("VES_FE", ""),
+    ("hives", "{-s}"),
+    ("tives", "{-s}"),
+    ("LR_VES", ""),
+    ("CONSONANT_IES", ""),
+    ("series", "{}"),
+    ("movies", "{-s}"),
+    ("xes|ches|sses|shes", "{-es}"),
+    ("^mice|^lice", "{-ice}ouse"),
+    ("buses|bus", "bus"),
+    ("oes", "{-es}"),
+    ("shoes", "{-s}"),
+    ("crisis|crises|testis|testes", "{-2}is"),
+    ("^axes|^axis", "axis"),
+    ("octopus|virus", "{}"),
+    ("octopi|viri", "{-i}us"),
+    ("aliases|alias|statuses|status", "{-es}"),
+    ("^oxen", "ox"),
+    ("vertices|indices", "{-ices}ex"),
+    ("matrices", "matrix"),
+    ("quizzes", "quiz"),
+    ("databases", "{-s}"),
+];
+
+/// `inflect.irregular` — matched as a SUFFIX, which is how Rails' own
+/// generated rules behave (`salesperson` → `salespeople`, `node_child`
+/// → `node_children`). That also reproduces Rails' quirk of inflecting
+/// `human` to `humen`; matching Rails is the contract, not English.
+const IRREGULAR: &[(&str, &str)] = &[
+    ("person", "people"),
+    ("man", "men"),
+    ("child", "children"),
+    ("sex", "sexes"),
+    ("move", "moves"),
+    ("zombie", "zombies"),
+];
+
+const UNCOUNTABLE: &[&str] = &[
+    "equipment",
+    "information",
+    "rice",
+    "money",
+    "species",
+    "series",
+    "fish",
+    "sheep",
+    "jeans",
+    "police",
+];
+
+/// Rails' uncountable check is `/\b<word>\z/i` — the match must begin at
+/// a word BOUNDARY. `_` is a word character, so `funky jeans` is
+/// uncountable while `old_news` is not (that one is handled by the
+/// explicit `(n)ews$` singular rule instead).
+fn uncountable(word: &str) -> bool {
+    UNCOUNTABLE.iter().any(|u| {
+        word.strip_suffix(u).is_some_and(|head| {
+            head.is_empty() || !head.ends_with(|c: char| c.is_alphanumeric() || c == '_')
+        })
+    })
 }
 
-/// Does a trailing `y` become `ies`? Only after a CONSONANT — Rails'
-/// inflector rule is `([^aeiouy]|qu)y$`. A vowel before the `y` just
-/// takes `s`: keys, days, boys, guys, surveys.
-///
-/// Without the vowel check `key` pluralized to `keies`, so campfire's
-/// `resource :key` produced a route naming `Accounts::Bots::KeiesController`
-/// while the controller emitted as `KeysController` — routes.rb then
-/// required a file that did not exist. CRuby only notices when that
-/// route is dispatched; the spinel lane, which resolves requires at
-/// build time, fails the whole build.
-fn y_takes_ies(stem: &str) -> bool {
-    if stem.ends_with("qu") {
-        return true;
+fn irregular_apply(word: &str, from_singular: bool) -> Option<String> {
+    for (s, p) in IRREGULAR {
+        let (from, to) = if from_singular { (*s, *p) } else { (*p, *s) };
+        if let Some(head) = word.strip_suffix(from) {
+            return Some(format!("{head}{to}"));
+        }
     }
-    match stem.chars().next_back() {
-        Some(c) => !matches!(c.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u' | 'y'),
-        // A bare "y" has nothing before it — "ys" beats "ies".
-        None => false,
+    None
+}
+
+/// The analysis/basis/diagnosis family, both directions of
+/// `((a)naly|(b)a|(d)iagno|…)(sis|ses)$ => '\1sis'`.
+fn sis_family(word: &str) -> Option<String> {
+    const STEMS: &[&str] = &[
+        "analy", "ba", "diagno", "parenthe", "progno", "synop", "the",
+    ];
+    let head = word.strip_suffix("ses").or_else(|| word.strip_suffix("sis"))?;
+    STEMS
+        .iter()
+        .find(|st| head.ends_with(*st))
+        .map(|_| format!("{head}sis"))
+}
+
+fn apply_rule(word: &str, alts: &str, repl: &str) -> Option<String> {
+    match alts {
+        // /(?:([^f])fe|([lr])f)$/ => '\1\2ves'
+        "FE_VES" => {
+            if let Some(h) = word.strip_suffix("fe") {
+                if !h.is_empty() && !h.ends_with('f') {
+                    return Some(format!("{h}ves"));
+                }
+            }
+            let h = word.strip_suffix('f')?;
+            return (h.ends_with('l') || h.ends_with('r')).then(|| format!("{h}ves"));
+        }
+        // /([^aeiouy]|qu)y$/ => '\1ies'
+        "CONSONANT_Y" => {
+            let h = word.strip_suffix('y')?;
+            return (h.ends_with("qu") || h.ends_with(|c: char| !"aeiouy".contains(c)))
+                .then(|| format!("{h}ies"));
+        }
+        "SIS_FAMILY" => return sis_family(word),
+        // /([^f])ves$/ => '\1fe'
+        "VES_FE" => {
+            let h = word.strip_suffix("ves")?;
+            return (!h.is_empty() && !h.ends_with('f')).then(|| format!("{h}fe"));
+        }
+        // /([lr])ves$/ => '\1f'
+        "LR_VES" => {
+            let h = word.strip_suffix("ves")?;
+            return (h.ends_with('l') || h.ends_with('r')).then(|| format!("{h}f"));
+        }
+        // /([^aeiouy]|qu)ies$/ => '\1y'
+        "CONSONANT_IES" => {
+            let h = word.strip_suffix("ies")?;
+            return (h.ends_with("qu") || h.ends_with(|c: char| !"aeiouy".contains(c)))
+                .then(|| format!("{h}y"));
+        }
+        _ => {}
     }
+    if alts.is_empty() {
+        return Some(expand(word, "", repl));
+    }
+    // A leading `^` marks a rule Rails anchors at both ends
+    // (`/^(ox)$/`, `/^(m|l)ice$/`): it matches the WHOLE word, never a
+    // tail. Without that, `box` hit the `ox` rule and pluralized to
+    // `boxen`, and `slice` hit `lice` and stayed `slice`.
+    let hit = alts.split('|').find(|a| match a.strip_prefix('^') {
+        Some(whole) => word == whole,
+        None => word.ends_with(a),
+    })?;
+    Some(expand(word, hit.trim_start_matches('^'), repl))
+}
+
+fn expand(word: &str, matched: &str, repl: &str) -> String {
+    let head = &word[..word.len() - matched.len()];
+    let Some(body) = repl.strip_prefix('{') else {
+        return format!("{head}{repl}");
+    };
+    let (inner, tail) = body.split_once('}').unwrap_or((body, ""));
+    let kept = if inner == "-2" {
+        &matched[..matched.len().saturating_sub(2)]
+    } else if let Some(drop) = inner.strip_prefix('-') {
+        matched.strip_suffix(drop).unwrap_or(matched)
+    } else {
+        matched
+    };
+    format!("{head}{kept}{tail}")
+}
+
+fn inflect(word: &str, rules: &[(&str, &str)], from_singular: bool) -> String {
+    if word.is_empty() || uncountable(word) {
+        return word.to_string();
+    }
+    if let Some(hit) = irregular_apply(word, from_singular) {
+        return hit;
+    }
+    // Reverse registration order: `inflect.plural`/`inflect.singular`
+    // prepend, so Rails tries the LAST rule in the file first.
+    for (alts, repl) in rules.iter().rev() {
+        if let Some(out) = apply_rule(word, alts, repl) {
+            return out;
+        }
+    }
+    word.to_string()
+}
+
+pub fn pluralize_snake(class_name: &str) -> String {
+    inflect(&snake_case(class_name), PLURAL_RULES, true)
 }
 
 pub fn singularize(plural: &str) -> String {
-    if let Some(stem) = plural.strip_suffix("ies") {
-        return format!("{stem}y");
-    }
-    // "es" strips only when the stem ends in a sibilant (s, x, z) or a
-    // sibilant digraph (sh, ch). Otherwise fall through to plain "s"
-    // strip: "articles" → "article" (stem "articl" not sibilant),
-    // "boxes" → "box" (stem "box" sibilant), "buses" → "bus" (stem "bus"
-    // sibilant).
-    if let Some(stem) = plural.strip_suffix("es") {
-        let sibilant = stem.ends_with('s')
-            || stem.ends_with('x')
-            || stem.ends_with('z')
-            || stem.ends_with("sh")
-            || stem.ends_with("ch");
-        if sibilant {
-            return stem.to_string();
-        }
-        // Otherwise fall through — "es" was coincidental; just strip "s".
-    }
-    if let Some(s) = plural.strip_suffix('s') {
-        return s.to_string();
-    }
-    plural.to_string()
+    inflect(plural, SINGULAR_RULES, false)
 }
+
 
 pub fn singularize_camelize(plural_symbol: &str) -> String {
     camelize(&singularize(plural_symbol))

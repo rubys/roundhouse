@@ -343,8 +343,22 @@ pub fn emit_lowered_routes(app: &App) -> EmittedFile {
     )
     .unwrap();
     let mut seen: Vec<String> = vec!["application_controller".to_string()];
+    // Only controllers the app actually DEFINES. Rails resolves a
+    // controller lazily at dispatch, so a route naming one that does not
+    // exist raises only when that path is requested; campfire routes
+    // `resource :settings` inside `scope module: "rooms"` and ships no
+    // `Rooms::SettingsController` at all. Requiring it eagerly turned
+    // that dangling route into a hard failure for the WHOLE app — a
+    // LoadError at boot on the ruby lane and a build abort on spinel.
+    // Skipping it keeps Rails' laziness: the route still dispatches,
+    // and it fails where Rails fails it.
+    let defined: std::collections::HashSet<&str> =
+        app.controllers.iter().map(|c| c.name.0.as_str()).collect();
     for r in &flat {
         let class_name = r.controller.0.as_str();
+        if !defined.contains(class_name) {
+            continue;
+        }
         let stem = crate::naming::underscore(class_name);
         if seen.contains(&stem) {
             continue;
