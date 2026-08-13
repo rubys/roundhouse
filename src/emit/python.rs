@@ -104,6 +104,7 @@ pub fn emit_method(m: &MethodDef) -> String {
 
 const RUNTIME_SOURCE: &str = include_str!("../../runtime/python/runtime.py");
 const DB_SOURCE: &str = include_str!("../../runtime/python/db.py");
+const PARAMS_SOURCE: &str = include_str!("../../runtime/python/params.py");
 /// Native-`datetime` seam for temporal columns: `Roundhouse.RhDateTime.
 /// parse` (stored ISO-8601 text -> datetime, the `parse_db_time` intrinsic
 /// target) plus a module-load patch that gives `json_builder.encode_datetime`
@@ -184,6 +185,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         files.push(EmittedFile {
             path: PathBuf::from("app/db.py"),
             content: DB_SOURCE.to_string(),
+        });
+        files.push(EmittedFile {
+            path: PathBuf::from("app/params.py"),
+            content: PARAMS_SOURCE.to_string(),
         });
         files.push(EmittedFile {
             path: PathBuf::from("app/rh_datetime.py"),

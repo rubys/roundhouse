@@ -72,6 +72,9 @@ pub(super) fn emit_py_views(app: &App) -> Vec<EmittedFile> {
     // Jbuilder view bodies reference `JsonBuilder.encode_value` and
     // `RouteHelpers.article_path` as `Const`-rooted sends; alias the
     // modules under those names so the shared Const emit resolves them.
+    if json_blob.contains("Params.") {
+        writeln!(s, "from app import params as Params").unwrap();
+    }
     if json_blob.contains("JsonBuilder") {
         writeln!(s, "from app import json_builder as JsonBuilder").unwrap();
     }

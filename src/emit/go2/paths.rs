@@ -163,7 +163,7 @@ pub(crate) fn package_for_class(class_name: &str) -> &'static str {
         | "ActionDispatch::Session" => "v2",
 
         // pkg/runtime/actionview/ — view helpers, JsonBuilder.
-        "ActionView::ViewHelpers" | "JsonBuilder" => "v2",
+        "ActionView::ViewHelpers" | "JsonBuilder" | "Params" => "v2",
 
         // pkg/runtime/inflector/ — standalone (one file).
         "Inflector" => "v2",
@@ -262,6 +262,7 @@ mod tests {
             "ActionDispatch::Router",
             "ActionView::ViewHelpers",
             "JsonBuilder",
+            "Params",
             "Inflector",
             "RouteHelpers",
             "Importmap",

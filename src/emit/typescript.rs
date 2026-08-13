@@ -38,6 +38,7 @@ const BROADCASTS_SOURCE: &str = include_str!("../../runtime/typescript/broadcast
 const DATETIME_SOURCE: &str = include_str!("../../runtime/typescript/datetime.ts");
 const DB_SOURCE: &str = include_str!("../../runtime/typescript/db.ts");
 const PARAM_VALUE_SOURCE: &str = include_str!("../../runtime/typescript/param_value.ts");
+const PARAMS_SOURCE: &str = include_str!("../../runtime/typescript/params.ts");
 const DB_LIBSQL_SOURCE: &str = include_str!("../../runtime/typescript/db-libsql.ts");
 const DB_WORKER_PROXY_SOURCE: &str =
     include_str!("../../runtime/typescript/db-worker-proxy.ts");
@@ -205,6 +206,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     files.push(EmittedFile {
         path: PathBuf::from("src/param_value.ts"),
         content: PARAM_VALUE_SOURCE.to_string(),
+    });
+    files.push(EmittedFile {
+        path: PathBuf::from("src/params.ts"),
+        content: PARAMS_SOURCE.to_string(),
     });
     files.push(EmittedFile {
         path: PathBuf::from("src/broadcasts.ts"),

@@ -38,6 +38,7 @@ const TIME_KT: &str = include_str!("../../../runtime/kotlin/time.kt");
 /// so the column-index params are `Long` and shifted to JDBC's 1-based,
 /// `Int`-typed column index internally.
 const DB_KT: &str = include_str!("../../../runtime/kotlin/db.kt");
+const PARAMS_KT: &str = include_str!("../../../runtime/kotlin/params.kt");
 
 /// Native-`Time` seam for temporal columns: `RhDateTime.parse` (stored
 /// ISO-8601 text → `OffsetDateTime`, the `ActiveSupport.parse_db_time`
@@ -114,6 +115,10 @@ pub fn primitives() -> Vec<EmittedFile> {
         EmittedFile {
             path: PathBuf::from("src/main/kotlin/Db.kt"),
             content: DB_KT.to_string(),
+        },
+        EmittedFile {
+            path: PathBuf::from("src/main/kotlin/Params.kt"),
+            content: PARAMS_KT.to_string(),
         },
         EmittedFile {
             path: PathBuf::from("src/main/kotlin/RhDateTime.kt"),

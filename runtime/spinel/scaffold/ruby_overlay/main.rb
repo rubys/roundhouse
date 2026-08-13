@@ -65,6 +65,11 @@ require_relative "runtime/json"
 # `runtime/json.rb`'s `JSON.generate` shim: this module exposes
 # `JsonBuilder.encode_value` / `encode_string` for per-value encoding.
 require_relative "runtime/json_builder"
+# Params — see the spinel scaffold's main.rb for the rationale. Both
+# entry points need it: the CRuby target uses this overlay, and patching
+# only the spinel one leaves `<Resource>Params.from_raw` reaching an
+# undefined constant on every request that carries params.
+require_relative "runtime/params"
 require_relative "runtime/importmap"
 require_relative "runtime/rails"
 # Park RAILS_ENV where the typed runtime can read it (`Rails.env`

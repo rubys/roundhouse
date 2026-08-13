@@ -42,6 +42,12 @@ require_relative "runtime/json"
 # `runtime/json.rb`'s `JSON.generate` shim: this module exposes
 # `JsonBuilder.encode_value` / `encode_string` for per-value encoding.
 require_relative "runtime/json_builder"
+# Params — narrowing accessors over the recursive request-params tree
+# (`Roundhouse::ParamValue`). The synthesized `<Resource>Params.from_raw`
+# calls these instead of open-coding `is_a?` narrowing per field, so the
+# type test lives in one transpiled body rather than in generated code
+# whose shape each emitter has to recognize.
+require_relative "runtime/params"
 require_relative "runtime/importmap"
 # ActiveSupport::Duration value class — the emit grounds `70.days` etc.
 # to `ActiveSupport::Duration.days(70)`, so the class must be loadable

@@ -108,6 +108,7 @@ fn main() {}\n";
 // the binary via include_str! and emitted alongside the transpiled
 // framework runtime files.
 const RT_PARAM_VALUE_SOURCE: &str = include_str!("../../runtime/rust/param_value.rs");
+const RT_PARAMS_SOURCE: &str = include_str!("../../runtime/rust/params.rs");
 const RT_FLASH_SOURCE: &str = include_str!("../../runtime/rust/flash.rs");
 const RT_SESSION_SOURCE: &str = include_str!("../../runtime/rust/session.rs");
 const RT_ERRORS_EXT_SOURCE: &str = include_str!("../../runtime/rust/errors_ext.rs");
@@ -162,6 +163,8 @@ use crate::importmap::{self, Importmap};
 #[allow(unused_imports)]
 use crate::json_builder::{self, JsonBuilder};
 #[allow(unused_imports)]
+use crate::params::{self, Params};
+#[allow(unused_imports)]
 use crate::http::RubyToS;
 #[allow(unused_imports)]
 use crate::models::*;
@@ -203,6 +206,8 @@ use crate::errors_ext::{raise, NotImplementedError, RecordNotFound, RecordInvali
 const MODEL_IMPORTS: &str = "\
 #[allow(unused_imports)]
 use crate::param_value::ParamValue;
+#[allow(unused_imports)]
+use crate::params::{self, Params};
 #[allow(unused_imports)]
 use crate::db::Db;
 #[allow(unused_imports)]
@@ -274,6 +279,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // imports referring to these modules) resolve at compile time.
     for (path, content) in [
         ("src/param_value.rs", RT_PARAM_VALUE_SOURCE),
+        ("src/params.rs", RT_PARAMS_SOURCE),
         ("src/flash.rs", RT_FLASH_SOURCE),
         ("src/session.rs", RT_SESSION_SOURCE),
         ("src/errors_ext.rs", RT_ERRORS_EXT_SOURCE),

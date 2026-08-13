@@ -40,6 +40,7 @@ use paths::{output_path, OutputKind};
 /// `go vet` / `go build` time.
 const RT_V2_ADAPTER_INTERFACE: &str =
     include_str!("../../runtime/go/v2/adapter_interface.go");
+const RT_V2_PARAMS: &str = include_str!("../../runtime/go/v2/params.go");
 const RT_V2_PARAM_VALUE: &str =
     include_str!("../../runtime/go/v2/param_value.go");
 const RT_V2_ERRORS: &str =
@@ -94,6 +95,7 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     for (name, src) in [
         ("adapter_interface.go", RT_V2_ADAPTER_INTERFACE),
         ("param_value.go", RT_V2_PARAM_VALUE),
+        ("params.go", RT_V2_PARAMS),
         ("errors.go", RT_V2_ERRORS),
         ("modeler.go", RT_V2_MODELER),
         // Per-goroutine slot store for content_for/yield — owns the

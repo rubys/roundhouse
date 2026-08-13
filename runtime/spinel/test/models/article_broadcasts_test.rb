@@ -27,14 +27,19 @@ class ArticleBroadcastsTest < Minitest::Test
     article.save
     Broadcasts.reset_log!
     # `Article#update` is the strong-params-typed variant: takes an
-    # `ArticleParams`, not a Hash. Construct one explicitly here so the
-    # update-broadcast assertion exercises the same path the controller
-    # uses (`@article.update(article_params)`). Rails-idiom Hash kwargs
+    # `ArticleParams`, not a Hash. Build it the way the controller does —
+    # `from_raw` off a request-shaped hash — so this exercises the same
+    # path as `@article.update(article_params)`. Rails-idiom Hash kwargs
     # would route to `synth_update`'s Hash-shape variant, which the
     # typed lowering doesn't emit when strong params are present.
-    p = ArticleParams.new
-    p.title = "Renamed"
+    #
+    # `body` is absent from the hash, so `update` must leave it alone
+    # (Rails assigns only the keys the request carried). That partial
+    # update is the point: the params class tracks which fields were
+    # provided, and a blank `""` is NOT the same as an absent key.
+    p = ArticleParams.from_raw({ "article" => { "title" => "Renamed" } })
     article.update(p)
+    assert_equal "Some body content here.", article.body
     entries = Broadcasts.log.select { |e| e[:stream] == "articles" }
     assert_equal 1, entries.length
     assert_equal :replace, entries.first[:action]

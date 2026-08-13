@@ -18,6 +18,7 @@ use crate::emit::EmittedFile;
 // `CSHARP_RUNTIME`), so they're no longer shipped as hand-written primitives.
 const ADAPTER_INTERFACE_CS: &str = include_str!("../../../runtime/csharp/AdapterInterface.cs");
 const DB_CS: &str = include_str!("../../../runtime/csharp/Db.cs");
+const PARAMS_CS: &str = include_str!("../../../runtime/csharp/Params.cs");
 const TIME_CS: &str = include_str!("../../../runtime/csharp/Time.cs");
 const BROADCASTS_CS: &str = include_str!("../../../runtime/csharp/Broadcasts.cs");
 const CABLE_CS: &str = include_str!("../../../runtime/csharp/Cable.cs");
@@ -33,6 +34,7 @@ pub fn primitives() -> Vec<EmittedFile> {
     let files = [
         ("app/runtime/AdapterInterface.cs", ADAPTER_INTERFACE_CS),
         ("app/runtime/Db.cs", DB_CS),
+        ("app/runtime/Params.cs", PARAMS_CS),
         ("app/runtime/Time.cs", TIME_CS),
         ("app/runtime/Broadcasts.cs", BROADCASTS_CS),
         ("app/runtime/Cable.cs", CABLE_CS),

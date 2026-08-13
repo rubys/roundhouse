@@ -426,6 +426,8 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         {
             for f in fields {
                 params_ivars.insert(f.clone(), Ty::Str);
+                // The companion presence slot each value slot carries.
+                params_ivars.insert(self::params::provided_field(f), Ty::Bool);
             }
         }
         for method in &mut params_lc.methods {

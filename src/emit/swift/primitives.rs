@@ -20,6 +20,7 @@ const RHSTRING_SWIFT: &str = include_str!("../../../runtime/swift/rhstring.swift
 // statement table; a request's whole prepare→step→finalize runs on one
 // thread — the Kotlin 7k→54k lesson, applied proactively).
 const DB_SWIFT: &str = include_str!("../../../runtime/swift/db.swift");
+const PARAMS_SWIFT: &str = include_str!("../../../runtime/swift/params.swift");
 
 // `Time.now.utc.iso8601` (the timestamp path in Base#save) — emitted as
 // `Time.now().utc.iso8601`, so: a method + two property reads. Ported
@@ -98,6 +99,10 @@ pub fn primitives() -> Vec<EmittedFile> {
         EmittedFile {
             path: PathBuf::from("Sources/App/runtime/Db.swift"),
             content: DB_SWIFT.to_string(),
+        },
+        EmittedFile {
+            path: PathBuf::from("Sources/App/runtime/Params.swift"),
+            content: PARAMS_SWIFT.to_string(),
         },
         EmittedFile {
             path: PathBuf::from("Sources/App/runtime/Time.swift"),

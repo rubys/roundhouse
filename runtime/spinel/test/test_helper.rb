@@ -24,6 +24,13 @@
 require_relative "../runtime/base64"
 require_relative "../runtime/json"
 require_relative "../runtime/db"
+# Params — narrowing accessors the synthesized `<Resource>Params.
+# from_raw` calls. THIRD entry point that needs it, alongside the two
+# scaffold main.rb files: this harness builds its own require chain
+# rather than loading main.rb, so a POST test hits `uninitialized
+# constant Params` without it (which is what caught it — `compare`
+# is GET-only and stayed green).
+require_relative "../runtime/params"
 require_relative "../runtime/active_record"
 require_relative "../runtime/sqlite_adapter"
 require_relative "../config/schema"

@@ -82,21 +82,6 @@ pub struct ParamsSpec {
     /// nil-writes widen the class's fields to nilable on inferring
     /// targets; classes nobody excepts keep tight types.
     pub wants_except: bool,
-    /// Some call site chains `.compact` off this permit. MEASURED
-    /// against Rails 8.1: `Parameters#compact` drops keys whose value is
-    /// explicitly nil and KEEPS `""` — so for a form POST it changes
-    /// nothing, and what it really expresses is "assign only what the
-    /// request actually provided."
-    ///
-    /// Our `from_raw` couldn't express that: it defaults an ABSENT key
-    /// to `""`, which `update` then assigns, clobbering the column.
-    /// campfire's profile page has an avatar-only form, so submitting it
-    /// blanked the user's name, email and bio. Setting this flag makes
-    /// the class presence-aware — absent (and JSON-null) keys read nil,
-    /// which `update`'s existing skip-nil turns into Rails' semantics —
-    /// at the cost of nilable field types, so it is demand-gated the way
-    /// `wants_except` is.
-    pub wants_compact: bool,
     /// Some call site writes `<Model>.create(<helper>)` / `.create!` on
     /// the model this list's resource names — synthesize the matching
     /// typed factory. Demand-gated like `wants_except`: the runtime's
@@ -259,7 +244,6 @@ pub fn specs_from_lists(lists: &[(Symbol, Vec<Symbol>)]) -> ParamsSpecs {
                 fields: fields.clone(),
                 span: Span::synthetic(),
                 wants_except: false,
-                wants_compact: false,
                 wants_create: false,
                 wants_create_bang: false,
                 declaring: Vec::new(),
@@ -276,7 +260,6 @@ pub fn specs_from_lists(lists: &[(Symbol, Vec<Symbol>)]) -> ParamsSpecs {
 #[derive(Clone, Copy, Default)]
 struct Wants {
     except: bool,
-    compact: bool,
 }
 
 fn record(
@@ -292,7 +275,6 @@ fn record(
     match index.get(&key) {
         Some(&i) => {
             specs[i].wants_except |= wants.except;
-            specs[i].wants_compact |= wants.compact;
             if !specs[i].declaring.contains(controller) {
                 specs[i].declaring.push(controller.clone());
             }
@@ -308,7 +290,6 @@ fn record(
                 fields,
                 span,
                 wants_except: wants.except,
-                wants_compact: wants.compact,
                 wants_create: false,
                 wants_create_bang: false,
                 declaring: vec![controller.clone()],
@@ -329,11 +310,10 @@ fn collect_from_expr(
     // `record`.
     if let ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node {
         let wants = match method.as_str() {
-            "except" => Wants { except: true, ..Default::default() },
-            "compact" => Wants { compact: true, ..Default::default() },
+            "except" => Wants { except: true },
             _ => Wants::default(),
         };
-        if (wants.except || wants.compact) && !matches!(&*recv.node, ExprNode::Lit { .. }) {
+        if wants.except {
             if let Some((resource, fields)) = match_permit_call(recv) {
                 record(resource, fields, controller, expr.span, wants, index, specs);
             }
@@ -702,19 +682,16 @@ pub fn synthesize_params_classes(specs: &ParamsSpecs) -> Vec<LibraryClass> {
 }
 
 fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
-    let presence = spec.wants_compact;
     let mut methods: Vec<MethodDef> = Vec::new();
-    methods.push(synth_params_initialize(&spec.class_id, &spec.fields, presence));
+    methods.push(synth_params_initialize(&spec.class_id, &spec.fields));
     for field in &spec.fields {
         methods.push(synth_attr_reader(&spec.class_id, field, Ty::Str));
         methods.push(synth_attr_writer(&spec.class_id, field, Ty::Str));
-        if presence {
-            let flag = provided_field(field);
-            methods.push(synth_attr_reader(&spec.class_id, &flag, Ty::Bool));
-            methods.push(synth_attr_writer(&spec.class_id, &flag, Ty::Bool));
-        }
+        let flag = provided_field(field);
+        methods.push(synth_attr_reader(&spec.class_id, &flag, Ty::Bool));
+        methods.push(synth_attr_writer(&spec.class_id, &flag, Ty::Bool));
     }
-    methods.push(synth_from_raw(&spec.class_id, &spec.resource, &spec.fields, presence));
+    methods.push(synth_from_raw(&spec.class_id, &spec.resource, &spec.fields));
     methods.push(synth_to_h(&spec.class_id, &spec.fields));
     if spec.wants_except {
         methods.push(synth_except(&spec.class_id, &spec.fields));
@@ -750,9 +727,9 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
 /// Ruby/Crystal/TS auto-init-from-attr_accessor convention. All
 /// fields are `Ty::Str` (CGI string-typed) per `synth_attr_reader`'s
 /// rule, so the literal default is consistently `""`.
-fn synth_params_initialize(owner: &ClassId, fields: &[Symbol], presence: bool) -> MethodDef {
+fn synth_params_initialize(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
     let mut stmts: Vec<Expr> = Vec::new();
-    if presence {
+    {
         for field in fields {
             stmts.push(Expr::new(
                 Span::synthetic(),
@@ -853,12 +830,16 @@ fn synth_attr_reader(owner: &ClassId, field: &Symbol, ty: Ty) -> MethodDef {
     }
 }
 
-/// `def except(key)` — nil the named field's slot and return self.
-/// Rails' `permitted.except(:reason)` drops a key before `update`
-/// consumes the params; the typed `update` skips nil fields, so a
-/// nil'd slot is exactly "not provided". The receiver is always a
-/// fresh `from_raw` product at the corpus sites, so mutate-and-return
-/// stands in for Rails' copy semantics.
+/// `def except(key)` — mark the named field not-provided and return
+/// self. Rails' `permitted.except(:reason)` drops a key before `update`
+/// consumes the params, and "dropped" is exactly what the
+/// `<field>_provided` flag says. Clearing the flag (rather than nilling
+/// the value slot, which is what this used to do) keeps the slot a
+/// plain `String` — a nil write there would ask every strict target to
+/// flow-narrow an Option through `update`'s guard.
+///
+/// The receiver is always a fresh `from_raw` product at the corpus
+/// sites, so mutate-and-return stands in for Rails' copy semantics.
 fn synth_except(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
     let key = Symbol::from("key");
     let key_read = |()| Expr::new(
@@ -883,8 +864,11 @@ fn synth_except(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
         let clear = Expr::new(
             Span::synthetic(),
             ExprNode::Assign {
-                target: LValue::Ivar { name: field.clone() },
-                value: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+                target: LValue::Ivar { name: provided_field(field) },
+                value: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lit { value: Literal::Bool { value: false } },
+                ),
             },
         );
         stmts.push(Expr::new(
@@ -973,46 +957,28 @@ fn synth_attr_writer(owner: &ClassId, field: &Symbol, ty: Ty) -> MethodDef {
 /// into the nested resource hash that controller params arrive under
 /// (e.g. `{"article" => {"title" => …}}`); the empty-hash default keeps
 /// the field fetches non-divergent if the resource key is absent.
-fn synth_from_raw(
-    owner: &ClassId,
-    resource: &Symbol,
-    fields: &[Symbol],
-    presence: bool,
-) -> MethodDef {
+fn synth_from_raw(owner: &ClassId, resource: &Symbol, fields: &[Symbol]) -> MethodDef {
     use crate::lower::typing::with_ty;
     let params = Symbol::from("params");
-    let raw_sub = Symbol::from("raw_sub");
     let sub = Symbol::from("sub");
     let instance = Symbol::from("instance");
 
-    // Type-shorthand helpers so the body's IR carries explicit annotations
-    // — the body-typer in mod.rs runs over the synthesized class, but
-    // attaching the types we know-by-construction keeps the emit
-    // dispatch (TS `.fetch` → bracket access, Crystal Hash#fetch
-    // narrowing) deterministic.
     let param_value_ty = Ty::Class {
         id: ClassId(Symbol::from("Roundhouse::ParamValue")),
         args: vec![],
     };
-    let inner_hash_ty = Ty::Hash {
+    let hash_ty = Ty::Hash {
         key: Box::new(Ty::Str),
-        value: Box::new(param_value_ty.clone()),
+        value: Box::new(param_value_ty),
     };
-    let outer_hash_ty = inner_hash_ty.clone();
+    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
 
-    let str_lit = |s: &str| with_ty(
+    let str_lit = |v: &str| with_ty(
         Expr::new(
             Span::synthetic(),
-            ExprNode::Lit { value: Literal::Str { value: s.to_string() } },
+            ExprNode::Lit { value: Literal::Str { value: v.to_string() } },
         ),
         Ty::Str,
-    );
-    let empty_hash = |ty: Ty| with_ty(
-        Expr::new(
-            Span::synthetic(),
-            ExprNode::Hash { entries: Vec::new(), kwargs: false },
-        ),
-        ty,
     );
     let var = |name: &Symbol, ty: Ty| with_ty(
         Expr::new(
@@ -1021,275 +987,110 @@ fn synth_from_raw(
         ),
         ty,
     );
-
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
-
-    // raw_sub = params.fetch("<resource>", {})
-    //   — value type is `ParamValue` per the body-typer.
-    let resource_fetch = with_ty(
-        Expr::new(
-            Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(var(&params, Ty::Hash {
-                    key: Box::new(Ty::Str),
-                    value: Box::new(param_value_ty.clone()),
-                })),
-                method: Symbol::from("fetch"),
-                args: vec![
-                    str_lit(resource.as_str()),
-                    empty_hash(inner_hash_ty.clone()),
-                ],
-                block: None,
-                parenthesized: false,
-            },
-        ),
-        param_value_ty.clone(),
-    );
-
-    // sub = raw_sub.is_a?(Hash) ? raw_sub : {}
-    //   — narrows the ParamValue variant to Hash[String, ParamValue]
-    //   on strict targets; degrades cleanly under duck typing.
-    let is_a_hash = with_ty(
-        Expr::new(
-            Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(var(&raw_sub, param_value_ty.clone())),
-                method: Symbol::from("is_a?"),
-                args: vec![Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Const { path: vec![Symbol::from("Hash")] },
-                )],
-                block: None,
-                parenthesized: true,
-            },
-        ),
-        Ty::Bool,
-    );
-    // Then-branch wraps the `raw_sub` var read in a `Cast` to
-    // `Hash[String, ParamValue]`. The lowerer types `raw_sub` as the
-    // outer `ParamValue` (rust2 → `serde_json::Value`), so a bare Var
-    // read in the then arm renders as `Value` while the else arm's
-    // empty Hash literal renders as `HashMap<String, Value>` — the
-    // branches mismatch under strict typing. The Cast surfaces the
-    // narrowing intent so per-target emit can bridge: TS as-cast,
-    // Crystal `as Hash(...)`, rust2 inserts `.as_object().cloned().
-    // unwrap_or_default().into_iter().collect::<HashMap<_, _>>()`.
-    let sub_narrowed = with_ty(
-        Expr::new(
-            Span::synthetic(),
-            ExprNode::If {
-                cond: is_a_hash,
-                then_branch: with_ty(
-                    Expr::new(
-                        Span::synthetic(),
-                        ExprNode::Cast {
-                            value: var(&raw_sub, param_value_ty.clone()),
-                            target_ty: inner_hash_ty.clone(),
-                        },
-                    ),
-                    inner_hash_ty.clone(),
-                ),
-                else_branch: empty_hash(inner_hash_ty.clone()),
-            },
-        ),
-        inner_hash_ty.clone(),
-    );
-
-    let new_call = with_ty(
+    // `Params.<method>(...)` — the narrowing accessors in
+    // runtime/ruby/params.rb. Everything this body used to open-code
+    // (`fetch` with a default, `is_a?(Hash)` + `Cast`, `is_a?(String)`
+    // narrowing, a `raw_<field>` temp per field) lives there now, in
+    // ONE body, so no emitter has to recognize a narrowing idiom in
+    // generated code to compile this.
+    let call = |method: &str, args: Vec<Expr>, ret: Ty| with_ty(
         Expr::new(
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(Expr::new(
                     Span::synthetic(),
-                    ExprNode::Const { path: vec![owner.0.clone()] },
+                    ExprNode::Const { path: vec![Symbol::from("Params")] },
                 )),
-                method: Symbol::from("new"),
-                args: Vec::new(),
+                method: Symbol::from(method),
+                args,
                 block: None,
                 parenthesized: true,
             },
         ),
-        owner_ty.clone(),
+        ret,
     );
 
     let mut stmts: Vec<Expr> = Vec::new();
-    stmts.push(Expr::new(
-        Span::synthetic(),
-        ExprNode::Assign {
-            target: LValue::Var { id: VarId(0), name: raw_sub.clone() },
-            value: resource_fetch,
-        },
-    ));
+    // sub = Params.sub(params, "<resource>")
     stmts.push(Expr::new(
         Span::synthetic(),
         ExprNode::Assign {
             target: LValue::Var { id: VarId(0), name: sub.clone() },
-            value: sub_narrowed,
+            value: call(
+                "sub",
+                vec![var(&params, hash_ty.clone()), str_lit(resource.as_str())],
+                hash_ty.clone(),
+            ),
         },
     ));
     stmts.push(Expr::new(
         Span::synthetic(),
         ExprNode::Assign {
             target: LValue::Var { id: VarId(0), name: instance.clone() },
-            value: new_call,
+            value: with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Const { path: vec![owner.0.clone()] },
+                        )),
+                        method: Symbol::from("new"),
+                        args: Vec::new(),
+                        block: None,
+                        parenthesized: true,
+                    },
+                ),
+                owner_ty.clone(),
+            ),
         },
     ));
 
     for field in fields {
-        // raw_<field> = sub.fetch("<field>", "")
-        //   — value type at the body-typer level is `ParamValue`;
-        //   `is_a?(String)` narrows it for the String-typed attr.
-        let raw_field = Symbol::from(format!("raw_{}", field.as_str()));
-        let fetch_call = with_ty(
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::Send {
-                    recv: Some(var(&sub, inner_hash_ty.clone())),
-                    method: Symbol::from("fetch"),
-                    args: vec![str_lit(field.as_str()), str_lit("")],
-                    block: None,
-                    parenthesized: false,
-                },
-            ),
-            param_value_ty.clone(),
-        );
-        stmts.push(Expr::new(
-            Span::synthetic(),
-            ExprNode::Assign {
-                target: LValue::Var { id: VarId(0), name: raw_field.clone() },
-                value: fetch_call,
-            },
-        ));
-        let is_a_string = with_ty(
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::Send {
-                    recv: Some(var(&raw_field, param_value_ty.clone())),
-                    method: Symbol::from("is_a?"),
-                    args: vec![Expr::new(
-                        Span::synthetic(),
-                        ExprNode::Const { path: vec![Symbol::from("String")] },
-                    )],
-                    block: None,
-                    parenthesized: true,
-                },
-            ),
-            Ty::Bool,
-        );
-        let narrowed = with_ty(
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::If {
-                    cond: is_a_string,
-                    then_branch: var(&raw_field, Ty::Str),
-                    else_branch: str_lit(""),
-                },
-            ),
-            Ty::Str,
-        );
-        // `<field>_provided` — present in the hash AND a String. Rails'
-        // `permit` keeps a blank `""` and `compact` does NOT drop it
-        // (measured against 8.1), so blank counts as provided; an
-        // absent key and an explicit JSON null do not. A missing key
-        // fetches as `""`, which `is_a?(String)` can't tell from a
-        // blank one, so the hash is asked directly.
-        if presence {
-            let key_present = with_ty(
-                Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Send {
-                        recv: Some(var(&sub, inner_hash_ty.clone())),
-                        method: Symbol::from("key?"),
-                        args: vec![str_lit(field.as_str())],
-                        block: None,
-                        parenthesized: true,
-                    },
-                ),
-                Ty::Bool,
-            );
-            let is_string = with_ty(
-                Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Send {
-                        recv: Some(var(&raw_field, param_value_ty.clone())),
-                        method: Symbol::from("is_a?"),
-                        args: vec![Expr::new(
-                            Span::synthetic(),
-                            ExprNode::Const { path: vec![Symbol::from("String")] },
-                        )],
-                        block: None,
-                        parenthesized: true,
-                    },
-                ),
-                Ty::Bool,
-            );
-            stmts.push(Expr::new(
-                Span::synthetic(),
-                ExprNode::Send {
-                    recv: Some(var(&instance, owner_ty.clone())),
-                    method: Symbol::from(format!("{}=", provided_field(field).as_str())),
-                    args: vec![with_ty(
-                        Expr::new(
-                            Span::synthetic(),
-                            ExprNode::BoolOp {
-                                op: crate::expr::BoolOpKind::And,
-                                surface: crate::expr::BoolOpSurface::default(),
-                                left: key_present,
-                                right: is_string,
-                            },
-                        ),
-                        Ty::Bool,
-                    )],
-                    block: None,
-                    parenthesized: false,
-                },
-            ));
-        }
-        stmts.push(Expr::new(
+        let setter = |name: Symbol, value: Expr| Expr::new(
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(var(&instance, owner_ty.clone())),
-                method: Symbol::from(format!("{}=", field.as_str())),
-                args: vec![narrowed],
+                method: name,
+                args: vec![value],
                 block: None,
                 parenthesized: false,
             },
+        );
+        // Presence BEFORE value, so reading the pair top-to-bottom says
+        // "was it provided, and what is it".
+        stmts.push(setter(
+            Symbol::from(format!("{}=", provided_field(field).as_str())),
+            call(
+                "provided",
+                vec![var(&sub, hash_ty.clone()), str_lit(field.as_str())],
+                Ty::Bool,
+            ),
+        ));
+        stmts.push(setter(
+            Symbol::from(format!("{}=", field.as_str())),
+            call(
+                "str",
+                vec![var(&sub, hash_ty.clone()), str_lit(field.as_str()), str_lit("")],
+                Ty::Str,
+            ),
         ));
     }
 
     stmts.push(var(&instance, owner_ty.clone()));
 
-    let _ = outer_hash_ty;
-
-    // Declare `params` as `Hash[String, Roundhouse::ParamValue]` —
-    // the same shape carried at the controller's `@params` slot
-    // (see `runtime/ruby/action_controller/base.rbs`). ParamValue
-    // is the recursive `String | Hash[String, PV] | Array[PV]`
-    // union each target's runtime realizes natively (Crystal alias,
-    // TS type, Ruby dynamic). Using it here keeps from_raw's
-    // call-site type-check honest — passing `@params` directly
-    // works without a cast on strict targets.
-    let param_value_ty = Ty::Class {
-        id: ClassId(Symbol::from("Roundhouse::ParamValue")),
-        args: vec![],
-    };
-    let params_ty = Ty::Hash {
-        key: Box::new(Ty::Str),
-        value: Box::new(param_value_ty),
-    };
-    let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
     MethodDef {
         name: Symbol::from("from_raw"),
         receiver: MethodReceiver::Class,
         params: vec![Param::positional(params.clone())],
         body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: stmts }),
-        signature: Some(fn_sig(vec![(params, params_ty)], owner_ty)),
+        signature: Some(fn_sig(vec![(params, hash_ty)], owner_ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,
         is_async: false,
-            mutates_self: false,
-            block_param: None,
+        mutates_self: false,
+        block_param: None,
     }
 }
 
@@ -1413,9 +1214,7 @@ pub fn rewrite_to_from_raw(expr: &Expr, specs: &ParamsSpecs) -> Expr {
             if method.as_str() == "compact" && args.is_empty() {
                 if let Some((resource, fields)) = match_permit_call(recv) {
                     if let Some(spec) = specs.find(&resource, &fields) {
-                        if spec.wants_compact {
-                            return Some(build_from_raw_call(&spec.class_id, e.span));
-                        }
+                        return Some(build_from_raw_call(&spec.class_id, e.span));
                     }
                 }
             }
@@ -1440,10 +1239,16 @@ pub fn rewrite_to_from_raw(expr: &Expr, specs: &ParamsSpecs) -> Expr {
 }
 
 /// `<chain>.merge(k: v)` → `_p = <Class>.from_raw(@params); _p.k = v;
-/// _p` — a statement-shaped Seq; the corpus site is a params-helper
-/// tail, where the Seq renders as plain statements. The setters run
-/// after `from_raw`, so a client-supplied value under the same key is
-/// overwritten (Rails' merge contract).
+/// _p.k_provided = true; _p` — a statement-shaped Seq; the corpus site
+/// is a params-helper tail, where the Seq renders as plain statements.
+/// The setters run after `from_raw`, so a client-supplied value under
+/// the same key is overwritten (Rails' merge contract).
+///
+/// The presence flag has to be set alongside: a merged key is a
+/// SERVER-side value, so `update` must assign it even when the request
+/// never mentioned it. (The `<field>=` writer can't do this itself —
+/// emitters collapse an `AttributeWriter` into a plain field and drop
+/// its body, so every producer sets the flag explicitly.)
 fn build_from_raw_merge(class_id: &ClassId, entries: &[(Expr, Expr)], span: Span) -> Expr {
     let p = |()| Expr::new(span, ExprNode::Var { id: VarId(0), name: Symbol::from("_p") });
     let mut stmts = vec![Expr::new(
@@ -1462,6 +1267,13 @@ fn build_from_raw_merge(class_id: &ClassId, entries: &[(Expr, Expr)], span: Span
             ExprNode::Assign {
                 target: LValue::Attr { recv: p(()), name: name.clone() },
                 value: v.clone(),
+            },
+        ));
+        stmts.push(Expr::new(
+            span,
+            ExprNode::Assign {
+                target: LValue::Attr { recv: p(()), name: provided_field(name) },
+                value: Expr::new(span, ExprNode::Lit { value: Literal::Bool { value: true } }),
             },
         ));
     }

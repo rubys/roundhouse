@@ -705,6 +705,57 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     }
 }
 
+/// Params — the narrowing-accessor contract over `Roundhouse::
+/// ParamValue` (`runtime/ruby/params.rb`). Registered for the app
+/// lowerer the same way `Db` is; the bodies are ordinary transpiled
+/// Ruby, so this only has to teach the app-side typer the signatures.
+pub fn insert_params_stub(
+    classes: &mut std::collections::HashMap<ClassId, crate::analyze::ClassInfo>,
+) {
+    use crate::lower::typing::fn_sig;
+    use crate::ty::Ty;
+
+    let param_value = Ty::Class {
+        id: ClassId(Symbol::from("Roundhouse::ParamValue")),
+        args: vec![],
+    };
+    let hash = Ty::Hash {
+        key: Box::new(Ty::Str),
+        value: Box::new(param_value),
+    };
+    let mut info = crate::analyze::ClassInfo::default();
+    info.class_methods.insert(
+        Symbol::from("sub"),
+        fn_sig(
+            vec![(Symbol::from("params"), hash.clone()), (Symbol::from("key"), Ty::Str)],
+            hash.clone(),
+        ),
+    );
+    info.class_methods.insert(
+        Symbol::from("str"),
+        fn_sig(
+            vec![
+                (Symbol::from("sub"), hash.clone()),
+                (Symbol::from("key"), Ty::Str),
+                (Symbol::from("fallback"), Ty::Str),
+            ],
+            Ty::Str,
+        ),
+    );
+    info.class_methods.insert(
+        Symbol::from("provided"),
+        fn_sig(
+            vec![(Symbol::from("sub"), hash), (Symbol::from("key"), Ty::Str)],
+            Ty::Bool,
+        ),
+    );
+    for name in ["sub", "str", "provided"] {
+        info.class_method_kinds
+            .insert(Symbol::from(name), crate::dialect::AccessorKind::Method);
+    }
+    classes.insert(ClassId(Symbol::from("Params")), info);
+}
+
 /// Db — the per-target primitive persistence shim's typing contract
 /// (backend-agnostic: cruby-gem sqlite, spinel-FFI sqlite, future
 /// siblings all satisfy it; stmt handle opaque-as-Integer, per-target
@@ -1172,6 +1223,14 @@ pub(crate) fn insert_framework_stubs(
     // pre-seed; runtime/ruby/active_record/connection.rb calls Db
     // directly).
     insert_db_stub(classes);
+
+    // Params — narrowing accessors over the recursive request-params
+    // tree (runtime/ruby/params.rb). The synthesized `<Resource>Params.
+    // from_raw` calls these instead of open-coding `is_a?` narrowing at
+    // each field, so the type test lives in ONE body written in the one
+    // shape every emitter handles rather than in generated code whose
+    // position each emitter has to recognize.
+    insert_params_stub(classes);
 
     // String — register `new` returning Ty::Str so the lowered
     // `io = String.new` produces a Str-typed local; downstream

@@ -21,7 +21,7 @@ pub(super) fn push_schema_methods(
     model: &Model,
     models: &[Model],
     table: &Table,
-    permitted: Option<(&ClassId, &[Symbol], bool)>,
+    permitted: Option<(&ClassId, &[Symbol])>,
 ) {
     let owner = &model.name;
 
@@ -239,8 +239,8 @@ pub(super) fn push_schema_methods(
     // exposed by any controller), falls back to the Hash-shaped variant
     // for backward compatibility.
     methods.push(match permitted {
-        Some((params_class, fields, presence)) => synth_update_typed(
-            owner, fields, table, params_class, Symbol::from("update"), presence,
+        Some((params_class, fields)) => synth_update_typed(
+            owner, fields, table, params_class, Symbol::from("update"),
         ),
         None => synth_update(owner, table),
     });
@@ -248,9 +248,9 @@ pub(super) fn push_schema_methods(
     // `update!` — same typed assignment, `save!` tail (raises on
     // invalid via Base). Only the typed variant: the corpus bang
     // sites all go through permitted resources.
-    if let Some((params_class, fields, presence)) = permitted {
+    if let Some((params_class, fields)) = permitted {
         methods.push(synth_update_typed(
-            owner, fields, table, params_class, Symbol::from("update!"), presence,
+            owner, fields, table, params_class, Symbol::from("update!"),
         ));
     }
 
@@ -914,7 +914,6 @@ pub(super) fn push_from_params_method(
     table: &Table,
     params_class_id: &ClassId,
     name: Symbol,
-    skip_nil: bool,
 ) {
     let owner = &model.name;
     let p = Symbol::from("p");
@@ -961,10 +960,10 @@ pub(super) fn push_from_params_method(
                 parenthesized: false,
             },
         );
-        // A presence-aware params class carries a `<field>_provided`
-        // flag. Rails' `new(attrs)` never sees an absent key, so
-        // assigning one here would write `""` over the column default.
-        stmts.push(if skip_nil {
+        // The params class carries a `<field>_provided` flag. Rails'
+        // `new(attrs)` never sees an absent key, so assigning one here
+        // would write `""` over the column default.
+        stmts.push({
             Expr::new(
                 Span::synthetic(),
                 ExprNode::If {
@@ -983,8 +982,6 @@ pub(super) fn push_from_params_method(
                     else_branch: nil_lit(),
                 },
             )
-        } else {
-            assign
         });
     }
 
@@ -1028,7 +1025,6 @@ pub(super) fn push_update_typed_variants(
             table,
             &spec.class_id,
             model_update_name(spec, bang),
-            spec.wants_compact,
         ));
     }
 }
@@ -2138,7 +2134,6 @@ fn synth_update_typed(
     table: &Table,
     params_class_id: &ClassId,
     name: Symbol,
-    presence: bool,
 ) -> MethodDef {
     let p = Symbol::from("p");
     let bang = name.as_str().ends_with('!');
@@ -2155,10 +2150,10 @@ fn synth_update_typed(
                 parenthesized: false,
             },
         );
-        // Presence-aware classes answer "did the request provide this"
-        // with their own flag; the rest use the nil convention that
-        // `<Params>.new` + selective setters produces.
-        let skip_check = if presence {
+        // "Did the request provide this?" is the params class's own
+        // flag — a value slot can't answer it, because a blank `""` and
+        // an absent key are different facts Rails keeps apart.
+        let nil_check = {
             Expr::new(
                 Span::synthetic(),
                 ExprNode::Send {
@@ -2179,19 +2174,7 @@ fn synth_update_typed(
                     parenthesized: false,
                 },
             )
-        } else {
-            Expr::new(
-                Span::synthetic(),
-                ExprNode::Send {
-                    recv: Some(p_field.clone()),
-                    method: Symbol::from("nil?"),
-                    args: Vec::new(),
-                    block: None,
-                    parenthesized: false,
-                },
-            )
         };
-        let nil_check = skip_check;
         let assign_call = Expr::new(
             Span::synthetic(),
             ExprNode::Send {

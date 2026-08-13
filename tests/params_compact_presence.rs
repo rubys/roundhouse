@@ -13,10 +13,14 @@
 //! user's name, email and bio. `.compact` was NoMethodError on top of
 //! that, which is what made the bug visible.
 //!
-//! Fix: a spec that anyone compacts becomes presence-aware — a
-//! `<field>_provided` Bool slot beside each value slot, which `update`
-//! and `from_params` guard on. Presence is a different fact from value,
-//! so it gets its own slot. Nilable slots were tried first and cost
+//! Fix: EVERY params class is presence-aware — a `<field>_provided` Bool
+//! slot beside each value slot, which `update` / `update!` /
+//! `from_params` guard on. Unconditional, because the conflation was
+//! never specific to `.compact`: any `@record.update(<x>_params)` on a
+//! form that omits a field assigned `""` where Rails assigns nothing.
+//! `.compact` is then just dropped from the chain.
+//!
+//! Presence is a different fact from value, so it gets its own slot. Nilable slots were tried first and cost
 //! more: `if !p.name.nil? { self.name = p.name }` needs the emitter to
 //! flow-narrow an Option through the guard, which rust2 doesn't do (6
 //! fresh `cargo check` errors, measured) and every other strict target
@@ -155,19 +159,60 @@ fn compact_is_dropped_from_the_chain() {
 }
 
 #[test]
-fn a_chain_nobody_compacts_is_untouched() {
-    // Presence slots are demand-gated: the corpus is all
-    // no-compact, and it must not grow a second slot per field.
+fn presence_tracking_does_not_wait_for_compact() {
+    // The conflation was never specific to `.compact`: ANY
+    // `@record.update(<x>_params)` against a form that omits a field
+    // assigned `""` where Rails assigns nothing. So a chain nobody
+    // compacts is presence-aware too.
     let app = app_with("");
     let lc = params_class(&app);
     let names: Vec<&str> = lc.methods.iter().map(|m| m.name.as_str()).collect();
-    assert!(
-        !names.iter().any(|n| n.ends_with("_provided")),
-        "no presence slots without demand: {names:?}"
-    );
+    assert!(names.contains(&"name_provided"), "got {names:?}");
+    assert!(names.contains(&"bio_provided"), "got {names:?}");
     let body = model_method(&app, "update");
     assert!(
-        body.contains("nil?") && !body.contains("_provided"),
-        "the nil convention stays for everyone else: {body}"
+        body.contains("name_provided") && !body.contains("nil?"),
+        "the presence flag replaces the nil convention outright: {body}"
+    );
+}
+
+#[test]
+fn a_merged_server_side_value_counts_as_provided() {
+    // `permit(...).merge(k: v)` folds in a value the REQUEST never
+    // carried, so `update` has to assign it. The `<field>=` writer can't
+    // set the flag itself — emitters collapse an AttributeWriter into a
+    // plain field and drop its body — so the merge expansion sets it.
+    let app = app_from(vec![
+        ("db/schema.rb", SCHEMA),
+        ("app/models/user.rb", "class User < ApplicationRecord\nend\n"),
+        (
+            "app/controllers/users_controller.rb",
+            r#"class UsersController < ApplicationController
+  def update
+    @user = User.find(params[:id])
+    @user.update(user_params)
+  end
+
+  private
+    def user_params
+      params.require(:user).permit(:name).merge(bio: "set by the server")
+    end
+end
+"#,
+        ),
+    ]);
+    let lcs = roundhouse::lower::lower_controllers_to_library_classes(&app.controllers, Vec::new());
+    let helper = lcs
+        .iter()
+        .find(|lc| lc.name.0.as_str() == "UsersController")
+        .expect("UsersController")
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "user_params")
+        .expect("user_params");
+    let body = format!("{:?}", helper.body);
+    assert!(
+        body.contains("bio_provided"),
+        "a merged key must be marked provided or `update` skips it: {body}"
     );
 }

@@ -908,6 +908,7 @@ fn collect_imports_with_companions(
     let mut views_import: bool = false;
     let mut view_helpers_import: bool = false;
     let mut inflector_import: bool = false;
+    let mut params_import: bool = false;
     let mut json_builder_import: bool = false;
     let mut broadcasts_import: bool = false;
     let mut importmap_import: bool = false;
@@ -982,6 +983,11 @@ fn collect_imports_with_companions(
             // (`Inflector.pluralize(...)`); import as `* as Inflector`
             // from `src/inflector.ts`.
             inflector_import = true;
+        } else if r == "Params" {
+            // Same shape as Inflector/JsonBuilder — Module-mode runtime
+            // helper at `src/params.ts`. Synthesized `<Resource>Params.
+            // from_raw` bodies use `Params.str(...)` namespace access.
+            params_import = true;
         } else if r == "JsonBuilder" {
             // Same shape as Inflector — Module-mode runtime helper at
             // `src/json_builder.ts`. Jbuilder-lowered view bodies use
@@ -1157,6 +1163,10 @@ fn collect_imports_with_companions(
     if json_builder_import {
         let import_path = relative_to_root(out_path, "src/json_builder.js");
         out.push(JsImport::Star { alias: "JsonBuilder".to_string(), from: import_path });
+    }
+    if params_import {
+        let import_path = relative_to_root(out_path, "src/params.js");
+        out.push(JsImport::Star { alias: "Params".to_string(), from: import_path });
     }
     if broadcasts_import {
         let import_path = relative_to_root(out_path, "src/broadcasts.js");

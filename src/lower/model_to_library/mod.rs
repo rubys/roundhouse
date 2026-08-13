@@ -206,12 +206,10 @@ fn lower_models_inner(
         };
         for field in &spec.fields {
             register(field.clone(), Ty::Str);
-            if spec.wants_compact {
-                register(
-                    crate::lower::controller_to_library::params::provided_field(field),
-                    Ty::Bool,
-                );
-            }
+            register(
+                crate::lower::controller_to_library::params::provided_field(field),
+                Ty::Bool,
+            );
         }
         info.class_methods.insert(
             Symbol::from("from_raw"),
@@ -691,7 +689,7 @@ fn build_methods(
             model,
             models,
             table,
-            permitted_fields.and_then(|f| canonical.map(|s| (&s.class_id, f, s.wants_compact))),
+            permitted_fields.and_then(|f| canonical.map(|s| (&s.class_id, f))),
         );
         // Per-model Level-3 adapter primitives (`_adapter_find_by_id`, etc.)
         // — typed methods that go directly from SQL composition to typed
@@ -706,7 +704,6 @@ fn build_methods(
             self::schema::push_from_params_method(
                 &mut methods, model, fields, table, &spec.class_id,
                 crate::lower::controller_to_library::params::model_from_params_name(spec),
-                spec.wants_compact,
             );
         }
         // One typed factory + update pair per NON-canonical permit list
@@ -721,7 +718,6 @@ fn build_methods(
             self::schema::push_from_params_method(
                 &mut methods, model, &writable, table, &spec.class_id,
                 crate::lower::controller_to_library::params::model_from_params_name(spec),
-                spec.wants_compact,
             );
             self::schema::push_update_typed_variants(
                 &mut methods, &model.name, &writable, table, spec,

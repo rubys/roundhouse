@@ -205,6 +205,13 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
             path: output_path(OutputKind::HandWrittenRuntime { name: "db.ex" }).path,
             content: include_str!("../../runtime/elixir/v2/db.ex").to_string(),
         });
+        // Params — narrowing accessors over the request-params tree.
+        // Hand-written per target like Db: the bodies inspect this
+        // target's representation of `Roundhouse::ParamValue`.
+        out.push(EmittedFile {
+            path: output_path(OutputKind::HandWrittenRuntime { name: "params.ex" }).path,
+            content: include_str!("../../runtime/elixir/v2/params.ex").to_string(),
+        });
         // Turbo Streams broadcasts shim — the model after_*_commit
         // callbacks call `Broadcasts.<action>(%{…})`. Hand-written like
         // the sibling per-target shims (the canonical broadcasts.rb
@@ -260,8 +267,19 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         // for the controller field registration there.
         for spec in specs.iter() {
             let class_name = spec.class_id.0.as_str().to_string();
-            let field_names: Vec<String> =
-                spec.fields.iter().map(|f| f.as_str().to_string()).collect();
+            // Both slots per permitted field: the value AND its
+            // `<field>_provided` companion. Registering only the values
+            // sent `p.title_provided` through `__struct__` dispatch as
+            // an undefined function.
+            let mut field_names: Vec<String> = Vec::new();
+            for f in &spec.fields {
+                field_names.push(f.as_str().to_string());
+                field_names.push(
+                    crate::lower::controller_to_library::params::provided_field(f)
+                        .as_str()
+                        .to_string(),
+                );
+            }
             expr::register_field_names(&class_name, &field_names);
         }
         let (model_lcs, model_registry) =

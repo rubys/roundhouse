@@ -68,6 +68,7 @@ const CR_DB_SOURCE: &str = include_str!("../../runtime/crystal/db.cr");
 const CR_DATETIME_SOURCE: &str = include_str!("../../runtime/crystal/datetime.cr");
 const CR_HTTP_SOURCE: &str = include_str!("../../runtime/crystal/http.cr");
 const CR_PARAM_VALUE_SOURCE: &str = include_str!("../../runtime/crystal/param_value.cr");
+const CR_PARAMS_SOURCE: &str = include_str!("../../runtime/crystal/params.cr");
 const CR_SERVER_SOURCE: &str = include_str!("../../runtime/crystal/server.cr");
 const CR_CABLE_SOURCE: &str = include_str!("../../runtime/crystal/cable.cr");
 const CR_TEST_SUPPORT_SOURCE: &str = include_str!("../../runtime/crystal/test_support.cr");
@@ -125,6 +126,13 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     files.push(EmittedFile {
         path: PathBuf::from("src/param_value.cr"),
         content: CR_PARAM_VALUE_SOURCE.to_string(),
+    });
+    // Params — narrowing accessors over the ParamValue the file above
+    // declares. Hand-written per target like Db: the bodies inspect this
+    // target's representation of the union.
+    files.push(EmittedFile {
+        path: PathBuf::from("src/params.cr"),
+        content: CR_PARAMS_SOURCE.to_string(),
     });
     files.push(EmittedFile {
         path: PathBuf::from("src/db.cr"),
