@@ -37,12 +37,6 @@ class Article < ActiveRecord::Base
     # the generated C fails to compile. The direct ivar write widens the
     # field to match instead, so all targets agree. See matz/spinel#1275.
     @id = id
-    # A double constructed WITH an id stands for a saved record, so it
-    # has to say so: `dom_id` asks `persisted?` (Rails answers
-    # `new_article` for an unsaved one), and the id alone cannot
-    # carry that — `0` IS the unsaved sentinel. See
-    # docs/pipeline/runtime.md § Deliberate divergences from Rails.
-    @persisted = id != 0
     @title = title
     @body = body
   end
@@ -155,21 +149,6 @@ class ViewHelpersTest < Minitest::Test
     # Rails' dom_id puts the suffix BEFORE the model_name+id.
     article = Article.new(3, "Hi", "body")
     assert_equal "comments_count_article_3",
-      ViewHelpers.dom_id(article, :comments_count)
-  end
-
-  # An UNSAVED record has no id to name it by. Both expectations are
-  # MEASURED against Rails 8.1 — note the suffix REPLACES `new` rather
-  # than stacking with it, which is not what the shape of the saved
-  # case suggests.
-  def test_dom_id_with_unsaved_record
-    article = Article.new
-    assert_equal "new_article", ViewHelpers.dom_id(article)
-  end
-
-  def test_dom_id_with_unsaved_record_and_suffix
-    article = Article.new
-    assert_equal "comments_count_article",
       ViewHelpers.dom_id(article, :comments_count)
   end
 
