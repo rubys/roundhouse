@@ -1966,14 +1966,23 @@ pub(crate) fn apply_duration_lowering(lcs: &mut [LibraryClass], app: &App) {
 /// looks scalar" would have to enumerate those instead, and would wrap
 /// the next unfamiliar shape by default.
 pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
-    let slug_models = models_overriding_to_param(app);
-    if slug_models.is_empty() {
+    let all_models: std::collections::HashSet<String> =
+        app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
+    if all_models.is_empty() {
         return;
     }
+    let slug_models = models_overriding_to_param(app);
     let assoc_targets = singular_association_targets(app);
+    let collection_targets = collection_association_targets(app);
     for lc in lcs.iter_mut() {
         for m in &mut lc.methods {
-            rewrite_route_params(&mut m.body, &slug_models, &assoc_targets);
+            rewrite_route_params(
+                &mut m.body,
+                &all_models,
+                &slug_models,
+                &assoc_targets,
+                &collection_targets,
+            );
         }
     }
 }
@@ -1994,6 +2003,40 @@ fn models_overriding_to_param(app: &App) -> std::collections::HashSet<String> {
 /// `has_one` only: a `has_many` reader is a collection and never lands
 /// in a path segment. An ambiguous name (two models naming the same
 /// reader at different targets) is dropped rather than guessed.
+/// has_many reader name → target model, when unambiguous across models.
+///
+/// Only consulted for `.first` / `.last` on such a read: those answer
+/// ONE record of the collection's type, which is a record a path helper
+/// needs converted. campfire's front door is
+/// `redirect_to room_url(Current.user.rooms.last)` — a Send chain, so
+/// none of the name-based signals see it, and it redirected to
+/// `/rooms/#<Room:0x…>`. An ambiguous name is dropped rather than
+/// guessed, exactly as the singular map does.
+fn collection_association_targets(app: &App) -> std::collections::HashMap<String, String> {
+    use crate::dialect::Association;
+    let mut out: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut ambiguous: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for m in &app.models {
+        for a in m.associations() {
+            let Association::HasMany { name, target, .. } = a else { continue };
+            let key = name.as_str().to_string();
+            let val = target.0.as_str().to_string();
+            match out.get(&key) {
+                Some(existing) if existing != &val => {
+                    ambiguous.insert(key);
+                }
+                _ => {
+                    out.insert(key, val);
+                }
+            }
+        }
+    }
+    for k in ambiguous {
+        out.remove(&k);
+    }
+    out
+}
+
 fn singular_association_targets(app: &App) -> std::collections::HashMap<String, String> {
     use crate::dialect::Association;
     let mut out: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -2025,11 +2068,14 @@ fn singular_association_targets(app: &App) -> std::collections::HashMap<String, 
 
 fn rewrite_route_params(
     expr: &mut Expr,
+    all_models: &std::collections::HashSet<String>,
     slug_models: &std::collections::HashSet<String>,
     assoc_targets: &std::collections::HashMap<String, String>,
+    collection_targets: &std::collections::HashMap<String, String>,
 ) {
-    expr.node
-        .for_each_child_mut(&mut |e| rewrite_route_params(e, slug_models, assoc_targets));
+    expr.node.for_each_child_mut(&mut |e| {
+        rewrite_route_params(e, all_models, slug_models, assoc_targets, collection_targets)
+    });
     let is_helper_call = matches!(
         &*expr.node,
         ExprNode::Send { recv: Some(r), method, block: None, .. }
@@ -2042,50 +2088,95 @@ fn rewrite_route_params(
     }
     let ExprNode::Send { args, .. } = &mut *expr.node else { unreachable!() };
     for arg in args.iter_mut() {
-        if !arg_is_slug_record(arg, slug_models, assoc_targets) {
+        let Some(model) = arg_record_model(arg, all_models, assoc_targets, collection_targets)
+        else {
             continue;
-        }
+        };
+        // A model that overrides `to_param` answers its slug there and
+        // the segment is declared `Str`. Every other model's `to_param`
+        // IS `id`, and `param_ty` declares that segment `Int` — so call
+        // `id` rather than a `to_param` the emitted model doesn't have.
+        let slug = slug_models.contains(&model);
+        let (method, ty) = if slug {
+            ("to_param", crate::ty::Ty::Str)
+        } else {
+            ("id", crate::ty::Ty::Int)
+        };
         let span = arg.span;
         let record = std::mem::replace(arg, Expr::new(span, ExprNode::Seq { exprs: vec![] }));
         *arg = Expr::new(
             span,
             ExprNode::Send {
                 recv: Some(record),
-                method: Symbol::from("to_param"),
+                method: Symbol::from(method),
                 args: vec![],
                 block: None,
                 parenthesized: false,
             },
         );
-        arg.ty = Some(crate::ty::Ty::Str);
+        arg.ty = Some(ty);
     }
 }
 
-fn arg_is_slug_record(
+fn arg_record_model(
     arg: &Expr,
-    slug_models: &std::collections::HashSet<String>,
+    all_models: &std::collections::HashSet<String>,
     assoc_targets: &std::collections::HashMap<String, String>,
-) -> bool {
+    collection_targets: &std::collections::HashMap<String, String>,
+) -> Option<String> {
     // (1) A stamped model type.
     if let Some(crate::ty::Ty::Class { id, .. }) =
         arg.ty.as_ref().map(crate::ty::Ty::peel_nilable)
     {
-        if slug_models.contains(id.0.as_str()) {
-            return true;
+        if all_models.contains(id.0.as_str()) {
+            return Some(id.0.as_str().to_string());
         }
     }
     match &*arg.node {
-        // (2) A singular association read.
-        ExprNode::Send { recv: Some(_), method, args, block: None, .. } if args.is_empty() => {
-            assoc_targets
+        // (2) A singular association read, or (4) `.first` / `.last` on
+        // a has_many read — one record of the collection's type. Both
+        // are receiver-ful zero-arg Sends, so they share an arm: a
+        // separate `first`/`last` arm placed after this one would be
+        // unreachable, since this pattern matches those method names too.
+        ExprNode::Send { recv: Some(r), method, args, block: None, .. } if args.is_empty() => {
+            if let Some(target) = assoc_targets
                 .get(method.as_str())
-                .is_some_and(|target| slug_models.contains(target))
+                .filter(|target| all_models.contains(*target))
+            {
+                return Some(target.clone());
+            }
+            if !matches!(method.as_str(), "first" | "last") {
+                return None;
+            }
+            let ExprNode::Send { method: assoc, args: aargs, block: None, .. } = &*r.node else {
+                return None;
+            };
+            if !aargs.is_empty() {
+                return None;
+            }
+            collection_targets
+                .get(assoc.as_str())
+                .filter(|target| all_models.contains(*target))
+                .cloned()
         }
-        // (3) A bare name that IS a model name.
+        // (3) A bare name that IS a model name — including the
+        // zero-arg receiver-less bareword form. A template local
+        // (`render "users/user", user: u` → `user` in the partial) and a
+        // helper's own reader (`Room::MessagePusher#room`) both parse as
+        // a receiver-less Send, not a Var, because prism cannot prove
+        // the name is a local inside an ERB-ingested body. Matching only
+        // Var/Ivar left campfire's `account_user_path(user)` and
+        // `room_path(room)` unconverted — the same owner-form note
+        // `scope_chain::owner_model_from_name` carries.
         ExprNode::Var { name, .. } | ExprNode::Ivar { name } => {
-            slug_models.contains(&crate::naming::camelize(name.as_str()))
+            let camel = crate::naming::camelize(name.as_str());
+            all_models.contains(&camel).then_some(camel)
         }
-        _ => false,
+        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
+            let camel = crate::naming::camelize(method.as_str());
+            all_models.contains(&camel).then_some(camel)
+        }
+        _ => None,
     }
 }
 

@@ -53,6 +53,7 @@ module Rails
   class Application
     def session_cookie_key: () -> String
     def secret_key_base: () -> String
+    def domain: () -> String
     def credentials: () -> Hash[Symbol, untyped]
     def config_time_zone: () -> String
   end

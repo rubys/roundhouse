@@ -241,6 +241,27 @@ module Rails
       key.nil? ? "" : key
     end
 
+    # Host for the absolute (`_url`) route helpers, which the view
+    # lowerer grounds as `"http://#{Rails.application.domain}#{…_path}"`.
+    #
+    # A FRAMEWORK DEFAULT, exactly like `session_cookie_key` above, not a
+    # stub for un-ingested config: Rails always has a host to build an
+    # absolute URL from — it takes the REQUEST's. This reader existed
+    # nowhere until now, because the only app in the corpus that reaches
+    # the interpolation is lobsters, which happens to define
+    # `Rails.application.domain` itself via `class << Rails.application`.
+    # Every other app NameError'd at render on its first `_url` helper —
+    # campfire's sign-in page, on `form_with url: session_url`.
+    #
+    # An app that DOES define it still wins: its `Rails::Application`
+    # reopen is required after this file, same override path
+    # `session_cookie_key` documents. So lobsters keeps its canonical
+    # host and everyone else gets the request's.
+    def domain
+      req = ActionController::Current.request
+      req.nil? ? "localhost" : req.host
+    end
+
     # Rails' encrypted credentials store, as an EMPTY one.
     #
     # Not a stub standing in for work not done: the store lives in
