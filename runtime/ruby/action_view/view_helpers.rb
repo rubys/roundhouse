@@ -164,33 +164,7 @@ module ActionView
       # (`record.dom_prefix` returns the function reference, not the
       # string). The synthesized method's AccessorKind doesn't yet
       # thread to the Send-emit; parens are the cheap forcing function.
-      # An UNSAVED record has no id to name it by. Rails answers
-      # `new_article`; ours would have said `article_0`, because the
-      # runtime seeds `@id = 0` as the unsaved sentinel (see
-      # `ActiveRecord::Base#initialize`). Branching on `persisted?`
-      # rather than on the id is also what `form_with` already does for
-      # its action — the sentinel is deliberately never the thing that
-      # answers "is this saved".
-      # Explicit parens on `persisted?()` for the same reason
-      # `dom_prefix()` above carries them: the TS emit collapses a
-      # parens-less zero-arg send to attr-reader-shaped property access,
-      # so `record.persisted?` rendered `record.is_persisted` — the
-      # METHOD, uncalled. `!<function reference>` is always false, so
-      # this branch never ran under TypeScript and every record looked
-      # persisted. A silent wrong answer, not a crash.
-      if !record.persisted?()
-        if suffix.nil?
-          "new_#{record.dom_prefix()}"
-        else
-          # MEASURED against Rails 8.1, not assumed: the suffix REPLACES
-          # `new` rather than stacking with it. Rails' `dom_id` falls
-          # through to `dom_class(record, prefix || NEW)` when there is
-          # no id, so `dom_id(Article.new, :comments_count)` is
-          # `comments_count_article` — not `comments_count_new_article`,
-          # which is what this branch said before the oracle run.
-          "#{suffix}_#{record.dom_prefix()}"
-        end
-      elsif suffix.nil?
+      if suffix.nil?
         # `dom_id(article)` -> "article_3"
         "#{record.dom_prefix()}_#{record.id}"
       else
