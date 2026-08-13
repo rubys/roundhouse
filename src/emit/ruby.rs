@@ -1203,9 +1203,28 @@ fn render_test_helper(fixture_lcs: &[LibraryClass]) -> String {
 /// `ArticleTest` → `article`, `ArticlesControllerTest` →
 /// `articles_controller` (strip Test suffix, snake_case). Used for the
 /// `test/<dir>/<stem>_test.rb` output path.
+/// File stem for a test program, with the namespace FLATTENED into the
+/// name: `Rooms::ClosedsControllerTest` → `rooms_closeds_controller`.
+///
+/// `snake_case` alone passes `::` straight through — the same trap
+/// 147d5848 fixed for model/controller output paths and require anchors,
+/// which the test path never got. It produced
+/// `test/rooms::closeds_controller_test.rb`, and a `::` in a filename is
+/// not merely ugly: the emitted Makefile globs `*.rbs` into `RBS_SRC`
+/// and lists the programs in `SPINEL_TESTS`, and a `::` in a Make
+/// prerequisite parses as a second target separator —
+/// `Makefile:149: *** multiple target patterns.  Stop.` campfire emits
+/// 33 such tests, so `make build` failed before spinel saw a line of it.
+///
+/// Flattened with `_` rather than nested with `underscore()`'s `/`,
+/// because the spin relocation moves an in-lane test to `test/<basename>`
+/// (`apply_spinel_test_layout`): a nested path would collapse to its last
+/// segment there, so `Rooms::ClosedsControllerTest` and
+/// `Accounts::ClosedsControllerTest` would both land on
+/// `closeds_controller_test.rb` and one would overwrite the other.
 fn test_file_stem(class_name: &str) -> String {
     let stem = class_name.strip_suffix("Test").unwrap_or(class_name);
-    crate::naming::snake_case(stem)
+    crate::naming::underscore(stem).replace('/', "_")
 }
 
 

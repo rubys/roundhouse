@@ -105,10 +105,31 @@ pub fn pluralize_snake(class_name: &str) -> String {
     let snake = snake_case(class_name);
     if snake.ends_with('s') {
         format!("{snake}es")
-    } else if let Some(stem) = snake.strip_suffix('y') {
+    } else if let Some(stem) = snake.strip_suffix('y').filter(|st| y_takes_ies(st)) {
         format!("{stem}ies")
     } else {
         format!("{snake}s")
+    }
+}
+
+/// Does a trailing `y` become `ies`? Only after a CONSONANT — Rails'
+/// inflector rule is `([^aeiouy]|qu)y$`. A vowel before the `y` just
+/// takes `s`: keys, days, boys, guys, surveys.
+///
+/// Without the vowel check `key` pluralized to `keies`, so campfire's
+/// `resource :key` produced a route naming `Accounts::Bots::KeiesController`
+/// while the controller emitted as `KeysController` — routes.rb then
+/// required a file that did not exist. CRuby only notices when that
+/// route is dispatched; the spinel lane, which resolves requires at
+/// build time, fails the whole build.
+fn y_takes_ies(stem: &str) -> bool {
+    if stem.ends_with("qu") {
+        return true;
+    }
+    match stem.chars().next_back() {
+        Some(c) => !matches!(c.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u' | 'y'),
+        // A bare "y" has nothing before it — "ys" beats "ies".
+        None => false,
     }
 }
 

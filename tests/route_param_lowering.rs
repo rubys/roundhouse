@@ -149,3 +149,55 @@ fn an_already_slug_argument_is_untouched() {
         "no double conversion:\n{c}"
     );
 }
+
+// ── inflection + emitted-path agreement ──────────────────────────────
+//
+// Not route-param lowering, but the same failure family: a path the emit
+// COMPUTES has to name the file the emit WROTE. Three separate call
+// sites derived one from `snake_case` (which passes `::` through) or from
+// a pluralizer that turned `key` into `keies`, and every one of them
+// produced a require for a file that does not exist. CRuby only notices
+// at dispatch; the spinel lane resolves requires at build time and fails
+// the whole build, which is how these surfaced.
+
+/// `underscore` nests on `::`; `snake_case` does not. A namespaced
+/// controller lives at `app/controllers/accounts/users_controller.rb`.
+#[test]
+fn a_namespaced_class_underscores_to_a_nested_path() {
+    assert_eq!(
+        roundhouse::naming::underscore("Accounts::Bots::KeysController"),
+        "accounts/bots/keys_controller"
+    );
+    assert!(
+        !roundhouse::naming::underscore("Accounts::UsersController").contains("::"),
+        "no `::` survives into a path"
+    );
+}
+
+/// A trailing `y` becomes `ies` only after a CONSONANT. `key` → `keys`,
+/// so campfire's `resource :key` names `Accounts::Bots::KeysController`
+/// and its require finds the file the controller emitter wrote.
+#[test]
+fn a_vowel_before_y_pluralizes_with_s() {
+    for (one, many) in [
+        ("key", "keys"),
+        ("day", "days"),
+        ("boy", "boys"),
+        ("survey", "surveys"),
+    ] {
+        assert_eq!(roundhouse::naming::pluralize_snake(one), many, "{one}");
+    }
+}
+
+/// The consonant case is unchanged — this is a narrowing, not a rewrite.
+#[test]
+fn a_consonant_before_y_still_pluralizes_with_ies() {
+    for (one, many) in [
+        ("story", "stories"),
+        ("category", "categories"),
+        ("reply", "replies"),
+        ("activity", "activities"),
+    ] {
+        assert_eq!(roundhouse::naming::pluralize_snake(one), many, "{one}");
+    }
+}

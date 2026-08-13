@@ -1349,7 +1349,17 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
             continue;
         }
         if lazy_requires {
-            let stem = crate::naming::snake_case(class);
+            // `underscore`, not `snake_case`: the latter passes `::`
+            // straight through, so a namespaced controller required
+            // `app/controllers/accounts::users_controller` while
+            // `emit_lowered_controllers` had written it to
+            // `app/controllers/accounts/users_controller.rb`. Every
+            // namespaced route raised LoadError at dispatch — ~20 of
+            // campfire's — and only at dispatch, so a boot probe that
+            // touched top-level controllers saw nothing wrong. The
+            // spinel lane, which resolves requires at BUILD time,
+            // is what surfaced it.
+            let stem = crate::naming::underscore(class);
             writeln!(
                 arms,
                 "    when :{sym} then require_relative \"app/controllers/{stem}\"; {class}.new"
