@@ -46,7 +46,9 @@ cd playground && node verify-playground.mjs
 
 - Source tree seeded from real-blog (`.rb` / `.erb`), click to edit.
 - **App selector** — switch the seed app in place: the blog (clean), the
-  Lobsters benchmark app, and Mastodon — each a full transpile that emits
+  Roda + Sequel blog (clean), the Lobsters benchmark app, ONCE Campfire (the
+  write+push app — Action Cable channels, model-side `broadcast_*_to`,
+  turbo_stream views), and Mastodon — each a full transpile that emits
   partially and surfaces the honest diagnostics ledger (ingest is
   survey-tolerant: an unmodeled construct becomes a gap-note diagnostic, not
   an abort). Driven by an optional `../lib/apps.json` manifest; absent it, the
@@ -78,7 +80,8 @@ The CI `build-site` job copies this dir into `_site/playground/` and
 regenerates `fixture.json` from the freshly-built real-blog fixture, so the
 published demo lands at `rubys.github.io/roundhouse/playground/`. It also
 bundles the Lobsters app (`RUBY_BENCH_SHA`) into `_site/lib/app-lobsters.json`
-and writes `_site/lib/apps.json` for the app selector. See the "Publishing to
+and ONCE Campfire (`CAMPFIRE_SHA`) into `_site/lib/app-campfire.json`, then
+writes `_site/lib/apps.json` for the app selector. See the "Publishing to
 Pages" section of `docs/browser-demo-plan.md`.
 
 ## The compiler wasm (built, not committed)

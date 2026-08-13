@@ -278,6 +278,26 @@ if (appNames.length >= 2 && appNames.includes("lobsters")) {
   if (lob.error) fail(`lobsters transpile errored: ${lob.error}`);
   if (!(lob.sources > 30 && lob.emitted > 30)) fail(`lobsters re-seed/transpile too small: ${lob.sources}/${lob.emitted}`);
   if (!(lob.diags > 100)) fail(`lobsters diagnostics ledger unexpectedly sparse: ${lob.diags}`);
+  // campfire (ONCE Campfire, MIT): the write+push app — Action Cable channels,
+  // model-side broadcast_*_to, turbo_stream views. Same partial-transpile
+  // contract as lobsters: it emits, and the unmodeled constructs land in the
+  // ledger rather than aborting.
+  if (appNames.includes("campfire")) {
+    await page.evaluate(() => window.__playground.setApp("campfire"));
+    await page.waitForFunction(() => window.__playground.source("app/models/message.rb") != null, { timeout: 60000 });
+    await page.waitForFunction(() => {
+      const out = window.__playground.output();
+      return out && (out.files || out.error);
+    }, { timeout: 60000 });
+    const cf = await page.evaluate(() => {
+      const out = window.__playground.output();
+      return { sources: window.__playground.sourceCount(), emitted: (out.files || []).length, error: out.error || null, diags: (out.diagnostics || []).length };
+    });
+    console.log(`campfire: ${cf.sources} sources -> ${cf.emitted} emitted, ${cf.diags} diagnostics`);
+    if (cf.error) fail(`campfire transpile errored: ${cf.error}`);
+    if (!(cf.sources > 100 && cf.emitted > 100)) fail(`campfire re-seed/transpile too small: ${cf.sources}/${cf.emitted}`);
+    if (!(cf.diags > 100)) fail(`campfire diagnostics ledger unexpectedly sparse: ${cf.diags}`);
+  }
   // Mastodon is the off-thread stress case: a multi-second transpile that only
   // works because the wasm runs in the worker (the main thread would freeze
   // otherwise). Assert the UI stays responsive WHILE it runs, then that partial

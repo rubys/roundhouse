@@ -25,6 +25,7 @@ Factored out in rung D, Phase 4 of
 | `analyzer.mjs` | analysis driver wrapping the query C-ABI (`analyze_app`/`complete`/`type_at`/`related_files`/`traceroute`) as a clean object over the wasm's last-good snapshot; drives `/ide/` and Node validation | yes |
 | `apps.json` | app-picker manifest (`default` + a `{name, label, src}` list) for the seed-app selector shared by the surfaces | no (gitignored, CI-generated) |
 | `app-lobsters.json` | Lobsters benchmark app bundle (a seed app for the picker) | no (gitignored, CI-generated) |
+| `app-campfire.json` | ONCE Campfire app bundle — the write+push seed app (Action Cable, `broadcast_*_to`, turbo_stream) | no (gitignored, CI-generated) |
 | `app-mastodon.json` | Mastodon app bundle (a seed app for the picker) | no (gitignored, CI-generated) |
 
 ## Serving / paths

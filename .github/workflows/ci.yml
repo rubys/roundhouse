@@ -21,12 +21,13 @@ env:
   # The Rails apps the /ide/ + /playground/ demos ship (in-browser). Pinned
   # so the page — and any blog post's claims about it — stay stable against
   # upstream churn; bump deliberately. Each bundle embeds the app's LICENSE
-  # and its commit (bundle-src.mjs). Mastodon (AGPL) analyzes on /ide/ only:
-  # its strict-mode ingest gaps (alias, class<<self) hard-fail the full
-  # transpile path, so /playground/ ships blog + lobsters. Lobsters is the
-  # ruby-bench benchmark copy (MIT).
+  # and its commit (bundle-src.mjs). Lobsters is the ruby-bench benchmark
+  # copy (MIT); campfire is Basecamp's ONCE Campfire (MIT) — the write+push
+  # app (Action Cable, turbo_stream broadcasts) and the current climb;
+  # Mastodon (AGPL) is the scale case.
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
+  CAMPFIRE_SHA: 2aa4141077141335e79cb0eac5a0eec1a57b2772
 
 jobs:
   # -------------------------------------------------------------------
@@ -419,6 +420,21 @@ jobs:
           node wasm/ide/bundle-src.mjs /tmp/lobsters /tmp/app-lobsters.json \
             --name lobsters --commit "${RUBY_BENCH_SHA}" \
             --open app/controllers/stories_controller.rb
+      - name: Cache campfire source bundle
+        id: campfire-src
+        uses: actions/cache@v4
+        with:
+          path: /tmp/app-campfire.json
+          key: campfire-app-src-${{ env.CAMPFIRE_SHA }}-v1
+      - name: Fetch pinned once-campfire + bundle sources (cache miss)
+        if: steps.campfire-src.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
+          mkdir -p /tmp/campfire && tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
+          node wasm/ide/bundle-src.mjs /tmp/campfire /tmp/app-campfire.json \
+            --name campfire --commit "${CAMPFIRE_SHA}" \
+            --open app/models/message.rb
       - name: Assemble picker bundles + manifest
         run: |
           set -euo pipefail
@@ -432,8 +448,9 @@ jobs:
           # blog fixture, so verify-playground exercises the app switch + the
           # off-thread Mastodon transpile.
           cp /tmp/app-lobsters.json wasm/lib/app-lobsters.json
+          cp /tmp/app-campfire.json wasm/lib/app-campfire.json
           cp wasm/ide/app-src.json  wasm/lib/app-mastodon.json
-          printf '%s\n' '{"default":"blog","apps":[{"name":"blog","label":"Rails blog","src":"fixture.json","open":"app/models/article.rb"},{"name":"roda","label":"Roda + Sequel blog","src":"app-roda.json","open":"app.rb"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json","open":"app/models/story.rb"},{"name":"mastodon","label":"Mastodon","src":"app-mastodon.json","open":"app/models/status.rb"}]}' > wasm/lib/apps.json
+          printf '%s\n' '{"default":"blog","apps":[{"name":"blog","label":"Rails blog","src":"fixture.json","open":"app/models/article.rb"},{"name":"roda","label":"Roda + Sequel blog","src":"app-roda.json","open":"app.rb"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json","open":"app/models/story.rb"},{"name":"campfire","label":"Campfire","src":"app-campfire.json","open":"app/models/message.rb"},{"name":"mastodon","label":"Mastodon","src":"app-mastodon.json","open":"app/models/status.rb"}]}' > wasm/lib/apps.json
       - name: Install harness deps (Playwright)
         run: npm ci
         working-directory: tests/browser_smoke
@@ -1358,6 +1375,21 @@ jobs:
           node wasm/ide/bundle-src.mjs /tmp/lobsters /tmp/app-lobsters.json \
             --name lobsters --commit "${RUBY_BENCH_SHA}" \
             --open app/controllers/stories_controller.rb
+      - name: Cache campfire source bundle
+        id: campfire-src-site
+        uses: actions/cache@v4
+        with:
+          path: /tmp/app-campfire.json
+          key: campfire-app-src-${{ env.CAMPFIRE_SHA }}-v1
+      - name: Fetch pinned once-campfire + bundle sources (cache miss)
+        if: steps.campfire-src-site.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
+          mkdir -p /tmp/campfire && tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
+          node wasm/ide/bundle-src.mjs /tmp/campfire /tmp/app-campfire.json \
+            --name campfire --commit "${CAMPFIRE_SHA}" \
+            --open app/models/message.rb
       - name: Assemble app-picker bundles + manifests (→ _site/lib, _site/ide)
         run: |
           set -euo pipefail
@@ -1367,6 +1399,10 @@ jobs:
           cp /tmp/app-lobsters.json _site/lib/app-lobsters.json
           cp /tmp/app-lobsters.json _site/ide/app-lobsters.json
           cp /tmp/app-blog.json     _site/ide/app-blog.json
+          # campfire: the write+push app (Action Cable channels, model-side
+          # broadcast_*_to, turbo_stream views) and the current climb — the
+          # picker's fourth app, transpiling partially with the gap ledger.
+          cp /tmp/app-campfire.json _site/lib/app-campfire.json
           # Mastodon ships to BOTH now: /ide/ analyzes it, and /playground/
           # transpiles it off the main thread (partial output + gap diagnostics —
           # the emit runs in the shared worker, so the multi-second pass never
@@ -1376,8 +1412,8 @@ jobs:
           # second CLEAN app, transpiled through the roda front-end.
           node wasm/ide/bundle-src.mjs fixtures/roda-blog _site/lib/app-roda.json \
             --name roda-blog --open app.rb
-          # Playground manifest: blog + roda (clean) + lobsters + mastodon (both partial → honest ledger).
-          printf '%s\n' '{"default":"blog","apps":[{"name":"blog","label":"Rails blog","src":"fixture.json","open":"app/models/article.rb"},{"name":"roda","label":"Roda + Sequel blog","src":"app-roda.json","open":"app.rb"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json","open":"app/models/story.rb"},{"name":"mastodon","label":"Mastodon","src":"app-mastodon.json","open":"app/models/status.rb"}]}' > _site/lib/apps.json
+          # Playground manifest: blog + roda (clean) + lobsters + campfire + mastodon (partial → honest ledger).
+          printf '%s\n' '{"default":"blog","apps":[{"name":"blog","label":"Rails blog","src":"fixture.json","open":"app/models/article.rb"},{"name":"roda","label":"Roda + Sequel blog","src":"app-roda.json","open":"app.rb"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json","open":"app/models/story.rb"},{"name":"campfire","label":"Campfire","src":"app-campfire.json","open":"app/models/message.rb"},{"name":"mastodon","label":"Mastodon","src":"app-mastodon.json","open":"app/models/status.rb"}]}' > _site/lib/apps.json
           # IDE manifest: all three (analysis is gap-tolerant; Mastodon default).
           printf '%s\n' '{"default":"mastodon","apps":[{"name":"blog","label":"Rails blog","src":"app-blog.json"},{"name":"lobsters","label":"Lobsters","src":"app-lobsters.json"},{"name":"mastodon","label":"Mastodon","src":"app-src.json"}]}' > _site/ide/apps.json
           echo "lib app bundles:"; ls -1 _site/lib/*.json | sort
