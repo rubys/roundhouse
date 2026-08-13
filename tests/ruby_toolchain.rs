@@ -101,6 +101,12 @@ fn generate_project(fixture: &Path, scratch: &Path) {
         "inflector.rb",
         "inflector_ext.rb",
         "json_builder.rb",
+        // Narrowing accessors over the request-params tree — the
+        // synthesized `<Resource>Params.from_raw` calls them, and this
+        // harness copies `runtime/spinel/test/`, whose test_helper.rb
+        // requires it. Same hand-maintained list as spinel_toolchain.rs.
+        "params.rb",
+        "params.rbs",
     ] {
         std::fs::copy(
             runtime_ruby.join(entry),

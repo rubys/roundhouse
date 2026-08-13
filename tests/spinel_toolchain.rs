@@ -112,6 +112,16 @@ fn generate_project(fixture: &Path, scratch: &Path) {
         "inflector.rb",
         "inflector_ext.rb",
         "json_builder.rb",
+        // Narrowing accessors over the request-params tree. The
+        // synthesized `<Resource>Params.from_raw` calls `Params.str` /
+        // `Params.provided`, and test_helper.rb requires it — a FOURTH
+        // registration point for a new runtime file, alongside
+        // `project.rs::spinel_files`, both scaffold main.rb files, and
+        // the harness's own require chain. This list is hand-maintained,
+        // so a miss shows up as `cannot load such file` from spinel
+        // rather than from anything the unit tests reach.
+        "params.rb",
+        "params.rbs",
     ] {
         std::fs::copy(
             runtime_ruby.join(entry),
