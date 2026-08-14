@@ -187,20 +187,6 @@ module ActionDispatch
   end
 end
 
-# GAP: `Time#to_fs`. Ours twice over — analyze TYPES it
-# (analyze/body/send.rs) and `routes_to_library/direct.rs` EMITS
-# `updated_at.to_fs(:number)` into every `direct`-generated URL helper — but
-# no target implements it. campfire's `fresh_account_logo_path` is on the
-# sign-in page and the layout, so this one blocks whole pages.
-class Time
-  def to_fs(format = :default)
-    case format
-    when :number then strftime("%Y%m%d%H%M%S")
-    else to_s
-    end
-  end
-end
-
 # GAP: a CLASS METHOD reached through an association — `user.sessions.start!`
 # needs the association's scope applied to what it creates (Rails sets
 # `user_id` that way). The receiver is a folded Array here, so `start!` is

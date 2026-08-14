@@ -1,10 +1,10 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
 use crate::dialect::{
-    Controller, Filter, Fixture, LibraryClass, Model, ModelBodyItem, RouteTable, TestModule,
-    View,
+    Controller, Filter, Fixture, LibraryClass, MethodDef, Model, ModelBodyItem, RouteTable,
+    TestModule, View,
 };
 use crate::expr::Expr;
 use crate::ident::{ClassId, Symbol};
@@ -114,6 +114,18 @@ pub struct App {
     /// `&lt;span&gt;` markup to the page.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub html_safe_methods: BTreeSet<Symbol>,
+    /// App-defined `Time::DATE_FORMATS[:name] = ->(t) { … }` entries
+    /// from `config/initializers/`, each as a one-parameter method whose
+    /// body IS the lambda's (campfire's `time_formats.rb` defines
+    /// `:epoch` as `(time.to_f * 1000).to_i`).
+    ///
+    /// Recorded because `to_fs(:name)` is otherwise unknowable and
+    /// Rails' fallback for an unknown format is `to_s` — a completely
+    /// different value, silently. `lower::time_current` inlines the body
+    /// at each call site with the receiver substituted for the
+    /// parameter. Empty for apps that define no formats.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub time_formats: BTreeMap<Symbol, MethodDef>,
     /// The app's `Rails::Application` subclass from
     /// `config/application.rb` (e.g. `Lobsters::Application`),
     /// reparented at ingest onto `Rails::Application` itself. Its
@@ -297,6 +309,7 @@ impl App {
             partial_local_types: HashMap::new(),
             view_ivar_types: HashMap::new(),
             html_safe_methods: BTreeSet::new(),
+            time_formats: BTreeMap::new(),
             rails_application: None,
             concern_filters: HashMap::new(),
             concern_model_items: HashMap::new(),

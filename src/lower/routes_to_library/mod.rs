@@ -228,6 +228,16 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
     // `flat`; they ride here because they live in the same module and
     // their `route_for` bodies need the flattened table to resolve.
     funcs.extend(direct::lower_direct_helpers(&module_path, app, &flat));
+    // These bodies carry APP source (a `direct` block's expressions —
+    // campfire's `v: Current.account&.updated_at&.to_fs(:number)`), but
+    // they are synthesized HERE, after the post-analyze hook has already
+    // walked every body it owns. So the Time grounding has to be applied
+    // to them on the way out; otherwise the one place `to_fs` is emitted
+    // by us, rather than written by the app, is the one place it never
+    // gets lowered.
+    for f in &mut funcs {
+        crate::lower::time_current::rewrite_time_current(&mut f.body, &app.time_formats);
+    }
     funcs
 }
 

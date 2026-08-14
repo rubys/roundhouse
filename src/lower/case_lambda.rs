@@ -89,14 +89,23 @@ pub(crate) fn is_pure_read(e: &Expr) -> bool {
         | ExprNode::Const { .. }
         | ExprNode::SelfRef
         | ExprNode::Lit { .. } => true,
-        ExprNode::Send { recv: Some(r), args, block: None, .. } => {
-            args.is_empty() && is_pure_read(r)
+        // A zero-arg send, with or without a receiver. The receiver-less
+        // form is the SAME read written against implicit self — a model
+        // body says `created_at`, a caller says `message.created_at` —
+        // and it is also how an ERB-ingested body spells a template
+        // local. Excluding it made a substitution decline on exactly the
+        // shape it was written for.
+        ExprNode::Send { recv, args, block: None, .. } => {
+            args.is_empty() && recv.as_ref().map(is_pure_read).unwrap_or(true)
         }
         _ => false,
     }
 }
 
-fn subst(e: &mut Expr, param: &Symbol, scrutinee: &Expr) {
+/// Replace every read of `param` with `scrutinee`, honoring shadowing.
+/// Shared with `lower::time_current`, which inlines an app-defined
+/// `Time::DATE_FORMATS` lambda the same way this inlines a case arm's.
+pub(crate) fn subst(e: &mut Expr, param: &Symbol, scrutinee: &Expr) {
     // A nested lambda that rebinds the name shadows it.
     if matches!(
         &*e.node,

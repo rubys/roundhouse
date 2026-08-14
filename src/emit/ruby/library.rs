@@ -1910,10 +1910,10 @@ fn is_url_helpers_chain(e: &Expr) -> bool {
 /// Delete when the view pipeline migrates to shared lowerings. Every
 /// other body class arrives already grounded (re-running is an
 /// idempotent no-op — `Time.current` no longer occurs).
-pub(crate) fn apply_time_current_lowering(lcs: &mut [LibraryClass]) {
+pub(crate) fn apply_time_current_lowering(lcs: &mut [LibraryClass], app: &App) {
     for lc in lcs.iter_mut() {
         for m in &mut lc.methods {
-            crate::lower::time_current::rewrite_time_current(&mut m.body);
+            crate::lower::time_current::rewrite_time_current(&mut m.body, &app.time_formats);
         }
     }
 }

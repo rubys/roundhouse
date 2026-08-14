@@ -129,6 +129,7 @@ fn tiny_blog_round_trips() {
         partial_local_types: std::collections::HashMap::new(),
         view_ivar_types: std::collections::HashMap::new(),
         html_safe_methods: std::collections::BTreeSet::new(),
+        time_formats: std::collections::BTreeMap::new(),
         rails_application: None,
         concern_filters: std::collections::HashMap::new(),
         concern_model_items: std::collections::HashMap::new(),

@@ -607,7 +607,7 @@ pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
     // A helper handed `raw(x)` retargets to a `_raw` clone in which
     // that argument's escaping comes off (no-op without such a site).
     library::apply_raw_helper_monomorphization(&mut lcs, app);
-    library::apply_time_current_lowering(&mut lcs);
+    library::apply_time_current_lowering(&mut lcs, app);
     library::apply_duration_lowering(&mut lcs, app);
     // Nullable columns hydrate to nil on the Ruby tree — synthesized
     // `.empty?` predicate forms in view bodies must tolerate it.

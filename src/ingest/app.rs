@@ -427,6 +427,32 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         }
     }
 
+    // `Time::DATE_FORMATS[:name] = ->(t) { … }` in an initializer —
+    // read independently of config/application.rb above, since an app
+    // can define a format without any of that file's config surface.
+    // The lambda becomes a one-parameter method so its body arrives as
+    // ordinary ingested IR; `lower::time_current` inlines it at each
+    // `to_fs(:name)` site.
+    {
+        let init_dir = dir.join("config/initializers");
+        if vfs.is_dir(&init_dir) {
+            for entry in read_rb_files(vfs, &init_dir)? {
+                let Ok(bytes) = vfs.read(&entry) else { continue };
+                let path_str = entry.display().to_string();
+                for (name, param, body) in extract_time_formats(&bytes, &path_str) {
+                    if let Ok(methods) = crate::runtime_src::parse_methods(&format!(
+                        "def __time_format_{name}({param})\n  {body}\nend\n"
+                    )) {
+                        if let Some(method) = methods.into_iter().next() {
+                            app.time_formats
+                                .insert(crate::ident::Symbol::from(name.as_str()), method);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let controllers_dir = dir.join("app/controllers");
     if vfs.is_dir(&controllers_dir) {
         for entry in read_rb_files(vfs, &controllers_dir)? {
@@ -2228,6 +2254,75 @@ const FRAMEWORK_CONFIG_KEYS: &[&str] = &[
     "force_ssl",
     "consider_all_requests_local",
 ];
+
+/// `Time::DATE_FORMATS[:name] = ->(t) { … }` — an app-defined `to_fs`
+/// format, returned as (format name, parameter name, body source).
+///
+/// Worth ingesting because the alternative is SILENTLY WRONG: Rails
+/// falls back to `to_s` for a format it does not know, so an app that
+/// defines `:epoch` (campfire, `(time.to_f * 1000).to_i` — the
+/// millisecond stamp three of its `data-` attributes are sorted by)
+/// would otherwise render a human-readable date into a JS number field
+/// with nothing reporting it.
+///
+/// Top level of an initializer only, which is where Rails' own docs put
+/// it — the same discipline `extract_config_assignments` draws below.
+/// `DateTime::DATE_FORMATS` / `Date::DATE_FORMATS` are separate
+/// registries in Rails and are deliberately not folded in here: our
+/// `Ty::Time` covers all three, but their formats need their own
+/// measurement before they can share a table.
+fn extract_time_formats(source: &[u8], file: &str) -> Vec<(String, String, String)> {
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let src = String::from_utf8_lossy(source).into_owned();
+    let stmts = root
+        .as_program_node()
+        .map(|p| p.statements().body().iter().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for stmt in stmts {
+        // `a[k] = v` parses as a call named `[]=` taking (k, v).
+        let Some(call) = stmt.as_call_node() else { continue };
+        if super::util::constant_id_str(&call.name()) != "[]=" {
+            continue;
+        }
+        let Some(recv) = call.receiver() else { continue };
+        let Some(path) = recv.as_constant_path_node() else { continue };
+        let loc = path.location();
+        if &src[loc.start_offset()..loc.end_offset()] != "Time::DATE_FORMATS" {
+            continue;
+        }
+        let Some(args) = call.arguments() else { continue };
+        let mut args = args.arguments().iter();
+        let (Some(key), Some(value)) = (args.next(), args.next()) else {
+            continue;
+        };
+        let Some(key) = key.as_symbol_node() else { continue };
+        // Only the lambda form. A format can also be a plain strftime
+        // String; that one needs no inlining and is not what any corpus
+        // app writes, so it declines here rather than being half-modeled.
+        let Some(lambda) = value.as_lambda_node() else { continue };
+        let Some(params) = lambda
+            .parameters()
+            .and_then(|p| p.as_block_parameters_node())
+            .and_then(|p| p.parameters())
+        else {
+            continue;
+        };
+        let requireds: Vec<_> = params.requireds().iter().collect();
+        let [param] = requireds.as_slice() else { continue };
+        let Some(param) = param.as_required_parameter_node() else { continue };
+        let Some(body) = lambda.body() else { continue };
+        let key_loc = key.unescaped();
+        let body_loc = body.location();
+        out.push((
+            String::from_utf8_lossy(key_loc).into_owned(),
+            super::util::constant_id_str(&param.name()).to_string(),
+            src[body_loc.start_offset()..body_loc.end_offset()].to_string(),
+        ));
+    }
+    out
+}
 
 fn extract_config_assignments(source: &[u8], file: &str) -> Vec<(String, String)> {
     fn walk(stmts: Vec<ruby_prism::Node<'_>>, src: &str, out: &mut Vec<(String, String)>) {
