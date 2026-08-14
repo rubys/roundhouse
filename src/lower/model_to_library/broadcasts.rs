@@ -273,7 +273,7 @@ fn rewrite_lambda_param(e: &Expr, param: Option<&Symbol>) -> Expr {
 ///
 /// Other shapes (non-belongs_to receiver, unknown method) pass
 /// through unchanged so the emitter still produces parseable Ruby.
-pub(super) fn rewrite_rails_broadcast_calls(expr: Expr, model: &Model) -> Expr {
+pub(crate) fn rewrite_rails_broadcast_calls(expr: Expr, model: &Model) -> Expr {
     walk(expr, model)
 }
 
@@ -309,21 +309,16 @@ fn walk(e: Expr, model: &Model) -> Expr {
 }
 
 fn try_rewrite_call(expr: &Expr, model: &Model) -> Option<Expr> {
-    let ExprNode::Send {
-        recv: Some(recv),
-        method,
-        args,
-        block: None,
-        ..
-    } = &*expr.node
-    else {
+    let ExprNode::Send { recv, method, args, block: None, .. } = &*expr.node else {
         return None;
     };
-    let action = match method.as_str() {
-        "broadcast_replace_to" => BroadcastAct::Replace,
-        "broadcast_append_to" => BroadcastAct::Append,
-        "broadcast_remove_to" => BroadcastAct::Remove,
-        _ => return None,
+    let action = broadcast_action(method.as_str())?;
+    // `broadcast_append_to room, :messages, target: […]` — the
+    // IMPERATIVE form, called on SELF from an ordinary method body
+    // (campfire writes its broadcasts that way, in a concern). The
+    // association form below is the one a `after_*_commit` block uses.
+    let Some(recv) = recv else {
+        return rewrite_self_broadcast(action, args, model, expr.span);
     };
     let ExprNode::Send {
         recv: None,
@@ -426,6 +421,297 @@ fn try_rewrite_call(expr: &Expr, model: &Model) -> Option<Expr> {
             exprs: vec![assign, return_if, broadcast_call],
         },
     ))
+}
+
+fn broadcast_action(method: &str) -> Option<BroadcastAct> {
+    match method {
+        "broadcast_replace_to" => Some(BroadcastAct::Replace),
+        "broadcast_append_to" => Some(BroadcastAct::Append),
+        "broadcast_prepend_to" => Some(BroadcastAct::Prepend),
+        "broadcast_remove_to" => Some(BroadcastAct::Remove),
+        _ => None,
+    }
+}
+
+/// The local the record streamable binds to. Evaluated ONCE: the stream
+/// name and the DOM target both read its id, and an association reader
+/// is a query on most targets.
+fn owner_local() -> Symbol {
+    Symbol::from("bc_owner")
+}
+
+/// `broadcast_<action>_to <streamables…>, target: <t>` with an implicit
+/// self receiver → the same `Broadcasts.<action>(stream:, target:,
+/// html:)` shape the declarative macro expands to.
+///
+/// Semantics measured against turbo-rails 2.0.23 + Rails 8.1:
+///   * the stream is `Turbo::StreamsChannel.stream_name_from` over the
+///     streamables — see `lower::broadcasts::stream_name` for how we
+///     spell it without GlobalIDs;
+///   * `target:` runs through `convert_to_turbo_stream_dom_id`, so an
+///     array is `dom_id(*array)` — `[room, :messages]` is
+///     `"messages_room_1"`, prefix FIRST — and a string passes through;
+///   * with no `target:`, append/prepend/replace default to
+///     `model_name.plural` and remove defaults to `dom_id(self)`;
+///   * with no `partial:`, the payload is the record's own partial with
+///     itself as the local, which is exactly `views_render_self`.
+fn rewrite_self_broadcast(
+    action: BroadcastAct,
+    args: &[Expr],
+    model: &Model,
+    span: Span,
+) -> Option<Expr> {
+    let (positional, opts) = split_trailing_kwargs(args);
+    if positional.is_empty() {
+        return None;
+    }
+    // Rendering options that would change WHAT is rendered are not
+    // modeled yet; taking the default partial anyway would broadcast
+    // the wrong markup, which is worse than not broadcasting.
+    for (key, _) in &opts {
+        match key.as_str() {
+            "target" => {}
+            other => {
+                return decline(
+                    span,
+                    &format!("broadcast_{}_to option `{other}:`", action.method_name()),
+                )
+            }
+        }
+    }
+
+    let (parts, owner) = streamables(positional, model, span)?;
+    let stream = crate::lower::broadcasts::stream_name(&parts);
+
+    let target = match opts.iter().find(|(k, _)| k.as_str() == "target") {
+        Some((_, value)) => dom_target(value, model, owner.as_ref(), span)?,
+        None => match action {
+            BroadcastAct::Remove => canonical_record_target(&model.name),
+            _ => lit_str(crate::naming::pluralize_snake(model.name.0.as_str())),
+        },
+    };
+
+    let html = match action {
+        BroadcastAct::Remove => None,
+        _ => Some(views_render_self(&model.name)),
+    };
+    let call = broadcasts_call(action, stream, target, html);
+
+    // A record streamable is read through an association, so bind it
+    // once and skip the broadcast when it is missing — same guard the
+    // association form uses, and for the same reason.
+    let Some(owner) = owner else {
+        return Some(call);
+    };
+    Some(Expr::new(
+        span,
+        ExprNode::Seq {
+            exprs: vec![
+                Expr::new(
+                    span,
+                    ExprNode::Assign {
+                        target: LValue::Var { id: VarId(0), name: owner_local() },
+                        value: owner.expr,
+                    },
+                ),
+                return_if_nil(owner_local()),
+                call,
+            ],
+        },
+    ))
+}
+
+/// A resolved record streamable: which class it names, and the
+/// expression that produced it.
+struct OwnerRef {
+    singular: String,
+    expr: Expr,
+}
+
+/// Classify each streamable argument. A literal is its own text; a
+/// bare name that is one of this model's `belongs_to` associations is
+/// that record. Anything else declines the whole call — a stream name
+/// we guessed at is a stream nobody is subscribed to.
+fn streamables(
+    args: &[Expr],
+    model: &Model,
+    span: Span,
+) -> Option<(Vec<crate::lower::broadcasts::Streamable>, Option<OwnerRef>)> {
+    use crate::lower::broadcasts::Streamable;
+    let mut parts = Vec::new();
+    let mut owner: Option<OwnerRef> = None;
+    for arg in args {
+        match &*arg.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => {
+                parts.push(Streamable::Literal(value.as_str().to_string()))
+            }
+            ExprNode::Lit { value: Literal::Str { value } } => {
+                parts.push(Streamable::Literal(value.clone()))
+            }
+            // `broadcast_append_to self` — Rails' own shorthand for a
+            // per-record stream. No association read, so no nil guard.
+            ExprNode::SelfRef => parts.push(Streamable::Record {
+                singular: crate::naming::snake_case(model.name.0.as_str()),
+                id: Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("id") }),
+            }),
+            ExprNode::Send { recv: None, method: name, args: a, block: None, .. }
+                if a.is_empty() =>
+            {
+                let target = model.associations().find_map(|assoc| match assoc {
+                    Association::BelongsTo { name: assoc_name, target, .. }
+                        if assoc_name == name =>
+                    {
+                        Some(target.clone())
+                    }
+                    _ => None,
+                });
+                let Some(target) = target else {
+                    return decline_opt(span, &format!("streamable `{name}` is not a belongs_to"));
+                };
+                if owner.is_some() {
+                    return decline_opt(span, "more than one record streamable");
+                }
+                let singular = crate::naming::snake_case(target.0.as_str());
+                parts.push(Streamable::Record {
+                    singular: singular.clone(),
+                    id: read_id(var_ref(owner_local())),
+                });
+                owner = Some(OwnerRef { singular, expr: arg.clone() });
+            }
+            _ => return decline_opt(span, "streamable is not a literal or a belongs_to"),
+        }
+    }
+    Some((parts, owner))
+}
+
+/// `target:` → the DOM id turbo would compute. An array is
+/// `dom_id(record, prefix)` — prefix FIRST, measured — and a literal
+/// string is itself.
+fn dom_target(value: &Expr, model: &Model, owner: Option<&OwnerRef>, span: Span) -> Option<Expr> {
+    match &*value.node {
+        ExprNode::Lit { value: Literal::Str { .. } } => Some(value.clone()),
+        ExprNode::Array { elements, .. } => {
+            let [record, prefix] = elements.as_slice() else {
+                return decline(span, "target: array is not [record, prefix]");
+            };
+            let Some(prefix) = literal_text(prefix) else {
+                return decline(span, "target: prefix is not a literal");
+            };
+            // The record must be the one already bound; a second
+            // association read here would be a second query AND could
+            // disagree with the stream it is paired with.
+            let owner = owner.filter(|o| same_bare_name(record, &o.expr))?;
+            Some(Expr::new(
+                span,
+                ExprNode::StringInterp {
+                    parts: vec![
+                        crate::expr::InterpPart::Text {
+                            value: format!("{prefix}_{}_", owner.singular),
+                        },
+                        crate::expr::InterpPart::Expr {
+                            expr: read_id(var_ref(owner_local())),
+                        },
+                    ],
+                },
+            ))
+        }
+        _ => decline(span, "target: is not a string or [record, prefix]"),
+    }
+}
+
+fn same_bare_name(a: &Expr, b: &Expr) -> bool {
+    let name_of = |e: &Expr| match &*e.node {
+        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
+            Some(method.clone())
+        }
+        _ => None,
+    };
+    match (name_of(a), name_of(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
+fn literal_text(e: &Expr) -> Option<String> {
+    match &*e.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn read_id(recv: Expr) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(recv),
+            method: Symbol::from("id"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    )
+}
+
+fn return_if_nil(name: Symbol) -> Expr {
+    let cond = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(var_ref(name)),
+            method: Symbol::from("nil?"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond,
+            then_branch: Expr::new(Span::synthetic(), ExprNode::Return { value: nil_lit() }),
+            else_branch: nil_lit(),
+        },
+    )
+}
+
+fn lit_str(value: String) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Lit { value: Literal::Str { value } },
+    )
+}
+
+/// Leave the call alone and file the reason. The emitted code then
+/// still parses and still fails loudly at run time, with a ledger line
+/// naming what we did not model — better than a broadcast to a stream
+/// name we invented.
+fn decline<T>(span: Span, what: &str) -> Option<T> {
+    crate::emit::diagnostics::push(crate::lower::residue_diagnostic(
+        "broadcast",
+        what,
+        span,
+        "broadcast call not lowered",
+        format!("`{what}` is not modeled — the call is emitted as written"),
+    ));
+    None
+}
+
+fn decline_opt<T>(span: Span, what: &str) -> Option<T> {
+    decline(span, what)
+}
+
+fn split_trailing_kwargs(args: &[Expr]) -> (&[Expr], Vec<(Symbol, Expr)>) {
+    let Some(last) = args.last() else {
+        return (args, Vec::new());
+    };
+    let ExprNode::Hash { entries, .. } = &*last.node else {
+        return (args, Vec::new());
+    };
+    let opts = entries
+        .iter()
+        .filter_map(|(k, v)| sym_key(k).map(|s| (s.clone(), v.clone())))
+        .collect();
+    (&args[..args.len() - 1], opts)
 }
 
 fn sym_key(e: &Expr) -> Option<&Symbol> {

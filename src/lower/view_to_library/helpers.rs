@@ -108,9 +108,9 @@ pub(super) fn emit_turbo_stream_fragment(
 pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) -> Option<Expr> {
     use ViewHelperKind::*;
     match kind {
-        TurboStreamFrom { channel } => Some(view_helpers_call(
+        TurboStreamFrom { streamables } => Some(view_helpers_call(
             "turbo_stream_from",
-            vec![(*channel).clone()],
+            vec![view_stream_name(streamables, ctx)?],
         )),
         DomId { record, prefix } => {
             let mut args = vec![(*record).clone()];
@@ -238,6 +238,86 @@ pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) ->
         // `<%= content_for :slot, body %>` form surfaces as a no-op
         // append rather than silent-passing through.
         ContentForSetter { .. } => None,
+    }
+}
+
+/// Spell the stream name for `turbo_stream_from <streamables…>`. The
+/// SUBSCRIBE half of the wire whose PUBLISH half is the model-side
+/// `broadcast_*_to` lowering; both call `lower::broadcasts::stream_name`
+/// so the two names cannot drift apart.
+///
+/// A bare name matching a model singular is that record (`room` →
+/// `room_#{room.id}`) — the same name signal `apply_route_param_lowering`
+/// and the view lowerer's `ivar_ty` already commit to. A literal is its
+/// own text. Anything else declines the whole call rather than
+/// subscribing to a name we guessed at; a `channel:` kwarg is dropped
+/// with a ledger line, since our cable transport has no per-channel
+/// classes to route to.
+fn view_stream_name(streamables: &[Expr], ctx: &ViewCtx) -> Option<Expr> {
+    use crate::lower::broadcasts::Streamable;
+    // ONE streamable that is not a bare record name is the app spelling
+    // the stream itself — `turbo_stream_from "article_#{@article.id}
+    // _comments"` is the blog's, and the name it builds is already the
+    // whole convention. Pass it through untouched; only the multi-part
+    // form needs a spelling, because only it has parts to join.
+    if let [only] = streamables {
+        let bare = matches!(&*only.node,
+            ExprNode::Lit { value: Literal::Sym { .. } })
+            || bare_record_name(only).is_some_and(|n| ctx.model_singulars.contains(&n));
+        if !bare {
+            return Some((*only).clone());
+        }
+    }
+    let mut parts = Vec::new();
+    for arg in streamables {
+        match &*arg.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => {
+                parts.push(Streamable::Literal(value.as_str().to_string()))
+            }
+            ExprNode::Lit { value: Literal::Str { value } } => {
+                parts.push(Streamable::Literal(value.clone()))
+            }
+            // The trailing options hash (`channel: "RoomMessagesChannel"`).
+            ExprNode::Hash { .. } => {
+                crate::emit::diagnostics::push(crate::lower::residue_diagnostic(
+                    "turbo_stream_from",
+                    "channel: option",
+                    arg.span,
+                    "custom cable channel not modeled",
+                    "the subscription is emitted on the default channel; a \
+                     per-channel authorization class has no equivalent here"
+                        .to_string(),
+                ));
+            }
+            _ => {
+                let name = bare_record_name(arg)?;
+                if !ctx.model_singulars.contains(&name) {
+                    return None;
+                }
+                parts.push(Streamable::Record {
+                    singular: name,
+                    id: send(Some(arg.clone()), "id", vec![], None, false),
+                });
+            }
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(crate::lower::broadcasts::stream_name(&parts))
+}
+
+/// The bare name a streamable reads as, if any — a local, an ivar, or a
+/// receiver-less send (which is how an ERB-ingested body spells a
+/// template local; prism cannot prove the difference).
+fn bare_record_name(e: &Expr) -> Option<String> {
+    match &*e.node {
+        ExprNode::Var { name, .. } => Some(name.as_str().to_string()),
+        ExprNode::Ivar { name } => Some(name.as_str().to_string()),
+        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
+            Some(method.as_str().to_string())
+        }
+        _ => None,
     }
 }
 

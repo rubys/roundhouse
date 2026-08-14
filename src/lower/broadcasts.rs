@@ -305,6 +305,67 @@ fn hash_sym_key(k: &Expr) -> Option<Symbol> {
     }
 }
 
+/// One element of a turbo stream name — `turbo_stream_from room,
+/// :messages` and `broadcast_append_to room, :messages` each describe
+/// their stream as a list of these.
+#[derive(Clone, Debug)]
+pub enum Streamable {
+    /// A literal segment: `:messages`, `"articles"`.
+    Literal(String),
+    /// A record, contributing `<singular>_<id>` with the id read at
+    /// run time.
+    Record { singular: String, id: Expr },
+}
+
+/// Spell a turbo stream name from its streamables — THE convention,
+/// and the reason it lives here rather than in either caller: the
+/// subscribe side (`turbo_stream_from` in a view) and the publish side
+/// (`broadcast_*_to` on a model) must agree exactly or the message goes
+/// to a stream nobody is listening on, silently.
+///
+/// Rails signs a list of GlobalIDs here. We have no GlobalID, so the
+/// name is built at LOWER time out of what a record already carries:
+/// `[room, :messages]` becomes `"room_#{room.id}:messages"`. The `:`
+/// join mirrors Rails' own, and building it as a string interpolation
+/// keeps this off every target's runtime — there is no heterogeneous
+/// streamables array to type.
+pub fn stream_name(parts: &[Streamable]) -> Expr {
+    let mut interp: Vec<crate::expr::InterpPart> = Vec::new();
+    let mut pending = String::new();
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            pending.push(':');
+        }
+        match part {
+            Streamable::Literal(text) => pending.push_str(text),
+            Streamable::Record { singular, id } => {
+                pending.push_str(singular);
+                pending.push('_');
+                interp.push(crate::expr::InterpPart::Text {
+                    value: std::mem::take(&mut pending),
+                });
+                interp.push(crate::expr::InterpPart::Expr { expr: id.clone() });
+            }
+        }
+    }
+    if !pending.is_empty() {
+        interp.push(crate::expr::InterpPart::Text { value: pending });
+    }
+    // An all-literal name is a plain String, not a one-part interp —
+    // `turbo_stream_from "articles"` has always emitted the literal and
+    // the blog's e2e pins that byte-for-byte.
+    if let [crate::expr::InterpPart::Text { value }] = interp.as_slice() {
+        return Expr::new(
+            crate::span::Span::synthetic(),
+            ExprNode::Lit { value: Literal::Str { value: value.clone() } },
+        );
+    }
+    Expr::new(
+        crate::span::Span::synthetic(),
+        ExprNode::StringInterp { parts: interp },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

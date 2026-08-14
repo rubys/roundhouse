@@ -721,6 +721,62 @@ fn emit_py_view_append_pass2(arg: &Expr, ctx: &PyViewCtx) -> String {
     "_buf += \"\"  # TODO ERB: complex interpolation".to_string()
 }
 
+/// Classify `turbo_stream_from`'s arguments the way the view lowering
+/// does: literals are their own text, a bare name matching a model
+/// singular is that record, the trailing options hash is dropped, and
+/// anything else declines.
+fn py_streamables(
+    args: &[Expr],
+    model_singulars: &std::collections::HashSet<String>,
+) -> Option<Vec<crate::lower::broadcasts::Streamable>> {
+    use crate::lower::broadcasts::Streamable;
+    let mut parts = Vec::new();
+    for arg in args {
+        match &*arg.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => {
+                parts.push(Streamable::Literal(value.as_str().to_string()))
+            }
+            ExprNode::Lit { value: Literal::Str { value } } => {
+                parts.push(Streamable::Literal(value.clone()))
+            }
+            ExprNode::Hash { .. } => {}
+            _ => {
+                let Some(name) = py_bare_record_name(arg) else { return None };
+                if !model_singulars.contains(&name) {
+                    return None;
+                }
+                parts.push(Streamable::Record {
+                    singular: name,
+                    id: Expr::new(
+                        arg.span,
+                        ExprNode::Send {
+                            recv: Some(arg.clone()),
+                            method: crate::ident::Symbol::from("id"),
+                            args: vec![],
+                            block: None,
+                            parenthesized: false,
+                        },
+                    ),
+                });
+            }
+        }
+    }
+    (!parts.is_empty()).then_some(parts)
+}
+
+/// The bare name a streamable reads as — local, ivar, or receiver-less
+/// send (an ERB-ingested template local parses as the last).
+fn py_bare_record_name(e: &Expr) -> Option<String> {
+    match &*e.node {
+        ExprNode::Var { name, .. } => Some(name.as_str().to_string()),
+        ExprNode::Ivar { name } => Some(name.as_str().to_string()),
+        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
+            Some(method.as_str().to_string())
+        }
+        _ => None,
+    }
+}
+
 fn py_extract_slot_name(arg: &Expr) -> Option<&str> {
     match &*arg.node {
         ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str()),
@@ -926,11 +982,30 @@ fn emit_py_view_helper(
             "_buf += Helpers.javascript_importmap_tags(importmap.PINS, \"application\")"
                 .to_string(),
         ),
-        TurboStreamFrom { channel } => {
-            if !is_py_simple_expr(channel, ctx) {
+        TurboStreamFrom { streamables } => {
+            // Same stream-name spelling as every other target — this
+            // walker does not share the view lowering, so it asks
+            // `lower::broadcasts` for the name and renders the result.
+            // `known_models` is Camel; a streamable name is singular.
+            let known: std::collections::HashSet<String> = ctx
+                .known_models
+                .iter()
+                .map(|m| crate::naming::snake_case(m))
+                .collect();
+            // One streamable that is not a bare record name is the app
+            // spelling the stream itself (the blog's
+            // `"article_#{@article.id}_comments"`); only a multi-part
+            // form needs the shared spelling.
+            let name = match streamables {
+                [only] if py_bare_record_name(only).is_none_or(|n| !known.contains(&n)) => {
+                    only.clone()
+                }
+                _ => crate::lower::broadcasts::stream_name(&py_streamables(streamables, &known)?),
+            };
+            if !is_py_simple_expr(&name, ctx) {
                 return None;
             }
-            let arg = emit_py_view_expr_raw(channel, ctx);
+            let arg = emit_py_view_expr_raw(&name, ctx);
             Some(format!("_buf += Helpers.turbo_stream_from({arg})"))
         }
         DomId { record, prefix } => {

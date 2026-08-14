@@ -20,6 +20,7 @@
 pub mod arel;
 pub mod associations;
 pub mod blank;
+pub mod broadcast_calls;
 pub mod broadcasts;
 pub mod chain;
 pub mod controller;
@@ -251,6 +252,11 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Grounds the plural duration-unit calls that send_static_dispatch
     // synthesizes into case arms, so it must observe that pass's output.
     ("duration", &["send_static_dispatch"]),
+    // Rails-API broadcast calls in ordinary method bodies (a concern's
+    // `def broadcast_create`) → `Broadcasts.<action>(…)`. Late, so the
+    // `Views::…` render call it synthesizes is not re-walked by the
+    // partial/capture passes.
+    ("broadcast_calls", &[]),
     // Pure ledger (no rewrite): counts Relation-typed chains still
     // dynamic after every grounding pass has had its say — last so a
     // chain a pass grounds doesn't false-positive.
@@ -394,6 +400,8 @@ pub fn apply_post_analyze_lowerings(
     // this grounding (`send_dispatch::duration_plural`).
     duration::apply_duration_lowering(app);
     ran!("duration");
+    broadcast_calls::apply_broadcast_calls_lowering(app);
+    ran!("broadcast_calls");
     diags.extend(relation_residue::apply_relation_residue_ledger(app));
     ran!("relation_residue");
     #[cfg(debug_assertions)]

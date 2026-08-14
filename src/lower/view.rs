@@ -38,8 +38,12 @@ pub enum ViewHelperKind<'a> {
     CspMetaTag,
     /// `<%= javascript_importmap_tags %>` — no args.
     JavascriptImportmapTags,
-    /// `<%= turbo_stream_from "channel" %>`.
-    TurboStreamFrom { channel: &'a Expr },
+    /// `<%= turbo_stream_from "channel" %>` and the multi-streamable
+    /// form campfire writes (`turbo_stream_from room, :messages`). The
+    /// stream NAME is spelled by `lower::broadcasts::stream_name`,
+    /// which the model-side `broadcast_*_to` lowering shares — the two
+    /// sides must agree or the message goes nowhere.
+    TurboStreamFrom { streamables: &'a [Expr] },
     /// `<%= dom_id(record [, prefix]) %>`.
     DomId { record: &'a Expr, prefix: Option<&'a Expr> },
     /// `<%= pluralize(count, "word") %>`.
@@ -375,8 +379,8 @@ pub fn classify_view_helper<'a>(
         ("csrf_meta_tags", 0) => Some(ViewHelperKind::CsrfMetaTags),
         ("csp_meta_tag", 0) => Some(ViewHelperKind::CspMetaTag),
         ("javascript_importmap_tags", 0) => Some(ViewHelperKind::JavascriptImportmapTags),
-        ("turbo_stream_from", 1) => {
-            Some(ViewHelperKind::TurboStreamFrom { channel: &args[0] })
+        ("turbo_stream_from", n) if n >= 1 => {
+            Some(ViewHelperKind::TurboStreamFrom { streamables: args })
         }
         ("dom_id", 1) => Some(ViewHelperKind::DomId {
             record: &args[0],

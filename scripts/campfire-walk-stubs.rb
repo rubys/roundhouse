@@ -364,25 +364,6 @@ WALK_LATE_PATCHES << lambda do
   end
 end
 
-# GAP, NEW: Turbo::Broadcastable's IMPERATIVE API on a model —
-# `broadcast_append_to` / `broadcast_remove_to`, called from campfire's own
-# `Message::Broadcasts` concern. The DECLARATIVE macro (`broadcasts_to`) is
-# modeled and proven by the blog's e2e, but the method form is absent, so
-# `broadcast_create` NoMethodErrors right after the message row is written.
-# This is the LIVE half of the milestone — two tabs, one message — so the
-# no-op below marks the spot rather than standing in for it.
-WALK_LATE_PATCHES << lambda do
-  class ApplicationRecord
-    def broadcast_append_to(*, **)
-      nil
-    end
-
-    def broadcast_remove_to(*, **)
-      nil
-    end
-  end
-end
-
 # GAP: `pluck` on a folded association (`room.memberships.pluck(:user_id)`).
 # Same family as `find_by!` above and `index_by` further up — an ActiveRecord
 # /ActiveSupport collection method the folded Array does not answer.
@@ -392,5 +373,15 @@ class Array
       values = names.map { |name| record.public_send(name) }
       names.one? ? values.first : values
     end
+  end
+end
+
+# GAP: the `sentry-ruby` gem. campfire's message helpers rescue every
+# Exception and report it before falling back to an "unrenderable"
+# partial, so the constant is reached the moment ANY message render
+# raises. Out of scope by design — a gem we do not intend to transpile.
+module Sentry
+  def self.capture_exception(_error, **_context)
+    nil
   end
 end
