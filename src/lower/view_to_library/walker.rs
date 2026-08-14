@@ -25,7 +25,7 @@ use super::turbo_drive::emit_turbo_drive_directive;
 use super::predicates::rewrite_predicates;
 use super::{
     accumulator_append_call, accumulator_result_ref, assign_accumulator_string_new, lit_sym,
-    nil_lit, seq, todo_io_append, var_ref, view_helpers_call, ViewCtx,
+    nil_lit, seq, todo_io_append, view_helpers_call, ViewCtx,
 };
 
 /// Walk a compiled-ERB body (`Seq` of `_buf = …` statements + control-
@@ -199,7 +199,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             let ExprNode::Lambda { body, .. } = &*block.node else {
                 return vec![todo_io_append("content_for block shape", stmt.span)];
             };
-            let cap = format!("_cf_{slot}");
+            let cap = format!("cf_{slot}");
             let cap_ctx = ViewCtx { accumulator: cap.clone(), ..ctx.clone() };
             let mut out = vec![assign_accumulator_string_new(&cap)];
             out.extend(walk_body(body, &cap_ctx));
@@ -250,7 +250,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 &is_local,
                 &is_options_ivar,
             ) {
-                let disc = "_discard";
+                let disc = "discard";
                 let disc_ctx = ViewCtx { accumulator: disc.to_string(), ..ctx.clone() };
                 if let Some(stmt) = emit_render_partial(&rp, &disc_ctx) {
                     return vec![assign_accumulator_string_new(disc), stmt];
