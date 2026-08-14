@@ -176,3 +176,59 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     }
     classes.insert(ClassId(Symbol::from("Arel::SelectManager")), arel_select);
 }
+
+/// Action Text's VALUE surface — `ActionText::Content` (the coder a
+/// `has_rich_text` attribute reads back through) and
+/// `ActionText::Attachment` (one parsed `<action-text-attachment>`
+/// node). Both are implemented in `runtime/ruby/action_text.rb`; this
+/// registration is what lets an app call `message.body.to_plain_text`
+/// and have it type.
+///
+/// `ActionText::RichText` is deliberately absent: it has a table, so
+/// `lower::rich_text` synthesizes it as an ordinary Model and it
+/// registers through the model loop like every other. Registering a
+/// stand-in here would shadow the real one.
+///
+/// Unconditional, like every other entry in this file — an app with no
+/// `has_rich_text` simply never dispatches against these.
+pub(in crate::analyze) fn register_action_text(classes: &mut HashMap<ClassId, ClassInfo>) {
+    let attachment_id = ClassId(Symbol::from("ActionText::Attachment"));
+    let attachment_ty = Ty::Class { id: attachment_id.clone(), args: vec![] };
+
+    let mut attachment = ClassInfo::default();
+    for m in ["sgid", "content_type", "caption", "filename", "url", "to_plain_text", "[]"] {
+        attachment.instance_methods.insert(Symbol::from(m), Ty::Str);
+    }
+    attachment.instance_methods.insert(
+        Symbol::from("attributes"),
+        Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) },
+    );
+    // Read as a constant by content filters (`Attachment.tag_name`),
+    // which is why it is a class method and not a bare literal.
+    attachment.class_methods.insert(Symbol::from("tag_name"), Ty::Str);
+    classes.insert(attachment_id, attachment);
+
+    let mut content = ClassInfo::default();
+    for m in ["to_html", "to_s", "as_json", "to_plain_text"] {
+        content.instance_methods.insert(Symbol::from(m), Ty::Str);
+    }
+    for m in ["blank?", "empty?", "present?"] {
+        content.instance_methods.insert(Symbol::from(m), Ty::Bool);
+    }
+    content
+        .instance_methods
+        .insert(Symbol::from("links"), Ty::Array { elem: Box::new(Ty::Str) });
+    content
+        .instance_methods
+        .insert(Symbol::from("attachments"), Ty::Array { elem: Box::new(attachment_ty) });
+    // DIVERGENCE, and typed as such: Rails resolves each attachment's
+    // signed GlobalID back to the record it points at, so this is
+    // `Array[ActionText::Attachable]` there. Nothing dereferences an
+    // sgid here yet, so the runtime returns an empty list and the
+    // element type is gradual rather than a lie about which model
+    // comes back.
+    content
+        .instance_methods
+        .insert(Symbol::from("attachables"), Ty::Array { elem: Box::new(Ty::Untyped) });
+    classes.insert(ClassId(Symbol::from("ActionText::Content")), content);
+}

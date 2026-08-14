@@ -46,8 +46,12 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) 
     // helper short-circuits when the FK is unset (nil/0) and queries
     // `<Target>.exists?(fk_value)` otherwise.
     for (span, assoc) in model.spanned_associations() {
-        if let Association::BelongsTo { name, target, foreign_key, optional: false, .. } = assoc {
-            let mut check = inline_belongs_to_check(name, foreign_key, target);
+        if let Association::BelongsTo {
+            name, target, foreign_key, optional: false, polymorphic, ..
+        } = assoc
+        {
+            let mut check =
+                inline_belongs_to_check(name, foreign_key, target, *polymorphic);
             check.inherit_span(span);
             stmts.push(check);
         }
@@ -192,10 +196,23 @@ fn validation_rule_to_calls(attr: &Symbol, rule: &ValidationRule, attr_ty: Optio
 /// Mirrors `runtime/ruby/active_record/validations.rb::validates_belongs_to`
 /// but flattens the early-return + post-check sequence to a single
 /// composite condition.
+///
+/// A POLYMORPHIC association keeps only the first two terms. The class
+/// to query is in the row's `<assoc>_type` COLUMN, so there is no
+/// constant to write here — and `target` for a polymorphic belongs_to
+/// is the assoc-name phantom (`Record` for `belongs_to :record`), a
+/// class that does not exist. Emitting `Record.exists?(@record_id)`
+/// was an uninitialized-constant NameError on the first save of any
+/// polymorphic child; `ActionText::RichText` is the first model in the
+/// corpus to reach it. Dropping the existence half is a strict SUBSET
+/// of Rails' check — it can fail a save Rails would fail, never one
+/// Rails would pass — and the id-presence half is the part that
+/// catches the real error (an unset owner).
 fn inline_belongs_to_check(
     assoc_name: &Symbol,
     foreign_key: &Symbol,
     target: &ClassId,
+    polymorphic: bool,
 ) -> Expr {
     let fk_ivar = ivar(foreign_key);
     // `@fk.nil?`
@@ -209,6 +226,10 @@ fn inline_belongs_to_check(
             ExprNode::Lit { value: Literal::Int { value: 0 } },
         )],
     );
+    let push_err = errors_push(format!("{} must exist", humanize(assoc_name.as_str())));
+    if polymorphic {
+        return if_with_nil_else(bool_op(BoolOpKind::Or, nil_check, zero_check), push_err);
+    }
     // `!Target.exists?(@fk)`
     let target_const = Expr::new(
         Span::synthetic(),
@@ -230,7 +251,6 @@ fn inline_belongs_to_check(
         bool_op(BoolOpKind::Or, nil_check, zero_check),
         not_exists,
     );
-    let push_err = errors_push(format!("{} must exist", humanize(assoc_name.as_str())));
     if_with_nil_else(cond, push_err)
 }
 
@@ -951,8 +971,25 @@ mod tests {
         let assoc_name = Symbol::from("article");
         let foreign_key = Symbol::from("article_id");
         let target = ClassId(Symbol::from("Article"));
-        let expr = inline_belongs_to_check(&assoc_name, &foreign_key, &target);
+        let expr = inline_belongs_to_check(&assoc_name, &foreign_key, &target, false);
         assert_eq!(collect_error_messages(&expr), vec!["Article must exist"]);
+    }
+
+    #[test]
+    fn polymorphic_belongs_to_checks_the_id_but_names_no_class() {
+        // The class to query lives in the row's `<assoc>_type` column,
+        // and `target` is the assoc-name phantom — writing it out was an
+        // uninitialized-constant NameError on the first save.
+        let assoc_name = Symbol::from("record");
+        let foreign_key = Symbol::from("record_id");
+        let target = ClassId(Symbol::from("Record"));
+        let expr = inline_belongs_to_check(&assoc_name, &foreign_key, &target, true);
+        assert_eq!(collect_error_messages(&expr), vec!["Record must exist"]);
+        let rendered = format!("{expr:?}");
+        assert!(
+            !rendered.contains("exists?"),
+            "a polymorphic check must not query a class: {rendered}"
+        );
     }
 }
 

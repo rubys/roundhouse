@@ -505,6 +505,19 @@ fn report_unclaimed_unknowns(model: &Model) {
         if name == "has_secure_password" {
             continue;
         }
+        // Bare `has_rich_text :body` — claimed by lower::rich_text.
+        // The option-carrying forms (`encrypted:`, `store_if_blank:`)
+        // are NOT claimed: each changes the expansion and none is
+        // implemented, so they keep warning. `rich_text_attrs` is the
+        // one place that decides which shape is claimed; this test
+        // asks it rather than re-deriving the arity.
+        if name == "has_rich_text"
+            && crate::lower::rich_text::rich_text_attrs(model)
+                .iter()
+                .any(|(span, _)| *span == expr.span)
+        {
+            continue;
+        }
         // 2-arg `attribute :name, :type` — claimed by
         // markers::push_attribute_api_methods (typed virtual
         // attributes). Other arities (default:-carrying) stay
@@ -599,7 +612,7 @@ fn writable_permit_fields(
 /// effect: `params_merge` has to know whether a merged key has a writer
 /// before it synthesizes a setter, and a second copy of this scan would
 /// drift.
-pub(crate) fn writable_field_set(
+pub fn writable_field_set(
     model: &Model,
     table: &crate::schema::Table,
 ) -> std::collections::BTreeSet<crate::ident::Symbol> {
@@ -643,6 +656,13 @@ pub(crate) fn writable_field_set(
     }
     for (name, _ty) in self::markers::attribute_api_decls(&model.body) {
         writable.insert(name);
+    }
+    // `has_rich_text :body` synthesizes `body=`, so `permit(:body)` is
+    // assignable even though `body` is not a column on this table.
+    // Without this the permit filter drops it and campfire's composer
+    // posts a message with no content.
+    for (_span, attr) in crate::lower::rich_text::rich_text_attrs(model) {
+        writable.insert(attr);
     }
     writable
 }
@@ -766,6 +786,13 @@ fn build_methods(
     // against the bcrypt gem's own surface (`BCrypt::Password`). Same
     // ordering rationale.
     crate::lower::secure_password::push_secure_password_methods(&mut methods, model);
+    // Action Text — `has_rich_text`'s expansion on a declaring model,
+    // and the `body`-as-Content coder on the synthesized
+    // `ActionText::RichText`. AFTER `push_schema_methods` because the
+    // coder REPLACES the column accessor pair that pass produced;
+    // before `push_user_methods` for the usual reason (a hand-written
+    // method in the model body wins).
+    crate::lower::rich_text::push_rich_text_methods(&mut methods, model);
     push_user_methods(&mut methods, model);
     push_dom_prefix_method(&mut methods, model);
     push_broadcasts_methods(&mut methods, model);

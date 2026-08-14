@@ -1735,6 +1735,47 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
         }
     }
 
+    // `has_rich_text` virtual attrs: `Message.create!(body: "<div>hi
+    // </div>")` is the canonical Rails spelling and the one a
+    // controller reaches through, but `body` is not a column on THIS
+    // table — the markup lives in `action_text_rich_texts` — so the
+    // column loop above never saw it and mass assignment dropped it
+    // silently. campfire posts a message that way and the message
+    // persisted with no content at all.
+    //
+    // Routed through the synthesized `<attr>=` writer (which builds the
+    // rich-text record and stages it for the after-save), exactly as
+    // the secure-password block above routes through its plaintext
+    // writers. `Cast` to `Str` bridges the untyped attrs value for the
+    // strict targets, whose writer signature takes a String.
+    for (_span, attr) in crate::lower::rich_text::rich_text_attrs(model) {
+        let lookup = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref(attrs.clone())),
+                method: Symbol::from("[]"),
+                args: vec![lit_sym(attr.clone())],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let value = Expr::new(
+            Span::synthetic(),
+            ExprNode::Cast { value: lookup.clone(), target_ty: Ty::Str },
+        );
+        let assign = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(self_ref()),
+                method: Symbol::from(format!("{}=", attr.as_str())),
+                args: vec![value],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        stmts.push(guard_unless_nil(lookup, assign));
+    }
+
     // has_many eager-load cache fields (issue #27): initialize each
     // `@<assoc>_cache = [] of <Target>` + `@<assoc>_loaded = false` so
     // the cache-aware reader's `@cache` reads/returns are non-nilable in

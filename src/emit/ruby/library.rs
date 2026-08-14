@@ -599,6 +599,15 @@ fn push_delegate_skip_diagnostic(
 }
 
 pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
+    // `has_rich_text`'s two preload scopes. Ahead of the `any_scopes`
+    // early return below, because an app can declare a rich-text
+    // attribute and no `scope` at all — and these still have to exist
+    // or every call site chaining through them is a NoMethodError.
+    for lc in lcs.iter_mut() {
+        if let Some(model) = app.models.iter().find(|m| m.name == lc.name) {
+            crate::lower::rich_text::push_preload_scope_methods(&mut lc.methods, model);
+        }
+    }
     let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
     if !crate::lower::scope_chain::any_scopes(&scopes) {
         return;
@@ -3537,6 +3546,11 @@ fn require_path_for_body_const(
         // resolve there. Add entries as lowerings introduce new ones;
         // unknown idents silently drop.
         "Broadcasts" => Some("runtime/broadcasts".to_string()),
+        // `ActionText::Content` / `ActionText::Attachment` — the value
+        // half of Action Text. `ActionText::RichText` is NOT here: it
+        // is a lowered model and resolves under `app/models/` like any
+        // other, which is exactly the split this entry preserves.
+        "ActionText" => Some("runtime/action_text".to_string()),
         "Inflector" => Some("runtime/inflector".to_string()),
         "ViewHelpers" => Some("runtime/action_view".to_string()),
         "RouteHelpers" => Some("app/route_helpers".to_string()),

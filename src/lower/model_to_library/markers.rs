@@ -427,7 +427,7 @@ fn rewrite_column_or_assign(e: &mut Expr, model: &Model) {
 /// its body's Seq, OR push a new method with `call` as the body. The
 /// fold preserves source order; broadcasts_to runs first so its calls
 /// lead any block-form callback bodies that the next pass would add.
-pub(super) fn fold_into_or_push(methods: &mut Vec<MethodDef>, model: &Model, hook_name: &str, call: Expr) {
+pub(crate) fn fold_into_or_push(methods: &mut Vec<MethodDef>, model: &Model, hook_name: &str, call: Expr) {
     let hook = Symbol::from(hook_name);
     if let Some(existing) = methods.iter_mut().find(|m| m.name == hook) {
         let mut stmts = match &*existing.body.node {

@@ -307,6 +307,16 @@ impl Analyzer {
                 };
                 cls.class_methods.entry(scope.name.clone()).or_insert(seed);
             }
+            // `has_rich_text :body` declares two preload scopes beside
+            // the association (`with_rich_text_body`,
+            // `with_rich_text_body_and_embeds`). They are relation-
+            // returning like any other scope; the bodies are synthesized
+            // at the ruby emit seam.
+            for name in crate::lower::rich_text::preload_scope_names(model) {
+                cls.class_methods
+                    .entry(name)
+                    .or_insert(Ty::Relation { of: model.name.clone() });
+            }
             // Core AR instance methods every model gets. Sourced
             // from the shared catalog — same mechanism as class
             // methods above. Covers mutation (save/update/destroy),
@@ -412,6 +422,7 @@ impl Analyzer {
         // ActiveRecord::AdapterInterface contract, and the Arel node family —
         // see `registry::ar`.
         registry::ar::register(&mut classes);
+        registry::ar::register_action_text(&mut classes);
 
         // ActiveModel::Validations / Model modules + the ActiveModel::Errors
         // collection and individual ActiveModel::Error classes — see

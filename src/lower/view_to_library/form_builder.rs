@@ -63,6 +63,12 @@ pub(super) fn emit_form_builder_inline(
             binding,
             ctx,
         ),
+        FormBuilderMethod::RichTextArea => emit_rich_text_area(
+            positional.first().copied(),
+            opts.as_slice(),
+            binding,
+            ctx,
+        ),
         FormBuilderMethod::Submit => emit_submit(
             positional.first().copied(),
             opts.as_slice(),
@@ -1437,6 +1443,166 @@ fn emit_text_area(
     vec![accumulator_append_call(string_interp(parts), ctx)]
 }
 
+/// The custom element the rich-text editor instantiates on, and the
+/// default class Rails gives it.
+///
+/// ONE PLACE, on purpose. Action Text's server side is editor-neutral
+/// — the same `has_rich_text`, the same `ActionText::RichText` row,
+/// the same canonical `<action-text-attachment>` markup — and the only
+/// thing that changes between front ends is this pair. Trix is what
+/// Rails ships and what the corpus runs; Lexxy (the Basecamp editor
+/// that supersedes it) is `("lexxy-editor", "lexxy-content")` plus its
+/// own two data attributes, and nothing else in this file would move.
+///
+/// It is a constant rather than a setting because nothing yet reads
+/// the app's bundle: roundhouse does not ingest the Gemfile, so there
+/// is no evidence to switch on. When it does, this is the switch.
+const EDITOR_TAG: &str = "trix-editor";
+const EDITOR_DEFAULT_CLASS: &str = "trix-content";
+
+/// Active Storage's conventional mount points, which Trix reads to
+/// upload a dropped file and to build a blob URL.
+///
+/// LITERAL, and stated as such: Rails fills these from
+/// `rails_direct_uploads_url` / `rails_service_blob_url`, route
+/// helpers the Active Storage engine installs. Active Storage is not
+/// modeled, so the routes do not exist here and neither does anything
+/// that could serve an upload. Emitting the conventional paths keeps
+/// the markup Rails-shaped for the editor's own initialization (Trix
+/// reads both attributes at connect time) and costs nothing; what it
+/// does NOT do is make attachments work.
+const DIRECT_UPLOAD_URL: &str = "/rails/active_storage/direct_uploads";
+const BLOB_URL_TEMPLATE: &str =
+    "/rails/active_storage/blobs/redirect/:signed_id/:filename";
+
+/// `form.rich_text_area :body [, opts]` — Rails' `rich_textarea_tag`,
+/// inline.
+///
+/// Two elements, in Rails' order:
+///
+/// ```html
+/// <input type="hidden" name="message[body]" id="message_body_trix_input" value="…" autocomplete="off">
+/// <trix-editor id="message_body" input="message_body_trix_input" class="trix-content" data-…></trix-editor>
+/// ```
+///
+/// The hidden input is the one that submits: Trix writes the editor's
+/// markup into it on every change, so `message[body]` arrives as HTML
+/// and lands on the `body=` writer `has_rich_text` synthesized. The
+/// editor element carries the id pairing (`input=`) that binds them.
+///
+/// Two departures from Rails, both deliberate:
+///
+/// * The input's id is `<field_id>_trix_input`, where Rails appends
+///   the record's dom id (`message_body_trix_input_message_5`). Rails
+///   needs the suffix because two forms for DIFFERENT records can
+///   share a page; the suffix is what keeps their hidden inputs
+///   distinct. Same-page duplicates are therefore a real (and
+///   detectable) divergence — and the fix is a `dom_id(record, …)`
+///   call here once a fixture exercises it.
+///
+/// * `class:` REPLACES `trix-content` rather than adding to it, which
+///   is Rails' own `options[:class] ||=` semantics — campfire passes
+///   `class: "input"` and gets exactly that.
+fn emit_rich_text_area(
+    field: Option<&Expr>,
+    opts: &[(Expr, Expr)],
+    binding: &FormBuilderBinding,
+    ctx: &ViewCtx,
+) -> Vec<Expr> {
+    let Some(field_sym) = field_symbol(field) else {
+        return vec![accumulator_append_call(lit_str(String::new()), ctx)];
+    };
+    let field_str = field_sym.as_str();
+    let editor_id = super::field_id(&binding.id_prefix, &binding.model_name, field_str);
+    let input_id = format!("{editor_id}_trix_input");
+    let name = if binding.model_name.is_empty() {
+        field_str.to_string()
+    } else {
+        format!("{}[{field_str}]", binding.model_name)
+    };
+
+    let mut opts = opts.to_vec();
+    // Rails deletes `value:` from the editor's options and routes it to
+    // the hidden input; without an explicit one the value is the
+    // record's own markup.
+    let value = super::attr_parts::take_opt(&mut opts, "value").unwrap_or_else(|| {
+        rich_text_markup_read(binding, field_sym.clone())
+    });
+
+    let mut parts: Vec<InterpPart> = Vec::new();
+    parts.push(InterpPart::Text {
+        value: format!("<input type=\"hidden\" name=\"{name}\" id=\"{input_id}\" value=\""),
+    });
+    parts.push(InterpPart::Expr {
+        expr: view_helpers_call("escape_or_empty", vec![value]),
+    });
+    parts.push(InterpPart::Text {
+        value: format!(
+            "\" autocomplete=\"off\"><{EDITOR_TAG} id=\"{editor_id}\" input=\"{input_id}\""
+        ),
+    });
+    // `class:` from the call site wins; otherwise Rails' default. Taken
+    // out of `opts` either way so `append_attr_parts` cannot emit a
+    // second `class=`.
+    match super::attr_parts::take_opt(&mut opts, "class") {
+        Some(cls) => {
+            parts.push(InterpPart::Text { value: " class=\"".to_string() });
+            parts.push(InterpPart::Expr {
+                expr: view_helpers_call("html_escape", vec![simplify_class_array(&cls)]),
+            });
+            parts.push(InterpPart::Text { value: "\"".to_string() });
+        }
+        None => parts.push(InterpPart::Text {
+            value: format!(" class=\"{EDITOR_DEFAULT_CLASS}\""),
+        }),
+    }
+    parts.push(InterpPart::Text {
+        value: format!(
+            " data-direct-upload-url=\"{DIRECT_UPLOAD_URL}\" \
+             data-blob-url-template=\"{BLOB_URL_TEMPLATE}\""
+        ),
+    });
+    append_attr_parts(&mut parts, &opts);
+    parts.push(InterpPart::Text {
+        value: format!("></{EDITOR_TAG}>"),
+    });
+    vec![accumulator_append_call(string_interp(parts), ctx)]
+}
+
+/// The markup the hidden input carries: `record.<field>.to_trix_html`.
+///
+/// Two things this does NOT do, both because a rich-text attribute is
+/// not a column:
+///
+/// * It does not read `record[:field]`, which is how the other field
+///   helpers reach a value. The indexer answers from the attributes
+///   hash, and there is no `body` key in it — the markup lives one
+///   table over. Only the synthesized reader knows that, so the read
+///   is a plain method call.
+///
+/// * It does not stop at the record. `record.body` is the
+///   `ActionText::RichText` ROW; interpolating that prints an object.
+///   `to_trix_html` is the accessor Rails itself reaches for here
+///   (`value.try(:to_trix_html) || value`), and `has_rich_text`
+///   guarantees the reader never returns nil, so the `try` has nothing
+///   left to guard.
+fn rich_text_markup_read(binding: &FormBuilderBinding, field: Symbol) -> Expr {
+    if binding.model_name.is_empty() {
+        return Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil });
+    }
+    let record_ref = Expr::new(
+        Span::synthetic(),
+        ExprNode::Var { id: VarId(0), name: binding.record_var.clone() },
+    );
+    send(
+        Some(send(Some(record_ref), field.as_str(), Vec::new(), None, false)),
+        "to_trix_html",
+        Vec::new(),
+        None,
+        false,
+    )
+}
+
 /// `<input type="submit" name="commit" value="<text>" data-disable-with="<text>"<opts>>`
 /// — inline expansion of `form.submit [label] [, opts]`. When the
 /// positional `label` is omitted, the default text branches on the
@@ -1551,7 +1717,15 @@ fn append_attr_parts(parts: &mut Vec<InterpPart>, opts: &[(Expr, Expr)]) {
         // `confirm` drops the whole attribute instead of rendering
         // `data-confirm=""` (lobsters' link_post passes `confirm`
         // through optionally).
-        if key.as_str() == "data" {
+        // `aria:` fans out by the SAME rule Rails applies to `data:`
+        // (`aria: { label: … }` → `aria-label="…"`), and this loop had
+        // only ever handled `data`. An `aria:` hash therefore reached
+        // the generic branch below and rendered as one attribute whose
+        // value was the hash's `to_s` — `aria="{multiline: "true", …}"`,
+        // which announces nothing and is not valid markup. campfire
+        // labels both its message editors that way, so the composer and
+        // the edit box each shipped an unlabelled input.
+        if key.as_str() == "data" || key.as_str() == "aria" {
             if let ExprNode::Hash { entries, .. } = &*v.node {
                 for (dk, dv) in entries {
                     let ExprNode::Lit { value: Literal::Sym { value: dkey } } = &*dk.node
@@ -1567,8 +1741,11 @@ fn append_attr_parts(parts: &mut Vec<InterpPart>, opts: &[(Expr, Expr)]) {
                     // builder uses); it kept the underscores, so every
                     // multi-word Stimulus target on a form input was
                     // silently inert.
-                    let attr_name =
-                        format!(" data-{}=\"", dkey.as_str().replace('_', "-"));
+                    let attr_name = format!(
+                        " {}-{}=\"",
+                        key.as_str(),
+                        dkey.as_str().replace('_', "-")
+                    );
                     if matches!(&*dv.node, ExprNode::Lit { value: Literal::Str { .. } }) {
                         parts.push(InterpPart::Text { value: attr_name });
                         parts.push(InterpPart::Expr {

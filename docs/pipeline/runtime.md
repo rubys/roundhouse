@@ -86,8 +86,16 @@ runtime/ruby/
   action_controller/    Base controller, Parameters
   action_view/          link_to, form_with, FormBuilder, pluralize, ...
   action_dispatch/      Routing helpers
+  action_text.rb        Content (the has_rich_text coder), Attachment
   inflector.rb          camelize / pluralize / dasherize
 ```
+
+`action_text.rb` holds only Action Text's VALUE layer.
+`ActionText::RichText` is absent because it has a table: it is
+synthesized as an ordinary model by `lower::rich_text` and reaches
+every target through the model machinery. That split — table-backed
+things are models, values are framework Ruby — is the general rule,
+not an Action Text special case.
 
 Each `.rb` ships with a `.rbs` sidecar declaring the public typed
 surface (see `analyze.md` on RBS-paired ingestion). The `.rbs` is
@@ -200,6 +208,59 @@ predicates and scopes carry the stored value too, which is what makes
 them correct with no enum type at runtime. Fixing the reader means
 mapping at every read; do it only if an app is found that reads the raw
 attribute.
+
+### Action Text resolves no attachment
+
+`ActionText::Content#attachables` answers `[]` where Rails answers the
+records the fragment's `<action-text-attachment sgid="…">` nodes point
+at.
+
+**Why.** An `sgid` is a *signed* GlobalID. Turning one back into a
+record needs SignedGlobalID verification against the app's secret,
+a GlobalID URI parse, and a class registry to look the model up in —
+three pieces that do not exist yet, and none of which the HTML scanner
+can approximate.
+
+**What still works.** The PARSE is complete: `#attachments` returns
+every node with every attribute it carried (`sgid`, `content_type`,
+`caption`, `filename`, `url`), and `to_plain_text` renders an
+attachment as its caption or filename exactly as Rails does. The
+boundary is dereferencing, not reading.
+
+**Where it is visible.** Code that greps attachables for a model —
+mention extraction is the canonical shape (campfire's
+`Message::Mentionee` does `body.body.attachables.grep(User)`) — sees
+no mentions rather than wrong ones. `RichText#to_trix_html` likewise
+hands back the stored markup instead of rendering attachment previews
+into it, so an editor loads the text and shows attachment nodes bare.
+
+### Action Text decodes only the entities Rails' escaper emits
+
+`Content#to_plain_text` decodes `&amp; &lt; &gt; &quot; &#39; &apos;
+&nbsp;` and passes anything else through verbatim — `&lowast;` stays
+`&lowast;` where Rails (via Nokogiri) yields `∗`.
+
+**Why.** Decoding an arbitrary reference needs a codepoint-to-character
+intrinsic the framework runtime does not carry, and a full named-entity
+table is ~2000 entries for a case no corpus app produces.
+
+**Where it is visible.** Plain-text projections only — search
+indexing, the `to_plain_text.presence` fallbacks. The round trip that
+matters is closed: every entity `ViewHelpers.html_escape` can emit is
+in the table, so escape-then-extract recovers the original text.
+
+### A rich-text preload scope is the identity
+
+`with_rich_text_<attr>` and `with_rich_text_<attr>_and_embeds` return
+the relation unchanged where Rails adds an `includes`.
+
+**Why.** The synthesized reader fetches per record, so there is no
+preloaded association for the hint to attach to.
+
+**Where it is visible.** Query COUNT, not query results: a page
+rendering N records issues N rich-text queries where Rails issues one.
+The methods exist rather than being dropped so that call sites chaining
+through them keep working.
 
 ## Related docs
 

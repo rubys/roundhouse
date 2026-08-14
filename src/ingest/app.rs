@@ -719,6 +719,11 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // Last: needs every model's complete `enums` table, including the
     // columns an included concern declared.
     map_enum_labels(&mut app);
+    // Last of all: `has_rich_text` can arrive through a concern's
+    // `included do`, so the declaration scan has to run after the
+    // splices — and `ActionText::RichText` has to be in `app.models`
+    // before anything downstream enumerates models.
+    crate::lower::rich_text::synthesize_record_model(&mut app);
 
     Ok(app)
 }

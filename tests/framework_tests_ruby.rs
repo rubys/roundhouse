@@ -89,6 +89,7 @@ fn build_and_run(test_file: &Path, tag: &str) {
         "inflector.rb",
         "inflector_ext.rb",
         "json_builder.rb",
+        "action_text.rb",
     ] {
         let src = runtime_ruby.join(entry);
         if src.exists() {
@@ -317,5 +318,20 @@ fn inflector_test_passes_under_cruby() {
     build_and_run(
         Path::new("runtime/ruby/test/inflector_test.rb"),
         "inflector",
+    );
+}
+
+/// `ActionText::Content` — the coder a `has_rich_text` attribute reads
+/// back through. Every `to_plain_text` expectation in the test file was
+/// measured against Rails' own `PlainTextConversion`; see the file
+/// header. Ruby-family lanes only: the value class is a top-level
+/// framework stem outside the strict-target runtime tables, so this has
+/// no crystal/kotlin/swift/typescript sibling.
+#[test]
+#[ignore]
+fn action_text_test_passes_under_cruby() {
+    build_and_run(
+        Path::new("runtime/ruby/test/action_text_test.rb"),
+        "action_text",
     );
 }

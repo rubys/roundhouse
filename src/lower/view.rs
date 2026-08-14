@@ -477,6 +477,7 @@ pub enum FormBuilderMethod {
     UrlField,
     EmailField,
     FileField,
+    RichTextArea,
 }
 
 /// Method name for a view template stem. A digit-leading stem
@@ -544,6 +545,12 @@ pub fn classify_form_builder_method(method: &str) -> Option<FormBuilderMethod> {
         // survives into the emit as a literal `form.file_field(…)` with
         // `form` unbound, taking the whole page down at render.
         "file_field" => Some(FormBuilderMethod::FileField),
+        // Action Text's editor pair. Same story as `file_field`: the
+        // upload half is Active Storage and deferred, but the MARKUP
+        // needs none of it — and without this the call survives into
+        // the emit as a literal `form.rich_text_area(…)` with `form`
+        // unbound, which is a NameError on every render of the page.
+        "rich_text_area" | "rich_textarea" => Some(FormBuilderMethod::RichTextArea),
         _ => None,
     }
 }

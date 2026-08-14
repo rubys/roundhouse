@@ -112,6 +112,14 @@ fn generate_project(fixture: &Path, scratch: &Path) {
         "inflector.rb",
         "inflector_ext.rb",
         "json_builder.rb",
+        "action_text.rb",
+        // …with its sidecar, which this lane genuinely needs:
+        // `Content.parse_attributes`'s declared `Hash[String, String]`
+        // return is what keeps its caller's `attrs[key] = …` a HASH
+        // index-assign. Inferred, it widened to a String index-assign
+        // and raised IndexError at run time. `reroute_runtime_rbs_to_sig`
+        // moves it under `sig/` after the copy.
+        "action_text.rbs",
         // Narrowing accessors over the request-params tree. The
         // synthesized `<Resource>Params.from_raw` calls `Params.str` /
         // `Params.provided`, and test_helper.rb requires it — a FOURTH

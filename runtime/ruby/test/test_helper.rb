@@ -56,6 +56,12 @@ require "action_controller/base"
 # because the test-file emit drops inline requires.
 require "action_controller/cookies"
 require "inflector"
+# Action Text's value layer (`Content`, `Attachment`). Same reason as
+# cookies above: required from the helper, not inline in the test,
+# because the test-file emit drops inline requires — the spinel lane's
+# copy of the test gets its `require_relative "../../runtime/action_text"`
+# from the harness instead.
+require "action_text"
 
 # Real Db primitive (gem-backed under CRuby) + SqliteAdapter shim that
 # satisfies the AR adapter contract by routing through Db. base_test

@@ -77,6 +77,7 @@ pub mod session_options;
 pub mod relation_residue;
 pub mod send_dispatch;
 pub(crate) mod secure_password;
+pub mod rich_text;
 pub mod capture_inline;
 pub mod partial_qualify;
 pub mod time_current;

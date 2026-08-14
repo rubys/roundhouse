@@ -70,6 +70,11 @@ require_relative "runtime/json_builder"
 # only the spinel one leaves `<Resource>Params.from_raw` reaching an
 # undefined constant on every request that carries params.
 require_relative "runtime/params"
+# ActionText::Content — see the spinel scaffold's main.rb. Both entry
+# points need it: a `has_rich_text` model's `body` reader constructs
+# one on every read, so an unloaded constant is a NameError on the
+# first message render, not a lazy failure.
+require_relative "runtime/action_text"
 require_relative "runtime/importmap"
 require_relative "runtime/rails"
 # Park RAILS_ENV where the typed runtime can read it (`Rails.env`

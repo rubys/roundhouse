@@ -107,11 +107,29 @@ fn build_and_run(test_file: &Path, tag: &str) {
         "inflector.rb",
         "inflector_ext.rb",
         "json_builder.rb",
+        "action_text.rb",
     ] {
         let src = runtime_ruby.join(entry);
         if src.exists() {
             std::fs::copy(&src, scratch_runtime.join(entry))
                 .unwrap_or_else(|_| panic!("copy {entry}"));
+        }
+        // …and its `.rbs` sidecar, which the subdir walk above already
+        // carries for `active_record/` &c but which this flat loop
+        // dropped. Production does copy it (`project.rs::spinel_files`
+        // pairs every stem with `sig/runtime/<stem>.rbs`), so a runtime
+        // file whose typing depends on the sidecar compiled here
+        // against inference alone — a strictly harder problem than the
+        // one the real emit poses, and one `action_text.rb` lost:
+        // `parse_attributes`'s declared `Hash[String, String]` return
+        // widened, and the `attrs[name] = …` in its caller compiled as
+        // a STRING index-assign that raised IndexError at run time.
+        let rbs = runtime_ruby.join(entry.replace(".rb", ".rbs"));
+        if rbs.exists() {
+            let sig_runtime = scratch.join("sig/runtime");
+            std::fs::create_dir_all(&sig_runtime).expect("mkdir sig/runtime");
+            std::fs::copy(&rbs, sig_runtime.join(entry.replace(".rb", ".rbs")))
+                .unwrap_or_else(|_| panic!("copy sidecar for {entry}"));
         }
     }
 
@@ -367,5 +385,18 @@ fn inflector_test_passes_under_spinel() {
     build_and_run(
         Path::new("runtime/ruby/test/inflector_test.rb"),
         "inflector",
+    );
+}
+
+/// `ActionText::Content` under spinel — the same measured-against-Rails
+/// cases the CRuby sibling runs. This is the lane that prices the
+/// scanner's shapes (two-arg slice, parallel single-type arrays, no
+/// regex) against the strict whole-graph check.
+#[test]
+#[ignore]
+fn action_text_test_passes_under_spinel() {
+    build_and_run(
+        Path::new("runtime/ruby/test/action_text_test.rb"),
+        "action_text",
     );
 }

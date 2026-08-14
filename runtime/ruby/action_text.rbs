@@ -1,0 +1,52 @@
+# Typing contract for action_text.rb beside this file.
+#
+# `Content#attachments` and `#links` return concrete element types
+# (not `untyped`): the strict targets' one-element-type-per-container
+# rule is the whole reason the scanner returns a flat
+# `Hash[String, String]` per tag rather than a pair or a variant.
+module ActionText
+  module Attachable
+  end
+
+  class Attachment
+    def self.tag_name: () -> String
+    def initialize: (Hash[String, String] attributes) -> void
+    def attributes: () -> Hash[String, String]
+    def []: (String name) -> String
+    def sgid: () -> String
+    def content_type: () -> String
+    def caption: () -> String
+    def filename: () -> String
+    def url: () -> String
+    def to_plain_text: () -> String
+  end
+
+  class Content
+    def initialize: (?String html) -> void
+    def to_html: () -> String
+    def to_s: () -> String
+    def as_json: () -> String
+    def blank?: () -> bool
+    def empty?: () -> bool
+    def present?: () -> bool
+    def links: () -> Array[String]
+    def attachments: () -> Array[ActionText::Attachment]
+    def attachables: () -> Array[untyped]
+    def to_plain_text: () -> String
+    def self.scoped_element: (String name) -> bool
+    def self.close_scoped: (String name, String segment, Array[String] list_names, Array[Integer] list_counts) -> String
+    def self.quote_wrap: (String text) -> String
+    def self.first_non_space_index: (String text) -> Integer
+    def self.last_non_space_index: (String text) -> Integer
+    def self.scan_tags: (String html) -> Array[Hash[String, String]]
+    def self.tag_name_of: (String raw) -> String
+    def self.parse_attributes: (String raw) -> Hash[String, String]
+    def self.space_at: (String text, Integer index) -> bool
+    def self.entity_end: (String html, Integer start) -> Integer
+    def self.decode_entity: (String entity) -> String
+    def self.decode_entities: (String text) -> String
+    def self.indent: (Integer list_depth) -> String
+    def self.ends_with_newline: (String text) -> bool
+    def self.chomp_newlines: (String text) -> String
+  end
+end

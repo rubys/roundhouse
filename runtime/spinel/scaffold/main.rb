@@ -48,6 +48,11 @@ require_relative "runtime/json_builder"
 # type test lives in one transpiled body rather than in generated code
 # whose shape each emitter has to recognize.
 require_relative "runtime/params"
+# ActionText::Content — the coder behind a `has_rich_text` attribute.
+# The RichText RECORD is an ordinary lowered model (it has a table);
+# this is only the value its `body` column reads back as, so it loads
+# with the other value classes rather than with the models.
+require_relative "runtime/action_text"
 require_relative "runtime/importmap"
 # ActiveSupport::Duration value class — the emit grounds `70.days` etc.
 # to `ActiveSupport::Duration.days(70)`, so the class must be loadable
