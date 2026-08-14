@@ -607,6 +607,21 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         }
     }
 
+    // turbo-rails' `turbo_frame_tag`, in both spellings — with a block
+    // (the frame wraps template content) and without (a lazily-loaded
+    // frame that is only a `src`). Placed ahead of the classifier
+    // because the block form never reaches it: the classifier matches
+    // `block: None`, so a framed template body fell through to the
+    // generic block-form helper below, which captured the body and left
+    // the `turbo_frame_tag` call itself unresolved.
+    if let ExprNode::Send { recv: None, method, args: sa, block, .. } = &*inner.node {
+        if method.as_str() == "turbo_frame_tag" && !ctx.is_local("turbo_frame_tag") {
+            if let Some(stmts) = emit_turbo_frame_tag(sa, block.as_ref(), ctx) {
+                return stmts;
+            }
+        }
+    }
+
     // View-helper classifier: `link_to`, `dom_id`, `pluralize`,
     // `truncate`, `turbo_stream_from`, `content_for(:slot)`, …. The
     // classifier matches bare Sends (no recv, no block) only.
@@ -753,6 +768,47 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     }
     let escaped = view_helpers_call("html_escape", vec![coerce_to_s(rewritten)]);
     vec![accumulator_append_call(escaped, ctx)]
+}
+
+/// `turbo_frame_tag <ids…>[, opts][ do … end]` → the `<turbo-frame …>`
+/// element, the walked block body, and the closing tag — the same
+/// open/walk/close splice `emit_tag_builder_inline` does, against the
+/// SAME outer accumulator, because an ERB block body is template buffer
+/// ops that have to be walked rather than captured.
+///
+/// The id positionals go through `rewrite_helpers_in_expr` first: that
+/// is what turns campfire's `turbo_frame_tag dom_id(room, :involvement)`
+/// into the `ViewHelpers.dom_id(…)` call an emitted view can answer.
+/// Options are left as written, the way every other tag inlined here
+/// leaves them (route helpers in their values are rewritten later, by
+/// the routes pass, over the whole IR).
+///
+/// `None` when the argument shape declines (see
+/// `turbo_frames::frame_open_parts`), which leaves the call to the
+/// generic paths below rather than inventing an id.
+fn emit_turbo_frame_tag(args: &[Expr], block: Option<&Expr>, ctx: &ViewCtx) -> Option<Vec<Expr>> {
+    let args: Vec<Expr> = args
+        .iter()
+        .map(|a| match &*a.node {
+            ExprNode::Hash { .. } => a.clone(),
+            _ => rewrite_helpers_in_expr(a, ctx),
+        })
+        .collect();
+    let is_record = |e: &Expr| super::turbo_frames::names_a_record(e, &ctx.model_singulars);
+    let parts = super::turbo_frames::frame_open_parts(&args, &is_record)?;
+    let mut out = vec![accumulator_append_call(
+        super::attr_parts::string_interp(parts),
+        ctx,
+    )];
+    if let Some(ExprNode::Lambda { params, body, .. }) = block.map(|b| &*b.node) {
+        let inner_ctx = ctx.with_locals(params.iter().map(|p| p.as_str().to_string()));
+        out.extend(walk_body(body, &inner_ctx));
+    }
+    out.push(accumulator_append_call(
+        super::lit_str(super::turbo_frames::FRAME_CLOSE.to_string()),
+        ctx,
+    ));
+    Some(out)
 }
 
 /// The value behind an html-safe interpolation, or `None` when the

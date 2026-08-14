@@ -19,8 +19,8 @@ use super::attr_parts::{
 };
 use super::walker::rewrite_helpers_in_expr;
 use super::{
-    inflector_call, lit_str, lit_sym, route_helpers_call, send, var_ref, view_helpers_call,
-    ViewCtx,
+    bare_record_name, inflector_call, lit_str, lit_sym, route_helpers_call, send, var_ref,
+    view_helpers_call, ViewCtx,
 };
 
 /// `turbo_stream.<action>(target[, record])` → `Broadcasts
@@ -305,20 +305,6 @@ fn view_stream_name(streamables: &[Expr], ctx: &ViewCtx) -> Option<Expr> {
         return None;
     }
     Some(crate::lower::broadcasts::stream_name(&parts))
-}
-
-/// The bare name a streamable reads as, if any — a local, an ivar, or a
-/// receiver-less send (which is how an ERB-ingested body spells a
-/// template local; prism cannot prove the difference).
-fn bare_record_name(e: &Expr) -> Option<String> {
-    match &*e.node {
-        ExprNode::Var { name, .. } => Some(name.as_str().to_string()),
-        ExprNode::Ivar { name } => Some(name.as_str().to_string()),
-        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
-            Some(method.as_str().to_string())
-        }
-        _ => None,
-    }
 }
 
 /// Inline-expand `link_to text, url, opts` into a single

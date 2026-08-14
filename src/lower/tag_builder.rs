@@ -60,12 +60,21 @@
 //! are ledgered. The fallback is what makes the pass TOTAL: every
 //! `tag.<name>` site becomes something that runs, which is the whole
 //! point when the alternative is an unbound `tag`.
+//!
+//! ## Also here: `turbo_frame_tag`
+//!
+//! turbo-rails' frame helper is `tag.turbo_frame(…)` with its arguments
+//! rearranged, and it reaches an emitted tree the same way — as an
+//! unbound bare call in a helper body. It expands here for the same
+//! reasons, through [`crate::lower::view_to_library::turbo_frames`],
+//! which owns the rearranging and is shared with the view walker.
 
 use crate::app::App;
 use crate::diagnostic::Diagnostic;
 use crate::expr::{Expr, ExprNode, InterpPart, Literal};
 use crate::ident::Symbol;
 use crate::lower::view_to_library::attr_parts::{append_attr_parts, string_interp};
+use crate::lower::view_to_library::turbo_frames;
 use crate::lower::view_to_library::{lit_str, view_helpers_call};
 
 /// HELPER METHOD BODIES ONLY — views are deliberately not walked.
@@ -80,7 +89,15 @@ use crate::lower::view_to_library::{lit_str, view_helpers_call};
 /// kind; the walker's own non-block gap is fixed in the walker.
 pub fn apply_tag_builder_lowering(app: &mut App) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
-    super::for_each_hook_body(app, &mut |body| rewrite(body, &mut diags));
+    // For `turbo_frame_tag`'s record test — the same snake-singular set
+    // the view lowering's `ViewCtx` carries, built here because a hook
+    // body has no view context.
+    let models: std::collections::HashSet<String> = app
+        .models
+        .iter()
+        .map(|m| crate::naming::snake_case(m.name.0.as_str()))
+        .collect();
+    super::for_each_hook_body(app, &mut |body| rewrite(body, &models, &mut diags));
     diags
 }
 
@@ -230,9 +247,17 @@ fn is_tag_helper(recv: &Expr) -> bool {
     )
 }
 
-fn rewrite(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
+fn rewrite(
+    expr: &mut Expr,
+    models: &std::collections::HashSet<String>,
+    diags: &mut Vec<Diagnostic>,
+) {
     expr.node
-        .for_each_child_mut(&mut |child| rewrite(child, diags));
+        .for_each_child_mut(&mut |child| rewrite(child, models, diags));
+
+    if rewrite_turbo_frame_tag(expr, models) {
+        return;
+    }
 
     let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*expr.node else {
         return;
@@ -297,6 +322,44 @@ fn rewrite(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     *expr = html_safe(built, span);
 }
 
+/// turbo-rails' `turbo_frame_tag` written in a HELPER body — the same
+/// `<turbo-frame>` element the view walker builds for the ERB spelling,
+/// through the same `turbo_frames` expansion, differing only in what
+/// goes between the tags: a Ruby block is CAPTURED here, where a
+/// template body is walked there.
+///
+/// campfire's `users/sidebar_helper.rb` is why this half exists — the
+/// room page opens with `content_for :sidebar,
+/// sidebar_turbo_frame_tag(src: user_sidebar_path)`, and the sidebar's
+/// own template calls the same helper with a block.
+///
+/// Returns whether the call was claimed. A declined argument shape
+/// (`frame_open_parts` → None) is left alone, where the emitted call to
+/// an undefined `turbo_frame_tag` is loud, rather than being given an
+/// invented id.
+fn rewrite_turbo_frame_tag(expr: &mut Expr, models: &std::collections::HashSet<String>) -> bool {
+    let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else {
+        return false;
+    };
+    if method.as_str() != "turbo_frame_tag" {
+        return false;
+    }
+    let is_record = |e: &Expr| turbo_frames::names_a_record(e, models);
+    let Some(mut parts) = turbo_frames::frame_open_parts(args, &is_record) else {
+        return false;
+    };
+    let span = expr.span;
+    if let Some(block) = block.clone() {
+        parts.push(InterpPart::Expr { expr: capture_call(block, span) });
+    }
+    parts.push(InterpPart::Text { value: turbo_frames::FRAME_CLOSE.to_string() });
+
+    let mut built = string_interp(parts);
+    qualify_view_helpers(&mut built);
+    *expr = html_safe(built, span);
+    true
+}
+
 /// Rewrite the bare `ViewHelpers` receiver the shared attribute
 /// renderer builds into the fully-qualified `ActionView::ViewHelpers`.
 ///
@@ -322,15 +385,44 @@ fn qualify_view_helpers(expr: &mut Expr) {
 
 /// `capture { <block body> }` — left for `capture_inline` to flatten
 /// into an accumulator.
+///
+/// A FORWARDED block (`tag.div …, &` / `turbo_frame_tag …, &`, which
+/// ingest spells as the `__blk` binding) may be ABSENT at run time: the
+/// helper declares an optional block and a caller can omit it, which is
+/// exactly how campfire's room page reaches `sidebar_turbo_frame_tag(src:
+/// user_sidebar_path)` with no block at all. Rails guards this in the tag
+/// builder itself — `content = capture(&block) if block` — so the guard
+/// belongs here rather than in nine runtime `capture`s, whose `yield`
+/// would otherwise raise LocalJumpError on the frame that has no body.
 fn capture_call(block: Expr, span: crate::span::Span) -> Expr {
-    Expr::new(
+    let call = Expr::new(
         span,
         ExprNode::Send {
             recv: None,
             method: Symbol::from("capture"),
             args: vec![],
-            block: Some(block),
+            block: Some(block.clone()),
             parenthesized: false,
+        },
+    );
+    if !matches!(&*block.node, ExprNode::Var { .. }) {
+        return call;
+    }
+    Expr::new(
+        span,
+        ExprNode::If {
+            cond: Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(block),
+                    method: Symbol::from("nil?"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            then_branch: lit_str(String::new()),
+            else_branch: call,
         },
     )
 }

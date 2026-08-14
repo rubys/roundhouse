@@ -31,6 +31,7 @@ mod partial;
 mod form_with;
 mod form_builder;
 pub(crate) mod turbo_drive;
+pub(crate) mod turbo_frames;
 pub(crate) mod attr_parts;
 
 use crate::App;
@@ -3656,6 +3657,22 @@ pub(super) fn send(
     )
 }
 
+/// The bare name an expression reads as, if any — a local, an ivar, or
+/// a receiver-less zero-arg send (which is how an ERB-ingested body
+/// spells a template local, and how a helper's own reader parses;
+/// prism cannot prove the difference). The shape behind every
+/// name-based signal in this pipeline.
+pub(crate) fn bare_record_name(e: &Expr) -> Option<String> {
+    match &*e.node {
+        ExprNode::Var { name, .. } => Some(name.as_str().to_string()),
+        ExprNode::Ivar { name } => Some(name.as_str().to_string()),
+        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
+            Some(method.as_str().to_string())
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn lit_str(s: String) -> Expr {
     Expr::new(
         Span::synthetic(),
@@ -3666,7 +3683,7 @@ pub(crate) fn lit_str(s: String) -> Expr {
 /// Apply `ViewHelpers::HTML_ESCAPES` at compile time. Single pass over the
 /// input so an introduced `&` is never re-escaped — matching the runtime
 /// `s.gsub(/[&<>"']/, HTML_ESCAPES)` byte-for-byte (and Rails').
-fn html_escape_fold(s: &str) -> String {
+pub(super) fn html_escape_fold(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
