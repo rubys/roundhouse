@@ -123,6 +123,12 @@ pub(in crate::analyze) fn register(
         // turbo / hotwire
         "turbo_frame_tag", "turbo_stream_from", "turbo_refreshes_with",
         "turbo_include_tags", "turbo_page_requires_reload",
+        // The rest of Turbo::DriveHelper, beside the two members that
+        // were already here. All four deposit into `:head` and render
+        // nothing; `src/lower/view_to_library/turbo_drive.rs` expands
+        // them away before emit, so what they are typed as never
+        // reaches a target — they are listed to be RESOLVED.
+        "turbo_exempts_page_from_preview", "turbo_exempts_page_from_cache",
         // form option builders + FormTagHelper (all render to SafeBuffer
         // strings, like the tag helpers above).
         "options_for_select", "options_from_collection_for_select",

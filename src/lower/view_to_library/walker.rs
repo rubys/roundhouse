@@ -21,6 +21,7 @@ use super::form_with::{
 };
 use super::helpers::emit_view_helper_call;
 use super::partial::{emit_render_partial, emit_yield};
+use super::turbo_drive::emit_turbo_drive_directive;
 use super::predicates::rewrite_predicates;
 use super::{
     accumulator_append_call, accumulator_result_ref, assign_accumulator_string_new, lit_sym,
@@ -202,9 +203,15 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             let cap_ctx = ViewCtx { accumulator: cap.clone(), ..ctx.clone() };
             let mut out = vec![assign_accumulator_string_new(&cap)];
             out.extend(walk_body(body, &cap_ctx));
+            // The capture is an ACCUMULATOR, and on a strict target
+            // that is a builder, not a String — Crystal rejected
+            // `content_for_set(:head, String::Builder)` the moment a
+            // fixture first wrote the block form. Same tagged read the
+            // tail of a view function uses, so each emitter finishes
+            // the builder its own way.
             out.push(view_helpers_call(
                 "content_for_set",
-                vec![lit_sym(Symbol::from(slot)), var_ref(Symbol::from(cap.as_str()))],
+                vec![lit_sym(Symbol::from(slot)), accumulator_result_ref(&cap)],
             ));
             out
         }
@@ -214,6 +221,11 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         // Other recognized statement-form helpers fall through to a
         // TODO append until a fixture exercises them.
         ExprNode::Send { recv: None, method, args, block: None, .. } => {
+            // `<% turbo_page_requires_reload %>` — a turbo Drive
+            // directive. Deposits into `:head`, appends nothing.
+            if let Some(out) = emit_turbo_drive_directive(method.as_str(), args, stmt.span) {
+                return out;
+            }
             if let Some(ViewHelperKind::ContentForSetter { slot, body }) =
                 classify_view_helper(method.as_str(), args)
             {
@@ -459,6 +471,14 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     // call site; the runtime alternative is the CRuby overlay's
     // untyped opts-walk).
     if let ExprNode::Send { recv: None, method, args: sa, block: None, .. } = &*inner.node {
+        // `<%= turbo_exempts_page_from_preview %>` (campfire's
+        // rooms/show) — the OUTPUT spelling of a Drive directive.
+        // Rails' `provide` returns nil once it is handed content, so
+        // the `<%= %>` renders "": the deposit is the whole effect and
+        // nothing joins the accumulator.
+        if let Some(out) = emit_turbo_drive_directive(method.as_str(), sa, inner.span) {
+            return out;
+        }
         if method.as_str() == "submit_tag" {
             return emit_submit_tag(sa, ctx);
         }
