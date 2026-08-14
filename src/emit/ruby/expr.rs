@@ -354,8 +354,22 @@ fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
         target_ty,
         Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil))
     );
+    // BOTH arms gate on a nilable target, for the reason the paragraph
+    // above gives for the second one: a guard exists to keep SQL NULL
+    // alive, and a target that cannot be nil has no NULL to keep. The
+    // Var/Ivar arm used to fire unconditionally, which is how `[]=`'s
+    // `value` param — always a Var — wrapped EVERY column, including
+    // `id`. That emitted `@id = (value).nil? ? nil : (value).to_i` into
+    // a slot the RBS pins `Integer` and the runtime seeds `0`: a write
+    // of the one value the design forbids. Unreachable (nothing calls
+    // `self[:id] = nil`), and it still cost the representation —
+    // spinel widens on the POSSIBILITY, so `@id` boxed to `sp_RbVal`
+    // on every model in the corpus and every `--rbs` pin was dropped.
+    // Dropping the guard is not a substitution either: `nil.to_i` is
+    // already `0`, so the plain coercion produces the sentinel by
+    // construction.
     let pure_read = match &*value.node {
-        ExprNode::Var { .. } | ExprNode::Ivar { .. } => true,
+        ExprNode::Var { .. } | ExprNode::Ivar { .. } => target_is_nilable,
         ExprNode::Send { recv: Some(r), method, args, block: None, .. } if target_is_nilable => {
             let recv_is_name = matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. });
             let reader_or_lookup = args.is_empty()
