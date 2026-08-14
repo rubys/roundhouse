@@ -30,7 +30,7 @@ mod helpers;
 mod partial;
 mod form_with;
 mod form_builder;
-mod turbo_drive;
+pub(crate) mod turbo_drive;
 pub(crate) mod attr_parts;
 
 use crate::App;

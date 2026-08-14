@@ -46,6 +46,36 @@ fn provide_head(markup: String) -> Expr {
     )
 }
 
+/// What a recognized Drive-helper call deposits into `:head`.
+pub(crate) enum HeadDirective {
+    /// One `<meta …>` per deposit, in call order.
+    Metas(Vec<String>),
+    /// A Drive helper we will not render, and the ledger tag saying
+    /// why. turbo-rails raises ArgumentError on these.
+    Declined(&'static str),
+}
+
+/// Recognize a Drive-helper call, or None when `method` names
+/// something else. Shared with the Python view emitter, which walks
+/// compiled ERB on its own and never sees this module's lowering — the
+/// markup table is Rails knowledge and lives in one place, while each
+/// walker renders the deposit its own way.
+pub(crate) fn head_directive(method: &str, args: &[Expr]) -> Option<HeadDirective> {
+    let markup = match method {
+        "turbo_exempts_page_from_cache" => meta("turbo-cache-control", "no-cache"),
+        "turbo_exempts_page_from_preview" => meta("turbo-cache-control", "no-preview"),
+        "turbo_page_requires_reload" => meta("turbo-visit-control", "reload"),
+        "turbo_refreshes_with" => return Some(refreshes_with(args)),
+        _ => return None,
+    };
+    // The no-arg members take none; anything passed means we are
+    // looking at a different method that happens to share the name.
+    if !args.is_empty() {
+        return None;
+    }
+    Some(HeadDirective::Metas(vec![markup]))
+}
+
 /// Recognize a Drive-helper call and return the statements it lowers
 /// to, or None when `method` names something else. Callers use it from
 /// both template positions — `<% turbo_page_requires_reload %>` and
@@ -56,19 +86,10 @@ pub(super) fn emit_turbo_drive_directive(
     args: &[Expr],
     span: Span,
 ) -> Option<Vec<Expr>> {
-    let markup = match method {
-        "turbo_exempts_page_from_cache" => meta("turbo-cache-control", "no-cache"),
-        "turbo_exempts_page_from_preview" => meta("turbo-cache-control", "no-preview"),
-        "turbo_page_requires_reload" => meta("turbo-visit-control", "reload"),
-        "turbo_refreshes_with" => return Some(emit_refreshes_with(args, span)),
-        _ => return None,
-    };
-    // The no-arg members take none; anything passed means we are
-    // looking at a different method that happens to share the name.
-    if !args.is_empty() {
-        return None;
+    match head_directive(method, args)? {
+        HeadDirective::Metas(metas) => Some(metas.into_iter().map(provide_head).collect()),
+        HeadDirective::Declined(why) => Some(vec![todo_io_append(why, span)]),
     }
-    Some(vec![provide_head(markup)])
 }
 
 /// `turbo_refreshes_with(method: :replace, scroll: :reset)` — two
@@ -77,37 +98,36 @@ pub(super) fn emit_turbo_drive_directive(
 /// its two-element sets, so an unrecognized one is a template bug: it
 /// files residue rather than rendering a directive Turbo would not
 /// honor.
-fn emit_refreshes_with(args: &[Expr], span: Span) -> Vec<Expr> {
+fn refreshes_with(args: &[Expr]) -> HeadDirective {
     let mut refresh_method = "replace";
     let mut scroll = "reset";
-    let residue = |what: &str| vec![todo_io_append(what, span)];
 
     if args.len() > 1 {
-        return residue("turbo_refreshes_with arg shape");
+        return HeadDirective::Declined("turbo_refreshes_with arg shape");
     }
     if let Some(opts) = args.first() {
         let ExprNode::Hash { entries, .. } = &*opts.node else {
-            return residue("turbo_refreshes_with non-literal options");
+            return HeadDirective::Declined("turbo_refreshes_with non-literal options");
         };
         for (key, value) in entries {
             let (Some(key), Some(value)) = (extract_sym_or_str(key), extract_sym_or_str(value))
             else {
-                return residue("turbo_refreshes_with non-literal options");
+                return HeadDirective::Declined("turbo_refreshes_with non-literal options");
             };
             match key {
                 "method" => refresh_method = value,
                 "scroll" => scroll = value,
-                _ => return residue("turbo_refreshes_with unknown option"),
+                _ => return HeadDirective::Declined("turbo_refreshes_with unknown option"),
             }
         }
     }
     if !matches!(refresh_method, "replace" | "morph") || !matches!(scroll, "reset" | "preserve") {
-        return residue("turbo_refreshes_with option value outside turbo's set");
+        return HeadDirective::Declined("turbo_refreshes_with option value outside turbo's set");
     }
-    vec![
-        provide_head(meta("turbo-refresh-method", refresh_method)),
-        provide_head(meta("turbo-refresh-scroll", scroll)),
-    ]
+    HeadDirective::Metas(vec![
+        meta("turbo-refresh-method", refresh_method),
+        meta("turbo-refresh-scroll", scroll),
+    ])
 }
 
 #[cfg(test)]

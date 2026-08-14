@@ -17,6 +17,7 @@ use crate::App;
 use crate::dialect::LibraryFunction;
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::Symbol;
+use crate::lower::view_to_library::turbo_drive;
 use crate::ty::Ty;
 
 pub(super) fn emit_py_views(app: &App) -> Vec<EmittedFile> {
@@ -527,6 +528,13 @@ fn emit_py_view_stmt_pass2(stmt: &Expr, ctx: &PyViewCtx) -> Vec<String> {
         // Statement-form `<% content_for :title, "Articles" %>` —
         // setter. Dispatch via the view-helper classifier.
         ExprNode::Send { recv: None, method, args, block: None, .. } => {
+            // `<% turbo_page_requires_reload %>` and the rest of the
+            // turbo Drive family — each is `provide :head, tag.meta(…)`.
+            // This walker never sees the lowering that expands them for
+            // every other target, so it asks the same table directly.
+            if let Some(d) = turbo_drive::head_directive(method.as_str(), args) {
+                return py_head_directive(d);
+            }
             if let Some(crate::lower::ViewHelperKind::ContentForSetter { slot, body }) =
                 crate::lower::classify_view_helper(method.as_str(), args)
             {
@@ -536,6 +544,19 @@ fn emit_py_view_stmt_pass2(stmt: &Expr, ctx: &PyViewCtx) -> Vec<String> {
                 }
             }
             vec!["pass  # TODO ERB: unknown stmt".to_string()]
+        }
+        // `<% content_for :head do %> … <% end %>` — the STATEMENT
+        // spelling of a slot capture. The output spelling (`<%=`) has
+        // been handled in the expression emitter all along; a template
+        // writing the statement form dropped its whole block, body
+        // included.
+        ExprNode::Send { recv: None, method, args, block: Some(block), .. }
+            if method.as_str() == "content_for" && args.len() == 1 =>
+        {
+            match py_content_for_capture(args, block, ctx) {
+                Some(lines) => lines,
+                None => vec!["pass  # TODO ERB: content_for block shape".to_string()],
+            }
         }
         ExprNode::If { cond, then_branch, else_branch } => {
             let cond_py = if is_py_simple_expr(cond, ctx) {
@@ -653,6 +674,16 @@ fn emit_py_view_append_pass2(arg: &Expr, ctx: &PyViewCtx) -> String {
         }
     }
 
+    // `<%= turbo_exempts_page_from_preview %>` — the OUTPUT spelling of
+    // a turbo Drive directive, which is how campfire's rooms/show and
+    // real-blog's `:head` block write it. The deposit is the whole
+    // effect; `provide` returns nil, so nothing joins `_buf`.
+    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*inner.node {
+        if let Some(d) = turbo_drive::head_directive(method.as_str(), args) {
+            return py_head_directive(d).join("\n");
+        }
+    }
+
     // View-helper classifier: link_to, button_to, dom_id, pluralize,
     // truncate, stylesheet_link_tag, content_for (getter),
     // javascript_importmap_tags, csrf_meta_tags, csp_meta_tag,
@@ -700,6 +731,37 @@ fn py_extract_slot_name(arg: &Expr) -> Option<&str> {
 
 fn is_py_capturing_helper(method: &str) -> bool {
     matches!(method, "form_with" | "content_for")
+}
+
+/// `content_for :slot do … end` in either template position: render the
+/// block body into `_buf`, deposit the slice, and rewind. The
+/// snapshot-and-slice pattern mirrors form_with. None when the slot is
+/// not a literal or the block is not one.
+fn py_content_for_capture(args: &[Expr], block: &Expr, ctx: &PyViewCtx) -> Option<Vec<String>> {
+    let slot = py_extract_slot_name(args.first()?)?;
+    let ExprNode::Lambda { body, .. } = &*block.node else {
+        return None;
+    };
+    let mut lines = vec!["_cf_begin = len(_buf)".to_string()];
+    lines.extend(emit_py_view_body(body, ctx));
+    lines.push(format!("Helpers.content_for_set({slot:?}, _buf[_cf_begin:])"));
+    lines.push("_buf = _buf[:_cf_begin]".to_string());
+    Some(lines)
+}
+
+/// Render a turbo Drive directive as its `:head` deposit(s). Nothing
+/// joins `_buf`: Rails' `provide` returns nil once handed content, so
+/// the helper's own output is "".
+fn py_head_directive(directive: turbo_drive::HeadDirective) -> Vec<String> {
+    match directive {
+        turbo_drive::HeadDirective::Metas(metas) => metas
+            .into_iter()
+            .map(|m| format!("Helpers.content_for_set(\"head\", {m:?})"))
+            .collect(),
+        turbo_drive::HeadDirective::Declined(why) => {
+            vec![format!("pass  # TODO ERB: {why}")]
+        }
+    }
 }
 
 fn emit_py_captured_helper(
@@ -803,27 +865,14 @@ fn emit_py_captured_helper(
         }
         "content_for" => {
             // `<%= content_for :slot do %>...<% end %>` — stash the
-            // block body into the slot; emit nothing inline. The
-            // snapshot-and-slice pattern mirrors form_with.
-            let slot = args.first().and_then(|a| match &*a.node {
-                ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str()),
-                ExprNode::Lit { value: Literal::Str { value } } => Some(value.as_str()),
-                _ => None,
-            });
-            let Some(slot) = slot else {
-                let _ = cls_expr;
-                return "_buf += \"\"".to_string();
-            };
-            let mut lines: Vec<String> = Vec::new();
-            lines.push("_cf_begin = len(_buf)".to_string());
-            for line in emit_py_view_body(body, ctx) {
-                lines.push(line);
+            // block body into the slot; emit nothing inline.
+            match py_content_for_capture(args, block, ctx) {
+                Some(lines) => lines.join("\n"),
+                None => {
+                    let _ = cls_expr;
+                    "_buf += \"\"".to_string()
+                }
             }
-            lines.push(format!(
-                "Helpers.content_for_set({slot:?}, _buf[_cf_begin:])"
-            ));
-            lines.push("_buf = _buf[:_cf_begin]".to_string());
-            lines.join("\n")
         }
         _ => {
             let _ = cls_expr;
