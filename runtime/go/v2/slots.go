@@ -79,8 +79,13 @@ func ActionViewViewHelpers_reset_slots_bang() {
 	slotsByGoroutine.Store(goroutineID(), newSlotsStore())
 }
 
+// Appends, like Rails' content_for (`@view_flow.append` unless the
+// caller passes `flush: true`) and provide (`append!`). A missing key
+// reads as "" from a Go map, so the first deposit needs no special
+// case. See the Ruby runtime's copy for the campfire rooms/show case
+// overwriting broke.
 func ActionViewViewHelpers_content_for_set(slot string, value string) {
-	currentSlots().data[slot] = value
+	currentSlots().data[slot] += value
 }
 
 func ActionViewViewHelpers_content_for_get(slot string) string {

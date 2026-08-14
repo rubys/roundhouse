@@ -119,6 +119,18 @@ class ViewHelpersTest < Minitest::Test
     assert_equal "Hello", ViewHelpers.content_for_get(:title)
   end
 
+  # Rails' content_for appends (only `flush: true` replaces), and
+  # `provide` — the turbo DriveHelper family's deposit — always
+  # appends. A page filling one slot from two places keeps both.
+  def test_content_for_set_appends
+    ViewHelpers.reset_slots!
+    ViewHelpers.content_for_set(:head, "<meta name=\"turbo-cache-control\">")
+    ViewHelpers.content_for_set(:head, "\n<meta name=\"current-room-id\">")
+    assert_equal "<meta name=\"turbo-cache-control\">\n<meta name=\"current-room-id\">",
+                 ViewHelpers.get_slot(:head)
+    ViewHelpers.reset_slots!
+  end
+
   def test_content_for_get_missing_returns_nil
     assert_nil ViewHelpers.content_for_get(:nope)
   end

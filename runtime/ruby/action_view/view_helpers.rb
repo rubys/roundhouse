@@ -35,8 +35,29 @@ module ActionView
       @slots = {}
     end
 
+    # The DEPOSIT form of `content_for` (its getter pair is
+    # `content_for_get`) — and it APPENDS, because that is what Rails
+    # does: `content_for(:slot, value)` runs `@view_flow.append` unless
+    # the caller passes `flush: true`, and `provide` — what turbo's
+    # DriveHelper family calls — is `append!` with no flush option at
+    # all.
+    #
+    # Overwriting cost campfire's rooms/show its `turbo-cache-control`
+    # meta: the page wraps `<% content_for :head do %>` around a
+    # `<%= turbo_exempts_page_from_preview %>`, so the outer deposit
+    # landed on top of the inner one and the directive vanished. Every
+    # page that fills one slot from two places had the same hole.
+    #
+    # The prior value is read into a LOCAL first. Inlining it as
+    # `@slots[slot] = get_slot(slot) + value` reads the same store
+    # inside its own write, and rust2 transpiles this file to a
+    # thread-local `RefCell`: the read's `borrow()` lands inside the
+    # write's live `borrow_mut()` and every view render panics with
+    # "RefCell already mutably borrowed". Ruby doesn't care; the
+    # strict targets do.
     def self.content_for_set(slot, value)
-      @slots[slot] = value
+      prior = get_slot(slot)
+      @slots[slot] = prior + value
       nil
     end
 

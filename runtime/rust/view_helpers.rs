@@ -64,11 +64,12 @@ pub fn get_slot(name: &str) -> String {
     SLOTS.with(|s| s.borrow().get(name).cloned().unwrap_or_default())
 }
 
-/// `content_for(:slot, "body")` — setter form. The 2-arg variant
-/// appends into the named slot (Rails semantics); emit-time the
-/// append vs overwrite behavior rarely matters for the scaffold,
-/// but we mirror Rails to avoid a surprise. Returns empty so the
-/// surrounding concat doesn't double-count the stashed value.
+/// `content_for(:slot, "body")` — the deposit form. Appends into the
+/// named slot, which is Rails semantics (`@view_flow.append` unless
+/// the caller passes `flush: true`; `provide` is `append!`). This
+/// runtime had it right while ruby/python/go overwrote — campfire's
+/// rooms/show is where that mattered: an outer `content_for :head`
+/// block wrapping a `provide :head` lost the inner directive.
 pub fn content_for_set(slot: &str, body: &str) {
     SLOTS.with(|s| {
         let mut map = s.borrow_mut();

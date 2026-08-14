@@ -67,7 +67,11 @@ def get_slot(name: str) -> str:
 
 
 def content_for_set(slot: str, body: str) -> None:
-    _state().setdefault("slots", {})[slot] = body
+    # Appends, like Rails' `content_for` (`@view_flow.append` unless
+    # `flush: true`) and `provide` (`append!`). See the Ruby runtime's
+    # copy for the campfire rooms/show case overwriting broke.
+    slots = _state().setdefault("slots", {})
+    slots[slot] = slots.get(slot, "") + body
 
 
 def content_for_get(slot: str) -> str:
