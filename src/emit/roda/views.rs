@@ -236,7 +236,19 @@ pub(super) fn translate_erb(src: &str, cx: &ViewCx, dir: &str) -> String {
         // static in the conversion.
         if trimmed.starts_with("<% content_for") {
             let inner = trimmed.trim_start_matches("<%").trim_end_matches("%>").trim();
-            out.push(format!("{pad}<%# ROUNDHOUSE-TODO: {inner} (layout title is static) %>"));
+            // The BLOCK form (`<% content_for :head do %> … <% end %>`)
+            // takes its body and its `end` with it. Commenting out the
+            // opener alone orphans the `<% end %>`, and the converted
+            // template no longer PARSES. Only the statement form (a
+            // static title) had ever reached here, so the orphan sat
+            // unexercised until a fixture wrote the block form.
+            let why = if delta > 0 {
+                drop_depth = Some(depth - delta);
+                "layout slots are static"
+            } else {
+                "layout title is static"
+            };
+            out.push(format!("{pad}<%# ROUNDHOUSE-TODO: {inner} ({why}) %>"));
             continue;
         }
         out.push(line.trim_end().to_string());
