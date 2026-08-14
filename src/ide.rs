@@ -951,8 +951,19 @@ fn render_record(row: &Row) -> String {
 
 /// Byte offset → zero-based UTF-16 [`Position`]. Offsets past EOF clamp to
 /// the end, matching how editors keep sending stale positions mid-edit.
+///
+/// An offset landing INSIDE a character clamps back to that character's
+/// start, which is what the round-trip contract already assumed. Slicing
+/// there instead panics, and the offsets reaching here are not all
+/// boundary-aligned: they come from spans over real source, where one
+/// non-ASCII character (an em dash in a template comment is enough) puts
+/// interior byte positions in range. An LSP query must not crash the
+/// server.
 pub fn offset_to_position(text: &str, offset: u32) -> Position {
-    let offset = (offset as usize).min(text.len());
+    let mut offset = (offset as usize).min(text.len());
+    while offset > 0 && !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
     let before = &text.as_bytes()[..offset];
     let line = before.iter().filter(|&&b| b == b'\n').count() as u32;
     let line_start = before.iter().rposition(|&b| b == b'\n').map(|p| p + 1).unwrap_or(0);
@@ -2653,6 +2664,19 @@ mod tests {
         assert_eq!(offset_to_position(text, 2), Position { line: 0, character: 1 });
         assert_eq!(offset_to_position(text, 6), Position { line: 0, character: 3 });
         assert_eq!(position_to_offset(text, Position { line: 0, character: 3 }), 6);
+    }
+
+    /// An offset pointing INTO a character clamps to that character's
+    /// start instead of panicking on a non-boundary slice. Every
+    /// interior byte of a template's em dash is such an offset.
+    #[test]
+    fn position_clamps_inside_a_multibyte_char() {
+        let text = "a — b";
+        // "—" occupies bytes 2..5.
+        let start = offset_to_position(text, 2);
+        assert_eq!(start, Position { line: 0, character: 2 });
+        assert_eq!(offset_to_position(text, 3), start);
+        assert_eq!(offset_to_position(text, 4), start);
     }
 
     #[test]
