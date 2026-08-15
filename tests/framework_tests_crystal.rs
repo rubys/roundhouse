@@ -210,3 +210,30 @@ fn view_helpers_test_passes_under_crystal() {
         "view_helpers",
     );
 }
+
+#[test]
+#[ignore]
+fn json_builder_test_passes_under_crystal() {
+    build_and_run(
+        Path::new("runtime/ruby/test/json_builder_test.rb"),
+        "json_builder",
+    );
+}
+
+// The five remaining canonical suites — action_view/slots_test,
+// active_record/registry_test, action_controller/cookies_test,
+// action_text_test, action_view/date_helper_test — are NOT wired here,
+// and the reason is not this harness.
+//
+// They test framework classes that NO target's runtime transpiles. Every
+// target's `runtime_loader` list carries the same nine units (inflector,
+// json_builder, router, view_helpers, ar/base, ar/errors, ac/base,
+// flash, session); `action_view/slots.rb`, `active_record/registry.rb`,
+// `action_controller/cookies.rb`, `action_text.rb` and
+// `action_view/date_helper.rb` are in none of them. Wiring the gates
+// would only produce "undefined constant Slots" — the class isn't
+// emitted because the framework file isn't in the transpile set.
+//
+// So these are a runtime-coverage dependency, not a gate to wire, and
+// the ceiling for a non-Ruby target today is seven files, not twelve.
+// Tracked in #34 §1.

@@ -2143,7 +2143,19 @@ fn js_send_inner(
             // on subsequent template-literal interpolations.
             Some("Symbol") => typeof_is("string"),
             Some("Array") => is_array(),
-            Some("TrueClass") | Some("FalseClass") => typeof_is("boolean"),
+            // `TrueClass` and `FalseClass` are DISTINCT Ruby classes, and
+            // code that tests them tests them separately — JsonBuilder's
+            // `encode_value` returns "true" for one and "false" for the
+            // other. Collapsing both to `typeof === "boolean"` made the
+            // first arm swallow the second, so `encode_value(false)`
+            // answered "true". Compare against the value, the way every
+            // other target does.
+            Some("TrueClass") => {
+                Js::binary(span, "===", js_expr(r), Js::new(span, JsExpr::Bool(true)))
+            }
+            Some("FalseClass") => {
+                Js::binary(span, "===", js_expr(r), Js::new(span, JsExpr::Bool(false)))
+            }
             // Ruby's `Hash` is a plain object in JS — no constructor
             // class to `instanceof` against. The plain-object check
             // is "typeof object && not null && not array".

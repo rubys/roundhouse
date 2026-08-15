@@ -257,10 +257,19 @@ pub(super) fn emit_is_a(recv: &Expr, class_arg: &Expr) -> String {
         "String" => Some("is_string"),
         "Integer" => Some("is_i64"),
         "Float" => Some("is_f64"),
-        "TrueClass" | "FalseClass" => Some("is_boolean"),
         "NilClass" => Some("is_null"),
         _ => None,
     };
+    // `TrueClass` and `FalseClass` are DISTINCT Ruby classes, and code
+    // that tests them tests them separately — JsonBuilder's `encode_value`
+    // returns "true" for one and "false" for the other. Both mapping to
+    // `is_boolean()` made the first arm swallow the second, so
+    // `encode_value(false)` answered "true". Compare the value itself.
+    match class_name.as_str() {
+        "TrueClass" => return format!("{recv_s} == true"),
+        "FalseClass" => return format!("{recv_s} == false"),
+        _ => {}
+    }
     match predicate {
         Some(p) => format!("{recv_s}.{p}()"),
         None => format!("/* is_a?({class_name}): no Value variant */ false"),

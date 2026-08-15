@@ -209,3 +209,33 @@ fn inflector_test_passes_under_tsx() {
         "inflector",
     );
 }
+
+#[test]
+#[ignore]
+fn json_builder_test_passes_under_tsx() {
+    build_and_run(
+        Path::new("runtime/ruby/test/json_builder_test.rb"),
+        "json_builder",
+    );
+}
+
+// The five remaining canonical suites — action_view/slots_test,
+// active_record/registry_test, action_controller/cookies_test,
+// action_text_test, action_view/date_helper_test — are NOT wired here,
+// and the reason is not this harness.
+//
+// They test framework classes that NO target's runtime transpiles. Every
+// target's `runtime_loader` list carries the same nine units (inflector,
+// json_builder, router, view_helpers, ar/base, ar/errors, ac/base,
+// flash, session); `action_view/slots.rb`, `active_record/registry.rb`,
+// `action_controller/cookies.rb`, `action_text.rb` and
+// `action_view/date_helper.rb` are in none of them. Wiring the gates
+// would only produce `ReferenceError: Slots is not defined` — the class
+// isn't emitted because the framework file isn't in the transpile set.
+// (slots.rb says as much in its own header: it's promoted ahead of the
+// lowerer change that threads Slots through the view chain.)
+//
+// So these are a runtime-coverage dependency, not a gate to wire, and
+// the ceiling for a non-Ruby target today is seven files, not twelve.
+// Adding a `runtime_entry!` is the prerequisite; the gate is a two-line
+// follow-on. Tracked in #34 §1.
