@@ -94,6 +94,16 @@ pub fn lower_test_modules_with_inner(
         .collect();
     for inner in inner_classes_per_module.iter().flatten() {
         let mut info = crate::lower::class_info_from_library_class(inner);
+        // Inherit the parent's instance surface. `class TestController <
+        // ActionController::Base` declared inside a test file is ingested
+        // as a plain LibraryClass — none of the controller lowering runs
+        // — so without this the registry knows only the three actions the
+        // stand-in declares, and both `@controller.session` at a test
+        // call site and a bare `render(...)` inside the stand-in's own
+        // body dispatch against nothing. The parent is already in
+        // `classes`: each target's test-emit branch seeds `extras` from
+        // `app.rbs_signatures`, which carries every framework `.rbs`.
+        inherit_parent_surface(&mut info, inner.parent.as_ref(), &classes);
         // Synthesize `new() -> Self` if the inner class doesn't
         // explicitly declare one. Ruby's class-level `.new` is
         // implicit; without registering it the typer leaves
@@ -261,23 +271,92 @@ pub fn lower_test_modules_with_inner(
 ///      inferred body type into each synthesized signature's return
 ///      slot. `initialize` is pinned to a nil (void) return rather than
 ///      the type of its last assignment.
+/// Copy a parent class's instance surface onto `info` for every name
+/// the subclass doesn't declare itself. Only the names are inherited —
+/// an override keeps its own entry, which `type_inner_class` then pins
+/// to the parent's *signature*.
+fn inherit_parent_surface(
+    info: &mut ClassInfo,
+    parent: Option<&ClassId>,
+    classes: &HashMap<ClassId, ClassInfo>,
+) {
+    let Some(pinfo) = parent.and_then(|p| classes.get(p)) else { return };
+    for (name, sig) in &pinfo.instance_methods {
+        info.instance_methods.entry(name.clone()).or_insert_with(|| sig.clone());
+    }
+    for (name, kind) in &pinfo.instance_method_kinds {
+        info.instance_method_kinds.entry(name.clone()).or_insert(*kind);
+    }
+}
+
+/// Take the parent signature's TYPES but this definition's parameter
+/// NAMES. The framework `.rbs` names its parameters for documentation
+/// (`def []: (String name) -> …`); the stand-in's body refers to its own
+/// (`def [](field)`), and any emitter that renders a parameter list from
+/// the signature rather than from `MethodDef.params` would otherwise
+/// declare `name` and leave the body reading an unbound `field`.
+fn adopt_param_names(ty: Ty, params: &[crate::dialect::Param]) -> Ty {
+    let Ty::Fn { params: sig_params, block, ret, effects } = ty else { return ty };
+    let renamed = sig_params
+        .into_iter()
+        .zip(params)
+        .map(|(sp, p)| crate::ty::Param { name: p.name.clone(), ..sp })
+        .collect();
+    Ty::Fn { params: renamed, block, ret, effects }
+}
+
 fn type_inner_class(inner: &mut LibraryClass, classes: &HashMap<ClassId, ClassInfo>) {
     let empty_ivars: HashMap<Symbol, Ty> = HashMap::new();
 
+    // An override has to keep the shape it overrides. `def
+    // process_action(action_name)` in a `< ActionController::Base`
+    // stand-in carries no annotation, so the params-only synthesis below
+    // would infer `(untyped) -> untyped` — which every statically-typed
+    // target then emits as a method that overrides nothing (Kotlin
+    // `Any?`, Swift `Any?`) while the `case action_name.to_sym` inside
+    // has no String to match against. Take the parent's declared
+    // signature instead; param NAMES still come from this definition
+    // (emit zips `m.params` against the signature positionally), so the
+    // RBS's `_action_name` doesn't leak into the body.
+    let parent_methods: HashMap<Symbol, Ty> = inner
+        .parent
+        .as_ref()
+        .and_then(|p| classes.get(p))
+        .map(|i| i.instance_methods.clone())
+        .unwrap_or_default();
+
     // Pass 1 — provisional signatures (so params bind from defaults) +
     // first typing. Track which methods we synthesized so pass 3 only
-    // refines those, never clobbering a signature ingest supplied.
+    // refines those, never clobbering a signature ingest supplied or one
+    // adopted from the parent.
     let synthesized: Vec<bool> = inner
         .methods
         .iter_mut()
         .map(|method| {
-            let was_none = method.signature.is_none();
-            if was_none {
-                method.signature =
-                    Some(signature_from_params(&method.params, classes, Ty::Untyped));
+            if method.signature.is_some() {
+                crate::lower::typing::type_method_body(method, classes, &empty_ivars);
+                return false;
             }
+            // Only a same-arity, non-constructor definition is an
+            // override of the parent's shape. `initialize` is excluded on
+            // principle (Ruby constructors aren't a dispatch contract),
+            // and the arity guard keeps a stand-in that merely REUSES a
+            // framework method's name — `Article#initialize(attrs)` next
+            // to `ActiveRecord::Base#initialize`'s three — from
+            // inheriting a signature its own body contradicts.
+            let inherited = parent_methods
+                .get(&method.name)
+                .filter(|_| method.name.as_str() != "initialize")
+                .filter(|ty| {
+                    matches!(ty, Ty::Fn { params, .. } if params.len() == method.params.len())
+                })
+                .cloned()
+                .map(|ty| adopt_param_names(ty, &method.params));
+            let adopted = inherited.is_some();
+            method.signature = inherited
+                .or_else(|| Some(signature_from_params(&method.params, classes, Ty::Untyped)));
             crate::lower::typing::type_method_body(method, classes, &empty_ivars);
-            was_none
+            !adopted
         })
         .collect();
 

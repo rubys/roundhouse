@@ -213,6 +213,61 @@ fn is_error_class_name(name: &str) -> bool {
     ERROR_CLASSES.with(|m| m.borrow().contains(name))
 }
 
+/// Ruby's `Module#<` family. `RecordNotFound < StandardError` is a
+/// subclass test over two class objects, not a value comparison — the
+/// classifier hands it back as [`CmpCase::ClassSubclass`] and every
+/// target renders it its own way (Crystal infix, TS prototype chain).
+///
+/// Swift's metatype `is` covers both halves of what Ruby's `<` means
+/// here in one form: `Child.self is Parent.Type` for class inheritance,
+/// and `RecordNotFound.self is Error.Type` for the protocol conformance
+/// a `< StandardError` transpile actually becomes (see
+/// `library::emit_library_class`). Swift warns "'is' test is always
+/// true" when it can prove the relation statically — which is the
+/// compiler confirming the assertion, not a problem.
+///
+/// Non-strict: `X.self is X.Type` is true, where Ruby's `<` is false.
+/// The identity guard that would fix it (`X.self != Y.self`) doesn't
+/// typecheck when the right side is a protocol metatype, and no call
+/// site compares a class against itself.
+///
+/// Returns `None` — falling through to native infix — unless both
+/// operands are literal constant references, which is the only shape
+/// that can name a metatype.
+fn emit_class_relation(recv: &Expr, method: &str, arg: &Expr) -> Option<String> {
+    if !matches!(method, "<" | "<=" | ">" | ">=") {
+        return None;
+    }
+    use crate::emit::shared::cmp::{classify_cmp, CmpCase};
+    if !matches!(classify_cmp(recv, arg), CmpCase::ClassSubclass) {
+        return None;
+    }
+    let (sub, sup) = if matches!(method, "<" | "<=") { (recv, arg) } else { (arg, recv) };
+    let (ExprNode::Const { path: sub_path }, ExprNode::Const { path: sup_path }) =
+        (&*sub.node, &*sup.node)
+    else {
+        return None;
+    };
+    Some(format!(
+        "({}.self is {}.Type)",
+        class_relation_ref(sub_path),
+        class_relation_ref(sup_path)
+    ))
+}
+
+/// Name a class for a metatype position. Mirrors the parent-clause
+/// mapping in `library::emit_library_class`: Ruby's error roots have no
+/// Swift class analog, so a `< StandardError` transpile conforms to
+/// `Error` and that is what the relation must name.
+fn class_relation_ref(path: &[crate::ident::Symbol]) -> String {
+    let joined = path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::");
+    let last = joined.rsplit("::").next().unwrap_or(joined.as_str());
+    if matches!(last, "StandardError" | "RuntimeError" | "Exception") {
+        return "Error".to_string();
+    }
+    super::naming::type_name(&joined)
+}
+
 /// Flag the class being emitted as an Error-conforming error class.
 pub(super) fn set_error_class(flag: bool) {
     IN_ERROR_CLASS.with(|f| *f.borrow_mut() = flag);
@@ -334,7 +389,18 @@ fn emit_call_args(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
                 // Self-send: the current class (ancestors walk in
                 // the lookup).
                 ExprNode::SelfRef => Some(CURRENT_CLASS.with(|c| c.borrow().clone())),
-                _ => None,
+                // Typed value receiver — `@controller.render("err",
+                // status: :unprocessable_entity)` in a test body. The
+                // annotation names the class just as well as a Const
+                // does; without this arm every kwarg call through a
+                // local or ivar falls back to a dictionary literal and
+                // fails to typecheck against the real parameter list.
+                _ => match r.ty.as_ref() {
+                    Some(crate::ty::Ty::Class { id, .. }) => {
+                        Some(super::naming::type_name(id.0.as_str()))
+                    }
+                    _ => None,
+                },
             },
             None => Some(CURRENT_CLASS.with(|c| c.borrow().clone())),
         };
@@ -459,6 +525,41 @@ pub(super) fn ancestor_has(class: &str, name: &str, statics: bool) -> bool {
         cur = CLASS_PARENTS.with(|m| m.borrow().get(&c).cloned());
     }
     false
+}
+
+/// Does this block body contain a raise that `emit_raise` renders as a
+/// real `throw`? Message-only raises are `fatalError` (divergent, not
+/// throwing) everywhere except inside a test class, where the inlined
+/// minitest assertions lower to `throw RhTestFailure(…)`; a raise of an
+/// Error-conforming class always throws.
+fn block_body_throws(e: &Expr) -> bool {
+    if let ExprNode::Raise { value } = &*e.node {
+        let error_class = match &*value.node {
+            ExprNode::Const { path } => Some(path),
+            ExprNode::Send { recv: Some(r), method, .. } if method.as_str() == "new" => {
+                match &*r.node {
+                    ExprNode::Const { path } => Some(path),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+        .map(|path| {
+            let joined = path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join("::");
+            is_error_class_name(&super::naming::type_name(&joined))
+        })
+        .unwrap_or(false);
+        if error_class || IN_TEST_CLASS.with(|f| *f.borrow()) {
+            return true;
+        }
+    }
+    let mut hit = false;
+    e.node.for_each_child(&mut |c| {
+        if !hit && block_body_throws(c) {
+            hit = true;
+        }
+    });
+    hit
 }
 
 fn is_known_instance_method(recv: &Expr, method: &str) -> bool {
@@ -1163,7 +1264,7 @@ fn emit_node(n: &ExprNode, e: &Expr) -> String {
             let joined: Vec<String> = path.iter().map(|s| s.to_string()).collect();
             super::naming::type_name(&joined.join("::"))
         }
-        ExprNode::Hash { entries, .. } => emit_hash(entries),
+        ExprNode::Hash { entries, .. } => emit_hash(entries, e),
         ExprNode::Array { elements, .. } => emit_array(elements, e),
         ExprNode::StringInterp { parts } => emit_string_interp(parts),
         ExprNode::BoolOp { op, left, right, .. } => emit_bool_op(*op, left, right, e),
@@ -1332,17 +1433,39 @@ fn escape_str(s: &str) -> String {
     out
 }
 
-fn emit_hash(entries: &[(Expr, Expr)]) -> String {
+fn emit_hash(entries: &[(Expr, Expr)], e: &Expr) -> String {
+    // Heterogeneous values defeat dictionary-literal inference, so the
+    // element type is always pinned, the way Kotlin pins
+    // `mutableMapOf<String, Any?>`. Pin it to the ANNOTATED types when
+    // the analyzer proved both concrete: `{ok: 200, created: 201, …}` is
+    // `Hash[Sym, Int]`, and pinning it to `Any?` there would erase the
+    // value type for everything downstream — an `each` over it binds its
+    // block params to `Any?`, and comparing one against an `Int` return
+    // no longer typechecks.
+    let dict_ty = match e.ty.as_ref() {
+        Some(crate::ty::Ty::Hash { key, value })
+            if is_concrete_elem(key) && is_concrete_elem(value) =>
+        {
+            format!("[{}: {}]", swift_ty(key), swift_ty(value))
+        }
+        _ => "[String: Any?]".to_string(),
+    };
     if entries.is_empty() {
-        return "[String: Any?]()".to_string();
+        return format!("{dict_ty}()");
     }
     let pairs: Vec<String> = entries
         .iter()
         .map(|(k, v)| format!("{}: {}", emit_expr(k), emit_expr(v)))
         .collect();
-    // Heterogeneous values defeat dictionary-literal inference, so pin
-    // the element type the way Kotlin pins `mutableMapOf<String, Any?>`.
-    format!("([{}] as [String: Any?])", pairs.join(", "))
+    format!("([{}] as {dict_ty})", pairs.join(", "))
+}
+
+/// A type precise enough to pin a container literal to. The gradual and
+/// inference-gap variants would render as `Any?` anyway, and `Nil` /
+/// `Bottom` name no storable value.
+fn is_concrete_elem(ty: &crate::ty::Ty) -> bool {
+    use crate::ty::Ty;
+    !matches!(ty, Ty::Untyped | Ty::Var { .. } | Ty::Nil | Ty::Bottom | Ty::Union { .. })
 }
 
 fn emit_array(elements: &[Expr], e: &Expr) -> String {
@@ -2347,6 +2470,9 @@ fn emit_send(
 
     // Binary operators with a receiver and one arg.
     if let (Some(r), 1) = (recv, args.len()) {
+        if let Some(rel) = emit_class_relation(r, method, &args[0]) {
+            return rel;
+        }
         match crate::emit::shared::ops::classify_binop(method) {
             crate::emit::shared::ops::BinopCase::NativeInfix(op) => {
                 return format!("{} {} {}", emit_expr(r), op, args_s[0]);
@@ -2404,11 +2530,23 @@ fn emit_send(
             return format!("{}.removeValue(forKey: {})", emit_expr(r), args_s[0]);
         }
         if method == "merge" {
-            return format!(
-                "{}.merging({}) {{ (_, new) in new }}",
-                emit_expr(r),
-                args_s[0]
-            );
+            // `merging` is homogeneous — both dictionaries must share a
+            // Value type. Ruby's `merge` isn't, and the literal receiver
+            // carries its own precise annotation (`{href: href}` is
+            // `Hash[Str, Str]`), so upcast it to the argument's
+            // dictionary type. The attribute bags the view helpers merge
+            // into are `[String: Any?]`; without the upcast a
+            // `[String: String]` receiver rejects them.
+            let rs = emit_expr(r);
+            let recv_dict = r.ty.as_ref().map(swift_ty);
+            let arg_dict = args[0].ty.as_ref().filter(|t| {
+                matches!(t, crate::ty::Ty::Hash { .. })
+            }).map(swift_ty);
+            let lhs = match (&recv_dict, &arg_dict) {
+                (Some(rd), Some(ad)) if rd != ad => format!("({rs} as {ad})"),
+                _ => rs,
+            };
+            return format!("{lhs}.merging({}) {{ (_, new) in new }}", args_s[0]);
         }
     }
     if let (Some(r), 2) = (recv, args.len()) {
@@ -2462,7 +2600,16 @@ fn emit_send(
     // Zero-arg receiver sends: builtin coercions, then property vs method.
     if let (Some(r), true) = (recv, args.is_empty() && block.is_none()) {
         let rs = emit_expr(r);
-        match method {
+        // A transpiled class that declares the name itself wins over the
+        // builtin coercion below. `flash.length` / `flash.empty?` are
+        // real methods on the transpiled `ActionDispatch::Flash` — the
+        // Ruby source spells them out precisely so every target has
+        // them — and rewriting either to Swift's `.count` / `.isEmpty`
+        // names something the class doesn't have. A sentinel scrutinee
+        // (no arm matches it) drops through to the general call path
+        // below, which still sees the real `method`.
+        let coercible = if is_known_instance_method(r, method) { "\0" } else { method };
+        match coercible {
             "nil?" => return format!("({rs} == nil)"),
             // `to_s`: identity on a String; plain interpolation for
             // provably-scalar receivers; the RhString.s unwrapper for
@@ -2477,6 +2624,12 @@ fn emit_send(
                     _ => format!("RhString.s({rs})"),
                 };
             }
+            // Symbols are Strings in every target's lowering, so
+            // `to_sym` is the identity — drop the call and return the
+            // receiver. Same rule as crystal/typescript; without it
+            // `action_name.to_sym` renders as a `.toSym` property read
+            // that resolves to nothing.
+            "to_sym" => return rs,
             "to_i" => return format!("Int(\"\\({rs})\")!"),
             "to_f" => return format!("Double(\"\\({rs})\")!"),
             "empty?" => return format!("{rs}.isEmpty"),
@@ -2576,10 +2729,16 @@ fn emit_send(
             Some(r) => format!("{}.{sw_method}", emit_expr(r)),
             None => sw_method,
         };
+        // `forEach` (and the rest of the sequence API) is `rethrows`: a
+        // closure that throws makes the CALL throw, so it needs its own
+        // `try`. The inlined minitest assertions inside an `each` block
+        // — `expectations.each { |sym, code| assert_equal … }` — are
+        // exactly that shape.
+        let try_kw = if block_body_throws(b) { "try " } else { "" };
         if args_s.is_empty() {
-            return format!("{base} {lam}");
+            return format!("{try_kw}{base} {lam}");
         }
-        return format!("{base}({}) {lam}", args_s.join(", "));
+        return format!("{try_kw}{base}({}) {lam}", args_s.join(", "));
     }
 
     // Stdlib-bridging Const receivers (the Kotlin special cases).

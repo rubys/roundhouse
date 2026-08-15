@@ -179,6 +179,30 @@ fn view_helpers_test_passes_under_swift() {
     );
 }
 
+// errors + ac_base were the last deferred pair; both are green now and CI
+// runs this file unfiltered. What it took, recorded because kotlin needed
+// the same four fixes and rust still does:
+//   - errors:  `RecordNotFound < StandardError` is Ruby class-reflection,
+//     not value comparison. Swift's metatype `is` covers both halves of
+//     what Ruby means here — `Child.self is Parent.Type` for inheritance,
+//     `RecordNotFound.self is Error.Type` for the protocol conformance a
+//     `< StandardError` transpile actually becomes.
+//   - ac_base: the inline `TestController < ActionController::Base` is
+//     ingested as a plain LibraryClass, so none of the controller
+//     lowering runs. Fixed at the LOWERING (shared by every target): an
+//     inner class now inherits its parent's instance surface and takes
+//     the parent's signature for a same-arity override.
+//
+// STILL VACUOUS, and not a swift gap: `assert_raises(NotImplementedError)
+// { … }` emits as `/* TODO BeginRescue */`, so
+// `testBaseProcessActionRaisesWhenNotOverridden` asserts nothing. Same on
+// kotlin. Tracked in roundhouse#34.
+//
+// The errors file's SECOND top-level test class (`RecordInvalidTest`) is
+// still dropped by ingest's single-`*Test`-class pick — see the note in
+// `src/ingest/test.rs`. That drop is cross-target (crystal and typescript
+// run the same 3 of 9 tests), and reaching it needs `Struct.new(:errors)`
+// support, not wiring.
 #[test]
 #[ignore]
 fn errors_test_passes_under_swift() {

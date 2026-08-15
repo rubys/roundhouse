@@ -249,14 +249,13 @@ jobs:
           swift-version: '6.1'
       - name: Install libsqlite3-dev (CSQLite systemLibrary)
         run: sudo apt-get update -q && sudo apt-get install -y -q libsqlite3-dev
-      # Scoped to the green subset (inflector + router + view_helpers —
-      # the same three kotlin runs). The remaining two canonical gates
-      # (errors / ac_base) are wired in the test file but fail on the
-      # SAME emit-gap families kotlin defers (class-reflection
-      # `< StandardError`; controller-body typing). Drop names as those
-      # gaps close. Tracked in #34.
-      - name: cargo test --test framework_tests_swift (green subset)
-        run: cargo test --test framework_tests_swift -- --ignored --nocapture inflector router view_helpers
+      # Unfiltered: all five wired suites (inflector, router,
+      # view_helpers, errors, ac_base) run. The last two joined when the
+      # class-reflection `< StandardError` emit and the inline
+      # `TestController < ActionController::Base` typing landed — the
+      # same pass that un-filtered framework-tests-kotlin.
+      - name: cargo test --test framework_tests_swift
+        run: cargo test --test framework_tests_swift -- --ignored --nocapture
 
   # toolchain-typescript: tsc parity + node:test on real-blog,
   # under both the default (`node-sync`, better-sqlite3) profile
@@ -514,14 +513,13 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.5.1'
-      # Scoped to the green subset (inflector + router + view_helpers). The
-      # remaining two canonical gates (errors / ac_base) are wired in the
-      # test file but still fail on deeper kotlin emit gaps (class-reflection
-      # `< StandardError`; controller-body typing) — see the comment there.
-      # Same filter convention as toolchain-typescript's tiny_blog exclusion;
-      # drop names as those gaps close. Tracked in #34.
-      - name: cargo test --test framework_tests_kotlin (green subset)
-        run: cargo test --test framework_tests_kotlin -- --ignored --nocapture inflector router view_helpers
+      # Unfiltered: all five wired suites (inflector, router,
+      # view_helpers, errors, ac_base) run. The last two joined when the
+      # class-reflection `< StandardError` emit and the inline
+      # `TestController < ActionController::Base` typing landed — the
+      # same pass that un-filtered framework-tests-swift.
+      - name: cargo test --test framework_tests_kotlin
+        run: cargo test --test framework_tests_kotlin -- --ignored --nocapture
 
   framework-tests-rust:
     # Per-target framework-test conformance gate for the Rust target.

@@ -209,21 +209,31 @@ fn view_helpers_test_passes_under_kotlin() {
     );
 }
 
-// The two gates below still FAIL on deeper kotlin emit gaps (NOT wiring —
-// the inner helper classes now emit, but their bodies hit target-specific
-// gaps the inflector/router/view_helpers slices don't):
-//   - errors:  `RecordNotFound < StandardError` is Ruby class-reflection
-//     (emitted as a `<` / `compareTo` over unresolved `StandardError`), and
-//     the file's second top-level `*Test` class is dropped by ingest's
-//     single-test-class pick.
-//   - ac_base: the inline `TestController < ActionController::Base` body
-//     surfaces several gaps at once — `processAction` override signature,
-//     `toSym`, params `Map`-vs-`String` typing, String method mapping.
-// Both pass under the typescript/crystal gates, so there's a reference
-// shape to port. Until then CI runs the green subset (inflector + router +
-// view_helpers) — same convention as toolchain-typescript's tiny_blog
-// filter. Tracked in roundhouse#34. Run all five locally with:
-//   cargo test --test framework_tests_kotlin -- --ignored
+// The two gates below were the last deferred pair; both are green now and
+// CI runs this file unfiltered. What it took, recorded because the swift
+// gate needed the same four fixes and the rust one still does:
+//   - errors:  `RecordNotFound < StandardError` is Ruby class-reflection,
+//     not value comparison. Kotlin renders it as the JVM's
+//     `RuntimeException::class.java.isAssignableFrom(RecordNotFound::class
+//     .java)` — a real runtime check, no kotlin-reflect needed.
+//   - ac_base: the inline `TestController < ActionController::Base` is
+//     ingested as a plain LibraryClass, so none of the controller
+//     lowering runs. Fixed at the LOWERING (shared by every target): an
+//     inner class now inherits its parent's instance surface and takes
+//     the parent's signature for a same-arity override, which is what
+//     turns `processAction(actionName: Any?): Any?` into a real override
+//     and lets `redirect_to(notice:)` splat to named arguments.
+//
+// STILL VACUOUS, and not a kotlin gap: `assert_raises(NotImplementedError)
+// { … }` emits as `/* TODO BeginRescue */`, so
+// `testBaseProcessActionRaisesWhenNotOverridden` asserts nothing. Same on
+// swift. Tracked in roundhouse#34.
+//
+// The file's SECOND top-level test class (`RecordInvalidTest`) is still
+// dropped by ingest's single-`*Test`-class pick — see the note in
+// `src/ingest/test.rs`. That drop is cross-target (crystal and typescript
+// run the same 3 of 9 tests), and reaching it needs `Struct.new(:errors)`
+// support, not wiring.
 #[test]
 #[ignore]
 fn errors_test_passes_under_kotlin() {

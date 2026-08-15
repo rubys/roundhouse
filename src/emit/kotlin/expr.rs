@@ -239,23 +239,40 @@ fn method_params_for(recv: Option<&Expr>, method: &str) -> Option<HashSet<String
             method_params_lookup(&name, method)
         }
         None | Some(ExprNode::SelfRef) => {
-            let mut cur = Some(CURRENT_CLASS.with(|c| c.borrow().clone()));
-            let mut guard = 0;
-            while let Some(c) = cur {
-                guard += 1;
-                if c.is_empty() || guard > 32 {
-                    break;
-                }
-                if let Some(p) = method_params_lookup(&c, method) {
-                    return Some(p);
-                }
-                cur = CLASS_HIERARCHY
-                    .with(|h| h.borrow().get(&c).and_then(|(parent, _)| parent.clone()));
-            }
-            None
+            method_params_up_chain(CURRENT_CLASS.with(|c| c.borrow().clone()), method)
         }
-        _ => None,
+        // Typed value receiver — `@controller.render("err", status:
+        // :unprocessable_entity)` in a test body. The annotation names
+        // the class just as well as a Const does; without this arm every
+        // kwarg call through a local or ivar falls back to a map literal
+        // and fails to typecheck against the real parameter list. The
+        // ancestor walk matters here too: the method is usually the
+        // framework base's, not the stand-in subclass's.
+        _ => match recv.and_then(|r| r.ty.as_ref()) {
+            Some(crate::ty::Ty::Class { id, .. }) => {
+                method_params_up_chain(type_name(id.0.as_str()), method)
+            }
+            _ => None,
+        },
     }
+}
+
+/// Walk `start` up `CLASS_HIERARCHY` looking for a registered parameter
+/// list for `method`. Depth-capped against a malformed cycle.
+fn method_params_up_chain(start: String, method: &str) -> Option<HashSet<String>> {
+    let mut cur = Some(start);
+    let mut guard = 0;
+    while let Some(c) = cur {
+        guard += 1;
+        if c.is_empty() || guard > 32 {
+            break;
+        }
+        if let Some(p) = method_params_lookup(&c, method) {
+            return Some(p);
+        }
+        cur = CLASS_HIERARCHY.with(|h| h.borrow().get(&c).and_then(|(parent, _)| parent.clone()));
+    }
+    None
 }
 
 /// True when the resolved callee has every `key` (camelCased) among its
@@ -299,6 +316,69 @@ fn recv_is_array(r: &Expr) -> bool {
     matches!(&*r.node,
         ExprNode::Ivar { name } | ExprNode::Var { name, .. }
             if matches!(instance_prop_ty(name.as_str()), Some(crate::ty::Ty::Array { .. })))
+}
+
+/// Ruby's `Module#<` family. `RecordNotFound < StandardError` is a
+/// subclass test over two class objects, not a value comparison — the
+/// classifier hands it back as [`CmpCase::ClassSubclass`] and every
+/// target renders it its own way (Crystal infix, TS prototype chain).
+///
+/// Kotlin's answer is the JVM's: `Parent::class.java.isAssignableFrom
+/// (Child::class.java)`, which covers classes and interfaces alike and
+/// needs no `kotlin-reflect` dependency. `isAssignableFrom` is
+/// reflexive, so the strict operators (`<`, `>`) pair it with an
+/// identity guard to match Ruby.
+///
+/// Returns `None` — falling through to native infix — unless both
+/// operands are literal constant references, the only shape that can
+/// name a class literal.
+fn emit_class_relation(recv: &Expr, method: &str, arg: &Expr) -> Option<String> {
+    if !matches!(method, "<" | "<=" | ">" | ">=") {
+        return None;
+    }
+    use crate::emit::shared::cmp::{classify_cmp, CmpCase};
+    if !matches!(classify_cmp(recv, arg), CmpCase::ClassSubclass) {
+        return None;
+    }
+    let (sub, sup) = if matches!(method, "<" | "<=") { (recv, arg) } else { (arg, recv) };
+    let (ExprNode::Const { path: sub_path }, ExprNode::Const { path: sup_path }) =
+        (&*sub.node, &*sup.node)
+    else {
+        return None;
+    };
+    let sub = format!("{}::class.java", class_relation_ref(sub_path));
+    let sup = format!("{}::class.java", class_relation_ref(sup_path));
+    // Strictness via a second `isAssignableFrom` rather than `sub != sup`:
+    // the two operands are differently-parameterized `Class<…>` types, and
+    // Kotlin rejects equality between types it can prove disjoint.
+    Some(if matches!(method, "<" | ">") {
+        format!("({sup}.isAssignableFrom({sub}) && !{sub}.isAssignableFrom({sup}))")
+    } else {
+        format!("({sup}.isAssignableFrom({sub}))")
+    })
+}
+
+/// Name a class for a `::class.java` position. Mirrors the parent-clause
+/// mapping in `library::emit_library_class`: Ruby's error roots have no
+/// Kotlin analog, so a `< StandardError` transpile extends
+/// `RuntimeException` and that is what the relation must name.
+fn class_relation_ref(path: &[crate::ident::Symbol]) -> String {
+    let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
+    let named = type_name(&joined);
+    match named.as_str() {
+        "StandardError" | "RuntimeError" => "RuntimeException".to_string(),
+        _ => named,
+    }
+}
+
+/// Does the receiver's own class (or an ancestor) declare `method`? Used
+/// to keep a transpiled class's real method from being rewritten into a
+/// Kotlin stdlib idiom of the same Ruby name.
+fn recv_declares_method(r: &Expr, method: &str) -> bool {
+    let Some(crate::ty::Ty::Class { id, .. }) = r.ty.as_ref() else {
+        return false;
+    };
+    is_instance_method_of(&type_name(id.0.as_str()), method)
 }
 
 fn is_instance_method_of(class_name: &str, method: &str) -> bool {
@@ -940,6 +1020,36 @@ fn emit_hash(entries: &[(Expr, Expr)], e: &Expr) -> String {
     format!("mutableMapOf<String, Any?>({})", pairs.join(", "))
 }
 
+/// Emit a non-empty hash literal with its ANNOTATED element types when the
+/// analyzer proved both concrete, falling back to `emit_hash`'s
+/// heterogeneous pin otherwise. Safe only where invariance can't bite —
+/// i.e. a local's own initializer, not an argument.
+fn emit_hash_precise(entries: &[(Expr, Expr)], e: &Expr) -> String {
+    if let Some(crate::ty::Ty::Hash { key, value }) = e.ty.as_ref() {
+        if is_concrete_elem(key) && is_concrete_elem(value) {
+            let pairs: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| format!("{} to {}", emit_expr(k), emit_expr(v)))
+                .collect();
+            return format!(
+                "mutableMapOf<{}, {}>({})",
+                kotlin_ty(key),
+                kotlin_ty(value),
+                pairs.join(", ")
+            );
+        }
+    }
+    emit_hash(entries, e)
+}
+
+/// A type precise enough to pin a container literal to. The gradual and
+/// inference-gap variants would render as `Any?` anyway, and `Nil` /
+/// `Bottom` name no storable value.
+fn is_concrete_elem(ty: &crate::ty::Ty) -> bool {
+    use crate::ty::Ty;
+    !matches!(ty, Ty::Untyped | Ty::Var { .. } | Ty::Nil | Ty::Bottom | Ty::Union { .. })
+}
+
 /// Emit a non-empty hash literal with no explicit type arguments, so the
 /// surrounding context (a method's declared `MutableMap<K, V>` return type)
 /// drives inference. Safe only where invariance can't bite — i.e. `return`
@@ -1072,7 +1182,20 @@ fn emit_case(scrutinee: &Expr, arms: &[Arm]) -> String {
 }
 
 fn emit_assign(target: &LValue, value: &Expr) -> String {
-    let val = emit_expr(value);
+    // A hash literal initializing a LOCAL takes its precise annotated
+    // element types. `emit_hash` pins `<String, Any?>` everywhere else on
+    // purpose — Kotlin's Map is invariant, so a precise literal can't be
+    // passed where an `Any?`-valued map is expected — but a local's own
+    // declaration has no such call site, and the precision is what makes
+    // its `forEach` block params bind to real types instead of `Any?`
+    // (`expectations.each { |sym, code| … resolve_status(sym) }` in
+    // `action_controller/base_test`).
+    let val = match (target, &*value.node) {
+        (LValue::Var { .. }, ExprNode::Hash { entries, .. }) if !entries.is_empty() => {
+            emit_hash_precise(entries, value)
+        }
+        _ => emit_expr(value),
+    };
     match target {
         LValue::Var { name, .. } => {
             let n = camel(name.as_str());
@@ -1526,6 +1649,9 @@ fn emit_send(
 
     // Binary operators with a receiver and one arg.
     if let (Some(r), 1) = (recv, args.len()) {
+        if let Some(rel) = emit_class_relation(r, method, &args[0]) {
+            return rel;
+        }
         match crate::emit::shared::ops::classify_binop(method) {
             crate::emit::shared::ops::BinopCase::NativeInfix(op) => {
                 return format!("{} {} {}", emit_expr(r), op, args_s[0]);
@@ -1574,10 +1700,25 @@ fn emit_send(
     // Zero-arg receiver sends: builtin coercions, then property vs method.
     if let (Some(r), true) = (recv, args.is_empty() && block.is_none()) {
         let rs = emit_expr(r);
-        match method {
+        // A transpiled class that declares the name itself wins over the
+        // builtin coercion below. `flash.length` / `flash.empty?` are
+        // real methods on the transpiled `ActionDispatch::Flash` — the
+        // Ruby source spells them out precisely so every target has
+        // them — and rewriting either to Kotlin's `.size` / `.isEmpty()`
+        // names something the class doesn't have. A sentinel scrutinee
+        // (no arm matches it) drops through to the general call path
+        // below, which still sees the real `method`.
+        let coercible = if recv_declares_method(r, method) { "\0" } else { method };
+        match coercible {
             "nil?" => return format!("({rs} == null)"),
             "!" => return format!("!({rs})"),
             "to_s" => return format!("{rs}.toString()"),
+            // Symbols are Strings in every target's lowering, so
+            // `to_sym` is the identity — drop the call and return the
+            // receiver. Same rule as crystal/typescript; without it
+            // `action_name.to_sym` renders as a `.toSym` property read
+            // that resolves to nothing.
+            "to_sym" => return rs,
             "to_i" => return format!("{rs}.toString().toLong()"),
             "to_f" => return format!("{rs}.toString().toDouble()"),
             "empty?" => return format!("{rs}.isEmpty()"),

@@ -525,6 +525,13 @@ pub fn emit_test_class(
 ) -> String {
     let class_name = type_name(lc.name.0.as_str());
     register_params_for(&class_name, &lc.methods);
+    // The inline stand-ins get the same pre-scan the runtime and model
+    // classes get. Without their parent edge in the registry, a test-body
+    // send through one of them (`@controller.redirect_to(notice: …)`,
+    // where `@controller` is a `TestController < ActionController::Base`)
+    // can't walk up to the framework base's parameter list, and the
+    // kwargs hash stays a map literal the callee won't accept.
+    register_class_hierarchy(inner_classes);
     super::expr::set_object_tl_fields(HashSet::new());
 
     let mut out = String::new();
