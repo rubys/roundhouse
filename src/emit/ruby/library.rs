@@ -630,6 +630,41 @@ fn push_assoc_scope_skip(model: &crate::ident::ClassId, method: &Symbol, reason:
     crate::emit::diagnostics::push(d);
 }
 
+/// Give `m` the trailing `__rel = ActiveRecord::Relation.new(self)` that
+/// makes it relation-taking — in the params AND in the signature the
+/// `.rbs` is written from.
+///
+/// The signature half is not optional: a body the typer could resolve
+/// carries a `Ty::Fn`, and the emitted `.rbs` prefers it over the
+/// params, so inserting on one side only publishes `() -> bool` for a
+/// method every call site now passes a relation to. Placement is before
+/// the first keyword in both, since `def f(__rel = …, k:)` is the only
+/// legal ordering.
+fn insert_rel_param(m: &mut crate::dialect::MethodDef, rel_param: &Symbol) {
+    let insert_at = m.params.iter().position(|p| p.keyword).unwrap_or(m.params.len());
+    m.params.insert(
+        insert_at,
+        crate::dialect::Param::with_default(
+            rel_param.clone(),
+            crate::lower::model_to_library::relation_new_self(),
+        ),
+    );
+    if let Some(crate::ty::Ty::Fn { params, .. }) = &mut m.signature {
+        let at = params
+            .iter()
+            .position(|p| matches!(p.kind, crate::ty::ParamKind::Keyword { .. }))
+            .unwrap_or(params.len());
+        params.insert(
+            at,
+            crate::ty::Param {
+                name: rel_param.clone(),
+                ty: crate::ty::Ty::Untyped,
+                kind: crate::ty::ParamKind::Optional,
+            },
+        );
+    }
+}
+
 pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     // `has_rich_text`'s two preload scopes. Ahead of the `any_scopes`
     // early return below, because an app can declare a rich-text
@@ -649,16 +684,8 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     // runs once for models and again for controllers, and the demand
     // for `Session.start!` lives in a CONTROLLER while the parameter
     // has to be inserted on the MODEL.
-    let mut demand: std::collections::HashSet<(Symbol, Symbol)> = Default::default();
-    crate::lower::for_each_hook_body_ref(app, &mut |body| {
-        crate::lower::scope_chain::collect_assoc_method_demand(body, &assocs, &mut demand);
-    });
-    let (assoc_class_methods, declined) = crate::lower::scope_chain::build_assoc_class_methods(
-        &app.models,
-        &assocs,
-        &scopes,
-        &demand,
-    );
+    let (assoc_class_methods, declined) =
+        crate::lower::scope_chain::survey_assoc_class_methods(app, &assocs, &scopes);
     // Reported by the pass that owns the model's own file — this runs
     // once per emitted family over a different `lcs`, and the ledger
     // line should appear once, beside the class it is about.
@@ -714,19 +741,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                     // scope's __rel is not last.
                     && !m.params.iter().any(|p| p.as_str() == "__rel")
                 {
-                    // Insert before keywords for the same reason.
-                    let insert_at = m
-                        .params
-                        .iter()
-                        .position(|p| p.keyword)
-                        .unwrap_or(m.params.len());
-                    m.params.insert(
-                        insert_at,
-                        crate::dialect::Param::with_default(
-                            rel_param.clone(),
-                            crate::lower::model_to_library::relation_new_self(),
-                        ),
-                    );
+                    insert_rel_param(m, &rel_param);
                     crate::lower::scope_chain::rewrite_scope_body(
                         &mut m.body,
                         &lc.name,
@@ -739,31 +754,49 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
             }
             // The association-scope side of the same idea: a class
             // method some call site reaches through a has_many takes
-            // the relation the same way, but reads it as its CREATE
-            // scope — `create!(attrs)` becomes `create!(__rel
-            // .scope_attributes.merge(attrs))`, which is how Rails'
-            // `scope_for_create` gets `user_id` onto the row. The
-            // default `Relation.new(self)` carries no scope attributes,
-            // so a direct `Session.start!(…)` is unchanged.
-            let assoc_registered: Vec<Symbol> = assoc_class_methods
+            // the relation the same way, and reads it in one or both of
+            // two ways. As a CREATE scope — `create!(attrs)` becomes
+            // `create!(__rel.scope_attributes.merge(attrs))`, which is
+            // how Rails' `scope_for_create` gets `user_id` onto the row.
+            // And as a QUERY scope — a bare `count` / `page_before(m)`
+            // roots on `__rel` exactly as it would inside a scope body,
+            // which is what makes `@room.messages.paged?` count THIS
+            // room. The default `Relation.new(self)` is empty and
+            // records no scope attributes, so a direct `Session.start!`
+            // / `Message.paged?` is unchanged.
+            let assoc_registered: Vec<(Symbol, bool, bool)> = assoc_class_methods
                 .get(&lc.name)
-                .map(|m| m.keys().cloned().collect())
+                .map(|m| m.iter().map(|(n, e)| (n.clone(), e.creates, e.queries)).collect())
                 .unwrap_or_default();
             for m in &mut lc.methods {
-                if m.receiver == MethodReceiver::Class
-                    && assoc_registered.contains(&m.name)
-                    && !m.params.iter().any(|p| p.as_str() == "__rel")
+                let Some(&(_, creates, queries)) = assoc_registered
+                    .iter()
+                    .find(|(n, _, _)| *n == m.name)
+                else {
+                    continue;
+                };
+                if m.receiver != MethodReceiver::Class
+                    || m.params.iter().any(|p| p.as_str() == "__rel")
                 {
-                    let insert_at =
-                        m.params.iter().position(|p| p.keyword).unwrap_or(m.params.len());
-                    m.params.insert(
-                        insert_at,
-                        crate::dialect::Param::with_default(
-                            rel_param.clone(),
-                            crate::lower::model_to_library::relation_new_self(),
-                        ),
+                    continue;
+                }
+                insert_rel_param(m, &rel_param);
+                if creates {
+                    crate::lower::scope_chain::merge_scope_attributes(
+                        &mut m.body,
+                        &lc.name,
+                        &rel_param,
                     );
-                    crate::lower::scope_chain::merge_scope_attributes(&mut m.body, &lc.name, &rel_param);
+                }
+                if queries {
+                    crate::lower::scope_chain::rewrite_assoc_scope_body(
+                        &mut m.body,
+                        &lc.name,
+                        &rel_param,
+                        &scopes,
+                        &models,
+                        &assocs,
+                    );
                 }
             }
         }
@@ -795,6 +828,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                 || crate::lower::scope_chain::mentions_assoc_class_method(
                     &m.body,
                     &assocs,
+                    &scopes,
                     &assoc_class_methods,
                 )
                 || (class_self.is_some()

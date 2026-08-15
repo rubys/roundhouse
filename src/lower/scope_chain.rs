@@ -203,38 +203,56 @@ pub fn build_user_method_returns(models: &[Model]) -> UserMethodReturns {
 
 // ---- class methods reached THROUGH an association ------------------
 
-/// Model class methods that CONSTRUCT, called through an association
-/// read — `user.sessions.start!(…)`, `@room.messages.
-/// create_with_attachment!(…)`.
+/// Model class methods called through an association read —
+/// `user.sessions.start!(…)`, `@room.messages.paged?`,
+/// `messages.page_around(m)`.
 ///
 /// Rails runs such a call with the association's relation as the
-/// current scope, so the `create!` inside the method body picks the
-/// foreign key up from it (`scope_for_create`) and the row lands owned
-/// by the right record without anybody naming the column. Our
-/// association read is arel-folded to an Array, so the call doesn't
-/// even resolve — and threading the seeded Relation the way a scope
+/// current scope. Two things follow from that, and a body can want
+/// either or both:
+///
+///   * a CONSTRUCTOR in the body picks the foreign key up from the
+///     scope (`scope_for_create`), so the row lands owned by the right
+///     record without anybody naming the column;
+///   * a QUERY in the body runs against the scope rather than the whole
+///     table — `Message.paged?`'s bare `count` counts THIS ROOM's
+///     messages.
+///
+/// Our association read is arel-folded to an Array, so neither call
+/// even resolves — and threading the seeded Relation the way a scope
 /// takes it is the same mechanism one layer over: the method gains a
-/// trailing `__rel`, the call site passes the seed, and the body's
-/// constructor merges `__rel.scope_attributes` under its own attributes
-/// (Rails lets explicit attributes win).
+/// trailing `__rel`, the call site passes the seed, and the body reads
+/// it. The two halves read it differently — a constructor merges
+/// `__rel.scope_attributes` under its own attributes (Rails lets
+/// explicit attributes win), a query roots on `__rel` exactly as a
+/// scope body does — which is why the registry records which applies.
 ///
 /// Same shape as [`ScopeRegistry`] — model -> name -> the method's own
 /// params — so `thread_rel` pads call sites identically.
-pub type AssocClassMethods = HashMap<ClassId, HashMap<Symbol, Vec<Param>>>;
+pub type AssocClassMethods = HashMap<ClassId, HashMap<Symbol, AssocScopedMethod>>;
+
+/// One registered method: its own params (NOT the synthesized trailing
+/// `__rel`), plus which halves of the association scope its body reads.
+pub struct AssocScopedMethod {
+    pub params: Vec<Param>,
+    /// The body constructs at implicit self — [`merge_scope_attributes`].
+    pub creates: bool,
+    /// The body queries at implicit self — [`rewrite_assoc_scope_body`].
+    pub queries: bool,
+}
 
 /// Constructors a class-method body roots at implicit self. `build` is
 /// absent deliberately: it is a CollectionProxy method, never a class
 /// method, and the proxy form is seeded at the call site instead.
 const SELF_CONSTRUCTORS: &[&str] = &["create", "create!", "new"];
 
-/// What a class-method body's implicit-self constructors can take.
-enum CtorShape {
-    /// No implicit-self constructor — nothing an association scope
-    /// would change; the method is not registered.
+/// What a class-method body does with the association's scope.
+enum AssocScopeShape {
+    /// Neither a constructor nor a query at implicit self — nothing an
+    /// association scope would change; the method is not registered.
     None,
-    /// Every constructor call takes no arguments or exactly one hash,
-    /// so the scope attributes can be merged under them.
-    Mergeable,
+    /// The body reads the scope, in one or both of the two ways.
+    Takes { creates: bool, queries: bool },
     /// A constructor whose argument is neither absent nor a hash —
     /// most often a bare parameter (`create!(attributes)`), where the
     /// value's own shape is unknown here. Registering the method would
@@ -264,12 +282,65 @@ fn self_rooted_ctor(recv: Option<&Expr>, method: &Symbol, owner: &ClassId) -> bo
     }
 }
 
-/// Classify a class method's constructor calls.
-/// All-or-nothing: one unmergeable constructor blocks the method,
-/// because a half-scoped body writes a row with the foreign key missing
-/// — silently the wrong owner rather than a loud failure.
-fn ctor_shape(method_def: &crate::dialect::MethodDef, owner: &ClassId) -> CtorShape {
+/// The AR class methods `ingest::app::qualify_model_class_method_ar_calls`
+/// rewrites from the bare form to `<Model>.…`. Past that pass the two
+/// spellings are the same expression, so reaching one of these THROUGH
+/// the model's own constant has to be read as the implicit self it
+/// stands for. Any other name on the constant is the author's own
+/// writing and keeps its class-level, deliberately unscoped meaning.
+const INGEST_QUALIFIED_AR_CALLS: &[&str] = &["all", "count", "where", "find_by", "exists?"];
+
+/// Is this send a QUERY rooted at the class the body belongs to — the
+/// implicit-self relation surface that Rails runs against the caller's
+/// scope? Four kinds, all unambiguous ON A MODEL'S OWN CLASS METHOD,
+/// because there `self` IS the class: a declared scope of this model,
+/// `all`, a chain method, or a terminal.
+///
+/// Receivers: absent, `self.`, or the model's own constant limited to
+/// [`INGEST_QUALIFIED_AR_CALLS`] — the same allowance
+/// [`self_rooted_ctor`] makes, and for the same reason (a pass upstream
+/// wrote the receiver, not the author).
+fn self_rooted_query(
+    recv: Option<&Expr>,
+    method: &Symbol,
+    args: &[Expr],
+    block: Option<&Expr>,
+    owner: &ClassId,
+    scopes: &ScopeRegistry,
+) -> bool {
+    match recv {
+        None => {}
+        Some(r) => match &*r.node {
+            ExprNode::SelfRef => {}
+            ExprNode::Const { path }
+                if INGEST_QUALIFIED_AR_CALLS.contains(&method.as_str())
+                    && path.last().map(|l| l.as_str())
+                        == owner.0.as_str().rsplit("::").next() => {}
+            _ => return false,
+        },
+    }
+    is_relation_chain_method(method.as_str())
+        || method.as_str() == "all"
+        || is_relation_terminal(method.as_str(), args, block)
+        || scopes.get(owner).is_some_and(|s| s.contains_key(method))
+}
+
+/// Classify what a class method's body wants from the association's
+/// scope: constructors to preset the foreign key on, queries to run
+/// against, or both.
+///
+/// All-or-nothing on the CREATE half: one unmergeable constructor
+/// blocks the whole method, because a half-scoped body writes a row
+/// with the foreign key missing — silently the wrong owner rather than
+/// a loud failure. The query half has no such trade (an unrecognized
+/// send simply stays where it is), so it never blocks.
+fn assoc_scope_shape(
+    method_def: &crate::dialect::MethodDef,
+    owner: &ClassId,
+    scopes: &ScopeRegistry,
+) -> AssocScopeShape {
     let mut found = false;
+    let mut queries = false;
     let mut blocked: Option<String> = None;
     // Parameters DECLARED to be an attribute hash. `params_merge` stamps
     // them when every call site agreed the argument is one, which is
@@ -282,14 +353,17 @@ fn ctor_shape(method_def: &crate::dialect::MethodDef, owner: &ClassId) -> CtorSh
             .collect(),
         _ => HashSet::new(),
     };
+    #[allow(clippy::too_many_arguments)]
     fn walk(
         e: &Expr,
         owner: &ClassId,
+        scopes: &ScopeRegistry,
         hash_params: &HashSet<Symbol>,
         found: &mut bool,
+        queries: &mut bool,
         blocked: &mut Option<String>,
     ) {
-        if let ExprNode::Send { recv, method, args, .. } = &*e.node {
+        if let ExprNode::Send { recv, method, args, block, .. } = &*e.node {
             if self_rooted_ctor(recv.as_ref(), method, owner) {
                 *found = true;
                 let mergeable = args.is_empty()
@@ -305,36 +379,176 @@ fn ctor_shape(method_def: &crate::dialect::MethodDef, owner: &ClassId) -> CtorSh
                         method.as_str()
                     ));
                 }
+            } else if self_rooted_query(
+                recv.as_ref(),
+                method,
+                args,
+                block.as_ref(),
+                owner,
+                scopes,
+            ) {
+                *queries = true;
             }
         }
-        e.node.for_each_child(&mut |c| walk(c, owner, hash_params, found, blocked));
+        e.node.for_each_child(&mut |c| {
+            walk(c, owner, scopes, hash_params, found, queries, blocked)
+        });
     }
-    walk(&method_def.body, owner, &hash_params, &mut found, &mut blocked);
-    match (found, blocked) {
-        (false, _) => CtorShape::None,
-        (true, Some(why)) => CtorShape::Blocked(why),
-        (true, None) => CtorShape::Mergeable,
+    walk(
+        &method_def.body,
+        owner,
+        scopes,
+        &hash_params,
+        &mut found,
+        &mut queries,
+        &mut blocked,
+    );
+    match (found, queries, blocked) {
+        (false, false, _) => AssocScopeShape::None,
+        (true, _, Some(why)) => AssocScopeShape::Blocked(why),
+        (creates, queries, _) => AssocScopeShape::Takes { creates, queries },
     }
 }
 
-/// `(association name, method)` for every `<owner>.<has_many>.<method>`
-/// call in `expr`. The demand side of the registry: a class method is
-/// only given the `__rel` parameter when some call site actually
-/// reaches it through an association, so an app that never writes that
-/// shape emits exactly what it emitted before.
+/// `(association name, method)` for every call in `expr` whose receiver
+/// is an association-derived relation. The demand side of the registry:
+/// a class method is only given the `__rel` parameter when some call
+/// site actually reaches it through an association, so an app that never
+/// writes that shape emits exactly what it emitted before.
+///
+/// Two receiver forms, because campfire writes both within four lines of
+/// each other:
+///
+///   @room.messages.paged?                    the read, called on
+///   messages = @room.messages.with_creator   … or parked in a local
+///   messages.page_around(m)                  and called off that
+///
+/// The local form is tracked here rather than left to the rewriter's
+/// `locals` map because demand is surveyed over the whole App BEFORE any
+/// body is rewritten — that ordering is what makes the model pass and
+/// the view/controller passes agree about which methods grew a
+/// parameter.
 pub fn collect_assoc_method_demand(
     expr: &Expr,
     assocs: &AssocRegistry,
+    scope_names: &HashSet<Symbol>,
     out: &mut HashSet<(Symbol, Symbol)>,
 ) {
-    if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node {
-        if let ExprNode::Send { method: aname, args, block: None, .. } = &*r.node {
-            if args.is_empty() && assocs.is_has_many_name(aname) {
+    let mut assoc_locals: HashMap<Symbol, Symbol> = HashMap::new();
+    walk_demand(expr, assocs, scope_names, &mut assoc_locals, out);
+}
+
+/// The association a relation expression descends from, peeling
+/// relation-preserving hops off the tail: `@room.messages.with_creator
+/// .with_boosts` → `messages`. A hop is a Relation built-in or a name
+/// some model declares as a scope — loose on purpose (this only decides
+/// whether to ASK about a method, and the ask is resolved precisely in
+/// [`build_assoc_class_methods`]).
+fn assoc_read_name<'a>(
+    expr: &'a Expr,
+    assocs: &AssocRegistry,
+    scope_names: &HashSet<Symbol>,
+) -> Option<&'a Symbol> {
+    let ExprNode::Send { recv, method, args, block, .. } = &*expr.node else { return None };
+    // The read itself. A receiver-less spelling counts: `messages
+    // .paged?` inside Room's own body is the same association.
+    if args.is_empty() && block.is_none() && assocs.is_has_many_name(method) {
+        return Some(method);
+    }
+    if is_relation_chain_method(method.as_str()) || scope_names.contains(method) {
+        return assoc_read_name(recv.as_ref()?, assocs, scope_names);
+    }
+    None
+}
+
+fn walk_demand(
+    expr: &Expr,
+    assocs: &AssocRegistry,
+    scope_names: &HashSet<Symbol>,
+    assoc_locals: &mut HashMap<Symbol, Symbol>,
+    out: &mut HashSet<(Symbol, Symbol)>,
+) {
+    match &*expr.node {
+        ExprNode::Assign { target, value } => {
+            if let crate::expr::LValue::Var { name, .. } = target {
+                match assoc_read_name(value, assocs, scope_names) {
+                    Some(aname) => {
+                        assoc_locals.insert(name.clone(), aname.clone());
+                    }
+                    // Reassigned to something else: the name stops
+                    // standing for the association.
+                    None => {
+                        assoc_locals.remove(name);
+                    }
+                }
+            }
+        }
+        ExprNode::Send { recv: Some(r), method, .. } => {
+            let aname = match &*r.node {
+                ExprNode::Var { name, .. } => assoc_locals.get(name),
+                _ => assoc_read_name(r, assocs, scope_names),
+            };
+            if let Some(aname) = aname {
                 out.insert((aname.clone(), method.clone()));
             }
         }
+        _ => {}
     }
-    expr.node.for_each_child(&mut |c| collect_assoc_method_demand(c, assocs, out));
+    // Children in source order — a `Seq`'s statements included, which is
+    // what lets an assignment above be visible to the lines below it.
+    expr.node
+        .for_each_child(&mut |c| walk_demand(c, assocs, scope_names, assoc_locals, out));
+}
+
+/// Survey the whole App for class methods reached through an
+/// association, and resolve them against the models.
+///
+/// THE one entry point, because three passes need this answer and they
+/// must not disagree: the Ruby model lowering (which holds back the
+/// arel fold on the query-shaped ones), the emit seam that inserts the
+/// parameter, and the emit seam that rewrites the call sites. The first
+/// two run over different slices, so surveying a slice rather than the
+/// App would thread a relation into a method that never grew the
+/// parameter.
+///
+/// Views are surveyed alongside the hook bodies and are NOT in that
+/// walk — a view is lowered later, once, by its own pass — but campfire
+/// reaches `Message.paged?` only from a partial.
+pub fn survey_assoc_class_methods(
+    app: &crate::app::App,
+    assocs: &AssocRegistry,
+    scopes: &ScopeRegistry,
+) -> (AssocClassMethods, Vec<DeclinedAssocScope>) {
+    let scope_names = all_scope_names(scopes);
+    let mut demand: HashSet<(Symbol, Symbol)> = HashSet::new();
+    crate::lower::for_each_hook_body_ref(app, &mut |body| {
+        collect_assoc_method_demand(body, assocs, &scope_names, &mut demand);
+    });
+    for view in &app.views {
+        collect_assoc_method_demand(&view.body, assocs, &scope_names, &mut demand);
+    }
+    build_assoc_class_methods(&app.models, assocs, scopes, &demand)
+}
+
+/// `(model, method)` for the QUERY-shaped half of that survey — the
+/// methods whose body must run against the caller's scope.
+///
+/// `lower::model_to_library` reads it to hold the arel fold back on
+/// exactly those bodies. `qualify_model_class_method_ar_calls` has
+/// already spelled their implicit-self query as `<Model>.count`, and
+/// folding that to an inline whole-table `SELECT COUNT(*)` would bake
+/// in the one reading the method must not have. Ruby-family only: a
+/// strict target has no relation to thread, so it keeps the fold and
+/// the class-level reading that goes with it.
+pub fn assoc_query_method_names(acm: &AssocClassMethods) -> HashSet<(ClassId, Symbol)> {
+    acm.iter()
+        .flat_map(|(model, per_model)| {
+            per_model
+                .iter()
+                .filter(|(_, e)| e.queries)
+                .map(move |(name, _)| (model.clone(), name.clone()))
+        })
+        .collect()
 }
 
 /// One class method that could not take an association scope, with the
@@ -391,14 +605,15 @@ pub fn build_assoc_class_methods(
             }) else {
                 continue;
             };
-            match ctor_shape(method, target) {
-                CtorShape::None => {}
-                CtorShape::Mergeable => {
-                    reg.entry(target.clone())
-                        .or_default()
-                        .insert(mname.clone(), method.params.clone());
+            match assoc_scope_shape(method, target, scopes) {
+                AssocScopeShape::None => {}
+                AssocScopeShape::Takes { creates, queries } => {
+                    reg.entry(target.clone()).or_default().insert(
+                        mname.clone(),
+                        AssocScopedMethod { params: method.params.clone(), creates, queries },
+                    );
                 }
-                CtorShape::Blocked(reason) => declined.push(DeclinedAssocScope {
+                AssocScopeShape::Blocked(reason) => declined.push(DeclinedAssocScope {
                     model: target.clone(),
                     method: mname.clone(),
                     reason,
@@ -898,13 +1113,15 @@ pub fn mentions_assoc_lookup(expr: &Expr, assocs: &AssocRegistry) -> bool {
 pub fn mentions_assoc_class_method(
     expr: &Expr,
     assocs: &AssocRegistry,
+    scopes: &ScopeRegistry,
     acm: &AssocClassMethods,
 ) -> bool {
     if acm.is_empty() {
         return false;
     }
+    let names = all_scope_names(scopes);
     let mut demand: HashSet<(Symbol, Symbol)> = HashSet::new();
-    collect_assoc_method_demand(expr, assocs, &mut demand);
+    collect_assoc_method_demand(expr, assocs, &names, &mut demand);
     demand
         .iter()
         .any(|(_, m)| acm.values().any(|per_model| per_model.contains_key(m)))
@@ -998,6 +1215,16 @@ pub struct Ctx<'a> {
     /// bodies, which are rewritten before the registry is resolved.
     pub assoc_class_methods: &'a AssocClassMethods,
     pub scope_body: Option<(ClassId, Symbol)>,
+    /// Read `<Model>.count` in this body as the implicit self it stands
+    /// for (see [`INGEST_QUALIFIED_AR_CALLS`]).
+    ///
+    /// True ONLY for the association-scoped class methods, where the
+    /// receiver is ingest's writing rather than the author's. A DECLARED
+    /// scope's body keeps the constant's class-level reading: lobsters'
+    /// `StoryText.cached?` spells `StoryText.find_by(id: story)` by
+    /// hand, and re-rooting that would scope a query the author wrote
+    /// unscoped.
+    pub self_const_is_implicit: bool,
     /// `Some(model)` when rewriting a model's own CLASS method (a
     /// user-written `def self.x`): a bare `where(...)`/`all` there is an
     /// implicit-self query root (`Keystore.value_for`'s `where(key:
@@ -1028,17 +1255,30 @@ impl Ctx<'_> {
     /// The method's own params when it is a class method taking an
     /// association scope — `Some` is also the "is registered" answer.
     fn assoc_class_method_params(&self, model: &ClassId, method: &Symbol) -> Option<&Vec<Param>> {
-        self.assoc_class_methods.get(model).and_then(|s| s.get(method))
+        self.assoc_class_methods
+            .get(model)
+            .and_then(|s| s.get(method))
+            .map(|m| &m.params)
     }
-    /// A copy of self with no scope-body relation (for args / blocks /
-    /// non-receiver subtrees, which root at their own constants).
+    /// A copy of self for args / blocks / non-receiver subtrees.
+    ///
+    /// The scope-body relation SURVIVES: an argument is evaluated with
+    /// the same `self` the receiver was, so a bare send there means the
+    /// current scope exactly as much — `page_before(m) + [m] +
+    /// page_after(m)` puts one of the two scope calls in receiver
+    /// position and the other in an argument, and Rails scopes both.
+    /// Dropping it here left the argument silently running against the
+    /// whole table. A constant-rooted argument (`where(id: Story.where(
+    /// …))`) is unaffected either way — the Const arm never consults
+    /// the scope body.
     fn at_callsite(&self) -> Ctx<'_> {
         Ctx {
             scopes: self.scopes,
             models: self.models,
             assocs: self.assocs,
             assoc_class_methods: self.assoc_class_methods,
-            scope_body: None,
+            scope_body: self.scope_body.clone(),
+            self_const_is_implicit: self.self_const_is_implicit,
             class_self: self.class_self.clone(),
             instance_self: self.instance_self.clone(),
             user_returns: self.user_returns,
@@ -1547,6 +1787,23 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 _ => Some(r),
             }
         }
+        // …and so is `Message.count` INSIDE a body that takes a
+        // threaded relation. `ingest::app::
+        // qualify_model_class_method_ar_calls` wrote that receiver, not
+        // the author; here — and only here, where there is a `__rel` to
+        // root on — it is read back as the implicit self it stands for.
+        // Outside a scope body the constant keeps its class-level
+        // reading, which is what the strict targets and every direct
+        // `Message.paged?` call want.
+        Some(r)
+            if ctx.self_const_is_implicit
+                && ctx.scope_body.as_ref().is_some_and(|(m, _)| {
+                    INGEST_QUALIFIED_AR_CALLS.contains(&method.as_str())
+                        && const_model(&r, ctx.models).as_ref() == Some(m)
+                }) =>
+        {
+            None
+        }
         other => other,
     };
 
@@ -1587,6 +1844,19 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     let _ = lower_relation_args(self_model, &method, &mut args, ctx);
                     *expr = put(span, Some(var_expr(span, rel)), method, args, block, parenthesized);
                     return Some(self_model.clone());
+                }
+                // A TERMINAL ends on the threaded relation too — `count`
+                // in `Message.paged?` counts THIS association's rows, not
+                // the table's. Safe here and only here: a scope-body
+                // `self` IS the model class, so the bare name can mean
+                // nothing but the relation method. Elsewhere (`class_self`
+                // with no `__rel` to thread) the bare form stays put and
+                // the arel pass folds it to a whole-table query, which is
+                // what an unscoped `Model.count` means.
+                if is_relation_terminal(method.as_str(), &args, block.as_ref()) {
+                    let method = counted_terminal(&method, &args, block.as_ref()).unwrap_or(method);
+                    *expr = put(span, Some(var_expr(span, rel)), method, args, block, parenthesized);
+                    return None;
                 }
             }
             if let Some(self_model) = ctx.class_self.clone() {
@@ -1833,6 +2103,18 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     *expr = put(span, Some(const_expr(span, &mr)), method, new_args, block, true);
                     return Some(mr);
                 }
+                // A registered association-scoped class method takes the
+                // relation the same way a scope does — the relation is
+                // ALREADY in hand here (`messages = @room.messages
+                // .with_creator …; messages.page_around(m)`), so it is
+                // threaded as-is rather than seeded. Unlike a scope it
+                // returns whatever its body returns — an Array, a boolean
+                // — so the model does not survive the call.
+                if let Some(leading) = ctx.assoc_class_method_params(&mr, &method) {
+                    let new_args = thread_rel(args, r, Some(leading), span);
+                    *expr = put(span, Some(const_expr(span, &mr)), method, new_args, block, true);
+                    return None;
+                }
                 if is_relation_chain_method(method.as_str()) {
                     let aliases = lower_relation_args(&mr, &method, &mut args, ctx);
                     let mut r = r;
@@ -1859,6 +2141,34 @@ pub fn rewrite_scope_body(
     models: &HashSet<ClassId>,
     assocs: &AssocRegistry,
 ) {
+    rewrite_relation_taking_body(body, self_model, rel_param, scopes, models, assocs, false);
+}
+
+/// The same rewrite for an ASSOCIATION-scoped class method's body, which
+/// additionally reads `<Model>.count` as the implicit self it stands for
+/// — there the receiver is ingest's writing, not the author's (see
+/// [`Ctx::self_const_is_implicit`]).
+pub fn rewrite_assoc_scope_body(
+    body: &mut Expr,
+    self_model: &ClassId,
+    rel_param: &Symbol,
+    scopes: &ScopeRegistry,
+    models: &HashSet<ClassId>,
+    assocs: &AssocRegistry,
+) {
+    rewrite_relation_taking_body(body, self_model, rel_param, scopes, models, assocs, true);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rewrite_relation_taking_body(
+    body: &mut Expr,
+    self_model: &ClassId,
+    rel_param: &Symbol,
+    scopes: &ScopeRegistry,
+    models: &HashSet<ClassId>,
+    assocs: &AssocRegistry,
+    self_const_is_implicit: bool,
+) {
     // Scope bodies don't consult user-method return types (none
     // exercised there yet), nor the association-scoped class methods
     // (those are resolved from call-site demand, which is collected
@@ -1871,6 +2181,7 @@ pub fn rewrite_scope_body(
         assocs,
         assoc_class_methods: &empty_assoc_cm,
         scope_body: Some((self_model.clone(), rel_param.clone())),
+        self_const_is_implicit,
         class_self: None,
         instance_self: None,
         user_returns: &empty_returns,
@@ -1895,6 +2206,7 @@ pub fn rewrite_call_site(
         assocs: regs.assocs,
         assoc_class_methods: regs.assoc_class_methods,
         scope_body: None,
+        self_const_is_implicit: false,
         class_self: class_self.cloned(),
         instance_self: instance_self.cloned(),
         user_returns: regs.user_returns,
@@ -2032,6 +2344,7 @@ mod tests {
             assocs,
             assoc_class_methods: empty_assoc_cm(),
             scope_body: None,
+            self_const_is_implicit: false,
             class_self: None,
             instance_self: None,
             user_returns: empty_returns(),

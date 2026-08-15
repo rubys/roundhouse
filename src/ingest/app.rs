@@ -1205,6 +1205,16 @@ fn qualify_lexical_consts(
 ///
 /// Only the base AR class methods, and only when the model does not
 /// define that name itself: a model with its own `count` means its own.
+///
+/// The receiver it names is the model CONSTANT, which is exactly right
+/// for a call on the class and loses one distinction Rails keeps: a
+/// method reached through an association runs against the caller's
+/// scope, so bare `count` means "this room's messages" where
+/// `Message.count` means the whole table. The Ruby-family emit seam
+/// re-roots those on the threaded relation
+/// (`scope_chain::AssocClassMethods`), reading the model constant back
+/// as the implicit self it stands for; the strict targets, which have
+/// no relation to thread, keep the class-level reading.
 fn qualify_model_class_method_ar_calls(app: &mut App) {
     use crate::dialect::{MethodReceiver, ModelBodyItem};
     use crate::expr::{Expr, ExprNode};

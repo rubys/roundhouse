@@ -1,16 +1,20 @@
 //! A model CLASS METHOD reached through an association takes that
-//! association's relation as its create scope
-//! (`scope_chain::AssocClassMethods`).
+//! association's relation as its scope (`scope_chain::AssocClassMethods`).
 //!
-//! Rails runs `user.sessions.start!(…)` with the association as the
-//! current scope, so the `create!` inside `Session.start!` picks the
-//! foreign key up from it (`scope_for_create`) and the row lands owned
-//! by that user without anybody naming `user_id`. Our association reader
-//! is arel-folded to an Array, so the call does not even resolve — and
-//! the fix is the mechanism a scope already uses one layer over: the
-//! method gains a trailing `__rel`, the call site passes the seed, and
-//! the body's constructor merges `__rel.scope_attributes` UNDER its own
-//! attributes (Rails lets an explicit attribute win).
+//! Rails runs `user.sessions.start!(…)` and `@room.notes.paged?` with
+//! the association as the current scope. The method gains a trailing
+//! `__rel`, the call site passes the seed, and the body reads it in one
+//! of two ways:
+//!
+//!   * a CONSTRUCTOR merges `__rel.scope_attributes` UNDER its own
+//!     attributes (Rails assigns explicit ones after the scope's, so an
+//!     explicit value wins) — which is how `scope_for_create` gets
+//!     `user_id` onto the row without anybody naming the column;
+//!   * a QUERY roots on `__rel` exactly as a scope body does — so
+//!     `paged?`'s bare `count` counts THIS room's notes.
+//!
+//! Our association reader is arel-folded to an Array, so neither call
+//! resolves at all today.
 //!
 //! Demand-gated: only a method some call site actually reaches through
 //! an association grows the parameter, so an app that never writes the
@@ -90,8 +94,22 @@ end
         (
             "app/models/note.rb",
             r#"class Note < ApplicationRecord
+  PAGE_SIZE = 40
+
+  scope :ordered, -> { order(:id) }
+  scope :earlier, ->(note) { where("id < ?", note.id) }
+  scope :later, ->(note) { where("id > ?", note.id) }
+
   def self.file!(attributes)
     create!(attributes)
+  end
+
+  def self.paged?
+    count > PAGE_SIZE
+  end
+
+  def self.page_around(note)
+    earlier(note) + [ note ] + later(note)
   end
 end
 "#,
@@ -106,6 +124,9 @@ end
     @membership = Current.user.memberships.find_by!(room_id: params[:room_id])
     @room = Room.find(params[:id])
     @note = @room.notes.file!(note_params)
+    @paged = @room.notes.paged?
+    notes = @room.notes.ordered
+    @around = notes.page_around(@note)
   end
 end
 "#,
@@ -210,8 +231,9 @@ fn find_by_bang_through_a_read_owner_seeds_a_relation() {
 fn an_opaque_constructor_argument_declines_rather_than_guessing() {
     let note = model("app/models/note.rb");
     assert!(
-        !note.contains("__rel"),
-        "a blocked method grows no relation parameter:\n{note}"
+        note.contains("def self.file!(attributes)"),
+        "a blocked method grows no relation parameter — unlike its \
+         admitted siblings on the same model:\n{note}"
     );
     assert!(
         note.contains("create!(attributes)"),
@@ -221,5 +243,78 @@ fn an_opaque_constructor_argument_declines_rather_than_guessing() {
     assert!(
         create.contains("@room.notes.file!("),
         "and the call site keeps its source shape:\n{create}"
+    );
+}
+
+// ---- the QUERY half -------------------------------------------------
+
+/// A class method whose body READS rather than constructs takes the
+/// same relation and roots its query on it. `Note.paged?`'s bare
+/// `count` is the whole point: Rails runs it against the caller's
+/// scope, so through `@room.notes` it counts THIS room's notes.
+#[test]
+fn a_query_shaped_class_method_roots_its_terminal_on_the_relation() {
+    let note = model("app/models/note.rb");
+    assert!(
+        note.contains("def self.paged?(__rel = ActiveRecord::Relation.new(self))"),
+        "the query-shaped method grows the same trailing parameter:\n{note}"
+    );
+    assert!(
+        note.contains("__rel.count >"),
+        "and its bare terminal roots on the threaded relation:\n{note}"
+    );
+}
+
+/// The bare `count` survives ingest for exactly this method.
+/// `qualify_model_class_method_ar_calls` names the model on a class
+/// method's implicit-self AR calls, which would spell the scoped form
+/// (`count`) as the deliberately-unscoped one (`Note.count`) past the
+/// point where anything could tell them apart — so a method reached
+/// through an association is left alone. Without that, this method
+/// would emit an inlined whole-table `SELECT COUNT(*)`.
+#[test]
+fn the_scoped_count_is_not_inlined_as_a_whole_table_query() {
+    let note = model("app/models/note.rb");
+    assert!(
+        !note.contains("def self.paged?(__rel = ActiveRecord::Relation.new(self))\n    stmt ="),
+        "the body is the relation read, not an arel-folded table count:\n{note}"
+    );
+    let create = controller();
+    assert!(
+        create.contains(
+            "Note.paged?(ActiveRecord::Relation.new(Note).where_scope(room_id: @room.id))"
+        ),
+        "and the call site passes the association's relation:\n{create}"
+    );
+}
+
+/// Both scope calls take the relation, including the one in ARGUMENT
+/// position. An argument is evaluated with the same `self` the receiver
+/// was, so Rails scopes both halves of `earlier(n) + [n] + later(n)`;
+/// threading only the receiver would leave the second running against
+/// the whole table.
+#[test]
+fn a_scope_call_in_argument_position_is_scoped_too() {
+    let note = model("app/models/note.rb");
+    assert!(
+        note.contains("def self.page_around(note, __rel = ActiveRecord::Relation.new(self))"),
+        "page_around grows the parameter:\n{note}"
+    );
+    assert!(
+        note.contains("Note.earlier(note, __rel) + [ note ] + Note.later(note, __rel)"),
+        "both scope calls thread it, receiver AND argument:\n{note}"
+    );
+}
+
+/// The relation is often already in hand — `notes = @room.notes
+/// .ordered` — and then it is threaded as-is rather than re-seeded.
+/// Unlike a scope the method returns whatever its body returns (an
+/// Array here), so the chain does not continue through it.
+#[test]
+fn a_relation_already_in_a_local_is_threaded_without_reseeding() {
+    let create = controller();
+    assert!(
+        create.contains("Note.page_around(@note, notes)"),
+        "the local relation is passed straight through:\n{create}"
     );
 }

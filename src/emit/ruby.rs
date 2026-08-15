@@ -176,11 +176,26 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // `emit_lowered_controllers`); we register them here as
     // synthesized siblings so model files that reference them
     // (`Article.from_params(...)` calls) get explicit requires.
-    let mut lcs = crate::lower::lower_models_to_library_classes_with_params(
+    // Class methods a call site reaches through an association and whose
+    // body QUERIES — `@room.messages.paged?`. `apply_scope_lowering`
+    // below re-roots those on a threaded `__rel`, so the arel fold has
+    // to be held back on them here or there is nothing left to re-root.
+    // Same survey both passes read, for the same reason the survey
+    // covers the App rather than a slice.
+    let assoc_scopes = crate::lower::scope_chain::assoc_query_method_names(
+        &crate::lower::scope_chain::survey_assoc_class_methods(
+            app,
+            &crate::lower::scope_chain::build_assoc_registry(&app.models),
+            &crate::lower::scope_chain::build_scope_registry(&app.models),
+        )
+        .0,
+    );
+    let mut lcs = crate::lower::model_to_library::lower_models_to_library_classes_unfolding(
         &app.models,
         &app.schema,
         Vec::new(),
         &params_specs,
+        &assoc_scopes,
     );
     // The sqlite statement handle `Db.prepare` returns is a per-target
     // `Db` primitive: an integer cursor on most adapters (the shared

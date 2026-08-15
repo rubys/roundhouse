@@ -110,7 +110,13 @@ pub fn lower_models_with_registry(
     schema: &Schema,
     extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
-    let (lcs, classes) = lower_models_inner(models, schema, extra_class_infos, &Default::default());
+    let (lcs, classes) = lower_models_inner(
+        models,
+        schema,
+        extra_class_infos,
+        &Default::default(),
+        &Default::default(),
+    );
     (lcs, classes)
 }
 
@@ -126,7 +132,7 @@ pub fn lower_models_with_registry_and_params(
     extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
-    lower_models_inner(models, schema, extra_class_infos, params_specs)
+    lower_models_inner(models, schema, extra_class_infos, params_specs, &Default::default())
 }
 
 pub fn lower_models_to_library_classes(
@@ -134,7 +140,14 @@ pub fn lower_models_to_library_classes(
     schema: &Schema,
     extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
 ) -> Vec<LibraryClass> {
-    lower_models_inner(models, schema, extra_class_infos, &Default::default()).0
+    lower_models_inner(
+        models,
+        schema,
+        extra_class_infos,
+        &Default::default(),
+        &Default::default(),
+    )
+    .0
 }
 
 pub fn lower_models_to_library_classes_with_params(
@@ -143,7 +156,27 @@ pub fn lower_models_to_library_classes_with_params(
     extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
 ) -> Vec<LibraryClass> {
-    lower_models_inner(models, schema, extra_class_infos, params_specs).0
+    lower_models_inner(models, schema, extra_class_infos, params_specs, &Default::default()).0
+}
+
+/// As above, plus the class methods whose bodies must NOT be arel-folded
+/// — the query-shaped half of `scope_chain::AssocClassMethods`, which a
+/// Ruby-family emit is about to re-root on a threaded relation
+/// (`scope_chain::assoc_query_method_names` names them). Folding
+/// `Message.count` there to an inline whole-table `SELECT COUNT(*)`
+/// would bake in the one reading the method must not have.
+///
+/// Ruby-family only. Every other target passes the empty set through
+/// the entries above and keeps the fold, which is right for an emit
+/// with no relation to thread.
+pub fn lower_models_to_library_classes_unfolding(
+    models: &[Model],
+    schema: &Schema,
+    extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
+    params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
+    unfolded: &std::collections::HashSet<(ClassId, Symbol)>,
+) -> Vec<LibraryClass> {
+    lower_models_inner(models, schema, extra_class_infos, params_specs, unfolded).0
 }
 
 fn lower_models_inner(
@@ -151,6 +184,7 @@ fn lower_models_inner(
     schema: &Schema,
     extra_class_infos: Vec<(ClassId, crate::analyze::ClassInfo)>,
     params_specs: &crate::lower::controller_to_library::params::ParamsSpecs,
+    unfolded: &std::collections::HashSet<(ClassId, Symbol)>,
 ) -> (Vec<LibraryClass>, HashMap<ClassId, crate::analyze::ClassInfo>) {
     // Synthesize per-model `<Model>Row` LibraryClasses up front. These
     // need to appear in the class registry before model body-typing so
@@ -250,7 +284,18 @@ fn lower_models_inner(
             // pattern are left as-is for the body-typer + emitter to
             // handle (Phase 2 will route them to a runtime Arel
             // module instead). See project_arel_compile_time_first.md.
-            crate::lower::arel::rewrite_arel_in_expr(&mut method.body, schema, &classes);
+            //
+            // Held back for a class method whose body is about to be
+            // re-rooted on a threaded relation: its `Message.count` is
+            // an implicit-self read that ingest spelled with the
+            // constant, and an inline whole-table count would bake in
+            // the reading Rails does not have. Only the Ruby-family
+            // entry ever names one.
+            let unfold = method.receiver == crate::dialect::MethodReceiver::Class
+                && unfolded.contains(&(model.name.clone(), method.name.clone()));
+            if !unfold {
+                crate::lower::arel::rewrite_arel_in_expr(&mut method.body, schema, &classes);
+            }
             type_method_body(method, &classes, table, Some(model));
         }
         out.push(LibraryClass {
