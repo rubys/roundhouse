@@ -167,9 +167,11 @@ fn inflector_test_passes_under_rust() {
 // These five run (`cargo test --test framework_tests_rust -- --ignored`)
 // and fail to COMPILE the emitted crate — they are a worklist, not a
 // mystery. Kept in the file so the intent is recorded and the next fix
-// has something to run against; CI is scoped to the green subset, the
-// same convention framework-tests-kotlin / -swift use. Drop names from
-// the CI filter as these close. Tracked in #34 §1.
+// has something to run against; CI is scoped to the green subset. (That
+// convention used to be shared with framework-tests-kotlin / -swift;
+// both now run unfiltered — see below for why rust's two look like
+// theirs and aren't.) Drop names from the CI filter as these close.
+// Tracked in #34 §1.
 //
 //   json_builder — the rust `JsonBuilder` surface is typed for APP call
 //     sites, not the framework contract: `encode_value` takes
@@ -186,13 +188,55 @@ fn inflector_test_passes_under_rust() {
 //     `id` accessor its own AR-shaped body implies, and String/Option
 //     mismatches remain (`unwrap_or_default` on a `String`).
 //
-//   errors — `RecordNotFound` / `StandardError` as class-reflection
-//     values. THE SAME FAMILY kotlin and swift defer; whoever closes it
-//     for one should check all three in the same pass.
+//   errors — NOT the same shape kotlin and swift had, despite the
+//     shared symptom. Those two transpile `active_record/errors.rb`
+//     and only needed `X < StandardError` rendered as a relation
+//     check; rust does not transpile the file at all (see the note in
+//     `runtime_loader::RUST_RUNTIME`), so `RecordNotFound` is an
+//     `errors_ext::FrameworkError` enum CONST, not a type, and the
+//     test's `RecordNotFound.new("…").message` has nothing to reach.
+//     Wiring the runtime entry was tried and measured; what comes out
+//     needs four things rust2 doesn't do yet:
+//       * `class X < StandardError` → an error struct. The parent is
+//         dropped, so the emit is a fieldless `struct RecordNotFound`
+//         with no `message` field and no Display / std::error::Error.
+//       * `super(message)` inside `initialize` → `/* TODO rust2:
+//         ExprNode::Discriminant(22) */`. rust2's expr emit has no
+//         `Super` arm at all (only the `decide/` walkers know it).
+//       * optional params. rust2 drops Ruby defaults and makes every
+//         param required, so `RecordNotFound.new()` — which the test
+//         calls, and which is the whole point of the default-message
+//         contract — has no constructor to hit.
+//       * a decision about `errors_ext`. Its `RecordNotFound` /
+//         `RecordInvalid` consts are what `raise(KIND, payload)`
+//         passes at the ~11 raise sites in the transpiled
+//         `active_record_base.rs`; real structs of the same names
+//         either shadow them or duplicate them. That is a design call
+//         about how rust represents a raise, not a wiring fix.
+//     The class-relation `<` still needs an answer too, and rust has
+//     no runtime type system to ask — unlike swift's metatype `is` and
+//     kotlin's `isAssignableFrom`, rust's honest rendering is a
+//     compile-time fold from the emitter's own class table.
 //
-//   ac_base — the inline `TestController` body, dominated by 54
-//     "expected value, found module `self`". Also a kotlin/swift
-//     sibling.
+//   ac_base — a rust2 test-emit shape, not a typing gap. Three
+//     findings, measured against the current tree:
+//       * rust2's `test_extras` is the only per-target test emit that
+//         does NOT seed itself from `app.rbs_signatures` (kotlin,
+//         swift and csharp all do). So the framework `.rbs` never
+//         reaches the test lowering, and the inline `TestController <
+//         ActionController::Base` misses the parent-signature adoption
+//         that greened kotlin and swift — `process_action` still emits
+//         `(action_name: serde_json::Value) -> serde_json::Value`.
+//       * the test class lowers to free `#[test]` fns (instance
+//         methods are rewritten to class methods for `emit_module`),
+//         so `@controller` set in `setup` emits as `self.controller`
+//         in a function that has no `self` — 54 E0424s, all one cause.
+//         Hoisting the setup ivars to a local per test fn is the fix.
+//       * the same Instance→Class rewrite reaches the hoisted inner
+//         class, so `TestController`'s methods lose `&self` and its
+//         body's `render(...)` / `index()` become free-function calls
+//         that resolve to nothing. rust has no inheritance, so the
+//         stand-in also needs its base's state by composition.
 
 #[test]
 #[ignore]
