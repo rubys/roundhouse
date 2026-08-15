@@ -380,6 +380,7 @@ fn walk(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnostic>) {
     }
 
     try_rewrite(expr, defs, diags);
+    try_rewrite_compact_blank(expr, defs, diags);
 }
 
 fn walk_lvalue(target: &mut LValue, defs: &AppDefinitions, diags: &mut Vec<Diagnostic>) {
@@ -526,6 +527,127 @@ fn try_rewrite(expr: &mut Expr, defs: &AppDefinitions, diags: &mut Vec<Diagnosti
     *expr = replacement;
     expr.span = span;
     expr.leading_blank_line = leading_blank_line;
+}
+
+/// `Array#compact_blank` — ActiveSupport's `reject(&:blank?)`, and the
+/// same problem the three predicates have: a core_ext reopen only the
+/// CRuby overlay could host, with no `blank?` for any other target to
+/// dispatch. Grounded through the ELEMENT type, using the answer
+/// `classify` gives that type, so `[a, b].compact_blank` and `a.blank?`
+/// cannot disagree about what blank means.
+///
+/// campfire's `User#title` is `[ name, bio ].compact_blank.join(" – ")`
+/// — the label on every avatar, so it is on the message row, the user
+/// list and the sidebar.
+///
+/// Only `empty?`-able element types ground; anything else keeps the
+/// call and files residue, the same policy the predicates use. A
+/// NEVER-BLANK element type would make the whole call a no-op — a fold
+/// worth having, but not one any corpus app forces yet.
+fn try_rewrite_compact_blank(
+    expr: &mut Expr,
+    defs: &AppDefinitions,
+    diags: &mut Vec<Diagnostic>,
+) {
+    let (grounding, elem_ty, recv_ty) = {
+        let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*expr.node else {
+            return;
+        };
+        if method.as_str() != "compact_blank" || !args.is_empty() {
+            return;
+        }
+        let Some(Ty::Array { elem }) = r.ty.as_ref() else {
+            // Not an Array (or untyped): the ledger says so rather than
+            // guessing at a receiver whose surface we do not know.
+            diags.push(unlowered(
+                expr,
+                r.ty.as_ref(),
+                "compact_blank",
+                "receiver is not a typed Array",
+            ));
+            return;
+        };
+        let elem = (**elem).clone();
+        (classify(Some(&elem), defs), elem, r.ty.clone())
+    };
+    let nilable = match grounding {
+        Grounding::Container { nilable } => nilable,
+        _ => {
+            diags.push(unlowered(
+                expr,
+                recv_ty.as_ref(),
+                "compact_blank",
+                "element type has no `empty?` grounding",
+            ));
+            return;
+        }
+    };
+
+    let span = expr.span;
+    let leading_blank_line = expr.leading_blank_line;
+    let old = std::mem::replace(&mut *expr.node, ExprNode::SelfRef);
+    let ExprNode::Send { recv: Some(r), .. } = old else { unreachable!() };
+
+    // `reject { |__cb| … }`. The block parameter is read twice in the
+    // nilable form, which is free — it is a local, not the receiver
+    // expression, so none of the effect-free gating above applies.
+    let name = Symbol::new("__cb");
+    let param = |ty: Ty| {
+        mk(
+            span,
+            ExprNode::Var { id: crate::ident::VarId(0), name: name.clone() },
+            ty,
+        )
+    };
+    let cond = if nilable {
+        bool_op(
+            span,
+            crate::expr::BoolOpKind::Or,
+            nil_check(span, param(elem_ty.clone())),
+            plain_empty(span, param(non_nil(&elem_ty))),
+        )
+    } else {
+        plain_empty(span, param(elem_ty.clone()))
+    };
+    let block = mk(
+        span,
+        ExprNode::Lambda {
+            params: vec![name],
+            block_param: None,
+            body: cond,
+            block_style: Default::default(),
+        },
+        Ty::Untyped,
+    );
+    let array_ty = Ty::Array { elem: Box::new(non_nil(&elem_ty)) };
+    *expr = mk(
+        span,
+        ExprNode::Send {
+            recv: Some(r),
+            method: Symbol::new("reject"),
+            args: vec![],
+            block: Some(block),
+            parenthesized: false,
+        },
+        array_ty,
+    );
+    expr.leading_blank_line = leading_blank_line;
+}
+
+/// The non-nil half of a nilable type — what survives the reject.
+fn non_nil(t: &Ty) -> Ty {
+    match t {
+        Ty::Union { variants } => {
+            let mut kept: Vec<Ty> =
+                variants.iter().filter(|v| !matches!(v, Ty::Nil)).cloned().collect();
+            match kept.len() {
+                0 => Ty::Untyped,
+                1 => kept.remove(0),
+                _ => Ty::Union { variants: kept },
+            }
+        }
+        other => other.clone(),
+    }
 }
 
 /// Shared shape for the two `empty?`-style groundings. `empty_form`
