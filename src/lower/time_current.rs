@@ -34,12 +34,27 @@
 //! raised on `fresh_account_logo_path` and its message list raised
 //! inside a `rescue Exception` that hid the cause.
 //!
-//! Rails resolves it through `Time::DATE_FORMATS`, a hash of strftime
-//! strings and lambdas. Both halves are compile-time knowledge, so both
-//! expand here rather than becoming a runtime method on nine `Time`s:
-//! a built-in maps to the `strftime` every emitter already speaks, and
-//! an APP-DEFINED format inlines the lambda body the initializer scan
-//! recorded (`App::time_formats`).
+//! Rails resolves it through `ActiveSupport::TimeFormats`, a table of
+//! strftime strings and lambdas, and its whole body is:
+//!
+//! ```ruby
+//! formatter.respond_to?(:call) ? formatter.call(self).to_s : strftime(formatter)
+//! ```
+//!
+//! Every part of that is compile-time knowledge, so it expands here
+//! rather than becoming a runtime method on nine `Time`s: a string
+//! format becomes the `strftime` every emitter already speaks, and a
+//! lambda inlines its body with the receiver substituted. The trailing
+//! `.to_s` on the call arm is Rails', and it is what makes campfire's
+//! Integer-returning `:epoch` agree with the `Str` the analyzer types
+//! this call as.
+//!
+//! An app's own formats come from the initializer scan
+//! (`App::time_formats`) in both spellings Rails accepts — the current
+//! `ActiveSupport::TimeFormats.register(:name, fmt)` and the
+//! DEPRECATED `Time::DATE_FORMATS[:name] = fmt` that campfire still
+//! writes — and win over a built-in of the same name, because
+//! `register` merges into that very table.
 //!
 //! An unrecognized format DECLINES, loudly. Rails' own fallback is
 //! `to_s`, and emitting that would be the worst outcome available: "we
@@ -50,12 +65,11 @@
 use std::collections::BTreeMap;
 
 use crate::app::App;
-use crate::dialect::MethodDef;
 use crate::expr::{Expr, ExprNode};
 use crate::ident::Symbol;
 
 /// App-defined `to_fs` formats, as the lowering consults them.
-pub(crate) type TimeFormats = BTreeMap<Symbol, MethodDef>;
+pub(crate) type TimeFormats = BTreeMap<Symbol, crate::app::TimeFormat>;
 
 /// Rewrite `Time.current` sends across every app body the post-analyze
 /// hook owns (models, library classes, controllers, seeds — not views).
@@ -148,30 +162,52 @@ pub(crate) fn rewrite_time_current(expr: &mut Expr, formats: &TimeFormats) {
     rewrite_to_fs(expr, formats);
 }
 
-/// Rails' built-in `Time::DATE_FORMATS` entries that are plain strftime
-/// strings, MEASURED against Rails 8.1 rather than transcribed from the
-/// source (`Time.utc(2026,8,14,9,5,3).to_fs(:<name>)`):
+/// Rails' built-in formats, from `ActiveSupport::TimeFormats`' own
+/// table (`activesupport/lib/active_support/time_formats.rb`) and
+/// confirmed by running each one.
 ///
-/// ```text
-/// db      2026-08-14 09:05:03      short   14 Aug 09:05
-/// number  20260814090503           long    August 14, 2026 09:05
-/// time    09:05
-/// ```
+/// `Strftime` covers the entries Rails stores as plain strings.
+/// `Method` covers two it stores as one-line lambdas over a method the
+/// pipeline already handles — `->(time) { time.iso8601 }` and
+/// `->(time) { time.rfc2822 }` — so they cost a rename, not a format.
 ///
-/// The rest of Rails' table is deliberately absent, each for a reason:
-/// `:usec` / `:nsec` need `%6N` / `%9N`, which our per-target strftime
-/// mappings do not all carry; `:rfc822` / `:long_ordinal` / `:inspect`
-/// are lambdas whose output wants its own oracle run. They decline (and
-/// say so) rather than shipping a format nobody measured.
-fn builtin_time_format(name: &str) -> Option<&'static str> {
+/// The rest of the table is deliberately absent, each for a reason:
+/// `:usec` / `:nsec` / `:inspect` need `%6N` / `%9N`, which our
+/// per-target strftime mappings do not all carry, and `:long_ordinal`
+/// / `:rfc822` are lambdas that interpolate a computed piece (an
+/// ordinalized day, `formatted_offset(false)`) into the format string.
+/// They decline, and say so, rather than shipping a rendering nobody
+/// measured.
+enum Builtin {
+    Strftime(&'static str),
+    Method(&'static str),
+}
+
+fn builtin_time_format(name: &str) -> Option<Builtin> {
     Some(match name {
-        "db" => "%Y-%m-%d %H:%M:%S",
-        "number" => "%Y%m%d%H%M%S",
-        "time" => "%H:%M",
-        "short" => "%d %b %H:%M",
-        "long" => "%B %d, %Y %H:%M",
+        "db" => Builtin::Strftime("%Y-%m-%d %H:%M:%S"),
+        "number" => Builtin::Strftime("%Y%m%d%H%M%S"),
+        "time" => Builtin::Strftime("%H:%M"),
+        "short" => Builtin::Strftime("%d %b %H:%M"),
+        "long" => Builtin::Strftime("%B %d, %Y %H:%M"),
+        "iso8601" => Builtin::Method("iso8601"),
+        "rfc2822" => Builtin::Method("rfc2822"),
         _ => return None,
     })
+}
+
+/// `<time>.strftime("<fmt>")`.
+fn strftime_call(recv: Expr, fmt: &str, span: crate::span::Span) -> ExprNode {
+    ExprNode::Send {
+        recv: Some(recv),
+        method: Symbol::from("strftime"),
+        args: vec![Expr::new(
+            span,
+            ExprNode::Lit { value: crate::expr::Literal::Str { value: fmt.to_string() } },
+        )],
+        block: None,
+        parenthesized: true,
+    }
 }
 
 /// `<time>.to_fs(:format)` / `to_formatted_s(:format)` → what the format
@@ -192,47 +228,54 @@ fn rewrite_to_fs(expr: &mut Expr, formats: &TimeFormats) {
     let recv = recv.clone();
     let span = expr.span;
 
-    // An app-defined format wins over a built-in, as it does in Rails —
-    // the initializer assigns into the same hash.
-    if let Some(method) = formats.get(&Symbol::from(name.as_str())) {
-        let Some(param) = method.params.first() else {
-            return decline(expr, "the app's format lambda takes no parameter");
-        };
-        // The receiver is substituted into the body once per mention of
-        // the parameter, so a re-evaluated one would be a behavior
-        // change, not just a slower one.
-        if !crate::lower::case_lambda::is_pure_read(&recv) {
-            return decline(expr, "the receiver is not a pure read to substitute");
+    // An app's registration wins over a built-in of the same name, as
+    // it does in Rails — `register` merges into that very table.
+    if let Some(format) = formats.get(&Symbol::from(name.as_str())) {
+        match format {
+            crate::app::TimeFormat::Strftime { format } => {
+                *expr.node = strftime_call(recv, format, span);
+            }
+            crate::app::TimeFormat::Lambda { method } => {
+                let Some(param) = method.params.first() else {
+                    return decline(expr, "the app's format lambda takes no parameter");
+                };
+                // The receiver is substituted into the body once per
+                // mention of the parameter, so a re-evaluated one would
+                // be a behavior change, not just a slower one.
+                if !crate::lower::case_lambda::is_pure_read(&recv) {
+                    return decline(expr, "the receiver is not a pure read to substitute");
+                }
+                let mut body = method.body.clone();
+                crate::lower::case_lambda::subst(&mut body, &param.name, &recv);
+                // `to_fs` is `formatter.call(self).to_s` — the `.to_s` is
+                // Rails', not ours, and it is what makes campfire's
+                // Integer-returning `:epoch` agree with the Str the
+                // analyzer types this call as.
+                *expr.node = ExprNode::Send {
+                    recv: Some(body),
+                    method: Symbol::from("to_s"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                };
+            }
         }
-        let mut body = method.body.clone();
-        crate::lower::case_lambda::subst(&mut body, &param.name, &recv);
-        // The lambda's value is whatever it returns — campfire's `:epoch`
-        // is an Integer — while `to_fs` is typed Str and every call site
-        // renders it. `.to_s` reconciles the two, and matches what Rails
-        // does with the value at those sites anyway.
-        *expr.node = ExprNode::Send {
-            recv: Some(body),
-            method: Symbol::from("to_s"),
-            args: vec![],
-            block: None,
-            parenthesized: false,
-        };
         return;
     }
 
-    let Some(fmt) = builtin_time_format(&name) else {
-        return decline(expr, &format!("`{name}` is not a format we have measured"));
-    };
-    *expr.node = ExprNode::Send {
-        recv: Some(recv),
-        method: Symbol::from("strftime"),
-        args: vec![Expr::new(
-            span,
-            ExprNode::Lit { value: crate::expr::Literal::Str { value: fmt.to_string() } },
-        )],
-        block: None,
-        parenthesized: true,
-    };
+    match builtin_time_format(&name) {
+        Some(Builtin::Strftime(fmt)) => *expr.node = strftime_call(recv, fmt, span),
+        Some(Builtin::Method(m)) => {
+            *expr.node = ExprNode::Send {
+                recv: Some(recv),
+                method: Symbol::from(m),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            }
+        }
+        None => decline(expr, &format!("`{name}` is not a format we have measured")),
+    }
 }
 
 /// The format name a `to_fs` argument spells, if it is a literal.

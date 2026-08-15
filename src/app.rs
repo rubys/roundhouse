@@ -114,18 +114,19 @@ pub struct App {
     /// `&lt;span&gt;` markup to the page.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub html_safe_methods: BTreeSet<Symbol>,
-    /// App-defined `Time::DATE_FORMATS[:name] = ->(t) { … }` entries
-    /// from `config/initializers/`, each as a one-parameter method whose
-    /// body IS the lambda's (campfire's `time_formats.rb` defines
-    /// `:epoch` as `(time.to_f * 1000).to_i`).
+    /// App-registered `to_fs` formats from `config/initializers/`, in
+    /// both spellings Rails accepts: the current
+    /// `ActiveSupport::TimeFormats.register(:name, fmt)` and the
+    /// deprecated `Time::DATE_FORMATS[:name] = fmt` (campfire's
+    /// `time_formats.rb` defines `:epoch` as
+    /// `->(time) { (time.to_f * 1000).to_i }`).
     ///
     /// Recorded because `to_fs(:name)` is otherwise unknowable and
     /// Rails' fallback for an unknown format is `to_s` — a completely
-    /// different value, silently. `lower::time_current` inlines the body
-    /// at each call site with the receiver substituted for the
-    /// parameter. Empty for apps that define no formats.
+    /// different value, silently. `lower::time_current` expands each
+    /// call site from this. Empty for apps that register no formats.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub time_formats: BTreeMap<Symbol, MethodDef>,
+    pub time_formats: BTreeMap<Symbol, TimeFormat>,
     /// The app's `Rails::Application` subclass from
     /// `config/application.rb` (e.g. `Lobsters::Application`),
     /// reparented at ingest onto `Rails::Application` itself. Its
@@ -266,6 +267,24 @@ pub struct ResolvedFilter {
     /// as a static query profile without re-finding the method body.
     #[serde(default, skip_serializing_if = "crate::effect::EffectSet::is_pure")]
     pub effects: crate::effect::EffectSet,
+}
+
+/// What an app registered a `to_fs` format AS. Rails accepts both,
+/// and `Time#to_fs` picks between them by asking the value whether it
+/// responds to `call`:
+///
+/// ```ruby
+/// formatter.respond_to?(:call) ? formatter.call(self).to_s : strftime(formatter)
+/// ```
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum TimeFormat {
+    /// A strftime string — `register(:month_and_year, "%B %Y")`.
+    Strftime { format: String },
+    /// A `->(t) { … }`, as a one-parameter method whose body is the
+    /// lambda's. Inlined with the receiver substituted for the
+    /// parameter, then `.to_s`, which is what Rails applies to the
+    /// call's result above.
+    Lambda { method: MethodDef },
 }
 
 /// A Rails-style importmap: one `<name>` → `<path>` entry per

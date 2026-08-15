@@ -3,13 +3,14 @@
 //!
 //! A hole we opened ourselves: analyze TYPES `to_fs` and the `direct`
 //! URL-helper lowering EMITS it, while no target implements it. Rails
-//! resolves it through `Time::DATE_FORMATS` — part built-in strftime
-//! strings, part app-defined lambdas from an initializer — and both
-//! halves are compile-time knowledge.
+//! resolves it through `ActiveSupport::TimeFormats` — part strftime
+//! strings, part lambdas, part whatever an app registered in an
+//! initializer — and all of it is compile-time knowledge.
 //!
-//! The built-in strings here were MEASURED against Rails 8.1
-//! (`Time.utc(2026,8,14,9,5,3).to_fs(:number)` → `"20260814090503"`),
-//! not transcribed.
+//! The built-in strings are Rails' own table
+//! (`activesupport/lib/active_support/time_formats.rb`), confirmed by
+//! running each one: `Time.utc(2026,8,14,9,5,3).to_fs(:number)` →
+//! `"20260814090503"`.
 
 use roundhouse::expr::{Expr, ExprNode};
 use roundhouse::ingest::ingest_app_from_tree;
@@ -98,6 +99,48 @@ fn the_older_spelling_lowers_identically() {
     );
 }
 
+/// Two of Rails' entries are one-line lambdas over a method the
+/// pipeline already handles, so they cost a rename, not a format.
+#[test]
+fn the_lambda_builtins_that_are_just_a_method_become_that_method() {
+    assert_eq!(stamp("created_at.to_fs(:iso8601)", vec![]), "created_at.iso8601");
+    assert_eq!(stamp("created_at.to_fs(:rfc2822)", vec![]), "created_at.rfc2822");
+}
+
+/// `ActiveSupport::TimeFormats.register` is the CURRENT spelling —
+/// `Time::DATE_FORMATS[…]=` carries a `deprecate_constant` on Rails
+/// main pointing at it. An app moving to the new API must not silently
+/// lose its format, which would mean falling back to `to_s`.
+#[test]
+fn the_register_spelling_is_read_too() {
+    assert_eq!(
+        stamp(
+            "created_at.to_fs(:epoch)",
+            vec![(
+                "config/initializers/time_formats.rb",
+                "ActiveSupport::TimeFormats.register(:epoch, ->(time) { time.to_i })\n"
+            )]
+        ),
+        "created_at.to_i.to_s"
+    );
+}
+
+/// A registered format can be a plain strftime string — the form Rails'
+/// own docs lead with (`register(:month_and_year, '%B %Y')`).
+#[test]
+fn a_registered_string_format_is_a_strftime_string() {
+    assert_eq!(
+        stamp(
+            "created_at.to_fs(:month_and_year)",
+            vec![(
+                "config/initializers/time_formats.rb",
+                "ActiveSupport::TimeFormats.register(:month_and_year, \"%B %Y\")\n"
+            )]
+        ),
+        "created_at.strftime(\"%B %Y\")"
+    );
+}
+
 /// An app-defined format is the lambda from its initializer, inlined
 /// with the receiver substituted for the parameter — campfire's
 /// `:epoch`, the millisecond stamp its message list sorts by.
@@ -132,11 +175,19 @@ fn an_app_definition_overrides_a_builtin_of_the_same_name() {
 /// `to_s`, and emitting that would render a readable date where the app
 /// asked for a format — "we do not know this format" is not the same
 /// fact as "Rails does not know it".
+///
+/// `:rfc822` is Rails' own, and still declines: its lambda interpolates
+/// `formatted_offset(false)` into the format string, so it is a
+/// rendering to measure rather than a table lookup.
 #[test]
 fn an_unknown_format_declines_rather_than_falling_back_to_to_s() {
     assert_eq!(
         stamp("created_at.to_fs(:rfc822)", vec![]),
         "created_at.to_fs(:rfc822)"
+    );
+    assert_eq!(
+        stamp("created_at.to_fs(:nope)", vec![]),
+        "created_at.to_fs(:nope)"
     );
 }
 

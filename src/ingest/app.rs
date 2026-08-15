@@ -457,15 +457,23 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             for entry in read_rb_files(vfs, &init_dir)? {
                 let Ok(bytes) = vfs.read(&entry) else { continue };
                 let path_str = entry.display().to_string();
-                for (name, param, body) in extract_time_formats(&bytes, &path_str) {
-                    if let Ok(methods) = crate::runtime_src::parse_methods(&format!(
-                        "def __time_format_{name}({param})\n  {body}\nend\n"
-                    )) {
-                        if let Some(method) = methods.into_iter().next() {
-                            app.time_formats
-                                .insert(crate::ident::Symbol::from(name.as_str()), method);
+                for (name, source) in extract_time_formats(&bytes, &path_str) {
+                    let format = match source {
+                        TimeFormatSource::Strftime(format) => {
+                            crate::app::TimeFormat::Strftime { format }
                         }
-                    }
+                        TimeFormatSource::Lambda { param, body } => {
+                            let Ok(methods) = crate::runtime_src::parse_methods(&format!(
+                                "def __time_format_{name}({param})\n  {body}\nend\n"
+                            )) else {
+                                continue;
+                            };
+                            let Some(method) = methods.into_iter().next() else { continue };
+                            crate::app::TimeFormat::Lambda { method }
+                        }
+                    };
+                    app.time_formats
+                        .insert(crate::ident::Symbol::from(name.as_str()), format);
                 }
             }
         }
@@ -2273,23 +2281,34 @@ const FRAMEWORK_CONFIG_KEYS: &[&str] = &[
     "consider_all_requests_local",
 ];
 
-/// `Time::DATE_FORMATS[:name] = ->(t) { … }` — an app-defined `to_fs`
-/// format, returned as (format name, parameter name, body source).
+/// An app-registered `to_fs` format, in either spelling Rails accepts:
 ///
-/// Worth ingesting because the alternative is SILENTLY WRONG: Rails
-/// falls back to `to_s` for a format it does not know, so an app that
-/// defines `:epoch` (campfire, `(time.to_f * 1000).to_i` — the
-/// millisecond stamp three of its `data-` attributes are sorted by)
-/// would otherwise render a human-readable date into a JS number field
-/// with nothing reporting it.
+/// ```ruby
+/// ActiveSupport::TimeFormats.register(:month_and_year, "%B %Y")   # current
+/// Time::DATE_FORMATS[:epoch] = ->(time) { … }                     # deprecated
+/// ```
+///
+/// The bracket form is DEPRECATED as of Rails main (`Time` carries a
+/// `deprecate_constant :DATE_FORMATS` pointing at
+/// `ActiveSupport::TimeFormats.register`), and campfire — which tracks
+/// Rails main — still writes it. Both are read, because an app moving
+/// to the new spelling must not silently lose its format.
+///
+/// Worth ingesting at all because the alternative is SILENTLY WRONG:
+/// `Time#to_fs` falls back to `to_s` for a format it does not know, so
+/// an app that registers `:epoch` (campfire,
+/// `(time.to_f * 1000).to_i` — the millisecond stamp three of its
+/// `data-` attributes are sorted by) would otherwise render a
+/// human-readable date into a JS number field, reported by nothing.
 ///
 /// Top level of an initializer only, which is where Rails' own docs put
 /// it — the same discipline `extract_config_assignments` draws below.
-/// `DateTime::DATE_FORMATS` / `Date::DATE_FORMATS` are separate
-/// registries in Rails and are deliberately not folded in here: our
-/// `Ty::Time` covers all three, but their formats need their own
-/// measurement before they can share a table.
-fn extract_time_formats(source: &[u8], file: &str) -> Vec<(String, String, String)> {
+/// `ActiveSupport::DateFormats` is a SEPARATE registry whose strings
+/// differ for the same names (`:number` is `"%Y%m%d"` there against
+/// `"%Y%m%d%H%M%S"` here), so it is deliberately not folded in: our
+/// `Ty::Time` covers Date and DateTime too, and sharing one table would
+/// render a full timestamp where Rails renders eight digits.
+fn extract_time_formats(source: &[u8], file: &str) -> Vec<(String, TimeFormatSource)> {
     let result = super::prism::parse(source, file);
     let root = result.node();
     let src = String::from_utf8_lossy(source).into_owned();
@@ -2299,15 +2318,20 @@ fn extract_time_formats(source: &[u8], file: &str) -> Vec<(String, String, Strin
         .unwrap_or_default();
     let mut out = Vec::new();
     for stmt in stmts {
-        // `a[k] = v` parses as a call named `[]=` taking (k, v).
         let Some(call) = stmt.as_call_node() else { continue };
-        if super::util::constant_id_str(&call.name()) != "[]=" {
-            continue;
-        }
         let Some(recv) = call.receiver() else { continue };
         let Some(path) = recv.as_constant_path_node() else { continue };
-        let loc = path.location();
-        if &src[loc.start_offset()..loc.end_offset()] != "Time::DATE_FORMATS" {
+        let recv_loc = path.location();
+        let receiver = &src[recv_loc.start_offset()..recv_loc.end_offset()];
+        // `a[k] = v` parses as a call named `[]=` taking (k, v), so both
+        // spellings arrive as a two-argument call and differ only in the
+        // receiver and method name.
+        let recognized = match super::util::constant_id_str(&call.name()) {
+            "[]=" => receiver == "Time::DATE_FORMATS",
+            "register" => receiver == "ActiveSupport::TimeFormats",
+            _ => false,
+        };
+        if !recognized {
             continue;
         }
         let Some(args) = call.arguments() else { continue };
@@ -2316,9 +2340,19 @@ fn extract_time_formats(source: &[u8], file: &str) -> Vec<(String, String, Strin
             continue;
         };
         let Some(key) = key.as_symbol_node() else { continue };
-        // Only the lambda form. A format can also be a plain strftime
-        // String; that one needs no inlining and is not what any corpus
-        // app writes, so it declines here rather than being half-modeled.
+        let name = String::from_utf8_lossy(key.unescaped()).into_owned();
+
+        // A String format is a strftime string; a lambda is inlined.
+        // Rails picks between them at run time with `respond_to?(:call)`.
+        if let Some(string) = value.as_string_node() {
+            out.push((
+                name,
+                TimeFormatSource::Strftime(
+                    String::from_utf8_lossy(string.unescaped()).into_owned(),
+                ),
+            ));
+            continue;
+        }
         let Some(lambda) = value.as_lambda_node() else { continue };
         let Some(params) = lambda
             .parameters()
@@ -2331,15 +2365,23 @@ fn extract_time_formats(source: &[u8], file: &str) -> Vec<(String, String, Strin
         let [param] = requireds.as_slice() else { continue };
         let Some(param) = param.as_required_parameter_node() else { continue };
         let Some(body) = lambda.body() else { continue };
-        let key_loc = key.unescaped();
         let body_loc = body.location();
         out.push((
-            String::from_utf8_lossy(key_loc).into_owned(),
-            super::util::constant_id_str(&param.name()).to_string(),
-            src[body_loc.start_offset()..body_loc.end_offset()].to_string(),
+            name,
+            TimeFormatSource::Lambda {
+                param: super::util::constant_id_str(&param.name()).to_string(),
+                body: src[body_loc.start_offset()..body_loc.end_offset()].to_string(),
+            },
         ));
     }
     out
+}
+
+/// A registered format as its initializer spells it, before the lambda
+/// form is parsed into IR.
+enum TimeFormatSource {
+    Strftime(String),
+    Lambda { param: String, body: String },
 }
 
 fn extract_config_assignments(source: &[u8], file: &str) -> Vec<(String, String)> {
