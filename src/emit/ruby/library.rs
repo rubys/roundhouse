@@ -3091,7 +3091,32 @@ pub(super) fn emit_library_class_decl_with_synthesized(
     // isn't already defined (Ruby looks up `Views` as a constant); nested
     // headers create the chain on the fly. Spinel-blog's hand-written
     // views use the nested form for the same reason.
-    let segments: Vec<&str> = name.split("::").collect();
+    let mut segments: Vec<&str> = name.split("::").collect();
+    // …UNLESS an outer segment belongs to the shared RUNTIME, where we
+    // cannot know whether to reopen it as `class` or `module` and the
+    // wrong guess is a TypeError at load. campfire extends Action Text
+    // with `class ActionText::Attachment::OpengraphEmbed`;
+    // `ActionText::Attachment` is a CLASS in runtime/action_text.rb, and
+    // nesting emitted `module Attachment` around it.
+    //
+    // The COMPOUND header the source itself wrote needs no such
+    // knowledge — it only requires the outer constants to already
+    // exist, which is exactly what the runtime being required before
+    // app code guarantees. That is also why this is not the default:
+    // `Views::Articles` has no owner but the nesting itself, and a
+    // compound header there would look up a `Views` nothing created.
+    if segments.len() > 1 {
+        let runtime_owned = require_path_for_body_const(
+            &[segments[0].to_string()],
+            app,
+            "",
+        )
+        .is_some_and(|p| p.starts_with("runtime/"));
+        if runtime_owned {
+            segments = vec![name];
+        }
+    }
+    let segments = segments;
     let depth = segments.len();
     let body_pad = "  ".repeat(depth);
 

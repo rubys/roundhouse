@@ -182,11 +182,20 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // Honor the ignore list when walking lib/ so dev-tooling classes
     // don't register as app library classes (and don't end up in the
     // `app/models.rb` aggregator's eager-load set).
+    // `config.autoload_lib(ignore: %w[…])` removes a directory from the
+    // AUTOLOAD paths, which is NOT the same as removing it from the app.
+    // campfire ignores `rails_ext` precisely BECAUSE it loads those
+    // files itself, from an initializer — and dropping them lost
+    // `String#all_emoji?`, which every message row calls. A subdir some
+    // initializer explicitly requires is app code after all.
     let lib_ignores: Vec<String> = vfs
         .read(&dir.join("config/application.rb"))
         .ok()
         .map(|s| extract_autoload_lib_ignores(&s))
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|ignored| !lib_dir_is_explicitly_required(vfs, dir, ignored))
+        .collect();
     for sub in [
         "extras",
         "lib",
@@ -2184,6 +2193,54 @@ pub(super) fn read_rb_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResul
 /// deliberately not parsed); commented lines don't match. Absent call
 /// or unrecognized shape → empty list (walk everything, the prior
 /// behavior).
+/// Does an initializer load this lib subdirectory itself?
+///
+/// The shape campfire writes, in `config/initializers/extensions.rb`:
+///
+/// ```ruby
+/// %w[ rails_ext ].each do |extensions_dir|
+///   Dir["#{Rails.root}/lib/#{extensions_dir}/*"].each { |path| require "#{extensions_dir}/#{File.basename(path)}" }
+/// end
+/// ```
+///
+/// The directory name and the `require` are both there, but neither is
+/// reachable by matching a require's ARGUMENT — the path is built by
+/// interpolation from a glob. So the test is per-STATEMENT and textual:
+/// a top-level statement that both names the directory and calls
+/// `require` is loading it.
+///
+/// Per-statement rather than per-file on purpose. `assets` and `tasks`
+/// are named in the comment Rails' own generator writes directly above
+/// the `autoload_lib` line, and a whole-file scan would read that as a
+/// load. Statement scope also keeps an unrelated `require` elsewhere in
+/// the same initializer from vouching for a directory it never mentions.
+fn lib_dir_is_explicitly_required<V: Vfs + ?Sized>(vfs: &V, dir: &Path, subdir: &str) -> bool {
+    let init_dir = dir.join("config/initializers");
+    if !vfs.is_dir(&init_dir) {
+        return false;
+    }
+    let Ok(entries) = read_rb_files(vfs, &init_dir) else { return false };
+    for entry in entries {
+        let Ok(bytes) = vfs.read(&entry) else { continue };
+        let file = entry.display().to_string();
+        let result = super::prism::parse(&bytes, &file);
+        let src = String::from_utf8_lossy(&bytes).into_owned();
+        let root = result.node();
+        let stmts = root
+            .as_program_node()
+            .map(|p| p.statements().body().iter().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for stmt in stmts {
+            let loc = stmt.location();
+            let text = &src[loc.start_offset()..loc.end_offset()];
+            if text.contains("require") && text.contains(subdir) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn extract_autoload_lib_ignores(source: &[u8]) -> Vec<String> {
     let source = String::from_utf8_lossy(source);
     for line in source.lines() {

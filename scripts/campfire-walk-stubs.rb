@@ -68,31 +68,19 @@ end
 # rich_text.rs + runtime/ruby/action_text.rb), so `Content`,
 # `Attachment.tag_name` and `Attachable` have left this file.
 #
-# GAP, what remains: the two classes campfire itself REOPENS under the
-# ActionText namespace. `lib/rails_ext/filter.rb` defines
-# `ActionText::Content::Filter` and `filters.rb` defines
-# `ActionText::Content::Filters`; `actiontext_opengraph_embeds.rb`
-# defines the OpengraphEmbed attachable. They are campfire's code, not
-# Rails', but they are reopens of a class the RUNTIME now owns — and the
-# emitted app requires `runtime/action_text` from a different path than
-# the one the lib reopen lands on, so the constants do not meet. Both
-# are read into class-body constants at LOAD time.
+# The classes campfire REOPENS under the ActionText namespace
+# (`lib/rails_ext/{filter,filters,actiontext_opengraph_embeds}.rb`) are
+# emitted from the app's own source now — they used to be dropped, and
+# the stand-ins that stood here with them are gone.
 #
-# This is the next Action Text slice, and it is a general question, not
-# an Action Text one: an app that reopens a runtime-provided class needs
-# its reopen to reach the runtime's constant. Until then, stand-ins.
-module ActionText
-  class Content
-    class Filter
-      def self.apply(content)
-        content
-      end
-    end
-  end
-
-  class Attachment
-    class OpengraphEmbed
-      OPENGRAPH_EMBED_CONTENT_TYPE = "application/vnd.actiontext.opengraph-embed"
+# GAP: `ActiveModel::Model`, which `ActionText::Attachment
+# ::OpengraphEmbed` includes. Rails' module gives a keyword-ish
+# `initialize(attributes = {})` plus validations; only the constructor
+# is reached here.
+module ActiveModel
+  module Model
+    def initialize(attributes = {})
+      attributes.each { |name, value| instance_variable_set("@#{name}", value) }
     end
   end
 end
