@@ -2572,25 +2572,57 @@ pub(crate) fn apply_nilsafe_empty_lowering(lcs: &mut [LibraryClass]) {
 /// on lobsters). The AOT lane just surfaces it at compile time.
 ///
 /// The rewrite is deliberately narrow — a head segment is rooted only
-/// when it BOTH collides with one of the view's own namespace segments
-/// AND names a real top-level app class. Emitted views always spell
-/// sibling views fully from the root (`Views::Stories.similar(...)`),
+/// when it BOTH collides with a namespace visible in the view's lexical
+/// scope AND names a real top-level app namespace. Emitted views always
+/// spell sibling views fully from the root (`Views::Stories.similar(...)`),
 /// so nothing here depends on lexical shorthand and the rooting cannot
 /// retarget a reference that was already resolving correctly.
+///
+/// "Visible in the lexical scope" is the part that was wrong at first:
+/// it read the view's OWN segments only. But every view is emitted
+/// inside `module Views`, so the scope of ANY view body includes EVERY
+/// OTHER view's namespace. campfire's `messages/_message` calls
+/// `Users::AvatarsHelper.avatar_tag(...)`; `Views::Users` exists because
+/// the app has `app/views/users/` templates, and Ruby stops there —
+/// `uninitialized constant Views::Users::AvatarsHelper`, on the page
+/// that renders every message.
 pub(crate) fn apply_view_constant_rooting(lcs: &mut [LibraryClass], app: &App) {
+    // …and "names a real top-level app namespace" has to mean the
+    // NAMESPACE, not a class of exactly that name: campfire has no class
+    // called `Users`, only `Users::AvatarsHelper` under it.
     let top_level = |name: &str| {
-        app.models.iter().any(|m| m.name.0.as_str() == name)
-            || app.library_classes.iter().any(|c| c.name.0.as_str() == name)
+        let prefix = format!("{name}::");
+        let under = |n: &str| n == name || n.starts_with(&prefix);
+        app.models.iter().any(|m| under(m.name.0.as_str()))
+            || app.library_classes.iter().any(|c| under(c.name.0.as_str()))
     };
+    // Every `Views::<Seg>` in this emit, which is exactly the set of
+    // names a view body can accidentally resolve to.
+    let mut view_namespaces: Vec<String> = lcs
+        .iter()
+        .filter_map(|lc| lc.name.0.as_str().strip_prefix("Views::"))
+        .filter_map(|rest| rest.split("::").next())
+        // `Views` itself is never the shadow: a `Views::X` reference
+        // inside `module Views` finds no `Views::Views` and lands on the
+        // top-level one, which is the intended target.
+        .filter(|seg| *seg != "Views" && top_level(seg))
+        .map(|seg| seg.to_string())
+        .collect();
+    view_namespaces.sort();
+    view_namespaces.dedup();
+
     for lc in lcs.iter_mut() {
-        let shadowing: Vec<String> = lc
-            .name
-            .0
-            .as_str()
+        let name = lc.name.0.as_str();
+        let mut shadowing: Vec<String> = name
             .split("::")
             .filter(|seg| top_level(seg))
             .map(|seg| seg.to_string())
             .collect();
+        if name.starts_with("Views::") {
+            shadowing.extend(view_namespaces.iter().cloned());
+        }
+        shadowing.sort();
+        shadowing.dedup();
         if shadowing.is_empty() {
             continue;
         }
@@ -3538,6 +3570,22 @@ fn require_path_for_body_const(
             || app.library_classes.iter().any(|lc| lc.name.0.as_str() == joined))
     {
         return Some(format!("app/models/{}", crate::naming::underscore(&joined)));
+    }
+    // A bare reference inside a namespace resolves LEXICALLY first:
+    // campfire's `module ContentFilters` builds
+    // `TextMessagePresentationFilters = …new(RemoveSoloUnfurledLinkText,
+    // …)` at LOAD time, and that name is
+    // `ContentFilters::RemoveSoloUnfurledLinkText` — a sibling file that
+    // the aggregator requires AFTER this one (`x.rb` sorts before
+    // `x/y.rb`). Without the require the constant is uninitialized and
+    // the whole app fails to load, so resolve the qualified form before
+    // giving up on the bare one.
+    let lexical = format!("{self_name}::{joined}");
+    if !self_name.is_empty()
+        && (app.models.iter().any(|m| m.name.0.as_str() == lexical)
+            || app.library_classes.iter().any(|lc| lc.name.0.as_str() == lexical))
+    {
+        return Some(format!("app/models/{}", crate::naming::underscore(&lexical)));
     }
     if first == self_name {
         return None;

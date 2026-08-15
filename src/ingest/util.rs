@@ -205,7 +205,23 @@ fn collect_modules<'pr, F: FnMut(&[String], ruby_prism::ModuleNode<'pr>)>(
 }
 
 fn module_has_direct_def(m: &ruby_prism::ModuleNode<'_>) -> bool {
-    body_has_direct_method_decl(m.body()) || body_has_included_block(m.body())
+    body_has_direct_method_decl(m.body())
+        || body_has_included_block(m.body())
+        || body_has_constant_decl(m.body())
+}
+
+/// A module whose only content is a CONSTANT is still app state the
+/// rest of the app reads, and surfacing is what gets it emitted at all.
+/// campfire's `EmojiHelper` is exactly this — one `REACTIONS` hash, the
+/// reaction picker every message row renders — and dropping the module
+/// took the constant with it, so `messages/_actions` raised
+/// `uninitialized constant EmojiHelper` on the page that lists
+/// messages.
+fn body_has_constant_decl(body: Option<Node<'_>>) -> bool {
+    let Some(body) = body else { return false };
+    flatten_statements(body).iter().any(|stmt| {
+        stmt.as_constant_write_node().is_some() || stmt.as_constant_path_write_node().is_some()
+    })
 }
 
 /// An `included do … end` block marks an ActiveSupport::Concern whose
