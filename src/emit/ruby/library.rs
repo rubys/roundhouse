@@ -1121,6 +1121,12 @@ fn is_framework_view_helper(name: &str) -> bool {
             | "content_for?"
             | "capture"
             | "concat"
+            // Every campfire message row is built by `MessagesHelper
+            // .message_tag`, which opens with `dom_id(message)`. The
+            // VIEW classifier has always known `dom_id`; a helper body
+            // never reached it, and the bare call raised NoMethodError
+            // — inside a `rescue Exception` that hid which call it was.
+            | "dom_id"
     )
 }
 

@@ -243,9 +243,27 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             for entry in entries {
                 let Ok(source) = vfs.read(&entry) else { continue };
                 let path_str = entry.display().to_string();
+                // Rails mixes in only the files whose NAME says helper:
+                // `all_helpers_from_path` globs `**/*_helper.rb` and
+                // nothing else. Everything else under app/helpers is
+                // ordinary autoloaded app code that happens to live
+                // there — campfire keeps `Messages::AttachmentPresentation`
+                // (a PORO) and its `ContentFilters` classes here.
+                //
+                // Registering those cost twice over: the PORO's methods
+                // entered the view surface, so a `render "messages/…"`
+                // in a HELPER body bound to `AttachmentPresentation
+                // .render` (arity 0, and not a partial render at all),
+                // and index membership flattened the class into module
+                // functions — `def self.initialize`, for a class whose
+                // whole job is to hold two ivars.
+                let is_helper_module = entry
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|stem| stem.ends_with("_helper"));
                 match ingest_library_classes(&source, &path_str) {
                     Ok(classes) => {
-                        for lc in &classes {
+                        for lc in classes.iter().filter(|_| is_helper_module) {
                             // Rails resolves a helper's `include`d
                             // modules into the same view surface —
                             // lobsters' ApplicationHelper includes
