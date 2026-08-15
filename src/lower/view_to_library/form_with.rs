@@ -18,6 +18,7 @@ use crate::ident::{Symbol, VarId};
 use crate::naming::{singularize, snake_case};
 use crate::span::Span;
 
+use super::attr_parts::append_attr_parts;
 use super::walker::{rewrite_helpers_in_expr, walk_body};
 use super::{
     accumulator_append_call, lit_str, lit_sym, send, view_helpers_call,
@@ -214,6 +215,56 @@ pub(super) fn emit_form_with_inline(
     out
 }
 
+/// Which of `form_with`'s options actually become `<form>` attributes,
+/// from Rails' own line (`form_helper.rb::html_options_for_form_with`):
+///
+/// ```ruby
+/// html_options = options.slice(:id, :class, :multipart, :method, :data,
+///                              :authenticity_token).merge!(html)
+/// ```
+///
+/// So the top-level options are FILTERED to a fixed allowlist and
+/// `html:`'s entries are merged over them — everything else is an
+/// option to form_with, not an attribute, and Rails renders none of it.
+/// We rendered every leftover opt, which is how lobsters' `form_with
+/// html: { id: "edit_story" }` reached the tag as a literal `html`
+/// attribute holding a stringified hash.
+///
+/// Three allowlist members are deliberately absent from what we render
+/// here because the expansion already owns them: `:method` (the tag
+/// hard-codes `post`; PATCH/DELETE ride the `_method` override input),
+/// `:authenticity_token` (the CSRF hidden input), and `:multipart`
+/// (Rails turns it into `enctype`, which the file-upload path will want
+/// when Active Storage lands).
+fn form_tag_attributes(opts: &[(Expr, Expr)]) -> Vec<(Expr, Expr)> {
+    let key_of = |k: &Expr| match &*k.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        _ => None,
+    };
+    let mut out: Vec<(Expr, Expr)> = Vec::new();
+    let mut html: Vec<(Expr, Expr)> = Vec::new();
+    for (k, v) in opts {
+        match key_of(k).as_deref() {
+            Some("id") | Some("class") | Some("data") => out.push((k.clone(), v.clone())),
+            Some("html") => {
+                if let ExprNode::Hash { entries, .. } = &*v.node {
+                    html = entries.clone();
+                }
+            }
+            _ => {}
+        }
+    }
+    // `merge!`: an existing key keeps its position and takes html's
+    // value; a new key appends.
+    for (hk, hv) in html {
+        match (key_of(&hk), out.iter().position(|(k, _)| key_of(k) == key_of(&hk))) {
+            (Some(_), Some(i)) => out[i].1 = hv,
+            _ => out.push((hk, hv)),
+        }
+    }
+    out
+}
+
 /// Build the opening `<form action="..." accept-charset="UTF-8"
 /// method="post"<opts>>` tag as one `<accumulator> << "<...>"`
 /// statement. Static text segments are folded into the surrounding
@@ -233,22 +284,16 @@ fn emit_open_form_tag(comps: &FormWithComponents, ctx: &ViewCtx) -> Expr {
     parts.push(InterpPart::Text {
         value: "\" accept-charset=\"UTF-8\" method=\"post\"".to_string(),
     });
-    for (k, v) in &comps.opts_entries {
-        let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
-            // Non-symbol keys not exercised; skip silently to keep
-            // output well-formed.
-            continue;
-        };
-        parts.push(InterpPart::Text {
-            value: format!(" {}=\"", key.as_str()),
-        });
-        parts.push(InterpPart::Expr {
-            expr: view_helpers_call("html_escape", vec![simplify_opts_value(k, v)]),
-        });
-        parts.push(InterpPart::Text {
-            value: "\"".to_string(),
-        });
-    }
+    // The user's opts go through the SHARED attribute renderer — the
+    // one link_to, button_to, the tag builder and the form builder all
+    // use. This loop used to be its own copy, rendering every value as
+    // `key="html_escape(value)"`, so a nested `data:` hash stringified
+    // instead of flattening: campfire's
+    // `form_with model: […], data: { turbo_frame: …, action: "popup#close" }`
+    // emitted `data="{:turbo_frame=>…}"` — one dead attribute in place
+    // of the two Stimulus targets that make the reaction buttons work.
+    // MEASURED against Rails 8.1: `data-turbo-frame="…" data-action="popup#close"`.
+    append_attr_parts(&mut parts, &form_tag_attributes(&comps.opts_entries));
     parts.push(InterpPart::Text {
         value: ">".to_string(),
     });

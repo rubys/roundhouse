@@ -33,13 +33,32 @@ pub(crate) fn append_attr_parts(parts: &mut Vec<InterpPart>, opts: &[(Expr, Expr
         // path — dynamic hashes pass through the simple-value
         // branch (which would render `[object Object]`-shaped junk,
         // but no real fixture exercises that shape).
-        if let ExprNode::Hash { entries: inner, .. } = &*v.node {
+        //
+        // ONLY those two prefixes. MEASURED: `tag.form(foo: { a: 1 })`
+        // renders `foo="a 1"` — Rails expands a nested hash for `data`
+        // and `aria` and for nothing else. Flattening every hash turned
+        // lobsters' `form_with html: { id: "edit_story" }` into
+        // `html-id="edit_story"`, an attribute no browser reads. (The
+        // `foo="a 1"` spelling itself stays unmodeled — the generic
+        // branch below renders Ruby's `to_s` — because no corpus app
+        // writes a non-data/aria hash attribute.)
+        let flattens = matches!(key.as_str(), "data" | "aria");
+        if let (true, ExprNode::Hash { entries: inner, .. }) = (flattens, &*v.node) {
             for (ik, iv) in inner {
                 let inner_key = match &*ik.node {
                     ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
                     ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
                     _ => continue,
                 };
+                // A nil sub-value is NO ATTRIBUTE, the same rule the
+                // outer level follows — MEASURED: `tag.form(data: {
+                // nothing: nil })` renders `<form>`, not
+                // `data-nothing=""`. (`false` is NOT nil here: Rails
+                // renders `data-turbo="false"`, because the boolean-
+                // attribute rule does not reach `data-*` sub-keys.)
+                if matches!(&*iv.node, ExprNode::Lit { value: Literal::Nil }) {
+                    continue;
+                }
                 let kebab = inner_key.replace('_', "-");
                 parts.push(InterpPart::Text {
                     value: format!(" {}-{}=\"", key.as_str(), kebab),
