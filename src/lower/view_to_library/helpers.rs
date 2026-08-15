@@ -363,6 +363,54 @@ fn emit_button_to_inline(
     opts: Option<&Expr>,
     ctx: &ViewCtx,
 ) -> Option<Expr> {
+    let (prefix, suffix) = button_to_wrapper_parts(url, opts, ctx)?;
+    let mut parts = prefix;
+    parts.push(InterpPart::Expr {
+        // Same `.to_s` the bare-interpolation path applies: the label
+        // can be a nullable column read (`link_to article.title, …`),
+        // and `html_escape` is deliberately monomorphic `(String) ->
+        // String`. `nil.to_s == ""` is what Rails renders.
+        expr: view_helpers_call("html_escape", vec![lit_str_coerce(text.clone())]),
+    });
+    parts.extend(suffix);
+    Some(string_interp(parts))
+}
+
+/// The block form — `<%= button_to url, class: "…" do %> …markup… <%
+/// end %>` (campfire's join-code regenerate button).
+///
+/// Emits STATEMENTS rather than one expression, the shape
+/// `emit_tag_builder_inline` uses: the `<form …><button …>` prefix
+/// appends, the block body walks into the SAME accumulator, then the
+/// closing appends. That is not a stylistic choice — the block body is
+/// template markup (`image_tag`, a literal `<span>`), and Rails treats
+/// what the block yields as the button's HTML content. Routing it
+/// through the positional form's `html_escape` would render the markup
+/// as visible text.
+pub(super) fn emit_button_to_block_inline(
+    url: &Expr,
+    opts: Option<&Expr>,
+    body: &Expr,
+    block_params: &[Symbol],
+    ctx: &ViewCtx,
+) -> Option<Vec<Expr>> {
+    let (prefix, suffix) = button_to_wrapper_parts(url, opts, ctx)?;
+    let mut out = vec![super::accumulator_append_call(string_interp(prefix), ctx)];
+    let inner_ctx = ctx.with_locals(block_params.iter().map(|p| p.as_str().to_string()));
+    out.extend(super::walker::walk_body(body, &inner_ctx));
+    out.push(super::accumulator_append_call(string_interp(suffix), ctx));
+    Some(out)
+}
+
+/// The wrapper both spellings share, split where the button's CONTENT
+/// goes: everything up to the open `<button …>` and everything from
+/// `</button>` on. One owner for the markup, so the two forms cannot
+/// drift.
+fn button_to_wrapper_parts(
+    url: &Expr,
+    opts: Option<&Expr>,
+    ctx: &ViewCtx,
+) -> Option<(Vec<InterpPart>, Vec<InterpPart>)> {
     let url_expr = emit_url_arg(url, ctx)?;
     let mut opts_entries = hash_entries(opts);
     let method_expr = take_opt(&mut opts_entries, "method").unwrap_or_else(default_method_sym);
@@ -400,24 +448,13 @@ fn emit_button_to_inline(
     parts.push(InterpPart::Text {
         value: ">".to_string(),
     });
-    parts.push(InterpPart::Expr {
-        // Same `.to_s` the bare-interpolation path applies: the label
-        // can be a nullable column read (`link_to article.title, …`),
-        // and `html_escape` is deliberately monomorphic `(String) ->
-        // String`. `nil.to_s == ""` is what Rails renders.
-        expr: view_helpers_call("html_escape", vec![lit_str_coerce(text.clone())]),
-    });
-    parts.push(InterpPart::Text {
-        value: "</button>".to_string(),
-    });
-    // CSRF authenticity_token hidden input.
-    parts.push(InterpPart::Expr {
-        expr: view_helpers_call("csrf_token_hidden_input", Vec::new()),
-    });
-    parts.push(InterpPart::Text {
-        value: "</form>".to_string(),
-    });
-    Some(string_interp(parts))
+    let suffix = vec![
+        InterpPart::Text { value: "</button>".to_string() },
+        // CSRF authenticity_token hidden input.
+        InterpPart::Expr { expr: view_helpers_call("csrf_token_hidden_input", Vec::new()) },
+        InterpPart::Text { value: "</form>".to_string() },
+    ];
+    Some((parts, suffix))
 }
 
 /// Extract the entries Vec from a `Hash` literal opts arg, or empty

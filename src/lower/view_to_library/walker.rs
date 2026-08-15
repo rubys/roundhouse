@@ -19,7 +19,7 @@ use super::form_with::{
     emit_form_tag_inline, emit_form_with_inline, emit_tag_builder_inline, emit_tag_builder_void_or_content, is_errors_each,
     rewrite_errors_each_body,
 };
-use super::helpers::emit_view_helper_call;
+use super::helpers::{emit_button_to_block_inline, emit_view_helper_call};
 use super::partial::{emit_render_partial, emit_yield};
 use super::turbo_drive::emit_turbo_drive_directive;
 use super::predicates::rewrite_predicates;
@@ -681,6 +681,37 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         }
     }
 
+    // `<%= button_to url, opts do %> …markup… <% end %>` — the block
+    // spelling of a helper the positional form already inlines
+    // (campfire's join-code regenerate button). Ahead of the generic arm
+    // below, which would rebuild the call verbatim and leave a bare
+    // `button_to` the emitted module does not define — the whole helper
+    // is inlined at lower time, so nothing answers it at run time.
+    if let ExprNode::Send {
+        recv: None,
+        method,
+        args: sa,
+        block: Some(block),
+        ..
+    } = &*inner.node
+    {
+        if method.as_str() == "button_to" && !ctx.is_local("button_to") {
+            if let ExprNode::Lambda { params, body, .. } = &*block.node {
+                if block_body_is_template(body) && !sa.is_empty() {
+                    if let Some(stmts) = emit_button_to_block_inline(
+                        &sa[0],
+                        sa.get(1),
+                        body,
+                        params,
+                        ctx,
+                    ) {
+                        return stmts;
+                    }
+                }
+            }
+        }
+    }
+
     // Generic block-form output helper: `<%= form_tag(...) do %> INNER
     // <% end %>` (form_tag / content_tag / link_to-with-block — anything
     // not form_with, form_builder, or render). The block body is template
@@ -1084,8 +1115,37 @@ mod tests {
     }
 
     fn block_helper_call(method: &str) -> Expr {
-        // Compiled `<%= <method>(x) do %> inner <% end %>` is
-        //   _buf = _buf + (<method>(x) do _buf = _buf + "inner" end).to_s
+        block_helper_call_with(method, vec![var("x")])
+    }
+
+    /// `<%= button_to account_join_code_path, class: "btn" do %> inner
+    /// <% end %>` — campfire's shape. A path-helper call in the URL
+    /// position, because a bare local (what `block_helper_call` passes)
+    /// is not a URL the inliner can resolve and would decline.
+    fn button_to_block_call() -> Expr {
+        let path = Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("account_join_code_path"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let opts = Expr::new(
+            Span::default(),
+            ExprNode::Hash {
+                entries: vec![(lit_sym(Symbol::from("class")), str_lit("btn"))],
+                kwargs: true,
+            },
+        );
+        block_helper_call_with("button_to", vec![path, opts])
+    }
+
+    /// Compiled `<%= <method>(<args>) do %> inner <% end %>` is
+    ///   _buf = _buf + (<method>(<args>) do _buf = _buf + "inner" end).to_s
+    fn block_helper_call_with(method: &str, args: Vec<Expr>) -> Expr {
         let inner = Expr::new(
             Span::default(),
             ExprNode::Lambda {
@@ -1100,7 +1160,7 @@ mod tests {
             ExprNode::Send {
                 recv: None,
                 method: Symbol::from(method),
-                args: vec![var("x")],
+                args,
                 block: Some(inner),
                 parenthesized: false,
             },
@@ -1207,6 +1267,64 @@ mod tests {
         assert!(emitted.contains("</form>"), "close tag emitted:\n{emitted}");
         assert!(!emitted.contains("form_tag"), "no runtime form_tag call:\n{emitted}");
         assert!(!emitted.contains("_buf"), "raw _buf must not survive:\n{emitted}");
+    }
+
+    #[test]
+    fn button_to_block_form_inlines_like_its_positional_twin() {
+        // `<%= button_to url do %> markup <% end %>` — campfire's
+        // join-code regenerate button. Without its own arm this fell to
+        // the generic block helper below, which rebuilds the call
+        // verbatim and leaves a bare `button_to` that nothing defines:
+        // the helper is inlined at lower time, so there is no runtime
+        // method to land on.
+        let stmts = walk_body(&buf_append(button_to_block_call()), &test_ctx());
+        let emitted = stmts
+            .iter()
+            .map(crate::emit::ruby::emit_expr)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(emitted.contains("<form action="), "the wrapping form opens inline:\n{emitted}");
+        assert!(
+            emitted.contains("<button type=\\\"submit\\\""),
+            "the button opens before the block body:\n{emitted}"
+        );
+        assert!(emitted.contains("inner"), "block body walked inline:\n{emitted}");
+        assert!(
+            emitted.contains("</button>"),
+            "and the button closes after it:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("csrf_token_hidden_input"),
+            "CSRF input rides the same wrapper the positional form uses:\n{emitted}"
+        );
+        assert!(
+            !emitted.contains("button_to("),
+            "no runtime button_to call survives:\n{emitted}"
+        );
+        assert!(!emitted.contains("_cap"), "no capture accumulator needed:\n{emitted}");
+    }
+
+    #[test]
+    fn button_to_block_content_is_not_escaped() {
+        // The positional form escapes its label — it is a String. A
+        // BLOCK yields markup (`image_tag`, a literal `<span>`), and
+        // Rails renders it as the button's HTML. Escaping it would show
+        // the tags as visible text, so the body must append raw.
+        let stmts = walk_body(&buf_append(button_to_block_call()), &test_ctx());
+        let emitted = stmts
+            .iter()
+            .map(crate::emit::ruby::emit_expr)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body_line = emitted
+            .lines()
+            .find(|l| l.contains("inner"))
+            .expect("block body line");
+        assert!(
+            !body_line.contains("html_escape"),
+            "block body appends raw:\n{body_line}"
+        );
     }
 
     #[test]
