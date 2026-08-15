@@ -233,6 +233,34 @@ use crate::models::*;
 use crate::views::*;
 ";
 
+/// The transpiled framework runtime, by bare name, for TEST files.
+///
+/// An app's own files reach the runtime through the specific imports
+/// their lowered bodies need. A framework test is the one emit that
+/// names these classes *directly* — `Inflector.pluralize`,
+/// `JsonBuilder.encode_value`, `ActionDispatch::Router.match` — because
+/// the class under test IS the framework class. Rust has no implicit
+/// sibling scope, so without these every such call is an E0433.
+///
+/// One line per transpiled runtime unit (the `runtime_loader` list),
+/// all `#[allow(unused_imports)]`: a given test file names one or two
+/// of them. `Router`'s `Route`/`MatchResult` ride along because router
+/// tests build tables and read matches.
+const FRAMEWORK_TEST_IMPORTS: &str = "\
+#[allow(unused_imports)]
+use crate::inflector::Inflector;
+#[allow(unused_imports)]
+use crate::json_builder::JsonBuilder;
+#[allow(unused_imports)]
+use crate::router::{MatchResult, Route, Router};
+#[allow(unused_imports)]
+use crate::view_helpers::ViewHelpers;
+#[allow(unused_imports)]
+use crate::flash::Flash;
+#[allow(unused_imports)]
+use crate::session::Session;
+";
+
 /// Emit a `rust2`-shaped project for `app`. Phase 2.1+: minimal
 /// scaffold + transpiled framework runtime files. Phase 5 (in
 /// progress): adds per-file application code emit through the
@@ -1239,10 +1267,59 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 .collect::<Vec<_>>()
                 .join("\n");
 
+            // Inner helper classes declared inline in the test file — a
+            // non-test model/controller paired with the `*Test` class
+            // (`Article < ActiveRecord::Base` in view_helpers_test,
+            // `TestController < ActionController::Base` in base_test).
+            // Ingest lifts them onto the module's `inner_classes`; emit
+            // them into the same file, above the test body, so its
+            // references resolve. Same companion-hoist the kotlin
+            // (`dc25f49`), swift, typescript and crystal gates do.
+            let mut inners = String::new();
+            for inner in &lowered.inner_classes {
+                let mut tmp = vec![inner.clone()];
+                let registry =
+                    crate::emit::rust2::decide::str_color::build_registry(&tmp, &[]);
+                crate::emit::rust2::decide::str_color::color_classes(&mut tmp, &registry);
+                crate::analyze::mutates_self::propagate(&mut tmp);
+                crate::analyze::block_refine::propagate(&mut tmp);
+                decide::decide_classes(&mut tmp);
+                let inner = tmp.into_iter().next().unwrap();
+                match library::emit_library_class(&inner) {
+                    Ok(s) => inners.push_str(&s),
+                    Err(e) => inners.push_str(&emit_failure_stub(
+                        &format!("inner class `{}`", inner.name.0.as_str()),
+                        &e,
+                    )),
+                }
+                inners.push('\n');
+            }
+
+            // Class-body constants (`TABLE = [...]` in router_test) lift
+            // to module scope: Rust has no class body to hold them, and
+            // the test fns that read them are free fns in this module.
+            let mut consts = String::new();
+            for (name, value) in &lowered.constants {
+                consts.push_str(&format!(
+                    "#[allow(dead_code)]\nstatic {}: std::sync::LazyLock<{}> = \
+                     std::sync::LazyLock::new(|| {});\n",
+                    name.as_str(),
+                    value
+                        .ty
+                        .as_ref()
+                        .map(crate::emit::rust2::ty::rust_ty)
+                        .unwrap_or_else(|| "String".to_string()),
+                    expr::emit_expr(value),
+                ));
+            }
+
             let content = format!(
                 "{MODEL_IMPORTS}\n\
                  #[allow(unused_imports)]\n\
                  use crate::fixtures::*;\n\
+                 {FRAMEWORK_TEST_IMPORTS}\
+                 {consts}\
+                 {inners}\
                  {with_attrs}\n"
             );
             files.push(EmittedFile {
@@ -1303,6 +1380,38 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         }
     }
     }); // end with_global_class_methods
+
+    // Empty aggregators for the module trio every emitted TEST file
+    // names unconditionally: `MODEL_IMPORTS` globs `crate::models::*`
+    // and `crate::views::*`, and each test body opens with
+    // `crate::fixtures::setup()`. An App carrying tests but no models
+    // — a framework-test App (`tests/framework_tests_rust.rs`), or any
+    // app whose tests don't ride on fixtures — otherwise emits a crate
+    // that fails to compile on three E0432s before a single assertion
+    // runs. The stubs cost nothing when the real ones were emitted:
+    // this only fills a gap, last-write-wins dedupe below is untouched.
+    if files.iter().any(|f| f.path.starts_with("src/tests")) {
+        let mut stub = |path: &str, content: &str| {
+            if !files.iter().any(|f| f.path == PathBuf::from(path)) {
+                files.push(EmittedFile {
+                    path: PathBuf::from(path),
+                    content: content.to_string(),
+                });
+            }
+        };
+        stub("src/models/mod.rs", "// Generated by Roundhouse (rust2). No models in this app.\n");
+        stub("src/views/mod.rs", "// Generated by Roundhouse (rust2). No views in this app.\n");
+        // A no-op `setup()`: with no fixtures there is no schema to
+        // create and nothing to load, but the call site is emitted
+        // unconditionally, so the function has to exist.
+        stub(
+            "src/fixtures/mod.rs",
+            "// Generated by Roundhouse (rust2). No fixtures in this app.\n\
+             \n/// Per-test entry point. No-op here — this app declares no\n\
+             /// fixtures, so there is no schema to create and nothing to load.\n\
+             pub fn setup() {}\n",
+        );
+    }
 
     // src/lib.rs — declares the modules emitted above (hand-written +
     // transpiled). emit_lib_rs scans the emitted file list for stems

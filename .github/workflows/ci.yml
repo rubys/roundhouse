@@ -523,6 +523,32 @@ jobs:
       - name: cargo test --test framework_tests_kotlin (green subset)
         run: cargo test --test framework_tests_kotlin -- --ignored --nocapture inflector router view_helpers
 
+  framework-tests-rust:
+    # Per-target framework-test conformance gate for the Rust target.
+    # Transpiles runtime/ruby/test/**/*_test.rb through rust2::emit and
+    # runs the emitted crate under `cargo test`. Independent of the
+    # real-blog fixture (each test builds a minimal in-process App), so
+    # it parallelizes freely against generate-fixture / toolchain-*.
+    #
+    # Why it exists: rust2 collapsed `is_a?(TrueClass)` and
+    # `is_a?(FalseClass)` to one predicate, so every `false` serialized
+    # as `true`. That was found via the TYPESCRIPT gate (db434d83) —
+    # rust had none, and real-blog has no boolean column, so nothing on
+    # the rust side would ever have caught it.
+    #
+    # Scoped to the green subset (inflector). The other five suites are
+    # wired in the test file and fail on named rust2 gaps — see the
+    # comment block there. Same filter convention as
+    # framework-tests-kotlin / -swift; drop names as the gaps close.
+    # Tracked in #34.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test --test framework_tests_rust (green subset)
+        run: cargo test --test framework_tests_rust -- --ignored --nocapture inflector
+
   framework-tests-ruby:
     # Per-target framework-test conformance gate for the Ruby target
     # (CRuby/MRI). Transpiles runtime/ruby/test/**/*_test.rb through
