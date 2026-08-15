@@ -605,6 +605,31 @@ fn push_delegate_skip_diagnostic(
     crate::emit::diagnostics::push(d);
 }
 
+/// A class method a call site reaches through an association, whose
+/// constructor cannot take the association's scope. Rails would have set
+/// the foreign key here; we leave the call resolving against the folded
+/// Array, which fails loudly, and say so.
+fn push_assoc_scope_skip(model: &crate::ident::ClassId, method: &Symbol, reason: &str) {
+    use crate::diagnostic::{Diagnostic, DiagnosticKind};
+    let model = model.0.as_str();
+    let name = method.as_str();
+    let kind = DiagnosticKind::LowerResidue {
+        pass: Symbol::from("assoc_class_method_scope"),
+        construct: Symbol::from(format!("{model}.{name}")),
+        reason: Symbol::from(reason),
+    };
+    let d = Diagnostic {
+        span: crate::span::Span::synthetic(),
+        severity: Diagnostic::default_severity(&kind),
+        kind,
+        message: format!(
+            "`{model}.{name}` is called through an association but cannot take its scope: \
+             {reason}; the foreign key Rails would preset is not set"
+        ),
+    };
+    crate::emit::diagnostics::push(d);
+}
+
 pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     // `has_rich_text`'s two preload scopes. Ahead of the `any_scopes`
     // early return below, because an app can declare a rich-text
@@ -616,13 +641,45 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
         }
     }
     let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
-    if !crate::lower::scope_chain::any_scopes(&scopes) {
+    let assocs = crate::lower::scope_chain::build_assoc_registry(&app.models);
+    // Class methods reached THROUGH an association (`user.sessions
+    // .start!`) — demand-gated on the call sites this app actually
+    // writes, so an app without that shape emits exactly what it did
+    // before. Surveyed over the whole App, not over `lcs`: this pass
+    // runs once for models and again for controllers, and the demand
+    // for `Session.start!` lives in a CONTROLLER while the parameter
+    // has to be inserted on the MODEL.
+    let mut demand: std::collections::HashSet<(Symbol, Symbol)> = Default::default();
+    crate::lower::for_each_hook_body_ref(app, &mut |body| {
+        crate::lower::scope_chain::collect_assoc_method_demand(body, &assocs, &mut demand);
+    });
+    let (assoc_class_methods, declined) = crate::lower::scope_chain::build_assoc_class_methods(
+        &app.models,
+        &assocs,
+        &scopes,
+        &demand,
+    );
+    // Reported by the pass that owns the model's own file — this runs
+    // once per emitted family over a different `lcs`, and the ledger
+    // line should appear once, beside the class it is about.
+    for d in &declined {
+        if lcs.iter().any(|lc| lc.name == d.model) {
+            push_assoc_scope_skip(&d.model, &d.method, &d.reason);
+        }
+    }
+    if !crate::lower::scope_chain::any_scopes(&scopes) && assoc_class_methods.is_empty() {
         return;
     }
     let names = crate::lower::scope_chain::all_scope_names(&scopes);
     let models = crate::lower::scope_chain::model_set(&app.models);
-    let assocs = crate::lower::scope_chain::build_assoc_registry(&app.models);
     let user_returns = crate::lower::scope_chain::build_user_method_returns(&app.models);
+    let regs = crate::lower::scope_chain::Registries {
+        scopes: &scopes,
+        models: &models,
+        assocs: &assocs,
+        assoc_class_methods: &assoc_class_methods,
+        user_returns: &user_returns,
+    };
     for lc in lcs.iter_mut() {
         // Models gain their scope class methods (already chain-normalized).
         let is_model = app.models.iter().any(|m| m.name == lc.name);
@@ -680,6 +737,35 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                     );
                 }
             }
+            // The association-scope side of the same idea: a class
+            // method some call site reaches through a has_many takes
+            // the relation the same way, but reads it as its CREATE
+            // scope — `create!(attrs)` becomes `create!(__rel
+            // .scope_attributes.merge(attrs))`, which is how Rails'
+            // `scope_for_create` gets `user_id` onto the row. The
+            // default `Relation.new(self)` carries no scope attributes,
+            // so a direct `Session.start!(…)` is unchanged.
+            let assoc_registered: Vec<Symbol> = assoc_class_methods
+                .get(&lc.name)
+                .map(|m| m.keys().cloned().collect())
+                .unwrap_or_default();
+            for m in &mut lc.methods {
+                if m.receiver == MethodReceiver::Class
+                    && assoc_registered.contains(&m.name)
+                    && !m.params.iter().any(|p| p.as_str() == "__rel")
+                {
+                    let insert_at =
+                        m.params.iter().position(|p| p.keyword).unwrap_or(m.params.len());
+                    m.params.insert(
+                        insert_at,
+                        crate::dialect::Param::with_default(
+                            rel_param.clone(),
+                            crate::lower::model_to_library::relation_new_self(),
+                        ),
+                    );
+                    crate::lower::scope_chain::merge_scope_attributes(&mut m.body, &rel_param);
+                }
+            }
         }
         // Every method body: normalize scope chains (call-site form).
         // Scope-free bodies still need the rewrite when they start a
@@ -705,17 +791,20 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
             if crate::lower::scope_chain::mentions_scope(&m.body, &names)
                 || crate::lower::scope_chain::mentions_model_chain_start(&m.body, &models)
                 || crate::lower::scope_chain::mentions_assoc_constructor(&m.body, &assocs)
+                || crate::lower::scope_chain::mentions_assoc_lookup(&m.body, &assocs)
+                || crate::lower::scope_chain::mentions_assoc_class_method(
+                    &m.body,
+                    &assocs,
+                    &assoc_class_methods,
+                )
                 || (class_self.is_some()
                     && crate::lower::scope_chain::mentions_bare_chain_start(&m.body))
             {
                 crate::lower::scope_chain::rewrite_call_site(
                     &mut m.body,
-                    &scopes,
-                    &models,
-                    &assocs,
+                    &regs,
                     class_self.as_ref(),
                     instance_self.as_ref(),
-                    &user_returns,
                 );
             }
         }

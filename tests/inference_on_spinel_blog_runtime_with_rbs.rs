@@ -467,7 +467,20 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // #initialize` / `Table#initialize` entries in the dump, whose `sql`
     // and `name` params are untyped the same way). A like-for-like
     // addition of two small methods, not a typing regression.
-    const CEILING: usize = 633;
+    // 2026-08-15: 633 -> 637 — `Relation#where_scope` / `#scope_attributes`,
+    // the association-scope pair. Rails derives a relation's create-scope
+    // from its equality conditions (`where_values_hash` /
+    // `scope_for_create`); ours records them where the association seed
+    // sets them, so `user.sessions.start!` can merge `user_id` into the
+    // `create!` inside `Session.start!`. The 4 nodes are the assign
+    // `@scope_attributes = condition` with its `condition` read, and the
+    // `add_condition(condition, [], false)` call with the same read again
+    // — the RBS-parameter shape already counted for `SelectManager
+    // #initialize`'s `sql` and `Table#initialize`'s `name`, which are
+    // untyped for the same reason (RBS parameter types do not reach this
+    // runtime's body typer for ANY method). Like-for-like, not a typing
+    // regression.
+    const CEILING: usize = 637;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions exceeds ceiling of {CEILING}.\n\

@@ -175,30 +175,6 @@ module ActionDispatch
   end
 end
 
-# GAP: a CLASS METHOD reached through an association — `user.sessions.start!`
-# needs the association's scope applied to what it creates (Rails sets
-# `user_id` that way). The receiver is a folded Array here, so `start!` is
-# undefined on it. Milestone walk finding #1's open half; this patch is the
-# call rewritten with the foreign key passed by hand.
-WALK_LATE_PATCHES << lambda do
-  # Controllers load LAZILY (main.rb requires one per dispatched route), so
-  # this has to pull the file in before reopening the class — declaring it
-  # here first would define a fresh ApplicationController < Object and the
-  # app's own `< ActionController::Base` would then be a superclass
-  # mismatch. Same trap for any late patch on a controller.
-  require_relative "app/controllers/application_controller"
-
-  class ApplicationController
-    def start_new_session_for(user)
-      session = Session.create!(user_id: user.id,
-                                user_agent: request.user_agent,
-                                ip_address: request.remote_ip)
-      authenticated_as(session)
-      session
-    end
-  end
-end
-
 # GAP: FILTER ORDER — a filter INLINED into the action body loses its
 # position relative to filters that stay in `process_action`. RoomsController
 # declares `set_room` then `remember_last_room_visited`; the first is inlined
@@ -231,23 +207,6 @@ WALK_LATE_PATCHES << lambda do
     def self.with_attachment_details(__rel = ActiveRecord::Relation.new(self))
       __rel
     end
-  end
-end
-
-# GAP: a folded has_many reader answers no Relation methods —
-# `Current.user.memberships.find_by!(room_id: …)` in `RoomScoped#set_room`
-# reaches a plain Array. Milestone walk finding #1's residue: the seed arm
-# declines a Send-with-receiver owner (`Current.user.…`) because re-evaluating
-# it would need a hoisted temp. Teaching Array the one method the walk needs
-# is narrower than rewriting the controller — and it shows up in every
-# room-scoped controller, not just this one.
-class Array
-  def find_by!(**conditions)
-    found = find do |record|
-      conditions.all? { |name, value| record.public_send(name).to_s == value.to_s }
-    end
-    raise ActiveRecord::RecordNotFound, "no match in #{size} rows" if found.nil?
-    found
   end
 end
 
@@ -287,16 +246,26 @@ end
 
 # GAP: a class method reached through an association, on the WRITE side —
 # `@room.messages.create_with_attachment!(…)` needs the association's scope
-# applied to what it CREATES (Rails sets `room_id` that way). The method
-# exists on Message since 581b97f6; the receiver is still a folded Array.
-# This is the last blocker on the milestone's write half, so the patch sets
-# the foreign key by hand to show what lies behind it.
+# applied to what it CREATES (Rails sets `room_id` that way). The mechanism
+# for that exists now (`Session.start!` takes its association's relation and
+# merges `__rel.scope_attributes` into its `create!`), and this method
+# DECLINES it, loudly: its constructor is `create!(attributes)` over an
+# opaque parameter, so there is no attribute hash to merge into. The emit
+# says so — `assoc_class_method_scope` residue on `Message
+# .create_with_attachment!`. Closing it means typing that parameter, which
+# is the strong-params binding pass's territory (`params_merge.rs` binds a
+# `<x>_params` helper argument to a callee's parameter, but only through a
+# `<Const>.<m>(…)` receiver — this call reaches the model through the
+# association). Until then the patch sets the foreign key by hand.
 WALK_LATE_PATCHES << lambda do
   require_relative "app/controllers/messages_controller"
 
   class MessagesController
     def create
-      @membership = Current.user.memberships.find_by!(room_id: @params["room_id"])
+      # Spelled the way the emit now spells it (the association seed) —
+      # this body is hand-written, so it gets no lowering of its own.
+      @membership = ActiveRecord::Relation.new(Membership)
+        .where(user_id: Current.user.id).find_by!(room_id: @params["room_id"])
       @room = @membership.room
       params = message_params
       @message = Message.create_with_attachment!(

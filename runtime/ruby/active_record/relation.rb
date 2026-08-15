@@ -41,6 +41,7 @@ module ActiveRecord
       @offset = nil
       @includes = []
       @records = nil
+      @scope_attributes = {}
     end
 
     # ---- chain methods (return self) --------------------------------
@@ -49,6 +50,27 @@ module ActiveRecord
     def where(condition = nil, *args)
       add_condition(condition, args, false)
       self
+    end
+
+    # An association's scope: `where(fk => owner.id)` that ALSO presets
+    # what a `create` through this relation writes.
+    #
+    # Rails derives both from the same place — a relation's equality
+    # conditions filter reads (`where_values_hash`) and seed writes
+    # (`scope_for_create`), which is why `user.sessions.create!(…)`
+    # comes back with `user_id` set without anybody naming it. Only the
+    # compiler's association seed calls this, so the ordinary `where`
+    # stays a pure filter and pays nothing for the extra bookkeeping.
+    def where_scope(condition)
+      @scope_attributes = condition
+      add_condition(condition, [], false)
+      self
+    end
+
+    # Rails' `scope_for_create`: the attributes a record built through
+    # this relation starts with. Empty for a relation nobody scoped.
+    def scope_attributes
+      @scope_attributes
     end
 
     # `where.not(...)` is lowered to `not(...)` on the relation: negate the

@@ -512,6 +512,84 @@ pub(crate) fn for_each_hook_body(
         f(seeds);
     }
 }
+
+/// Read-only twin of [`for_each_hook_body`], for a pass that needs to
+/// SURVEY every body before anything rewrites one — `emit::ruby::
+/// library::apply_scope_lowering` collects which class methods are
+/// reached through an association, and it runs once per emitted family
+/// (models, then controllers) over a different `lcs` slice each time.
+/// Surveying the App instead of the slice is what makes the two runs
+/// agree; disagreeing would thread a relation at the call site into a
+/// method that never grew the parameter.
+///
+/// Kept adjacent to the mutable version deliberately: the two must walk
+/// the same set, and the only defence against that drifting is that
+/// they are read together.
+pub(crate) fn for_each_hook_body_ref(
+    app: &crate::app::App,
+    f: &mut impl FnMut(&crate::expr::Expr),
+) {
+    fn visit_param_defaults(
+        params: &[crate::dialect::Param],
+        f: &mut impl FnMut(&crate::expr::Expr),
+    ) {
+        for p in params {
+            if let Some(default) = &p.default {
+                f(default);
+            }
+        }
+    }
+    for model in &app.models {
+        for item in &model.body {
+            match item {
+                crate::dialect::ModelBodyItem::Method { method, .. } => {
+                    visit_param_defaults(&method.params, f);
+                    f(&method.body)
+                }
+                crate::dialect::ModelBodyItem::Scope { scope, .. } => {
+                    visit_param_defaults(&scope.params, f);
+                    f(&scope.body)
+                }
+                crate::dialect::ModelBodyItem::Callback { callback, .. } => {
+                    if let Some(cond) = &callback.condition {
+                        f(cond);
+                    }
+                }
+                crate::dialect::ModelBodyItem::Unknown { expr, .. } => f(expr),
+                _ => {}
+            }
+        }
+    }
+    for lc in &app.library_classes {
+        for method in &lc.methods {
+            visit_param_defaults(&method.params, f);
+            f(&method.body);
+        }
+        for (_name, value) in &lc.constants {
+            f(value);
+        }
+        for call in &lc.unknown_calls {
+            f(call);
+        }
+    }
+    for controller in &app.controllers {
+        for item in &controller.body {
+            match item {
+                crate::dialect::ControllerBodyItem::Action { action, .. } => {
+                    for (_name, default) in &action.opt_params {
+                        f(default);
+                    }
+                    f(&action.body)
+                }
+                crate::dialect::ControllerBodyItem::Unknown { expr, .. } => f(expr),
+                _ => {}
+            }
+        }
+    }
+    if let Some(seeds) = &app.seeds {
+        f(seeds);
+    }
+}
 pub use controller_walk::{CtrlWalker, Stmt, WalkCtx, WalkState};
 
 pub use associations::{

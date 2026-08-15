@@ -7,6 +7,15 @@ module ActiveRecord
     def initialize: (untyped model) -> void
 
     def where: (?untyped condition, *untyped args) -> Relation
+
+    # The association scope (`where_scope`) and what it presets on a
+    # create (`scope_attributes`). The ivar is declared as well as the
+    # reader: a consumer that only reads signatures would otherwise seed
+    # it from the bare `{}` in `initialize`, which carries no element
+    # type — the same trap `Base`'s `@errors` documents.
+    @scope_attributes: Hash[Symbol, untyped]
+    def where_scope: (Hash[Symbol, untyped] condition) -> Relation
+    def scope_attributes: () -> Hash[Symbol, untyped]
     def not: (?untyped condition, *untyped args) -> Relation
     def or: (Relation other) -> Relation
     def add_condition: (untyped condition, Array[untyped] args, bool negate) -> void
