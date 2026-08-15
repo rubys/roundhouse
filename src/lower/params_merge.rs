@@ -113,6 +113,11 @@ pub fn apply_params_merge_lowering(app: &mut App) -> Vec<Diagnostic> {
     let ctx = Ctx { specs: &specs, writers: &writers, resource_of: &resource_of, models: &models };
     let mut diags = Vec::new();
 
+    // Attribute-hash sites first: the CALL SIDE of a `Binding::Attrs`,
+    // where the params object converts. Rebuilt registries because the
+    // scan's borrow of `app` has ended.
+    convert_attrs_call_sites(app, &specs, &bindings);
+
     for lc in &mut app.library_classes {
         let owner = lc.name.0.clone();
         for method in &mut lc.methods {
@@ -155,10 +160,91 @@ impl Ctx<'_> {
 // Scan: which parameter of which method holds which params class.
 // ---------------------------------------------------------------------------
 
-fn scan_bindings(app: &App, specs: &ParamsSpecs) -> HashMap<BindKey, ClassId> {
-    // `None` = poisoned: two call sites disagreed, or one passed
-    // something that isn't a params helper at all.
-    let mut seen: HashMap<BindKey, Option<ClassId>> = HashMap::new();
+/// What a parameter was proven to hold.
+#[derive(Clone, Debug, PartialEq)]
+enum Binding {
+    /// EVERY call site passes a `<x>_params` helper for this list — the
+    /// parameter holds the params object itself, and the merge rewrite
+    /// can call its typed factory.
+    Spec(ClassId),
+    /// Some sites pass a helper for this list and some pass a literal
+    /// attribute hash. The parameter's real type is the ATTRIBUTE HASH
+    /// both agree on, so the helper sites convert with `to_attrs` and
+    /// the callee keeps one body.
+    ///
+    /// campfire's `Message.create_with_attachment!(attributes)` is the
+    /// shape: `MessagesController` passes `message_params`, `Webhook`
+    /// passes `attachment: …, creator: …`. Monomorphizing into two
+    /// methods was the alternative — rejected because the app has ONE
+    /// concept here (the name is `attributes`), and the params object is
+    /// the side that knows how to become one.
+    Attrs(ClassId),
+}
+
+/// Argument shapes seen at one `(class, method, index)` across the app.
+#[derive(Default)]
+struct SiteShapes {
+    /// Params lists passed here, by their class.
+    specs: std::collections::BTreeSet<ClassId>,
+    /// A literal hash — `create_with_attachment!(attachment: a)`.
+    saw_hash: bool,
+    /// Anything else: a local, a call, a literal. One of these and the
+    /// parameter is not uniformly anything.
+    saw_other: bool,
+}
+
+impl SiteShapes {
+    /// `user_written` — does the callee name a method the APP declared?
+    ///
+    /// It gates the `Attrs` half only, and the reason is that
+    /// `<Model>.create(<helper>)` is ALREADY monomorphized by name:
+    /// `create_from_params` serves the params site and the runtime's
+    /// `create(attrs)` serves the hash site, each typed. Converting there
+    /// would replace a typed factory with a hash — lobsters'
+    /// `Tag.create(tag_params)` is exactly that, and it is what caught
+    /// this. A user-written method has one body and no such split.
+    fn conclude(&self, user_written: bool) -> Option<Binding> {
+        if self.saw_other || self.specs.len() != 1 {
+            return None;
+        }
+        let spec = self.specs.iter().next()?.clone();
+        if self.saw_hash {
+            return user_written.then_some(Binding::Attrs(spec));
+        }
+        Some(Binding::Spec(spec))
+    }
+}
+
+/// `(class, method)` for every class-side method the app declares.
+fn user_class_methods(app: &App) -> std::collections::HashSet<(Symbol, Symbol)> {
+    let mut out = std::collections::HashSet::new();
+    let unqualified = |id: &ClassId| {
+        Symbol::from(id.0.as_str().rsplit("::").next().unwrap_or(id.0.as_str()))
+    };
+    for model in &app.models {
+        for item in &model.body {
+            if let crate::dialect::ModelBodyItem::Method { method, .. } = item {
+                if method.receiver == MethodReceiver::Class {
+                    out.insert((unqualified(&model.name), method.name.clone()));
+                }
+            }
+        }
+    }
+    for lc in &app.library_classes {
+        for method in &lc.methods {
+            if method.receiver == MethodReceiver::Class {
+                out.insert((unqualified(&lc.name), method.name.clone()));
+            }
+        }
+    }
+    out
+}
+
+fn scan_bindings(app: &App, specs: &ParamsSpecs) -> HashMap<BindKey, Binding> {
+    let mut seen: HashMap<BindKey, SiteShapes> = HashMap::new();
+    let models = crate::lower::scope_chain::model_set(&app.models);
+    let assocs = crate::lower::scope_chain::build_assoc_registry(&app.models);
+    let assoc = AssocCtx { models: &models, assocs: &assocs };
 
     // EVERY call site has to be seen, not just the ones that could bind
     // — a site passing a plain Hash is exactly what proves the parameter
@@ -170,7 +256,7 @@ fn scan_bindings(app: &App, specs: &ParamsSpecs) -> HashMap<BindKey, ClassId> {
         let actions: Vec<crate::dialect::Action> = controller.actions().cloned().collect();
         let helpers = helper_spec_map(&actions, specs);
         for action in &actions {
-            scan_body(&action.body, &helpers, &mut seen);
+            scan_body(&action.body, &helpers, &assoc, &mut seen);
         }
     }
     let none = BTreeMap::new();
@@ -178,13 +264,13 @@ fn scan_bindings(app: &App, specs: &ParamsSpecs) -> HashMap<BindKey, ClassId> {
         for item in &model.body {
             match item {
                 crate::dialect::ModelBodyItem::Method { method, .. } => {
-                    scan_body(&method.body, &none, &mut seen)
+                    scan_body(&method.body, &none, &assoc, &mut seen)
                 }
                 crate::dialect::ModelBodyItem::Scope { scope, .. } => {
-                    scan_body(&scope.body, &none, &mut seen)
+                    scan_body(&scope.body, &none, &assoc, &mut seen)
                 }
                 crate::dialect::ModelBodyItem::Unknown { expr, .. } => {
-                    scan_body(expr, &none, &mut seen)
+                    scan_body(expr, &none, &assoc, &mut seen)
                 }
                 _ => {}
             }
@@ -192,71 +278,180 @@ fn scan_bindings(app: &App, specs: &ParamsSpecs) -> HashMap<BindKey, ClassId> {
     }
     for lc in &app.library_classes {
         for method in &lc.methods {
-            scan_body(&method.body, &none, &mut seen);
+            scan_body(&method.body, &none, &assoc, &mut seen);
         }
         for (_name, value) in &lc.constants {
-            scan_body(value, &none, &mut seen);
+            scan_body(value, &none, &assoc, &mut seen);
         }
         for call in &lc.unknown_calls {
-            scan_body(call, &none, &mut seen);
+            scan_body(call, &none, &assoc, &mut seen);
         }
     }
     if let Some(seeds) = &app.seeds {
-        scan_body(seeds, &none, &mut seen);
+        scan_body(seeds, &none, &assoc, &mut seen);
     }
 
-    seen.into_iter().filter_map(|(k, v)| v.map(|c| (k, c))).collect()
+    let user = user_class_methods(app);
+    seen.into_iter()
+        .filter_map(|(k, v)| {
+            let written = user.contains(&(k.0.clone(), k.1.clone()));
+            v.conclude(written).map(|b| (k, b))
+        })
+        .collect()
+}
+
+/// The class a call site's receiver names, for keying a binding.
+///
+/// A model constant is the direct form. An ASSOCIATION READ is the same
+/// call one level of Rails sugar over — `@room.messages
+/// .create_with_attachment!(message_params)` reaches
+/// `Message.create_with_attachment!` and names its parameter exactly as
+/// the constant spelling would, so both have to land on the same key.
+/// Missing that arm is not merely a lost binding: campfire's two sites
+/// for that method are one of each, and seeing only one of them would
+/// have concluded a params object where the app has an attribute hash.
+fn walk<'a>(e: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
+    f(e);
+    e.node.for_each_child(&mut |c| walk(c, f));
+}
+
+fn callee_class(recv: &Expr, assoc: &AssocCtx<'_>) -> Option<Symbol> {
+    if let ExprNode::Const { path } = &*recv.node {
+        return path.last().cloned();
+    }
+    let ExprNode::Send { recv: Some(owner), method: aname, args, block: None, .. } = &*recv.node
+    else {
+        return None;
+    };
+    if !args.is_empty() {
+        return None;
+    }
+    let (_, target, _) =
+        crate::lower::scope_chain::assoc_read_target(owner, aname, assoc.models, assoc.assocs)?;
+    // The key space is the UNQUALIFIED name, matching the `Const` arm's
+    // `path.last()`.
+    Some(Symbol::from(target.0.as_str().rsplit("::").next().unwrap_or(target.0.as_str())))
+}
+
+struct AssocCtx<'a> {
+    models: &'a std::collections::HashSet<ClassId>,
+    assocs: &'a crate::lower::scope_chain::AssocRegistry,
+}
+
+/// The params list an argument expression names, if it is a bare
+/// `<x>_params` helper call of the enclosing controller.
+fn arg_spec(arg: &Expr, helpers: &BTreeMap<Symbol, &ParamsSpec>) -> Option<ClassId> {
+    let ExprNode::Send { recv: None, method: h, args, block: None, .. } = &*arg.node else {
+        return None;
+    };
+    if !args.is_empty() {
+        return None;
+    }
+    helpers.get(h).map(|s| s.class_id.clone())
 }
 
 fn scan_body(
     body: &Expr,
     helpers: &BTreeMap<Symbol, &ParamsSpec>,
-    seen: &mut HashMap<BindKey, Option<ClassId>>,
+    assoc: &AssocCtx<'_>,
+    seen: &mut HashMap<BindKey, SiteShapes>,
 ) {
     walk(body, &mut |e| {
         let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node else {
             return;
         };
-        let ExprNode::Const { path } = &*recv.node else { return };
-        let Some(class) = path.last() else { return };
+        let Some(class) = callee_class(recv, assoc) else { return };
         for (i, arg) in args.iter().enumerate() {
-            let key = (class.clone(), method.clone(), i);
-            let bound = match &*arg.node {
-                ExprNode::Send { recv: None, method: h, args, block: None, .. }
-                    if args.is_empty() =>
-                {
-                    helpers.get(h).map(|s| s.class_id.clone())
+            let shapes = seen.entry((class.clone(), method.clone(), i)).or_default();
+            match arg_spec(arg, helpers) {
+                Some(class_id) => {
+                    shapes.specs.insert(class_id);
                 }
-                _ => None,
-            };
-            match (seen.get(&key), bound) {
-                (None, b) => {
-                    seen.insert(key, b);
-                }
-                // Agreeing sites reinforce; anything else poisons.
-                (Some(Some(prev)), Some(b)) if *prev == b => {}
-                (Some(None), None) => {}
-                _ => {
-                    seen.insert(key, None);
-                }
+                None if matches!(&*arg.node, ExprNode::Hash { .. }) => shapes.saw_hash = true,
+                None => shapes.saw_other = true,
             }
         }
     });
 }
 
-fn walk<'a>(expr: &'a Expr, f: &mut impl FnMut(&'a Expr)) {
-    f(expr);
-    expr.node.for_each_child(&mut |c| walk(c, f));
+/// Rewrite `<helper>` to `<helper>.to_attrs` at every call site whose
+/// callee parameter was proven to be an attribute hash.
+///
+/// Only controller actions can name a `<x>_params` helper, so only they
+/// are walked. The conversion is per-SITE, not per-helper: the same
+/// `message_params` still reaches `@message.update!` as a params object
+/// two lines away.
+fn convert_attrs_call_sites(
+    app: &mut App,
+    specs: &ParamsSpecs,
+    bindings: &HashMap<BindKey, Binding>,
+) {
+    if !bindings.values().any(|b| matches!(b, Binding::Attrs(_))) {
+        return;
+    }
+    let models = crate::lower::scope_chain::model_set(&app.models);
+    let assocs = crate::lower::scope_chain::build_assoc_registry(&app.models);
+    let assoc = AssocCtx { models: &models, assocs: &assocs };
+    for controller in &mut app.controllers {
+        let actions: Vec<crate::dialect::Action> = controller.actions().cloned().collect();
+        let helpers: BTreeMap<Symbol, ClassId> = helper_spec_map(&actions, specs)
+            .into_iter()
+            .map(|(name, spec)| (name, spec.class_id.clone()))
+            .collect();
+        if helpers.is_empty() {
+            continue;
+        }
+        for item in &mut controller.body {
+            let crate::dialect::ControllerBodyItem::Action { action, .. } = item else { continue };
+            convert_in(&mut action.body, &helpers, &assoc, bindings);
+        }
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Rewrite.
-// ---------------------------------------------------------------------------
+fn convert_in(
+    e: &mut Expr,
+    helpers: &BTreeMap<Symbol, ClassId>,
+    assoc: &AssocCtx<'_>,
+    bindings: &HashMap<BindKey, Binding>,
+) {
+    if let ExprNode::Send { recv: Some(recv), method, args, .. } = &mut *e.node {
+        if let Some(class) = callee_class(recv, assoc) {
+            for (i, arg) in args.iter_mut().enumerate() {
+                let Some(Binding::Attrs(want)) =
+                    bindings.get(&(class.clone(), method.clone(), i))
+                else {
+                    continue;
+                };
+                let ExprNode::Send { recv: None, method: h, args: hargs, block: None, .. } =
+                    &*arg.node
+                else {
+                    continue;
+                };
+                if !hargs.is_empty() || helpers.get(h) != Some(want) {
+                    continue;
+                }
+                let span = arg.span;
+                let inner = arg.clone();
+                *arg = Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(inner),
+                        method: Symbol::from("to_attrs"),
+                        args: Vec::new(),
+                        block: None,
+                        parenthesized: false,
+                    },
+                );
+            }
+        }
+    }
+    e.node.for_each_child_mut(&mut |c| convert_in(c, helpers, assoc, bindings));
+}
 
 fn rewrite_method(
     owner: &Symbol,
     method: &mut MethodDef,
-    bindings: &HashMap<BindKey, ClassId>,
+    bindings: &HashMap<BindKey, Binding>,
     ctx: &Ctx<'_>,
     diags: &mut Vec<Diagnostic>,
 ) {
@@ -265,16 +460,27 @@ fn rewrite_method(
     if !matches!(method.receiver, MethodReceiver::Class) {
         return;
     }
-    let bound: Vec<(usize, Symbol, &ParamsSpec)> = method
-        .params
-        .iter()
-        .enumerate()
-        .filter_map(|(i, p)| {
-            let class_id = bindings.get(&(owner.clone(), method.name.clone(), i))?;
-            let spec = ctx.specs.by_class(class_id)?;
-            Some((i, p.name.clone(), spec))
-        })
-        .collect();
+    let mut bound: Vec<(usize, Symbol, &ParamsSpec)> = Vec::new();
+    // Parameters proven to be an ATTRIBUTE HASH rather than a params
+    // object. Nothing in the BODY changes for those — `create!(attrs)`
+    // over a hash is what the runtime already takes — but the declared
+    // type has to say `Hash`, because that is what lets the scope pass
+    // merge an association's foreign key into it.
+    let mut attrs_bound: Vec<usize> = Vec::new();
+    for (i, p) in method.params.iter().enumerate() {
+        match bindings.get(&(owner.clone(), method.name.clone(), i)) {
+            Some(Binding::Spec(class_id)) => {
+                if let Some(spec) = ctx.specs.by_class(class_id) {
+                    bound.push((i, p.name.clone(), spec));
+                }
+            }
+            Some(Binding::Attrs(_)) => attrs_bound.push(i),
+            None => {}
+        }
+    }
+    if !attrs_bound.is_empty() {
+        stamp_attr_hash_params(method, &attrs_bound);
+    }
     if bound.is_empty() {
         return;
     }
@@ -291,6 +497,41 @@ fn rewrite_method(
     // parameter, so its declared type has to say so — an `untyped`
     // here doesn't compile on a strict target.
     stamp_param_types(method, &bound);
+}
+
+/// Declare a parameter proven to be an attribute hash as one.
+///
+/// `Hash[Symbol, untyped]` is `initialize(attrs)`'s parameter type
+/// verbatim, so a `create!` over it needs no conversion — and it is what
+/// `emit::ruby::library`'s scope pass reads to decide it may merge an
+/// association's `scope_attributes` in. Left untyped, that pass has to
+/// decline (`assoc_class_method_scope` residue) because merging into
+/// something that may not be a Hash is a guess.
+fn stamp_attr_hash_params(method: &mut MethodDef, indices: &[usize]) {
+    let hash_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let (mut params, block, ret, effects) = match method.signature.clone() {
+        Some(Ty::Fn { params, block, ret, effects }) => (params, block, ret, effects),
+        _ => (
+            method
+                .params
+                .iter()
+                .map(|p| crate::ty::Param {
+                    name: p.name.clone(),
+                    ty: Ty::Untyped,
+                    kind: crate::ty::ParamKind::Required,
+                })
+                .collect(),
+            None,
+            Box::new(Ty::Untyped),
+            method.effects.clone(),
+        ),
+    };
+    for i in indices {
+        if let Some(p) = params.get_mut(*i) {
+            p.ty = hash_ty.clone();
+        }
+    }
+    method.signature = Some(Ty::Fn { params, block, ret, effects });
 }
 
 fn stamp_param_types(method: &mut MethodDef, bound: &[(usize, Symbol, &ParamsSpec)]) {

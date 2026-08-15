@@ -89,6 +89,12 @@ pub struct ParamsSpec {
     /// in every app would otherwise carry two methods nobody calls.
     pub wants_create: bool,
     pub wants_create_bang: bool,
+    /// Some call site needs this list as an ATTRIBUTE HASH — see
+    /// [`synth_to_attrs`]. Demand is read off the rewritten controller
+    /// body (`<helper>.to_attrs`), the same way `wants_create` is read
+    /// off `<Model>.create(<helper>)`, so nothing has to be threaded
+    /// from the pass that decided it.
+    pub wants_to_attrs: bool,
     /// Controllers whose bodies declared this exact permit list, in
     /// source order. Two controllers permitting the same fields share
     /// one class (campfire's `FirstRunsController` and `UsersController`
@@ -178,6 +184,7 @@ pub fn collect_specs(controllers: &[Controller]) -> ParamsSpecs {
 /// `Membership.create(boost_params)` has no typed factory to reach.
 fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
     let mut demand: Vec<(ClassId, bool)> = Vec::new();
+    let mut to_attrs: Vec<ClassId> = Vec::new();
     for c in controllers {
         let actions: Vec<crate::dialect::Action> = c.actions().cloned().collect();
         let helpers = helper_spec_map(&actions, specs);
@@ -189,6 +196,22 @@ fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
                 let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node else {
                     return;
                 };
+                // `<helper>.to_attrs` — the attribute-hash conversion
+                // `params_merge` writes at a call site whose callee takes
+                // a hash, not a params object.
+                if method.as_str() == "to_attrs" && args.is_empty() {
+                    let ExprNode::Send { recv: None, method: h, args: hargs, block: None, .. } =
+                        &*recv.node
+                    else {
+                        return;
+                    };
+                    if hargs.is_empty() {
+                        if let Some(spec) = helpers.get(h) {
+                            to_attrs.push(spec.class_id.clone());
+                        }
+                    }
+                    return;
+                }
                 let bang = match method.as_str() {
                     "create" => false,
                     "create!" => true,
@@ -224,6 +247,11 @@ fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
             }
         }
     }
+    for class_id in to_attrs {
+        if let Some(spec) = specs.specs.iter_mut().find(|s| s.class_id == class_id) {
+            spec.wants_to_attrs = true;
+        }
+    }
 }
 
 fn walk_all<'a>(expr: &'a Expr, f: &mut impl FnMut(&'a Expr)) {
@@ -246,6 +274,7 @@ pub fn specs_from_lists(lists: &[(Symbol, Vec<Symbol>)]) -> ParamsSpecs {
                 wants_except: false,
                 wants_create: false,
                 wants_create_bang: false,
+                wants_to_attrs: false,
                 declaring: Vec::new(),
                 is_canonical: true,
             })
@@ -292,6 +321,7 @@ fn record(
                 wants_except: wants.except,
                 wants_create: false,
                 wants_create_bang: false,
+                wants_to_attrs: false,
                 declaring: vec![controller.clone()],
                 is_canonical: false,
             });
@@ -693,6 +723,9 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
     }
     methods.push(synth_from_raw(&spec.class_id, &spec.resource, &spec.fields));
     methods.push(synth_to_h(&spec.class_id, &spec.fields));
+    if spec.wants_to_attrs {
+        methods.push(synth_to_attrs(&spec.class_id, &spec.fields));
+    }
     if spec.wants_except {
         methods.push(synth_except(&spec.class_id, &spec.fields));
     }
@@ -1085,6 +1118,110 @@ fn synth_from_raw(owner: &ClassId, resource: &Symbol, fields: &[Symbol]) -> Meth
         params: vec![Param::positional(params.clone())],
         body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: stmts }),
         signature: Some(fn_sig(vec![(params, hash_ty)], owner_ty)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    }
+}
+
+/// `def to_attrs; attrs = {}; attrs[:field] = @field if @field_provided; …; attrs; end`
+///
+/// The ATTRIBUTE HASH this permitted list stands for — Symbol-keyed and
+/// presence-guarded, which is exactly the shape `initialize(attrs)`
+/// consumes, so `Model.create!(p.to_attrs)` writes the same row
+/// `Model.from_params(p)` + save would.
+///
+/// It exists because a params object is not always what a callee wants.
+/// campfire's `Message.create_with_attachment!(attributes)` is called
+/// once from a controller with `message_params` and once from
+/// `Webhook` with a plain `attachment:`/`creator:` hash — so the
+/// parameter's real type is an attribute hash, and the params object is
+/// what has to convert. Distinct from [`synth_to_h`], which mirrors
+/// Rails' `Parameters#to_h`: String keys, every field, no guards.
+///
+/// A field the request did not send is OMITTED rather than written as
+/// `""` — the same distinction `<field>_provided` was introduced for.
+/// Writing it would overwrite a column default on create, which is the
+/// data loss the presence slots were added to stop.
+fn synth_to_attrs(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
+    use crate::lower::typing::with_ty;
+    let attrs = Symbol::from("attrs");
+    // The declared type is `initialize`'s parameter type verbatim: this
+    // hash is built to be handed straight to it, and a narrower element
+    // type would need a widening conversion at every call site.
+    let hash_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let attrs_var = || {
+        with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Var { id: VarId(0), name: attrs.clone() },
+            ),
+            hash_ty.clone(),
+        )
+    };
+
+    let mut stmts: Vec<Expr> = vec![Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: attrs.clone() },
+            value: with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Hash { entries: Vec::new(), kwargs: false },
+                ),
+                hash_ty.clone(),
+            ),
+        },
+    )];
+    for field in fields {
+        let key = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Sym { value: field.clone() } },
+            ),
+            Ty::Sym,
+        );
+        let value = with_ty(
+            Expr::new(Span::synthetic(), ExprNode::Ivar { name: field.clone() }),
+            Ty::Str,
+        );
+        let write = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(attrs_var()),
+                method: Symbol::from("[]="),
+                args: vec![key, value],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let guard = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Ivar { name: provided_field(field) },
+            ),
+            Ty::Bool,
+        );
+        stmts.push(Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: guard,
+                then_branch: write,
+                else_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+            },
+        ));
+    }
+    stmts.push(attrs_var());
+
+    MethodDef {
+        name: Symbol::from("to_attrs"),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: stmts }),
+        signature: Some(fn_sig(vec![], hash_ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,

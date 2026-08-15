@@ -244,36 +244,22 @@ WALK_LATE_PATCHES << lambda do
   end
 end
 
-# GAP: a class method reached through an association, on the WRITE side —
-# `@room.messages.create_with_attachment!(…)` needs the association's scope
-# applied to what it CREATES (Rails sets `room_id` that way). The mechanism
-# for that exists now (`Session.start!` takes its association's relation and
-# merges `__rel.scope_attributes` into its `create!`), and this method
-# DECLINES it, loudly: its constructor is `create!(attributes)` over an
-# opaque parameter, so there is no attribute hash to merge into. The emit
-# says so — `assoc_class_method_scope` residue on `Message
-# .create_with_attachment!`. Closing it means typing that parameter, which
-# is the strong-params binding pass's territory (`params_merge.rs` binds a
-# `<x>_params` helper argument to a callee's parameter, but only through a
-# `<Const>.<m>(…)` receiver — this call reaches the model through the
-# association). Until then the patch sets the foreign key by hand.
+# GAP: `belongs_to :creator, class_name: "User", default: -> { Current.user }`
+# — the DEFAULT LAMBDA is dropped, so nothing sets `creator_id` and every
+# message fails `Creator must exist`. Milestone walk finding #6, and now the
+# only thing standing between the walk and a posted message: the association
+# scope itself works (`@room.messages.create_with_attachment!` carries
+# `room_id` through `where_scope` / `scope_attributes`).
+#
+# Rails evaluates the lambda at INITIALIZATION; this stands in for it at
+# validation time, which is close enough to measure what lies behind.
 WALK_LATE_PATCHES << lambda do
-  require_relative "app/controllers/messages_controller"
+  class Message
+    alias_method :walk_orig_validate, :validate
 
-  class MessagesController
-    def create
-      # Spelled the way the emit now spells it (the association seed) —
-      # this body is hand-written, so it gets no lowering of its own.
-      @membership = ActiveRecord::Relation.new(Membership)
-        .where(user_id: Current.user.id).find_by!(room_id: @params["room_id"])
-      @room = @membership.room
-      params = message_params
-      @message = Message.create_with_attachment!(
-        body: params.body, client_message_id: params.client_message_id,
-        room_id: @room.id, creator_id: Current.user.id
-      )
-      @message.broadcast_create
-      deliver_webhooks_to_bots
+    def validate
+      self.creator_id = Current.user.id if @creator_id.nil? || @creator_id == 0
+      walk_orig_validate
     end
   end
 end

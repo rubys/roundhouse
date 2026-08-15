@@ -763,7 +763,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                             crate::lower::model_to_library::relation_new_self(),
                         ),
                     );
-                    crate::lower::scope_chain::merge_scope_attributes(&mut m.body, &rel_param);
+                    crate::lower::scope_chain::merge_scope_attributes(&mut m.body, &lc.name, &rel_param);
                 }
             }
         }

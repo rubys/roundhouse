@@ -243,23 +243,62 @@ enum CtorShape {
     Blocked(String),
 }
 
-/// Classify a class method's implicit-self constructor calls.
+/// Is this send a constructor rooted at the class the body belongs to?
+/// Implicit self and `self.` are the spellings a hand-written body uses;
+/// the explicit `<Model>.new` is what `params_merge` leaves behind when
+/// it composes a params-object create out of `new` + the typed
+/// `update!`, and it is a constructor on this class exactly as much.
+fn self_rooted_ctor(recv: Option<&Expr>, method: &Symbol, owner: &ClassId) -> bool {
+    if !SELF_CONSTRUCTORS.contains(&method.as_str()) {
+        return false;
+    }
+    match recv {
+        None => true,
+        Some(r) => match &*r.node {
+            ExprNode::SelfRef => true,
+            ExprNode::Const { path } => path
+                .last()
+                .is_some_and(|last| owner.0.as_str().rsplit("::").next() == Some(last.as_str())),
+            _ => false,
+        },
+    }
+}
+
+/// Classify a class method's constructor calls.
 /// All-or-nothing: one unmergeable constructor blocks the method,
 /// because a half-scoped body writes a row with the foreign key missing
 /// — silently the wrong owner rather than a loud failure.
-fn ctor_shape(body: &Expr) -> CtorShape {
+fn ctor_shape(method_def: &crate::dialect::MethodDef, owner: &ClassId) -> CtorShape {
     let mut found = false;
     let mut blocked: Option<String> = None;
-    fn walk(e: &Expr, found: &mut bool, blocked: &mut Option<String>) {
+    // Parameters DECLARED to be an attribute hash. `params_merge` stamps
+    // them when every call site agreed the argument is one, which is
+    // what makes `create!(attributes)` mergeable without guessing.
+    let hash_params: HashSet<Symbol> = match &method_def.signature {
+        Some(crate::ty::Ty::Fn { params, .. }) => params
+            .iter()
+            .filter(|p| matches!(p.ty, crate::ty::Ty::Hash { .. }))
+            .map(|p| p.name.clone())
+            .collect(),
+        _ => HashSet::new(),
+    };
+    fn walk(
+        e: &Expr,
+        owner: &ClassId,
+        hash_params: &HashSet<Symbol>,
+        found: &mut bool,
+        blocked: &mut Option<String>,
+    ) {
         if let ExprNode::Send { recv, method, args, .. } = &*e.node {
-            let self_rooted = match recv {
-                None => true,
-                Some(r) => matches!(&*r.node, ExprNode::SelfRef),
-            };
-            if self_rooted && SELF_CONSTRUCTORS.contains(&method.as_str()) {
+            if self_rooted_ctor(recv.as_ref(), method, owner) {
                 *found = true;
                 let mergeable = args.is_empty()
-                    || (args.len() == 1 && matches!(&*args[0].node, ExprNode::Hash { .. }));
+                    || (args.len() == 1
+                        && match &*args[0].node {
+                            ExprNode::Hash { .. } => true,
+                            ExprNode::Var { name, .. } => hash_params.contains(name),
+                            _ => false,
+                        });
                 if !mergeable && blocked.is_none() {
                     *blocked = Some(format!(
                         "`{}` takes an argument that is not an attribute hash",
@@ -268,9 +307,9 @@ fn ctor_shape(body: &Expr) -> CtorShape {
                 }
             }
         }
-        e.node.for_each_child(&mut |c| walk(c, found, blocked));
+        e.node.for_each_child(&mut |c| walk(c, owner, hash_params, found, blocked));
     }
-    walk(body, &mut found, &mut blocked);
+    walk(&method_def.body, owner, &hash_params, &mut found, &mut blocked);
     match (found, blocked) {
         (false, _) => CtorShape::None,
         (true, Some(why)) => CtorShape::Blocked(why),
@@ -352,7 +391,7 @@ pub fn build_assoc_class_methods(
             }) else {
                 continue;
             };
-            match ctor_shape(&method.body) {
+            match ctor_shape(method, target) {
                 CtorShape::None => {}
                 CtorShape::Mergeable => {
                     reg.entry(target.clone())
@@ -379,15 +418,11 @@ pub fn build_assoc_class_methods(
 /// The caller's own attributes stay on the OUTSIDE of the merge because
 /// Rails assigns them after the scope's, so an explicit value wins over
 /// the association's. Only shapes [`ctor_shape`] admitted reach here.
-pub fn merge_scope_attributes(body: &mut Expr, rel: &Symbol) {
-    fn walk(e: &mut Expr, rel: &Symbol) {
+pub fn merge_scope_attributes(body: &mut Expr, owner: &ClassId, rel: &Symbol) {
+    fn walk(e: &mut Expr, owner: &ClassId, rel: &Symbol) {
         let span = e.span;
-        if let ExprNode::Send { recv, method, args, .. } = &mut *e.node {
-            let self_rooted = match recv {
-                None => true,
-                Some(r) => matches!(&*r.node, ExprNode::SelfRef),
-            };
-            if self_rooted && SELF_CONSTRUCTORS.contains(&method.as_str()) {
+        if let ExprNode::Send { recv, method, args, parenthesized, .. } = &mut *e.node {
+            if self_rooted_ctor(recv.as_ref(), method, owner) {
                 let scope_attrs = syn(
                     span,
                     ExprNode::Send {
@@ -398,9 +433,15 @@ pub fn merge_scope_attributes(body: &mut Expr, rel: &Symbol) {
                         parenthesized: false,
                     },
                 );
+                let arg_is_attrs = args.len() == 1
+                    && matches!(
+                        &*args[0].node,
+                        ExprNode::Hash { .. } | ExprNode::Var { .. }
+                    );
                 if args.is_empty() {
                     *args = vec![scope_attrs];
-                } else if args.len() == 1 && matches!(&*args[0].node, ExprNode::Hash { .. }) {
+                    *parenthesized = true;
+                } else if arg_is_attrs {
                     let own = args[0].clone();
                     *args = vec![syn(
                         span,
@@ -415,9 +456,9 @@ pub fn merge_scope_attributes(body: &mut Expr, rel: &Symbol) {
                 }
             }
         }
-        e.node.for_each_child_mut(&mut |c| walk(c, rel));
+        e.node.for_each_child_mut(&mut |c| walk(c, owner, rel));
     }
-    walk(body, rel);
+    walk(body, owner, rel);
 }
 
 /// The model whose relation `expr` evaluates to, when that is statically
@@ -1112,7 +1153,7 @@ fn counted_terminal(method: &Symbol, args: &[Expr], block: Option<&Expr>) -> Opt
 /// read (`Current.user.memberships`): a name that isn't a model, or a
 /// model that doesn't declare the collection, answers None and the
 /// chain keeps its source shape.
-fn owner_model_from_name(owner: &Expr, ctx: &Ctx) -> Option<ClassId> {
+fn owner_model_from_name(owner: &Expr, models: &HashSet<ClassId>) -> Option<ClassId> {
     let name = match &*owner.node {
         ExprNode::Ivar { name } => name.as_str(),
         ExprNode::Var { name, .. } => name.as_str(),
@@ -1124,7 +1165,39 @@ fn owner_model_from_name(owner: &Expr, ctx: &Ctx) -> Option<ClassId> {
         _ => return None,
     };
     let id = ClassId(Symbol::from(crate::naming::camelize(name).as_str()));
-    ctx.models.contains(&id).then_some(id)
+    models.contains(&id).then_some(id)
+}
+
+/// The `(owner model, target, foreign key)` a `<owner>.<has_many>` read
+/// resolves to — the three rungs above, with no judgment about whether
+/// the seed can REPRODUCE the association (that is
+/// `AssocRegistry::is_unseedable`, and only the rewriter needs it).
+///
+/// Public because the strong-params binding scan asks the same question
+/// for a different purpose: `@room.messages.create_with_attachment!(
+/// message_params)` names `Message.create_with_attachment!`'s parameter
+/// exactly as `Message.create_with_attachment!(message_params)` would,
+/// and one resolver keeps the two answers from drifting.
+pub fn assoc_read_target(
+    owner: &Expr,
+    aname: &Symbol,
+    models: &HashSet<ClassId>,
+    assocs: &AssocRegistry,
+) -> Option<(Option<ClassId>, ClassId, Symbol)> {
+    let typed = match owner.ty.as_ref().map(|t| t.peel_nilable()) {
+        Some(crate::ty::Ty::Class { id, .. }) => assocs
+            .has_many_fk(id, aname)
+            .cloned()
+            .map(|hit| (Some(id.clone()), hit)),
+        _ => None,
+    };
+    typed
+        .or_else(|| {
+            owner_model_from_name(owner, models)
+                .and_then(|m| assocs.has_many_fk(&m, aname).cloned().map(|hit| (Some(m), hit)))
+        })
+        .or_else(|| assocs.has_many_by_name(aname).cloned().map(|hit| (None, hit)))
+        .map(|(owner_model, (target, fk))| (owner_model, target, fk))
 }
 
 /// May the seed take this owner expression apart and read `<owner>.id`
@@ -1161,37 +1234,18 @@ fn assoc_owner_seed(
     owner: &Expr,
     span: crate::span::Span,
 ) -> Option<(ClassId, Symbol, Expr)> {
-    // Owner-typed resolution first: when the analyzer stamped the
-    // owner expression with its model class, the (model, assoc) pair
-    // resolves directly — this is what disambiguates an assoc name
-    // declared on several models (`comments` on both Story and User;
-    // `ms.comments` with `ms : Story` is unambiguous). The by-NAME
-    // map stays as the fallback for untyped owners, and maps an
-    // ambiguous name to None.
-    // `find_by` owners arrive as `Story | Nil` — peel the nilable
-    // wrapper before matching (the nil case raises at the `.id` read
-    // either way, same as Rails).
+    // Resolution is `assoc_read_target`'s three rungs — the owner's
+    // stamped type (which disambiguates an assoc name declared on
+    // several models), then the owner's NAME, then the assoc name when
+    // it is unique across models.
     //
-    // Each rung carries the OWNER it resolved through so the seedability
-    // check below can ask about that exact declaration; the by-NAME rung
-    // has no owner and is checked against every declarer.
-    let typed = match owner.ty.as_ref().map(|t| t.peel_nilable()) {
-        Some(crate::ty::Ty::Class { id, .. }) => ctx
-            .assocs
-            .has_many_fk(id, aname)
-            .cloned()
-            .map(|hit| (Some(id.clone()), hit)),
-        _ => None,
-    };
-    typed
-        .or_else(|| {
-            owner_model_from_name(owner, ctx).and_then(|m| {
-                ctx.assocs.has_many_fk(&m, aname).cloned().map(|hit| (Some(m), hit))
-            })
-        })
-        .or_else(|| ctx.assocs.has_many_by_name(aname).cloned().map(|hit| (None, hit)))
-        .filter(|(owner_model, _)| !ctx.assocs.is_unseedable(owner_model.as_ref(), aname))
-        .map(|(_, (target, fk))| {
+    // What is this function's OWN judgment is the seedability filter:
+    // each rung carries the OWNER it resolved through so the check can
+    // ask about that exact declaration; the by-NAME rung has no owner
+    // and is checked against every declarer.
+    assoc_read_target(owner, aname, ctx.models, ctx.assocs)
+        .filter(|(owner_model, _, _)| !ctx.assocs.is_unseedable(owner_model.as_ref(), aname))
+        .map(|(_, target, fk)| {
             let owner_id = syn(
                 span,
                 ExprNode::Send {
