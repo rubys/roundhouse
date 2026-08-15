@@ -50,14 +50,64 @@ pub fn apply_inquiry_lowering(app: &mut App) {
     if app_defines_inquiry(app) {
         return;
     }
-    super::for_each_hook_body(app, &mut rewrite);
+    let inquirers = inquirer_methods(app);
+    super::for_each_hook_body(app, &mut |body| rewrite(body, &inquirers));
     for view in &mut app.views {
-        rewrite(&mut view.body);
+        rewrite(&mut view.body, &inquirers);
     }
 }
 
-fn rewrite(expr: &mut Expr) {
-    expr.node.for_each_child_mut(&mut rewrite);
+/// Methods that RETURN an inquirer — their body's tail is the
+/// `.inquiry` call this pass is about to erase.
+///
+/// Collected before the rewrite because the rewrite destroys the
+/// evidence: campfire's `Message#content_type` is a `case … end.inquiry`,
+/// and once that call is folded away nothing downstream can tell the
+/// method from any other String-returning reader. The call SITE is what
+/// needs to know — `message.content_type.attachment?` lives in a
+/// template, where the receiver is a user method whose return type the
+/// analyzer does not infer, so the `Ty::Str` gate below never fires and
+/// the predicate survived to raise NoMethodError on a String.
+///
+/// Same shape as `lower::html_safe` recording `App::html_safe_methods`:
+/// a value-level fact the runtime cannot carry, so record it and erase
+/// the call. Keyed by NAME, which can over-match a same-named method on
+/// another class — the same tradeoff `html_safe_methods` takes, and the
+/// consequence is confined to a predicate no String answers.
+fn inquirer_methods(app: &App) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let mut note = |m: &crate::dialect::MethodDef| {
+        if tail_is_inquiry(&m.body) {
+            out.insert(m.name.as_str().to_string());
+        }
+    };
+    for model in &app.models {
+        for method in model.methods() {
+            note(method);
+        }
+    }
+    for lc in &app.library_classes {
+        for method in &lc.methods {
+            note(method);
+        }
+    }
+    out
+}
+
+/// Does this body's VALUE — its tail expression — come from `.inquiry`?
+fn tail_is_inquiry(body: &Expr) -> bool {
+    match &*body.node {
+        ExprNode::Seq { exprs } => exprs.last().is_some_and(tail_is_inquiry),
+        ExprNode::Return { value } => tail_is_inquiry(value),
+        ExprNode::Send { method, args, block: None, .. } => {
+            method.as_str() == "inquiry" && args.is_empty()
+        }
+        _ => false,
+    }
+}
+
+fn rewrite(expr: &mut Expr, inquirers: &std::collections::HashSet<String>) {
+    expr.node.for_each_child_mut(&mut |c| rewrite(c, inquirers));
 
     let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node else {
         return;
@@ -78,7 +128,14 @@ fn rewrite(expr: &mut Expr) {
     if label.is_empty() || crate::analyze::string_answers(method) {
         return;
     }
-    if !matches!(recv.ty, Some(Ty::Str)) {
+    // Either the analyzer typed the receiver a String, or the receiver
+    // is a call to a method whose value came from `.inquiry` — the fact
+    // collected above, since the fold erases the call itself.
+    let recv_is_inquirer = matches!(
+        &*recv.node,
+        ExprNode::Send { method, .. } if inquirers.contains(method.as_str())
+    );
+    if !matches!(recv.ty, Some(Ty::Str)) && !recv_is_inquirer {
         return;
     }
     let recv = recv.clone();

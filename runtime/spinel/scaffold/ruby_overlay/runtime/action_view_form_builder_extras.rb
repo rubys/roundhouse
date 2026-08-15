@@ -48,6 +48,34 @@ module ActionView
         " data-disable-with=\"#{html_escape(value.to_s)}\"#{attrs}>"
     end
 
+    # `<input type="hidden" name="N" id="N" value="V" />` — the bare
+    # (builder-less) hidden field. campfire's quick-boost buttons carry
+    # the emoji this way, one form per reaction on every message.
+    #
+    # MEASURED against Rails 8.1, and three details are not guessable:
+    # the id is the name SANITIZED (`boost[content]` → `boost_content`,
+    # Rails' `sanitize_to_id`: drop `]`, then anything outside
+    # `-a-zA-Z0-9:.` becomes `_`); `value` is omitted entirely when nil
+    # rather than rendered empty; and the tag closes ` />`, which is the
+    # legacy `tag()` spelling the other field helpers share.
+    def self.hidden_field_tag(name, value = nil, options = {})
+      id = name.to_s.delete("]").gsub(/[^\-a-zA-Z0-9:.]/, "_")
+      attrs = +""
+      unless value.nil?
+        attrs << " value=\"#{html_escape(value.to_s)}\""
+      end
+      options.each do |k, v|
+        if k == :data && v.is_a?(Hash)
+          v.each do |dk, dv|
+            attrs << " data-#{dk.to_s.tr("_", "-")}=\"#{html_escape(dv.to_s)}\"" unless dv.nil?
+          end
+        elsif !v.nil?
+          attrs << " #{k}=\"#{html_escape(v.to_s)}\""
+        end
+      end
+      "<input type=\"hidden\" name=\"#{html_escape(name.to_s)}\" id=\"#{html_escape(id)}\"#{attrs} />"
+    end
+
     # `<form action="URL" accept-charset="UTF-8" method="post"<opts>>` +
     # block content + `</form>` — the bare form_tag. The walker lowers
     # the block to a capture that returns its accumulated string.
