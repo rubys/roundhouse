@@ -1024,6 +1024,14 @@ jobs:
   # toolchain harnesses remain as dev-loop tools:
   # cargo test --test <t>_toolchain -- --ignored.
   #
+  # § Test also has to prove it EXECUTED something: scripts/smoke parses
+  # the runner's own summary (or its JUnit XML, for gradle) and fails
+  # below a per-target floor — 21, the real-blog app suite. Exit status
+  # alone is not evidence; every runner here exits 0 having run nothing,
+  # which is how csharp's `dotnet test` stayed green for months over an
+  # archive with no test project (#34 §0). csharp is declared as a
+  # floor-0 KNOWN GAP and warns on every run until its test emit lands.
+  #
   # Per-job content = toolchain setup only; no per-target build/seed/
   # boot knowledge lives here (that's the point — it's all in the
   # archive). The repo-side playwright install pre-warms the browser
