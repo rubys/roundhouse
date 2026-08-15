@@ -62,9 +62,19 @@ module ActionDispatch
     # (campfire stores it as the post-login return path).
     def url = original_url
 
+    # Host (with port when the client sent one), as Rails reports it.
+    # The shared `ActionDispatch::Request` has always carried this; the
+    # overlay twin did not, and `Rails.application.domain` — the
+    # framework default every `_url` helper grounds against — reads it.
+    # So an app with no `domain` of its own raised NoMethodError on its
+    # first absolute URL: campfire's message row, which links each
+    # message by `room_at_message_url`.
+    def host
+      @env["HTTP_HOST"] || @env["SERVER_NAME"] || "localhost"
+    end
+
     def base_url
       scheme = @env["HTTPS"] == "on" ? "https" : "http"
-      host = @env["HTTP_HOST"] || @env["SERVER_NAME"] || "localhost"
       "#{scheme}://#{host}"
     end
 
