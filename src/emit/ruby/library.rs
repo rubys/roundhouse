@@ -1178,6 +1178,7 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
                 rewrite_request,
                 &own_methods,
                 &own_params,
+                &app.view_visible_controller_methods,
             );
         }
     }
@@ -1335,6 +1336,7 @@ fn rewrite_helper_calls(
     rewrite_request: bool,
     own_methods: &std::collections::HashSet<Symbol>,
     own_params: &std::collections::HashSet<Symbol>,
+    view_visible: &std::collections::BTreeSet<Symbol>,
 ) {
     expr.node.for_each_child_mut(&mut |c| {
         rewrite_helper_calls(
@@ -1345,6 +1347,7 @@ fn rewrite_helper_calls(
             rewrite_request,
             own_methods,
             own_params,
+            view_visible,
         )
     });
 
@@ -1462,9 +1465,70 @@ fn rewrite_helper_calls(
     // → `ActionController::Current.controller.<x>` (lobsters'
     // ApplicationHelper.filtered_tags reads the tag-filter cookie).
     if rewrite_request {
+        // `helper_method :platform` — the app SAYING this controller
+        // method is view-callable, for the marked methods the existing
+        // path cannot serve.
+        //
+        // TWO ARMS OF ONE RULE, and the discriminator already exists.
+        // `controller_helper_method_names` clones a marked method
+        // CLASS-SIDE when its body is pure over its arguments, and the
+        // view calls `DomainsController.caption_of_button(domain)` —
+        // a static call, which is right because there is no per-request
+        // state to reach. A marked method that READS REQUEST STATE
+        // (campfire's `platform` is `@platform ||= ApplicationPlatform
+        // .new(request.user_agent)`) cannot be cloned for exactly that
+        // reason, and was left as honest residue. It routes through the
+        // live controller instead.
+        //
+        // `index` is the "already served" test: a name in
+        // `helper_method_index` has a module or a class-side clone
+        // behind it, and this arm must not take it — doing so turned
+        // lobsters' working static call into a dynamic one.
+        //
+        // Shadowed by the module's own methods and its params, because a
+        // partial local spelled `platform` is that local (Rails mixes
+        // helpers BENEATH a template's locals). Args are FORWARDED
+        // rather than required to be empty: Rails allows a helper_method
+        // to take them.
+        if let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node {
+            if view_visible.contains(method)
+                && !index.contains_key(method)
+                && !own_methods.contains(method)
+                && !own_params.contains(method)
+            {
+                let span = expr.span;
+                let controller = Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(Expr::new(
+                            span,
+                            ExprNode::Const {
+                                path: vec![
+                                    Symbol::from("ActionController"),
+                                    Symbol::from("Current"),
+                                ],
+                            },
+                        )),
+                        method: Symbol::from("controller"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    },
+                );
+                *expr.node = ExprNode::Send {
+                    recv: Some(controller),
+                    method: method.clone(),
+                    args: args.clone(),
+                    block: block.clone(),
+                    parenthesized: !args.is_empty(),
+                };
+                return;
+            }
+        }
         if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
             let m = method.as_str();
-            if (m == "request" || m == "cookies" || m == "session" || m == "flash")
+            if (m == "request" || m == "cookies" || m == "session" || m == "flash"
+                || m == "params")
                 && args.is_empty()
             {
                 let span = expr.span;

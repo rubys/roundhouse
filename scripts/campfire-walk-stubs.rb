@@ -273,6 +273,14 @@ WALK_LATE_PATCHES << lambda do
     def self.user_push_subscriptions_path(user_id = "me")
       "/users/#{user_id}/push_subscriptions"
     end
+
+    def self.user_sidebar_path(user_id = "me")
+      "/users/#{user_id}/sidebar"
+    end
+
+    def self.user_profile_path(user_id = "me")
+      "/users/#{user_id}/profile"
+    end
   end
 end
 

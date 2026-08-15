@@ -22,7 +22,7 @@ use super::fixture::ingest_fixture_file;
 use super::jbuilder::ingest_jbuilder;
 use super::library_class::{
     ClassKind, classify_class_file, ingest_concern_class_method_names,
-    ingest_concern_filters, ingest_concern_model_items,
+    ingest_concern_filters, ingest_concern_model_items, ingest_helper_method_names,
     ingest_library_classes, ingest_rails_application_singleton_methods,
 };
 use super::model::ingest_model;
@@ -139,6 +139,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         app.concern_model_items.extend(concern_items);
                         concern_class_method_names
                             .extend(ingest_concern_class_method_names(&source));
+                        app.view_visible_controller_methods
+                            .extend(ingest_helper_method_names(&source));
                         concern_enums.extend(concern_enum_decls);
                     }
                 }
@@ -510,6 +512,11 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                     ) {
                         app.helper_method_index.insert(name, controller.name.clone());
                     }
+                    // `helper_method :platform` written directly in a
+                    // controller class body — the concern spelling is
+                    // picked up at the module branch below.
+                    app.view_visible_controller_methods
+                        .extend(ingest_helper_method_names(&source));
                     app.controllers.push(controller);
                 } else {
                     // No class in the file — a module: a concern under
@@ -530,6 +537,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                         app.concern_model_items.extend(concern_items);
                         concern_class_method_names
                             .extend(ingest_concern_class_method_names(&source));
+                        app.view_visible_controller_methods
+                            .extend(ingest_helper_method_names(&source));
                         concern_enums.extend(concern_enum_decls);
                     }
                 }

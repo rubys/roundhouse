@@ -126,6 +126,7 @@ fn tiny_blog_round_trips() {
         stylesheets: vec![],
         rbs_signatures: std::collections::HashMap::new(),
         helper_method_index: std::collections::HashMap::new(),
+        view_visible_controller_methods: std::collections::BTreeSet::new(),
         partial_local_types: std::collections::HashMap::new(),
         view_ivar_types: std::collections::HashMap::new(),
         html_safe_methods: std::collections::BTreeSet::new(),

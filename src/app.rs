@@ -73,6 +73,17 @@ pub struct App {
     /// ships no helpers or only empty helper modules (the blog).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub helper_method_index: HashMap<Symbol, ClassId>,
+    /// Controller methods the app declared view-visible with Rails'
+    /// `helper_method :name`. A view lowers to a module function with no
+    /// controller instance, so a bare call to one of these routes
+    /// through the per-dispatch `ActionController::Current.controller`
+    /// — the same seam `flash` and `cookies` already use.
+    ///
+    /// Distinct from [`Self::helper_method_index`], which maps a name to
+    /// the `app/helpers/` MODULE that defines it. This one names methods
+    /// that live on the CONTROLLER.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub view_visible_controller_methods: BTreeSet<Symbol>,
     /// Partial → local name → type, harvested by the analyzer from the
     /// RENDER SITES that pass each local (`render partial: "form",
     /// locals: { new_message: @new_message }` with `@new_message` typed
@@ -325,6 +336,7 @@ impl App {
             stylesheets: Vec::new(),
             rbs_signatures: HashMap::new(),
             helper_method_index: HashMap::new(),
+            view_visible_controller_methods: BTreeSet::new(),
             partial_local_types: HashMap::new(),
             view_ivar_types: HashMap::new(),
             html_safe_methods: BTreeSet::new(),

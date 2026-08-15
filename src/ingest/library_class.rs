@@ -932,6 +932,51 @@ pub enum ClassKind {
 /// `DeclBody` — that tuple reaches 25 `LibraryClass` construction
 /// sites, nearly all of them synthesizing classes that can never have a
 /// concern carrier.
+/// Every `helper_method :name, …` the file declares.
+///
+/// Rails' `helper_method` is the app SAYING which controller methods a
+/// view may call — campfire's `SetPlatform` exposes `platform`,
+/// `Authentication` exposes `signed_in?`, `TrackedRoomVisit` exposes
+/// `last_room_visited`, and the room page calls all three. Our views
+/// lower to module functions with no controller instance, so a bare
+/// `platform` there resolved to nothing and the page died on a
+/// NameError.
+///
+/// A whole-file VISIT rather than a per-module statement scan: the
+/// declaration is spelled the same in a controller class body, inside a
+/// concern's `included do`, and inside `class_methods do`, and what the
+/// call-site rewrite wants is one NAME SET. Rails scopes the exposure to
+/// the declaring controller and its descendants; a name is only routed
+/// where a view actually calls it, and that rewrite is already shadowed
+/// by the module's own methods and its params.
+pub fn ingest_helper_method_names(source: &[u8]) -> Vec<Symbol> {
+    struct HelperMethodVisitor {
+        names: Vec<Symbol>,
+    }
+
+    impl<'pr> ruby_prism::Visit<'pr> for HelperMethodVisitor {
+        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+            if node.receiver().is_none() && constant_id_str(&node.name()) == "helper_method" {
+                if let Some(args) = node.arguments() {
+                    for arg in args.arguments().iter() {
+                        if let Some(sym) = arg.as_symbol_node() {
+                            self.names.push(Symbol::from(
+                                String::from_utf8_lossy(sym.unescaped()).as_ref(),
+                            ));
+                        }
+                    }
+                }
+            }
+            ruby_prism::visit_call_node(self, node);
+        }
+    }
+
+    let result = parse(source);
+    let mut visitor = HelperMethodVisitor { names: Vec::new() };
+    ruby_prism::Visit::visit(&mut visitor, &result.node());
+    visitor.names
+}
+
 pub fn ingest_concern_class_method_names(source: &[u8]) -> Vec<(ClassId, Vec<Symbol>)> {
     fn defs_in(body: Option<ruby_prism::Node<'_>>, out: &mut Vec<Symbol>) {
         let Some(body) = body else { return };
