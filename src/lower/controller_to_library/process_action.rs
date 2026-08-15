@@ -117,7 +117,10 @@ pub(super) fn synthesize_process_action(
 
 /// `return if performed?` — the halting check after a filter that can
 /// render or redirect.
-fn halt_if_performed() -> Expr {
+/// `return if performed?` — Rails' halting semantics, as one statement.
+/// Shared with `inline_before_filters`, which needs the same guard
+/// after a filter body it prepended into an action.
+pub(super) fn halt_if_performed() -> Expr {
     let performed = syn(ExprNode::Send {
         recv: None,
         method: Symbol::from("performed?"),

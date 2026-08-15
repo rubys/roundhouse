@@ -41,7 +41,7 @@ use crate::lower::controller::body::{
 };
 
 use self::params::ParamsSpecs;
-use self::process_action::{synthesize_process_action, PreambleStmt};
+use self::process_action::{halt_if_performed, synthesize_process_action, PreambleStmt};
 use self::rewrites::{
     rewrite_assoc_through_parent_typed, rewrite_destroy_bang,
     rewrite_model_new_to_from_params, rewrite_update_to_typed_variant, rewrite_params,
@@ -566,9 +566,27 @@ fn build_methods(
     // the action body, where the body-typer's Seq walk picks it up
     // and types subsequent reads correctly. Self-describing IR — no
     // convention-based ivar naming heuristic needed downstream.
+    // Order safety is decided ONCE per controller — see
+    // `own_filter_inlining_is_ordered`. When it declines, every own
+    // filter falls through to the preamble, which emits them in
+    // declaration order.
+    let inlining_ordered = own_filter_inlining_is_ordered(controller, &privs);
+    let resolve_own = |name: &Symbol| {
+        privs
+            .iter()
+            .chain(publics.iter())
+            .find(|a| &a.name == name)
+            .map(|a| a.body.clone())
+    };
     let publics_inlined: Vec<Action> = publics
         .iter()
-        .map(|a| inline_before_filters(a, &before_filters, &privs))
+        .map(|a| {
+            if inlining_ordered {
+                inline_before_filters(a, &before_filters, &privs, &resolve_own)
+            } else {
+                a.clone()
+            }
+        })
         .collect();
 
     // Filter targets that are PURELY filter targets (called only via
@@ -589,7 +607,11 @@ fn build_methods(
         .any(|c| ancestor_chain(c, all_controllers).iter().any(|p| p.name == controller.name));
     let privs_kept: Vec<Action> = privs
         .iter()
-        .filter(|a| has_descendants || !filter_target_names.contains(&a.name))
+        .filter(|a| {
+            // A target is dead only if inlining actually consumed it.
+            // With inlining declined the preamble CALLS it by name.
+            has_descendants || !inlining_ordered || !filter_target_names.contains(&a.name)
+        })
         .cloned()
         .collect();
 
@@ -601,7 +623,12 @@ fn build_methods(
         // filters. Same-controller private-target filters stay inlined
         // (typing seeds the action bodies); a controller with none of the
         // former gets an empty preamble and a byte-identical dispatcher.
-        let preamble = build_filter_preamble(controller, all_controllers, &privs);
+        let preamble = build_filter_preamble(
+            controller,
+            all_controllers,
+            &privs,
+            /*own_privs_inlined=*/ inlining_ordered,
+        );
         methods.push(synthesize_process_action(
             &preamble,
             &publics_inlined,
@@ -703,22 +730,84 @@ pub(crate) fn controller_helper_method_names(controller: &Controller) -> Vec<Sym
     marked
 }
 
+/// Does `f` apply to the action named `action_name`?
+fn filter_applies(f: &Filter, action_name: &Symbol) -> bool {
+    if !f.only.is_empty() {
+        f.only.contains(action_name)
+    } else if !f.except.is_empty() {
+        !f.except.contains(action_name)
+    } else {
+        true
+    }
+}
+
+/// May this controller's own filters be inlined into its action bodies
+/// at all?
+///
+/// Inlining moves a filter INTO the action, and the preamble runs
+/// BEFORE the action — so an inlined filter always runs after every
+/// preamble one, whatever the source said. That is fine while all of a
+/// controller's own inlinable filters are declared before its
+/// non-inlinable ones, and wrong the moment they are not.
+///
+/// campfire's RoomsController is the counter-example that made this a
+/// bug rather than a theory:
+///
+/// ```ruby
+/// before_action :set_room,                  only: %i[ show destroy ]
+/// before_action :ensure_can_administer,     only: %i[ destroy ]
+/// before_action :remember_last_room_visited, only: :show
+/// ```
+///
+/// The first two target this controller's own private methods and were
+/// inlined; the third's target lives on ApplicationController (a
+/// concern included there), so it stayed in the preamble and ran FIRST
+/// — reading `@room` before `set_room` had set it, and dying on nil.
+///
+/// The judgment is per-CONTROLLER, not per-action: the preamble is one
+/// statement list shared by every action, so "inline for `show` but not
+/// for `destroy`" would need the preamble's `only:`/`except:` scoping
+/// rewritten per filter. Declining wholesale costs the ivar typing that
+/// inlining seeds (`@room` reads as untyped again) and nothing else —
+/// the preamble emits the same calls in declaration order, with the
+/// halt checks it already builds.
+///
+/// ANCESTORS' filters are not consulted: Rails runs them before the
+/// controller's own, which is exactly where the preamble puts them.
+fn own_filter_inlining_is_ordered(controller: &Controller, privs: &[Action]) -> bool {
+    let own_priv = |target: &Symbol| privs.iter().any(|a| &a.name == target);
+    let mut seen_inlinable = false;
+    for f in controller.filters().filter(|f| matches!(f.kind, FilterKind::Before)) {
+        if own_priv(&f.target) {
+            seen_inlinable = true;
+        } else if seen_inlinable {
+            return false;
+        }
+    }
+    true
+}
+
 /// Return a copy of `action` with every applicable before_action
 /// filter target's body prepended to the action body. A filter
 /// applies when its `only:` includes the action name, or its
 /// `except:` doesn't, or it has neither (unconditional).
-fn inline_before_filters(action: &Action, filters: &[&Filter], privs: &[Action]) -> Action {
+///
+/// A prepended body that can render/redirect/head is followed by
+/// `return if performed?`, exactly as the preamble does for the filters
+/// it owns. Rails halts the chain on a filter that responds, and an
+/// inlined one had been losing that: campfire's `ensure_can_administer`
+/// emitted `head(:forbidden)` and then `@room.destroy` ran anyway, so a
+/// non-administrator got a 403 AND the room was deleted.
+fn inline_before_filters(
+    action: &Action,
+    filters: &[&Filter],
+    privs: &[Action],
+    resolve: &dyn Fn(&Symbol) -> Option<Expr>,
+) -> Action {
     let action_name = &action.name;
     let mut prepended: Vec<Expr> = Vec::new();
     for f in filters {
-        let applies = if !f.only.is_empty() {
-            f.only.contains(action_name)
-        } else if !f.except.is_empty() {
-            !f.except.contains(action_name)
-        } else {
-            true
-        };
-        if !applies {
+        if !filter_applies(f, action_name) {
             continue;
         }
         // Look up the filter's target action by name in privs.
@@ -731,6 +820,11 @@ fn inline_before_filters(action: &Action, filters: &[&Filter], privs: &[Action])
         match &*target.body.node {
             ExprNode::Seq { exprs } => prepended.extend(exprs.iter().cloned()),
             _ => prepended.push(target.body.clone()),
+        }
+        // Same resolver-following check the preamble uses, so a filter
+        // that delegates its redirect still halts.
+        if can_respond_within(&target.body, resolve, &mut std::collections::BTreeSet::new()) {
+            prepended.push(halt_if_performed());
         }
     }
     if prepended.is_empty() {
@@ -778,6 +872,7 @@ fn build_filter_preamble(
     controller: &Controller,
     all_controllers: &[Controller],
     own_privs: &[Action],
+    own_privs_inlined: bool,
 ) -> Vec<PreambleStmt> {
     let chain = ancestor_chain(controller, all_controllers);
 
@@ -869,7 +964,7 @@ fn build_filter_preamble(
             ControllerBodyItem::Filter { filter, .. }
                 if matches!(filter.kind, FilterKind::Before) =>
             {
-                if own_priv_targets.contains(&filter.target) {
+                if own_privs_inlined && own_priv_targets.contains(&filter.target) {
                     continue; // inlined into action bodies upstream
                 }
                 push_call(filter, &mut preamble);
