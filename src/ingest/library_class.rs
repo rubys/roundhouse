@@ -783,7 +783,20 @@ pub(super) fn ingest_library_method(
             if let Some(krp) = krest.as_keyword_rest_parameter_node() {
                 if let Some(loc) = krp.name() {
                     if let Ok(s) = std::str::from_utf8(loc.as_slice()) {
-                        params.push(Param::positional(Symbol::from(s)));
+                        // `**options` is OPTIONAL in Ruby — it binds to
+                        // `{}` when the caller passes no keywords — and
+                        // the trailing positional it becomes here has to
+                        // say so, or every bare call is an ArgumentError.
+                        // campfire's `avatar_tag(user, **options)` is
+                        // called with one argument from the message row,
+                        // the user list and the sidebar.
+                        params.push(Param::with_default(
+                            Symbol::from(s),
+                            Expr::new(
+                                Span::synthetic(),
+                                ExprNode::Hash { entries: vec![], kwargs: false },
+                            ),
+                        ));
                     }
                 }
             }
