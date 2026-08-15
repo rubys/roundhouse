@@ -40,6 +40,13 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     apply_hydration_nil_lowering(&mut lcs, app);
     apply_nilsafe_empty_lowering(&mut lcs);
     apply_time_format_lowering(&mut lcs);
+    // Same rooting the view pipeline applies, for the same reason one
+    // step over: a class nested in a namespace that SHADOWS what it
+    // references. `Message::Broadcasts` is where the broadcast lowering
+    // emits `Broadcasts.append(...)`, and inside `module Broadcasts`
+    // that constant is the concern itself. Idempotent (an already-rooted
+    // head is skipped), so running it in both pipelines is safe.
+    apply_constant_rooting(&mut lcs, app, RootingScope::RuntimeOnly);
     lcs.iter()
         .flat_map(|lc| {
             // `underscore`, not `snake_case`: a namespaced reopen
@@ -1112,6 +1119,11 @@ fn is_framework_view_helper(name: &str) -> bool {
             | "label_tag"
             | "url_for"
             | "submit_tag"
+            // The bare (builder-less) hidden field, beside its
+            // `label_tag`/`submit_tag` siblings in the same overlay
+            // file. campfire's quick-boost forms carry the emoji this
+            // way, one per reaction on every message.
+            | "hidden_field_tag"
             | "form_tag"
             | "content_tag"
             | "time_ago_in_words"
@@ -2586,15 +2598,45 @@ pub(crate) fn apply_nilsafe_empty_lowering(lcs: &mut [LibraryClass]) {
 /// the app has `app/views/users/` templates, and Ruby stops there —
 /// `uninitialized constant Views::Users::AvatarsHelper`, on the page
 /// that renders every message.
-pub(crate) fn apply_view_constant_rooting(lcs: &mut [LibraryClass], app: &App) {
+/// Which shadows this pipeline roots. The view pipeline takes both —
+/// every view sits under `module Views` beside every other view. The
+/// LIBRARY pipeline takes only the runtime's, because an app class
+/// referencing its OWN nested constant (`Sound::Image` inside `class
+/// Sound`) already resolves, and rooting it would be churn for nothing.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum RootingScope {
+    AppAndRuntime,
+    RuntimeOnly,
+}
+
+pub(crate) fn apply_constant_rooting(
+    lcs: &mut [LibraryClass],
+    app: &App,
+    scope: RootingScope,
+) {
     // …and "names a real top-level app namespace" has to mean the
     // NAMESPACE, not a class of exactly that name: campfire has no class
     // called `Users`, only `Users::AvatarsHelper` under it.
-    let top_level = |name: &str| {
+    //
+    // A name the shared RUNTIME owns counts too, and for the same
+    // reason a view's does: campfire's `Message::Broadcasts` concern is
+    // where the broadcast lowering emits `Broadcasts.append(...)`, and
+    // inside `module Broadcasts` that constant resolves to the concern
+    // ITSELF. One authority for "is this the runtime's" —
+    // `require_path_for_body_const`, which already had to know.
+    let runtime_owned = |name: &str| {
+        require_path_for_body_const(&[name.to_string()], app, "")
+            .is_some_and(|p| p.starts_with("runtime/"))
+    };
+    let shadows = |name: &str| {
+        if scope == RootingScope::RuntimeOnly {
+            return runtime_owned(name);
+        }
         let prefix = format!("{name}::");
         let under = |n: &str| n == name || n.starts_with(&prefix);
         app.models.iter().any(|m| under(m.name.0.as_str()))
             || app.library_classes.iter().any(|c| under(c.name.0.as_str()))
+            || runtime_owned(name)
     };
     // Every `Views::<Seg>` in this emit, which is exactly the set of
     // names a view body can accidentally resolve to.
@@ -2605,7 +2647,7 @@ pub(crate) fn apply_view_constant_rooting(lcs: &mut [LibraryClass], app: &App) {
         // `Views` itself is never the shadow: a `Views::X` reference
         // inside `module Views` finds no `Views::Views` and lands on the
         // top-level one, which is the intended target.
-        .filter(|seg| *seg != "Views" && top_level(seg))
+        .filter(|seg| *seg != "Views" && shadows(seg))
         .map(|seg| seg.to_string())
         .collect();
     view_namespaces.sort();
@@ -2615,7 +2657,7 @@ pub(crate) fn apply_view_constant_rooting(lcs: &mut [LibraryClass], app: &App) {
         let name = lc.name.0.as_str();
         let mut shadowing: Vec<String> = name
             .split("::")
-            .filter(|seg| top_level(seg))
+            .filter(|seg| shadows(seg))
             .map(|seg| seg.to_string())
             .collect();
         if name.starts_with("Views::") {
@@ -3559,6 +3601,21 @@ fn require_path_for_body_const(
     app: &App,
     self_name: &str,
 ) -> Option<String> {
+    // A ROOTED head (`::Broadcasts`, `::Sound::Image`) names the same
+    // file as the bare one — the marker says where Ruby should look, not
+    // what to load. Strip it before resolving, or rooting a reference
+    // silently deletes its require and the constant is undefined at load
+    // for a different reason than the one rooting fixed.
+    let rooted;
+    let path: &[String] = match path.first().and_then(|f| f.strip_prefix("::")) {
+        Some(bare) => {
+            rooted = std::iter::once(bare.to_string())
+                .chain(path.iter().skip(1).cloned())
+                .collect::<Vec<_>>();
+            &rooted
+        }
+        None => path,
+    };
     let first = path.first()?;
     // A nested class of THIS class is still a different file:
     // `Sound::Image` lives at app/models/sound/image.rb even though the

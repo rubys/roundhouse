@@ -618,7 +618,7 @@ pub fn emit_lowered_views(app: &App) -> Vec<EmittedFile> {
     // (`Views::Stats` over `Stats`) must reference it absolutely, or
     // Ruby resolves the inner module first. No-op unless a view
     // directory shares a name with a class.
-    library::apply_view_constant_rooting(&mut lcs, app);
+    library::apply_constant_rooting(&mut lcs, app, library::RootingScope::AppAndRuntime);
     html_views
         .iter()
         .zip(lcs.iter())
