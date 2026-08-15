@@ -321,6 +321,26 @@ fn emit_link_to_inline(
     opts: Option<&Expr>,
     ctx: &ViewCtx,
 ) -> Option<Expr> {
+    let (prefix, suffix) = link_to_wrapper_parts(url, opts, ctx)?;
+    let mut parts = prefix;
+    parts.push(InterpPart::Expr {
+        // Same `.to_s` the bare-interpolation path applies: the label
+        // can be a nullable column read (`link_to article.title, …`),
+        // and `html_escape` is deliberately monomorphic `(String) ->
+        // String`. `nil.to_s == ""` is what Rails renders.
+        expr: view_helpers_call("html_escape", vec![lit_str_coerce(text.clone())]),
+    });
+    parts.extend(suffix);
+    Some(string_interp(parts))
+}
+
+/// The anchor both spellings share, split where the link's CONTENT
+/// goes. Same division of labour as [`button_to_wrapper_parts`].
+fn link_to_wrapper_parts(
+    url: &Expr,
+    opts: Option<&Expr>,
+    ctx: &ViewCtx,
+) -> Option<(Vec<InterpPart>, Vec<InterpPart>)> {
     let url_expr = emit_url_arg(url, ctx)?;
     let opts_entries = hash_entries(opts);
     let mut parts: Vec<InterpPart> = Vec::new();
@@ -337,17 +357,8 @@ fn emit_link_to_inline(
     parts.push(InterpPart::Text {
         value: ">".to_string(),
     });
-    parts.push(InterpPart::Expr {
-        // Same `.to_s` the bare-interpolation path applies: the label
-        // can be a nullable column read (`link_to article.title, …`),
-        // and `html_escape` is deliberately monomorphic `(String) ->
-        // String`. `nil.to_s == ""` is what Rails renders.
-        expr: view_helpers_call("html_escape", vec![lit_str_coerce(text.clone())]),
-    });
-    parts.push(InterpPart::Text {
-        value: "</a>".to_string(),
-    });
-    Some(string_interp(parts))
+    let suffix = vec![InterpPart::Text { value: "</a>".to_string() }];
+    Some((parts, suffix))
 }
 
 /// Inline-expand `button_to text, url, opts` into the wrapping
@@ -376,25 +387,39 @@ fn emit_button_to_inline(
     Some(string_interp(parts))
 }
 
-/// The block form — `<%= button_to url, class: "…" do %> …markup… <%
-/// end %>` (campfire's join-code regenerate button).
+/// The BLOCK spelling of a helper whose positional form inline-expands
+/// — `<%= button_to url, class: "…" do %> …markup… <% end %>`
+/// (campfire's join-code regenerate button) and the same for `link_to`
+/// (five campfire templates, `messages/_actions` among them).
 ///
 /// Emits STATEMENTS rather than one expression, the shape
-/// `emit_tag_builder_inline` uses: the `<form …><button …>` prefix
-/// appends, the block body walks into the SAME accumulator, then the
-/// closing appends. That is not a stylistic choice — the block body is
-/// template markup (`image_tag`, a literal `<span>`), and Rails treats
-/// what the block yields as the button's HTML content. Routing it
-/// through the positional form's `html_escape` would render the markup
-/// as visible text.
-pub(super) fn emit_button_to_block_inline(
-    url: &Expr,
-    opts: Option<&Expr>,
+/// `emit_tag_builder_inline` uses: the opening markup appends, the block
+/// body walks into the SAME accumulator, then the closing appends. That
+/// is not a stylistic choice — the block body is template markup
+/// (`image_tag`, a literal `<span>`), and Rails treats what the block
+/// yields as the element's HTML content. Routing it through the
+/// positional form's `html_escape` would render the markup as visible
+/// text.
+///
+/// `None` when the name is not one of those, or when the URL position
+/// is a shape `emit_url_arg` declines — the caller then leaves the site
+/// to the generic block arm, exactly as before.
+pub(super) fn emit_inline_helper_block(
+    method: &str,
+    args: &[Expr],
     body: &Expr,
     block_params: &[Symbol],
     ctx: &ViewCtx,
 ) -> Option<Vec<Expr>> {
-    let (prefix, suffix) = button_to_wrapper_parts(url, opts, ctx)?;
+    // Both helpers put the URL first and an optional attributes hash
+    // second; the block replaces the positional form's leading label.
+    let url = args.first()?;
+    let opts = args.get(1);
+    let (prefix, suffix) = match method {
+        "button_to" => button_to_wrapper_parts(url, opts, ctx)?,
+        "link_to" => link_to_wrapper_parts(url, opts, ctx)?,
+        _ => return None,
+    };
     let mut out = vec![super::accumulator_append_call(string_interp(prefix), ctx)];
     let inner_ctx = ctx.with_locals(block_params.iter().map(|p| p.as_str().to_string()));
     out.extend(super::walker::walk_body(body, &inner_ctx));
