@@ -1026,7 +1026,14 @@ fn emit_hash(entries: &[(Expr, Expr)], e: &Expr) -> String {
 /// i.e. a local's own initializer, not an argument.
 fn emit_hash_precise(entries: &[(Expr, Expr)], e: &Expr) -> String {
     if let Some(crate::ty::Ty::Hash { key, value }) = e.ty.as_ref() {
-        if is_concrete_elem(key) && is_concrete_elem(value) {
+        // Never pin a literal whose values are themselves containers. A
+        // nested hash renders through plain `emit_hash`, which always
+        // pins `<String, Any?>` — under Kotlin's Map INVARIANCE that is a
+        // hard mismatch against a precise outer pin, not a warning. (The
+        // swift twin of this bug reached CI once; see `is_concrete_elem`
+        // there.) Flat literals are the case this exists for.
+        let nested = matches!(**value, crate::ty::Ty::Hash { .. } | crate::ty::Ty::Array { .. });
+        if !nested && is_concrete_elem(key) && is_concrete_elem(value) {
             let pairs: Vec<String> = entries
                 .iter()
                 .map(|(k, v)| format!("{} to {}", emit_expr(k), emit_expr(v)))

@@ -1462,10 +1462,20 @@ fn emit_hash(entries: &[(Expr, Expr)], e: &Expr) -> String {
 
 /// A type precise enough to pin a container literal to. The gradual and
 /// inference-gap variants would render as `Any?` anyway, and `Nil` /
-/// `Bottom` name no storable value.
+/// `Bottom` render `Void` / `Never`, which name no storable value.
+///
+/// `Union` IS accepted, and the reason is worth stating: a NESTED literal
+/// reads the same inference its enclosing literal does, so the two pins
+/// have to agree. `{params: {article: {title: …, body: article.body}}}`
+/// types the innermost value as `Str | Nil`, which `swift_ty` renders
+/// `String?` — so the outer pin already says `[String: [String: String?]]`.
+/// Rejecting the union here made only the inner literal fall back to
+/// `[String: Any?]`, and Swift rejected the literal against its own
+/// enclosing annotation. The guard has to agree with `swift_ty`, not
+/// second-guess it.
 fn is_concrete_elem(ty: &crate::ty::Ty) -> bool {
     use crate::ty::Ty;
-    !matches!(ty, Ty::Untyped | Ty::Var { .. } | Ty::Nil | Ty::Bottom | Ty::Union { .. })
+    !matches!(ty, Ty::Untyped | Ty::Var { .. } | Ty::Nil | Ty::Bottom)
 }
 
 fn emit_array(elements: &[Expr], e: &Expr) -> String {
