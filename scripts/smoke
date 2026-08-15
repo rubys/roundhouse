@@ -237,11 +237,8 @@ case "$TARGET" in
         # case this floor exists to catch. Upgrade to a number if the
         # README's command ever grows a counting flag.
         MIN_TESTS=ran ;;
-    csharp)
-        # KNOWN GAP (#34): csharp emits no test project, so `dotnet test`
-        # executes zero tests. Declared, warned about on every run, and
-        # NOT silent. Set to 21 the moment csharp test emit lands.
-        MIN_TESTS=0 ;;
+    # (csharp's KNOWN-GAP floor of 0 is retired: it now emits `tests/` —
+    # an xUnit project running the same 21 — and takes the default.)
 esac
 if [[ -n "${SMOKE_MIN_TESTS:-}" ]]; then
     MIN_TESTS="$SMOKE_MIN_TESTS"

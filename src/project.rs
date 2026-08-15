@@ -447,7 +447,7 @@ pub fn target_readme(target: BuildTarget) -> String {
              ```\n\n\
              ## Test\n\
              ```sh\n\
-             dotnet test\n\
+             dotnet test tests\n\
              ```\n"
         }
         BuildTarget::Typescript => {

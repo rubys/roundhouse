@@ -42,9 +42,32 @@ const FILE_HEADER: &str = "using System;\n\
                            using System.Text.RegularExpressions;\n\n\
                            namespace Roundhouse;\n\n";
 
+/// The test files' header — the standard one plus `Xunit` (`[Fact]`).
+const TEST_FILE_HEADER: &str = "using System;\n\
+                                using System.Collections.Generic;\n\
+                                using System.Linq;\n\
+                                using System.Text;\n\
+                                using System.Text.RegularExpressions;\n\
+                                using Xunit;\n\n\
+                                namespace Roundhouse;\n\n";
+
 /// Emit a `LibraryClass` as a standalone C# file under `app/models/<Name>.cs`.
 pub fn emit_class_file(lc: &LibraryClass) -> EmittedFile {
     emit_class_file_in(lc, "app/models")
+}
+
+/// Emit a lowered test class under `tests/<Name>.cs`, with the xUnit header.
+pub fn emit_test_class_file(
+    lc: &LibraryClass,
+    inner_classes: &[LibraryClass],
+    constants: &[(crate::ident::Symbol, Expr)],
+) -> EmittedFile {
+    let name = lc.name.0.as_str();
+    let last = name.rsplit("::").next().unwrap_or(name);
+    EmittedFile {
+        path: PathBuf::from(format!("tests/{last}.cs")),
+        content: format!("{TEST_FILE_HEADER}{}", emit_test_class(lc, inner_classes, constants)),
+    }
 }
 
 /// Emit a `LibraryClass` under `<dir>/<Name>.cs` (controllers route to
@@ -91,6 +114,124 @@ pub fn emit_function_module(funcs: &[crate::dialect::LibraryFunction]) -> Option
 
 pub fn emit_library_class_result(lc: &LibraryClass) -> Result<String, String> {
     Ok(emit_library_class(lc))
+}
+
+/// Render a lowered test class (`ArticleTest`, …) as an xUnit test file
+/// body. Mirrors the instance-class path of `emit_library_class` but drops
+/// the AR machinery (no synthesized finders, no `virtual`/inheritance
+/// modifiers): a test class is a leaf. Each `test_*` instance method gets a
+/// `[Fact]` so xUnit's discovery finds it. Assertion bodies were already
+/// rewritten to inline `throw` by the `inline_assertions` lowerer, so a
+/// failing assertion surfaces as an xUnit failure with no per-target
+/// assertion shim.
+///
+/// **Lifecycle.** xUnit has no `@BeforeEach`; it constructs a fresh instance
+/// per test, so the ingested `setup` method emits as an ordinary `Setup()`
+/// and the class gets a constructor calling it. C# runs the base constructor
+/// first, so `RoundhouseTestCase`'s per-test schema reset + fixture load
+/// still happens before `setup` — the ordering JUnit gets from superclass
+/// lifecycle methods and XCTest from `setUp` chaining.
+///
+/// `constants` (class-body `TABLE = [...]`) render as `private static
+/// readonly` members: C# has no file-scope constant, and class scope is
+/// exactly where the test body's unqualified reads resolve. Body-only ivars
+/// (`@article` set in `setup`) become properties so cross-method reads
+/// resolve, same as the ordinary class path.
+pub fn emit_test_class(
+    lc: &LibraryClass,
+    inner_classes: &[LibraryClass],
+    constants: &[(crate::ident::Symbol, Expr)],
+) -> String {
+    let class_name = type_name(lc.name.0.as_str());
+
+    let mut out = String::new();
+
+    // Inner helper classes declared inline in the test file (a non-test
+    // model/controller paired with the `*Test` class). Ingest lifts them onto
+    // the module's `inner_classes`; emit them ahead of the test class so its
+    // body's references resolve. `emit_library_class` sets its own emit
+    // context, which the test-class setup below then overrides — so this must
+    // come first.
+    for inner in inner_classes {
+        out.push_str(&emit_library_class(inner));
+        out.push('\n');
+    }
+
+    register_params_for(&class_name, &lc.methods);
+    super::expr::set_object_tl_fields(HashSet::new());
+    set_ivar_renames(std::collections::HashMap::new());
+
+    // Body-only ivars (e.g. `@article` assigned in `setup`) → properties so
+    // reads in the test methods resolve.
+    let mut body_ivars: BTreeMap<String, ()> = BTreeMap::new();
+    for m in &lc.methods {
+        collect_ivars(&m.body, &mut body_ivars);
+    }
+    let inferred_ivar_types = infer_body_ivar_types(&lc.methods);
+
+    out.push_str(&format!("public class {class_name} : RoundhouseTestCase\n{{\n"));
+
+    for (name, value) in constants {
+        let ty = value.ty.as_ref().map(csharp_ty).unwrap_or_else(|| "object?".to_string());
+        out.push_str(&format!(
+            "    private static readonly {ty} {} = {};\n",
+            name.as_str(),
+            emit_expr(value)
+        ));
+    }
+    if !constants.is_empty() {
+        out.push('\n');
+    }
+
+    for n in body_ivars.keys() {
+        match inferred_ivar_types.get(n) {
+            Some(ty) => {
+                out.push_str(&format!("    {}\n", render_member_vis("public", &pascal_of_camel(n), ty)))
+            }
+            None => out.push_str(&format!("    public object? {} = null;\n", pascal_of_camel(n))),
+        }
+    }
+    if !body_ivars.is_empty() {
+        out.push('\n');
+    }
+
+    // Property registry so `self.@article` reads emit as a property name.
+    let instance_props: HashSet<String> = body_ivars.keys().cloned().collect();
+    set_instance_props(instance_props);
+    let prop_ty_map: std::collections::HashMap<String, Ty> =
+        inferred_ivar_types.iter().map(|(n, t)| (n.clone(), t.clone())).collect();
+    set_instance_prop_types(prop_ty_map);
+    set_current_class(&class_name);
+
+    // The per-test constructor: xUnit's "fresh instance per test" IS the
+    // setup hook, and the base constructor (schema + fixtures) has already
+    // run by the time this body executes.
+    let has_setup = lc.methods.iter().any(|m| {
+        m.receiver == MethodReceiver::Instance
+            && m.kind == AccessorKind::Method
+            && m.name.as_str() == "setup"
+    });
+    if has_setup {
+        out.push_str(&format!("    public {class_name}()\n    {{\n        Setup();\n    }}\n\n"));
+    }
+
+    for m in &lc.methods {
+        if m.receiver != MethodReceiver::Instance || m.kind != AccessorKind::Method {
+            continue;
+        }
+        if m.name.as_str() == "initialize" {
+            continue;
+        }
+        let rendered = if m.name.as_str().starts_with("test_") {
+            format!("[Fact]\n{}", emit_method(m, ""))
+        } else {
+            emit_method(m, "")
+        };
+        out.push_str(&indent_method(&rendered));
+        out.push('\n');
+    }
+    out.push_str("}\n");
+    out
 }
 
 /// Render a module-level constant (`ESCAPES = {...}`) as a fragment of the

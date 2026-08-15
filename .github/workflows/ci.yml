@@ -779,9 +779,12 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-      # `dotnet build` of the emitted ASP.NET Core project — the C# analog of
-      # crystal's `--no-codegen` / go's `vet`: compiles the model layer, the
-      # transpiled framework runtime, and the primitives together.
+      # Two legs: `dotnet build` of the emitted ASP.NET Core project (the C#
+      # analog of crystal's `--no-codegen` / go's `vet` — model layer,
+      # transpiled framework runtime and primitives compiling together), and
+      # `dotnet test tests`, which RUNS the transpiled real-blog suite (21) as
+      # an xUnit project with an executed-count floor. csharp was the last
+      # target whose gates asserted nothing about behavior (#34 §0).
       - name: cargo test --test csharp_toolchain -- --ignored
         run: cargo test --test csharp_toolchain -- --ignored --nocapture
 

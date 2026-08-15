@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading;
 using Microsoft.Data.Sqlite;
 
@@ -23,8 +24,12 @@ namespace Roundhouse;
 // committed write visible to the read pool immediately.
 public static class Db
 {
+    // Set only by `SetupTestDb`; production reads the environment.
+    private static string? _testPath;
+
     private static string DbPath =>
-        Environment.GetEnvironmentVariable("BLOG_DB")
+        _testPath
+        ?? Environment.GetEnvironmentVariable("BLOG_DB")
         ?? Environment.GetEnvironmentVariable("DATABASE_PATH")
         ?? "storage/development.sqlite3";
 
@@ -134,6 +139,50 @@ public static class Db
     }
 
     private static SqliteConnection WriteConn() => _writeConn ??= Open();
+
+    // Per-test database: point every future connection at a fresh file and
+    // replay the schema DDL. The C# analog of kotlin's `Db.setupTestDb` /
+    // swift's per-test `:memory:`.
+    //
+    // A FILE, not `:memory:`, because this Db pools connections and each
+    // connection to `:memory:` is its OWN database — the write would land
+    // somewhere the read pool can't see. One path per process, deleted and
+    // recreated per test, keeps every connection looking at the same bytes.
+    //
+    // Existing connections point at the previous file, so they're dropped:
+    // pooled readers are disposed (the next `Rent` opens a fresh one — the
+    // Gate counts concurrent rentals, not pool contents, so draining it does
+    // not desync), and this thread's write connection is closed. Callers run
+    // on the test thread with parallelization disabled (see the test
+    // project's AssemblyInfo), so per-thread state is per-test state.
+    public static void SetupTestDb(string schema)
+    {
+        foreach (var handle in OpenReaders.Keys)
+        {
+            Finalize(handle);
+        }
+        while (Pool.TryTake(out var pooled))
+        {
+            pooled.Dispose();
+        }
+        _writeConn?.Dispose();
+        _writeConn = null;
+        SqliteConnection.ClearAllPools();
+
+        _testPath ??= Path.Combine(
+            Path.GetTempPath(), $"roundhouse-test-{Environment.ProcessId}.sqlite3");
+        foreach (var suffix in new[] { "", "-wal", "-shm" })
+        {
+            var f = _testPath + suffix;
+            if (File.Exists(f)) File.Delete(f);
+        }
+
+        if (schema.Length == 0) return;
+        foreach (var stmt in schema.Split(";\n"))
+        {
+            if (stmt.Trim().Length > 0) Exec(stmt);
+        }
+    }
 
     public static void Exec(string sql)
     {
