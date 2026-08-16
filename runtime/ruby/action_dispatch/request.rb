@@ -103,5 +103,54 @@ module ActionDispatch
     def referrer
       @referer
     end
+
+    # The User-Agent header. campfire's auth spine records it on every
+    # Session row (`start_new_session_for`) and `deny_bots` filters on
+    # it, so every sign-in reads it. Was a hole we opened ourselves:
+    # the walk's stub ledger carried it as "ours to implement".
+    def user_agent
+      @user_agent
+    end
+
+    def user_agent=(value)
+      @user_agent = value
+    end
+
+    # Retained so `Request.for`'s signature matches the overlay twin's.
+    # No `[]` delegator here: the overlay has one because lobsters
+    # writes `request[:format]`, and adding an untyped-returning reader
+    # nothing calls just spends runtime-typing budget.
+    def params
+      @params
+    end
+
+    def params=(value)
+      @params = value
+    end
+
+    # Build a request from a CGI/Rack-shaped env hash.
+    #
+    # THE SHARED CONSTRUCTOR. This class and the CRuby overlay's twin
+    # (`runtime/action_dispatch_request.rb`) hold their state
+    # differently — this one in attributes, that one derived from a
+    # retained `@env` — so they cannot share a `new`. They can share
+    # this, which is what lets one caller build a request on either
+    # target. The test harness is that caller; before it existed,
+    # `controller.request` was simply nil in every controller test and
+    # campfire's first filter died on `request.remote_ip`.
+    def self.for(env, params = {})
+      r = new
+      r.env = env
+      r.params = params
+      r.request_method = env["REQUEST_METHOD"] || "GET"
+      r.path = env["PATH_INFO"] || "/"
+      r.query_string = env["QUERY_STRING"] || ""
+      r.script_name = env["SCRIPT_NAME"] || ""
+      r.host = env["HTTP_HOST"] || env["SERVER_NAME"] || "localhost"
+      r.remote_ip = env["REMOTE_ADDR"] || "127.0.0.1"
+      r.referer = env["HTTP_REFERER"] || ""
+      r.user_agent = env["HTTP_USER_AGENT"] || ""
+      r
+    end
   end
 end

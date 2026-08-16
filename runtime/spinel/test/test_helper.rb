@@ -334,6 +334,34 @@ module RequestDispatch
     controller.flash   = @__flash   ||= ActionDispatch::Flash.new
     controller.request_method = method
     controller.request_path   = path
+    # The request object, built the way the dispatcher builds it (see
+    # `main.rb`'s `controller.request = ActionDispatch::Request.new(...)`).
+    # Without it `controller.request` was nil and any filter touching it
+    # died before the action ran — campfire's `reject_banned_ip` reads
+    # `request.remote_ip` on EVERY request, so all 29 of its controller
+    # tests stopped there. The blog's controller tests never touch the
+    # request, which is why the harness got this far without one.
+    #
+    # `Request.for` rather than `.new`: the shared class and the CRuby
+    # overlay's twin hold their state differently and take different
+    # constructors. Values are the loopback defaults a test wants —
+    # a test that needs a specific one sets it on `request` directly.
+    request_path, _, request_query = path.partition("?")
+    controller.request = ActionDispatch::Request.for(
+      {
+        "REQUEST_METHOD"  => method,
+        "PATH_INFO"       => request_path,
+        "QUERY_STRING"    => request_query,
+        "HTTP_HOST"       => "example.org",
+        "REMOTE_ADDR"     => "127.0.0.1",
+        "HTTP_USER_AGENT" => "Roundhouse Test",
+      },
+      merged,
+    )
+    # Same object where module-function helpers reach it, and the
+    # controller alongside — mirrors the dispatcher's pair.
+    ActionController::Current.request = controller.request
+    ActionController::Current.controller = controller
     controller.process_action(matched.action)
     @__flash = controller.flash
     @__response = ActionResponse.new(

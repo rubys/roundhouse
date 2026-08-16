@@ -87,6 +87,22 @@ module ActionDispatch
     end
     alias referrer referer
 
+    # The User-Agent header. campfire's auth spine records it on every
+    # Session row and `deny_bots` filters on it — a hole we opened
+    # ourselves (the walk's stub ledger carried it as "ours to
+    # implement"). Twin of the shared class's, which stores it.
+    def user_agent
+      @env["HTTP_USER_AGENT"] || ""
+    end
+
+    # Shared constructor — see the twin in
+    # `runtime/ruby/action_dispatch/request.rb`. The two classes hold
+    # their state differently and so cannot share a `new`; this is the
+    # seam one caller uses to build a request on either target.
+    def self.for(env, params = {})
+      new(env, params)
+    end
+
     def xhr?
       @env["HTTP_X_REQUESTED_WITH"] == "XMLHttpRequest"
     end

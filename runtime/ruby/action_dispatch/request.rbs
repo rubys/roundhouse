@@ -13,6 +13,8 @@ module ActionDispatch
     @format: String
     @body: String
     @env: Hash[String, untyped]
+    @user_agent: String
+    @params: Hash[String, untyped]
 
     def remote_ip: () -> String
     def remote_ip=: (String) -> String
@@ -44,5 +46,10 @@ module ActionDispatch
     def original_url: () -> String
     def url: () -> String
     def referrer: () -> String
+    def user_agent: () -> String
+    def user_agent=: (String) -> String
+    def params: () -> Hash[String, untyped]
+    def params=: (Hash[String, untyped]) -> Hash[String, untyped]
+    def self.for: (Hash[String, untyped] env, ?Hash[String, untyped] params) -> Request
   end
 end
