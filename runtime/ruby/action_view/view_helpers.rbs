@@ -76,6 +76,8 @@ module ActionView
 
     # Rails' html_safe marker; identity here (no safe-buffer type).
     def self.raw: (untyped value) -> String
+
+    def self.safe_join: (Array[String] parts, ?String separator) -> String
   
     def self.csrf_meta_tags: () -> String
     def self.form_authenticity_token: () -> String

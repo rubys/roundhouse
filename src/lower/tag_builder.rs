@@ -258,6 +258,9 @@ fn rewrite(
     if rewrite_turbo_frame_tag(expr, models) {
         return;
     }
+    if rewrite_legacy_tag(expr, diags) {
+        return;
+    }
 
     let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*expr.node else {
         return;
@@ -337,6 +340,69 @@ fn rewrite(
 /// (`frame_open_parts` → None) is left alone, where the emitted call to
 /// an undefined `turbo_frame_tag` is loud, rather than being given an
 /// invented id.
+/// The LEGACY function form — `tag(:meta, name: "x", content: "y")`,
+/// which campfire's `current_user_meta_tags` writes twice and every
+/// page's `<head>` therefore depends on.
+///
+/// Same proxy object, different call: `tag` with arguments is
+/// ActionView's original `tag(name, options)` rather than the
+/// `method_missing` builder, and it renders DIFFERENTLY. MEASURED
+/// against Rails 8:
+///
+///   tag(:meta, name: "n", content: "c")  =>  <meta name="n" content="c" />
+///   tag.meta(name: "n")                  =>  <meta name="n">
+///
+/// The legacy form keeps the XHTML-style close, the builder does not.
+/// Routing this through the builder's renderer would have been
+/// DOM-equivalent and byte-wrong; the two spellings share
+/// `append_attr_parts` and nothing else.
+///
+/// Void-ness does not enter into it: the legacy form self-closes
+/// whatever it is handed, which is why it takes no block and no
+/// content argument here.
+fn rewrite_legacy_tag(expr: &mut Expr, diags: &mut Vec<Diagnostic>) -> bool {
+    let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
+        return false;
+    };
+    if method.as_str() != "tag" || args.is_empty() {
+        return false;
+    }
+    let name = match &*args[0].node {
+        ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+        ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+        // A computed element name has nothing to expand at compile
+        // time; leave it for the ledger rather than guess.
+        _ => return false,
+    };
+    if !is_html_element(&name) {
+        diags.push(residue(expr, &format!("`{name}` is not a known HTML element")));
+        return false;
+    }
+    let opts = match args.get(1).map(|a| &*a.node) {
+        None => Vec::new(),
+        Some(ExprNode::Hash { entries, .. }) => entries.clone(),
+        // `tag(:meta, attrs)` over a computed hash — same decline the
+        // builder form makes, for the same reason.
+        Some(_) => {
+            diags.push(residue(
+                expr,
+                "attributes are a computed expression, not a literal hash",
+            ));
+            return false;
+        }
+    };
+    let span = expr.span;
+    let mut parts: Vec<InterpPart> = vec![InterpPart::Text { value: format!("<{name}") }];
+    append_attr_parts(&mut parts, &opts);
+    parts.push(InterpPart::Text { value: " />".to_string() });
+    let mut built = string_interp(parts);
+    // A lone `ViewHelpers` resolves against the enclosing helper module
+    // and raises NameError — same reason the two builder paths do this.
+    qualify_view_helpers(&mut built);
+    *expr = html_safe(built, span);
+    true
+}
+
 fn rewrite_turbo_frame_tag(expr: &mut Expr, models: &std::collections::HashSet<String>) -> bool {
     let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else {
         return false;

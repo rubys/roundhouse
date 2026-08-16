@@ -251,6 +251,16 @@ module ActionView
     def self.raw(value)
       value.to_s
     end
+
+    # Rails' `safe_join` concatenates an array of fragments, escaping
+    # each one that is not already html_safe. With no safe-buffer type
+    # the parts arrive already-rendered (every producer in an emitted
+    # tree is a lowered tag expansion), so this is the join Rails does
+    # and nothing else — MEASURED: `safe_join(["<a>", "<b>"])` is
+    # `<a><b>`, an empty separator, not a space.
+    def self.safe_join(parts, separator = "")
+      parts.join(separator)
+    end
   
     def self.button_to(text, href, opts = {})
       # Use `.fetch(k, nil)` instead of bare `opts[:k]`: Ruby's Hash#[]

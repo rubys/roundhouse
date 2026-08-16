@@ -1248,6 +1248,10 @@ fn is_framework_view_helper(name: &str) -> bool {
             // file. campfire's quick-boost forms carry the emoji this
             // way, one per reaction on every message.
             | "hidden_field_tag"
+            // Rails' array-of-fragments concat. campfire's
+            // `current_user_meta_tags` builds the two `<meta>` tags the
+            // page's `<head>` needs and joins them with it.
+            | "safe_join"
             | "form_tag"
             | "content_tag"
             | "time_ago_in_words"

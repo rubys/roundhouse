@@ -137,3 +137,64 @@ fn computed_attributes_fall_back_to_the_runtime_and_ledger() {
     );
     assert_eq!(diags, 1, "the fallback should be ledgered");
 }
+
+// ---- the LEGACY function form ---------------------------------------
+
+/// `tag(:meta, name: …)` is ActionView's ORIGINAL helper, not the
+/// `method_missing` builder, and it renders differently. MEASURED
+/// against Rails 8:
+///
+///   tag(:meta, name: "n", content: "c")  =>  <meta name="n" content="c" />
+///   tag.meta(name: "n")                  =>  <meta name="n">
+///
+/// campfire's `current_user_meta_tags` writes two of them, so every
+/// page's `<head>` depended on it.
+#[test]
+fn the_legacy_function_form_self_closes() {
+    let (out, diags) = helper(r#"tag(:meta, name: "current-user-id", content: "7")"#);
+    assert!(out.contains("<meta name="), "expected a meta tag:\n{out}");
+    assert!(
+        out.contains(r#" />".html_safe"#),
+        "the legacy form keeps the XHTML close the builder drops:\n{out}"
+    );
+    assert!(!out.contains("</meta>"), "and takes no closing tag:\n{out}");
+    assert_eq!(diags, 0, "a literal-hash call should not ledger");
+}
+
+/// The attribute renderer is shared with the builder, so a `ViewHelpers`
+/// receiver has to be qualified here too — bare, it resolves against the
+/// enclosing helper module and raises NameError.
+#[test]
+fn the_legacy_form_qualifies_its_escape_receiver() {
+    let (out, _) = helper(r#"tag(:meta, name: "x", content: value)"#);
+    assert!(
+        out.contains("ActionView::ViewHelpers.html_escape"),
+        "the escape receiver is qualified:\n{out}"
+    );
+}
+
+/// No attributes at all — `tag(:br)`.
+#[test]
+fn the_legacy_form_works_without_options() {
+    let (out, diags) = helper("tag(:br)");
+    assert!(out.contains("<br />"), "expected a self-closed br:\n{out}");
+    assert_eq!(diags, 0);
+}
+
+/// A computed element name has nothing to expand at compile time, and
+/// an unknown one is not an element we build. Both leave the call
+/// alone rather than guessing.
+#[test]
+fn the_legacy_form_declines_what_it_cannot_resolve() {
+    let (computed, _) = helper("tag(name_var, class: \"x\")");
+    assert!(
+        computed.contains("tag(name_var"),
+        "a computed element name is left alone:\n{computed}"
+    );
+    let (unknown, diags) = helper(r#"tag(:not_an_element, class: "x")"#);
+    assert!(
+        unknown.contains("tag(:not_an_element"),
+        "an unknown element is left alone:\n{unknown}"
+    );
+    assert_eq!(diags, 1, "and is ledgered:\n{unknown}");
+}
