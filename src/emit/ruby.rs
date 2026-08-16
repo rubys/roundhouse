@@ -1225,13 +1225,17 @@ fn fixture_file_stem(class_name: &str) -> String {
 fn render_test_helper(fixture_lcs: &[LibraryClass], truncate_lines: &[String]) -> String {
     // (1) The require chain. The source list is a hand-maintained
     // SUBSET that stopped tracking the runtime as it grew: by
-    // 2026-08-16 `main.rb` required 23 files this did not, so a
+    // 2026-08-16 `boot.rb` required 23 files this did not, so a
     // harness-loaded app died at `uninitialized constant ActionText`
-    // — a require gap that reads exactly like a modeling gap. main.rb
-    // guards its own boot with `__FILE__ == $PROGRAM_NAME`
-    // specifically so tests can require it, and its order is already
-    // curated and already maintained. Deferring to it means one owner
-    // and no second copy to drift.
+    // — a require gap that reads exactly like a modeling gap.
+    //
+    // Defers to `boot.rb`, which is the app's whole chain in its
+    // curated order and NOTHING that starts anything. Deliberately not
+    // `main.rb`: the spinel-AOT main.rb boots the server
+    // unconditionally (the `__FILE__ == $PROGRAM_NAME` guard cannot
+    // work under AOT — see its own comment), so a test that required it
+    // opened the dev database and died at `sqlite3_open(…) failed (14)`
+    // before running an assertion. boot.rb is the half both can share.
     const REQUIRE_BLOCK: &str = "require_relative \"../runtime/base64\"";
     const REQUIRE_BLOCK_END: &str = "require_relative \"../app/models\"";
 
@@ -1275,12 +1279,12 @@ fn render_test_helper(fixture_lcs: &[LibraryClass], truncate_lines: &[String]) -
     };
     out.replace_range(
         start..end + REQUIRE_BLOCK_END.len(),
-        "# The app's whole boot chain, in main.rb's curated order. main.rb\n\
-         # guards its own dispatch with `__FILE__ == $PROGRAM_NAME`, so\n\
-         # requiring it here loads the runtime, config/schema, config/routes\n\
-         # and app/models without starting anything. One owner for the\n\
-         # order; a harness-local copy of the list drifts (it did).\n\
-         require_relative \"../main\"",
+        "# The app's whole boot chain, in its curated order: the runtime,\n\
+         # config/schema, config/routes, app/models, app/views. boot.rb\n\
+         # starts nothing — main.rb requires it too, then adds the server.\n\
+         # One owner for the order; a harness-local copy of the list\n\
+         # drifts, and did (23 files short, read as a modeling gap).\n\
+         require_relative \"../boot\"",
     );
 
     // (2)
