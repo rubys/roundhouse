@@ -1668,6 +1668,92 @@ pub fn rewrite_route_helpers(expr: &Expr, shadowed: &HashSet<Symbol>) -> Expr {
     })
 }
 
+/// A RECORD reaching a route helper projects to its id.
+///
+/// `rewrite_route_helpers` above already does this, shape-directed, at
+/// the moment it adds the `RouteHelpers.` receiver. But shape is not
+/// enough in a test body: at that moment `room_path(rooms(:watercooler))`
+/// still holds a bare fixture call (no receiver at all), and
+/// `room_path(users(:david).rooms.original)` holds a chain whose head is
+/// not a Const either. Both are records, and both reached the helper
+/// whole — campfire's rooms tests asserted a redirect to
+/// `/rooms/#<Room:0x000000012339eda0>`.
+///
+/// So this pass asks the TYPE instead, which means it must run after the
+/// body-typer. A route helper's segment parameter is an id; an argument
+/// that types to a class is a record standing where its id belongs.
+/// Idempotent — a projected argument types `Integer`, not a class.
+pub fn project_route_helper_ids(expr: &Expr) -> Expr {
+    map_expr(expr, &|e| {
+        let ExprNode::Send { recv: Some(r), method, args, block, parenthesized } = &*e.node else {
+            return None;
+        };
+        if !matches!(&*r.node, ExprNode::Const { path }
+            if path.len() == 1 && path[0].as_str() == "RouteHelpers")
+        {
+            return None;
+        }
+        if !(method.as_str().ends_with("_path") || method.as_str().ends_with("_url")) {
+            return None;
+        }
+        if !args.iter().any(records_a_model) {
+            return None;
+        }
+        let projected: Vec<Expr> = args
+            .iter()
+            .map(|a| {
+                if !records_a_model(a) {
+                    return a.clone();
+                }
+                Expr::new(
+                    a.span,
+                    ExprNode::Send {
+                        recv: Some(a.clone()),
+                        method: Symbol::from("id"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    },
+                )
+            })
+            .collect();
+        Some(Expr::new(
+            e.span,
+            ExprNode::Send {
+                recv: Some(r.clone()),
+                method: method.clone(),
+                args: projected,
+                block: block.clone(),
+                parenthesized: *parenthesized,
+            },
+        ))
+    })
+}
+
+/// Does this argument carry a model instance? Only a positively
+/// class-typed expression counts — an unknown type stays untouched
+/// rather than guessing, which is the half `rewrite_route_helpers`'
+/// shape heuristic already covers for the ivar and `Model.find(…)`
+/// forms it can see.
+fn records_a_model(arg: &Expr) -> bool {
+    fn is_record(t: &crate::ty::Ty) -> bool {
+        match t {
+            crate::ty::Ty::Class { .. } => true,
+            // `user.rooms.last` types `Room | Nil` — the catalog's
+            // SelfOrNil. Still a record standing where an id belongs;
+            // Rails would fail on the nil too.
+            crate::ty::Ty::Union { variants } => {
+                variants.iter().any(|v| matches!(v, crate::ty::Ty::Class { .. }))
+                    && variants
+                        .iter()
+                        .all(|v| matches!(v, crate::ty::Ty::Class { .. } | crate::ty::Ty::Nil))
+            }
+            _ => false,
+        }
+    }
+    arg.ty.as_ref().is_some_and(is_record)
+}
+
 fn const_path(segments: &[&str], span: Span) -> Expr {
     Expr::new(
         span,

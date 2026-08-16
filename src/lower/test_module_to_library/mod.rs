@@ -243,6 +243,16 @@ pub fn lower_test_modules_with_inner(
             // `lowered_real_blog_typing_residual` enforces a
             // 0-untyped ceiling.
             method.body = crate::lower::seeds_to_library::rewrite_assoc_create(&method.body);
+            // A record standing where a route helper wants an id.
+            // Type-directed, so it must be here and not back where the
+            // `RouteHelpers.` receiver was added: at THAT point a test
+            // body's `room_path(rooms(:watercooler))` still held a bare
+            // fixture call, and `room_path(users(:david).rooms.original)`
+            // a chain — neither is a shape the receiver-adding pass can
+            // recognize, and both asserted a redirect to
+            // `/rooms/#<Room:0x000000012339eda0>`.
+            method.body = crate::lower::controller_to_library::rewrites::
+                project_route_helper_ids(&method.body);
             // Inline assert_*/refute_* sends — replaces vacuous
             // Minitest dispatch with real `raise` so spinel's
             // assertion-correctness signal is non-fake. See

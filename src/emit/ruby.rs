@@ -863,9 +863,26 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
         // is what the has-many `.create`/`.build` rewrite consults to
         // de-magic `article.comments.create(...)` into
         // `Comment.create(article_id: article.id, ...)`.
+        // App models ride along beside the fixture classes. A test body
+        // names them constantly — `users(:david).rooms.last` — and with
+        // no entry the has_many reader resolves to nothing, so the
+        // record never types and every type-directed rewrite downstream
+        // (the route-helper id projection among them) declines.
+        //
+        // Inside a diagnostic scope, and the collected diagnostics are
+        // DROPPED: this is a second call to the model lowerer purely for
+        // its registry, and letting it report again duplicated 58
+        // `unsupported` entries into campfire's ledger — the same gaps,
+        // counted twice, which is worse than not knowing.
+        let (model_registry, _dup_diags) = crate::emit::diagnostics::scope(|| {
+            let (_, reg) =
+                crate::lower::lower_models_with_registry(&app.models, &app.schema, Vec::new());
+            reg
+        });
         let fixture_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> = fixture_lcs
             .iter()
             .map(|lc| (lc.name.clone(), crate::lower::class_info_from_library_class(lc)))
+            .chain(model_registry)
             .collect();
         let test_lowered = crate::lower::lower_test_modules_with_inner(
             &app.test_modules,
