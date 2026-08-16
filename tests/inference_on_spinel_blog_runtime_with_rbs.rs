@@ -489,7 +489,31 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // exactly the reason `SelectManager#initialize`'s `sql` is — RBS
     // parameter types do not reach this runtime's body typer. The method
     // delegates the typed work to `not`; nothing new became untypable.
-    const CEILING: usize = 645;
+    // 2026-08-16: 645 -> 656 — `Relation#destroy_all` (8) and the
+    // `to_sql` / `to_subquery_sql` / `select_sql_with` split (3).
+    //
+    // `destroy_all`'s 8 all root in `to_a`, which answers
+    // `Array[untyped]` because this Relation is not generic over its
+    // model: the method node, the `records = to_a` assign and its
+    // value, the `records.each` send and its receiver, the block body
+    // `r.destroy` and its `r` receiver, and the trailing `records` read.
+    // Exactly the shape `find` and `first` already contribute here, for
+    // the same reason. The method has to exist separately from
+    // `delete_all` because Rails draws the line there too — one runs
+    // callbacks, the other is a single DELETE.
+    //
+    // The other 3 are bookkeeping from splitting one method into three:
+    // `to_sql` became a one-line delegate, `to_subquery_sql` is a second
+    // delegate (a relation used as a CONDITION value must project one
+    // column, not `*`), and the shared builder moved to
+    // `select_sql_with`, whose `default_cols` parameter is untyped for
+    // the same RBS-parameter reason as `SelectManager#initialize`'s
+    // `sql`. The builder's own nodes moved with it rather than
+    // multiplying.
+    //
+    // Like-for-like: two Rails methods this runtime lacked, plus a
+    // refactor. Nothing that was typed became untyped.
+    const CEILING: usize = 656;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions exceeds ceiling of {CEILING}.\n\

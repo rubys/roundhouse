@@ -1200,6 +1200,17 @@ fn is_relation_chain_method(name: &str) -> bool {
             | "references"
             | "merge"
             | "none"
+            // `excluding` (Rails 7 `where.not(id: …)` in one hop).
+            // Listed here so an association read that continues into it
+            // is ROOTED as a relation: campfire's
+            // `user.searches.excluding(…).destroy_all` otherwise left
+            // the has_many reader answering an Array, and every hop
+            // after it wanted a different method — `excluding`, then
+            // `destroy_all`, then the next. Chasing those onto Array is
+            // how ActiveRecord semantics leak into core; rooting the
+            // chain once puts all of them on Relation, which already
+            // defines them.
+            | "excluding"
     )
 }
 

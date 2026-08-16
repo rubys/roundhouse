@@ -74,6 +74,7 @@ module ActiveRecord
     def length: () -> Integer
     def size: () -> Integer
     def delete_all: () -> Integer
+    def destroy_all: () -> Array[untyped]
     def update_all: (untyped updates) -> Integer
     # `pluck`/`pick` hand back whatever the COLUMN holds — Integer for an
     # INTEGER column, Float for REAL, String for TEXT, nil for NULL —
@@ -100,6 +101,8 @@ module ActiveRecord
     def first_or_initialize: () -> untyped
 
     def to_sql: () -> String
+    def to_subquery_sql: () -> String
+    def select_sql_with: (String default_cols) -> String
     def count_sql: () -> String
     def hash_conditions: (untyped hash) -> String
     def column_predicate: (String col, untyped val) -> String

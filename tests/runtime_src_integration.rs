@@ -862,7 +862,19 @@ fn every_runtime_method_body_concretely_typed() {
     //     the parameter exists to match the documented call shape and is
     //     never read. Typing it would claim it participates.
     // +3 sites; ceiling raised 259 -> 262.
-    const CEILING: usize = 262;
+    // 2026-08-16 `Relation#destroy_all` — Rails' callback-running
+    // counterpart to `delete_all` (campfire prunes a user's search
+    // history through it, and the `after_destroy` hooks are the whole
+    // point). Its three sites are the `Array[untyped]` return and the
+    // per-record reads in `records.each { |r| r.destroy }`. The element
+    // type is untyped because this Relation is NOT generic over its
+    // model — `to_a`, `first` and `find` beside it say the same thing,
+    // and narrowing one of them means narrowing all of them. Rails'
+    // return value (the destroyed records) is kept rather than swapped
+    // for a count: `delete_all` already answers a count, and having the
+    // two differ only in callbacks is the distinction worth preserving.
+    // +3 sites; ceiling raised 262 -> 265.
+    const CEILING: usize = 265;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

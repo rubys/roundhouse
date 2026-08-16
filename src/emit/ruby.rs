@@ -1300,8 +1300,13 @@ fn render_test_helper(fixture_lcs: &[LibraryClass], truncate_lines: &[String]) -
     out = out.replace(TRUNCATE_BLOCK, &truncate);
 
     // (3)
-    let mut names: Vec<&str> = fixture_lcs.iter().map(|lc| lc.name.0.as_str()).collect();
-    names.sort_unstable();
+    // `fixture_lcs` ORDER, not sorted. The lowerer topologically sorts
+    // the fixtures parent-before-child (`fixture_to_library::
+    // load_order`); re-sorting here alphabetically threw that away and
+    // is how campfire loaded `users` last, after the five fixtures that
+    // reference one. Two owners for one order, and the second had no
+    // idea the first had computed anything.
+    let names: Vec<&str> = fixture_lcs.iter().map(|lc| lc.name.0.as_str()).collect();
     let explicit = if names.is_empty() {
         // Empty FixtureLoader.load_all! body: no fixtures to load.
         // Keep the indentation consistent so the substitution result

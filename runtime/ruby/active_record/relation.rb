@@ -539,6 +539,19 @@ module ActiveRecord
       ActiveRecord.adapter.changes
     end
 
+    # `destroy_all` — load the scoped records and destroy each one, so
+    # `before_destroy` / `after_destroy` and any dependent-association
+    # cleanup RUN. Deliberately not `delete_all` with a different name:
+    # Rails draws exactly this line, and campfire depends on the
+    # callback half (`Search#trim_recent_searches` prunes a user's
+    # search history through it). The Array of destroyed records is
+    # Rails' return value too.
+    def destroy_all
+      records = to_a
+      records.each { |r| r.destroy }
+      records
+    end
+
     # `update_all(...)` — bulk UPDATE scoped by the accumulated WHEREs.
     # Hash form (`update_all(user_id: 3)`) escapes values; String form
     # (`update_all("hits = hits + 1")`) is trusted verbatim, same as
@@ -612,7 +625,23 @@ module ActiveRecord
     # ---- SQL composition --------------------------------------------
 
     def to_sql
-      cols = @select_sql.nil? ? "#{@table}.*" : @select_sql
+      select_sql_with("#{@table}.*")
+    end
+
+    # This relation rendered as a CONDITION value — `where(id: other)`
+    # and `excluding(other)` both put one relation inside another, and a
+    # subquery must project exactly ONE column. Rails projects the
+    # primary key when no explicit `select` was given; `to_sql`'s
+    # `<table>.*` is right at top level and wrong here, and sqlite says
+    # so out loud: "sub-select returns 5 columns - expected 1".
+    def to_subquery_sql
+      select_sql_with("#{@table}.#{@model.primary_key}")
+    end
+
+    # Shared body. `default_cols` is the projection when the caller
+    # never said `select(...)`; an explicit one always wins.
+    def select_sql_with(default_cols)
+      cols = @select_sql.nil? ? default_cols : @select_sql
       distinct = @distinct ? "DISTINCT " : ""
       sql = "SELECT #{distinct}#{cols} FROM #{@table}"
       sql = "#{sql} #{@joins.join(" ")}" if @joins.length > 0
@@ -662,8 +691,10 @@ module ActiveRecord
         # `where(story_id: Tagging.where(...).select(:story_id))` →
         # `story_id IN (SELECT taggings.story_id FROM taggings …)`.
         # The inner relation renders inline; its values were escaped
-        # as its own conditions were added.
-        "#{qcol} IN (#{val.to_sql})"
+        # as its own conditions were added. `to_subquery_sql`, not
+        # `to_sql`: a relation with no explicit `select` must project
+        # its primary key here, not every column.
+        "#{qcol} IN (#{val.to_subquery_sql})"
       elsif val.is_a?(Array)
         # Record elements read their id — Rails' IN-of-records form
         # (`where(comment: comments)`, lobsters Vote.comments_flags);

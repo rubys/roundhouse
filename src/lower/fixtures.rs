@@ -146,6 +146,19 @@ fn resolve_field(
     let Some(value) = value.as_scalar() else {
         return None;
     };
+    // A label may be written as a YAML SYMBOL — campfire's rooms.yml
+    // says `creator: :david` where its messages.yml says `creator:
+    // david`. Both name the same fixture; Rails resolves the reference
+    // by name and a Symbol scalar stringifies to it. Strip the sigil
+    // for the lookup ONLY — the column branch above keeps its raw
+    // scalar, so a genuine String column whose value starts with `:`
+    // is untouched.
+    //
+    // Silently dropping the field is what makes this expensive: `Room`
+    // validates its `creator` present, the generated loader calls
+    // `save` and not `save!`, so all seven rooms vanished without a
+    // word — and every messages row referencing one went with them.
+    let value = value.strip_prefix(':').unwrap_or(value);
 
     for assoc in model.associations() {
         if let Association::BelongsTo {
