@@ -30,14 +30,62 @@ use crate::App;
 /// (apps without test fixtures skip the artifact).
 pub fn lower_fixtures_to_library_classes(app: &App) -> Vec<LibraryClass> {
     let lowered = crate::lower::lower_fixtures(app);
+    // `by_label` is DEMAND-GATED — emitted only for a fixture some test
+    // body reaches with a variable label. Unconditionally is wrong, and
+    // strict targets are what say so: its `label` param is Untyped, and
+    // rust renders that `serde_json::Value`, which answers no `to_s`.
+    // The blog writes `articles(:one)` everywhere and never needs the
+    // table, so emitting it there was four E0599s of dead code.
+    let dynamic = fixtures_reached_by_variable(app);
     lowered
         .fixtures
         .iter()
-        .map(|f| build_fixture_class(f, &lowered))
+        .map(|f| build_fixture_class(f, &lowered, dynamic.contains(&f.name)))
         .collect()
 }
 
-fn build_fixture_class(f: &LoweredFixture, all: &LoweredFixtureSet) -> LibraryClass {
+/// Fixture names called with something other than a symbol literal —
+/// `users(user)` rather than `users(:david)`. campfire's spliced
+/// `SessionTestHelper#sign_in` is the only shape in the corpus that
+/// does this.
+fn fixtures_reached_by_variable(app: &App) -> std::collections::HashSet<Symbol> {
+    let names: Vec<Symbol> = app.fixtures.iter().map(|f| f.name.clone()).collect();
+    let mut out = std::collections::HashSet::new();
+    for tm in &app.test_modules {
+        let bodies = tm
+            .tests
+            .iter()
+            .map(|t| &t.body)
+            .chain(tm.helpers.iter().map(|h| &h.body))
+            .chain(tm.setup.iter());
+        for body in bodies {
+            collect_variable_fixture_calls(body, &names, &mut out);
+        }
+    }
+    out
+}
+
+fn collect_variable_fixture_calls(
+    e: &Expr,
+    names: &[Symbol],
+    out: &mut std::collections::HashSet<Symbol>,
+) {
+    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*e.node {
+        if args.len() == 1
+            && names.iter().any(|n| n == method)
+            && !matches!(&*args[0].node, ExprNode::Lit { value: Literal::Sym { .. } })
+        {
+            out.insert(method.clone());
+        }
+    }
+    e.node.for_each_child(&mut |c| collect_variable_fixture_calls(c, names, out));
+}
+
+fn build_fixture_class(
+    f: &LoweredFixture,
+    all: &LoweredFixtureSet,
+    wants_by_label: bool,
+) -> LibraryClass {
     let owner_name = format!("{}Fixtures", camelize(f.name.as_str()));
     let owner_id = ClassId(Symbol::from(owner_name.clone()));
     let class_ty = Ty::Class { id: f.class.clone(), args: vec![] };
@@ -82,8 +130,9 @@ fn build_fixture_class(f: &LoweredFixture, all: &LoweredFixtureSet) -> LibraryCl
     // runtime `send`: the label set is a compile-time fact, and a chain
     // of string compares needs nothing from a target's dynamic dispatch
     // (spinel's AOT model has no constant table to `send` through).
-    methods.push(MethodDef {
-        name: Symbol::from("by_label"),
+    if wants_by_label {
+        methods.push(MethodDef {
+            name: Symbol::from("by_label"),
         receiver: MethodReceiver::Class,
         params: vec![crate::dialect::Param {
             name: Symbol::from("label"),
@@ -103,6 +152,7 @@ fn build_fixture_class(f: &LoweredFixture, all: &LoweredFixtureSet) -> LibraryCl
         mutates_self: false,
         block_param: None,
     });
+    }
 
     // `_fixtures_load!` — class method that inserts every record into
     // the DB by `<Class>.new({...attrs...}).save`. Inserts happen in
