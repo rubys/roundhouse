@@ -17,6 +17,7 @@ module ActiveRecord
     def where_scope: (Hash[Symbol, untyped] condition) -> Relation
     def scope_attributes: () -> Hash[Symbol, untyped]
     def not: (?untyped condition, *untyped args) -> Relation
+    def excluding: (*untyped records) -> Relation
     def or: (Relation other) -> Relation
     def add_condition: (untyped condition, Array[untyped] args, bool negate) -> void
     def order: (*untyped parts) -> Relation

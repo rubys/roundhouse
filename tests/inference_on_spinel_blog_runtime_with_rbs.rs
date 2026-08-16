@@ -480,7 +480,16 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // untyped for the same reason (RBS parameter types do not reach this
     // runtime's body typer for ANY method). Like-for-like, not a typing
     // regression.
-    const CEILING: usize = 637;
+    // 2026-08-16: 637 -> 645 — `Relation#excluding`, Rails' "everything
+    // except these records". All 8 nodes sit in that one method and all 8
+    // root in its splat parameter: the `if` and both branches, the
+    // `records.length` send with its `records` receiver, and the two
+    // branches' hash values (`records[0]` and bare `records`) plus the
+    // former's own receiver. A `*records` splat is untyped here for
+    // exactly the reason `SelectManager#initialize`'s `sql` is — RBS
+    // parameter types do not reach this runtime's body typer. The method
+    // delegates the typed work to `not`; nothing new became untypable.
+    const CEILING: usize = 645;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions exceeds ceiling of {CEILING}.\n\

@@ -823,7 +823,16 @@ fn every_runtime_method_body_concretely_typed() {
     // — `super` has no signature for the typer to resolve. +1 site;
     // ceiling raised 255 -> 256. Growth from one more class in the
     // corpus, not from typing getting worse.
-    const CEILING: usize = 256;
+    // 2026-08-16 `Relation#excluding` (campfire's messages#create skips
+    // the poster when it fans a new message out to bot webhooks): the
+    // two new sites are in relation.rb, the only body added, and both
+    // are its `*records` splat — untyped BY CONTRACT for the same reason
+    // `where`'s condition is. Rails' `excluding` takes a record, an
+    // array of records, or a relation, and this method's whole job is to
+    // hand that straight to `column_predicate`, which already dispatches
+    // on all three; typing the parameter would mean picking one. +2
+    // sites; ceiling raised 256 -> 258.
+    const CEILING: usize = 258;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

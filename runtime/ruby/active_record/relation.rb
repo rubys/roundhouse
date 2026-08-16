@@ -80,6 +80,26 @@ module ActiveRecord
       self
     end
 
+    # Rails' `excluding(…)` — everything in this relation except what is
+    # named. Rails accepts records, arrays of records, and relations, and
+    # all three already have a spelling here: `column_predicate` reads a
+    # `Base` as its id, an `Array` as an IN list, and a `Relation` as an
+    # IN subquery. So this is a negated primary-key condition and nothing
+    # more — the polymorphism it looks like it needs is the polymorphism
+    # `where` already carries.
+    #
+    # The one-argument case unwraps rather than passing the splat array
+    # through: `excluding(some_relation)` has to reach the SUBQUERY
+    # branch, and wrapped in an array it would reach the IN-list branch
+    # and escape a Relation object into the SQL text.
+    def excluding(*records)
+      if records.length == 1
+        self.not(@model.primary_key => records[0])
+      else
+        self.not(@model.primary_key => records)
+      end
+    end
+
     # `rel.or(other)` — Rails' Relation#or: this relation's accumulated
     # WHERE conjunction OR'd with the other's, grouped as one condition.
     # Rails requires matching structure (joins/limit) on both sides;
