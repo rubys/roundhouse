@@ -374,6 +374,7 @@ fn ingest_namespace_route(
         path: Some(name.clone()),
         module: Some(name.clone()),
         as_prefix: Some(name),
+        defaults: IndexMap::new(),
         entries,
     })
 }
@@ -389,6 +390,7 @@ fn ingest_scope_route(
     let mut path = first_name_arg(call);
     let mut module: Option<String> = None;
     let mut as_prefix: Option<String> = None;
+    let mut defaults: IndexMap<Symbol, String> = IndexMap::new();
     if let Some(args) = call.arguments() {
         for arg in args.arguments().iter() {
             let Some(kh) = arg.as_keyword_hash_node() else { continue };
@@ -401,16 +403,36 @@ fn ingest_scope_route(
                     "path" => path = val.or(path),
                     "module" => module = val,
                     "as" => as_prefix = val,
-                    // `defaults:`, `constraints:`, `format:` shape the
-                    // request, not the (path, controller, action)
-                    // triple this table models.
+                    // `defaults: { user_id: "me" }` fills a dynamic
+                    // segment the caller omits, which makes the
+                    // generated helper's parameter OPTIONAL — this used
+                    // to be dropped as "shapes the request, not the
+                    // (path, controller, action) triple", and that is
+                    // true of the triple but not of the signature.
+                    // campfire calls `user_profile_url` with no argument.
+                    "defaults" => {
+                        if let Some(h) = value.as_hash_node() {
+                            for el in h.elements().iter() {
+                                let Some(a) = el.as_assoc_node() else { continue };
+                                let Some(k) = symbol_value(&a.key()) else { continue };
+                                let Some(v) = string_value(&a.value())
+                                    .or_else(|| symbol_value(&a.value()))
+                                else {
+                                    continue;
+                                };
+                                defaults.insert(Symbol::from(k.as_str()), v);
+                            }
+                        }
+                    }
+                    // `constraints:` / `format:` shape the request, not
+                    // the (path, controller, action) triple.
                     _ => {}
                 }
             }
         }
     }
     let entries = block_entries(call, file, None, draws)?;
-    Ok(RouteSpec::Scope { path, module, as_prefix, entries })
+    Ok(RouteSpec::Scope { path, module, as_prefix, defaults, entries })
 }
 
 /// `draw(:admin)` — Rails loads `config/routes/admin.rb` into the same
@@ -445,7 +467,13 @@ fn ingest_draw_route(
     };
     let entries =
         ingest_route_stmts(program.statements().body().iter(), path, None, draws)?;
-    Ok(Some(RouteSpec::Scope { path: None, module: None, as_prefix: None, entries }))
+    Ok(Some(RouteSpec::Scope {
+        path: None,
+        module: None,
+        as_prefix: None,
+        defaults: IndexMap::new(),
+        entries,
+    }))
 }
 
 /// Raw regex-pattern source of a `/.../ ` literal value node — the text

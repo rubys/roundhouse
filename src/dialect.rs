@@ -1090,6 +1090,14 @@ pub enum RouteSpec {
         module: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_prefix: Option<String>,
+        /// `scope defaults: { user_id: "me" }` — a value Rails fills in
+        /// for a dynamic segment the caller omits. It shapes the HELPER
+        /// SIGNATURE, not just the request: campfire's `resource :profile`
+        /// under this scope is `/users/:user_id/profile`, and Rails'
+        /// `user_profile_path` takes NO argument because the default
+        /// supplies the segment.
+        #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+        defaults: IndexMap<Symbol, String>,
         entries: Vec<RouteSpec>,
     },
 }

@@ -63,6 +63,13 @@ pub struct FlatRoute {
     /// `id = "12abc"` (and, post-`to_i`, serving article 12).
     /// Constraint regexes beyond the digit class aren't modeled — the
     /// runtime router is deliberately regex-free.
+    /// Segment values Rails fills in when the caller omits them —
+    /// `scope defaults: { user_id: "me" }`. The generated helper takes
+    /// such a param OPTIONALLY, defaulted to this value, which is why
+    /// this rides the flat route rather than staying a request-shaping
+    /// detail: campfire calls `user_profile_url` with no argument at
+    /// all, and the helper's own signature is what has to allow it.
+    pub param_defaults: Vec<(String, String)>,
     pub int_params: Vec<String>,
     /// Non-digit `constraints:` regexes, as `(param, regex_source)` for
     /// the params this route captures. The regex-free runtime router
@@ -137,6 +144,9 @@ struct Ctx {
     module_prefix: String,
     /// Helper-name prefix: `admin_`.
     name_prefix: String,
+    /// Segment defaults from enclosing `scope defaults: { … }` entries,
+    /// innermost last so a nested scope can override an outer one.
+    param_defaults: Vec<(String, String)>,
     /// Enclosing `resources`/`resource` blocks, OUTERMOST FIRST.
     ///
     /// A stack rather than one pair because Rails accumulates every
@@ -392,10 +402,11 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     controller: qualify_controller(&ctx.module_prefix, controller),
                     action: action.clone(),
                     as_name: derived_name.clone(),
-                    path_params: params,
                     named: named && i == 0,
                     format: forced_format.clone(),
                     required_params,
+                    param_defaults: defaults_for(ctx, &params),
+                    path_params: params,
                     int_params,
                     constraints,
                 });
@@ -426,6 +437,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 action: Symbol::from(action_name),
                 as_name: format!("{}root", ctx.name_prefix),
                 path_params: vec![],
+                param_defaults: vec![],
                 named: true,
                 format: None,
                 required_params: 0,
@@ -501,6 +513,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                     action: Symbol::from(action_name),
                     as_name,
                     required_params: params.len(),
+                    param_defaults: defaults_for(ctx, &params),
                     path_params: params,
                     named: true,
                     format: None,
@@ -524,7 +537,7 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 collect_flat_routes(child, out, &child_ctx);
             }
         }
-        RouteSpec::Scope { path, module, as_prefix, entries } => {
+        RouteSpec::Scope { path, module, as_prefix, defaults, entries } => {
             let mut child = ctx.clone();
             // Resource nesting SURVIVES a scope/namespace boundary —
             // measured against Rails 8.1, which is the only authority
@@ -560,11 +573,27 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 child.name_prefix.push_str(a);
                 child.name_prefix.push('_');
             }
+            for (k, v) in defaults {
+                let name = k.as_str().to_string();
+                child.param_defaults.retain(|(n, _)| n != &name);
+                child.param_defaults.push((name, v.clone()));
+            }
             for entry in entries {
                 collect_flat_routes(entry, out, &child);
             }
         }
     }
+}
+
+/// The scope defaults that apply to THIS route's params. A default for
+/// a segment the route does not carry is irrelevant here (Rails would
+/// put it in the query string; the helper signature is unaffected).
+fn defaults_for(ctx: &Ctx, params: &[String]) -> Vec<(String, String)> {
+    ctx.param_defaults
+        .iter()
+        .filter(|(n, _)| params.iter().any(|p| p == n))
+        .cloned()
+        .collect()
 }
 
 /// Prepend the accumulated namespace path. Both sides are `/`-rooted

@@ -2024,6 +2024,7 @@ mod tests {
             path_params: params,
             named: false,
             format: None,
+            param_defaults: vec![],
             int_params: vec![],
             constraints: vec![],
         }

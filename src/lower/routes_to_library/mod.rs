@@ -550,12 +550,41 @@ fn build_helper_function(
     let nil_default = || {
         Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Nil })
     };
+    // `scope defaults: { user_id: "me" }` — the segment has a value
+    // Rails supplies, so the helper takes it OPTIONALLY. campfire's
+    // `resource :profile` lives under exactly that scope and every call
+    // site writes a bare `user_profile_url`.
+    //
+    // Only honored when the defaulted params form a SUFFIX of the
+    // signature: Ruby cannot write `def f(a = "me", b)`. A default in
+    // the middle keeps its param required, which is the shape the
+    // signature could already express.
+    let default_for = |p: &String| -> Option<&String> {
+        route.param_defaults.iter().find(|(n, _)| n == p).map(|(_, v)| v)
+    };
+    let defaults_are_a_suffix = seg_params
+        .iter()
+        .position(|p| default_for(p).is_some())
+        .is_none_or(|first| seg_params[first..].iter().all(|p| default_for(p).is_some()));
+    let seg_default = |p: &String| -> Option<Expr> {
+        if !defaults_are_a_suffix {
+            return None;
+        }
+        default_for(p).map(|v| {
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: crate::expr::Literal::Str { value: v.clone() } },
+            )
+        })
+    };
     let mut params: Vec<Param> = seg_params
         .iter()
         .enumerate()
         .map(|(i, p)| {
             let sym = Symbol::from(p.clone());
-            if i < required {
+            if let Some(d) = seg_default(p) {
+                Param::with_default(sym, d)
+            } else if i < required {
                 Param::positional(sym)
             } else {
                 Param::with_default(sym, nil_default())
@@ -641,7 +670,38 @@ fn build_helper_function(
         }
         body = append_query_string(body, query_keys);
     }
-    let signature = match fn_sig(sig_params, Ty::Str) {
+    // The signature must agree with the `def` above about which params
+    // are optional: `fn_sig` marks every param Required, so a helper
+    // whose Ruby reads `def f(x = nil)` was declaring `(T x)` in its
+    // `.rbs`. Harmless while nothing checked, and not harmless on a
+    // strict target reading the sidecar as a seed — a 0-arg call site
+    // against a Required declaration is the exact contradiction
+    // spinel#3977 was about. `optional_names` is the set the `def`
+    // actually defaulted, defaults-from-`scope` and trailing
+    // nil-optionals alike.
+    let optional_names: std::collections::HashSet<Symbol> = params
+        .iter()
+        .filter(|p| p.default.is_some())
+        .map(|p| p.name.clone())
+        .collect();
+    let mark_optional = |t: Ty| -> Ty {
+        let Ty::Fn { params, block, ret, effects } = t else { return t };
+        Ty::Fn {
+            params: params
+                .into_iter()
+                .map(|mut tp| {
+                    if optional_names.contains(&tp.name) {
+                        tp.kind = crate::ty::ParamKind::Optional;
+                    }
+                    tp
+                })
+                .collect(),
+            block,
+            ret,
+            effects,
+        }
+    };
+    let signature = match mark_optional(fn_sig(sig_params, Ty::Str)) {
         Ty::Fn { mut params, block, ret, effects } if !query_sig.is_empty() => {
             params.extend(query_sig);
             Ty::Fn { params, block, ret, effects }
