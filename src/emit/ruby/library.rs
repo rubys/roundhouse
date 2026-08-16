@@ -3865,6 +3865,15 @@ fn require_path_for_body_const(
     if app.controllers.iter().any(|c| c.name.0.as_str() == first.as_str()) {
         return Some(format!("app/controllers/{}", crate::naming::underscore(first)));
     }
+    // Qualified runtime names, resolved on the FULL path — `ActiveSupport`
+    // is a namespace we ship several unrelated pieces of, so anchoring on
+    // its root segment would over-require. A fixture loader is the first
+    // body to need this: `created_at: <%= 1.hour.ago %>` grounds to
+    // `ActiveSupport::Duration.hour(1)` and `test/fixtures/<x>.rb` is
+    // reached from the test harness, not from main.rb's require chain.
+    if joined == "ActiveSupport::Duration" {
+        return Some("runtime/active_support_duration".to_string());
+    }
     match first.as_str() {
         // `Views::*` refs always go through the per-app aggregator at
         // `app/views.rb` (spinel-blog convention; loads all view

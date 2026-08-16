@@ -795,7 +795,13 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
     // + `Object.const_get` scan, which violates the spinel subset).
     // Same `fixture_lcs` is reused below for the per-fixture file emit
     // and for `fixture_extras` synthesized siblings.
-    let fixture_lcs = crate::lower::lower_fixtures_to_library_classes(app);
+    let mut fixture_lcs = crate::lower::lower_fixtures_to_library_classes(app);
+    // Same vestige as the view pipeline above, for the same reason:
+    // fixture classes are synthesized here, after the shared post-
+    // analyze hooks have already run over the App, so an ERB tag's
+    // `<%= 1.hour.ago %>` reaches emit ungrounded unless it takes the
+    // rewrite on the way out. No-op for fixtures without ERB.
+    library::apply_duration_lowering(&mut fixture_lcs, app);
 
     // Test bootstrap. The canonical content (LOAD_PATH wiring,
     // SqliteAdapter setup, RequestDispatch + ActionResponse +

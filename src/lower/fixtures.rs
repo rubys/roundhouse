@@ -12,7 +12,8 @@
 //! plus a thread-local id map; Python might use sqlite3 directly;
 //! Crystal might emit DB.exec. That's per-target.
 
-use crate::dialect::{Association, Fixture, Model};
+use crate::dialect::{Association, Fixture, FixtureValue, Model};
+use crate::expr::Expr;
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 use crate::App;
@@ -34,6 +35,10 @@ pub struct LoweredFixture {
     pub class: ClassId,
     /// Records in declaration order.
     pub records: Vec<LoweredFixtureRecord>,
+    /// Statements from the file's `<% … %>` ERB tags, to run once
+    /// ahead of the inserts and in the same scope as the values.
+    /// Empty for every fixture without ERB.
+    pub preamble: Vec<Expr>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -64,6 +69,13 @@ pub enum LoweredFixtureValue {
         target_fixture: Symbol,
         target_label: Symbol,
     },
+    /// A `<%= … %>` tag's Ruby, as an expression. Unlike `Literal`
+    /// there is no `raw` to re-render per target: the value only
+    /// exists once the expression runs, so a target can carry it only
+    /// if it can execute Ruby-shaped IR. Ruby-family emitters splice
+    /// the expression into the loader body; the others skip the field
+    /// and say so in the generated source.
+    Ruby(Expr),
 }
 
 pub fn lower_fixtures(app: &App) -> LoweredFixtureSet {
@@ -99,6 +111,7 @@ fn lower_fixture(fixture: &Fixture, app: &App) -> LoweredFixture {
         name: fixture.name.clone(),
         class,
         records,
+        preamble: fixture.preamble.clone(),
     }
 }
 
@@ -108,7 +121,7 @@ fn lower_fixture(fixture: &Fixture, app: &App) -> LoweredFixture {
 /// tolerance for scaffolding-only columns.
 fn resolve_field(
     key: &Symbol,
-    value: &str,
+    value: &FixtureValue,
     model: Option<&Model>,
     app: &App,
 ) -> Option<LoweredFixtureField> {
@@ -117,12 +130,22 @@ fn resolve_field(
     if let Some(ty) = model.attributes.fields.get(key) {
         return Some(LoweredFixtureField {
             column: key.clone(),
-            value: LoweredFixtureValue::Literal {
-                ty: ty.clone(),
-                raw: value.to_string(),
+            value: match value {
+                FixtureValue::Scalar(raw) => LoweredFixtureValue::Literal {
+                    ty: ty.clone(),
+                    raw: raw.clone(),
+                },
+                FixtureValue::Ruby(expr) => LoweredFixtureValue::Ruby(expr.clone()),
             },
         });
     }
+
+    // Only a scalar can name another fixture's label — `creator: <%=
+    // … %>` would be an id-producing expression, and that lands on the
+    // column branch above (or nowhere) rather than here.
+    let Some(value) = value.as_scalar() else {
+        return None;
+    };
 
     for assoc in model.associations() {
         if let Association::BelongsTo {

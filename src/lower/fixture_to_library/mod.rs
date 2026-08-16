@@ -73,7 +73,7 @@ fn build_fixture_class(f: &LoweredFixture, all: &LoweredFixtureSet) -> LibraryCl
     // the DB by `<Class>.new({...attrs...}).save`. Inserts happen in
     // 1-indexed file order so the autoincrement column matches the
     // ids the label methods look up. Body is a Seq of Sends.
-    let load_body = build_load_method_body(&f.class, &f.records, all);
+    let load_body = build_load_method_body(&f.class, &f.records, &f.preamble, all);
     methods.push(MethodDef {
         name: Symbol::from("_fixtures_load!"),
         receiver: MethodReceiver::Class,
@@ -143,12 +143,19 @@ fn build_find_call(cls: &ClassId, id: i64) -> Expr {
 fn build_load_method_body(
     cls: &ClassId,
     records: &[LoweredFixtureRecord],
+    preamble: &[Expr],
     all: &LoweredFixtureSet,
 ) -> Expr {
     let class_ty = Ty::Class { id: cls.clone(), args: vec![] };
     let instance_sym = Symbol::from("instance");
 
     let mut exprs: Vec<Expr> = Vec::new();
+
+    // ERB statement tags first, in source order — they bind the locals
+    // the value tags read (`password_digest`), so they have to run in
+    // this body and ahead of every insert.
+    exprs.extend(preamble.iter().cloned());
+
     for (idx, r) in records.iter().enumerate() {
         let id = (idx + 1) as i64;
         // instance = <Class>.new
@@ -212,6 +219,7 @@ fn build_load_method_body(
                 LoweredFixtureValue::FkLookup { target_fixture, target_label } => {
                     resolve_fk_id(target_fixture, target_label, all)
                 }
+                LoweredFixtureValue::Ruby(expr) => expr.clone(),
             };
             let recv = with_ty(
                 Expr::new(

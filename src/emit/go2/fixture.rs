@@ -77,6 +77,17 @@ pub(crate) fn emit_go_fixtures(app: &App) -> EmittedFile {
                         target_fixture.as_str(),
                         target_label.as_str(),
                     ),
+                    // An ERB-valued field only has a value once its Ruby
+                    // runs. Left unset, and said so here — a silently
+                    // absent column reads as a fixture that never had one.
+                    crate::lower::LoweredFixtureValue::Ruby(_) => {
+                        writeln!(
+                            s,
+                            "\t\t// roundhouse: {col} unset — ERB-valued fixture field"
+                        )
+                        .unwrap();
+                        continue;
+                    }
                 };
                 // A nullable column's field is a Go pointer; fixture
                 // values are plain literals, so route them through the

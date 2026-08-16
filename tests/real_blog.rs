@@ -128,7 +128,8 @@ fn fixtures_ingest_into_app() {
         .get(&roundhouse::Symbol::from("one"))
         .expect("articles: one");
     assert_eq!(
-        one.get(&roundhouse::Symbol::from("title")).map(|s| s.as_str()),
+        one.get(&roundhouse::Symbol::from("title"))
+            .and_then(|v| v.as_scalar()),
         Some("Getting Started with Rails"),
     );
     // Fixture-reference shorthand stays as a string in the IR —
@@ -143,7 +144,9 @@ fn fixtures_ingest_into_app() {
         .get(&roundhouse::Symbol::from("one"))
         .expect("comments: one");
     assert_eq!(
-        one_c.get(&roundhouse::Symbol::from("article")).map(|s| s.as_str()),
+        one_c
+            .get(&roundhouse::Symbol::from("article"))
+            .and_then(|v| v.as_scalar()),
         Some("one"),
     );
 }

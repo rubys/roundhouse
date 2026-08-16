@@ -59,7 +59,7 @@ pub(super) fn emit_py_fixtures(app: &App) -> EmittedFile {
             let kwargs: Vec<String> = record
                 .fields
                 .iter()
-                .map(|f| {
+                .filter_map(|f| {
                     let col = f.column.as_str();
                     let val = match &f.value {
                         crate::lower::LoweredFixtureValue::Literal { ty, raw } => {
@@ -73,10 +73,25 @@ pub(super) fn emit_py_fixtures(app: &App) -> EmittedFile {
                             target_fixture.as_str(),
                             target_label.as_str(),
                         ),
+                        // An ERB-valued field only has a value once its
+                        // Ruby runs. Skipped here, with a line saying so
+                        // above the record — a silently absent column
+                        // reads as a fixture that never had one.
+                        crate::lower::LoweredFixtureValue::Ruby(_) => return None,
                     };
-                    format!("        {col:?}: {val}")
+                    Some(format!("        {col:?}: {val}"))
                 })
                 .collect();
+            for f in &record.fields {
+                if matches!(f.value, crate::lower::LoweredFixtureValue::Ruby(_)) {
+                    writeln!(
+                        s,
+                        "    # roundhouse: {:?} omitted — ERB-valued fixture field",
+                        f.column.as_str()
+                    )
+                    .unwrap();
+                }
+            }
             // The lowered constructor takes a single positional attrs
             // dict (`__init__(self, attrs)`, mirroring TS
             // `constructor(attrs)`), not **kwargs — pass a dict literal.

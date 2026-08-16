@@ -651,20 +651,10 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     if vfs.is_dir(&fixtures_dir) {
         for entry in read_yml_files(vfs, &fixtures_dir)? {
             let source = vfs.read(&entry)?;
-            // Rails renders every fixture through ERB before handing it
-            // to YAML. The tags hold arbitrary Ruby — campfire's
-            // users.yml opens with `<% password_digest =
-            // BCrypt::Password.create("…") %>` — so the file's data is
-            // only knowable to a running Ruby. Drop it with a ledger
-            // line naming the reason, instead of failing on the "expected
-            // a map" YAML type error the raw tags produce.
-            if source.windows(2).any(|w| w == b"<%") {
-                survey::record(&IngestError::Unsupported {
-                    file: entry.display().to_string(),
-                    message: "fixture not ingested: ERB-templated YAML".into(),
-                });
-                continue;
-            }
+            // ERB tags are lifted out and carried as expressions rather
+            // than dropped — see `ingest::fixture`. A file whose ERB we
+            // genuinely can't ingest still records a ledger line and is
+            // skipped, via `unwrap_or_record`.
             if let Some(fixture) = unwrap_or_record(ingest_fixture_file(&source, &entry))? {
                 app.fixtures.push(fixture);
             }

@@ -1209,16 +1209,52 @@ pub struct Test {
     pub body: Expr,
 }
 
+/// One field's value in a fixture record.
+///
+/// Rails renders every fixture file through ERB before handing it to
+/// YAML, so a value is either a plain scalar or a piece of Ruby. Both
+/// arrive here; which one a target can render is a per-target question
+/// (see `LoweredFixtureValue`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum FixtureValue {
+    /// A YAML scalar, stringified. Emitters coerce per column type.
+    Scalar(String),
+    /// A `<%= … %>` tag, ingested as an expression. campfire's
+    /// `created_at: <%= 1.hour.ago %>` and `password_digest: <%=
+    /// password_digest %>` are the motivating shapes — neither is
+    /// knowable without running Ruby, which is exactly why the value
+    /// stays an expression rather than being folded at ingest.
+    Ruby(Expr),
+}
+
+impl FixtureValue {
+    /// The scalar text, or `None` for an expression value. Callers that
+    /// only understand scalars (fixture-reference resolution, say) use
+    /// this rather than matching.
+    pub fn as_scalar(&self) -> Option<&str> {
+        match self {
+            FixtureValue::Scalar(s) => Some(s.as_str()),
+            FixtureValue::Ruby(_) => None,
+        }
+    }
+}
+
 /// A `test/fixtures/<name>.yml` file. `name` is the file stem
 /// (`articles`, `comments`) — conventionally matches the table name.
-/// `records` preserves the label→fields mapping order from the source;
-/// values stay as strings since Rails YAML fixtures rarely type-tag
-/// them and emitters can interpret per column type. Fixture-to-fixture
-/// references (Rails's `article: one` shorthand for "id of the `one`
-/// fixture in articles") are preserved verbatim as strings — the
-/// resolver is an emit-time concern.
+/// `records` preserves the label→fields mapping order from the source.
+/// Fixture-to-fixture references (Rails's `article: one` shorthand for
+/// "id of the `one` fixture in articles") are preserved verbatim as
+/// scalars — the resolver is an emit-time concern.
+///
+/// `preamble` holds the file's non-output ERB tags (`<% … %>`) in
+/// source order. campfire's `users.yml` opens with `<% password_digest
+/// = BCrypt::Password.create("secret123456") %>` and then references
+/// `password_digest` from four records, so the statements have to run
+/// once, ahead of the inserts, in the same scope the values evaluate
+/// in.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Fixture {
     pub name: Symbol,
-    pub records: IndexMap<Symbol, IndexMap<Symbol, String>>,
+    pub records: IndexMap<Symbol, IndexMap<Symbol, FixtureValue>>,
+    pub preamble: Vec<Expr>,
 }

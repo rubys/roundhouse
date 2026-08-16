@@ -110,6 +110,15 @@ fn emit_fixture(lowered: &crate::lower::LoweredFixture) -> EmittedFile {
                     target_fixture.as_str(),
                     target_label.as_str(),
                 ),
+                // An ERB-valued field only has a value once its Ruby
+                // runs. Left off the struct, and said so above it — a
+                // silently absent column reads as a fixture that never
+                // had one.
+                crate::lower::LoweredFixtureValue::Ruby(_) => {
+                    writeln!(s, "    # roundhouse: {col} omitted — ERB-valued fixture field")
+                        .unwrap();
+                    continue;
+                }
             };
             field_lines.push(format!("      {col}: {val}"));
         }

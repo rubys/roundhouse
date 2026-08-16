@@ -1072,11 +1072,31 @@ fn ruby_runtime_files(
     // resolves without clobbering the real implementations.
     for (path, content) in files.iter_mut() {
         if path == "runtime/gem_facades.rb" {
+            // Not a bare no-op: the anchor has to MEAN something. main.rb
+            // guarded-requires these gems too, but a test run never loads
+            // main.rb — `test/test_helper.rb` builds its own require
+            // chain — so a body reached only from the test harness saw an
+            // anchor that resolved to an empty file and a constant that
+            // was never defined. campfire's `users.yml` is the first such
+            // body: `password_digest: <%= BCrypt::Password.create(…) %>`
+            // lands in `UsersFixtures._fixtures_load!`, whose only caller
+            // is the harness. Requires are idempotent, so doing them here
+            // makes every consumer of the anchor self-sufficient without
+            // changing main.rb's behavior.
             *content = "# Gem façades are spinel-only (no native gems there). On the CRuby\n\
-                        # path the real markly / nokogiri / mail gems are used (guarded\n\
-                        # requires in main.rb); this no-op keeps the require anchor resolving\n\
-                        # without shadowing them. (JRuby swaps in the commonmark-java Markly\n\
-                        # shim instead — see jruby_runtime_files.)\n"
+                        # path the real gems ARE available, so this file guarded-requires\n\
+                        # them rather than shadowing them with raising stubs. Guarded because\n\
+                        # an app that uses none of them (the blog) must boot without them\n\
+                        # installed. Keep this list in step with main.rb's. (JRuby swaps in\n\
+                        # the commonmark-java Markly shim instead — see jruby_runtime_files.)\n\
+                        [\"bcrypt\", \"htmlentities\", \"rotp\", \"markly\", \"nokogiri\", \"parslet\",\n\
+                        \x20\"typeid\", \"SVG/Graph/TimeSeries\"].each do |gem_name|\n\
+                        \x20\x20begin\n\
+                        \x20\x20\x20\x20require gem_name\n\
+                        \x20\x20rescue LoadError\n\
+                        \x20\x20\x20\x20nil\n\
+                        \x20\x20end\n\
+                        end\n"
                 .to_string();
         }
     }
