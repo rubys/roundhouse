@@ -256,6 +256,55 @@ class TestBase
     return if value =~ pattern
     raise(msg || "assert_match failed: expected #{value.inspect} to match #{pattern.inspect}")
   end
+
+  # ---- ActiveSupport::Testing::Assertions ------------------------
+  #
+  # Methods rather than emit-time rewrites, because each one has to
+  # evaluate its expression TWICE around the block — a shape the
+  # assertion rewriter (which turns `assert_equal a, b` into a raising
+  # `if`) has no form for. They live on TestBase, not RequestDispatch,
+  # because model tests use them too (campfire's user_test counts
+  # memberships, webhook_test counts messages).
+  #
+  # Only the LAMBDA form is supported. Rails also takes a String to
+  # `eval`, an Array of expressions, and a Hash of expression =>
+  # delta; the whole corpus writes `-> { … }`, and `eval` has no
+  # meaning on a compiled target.
+
+  # `assert_difference -> { Model.count }, +1 do … end`
+  def assert_difference(expression, difference = 1, message = nil, &block)
+    before = expression.call
+    block.call
+    actual = expression.call - before
+    return if actual == difference
+    raise(message || "assert_difference failed: expected #{difference}, got #{actual}")
+  end
+
+  def assert_no_difference(expression, message = nil, &block)
+    assert_difference(expression, 0, message, &block)
+  end
+
+  # `assert_changes -> { record.reload.token } do … end`, optionally
+  # pinned with `from:`/`to:`.
+  #
+  # DIVERGENCE: Rails distinguishes "not passed" from "passed as nil"
+  # with an UNTRACKED sentinel, so `assert_changes …, to: nil` asserts
+  # the value BECOMES nil. Here nil means "unspecified" — asserting a
+  # change *to* nil is spelled by letting the plain change check carry
+  # it. Nothing in the corpus passes either as nil.
+  def assert_changes(expression, message = nil, from: nil, to: nil, &block)
+    before = expression.call
+    if !from.nil? && before != from
+      raise(message || "assert_changes failed: expected initial #{from.inspect}, got #{before.inspect}")
+    end
+    block.call
+    after = expression.call
+    if after == before
+      raise(message || "assert_changes failed: #{before.inspect} did not change")
+    end
+    return if to.nil? || after == to
+    raise(message || "assert_changes failed: expected #{to.inspect}, got #{after.inspect}")
+  end
 end
 
 # `ActionDispatch::IntegrationTest` parent — Rails controller tests
@@ -278,11 +327,16 @@ module ActionDispatch
 end
 
 module RequestDispatch
-  # Bring `ActionView::ViewHelpers` and `ActionDispatch::Router` into
-  # scope as bare `ViewHelpers` / `Router` for the request-dispatch
-  # body — matches Ruby's `include` idiom for nested-module access.
-  include ActionView
-  include ActionDispatch
+  # NO `include ActionView` / `include ActionDispatch` here, though it
+  # would shorten the two references below. Including a namespace makes
+  # every class nested in it resolve as a BARE constant inside every
+  # test class that mixes this module in — so campfire's own
+  # `Session < ApplicationRecord` lost `Session.create!` to
+  # `ActionDispatch::Session`, which answers no such method. Ruby
+  # searches an included module's namespace before top level, so the
+  # app's own class cannot win. `Flash`, `Request` and `Cookies` are
+  # the same hazard waiting for the app that names one. Two qualified
+  # references are cheaper than that.
 
   def get(path, params: {})
     dispatch_request("GET", path, params)
@@ -319,6 +373,20 @@ module RequestDispatch
     @__request
   end
 
+  # `host! "once.campfire.test"` — the Host every subsequent request in
+  # this test carries. Rails' integration tests set it when the app
+  # reads the host back: campfire's messages_controller_test does,
+  # because a message's attachment URLs are absolute. Per-test, like the
+  # cookie jar; the default is the one the env below always used.
+  def host!(name)
+    @__host = name
+  end
+
+  def host
+    @__host = "example.org" if @__host.nil?
+    @__host
+  end
+
   def dispatch_request(method, path, params)
     require_relative "../config/routes"
     # Controllers load on demand (the CRuby target's routes.rb no longer
@@ -328,8 +396,8 @@ module RequestDispatch
     # requires controllers eagerly.
     require_relative "../app/controllers/articles_controller"
     require_relative "../app/controllers/comments_controller"
-    ViewHelpers.reset_slots!
-    matched = Router.match(method, path, RouteTable.table)
+    ActionView::ViewHelpers.reset_slots!
+    matched = ActionDispatch::Router.match(method, path, RouteTable.table)
     raise "No route matches #{method} #{path}" if matched.nil?
     controller = case matched.controller
                  when :articles then ArticlesController.new
@@ -384,7 +452,7 @@ module RequestDispatch
         "REQUEST_METHOD"  => method,
         "PATH_INFO"       => request_path,
         "QUERY_STRING"    => request_query,
-        "HTTP_HOST"       => "example.org",
+        "HTTP_HOST"       => host,
         "REMOTE_ADDR"     => "127.0.0.1",
         "HTTP_USER_AGENT" => "Roundhouse Test",
       },
