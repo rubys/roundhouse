@@ -1142,6 +1142,7 @@ fn ruby_runtime_files(
     // controller-require header.
     apply_controller_dispatch(&mut files, app, true);
     apply_cable_strip(&mut files, app)?;
+    apply_makefile_test_list(&mut files, app);
     Ok(files)
 }
 
@@ -1611,7 +1612,22 @@ fn jruby_runtime_files(
     // Same cable strip as the CRuby tree (this walk re-added cable.rb +
     // the config.ru seams; the Gemfile trim already ran in spinel_files).
     apply_cable_strip(&mut files, app)?;
+    apply_makefile_test_list(&mut files, app);
     Ok(files)
+}
+
+/// The spinel file set BEFORE `spin_shape` re-points it at the spin
+/// package layout — i.e. the tree `make spinel-test` drives, with the
+/// scaffold Makefile's own `--rbs sig` rules intact.
+///
+/// Exists for `tests/spinel_toolchain.rs`, which used to assemble this
+/// tree by hand-copying an enumerated list of runtime files. That list
+/// was the FIFTH copy of "which runtime files does a spinel tree need"
+/// and its own comment said so; it drifted, and the miss surfaced as
+/// `spinel: main.rb: cannot load such file` rather than as anything a
+/// unit test could see. A toolchain test should drive what ships.
+pub fn spinel_base_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, String> {
+    spinel_files(app, fixture)
 }
 
 /// Spinel-target files: lowered emit (app/, config/, test/) plus
@@ -1737,14 +1753,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         }
     }
 
-    let emitted = sort_files(emit::ruby::emit_spinel(app));
-    // The Makefile's test list names the APP's tests, and only those.
-    // Captured here rather than re-derived from `files` later because by
-    // then the scaffold walk's own `test/models/*_test.rb` (the FRAMEWORK
-    // runtime's tests, which `require "models/article"` and are not
-    // runnable standalone) are indistinguishable from the app's by path.
-    let app_test_stems = app_test_stems(&emitted);
-    files.extend(emitted);
+    files.extend(sort_files(emit::ruby::emit_spinel(app)));
 
     // Emit the ingested support classes (extras/, lib/, app/helpers/,
     // app/mailers/, and non-AR classes under app/models/ — Markdowner,
@@ -1792,18 +1801,39 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // the rename needs to happen for any of them.
     scaffold_readme_to_specimen(&mut files);
     apply_gemfile_trim(&mut files, app, fixture);
-    apply_makefile_test_list(&mut files, &app_test_stems);
     Ok(files)
 }
 
-/// The app's own emitted test stems (`test/models/article_test`, …),
-/// sorted. Input is `emit_spinel`'s output, so framework-runtime tests
-/// that the scaffold walk drops at the same paths are excluded by
-/// construction.
-fn app_test_stems(emitted: &[(String, String)]) -> Vec<String> {
-    let mut stems: Vec<String> = emitted
+/// De-blog the scaffold Makefile's `SPINEL_TESTS` list for the CRuby /
+/// JRuby trees, where it drives `make cruby-test` over the app's own
+/// emitted tests. The scaffold hard-codes the blog's four stems, so
+/// every other app shipped a target naming files it does not have —
+/// campfire emits 52 and named none of them.
+///
+/// NOT applied in `spinel_files`, even though that is where the
+/// Makefile arrives: the SPINEL target rewrites the same block from its
+/// own `lane` (see `spin_shape`), which is a different selection of
+/// tests, and it anchors on the blog list with a hard error if the
+/// anchor is missing. Running this first consumed that anchor and took
+/// `build-site` down. Two lanes, two owners, and the split is by TARGET
+/// — so this has to sit on the CRuby side of the fork, not upstream of
+/// it.
+///
+/// Derived from what the EMITTER produced rather than from
+/// `app.test_modules`: re-deriving the stems from the source
+/// declarations would be a second copy of `test_file_stem`'s naming
+/// rules — including the namespace flatten
+/// `Rooms::ClosedsControllerTest` → `rooms_closeds_controller` — and a
+/// stale one the first time those rules change. It also cannot be a
+/// scan of the FINAL file set: the scaffold drops the framework
+/// runtime's own `test/models/*_test.rb` at the same paths (they
+/// `require "models/article"` and are not runnable standalone), and
+/// `article_broadcasts_test` rode along into the blog's list that way.
+fn apply_makefile_test_list(files: &mut [(String, String)], app: &App) {
+    let mut stems: Vec<String> = emit::ruby::emit_spinel(app)
         .iter()
-        .filter_map(|(p, _)| {
+        .filter_map(|f| {
+            let p = f.path.to_str()?;
             let stem = p.strip_suffix(".rb")?;
             (stem.ends_with("_test")
                 && (stem.starts_with("test/models/") || stem.starts_with("test/controllers/")))
@@ -1811,23 +1841,10 @@ fn app_test_stems(emitted: &[(String, String)]) -> Vec<String> {
         })
         .collect();
     stems.sort();
-    stems
+    apply_makefile_test_list_stems(files, &stems);
 }
 
-/// De-blog the scaffold Makefile's `SPINEL_TESTS` list.
-///
-/// The scaffold hard-codes the blog's four stems, so every other app
-/// shipped a `make spinel-test` / `make cruby-test` that built four
-/// binaries from files it does not have. campfire emits 53 test files
-/// and named none of them.
-///
-/// Derived from what the EMITTER produced rather than from
-/// `app.test_modules`: re-deriving the stems from the source
-/// declarations would be a second copy of `test_file_stem`'s naming
-/// rules — including the namespace flatten
-/// `Rooms::ClosedsControllerTest` → `rooms_closeds_controller` — and a
-/// stale one the first time those rules change.
-fn apply_makefile_test_list(files: &mut [(String, String)], stems: &[String]) {
+fn apply_makefile_test_list_stems(files: &mut [(String, String)], stems: &[String]) {
     const BLOG_LIST: &str = "SPINEL_TESTS := \\\n\
                              \ttest/models/article_test \\\n\
                              \ttest/models/comment_test \\\n\
