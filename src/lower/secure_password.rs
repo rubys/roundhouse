@@ -46,11 +46,7 @@ pub(crate) fn push_secure_password_methods(methods: &mut Vec<MethodDef>, model: 
     let confirmation = Symbol::from(format!("{}_confirmation", attr.as_str()));
     // Rails names the authenticator after the attribute, except the
     // default `password` which gets the bare `authenticate`.
-    let auth_name = if attr.as_str() == "password" {
-        Symbol::from("authenticate")
-    } else {
-        Symbol::from(format!("authenticate_{}", attr.as_str()))
-    };
+    let auth_name = authenticator_name(&attr);
     let plain = Symbol::from("unencrypted_password");
     let self_ty = Ty::Class { id: model.name.clone(), args: vec![] };
     let plaintext_ty = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
@@ -111,12 +107,34 @@ pub(crate) fn push_secure_password_methods(methods: &mut Vec<MethodDef>, model: 
     );
 }
 
+/// Rails names the authenticator after the attribute, except the
+/// default `password` which gets the bare `authenticate`. One home,
+/// because `authenticate_by`'s call-site expansion has to name the same
+/// method this pass synthesizes.
+pub(crate) fn authenticator_name(attr: &Symbol) -> Symbol {
+    if attr.as_str() == "password" {
+        Symbol::from("authenticate")
+    } else {
+        Symbol::from(format!("authenticate_{}", attr.as_str()))
+    }
+}
+
 /// The secure-password attribute name when the model body declares
 /// `has_secure_password` (first positional symbol, default
 /// `password`), else None. Mirrors analyze's registration scan.
 /// `pub(crate)` for the permit-writer filter (model_to_library), which
 /// counts the synthesized plaintext writers as assignable.
 pub(crate) fn secure_password_attr(body: &[ModelBodyItem]) -> Option<Symbol> {
+    secure_password_attrs(body).into_iter().next()
+}
+
+/// Every secure-password attribute the model declares, in declaration
+/// order — Rails allows more than one `has_secure_password` per model,
+/// and `authenticate_by` partitions its keyword arguments against the
+/// whole set (a key naming one of these is a password to check; every
+/// other key is a finder condition).
+pub(crate) fn secure_password_attrs(body: &[ModelBodyItem]) -> Vec<Symbol> {
+    let mut out = Vec::new();
     for item in body {
         let ModelBodyItem::Unknown { expr, .. } = item else {
             continue;
@@ -134,9 +152,11 @@ pub(crate) fn secure_password_attr(body: &[ModelBodyItem]) -> Option<Symbol> {
                 _ => None,
             })
             .unwrap_or_else(|| Symbol::from("password"));
-        return Some(attr);
+        if !out.contains(&attr) {
+            out.push(attr);
+        }
     }
-    None
+    out
 }
 
 fn sp_expr(node: ExprNode) -> Expr {

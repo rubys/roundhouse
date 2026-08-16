@@ -48,6 +48,7 @@ pub mod duration;
 pub mod and_return;
 pub mod case_lambda;
 pub mod first_or_create;
+pub mod authenticate_by;
 pub mod group_count;
 pub mod bool_fold;
 pub mod dead_default;
@@ -96,6 +97,7 @@ pub use duration::apply_duration_lowering;
 pub use and_return::apply_and_return_lowering;
 pub use case_lambda::apply_case_lambda_lowering;
 pub use first_or_create::apply_first_or_create_lowering;
+pub use authenticate_by::apply_authenticate_by_lowering;
 pub use group_count::apply_group_count_lowering;
 pub use dead_default::apply_dead_default_lowering;
 pub use errors_add::apply_errors_add_lowering;
@@ -232,6 +234,12 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("and_return", &[]),
     ("case_lambda", &[]),
     ("first_or_create", &[]),
+    // `Model.authenticate_by(email: …, password: …)` → bind
+    // `find_by(<identifiers>)`, then check `authenticate(<password>)`;
+    // macro-inline of a Rails 7.1 name no other pass produces or
+    // consumes. Before `relation_residue`, which then sees the grounded
+    // `find_by` chain rather than an unresolved send.
+    ("authenticate_by", &[]),
     ("group_count", &[]),
     ("dead_default", &[]),
     ("errors_add", &[]),
@@ -375,6 +383,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("case_lambda");
     first_or_create::apply_first_or_create_lowering(app);
     ran!("first_or_create");
+    diags.extend(authenticate_by::apply_authenticate_by_lowering(app));
+    ran!("authenticate_by");
     group_count::apply_group_count_lowering(app);
     ran!("group_count");
     dead_default::apply_dead_default_lowering(app, registry);
