@@ -72,6 +72,31 @@ pub(crate) fn append_attr_parts(parts: &mut Vec<InterpPart>, opts: &[(Expr, Expr
             }
             continue;
         }
+        // `data:`/`aria:` whose value is NOT a literal hash — campfire's
+        // `data: composer_data_options(room)`. Whether it expands to
+        // `data-*` pairs depends on whether the value IS a hash, which
+        // only the value knows, so defer the same dispatch Rails makes
+        // to the runtime `render_attrs` (already the haml path's
+        // renderer, and already compiling on every strict target).
+        // Rendering it the ordinary way instead ships the hash's `to_s`
+        // as one `data="{…}"` attribute — this branch's own comment
+        // above used to say no fixture reached the shape, and campfire's
+        // composer now does.
+        if flattens {
+            parts.push(InterpPart::Expr {
+                expr: view_helpers_call(
+                    "render_attrs",
+                    vec![Expr::new(
+                        v.span,
+                        ExprNode::Hash {
+                            entries: vec![(k.clone(), v.clone())],
+                            kwargs: false,
+                        },
+                    )],
+                ),
+            });
+            continue;
+        }
         if let Some(decided) = tag_option_parts(key.as_str(), v) {
             parts.extend(decided);
             continue;

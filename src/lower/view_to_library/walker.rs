@@ -375,6 +375,75 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     }
 }
 
+/// Rebuild a form-wrapper helper's call site as the call it wraps:
+/// `composer_form_tag(room) do |form| … end` → `form_with(model: …,
+/// url: room_messages_path(room), …) do |form| … end`.
+///
+/// SUBSTITUTION, not inlining — the wrapper's body is one call by
+/// construction ([`FormWrapperHelper`]), so the only thing to carry
+/// across is each parameter's argument. Declines (leaving the site to
+/// its loud NoMethodError) when an argument is anything but a
+/// side-effect-free read: a parameter used twice would evaluate it
+/// twice, and moving a call across the boundary changes when it runs.
+/// campfire passes a plain local.
+fn splice_form_wrapper(
+    w: &super::FormWrapperHelper,
+    args: &[Expr],
+    block: &Expr,
+) -> Option<Expr> {
+    if args.len() != w.params.len() {
+        return None;
+    }
+    if !args.iter().all(is_pure_read) {
+        return None;
+    }
+    let binding: std::collections::HashMap<&Symbol, &Expr> =
+        w.params.iter().zip(args.iter()).collect();
+    let ExprNode::Send { method, args: wargs, parenthesized, .. } = &*w.call.node else {
+        return None;
+    };
+    Some(Expr::new(
+        w.call.span,
+        ExprNode::Send {
+            recv: None,
+            method: method.clone(),
+            args: wargs.iter().map(|a| substitute_vars(a, &binding)).collect(),
+            block: Some(block.clone()),
+            parenthesized: *parenthesized,
+        },
+    ))
+}
+
+/// A read with no side effect and no cost worth worrying about, so
+/// substituting it for each use of a parameter is safe however many
+/// times the body names it.
+///
+/// The zero-arg block-less bare send belongs here for a reason specific
+/// to templates: prism cannot prove `room` is a local inside an
+/// ERB-ingested body, so a template local arrives as a `Send`, not a
+/// `Var`. `composer_form_tag(room)` passes exactly that, and reading it
+/// as impure would decline the only site this pass exists for. Same
+/// judgment `scope_chain::owner_reads_once` makes about the same shape.
+fn is_pure_read(e: &Expr) -> bool {
+    match &*e.node {
+        ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::Lit { .. }
+        | ExprNode::Const { .. } => true,
+        ExprNode::Send { recv: None, args, block: None, .. } => args.is_empty(),
+        _ => false,
+    }
+}
+
+fn substitute_vars(e: &Expr, binding: &std::collections::HashMap<&Symbol, &Expr>) -> Expr {
+    if let ExprNode::Var { name, .. } = &*e.node {
+        if let Some(replacement) = binding.get(name) {
+            return (*replacement).clone();
+        }
+    }
+    let mut out = e.clone();
+    out.node.for_each_child_mut(&mut |c| *c = substitute_vars(c, binding));
+    out
+}
+
 /// Emit the IR for `io << <argument>` given the argument expression
 /// from a `_buf = _buf + ARG` step. Splits into text-chunk vs.
 /// output-interpolation handling — the latter goes through the
@@ -678,6 +747,31 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         );
         if is_bare_tag && !ctx.is_local("tag") {
             return emit_tag_builder_void_or_content(method.as_str(), sa, ctx);
+        }
+    }
+
+    // `<%= composer_form_tag(room) do |form| %> … <% end %>` — a helper
+    // that is nothing but a `form_with` with the block forwarded
+    // through. Splice the wrapped call in with the caller's block
+    // attached, then walk THAT: the form-builder macro-inline needs the
+    // `form_with` and the `form.rich_text_area` calls visible at once,
+    // and they are on opposite sides of the helper boundary until this
+    // runs. See `form_wrapper_helpers` for why the other block-
+    // forwarding wrappers don't need it.
+    if let ExprNode::Send {
+        recv: None,
+        method,
+        args: sa,
+        block: Some(block),
+        ..
+    } = &*inner.node
+    {
+        if let Some(w) = ctx.form_wrappers.get(method.as_str()) {
+            if !ctx.is_local(method.as_str()) {
+                if let Some(spliced) = splice_form_wrapper(w, sa, block) {
+                    return emit_io_append(&spliced, ctx);
+                }
+            }
         }
     }
 
@@ -1101,6 +1195,7 @@ mod tests {
             bool_readers: Default::default(),
             store_readers: Default::default(),
             route_helper_names: Default::default(),
+            form_wrappers: Default::default(),
             stylesheets: Vec::new(),
             partial_ivars: Default::default(),
             dyn_pools: Default::default(),
@@ -1339,6 +1434,118 @@ mod tests {
                 "{helper}: block body appends raw:\n{body_line}"
             );
         }
+    }
+
+    #[test]
+    fn a_form_wrapper_helper_is_spliced_to_the_call_it_wraps() {
+        // `composer_form_tag(room) do |form| … end` where the helper is
+        // `def composer_form_tag(room, &) = form_with(url: …, &)`. The
+        // splice has to happen before the walk reaches the block, or the
+        // form-builder macro-inline never sees the `form_with` and the
+        // `form.x` calls together — which is the NoMethodError campfire's
+        // room page died on.
+        let wrapper = super::super::FormWrapperHelper {
+            params: vec![Symbol::from("room")],
+            call: Expr::new(
+                Span::default(),
+                ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from("form_with"),
+                    args: vec![Expr::new(
+                        Span::default(),
+                        ExprNode::Hash {
+                            entries: vec![(lit_sym(Symbol::from("url")), var("room"))],
+                            kwargs: true,
+                        },
+                    )],
+                    block: None,
+                    parenthesized: true,
+                },
+            ),
+        };
+        let mut ctx = test_ctx();
+        ctx.form_wrappers = std::rc::Rc::new(
+            [("composer_form_tag".to_string(), wrapper)].into_iter().collect(),
+        );
+        // The call site passes a template local, which inside an
+        // ERB-ingested body parses as a zero-arg Send rather than a Var.
+        let local_read = Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("the_room"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let call = block_helper_call_with("composer_form_tag", vec![local_read]);
+        let emitted = walk_body(&buf_append(call), &ctx)
+            .iter()
+            .map(crate::emit::ruby::emit_expr)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            !emitted.contains("composer_form_tag"),
+            "the wrapper call is replaced, not kept:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("<form action="),
+            "and the form_with it wraps expands inline:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("the_room"),
+            "with the call site's argument substituted for the parameter:\n{emitted}"
+        );
+        assert!(emitted.contains("inner"), "block body walked inline:\n{emitted}");
+    }
+
+    #[test]
+    fn a_form_wrapper_declines_an_argument_it_cannot_move() {
+        // Substituting a parameter means moving its argument into the
+        // wrapped call. A read is free to move; a call is not — it could
+        // run a different number of times, or in a different order. Such
+        // a site keeps its shape and stays a loud failure.
+        let wrapper = super::super::FormWrapperHelper {
+            params: vec![Symbol::from("room")],
+            call: Expr::new(
+                Span::default(),
+                ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from("form_with"),
+                    args: Vec::new(),
+                    block: None,
+                    parenthesized: true,
+                },
+            ),
+        };
+        let mut ctx = test_ctx();
+        ctx.form_wrappers = std::rc::Rc::new(
+            [("composer_form_tag".to_string(), wrapper)].into_iter().collect(),
+        );
+        // `find_room(1)` — an argument-taking call, not a bare read.
+        let impure = Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("find_room"),
+                args: vec![str_lit("1")],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        let call = block_helper_call_with("composer_form_tag", vec![impure]);
+        let emitted = walk_body(&buf_append(call), &ctx)
+            .iter()
+            .map(crate::emit::ruby::emit_expr)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            emitted.contains("composer_form_tag"),
+            "the site keeps its source shape:\n{emitted}"
+        );
     }
 
     #[test]
