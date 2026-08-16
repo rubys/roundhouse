@@ -494,10 +494,19 @@ fn build_library_class(tm: &TestModule) -> LibraryClass {
     // propagates the type to downstream reads. Self-describing IR —
     // the assignment is materialized at every call site, just like
     // controller before-action filter inlining (ticket 8).
+    // A test class's own `*_path` / `*_url` helpers shadow the route
+    // helpers of the same name — same rule the controller lowering
+    // applies to its ancestry.
+    let helper_shadows: std::collections::HashSet<Symbol> = tm
+        .helpers
+        .iter()
+        .map(|h| h.name.clone())
+        .filter(|n| n.as_str().ends_with("_path") || n.as_str().ends_with("_url"))
+        .collect();
     let mut methods: Vec<MethodDef> = tm
         .tests
         .iter()
-        .map(|t| test_to_method_def(&tm.name, t, tm.setup.as_ref()))
+        .map(|t| test_to_method_def(&tm.name, t, tm.setup.as_ref(), &helper_shadows))
         .collect();
     // Helpers (non-test, non-setup `def` items in the test class
     // body — e.g. `setup_adapter_with_stub_row`) lower as ordinary
@@ -512,7 +521,10 @@ fn build_library_class(tm: &TestModule) -> LibraryClass {
         // `SessionTestHelper#sign_in` posts to it — and without the
         // rewrite the bare Send self-injects to `self.session_url`,
         // which the test class does not carry.
-        m.body = crate::lower::controller_to_library::rewrites::rewrite_route_helpers(&m.body);
+        m.body = crate::lower::controller_to_library::rewrites::rewrite_route_helpers(
+            &m.body,
+            &helper_shadows,
+        );
         if m.signature.is_none() {
             let param_pairs: Vec<(Symbol, Ty)> = m
                 .params
@@ -542,7 +554,12 @@ fn build_library_class(tm: &TestModule) -> LibraryClass {
 /// argument — when present — gets prepended to the test body so
 /// every test method is self-contained (no out-of-band setup
 /// dependency, no double-call risk vs runtime auto-discovery).
-fn test_to_method_def(owner: &ClassId, t: &Test, setup: Option<&Expr>) -> MethodDef {
+fn test_to_method_def(
+    owner: &ClassId,
+    t: &Test,
+    setup: Option<&Expr>,
+    shadows: &std::collections::HashSet<Symbol>,
+) -> MethodDef {
     let snake = sanitize_test_name(&t.name);
     let method_name = Symbol::from(format!("test_{snake}"));
     let raw_body = match setup {
@@ -555,7 +572,10 @@ fn test_to_method_def(owner: &ClassId, t: &Test, setup: Option<&Expr>) -> Method
     // self-injection in the emitter turns these into
     // `this.articles_url(...)`, which fails tsc since the test
     // class doesn't carry route helpers as instance methods.
-    let body = crate::lower::controller_to_library::rewrites::rewrite_route_helpers(&raw_body);
+    let body = crate::lower::controller_to_library::rewrites::rewrite_route_helpers(
+        &raw_body,
+        shadows,
+    );
     MethodDef {
         name: method_name,
         receiver: MethodReceiver::Instance,

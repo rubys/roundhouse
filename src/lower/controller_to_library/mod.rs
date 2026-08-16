@@ -547,6 +547,10 @@ fn build_methods(
 ) -> Vec<MethodDef> {
     let mut methods: Vec<MethodDef> = Vec::new();
 
+    // Names this controller's ancestry DEFINES that the route-helper
+    // rewrite would otherwise claim by suffix alone.
+    let shadows = route_helper_shadows(controller, all_controllers);
+
     let (publics_all, privs) = split_public_private_actions(controller);
     // With route info, a public method is a routable action only if a route
     // reaches it; the rest are helper/filter methods that must keep their
@@ -640,14 +644,14 @@ fn build_methods(
         methods.push(action_to_method(
             a, controller, &privs, /*is_public=*/ true, params_specs, json_actions,
             turbo_stream_actions, view_ivars,
-            partials, format_breadth,
+            partials, format_breadth, &shadows,
         ));
     }
     for a in &privs_kept {
         methods.push(action_to_method(
             a, controller, &privs, /*is_public=*/ false, params_specs, json_actions,
             turbo_stream_actions, view_ivars,
-            partials, format_breadth,
+            partials, format_breadth, &shadows,
         ));
     }
     // Public methods no route reaches are helpers/filters, not actions:
@@ -658,7 +662,7 @@ fn build_methods(
         methods.push(action_to_method(
             a, controller, &privs, /*is_public=*/ false, params_specs, json_actions,
             turbo_stream_actions, view_ivars,
-            partials, format_breadth,
+            partials, format_breadth, &shadows,
         ));
     }
 
@@ -981,6 +985,31 @@ fn build_filter_preamble(
     preamble
 }
 
+/// Method names ending in `_path` / `_url` that this controller or one
+/// of its ancestors DEFINES — the names `rewrite_route_helpers` must not
+/// treat as route helpers. Rails injects route helpers by module
+/// inclusion, so a `def` anywhere in the ancestry wins over them; the
+/// suffix heuristic alone does not know that. campfire's
+/// `post_authenticating_url` (a private method on the Authentication
+/// concern, spliced into ApplicationController) and `logo_path` are the
+/// corpus members that made this visible.
+fn route_helper_shadows(
+    controller: &Controller,
+    all: &[Controller],
+) -> std::collections::HashSet<Symbol> {
+    ancestor_chain(controller, all)
+        .into_iter()
+        .chain(std::iter::once(controller))
+        .flat_map(|c| c.body.iter())
+        .filter_map(|item| match item {
+            ControllerBodyItem::Action { action, .. } => Some(&action.name),
+            _ => None,
+        })
+        .filter(|n| n.as_str().ends_with("_path") || n.as_str().ends_with("_url"))
+        .cloned()
+        .collect()
+}
+
 /// Walk `parent` links root-first (`[ApplicationController]` for a
 /// typical leaf controller). A parent that isn't among the ingested
 /// controllers (ActionController::Base) ends the walk; the depth cap
@@ -1242,6 +1271,7 @@ fn action_to_method(
     view_ivars: &ViewIvarMap,
     partials: &PartialMap,
     format_breadth: FormatBreadth,
+    shadows: &std::collections::HashSet<Symbol>,
 ) -> MethodDef {
     let method_name = method_name_for_action(a.name.as_str());
     // Required positionals first, then optional positionals with their
@@ -1276,6 +1306,7 @@ fn action_to_method(
         view_ivars,
         partials,
         format_breadth,
+        shadows,
     );
     // Action params type to Untyped for now — Rails action signatures
     // are conventionally `def show(id)` with all-string CGI inputs;
@@ -1386,6 +1417,7 @@ fn lower_action_body(
     view_ivars: &ViewIvarMap,
     partials: &PartialMap,
     format_breadth: FormatBreadth,
+    shadows: &std::collections::HashSet<Symbol>,
 ) -> Expr {
     let unwrapped = unwrap_respond_to_with_format_dispatch(body, format_breadth);
     let with_render = if is_public {
@@ -1436,7 +1468,7 @@ fn lower_action_body(
     // a fallback for anything Arel doesn't recognize. See
     // project_arel_compile_time_first.md.
     let with_destroy = rewrite_destroy_bang(&with_assoc);
-    let with_routes = rewrite_route_helpers(&with_destroy);
+    let with_routes = rewrite_route_helpers(&with_destroy, shadows);
     // Some rewrites (rewrite_assoc_through_parent in particular)
     // produce nested Seqs — `Seq { ..., Seq { stmts }, ... }`. The
     // body-typer's Seq walker only propagates ivar bindings from

@@ -4,7 +4,7 @@
 //! `synthesize_implicit_render` so the synthesized symbol-form render
 //! shows up here as a plain `Send`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::dialect::Action;
 use crate::expr::{ArrayStyle, Expr, ExprNode, LValue, Literal};
@@ -1574,13 +1574,24 @@ fn polymorphic_path(ivar_name: &Symbol, span: Span) -> Expr {
 // This pass runs AFTER `rewrite_redirect_to` so the polymorphic
 // rewrite's freshly-synthesized `RouteHelpers.x_path(...)` calls (which
 // have a recv) are skipped — only original bare calls get the prefix.
+//
+// `shadowed` are names the caller's own scope DEFINES as methods — a
+// controller's (or its ancestors') own `def post_authenticating_url`,
+// `def logo_path(filename)`, `def next_page_url`. The suffix alone is a
+// heuristic, and Ruby's answer is not a heuristic: a defined method wins
+// over anything Rails injects. Without the set, campfire's
+// `redirect_to post_authenticating_url` — a private method on the
+// Authentication concern — became `RouteHelpers.post_authenticating_path`
+// and raised NoMethodError on a module that has no such route. Mastodon
+// has 120 controller methods with this shape.
 // ---------------------------------------------------------------------------
 
-pub fn rewrite_route_helpers(expr: &Expr) -> Expr {
+pub fn rewrite_route_helpers(expr: &Expr, shadowed: &HashSet<Symbol>) -> Expr {
     map_expr(expr, &|e| match &*e.node {
         ExprNode::Send { recv: None, method, args, block, parenthesized }
-            if method.as_str().ends_with("_path")
-                || method.as_str().ends_with("_url") =>
+            if (method.as_str().ends_with("_path")
+                || method.as_str().ends_with("_url"))
+                && !shadowed.contains(method) =>
         {
             // `RouteHelpers` only emits `_path` helpers — Rails'
             // `_url` form differs by host prefix, which we don't
@@ -1638,7 +1649,7 @@ pub fn rewrite_route_helpers(expr: &Expr) -> Expr {
                             },
                         )
                     } else {
-                        rewrite_route_helpers(arg)
+                        rewrite_route_helpers(arg, shadowed)
                     }
                 })
                 .collect();
@@ -1648,7 +1659,7 @@ pub fn rewrite_route_helpers(expr: &Expr) -> Expr {
                     recv: Some(const_path(&["RouteHelpers"], e.span)),
                     method: dispatch_method,
                     args: projected_args,
-                    block: block.as_ref().map(rewrite_route_helpers),
+                    block: block.as_ref().map(|b| rewrite_route_helpers(b, shadowed)),
                     parenthesized: *parenthesized,
                 },
             ))
