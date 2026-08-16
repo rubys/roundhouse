@@ -205,6 +205,40 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
     // function body is the same.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut funcs: Vec<LibraryFunction> = Vec::new();
+    // Helper name -> (every segment name it can take, how many
+    // positionals the GENERATED helper requires). The query survey
+    // needs both: to tell an option naming a SEGMENT from a query
+    // param, and to ignore a call that doesn't fill the segments.
+    //
+    // Segments UNION across same-named routes and `required` is
+    // first-wins, because `flatten_routes` expands a Rails optional
+    // group into several routes that share one helper — lobsters'
+    // `get "/mod/notes(/:period)"` yields one route with `period` and
+    // one without, and the generated helper is the FIRST (`seen` below).
+    // Taking the last one's segments instead made `period` look like a
+    // query param and emitted `mod_notes_path(period = nil, period:
+    // nil)` — a duplicate parameter name.
+    let mut helper_shape: std::collections::HashMap<String, (Vec<String>, usize)> =
+        Default::default();
+    for r in flat.iter().filter(|r| r.named) {
+        // Both spellings: `_url` is the same helper with the host in
+        // front (the view/controller lowering rewrites it to `"http://…"
+        // + <name>_path(…)`), and campfire calls `new_session_url(
+        // email_address: …)`. That rewrite happens after this survey, so
+        // a `_url`-only key would be missed — register the alias and
+        // record its demand against the `_path` helper that is generated.
+        for suffix in ["_path", "_url"] {
+            let entry = helper_shape
+                .entry(format!("{}{suffix}", r.as_name))
+                .or_insert_with(|| (Vec::new(), r.required_params.min(r.path_params.len())));
+            for p in &r.path_params {
+                if !entry.0.iter().any(|s| s == p.as_str()) {
+                    entry.0.push(p.to_string());
+                }
+            }
+        }
+    }
+    let query_keys = query_param_demand(app, &helper_shape);
     for route in &flat {
         // Unnamed dynamic routes (`get "/comments/page/:page"`, no `as:`)
         // get no helper in Rails — their action-name fallback would
@@ -218,7 +252,13 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
         if !seen.insert(helper.clone()) {
             continue;
         }
-        funcs.push(build_helper_function(&module_path, &helper, route, app));
+        funcs.push(build_helper_function(
+            &module_path,
+            &helper,
+            route,
+            app,
+            query_keys.get(&helper).map(|v| v.as_slice()).unwrap_or(&[]),
+        ));
     }
     // Hash-form `url_for` resolvers ride along here rather than at each
     // target's call site: every emitter that wants route helpers wants
@@ -464,6 +504,7 @@ fn build_helper_function(
     helper_name: &str,
     route: &FlatRoute,
     app: &App,
+    query_keys: &[String],
 ) -> LibraryFunction {
     let slug_id = model_overrides_to_param(route.controller.0.as_str(), helper_name, app);
     // Slugness is PER PARAM: a nested parent's segment names its model
@@ -578,15 +619,229 @@ fn build_helper_function(
             },
         );
     }
+    // Options a call site passes that name no segment become the query
+    // string. KEYWORD params with `nil` defaults, so the call sites
+    // already written (`autocompletable_users_path(room_id: room.id)`)
+    // bind unchanged and every other caller is unaffected.
+    let mut query_sig: Vec<crate::ty::Param> = Vec::new();
+    if !query_keys.is_empty() {
+        for key in query_keys {
+            let sym = Symbol::from(key.clone());
+            params.push(Param::keyword(sym.clone(), Some(nil_default())));
+            // KEYWORD in the signature too, not just in the `def`.
+            // `fn_sig` types every param `Required`, which renders the
+            // `.rbs` as a positional — spinel binds from the signature,
+            // so a keyword declared positionally is a call it cannot
+            // make.
+            query_sig.push(crate::ty::Param {
+                name: sym,
+                ty: Ty::Union { variants: vec![param_ty(key, false), Ty::Nil] },
+                kind: crate::ty::ParamKind::Keyword { required: false },
+            });
+        }
+        body = append_query_string(body, query_keys);
+    }
+    let signature = match fn_sig(sig_params, Ty::Str) {
+        Ty::Fn { mut params, block, ret, effects } if !query_sig.is_empty() => {
+            params.extend(query_sig);
+            Ty::Fn { params, block, ret, effects }
+        }
+        other => other,
+    };
     LibraryFunction {
         module_path: module_path.to_vec(),
         name: Symbol::from(helper_name),
         params,
         body,
-        signature: Some(fn_sig(sig_params, Ty::Str)),
+        signature: Some(signature),
         effects: EffectSet::default(),
         is_async: false,
     }
+}
+
+/// Keyword names a call site may pass that are NOT query params, so
+/// the demand survey must not turn them into one.
+///
+///   * `format:` is already a parameter — the trailing `(.:format)`
+///     group gives the helper a `format = nil` and appends `.json`;
+///   * `anchor:` is Rails' FRAGMENT (`#tag`), which is not part of the
+///     query string and belongs to whoever models fragments.
+///
+/// A key naming one of the route's own path segments is excluded at the
+/// call-site survey instead (it varies per route).
+const NON_QUERY_OPTIONS: &[&str] = &["format", "anchor"];
+
+/// Query-string keys each route helper is actually called with —
+/// `autocompletable_users_path(room_id: room.id)` demands `room_id`.
+///
+/// Rails turns every option that is not a path segment into a query
+/// param at call time; a generated helper has a fixed signature, so the
+/// keys have to be known to appear in it. DEMAND-GATED for the same
+/// reason the association-scope pass is: a helper nobody passes options
+/// to keeps exactly the signature it had, so no corpus call site moves.
+///
+/// Surveyed over every body INCLUDING views, which is where most URL
+/// helpers are called from and which the hook-body walk does not cover.
+fn query_param_demand(
+    app: &App,
+    helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut out: std::collections::HashMap<String, std::collections::BTreeSet<String>> =
+        Default::default();
+    let mut collect = |e: &Expr| {
+        fn walk(
+            e: &Expr,
+            helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
+            out: &mut std::collections::HashMap<String, std::collections::BTreeSet<String>>,
+        ) {
+            if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
+                if let Some((segments, required)) = helpers.get(method.as_str()) {
+                    if let Some(last) = args.last() {
+                        // A call that does not fill the helper's required
+                        // segments is not a query call — lobsters writes
+                        // `user_path(:user => name)` against `/u/:username`,
+                        // which names no segment and supplies none either.
+                        // Rails raises on it; adding a `user:` keyword
+                        // would only change WHICH error it is, on a page
+                        // that renders (a junk URL) today.
+                        if args.len() - 1 < *required {
+                            e.node.for_each_child(&mut |c| walk(c, helpers, out));
+                            return;
+                        }
+                        if let ExprNode::Hash { entries, kwargs: true } = &*last.node {
+                            for (k, v) in entries {
+                                let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node
+                                else {
+                                    continue;
+                                };
+                                let key = key.as_str();
+                                if NON_QUERY_OPTIONS.contains(&key)
+                                    || segments.iter().any(|s| s.as_str() == key)
+                                {
+                                    continue;
+                                }
+                                // An Array value renders as `k[]=a&k[]=b`
+                                // in Rails (lobsters/campfire both write
+                                // one). Left out rather than rendered as
+                                // the array's `to_s`: a wrong URL is
+                                // worse than a missing helper.
+                                if matches!(&*v.node, ExprNode::Array { .. }) {
+                                    continue;
+                                }
+                                let helper = method
+                                    .as_str()
+                                    .strip_suffix("_url")
+                                    .map(|stem| format!("{stem}_path"))
+                                    .unwrap_or_else(|| method.as_str().to_string());
+                                out.entry(helper).or_default().insert(key.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            e.node.for_each_child(&mut |c| walk(c, helpers, out));
+        }
+        walk(e, helpers, &mut out);
+    };
+    crate::lower::for_each_hook_body_ref(app, &mut collect);
+    for view in &app.views {
+        collect(&view.body);
+    }
+    out.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect()
+}
+
+/// Append `?k=v&k2=v2` for the query keys this helper accepts, skipping
+/// each one the caller left `nil`.
+///
+/// Built as ONE expression rather than statements: each key contributes
+/// a conditional whose separator is `?` when every earlier key was also
+/// omitted and `&` otherwise, so any subset of the keys renders a
+/// well-formed query string. Values go through the same `url_encode` the
+/// view helpers use — a raw `q=` value carrying a space or `&` would
+/// otherwise produce a URL that means something else.
+fn append_query_string(path: Expr, keys: &[String]) -> Expr {
+    let mut out = path;
+    for (i, key) in keys.iter().enumerate() {
+        let is_nil = |k: &str| -> Expr {
+            send_method(var_ref(k), "nil?", Vec::new())
+        };
+        // `?` only while nothing earlier was rendered. The first key
+        // needs no test — nothing can precede it.
+        let separator = if i == 0 {
+            None
+        } else {
+            Some({
+            let mut cond = is_nil(&keys[0]);
+            for earlier in &keys[1..i] {
+                cond = Expr::new(
+                    Span::synthetic(),
+                    ExprNode::BoolOp {
+                        op: crate::expr::BoolOpKind::And,
+                        surface: Default::default(),
+                        left: cond,
+                        right: is_nil(earlier),
+                    },
+                );
+            }
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::If {
+                    cond,
+                    then_branch: lit_str("?".to_string()),
+                    else_branch: lit_str("&".to_string()),
+                },
+            )
+            })
+        };
+        let encoded = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const {
+                        path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")],
+                    },
+                )),
+                method: Symbol::from("url_encode"),
+                args: vec![send_method(var_ref(key), "to_s", Vec::new())],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        let mut parts: Vec<InterpPart> = Vec::new();
+        match separator {
+            None => parts.push(InterpPart::Text { value: format!("?{key}=") }),
+            Some(sep) => {
+                parts.push(InterpPart::Expr { expr: sep });
+                parts.push(InterpPart::Text { value: format!("{key}=") });
+            }
+        }
+        parts.push(InterpPart::Expr { expr: encoded });
+        let pair = Expr::new(Span::synthetic(), ExprNode::StringInterp { parts });
+        let arm = Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond: send_method(var_ref(key), "nil?", Vec::new()),
+                then_branch: lit_str(String::new()),
+                else_branch: pair,
+            },
+        );
+        out = send_method(out, "+", vec![arm]);
+    }
+    out
+}
+
+fn send_method(recv: Expr, method: &str, args: Vec<Expr>) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(recv),
+            method: Symbol::from(method),
+            args,
+            block: None,
+            parenthesized: true,
+        },
+    )
 }
 
 /// `id`-shape params (`id`, `<x>_id`) are integer; everything else is
