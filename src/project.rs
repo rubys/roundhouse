@@ -1134,11 +1134,7 @@ fn ruby_runtime_files(
 /// (issue #67: the Roda exemplar's tree loaded websocket-driver at
 /// boot despite the app having no websockets).
 fn apply_cable_strip(files: &mut Vec<(String, String)>, app: &App) -> Result<(), String> {
-    let has_cable = app
-        .models
-        .iter()
-        .any(|m| !crate::lower::lower_broadcasts(m).is_empty());
-    if has_cable {
+    if crate::lower::app_broadcasts_live(app) {
         return Ok(());
     }
     files.retain(|(p, _)| p != "cable.rb");
@@ -1792,10 +1788,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
 /// the JRuby tree already ships lock-free after its sqlite3 gem swap.
 fn apply_gemfile_trim(files: &mut Vec<(String, String)>, app: &App, fixture: &Path) {
     let has_js = fixture.join("app/javascript/application.js").exists();
-    let has_cable = app
-        .models
-        .iter()
-        .any(|m| !crate::lower::lower_broadcasts(m).is_empty());
+    let has_cable = crate::lower::app_broadcasts_live(app);
     if has_js && has_cable {
         return;
     }

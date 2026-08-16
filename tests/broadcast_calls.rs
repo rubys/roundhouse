@@ -29,6 +29,12 @@ fn tree(files: &[(&str, &str)]) -> HashMap<PathBuf, Vec<u8>> {
 }
 
 fn lowered() -> Vec<roundhouse::emit::EmittedFile> {
+    // `emit_library` is what writes a concern MODULE — the home
+    // campfire's broadcasts actually live in.
+    ruby::emit_library(&lowered_app())
+}
+
+fn lowered_app() -> roundhouse::App {
     let mut app = ingest_app_from_tree(tree(&[
         (
             "db/schema.rb",
@@ -69,9 +75,7 @@ end
     ]))
     .expect("ingest");
     roundhouse::session::analyze_and_lower(&mut app);
-    // `emit_library` is what writes a concern MODULE — the home
-    // campfire's broadcasts actually live in.
-    ruby::emit_library(&app)
+    app
 }
 
 fn find(files: &[roundhouse::emit::EmittedFile], name: &str) -> String {
@@ -118,6 +122,46 @@ fn remove_defaults_its_target_to_the_record_and_carries_no_html() {
         ),
         "{src}",
     );
+}
+
+/// The `/cable` endpoint, the `Broadcasts.set_transport` registration in
+/// config.ru and the `websocket-driver` gem all ride ONE predicate, and
+/// it used to ask whether a model DECLARED broadcasts. This app declares
+/// none — the calls are ordinary methods on a concern — so the tree
+/// shipped `Broadcasts.append` with nothing to deliver it: the POST wrote
+/// its row and no second tab ever heard about it.
+#[test]
+fn a_broadcast_written_as_a_plain_method_still_needs_the_cable_endpoint() {
+    let app = lowered_app();
+    assert!(
+        app.models
+            .iter()
+            .all(|m| roundhouse::lower::lower_broadcasts(m).is_empty()),
+        "no model here DECLARES a broadcast — that is exactly the case that regressed",
+    );
+    assert!(roundhouse::lower::app_broadcasts_live(&app));
+}
+
+/// The other direction, and the reason the predicate can't just be
+/// `true`: an app that never broadcasts still ships cable-free (no
+/// endpoint, no gem — issue #67).
+#[test]
+fn an_app_that_never_broadcasts_stays_cable_free() {
+    let mut app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "rooms", force: :cascade do |t|
+    t.string "name", null: false
+  end
+end
+"#,
+        ),
+        ("app/models/room.rb", "class Room < ApplicationRecord\nend\n"),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    assert!(!roundhouse::lower::app_broadcasts_live(&app));
 }
 
 /// The two ends of the wire. A publish-side name that does not match the

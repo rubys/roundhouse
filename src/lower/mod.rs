@@ -629,7 +629,8 @@ pub use jbuilder_to_library::{
     lower_jbuilder_to_library_class, lower_jbuilder_to_library_classes,
 };
 pub use broadcasts::{
-    lower_broadcasts, BroadcastAction, LoweredAssocRef, LoweredBroadcast, LoweredBroadcasts,
+    app_broadcasts_live, lower_broadcasts, BroadcastAction, LoweredAssocRef, LoweredBroadcast,
+    LoweredBroadcasts,
 };
 pub use controller::{
     chain_target_class, classify_controller_send, default_permitted_fields,

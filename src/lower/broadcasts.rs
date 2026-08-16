@@ -138,6 +138,73 @@ pub fn lower_broadcasts(model: &Model) -> LoweredBroadcasts {
     out
 }
 
+/// Does the tree this app emits reach the LIVE broadcast path — the one
+/// that ends at a WebSocket transport?
+///
+/// `lower_broadcasts` answers a narrower question: does a model DECLARE
+/// broadcasts with the `broadcasts_to` / `after_*_commit` macro family.
+/// That was the whole story while the corpus was blog-shaped, so both
+/// consumers of "does this app need /cable" asked it directly — and
+/// campfire, which writes `broadcast_append_to` in an ordinary concern
+/// METHOD (rewritten by `broadcast_calls`, a pass no macro walk visits),
+/// shipped `Broadcasts.append` calls in a tree with no `/cable`
+/// endpoint, no transport registered, and no websocket-driver gem. The
+/// emitted app looked complete and was silently one-way: the POST wrote
+/// the row, and nothing ever reached a second tab.
+///
+/// Asking the LOWERED BODIES keeps the two questions from drifting apart
+/// again — whatever pass puts a `Broadcasts.<action>` send in a body,
+/// this sees it. Bodies live in exactly the two homes
+/// `apply_broadcast_calls_lowering` rewrites: a model's own methods and
+/// a library class (the concern module emitted beside it).
+///
+/// `turbo_stream_fragment` is deliberately NOT counted. A
+/// `.turbo_stream.erb` template composes markup for an HTTP response
+/// body and never touches a transport, so an app with turbo_stream views
+/// and no broadcasts still ships cable-free.
+pub fn app_broadcasts_live(app: &crate::app::App) -> bool {
+    if app.models.iter().any(|m| !lower_broadcasts(m).is_empty()) {
+        return true;
+    }
+    let model_bodies = app.models.iter().flat_map(|m| {
+        m.body.iter().filter_map(|item| match item {
+            ModelBodyItem::Method { method, .. } => Some(&method.body),
+            _ => None,
+        })
+    });
+    let library_bodies = app
+        .library_classes
+        .iter()
+        .flat_map(|lc| lc.methods.iter().map(|m| &m.body));
+    model_bodies.chain(library_bodies).any(is_live_broadcast_call)
+}
+
+/// True when `expr` — or anything under it — is a send to the
+/// `Broadcasts` module naming one of the four live actions.
+fn is_live_broadcast_call(expr: &Expr) -> bool {
+    if let ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node {
+        let names_broadcasts = matches!(
+            &*recv.node,
+            ExprNode::Const { path } if path.last().is_some_and(|s| {
+                // A rooted reference (`::Broadcasts`, which
+                // `apply_view_constant_rooting` may have stamped) names
+                // the same module.
+                matches!(s.as_str(), "Broadcasts" | "::Broadcasts")
+            })
+        );
+        if names_broadcasts
+            && matches!(method.as_str(), "append" | "prepend" | "replace" | "remove")
+        {
+            return true;
+        }
+    }
+    let mut found = false;
+    expr.node.for_each_child(&mut |child| {
+        found = found || is_live_broadcast_call(child);
+    });
+    found
+}
+
 /// Pick belongs_to associations off the model body so commit blocks
 /// can resolve a bare-method receiver (`article.broadcast_…`) to
 /// its target class and foreign key.
