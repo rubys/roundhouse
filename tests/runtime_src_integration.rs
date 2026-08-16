@@ -832,7 +832,20 @@ fn every_runtime_method_body_concretely_typed() {
     // hand that straight to `column_predicate`, which already dispatches
     // on all three; typing the parameter would mean picking one. +2
     // sites; ceiling raised 256 -> 258.
-    const CEILING: usize = 258;
+    // 2026-08-16 `Request.for` (the shared constructor the test harness
+    // uses to build a request on either target): the one site is the
+    // `env.each { |k, v| r.env[k] = v }` widening copy. `@env` is
+    // `Hash[String, untyped]` BY CONTRACT — this file's own header says
+    // callers write scratch keys of any type into it
+    // (`exception_notifier.exception_data`) — while a caller's env
+    // literal is `Hash[String, String]`, so the copy is what bridges the
+    // two. Assigning instead of copying is a real type error that only a
+    // strict target notices, and spinel named it exactly once matz's
+    // `77cc33c9` began failing the build on wrong-typed pointers.
+    // Typing the block params would mean claiming env values are
+    // Strings, which is the thing that is false. +1 site; ceiling raised
+    // 258 -> 259.
+    const CEILING: usize = 259;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

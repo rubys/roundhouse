@@ -140,7 +140,16 @@ module ActionDispatch
     # campfire's first filter died on `request.remote_ip`.
     def self.for(env, params = {})
       r = new
-      r.env = env
+      # COPIED IN, not assigned. `@env` is declared
+      # `Hash[String, untyped]` — callers write scratch keys of any type
+      # into it — while a caller's env literal is usually
+      # `Hash[String, String]`. Assigning the narrow hash into the wide
+      # slot is a real type error that a dynamic target simply never
+      # notices; spinel names it exactly
+      # (`assignment to 'sp_StrPolyHash *' from incompatible pointer
+      # type 'sp_StrStrHash *'`). Same reason `stringify_keys` exists
+      # in the test harness rather than a `.dup`.
+      env.each { |k, v| r.env[k] = v }
       r.params = params
       r.request_method = env["REQUEST_METHOD"] || "GET"
       r.path = env["PATH_INFO"] || "/"
