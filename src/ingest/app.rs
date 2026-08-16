@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use ruby_prism::Node;
 
 use crate::App;
+use crate::Symbol;
+use crate::dialect::{LibraryClass, MethodReceiver, TestModule};
 use crate::vfs::{FsVfs, MapVfs, Vfs};
 
 use super::controller::ingest_controller;
@@ -621,6 +623,18 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         }
     }
 
+    // Shared test-support modules — `test/test_helpers/*.rb`, mixed
+    // into every test case by the app's own `test/test_helper.rb`
+    // (`include SessionTestHelper, MentionTestHelper, TurboTestHelper`).
+    // Read BEFORE the test files so the splice below has them.
+    //
+    // Spliced rather than `include`d, the same call the model side made
+    // (`splice_concerns_into_models`): a test class's `helpers` already
+    // lower to ordinary instance methods on it, which is exactly what
+    // the mixin means, and it needs nothing from a target's mixin
+    // semantics.
+    let shared_test_helpers = ingest_test_helper_modules(vfs, dir)?;
+
     // Test files — `test/models/*_test.rb` and
     // `test/controllers/*_test.rb`. System tests under `test/system/`
     // still need a browser-driver runtime and stay out of scope.
@@ -635,7 +649,8 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 if let Some(maybe_tm) =
                     unwrap_or_record(ingest_test_file(&source, &entry.display().to_string()))?
                 {
-                    if let Some(tm) = maybe_tm {
+                    if let Some(mut tm) = maybe_tm {
+                        splice_test_helpers(&mut tm, &shared_test_helpers);
                         app.test_modules.push(tm);
                     }
                 }
@@ -2658,4 +2673,98 @@ fn extract_config_time_zone(source: &[u8]) -> Option<String> {
         }
     }
     None
+}
+
+/// Shared test-support modules under `test/test_helpers/`, keyed by
+/// module name, filtered to the ones the app's own
+/// `test/test_helper.rb` mixes into every test case.
+///
+/// The filter matters. campfire ships four such modules but includes
+/// only three; the fourth, `SystemTestHelper`, is included by
+/// `application_system_test_case.rb` and is Capybara all the way down
+/// (`visit`, `find`, `fill_in`). Splicing it into every test class
+/// would put a pile of permanently-unresolvable dispatch into the
+/// emit for methods nothing calls — `test/system/` is out of scope
+/// (see the test-file loop above), so nothing would ever reach them.
+///
+/// Reading the include list rather than globbing the directory is also
+/// what makes this track the app: a module the app stops mixing in
+/// stops being spliced.
+fn ingest_test_helper_modules<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+) -> IngestResult<Vec<LibraryClass>> {
+    let helpers_dir = dir.join("test/test_helpers");
+    if !vfs.is_dir(&helpers_dir) {
+        return Ok(Vec::new());
+    }
+
+    // Which modules get mixed into every test case. `test/test_helper.rb`
+    // reopens `ActiveSupport::TestCase` and includes them there; ingest
+    // the file as library classes and read that class's include list.
+    // An app whose helper file we can't read (or that includes nothing)
+    // splices nothing — the tests still ingest, they just don't gain
+    // the helper methods, which is the pre-existing behavior.
+    let mut wanted: Vec<Symbol> = Vec::new();
+    let helper_rb = dir.join("test/test_helper.rb");
+    if vfs.exists(&helper_rb) {
+        let source = vfs.read(&helper_rb)?;
+        if let Some(classes) = unwrap_or_record(ingest_library_classes(
+            &source,
+            &helper_rb.display().to_string(),
+        ))? {
+            for lc in classes {
+                wanted.extend(lc.includes.iter().map(|c| c.0.clone()));
+            }
+        }
+    }
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut out: Vec<LibraryClass> = Vec::new();
+    for entry in read_rb_files(vfs, &helpers_dir)? {
+        let source = vfs.read(&entry)?;
+        let Some(classes) =
+            unwrap_or_record(ingest_library_classes(&source, &entry.display().to_string()))?
+        else {
+            continue;
+        };
+        for lc in classes {
+            if wanted.iter().any(|w| w == &lc.name.0) {
+                out.push(lc);
+            }
+        }
+    }
+    // Include order, so a name defined twice resolves the way Ruby's
+    // `include A, B` would.
+    out.sort_by_key(|lc| {
+        wanted
+            .iter()
+            .position(|w| w == &lc.name.0)
+            .unwrap_or(usize::MAX)
+    });
+    Ok(out)
+}
+
+/// Copy shared helper methods onto a test class, the test's own
+/// definitions winning on a name collision (Ruby resolves the class
+/// body ahead of an included module).
+fn splice_test_helpers(tm: &mut TestModule, helpers: &[LibraryClass]) {
+    for lc in helpers {
+        for m in &lc.methods {
+            if m.receiver != MethodReceiver::Instance {
+                continue;
+            }
+            if tm.helpers.iter().any(|h| h.name == m.name) {
+                continue;
+            }
+            if tm.tests.iter().any(|t| t.name == m.name.as_str()) {
+                continue;
+            }
+            let mut m = m.clone();
+            m.enclosing_class = Some(tm.name.0.clone());
+            tm.helpers.push(m);
+        }
+    }
 }

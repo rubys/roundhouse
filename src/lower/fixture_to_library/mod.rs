@@ -69,6 +69,41 @@ fn build_fixture_class(f: &LoweredFixture, all: &LoweredFixtureSet) -> LibraryCl
         })
         .collect();
 
+    // `by_label(name)` — the DYNAMIC accessor. `users(:david)` is
+    // rewritten at the call site to `UsersFixtures.david()`, but Rails'
+    // fixture accessor also takes a variable, and campfire's
+    // `SessionTestHelper#sign_in` is exactly that shape:
+    //
+    //     def sign_in(user)
+    //       user = users(user) unless user.is_a? User
+    //
+    // A label→record table has to exist somewhere for that to resolve.
+    // Built as an if/elsif chain over the KNOWN labels rather than a
+    // runtime `send`: the label set is a compile-time fact, and a chain
+    // of string compares needs nothing from a target's dynamic dispatch
+    // (spinel's AOT model has no constant table to `send` through).
+    methods.push(MethodDef {
+        name: Symbol::from("by_label"),
+        receiver: MethodReceiver::Class,
+        params: vec![crate::dialect::Param {
+            name: Symbol::from("label"),
+            default: None,
+            keyword: false,
+            rest: false,
+        }],
+        body: build_by_label_body(&f.class, &f.records),
+        signature: Some(fn_sig(
+            vec![(Symbol::from("label"), Ty::Untyped)],
+            class_ty.clone(),
+        )),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner_id.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    });
+
     // `_fixtures_load!` — class method that inserts every record into
     // the DB by `<Class>.new({...attrs...}).save`. Inserts happen in
     // 1-indexed file order so the autoincrement column matches the
@@ -99,6 +134,71 @@ fn build_fixture_class(f: &LoweredFixture, all: &LoweredFixtureSet) -> LibraryCl
         constants: Vec::new(),
         unknown_calls: Vec::new(),
     }
+}
+
+/// Body of `by_label(label)`: an if/elsif chain comparing
+/// `label.to_s` against each known label, answering that label's
+/// record, and raising on a name no fixture defines.
+///
+/// `.to_s` on the way in so a Symbol and a String both hit — Rails'
+/// accessor takes `users(:david)` and `users("david")` alike, and the
+/// variable that reaches here has already lost which one it was.
+fn build_by_label_body(cls: &ClassId, records: &[LoweredFixtureRecord]) -> Expr {
+    let label_var = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("label") },
+        ),
+        Ty::Untyped,
+    );
+    let key = with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(label_var),
+                method: Symbol::from("to_s"),
+                args: vec![],
+                block: None,
+                parenthesized: true,
+            },
+        ),
+        Ty::Str,
+    );
+
+    // Innermost else: no fixture by that name. Raising beats answering
+    // a wrong record — `find(0)` would surface as a confusing
+    // RecordNotFound three frames away from the typo.
+    let mut chain = Expr::new(
+        Span::synthetic(),
+        ExprNode::Raise {
+            value: lit_str(format!("no {} fixture named", cls.0.as_str())),
+        },
+    );
+
+    for (idx, r) in records.iter().enumerate().rev() {
+        let cond = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(key.clone()),
+                    method: Symbol::from("=="),
+                    args: vec![lit_str(r.label.as_str().to_string())],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            Ty::Bool,
+        );
+        chain = Expr::new(
+            Span::synthetic(),
+            ExprNode::If {
+                cond,
+                then_branch: build_find_call(cls, (idx + 1) as i64),
+                else_branch: chain,
+            },
+        );
+    }
+    chain
 }
 
 /// `<Class>.find(<id>)` — used by each label method to return the
@@ -359,9 +459,6 @@ pub fn rewrite_fixture_calls(body: &Expr, fixture_names: &[Symbol]) -> Expr {
         if args.len() != 1 {
             return None;
         }
-        let ExprNode::Lit { value: Literal::Sym { value: label } } = &*args[0].node else {
-            return None;
-        };
         let owner = format!("{}Fixtures", camelize(method.as_str()));
         let owner_id = ClassId(Symbol::from(owner.clone()));
         let class_const = with_ty(
@@ -371,12 +468,30 @@ pub fn rewrite_fixture_calls(body: &Expr, fixture_names: &[Symbol]) -> Expr {
             ),
             Ty::Class { id: owner_id, args: vec![] },
         );
+        // `users(:david)` — the label is known here, so bind straight to
+        // the generated reader. Concrete dispatch, no table lookup.
+        if let ExprNode::Lit { value: Literal::Sym { value: label } } = &*args[0].node {
+            return Some(Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: Some(class_const),
+                    method: label.clone(),
+                    args: vec![],
+                    block: None,
+                    parenthesized: true,
+                },
+            ));
+        }
+        // `users(name)` — the label is a value. Rails allows it and
+        // campfire's `SessionTestHelper#sign_in` writes it, so route it
+        // through the generated `by_label` table rather than leaving a
+        // bare `users(...)` that resolves to nothing.
         Some(Expr::new(
             e.span,
             ExprNode::Send {
                 recv: Some(class_const),
-                method: label.clone(),
-                args: vec![],
+                method: Symbol::from("by_label"),
+                args: vec![args[0].clone()],
                 block: None,
                 parenthesized: true,
             },

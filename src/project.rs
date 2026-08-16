@@ -1352,6 +1352,45 @@ fn apply_models_aggregator(files: &mut Vec<(String, String)>) {
 /// false: AOT resolves the whole require graph statically, so arms are
 /// bare `<Class>.new` and routes.rb keeps its eager header — there is no
 /// lazy escape hatch to preserve.
+/// Rewrite the test harness's controller-dispatch table in
+/// `RequestDispatch#dispatch_request`.
+///
+/// The harness carries a blog-shaped copy of main.rb's table — two
+/// eager `require_relative "../app/controllers/…"` lines plus a
+/// two-arm case. campfire's spliced `SessionTestHelper#sign_in` POSTs
+/// to `session_url`, so EVERY controller test reached it and died at
+/// `cannot load such file -- app/controllers/articles_controller`.
+///
+/// Written as a re-appliable SPAN replace, not a match on the blog
+/// text, because `apply_controller_dispatch` runs twice on a CRuby
+/// tree: once in `spinel_files` (eager) and again in
+/// `ruby_runtime_files` (lazy, over the overlay main.rb that supersedes
+/// it). A one-shot text match would freeze the harness at the first
+/// pass's shape while main.rb moved on — and on a lazy tree, where
+/// routes.rb's eager requires have been stripped, that means nothing
+/// requires controllers at all.
+fn patch_harness_dispatch(content: &mut String, generated: &str) {
+    const HEAD: &str = "    controller = case matched.controller\n";
+    const TAIL: &str = "                 end";
+
+    // Eager pair at the top of the method: the arms carry their own
+    // requires on a lazy tree, and on an eager one routes.rb already
+    // did it. Line-filtered so re-running is a no-op.
+    if content.contains("require_relative \"../app/controllers/") {
+        let filtered: Vec<&str> = content
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("require_relative \"../app/controllers/"))
+            .collect();
+        *content = filtered.join("\n");
+        content.push('\n');
+    }
+
+    let Some(start) = content.find(HEAD) else { return };
+    let Some(rel_end) = content[start..].find(TAIL) else { return };
+    let end = start + rel_end + TAIL.len();
+    content.replace_range(start..end, generated);
+}
+
 fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_requires: bool) {
     use std::fmt::Write;
     const HARDCODED: &str = "  def self.instantiate_controller(sym)\n    case sym\n    when :articles then ArticlesController.new\n    when :comments then CommentsController.new\n    end\n  end";
@@ -1403,9 +1442,28 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
     let generated =
         format!("  def self.instantiate_controller(sym)\n    case sym\n{arms}    end\n  end");
 
+    // The test harness dispatches controller tests through its own copy
+    // of the same table, hard-coded to the blog. campfire's spliced
+    // `SessionTestHelper#sign_in` POSTs to `session_url`, so every
+    // controller test reached it and died at
+    // `cannot load such file -- app/controllers/articles_controller`.
+    // Generated from the same route data as main.rb's, one line below —
+    // the two were never meant to be different tables.
+    // Same arms, re-indented for the harness's method body and with the
+    // require path walked up one level (`test/` → tree root).
+    let test_arms = arms
+        .replace("app/controllers/", "../app/controllers/")
+        .replace("    when ", "                 when ");
+    let generated_test_case = format!(
+        "    controller = case matched.controller\n{test_arms}                 end"
+    );
+
     for (path, content) in files.iter_mut() {
         if path.ends_with("main.rb") && content.contains(HARDCODED) {
             *content = content.replace(HARDCODED, &generated);
+        }
+        if path.ends_with("test/test_helper.rb") {
+            patch_harness_dispatch(content, &generated_test_case);
         }
         // Per-request reset for the app's `ActiveSupport::CurrentAttributes`
         // subclass. `Current.instance` memoizes on the CLASS, so without

@@ -506,6 +506,13 @@ fn build_library_class(tm: &TestModule) -> LibraryClass {
     // when the ingest pipeline didn't attach a signature.
     for h in &tm.helpers {
         let mut m = h.clone();
+        // Same route-helper namespacing the test methods get in
+        // `test_to_method_def`. A helper body reaches `session_url`
+        // exactly the way a test body does — campfire's spliced
+        // `SessionTestHelper#sign_in` posts to it — and without the
+        // rewrite the bare Send self-injects to `self.session_url`,
+        // which the test class does not carry.
+        m.body = crate::lower::controller_to_library::rewrites::rewrite_route_helpers(&m.body);
         if m.signature.is_none() {
             let param_pairs: Vec<(Symbol, Ty)> = m
                 .params
