@@ -1737,7 +1737,14 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
         }
     }
 
-    files.extend(sort_files(emit::ruby::emit_spinel(app)));
+    let emitted = sort_files(emit::ruby::emit_spinel(app));
+    // The Makefile's test list names the APP's tests, and only those.
+    // Captured here rather than re-derived from `files` later because by
+    // then the scaffold walk's own `test/models/*_test.rb` (the FRAMEWORK
+    // runtime's tests, which `require "models/article"` and are not
+    // runnable standalone) are indistinguishable from the app's by path.
+    let app_test_stems = app_test_stems(&emitted);
+    files.extend(emitted);
 
     // Emit the ingested support classes (extras/, lib/, app/helpers/,
     // app/mailers/, and non-AR classes under app/models/ — Markdowner,
@@ -1785,7 +1792,71 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // the rename needs to happen for any of them.
     scaffold_readme_to_specimen(&mut files);
     apply_gemfile_trim(&mut files, app, fixture);
+    apply_makefile_test_list(&mut files, &app_test_stems);
     Ok(files)
+}
+
+/// The app's own emitted test stems (`test/models/article_test`, …),
+/// sorted. Input is `emit_spinel`'s output, so framework-runtime tests
+/// that the scaffold walk drops at the same paths are excluded by
+/// construction.
+fn app_test_stems(emitted: &[(String, String)]) -> Vec<String> {
+    let mut stems: Vec<String> = emitted
+        .iter()
+        .filter_map(|(p, _)| {
+            let stem = p.strip_suffix(".rb")?;
+            (stem.ends_with("_test")
+                && (stem.starts_with("test/models/") || stem.starts_with("test/controllers/")))
+            .then(|| stem.to_string())
+        })
+        .collect();
+    stems.sort();
+    stems
+}
+
+/// De-blog the scaffold Makefile's `SPINEL_TESTS` list.
+///
+/// The scaffold hard-codes the blog's four stems, so every other app
+/// shipped a `make spinel-test` / `make cruby-test` that built four
+/// binaries from files it does not have. campfire emits 53 test files
+/// and named none of them.
+///
+/// Derived from what the EMITTER produced rather than from
+/// `app.test_modules`: re-deriving the stems from the source
+/// declarations would be a second copy of `test_file_stem`'s naming
+/// rules — including the namespace flatten
+/// `Rooms::ClosedsControllerTest` → `rooms_closeds_controller` — and a
+/// stale one the first time those rules change.
+fn apply_makefile_test_list(files: &mut [(String, String)], stems: &[String]) {
+    const BLOG_LIST: &str = "SPINEL_TESTS := \\\n\
+                             \ttest/models/article_test \\\n\
+                             \ttest/models/comment_test \\\n\
+                             \ttest/controllers/articles_controller_test \\\n\
+                             \ttest/controllers/comments_controller_test";
+
+    let list = if stems.is_empty() {
+        // An app with no tests still needs the variable defined —
+        // `$(addprefix …)` over an undefined var is empty, and
+        // `spinel-test` then trivially succeeds, which is honest here
+        // (there is nothing to run) in a way it would not be if the
+        // list were merely wrong.
+        "SPINEL_TESTS :=".to_string()
+    } else {
+        format!(
+            "SPINEL_TESTS := \\\n{}",
+            stems
+                .iter()
+                .map(|s| format!("\t{s}"))
+                .collect::<Vec<_>>()
+                .join(" \\\n")
+        )
+    };
+
+    for (path, content) in files.iter_mut() {
+        if path == "Makefile" && content.contains(BLOG_LIST) {
+            *content = content.replace(BLOG_LIST, &list);
+        }
+    }
 }
 
 /// De-blog the scaffold Gemfile: drop gem blocks whose backing app

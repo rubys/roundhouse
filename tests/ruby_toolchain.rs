@@ -34,8 +34,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use roundhouse::analyze::Analyzer;
-use roundhouse::emit::ruby;
 use roundhouse::ingest::ingest_app;
+use roundhouse::project::BuildTarget;
 
 fn scratch_dir(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("roundhouse-ruby-{tag}"))
@@ -58,118 +58,48 @@ fn copy_tree(src: &Path, dst: &Path) {
     }
 }
 
-/// Build the scratch project: runtime/spinel scaffold + emitted spinel
-/// app/. Returns the scratch path.
+/// Build the scratch project: the REAL ruby-target file set, exactly as
+/// `roundhouse --target ruby` ships it.
+///
+/// This used to hand-copy a curated list of runtime files on top of the
+/// scaffold — a third copy of "what the ruby target needs", alongside
+/// `project::ruby_runtime_files` (the one that actually ships) and
+/// `spinel_toolchain.rs`. It drifted, silently, in the direction that
+/// matters least until something depends on it: the harness passed while
+/// the tree it built was missing 20-odd runtime files the shipped tree
+/// has. The moment `test/test_helper.rb` started requiring `main.rb`
+/// (whose chain is complete), the gap surfaced as
+/// `cannot load such file -- runtime/active_support_duration`.
+///
+/// A toolchain test should exercise what ships. `target_files` IS what
+/// ships, so ask it.
 fn generate_project(fixture: &Path, scratch: &Path) {
     if scratch.exists() {
         std::fs::remove_dir_all(scratch).expect("clean scratch");
     }
     std::fs::create_dir_all(scratch).expect("create scratch");
 
-    // Verbatim scaffold (Gemfile, inner Makefile, main.rb, app/views.rb,
-    // app/assets/tailwind.css, server/, tools/, .gitignore). Bundler
-    // resolves against the scratch's own Gemfile via BUNDLE_GEMFILE in
-    // assert_test_passes.
-    let scaffold = Path::new("runtime/spinel/scaffold");
-    copy_tree(scaffold, scratch);
-
-    // Target-specific tests (broadcasts/cgi_io at the top level +
-    // integration/views/models/tools subdirs).
-    copy_tree(Path::new("runtime/spinel/test"), &scratch.join("test"));
-
-    // Runtime: framework Ruby + spinel target primitives, both flat
-    // under scratch/runtime/. The scratch simulates the eventual
-    // Spinel-target layout where runtime/ is a flat tree of framework
-    // code (ruby) + primitive runtime (spinel).
-    let runtime_ruby = Path::new("runtime/ruby");
-    for entry in [
-        "active_record",
-        "action_view",
-        "action_controller",
-        "action_dispatch",
-    ] {
-        let src = runtime_ruby.join(entry);
-        if src.exists() {
-            copy_tree(&src, &scratch.join("runtime").join(entry));
-        }
-    }
-    for entry in [
-        "active_record.rb",
-        "action_view.rb",
-        "action_controller.rb",
-        "action_dispatch.rb",
-        "inflector.rb",
-        "inflector_ext.rb",
-        "json_builder.rb",
-        "action_text.rb",
-        // Narrowing accessors over the request-params tree — the
-        // synthesized `<Resource>Params.from_raw` calls them, and this
-        // harness copies `runtime/spinel/test/`, whose test_helper.rb
-        // requires it. Same hand-maintained list as spinel_toolchain.rs.
-        "params.rb",
-        "params.rbs",
-    ] {
-        std::fs::copy(
-            runtime_ruby.join(entry),
-            scratch.join("runtime").join(entry),
-        )
-        .unwrap_or_else(|_| panic!("copy {entry}"));
-    }
-    let runtime_spinel = Path::new("runtime/spinel");
-    for entry in [
-        "sqlite_adapter.rb",
-        "cgi_io.rb",
-        "broadcasts.rb",
-        "base64.rb",
-        "json.rb",
-        "importmap.rb",
-    ] {
-        std::fs::copy(
-            runtime_spinel.join(entry),
-            scratch.join("runtime").join(entry),
-        )
-        .unwrap_or_else(|_| panic!("copy {entry}"));
-    }
-    // Db primitive surface — the Ruby target gets the gem-backed
-    // variant (`db_cruby.rb` source) materialized as `db.rb` in the
-    // emitted tree so main.rb's `require_relative "runtime/db"`
-    // resolves to the CRuby-runnable shim. The FFI variant
-    // (`runtime/spinel/db.rb`) is reserved for a future Spinel-AOT
-    // target's tree; not shipped to the Ruby target.
-    // Keyed digests behind ActionController::MessageVerifier — the same
-    // per-target swap as db below: this target gets the OpenSSL variant
-    // materialized at the shared path the aggregator requires.
-    std::fs::copy(
-        runtime_spinel.join("message_digest_cruby.rb"),
-        scratch.join("runtime").join("message_digest.rb"),
-    )
-    .expect("copy message_digest_cruby.rb -> runtime/message_digest.rb");
-    std::fs::copy(
-        runtime_spinel.join("db_cruby.rb"),
-        scratch.join("runtime").join("db.rb"),
-    )
-    .expect("copy db_cruby.rb -> runtime/db.rb");
-    // Emit the spinel-shape app/ from real-blog and write into scratch.
-    // emit_spinel writes its own `test/test_helper.rb` from the canonical
-    // at `runtime/spinel/test/`, overwriting the copy laid down above
-    // (same content; harmless).
     let mut app = ingest_app(fixture).expect("ingest");
     Analyzer::new(&app).analyze(&mut app);
-    for file in ruby::emit_spinel(&app) {
-        let path = scratch.join(&file.path);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("mkdir emit parent");
-        }
-        std::fs::write(&path, &file.content).expect("write emitted file");
-    }
+    let files = roundhouse::project::target_files(&app, fixture, BuildTarget::Ruby)
+        .expect("ruby target files");
+    roundhouse::project::write_to_dir(&files, scratch).expect("write ruby target tree");
 
-    // emit_spinel writes test/{models,controllers}/*_test.rb in
-    // real-blog's shape and the spinel runtime now supports the
-    // Rails-idiom surface those tests use (fixture persistence via
-    // FixtureLoader, assert_response/assert_select/
-    // assert_no_difference shims, ActionDispatch::IntegrationTest
-    // parent class, single-arg assert_redirected_to). No overlay —
-    // the emitted tests run as-is.
+    // The framework runtime's OWN tests (broadcasts/cgi_io + the
+    // integration/views/models/tools subdirs) are a harness concern, not
+    // something an app archive ships — overlay them so this job keeps
+    // covering them alongside the app's emitted suite.
+    copy_tree(Path::new("runtime/spinel/test"), &scratch.join("test"));
+
+    // …but not that tree's `test_helper.rb`: the shipped tree already
+    // carries the per-app rendered one (`render_test_helper`), and the
+    // source copy is the blog-shaped stand-in it exists to replace.
+    for file in &files {
+        if file.0 == "test/test_helper.rb" {
+            std::fs::write(scratch.join("test/test_helper.rb"), &file.1)
+                .expect("restore rendered test_helper");
+        }
+    }
 }
 
 /// Run a single test file via `bundle exec ruby -Itest -I.` and assert

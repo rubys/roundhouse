@@ -803,18 +803,36 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
     // rewrite on the way out. No-op for fixtures without ERB.
     library::apply_duration_lowering(&mut fixture_lcs, app);
 
+    // Per-test truncation, shared by `SchemaSetup.reset!` in the test
+    // helper and by each test file's autorun shim below. ONE list: the
+    // two disagreeing was the bug — the shim truncated correctly while
+    // the helper's stale `Article`/`Comment` pair no-opped, so
+    // `reset!` re-loaded every fixture onto rows it had not removed
+    // (campfire: `UNIQUE constraint failed: accounts.singleton_guard`).
+    //
+    // Only models with a backing schema table get an
+    // `_adapter_truncate` (synthesized by push_adapter_methods under
+    // the same gate). Abstract parents like ApplicationRecord have no
+    // table → no truncate method → calling it falls through to
+    // ActiveRecord::Base and raises NotImplementedError. Skip them.
+    let truncate_lines: Vec<String> = app
+        .models
+        .iter()
+        .filter(|m| app.schema.tables.contains_key(&m.table.0))
+        .map(|m| format!("{}._adapter_truncate", m.name.0.as_str()))
+        .collect();
+
     // Test bootstrap. The canonical content (LOAD_PATH wiring,
     // SqliteAdapter setup, RequestDispatch + ActionResponse +
     // SchemaSetup modules) lives at `runtime/spinel/test/test_helper.rb`
     // so the standalone fixture and overlay flows share one source.
-    // The renderer rewrites `FixtureLoader.load_all!` to explicit
-    // `<X>Fixtures._fixtures_load!` calls per-app — see
-    // `render_test_helper`. Emitted unconditionally — every spinel
-    // project carries the helper even when no test files are produced
-    // yet.
+    // The renderer substitutes the three per-app pieces the source
+    // carries blog-shaped stand-ins for — see `render_test_helper`.
+    // Emitted unconditionally — every spinel project carries the helper
+    // even when no test files are produced yet.
     files.push(EmittedFile {
         path: PathBuf::from("test/test_helper.rb"),
-        content: render_test_helper(&fixture_lcs),
+        content: render_test_helper(&fixture_lcs, &truncate_lines),
     });
 
     // Test fixtures — one `<Plural>Fixtures` LibraryClass per YAML file
@@ -875,18 +893,7 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
         // walk that `FixtureLoader.load_all!` uses under CRuby is not
         // reachable under spinel-AOT; materializing the list at emit
         // time is the AOT-friendly analog.
-        let mut reset_lines: Vec<String> = Vec::new();
-        for model in &app.models {
-            // Only models with a backing schema table get an
-            // `_adapter_truncate` (synthesized by push_adapter_methods
-            // under the same gate). Abstract parents like
-            // ApplicationRecord have no table → no truncate method →
-            // calling it falls through to ActiveRecord::Base and
-            // raises NotImplementedError. Skip them here.
-            if app.schema.tables.contains_key(&model.table.0) {
-                reset_lines.push(format!("{}._adapter_truncate", model.name.0.as_str()));
-            }
-        }
+        let mut reset_lines: Vec<String> = truncate_lines.clone();
         for lc in &fixture_lcs {
             reset_lines.push(format!("{}._fixtures_load!", lc.name.0.as_str()));
         }
@@ -1202,7 +1209,39 @@ fn fixture_file_stem(class_name: &str) -> String {
 /// the `Articles → Comments` belongs_to shape; topological ordering
 /// is the principled fix once a fixture set exposes a non-alphabetic
 /// dependency).
-fn render_test_helper(fixture_lcs: &[LibraryClass]) -> String {
+/// Render `test/test_helper.rb` for an emitted app.
+///
+/// The source file at `runtime/spinel/test/test_helper.rb` has to run
+/// verbatim under the source-side `framework_ruby_tests_pass` gate,
+/// where there is no app and no `main.rb` — so it carries a
+/// blog-shaped stand-in for each of the three things that are really
+/// per-app, and each is substituted here. Everything blog-specific in
+/// this harness is one of these three; if a fourth appears, it belongs
+/// here rather than in the source file.
+///
+///   1. the runtime require chain → `require_relative "../main"`
+///   2. `SchemaSetup.reset!`'s truncate list → the app's own models
+///   3. `FixtureLoader.load_all!`'s constant scan → explicit calls
+fn render_test_helper(fixture_lcs: &[LibraryClass], truncate_lines: &[String]) -> String {
+    // (1) The require chain. The source list is a hand-maintained
+    // SUBSET that stopped tracking the runtime as it grew: by
+    // 2026-08-16 `main.rb` required 23 files this did not, so a
+    // harness-loaded app died at `uninitialized constant ActionText`
+    // — a require gap that reads exactly like a modeling gap. main.rb
+    // guards its own boot with `__FILE__ == $PROGRAM_NAME`
+    // specifically so tests can require it, and its order is already
+    // curated and already maintained. Deferring to it means one owner
+    // and no second copy to drift.
+    const REQUIRE_BLOCK: &str = "require_relative \"../runtime/base64\"";
+    const REQUIRE_BLOCK_END: &str = "require_relative \"../app/models\"";
+
+    // (2) Per-test isolation. `_adapter_truncate` exists only on models
+    // with a backing schema table; the caller applies that gate.
+    const TRUNCATE_BLOCK: &str = "    Article._adapter_truncate if defined?(Article)
+    Comment._adapter_truncate if defined?(Comment)";
+
+    // (3) Fixture loading — spinel's AOT model has no runtime constant
+    // table, so the scan is materialized at emit time.
     const SCAN_BLOCK: &str = "    Object.constants.sort.each do |c|
       next unless c.to_s.end_with?(\"Fixtures\")
       mod = Object.const_get(c)
@@ -1216,7 +1255,47 @@ fn render_test_helper(fixture_lcs: &[LibraryClass]) -> String {
         "runtime/spinel/test/test_helper.rb FixtureLoader.load_all! body \
          changed; update SCAN_BLOCK in render_test_helper"
     );
+    debug_assert!(
+        SPINEL_TEST_HELPER.contains(TRUNCATE_BLOCK),
+        "runtime/spinel/test/test_helper.rb SchemaSetup.reset! truncate \
+         list changed; update TRUNCATE_BLOCK in render_test_helper"
+    );
 
+    let mut out = SPINEL_TEST_HELPER.to_string();
+
+    // (1) — replace the whole span, comments included, so no stale
+    // rationale survives next to the line that replaced it.
+    let (Some(start), Some(end)) = (out.find(REQUIRE_BLOCK), out.find(REQUIRE_BLOCK_END)) else {
+        debug_assert!(
+            false,
+            "runtime/spinel/test/test_helper.rb require chain changed; \
+             update REQUIRE_BLOCK/_END in render_test_helper"
+        );
+        return out;
+    };
+    out.replace_range(
+        start..end + REQUIRE_BLOCK_END.len(),
+        "# The app's whole boot chain, in main.rb's curated order. main.rb\n\
+         # guards its own dispatch with `__FILE__ == $PROGRAM_NAME`, so\n\
+         # requiring it here loads the runtime, config/schema, config/routes\n\
+         # and app/models without starting anything. One owner for the\n\
+         # order; a harness-local copy of the list drifts (it did).\n\
+         require_relative \"../main\"",
+    );
+
+    // (2)
+    let truncate = if truncate_lines.is_empty() {
+        String::from("    # no table-backed models")
+    } else {
+        truncate_lines
+            .iter()
+            .map(|line| format!("    {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    out = out.replace(TRUNCATE_BLOCK, &truncate);
+
+    // (3)
     let mut names: Vec<&str> = fixture_lcs.iter().map(|lc| lc.name.0.as_str()).collect();
     names.sort_unstable();
     let explicit = if names.is_empty() {
@@ -1231,8 +1310,7 @@ fn render_test_helper(fixture_lcs: &[LibraryClass]) -> String {
             .collect::<Vec<_>>()
             .join("\n")
     };
-
-    SPINEL_TEST_HELPER.replace(SCAN_BLOCK, &explicit)
+    out.replace(SCAN_BLOCK, &explicit)
 }
 
 /// `ArticleTest` → `article`, `ArticlesControllerTest` →
