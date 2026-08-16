@@ -79,4 +79,65 @@ class ActionControllerCookiesTest < Minitest::Test
     @jar.each { |key, _value| @jar.delete(key) if key == "b" }
     assert_equal({"b" => ""}, @jar.pending)
   end
+
+  # ── values are Strings on the wire ──────────────────────────
+  # A cookie has no type; Rails serializes whatever it is given. The
+  # store is declared Hash[String, String] and every reader treats it
+  # that way, so the coercion belongs at the write, not at each read.
+  # campfire's welcome_controller_test seeds `cookies[:last_room] =
+  # room.id` — an Integer.
+
+  def test_a_non_string_value_is_stored_as_a_string
+    @jar[:last_room] = 7
+    assert_equal "7", @jar["last_room"]
+    assert_equal({"last_room" => "7"}, @jar.pending)
+  end
+
+  # ── signing round-trip ──────────────────────────────────────
+  # The `signed` view is the half campfire's whole session depends on,
+  # and nothing covered it. A verified read must give back exactly what
+  # was written; anything that does not verify must be indistinguishable
+  # from absent.
+
+  def test_signed_write_then_read_round_trips
+    jar = ActionController::CookieJar.new({})
+    jar.signed[:session_token] = "abc123"
+    refute_equal "abc123", jar["session_token"], "the stored cookie must be signed, not plaintext"
+    assert_equal "abc123", jar.signed[:session_token]
+  end
+
+  def test_signed_accepts_the_options_hash_write_form
+    # `cookies.signed.permanent[:k] = {value:, httponly:, same_site:}`
+    # — how campfire's Authentication concern writes the session.
+    jar = ActionController::CookieJar.new({})
+    jar.signed.permanent[:session_token] = { value: "tok", httponly: true, same_site: :lax }
+    assert_equal "tok", jar.signed[:session_token]
+  end
+
+  def test_a_tampered_signed_cookie_reads_as_absent
+    jar = ActionController::CookieJar.new({})
+    jar.signed[:session_token] = "abc123"
+    tampered = ActionController::CookieJar.new({"session_token" => jar["session_token"] + "x"})
+    assert_equal "", tampered.signed[:session_token]
+  end
+
+  def test_a_cookie_signed_for_another_name_does_not_verify
+    jar = ActionController::CookieJar.new({})
+    jar.signed[:session_token] = "abc123"
+    moved = ActionController::CookieJar.new({"other_token" => jar["session_token"]})
+    assert_equal "", moved.signed[:other_token]
+  end
+
+  # ── Rails' own spelling ─────────────────────────────────────
+
+  def test_to_hash_is_the_merged_view
+    @jar["c"] = "3"
+    assert_equal @jar.to_h, @jar.to_hash
+  end
+
+  def test_action_dispatch_cookie_jar_builds_onto_the_same_implementation
+    jar = ActionDispatch::Cookies::CookieJar.build(nil, {"a" => "1"})
+    assert_instance_of ActionController::CookieJar, jar
+    assert_equal "1", jar["a"]
+  end
 end

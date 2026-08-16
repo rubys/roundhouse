@@ -845,7 +845,24 @@ fn every_runtime_method_body_concretely_typed() {
     // Typing the block params would mean claiming env values are
     // Strings, which is the thing that is false. +1 site; ceiling raised
     // 258 -> 259.
-    const CEILING: usize = 259;
+    // 2026-08-16 the cookie jar's WRITE side, wired up for campfire's
+    // integration tests. Three sites, and each is a value this runtime
+    // has no business narrowing:
+    //   - `CookieJar#[]=` / `#raw_set`'s value (2). A cookie is a String
+    //     on the wire and app code writes whatever it has —
+    //     campfire's TrackedRoomVisit writes `@room.id`, an Integer.
+    //     `raw_set` coerces, so the STORE stays String→String and the
+    //     RETURN stays String; only the argument is untyped, which is
+    //     the one thing that is actually true of it. Declaring `String`
+    //     here (what it said before) was the lie that let an Integer
+    //     into the map unremarked.
+    //   - `ActionDispatch::Cookies::CookieJar.build`'s request (1).
+    //     Rails threads a request through for the key generator and for
+    //     host-scoping `domain: :all`; this runtime models neither, so
+    //     the parameter exists to match the documented call shape and is
+    //     never read. Typing it would claim it participates.
+    // +3 sites; ceiling raised 259 -> 262.
+    const CEILING: usize = 262;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

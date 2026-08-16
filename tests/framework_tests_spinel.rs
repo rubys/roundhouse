@@ -88,27 +88,28 @@ fn build_and_run(test_file: &Path, tag: &str) {
     let runtime_ruby = Path::new("runtime/ruby");
     let scratch_runtime = scratch.join("runtime");
     std::fs::create_dir_all(&scratch_runtime).expect("mkdir runtime");
-    for entry in [
-        "active_record",
-        "action_view",
-        "action_controller",
-        "action_dispatch",
-    ] {
-        let src = runtime_ruby.join(entry);
-        if src.exists() {
-            copy_tree(&src, &scratch_runtime.join(entry));
+    // EVERYTHING under `runtime/ruby` except its own `test/` dir — this
+    // was two hand-maintained lists (four subdirs, eight files) and it
+    // had drifted: `rails.rb` was absent, so `cookies.signed`, which
+    // keys off `Rails.application.secret_key_base`, compiled to a call
+    // on `unknown`. The framework runtime is a require graph, not a
+    // curated subset. Subdirectories carry their own `.rbs` sidecars;
+    // a top-level stem's sidecar belongs at `sig/runtime/` (below).
+    let mut stems: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(runtime_ruby).expect("readdir runtime/ruby") {
+        let entry = entry.expect("entry");
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "test" {
+            continue;
+        }
+        if entry.path().is_dir() {
+            copy_tree(&entry.path(), &scratch_runtime.join(&name));
+        } else if name.ends_with(".rb") {
+            stems.push(name);
         }
     }
-    for entry in [
-        "active_record.rb",
-        "action_view.rb",
-        "action_controller.rb",
-        "action_dispatch.rb",
-        "inflector.rb",
-        "inflector_ext.rb",
-        "json_builder.rb",
-        "action_text.rb",
-    ] {
+    stems.sort();
+    for entry in stems.iter().map(|s| s.as_str()) {
         let src = runtime_ruby.join(entry);
         if src.exists() {
             std::fs::copy(&src, scratch_runtime.join(entry))
@@ -162,6 +163,9 @@ require_relative "../runtime/action_view/view_helpers"
 require_relative "../runtime/action_view/view_helpers_ext"
 require_relative "../runtime/action_dispatch/router"
 require_relative "../runtime/action_controller/base"
+require_relative "../runtime/message_digest"
+require_relative "../runtime/rails"
+require_relative "../runtime/action_controller/message_verifier"
 require_relative "../runtime/action_controller/cookies"
 
 class TestBase

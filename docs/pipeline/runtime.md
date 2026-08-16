@@ -201,6 +201,43 @@ record. The framework never does: `form_with` picks its action from
 `persisted?`, and so does `dom_id`. `record.id.nil?` is `false` here
 where Rails says `true`.
 
+### An absent cookie reads as `""`, not `nil`
+
+`cookies[:missing]` and `cookies.signed[:missing]` both answer `""`.
+Rails answers `nil`. The signed jar answers `""` for *anything that does
+not verify* too — a tampered payload, a bad signature, a value signed
+for a different cookie name — which is the same thing Rails does
+semantically (it answers `nil` and the app reads as signed out), just
+spelled with a different empty.
+
+**Why.** The store is `Hash[String, String]`, and a nullable String puts
+every read on spinel's nullable path: `cookies[k].to_s.split(",")`
+yields a null array there, which is how lobsters'
+`remove_unknown_cookies` first met this. Every call site in the corpus
+coerces with `.to_s`, under which `""` and `nil` are identical.
+
+**What depends on it.** `raw` returns `""` as its final fallback, and
+`SignedCookieJar#[]` returns `""` on every verification failure. `delete`
+records a cleared write as `""` rather than a tombstone, so `@out` stays
+a plain String→String map — the harness and both dispatchers read that
+empty as "expire this cookie".
+
+**Where it is visible.** Two shapes, both real:
+
+- `if token = cookies.signed[:session_token]` is truthy when signed out,
+  because `""` is truthy in Ruby. campfire's `SessionLookup` has exactly
+  this, and it still behaves correctly — the branch runs
+  `Session.find_by(token: "")`, which finds nothing — but it costs a
+  query Rails would not make, and a call site that *only* checked
+  presence would be wrong.
+- `assert_nil cookies.signed[:session_token]` fails where Rails passes.
+  campfire's `sessions_controller_test` asserts this after a failed
+  sign-in.
+
+Closing it means making the signed read nullable and auditing every
+`.to_s` coercion above; the truthiness shape is the one that would
+justify it.
+
 ### An enum attribute reader yields the STORED value
 
 `user.status` answers `0` where Rails answers `"active"`. The generated

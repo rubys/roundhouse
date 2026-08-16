@@ -67,36 +67,35 @@ fn build_and_run(test_file: &Path, tag: &str) {
     // `runtime/inflector` for cross-tree refs — works without
     // adjustment. Earlier flat layout (everything under scratch
     // root) didn't match what the emitter expects.
+    // EVERYTHING under `runtime/ruby` except its own `test/` dir. This
+    // was two hand-maintained lists (four subdirs, eight files), and it
+    // had drifted the way every list here has: `rails.rb` was absent, so
+    // `cookies.signed` — which keys off `Rails.application
+    // .secret_key_base` — was a NameError the moment a test touched it.
+    // The framework runtime is a require graph, not a curated subset;
+    // let the graph decide what loads by giving it the whole tree.
     let runtime_ruby = Path::new("runtime/ruby");
     let scratch_runtime = scratch.join("runtime");
     std::fs::create_dir_all(&scratch_runtime).expect("mkdir runtime");
-    for entry in [
-        "active_record",
-        "action_view",
-        "action_controller",
-        "action_dispatch",
-    ] {
-        let src = runtime_ruby.join(entry);
-        if src.exists() {
-            copy_tree(&src, &scratch_runtime.join(entry));
+    for entry in std::fs::read_dir(runtime_ruby).expect("readdir runtime/ruby") {
+        let entry = entry.expect("entry");
+        if entry.file_name() == "test" {
+            continue;
         }
+        copy_tree(&entry.path(), &scratch_runtime.join(entry.file_name()));
     }
-    for entry in [
-        "active_record.rb",
-        "action_view.rb",
-        "action_controller.rb",
-        "action_dispatch.rb",
-        "inflector.rb",
-        "inflector_ext.rb",
-        "json_builder.rb",
-        "action_text.rb",
-    ] {
-        let src = runtime_ruby.join(entry);
-        if src.exists() {
-            std::fs::copy(&src, scratch_runtime.join(entry))
-                .unwrap_or_else(|_| panic!("copy {entry}"));
-        }
-    }
+    // `runtime/ruby/message_digest.rb` does not exist: the keyed-digest
+    // primitive is a two-implementation split (spinel intrinsics vs
+    // OpenSSL) that the emit resolves by RENAMING one half into the
+    // shared path — see `project.rs`'s `message_digest_cruby.rb` →
+    // `runtime/message_digest.rb`. The aggregator requires the shared
+    // name, so a scratch tree that never performs the swap has a hole
+    // exactly where `cookies.signed` reaches. Perform the same swap.
+    std::fs::copy(
+        Path::new("runtime/spinel/message_digest_cruby.rb"),
+        scratch_runtime.join("message_digest.rb"),
+    )
+    .expect("copy message_digest_cruby.rb");
 
     // Test helper: same framework-Ruby version the source-side
     // `framework_ruby_tests_pass` gate uses, but with FRAMEWORK_RUBY

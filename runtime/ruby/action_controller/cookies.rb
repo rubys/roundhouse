@@ -76,9 +76,20 @@ module ActionController
       ""
     end
 
+    # `.to_s` on the way in, because a cookie value is a String on the
+    # wire and nowhere else — Rails serializes the same way. Without it
+    # `cookies.permanent[:last_room] = @room.id` (campfire's
+    # TrackedRoomVisit, and the test that seeds the same cookie) puts an
+    # Integer into a map the strict typer and every reader here treat as
+    # String→String.
+    #
+    # Returns the STORED string, not the argument. Ruby evaluates `x[k] =
+    # v` to `v` by language rule whatever the method returns, so nothing
+    # observes the difference — and it keeps this pair off the untyped
+    # ledger, which a `-> untyped` return would have joined for no gain.
     def raw_set(key, value)
-      @out[key.to_s] = value
-      value
+      @out[key.to_s] = value.to_s
+      @out[key.to_s]
     end
 
     # Removing a cookie is recorded as an empty write; the dispatcher emits a
@@ -112,6 +123,14 @@ module ActionController
     # concrete, which the fully-typed runtime gate requires.)
     def to_h
       @inbound.merge(@out)
+    end
+
+    # Rails spells the same thing `to_hash` on the jar, and that is the
+    # name app code reaches for — campfire's `SessionTestHelper
+    # #parsed_cookies` rebuilds a jar from `cookies.to_hash`. An alias,
+    # not a second implementation.
+    def to_hash
+      to_h
     end
 
     # Iterate the merged view, as Rails' CookieJar does (it is Enumerable
@@ -203,6 +222,32 @@ module ActionController
     def cookies=(value)
       @cookies = value
       value
+    end
+  end
+end
+
+# Rails puts the jar at `ActionDispatch::Cookies::CookieJar` and reaches
+# it from a controller as `cookies`; this runtime named the class for the
+# layer that owns the accessor instead. Both names are Rails API — app
+# code that only ever writes `cookies` never sees the difference, but
+# code that rebuilds a jar around a request does:
+#
+#   ActionDispatch::Cookies::CookieJar.build(request, cookies.to_hash)
+#
+# is how campfire's SessionTestHelper re-reads a response's signed
+# cookies. So the ActionDispatch spelling exists as a constructor onto
+# the one implementation above, not as a second jar.
+#
+# `request` is accepted and ignored. Rails threads it through for the key
+# generator and the host-scoping of `domain: :all`; neither is modeled
+# here (the verifier keys straight off `Rails.application.secret_key_base`),
+# and dropping the parameter would break the documented call shape.
+module ActionDispatch
+  module Cookies
+    class CookieJar
+      def self.build(request, cookies)
+        ActionController::CookieJar.new(cookies)
+      end
     end
   end
 end

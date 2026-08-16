@@ -5,14 +5,20 @@ module ActionController
   class CookieJar
     def initialize: (?Hash[String, String] inbound) -> void
     def []: (untyped key) -> String
-    def []=: (untyped key, String value) -> String
+    # The written value is untyped and the STORE is String: `raw_set`
+    # coerces, because a cookie is a String on the wire and campfire
+    # writes `cookies.permanent[:last_room] = @room.id`, an Integer.
+    # Returning the stored String rather than the argument keeps the
+    # return concrete; Ruby's `x[k] = v` evaluates to `v` regardless.
+    def []=: (untyped key, untyped value) -> String
     def permanent: () -> ActionController::CookieJar
     def signed: () -> ActionController::SignedCookieJar
     def raw: (untyped key) -> String
-    def raw_set: (untyped key, String value) -> String
+    def raw_set: (untyped key, untyped value) -> String
     def delete: (untyped key) -> String
     def pending: () -> Hash[String, String]
     def to_h: () -> Hash[String, String]
+    def to_hash: () -> Hash[String, String]
     def each: () { (String, String) -> void } -> ActionController::CookieJar
   end
 
@@ -28,5 +34,15 @@ module ActionController
   class Base
     def cookies: () -> ActionController::CookieJar
     def cookies=: (ActionController::CookieJar value) -> ActionController::CookieJar
+  end
+end
+
+# Rails' own name for the jar, as a constructor onto the implementation
+# above — see the comment at the foot of cookies.rb.
+module ActionDispatch
+  module Cookies
+    class CookieJar
+      def self.build: (untyped request, Hash[String, String] cookies) -> ActionController::CookieJar
+    end
   end
 end

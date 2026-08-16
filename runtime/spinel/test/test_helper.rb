@@ -194,13 +194,20 @@ end
 # ActionDispatch::IntegrationTest. Test classes that need to exercise
 # controller actions extend this module to get get/post/patch/delete.
 class ActionResponse
-  attr_reader :status, :body, :location, :flash
+  # `cookies` is THIS response's writes — the set the dispatcher would
+  # serialize as Set-Cookie — not the browser's whole jar. Same split
+  # Rails draws, and the same one `CookieJar#pending` vs `#to_h` draws.
+  # Handed back as a jar rather than the raw Hash so a Symbol subscript
+  # (`response.cookies[:last_room]`, which is what tests write) hits the
+  # same key normalization every other read goes through.
+  attr_reader :status, :body, :location, :flash, :cookies
 
-  def initialize(status:, body:, location:, flash:)
+  def initialize(status:, body:, location:, flash:, cookies:)
     @status   = status
     @body     = body
     @location = location
     @flash    = flash
+    @cookies  = cookies
   end
 
   def redirect?
@@ -293,6 +300,25 @@ module RequestDispatch
     dispatch_request("DELETE", path, params)
   end
 
+  # The browser. An integration test's requests share cookie state the
+  # way a real client does — `sign_in` POSTs, and every later request in
+  # that test carries the session cookie — and a test may seed one before
+  # the first request (campfire's `cookies[:last_room] = room.id`).
+  # Per-test lifetime, like `@__session` / `@__flash` beside it: the shim
+  # builds a fresh test instance per test method, so a fresh jar comes
+  # with it.
+  def cookies
+    @__cookies = ActionController::CookieJar.new if @__cookies.nil?
+    @__cookies
+  end
+
+  # The request the last dispatch built, as Rails' integration tests
+  # expose it. campfire rebuilds a jar around it to read back a signed
+  # cookie (`ActionDispatch::Cookies::CookieJar.build(request, …)`).
+  def request
+    @__request
+  end
+
   def dispatch_request(method, path, params)
     require_relative "../config/routes"
     # Controllers load on demand (the CRuby target's routes.rb no longer
@@ -332,6 +358,12 @@ module RequestDispatch
     controller.params  = merged
     controller.session = @__session ||= ActionDispatch::Session.new
     controller.flash   = @__flash   ||= ActionDispatch::Flash.new
+    # The inbound jar is the browser's whole state — what the test has
+    # accumulated from earlier responses PLUS anything it seeded itself,
+    # which is exactly `to_h`. A fresh jar per request, so `pending`
+    # holds only this response's writes, matching what both production
+    # dispatchers drain (main.rb's `controller.cookies.pending` loop).
+    controller.cookies = ActionController::CookieJar.new(cookies.to_h)
     controller.request_method = method
     controller.request_path   = path
     # The request object, built the way the dispatcher builds it (see
@@ -362,15 +394,39 @@ module RequestDispatch
     # controller alongside — mirrors the dispatcher's pair.
     ActionController::Current.request = controller.request
     ActionController::Current.controller = controller
+    @__request = controller.request
     controller.process_action(matched.action)
     @__flash = controller.flash
+    # Fold this response's Set-Cookie writes back into the browser.
+    @__cookies = ActionController::CookieJar.new(
+      accept_cookies(cookies.to_h, controller.cookies.pending)
+    )
     @__response = ActionResponse.new(
       status:   controller.status,
       body:     controller.body,
       location: controller.location,
       flash:    controller.flash,
+      cookies:  ActionController::CookieJar.new(controller.cookies.pending),
     )
     @__response
+  end
+
+  # What a browser does with a response's Set-Cookie lines: take the
+  # writes over what it was already holding, and DROP the ones that came
+  # back cleared. `CookieJar#delete` records a cleared write as "" (the
+  # jar has no tombstone type — see runtime/ruby/action_controller/
+  # cookies.rb), and both production dispatchers turn that into an
+  # expiring Set-Cookie. Keeping the key here instead would leave
+  # `cookies[:session_token].present?` true after a sign-out, which is
+  # precisely the assertion campfire's sessions_controller_test makes.
+  #
+  # `merge` then delete, rather than accumulating into a `{}` literal:
+  # a bare-Hash seed types its values Untyped, and both operands here
+  # are already Hash[String, String].
+  def accept_cookies(carried, pending)
+    merged = carried.merge(pending)
+    pending.each { |k, v| merged.delete(k) if v == "" }
+    merged
   end
 
   # Recursively stringify Hash keys. Test fixtures pass Symbol-keyed

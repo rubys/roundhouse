@@ -55,6 +55,28 @@ require "action_controller/base"
 # strict tables. Required from the helper rather than inline in the test
 # because the test-file emit drops inline requires.
 require "action_controller/cookies"
+# What `cookies.signed` signs WITH. cookies.rb names it but does not
+# require it — the production aggregator (runtime/ruby/action_controller
+# .rb) supplies it, and this helper is a second list of the same thing.
+# Without it the signed half of the jar is a NameError the moment a test
+# touches it, which is exactly how far the coverage went until campfire
+# needed a session cookie.
+require "action_controller/message_verifier"
+# …and what it keys off: `Rails.application.secret_key_base`.
+require "rails"
+# The keyed digest the verifier signs with. `message_digest` has no
+# `runtime/ruby` half at all: it is a two-implementation split (spinel
+# intrinsics vs OpenSSL) that the emit resolves by RENAMING the CRuby
+# half into the shared path. So the name to require depends on which
+# layout this helper is running under — the emitted/scratch tree, where
+# the swap has already happened, or the source tree, where only the
+# pre-swap file exists. Try the post-swap name first; both define the
+# same `MessageDigest`.
+begin
+  require "message_digest"
+rescue LoadError
+  require "spinel/message_digest_cruby"
+end
 require "inflector"
 # Action Text's value layer (`Content`, `Attachment`). Same reason as
 # cookies above: required from the helper, not inline in the test,
