@@ -210,10 +210,18 @@ if room.nil?
 end
 
 walk.get room
+
+# Turbo's Accept header, not the browser's. A form inside a Turbo page
+# submits with `text/vnd.turbo-stream.html` first, and campfire's
+# messages#create answers ONLY that format — there is no
+# `create.html.erb`, deliberately, because the reply to posting a message
+# is the turbo-stream that appends it. Asking for text/html here gets a
+# MissingTemplate that Rails would raise too, so the header is part of
+# reproducing the request, not a workaround.
 walk.post "#{room}/messages", {
   "message[body]" => "hello from the walk",
   "message[client_message_id]" => "walk-1",
-}
+}, accept: "text/vnd.turbo-stream.html, text/html, application/xhtml+xml"
 
 crashed = walk.any_crashes?
 puts "\n#{crashed ? "\e[1;31mwalk stopped\e[0m" : "\e[1;32mwalk complete\e[0m"} — " \
