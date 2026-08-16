@@ -203,6 +203,14 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
         "lib",
         "app/lib",
         "app/jobs",
+        // `app/channels` is here for the half of a channel that needs no
+        // socket. `UnreadRoomsChannel.stream_name_for(user_id)` is a
+        // plain class method, and the MODEL doing the broadcasting is
+        // what calls it — so leaving channels uningested left a live
+        // call site pointing at nothing. The subscription half
+        // (`subscribed` / `stream_from`) is not dispatched yet; its
+        // bases live in `runtime/action_cable.rb` so these files load.
+        "app/channels",
         "app/mailers",
         "app/services",
         "app/workers",

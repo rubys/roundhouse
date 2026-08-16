@@ -3747,6 +3747,13 @@ fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {
     if raw == "ActiveJob::Base" {
         return Some("runtime/active_job".to_string());
     }
+    // `ApplicationCable::Channel < ActionCable::Channel::Base` and its
+    // Connection twin — the two roots of an ingested `app/channels/`
+    // tree. Both are a SUPERCLASS reference, which is load-time, so a
+    // missing require is not a lazy failure: the file does not define.
+    if raw == "ActionCable::Channel::Base" || raw == "ActionCable::Connection::Base" {
+        return Some("runtime/action_cable".to_string());
+    }
     if app.models.iter().any(|m| m.name.0.as_str() == raw)
         || app.library_classes.iter().any(|lc| lc.name.0.as_str() == raw)
     {
@@ -3873,6 +3880,11 @@ fn require_path_for_body_const(
         // resolve there. Add entries as lowerings introduce new ones;
         // unknown idents silently drop.
         "Broadcasts" => Some("runtime/broadcasts".to_string()),
+        // `ActionCable.server.broadcast(stream, payload)` — the
+        // low-level publish API, and the two bases `app/channels/*.rb`
+        // subclasses. Sibling of Broadcasts, not a replacement: the
+        // Turbo Stream family still goes through `Broadcasts.append`.
+        "ActionCable" => Some("runtime/action_cable".to_string()),
         // `ActionText::Content` / `ActionText::Attachment` — the value
         // half of Action Text. `ActionText::RichText` is NOT here: it
         // is a lowered model and resolves under `app/models/` like any

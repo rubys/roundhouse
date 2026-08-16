@@ -296,6 +296,36 @@ class Array
   end
 end
 
+# GAP, NEW and arriving WITH a gain: `app/channels/` is ingested now, so
+# `UnreadRoomsChannel.stream_name_for` — which a MODEL calls on the
+# broadcast path — is real emitted code instead of a stub. The cost is
+# that RoomMessagesChannel `include`s turbo-rails' stream-name module at
+# LOAD time, and that module is not modeled.
+#
+# Its two methods are the SIGNING half of Turbo's stream names, and
+# implementing them honestly means deciding what a signed stream name is
+# for us: `turbo_stream_from` emits `<base64>--unsigned` today and
+# Cable's `decode_stream` reads it back the same way. Wiring a real HMAC
+# through both ends is its own stone, so this stands in until then —
+# `verified_stream_name_from_params` raises rather than returning
+# something plausible, since a stream name nobody verified is exactly the
+# thing RoomMessagesChannel exists to prevent.
+module Turbo
+  module Streams
+    module StreamName
+      module ClassMethods
+        def verified_stream_name_from_params
+          raise NotImplementedError, "Turbo::Streams::StreamName is not modeled"
+        end
+
+        def signed_stream_name(streamables)
+          raise NotImplementedError, "Turbo::Streams::StreamName is not modeled"
+        end
+      end
+    end
+  end
+end
+
 # GAP: the `sentry-ruby` gem. campfire's message helpers rescue every
 # Exception and report it before falling back to an "unrenderable"
 # partial, so the constant is reached the moment ANY message render
