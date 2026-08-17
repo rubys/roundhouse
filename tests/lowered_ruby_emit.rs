@@ -92,10 +92,14 @@ fn article_renders_schema_scaffold_methods() {
         "def attributes",
         "def [](name)",
         "def []=(name, value)",
-        // `update` now takes the typed `<Resource>Params` (`p`) when a
-        // controller permits the model. Hash-shaped `update(attrs)`
-        // remains for models without a permit declaration.
-        "def update(p)",
+        // `update` / `update!` are Rails-shaped on EVERY model: an
+        // attribute Hash over the writable surface. The typed
+        // per-permit-list assignment is a separate, separately-named
+        // method (asserted just below) — `<Resource>Params` is a
+        // mass-assignment boundary and `update` is not.
+        "def update(attrs)",
+        "def update!(attrs)",
+        "def update_from_article_params(p)",
     ] {
         assert!(src.contains(m), "missing `{m}`:\n{src}");
     }
@@ -1056,9 +1060,14 @@ fn controllers_params_helper_use_sites_call_typed_factory() {
         src.contains("Article.from_params(self.article_params)"),
         "expected `Article.from_params(article_params)`; got:\n{src}",
     );
+    // The typed update is named for the permit list it is sized to, and
+    // the controller site — which the lowerer already owns — is
+    // retargeted to it. Plain `update` stays Rails' attribute-Hash
+    // contract, which model code and tests call with keys no permit
+    // list contains.
     assert!(
-        src.contains("@article.update(self.article_params)"),
-        "expected `update(article_params)` (typed); got:\n{src}",
+        src.contains("@article.update_from_article_params(self.article_params)"),
+        "expected `update_from_article_params(article_params)` (typed); got:\n{src}",
     );
     // Legacy forms must not appear.
     assert!(

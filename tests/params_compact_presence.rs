@@ -14,8 +14,12 @@
 //! that, which is what made the bug visible.
 //!
 //! Fix: EVERY params class is presence-aware — a `<field>_provided` Bool
-//! slot beside each value slot, which `update` / `update!` /
-//! `from_params` guard on. Unconditional, because the conflation was
+//! slot beside each value slot, which the TYPED assignment methods
+//! (`update_from_<class>` / `…!` / `from_params`) guard on.
+//! (Plain `update` / `update!` take an attribute Hash, Rails' own
+//! contract, and answer the same question with `attrs.key?` — a Hash can
+//! simply omit a key, which is the fact a params object needs a separate
+//! slot to record.) Unconditional, because the conflation was
 //! never specific to `.compact`: any `@record.update(<x>_params)` on a
 //! form that omits a field assigned `""` where Rails assigns nothing.
 //! `.compact` is then just dropped from the chain.
@@ -124,7 +128,12 @@ fn the_value_slots_stay_plain_strings() {
 #[test]
 fn update_guards_on_provided_instead_of_assigning_blanks() {
     let app = app_with(".compact");
-    let body = model_method(&app, "update");
+    // The TYPED update — the one a controller's `@user.update(user_params)`
+    // is rewritten to. Plain `update` takes an attribute Hash (Rails'
+    // own contract) and answers the same question with `attrs.key?`;
+    // `<field>_provided` is what a params object carries instead, since
+    // its slots always exist.
+    let body = model_method(&app, "update_from_user_params");
     assert!(body.contains("name_provided"), "expected a presence guard: {body}");
     assert!(body.contains("bio_provided"), "expected a presence guard: {body}");
     // `from_params` needs the same guard — Rails' `new(attrs)` never
@@ -169,7 +178,7 @@ fn presence_tracking_does_not_wait_for_compact() {
     let names: Vec<&str> = lc.methods.iter().map(|m| m.name.as_str()).collect();
     assert!(names.contains(&"name_provided"), "got {names:?}");
     assert!(names.contains(&"bio_provided"), "got {names:?}");
-    let body = model_method(&app, "update");
+    let body = model_method(&app, "update_from_user_params");
     assert!(
         body.contains("name_provided") && !body.contains("nil?"),
         "the presence flag replaces the nil convention outright: {body}"

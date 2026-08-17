@@ -552,6 +552,34 @@ fn build_methods(
     let shadows = route_helper_shadows(controller, all_controllers);
 
     let (publics_all, privs) = split_public_private_actions(controller);
+    // Params helpers resolve through Ruby's MRO: `Rooms::OpensController`
+    // writes `@room.update! room_params`, and `room_params` is defined on
+    // `RoomsController`. The helper→spec map behind
+    // `rewrite_update_to_typed_variant` / `rewrite_model_new_to_from_params`
+    // sees only the actions handed to it, so a subclass call site matched
+    // nothing and kept a shape whose argument type no longer fit.
+    //
+    // Deliberately NOT folded into `privs`: that list is also what gets
+    // EMITTED (`privs_kept`) and what filter inlining resolves against,
+    // so merging inherited helpers there would emit a second copy of
+    // `room_params` on every subclass. Own actions first (a subclass may
+    // override), then ancestors nearest-first, deduped by name — Ruby's
+    // own lookup order.
+    let params_privs: Vec<Action> = {
+        let chain = ancestor_chain(controller, all_controllers);
+        let mut seen: std::collections::HashSet<Symbol> =
+            privs.iter().map(|a| a.name.clone()).collect();
+        let mut out = privs.clone();
+        for c in chain.iter().rev() {
+            let (pubs, ancestor_privs) = split_public_private_actions(c);
+            for a in ancestor_privs.iter().chain(pubs.iter()) {
+                if a.name.as_str().ends_with("_params") && seen.insert(a.name.clone()) {
+                    out.push(a.clone());
+                }
+            }
+        }
+        out
+    };
     // With route info, a public method is a routable action only if a route
     // reaches it; the rest are helper/filter methods that must keep their
     // return value (no synthesized render) — emitted like privates. Without
@@ -642,14 +670,14 @@ fn build_methods(
 
     for a in &publics_inlined {
         methods.push(action_to_method(
-            a, controller, &privs, /*is_public=*/ true, params_specs, json_actions,
+            a, controller, &privs, &params_privs, /*is_public=*/ true, params_specs, json_actions,
             turbo_stream_actions, view_ivars,
             partials, format_breadth, &shadows,
         ));
     }
     for a in &privs_kept {
         methods.push(action_to_method(
-            a, controller, &privs, /*is_public=*/ false, params_specs, json_actions,
+            a, controller, &privs, &params_privs, /*is_public=*/ false, params_specs, json_actions,
             turbo_stream_actions, view_ivars,
             partials, format_breadth, &shadows,
         ));
@@ -660,7 +688,7 @@ fn build_methods(
     // the filter-chain work, not here.)
     for a in &helper_publics {
         methods.push(action_to_method(
-            a, controller, &privs, /*is_public=*/ false, params_specs, json_actions,
+            a, controller, &privs, &params_privs, /*is_public=*/ false, params_specs, json_actions,
             turbo_stream_actions, view_ivars,
             partials, format_breadth, &shadows,
         ));
@@ -1264,6 +1292,9 @@ fn action_to_method(
     a: &Action,
     controller: &Controller,
     privs: &[Action],
+    // `privs` plus every inherited `*_params` helper — the MRO-correct
+    // list the params-helper rewrites resolve against.
+    params_privs: &[Action],
     is_public: bool,
     params_specs: &ParamsSpecs,
     json_actions: &std::collections::HashSet<Symbol>,
@@ -1300,6 +1331,7 @@ fn action_to_method(
         controller,
         a.name.as_str(),
         privs,
+        params_privs,
         is_public,
         params_specs,
         &variants,
@@ -1411,6 +1443,7 @@ fn lower_action_body(
     controller: &Controller,
     action_name: &str,
     privs: &[Action],
+    params_privs: &[Action],
     is_public: bool,
     params_specs: &ParamsSpecs,
     variants: &[&str],
@@ -1454,13 +1487,14 @@ fn lower_action_body(
     // BEFORE the assoc-through-parent rewrite, so the build path picks
     // up the typed factory shape rather than the legacy attrs-Hash.
     let with_from_params =
-        rewrite_model_new_to_from_params(&with_redirects, privs, params_specs);
-    // `@user.update user_params` where that helper's list isn't the
-    // resource's canonical one — retarget to the matching typed method.
+        rewrite_model_new_to_from_params(&with_redirects, params_privs, params_specs);
+    // `@user.update user_params` — retarget to the typed method sized to
+    // that helper's permit list. Plain `update` is Rails' attribute-Hash
+    // contract and no longer takes a params object.
     let with_from_params =
-        rewrite_update_to_typed_variant(&with_from_params, privs, params_specs);
+        rewrite_update_to_typed_variant(&with_from_params, params_privs, params_specs);
     let with_assoc =
-        rewrite_assoc_through_parent_typed(&with_from_params, privs, params_specs);
+        rewrite_assoc_through_parent_typed(&with_from_params, params_privs, params_specs);
     // The legacy chain rewrites (`rewrite_drop_includes` +
     // `rewrite_order_to_sort_by`) used to land here. They've moved
     // to a post-typing pass in the per-method loop so the Arel pass

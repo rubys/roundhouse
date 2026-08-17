@@ -14,9 +14,12 @@
 //! mass-assignment Rails' `permit` exists to prevent.
 //!
 //! So: one class per distinct `(resource, fields)` pair. The controller
-//! the resource is named for keeps the unqualified name (and with it the
-//! model's plain `from_params` / `update`); the others are qualified by
-//! their declaring controller and get their own model methods.
+//! the resource is named for keeps the unqualified CLASS name (and with
+//! it the model's plain `from_params` factory); the others are qualified
+//! by their declaring controller. The typed ASSIGNMENT method is named
+//! for its permit list in every case — `update` / `update!` are Rails'
+//! attribute-Hash contract over the model's whole writable surface, a
+//! different and wider thing than any one mass-assignment boundary.
 
 use roundhouse::dialect::LibraryClassOrigin;
 use roundhouse::ident::Symbol;
@@ -188,7 +191,8 @@ fn each_helper_returns_and_builds_its_own_params_class() {
         .contains("UsersProfilesUserParams"));
 
     // `User.new(user_params)` in the canonical controller keeps the plain
-    // factory; a non-canonical `update` retargets to its typed variant.
+    // factory; every `update` retargets to the typed variant for its
+    // own list.
     assert!(body_of("UsersController", "create").contains("from_params"));
     assert!(body_of("Users::ProfilesController", "update")
         .contains("update_from_users_profiles_user_params"));
@@ -217,13 +221,27 @@ fn the_model_gets_one_typed_surface_per_permit_list() {
             .collect()
     };
 
-    // Plain surface is sized to the canonical list — including the
-    // `email_address` the collapse used to drop.
+    // The canonical list keeps the plain FACTORY name (nothing else
+    // competes for it) — including the `email_address` the collapse
+    // used to drop.
     assert_eq!(assigns("from_params"), vec!["name", "email_address"]);
-    assert_eq!(assigns("update"), vec!["name", "email_address"]);
-    assert_eq!(assigns("update!"), vec!["name", "email_address"]);
+    // …but not the plain `update`. That name belongs to Rails'
+    // attribute-Hash contract, which is sized to the model's WRITABLE
+    // surface, not to any one mass-assignment boundary — so it assigns
+    // every column, `bio` and `webhook_url` included.
+    assert_eq!(
+        assigns("update"),
+        vec!["name", "email_address", "bio", "webhook_url"]
+    );
+    assert_eq!(
+        assigns("update!"),
+        vec!["name", "email_address", "bio", "webhook_url"]
+    );
 
-    // One named pair per non-canonical list, each sized to its own.
+    // One named typed pair per permit list, canonical included, each
+    // sized to its own.
+    assert_eq!(assigns("update_from_user_params"), vec!["name", "email_address"]);
+    assert_eq!(assigns("update_from_user_params!"), vec!["name", "email_address"]);
     assert_eq!(assigns("from_accounts_bots_user_params"), vec!["name", "webhook_url"]);
     assert_eq!(
         assigns("update_from_accounts_bots_user_params"),
@@ -273,10 +291,17 @@ end
         lower_models_with_registry_and_params(&app.models, &app.schema, vec![], &specs);
     let model = lcs.iter().find(|lc| lc.name.0.as_str() == "Article").expect("Article lowered");
     let names: Vec<&str> = model.methods.iter().map(|m| m.name.as_str()).collect();
+    // The factory keeps the unqualified name — nothing else competes
+    // for it, so a single-list app sees no churn there.
     assert!(names.contains(&"from_params"));
+    assert!(!names.iter().any(|n| n.starts_with("from_articles_")));
+    // `update` / `update!` exist on EVERY model as Rails' attribute-Hash
+    // contract, and the typed assignment is named for its permit list
+    // whether or not the resource has more than one. Making the name
+    // depend on how many lists exist would mean adding a second permit
+    // list somewhere in the app silently renames a method the first
+    // one's controller calls.
     assert!(names.contains(&"update"));
-    assert!(
-        !names.iter().any(|n| n.starts_with("update_from_")),
-        "no variant methods when the resource has one permit list"
-    );
+    assert!(names.contains(&"update!"));
+    assert!(names.contains(&"update_from_article_params"));
 }

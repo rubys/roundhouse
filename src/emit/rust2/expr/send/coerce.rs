@@ -462,6 +462,13 @@ pub(crate) fn cast_via_value_for_union(value: &Expr, target_ty: &crate::ty::Ty) 
             Ty::Int => Some(format!("({raw}).as_i64()")),
             Ty::Float => Some(format!("({raw}).as_f64()")),
             Ty::Bool => Some(format!("({raw}).as_bool()")),
+            // A `serde_json::Value` cannot BE a `DateTime<Utc>`, so the
+            // only honest reading is the stored text form — which is
+            // exactly what `parse_db_time` accepts, and it already
+            // returns the Option this arm wants.
+            Ty::Time => {
+                Some(format!("({raw}).as_str().and_then(crate::rh_datetime::parse_db_time)"))
+            }
             _ => None,
         };
     }
@@ -470,6 +477,15 @@ pub(crate) fn cast_via_value_for_union(value: &Expr, target_ty: &crate::ty::Ty) 
         Ty::Int => Some(format!("({raw}).as_i64().unwrap()")),
         Ty::Float => Some(format!("({raw}).as_f64().unwrap()")),
         Ty::Bool => Some(format!("({raw}).as_bool().unwrap()")),
+        // Same reading as the nilable arm, unwrapped. Reached from the
+        // Hash-shaped `update`'s temporal normalize
+        // (`format_db_time(Cast(attrs[:created_at], Time))`), which is
+        // nil-guarded at the IR level — a `Value` that is neither a
+        // string nor db-form time is a caller error, and a checked cast
+        // is allowed to say so.
+        Ty::Time => Some(format!(
+            "crate::rh_datetime::parse_db_time(({raw}).as_str().unwrap()).unwrap()"
+        )),
         _ => None,
     }
 }
@@ -512,12 +528,21 @@ pub(crate) fn coerce_arg_for_field_ty(arg: &Expr, field_ty: &crate::ty::Ty) -> S
                 Ty::Int => Some("as_i64()"),
                 Ty::Float => Some("as_f64()"),
                 Ty::Bool => Some("as_bool()"),
+                // A `serde_json::Value` can only carry a time as its
+                // stored TEXT form, which is exactly what
+                // `parse_db_time` reads — and it already returns the
+                // Option this arm wants.
+                Ty::Time => Some("as_str().and_then(crate::rh_datetime::parse_db_time)"),
                 _ => None,
             },
             Ty::Str | Ty::Sym => Some("as_str().unwrap().to_string()"),
             Ty::Int => Some("as_i64().unwrap()"),
             Ty::Float => Some("as_f64().unwrap()"),
             Ty::Bool => Some("as_bool().unwrap()"),
+            // Same reading, unwrapped — reached from the Hash-shaped
+            // `update`'s temporal normalize, which is nil-guarded at the
+            // IR level.
+            Ty::Time => Some("as_str().and_then(crate::rh_datetime::parse_db_time).unwrap()"),
             _ => None,
         };
         if let Some(c) = coercion {

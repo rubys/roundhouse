@@ -21,7 +21,6 @@ pub(super) fn push_schema_methods(
     model: &Model,
     models: &[Model],
     table: &Table,
-    permitted: Option<(&ClassId, &[Symbol])>,
 ) {
     let owner = &model.name;
 
@@ -230,28 +229,29 @@ pub(super) fn push_schema_methods(
     // def []=(name, value); case name; when :col then @col = value; ...; end; end
     methods.push(synth_index_write(owner, table));
 
-    // def update(<arg>); per-permitted-field setter; save; end
+    // def update(attrs) / update!(attrs) — Rails-shaped: an attribute
+    // Hash over the model's writable surface, saved.
     //
-    // When a controller permits this model's resource, `update` takes the
-    // typed `<Resource>Params` and assigns each permitted field via
-    // `attr_writer` (no `.key?` check needed — `*Params` always carries
-    // every permitted field). When no spec applies (rare; model not
-    // exposed by any controller), falls back to the Hash-shaped variant
-    // for backward compatibility.
-    methods.push(match permitted {
-        Some((params_class, fields)) => synth_update_typed(
-            owner, fields, table, params_class, Symbol::from("update"),
-        ),
-        None => synth_update(owner, table),
-    });
-
-    // `update!` — same typed assignment, `save!` tail (raises on
-    // invalid via Base). Only the typed variant: the corpus bang
-    // sites all go through permitted resources.
-    if let Some((params_class, fields)) = permitted {
-        methods.push(synth_update_typed(
-            owner, fields, table, params_class, Symbol::from("update!"),
-        ));
+    // These used to be MONOMORPHIZED onto the canonical `<Resource>Params`
+    // whenever any controller permitted this resource, which conflated two
+    // different contracts. `<Resource>Params` is a MASS-ASSIGNMENT
+    // BOUNDARY: deliberately narrower than the model's writers, and one
+    // resource can carry several mutually-unrelated lists. `update` is not
+    // that boundary — Rails guards at the params layer precisely so
+    // `update` doesn't have to — and the model's own code calls it with
+    // keys no permit list contains (campfire's `User#deactivate` writes
+    // `status:`, which no controller permits, with a Symbol into an
+    // integer enum). No `from_attrs` bridge can close that gap: the slots
+    // don't exist, and the values are Strings, Symbols, Integers, nils,
+    // Times and Hashes where a params slot is `Str`.
+    //
+    // So the typed assignment keeps its own name for every permit list
+    // (`update_from_<class>` via `push_update_typed_variants`), the
+    // controller call sites the lowerer already rewrites are retargeted
+    // there (`rewrite_update_to_typed_variant`), and `update` stays
+    // Rails-shaped for everyone else.
+    for bang in [false, true] {
+        methods.push(synth_update_hash(owner, model, table, bang));
     }
 
     // def fill_timestamps(creating); now = ActiveSupport.db_now; @updated_at = now; @created_at = now if creating; end
@@ -2272,8 +2272,70 @@ fn synth_update_typed(
     }
 }
 
-fn synth_update(owner: &ClassId, table: &Table) -> MethodDef {
+/// Rails-shaped `update(attrs)` / `update!(attrs)` — an attribute Hash
+/// over the model's WRITABLE surface, saved.
+///
+/// The field list is [`writable_field_set`], not `table.columns`: Rails'
+/// `update` assigns through public writers, and a model's writers are
+/// wider than its schema. campfire's `users(:david).update(password:
+/// "…")` writes a `has_secure_password` virtual with no column behind
+/// it; `Message.update(body: …)` writes a `has_rich_text` attr whose
+/// markup lives in another table. Iterating columns alone did not fail
+/// on those — it silently DROPPED them, so `assert users(:david).valid?`
+/// passed having tested nothing. A hollow green is worse than the red,
+/// which is why an unwritable key is now a diagnostic (see
+/// `report_unwritable_update_keys`) rather than a quiet no-op.
+///
+/// Every statement shape here is lifted verbatim from
+/// [`synth_initialize`] — the same `attrs[:k] || <default>` slot write,
+/// the same two-step temporal normalize through `format_db_time`, the
+/// same `Cast`-to-target `.id` write for a `belongs_to` object key. That
+/// is deliberate: those shapes are the ones all eleven targets already
+/// compile for mass assignment, so `update` introduces no new emit
+/// surface. The one addition is the enclosing `attrs.key?(:k)` guard —
+/// `update` is PATCH-shaped, and a key the caller omitted must not
+/// overwrite the stored value with a type default.
+///
+/// `update!` differs only in the tail: `save!` (Base raises on invalid)
+/// and an explicit `self` read, so the call's value keeps the concrete
+/// model type instead of `save!`'s Base-typed return.
+fn synth_update_hash(
+    owner: &ClassId,
+    model: &Model,
+    table: &Table,
+    bang: bool,
+) -> MethodDef {
     let attrs = Symbol::from("attrs");
+
+    let lookup = |field: &Symbol| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref(attrs.clone())),
+                method: Symbol::from("[]"),
+                args: vec![lit_sym(field.clone())],
+                block: None,
+                parenthesized: false,
+            },
+        )
+    };
+    // `if attrs.key?(:field) then <body> end` — the PATCH guard.
+    let when_present = |field: &Symbol, body: Expr| {
+        let cond = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref(attrs.clone())),
+                method: Symbol::from("key?"),
+                args: vec![lit_sym(field.clone())],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::If { cond, then_branch: body, else_branch: nil_lit() },
+        )
+    };
 
     let mut stmts: Vec<Expr> = Vec::new();
 
@@ -2281,67 +2343,202 @@ fn synth_update(owner: &ClassId, table: &Table) -> MethodDef {
         if col.name.as_str() == "id" {
             continue;
         }
-
-        let cond = Expr::new(
+        let slot_ty = super::ty_of_column_slot(col);
+        // `Cast` to the column's SLOT type is the bridge from the
+        // untyped attrs value on every strict target — the same node,
+        // for the same reason, that `synth_index_write` wraps its
+        // `value` param in (`self[:title] = v`). No `|| <default>`
+        // fallback: this sits inside `attrs.key?`, so the value is
+        // present by construction, and a nullable slot has somewhere to
+        // put an explicit nil — which is what makes
+        // `update!(unread_at: nil)` clear the column rather than stamp
+        // a type zero.
+        //
+        // `synth_initialize`'s `attrs[:col] || <default>` shape is NOT
+        // reusable here: rust2 compiles the constructor through a
+        // let-binding path that coerces hash reads on its own, and
+        // outside it a bare `serde_json::Value` reaches the typed setter
+        // unconverted. The Hash-shaped `update` had never been compiled
+        // by a strict target before — every corpus model carried a
+        // permit list, so only the typed variant existed — which is how
+        // that gap stayed invisible.
+        let slot_value = Expr::new(
             Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(var_ref(attrs.clone())),
-                method: Symbol::from("key?"),
-                args: vec![lit_sym(col.name.clone())],
-                block: None,
-                parenthesized: true,
-            },
+            ExprNode::Cast { value: lookup(&col.name), target_ty: slot_ty.clone() },
         );
-
-        let assign_call = Expr::new(
+        let raw_assign = Expr::new(
             Span::synthetic(),
             ExprNode::Send {
                 recv: Some(self_ref()),
                 method: col_storage_setter(col),
-                args: vec![Expr::new(
-                    Span::synthetic(),
-                    ExprNode::Send {
-                        recv: Some(var_ref(attrs.clone())),
-                        method: Symbol::from("[]"),
-                        args: vec![lit_sym(col.name.clone())],
-                        block: None,
-                        parenthesized: false,
-                    },
-                )],
+                args: vec![slot_value],
                 block: None,
                 parenthesized: false,
             },
         );
 
-        stmts.push(Expr::new(
+        stmts.push(when_present(&col.name, raw_assign));
+        if is_temporal_col(col) {
+            // Normalize a native `Time` into the raw ISO-text slot
+            // through `format_db_time`, the same funnel
+            // `synth_initialize` uses. `update! last_active_at:
+            // Time.now` is the campfire shape, and without this the slot
+            // keeps a Time whose `to_s` is not Rails' storage form.
+            //
+            // A SIBLING statement, not nested inside the `key?` guard.
+            // Its own nil check already subsumes the key check — an
+            // absent key reads nil — and flat statements are what every
+            // other synthesizer here emits. Nesting an `If` in
+            // then-position is a shape the python emitter renders on one
+            // line (`if a: if b: …`), which is a syntax error.
+            let time_value = Expr::new(
+                Span::synthetic(),
+                ExprNode::Cast { value: lookup(&col.name), target_ty: Ty::Time },
+            );
+            let normalized = with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Send {
+                        recv: Some(Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
+                        )),
+                        method: Symbol::from("format_db_time"),
+                        args: vec![time_value],
+                        block: None,
+                        parenthesized: true,
+                    },
+                ),
+                Ty::Str,
+            );
+            let normalize_assign = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(self_ref()),
+                    method: col_storage_setter(col),
+                    args: vec![normalized],
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+            // The nil test rides the CAST value, not the raw hash read:
+            // `nil?` on an untyped hash value is a known rust2 gap (it
+            // renders `is_none()`, and `serde_json::Value` answers
+            // `is_null()`), while the cast has already produced the
+            // slot's own nilable type.
+            let cast_for_guard = Expr::new(
+                Span::synthetic(),
+                ExprNode::Cast { value: lookup(&col.name), target_ty: slot_ty.clone() },
+            );
+            stmts.push(guard_unless_nil(cast_for_guard, normalize_assign));
+        }
+    }
+
+    // Association-object keys (`membership.update!(room: other_room)`)
+    // are DELIBERATELY not assignable here — the name is claimed so it
+    // can't fall through to the virtual-writer loop, and nothing is
+    // emitted for it.
+    //
+    // `synth_initialize` does support them, reading `attrs[:room].id`
+    // through a `Cast` to the target class. That only compiles because
+    // rust2 routes the constructor through a let-binding path that
+    // strips the statement: an attrs Hash is `HashMap<String,
+    // serde_json::Value>` on every strict target, and a model instance
+    // cannot be a `serde_json::Value`. Emitting it from an ordinary
+    // method makes the impossibility a compile error instead of a
+    // silently-dropped statement.
+    //
+    // The cost is nil — `update(room_id: 3)` is the spelling that works
+    // everywhere and goes through the column loop above. Closing the gap
+    // properly means giving the attrs Hash a value type that can carry a
+    // record, which is a change to the whole mass-assignment seam
+    // (initialize included), not to `update` alone.
+    let assoc_names: std::collections::BTreeSet<Symbol> = model
+        .associations()
+        .into_iter()
+        .filter_map(|a| match a {
+            Association::BelongsTo { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+
+    // Everything else the model can be assigned through: `attr_accessor`
+    // / `attr_writer` virtuals, `typed_store` attrs, the Attributes API,
+    // `has_secure_password`'s plaintext pair, `has_rich_text` attrs.
+    // Each has a synthesized `<attr>=` writer; route through it, exactly
+    // as `synth_initialize` routes the password and rich-text keys.
+    let rich_text: std::collections::BTreeSet<Symbol> =
+        crate::lower::rich_text::rich_text_attrs(model).into_iter().map(|(_s, a)| a).collect();
+    let mut virtuals = super::writable_field_set(model, table);
+    // Hand-written `def <field>=` in the model body. `writable_field_set`
+    // deliberately leaves these out — its callers hold a field name and
+    // ask `model_defines_writer` per-field — but `update` has to
+    // ENUMERATE, and a user-defined writer is exactly as assignable as a
+    // synthesized one. lobsters' `def category_name=` is the shape, and
+    // `permit_writer_filter` is the test that holds this pair together.
+    for item in &model.body {
+        let crate::dialect::ModelBodyItem::Method { method, .. } = item else { continue };
+        if method.receiver != MethodReceiver::Instance {
+            continue;
+        }
+        if let Some(base) = method.name.as_str().strip_suffix('=') {
+            virtuals.insert(Symbol::from(base));
+        }
+    }
+    for field in virtuals {
+        if table.columns.iter().any(|c| c.name == field) || assoc_names.contains(&field) {
+            continue;
+        }
+        // `Cast` to `Str` bridges the untyped attrs value into the
+        // rich-text writer's String parameter on strict targets — the
+        // one place `synth_initialize` needs it, and for the same
+        // reason.
+        let value = if rich_text.contains(&field) {
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Cast { value: lookup(&field), target_ty: Ty::Str },
+            )
+        } else {
+            lookup(&field)
+        };
+        let assign = Expr::new(
             Span::synthetic(),
-            ExprNode::If {
-                cond,
-                then_branch: assign_call,
-                else_branch: nil_lit(),
+            ExprNode::Send {
+                recv: Some(self_ref()),
+                method: Symbol::from(format!("{}=", field.as_str())),
+                args: vec![value],
+                block: None,
+                parenthesized: false,
             },
-        ));
+        );
+        stmts.push(guard_unless_nil(lookup(&field), assign));
     }
 
     stmts.push(Expr::new(
         Span::synthetic(),
         ExprNode::Send {
             recv: None,
-            method: Symbol::from("save"),
+            method: Symbol::from(if bang { "save!" } else { "save" }),
             args: Vec::new(),
             block: None,
             parenthesized: false,
         },
     ));
+    if bang {
+        // Explicit `self` read — `save!` is declared on Base and returns
+        // Base, so without this the call's value types as the base class
+        // and every downstream typed read fails on a strict target.
+        stmts.push(Expr::new(Span::synthetic(), ExprNode::SelfRef));
+    }
 
     let attrs_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let ret_ty = if bang { Ty::Class { id: owner.clone(), args: vec![] } } else { Ty::Bool };
     MethodDef {
-        name: Symbol::from("update"),
+        name: Symbol::from(if bang { "update!" } else { "update" }),
         receiver: MethodReceiver::Instance,
         params: vec![Param::positional(attrs.clone())],
         body: seq(stmts),
-        // save returns Bool.
-        signature: Some(fn_sig(vec![(attrs, attrs_ty)], Ty::Bool)),
+        signature: Some(fn_sig(vec![(attrs, attrs_ty)], ret_ty)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,

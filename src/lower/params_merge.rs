@@ -248,10 +248,19 @@ fn scan_bindings(app: &App, specs: &ParamsSpecs) -> HashMap<BindKey, Binding> {
 
     // EVERY call site has to be seen, not just the ones that could bind
     // — a site passing a plain Hash is exactly what proves the parameter
-    // ISN'T uniformly a params object. Coverage mirrors
-    // `for_each_hook_body` (models, library classes, controllers, seeds);
-    // only controller actions can name a `<x>_params` helper, and only
-    // their own controller's.
+    // ISN'T uniformly a params object. Coverage is models, library
+    // classes, controllers, seeds AND THE TEST MODULES; only controller
+    // actions can name a `<x>_params` helper, and only their own
+    // controller's.
+    //
+    // The test modules were the omission that proved the rule. campfire's
+    // `FirstRun.create!(user_params)` is called once from
+    // `FirstRunsController` with the helper and once from
+    // `first_run_test.rb` with a literal Hash — with only the first site
+    // in the census this concluded `Spec`, rewrote the body to
+    // `User.from_params(…)`, and the test died on `undefined method
+    // 'name_provided' for an instance of Hash`. An app's own suite is
+    // full of exactly the plain-Hash sites this census exists to find.
     for controller in &app.controllers {
         let actions: Vec<crate::dialect::Action> = controller.actions().cloned().collect();
         let helpers = helper_spec_map(&actions, specs);
@@ -289,6 +298,17 @@ fn scan_bindings(app: &App, specs: &ParamsSpecs) -> HashMap<BindKey, Binding> {
     }
     if let Some(seeds) = &app.seeds {
         scan_body(seeds, &none, &assoc, &mut seen);
+    }
+    for tm in &app.test_modules {
+        if let Some(setup) = &tm.setup {
+            scan_body(setup, &none, &assoc, &mut seen);
+        }
+        for t in &tm.tests {
+            scan_body(&t.body, &none, &assoc, &mut seen);
+        }
+        for m in &tm.helpers {
+            scan_body(&m.body, &none, &assoc, &mut seen);
+        }
     }
 
     let user = user_class_methods(app);

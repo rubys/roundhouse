@@ -743,19 +743,13 @@ fn build_methods(
         // A controller's permit list is wider than the model's writer
         // surface (lobsters permits lookup keys like `tag[tag_name]`
         // that no writer backs) — filter to assignable names before
-        // sizing `update`/`from_params`. The `<Resource>Params` class
-        // itself keeps every permitted field (registration above uses
-        // the unfiltered spec); only the assignment synthesis narrows.
+        // sizing `from_params`. The `<Resource>Params` class itself keeps
+        // every permitted field (registration above uses the unfiltered
+        // spec); only the assignment synthesis narrows.
         let writable_fields =
             permitted_fields.map(|fields| writable_permit_fields(model, table, fields));
         let permitted_fields = writable_fields.as_deref();
-        push_schema_methods(
-            &mut methods,
-            model,
-            models,
-            table,
-            permitted_fields.and_then(|f| canonical.map(|s| (&s.class_id, f))),
-        );
+        push_schema_methods(&mut methods, model, models, table);
         // Per-model Level-3 adapter primitives (`_adapter_find_by_id`, etc.)
         // — typed methods that go directly from SQL composition to typed
         // model instances over the `Sqlite` primitive surface. See
@@ -771,12 +765,21 @@ fn build_methods(
                 crate::lower::controller_to_library::params::model_from_params_name(spec),
             );
         }
-        // One typed factory + update pair per NON-canonical permit list
-        // of this resource. campfire permits `:user` three different
-        // ways; `Users::ProfilesController`'s list (which adds `:bio`)
-        // can't reach a plain `update` sized to another list's fields.
+        // One typed update pair per permit list of this resource —
+        // INCLUDING the canonical one, which no longer claims the plain
+        // `update` / `update!` names (those are Rails-shaped now; see
+        // `synth_update_hash`). Two lists for one resource are unrelated
+        // types on every strict target, so each needs its own method
+        // name and `rewrite_update_to_typed_variant` retargets the
+        // controller call site to it. The typed factory (`from_params`)
+        // still keeps the plain name for the canonical list, since
+        // nothing else competes for it.
         for spec in params_specs.for_resource(&resource) {
             if spec.is_canonical {
+                let writable = writable_permit_fields(model, table, &spec.fields);
+                self::schema::push_update_typed_variants(
+                    &mut methods, &model.name, &writable, table, spec,
+                );
                 continue;
             }
             let writable = writable_permit_fields(model, table, &spec.fields);

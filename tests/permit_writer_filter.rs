@@ -11,6 +11,11 @@
 //! `has_secure_password`'s plaintext pair, and user-defined
 //! `def <field>=`. Everything else drops (with a `lower_residue`
 //! warning at emit time).
+//!
+//! The same set sizes the Rails-shaped `update(attrs)` — it is not
+//! filtering a permit list there, it IS the field list, so the two must
+//! not drift. A name with no writer must be unassignable through either
+//! door.
 
 use roundhouse::ident::Symbol;
 use roundhouse::ingest::ingest_app_from_tree;

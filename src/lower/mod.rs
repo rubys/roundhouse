@@ -67,6 +67,7 @@ pub mod arel_attribute;
 pub mod exclude_predicate;
 pub mod including;
 pub mod enum_symbols;
+pub mod update_writer_check;
 pub mod route_format_suffix;
 pub mod config_reader;
 pub mod exists_conditions;
@@ -214,6 +215,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // folding that turns a `where` hash into SQL, so the folded literal
     // is the integer the column stores.
     ("enum_symbols", &[]),
+    // Read-only ledger: a `self.update(k: …)` whose `k` no writer backs.
+    // Rewrites nothing, so it has no ordering constraint of its own —
+    // it just has to see the final tree.
+    ("update_writer_check", &[]),
     // `x.inquiry` / `x.<name>?` → equality against the label; total
     // rewrite of a name no other pass produces or consumes.
     ("inquiry", &[]),
@@ -377,6 +382,12 @@ pub fn apply_post_analyze_lowerings(
     ran!("route_format_suffix");
     enum_symbols::apply_enum_symbol_lowering(app);
     ran!("enum_symbols");
+    // Read-only ledger, no rewrite — but it must run AFTER
+    // `enum_symbols` so a label that pass already translated isn't
+    // mistaken for anything, and after every pass that could introduce
+    // an `update` site.
+    update_writer_check::apply_update_writer_check(app);
+    ran!("update_writer_check");
     inquiry::apply_inquiry_lowering(app);
     ran!("inquiry");
     exists_conditions::apply_exists_conditions_lowering(app);

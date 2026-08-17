@@ -1279,14 +1279,16 @@ pub(super) fn rewrite_model_new_to_from_params(
 
 // ---------------------------------------------------------------------------
 // `<record>.update(<resource>_params)` → `<record>.update_from_<class>(...)`
-// when the helper's permit list is NOT the resource's canonical one.
+// for EVERY permit list.
 //
-// The model's typed `update` / `update!` are sized to one permit list —
-// the canonical `<Resource>Params`. A controller permitting the same
-// resource differently (campfire's `Users::ProfilesController` adds
-// `:bio` to the four fields `UsersController` permits) gets its own
-// params class, so its `update` call needs the matching typed method.
-// Canonical call sites are left exactly as they were.
+// The model's plain `update` / `update!` take an attribute Hash (Rails'
+// own contract). A controller handing one a typed params object is the
+// site the lowerer already owns, so it is the site that moves: each
+// permit list has a typed update sized to exactly its fields, and this
+// rewrite points the call at it by the helper's name. Two lists for one
+// resource (campfire's `Users::ProfilesController` adds `:bio` to the
+// four fields `UsersController` permits) are unrelated types on every
+// strict target and could never have shared a method anyway.
 // ---------------------------------------------------------------------------
 
 pub(super) fn rewrite_update_to_typed_variant(
@@ -1313,9 +1315,6 @@ pub(super) fn rewrite_update_to_typed_variant(
             return None;
         }
         let spec = match_params_helper(&args[0], &helper_specs)?;
-        if spec.is_canonical {
-            return None;
-        }
         Some(Expr::new(
             e.span,
             ExprNode::Send {

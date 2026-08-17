@@ -462,14 +462,14 @@ pub fn model_create_from_params_name(spec: &ParamsSpec, bang: bool) -> Symbol {
 /// Same rule for the typed `update` / `update!` pair.
 pub fn model_update_name(spec: &ParamsSpec, bang: bool) -> Symbol {
     let bang = if bang { "!" } else { "" };
-    if spec.is_canonical {
-        Symbol::from(format!("update{bang}"))
-    } else {
-        Symbol::from(format!(
-            "update_from_{}{bang}",
-            crate::naming::snake_case(spec.class_id.0.as_str())
-        ))
-    }
+    // EVERY permit list gets a qualified name, canonical included. The
+    // plain `update` / `update!` belong to Rails' attribute-Hash
+    // contract, which is a different (wider, differently-typed) surface
+    // than any mass-assignment boundary — see `synth_update_hash`.
+    Symbol::from(format!(
+        "update_from_{}{bang}",
+        crate::naming::snake_case(spec.class_id.0.as_str())
+    ))
 }
 
 /// First permit list in `expr`, in the same pre-order the collector
