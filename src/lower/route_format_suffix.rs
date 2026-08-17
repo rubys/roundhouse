@@ -91,7 +91,12 @@ fn rewrite(expr: &mut Expr, helpers: &std::collections::HashSet<String>) {
         args.pop();
     }
     let span = expr.span;
-    let call = Expr::new(span, std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] }));
+    // The rebuilt call keeps the ORIGINAL node's type. `Expr::new` seeds
+    // `ty: None`, and dropping a type an earlier pass established makes
+    // the call an `unresolved_type` in the ledger — a diagnostic about
+    // this rewrite rather than about the app.
+    let mut call = Expr::new(span, std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] }));
+    call.ty = expr.ty.clone().or(Some(crate::ty::Ty::Str));
     // A literal folds into the text; anything else interpolates, which
     // is where `to_s` on a Symbol happens.
     let suffix = match &*format_value.node {

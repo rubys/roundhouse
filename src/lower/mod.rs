@@ -66,6 +66,7 @@ pub mod request_index;
 pub mod arel_attribute;
 pub mod exclude_predicate;
 pub mod including;
+pub mod enum_symbols;
 pub mod route_format_suffix;
 pub mod config_reader;
 pub mod exists_conditions;
@@ -111,6 +112,7 @@ pub use request_index::apply_request_index_lowering;
 pub use arel_attribute::apply_arel_attribute_lowering;
 pub use exclude_predicate::apply_exclude_predicate_lowering;
 pub use including::apply_including_lowering;
+pub use enum_symbols::apply_enum_symbol_lowering;
 pub use route_format_suffix::apply_route_format_suffix_lowering;
 pub use config_reader::apply_config_reader_lowering;
 pub use exists_conditions::apply_exists_conditions_lowering;
@@ -208,6 +210,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // two do not overlap (`format` is on NON_QUERY_OPTIONS) but the
     // survey should see the shape this pass leaves behind.
     ("route_format_suffix", &[]),
+    // `where(role: :bot)` → `where(role: 2)`. Must run BEFORE the arel
+    // folding that turns a `where` hash into SQL, so the folded literal
+    // is the integer the column stores.
+    ("enum_symbols", &[]),
     // `x.inquiry` / `x.<name>?` → equality against the label; total
     // rewrite of a name no other pass produces or consumes.
     ("inquiry", &[]),
@@ -369,6 +375,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("including");
     route_format_suffix::apply_route_format_suffix_lowering(app);
     ran!("route_format_suffix");
+    enum_symbols::apply_enum_symbol_lowering(app);
+    ran!("enum_symbols");
     inquiry::apply_inquiry_lowering(app);
     ran!("inquiry");
     exists_conditions::apply_exists_conditions_lowering(app);
