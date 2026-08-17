@@ -1145,8 +1145,24 @@ fn rbs_only_from_funcs(
 /// `FixtureLoader.load_all!`, which walks `Object.constants`
 /// dynamically — not reachable under spinel-AOT.
 ///
-/// No `rescue` — an assertion failure raises uncaught and spinel
-/// exits nonzero, which `make spinel-test` consumes as a fail signal.
+/// EVERY test runs, and a failing one does not take the rest of the
+/// file with it. The straight-line form this replaced reported only a
+/// file's FIRST failing test, which made the campfire suite 52
+/// booleans over 240 tests — a file one wall from green and a file ten
+/// walls from green were the same row, so a first-error histogram
+/// ranked work by what fails FIRST rather than by what BLOCKS (two
+/// consecutive mis-ranked probes; see the coverage-ladder notes).
+///
+/// Both contracts of the old shape survive:
+///   * an all-green run prints EXACTLY `<Class>: <N> tests passed`,
+///     which is what `project.rs`'s `.expected` snapshots pin;
+///   * any failure still exits nonzero (the trailing `raise`), which
+///     `make spinel-test` consumes as a fail signal.
+///
+/// `setup` runs inside the guard (minitest reports a setup error
+/// against the test); `teardown` runs outside it so it fires whether
+/// or not the body raised, and a raise from teardown itself still
+/// aborts the file rather than being swallowed.
 fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
     let class_name = lc.name.0.as_str();
     let test_methods: Vec<&str> = lc
@@ -1160,6 +1176,12 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
     let mut s = String::from(
         "\n# Spinel AOT autorun shim — see emit/ruby.rs::render_autorun_shim.\n",
     );
+    // An Integer counter and per-failure `puts`, deliberately: no
+    // array accumulator and no block, so the shim leans on nothing
+    // beyond `begin/rescue`, `+`, `to_s` and string concatenation —
+    // the surface spinel-AOT already compiles in lowered test bodies
+    // (`assert_raises`) and `runtime/spinel`.
+    writeln!(s, "__failed = 0").unwrap();
     for tm in &test_methods {
         // Zero-arg `.new` — mirrors Crystal's `@type.new.test_X` shape.
         // Spinel doesn't propagate inherited `Minitest::Test#
@@ -1167,20 +1189,34 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
         // used by any assertion the lowered tests reach, so dropping
         // it is safe.
         writeln!(s, "__t = {class_name}.new").unwrap();
+        writeln!(s, "begin").unwrap();
+        // Truncate + fixture-load INSIDE the guard: they are this
+        // shim's spelling of minitest's fixture setup, and a fixture
+        // that fails to load is a per-test error in Rails. Outside
+        // the guard it would abort the file and hide every test
+        // behind it — the exact failure mode this shim exists to end.
         for line in reset_lines {
-            s.push_str(line);
-            s.push('\n');
+            writeln!(s, "  {line}").unwrap();
         }
-        writeln!(s, "__t.setup").unwrap();
-        writeln!(s, "__t.{tm}").unwrap();
+        writeln!(s, "  __t.setup").unwrap();
+        writeln!(s, "  __t.{tm}").unwrap();
+        writeln!(s, "rescue => __e").unwrap();
+        writeln!(s, "  __failed = __failed + 1").unwrap();
+        writeln!(s, "  puts {:?} + __e.message", format!("FAIL {class_name}#{tm}: ")).unwrap();
+        writeln!(s, "end").unwrap();
         writeln!(s, "__t.teardown").unwrap();
     }
+    let n = test_methods.len();
+    writeln!(s, "if __failed > 0").unwrap();
     writeln!(
         s,
-        "puts {:?}",
-        format!("{class_name}: {} tests passed", test_methods.len())
+        "  raise {:?} + __failed.to_s + {:?}",
+        format!("{class_name}: "),
+        format!(" of {n} tests failed")
     )
     .unwrap();
+    writeln!(s, "end").unwrap();
+    writeln!(s, "puts {:?}", format!("{class_name}: {n} tests passed")).unwrap();
     s
 }
 

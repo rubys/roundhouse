@@ -30,7 +30,8 @@
 #   --reuse DIR  Skip transpiling; run against an emit DIR prepared earlier.
 #   --no-stubs   Splice nothing (see scripts/campfire-walk's note).
 #   --filter PAT Only run test files whose path matches PAT (grep -E).
-#   --tally FILE Write the `STATUS|file|first-error` table to FILE.
+#   --tally FILE Write the `STATUS|file|passed|total|first-error` table
+#                to FILE.
 #
 # Exit status is 0 when the run completes, whatever the tally — this
 # reports a number, it does not gate on one. A CI rung that pins a floor
@@ -139,21 +140,53 @@ step "running ${#TESTS[@]} test files"
 cd "$OUT"
 pass=0
 fail=0
+tests_total=0
+tests_pass=0
 table=""
 for t in "${TESTS[@]}"; do
+    # The emitted autorun shim (emit/ruby.rs::render_autorun_shim) runs
+    # EVERY test and prints one `FAIL <Class>#<test>: <msg>` line per
+    # failure, so a file's score is tests, not a boolean. The
+    # denominator comes from the shim's own `__t.test_*` calls, which
+    # exist even when the file dies before running any of them.
+    n=$(grep -cE '^  __t\.test_' "$t.rb" || true)
+    tests_total=$((tests_total + n))
     if out=$(SECRET_KEY_BASE="${SECRET_KEY_BASE:-campfire-suite-secret}" \
              ruby -Itest "$t.rb" 2>&1); then
         pass=$((pass + 1))
-        printf '\033[1;32m  ok  \033[0m %s\n' "$t"
-        table+="PASS|$t|"$'\n'
+        tests_pass=$((tests_pass + n))
+        printf '\033[1;32m  ok  \033[0m %-56s %d/%d\n' "$t" "$n" "$n"
+        table+="PASS|$t|$n|$n|"$'\n'
     else
         fail=$((fail + 1))
-        # First non-indented line of the failure — the raise site plus its
-        # message. Trailing backtrace frames are noise in a 52-line table.
-        why=$(printf '%s\n' "$out" | grep -vE '^\s|^$' | head -1 |
-              sed "s|$OUT/||" | cut -c1-160)
-        printf '\033[1;31m FAIL \033[0m %s\n         %s\n' "$t" "$why"
-        table+="FAIL|$t|$why"$'\n'
+        # The shim's own `<Class>: X of N tests failed` is the
+        # authoritative count — it can only be reached once every test
+        # has run. Its absence means the file ABORTED (a load error, or
+        # a raise from teardown — the two places left outside the
+        # per-test guard), and nothing ran that we can credit.
+        # `|| true` on every pipeline below: `set -o pipefail` turns
+        # `head -1`'s early exit into a SIGPIPE failure for the
+        # upstream grep, which `set -e` then treats as fatal — it ends
+        # the run mid-suite with a partial tally and no summary.
+        nf=$(printf '%s\n' "$out" |
+             sed -nE 's/.*: ([0-9]+) of [0-9]+ tests failed.*/\1/p' | head -1 || true)
+        if [[ -n "$nf" ]]; then
+            ok=$((n - nf))
+        else
+            ok=0
+        fi
+        tests_pass=$((tests_pass + ok))
+        # The FIRST per-test failure, which is the wall to work on. The
+        # trailing `<Class>: X of N tests failed` raise is a summary,
+        # not a diagnosis, so it is only the fallback — and for an
+        # aborted file it is absent and the load error shows instead.
+        why=$(printf '%s\n' "$out" | grep -E '^FAIL ' | head -1 | cut -c1-160 || true)
+        if [[ -z "$why" ]]; then
+            why=$(printf '%s\n' "$out" | grep -vE '^\s|^$' | head -1 |
+                  sed "s|$OUT/||" | cut -c1-160 || true)
+        fi
+        printf '\033[1;31m FAIL \033[0m %-56s %d/%d\n         %s\n' "$t" "$ok" "$n" "$why"
+        table+="FAIL|$t|$ok|$n|$why"$'\n'
     fi
 done
 
@@ -163,4 +196,4 @@ if [[ -n "$TALLY" ]]; then
     echo "tally written to $TALLY"
 fi
 
-step "$pass of $((pass + fail)) test files pass"
+step "$tests_pass of $tests_total tests pass ($pass of $((pass + fail)) files green)"
