@@ -540,7 +540,19 @@ fn untyped_subexpressions_with_rbs_baseline() {
     //
     // campfire's `Room has_many :memberships do def revoke_from(users)
     // destroy_by user: users end end` is the caller. Headroom left: 6.
-    const CEILING: usize = 685;
+    // 2026-08-17: 685 -> 687 — `Relation#exists?(id)` and `Base#touch`,
+    // two methods `src/catalog/mod.rs` has declared for as long as it
+    // has existed with nothing implementing them. ONE node each, and
+    // both are the same RBS-parameter shape as every other entry here:
+    // `exists?`'s optional `id` parameter read (the `@wheres <<`
+    // interpolation that consumes it), and `touch`'s `fill_timestamps
+    // (false)` self-send. Neither method delegates to anything new.
+    // Nothing that was typed became untyped.
+    //
+    // This ceiling moved on EVERY runtime/ruby method this session, and
+    // `cargo test` is the only gate that reads it — budget ~1-3 nodes
+    // per added method before touching the number here.
+    const CEILING: usize = 687;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions exceeds ceiling of {CEILING}.\n\
