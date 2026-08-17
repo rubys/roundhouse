@@ -365,6 +365,28 @@ effects. The corpus caller (campfire's `Room has_many :memberships do
 def grant_to … end end`) inserts Membership rows whose callbacks are
 inert.
 
+### A `has_secure_token` column fills at CREATE, not at initialize
+
+Rails 7.1+ defaults `has_secure_token` to `on: :initialize`, so
+`Session.new.token` already holds a token. `lower::secure_token`
+expands the macro into a `before_create` default instead, so the token
+is readable from the moment the record is SAVED. Every corpus call site
+reads it after a save, which is what a session token is for. `on:
+:create` is exactly this lowering, and `on: :initialize` gets it too —
+keeping half of Rails' own default would be the worse divergence.
+
+The generator is `SecureRandom.alphanumeric(<length>)`, not Rails'
+`SecureRandom.base58`: base58 is not core Ruby (it arrives with
+`active_support/core_ext/securerandom`, which the emitted app does not
+load), while `alphanumeric` is core and already carried by every target.
+Same length, different alphabet.
+
+**Why it matters that this expands at all.** A dropped
+`has_secure_token` is not an absent method, it is a wrong column value:
+this runtime defaults a string slot to `""`, so every unsaved record
+carries the same token and the second INSERT dies on the table's UNIQUE
+index.
+
 ## Related docs
 
 - [`emit.md`](emit.md) — the universal IR contract; the consumers of

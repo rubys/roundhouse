@@ -550,6 +550,18 @@ fn report_unclaimed_unknowns(model: &Model) {
         if name == "has_secure_password" {
             continue;
         }
+        // `has_secure_token` — claimed by lower::secure_token, which
+        // expands the bare/`length:`/`on:` forms it can honor. Asked
+        // by span rather than re-derived, same as has_json/
+        // has_rich_text below: an option it declines to expand keeps
+        // warning.
+        if name == "has_secure_token"
+            && crate::lower::secure_token::secure_token_decls(&model.body)
+                .iter()
+                .any(|d| d.span == expr.span)
+        {
+            continue;
+        }
         // `has_json :col, key: <literal>, …` — claimed by
         // lower::has_json's shared method synthesis. A declaration
         // carrying a schema entry that pass cannot expand (a
@@ -863,6 +875,11 @@ fn build_methods(
     push_user_methods(&mut methods, model);
     push_dom_prefix_method(&mut methods, model);
     push_broadcasts_methods(&mut methods, model);
+    // `has_secure_token` — the token default folds into the
+    // `before_create` hook, so it runs BEFORE `push_callback_methods`:
+    // the fold appends, and the macro's assignment belongs ahead of a
+    // callback the model declares below it (Rails' declaration order).
+    crate::lower::secure_token::push_secure_token_methods(&mut methods, model);
     push_callback_methods(&mut methods, model);
 
     // File-grain catch-all (mirrors view_to_library's
