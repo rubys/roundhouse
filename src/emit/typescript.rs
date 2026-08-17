@@ -2465,16 +2465,28 @@ pub(super) fn js_library_function(
             ),
         };
 
+    // Defaults ride through, the same way `js_class_member` carries
+    // them: `name: T = <default>` when the param declares one, plain
+    // `name?: T` otherwise. Dropping the default binds an omitted arg
+    // to `undefined` instead of the value the source wrote — a route
+    // helper defaulting `format` to `""` rendered `/articles/1.` +
+    // `String(undefined)` = "/articles/1.undefined" on every call that
+    // omitted it. `?` and `= <default>` give the CALLER the same
+    // option to omit; only the callee sees the difference.
     let param_list: Vec<JsParam> = func
         .params
         .iter()
         .zip(sig_param_tys.iter())
         .zip(sig_param_optional.iter())
-        .map(|((name, ty), optional)| JsParam {
-            name: escape_reserved(name.as_str()),
-            optional: *optional,
-            ty: Some(TsType(ts_ty(ty))),
-            default: None,
+        .map(|((p, ty), optional)| {
+            let has_default = *optional && p.default.is_some();
+            JsParam {
+                name: escape_reserved(p.name.as_str()),
+                optional: *optional && !has_default,
+                ty: Some(TsType(ts_ty(ty))),
+                default: has_default
+                    .then(|| expr::js_expr(p.default.as_ref().unwrap())),
+            }
         })
         .collect();
 

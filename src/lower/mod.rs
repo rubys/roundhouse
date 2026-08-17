@@ -65,6 +65,8 @@ pub mod values_at_splat;
 pub mod request_index;
 pub mod arel_attribute;
 pub mod exclude_predicate;
+pub mod including;
+pub mod route_format_suffix;
 pub mod config_reader;
 pub mod exists_conditions;
 pub mod inquiry;
@@ -108,6 +110,8 @@ pub use parameterize::apply_parameterize_grounding;
 pub use request_index::apply_request_index_lowering;
 pub use arel_attribute::apply_arel_attribute_lowering;
 pub use exclude_predicate::apply_exclude_predicate_lowering;
+pub use including::apply_including_lowering;
+pub use route_format_suffix::apply_route_format_suffix_lowering;
 pub use config_reader::apply_config_reader_lowering;
 pub use exists_conditions::apply_exists_conditions_lowering;
 pub use inquiry::apply_inquiry_lowering;
@@ -196,6 +200,14 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `x.exclude?(y)` → `!x.include?(y)`; total rewrite, no ordering
     // constraints (no other pass produces or consumes `exclude?`).
     ("exclude_predicate", &[]),
+    // `xs.including(a)` → `xs.to_a + [a]`; same shape and same lack of
+    // ordering constraints as `exclude_predicate` above.
+    ("including", &[]),
+    // `x_path(format: :json)` → `x_path() + ".json"`. Must run before
+    // the route-helper lowering surveys call sites for query keys; the
+    // two do not overlap (`format` is on NON_QUERY_OPTIONS) but the
+    // survey should see the shape this pass leaves behind.
+    ("route_format_suffix", &[]),
     // `x.inquiry` / `x.<name>?` → equality against the label; total
     // rewrite of a name no other pass produces or consumes.
     ("inquiry", &[]),
@@ -353,6 +365,10 @@ pub fn apply_post_analyze_lowerings(
     ran!("session_options");
     exclude_predicate::apply_exclude_predicate_lowering(app);
     ran!("exclude_predicate");
+    including::apply_including_lowering(app);
+    ran!("including");
+    route_format_suffix::apply_route_format_suffix_lowering(app);
+    ran!("route_format_suffix");
     inquiry::apply_inquiry_lowering(app);
     ran!("inquiry");
     exists_conditions::apply_exists_conditions_lowering(app);

@@ -513,7 +513,18 @@ fn untyped_subexpressions_with_rbs_baseline() {
     //
     // Like-for-like: two Rails methods this runtime lacked, plus a
     // refactor. Nothing that was typed became untyped.
-    const CEILING: usize = 656;
+    // 2026-08-17: 656 -> 673 — the Enumerable surface campfire's own
+    // suite reaches for: `partition`, `detect`, `sort_by`, the block
+    // form of `select`, and `without` (Rails' own alias for
+    // `excluding`). Every one of them is `to_a.<m> { |x| yield x }`,
+    // and every added node roots in `to_a` answering `Array[untyped]`
+    // — the same shape `find`, `first`, `map`, `group_by` and
+    // `destroy_all` already contribute here, and for the same reason:
+    // this Relation is not generic over its model. A generic
+    // `Relation[T]` is what retires the whole class of them at once;
+    // adding these one Enumerable method at a time neither helps nor
+    // hurts that. Nothing that was typed became untyped.
+    const CEILING: usize = 673;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions exceeds ceiling of {CEILING}.\n\

@@ -100,6 +100,14 @@ module ActiveRecord
       end
     end
 
+    # `without` — Rails' own alias for `excluding`, on both Relation and
+    # Enumerable. campfire's sidebar splits its memberships in two and
+    # writes `all_memberships.without(@direct_memberships)` for the
+    # remainder.
+    def without(*records)
+      excluding(*records)
+    end
+
     # `rel.or(other)` — Rails' Relation#or: this relation's accumulated
     # WHERE conjunction OR'd with the other's, grouped as one condition.
     # Rails requires matching structure (joins/limit) on both sides;
@@ -198,7 +206,20 @@ module ActiveRecord
 
     # `select(:id, :username, "raw AS x")` — Symbols qualify against this
     # relation's table (as Rails renders them); raw strings ride verbatim.
+    #
+    # WITH A BLOCK it is a different method sharing the name:
+    # Enumerable's filter over the loaded records, answering an Array.
+    # Zero args means that form — `select()` with neither args nor block
+    # is meaningless in Rails too, so `specs.empty?` decides it without
+    # needing `block_given?` (which nothing in this runtime may use;
+    # every method here has to be statically resolvable).
+    #
+    # Getting this wrong was silent until something forced the query:
+    # `memberships.select { |m| m.room.direct? }` left `@select_sql` an
+    # EMPTY string and answered a Relation, so the caller's next hop
+    # emitted `SELECT  FROM memberships …`.
     def select(*specs)
+      return to_a.select { |x| yield x } if specs.empty?
       @records = nil
       cols = []
       specs.each do |spec|
@@ -397,6 +418,28 @@ module ActiveRecord
         arr << rec
       end
       out
+    end
+
+    # `partition { |r| … }` — Enumerable's two-way split over the
+    # materialized rows, `[matching, rest]`. campfire's account page
+    # writes `@administrators, @members = users.partition(&:administrator?)`
+    # straight off a `User.where(...)`.
+    def partition
+      to_a.partition { |x| yield x }
+    end
+
+    # `detect { |r| … }` — Enumerable's first match, nil when none.
+    # (`find` is NOT this: on a Relation that is Rails' find-by-id.)
+    def detect
+      to_a.detect { |x| yield x }
+    end
+
+    # `sort_by { |r| key }` — Enumerable's sort over the materialized
+    # rows. Distinct from `order`, which is SQL: this one sorts by a
+    # value the block computes in Ruby, which is why campfire reaches
+    # for it to sort direct rooms by their room's `updated_at`.
+    def sort_by
+      to_a.sort_by { |x| yield x }
     end
 
     # `inject(initial) { |acc, x| ... }` — the accumulator form the

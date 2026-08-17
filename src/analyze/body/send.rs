@@ -64,6 +64,7 @@ impl<'a> BodyTyper<'a> {
                 "each" | "map" | "collect" | "flat_map" | "collect_concat"
                 | "select" | "filter" | "reject"
                 | "find" | "detect" | "sort_by" | "group_by" | "min_by" | "max_by"
+                | "partition"
                 | "any?" | "all?" | "none?" | "one?"
                 | "to_h" => Some(vec![(**elem).clone()]),
                 "each_with_index" => Some(vec![(**elem).clone(), Ty::Int]),
@@ -1038,6 +1039,12 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         "flat_map" | "collect_concat" => match block_ret {
             Some(Ty::Array { elem: inner }) => Ty::Array { elem: inner.clone() },
             _ => Ty::Array { elem: Box::new(elem.clone()) },
+        },
+        // `partition { … }` → `[matching, rest]`: two same-element
+        // Arrays, so an Array of Array-of-elem. Rails' own
+        // `users.partition(&:administrator?)` destructures it.
+        "partition" => Ty::Array {
+            elem: Box::new(Ty::Array { elem: Box::new(elem.clone()) }),
         },
         // `each`, predicates, and shape-preserving transforms keep elem.
         "each" | "reverse_each" | "select" | "filter" | "reject"

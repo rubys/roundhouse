@@ -239,7 +239,6 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
         }
     }
     let query_keys = query_param_demand(app, &helper_shape);
-    let format_keys = format_kwarg_demand(app, &helper_shape);
     for route in &flat {
         // Unnamed dynamic routes (`get "/comments/page/:page"`, no `as:`)
         // get no helper in Rails — their action-name fallback would
@@ -259,7 +258,6 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
             route,
             app,
             query_keys.get(&helper).map(|v| v.as_slice()).unwrap_or(&[]),
-            format_keys.contains(&helper),
         ));
     }
     // Hash-form `url_for` resolvers ride along here rather than at each
@@ -507,7 +505,6 @@ fn build_helper_function(
     route: &FlatRoute,
     app: &App,
     query_keys: &[String],
-    format_kwarg: bool,
 ) -> LibraryFunction {
     let slug_id = model_overrides_to_param(route.controller.0.as_str(), helper_name, app);
     // Slugness is PER PARAM: a nested parent's segment names its model
@@ -612,91 +609,102 @@ fn build_helper_function(
     } else {
         build_path_expr(path, &seg_params, &slug_params)
     };
-    // Rails' `(.:format)`: `x_path(format: :turbo_stream)` →
-    // "/x.turbo_stream". Two ways in, and the suffix expression is the
-    // same for both:
+    // Rails' `(.:format)`: a route path spelled the `rails routes` way
+    // ends in `(.:format)`, which gives the helper a trailing optional
+    // positional — `comments_path(:rss)` → "/comments.rss".
     //
-    //   * the route PATH spells `(.:format)` (the `rails routes` shape),
-    //     which gives a trailing POSITIONAL optional — `comments_path(:rss)`;
-    //   * a call site passes `format:` as a KEYWORD. The routes DSL builds
-    //     paths without the `(.:format)` decoration, so campfire — whose
-    //     routes come from `resources`, and which writes
-    //     `room_messages_url(@room, format: :turbo_stream)` — reached
-    //     neither the positional slot nor a query key (`format` is on
-    //     NON_QUERY_OPTIONS, correctly: it is a suffix, not a query).
-    //     The helper simply did not take it, and the call was an arity
-    //     error.
-    //
-    // Keyword form is DEMAND-GATED (see `format_kwarg_demand`): a helper
-    // nobody passes `format:` keeps the signature it had. The positional
-    // form wins when both apply — it is the one existing call sites bind
-    // against, and no corpus app spells a route both ways.
-    let mut format_sig: Option<crate::ty::Param> = None;
-    if has_format || format_kwarg {
+    // The KEYWORD spelling (`x_path(format: :json)`) is NOT a parameter:
+    // `lower::route_format_suffix` turns it into a string concatenation
+    // at the CALL SITE before this pass runs. Growing a parameter for it
+    // was the obvious move and the wrong one — Rust and Go have no
+    // default arguments, so widening a helper's signature broke every
+    // call site that omitted the format, in every app, to serve the few
+    // that pass one.
+    if has_format {
         let format_sym = Symbol::from("format");
-        if has_format {
-            params.push(Param::with_default(
-                format_sym.clone(),
-                Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Nil }),
-            ));
-            sig_params.push((
-                format_sym.clone(),
-                Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
-            ));
-        } else {
-            params.push(Param::keyword(format_sym.clone(), Some(nil_default())));
-            // KEYWORD in the signature too, for the same reason the query
-            // keys are: a keyword declared positionally in the `.rbs` is a
-            // call a strict target cannot make.
-            format_sig = Some(crate::ty::Param {
-                name: format_sym.clone(),
-                ty: Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
-                kind: crate::ty::ParamKind::Keyword { required: false },
-            });
-        }
-        // <path> + (format.nil? ? "" : ".#{format}")
+        params.push(Param::with_default(
+            format_sym.clone(),
+            Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Nil }),
+        ));
+        sig_params.push((
+            format_sym.clone(),
+            Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+        ));
+        // <path> + (format.to_s == "" ? "" : ".#{format}")
         //
-        // `format.nil?`, not bare `format`: the param is typed
-        // `String | Nil`, and a target whose `if` takes a real Bool
-        // (C#: "cannot implicitly convert type 'string' to 'bool'")
-        // rejects Ruby truthiness on it. The nil test is the same
-        // question every target can ask.
-        let dot_format = Expr::new(
-            Span::synthetic(),
-            ExprNode::StringInterp {
-                parts: vec![
-                    InterpPart::Text { value: ".".to_string() },
-                    InterpPart::Expr { expr: var_ref("format") },
-                ],
-            },
+        // Not bare `format`: the param is `String | Nil`, and a target
+        // whose `if` wants a real Bool rejects Ruby truthiness on it.
+        // Not `format.nil?` either — Go renders an omitted optional as
+        // the zero value, so `nil?` folds to `false` there and every
+        // caller who omitted the format gets a trailing dot in the URL.
+        // `to_s == ""` reads "absent" correctly whether the target
+        // spells absence as nil, None, or "".
+        //
+        // Every node carries `Ty::Str`: a conditional whose type is left
+        // for the emitter to infer renders as the target's top type (Go
+        // answered `interface{}` and then refused to `+` it onto a
+        // string), and the IR knows the answer perfectly well.
+        let dot_format = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::StringInterp {
+                    parts: vec![
+                        InterpPart::Text { value: ".".to_string() },
+                        InterpPart::Expr { expr: var_ref("format") },
+                    ],
+                },
+            ),
+            Ty::Str,
         );
-        let is_nil = Expr::new(
-            Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(var_ref("format")),
-                method: Symbol::from("nil?"),
-                args: vec![],
-                block: None,
-                parenthesized: false,
-            },
+        let format_to_s = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(var_ref("format")),
+                    method: Symbol::from("to_s"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            Ty::Str,
         );
-        let suffix = Expr::new(
-            Span::synthetic(),
-            ExprNode::If {
-                cond: is_nil,
-                then_branch: lit_str(String::new()),
-                else_branch: dot_format,
-            },
+        let is_absent = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(format_to_s),
+                    method: Symbol::from("=="),
+                    args: vec![lit_str(String::new())],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            Ty::Bool,
         );
-        body = Expr::new(
-            Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(body),
-                method: Symbol::from("+"),
-                args: vec![suffix],
-                block: None,
-                parenthesized: false,
-            },
+        let suffix = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::If {
+                    cond: is_absent,
+                    then_branch: lit_str(String::new()),
+                    else_branch: dot_format,
+                },
+            ),
+            Ty::Str,
+        );
+        body = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(body),
+                    method: Symbol::from("+"),
+                    args: vec![suffix],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            Ty::Str,
         );
     }
     // Options a call site passes that name no segment become the query
@@ -721,9 +729,6 @@ fn build_helper_function(
         }
         body = append_query_string(body, query_keys);
     }
-    // The keyword `format:` joins the keyword tail, alongside the query
-    // keys — order within the tail is irrelevant to a keyword call.
-    query_sig.extend(format_sig);
     // The signature must agree with the `def` above about which params
     // are optional: `fn_sig` marks every param Required, so a helper
     // whose Ruby reads `def f(x = nil)` was declaring `(T x)` in its
@@ -859,58 +864,6 @@ fn query_param_demand(
     };
     for_each_route_call_site(app, &mut collect);
     out.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect()
-}
-
-/// Helpers a call site passes `format:` to, as a keyword.
-///
-/// Separate from `query_param_demand` because the two do opposite things
-/// with the key: a query key becomes `?k=v`, `format` becomes a `.ext`
-/// SUFFIX (which is why it is on `NON_QUERY_OPTIONS`). Same survey shape,
-/// though — demand-gated, so only the helpers that are actually called
-/// with one grow the parameter.
-///
-/// No required-segment guard here, unlike the query survey: `format:` is
-/// meaningful on a helper call whether or not the caller filled the
-/// segments, and a call that under-fills them is already broken for a
-/// reason this pass does not own.
-fn format_kwarg_demand(
-    app: &App,
-    helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
-) -> std::collections::HashSet<String> {
-    let mut out: std::collections::HashSet<String> = Default::default();
-    let mut collect = |e: &Expr| {
-        fn walk(
-            e: &Expr,
-            helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
-            out: &mut std::collections::HashSet<String>,
-        ) {
-            if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
-                if helpers.contains_key(method.as_str()) {
-                    if let Some(last) = args.last() {
-                        if let ExprNode::Hash { entries, kwargs: true } = &*last.node {
-                            let names_format = entries.iter().any(|(k, _)| {
-                                matches!(&*k.node,
-                                    ExprNode::Lit { value: Literal::Sym { value } }
-                                        if value.as_str() == "format")
-                            });
-                            if names_format {
-                                let helper = method
-                                    .as_str()
-                                    .strip_suffix("_url")
-                                    .map(|stem| format!("{stem}_path"))
-                                    .unwrap_or_else(|| method.as_str().to_string());
-                                out.insert(helper);
-                            }
-                        }
-                    }
-                }
-            }
-            e.node.for_each_child(&mut |c| walk(c, helpers, out));
-        }
-        walk(e, helpers, &mut out);
-    };
-    for_each_route_call_site(app, &mut collect);
-    out
 }
 
 /// Every body a route helper can be called from. `for_each_hook_body_ref`

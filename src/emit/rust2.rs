@@ -1722,11 +1722,18 @@ fn axum_verb_fn(method: &crate::dialect::HttpMethod) -> &'static str {
 /// (one `pub fn <as_name>_path(...) -> String` per route) so the
 /// per-target divergence stays surface-only.
 ///
-/// Reads the method signatures off the `RouteHelpers` LC (already
-/// lowered with `i64` path params); each wrapper delegates to
-/// `RouteHelpers::<method>(args)`. Helpers with non-`i64` shapes
-/// would need richer translation; none in the scaffold blog hit
-/// that.
+/// Reads the method signatures off the `RouteHelpers` LC; each wrapper
+/// delegates to `RouteHelpers::<method>(args)`.
+///
+/// Param types come from the method's own SIGNATURE, matched by name.
+/// They used to be hardcoded `i64` under a comment saying nothing in
+/// the scaffold blog had another shape — true right up until route
+/// helpers grew a `format:` keyword (`String?`), at which point the
+/// wrapper declared `format: i64` and delegated it into an
+/// `Option<String>`. A wrapper that restates a signature instead of
+/// reading it is the same stale second copy this codebase keeps
+/// finding; `i64` survives only as the fallback for a param the
+/// signature does not name.
 fn render_route_helpers_bare_wrappers(lc: &crate::dialect::LibraryClass) -> String {
     let mut out = String::from(
         "\n// Wedge 2c.3 bare-fn compat shims — delegate to `impl RouteHelpers`.\n",
@@ -1737,10 +1744,21 @@ fn render_route_helpers_bare_wrappers(lc: &crate::dialect::LibraryClass) -> Stri
         if name.starts_with('_') {
             continue;
         }
+        let sig_params: &[crate::ty::Param] = match m.signature.as_ref() {
+            Some(crate::ty::Ty::Fn { params, .. }) => params,
+            _ => &[],
+        };
         let params: Vec<String> = m
             .params
             .iter()
-            .map(|p| format!("{}: i64", p.name.as_str()))
+            .map(|p| {
+                let ty = sig_params
+                    .iter()
+                    .find(|sp| sp.name == p.name)
+                    .map(|sp| method::rust_param_ty(&sp.ty))
+                    .unwrap_or_else(|| "i64".to_string());
+                format!("{}: {ty}", p.name.as_str())
+            })
             .collect();
         let arg_names: Vec<String> = m
             .params

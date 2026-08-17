@@ -263,7 +263,7 @@ fn view_stream_name(streamables: &[Expr], ctx: &ViewCtx) -> Option<Expr> {
     if let [only] = streamables {
         let bare = matches!(&*only.node,
             ExprNode::Lit { value: Literal::Sym { .. } })
-            || bare_record_name(only).is_some_and(|n| ctx.model_singulars.contains(&n));
+            || streamable_record_name(only).is_some_and(|n| ctx.model_singulars.contains(&n));
         if !bare {
             return Some((*only).clone());
         }
@@ -290,7 +290,7 @@ fn view_stream_name(streamables: &[Expr], ctx: &ViewCtx) -> Option<Expr> {
                 ));
             }
             _ => {
-                let name = bare_record_name(arg)?;
+                let name = streamable_record_name(arg)?;
                 if !ctx.model_singulars.contains(&name) {
                     return None;
                 }
@@ -711,4 +711,32 @@ fn rewrite_path_arg(arg: &Expr, ctx: &ViewCtx) -> Expr {
         ),
         None => arg.clone(),
     }
+}
+
+/// The model singular a `turbo_stream_from` streamable names, if it
+/// names one.
+///
+/// `bare_record_name`'s three shapes (local, ivar, bare call) plus
+/// `Current.<name>` — campfire's sidebar subscribes with
+/// `turbo_stream_from Current.user, :rooms`, and `Current` is the app's
+/// own `CurrentAttributes`, so the METHOD is the model singular there
+/// the way the variable name is elsewhere. Declining it declined the
+/// whole call, and an unlowered `turbo_stream_from` in a view body is a
+/// NoMethodError at render — the subscribe half of the wire simply
+/// missing while its publish half worked.
+///
+/// Kept local rather than folded into `bare_record_name`: this asks
+/// "what record does this expression denote", which is the streamable
+/// question. `bare_record_name`'s other callers ask narrower ones.
+fn streamable_record_name(e: &Expr) -> Option<String> {
+    if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node {
+        if args.is_empty() {
+            if let ExprNode::Const { path } = &*r.node {
+                if path.last().map(|s| s.as_str()) == Some("Current") {
+                    return Some(method.as_str().to_string());
+                }
+            }
+        }
+    }
+    bare_record_name(e)
 }

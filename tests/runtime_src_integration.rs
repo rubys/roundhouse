@@ -874,7 +874,18 @@ fn every_runtime_method_body_concretely_typed() {
     // for a count: `delete_all` already answers a count, and having the
     // two differ only in callbacks is the distinction worth preserving.
     // +3 sites; ceiling raised 262 -> 265.
-    const CEILING: usize = 265;
+    // 2026-08-17 the Enumerable surface campfire's suite reaches for —
+    // `partition`, `detect`, `sort_by`, `without` (Rails' own alias for
+    // `excluding`), and the block form of `select`. Every one is
+    // `to_a.<m> { |x| yield x }`, and every new site is the
+    // `Array[untyped]` element `to_a` hands back plus the block's
+    // parameter read: exactly what `map`, `group_by`, `find_each` and
+    // `destroy_all` already contribute, and untyped for the one reason
+    // they all share — this Relation is not generic over its model. A
+    // generic `Relation[T]` retires the class of them at once; adding
+    // Enumerable methods one at a time neither helps nor hurts that.
+    // +8 sites; ceiling raised 265 -> 273.
+    const CEILING: usize = 273;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

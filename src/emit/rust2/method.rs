@@ -259,7 +259,7 @@ fn render_return(m: &MethodDef) -> String {
 /// String params take `&str` (avoids forcing callers to clone), Vec
 /// stays owned for now (Phase 2.1 scope; refine at Phase 4 when
 /// closures + lifetimes pressure surfaces).
-fn rust_param_ty(ty: &Ty) -> String {
+pub(crate) fn rust_param_ty(ty: &Ty) -> String {
     match ty {
         Ty::Str | Ty::Sym => "&str".to_string(),
         other => rust_ty(other),

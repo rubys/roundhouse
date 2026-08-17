@@ -18,6 +18,7 @@ module ActiveRecord
     def scope_attributes: () -> Hash[Symbol, untyped]
     def not: (?untyped condition, *untyped args) -> Relation
     def excluding: (*untyped records) -> Relation
+    def without: (*untyped records) -> Relation
     def or: (Relation other) -> Relation
     def add_condition: (untyped condition, Array[untyped] args, bool negate) -> void
     def order: (*untyped parts) -> Relation
@@ -30,6 +31,14 @@ module ActiveRecord
     def joins: (untyped spec) -> Relation
     def left_outer_joins: (untyped spec) -> Relation
     def left_joins: (untyped spec) -> Relation
+    # Two methods sharing a name: field args PROJECT columns and keep
+    # the Relation; a block is Enumerable's filter over the loaded
+    # records and answers an Array (zero args means the block form —
+    # see the body). Declared as the PROJECTION form only: the sidecar
+    # parser takes one signature per method, and every strict-target
+    # call site in the corpus is the projection. `filter` below is the
+    # same method under Ruby's other name and DOES declare the block
+    # shape, so a strict target that needs it has a spelling.
     def select: (*untyped specs) -> Relation
     def distinct: () -> Relation
     def includes: (*untyped names) -> Relation
@@ -57,6 +66,9 @@ module ActiveRecord
     def find_each: () { (untyped) -> void } -> Array[untyped]
     def map: () { (untyped) -> untyped } -> Array[untyped]
     def group_by: () { (untyped) -> untyped } -> Hash[untyped, Array[untyped]]
+    def partition: () { (untyped) -> bool } -> Array[Array[untyped]]
+    def detect: () { (untyped) -> bool } -> untyped
+    def sort_by: () { (untyped) -> untyped } -> Array[untyped]
     def inject: (untyped initial) { (untyped, untyped) -> untyped } -> untyped
     def first: () -> untyped
     def first!: () -> untyped
