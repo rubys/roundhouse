@@ -884,12 +884,48 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
             .map(|lc| (lc.name.clone(), crate::lower::class_info_from_library_class(lc)))
             .chain(model_registry)
             .collect();
-        let test_lowered = crate::lower::lower_test_modules_with_inner(
+        let mut test_lowered = crate::lower::lower_test_modules_with_inner(
             &app.test_modules,
             &app.fixtures,
             &app.models,
             fixture_extras,
         );
+        // A test body writes the same relation chains an app body does —
+        // `@room.messages.ordered`, `user.push_subscriptions.find_by(…)`,
+        // `room.memberships.grant_to(users)`. The has_many reader hands
+        // back the arel-inlined Array, so every one of those needs the
+        // association-seeded Relation that `apply_scope_lowering` builds
+        // (`Relation.new(Message).where(room_id: @room.id).ordered`). It
+        // runs over models, controllers, helpers and views; the test
+        // classes were the one lowered family it never saw, so the exact
+        // chain that compiled inside a controller raised NoMethodError
+        // one file over.
+        //
+        // This is the same drift wall 21 found on the REGISTRY side (test
+        // bodies typed against a registry with no scopes in it). Same two
+        // sides, same fix: one seam, both callers.
+        //
+        // Inner classes ride along — a `class Validatable` declared in a
+        // test body is an ordinary lowered class and may query too. No
+        // entry in `app.models` matches a test class, so the model-only
+        // half (scope-method synthesis, `push_scope_variants`) is inert
+        // here and only the call-site rewrite runs.
+        {
+            let mut test_lcs: Vec<crate::dialect::LibraryClass> = test_lowered
+                .iter()
+                .flat_map(|m| {
+                    std::iter::once(m.test_class.clone()).chain(m.inner_classes.iter().cloned())
+                })
+                .collect();
+            library::apply_scope_lowering(&mut test_lcs, app);
+            let mut it = test_lcs.into_iter();
+            for m in &mut test_lowered {
+                m.test_class = it.next().expect("one lowered class per test module");
+                for inner in &mut m.inner_classes {
+                    *inner = it.next().expect("one lowered class per inner class");
+                }
+            }
+        }
         // Fixture classes (`ArticlesFixtures`, etc.) live at
         // `test/fixtures/<plural>.rb` — outside the model/controller
         // require-resolution paths the library emitter knows. Pass them
