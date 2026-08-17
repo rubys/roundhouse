@@ -178,6 +178,8 @@ module ActiveRecord
     def save!: () -> Base
     def destroy: () -> Base
     def reload: () -> Base
+    # `touch` is no-arg on purpose; see the note on the body.
+    def touch: () -> bool
 
     # Lifecycle hooks — no-op defaults. Subclasses override.
     def after_initialize: () -> void

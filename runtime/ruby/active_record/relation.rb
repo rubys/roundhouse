@@ -560,7 +560,15 @@ module ActiveRecord
       ok
     end
 
-    def exists?
+    # `exists?` / `exists?(id)` — Rails also takes a conditions Hash or
+    # a String; the id form is what the corpus spells
+    # (`Membership.connected.exists?(@membership.id)`), and a Hash
+    # would be the untyped-Hash-surface problem `has_json` mapped out.
+    # An `Integer?` param narrows by early return, not by a guard —
+    # rust2 does not narrow an `Option` across `unless x.nil?`.
+    def exists?(id = nil)
+      return count > 0 if id.nil?
+      @wheres << "#{@table}.id = #{ActiveRecord.adapter.escape_value(id)}"
       count > 0
     end
 

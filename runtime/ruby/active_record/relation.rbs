@@ -82,7 +82,7 @@ module ActiveRecord
     def any?: () -> bool
     def none?: () -> bool
     def all?: () { (untyped) -> bool } -> bool
-    def exists?: () -> bool
+    def exists?: (?Integer? id) -> bool
     def length: () -> Integer
     def size: () -> Integer
     def delete_all: () -> Integer

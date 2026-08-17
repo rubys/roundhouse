@@ -518,6 +518,37 @@ module ActiveRecord
       self
     end
 
+    # `record.touch` — write the current time to `updated_at` and
+    # UPDATE, skipping validations and save callbacks. The catalog has
+    # typed this as an instance DbWrite returning Bool since before it
+    # existed here; this is the implementation catching up to the
+    # declaration.
+    #
+    # NO-ARG ONLY, and that is a decision, not an omission. Rails'
+    # `touch(:column)` names the extra column to stamp, which as a
+    # shared method means `self[name] = …` — an index write through a
+    # VARIABLE key. rust2 colors an index-write key for a Hash receiver
+    # and for nothing else (`decide/str_color.rs` walks the key with
+    # `ParentExpect::None` on the `LValue::Index` arm), so the owned
+    # `String` lands in `set_index`'s `&str` slot and the app crate
+    # fails to compile — E0308, and it takes every rust test with it.
+    # The column form belongs at the CALL SITE, where the column is a
+    # literal (`touch :connected_at` → `self.connected_at = …; touch`),
+    # which is the same posture `insert_all` and `has_json` landed on:
+    # inline what would otherwise need an untyped or dynamic parameter.
+    # Until that lowering lands, `touch(:col)` raises ArgumentError,
+    # which is the honest failure — campfire's `Membership#connected`
+    # is the one corpus site.
+    #
+    # DIVERGENCE: Rails fires `after_touch` and the commit callbacks
+    # here. This runtime has no `after_touch` hook, so a touch runs no
+    # callbacks at all.
+    def touch
+      fill_timestamps(false)
+      _adapter_update
+      true
+    end
+
     def destroy
       return self unless persisted?
       before_destroy
