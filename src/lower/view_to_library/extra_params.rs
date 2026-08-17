@@ -70,6 +70,15 @@ fn walk_for_extra(e: &Expr, bound: &[String], out: &mut Vec<String>) {
             // is_flash_name. Without this, `defined?(force_open)` in
             // _comment.html.erb would leave `force_open` as a free
             // reference the analyzer can't resolve.
+            // `local_assigns[:x]` marks `x` as an optional partial-local
+            // just as deliberately as `defined?(x)` does — Rails' two
+            // spellings for "a local a caller may not have passed" — so
+            // it earns a nil-default param the same way.
+            if let Some(n) = super::local_assigns_key(e) {
+                if !bound.iter().any(|b| b == &n) && !out.iter().any(|x| x == &n) {
+                    out.push(n);
+                }
+            }
             if recv.is_none() && method.as_str() == "defined?" && args.len() == 1 {
                 if let ExprNode::Var { name, .. } = &*args[0].node {
                     let n = name.as_str();

@@ -29,7 +29,7 @@ mod walker;
 mod helpers;
 mod partial;
 mod form_with;
-mod form_builder;
+pub(crate) mod form_builder;
 pub(crate) mod turbo_drive;
 pub(crate) mod turbo_frames;
 pub(crate) mod attr_parts;
@@ -355,6 +355,10 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // `defined?` knowledge.
     let mut rewritten = rewritten;
     rewrite_defined_to_nil_check(&mut rewritten);
+    // `local_assigns[:x]` → the bare local `x`. Same place and the same
+    // reason as the line above: `collect_extra_params` has already
+    // recorded the name as a nil-default param, so the read resolves.
+    rewrite_local_assigns_to_locals(&mut rewritten);
 
     // The inferred record arg (e.g. `articles`, `article`) is the
     // required positional. Free locals discovered downstream
@@ -3169,6 +3173,62 @@ fn rewrite_lvalue(lv: &LValue) -> LValue {
 /// the nil-check captures the same semantics. Downstream emitters
 /// then handle a plain Send chain instead of needing target-specific
 /// `defined?` keyword knowledge.
+/// `local_assigns[:name]` → the bare local `name`.
+///
+/// Rails' `local_assigns` is the hash of locals a partial was actually
+/// rendered with, and indexing it is how a template reads an OPTIONAL
+/// local without a NameError on the ones no caller passed. The lowering
+/// already models an optional local as a nil-default parameter — the very
+/// thing `defined?(name)` marks — so the read IS that parameter.
+///
+/// Left alone, `local_assigns` has nothing to resolve to in a module
+/// function and took the page down with a NameError; campfire's
+/// `rooms/layouts/_new` reads a `view_transition_name` no call site
+/// passes, which is exactly the case the spelling exists for.
+fn rewrite_local_assigns_to_locals(expr: &mut Expr) {
+    expr.node
+        .for_each_child_mut(&mut rewrite_local_assigns_to_locals);
+    if let Some(name) = local_assigns_key(expr) {
+        *expr = Expr::new(
+            expr.span,
+            ExprNode::Var {
+                id: VarId(0),
+                name: Symbol::from(crate::naming::safe_local(&name)),
+            },
+        );
+    }
+}
+
+/// The local a `local_assigns[:name]` / `local_assigns["name"]` read
+/// names. `None` for a computed key — there is no static parameter to
+/// resolve that to.
+pub(crate) fn local_assigns_key(expr: &Expr) -> Option<String> {
+    let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node
+    else {
+        return None;
+    };
+    if method.as_str() != "[]" || args.len() != 1 {
+        return None;
+    }
+    // Prism parses the bare name as an implicit-self Send in a template
+    // body; a `Var` shows up once scope analysis has bound it.
+    let is_local_assigns = match &*recv.node {
+        ExprNode::Send { recv: None, method, args, block: None, .. } => {
+            method.as_str() == "local_assigns" && args.is_empty()
+        }
+        ExprNode::Var { name, .. } => name.as_str() == "local_assigns",
+        _ => false,
+    };
+    if !is_local_assigns {
+        return None;
+    }
+    match &*args[0].node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        _ => None,
+    }
+}
+
 fn rewrite_defined_to_nil_check(expr: &mut Expr) {
     // Recurse into children first.
     match &mut *expr.node {

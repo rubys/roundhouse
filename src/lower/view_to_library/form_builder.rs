@@ -993,7 +993,7 @@ fn sanitize_to_id_static(name: &str) -> String {
 /// defaults its type to `submit` unless the caller gave one. Shared by
 /// the inline form and the BLOCK form below so the two spellings can't
 /// drift in their attribute rendering.
-fn button_open_parts(opts: &[(Expr, Expr)]) -> Vec<InterpPart> {
+pub(crate) fn button_open_parts(opts: &[(Expr, Expr)]) -> Vec<InterpPart> {
     let has_type = opts.iter().any(|(k, _)| {
         matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
             if value.as_str() == "type")

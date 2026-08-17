@@ -261,6 +261,9 @@ fn rewrite(
     if rewrite_legacy_tag(expr, diags) {
         return;
     }
+    if rewrite_button_tag(expr) {
+        return;
+    }
 
     let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*expr.node else {
         return;
@@ -340,6 +343,70 @@ fn rewrite(
 /// (`frame_open_parts` → None) is left alone, where the emitted call to
 /// an undefined `turbo_frame_tag` is loud, rather than being given an
 /// invented id.
+/// `button_tag [content][, opts] [do … end]` written in a HELPER body.
+///
+/// The blockless spelling is already inlined for VIEWS
+/// (`form_builder::emit_button_tag`); a helper body has no view context,
+/// so the call survived into the emit as a literal `button_tag` with
+/// nothing to resolve it — campfire's `submit_room_button_tag` is that
+/// call, and it stands between the room forms and any rendered page.
+///
+/// The open tag comes from `form_builder::button_open_parts`, the same
+/// builder the view spelling uses, so the two cannot disagree about
+/// Rails' `name="button"` / `type="submit"` defaults. Only the CONTENT
+/// differs by call site: a Ruby block is CAPTURED here where a template
+/// body is walked there — the same split as `turbo_frame_tag`'s two
+/// halves above.
+///
+/// Rails reads a Hash first argument as the OPTIONS when a block is
+/// given (`button_tag class: "x" do … end`), which is the campfire
+/// spelling and why the content/opts split can't just take the last
+/// argument.
+fn rewrite_button_tag(expr: &mut Expr) -> bool {
+    let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else {
+        return false;
+    };
+    if method.as_str() != "button_tag" {
+        return false;
+    }
+    let trailing_hash = |e: &Expr| match &*e.node {
+        ExprNode::Hash { entries, .. } => Some(entries.clone()),
+        _ => None,
+    };
+    let (content, opts): (Option<Expr>, Vec<(Expr, Expr)>) = match &args[..] {
+        [] => (None, Vec::new()),
+        [only] => match trailing_hash(only) {
+            // A lone Hash is the options — with a block (Rails' rule) and
+            // without one (`button_tag class: "x"`, a label-less button).
+            Some(entries) => (None, entries),
+            None => (Some(only.clone()), Vec::new()),
+        },
+        [first, rest @ ..] => match rest.last().and_then(trailing_hash) {
+            Some(entries) => (Some(first.clone()), entries),
+            // `button_tag(a, b)` with a non-Hash tail is not a shape
+            // Rails defines; leave it for the emit to be loud about.
+            None => return false,
+        },
+    };
+    let span = expr.span;
+    let block = block.clone();
+    let mut parts = crate::lower::view_to_library::form_builder::button_open_parts(&opts);
+    match (block, content) {
+        (Some(block), _) => {
+            parts.push(InterpPart::Expr { expr: capture_call(block, span) });
+        }
+        (None, Some(content)) => {
+            parts.push(InterpPart::Expr { expr: escaped_content(content) });
+        }
+        (None, None) => {}
+    }
+    parts.push(InterpPart::Text { value: "</button>".to_string() });
+    let mut built = string_interp(parts);
+    qualify_view_helpers(&mut built);
+    *expr = html_safe(built, span);
+    true
+}
+
 /// The LEGACY function form — `tag(:meta, name: "x", content: "y")`,
 /// which campfire's `current_user_meta_tags` writes twice and every
 /// page's `<head>` therefore depends on.
