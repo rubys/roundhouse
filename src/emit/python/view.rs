@@ -1118,6 +1118,8 @@ fn emit_py_link_or_button(
     let url_kind = crate::lower::classify_view_url_arg(url, &is_local)?;
     let url_expr = match url_kind {
         crate::lower::ViewUrlArg::Literal { value } => format!("{value:?}"),
+        // A local named `<x>_path` already holds the url string.
+        crate::lower::ViewUrlArg::LocalUrl { name } => name.to_string(),
         crate::lower::ViewUrlArg::PathHelper { name, args } => {
             let args_s: Vec<String> = args.iter().map(|a| py_path_arg(a, ctx)).collect();
             format!("{name}({})", args_s.join(", "))
@@ -1389,6 +1391,13 @@ fn emit_py_render_partial(
 ) -> String {
     use crate::lower::RenderPartial;
     match rp {
+        // `render layout: "x" do … end` — the shared lowering turns this
+        // into a capture local plus an ordinary partial call
+        // (`lower::view_to_library::partial::emit_layout_block`), so this
+        // emitter only meets it when a view reaches here un-lowered. No
+        // python corpus view uses the form; emit nothing rather than a
+        // call that would not run.
+        RenderPartial::LayoutBlock { .. } => String::new(),
         RenderPartial::Collection { name, .. } => {
             let singular = crate::naming::singularize(name);
             let partial_fn = format!("render_{name}_{singular}");

@@ -563,6 +563,8 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
     let kind = classify_view_url_arg(url, &is_local)?;
     match kind {
         ViewUrlArg::Literal { value } => Some(lit_str(value.to_string())),
+        // The local already holds the url — read it.
+        ViewUrlArg::LocalUrl { name } => Some(var_ref(Symbol::from(name))),
         ViewUrlArg::PathHelper { name, args } => {
             let route_args: Vec<Expr> = args.iter().map(|a| rewrite_path_arg(a, ctx)).collect();
             Some(route_helpers_call(name, route_args))

@@ -37,7 +37,12 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
         RenderPartial::Named { partial, arg, locals } => {
             let call = named_partial_call(partial, *arg, *locals, ctx)?;
             Some(accumulator_append_call(call, ctx))
-        }        // `render @article.comments` — has_many association iteration.
+        }
+        // `render layout: "x" do … end` needs MULTIPLE statements (the
+        // capture local, then the call), so the walker routes it to
+        // `emit_layout_block` before reaching here. Anything that arrives
+        // at this arm has no single-expression form.
+        RenderPartial::LayoutBlock { .. } => None,        // `render @article.comments` — has_many association iteration.
         // The `receiver` is the post-ivar-rewrite `Var(article)` (or a
         // bareword `Send`); `method` is the assoc name, plural. We
         // build `receiver.method.each { |c| io << Views::<Plural>
@@ -60,7 +65,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
         // local. Like emit_partial_each but the partial module/method come
         // from the explicit name, and the block var from `as:` (default:
         // the partial's base name).
-        RenderPartial::CollectionNamed { collection, partial, as_name } => {
+        RenderPartial::CollectionNamed { collection, partial, as_name, locals } => {
             let (module_dir, base_name) = match partial.rsplit_once('/') {
                 Some((dir, name)) => (dir.to_string(), name.to_string()),
                 None => (ctx.resource_dir.clone(), (*partial).to_string()),
@@ -78,6 +83,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
 
             let mut call_args = vec![var_ref(var_name.clone())];
             call_args.extend(partial_extra_args(ctx, &module_camel, &method_sym));
+            call_args.extend(locals_extra_args(*locals, &module_camel, &method_sym, ctx));
             let render_call = send(
                 Some(Expr::new(
                     Span::synthetic(),
@@ -85,7 +91,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                         path: vec![Symbol::from("Views"), Symbol::from(module_camel)],
                     },
                 )),
-                &method_sym,
+                crate::lower::view::view_method_name(&method_sym).as_str(),
                 call_args,
                 None,
                 true,
@@ -202,7 +208,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                             path: vec![Symbol::from("Views"), Symbol::from(module_camel)],
                         },
                     )),
-                    &method_sym,
+                    crate::lower::view::view_method_name(&method_sym).as_str(),
                     call_args,
                     None,
                     true,
@@ -368,6 +374,23 @@ pub(super) fn named_partial_call(
     locals: Option<&[(Expr, Expr)]>,
     ctx: &ViewCtx,
 ) -> Option<Expr> {
+    named_partial_call_with_record(partial, arg, locals, None, ctx)
+}
+
+/// `named_partial_call` with the record argument supplied directly
+/// rather than resolved from `arg`/`locals`.
+///
+/// The one caller is the layout-block render, whose record is the
+/// captured block output — a local this lowering just synthesized, which
+/// no `locals:` hash names and no dir convention could find. `locals`
+/// still governs the trailing extras.
+pub(super) fn named_partial_call_with_record(
+    partial: &str,
+    arg: Option<&Expr>,
+    locals: Option<&[(Expr, Expr)]>,
+    record_override: Option<Expr>,
+    ctx: &ViewCtx,
+) -> Option<Expr> {
 
             let (module_dir, base_name) = match partial.rsplit_once('/') {
                 Some((dir, name)) => (dir.to_string(), name.to_string()),
@@ -407,7 +430,9 @@ pub(super) fn named_partial_call(
             // name; an omitted record falls to the header default. The
             // dir-convention singular governs only convention-inferred
             // partials.
-            let arg_expr = match (strict_decl, locals.is_some()) {
+            let arg_expr = match (record_override, strict_decl, locals.is_some()) {
+                (Some(record), _, _) => record,
+                (None, strict_decl, has_locals) => match (strict_decl, has_locals) {
                 (Some(decl), true) => lookup_local(decl[0].name.as_str())
                     .or_else(|| decl[0].default.clone())
                     .unwrap_or_else(nil_lit),
@@ -417,6 +442,7 @@ pub(super) fn named_partial_call(
                     .unwrap_or_else(nil_lit),
                 (None, true) => lookup_local(&record_name).unwrap_or_else(nil_lit),
                 (None, false) => arg.cloned().unwrap_or_else(nil_lit),
+                },
             };
             let mut call_args = vec![arg_expr];
             call_args.extend(partial_extra_args(ctx, &module_camel, &method_sym));
@@ -430,21 +456,8 @@ pub(super) fn named_partial_call(
                 if let Some(hash) = strict_kwargs(&decl[1..], &lookup_local) {
                     call_args.push(hash);
                 }
-            } else if locals.is_some() {
-                if let Some(extras) = ctx
-                    .partial_extras
-                    .get(&(module_camel.clone(), method_sym.clone()))
-                {
-                    // Only emit up to the LAST extra actually provided —
-                    // wholly-absent tails keep the short call.
-                    let bound: Vec<Option<Expr>> =
-                        extras.iter().map(|e| lookup_local(e)).collect();
-                    if let Some(last) = bound.iter().rposition(|b| b.is_some()) {
-                        for b in bound.into_iter().take(last + 1) {
-                            call_args.push(b.unwrap_or_else(nil_lit));
-                        }
-                    }
-                }
+            } else {
+                call_args.extend(locals_extra_args(locals, &module_camel, &method_sym, ctx));
             }
             let render_call = send(
                 Some(Expr::new(
@@ -453,10 +466,113 @@ pub(super) fn named_partial_call(
                         path: vec![Symbol::from("Views"), Symbol::from(module_camel)],
                     },
                 )),
-                &method_sym,
+                // `view_method_name`, matching the DEF side and the
+                // `Template` arm above: a partial named `_new.html.erb`
+                // defines `self._new`, because a module method called
+                // `new` would collide with `Object.new`. Three of the four
+                // call-site builders here had drifted from that rule —
+                // latent until campfire's `rooms/layouts/_new`. The
+                // extras/strict-locals keys stay on the RAW stem, which
+                // is what the def side keys on too.
+                crate::lower::view::view_method_name(&method_sym).as_str(),
                 call_args,
                 None,
                 true,
             );
             Some(render_call)
+}
+
+/// `render layout: "rooms/layouts/new"[, locals: { … }] do … end`
+///
+/// Rails renders the block, then renders the layout partial with that
+/// markup as its `yield`. The lowered shape is the same two steps, flat:
+///
+/// ```text
+/// _layout_body = String.new
+/// <block body, appending to _layout_body>
+/// io << Views::Rooms::Layouts._new(_layout_body, room)
+/// ```
+///
+/// The layout partial already takes its body as the dir-convention
+/// record arg and reads it for `<%= yield %>` (see `partial::emit_yield`
+/// and the arg-contract derivation in `mod.rs`) — this is the call half
+/// that was missing, which is why the form previously survived into the
+/// emit as a bare `render` inside a module that has no such method.
+///
+/// The capture local is `_layout_body`, deliberately NOT the `_cap` the
+/// generic block-form helper arm uses: a `render layout:` block whose
+/// own body contains a block-form helper would otherwise have the inner
+/// capture clobber the outer one (Ruby block bodies share the enclosing
+/// scope for names already bound). Nesting two LAYOUT renders would
+/// still collide; no corpus view does, and the fix then is a counter,
+/// not a rename.
+pub(super) fn emit_layout_block(
+    layout: &str,
+    locals: Option<&[(Expr, Expr)]>,
+    block: &Expr,
+    ctx: &ViewCtx,
+) -> Option<Vec<Expr>> {
+    let ExprNode::Lambda { params, body, .. } = &*block.node else {
+        return None;
+    };
+    let cap = "_layout_body";
+    let cap_ctx = ViewCtx {
+        accumulator: cap.to_string(),
+        ..ctx.with_locals(params.iter().map(|p| p.as_str().to_string()))
+    };
+    let mut out = vec![super::assign_accumulator_string_new(cap)];
+    out.extend(super::walker::walk_body(body, &cap_ctx));
+    let call = named_partial_call_with_record(
+        layout,
+        None,
+        locals,
+        Some(var_ref(Symbol::from(cap))),
+        ctx,
+    )?;
+    out.push(accumulator_append_call(call, ctx));
+    Some(out)
+}
+
+/// The trailing extra-param arguments an explicit `locals:` hash binds,
+/// in the partial's declared extra order.
+///
+/// A partial's non-record params are positional with nil defaults, so a
+/// provided local has to land at its declared index; only the tail up to
+/// the LAST provided one is emitted, keeping the short call when a
+/// caller supplies nothing. Shared by the named-render and
+/// collection-render call sites — Rails passes `locals:` to every
+/// element render of a collection too, and having only one of the two
+/// bind them is what left `rooms/opens/_user`'s `room` nil.
+fn locals_extra_args(
+    locals: Option<&[(Expr, Expr)]>,
+    module_camel: &str,
+    method_sym: &str,
+    ctx: &ViewCtx,
+) -> Vec<Expr> {
+    let Some(entries) = locals else { return Vec::new() };
+    let Some(extras) = ctx
+        .partial_extras
+        .get(&(module_camel.to_string(), method_sym.to_string()))
+    else {
+        return Vec::new();
+    };
+    let bound: Vec<Option<Expr>> = extras
+        .iter()
+        .map(|name| {
+            entries.iter().find_map(|(k, v)| match &*k.node {
+                ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == name => {
+                    Some(v.clone())
+                }
+                _ => None,
+            })
+        })
+        .collect();
+    let Some(last) = bound.iter().rposition(|b| b.is_some()) else {
+        return Vec::new();
+    };
+    bound
+        .into_iter()
+        .take(last + 1)
+        .map(|b| b.unwrap_or_else(nil_lit))
+        .collect()
 }

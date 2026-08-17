@@ -634,6 +634,19 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             &is_local,
             &is_options_ivar,
         ) {
+            // `render layout: "x" do … end` lowers to SEVERAL statements
+            // (a capture local, then the layout call), so it can't ride
+            // `emit_render_partial`'s single-expression return. It also
+            // has to be caught here rather than in the generic
+            // block-form helper arm below, which would keep the bare
+            // `render` and emit a call to a method no view module has.
+            if let crate::lower::view::RenderPartial::LayoutBlock { layout, locals, block } = &rp {
+                if let Some(stmts) =
+                    super::partial::emit_layout_block(layout, *locals, block, ctx)
+                {
+                    return stmts;
+                }
+            }
             if let Some(stmt) = emit_render_partial(&rp, ctx) {
                 return vec![stmt];
             }

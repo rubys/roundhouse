@@ -101,6 +101,12 @@ pub enum RenderPartial<'a> {
         collection: &'a Expr,
         partial: &'a str,
         as_name: Option<&'a str>,
+        /// An explicit `locals:` hash rides along: Rails passes it to
+        /// EVERY element render alongside the element itself
+        /// (`render partial: "rooms/opens/user", collection: users,
+        /// locals: { room: room }`), so the partial's non-record params
+        /// have to be bound per iteration like any named render's.
+        locals: Option<&'a [(Expr, Expr)]>,
     },
     /// `render partial: @above` — the partial NAME is a runtime value
     /// (an ivar/local), not a literal, so it can't be resolved to one
@@ -110,6 +116,21 @@ pub enum RenderPartial<'a> {
     /// controllers assign to `@<ivar>` (see `dynamic_partial_pools`),
     /// each arm calling the resolved partial with its threaded closure.
     DynamicNamed { name: &'a Expr, ivar: &'a str },
+    /// `render layout: "rooms/layouts/new"[, locals: { … }] do … end` —
+    /// the block's rendered markup becomes the layout partial's `yield`.
+    ///
+    /// Rails' layout partials are ordinary partials that `yield`, and the
+    /// lowering already models that: a `_new.html.erb` under `layouts/`
+    /// takes its body as the dir-convention record arg (`def
+    /// self._new(layout, …)`) and `<%= yield %>` reads it. The only
+    /// missing half was the CALL — this variant is it. `block` is the
+    /// attached lambda; the emitter walks its body into a capture local
+    /// and passes that as the record.
+    LayoutBlock {
+        layout: &'a str,
+        locals: Option<&'a [(Expr, Expr)]>,
+        block: &'a Expr,
+    },
     /// `render template: "stories/show"` — a full ACTION VIEW rendered
     /// from another view (lobsters' new-story page previews the story).
     /// Resolves through the same `(module, stem)` key space as
@@ -121,8 +142,13 @@ pub enum RenderPartial<'a> {
 
 /// Recognize a `render ...` call inside an ERB view body. Returns
 /// `None` when the shape doesn't match any supported form, when
-/// there's a receiver, when a block is attached, or when a
-/// one-arg Var/Ivar doesn't name a view-scope local (`is_local`).
+/// there's a receiver, or when a one-arg Var/Ivar doesn't name a
+/// view-scope local (`is_local`).
+///
+/// A block is accepted for exactly ONE shape — `render layout: "…" do …
+/// end` (`LayoutBlock`), where the block IS the render's content. Every
+/// other block-form render still returns `None`: the block would be a
+/// Rails feature nothing here models, and saying so beats guessing.
 pub fn classify_render_partial<'a>(
     recv: Option<&'a Expr>,
     method: &str,
@@ -131,8 +157,13 @@ pub fn classify_render_partial<'a>(
     is_local: &impl Fn(&str) -> bool,
     is_options_ivar: &impl Fn(&str) -> bool,
 ) -> Option<RenderPartial<'a>> {
-    if method != "render" || recv.is_some() || block.is_some() {
+    if method != "render" || recv.is_some() {
         return None;
+    }
+    if let Some(block) = block {
+        let [arg] = args else { return None };
+        let ExprNode::Hash { entries, .. } = &*arg.node else { return None };
+        return classify_render_layout(entries, block);
     }
     match args {
         [arg] => match &*arg.node {
@@ -215,6 +246,38 @@ pub fn classify_render_partial<'a>(
         }
         _ => None,
     }
+}
+
+/// `render layout: "<path>"[, locals: { … }] do … end` from its kwarg
+/// hash. A hash with no `layout:` key returns `None` — the block-form
+/// renders this lowering does not model stay unrecognized rather than
+/// being mistaken for the layout shape.
+fn classify_render_layout<'a>(
+    entries: &'a [(Expr, Expr)],
+    block: &'a Expr,
+) -> Option<RenderPartial<'a>> {
+    let mut layout: Option<&str> = None;
+    let mut locals: Option<&[(Expr, Expr)]> = None;
+    for (k, v) in entries {
+        let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else { continue };
+        match key.as_str() {
+            "layout" => {
+                let ExprNode::Lit { value: Literal::Str { value } } = &*v.node else {
+                    // A runtime layout name has no static partial to
+                    // resolve; unrecognized rather than guessed.
+                    return None;
+                };
+                layout = Some(value.as_str());
+            }
+            "locals" => {
+                if let ExprNode::Hash { entries: le, .. } = &*v.node {
+                    locals = Some(le);
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(RenderPartial::LayoutBlock { layout: layout?, locals, block })
 }
 
 /// Classify the explicit-kwarg render forms from the trailing kwarg
@@ -300,6 +363,7 @@ fn classify_render_kwargs(entries: &[(Expr, Expr)]) -> Option<RenderPartial<'_>>
             collection,
             partial,
             as_name,
+            locals: locals_entries,
         })
     } else {
         Some(RenderPartial::Named {
@@ -600,6 +664,17 @@ pub enum ViewUrlArg<'a> {
     /// `elements` is the raw element list; emitters classify each
     /// element (recursively via RecordRef / association read).
     NestedArray { elements: &'a [Expr] },
+    /// A view-scope LOCAL whose name ends `_path`/`_url` — it already
+    /// holds the url string, so there is nothing to resolve.
+    ///
+    /// Rails partials pass paths around as locals (campfire's
+    /// `rooms/_form` takes `type_change_path:` and hands it straight to
+    /// `link_to`), and the `_path` suffix rule above would otherwise
+    /// claim the name and emit a call to a route helper that does not
+    /// exist. The suffix is the whole reason to distinguish this from
+    /// `RecordRef`: a local named `article` is a record to route FOR, a
+    /// local named `article_path` is the route itself.
+    LocalUrl { name: &'a str },
 }
 
 /// Classify the URL-position arg of a nav helper. `is_local`
@@ -614,6 +689,23 @@ where
     match &*arg.node {
         ExprNode::Lit { value: Literal::Str { value } } => {
             Some(ViewUrlArg::Literal { value: value.as_str() })
+        }
+        // A LOCAL named `<x>_path` / `<x>_url` holds the url already —
+        // checked before the suffix rule below, which would otherwise
+        // rewrite the name to a route helper of the same spelling.
+        // (Prism parses a partial-scope local as an implicit-self Send,
+        // so both node shapes have to be tested.)
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name }
+            if is_local_url_name(name.as_str()) && is_local(name.as_str()) =>
+        {
+            Some(ViewUrlArg::LocalUrl { name: name.as_str() })
+        }
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if args.is_empty()
+                && is_local_url_name(method.as_str())
+                && is_local(method.as_str()) =>
+        {
+            Some(ViewUrlArg::LocalUrl { name: method.as_str() })
         }
         // Path helper: `articles_path()` / `article_path(x)` — any
         // method ending in `_path`.
@@ -643,6 +735,12 @@ where
         }
         _ => None,
     }
+}
+
+/// True for a name that reads as a url rather than a record — the
+/// `_path` / `_url` suffix Rails' own helpers use.
+fn is_local_url_name(name: &str) -> bool {
+    name.ends_with("_path") || name.ends_with("_url")
 }
 
 // ── Nested URL/form element classifier ────────────────────────

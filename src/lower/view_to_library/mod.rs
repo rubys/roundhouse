@@ -219,6 +219,12 @@ pub struct ViewLowerCtx<'a> {
     /// record). Render call sites consult it to bind provided locals by
     /// name and to suppress convention closure-threading.
     strict_locals: std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Param>>>,
+    /// For a partial rendered as a COLLECTION with an explicit name, the
+    /// local its callers bind each element to — `as:` when given, else
+    /// the partial's own base name. Rails' rule, read off the call site;
+    /// absent for every partial nobody renders that way, which then keeps
+    /// the dir-singular convention arg.
+    collection_element_locals: std::rc::Rc<std::collections::HashMap<ViewKey, String>>,
     /// Helper methods that are a thin wrapper around a BUILDER-YIELDING
     /// form helper (see [`form_wrapper_helpers`]).
     form_wrappers: std::rc::Rc<std::collections::HashMap<String, FormWrapperHelper>>,
@@ -272,6 +278,7 @@ impl<'a> ViewLowerCtx<'a> {
                     .collect(),
             ),
             strict_locals: std::rc::Rc::new(strict_locals_by_key(&app.views)),
+            collection_element_locals: std::rc::Rc::new(collection_element_locals(&app.views)),
             form_wrappers: std::rc::Rc::new(form_wrapper_helpers(app)),
         }
     }
@@ -299,7 +306,25 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         crate::lower::view::view_method_name_for(stem, view.format.as_str());
 
     let known_models: &[String] = &lx.known_models;
-    let arg_name = infer_view_arg(stem, dir, base.starts_with('_'), known_models);
+    // Rails binds a collection element to the local named after the
+    // PARTIAL (or `as:`), not after its DIRECTORY: `render partial:
+    // "rooms/opens/user", collection: users` hands the partial a `user`,
+    // where the dir convention says `open`. The two agree for
+    // `articles/_article` and part ways for a partial not named after its
+    // directory — and the CALL side already binds the caller's name
+    // (`emit_partial_each`'s `as_name.unwrap_or(base_name)`), so this half
+    // was the one out of step: `_user`'s body read `user`, which resolved
+    // to the module's own `user` method and recursed.
+    //
+    // Taken from the CALL SITES (`collection_element_locals`), not guessed
+    // from the body: a body-reads-the-stem heuristic also fires on a
+    // BLOCK parameter, which is how `rooms/layouts/_form` — whose
+    // `form_with … do |form|` binds `form` — briefly lost its `yield` arg.
+    let arg_name = view_key_of(view)
+        .and_then(|k| lx.collection_element_locals.get(&k).cloned())
+        .unwrap_or_else(|| {
+            infer_view_arg(stem, dir, base.starts_with('_'), known_models)
+        });
 
     // Rewrite `@ivar` → bare `ivar` everywhere so the inferred arg name
     // (and any extra params we surface) read as plain locals in the
@@ -1956,7 +1981,11 @@ pub(crate) fn render_locals_keys(
                             _ => "",
                         };
                         match key {
-                            "partial" => {
+                            // `layout:` is the same shape as `partial:` —
+                            // a path plus an optional `locals:` — and its
+                            // block-form call site declares the layout
+                            // partial's interface just as much.
+                            "partial" | "layout" => {
                                 if let ExprNode::Lit { value: Literal::Str { value } } = &*v.node {
                                     partial = Some(value.clone());
                                 }
@@ -2398,6 +2427,72 @@ pub(crate) fn view_ivar_closures(
         .collect()
 }
 
+/// For each partial rendered as an explicitly-named COLLECTION, the local
+/// its call sites bind the element to.
+///
+/// Rails' rule is `as:` when given, else the PARTIAL's base name — not
+/// the directory singular the arg convention otherwise infers. Only the
+/// `CollectionNamed` shape needs recording: the bare `render articles`
+/// and association forms bind the collection's singular, which is what
+/// the convention already produces.
+///
+/// A partial two call sites bind DIFFERENTLY has no single right answer,
+/// so it is dropped and keeps the convention arg.
+fn collection_element_locals(
+    views: &[View],
+) -> std::collections::HashMap<ViewKey, String> {
+    use std::collections::{HashMap, HashSet};
+    let mut out: HashMap<ViewKey, String> = HashMap::new();
+    let mut conflicted: HashSet<ViewKey> = HashSet::new();
+    for view in views {
+        let (dir, _) = split_view_name(view.name.as_str());
+        collect_collection_element_locals(&view.body, dir, &mut out, &mut conflicted);
+    }
+    out
+}
+
+fn collect_collection_element_locals(
+    e: &Expr,
+    dir: &str,
+    out: &mut std::collections::HashMap<ViewKey, String>,
+    conflicted: &mut std::collections::HashSet<ViewKey>,
+) {
+    if let ExprNode::Send { recv, method, args, block, .. } = &*e.node {
+        if let Some(crate::lower::view::RenderPartial::CollectionNamed {
+            partial,
+            as_name,
+            ..
+        }) = crate::lower::view::classify_render_partial(
+            recv.as_ref(),
+            method.as_str(),
+            args,
+            block.as_ref(),
+            &|_| true,
+            &|_| false,
+        ) {
+            let key = partial_name_to_key(partial, dir);
+            let local = as_name
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| key.1.clone());
+            if conflicted.contains(&key) {
+                return;
+            }
+            match out.get(&key) {
+                Some(existing) if *existing != local => {
+                    out.remove(&key);
+                    conflicted.insert(key);
+                }
+                Some(_) => {}
+                None => {
+                    out.insert(key, local);
+                }
+            }
+        }
+    }
+    e.node
+        .for_each_child(&mut |c| collect_collection_element_locals(c, dir, out, conflicted));
+}
+
 /// The partial views a body renders, as `ViewKey`s — for the render graph.
 /// Resolves the same render shapes `classify_render_partial` recognizes;
 /// unresolvable (dynamic) partial names are skipped.
@@ -2463,6 +2558,10 @@ fn render_partial_key(rp: &crate::lower::view::RenderPartial<'_>, dir: &str) -> 
         // A full-template render is a render-graph edge like any other:
         // the caller's closure must cover the action view's.
         RenderPartial::Template { name } => partial_name_to_key(name, dir),
+        // `render layout: "rooms/layouts/new" do … end` — an edge like any
+        // other named partial: the caller's closure must cover the
+        // layout's, since the layout body reads the caller's ivars.
+        RenderPartial::LayoutBlock { layout, .. } => partial_name_to_key(layout, dir),
         // A dynamic name resolves to a POOL of keys, not one — folded into
         // the render graph separately (see `dynamic_render_edges`).
         RenderPartial::DynamicNamed { .. } => return None,

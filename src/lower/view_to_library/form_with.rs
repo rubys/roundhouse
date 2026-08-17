@@ -787,6 +787,30 @@ fn classify_form_with_components(
     // slash; helper names join with underscores (`mod_tags_path`, never
     // `mod/tag_path` — which reads as division in the emitted Ruby).
     let plural_owned = ctx.resource_dir.replace('/', "_");
+    let mut plural_owned = plural_owned;
+    // Rails derives a `form_with model:` action from the RECORD's class
+    // (`polymorphic_path`), not from the view's directory. The directory
+    // is a stand-in that holds while a form lives under its own resource's
+    // views, and parts ways as soon as it doesn't — campfire's
+    // `rooms/layouts/_form` takes a `room` and emitted
+    // `rooms_layout_path`, which no route table has.
+    //
+    // The ROUTE TABLE is the oracle, not a model registry: prefer the
+    // record-derived pair when the routes actually name it, otherwise keep
+    // the directory-derived pair (including for the empty helper set that
+    // test harnesses without routes carry, where neither can be checked).
+    if let Some(name) = record_local_name(&model) {
+        let rec_singular = singularize(&snake_case(&name));
+        let rec_plural = crate::naming::pluralize_snake(&rec_singular);
+        let known = |n: &str| ctx.route_helper_names.contains(&format!("{n}_path"));
+        if rec_plural != plural_owned
+            && !known(&plural_owned)
+            && !known(&singularize(&plural_owned))
+            && (known(&rec_plural) || known(&rec_singular))
+        {
+            plural_owned = rec_plural;
+        }
+    }
     let plural = plural_owned.as_str();
     let singular = singularize(plural);
 
@@ -830,13 +854,7 @@ fn classify_form_with_components(
     // directory-derived and Rails-divergent (it renders only for
     // moderators, off-replay) — a pre-existing gap this pass leaves
     // as-was rather than turning into a compile stop.
-    let record_name: Option<String> = match &*model.node {
-        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => Some(name.as_str().to_string()),
-        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
-            Some(method.as_str().to_string())
-        }
-        _ => None,
-    };
+    let record_name: Option<String> = record_local_name(&model);
     let slug_key = record_name.as_deref().unwrap_or(singular.as_str());
     let member_arg = if ctx.slug_models.contains(slug_key) {
         send(Some(model.clone()), "to_param", Vec::new(), None, false)
@@ -1366,5 +1384,19 @@ mod tests {
             panic!("expected ActionView::ViewHelpers receiver");
         };
         assert_eq!(path.last().map(|s| s.as_str()), Some("ViewHelpers"));
+    }
+}
+
+/// The identifier a `form_with model:` record is bound to — a local, an
+/// ivar, or the bare no-arg Send Prism produces for a partial-scope
+/// local before scope analysis. `None` for any other shape (an array, a
+/// call chain, a literal).
+fn record_local_name(model: &Expr) -> Option<String> {
+    match &*model.node {
+        ExprNode::Var { name, .. } | ExprNode::Ivar { name } => Some(name.as_str().to_string()),
+        ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
+            Some(method.as_str().to_string())
+        }
+        _ => None,
     }
 }
