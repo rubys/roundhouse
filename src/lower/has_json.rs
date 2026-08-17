@@ -20,8 +20,10 @@
 //! one-hop flat name. This is the same shape as `lower::typed_store`,
 //! whose column is the YAML twin of this one: `@<col>` stays the
 //! serialized TEXT that goes to the database, and reads/writes route
-//! through ONE named runtime seam — here `JsonBuilder.read_*`/`write_*`,
-//! the app's existing JSON home rather than a second one beside it.
+//! through ONE named runtime seam — here `SchematizedJson.read_*`/`write_*`
+//! (`runtime/spinel/schematized_json.rb` and its CRuby overlay twin —
+//! see that file's header for why it is per-target and not transpiled
+//! framework Ruby).
 //! `has_delegated_json` (Rails' variant that also aliases each key onto
 //! the model itself) is not claimed: no corpus app declares one, and it
 //! is `has_json` plus aliases, so it can land the day one does.
@@ -365,9 +367,9 @@ fn sp(node: ExprNode) -> Expr {
     Expr::new(Span::synthetic(), node)
 }
 
-fn json_builder(method: &str, args: Vec<Expr>) -> Expr {
+fn schematized_json(method: &str, args: Vec<Expr>) -> Expr {
     sp(ExprNode::Send {
-        recv: Some(sp(ExprNode::Const { path: vec![Symbol::from("JsonBuilder")] })),
+        recv: Some(sp(ExprNode::Const { path: vec![Symbol::from("SchematizedJson")] })),
         method: Symbol::from(method),
         args,
         block: None,
@@ -375,10 +377,10 @@ fn json_builder(method: &str, args: Vec<Expr>) -> Expr {
     })
 }
 
-/// `JsonBuilder.read_<ty>(@<col>, "<key>", <default>)`.
+/// `SchematizedJson.read_<ty>(@<col>, "<key>", <default>)`.
 fn read_body(col: &Symbol, a: &HasJsonAttr) -> Expr {
     super::typing::with_ty(
-        json_builder(
+        schematized_json(
             a.scalar.reader(),
             vec![
                 sp(ExprNode::Ivar { name: col.clone() }),
@@ -392,7 +394,7 @@ fn read_body(col: &Symbol, a: &HasJsonAttr) -> Expr {
     )
 }
 
-/// `@<col> = JsonBuilder.write_<ty>(@<col>, "<key>", <cast(value)>)`.
+/// `@<col> = SchematizedJson.write_<ty>(@<col>, "<key>", <cast(value)>)`.
 fn write_body(col: &Symbol, a: &HasJsonAttr) -> Expr {
     let value = sp(ExprNode::Var { id: VarId(0), name: Symbol::from("value") });
     let cast = match a.scalar {
@@ -414,7 +416,7 @@ fn write_body(col: &Symbol, a: &HasJsonAttr) -> Expr {
     };
     sp(ExprNode::Assign {
         target: LValue::Ivar { name: col.clone() },
-        value: json_builder(
+        value: schematized_json(
             a.scalar.writer(),
             vec![
                 sp(ExprNode::Ivar { name: col.clone() }),

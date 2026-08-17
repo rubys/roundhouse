@@ -76,23 +76,23 @@ fn accessors_render_over_the_serialized_column() {
     let src = account_source(&campfire_like_app());
     assert!(
         src.contains(
-            r#"JsonBuilder.read_boolean(@settings, "restrict_room_creation_to_administrators", false)"#
+            r#"SchematizedJson.read_boolean(@settings, "restrict_room_creation_to_administrators", false)"#
         ),
         "reader routes through the JSON seam carrying the declared default:\n{src}"
     );
     assert!(
-        src.contains(r#"JsonBuilder.read_integer(@settings, "max_invites", 10)"#),
+        src.contains(r#"SchematizedJson.read_integer(@settings, "max_invites", 10)"#),
         "integer key reads through the integer seam:\n{src}"
     );
     assert!(
-        src.contains(r#"JsonBuilder.read_string(@settings, "greeting", "Hello!") != """#),
+        src.contains(r#"SchematizedJson.read_string(@settings, "greeting", "Hello!") != """#),
         "a string key's predicate is the non-empty test:\n{src}"
     );
     // The writer is the coercion boundary — a form sends `"0"`/`"true"`
     // where the schema says boolean, exactly as for typed_store.
     assert!(
         src.contains(
-            r#"JsonBuilder.write_boolean(@settings, "restrict_room_creation_to_administrators", value.to_s != "0" && value.to_s != "" && value.to_s != "false")"#
+            r#"SchematizedJson.write_boolean(@settings, "restrict_room_creation_to_administrators", value.to_s != "0" && value.to_s != "" && value.to_s != "false")"#
         ),
         "boolean writer casts rather than storing the form value verbatim:\n{src}"
     );
@@ -123,7 +123,7 @@ fn a_user_defined_method_wins_over_synthesis() {
         .expect("reader present");
     let body = format!("{:?}", reader.body);
     assert!(
-        !body.contains("JsonBuilder"),
+        !body.contains("SchematizedJson"),
         "the model's own method must win over synthesis: {body}"
     );
 }
@@ -148,7 +148,7 @@ fn an_unexpandable_schema_entry_leaves_the_declaration_unclaimed() {
     // the schema synthesizer's plain one.
     let src = account_source(&app);
     assert!(
-        !src.contains("JsonBuilder"),
+        !src.contains("SchematizedJson"),
         "nothing routes through the JSON seam:\n{src}"
     );
 }

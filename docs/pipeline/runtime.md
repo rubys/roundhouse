@@ -307,7 +307,10 @@ object out of `account.settings`, and a decoded Hash out of
 `attributes` all give the SERIALIZED JSON text; the schema's keys are
 reached through the flat accessors `lower::has_json` synthesizes
 (`account.settings_restrict?`), and the two-hop source spelling rewrites
-to them.
+to them. The seam itself is `runtime/spinel/schematized_json.rb` plus its
+CRuby overlay twin — per-target like `TypedStore`, so the strict targets
+carry the calls as one named unresolved seam until a native
+implementation lands.
 
 **Why.** The accessor object answers through `method_missing` and would
 need a live back-reference into the record for a write through it to be

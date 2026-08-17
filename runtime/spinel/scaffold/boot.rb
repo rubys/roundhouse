@@ -94,6 +94,10 @@ require_relative "runtime/action_controller"
 # Before app/models — the synthesized settings accessors route
 # through it.
 require_relative "runtime/typed_store"
+# has_json (ActiveModel::SchematizedJson) virtual-attribute seam — the
+# JSON sibling of the line above. After runtime/json_builder, whose
+# string escaper it uses.
+require_relative "runtime/schematized_json"
 require_relative "runtime/broadcasts"
 require_relative "runtime/tep/tep"
 # Spinel-only CGI shim (escape/unescape_html/parse) — CRuby/JRuby use stdlib

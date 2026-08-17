@@ -2,18 +2,4 @@ module JsonBuilder
   def self.encode_string: (String) -> String
   def self.encode_value: (untyped) -> String
   def self.encode_datetime: (String?) -> String
-  def self.parse_object: (String?) -> Hash[String, String]
-  def self.json_separator?: (String) -> bool
-  def self.scan_json_string: (String, Integer) -> Integer
-  def self.scan_json_value: (String, Integer) -> Integer
-  def self.decode_string: (String) -> String
-  def self.read_raw: (Hash[String, String], String) -> String
-  def self.read_boolean: (String?, String, bool) -> bool
-  def self.read_integer: (String?, String, Integer) -> Integer
-  def self.read_string: (String?, String, String) -> String
-  def self.write_boolean: (String?, String, bool) -> String
-  def self.write_integer: (String?, String, Integer) -> String
-  def self.write_string: (String?, String, String) -> String
-  def self.write_json_raw: (String?, String, String) -> String
-  def self.render_object: (Hash[String, String]) -> String
 end

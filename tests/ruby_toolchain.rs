@@ -149,6 +149,10 @@ fn real_blog_spinel_tests_pass() {
         // comments in 2 queries rather than the 1+N `compare` is blind
         // to. Rides in via runtime/spinel/test/query_count_test.rb.
         "test/query_count_test.rb",
+        // `has_json`'s column seam (`runtime/schematized_json.rb`) — a
+        // per-target runtime module, so this is the lane that runs its
+        // unit tests. Rides in the same way query_count_test does.
+        "test/schematized_json_test.rb",
     ] {
         assert_test_passes(&scratch, &gemfile, test);
     }

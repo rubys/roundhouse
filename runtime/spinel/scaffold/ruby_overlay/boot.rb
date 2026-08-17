@@ -110,6 +110,10 @@ require_relative "runtime/action_dispatch_request"
 require_relative "runtime/action_controller_session"
 require_relative "runtime/action_controller_json_render"
 require_relative "runtime/typed_store"
+# has_json (ActiveModel::SchematizedJson) virtual-attribute seam — the
+# JSON sibling of the line above. After runtime/json_builder, whose
+# string escaper it uses.
+require_relative "runtime/schematized_json"
 require_relative "runtime/action_mailer"
 # App-code gem dependencies, guarded so apps that don't use them (the
 # blog) boot without the gems installed. Under Rails, Bundler
