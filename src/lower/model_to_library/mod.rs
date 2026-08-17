@@ -550,6 +550,21 @@ fn report_unclaimed_unknowns(model: &Model) {
         if name == "has_secure_password" {
             continue;
         }
+        // `has_json :col, key: <literal>, …` — claimed by
+        // lower::has_json's shared method synthesis. A declaration
+        // carrying a schema entry that pass cannot expand (a
+        // symbol-declared type, whose Rails default is nil) is NOT
+        // claimed and keeps warning: half an expansion is worse than
+        // none. `has_json_decls` is the one place that decides which
+        // declarations are claimed; this test asks it rather than
+        // re-deriving the shape (same dance as `has_rich_text`).
+        if name == "has_json"
+            && crate::lower::has_json::has_json_decls(&model.body)
+                .iter()
+                .any(|d| d.span == expr.span)
+        {
+            continue;
+        }
         // Bare `has_rich_text :body` — claimed by lower::rich_text.
         // The option-carrying forms (`encrypted:`, `store_if_blank:`)
         // are NOT claimed: each changes the expansion and none is
@@ -830,6 +845,10 @@ fn build_methods(
     // YAML seam). Before `push_user_methods` so a custom method in the
     // model body wins via the synthesizer's own model-body check.
     crate::lower::typed_store::push_typed_store_methods(&mut methods, model);
+    // `has_json` schema keys — the JSON twin of the above: one typed
+    // accessor triple per declared key, over the serialized column.
+    // Same ordering rationale.
+    crate::lower::has_json::push_has_json_methods(&mut methods, model);
     // has_secure_password — authenticate + plaintext accessors,
     // against the bcrypt gem's own surface (`BCrypt::Password`). Same
     // ordering rationale.
@@ -1719,7 +1738,14 @@ pub fn ty_of_column(t: &ColumnType) -> Ty {
         ColumnType::Boolean => Ty::Bool,
         ColumnType::Date | ColumnType::DateTime | ColumnType::Time => Ty::Str,
         ColumnType::Binary => Ty::Str,
-        ColumnType::Json => Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) },
+        // A `json` column is stored TEXT and nothing parses it: the
+        // Row field, hydration, `[]`, `attributes` and the adapter's
+        // escape all move the serialized string. `Hash[String, String]`
+        // was a declaration no synthesized path implemented. What gives
+        // such a column STRUCTURE is a `has_json` declaration, and that
+        // is modeled as typed per-key accessors over this text
+        // (`lower::has_json`), not as a Hash the whole column decodes to.
+        ColumnType::Json => Ty::Str,
         ColumnType::Reference { .. } => Ty::Int,
     }
 }

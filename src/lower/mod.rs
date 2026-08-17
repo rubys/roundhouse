@@ -67,6 +67,7 @@ pub mod arel_attribute;
 pub mod exclude_predicate;
 pub mod including;
 pub mod enum_symbols;
+pub mod has_json;
 pub mod update_writer_check;
 pub mod route_format_suffix;
 pub mod config_reader;
@@ -114,6 +115,7 @@ pub use arel_attribute::apply_arel_attribute_lowering;
 pub use exclude_predicate::apply_exclude_predicate_lowering;
 pub use including::apply_including_lowering;
 pub use enum_symbols::apply_enum_symbol_lowering;
+pub use has_json::apply_has_json_lowering;
 pub use route_format_suffix::apply_route_format_suffix_lowering;
 pub use config_reader::apply_config_reader_lowering;
 pub use exists_conditions::apply_exists_conditions_lowering;
@@ -215,6 +217,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // folding that turns a `where` hash into SQL, so the folded literal
     // is the integer the column stores.
     ("enum_symbols", &[]),
+    // `account.settings.foo?` → `account.settings_foo?`. No ordering
+    // constraint: the two-hop shape it consumes is one no other pass
+    // produces, and the flat send it leaves is an ordinary typed call.
+    ("has_json", &[]),
     // Read-only ledger: a `self.update(k: …)` whose `k` no writer backs.
     // Rewrites nothing, so it has no ordering constraint of its own —
     // it just has to see the final tree.
@@ -382,6 +388,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("route_format_suffix");
     enum_symbols::apply_enum_symbol_lowering(app);
     ran!("enum_symbols");
+    diags.extend(has_json::apply_has_json_lowering(app));
+    ran!("has_json");
     // Read-only ledger, no rewrite — but it must run AFTER
     // `enum_symbols` so a label that pass already translated isn't
     // mistaken for anything, and after every pass that could introduce

@@ -299,6 +299,40 @@ rendering N records issues N rich-text queries where Rails issues one.
 The methods exist rather than being dropped so that call sites chaining
 through them keep working.
 
+### A `has_json` column reads back as its stored TEXT
+
+`has_json :settings, restrict: false` gives Rails a `DataAccessor`
+object out of `account.settings`, and a decoded Hash out of
+`account[:settings]` / `account.attributes`. Here the reader, `[]`, and
+`attributes` all give the SERIALIZED JSON text; the schema's keys are
+reached through the flat accessors `lower::has_json` synthesizes
+(`account.settings_restrict?`), and the two-hop source spelling rewrites
+to them.
+
+**Why.** The accessor object answers through `method_missing` and would
+need a live back-reference into the record for a write through it to be
+visible in the record — neither survives static resolution. The schema
+is a compile-time fact, so it expands instead. `[]`/`attributes` are the
+STORAGE view (`created_at` reads back through them as its raw ISO text
+for the same reason), and the storage here is the serialized column.
+
+**Where it is visible.** Three places. `record[:settings]` is a String
+where Rails gives a Hash. Assigning the column a whole Hash —
+`update!(settings: { … })`, which Rails casts key by key through the
+schema — is UNMODELED and reported: the same writer is where hydration
+lands (`from_row` assigns the stored column straight through it), so
+telling a Hash of attributes from already-serialized text would need a
+runtime type test over an untyped Hash, which no target's Hash surface
+resolves. The per-key writer is the supported spelling and the whole-Hash
+one is a diagnostic, never a silent `Hash#to_s` in the column. Third: an
+integer key gets no `?` predicate, because Rails' `present?` on any
+Integer — `0` included — is unconditionally true, and a method that
+always answers the same thing is worse than an honest gap.
+
+Analyze additionally types the column reader `untyped` where the emitted
+reader returns `String`: that is the source-shaped accessor object, and
+it exists only between the two hops the lowering erases.
+
 ## Related docs
 
 - [`emit.md`](emit.md) — the universal IR contract; the consumers of

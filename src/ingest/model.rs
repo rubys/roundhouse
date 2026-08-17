@@ -1221,7 +1221,14 @@ fn ty_of_column(t: &ColumnType) -> Ty {
         ColumnType::Boolean => Ty::Bool,
         ColumnType::Date | ColumnType::DateTime | ColumnType::Time => Ty::Time,
         ColumnType::Binary => Ty::Str,
-        ColumnType::Json => Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Str) },
+        // A `json` column is stored TEXT and nothing parses it: the
+        // Row field, hydration, `[]`, `attributes` and the adapter's
+        // escape all move the serialized string. `Hash[String, String]`
+        // was a declaration no synthesized path implemented. What gives
+        // such a column STRUCTURE is a `has_json` declaration, and that
+        // is modeled as typed per-key accessors over this text
+        // (`lower::has_json`), not as a Hash the whole column decodes to.
+        ColumnType::Json => Ty::Str,
         ColumnType::Reference { .. } => Ty::Int,
     }
 }

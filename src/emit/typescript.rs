@@ -2769,7 +2769,14 @@ pub fn emit_method(m: &crate::dialect::MethodDef) -> String {
         .iter()
         .zip(sig_params.iter())
         .map(|(name, p)| js_ast::JsParam {
-            name: name.as_str().to_string(),
+            // `escape_reserved`, matching `js_library_function` and the
+            // `escape_reserved_word` the body's Var reads already go
+            // through: a Ruby param may be named `default`, which is a
+            // JS keyword. Module-mode declarations were the one path
+            // that skipped it, so a `default` param emitted a
+            // signature the body's `default_` could not have referred
+            // to anyway.
+            name: escape_reserved(name.as_str()),
             optional: false,
             ty: Some(js_ast::TsType(ts_ty(&p.ty))),
             default: None,
@@ -2797,7 +2804,14 @@ pub fn emit_method(m: &crate::dialect::MethodDef) -> String {
     printer::render_decl(&js_ast::JsDecl::Function {
         export: true,
         is_async: emit_async,
-        name: m.name.as_str().to_string(),
+        // Same rename as every other definition site
+        // (`library::sanitize_identifier`): a Ruby `?`/`!` suffix is not
+        // a legal TS identifier. Module-mode DEFINITIONS were the one
+        // path that skipped it while call sites did not — latent only
+        // because no module-mode runtime file had declared a predicate
+        // yet, so `def self.json_separator?` emitted `export function
+        // json_separator?(…)` against a call to `is_json_separator`.
+        name: escape_for_function_name(m.name.as_str()),
         params: param_list,
         ret: Some(js_ast::TsType(ret_s)),
         body,

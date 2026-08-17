@@ -292,7 +292,7 @@ fn value_ref() -> Expr {
 /// stored nil would put the reader right back to describing something
 /// it isn't. Every corpus attribute defaults to false, so the value is
 /// the same one an unset read produces.
-fn bool_cast(value: Expr) -> Expr {
+pub(crate) fn bool_cast(value: Expr) -> Expr {
     let ne = |lit: &str| {
         sp_expr(ExprNode::Send {
             recv: Some(sp_expr(ExprNode::Send {

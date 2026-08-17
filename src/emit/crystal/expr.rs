@@ -1281,6 +1281,15 @@ pub(super) fn emit_send_base(
         // `include?` is method-only — the bare `include` Ruby keyword
         // for module mixin lowers to `LibraryClass::includes`, not
         // a Send, so it's never seen here.
+        // Ruby has ONE Integer; this emitter maps `Ty::Int` to `Int64`
+        // (see `crystal::ty` — Rails IDs are 64-bit). Crystal's `to_i`
+        // answers `Int32`, so every `x.to_i` was a value one width
+        // narrower than the type the rest of the emit declares, and a
+        // method whose signature says `Int64` while its tail says
+        // `raw.to_i` does not compile (`must return Int64 but it is
+        // returning (Int32 | Int64)`). `to_i64` is the width-agreeing
+        // spelling and exists on String / Int / Float / Char alike.
+        "to_i" if args_s.is_empty() => "to_i64",
         "start_with?" => "starts_with?",
         "end_with?" => "ends_with?",
         "include?" => "includes?",

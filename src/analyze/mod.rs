@@ -272,6 +272,9 @@ impl Analyzer {
             // DSL block, backed by a serialized column, so absent from the
             // schema-derived attributes above. Register them as typed methods.
             register_typed_store(&model.body, &mut cls.instance_methods);
+            // `has_json` schema keys — same situation, JSON instead of
+            // YAML, plus the one type the declaration erases.
+            register_has_json(&model.body, &mut cls.instance_methods);
             // `attribute :name, :type` virtual attributes (ActiveModel) —
             // backed by something other than a schema column, so absent
             // from `model.attributes` above.
@@ -3588,6 +3591,42 @@ fn register_ar_attributes(body: &[ModelBodyItem], methods: &mut HashMap<Symbol, 
         methods.entry(setter).or_insert(ty.clone());
         let predicate = Symbol::from(format!("{}?", name.as_str()));
         methods.entry(predicate).or_insert(Ty::Bool);
+    }
+}
+
+/// Register the flat accessors `lower::has_json` synthesizes for a
+/// `has_json :settings, key: default` declaration, and re-register the
+/// column reader itself as GRADUAL.
+///
+/// The split is deliberate. Analyze runs on source-shaped IR, where the
+/// call is still Rails' two-hop `account.settings.foo?` and the object
+/// between the hops has no class of its own — nothing to register a
+/// method surface on. `Untyped` is the gradual escape that lets that
+/// hop resolve; `lower::has_json` then rewrites it to
+/// `account.settings_foo?`, whose type IS registered here, so nothing
+/// untyped survives to a target. The one visible consequence: the
+/// EMITTED `settings` reader returns the serialized column text
+/// (`Ty::Str`) where analyze called it untyped. That is the divergence
+/// the erased accessor object costs, and it is recorded in
+/// `docs/pipeline/runtime.md`.
+///
+/// `insert`, not `or_insert`, on the column: the schema-derived pass
+/// above already registered the storage type and this is deliberately
+/// overriding it.
+fn register_has_json(body: &[ModelBodyItem], methods: &mut HashMap<Symbol, Ty>) {
+    for decl in crate::lower::has_json::has_json_decls(body) {
+        methods.insert(decl.column.clone(), Ty::Untyped);
+        for a in &decl.attrs {
+            let flat = crate::lower::has_json::flat_name(&decl.column, &a.name);
+            let ty = a.scalar.ty();
+            methods.entry(flat.clone()).or_insert(ty.clone());
+            methods
+                .entry(Symbol::from(format!("{}?", flat.as_str())))
+                .or_insert(Ty::Bool);
+            methods
+                .entry(Symbol::from(format!("{}=", flat.as_str())))
+                .or_insert(ty);
+        }
     }
 }
 
