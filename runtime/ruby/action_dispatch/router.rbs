@@ -43,6 +43,20 @@ module ActionDispatch
       Array[::ActionDispatch::Router::Route] table
     ) -> ::ActionDispatch::Router::MatchResult?
 
+    # One table scan for a literal path, with the format extension the
+    # request carried (`.turbo_stream` stripped off the last segment by
+    # `match`) — the empty string when the path carried none. A match
+    # puts it in `path_params["format"]`.
+    def self.match_path: (
+      String method,
+      String path,
+      Array[::ActionDispatch::Router::Route] table,
+      String format
+    ) -> ::ActionDispatch::Router::MatchResult?
+
+    # Is `ext` one of Rails' registered format extensions?
+    def self.format_extension: (String ext) -> bool
+
     # Match a path against a `:name`-segment pattern. Returns a
     # `Hash[String, String]` of captured params (URL segments are
     # always strings), or nil if no match. `int_params` is the route's
@@ -60,7 +74,8 @@ module ActionDispatch
     def self.match_parts: (
       Array[String] pattern_parts,
       Array[String] path_parts,
-      ?String int_params
+      ?String int_params,
+      ?String format
     ) -> Hash[String, String]?
 
     # Digit-only (`Integer` matcher / `constraints: /\d+/`) param

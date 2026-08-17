@@ -460,7 +460,7 @@ fn symbol_form_callbacks_lower_to_hook_overrides() {
   after_save :log_hat_use, if: :hat_selected?
 end
 "#;
-    let model = ingest_model(source, "app/models/user.rb", &Schema::default())
+    let model = ingest_model(source, "app/models/user.rb", &Schema::default(), &Default::default())
         .expect("ingest")
         .expect("model");
     let lc = lower_model_to_library_class(&model, &Schema::default());
@@ -547,7 +547,7 @@ fn block_form_callbacks_honor_the_on_restriction() {
   end
 end
 "#;
-    let model = ingest_model(source, "app/models/user.rb", &Schema::default())
+    let model = ingest_model(source, "app/models/user.rb", &Schema::default(), &Default::default())
         .expect("ingest")
         .expect("model");
     let lc = lower_model_to_library_class(&model, &Schema::default());
@@ -625,6 +625,7 @@ end
 "#,
         "app/models/username.rb",
         &schema,
+        &Default::default(),
     )
     .expect("ingest")
     .expect("model");
@@ -705,6 +706,7 @@ end
 "#,
         "app/models/story.rb",
         &schema,
+        &Default::default(),
     )
     .expect("ingest")
     .expect("model");
@@ -758,6 +760,7 @@ end
 "#,
         "app/models/user.rb",
         &schema,
+        &Default::default(),
     )
     .expect("ingest")
     .expect("model");
@@ -869,7 +872,7 @@ fn allow_blank_drops_dead_presence_check() {
   validates :email, presence: true
 end
 "#;
-    let model = ingest_model(source, "app/models/user.rb", &Schema::default())
+    let model = ingest_model(source, "app/models/user.rb", &Schema::default(), &Default::default())
         .expect("ingest")
         .expect("model");
     let validations: Vec<&roundhouse::Validation> = model.validations().collect();
@@ -1230,7 +1233,7 @@ fn unclaimed_model_dsl_reports_spanned_warning() {
   validates :name, presence: true
 end
 "#;
-    let model = ingest_model(source, "app/models/clip.rb", &Schema::default())
+    let model = ingest_model(source, "app/models/clip.rb", &Schema::default(), &Default::default())
         .expect("ingest")
         .expect("model");
 

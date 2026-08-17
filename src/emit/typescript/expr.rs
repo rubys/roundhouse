@@ -2198,6 +2198,30 @@ fn js_send_inner(
                 );
                 return iife(span, vec![JsStmt::synth(JsStmtNode::Throw(err))]);
             }
+            // `raise "msg"` is Ruby for `raise RuntimeError, "msg"` — an
+            // exception OBJECT, not a bare string. Thrown as a string, JS
+            // `catch (e) { if (e instanceof Error) }` does not recognize
+            // it, so an emitted `rescue` re-throws right past it: the
+            // runtime's own `assert_raises` could not see a `raise "..."`
+            // at all. Wrapping restores the Ruby meaning.
+            //
+            // A non-String operand (`raise e` re-raising a caught
+            // exception, `raise SomeError`) is thrown as written.
+            [value]
+                if matches!(
+                    &*value.node,
+                    ExprNode::Lit { value: Literal::Str { .. } } | ExprNode::StringInterp { .. }
+                ) =>
+            {
+                let err = Js::new(
+                    span,
+                    JsExpr::New {
+                        callee: Js::ident(span, "Error"),
+                        args: vec![js_expr(value)],
+                    },
+                );
+                return iife(span, vec![JsStmt::synth(JsStmtNode::Throw(err))]);
+            }
             [value] => {
                 return iife(span, vec![JsStmt::synth(JsStmtNode::Throw(js_expr(value)))]);
             }

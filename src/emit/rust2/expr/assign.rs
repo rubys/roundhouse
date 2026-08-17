@@ -36,6 +36,20 @@ pub(super) fn emit_assign(target: &LValue, value: &Expr) -> String {
                 }
                 let ty = back_propagated.or_else(|| value.ty.clone());
                 if let Some(t) = ty {
+                    // An Array index read is `T | Nil` in the IR —
+                    // Ruby's `Array#[]` answers nil past the end — but
+                    // rust2 emits `vec[(i) as usize].clone()`, which
+                    // panics instead and hands back an owned `T`. Record
+                    // what the BINDING actually holds; otherwise every
+                    // later use of the local gets an Option-shaped
+                    // coercion (`.as_deref()`, `.unwrap()`) against a
+                    // value that is not an Option, which is a compile
+                    // error rather than a wrong answer.
+                    let t = if super::send::is_array_index_read(value) {
+                        super::util::peel_nil(&t).clone()
+                    } else {
+                        t
+                    };
                     mark_local_var_ty(&name_str, t);
                 }
             }

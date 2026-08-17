@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# scripts/campfire-suite — run ONCE Campfire's OWN test suite against the emit.
+#
+# The C4 rung of the campfire coverage ladder: transpile campfire for the
+# `ruby` target, then run each of the app's own test files and tally
+# pass/fail. Unlike the walk (scripts/campfire-walk), which drives one
+# hand-written path, this measures the app's own assertions — the suite is
+# the spec campfire's authors wrote, so "how many of its files run green" is
+# the honest coverage number.
+#
+# THE FILE LIST IS THE APP'S, NOT OURS. The emitted Makefile's SPINEL_TESTS
+# is generated from the app's own test tree, so it is read from the emit
+# rather than restated here. `find test -name '*_test.rb'` would also sweep
+# in the scaffold's own tests (cgi_io_test, article_broadcasts_test, the
+# blog's view tests), which campfire's list correctly excludes — counting
+# those inflates both numerator and denominator with tests that are not
+# campfire's.
+#
+# STUBS: scripts/campfire-walk-stubs.rb is spliced in, same ledger, same
+# rule — a gap closed in the compiler is an entry DELETED there. `--no-stubs`
+# runs without it to check whether an entry still earns its place.
+#
+# Usage:  scripts/campfire-suite [options] [APP_PATH]
+#
+#   APP_PATH   Rails app to transpile. Default: ~/git/once-campfire
+#
+# Options:
+#   --out DIR    Emit into DIR and keep it (default: a temp dir, removed).
+#   --keep       Keep the temp emit and print its path.
+#   --reuse DIR  Skip transpiling; run against an emit DIR prepared earlier.
+#   --no-stubs   Splice nothing (see scripts/campfire-walk's note).
+#   --filter PAT Only run test files whose path matches PAT (grep -E).
+#   --tally FILE Write the `STATUS|file|first-error` table to FILE.
+#
+# Exit status is 0 when the run completes, whatever the tally — this
+# reports a number, it does not gate on one. A CI rung that pins a floor
+# reads the tally.
+#
+# Requires: cargo, ruby, the sqlite3 CLI.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+APP="$HOME/git/once-campfire"
+OUT=""
+KEEP=0
+STUBS=1
+REUSE=""
+FILTER=""
+TALLY=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --out)       OUT="$2"; KEEP=1; shift 2 ;;
+        --keep)      KEEP=1;   shift ;;
+        --reuse)     REUSE="$2"; shift 2 ;;
+        --no-stubs)  STUBS=0;  shift ;;
+        --filter)    FILTER="$2"; shift 2 ;;
+        --tally)     TALLY="$2"; shift 2 ;;
+        -h|--help)   sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -*)          echo "unknown flag: $1" >&2; exit 2 ;;
+        *)           APP="$1"; shift ;;
+    esac
+done
+
+command -v sqlite3 >/dev/null || { echo "campfire-suite: needs the sqlite3 CLI" >&2; exit 2; }
+
+step() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
+
+if [[ -n "$REUSE" ]]; then
+    [[ -d "$REUSE" ]] || { echo "campfire-suite: no emit at $REUSE" >&2; exit 2; }
+    OUT="$REUSE"; KEEP=1
+else
+    [[ -d "$APP" ]] || { echo "campfire-suite: no app at $APP" >&2; exit 2; }
+    [[ -z "$OUT" ]] && OUT="$(mktemp -d -t roundhouse-campfire-suite.XXXXXX)"
+fi
+
+cleanup() {
+    local code=$?
+    if (( KEEP )); then
+        echo ""
+        echo "emit retained at $OUT"
+    else
+        rm -rf "$OUT"
+    fi
+    exit "$code"
+}
+trap cleanup EXIT INT TERM
+
+if [[ -z "$REUSE" ]]; then
+    # `--allow-unsupported` for the same reason the walk uses it: campfire is
+    # a ledger app. The point is to run what DOES work and count it.
+    step "transpiling $APP → $OUT (target: ruby)"
+    rm -rf "$OUT"
+    (cd "$REPO_ROOT" && cargo run --quiet --bin roundhouse -- \
+        --target ruby "$APP" -o "$OUT" --allow-unsupported) 2>"$OUT.log" | tail -1
+    echo "  emit diagnostics: $OUT.log"
+
+    # The suite's own fixtures populate every table, so the database only
+    # needs the schema. Each test file resets and reloads it (SchemaSetup).
+    step "preparing storage/development.sqlite3 from db/seed.sql"
+    mkdir -p "$OUT/storage"
+    sqlite3 "$OUT/storage/development.sqlite3" < "$OUT/db/seed.sql"
+
+    if (( STUBS )); then
+        cp "$REPO_ROOT/scripts/campfire-walk-stubs.rb" "$OUT/walk_stubs.rb"
+        # Into BOOT.rb, not main.rb: `test/test_helper.rb` requires boot.rb
+        # (main.rb is boot plus the server, and a test run never loads it).
+        # Ahead of `app/models`, the first emitted code to reference an
+        # unmodeled base class at LOAD time.
+        ruby -e '
+          path = ARGV[0]
+          src = File.read(path)
+          anchor = %(require_relative "app/models")
+          abort "campfire-suite: no #{anchor} in boot.rb" unless src.include?(anchor)
+          File.write(path, src.sub(anchor, %(require_relative "walk_stubs"\n) + anchor))
+        ' "$OUT/boot.rb"
+        echo "  spliced walk_stubs.rb ($(grep -c '^# GAP' "$OUT/walk_stubs.rb") ledger entries) into boot.rb"
+    fi
+fi
+
+# -------- the app's own file list --------
+
+[[ -f "$OUT/Makefile" ]] || { echo "campfire-suite: no Makefile in $OUT" >&2; exit 2; }
+mapfile -t TESTS < <(
+    ruby -e '
+      src = File.read(ARGV[0])
+      block = src[/^SPINEL_TESTS :=(.*?)(?=\n\n|\n[A-Z])/m] or abort "no SPINEL_TESTS"
+      puts block.scan(%r{test/\S+_test})
+    ' "$OUT/Makefile"
+)
+if [[ -n "$FILTER" ]]; then
+    mapfile -t TESTS < <(printf '%s\n' "${TESTS[@]}" | grep -E "$FILTER" || true)
+fi
+
+step "running ${#TESTS[@]} test files"
+
+cd "$OUT"
+pass=0
+fail=0
+table=""
+for t in "${TESTS[@]}"; do
+    if out=$(SECRET_KEY_BASE="${SECRET_KEY_BASE:-campfire-suite-secret}" \
+             ruby -Itest "$t.rb" 2>&1); then
+        pass=$((pass + 1))
+        printf '\033[1;32m  ok  \033[0m %s\n' "$t"
+        table+="PASS|$t|"$'\n'
+    else
+        fail=$((fail + 1))
+        # First non-indented line of the failure — the raise site plus its
+        # message. Trailing backtrace frames are noise in a 52-line table.
+        why=$(printf '%s\n' "$out" | grep -vE '^\s|^$' | head -1 |
+              sed "s|$OUT/||" | cut -c1-160)
+        printf '\033[1;31m FAIL \033[0m %s\n         %s\n' "$t" "$why"
+        table+="FAIL|$t|$why"$'\n'
+    fi
+done
+
+if [[ -n "$TALLY" ]]; then
+    printf '%s' "$table" > "$TALLY"
+    echo ""
+    echo "tally written to $TALLY"
+fi
+
+step "$pass of $((pass + fail)) test files pass"

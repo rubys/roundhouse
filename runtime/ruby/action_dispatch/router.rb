@@ -77,20 +77,81 @@ module ActionDispatch
 
     # Match a request against the route table. Returns a `MatchResult`
     # on success; nil otherwise.
-    #
-    # Index-style loop (not `table.each do |...| ... return ... end`)
-    # so the cross-target lowering doesn't have to model "return from
-    # enclosing method out of an iterator block" — JS `forEach` can't
-    # break out of the surrounding function and the body-walker would
-    # silently strip the early-return.
     def self.match(method, path, table)
+      exact = match_path(method, path, table, +"")
+      return exact unless exact.nil?
+      # Rails' `(.:format)`: every route's last segment may carry a
+      # `.ext` that names the RESPONSE FORMAT and is not part of the
+      # path. `POST /rooms/3/messages.turbo_stream` is the same route as
+      # `POST /rooms/3/messages`, with `params["format"]` set.
+      #
+      # Tried only AFTER the literal path fails, so a route whose path
+      # genuinely contains a dot (`/manifest.json`, `/robots.txt`) still
+      # wins as itself — matching the extension-stripped form first would
+      # silently reroute those.
+      #
+      # Split on "." rather than `rindex`-and-slice: that is a Ruby
+      # string idiom several targets' emitters do not carry, and the
+      # whole point of this file is that it compiles everywhere. One
+      # split of the WHOLE path, not a split of its last segment: the
+      # extension must be in the last segment, and `include?("/")` says
+      # so directly — while splitting twice asks an emitter to
+      # materialize a `split` off a local rather than a parameter.
+      dotted = path.split(".")
+      return nil if dotted.length < 2
+      ext = dotted[dotted.length - 1]
+      return nil if ext.include?("/")
+      return nil unless format_extension(ext)
+      # Trimming from the FULL path (rather than rewriting the segment
+      # array and re-joining) avoids an array index ASSIGNMENT, which is
+      # another shape not every emitter carries.
+      match_path(method, path[0, path.length - ext.length - 1].to_s, table, ext)
+    end
+
+    # Is `ext` one of Rails' registered format extensions? The registry
+    # PORTED WHOLE rather than grown one entry at a time as apps hit it:
+    # the dispatchers sniffed a hardcoded `.json` and nothing else, so
+    # `POST /rooms/3/messages.turbo_stream` matched no route at all. It
+    # is a closed set with a published membership, which is exactly the
+    # kind of table to copy rather than derive.
+    #
+    # A space-delimited STRING scanned by split-and-compare — literally
+    # the shape `int_constrained` below uses for the digit-constraint
+    # list, and chosen for the same reason: it is the one membership
+    # test every target emits correctly. A module-level constant Hash is
+    # where the emitters diverge most (Elixir binds a module attribute
+    # to the file's FIRST `defmodule`, which here is `Route`, not
+    # `Router`; the strict targets each type a constant hash's values
+    # differently), and even substring matching needs a concatenation
+    # rust rejects at `str::contains`.
+    #
+    # No `?` suffix, for the reason `int_constrained` states below: the
+    # Elixir lowering appends `__loop` to a while-loop method's own
+    # name, and `?` can only END an Elixir identifier. That comment is
+    # the only thing standing between this file and the same failure
+    # twice — which is what it is for.
+    def self.format_extension(ext)
+      known = "html text js css ics csv vcf vtt png jpeg jpg gif bmp tiff svg webp mpeg mp3 mp4 ogg webm otf ttf woff woff2 pdf zip gzip xml rss atom yaml json turbo_stream".split(" ")
+      i = 0
+      while i < known.length
+        return true if known[i] == ext
+        i += 1
+      end
+      false
+    end
+
+    # One scan of the table for a literal path. `format` is the
+    # extension the REQUEST carried ("" when it carried none); it
+    # reaches the action as `params["format"]`, which is where Rails
+    # puts the `(.:format)` segment.
+    def self.match_path(method, path, table, format)
       method_upcase = method.to_s.upcase
       path_parts = path.split("/")
       i = 0
       while i < table.length
         route = table[i]
         if route.verb.to_s == method_upcase
-          params = match_parts(route.pattern_parts, path_parts, route.int_params)
+          params = match_parts(route.pattern_parts, path_parts, route.int_params, format)
           unless params.nil?
             return MatchResult.new(route.controller, route.action, params, route.req_format)
           end
@@ -123,9 +184,17 @@ module ActionDispatch
     # `match_pattern` above keeps the split-here-from-two-strings signature —
     # it is the shape the runtime tests and the per-target smoke tests call,
     # and a tree-shake root in src/runtime_loader.rs.
-    def self.match_parts(pattern_parts, path_parts, int_params = +"")
+    # `format` is the extension `Router.match` stripped off the path
+    # ("" when there was none). It lands in the captured params, which
+    # is where Rails puts the `(.:format)` segment — and it is captured
+    # HERE, beside the `:name` segments, rather than inserted into the
+    # returned hash by the caller: this is the only place the hash is a
+    # freshly-built local of known shape, and a strict emitter types a
+    # write into a returned-and-nil-checked hash differently.
+    def self.match_parts(pattern_parts, path_parts, int_params = +"", format = +"")
       return nil if pattern_parts.length != path_parts.length
       params = {}
+      params["format"] = format unless format.empty?
       i = 0
       while i < pattern_parts.length
         pp = pattern_parts[i]

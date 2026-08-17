@@ -8,7 +8,7 @@ use ruby_prism::Node;
 use crate::dialect::{Comment, Model, ModelBodyItem};
 use crate::effect::EffectSet;
 use crate::expr::{Expr, ExprNode, Literal};
-use crate::naming::{camelize, pluralize_snake, singularize_camelize, snake_case};
+use crate::naming::{camelize, singularize_camelize, snake_case};
 use crate::schema::{ColumnType, Schema, Table};
 use crate::span::Span;
 use crate::ty::{Row, Ty};
@@ -21,12 +21,59 @@ use super::util::{
 };
 use super::{IngestError, IngestResult};
 
+/// Namespace module → the `table_name_prefix` it declares. Rails walks a
+/// model's `module_parents` looking for this and prepends what it finds,
+/// which is the ONLY thing that puts a namespace into a table name (the
+/// name itself is demodulized — see `naming::rails_table_name`).
+///
+/// campfire's `app/models/push.rb` is four lines and exists solely for
+/// this: without it `Push::Subscription` reads `subscriptions`, and its
+/// table is `push_subscriptions`.
+pub type TablePrefixes = std::collections::HashMap<String, String>;
+
+/// Scan one file for `module <Ns>; def self.table_name_prefix; "<p>"; end`.
+/// Deliberately narrow: only a module-level `self.` def whose body is a
+/// single string literal. A computed prefix would have to run to be known,
+/// and nothing in the corpus writes one.
+pub fn ingest_table_name_prefixes(source: &[u8], file: &str) -> TablePrefixes {
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let mut out = TablePrefixes::new();
+    for (scope, module) in super::util::find_all_modules_with_scope(&root) {
+        let Some(name_path) = super::util::module_name_path(&module) else {
+            continue;
+        };
+        let mut full = scope;
+        full.extend(name_path);
+        let Some(body) = module.body() else { continue };
+        for stmt in flatten_statements(body) {
+            let Some(def) = stmt.as_def_node() else { continue };
+            if def.receiver().and_then(|r| r.as_self_node()).is_none() {
+                continue;
+            }
+            if constant_id_str(&def.name()) != "table_name_prefix" {
+                continue;
+            }
+            let Some(def_body) = def.body() else { continue };
+            let stmts = flatten_statements(def_body);
+            if stmts.len() != 1 {
+                continue;
+            }
+            if let Some(prefix) = string_value(&stmts[0]) {
+                out.insert(full.join("::"), prefix);
+            }
+        }
+    }
+    out
+}
+
 /// Parse a single model file. The first class definition is treated as the
 /// model; any schema-derived attributes are filled in from `schema`.
 pub fn ingest_model(
     source: &[u8],
     file: &str,
     schema: &Schema,
+    prefixes: &TablePrefixes,
 ) -> IngestResult<Option<Model>> {
     super::sources::register(file, &String::from_utf8_lossy(source));
     let result = super::prism::parse(source, file);
@@ -51,7 +98,22 @@ pub fn ingest_model(
     })?);
     let class_name = Symbol::from(name_path.join("::"));
     let owner = ClassId(class_name.clone());
-    let table_name = pluralize_snake(class_name.as_str());
+    // Rails: `full_table_name_prefix + undecorated_table_name`. The
+    // prefix comes from the nearest module parent that declares one,
+    // searched innermost-out the way `module_parents` walks.
+    let table_name = {
+        let mut segments: Vec<&str> = class_name.as_str().split("::").collect();
+        segments.pop();
+        let mut prefix = String::new();
+        while !segments.is_empty() {
+            if let Some(p) = prefixes.get(&segments.join("::")) {
+                prefix = p.clone();
+                break;
+            }
+            segments.pop();
+        }
+        format!("{prefix}{}", crate::naming::rails_table_name(class_name.as_str()))
+    };
 
     let attributes = if let Some(table) = schema.tables.get(&Symbol::from(table_name.as_str())) {
         row_from_table(table)

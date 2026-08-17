@@ -376,6 +376,8 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     // pulls its weight vs. keeping the decision rust-local.
     if param_ty.is_stringish()
         && !super::super::has_str_coercion(arg)
+        && !super::is_array_index_read(arg)
+        && !var_binding_is_non_option(arg)
         && matches!(arg.ty.as_ref(), Some(t) if is_option_ty(t))
         && matches!(
             arg.ty.as_ref().and_then(|t| {
@@ -604,4 +606,21 @@ fn value_narrowing_coercion_opt(inner: &crate::ty::Ty) -> Option<&'static str> {
         Ty::Bool => Some("as_bool()"),
         _ => None,
     }
+}
+
+/// Is `arg` a Var whose emitted BINDING is non-Option, even though the
+/// body-typer's Ty for the read says `T | Nil`?
+///
+/// The binding's recorded type is the one `assign.rs` wrote when it
+/// emitted the `let`, and it already accounts for rust2's own rendering
+/// choices — notably that an Array index read panics rather than
+/// answering an Option. When the two disagree, the binding wins: it
+/// describes the value that actually exists at this call site.
+fn var_binding_is_non_option(arg: &Expr) -> bool {
+    let ExprNode::Var { name, .. } = &*arg.node else {
+        return false;
+    };
+    super::super::local_var_ty(name.as_str())
+        .map(|t| !is_option_ty(&t))
+        .unwrap_or(false)
 }

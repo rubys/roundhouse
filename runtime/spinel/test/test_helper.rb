@@ -338,20 +338,30 @@ module RequestDispatch
   # the same hazard waiting for the app that names one. Two qualified
   # references are cheaper than that.
 
-  def get(path, params: {})
-    dispatch_request("GET", path, params)
+  # `headers:` carries RAW CGI env keys, the way Rails' integration
+  # tests do — `"REMOTE_ADDR" => "203.0.113.1"`, `"HTTP_USER_AGENT" =>
+  # "Mozilla/5.0"`. Rails also accepts wire-shaped names ("Content-Type")
+  # and normalizes them; campfire only ever writes the env shape, and
+  # normalizing would need a rule table nothing in the corpus exercises,
+  # so the keys go through verbatim onto the env the dispatch builds.
+  # Any test asserting on a request-derived value the app reads —
+  # `reject_banned_ip`'s `request.remote_ip`, a push subscription's
+  # `request.user_agent` — needs this to reach the env, not just the
+  # params.
+  def get(path, params: {}, headers: {})
+    dispatch_request("GET", path, params, headers)
   end
 
-  def post(path, params: {})
-    dispatch_request("POST", path, params)
+  def post(path, params: {}, headers: {})
+    dispatch_request("POST", path, params, headers)
   end
 
-  def patch(path, params: {})
-    dispatch_request("PATCH", path, params)
+  def patch(path, params: {}, headers: {})
+    dispatch_request("PATCH", path, params, headers)
   end
 
-  def delete(path, params: {})
-    dispatch_request("DELETE", path, params)
+  def delete(path, params: {}, headers: {})
+    dispatch_request("DELETE", path, params, headers)
   end
 
   # The browser. An integration test's requests share cookie state the
@@ -387,7 +397,7 @@ module RequestDispatch
     @__host
   end
 
-  def dispatch_request(method, path, params)
+  def dispatch_request(method, path, params, headers = {})
     require_relative "../config/routes"
     # Controllers load on demand (the CRuby target's routes.rb no longer
     # eager-requires them; they're lazy-loaded at dispatch). The blog's
@@ -445,19 +455,21 @@ module RequestDispatch
     # `Request.for` rather than `.new`: the shared class and the CRuby
     # overlay's twin hold their state differently and take different
     # constructors. Values are the loopback defaults a test wants —
-    # a test that needs a specific one sets it on `request` directly.
+    # a test that needs a specific one passes `headers:`, which is
+    # applied OVER the defaults below (so a test can override
+    # REMOTE_ADDR / HTTP_USER_AGENT) but under the four keys the
+    # dispatch itself owns.
     request_path, _, request_query = path.partition("?")
-    controller.request = ActionDispatch::Request.for(
-      {
-        "REQUEST_METHOD"  => method,
-        "PATH_INFO"       => request_path,
-        "QUERY_STRING"    => request_query,
-        "HTTP_HOST"       => host,
-        "REMOTE_ADDR"     => "127.0.0.1",
-        "HTTP_USER_AGENT" => "Roundhouse Test",
-      },
-      merged,
-    )
+    env = {
+      "HTTP_HOST"       => host,
+      "REMOTE_ADDR"     => "127.0.0.1",
+      "HTTP_USER_AGENT" => "Roundhouse Test",
+    }
+    headers.each { |k, v| env[k.to_s] = v.to_s }
+    env["REQUEST_METHOD"] = method
+    env["PATH_INFO"]      = request_path
+    env["QUERY_STRING"]   = request_query
+    controller.request = ActionDispatch::Request.for(env, merged)
     # Same object where module-function helpers reach it, and the
     # controller alongside — mirrors the dispatcher's pair.
     ActionController::Current.request = controller.request
@@ -525,37 +537,37 @@ module RequestDispatch
   # surfaces today. Numeric form (`assert_response 200`) and
   # range-form (`assert_response 200..299`) also work for parity with
   # ActionDispatch::IntegrationTest.
-  STATUS_SYMBOLS = {
-    success:              200..299,
-    redirect:             300..399,
-    missing:              404,
-    not_found:            404,
-    error:                500..599,
-    ok:                   200,
-    created:              201,
-    no_content:           204,
-    moved_permanently:    301,
-    found:                302,
-    see_other:            303,
-    bad_request:          400,
-    unauthorized:         401,
-    forbidden:            403,
-    unprocessable_entity: 422,
-    # Rails 8.1.x scaffold renamed `:unprocessable_entity` →
-    # `:unprocessable_content` mid-version (HTTP 422 description
-    # churn). Alias both so test asserts work regardless of which
-    # the fixture's scaffold currently produces.
-    unprocessable_content: 422,
-    internal_server_error: 500,
+  # ASSERTION-ONLY aliases: Rails lets a controller test say
+  # `assert_response :success` and match any 2xx. These are ranges, and
+  # they are not statuses a response can be SET to — which is why they
+  # do not belong in `ActionController::STATUS_CODES` and why every
+  # real status here is read from that table instead of restated.
+  #
+  # This file used to carry its own copy of the registry, and campfire
+  # found what two copies cost: `:too_many_requests` was missing from
+  # BOTH, so `head :too_many_requests` answered 200 and then the
+  # assertion that should have caught it could not name a 429 either.
+  # Ranges only, so the Hash stays monomorphic on its value type.
+  STATUS_RANGES = {
+    success:  200..299,
+    redirect: 300..399,
+    missing:  404..404,
+    error:    500..599,
   }.freeze
 
   def assert_response(expected, response = @__response)
     actual = response.status
-    expected_match = expected.is_a?(Symbol) ? STATUS_SYMBOLS[expected] : expected
-    matches = case expected_match
-              when Range   then expected_match.include?(actual)
-              when Integer then expected_match == actual
-              else false
+    matches = if expected.is_a?(Symbol)
+                range = STATUS_RANGES[expected]
+                if range.nil?
+                  code = ActionController::STATUS_CODES[expected]
+                  raise "assert_response: unknown status #{expected.inspect}" if code.nil?
+                  code == actual
+                else
+                  range.include?(actual)
+                end
+              else
+                expected == actual
               end
     # Direct `raise unless` rather than delegating to `assert` — spinel
     # doesn't ship `Minitest::Assertions`, so the inherited `assert`

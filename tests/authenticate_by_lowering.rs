@@ -48,7 +48,7 @@ end
         ),
         ("class Article < ApplicationRecord\nend\n", "app/models/article.rb"),
     ] {
-        let model = ingest_model(src.as_bytes(), path, &schema)
+        let model = ingest_model(src.as_bytes(), path, &schema, &Default::default())
             .expect("ingest model")
             .expect("model recognized");
         app.models.push(model);

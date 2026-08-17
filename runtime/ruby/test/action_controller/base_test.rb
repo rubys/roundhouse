@@ -121,8 +121,7 @@ class ActionControllerBaseTest < Minitest::Test
   # ── resolve_status ──────────────────────────────────────────
 
   # The Integer pass-through case (`resolve_status(418)`) is removed
-  # along with the `untyped` parameter; the Symbol-only contract makes
-  # `STATUS_CODES.fetch(s, 200)` the entire body.
+  # along with the `untyped` parameter; the contract is Symbol-only.
 
   def test_resolve_status_maps_known_symbols
     assert_equal 200, @controller.resolve_status(:ok)
@@ -132,8 +131,19 @@ class ActionControllerBaseTest < Minitest::Test
     assert_equal 422, @controller.resolve_status(:unprocessable_entity)
   end
 
-  def test_resolve_status_falls_back_to_200_on_unknown_symbol
-    assert_equal 200, @controller.resolve_status(:totally_invented)
+  # The whole Rack registry, not the handful real-blog happens to use.
+  # `:too_many_requests` is here because campfire's rate-limit filter
+  # asked for it and got a 200 — the miss is what made the fallback
+  # below a hazard rather than a convenience.
+  def test_resolve_status_covers_the_full_registry
+    assert_equal 429, @controller.resolve_status(:too_many_requests)
+    assert_equal 503, @controller.resolve_status(:service_unavailable)
+    assert_equal 451, @controller.resolve_status(:unavailable_for_legal_reasons)
+    assert_equal 100, @controller.resolve_status(:continue)
+  end
+
+  def test_resolve_status_raises_on_unknown_symbol
+    assert_raises(RuntimeError) { @controller.resolve_status(:totally_invented) }
   end
 
   # ── process_action ──────────────────────────────────────────

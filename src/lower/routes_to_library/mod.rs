@@ -239,6 +239,7 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
         }
     }
     let query_keys = query_param_demand(app, &helper_shape);
+    let format_keys = format_kwarg_demand(app, &helper_shape);
     for route in &flat {
         // Unnamed dynamic routes (`get "/comments/page/:page"`, no `as:`)
         // get no helper in Rails — their action-name fallback would
@@ -258,6 +259,7 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
             route,
             app,
             query_keys.get(&helper).map(|v| v.as_slice()).unwrap_or(&[]),
+            format_keys.contains(&helper),
         ));
     }
     // Hash-form `url_for` resolvers ride along here rather than at each
@@ -505,6 +507,7 @@ fn build_helper_function(
     route: &FlatRoute,
     app: &App,
     query_keys: &[String],
+    format_kwarg: bool,
 ) -> LibraryFunction {
     let slug_id = model_overrides_to_param(route.controller.0.as_str(), helper_name, app);
     // Slugness is PER PARAM: a nested parent's segment names its model
@@ -609,17 +612,55 @@ fn build_helper_function(
     } else {
         build_path_expr(path, &seg_params, &slug_params)
     };
-    if has_format {
+    // Rails' `(.:format)`: `x_path(format: :turbo_stream)` →
+    // "/x.turbo_stream". Two ways in, and the suffix expression is the
+    // same for both:
+    //
+    //   * the route PATH spells `(.:format)` (the `rails routes` shape),
+    //     which gives a trailing POSITIONAL optional — `comments_path(:rss)`;
+    //   * a call site passes `format:` as a KEYWORD. The routes DSL builds
+    //     paths without the `(.:format)` decoration, so campfire — whose
+    //     routes come from `resources`, and which writes
+    //     `room_messages_url(@room, format: :turbo_stream)` — reached
+    //     neither the positional slot nor a query key (`format` is on
+    //     NON_QUERY_OPTIONS, correctly: it is a suffix, not a query).
+    //     The helper simply did not take it, and the call was an arity
+    //     error.
+    //
+    // Keyword form is DEMAND-GATED (see `format_kwarg_demand`): a helper
+    // nobody passes `format:` keeps the signature it had. The positional
+    // form wins when both apply — it is the one existing call sites bind
+    // against, and no corpus app spells a route both ways.
+    let mut format_sig: Option<crate::ty::Param> = None;
+    if has_format || format_kwarg {
         let format_sym = Symbol::from("format");
-        params.push(Param::with_default(
-            format_sym.clone(),
-            Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Nil }),
-        ));
-        sig_params.push((
-            format_sym.clone(),
-            Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
-        ));
-        // <path> + (format ? ".#{format}" : "")
+        if has_format {
+            params.push(Param::with_default(
+                format_sym.clone(),
+                Expr::new(Span::synthetic(), ExprNode::Lit { value: crate::expr::Literal::Nil }),
+            ));
+            sig_params.push((
+                format_sym.clone(),
+                Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+            ));
+        } else {
+            params.push(Param::keyword(format_sym.clone(), Some(nil_default())));
+            // KEYWORD in the signature too, for the same reason the query
+            // keys are: a keyword declared positionally in the `.rbs` is a
+            // call a strict target cannot make.
+            format_sig = Some(crate::ty::Param {
+                name: format_sym.clone(),
+                ty: Ty::Union { variants: vec![Ty::Str, Ty::Nil] },
+                kind: crate::ty::ParamKind::Keyword { required: false },
+            });
+        }
+        // <path> + (format.nil? ? "" : ".#{format}")
+        //
+        // `format.nil?`, not bare `format`: the param is typed
+        // `String | Nil`, and a target whose `if` takes a real Bool
+        // (C#: "cannot implicitly convert type 'string' to 'bool'")
+        // rejects Ruby truthiness on it. The nil test is the same
+        // question every target can ask.
         let dot_format = Expr::new(
             Span::synthetic(),
             ExprNode::StringInterp {
@@ -629,12 +670,22 @@ fn build_helper_function(
                 ],
             },
         );
+        let is_nil = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(var_ref("format")),
+                method: Symbol::from("nil?"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
         let suffix = Expr::new(
             Span::synthetic(),
             ExprNode::If {
-                cond: var_ref("format"),
-                then_branch: dot_format,
-                else_branch: lit_str(String::new()),
+                cond: is_nil,
+                then_branch: lit_str(String::new()),
+                else_branch: dot_format,
             },
         );
         body = Expr::new(
@@ -670,6 +721,9 @@ fn build_helper_function(
         }
         body = append_query_string(body, query_keys);
     }
+    // The keyword `format:` joins the keyword tail, alongside the query
+    // keys — order within the tail is irrelevant to a keyword call.
+    query_sig.extend(format_sig);
     // The signature must agree with the `def` above about which params
     // are optional: `fn_sig` marks every param Required, so a helper
     // whose Ruby reads `def f(x = nil)` was declaring `(T x)` in its
@@ -803,11 +857,85 @@ fn query_param_demand(
         }
         walk(e, helpers, &mut out);
     };
-    crate::lower::for_each_hook_body_ref(app, &mut collect);
-    for view in &app.views {
-        collect(&view.body);
-    }
+    for_each_route_call_site(app, &mut collect);
     out.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect()
+}
+
+/// Helpers a call site passes `format:` to, as a keyword.
+///
+/// Separate from `query_param_demand` because the two do opposite things
+/// with the key: a query key becomes `?k=v`, `format` becomes a `.ext`
+/// SUFFIX (which is why it is on `NON_QUERY_OPTIONS`). Same survey shape,
+/// though — demand-gated, so only the helpers that are actually called
+/// with one grow the parameter.
+///
+/// No required-segment guard here, unlike the query survey: `format:` is
+/// meaningful on a helper call whether or not the caller filled the
+/// segments, and a call that under-fills them is already broken for a
+/// reason this pass does not own.
+fn format_kwarg_demand(
+    app: &App,
+    helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
+) -> std::collections::HashSet<String> {
+    let mut out: std::collections::HashSet<String> = Default::default();
+    let mut collect = |e: &Expr| {
+        fn walk(
+            e: &Expr,
+            helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
+            out: &mut std::collections::HashSet<String>,
+        ) {
+            if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
+                if helpers.contains_key(method.as_str()) {
+                    if let Some(last) = args.last() {
+                        if let ExprNode::Hash { entries, kwargs: true } = &*last.node {
+                            let names_format = entries.iter().any(|(k, _)| {
+                                matches!(&*k.node,
+                                    ExprNode::Lit { value: Literal::Sym { value } }
+                                        if value.as_str() == "format")
+                            });
+                            if names_format {
+                                let helper = method
+                                    .as_str()
+                                    .strip_suffix("_url")
+                                    .map(|stem| format!("{stem}_path"))
+                                    .unwrap_or_else(|| method.as_str().to_string());
+                                out.insert(helper);
+                            }
+                        }
+                    }
+                }
+            }
+            e.node.for_each_child(&mut |c| walk(c, helpers, out));
+        }
+        walk(e, helpers, &mut out);
+    };
+    for_each_route_call_site(app, &mut collect);
+    out
+}
+
+/// Every body a route helper can be called from. `for_each_hook_body_ref`
+/// covers models/controllers/library classes, views carry most URL calls
+/// — and TEST bodies call them too, which is where campfire's
+/// `room_messages_url(@room, format: :turbo_stream)` lives. A test that
+/// the emit ships is a call site like any other; leaving it out of the
+/// survey means the helper it calls is built without the parameter it
+/// needs, and the test fails on arity.
+fn for_each_route_call_site(app: &App, f: &mut impl FnMut(&Expr)) {
+    crate::lower::for_each_hook_body_ref(app, f);
+    for view in &app.views {
+        f(&view.body);
+    }
+    for tm in &app.test_modules {
+        if let Some(setup) = &tm.setup {
+            f(setup);
+        }
+        for t in &tm.tests {
+            f(&t.body);
+        }
+        for m in &tm.helpers {
+            f(&m.body);
+        }
+    }
 }
 
 /// Append `?k=v&k2=v2` for the query keys this helper accepts, skipping

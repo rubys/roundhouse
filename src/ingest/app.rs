@@ -106,6 +106,19 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     }
 
     let models_dir = dir.join("app/models");
+    // A namespace's `table_name_prefix` has to be known BEFORE the model
+    // it prefixes is ingested, and file order does not guarantee that
+    // (`push/subscription.rb` may be read before `push.rb`). One cheap
+    // pre-pass over the same files, so the fact is complete when the
+    // models loop starts.
+    let mut table_prefixes = super::model::TablePrefixes::new();
+    if vfs.is_dir(&models_dir) {
+        for entry in read_rb_files(vfs, &models_dir)? {
+            let source = vfs.read(&entry)?;
+            table_prefixes
+                .extend(super::model::ingest_table_name_prefixes(&source, &entry.display().to_string()));
+        }
+    }
     if vfs.is_dir(&models_dir) {
         for entry in read_rb_files(vfs, &models_dir)? {
             let source = vfs.read(&entry)?;
@@ -113,7 +126,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             match classify_class_file(&source) {
                 Some(ClassKind::Model) | None => {
                     if let Some(maybe_model) =
-                        unwrap_or_record(ingest_model(&source, &path_str, &app.schema))?
+                        unwrap_or_record(ingest_model(&source, &path_str, &app.schema, &table_prefixes))?
                     {
                         if let Some(model) = maybe_model {
                             app.models.push(model);

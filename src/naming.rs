@@ -331,6 +331,21 @@ pub fn pluralize_snake(class_name: &str) -> String {
     inflect(&snake_case(class_name), PLURAL_RULES, true)
 }
 
+/// Rails' `undecorated_table_name`: DEMODULIZE, then underscore, then
+/// pluralize. A namespaced model does NOT get its namespace folded into
+/// the table name — `Push::Subscription` is `subscriptions`, not
+/// `push_subscriptions`. The `push_` in campfire's schema comes from
+/// `Push.table_name_prefix`, which is a separate, opt-in declaration
+/// (see `Model::table` construction in `ingest::model`).
+///
+/// Feeding the qualified name to `pluralize_snake` produces
+/// `push::subscriptions`, which cannot name a table — so the model
+/// silently ingested with NO columns and every query against it failed
+/// at `table_name must be overridden`.
+pub fn rails_table_name(class_name: &str) -> String {
+    pluralize_snake(class_name.rsplit("::").next().unwrap_or(class_name))
+}
+
 pub fn singularize(plural: &str) -> String {
     inflect(plural, SINGULAR_RULES, false)
 }

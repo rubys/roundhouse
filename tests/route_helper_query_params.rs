@@ -142,18 +142,36 @@ fn a_call_missing_its_required_segments_is_left_alone() {
     );
 }
 
-/// `format:` is already a parameter (the `(.:format)` group) and
-/// `anchor:` is the URL FRAGMENT, not the query string. Neither may be
-/// harvested.
+/// Neither `format:` nor `anchor:` is a QUERY key: `format` is a
+/// trailing `.ext` on the path and `anchor` is the URL fragment. They
+/// part ways after that — `format` becomes a keyword parameter that
+/// appends the suffix (the `(.:format)` group is only ever spelled in
+/// the `rails routes` shape, so a DSL-built route like campfire's has
+/// to grow it from the call site), while `anchor` is still nobody's.
 #[test]
-fn format_and_anchor_are_not_query_params() {
+fn format_is_a_suffix_keyword_and_anchor_is_neither() {
     let app = app_with(
         ROUTES,
         "<%= link_to \"a\", autocompletable_notes_path(format: :json, anchor: \"x\") %>\n",
     );
+    let ps = params(&app, "autocompletable_notes_path");
+    assert_eq!(
+        ps.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+        vec!["format"],
+        "format takes a keyword slot, anchor takes none: {ps:?}"
+    );
+    assert!(matches!(ps[0].kind, ParamKind::Keyword { required: false }));
+}
+
+/// DEMAND-GATED, like the query keys beside it: a helper nobody passes
+/// `format:` keeps exactly the signature it had, so no corpus call site
+/// moves and no strict target grows a parameter to type.
+#[test]
+fn a_helper_nobody_formats_grows_no_format_param() {
+    let app = app_with(ROUTES, "<%= link_to \"a\", autocompletable_notes_path %>\n");
     assert!(
         params(&app, "autocompletable_notes_path").is_empty(),
-        "neither key is a query param"
+        "unformatted helper keeps its signature"
     );
 }
 

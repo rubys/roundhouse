@@ -272,6 +272,12 @@ fn homogeneous_lit_type<'a>(mut elems: impl Iterator<Item = &'a Expr>) -> &'stat
         ExprNode::Lit { value: Literal::Float { .. } } => Some("double"),
         ExprNode::Lit { value: Literal::Bool { .. } } => Some("bool"),
         ExprNode::Lit { value: Literal::Str { .. } } => Some("string"),
+        // A Symbol emits as a C# string literal, so a symbol-valued
+        // constant hash is `Dictionary<string, string>` like any other.
+        // Without this it fell to `object?` — and the router's
+        // extension→format table, read into an argument declared
+        // `Symbol?`, became "cannot convert from 'object' to 'string?'".
+        ExprNode::Lit { value: Literal::Sym { .. } } => Some("string"),
         _ => None,
     };
     match elems.next().and_then(kind) {

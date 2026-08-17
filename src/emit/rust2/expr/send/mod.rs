@@ -189,6 +189,16 @@ pub(super) fn emit_send(
         if method == "new" && in_class_method() {
             return format!("Self::new({})", args_s.join(", "));
         }
+        // Ruby's ONE-argument `raise "msg"` — a RuntimeError with that
+        // message. The runtime's `errors_ext::raise` models the
+        // two-argument `raise Klass, payload` form only, so the bare
+        // call emitted `raise(msg)` and failed to compile ("this
+        // function takes 2 arguments"). Same `panic!` the `Raise` IR
+        // node emits (assertion failures arrive that way), so the two
+        // spellings of the same Ruby end up as the same Rust.
+        if method == "raise" && args.len() == 1 {
+            return format!("panic!(\"{{}}\", {})", args_s[0]);
+        }
         return format!("{}({})", rewritten_method, args_s.join(", "));
     }
     let r = recv.unwrap();
@@ -681,3 +691,30 @@ fn unpack_trailing_kwargs(
     Some(out)
 }
 
+/// Does `arg` read an element out of an Array by integer index?
+///
+/// Ruby's `Array#[]` answers nil past the end, so the IR types every
+/// such read `T | Nil` — accurately. rust2 does NOT emit an Option for
+/// it, though: `vec[(i) as usize].clone()` panics out of range and
+/// hands back an owned `T`. The two facts together make the nilable
+/// TYPE a lie about the emitted VALUE, and any Option-shaped coercion
+/// keyed off it (`.as_deref()`, `.unwrap_or`) lands on a `String` that
+/// has no such method.
+///
+/// The router's `dotted[dotted.length - 1]` is the case that found
+/// this: passed to a `(String) -> bool` predicate, it emitted
+/// `ext.clone().as_deref().unwrap_or("")`.
+pub(crate) fn is_array_index_read(arg: &Expr) -> bool {
+    use crate::ty::Ty;
+    // `emit_expr` renders a Var read as `name.clone()`, so an index read
+    // reaches here either bare or already assigned to a local. Only the
+    // direct form is decidable here; a local's recorded type is the
+    // body-typer's business.
+    let ExprNode::Send { recv: Some(r), method, args, .. } = &*arg.node else {
+        return false;
+    };
+    method.as_str() == "[]"
+        && args.len() == 1
+        && matches!(r.ty.as_ref(), Some(Ty::Array { .. }))
+        && matches!(args[0].ty.as_ref(), Some(Ty::Int))
+}

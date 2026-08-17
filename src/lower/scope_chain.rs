@@ -2514,7 +2514,12 @@ mod tests {
     // ---- build_assoc_registry: has_many :through ----------------------
 
     fn ingest(src: &str, path: &str) -> crate::dialect::Model {
-        crate::ingest::ingest_model(src.as_bytes(), path, &crate::schema::Schema::default())
+        crate::ingest::ingest_model(
+            src.as_bytes(),
+            path,
+            &crate::schema::Schema::default(),
+            &Default::default(),
+        )
             .expect("ingest")
             .expect("model")
     }

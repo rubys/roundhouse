@@ -2,8 +2,8 @@ module ActionController
   # Symbolic-status to integer-code mapping (`STATUS_CODES`) is a
   # Ruby-level frozen Hash literal — module-level constant, not a
   # method. RBS doesn't require declaring constants for the strict
-  # test (the test exercises method bodies); it's accessed inside
-  # `resolve_status` via `STATUS_CODES.fetch(s, 200)`.
+  # test (the test exercises method bodies); it's read inside
+  # `resolve_status`, which raises when the symbol isn't in it.
 
   # Base controller. Holds per-request state (params, session, flash)
   # and response state (status, body, location). Subclasses define

@@ -86,15 +86,21 @@ end
 # caller's ternary, not on this boundary. Keeps inference clean
 # across every strict-typed target.
 module RequestDispatch
-  def get: (String path, ?params: Hash[untyped, untyped]) -> ActionResponse
-  def post: (String path, ?params: Hash[untyped, untyped]) -> ActionResponse
-  def patch: (String path, ?params: Hash[untyped, untyped]) -> ActionResponse
-  def delete: (String path, ?params: Hash[untyped, untyped]) -> ActionResponse
+  # `headers:` is raw CGI env (`"REMOTE_ADDR" => "203.0.113.1"`),
+  # merged onto the env the dispatch builds. String=>String on the
+  # wire; declared wide because a test may pass Symbol keys or a
+  # non-String value (`content_length: 1.gigabyte`) and the body
+  # `to_s`es both.
+  def get: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped]) -> ActionResponse
+  def post: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped]) -> ActionResponse
+  def patch: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped]) -> ActionResponse
+  def delete: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped]) -> ActionResponse
 
   def dispatch_request: (
     String method,
     String path,
-    Hash[untyped, untyped] params
+    Hash[untyped, untyped] params,
+    ?Hash[untyped, untyped] headers
   ) -> ActionResponse
 
   # Recursive Hash-keys-to-strings. Strictly `(Hash) -> Hash`; non-

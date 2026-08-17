@@ -650,7 +650,7 @@ class Widget < ApplicationRecord
 end
 "#;
     let schema = roundhouse::schema::Schema::default();
-    let model = roundhouse::ingest::ingest_model(source, "<inline>", &schema)
+    let model = roundhouse::ingest::ingest_model(source, "<inline>", &schema, &Default::default())
         .unwrap()
         .unwrap();
 
@@ -688,7 +688,7 @@ class Widget < ApplicationRecord
 end
 "#;
     let schema = roundhouse::schema::Schema::default();
-    let model = roundhouse::ingest::ingest_model(source, "<inline>", &schema)
+    let model = roundhouse::ingest::ingest_model(source, "<inline>", &schema, &Default::default())
         .unwrap()
         .unwrap();
 
@@ -727,7 +727,7 @@ class Widget < ApplicationRecord
 end
 "#;
     let schema = roundhouse::schema::Schema::default();
-    let model = roundhouse::ingest::ingest_model(source, "<inline>", &schema)
+    let model = roundhouse::ingest::ingest_model(source, "<inline>", &schema, &Default::default())
         .unwrap()
         .unwrap();
 
@@ -771,7 +771,7 @@ class Widget < ApplicationRecord
 end
 "#;
     let schema = roundhouse::schema::Schema::default();
-    let model = roundhouse::ingest::ingest_model(source, "<inline>", &schema)
+    let model = roundhouse::ingest::ingest_model(source, "<inline>", &schema, &Default::default())
         .unwrap()
         .unwrap();
 

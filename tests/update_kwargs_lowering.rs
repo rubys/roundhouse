@@ -36,6 +36,7 @@ end
 "#,
         "app/models/invitation.rb",
         &schema,
+        &Default::default(),
     )
     .expect("ingest model")
     .expect("model recognized");
