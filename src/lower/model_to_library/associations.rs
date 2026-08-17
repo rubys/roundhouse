@@ -84,7 +84,16 @@ pub(super) fn push_association_methods(
     for (span, assoc) in model.spanned_associations() {
         let before = methods.len();
         match assoc {
-            Association::HasMany { name, target, foreign_key, as_interface, scope, through, .. } => {
+            Association::HasMany {
+                name,
+                target,
+                foreign_key,
+                as_interface,
+                scope,
+                through,
+                extension,
+                ..
+            } => {
                 methods.push(synth_has_many_reader(
                     owner,
                     name,
@@ -94,6 +103,15 @@ pub(super) fn push_association_methods(
                     scope.as_ref(),
                 ));
                 methods.push(synth_preload_setter(owner, name, target));
+                for m in synth_assoc_extension_methods(owner, name, extension) {
+                    if !model_defines_instance_method(model, &m.name)
+                        && !methods
+                            .iter()
+                            .any(|x| x.name == m.name && x.receiver == MethodReceiver::Instance)
+                    {
+                        methods.push(m);
+                    }
+                }
                 // `has_many :through` collection writer (`story.tags =
                 // [tag]` — the factory/edit shape). Stages the target
                 // collection and marks it stale; `_sync_<name>` folds
@@ -371,6 +389,152 @@ fn synth_has_many_reader(
             mutates_self: false,
             block_param: None,
     }
+}
+
+/// Association-extension methods (`has_many :memberships do def
+/// grant_to(users) … end end`) FLATTENED onto the owner as
+/// `<assoc>_<method>` instance methods.
+///
+/// Rails mixes an anonymous module into the CollectionProxy, so these
+/// live on the relation and reach the record through
+/// `proxy_association.owner`. Neither half survives here: the has_many
+/// reader hands back an Array, and a per-association anonymous module is
+/// not something a strict target can express. But the module's whole
+/// purpose is to be a method that knows one owner record — which is
+/// exactly an instance method ON that record. So:
+///
+///   room.memberships.grant_to(users)  ->  room.memberships_grant_to(users)
+///   proxy_association.owner           ->  self
+///
+/// This is the [[has_json]] shape — a per-owner compile-time schema
+/// expanded into flat, statically-resolvable methods — and it is
+/// collision-free by construction: the name carries the association, so
+/// two models declaring `grant_to` on different associations cannot
+/// collide the way a shared method on the TARGET model would.
+///
+/// Inside the body, a bare implicit-self call that names relation
+/// surface (`destroy_by user: users`) meant the association's relation,
+/// not the owner — re-spell it `self.<assoc>.<method>(…)` so the
+/// scope-chain lowering's existing SelfRef arm seeds a Relation from the
+/// foreign key. A bare call naming a SIBLING extension method
+/// (`revise`'s `grant_to(granted)`) follows the flattening.
+fn synth_assoc_extension_methods(
+    owner: &ClassId,
+    assoc: &Symbol,
+    extension: &[MethodDef],
+) -> Vec<MethodDef> {
+    let flat_name =
+        |m: &Symbol| Symbol::from(format!("{}_{}", assoc.as_str(), m.as_str()));
+    let siblings: Vec<Symbol> = extension.iter().map(|m| m.name.clone()).collect();
+    extension
+        .iter()
+        .map(|m| {
+            let mut body = m.body.clone();
+            rewrite_extension_body(&mut body, assoc, &siblings);
+            MethodDef {
+                name: flat_name(&m.name),
+                receiver: MethodReceiver::Instance,
+                params: m.params.clone(),
+                body,
+                signature: m.signature.clone(),
+                effects: m.effects.clone(),
+                enclosing_class: Some(owner.0.clone()),
+                kind: AccessorKind::Method,
+                is_async: m.is_async,
+                mutates_self: m.mutates_self,
+                block_param: m.block_param.clone(),
+            }
+        })
+        .collect()
+}
+
+/// The three in-body respellings `synth_assoc_extension_methods`
+/// documents, applied bottom-up so a rewritten receiver is not
+/// re-examined.
+fn rewrite_extension_body(e: &mut Expr, assoc: &Symbol, siblings: &[Symbol]) {
+    crate::lower::arel::walk_subexprs_mut(e, &mut |c| {
+        rewrite_extension_body(c, assoc, siblings)
+    });
+    let ExprNode::Send { recv, method, args, block, parenthesized } = &*e.node else { return };
+    // `proxy_association.owner` -> `self`
+    if method.as_str() == "owner" && args.is_empty() {
+        if let Some(r) = recv {
+            if matches!(&*r.node, ExprNode::Send { recv: None, method: m, .. }
+                if m.as_str() == "proxy_association")
+            {
+                *e = Expr::new(e.span, ExprNode::SelfRef);
+                return;
+            }
+        }
+    }
+    if recv.is_some() {
+        return;
+    }
+    // Bare sibling extension call -> the flattened name.
+    if siblings.contains(method) {
+        *e = Expr::new(
+            e.span,
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from(format!("{}_{}", assoc.as_str(), method.as_str())),
+                args: args.clone(),
+                block: block.clone(),
+                parenthesized: *parenthesized,
+            },
+        );
+        return;
+    }
+    // Bare relation surface -> `self.<assoc>.<method>(…)`, which the
+    // scope-chain lowering then seeds from the foreign key.
+    if extension_relation_method(method.as_str()) {
+        let assoc_read = Expr::new(
+            e.span,
+            ExprNode::Send {
+                recv: Some(Expr::new(e.span, ExprNode::SelfRef)),
+                method: assoc.clone(),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        *e = Expr::new(
+            e.span,
+            ExprNode::Send {
+                recv: Some(assoc_read),
+                method: method.clone(),
+                args: args.clone(),
+                block: block.clone(),
+                parenthesized: *parenthesized,
+            },
+        );
+    }
+}
+
+/// Relation surface an extension body may call bare. Deliberately NOT
+/// the full relation vocabulary: `transaction` and the Ruby built-ins an
+/// extension body also calls bare belong to the owner, and re-rooting
+/// those onto the association would be wrong. Grown from the shapes a
+/// corpus extension actually writes.
+fn extension_relation_method(name: &str) -> bool {
+    matches!(
+        name,
+        "where"
+            | "order"
+            | "limit"
+            | "count"
+            | "destroy_by"
+            | "delete_by"
+            | "delete_all"
+            | "destroy_all"
+            | "update_all"
+            | "insert_all"
+            | "find_by"
+            | "exists?"
+            | "pluck"
+            | "ids"
+            | "first"
+            | "last"
+    )
 }
 
 /// Re-root an association-scope chain onto `base`: walk the scope's

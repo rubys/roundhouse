@@ -279,6 +279,7 @@ mod tests {
             dependent: Dependent::None,
             as_interface: None,
             scope: None,
+            extension: Vec::new(),
         }
     }
 

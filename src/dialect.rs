@@ -306,6 +306,18 @@ pub enum Association {
         /// seed; None for the unscoped common case.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope: Option<Expr>,
+        /// Association-extension block — `has_many :memberships do def
+        /// grant_to(users) … end end`. Rails builds an anonymous module
+        /// and mixes it into the CollectionProxy, so these methods live
+        /// on the relation and read `proxy_association.owner` to get
+        /// back to the record.
+        ///
+        /// Kept as the block's own `def`s rather than expanded here:
+        /// the expansion needs the owner class, which the reader
+        /// synthesis has and this parser does not. Empty for the
+        /// blockless common case.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        extension: Vec<MethodDef>,
     },
     HasOne {
         name: Symbol,

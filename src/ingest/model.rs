@@ -1071,9 +1071,29 @@ fn parse_association(
 
     let owner_snake = snake_case(owner.0.as_str());
 
+    // Association-extension block: `has_many :memberships do def
+    // grant_to(users) … end end`. Only `def`s are collected — a block
+    // body that does anything else is not an extension module and is
+    // left where it is rather than half-read.
+    let extension: Vec<crate::dialect::MethodDef> = call
+        .block()
+        .and_then(|b| b.as_block_node())
+        .and_then(|b| b.body())
+        .and_then(|b| b.as_statements_node())
+        .map(|stmts| {
+            stmts
+                .body()
+                .iter()
+                .filter_map(|s| s.as_def_node())
+                .filter_map(|d| ingest_method(&d, file).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+
     match method {
         "has_many" => Some(Association::HasMany {
             name: name.clone(),
+            extension,
             // `source:` names the association on the `through:` model
             // that supplies the rows (`has_many :upvoted_stories,
             // through: :votes, source: :story` → Story, not the

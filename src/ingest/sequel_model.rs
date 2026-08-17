@@ -234,6 +234,9 @@ fn parse_sequel_association(
                 dependent,
                 as_interface: None,
                 scope: order_expr,
+                // Sequel has no association-extension block — its
+                // `one_to_many` takes a dataset block, a different thing.
+                extension: Vec::new(),
             }
         }
         "one_to_one" => Association::HasOne {

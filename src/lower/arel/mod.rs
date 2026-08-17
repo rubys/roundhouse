@@ -299,7 +299,7 @@ fn hoist_value_child(child: &mut Expr, hoisted: &mut Vec<Expr>) {
 /// applies whatever transform via `f`; this only handles the
 /// recursion shape so adding a new ExprNode variant updates one
 /// place.
-fn walk_subexprs_mut(expr: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
+pub(crate) fn walk_subexprs_mut(expr: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
     match &mut *expr.node {
         ExprNode::Lit { .. }
         | ExprNode::Var { .. }
