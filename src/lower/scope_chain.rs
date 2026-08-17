@@ -801,6 +801,22 @@ pub struct AssocRegistry {
     /// Declining leaves the pre-existing NoMethodError-on-Array, which is
     /// loud and locatable. Wrong rows are neither.
     has_many_unseedable: std::collections::HashSet<(ClassId, Symbol)>,
+    /// `(association name, extension method)` for every `has_many :x do
+    /// def m … end end` in the app. The model lowerer FLATTENS those onto
+    /// the owner as `<assoc>_<method>` instance methods
+    /// (`synth_assoc_extension_methods`); this is the call-site half —
+    /// `room.memberships.grant_to(users)` -> `room.memberships_grant_to(
+    /// users)`.
+    ///
+    /// Keyed by association name WITHOUT the owner model, because that
+    /// is what the call site can always answer: the flattened name is
+    /// derived from the association alone, so an owner whose type is
+    /// unknown still rewrites correctly. Two models declaring the same
+    /// extension method on the same association name agree on the
+    /// flattened name by construction; declaring it on DIFFERENT
+    /// association names produces different flattened names, which is
+    /// also correct.
+    assoc_extension: std::collections::HashSet<(Symbol, Symbol)>,
 }
 
 impl AssocRegistry {
@@ -828,6 +844,11 @@ impl AssocRegistry {
     }
     fn has_many_by_name(&self, assoc: &Symbol) -> Option<&(ClassId, Symbol)> {
         self.has_many_by_name.get(assoc).and_then(|o| o.as_ref())
+    }
+    /// See `assoc_extension`: is `<assoc>.<method>` an association
+    /// extension the model lowerer flattened onto the owner?
+    fn is_assoc_extension(&self, assoc: &Symbol, method: &Symbol) -> bool {
+        self.assoc_extension.contains(&(assoc.clone(), method.clone()))
     }
     /// See `has_many_unseedable`. Checked against every model declaring
     /// the name, not just the resolved owner: the by-NAME rung answers
@@ -899,8 +920,12 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     through: None,
                     as_interface,
                     scope,
+                    extension,
                     ..
                 } => {
+                    for x in extension {
+                        reg.assoc_extension.insert((name.clone(), x.name.clone()));
+                    }
                     if as_interface.is_some()
                         || scope.as_ref().is_some_and(|s| !scope_is_row_preserving(s))
                     {
@@ -1081,6 +1106,12 @@ pub fn mentions_assoc_constructor(expr: &Expr, assocs: &AssocRegistry) -> bool {
 /// a correct cached read into an N+1. The lookup family has no such
 /// trade — `Array` answers none of these methods, so the site is a
 /// NoMethodError today and a query after.
+///
+/// The bulk WRITES join on exactly that test, not by analogy: `Array`
+/// answers no `destroy_by`/`delete_by`/`update_all` either, and none of
+/// them can degrade a cached read into an N+1 because none of them is a
+/// read. campfire's `memberships.destroy_by user: users` is the caller
+/// that showed the gate was narrower than its own reasoning.
 pub fn mentions_assoc_lookup(expr: &Expr, assocs: &AssocRegistry) -> bool {
     let mut found = false;
     fn walk(e: &Expr, assocs: &AssocRegistry, found: &mut bool) {
@@ -1089,13 +1120,56 @@ pub fn mentions_assoc_lookup(expr: &Expr, assocs: &AssocRegistry) -> bool {
         }
         if let ExprNode::Send { recv: Some(r), method, args, block, .. } = &*e.node {
             if is_relation_terminal(method.as_str(), args, block.as_ref())
-                && matches!(method.as_str(), "find" | "find_by" | "find_by!")
+                && matches!(
+                    method.as_str(),
+                    "find"
+                        | "find_by"
+                        | "find_by!"
+                        | "destroy_by"
+                        | "delete_by"
+                        | "destroy_all"
+                        | "delete_all"
+                        | "update_all"
+                )
             {
                 if let ExprNode::Send { method: aname, args: aargs, block: None, .. } = &*r.node {
                     if aargs.is_empty() && assocs.is_has_many_name(aname) {
                         *found = true;
                         return;
                     }
+                }
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, assocs, found));
+    }
+    walk(expr, assocs, &mut found);
+    found
+}
+
+/// True when `expr` calls an association EXTENSION method through an
+/// association read (`room.memberships.grant_to users`). Gate for
+/// `rewrite_call_site`, the same reason as its two siblings: such a body
+/// may name no scope and start no model chain, so without a gate the
+/// rewriter never sees it. `Array` answers none of these names either,
+/// so the site is a NoMethodError today and a call after.
+pub fn any_assoc_extensions(assocs: &AssocRegistry) -> bool {
+    !assocs.assoc_extension.is_empty()
+}
+
+pub fn mentions_assoc_extension(expr: &Expr, assocs: &AssocRegistry) -> bool {
+    if assocs.assoc_extension.is_empty() {
+        return false;
+    }
+    let mut found = false;
+    fn walk(e: &Expr, assocs: &AssocRegistry, found: &mut bool) {
+        if *found {
+            return;
+        }
+        if let ExprNode::Send { recv: Some(r), method, .. } = &*e.node {
+            if let ExprNode::Send { method: aname, args: aargs, block: None, .. } = &*r.node {
+                if aargs.is_empty() && assocs.is_assoc_extension(aname, method) {
+                    *found = true;
+                    return;
                 }
             }
         }
@@ -1135,6 +1209,29 @@ pub fn mentions_model_chain_start(expr: &Expr, models: &HashSet<ClassId>) -> boo
         }
         if let ExprNode::Send { recv: Some(r), method, .. } = &*e.node {
             if (is_relation_chain_method(method.as_str()) || method.as_str() == "all")
+                && const_model(r, models).is_some()
+            {
+                *found = true;
+                return;
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, models, found));
+    }
+    walk(expr, models, &mut found);
+    found
+}
+
+/// True when `expr` calls `<Model>.insert_all(rows)`. Gate for the
+/// call-site expansion in `rewrite_send`.
+pub fn mentions_model_insert_all(expr: &Expr, models: &HashSet<ClassId>) -> bool {
+    let mut found = false;
+    fn walk(e: &Expr, models: &HashSet<ClassId>, found: &mut bool) {
+        if *found {
+            return;
+        }
+        if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*e.node {
+            if method.as_str() == "insert_all"
+                && args.len() == 1
                 && const_model(r, models).is_some()
             {
                 *found = true;
@@ -1348,10 +1445,19 @@ fn is_relation_terminal(name: &str, args: &[Expr], block: Option<&Expr>) -> bool
     match name {
         "find" => args.len() == 1 && block.is_none(),
         "find_by" | "find_by!" => block.is_none(),
+        // Bulk WRITES are terminals too — they end the chain and answer
+        // a count / an Array of destroyed records, never a relation.
+        // `Array` answers none of them, so an association-read receiver
+        // is a NoMethodError today and a scoped statement after
+        // (campfire's `memberships.destroy_by user: users`).
+        "destroy_by" | "delete_by" => block.is_none(),
         _ => matches!(
             name,
             "ids" | "pluck" | "count" | "first" | "last" | "exists?" | "any?" | "empty?" | "size"
                 | "length"
+                | "destroy_all"
+                | "delete_all"
+                | "update_all"
         ),
     }
 }
@@ -1570,7 +1676,13 @@ fn lower_relation_args(
                 }
             }
         }
-        "where" | "not" | "find_by" => {
+        // Every method taking a CONDITION HASH, not just the three the
+        // corpus reached first. `destroy_by`/`delete_by` are `where`'s
+        // arguments with a terminal attached, and `find_by!`/`exists?`
+        // are `find_by`'s — a list that names some of them renames
+        // `user:` to `user_id:` on one spelling and emits the
+        // nonexistent `memberships.user` column on the next.
+        "where" | "not" | "find_by" | "find_by!" | "destroy_by" | "delete_by" | "exists?" => {
             for a in args.iter_mut() {
                 let span = a.span;
                 let ExprNode::Hash { entries, .. } = &mut *a.node else { continue };
@@ -1897,6 +2009,69 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
         Some(mut r) => {
             // Class-level call on a model constant.
             if let Some(m) = const_model(&r, ctx.models) {
+                // `<Model>.insert_all(rows)` — Rails' bulk insert over an
+                // Array of attribute Hashes. INLINED at the call site
+                // rather than synthesized as a per-model method: an
+                // untyped attribute Hash is exactly the shape the
+                // has_json work established no target's Hash surface
+                // resolves portably, and a synthesized `insert_all` would
+                // land on every model of every app to serve the handful
+                // that call it.
+                //
+                //   Membership.insert_all(rows)
+                //     -> rows.each { |__attrs|
+                //          Membership.new(__attrs).save_after_validation }
+                //
+                // `save_after_validation` is the seam Rails' own
+                // validation-skipping writes already enter at, so this
+                // reuses one definition of "write without validating"
+                // instead of adding a second. The divergence it leaves —
+                // Rails skips the SAVE callbacks too and issues ONE
+                // multi-row INSERT — is recorded in
+                // docs/pipeline/runtime.md.
+                if method.as_str() == "insert_all" && args.len() == 1 && block.is_none() {
+                    let attrs = Symbol::from("__attrs");
+                    let build = syn(
+                        span,
+                        ExprNode::Send {
+                            recv: Some(const_expr(span, &m)),
+                            method: Symbol::from("new"),
+                            args: vec![var_expr(span, &attrs)],
+                            block: None,
+                            parenthesized: true,
+                        },
+                    );
+                    let save = syn(
+                        span,
+                        ExprNode::Send {
+                            recv: Some(build),
+                            method: Symbol::from("save_after_validation"),
+                            args: vec![],
+                            block: None,
+                            parenthesized: true,
+                        },
+                    );
+                    let mut args = args;
+                    *expr = syn(
+                        span,
+                        ExprNode::Send {
+                            recv: Some(args.remove(0)),
+                            method: Symbol::from("each"),
+                            args: vec![],
+                            block: Some(syn(
+                                span,
+                                ExprNode::Lambda {
+                                    params: vec![attrs],
+                                    block_param: None,
+                                    body: save,
+                                    block_style: BlockStyle::Brace,
+                                },
+                            )),
+                            parenthesized: false,
+                        },
+                    );
+                    return None;
+                }
                 if ctx.scope_of(&m, &method) {
                     *expr = put(span, Some(r), method, args, block, parenthesized);
                     return Some(m);
@@ -1928,6 +2103,31 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
             // terminals ride it as receiver. Plain iteration (`each`/`map`)
             // keeps the Array and the reader's preload cache.
             if let ExprNode::Send { recv: Some(ir), method: aname, args: aargs, .. } = &*r.node {
+                // Association EXTENSION (`has_many :memberships do def
+                // grant_to … end end`): the model lowerer flattened it
+                // onto the owner as `<assoc>_<method>`, so the call
+                // drops the association hop and keeps the owner as
+                // receiver. Ahead of the seed arm and independent of it
+                // — an extension call wants the owner RECORD, not a
+                // relation, so seedability (`as:`, a row-changing scope)
+                // has no bearing on it.
+                if aargs.is_empty() && ctx.assocs.is_assoc_extension(aname, &method) {
+                    let flat = Symbol::from(format!(
+                        "{}_{}",
+                        aname.as_str(),
+                        method.as_str()
+                    ));
+                    // `self.<assoc>.<m>` inside the owner's own body
+                    // flattens to a bare implicit-self call.
+                    let new_recv = match &*ir.node {
+                        ExprNode::SelfRef => None,
+                        _ => Some(ir.clone()),
+                    };
+                    *expr = put(span, new_recv, flat, args, block, parenthesized);
+                    // Returns whatever the extension body returns — a
+                    // record, a count, nil. Never a relation.
+                    return None;
+                }
                 if aargs.is_empty() {
                     // (target, fk, owner-id expression)
                     let resolved: Option<(ClassId, Symbol, Expr)> = match &*ir.node {
@@ -2078,6 +2278,19 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                             }
                             // Chain method or terminal: stays on the seeded
                             // receiver. Chains keep the model; terminals end it.
+                            //
+                            // Both take the same condition-hash lowering the
+                            // Const arm applies (`user: user` -> `user_id:
+                            // user && user.id`, association joins). It is the
+                            // TARGET's associations that resolve here — the
+                            // hash keys conditions on the seeded relation, not
+                            // on the owner. Skipping it emitted `WHERE
+                            // memberships.user = …` for campfire's
+                            // `memberships.destroy_by user: users`, a column
+                            // that does not exist; the Const arm has always
+                            // called this and the seed arm never did.
+                            let mut args = args;
+                            let _ = lower_relation_args(&target, &method, &mut args, ctx);
                             let keeps_model = is_chain;
                             let method = counted_terminal(&method, &args, block.as_ref())
                                 .unwrap_or(method);

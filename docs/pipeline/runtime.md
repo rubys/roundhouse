@@ -336,6 +336,35 @@ Analyze additionally types the column reader `untyped` where the emitted
 reader returns `String`: that is the source-shaped accessor object, and
 it exists only between the two hops the lowering erases.
 
+### `insert_all` runs save callbacks and issues one INSERT per row
+
+`Model.insert_all(rows)` is INLINED at the call site (Ruby family,
+`scope_chain.rs`) as `rows.each { |a| Model.new(a)
+.save_after_validation }`. Rails issues ONE multi-row INSERT and skips
+validations *and* callbacks; this skips validations and their callbacks,
+fills timestamps, and runs the save callbacks.
+
+**Why `save_after_validation`.** It is the seam Rails' own
+validation-skipping writes (`update_attribute`) already enter at, so
+this reuses one definition of "write without validating" rather than
+adding a second path that has to be kept in step.
+
+**Why inlined, not a synthesized method.** A per-model `insert_all`
+would land on every model of every app to serve the handful that call
+it, and its parameter is an untyped attribute Hash — the shape the
+has_json work established no target's Hash surface resolves portably. A
+shared `ActiveRecord::Base` version is worse still: it would call
+`new(attrs)` polymorphically against a `Base#initialize` taking no
+attributes, in a file that prices every target. Inlining costs nothing
+to an app that never calls it, and leaves strict targets an honest
+unsupported diagnostic rather than a method that compiles and misbehaves.
+
+**What it costs.** N statements instead of one, and callbacks Rails
+would not run — visible on any model whose `after_create` has side
+effects. The corpus caller (campfire's `Room has_many :memberships do
+def grant_to … end end`) inserts Membership rows whose callbacks are
+inert.
+
 ## Related docs
 
 - [`emit.md`](emit.md) — the universal IR contract; the consumers of

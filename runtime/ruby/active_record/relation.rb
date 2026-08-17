@@ -595,6 +595,20 @@ module ActiveRecord
       records
     end
 
+    # `destroy_by(conditions)` — Rails' `where(conditions).destroy_all`,
+    # and spelled as exactly that so the callback contract `destroy_all`
+    # documents above carries over unchanged. campfire's
+    # `Room#memberships.revoke_from` is the caller.
+    def destroy_by(conditions)
+      where(conditions).destroy_all
+    end
+
+    # `delete_by(conditions)` — `destroy_by`'s callback-skipping twin,
+    # the same line Rails draws between `destroy_all` and `delete_all`.
+    def delete_by(conditions)
+      where(conditions).delete_all
+    end
+
     # `update_all(...)` — bulk UPDATE scoped by the accumulated WHEREs.
     # Hash form (`update_all(user_id: 3)`) escapes values; String form
     # (`update_all("hits = hits + 1")`) is trusted verbatim, same as

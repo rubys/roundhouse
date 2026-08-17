@@ -885,7 +885,18 @@ fn every_runtime_method_body_concretely_typed() {
     // generic `Relation[T]` retires the class of them at once; adding
     // Enumerable methods one at a time neither helps nor hurts that.
     // +8 sites; ceiling raised 265 -> 273.
-    const CEILING: usize = 273;
+    // 2026-08-17 `Relation#destroy_by` / `#delete_by` — Rails'
+    // condition-taking bulk writes, the pair that stands to
+    // `destroy_all`/`delete_all` as `find_by` stands to `find`. Each
+    // contributes its `conditions` parameter (an untyped condition hash,
+    // exactly as `where`'s already is beside it) and the untyped result
+    // it forwards from the terminal it delegates to. Neither body does
+    // anything but `where(conditions).<terminal>`; nothing that was
+    // concrete became gradual. campfire's `Room has_many :memberships do
+    // def revoke_from(users) destroy_by user: users end end` is the
+    // caller that wanted them.
+    // +2 sites; ceiling raised 273 -> 275.
+    const CEILING: usize = 275;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

@@ -87,6 +87,8 @@ module ActiveRecord
     def size: () -> Integer
     def delete_all: () -> Integer
     def destroy_all: () -> Array[untyped]
+    def destroy_by: (untyped conditions) -> Array[untyped]
+    def delete_by: (untyped conditions) -> Integer
     def update_all: (untyped updates) -> Integer
     # `pluck`/`pick` hand back whatever the COLUMN holds — Integer for an
     # INTEGER column, Float for REAL, String for TEXT, nil for NULL —

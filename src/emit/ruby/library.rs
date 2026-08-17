@@ -694,7 +694,12 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
             push_assoc_scope_skip(&d.model, &d.method, &d.reason);
         }
     }
-    if !crate::lower::scope_chain::any_scopes(&scopes) && assoc_class_methods.is_empty() {
+    if !crate::lower::scope_chain::any_scopes(&scopes)
+        && assoc_class_methods.is_empty()
+        // An app with no scopes at all can still declare an association
+        // extension, and its call sites need the same rewrite.
+        && !crate::lower::scope_chain::any_assoc_extensions(&assocs)
+    {
         return;
     }
     let names = crate::lower::scope_chain::all_scope_names(&scopes);
@@ -825,6 +830,8 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                 || crate::lower::scope_chain::mentions_model_chain_start(&m.body, &models)
                 || crate::lower::scope_chain::mentions_assoc_constructor(&m.body, &assocs)
                 || crate::lower::scope_chain::mentions_assoc_lookup(&m.body, &assocs)
+                || crate::lower::scope_chain::mentions_assoc_extension(&m.body, &assocs)
+                || crate::lower::scope_chain::mentions_model_insert_all(&m.body, &models)
                 || crate::lower::scope_chain::mentions_assoc_class_method(
                     &m.body,
                     &assocs,

@@ -524,7 +524,23 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // `Relation[T]` is what retires the whole class of them at once;
     // adding these one Enumerable method at a time neither helps nor
     // hurts that. Nothing that was typed became untyped.
-    const CEILING: usize = 673;
+    // 2026-08-17: 673 -> 685 — `Relation#destroy_by` / `#delete_by`,
+    // Rails' condition-taking bulk writes, measured at 679. Three nodes
+    // each: the method body `where(conditions).destroy_all`, its
+    // `where(conditions)` receiver, and the `conditions` parameter read.
+    // The parameter is untyped for the reason every RBS parameter in
+    // this file is — RBS parameter types do not reach this runtime's
+    // body typer for ANY method (see `SelectManager#initialize`'s `sql`
+    // and `Table#initialize`'s `name` in the dump) — and the two sends
+    // ride on it. Both bodies delegate straight to the already-counted
+    // `where` + `destroy_all`/`delete_all`; nothing that was typed
+    // became untyped, and the pair exists separately for the same
+    // reason `destroy_all` and `delete_all` do, one running callbacks
+    // and the other issuing a single DELETE.
+    //
+    // campfire's `Room has_many :memberships do def revoke_from(users)
+    // destroy_by user: users end end` is the caller. Headroom left: 6.
+    const CEILING: usize = 685;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions exceeds ceiling of {CEILING}.\n\
