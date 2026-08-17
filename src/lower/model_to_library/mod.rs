@@ -1150,6 +1150,53 @@ fn build_class_info(
         }
     }
 
+    // Scopes. `push_scope_methods` runs only at the ruby emit seam and
+    // leaves `signature: None`, so the loop above cannot see them — and
+    // this registry is what types TEST bodies. Without an entry the
+    // chain dies at the scope hop: `users(:david).rooms.opens.last`
+    // typed to nothing, the route-helper id projection declined, and
+    // campfire's rooms tests asserted a redirect to
+    // `/rooms/#<Room:0x000000010…>`. Uses the analyzer's own seed rule
+    // rather than a second copy of it.
+    {
+        let scope_names: std::collections::HashSet<Symbol> =
+            model.scopes().map(|s| s.name.clone()).collect();
+        for scope in model.scopes() {
+            info.class_methods.entry(scope.name.clone()).or_insert_with(|| {
+                crate::analyze::scope_return_seed(&scope.body, &model.name, &scope_names)
+            });
+            info.class_method_kinds
+                .entry(scope.name.clone())
+                .or_insert(crate::dialect::AccessorKind::Method);
+            info.relation_derived.insert(scope.name.clone());
+        }
+        // Hand-written class methods whose body IS a query over this
+        // model. campfire's `class << self; def original;
+        // order(:created_at).first; end; end` is the shape, reached as
+        // `Current.user.rooms.original`. The synthesized-method loop
+        // above cannot see these (they come from the model body, not
+        // from `build_methods`), and the analyzer's registry — which
+        // does harvest them — is not the one that types test bodies.
+        for item in &model.body {
+            let crate::dialect::ModelBodyItem::Method { method, .. } = item else { continue };
+            if method.receiver != crate::dialect::MethodReceiver::Class {
+                continue;
+            }
+            let seed = crate::analyze::scope_return_seed(&method.body, &model.name, &scope_names);
+            // `scope_return_seed`'s fallback is `Array[Self]`, which for
+            // a method that is NOT a query would be a fabrication. Only
+            // register when the body actually classified.
+            if !crate::analyze::body_is_relation_query(&method.body, &model.name, &scope_names) {
+                continue;
+            }
+            info.class_methods.entry(method.name.clone()).or_insert(seed);
+            info.class_method_kinds
+                .entry(method.name.clone())
+                .or_insert(crate::dialect::AccessorKind::Method);
+            info.relation_derived.insert(method.name.clone());
+        }
+    }
+
     // ApplicationRecord baseline (subset of runtime/ruby/active_record/base.rb's
     // public API that synthesized model bodies actually call). Only insert
     // when not already overridden by the lowerer.

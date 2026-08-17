@@ -299,13 +299,9 @@ impl Analyzer {
             let scope_names: std::collections::HashSet<Symbol> =
                 model.scopes().map(|s| s.name.clone()).collect();
             for scope in model.scopes() {
-                let seed = if body_tail_yields_relation(&scope.body, &model.name, &scope_names)
-                {
-                    Ty::Relation { of: model.name.clone() }
-                } else {
-                    array_of_self.clone()
-                };
+                let seed = scope_return_seed(&scope.body, &model.name, &scope_names);
                 cls.class_methods.entry(scope.name.clone()).or_insert(seed);
+                cls.relation_derived.insert(scope.name.clone());
             }
             // `has_rich_text :body` declares two preload scopes beside
             // the association (`with_rich_text_body`,
@@ -2116,7 +2112,37 @@ impl Analyzer {
                         &method.name,
                         Ty::Relation { of: class_id.clone() },
                     );
+                    self.classes
+                        .entry(class_id.clone())
+                        .or_default()
+                        .relation_derived
+                        .insert(method.name.clone());
                     continue;
+                }
+                // …and the half that TERMINATES the chain rather than
+                // extending it: `def self.original; order(:created_at)
+                // .first; end` returns a record, not a relation, but it
+                // is just as much a query over this model and Rails
+                // delegates it on a relation receiver the same way.
+                // Marked `relation_derived` so that delegation can tell
+                // it apart from a class method that merely happens to
+                // return a record.
+                if method.receiver == crate::dialect::MethodReceiver::Class {
+                    if let Some(kind) =
+                        body_tail_terminal_kind(&method.body, class_id, &scope_names)
+                    {
+                        Self::insert_inferred_return(
+                            target,
+                            &method.name,
+                            instantiate_return_kind(kind, class_id),
+                        );
+                        self.classes
+                            .entry(class_id.clone())
+                            .or_default()
+                            .relation_derived
+                            .insert(method.name.clone());
+                        continue;
+                    }
                 }
                 Self::register_method_return(
                     target,
@@ -2615,6 +2641,91 @@ fn body_tail_yields_relation(
             },
         }
     }
+}
+
+/// What a `scope :name, -> { … }` call returns.
+///
+/// Three answers, in order:
+///
+///  1. Body tail is a BUILDER chain rooted at this model
+///     (`where(…).order(…)`) → `Relation { of: Self }`, the true lazy
+///     relation that chains and class-side delegation resolve.
+///  2. Body tail is a relation TERMINAL (`order(:created_at).first`,
+///     `where(…).count`) → whatever the catalog says that terminal
+///     returns, instantiated against this model. campfire's
+///     `scope :original, -> { order(:created_at).first }` is the shape:
+///     it yields a Room, and calling it `Array[Room]` is not merely
+///     imprecise — it made `room_url(user.rooms.original)` render
+///     `/rooms/#<Room:0x…>`, because the route-helper id projection
+///     asks the type and an Array is not a record.
+///  3. Anything else (block-taking hop, cross-model root, unrecognized
+///     tail) → the legacy `Array[Self]` stand-in, whose `Array[Class]`
+///     dispatch delegates the same way.
+///
+/// Shared with the LOWERING-side registry (`build_class_info`), which
+/// is what types test bodies. The analyzer's registry and that one are
+/// two different maps over the same fact, and a second copy of this
+/// rule is exactly how `user.rooms.opens.last` came to type in a
+/// controller and not in a test.
+pub(crate) fn scope_return_seed(
+    body: &Expr,
+    model_id: &ClassId,
+    scope_names: &std::collections::HashSet<Symbol>,
+) -> Ty {
+    if body_tail_yields_relation(body, model_id, scope_names) {
+        return Ty::Relation { of: model_id.clone() };
+    }
+    if let Some(kind) = body_tail_terminal_kind(body, model_id, scope_names) {
+        return instantiate_return_kind(kind, model_id);
+    }
+    Ty::Array { elem: Box::new(Ty::Class { id: model_id.clone(), args: vec![] }) }
+}
+
+/// Did [`scope_return_seed`] actually classify this body, or fall back?
+///
+/// The fallback is `Array[Self]`, which is a safe stand-in for a SCOPE
+/// (a scope is a query by construction) but a fabrication for a
+/// hand-written class method that happens to live on a model. Callers
+/// registering the latter ask this first.
+pub(crate) fn body_is_relation_query(
+    body: &Expr,
+    model_id: &ClassId,
+    scope_names: &std::collections::HashSet<Symbol>,
+) -> bool {
+    body_tail_yields_relation(body, model_id, scope_names)
+        || body_tail_terminal_kind(body, model_id, scope_names).is_some()
+}
+
+/// The catalog return kind of a scope body's tail TERMINAL, when the
+/// receiver it terminates is itself a relation over this model.
+///
+/// `order(:created_at).first` → `first` is a `ChainKind::Terminal` in
+/// `ReceiverContext::Relation` with `ReturnKind::SelfOrNil`, and its
+/// receiver `order(:created_at)` is a builder chain rooted here — so
+/// the scope returns `Self | Nil`. Reusing `body_tail_yields_relation`
+/// for the receiver check is what keeps the two rules from drifting;
+/// the guard it applies (no blocks, constant root must name THIS model)
+/// applies here unchanged.
+fn body_tail_terminal_kind(
+    body: &Expr,
+    model_id: &ClassId,
+    scope_names: &std::collections::HashSet<Symbol>,
+) -> Option<crate::catalog::ReturnKind> {
+    let tail = match &*body.node {
+        ExprNode::Seq { exprs } => exprs.last()?,
+        _ => body,
+    };
+    let ExprNode::Send { recv: Some(recv), method, block: None, .. } = &*tail.node else {
+        return None;
+    };
+    let entry = crate::catalog::lookup(method.as_str(), crate::catalog::ReceiverContext::Relation)?;
+    if !matches!(entry.chain, crate::catalog::ChainKind::Terminal) {
+        return None;
+    }
+    if !body_tail_yields_relation(recv, model_id, scope_names) {
+        return None;
+    }
+    entry.return_kind
 }
 
 /// Instantiate a catalog [`crate::catalog::ReturnKind`] against a

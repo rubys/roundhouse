@@ -596,6 +596,18 @@ impl<'a> BodyTyper<'a> {
                                     }),
                                 };
                             }
+                            // A TERMINAL scope — one whose body ends in
+                            // `first`/`last`/`count`/… rather than a
+                            // builder. It materializes, so it does NOT
+                            // preserve the receiver's representation:
+                            // its own return type is the answer.
+                            // campfire's `user.rooms.original` is the
+                            // shape. Gated on `scopes` so this stays
+                            // scope delegation and doesn't become
+                            // method_missing over the whole class side.
+                            Some(other) if cls.relation_derived.contains(method) => {
+                                return other.clone();
+                            }
                             _ => {}
                         }
                     }
@@ -679,6 +691,14 @@ impl<'a> BodyTyper<'a> {
                                 Ty::Class { id, .. } => Ty::Relation { of: id.clone() },
                                 _ => Ty::Array { elem: elem.clone() },
                             };
+                        }
+                        // Terminal scope on a relation receiver — same
+                        // reasoning as the Array arm above: a scope that
+                        // materializes answers with its own return type,
+                        // and `scopes` keeps the delegation scoped to
+                        // declared scopes.
+                        Some(other) if cls.relation_derived.contains(method) => {
+                            return other.clone();
                         }
                         _ => {}
                     }

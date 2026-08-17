@@ -76,6 +76,27 @@ pub struct ClassInfo {
     pub attributes: Row,
     /// Methods callable on the class itself: `Post.all`, `Post.find(id)`.
     pub class_methods: HashMap<Symbol, Ty>,
+    /// Which of `class_methods` had their return type inferred FROM a
+    /// query chain over this model — every `scope`, plus any class
+    /// method whose body tail is such a chain.
+    ///
+    /// Relation- and Array-receiver dispatch delegates to the element
+    /// model's class-method table, and this is the membership test that
+    /// keeps the delegation honest. Forwarding arbitrary class methods
+    /// would be Rails' method_missing semantics; an unresolved send
+    /// should surface rather than silently forward. But a method whose
+    /// body IS a relation chain over this model is exactly what Rails
+    /// delegates through `scoping`, and it is the one case where the
+    /// answer is knowable rather than guessed.
+    ///
+    /// The relation-RETURNING half of that surface already delegated by
+    /// matching on `Ty::Relation`. This set extends it to the half that
+    /// TERMINATES — campfire's `def self.original; order(:created_at)
+    /// .first; end`, reached as `Current.user.rooms.original`, whose
+    /// return is a record and so matches no relation shape. Without it
+    /// the chain typed to nothing and `room_url(…)` rendered
+    /// `/rooms/#<Room:0x…>`.
+    pub relation_derived: std::collections::HashSet<Symbol>,
     /// Methods callable on an instance: `post.title`, `post.destroy`.
     pub instance_methods: HashMap<Symbol, Ty>,
     /// AccessorKind per method — lets the body-typer flag Method
