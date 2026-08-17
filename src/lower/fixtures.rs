@@ -131,10 +131,21 @@ fn resolve_field(
         return Some(LoweredFixtureField {
             column: key.clone(),
             value: match value {
-                FixtureValue::Scalar(raw) => LoweredFixtureValue::Literal {
-                    ty: ty.clone(),
-                    raw: raw.clone(),
-                },
+                FixtureValue::Scalar(raw) => {
+                    // An `enum` column's fixture value is the LABEL —
+                    // campfire's `users.yml` says `role: administrator`
+                    // where the column stores `1`. Rails maps it when it
+                    // loads the fixture; the mapping is on the model, so
+                    // map it here rather than writing the label text into
+                    // an integer column. Without this David loaded with
+                    // `role = "administrator"` and `david.administrator?`
+                    // — which compares against `1` — answered false, so
+                    // every test that signs in as an admin failed its
+                    // first assertion.
+                    let (ty, raw) = enum_stored_value(model, key, raw)
+                        .unwrap_or_else(|| (ty.clone(), raw.clone()));
+                    LoweredFixtureValue::Literal { ty, raw }
+                }
                 FixtureValue::Ruby(expr) => LoweredFixtureValue::Ruby(expr.clone()),
             },
         });
@@ -193,4 +204,26 @@ fn resolve_field(
         }
     }
     None
+}
+
+/// The value an enum column actually stores for `raw`, when `raw` names
+/// one of that column's labels. `None` for a non-enum column or a value
+/// that is not a label (a column whose enum maps `"active" => "active"`
+/// stores the label itself, and this answers that too — harmlessly).
+///
+/// Reads the same `Model::enums` table `lower::enum_symbols` uses for
+/// hand-written `where(role: :bot)`; the two are the query side and the
+/// fixture side of one fact.
+fn enum_stored_value(
+    model: &Model,
+    column: &Symbol,
+    raw: &str,
+) -> Option<(Ty, String)> {
+    let labels = model.enums.get(column)?;
+    let (_, stored) = labels.iter().find(|(label, _)| label == raw)?;
+    match stored {
+        crate::expr::Literal::Int { value } => Some((Ty::Int, value.to_string())),
+        crate::expr::Literal::Str { value } => Some((Ty::Str, value.clone())),
+        _ => None,
+    }
 }

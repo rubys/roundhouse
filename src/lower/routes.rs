@@ -508,18 +508,45 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
                 );
                 out.push(FlatRoute {
                     method: method.clone(),
-                    path: full_path,
+                    path: full_path.clone(),
                     controller: controller_class.clone(),
                     action: Symbol::from(action_name),
-                    as_name,
+                    as_name: as_name.clone(),
                     required_params: params.len(),
                     param_defaults: defaults_for(ctx, &params),
-                    path_params: params,
+                    path_params: params.clone(),
                     named: true,
                     format: None,
                     int_params: vec![],
                     constraints: vec![],
                 });
+                // Rails routes `update` on BOTH `PATCH` and `PUT` — the
+                // verb changed in Rails 4 and the older one was kept, so
+                // both reach the same action. campfire's controller
+                // tests write `put account_user_url(...)`, and a table
+                // carrying only the PATCH row answered "no route
+                // matches" for a request Rails routes fine.
+                //
+                // `named: false`: the pair is ONE route as far as
+                // helpers go, and a second named row would either
+                // duplicate `<x>_path` or lose the dedupe race with it.
+                // Only the dispatch table needs both.
+                if action_name == "update" {
+                    out.push(FlatRoute {
+                        method: HttpMethod::Put,
+                        path: full_path,
+                        controller: controller_class.clone(),
+                        action: Symbol::from(action_name),
+                        as_name,
+                        required_params: params.len(),
+                        param_defaults: defaults_for(ctx, &params),
+                        path_params: params,
+                        named: false,
+                        format: None,
+                        int_params: vec![],
+                        constraints: vec![],
+                    });
+                }
             }
             let child_ctx = Ctx {
                 parents: {

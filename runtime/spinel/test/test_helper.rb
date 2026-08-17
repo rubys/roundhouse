@@ -360,8 +360,20 @@ module RequestDispatch
     dispatch_request("PATCH", path, params, headers)
   end
 
+  # Rails' integration tests define all five verbs plus `head`; the four
+  # the blog happened to use were the four that existed. campfire's
+  # `put account_user_url(...)` is the first `put` in the corpus, and it
+  # failed as a missing METHOD rather than as an unrouted request.
+  def put(path, params: {}, headers: {})
+    dispatch_request("PUT", path, params, headers)
+  end
+
   def delete(path, params: {}, headers: {})
     dispatch_request("DELETE", path, params, headers)
+  end
+
+  def head(path, params: {}, headers: {})
+    dispatch_request("HEAD", path, params, headers)
   end
 
   # The browser. An integration test's requests share cookie state the
@@ -407,7 +419,13 @@ module RequestDispatch
     require_relative "../app/controllers/articles_controller"
     require_relative "../app/controllers/comments_controller"
     ActionView::ViewHelpers.reset_slots!
-    matched = ActionDispatch::Router.match(method, path, RouteTable.table)
+    # `[RouteTable.root] + RouteTable.table`, exactly as both production
+    # dispatchers compose it: `root "c#a"` is kept as its own constant
+    # (it is the only literal-pattern entry) and the table walk stays
+    # flat. The harness searched `table` alone, so `get "/"` — the one
+    # request every app answers — was "No route matches" in a controller
+    # test and a 200 in production.
+    matched = ActionDispatch::Router.match(method, path, [RouteTable.root] + RouteTable.table)
     raise "No route matches #{method} #{path}" if matched.nil?
     controller = case matched.controller
                  when :articles then ArticlesController.new
