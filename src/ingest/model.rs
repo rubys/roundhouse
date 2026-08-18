@@ -610,6 +610,31 @@ fn ingest_singleton_class_methods(
     let Some(body) = sc.body() else { return Ok(Vec::new()) };
     let mut methods = Vec::new();
     for stmt in super::util::flatten_statements(body) {
+        // A bare `private` (or `protected` / `public`) inside the
+        // singleton block is a VISIBILITY MARKER, not a statement with
+        // a body. Visibility is not modeled on a lowered class method
+        // (everything a body can reach, it reaches), so the marker is
+        // skipped rather than refused — and refusing it dropped the
+        // WHOLE MODEL at ingest, since `ingest_model` propagates the
+        // error for the file.
+        //
+        // Found by an STI probe: campfire's `Rooms::Direct` writes one
+        // above `find_for`, and it only surfaced once that class was
+        // classified as a model rather than a library class (the
+        // library-class walk has always tolerated the marker). Any
+        // model with a `class << self … private … end` block hits it.
+        if let Some(call) = stmt.as_call_node() {
+            let bare_marker = call.receiver().is_none()
+                && call.arguments().is_none()
+                && call.block().is_none()
+                && matches!(
+                    std::str::from_utf8(call.name().as_slice()).unwrap_or(""),
+                    "private" | "protected" | "public"
+                );
+            if bare_marker {
+                continue;
+            }
+        }
         let Some(def) = stmt.as_def_node() else {
             return Err(IngestError::Unsupported {
                 file: file.into(),
@@ -1269,5 +1294,55 @@ fn ty_of_column(t: &ColumnType) -> Ty {
         // (`lower::has_json`), not as a Hash the whole column decodes to.
         ColumnType::Json => Ty::Str,
         ColumnType::Reference { .. } => Ty::Int,
+    }
+}
+
+#[cfg(test)]
+mod singleton_visibility_tests {
+    use super::*;
+
+    fn ingest(src: &str) -> IngestResult<Option<crate::dialect::Model>> {
+        ingest_model(
+            src.as_bytes(),
+            "app/models/thing.rb",
+            &Schema::default(),
+            &Default::default(),
+        )
+    }
+
+    /// A bare `private` inside `class << self` used to abort the whole
+    /// file's ingest ("unsupported statement inside `class << self`"),
+    /// which drops the model rather than the marker.
+    #[test]
+    fn a_visibility_marker_in_a_singleton_block_is_skipped_not_refused() {
+        let model = ingest(
+            "class Thing < ApplicationRecord\n  \
+             class << self\n    \
+             def visible\n      1\n    end\n\n    \
+             private\n      def hidden\n        2\n      end\n  \
+             end\nend\n",
+        )
+        .expect("ingest must not fail on a visibility marker")
+        .expect("model");
+        let names: Vec<&str> = model
+            .body
+            .iter()
+            .filter_map(|item| match item {
+                crate::dialect::ModelBodyItem::Method { method, .. } => Some(method.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["visible", "hidden"], "both singleton methods survive");
+    }
+
+    /// A statement the walk genuinely cannot read still refuses — the
+    /// skip is for the three markers, not for anything call-shaped.
+    #[test]
+    fn a_real_statement_in_a_singleton_block_still_refuses() {
+        let err = ingest(
+            "class Thing < ApplicationRecord\n  \
+             class << self\n    attr_accessor :cache\n  end\nend\n",
+        );
+        assert!(err.is_err(), "an unmodeled singleton statement is still an error: {err:?}");
     }
 }
