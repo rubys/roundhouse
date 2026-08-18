@@ -707,8 +707,14 @@ jobs:
       #             `uninitialized constant UsersFixtures::BCrypt` in 49
       #             of 52 files. A dev box that has bcrypt installed for
       #             any other reason hides it completely.
+      #   nokogiri — also from the app: `app/models/opengraph/document.rb`
+      #             calls `Nokogiri::HTML(html)` and campfire carries it
+      #             transitively (rails-html-sanitizer). The emitted tree
+      #             does not DECLARE it in its Gemfile, which is its own
+      #             gap; installing it here is parity with what the emit
+      #             actually loads.
       - name: Install the gems the emitted suite loads
-        run: gem install sqlite3 bcrypt --no-document
+        run: gem install sqlite3 bcrypt nokogiri --no-document
       - name: Fetch once-campfire at the pinned SHA
         run: |
           set -euo pipefail
@@ -722,9 +728,19 @@ jobs:
       # never a failure; exceeding it emits a notice asking for the bump,
       # which is how the floor stays honest instead of decorative.
       - name: Enforce the floor
+      #
+      # MEASURED HERE, NOT ON A LAPTOP. The 72/8 this job first shipped
+      # with came from a dev box and was not reproducible: bcrypt and
+      # nokogiri were ambient there, and `Pathname()` — which
+      # `app/helpers/cable_helper.rb` calls without a `require
+      # "pathname"` — resolves bare on Ruby 4.0 but not on the 3.4 this
+      # job pins. (The BUNDLED table that writes that require lives in
+      # `spin_shape`, so the ruby target never gets it. Real gap; costs
+      # two files.) The floor is whatever a clean runner reaches, and it
+      # goes UP by the notice below, never by assertion.
         env:
-          FLOOR_TESTS: 72
-          FLOOR_FILES: 8
+          FLOOR_TESTS: 59
+          FLOOR_FILES: 5
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)
