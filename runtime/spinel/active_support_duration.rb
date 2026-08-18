@@ -97,20 +97,23 @@ module ActiveSupport
     # A Time minus seconds is a Time, so `ago`/`from_now` (and the
     # Rails aliases `until`/`since`) stay Time-typed for callers like
     # `created_at > 70.days.ago`.
+    # `ActiveSupport.now`, not `Time.now` — the runtime's one clock, so
+    # `travel_to` in a test moves what `70.days.ago` means. See the
+    # TEST CLOCK block in active_support_time_parsing.rb.
     def ago
-      Time.now.utc - @seconds
+      ActiveSupport.now.utc - @seconds
     end
 
     def until
-      Time.now.utc - @seconds
+      ActiveSupport.now.utc - @seconds
     end
 
     def from_now
-      Time.now.utc + @seconds
+      ActiveSupport.now.utc + @seconds
     end
 
     def since
-      Time.now.utc + @seconds
+      ActiveSupport.now.utc + @seconds
     end
 
     def to_i

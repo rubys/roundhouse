@@ -241,11 +241,47 @@ class TestBase
   # invoke `super` — same Minitest before_setup → setup ordering.)
   def setup
     SchemaSetup.reset! if defined?(SchemaSetup)
+    ActiveSupport.travel(0) if defined?(ActiveSupport)
   end
 
   # Default no-op so the shim's `__t.teardown` resolves on test
   # classes that don't define one.
   def teardown
+  end
+
+  # ---- ActiveSupport::Testing::TimeHelpers -----------------------
+  #
+  # Rails stubs `Time.now` itself; the shared runtime cannot reopen a
+  # built-in and spinel AOT cannot stub at all, so the runtime routes
+  # every time read through `ActiveSupport.now` and this moves THAT.
+  # See the TEST CLOCK block in
+  # `runtime/spinel/active_support_time_parsing.rb`.
+  #
+  # WHOLE SECONDS, like Rails' own (`travel` truncates to the second);
+  # the offset is relative to the real clock, so the app keeps ticking
+  # from the target rather than freezing on it — which is `travel_to`'s
+  # documented behaviour without a block.
+  #
+  # `setup` above resets it, so a travelling test cannot leak its clock
+  # into the next one. That is Rails' `after_teardown travel_back`,
+  # moved to setup because the shim calls `teardown` on the test's own
+  # class, which may not call super.
+  def travel_to(target)
+    ActiveSupport.travel(target.to_i - Time.now.to_i)
+    return unless block_given?
+    begin
+      yield
+    ensure
+      travel_back
+    end
+  end
+
+  def travel(duration)
+    travel_to(Time.now + duration.to_i)
+  end
+
+  def travel_back
+    ActiveSupport.travel(0)
   end
 
   # `assert_match` left as a method — nilable value handling differs

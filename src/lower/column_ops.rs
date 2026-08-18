@@ -1,7 +1,7 @@
 //! Rails' record methods that take a COLUMN NAME, rewritten at the call
 //! site where that name is a literal:
 //!
-//!   touch :connected_at            -> self.connected_at = Time.now; touch
+//!   touch :connected_at            -> self.connected_at = ActiveSupport.db_now; touch
 //!   increment!(:connections, touch: true)
 //!                                  -> self.connections = self.connections + 1; touch
 //!   decrement!(:connections, touch: true)
@@ -64,11 +64,22 @@ fn rewrite_stmt(e: &mut Expr) {
     // (`ActiveSupport.format_db_time`), and every writer is typed per
     // target.
     let value = match op.kind {
+        // `ActiveSupport.db_now`, NOT `Time.now`: it is what the no-arg
+        // `touch` beneath this stamps `updated_at` with
+        // (`fill_timestamps`), so the two columns a `touch :col` writes
+        // carry the same instant in the same storage form. It is also
+        // the runtime's single clock — `travel_to` moves it, and a
+        // `Time.now` here would leave `connected_at` stamped in the
+        // real present while `updated_at` moved (campfire's
+        // `Membership::Connectable`, whose whole test file travels).
         OpKind::Touch => Expr::new(
             span,
             ExprNode::Send {
-                recv: Some(Expr::new(span, ExprNode::Const { path: vec![Symbol::from("Time")] })),
-                method: Symbol::from("now"),
+                recv: Some(Expr::new(
+                    span,
+                    ExprNode::Const { path: vec![Symbol::from("ActiveSupport")] },
+                )),
+                method: Symbol::from("db_now"),
                 args: vec![],
                 block: None,
                 parenthesized: false,

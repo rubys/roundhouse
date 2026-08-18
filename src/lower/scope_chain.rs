@@ -1718,28 +1718,76 @@ fn range_condition_fragment(model: &ClassId, arg: &Expr) -> Option<(Expr, Vec<Ex
     let ExprNode::Hash { entries, .. } = &*arg.node else { return None };
     let [(k, v)] = &entries[..] else { return None };
     let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else { return None };
-    let ExprNode::Range { begin, end, exclusive } = &*v.node else { return None };
     let table = crate::naming::pluralize_snake(model.0.as_str());
     let col = format!("{table}.{key}");
-    let mut clauses: Vec<String> = Vec::new();
     let mut binds: Vec<Expr> = Vec::new();
+    let sql = match &*v.node {
+        ExprNode::Range { .. } => range_clause(&col, v, &mut binds)?,
+        // `where(connected_at: [ nil, ...CONNECTION_TTL.ago ])` — an
+        // ARRAY of alternatives, which Rails ORs together, splitting
+        // `nil` out as `IS NULL`. The runtime's `column_predicate`
+        // renders an Array as `IN (…)`, so the Range inside one is the
+        // silent no-match of the bare-Range case wearing a different
+        // hat: campfire's `Membership.disconnected` selected the rows
+        // whose `connected_at` equalled the literal string "nil" or a
+        // Range object, i.e. none.
+        //
+        // Only `nil` and Range members are claimed. A mixed array with
+        // scalars would need `IN (…)` composed alongside the OR arms,
+        // and nothing in the corpus writes one.
+        ExprNode::Array { elements, .. } => {
+            let mut arms: Vec<String> = Vec::new();
+            for el in elements {
+                match &*el.node {
+                    ExprNode::Lit { value: Literal::Nil } => {
+                        arms.push(format!("{col} IS NULL"));
+                    }
+                    ExprNode::Range { .. } => arms.push(range_clause(&col, el, &mut binds)?),
+                    _ => return None,
+                }
+            }
+            if arms.len() < 2 {
+                return None;
+            }
+            // Parenthesized: the runtime ANDs this fragment with every
+            // other condition on the relation, and an unwrapped OR
+            // would bind looser than that AND.
+            format!("({})", arms.join(" OR "))
+        }
+        _ => return None,
+    };
+    let fragment = Expr::new(arg.span, ExprNode::Lit { value: Literal::Str { value: sql } });
+    Some((fragment, binds))
+}
+
+/// One Range's comparison SQL, appending its bound expressions to
+/// `binds` in the order the `?` placeholders appear.
+///
+/// Rails renders a Range as `>=` / `<=`, `<` for an exclusive end, and
+/// either half alone for a beginless or endless one. A range with
+/// NEITHER end (`nil..nil`) has no comparison to make and declines.
+fn range_clause(col: &str, e: &Expr, binds: &mut Vec<Expr>) -> Option<String> {
+    let ExprNode::Range { begin, end, exclusive } = &*e.node else { return None };
+    let mut clauses: Vec<String> = Vec::new();
     if let Some(b) = begin {
         clauses.push(format!("{col} >= ?"));
         binds.push(b.clone());
     }
-    if let Some(e) = end {
+    if let Some(x) = end {
         // `a...b` excludes its end; `a..b` includes it.
         clauses.push(format!("{col} {} ?", if *exclusive { "<" } else { "<=" }));
-        binds.push(e.clone());
+        binds.push(x.clone());
     }
     if clauses.is_empty() {
         return None;
     }
-    let fragment = Expr::new(
-        arg.span,
-        ExprNode::Lit { value: Literal::Str { value: clauses.join(" AND ") } },
-    );
-    Some((fragment, binds))
+    // Both halves present: parenthesize so the pair survives being
+    // ORed with a sibling arm.
+    Some(if clauses.len() == 1 {
+        clauses.remove(0)
+    } else {
+        format!("({})", clauses.join(" AND "))
+    })
 }
 
 fn lower_relation_args(
@@ -2839,6 +2887,127 @@ mod tests {
             ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "id"
         ));
         assert!(matches!(&*v.node, ExprNode::Var { .. }));
+    }
+
+    // ---- where(col: <range>) ------------------------------------------
+
+    fn range(begin_: Option<Expr>, end_: Option<Expr>, exclusive: bool) -> Expr {
+        Expr::new(span(), ExprNode::Range { begin: begin_, end: end_, exclusive })
+    }
+
+    fn cond_hash(key: &str, value: Expr) -> Expr {
+        Expr::new(
+            span(),
+            ExprNode::Hash {
+                entries: vec![(
+                    Expr::new(
+                        span(),
+                        ExprNode::Lit { value: Literal::Sym { value: Symbol::from(key) } },
+                    ),
+                    value,
+                )],
+                kwargs: true,
+            },
+        )
+    }
+
+    fn cutoff(name: &str) -> Expr {
+        Expr::new(span(), ExprNode::Var { id: VarId(0), name: Symbol::from(name) })
+    }
+
+    fn fragment_sql(f: &Expr) -> &str {
+        match &*f.node {
+            ExprNode::Lit { value: Literal::Str { value } } => value.as_str(),
+            other => panic!("expected a SQL string literal, got {other:?}"),
+        }
+    }
+
+    /// A Range value compared for EQUALITY matched nothing, silently —
+    /// `column_predicate` has no Range arm and falls through to
+    /// `col = <the range object>`. Both ends, one end, and neither.
+    #[test]
+    fn a_range_condition_becomes_comparisons() {
+        let m = ClassId(Symbol::from("Membership"));
+
+        let (sql, binds) = range_condition_fragment(
+            &m,
+            &cond_hash("connected_at", range(Some(cutoff("a")), Some(cutoff("b")), false)),
+        )
+        .expect("both ends");
+        assert_eq!(
+            fragment_sql(&sql),
+            "(memberships.connected_at >= ? AND memberships.connected_at <= ?)"
+        );
+        assert_eq!(binds.len(), 2);
+
+        // `a...b` excludes its end.
+        let (sql, _) = range_condition_fragment(
+            &m,
+            &cond_hash("connected_at", range(Some(cutoff("a")), Some(cutoff("b")), true)),
+        )
+        .expect("exclusive end");
+        assert!(fragment_sql(&sql).contains("< ?"), "{}", fragment_sql(&sql));
+
+        // Endless — the half that `Membership.connected` writes.
+        let (sql, binds) = range_condition_fragment(
+            &m,
+            &cond_hash("connected_at", range(Some(cutoff("a")), None, false)),
+        )
+        .expect("endless");
+        assert_eq!(fragment_sql(&sql), "memberships.connected_at >= ?");
+        assert_eq!(binds.len(), 1);
+
+        // Neither end has no comparison to make.
+        assert!(
+            range_condition_fragment(&m, &cond_hash("connected_at", range(None, None, false)))
+                .is_none()
+        );
+    }
+
+    /// `where(connected_at: [ nil, ...cutoff ])` — Rails ORs the
+    /// alternatives and splits `nil` out as `IS NULL`. The runtime
+    /// renders an Array as `IN (…)`, so this is the same silent
+    /// no-match wearing a different hat (campfire's
+    /// `Membership.disconnected`).
+    #[test]
+    fn an_array_of_alternatives_becomes_an_or() {
+        let m = ClassId(Symbol::from("Membership"));
+        let value = Expr::new(
+            span(),
+            ExprNode::Array {
+                elements: vec![
+                    Expr::new(span(), ExprNode::Lit { value: Literal::Nil }),
+                    range(None, Some(cutoff("cutoff")), true),
+                ],
+                style: Default::default(),
+            },
+        );
+        let (sql, binds) = range_condition_fragment(&m, &cond_hash("connected_at", value))
+            .expect("nil + range");
+        assert_eq!(
+            fragment_sql(&sql),
+            "(memberships.connected_at IS NULL OR memberships.connected_at < ?)"
+        );
+        assert_eq!(binds.len(), 1);
+    }
+
+    /// A member this rewrite does not reproduce declines the whole
+    /// condition rather than composing half of it: a scalar would need
+    /// `IN (…)` alongside the OR arms.
+    #[test]
+    fn an_array_with_a_scalar_member_declines() {
+        let m = ClassId(Symbol::from("Membership"));
+        let value = Expr::new(
+            span(),
+            ExprNode::Array {
+                elements: vec![
+                    Expr::new(span(), ExprNode::Lit { value: Literal::Nil }),
+                    Expr::new(span(), ExprNode::Lit { value: Literal::Int { value: 3 } }),
+                ],
+                style: Default::default(),
+            },
+        );
+        assert!(range_condition_fragment(&m, &cond_hash("connected_at", value)).is_none());
     }
 
     // ---- build_assoc_registry: has_many :through ----------------------

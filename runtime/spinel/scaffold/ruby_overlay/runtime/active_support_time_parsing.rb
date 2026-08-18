@@ -82,6 +82,42 @@ module ActiveSupport
     t.xmlschema(3)
   end
 
+  # ---- THE TEST CLOCK ------------------------------------------------
+  #
+  # `ActiveSupport.now` is the ONE time read in this runtime. Every
+  # other one calls it — `db_now` below, `Duration#ago`/`#from_now`
+  # beside it — so `travel_to` in the test harness can move the clock
+  # for the whole app with a single write, and a model does not have to
+  # know it is under test.
+  #
+  # ActiveSupport's own `TimeHelpers` do this by stubbing `Time.now`,
+  # which needs a reopened built-in; the shared runtime cannot reopen
+  # one, and spinel AOT cannot stub at all. A module function every
+  # caller already routes through is the same seam without either.
+  #
+  # An ARRAY, not a module ivar: `TRANSPORTS` in broadcasts.rb holds
+  # mutable module state the same way, and the literal `[0]` is what
+  # pins the element type for spinel.
+  #
+  # PRODUCTION IS ZERO. Nothing outside the harness ever calls
+  # `travel`, so `now` is `Time.now` plus a constant-folded 0.
+  TRAVEL_OFFSET = [0]
+
+  def self.travel_offset
+    TRAVEL_OFFSET[0]
+  end
+
+  # Whole seconds relative to the real clock. `travel(0)` is Rails'
+  # `travel_back`, which the harness runs after every test.
+  def self.travel(seconds)
+    TRAVEL_OFFSET.clear
+    TRAVEL_OFFSET << seconds
+  end
+
+  def self.now
+    Time.now + TRAVEL_OFFSET[0]
+  end
+
   # Write-side sibling of `parse_db_time`: current UTC time in Rails'
   # exact storage form — "YYYY-MM-DD HH:MM:SS.ffffff", space separator,
   # zero-padded 6-digit fractional seconds, no zone marker (implicitly
@@ -93,7 +129,7 @@ module ActiveSupport
   # plain integer fields are the most portable surface across
   # CRuby/JRuby.
   def self.db_now
-    t = Time.now.getutc
+    t = ActiveSupport.now.getutc
     format(
       "%04d-%02d-%02d %02d:%02d:%02d.%06d",
       t.year, t.month, t.day, t.hour, t.min, t.sec, t.usec

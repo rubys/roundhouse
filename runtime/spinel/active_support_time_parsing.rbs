@@ -5,6 +5,10 @@ module ActiveSupport
   def self.parse_db_time: (String? str) -> Time?
   def self.json_time: (String? str) -> String?
   def self.db_now: () -> String
+  # The test clock — see the TEST CLOCK block in the .rb.
+  def self.now: () -> Time
+  def self.travel: (Integer seconds) -> void
+  def self.travel_offset: () -> Integer
   def self.format_db_time: (untyped value) -> String?
   # The RSS feed's `<pubDate>`. Absent from this file until 2026-08-01,
   # which is why every pubDate rendered EMPTY on this tree: the call site
