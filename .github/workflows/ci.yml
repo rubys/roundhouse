@@ -37,6 +37,7 @@ jobs:
   # -------------------------------------------------------------------
   generate-fixture:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - name: Set up Ruby
@@ -73,6 +74,7 @@ jobs:
   # -------------------------------------------------------------------
   build-wasm:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       WASI_SDK_VERSION: "33.0"
     steps:
@@ -84,7 +86,9 @@ jobs:
         with:
           workspaces: wasm
       - name: Install libclang (host bindgen)
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y libclang-dev
       - name: Cache WASI SDK
         id: wasi-sdk
         uses: actions/cache@v4
@@ -133,6 +137,7 @@ jobs:
     # stays gated below pending matz/spinel#1447.)
     continue-on-error: true
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
@@ -185,6 +190,7 @@ jobs:
   unit:
     needs: generate-fixture
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -214,6 +220,7 @@ jobs:
   toolchain-crystal:
     needs: generate-fixture
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -240,6 +247,7 @@ jobs:
     # framework-tests-kotlin. NOTE: needs a full toolchain with XCTest —
     # Linux toolchains bundle it; macOS would need Xcode (not just CLT).
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -248,7 +256,9 @@ jobs:
         with:
           swift-version: '6.1'
       - name: Install libsqlite3-dev (CSQLite systemLibrary)
-        run: sudo apt-get update -q && sudo apt-get install -y -q libsqlite3-dev
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -q libsqlite3-dev
       # Unfiltered: all five wired suites (inflector, router,
       # view_helpers, errors, ac_base) run. The last two joined when the
       # class-reflection `< StandardError` emit and the inline
@@ -267,6 +277,7 @@ jobs:
   toolchain-typescript:
     needs: generate-fixture
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -296,6 +307,7 @@ jobs:
     # Node setup but a much smaller and faster scope (~12s vs
     # minutes). See project_framework_test_transpile.md.
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -327,6 +339,7 @@ jobs:
   browser-smoke-typescript:
     needs: generate-fixture
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -371,6 +384,7 @@ jobs:
   browser-smoke-ide:
     needs: [build-wasm, generate-fixture]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: actions/download-artifact@v8
@@ -480,6 +494,7 @@ jobs:
     # runtime failures. Sibling of framework-tests-typescript /
     # framework-tests-ruby.
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -502,6 +517,7 @@ jobs:
     # own assertions, catching adapter drift the app tests miss. Sibling
     # of framework-tests-typescript / framework-tests-crystal.
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -540,6 +556,7 @@ jobs:
     # framework-tests-kotlin / -swift; drop names as the gaps close.
     # Tracked in #34.
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -558,6 +575,7 @@ jobs:
     # Ruby verbatim. Sibling of framework-tests-typescript above and
     # framework-tests-spinel below.
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -617,6 +635,7 @@ jobs:
     # Re-enabled 2026-06-17 (5/5 green on matz/spinel master). Advisory.
     needs: build-spinel
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     continue-on-error: true
     steps:
       - uses: actions/checkout@v5
@@ -636,6 +655,7 @@ jobs:
   toolchain-elixir:
     needs: generate-fixture
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -694,6 +714,7 @@ jobs:
     # work; if master churns red, the signal is visible but non-blocking.
     needs: [generate-fixture, build-spinel]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     continue-on-error: true
     steps:
       - uses: actions/checkout@v5
@@ -713,7 +734,9 @@ jobs:
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: Install libsqlite3-dev
-        run: sudo apt-get update -qq && sudo apt-get install -y libsqlite3-dev
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y libsqlite3-dev
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
@@ -772,6 +795,7 @@ jobs:
     # back to 3.11 (the emitted `requires-python`).
     needs: generate-fixture
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -791,6 +815,7 @@ jobs:
   toolchain-csharp:
     needs: generate-fixture
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -833,6 +858,7 @@ jobs:
   compare:
     needs: generate-fixture
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -869,7 +895,9 @@ jobs:
           swift-version: '6.1'
       - name: Install libsqlite3-dev (Swift CSQLite systemLibrary)
         if: matrix.target == 'swift'
-        run: sudo apt-get update -q && sudo apt-get install -y -q libsqlite3-dev
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -q libsqlite3-dev
       - name: Install .NET (C#)
         if: matrix.target == 'csharp'
         uses: actions/setup-dotnet@v4
@@ -918,6 +946,7 @@ jobs:
   compare-ruby:
     needs: generate-fixture
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -955,6 +984,7 @@ jobs:
   compare-jruby:
     needs: generate-fixture
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -998,6 +1028,7 @@ jobs:
     # Re-enabled 2026-06-17 (7/7 paths match Rails on matz/spinel master). Advisory.
     needs: [generate-fixture, build-spinel]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     continue-on-error: true
     steps:
       - uses: actions/checkout@v5
@@ -1017,7 +1048,9 @@ jobs:
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: Install libsqlite3-dev
-        run: sudo apt-get update -qq && sudo apt-get install -y libsqlite3-dev
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y libsqlite3-dev
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
@@ -1074,6 +1107,7 @@ jobs:
   smoke:
     needs: build-site
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -1110,7 +1144,9 @@ jobs:
           swift-version: '6.1'
       - name: Install libsqlite3-dev (Swift CSQLite systemLibrary)
         if: matrix.target == 'swift'
-        run: sudo apt-get update -q && sudo apt-get install -y -q libsqlite3-dev
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -q libsqlite3-dev
       - name: Install .NET (C#)
         if: matrix.target == 'csharp'
         uses: actions/setup-dotnet@v4
@@ -1170,6 +1206,7 @@ jobs:
   smoke-spinel:
     needs: [build-site, build-spinel]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     continue-on-error: true
     steps:
       - uses: actions/checkout@v5
@@ -1186,7 +1223,9 @@ jobs:
           chmod +x spinel-dist/spinel spinel-dist/spin spinel-dist/spinel_rbs_extract
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: Install libsqlite3-dev
-        run: sudo apt-get update -qq && sudo apt-get install -y libsqlite3-dev
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y libsqlite3-dev
       - uses: actions/setup-node@v5
         with:
           node-version: '20'
@@ -1223,6 +1262,7 @@ jobs:
   build-site:
     needs: [generate-fixture, build-wasm]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -1598,6 +1638,7 @@ jobs:
       - unit
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
