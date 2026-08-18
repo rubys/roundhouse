@@ -37,6 +37,36 @@ class Object
   end
 end
 
+# `compact_blank` (core_ext/enumerable.rb + core_ext/hash.rb) — the
+# blank family's collection form, and the one member of it `lower::blank`
+# cannot always ground.
+#
+# That pass rewrites `xs.compact_blank` through the ELEMENT type and
+# files a `blank_unlowered` diagnostic when the element is untyped,
+# saying in as many words that "the CRuby overlay serves it at
+# runtime". It did not: nothing here defined the method, so the ledger
+# entry promised a fallback that raised NoMethodError. campfire's
+# `sessions.pluck(:ip_address).compact_blank` (a concern body, where
+# `self` is not yet typed) is the site that showed it.
+#
+# Enumerable, not Array: Rails defines it there, so a Hash keeps its
+# own pair-shaped override below and every other collection gets the
+# element form.
+module Enumerable
+  def compact_blank
+    reject(&:blank?)
+  end
+end
+
+class Hash
+  # Rails rejects on the VALUE and keeps the key — `{ host: nil,
+  # protocol: "https" }.compact_blank` is `{ protocol: "https" }`,
+  # which is how campfire's `SetCurrentRequest` builds default_url_options.
+  def compact_blank
+    reject { |_k, v| v.blank? }
+  end
+end
+
 # A string an app has explicitly marked html-safe (`raw(...)`,
 # `.html_safe`) — the overlay's ActiveSupport::SafeBuffer equivalent.
 # The only behavior it adds is `html_safe?` returning true, which the

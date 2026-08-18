@@ -453,6 +453,91 @@ pub(crate) fn fold_into_or_push(methods: &mut Vec<MethodDef>, model: &Model, hoo
     }
 }
 
+
+/// `belongs_to :creator, class_name: "User", default: -> { Current.user }`
+/// → a `before_validation` statement:
+///
+///   self.creator = Current.user if @creator_id.nil? || @creator_id == 0
+///
+/// Rails registers this as a `before_validation` at declaration time
+/// (`Builder::BelongsTo.add_default_callbacks`), whose body is
+/// `association(name).default(&block)` — "write the block's value when
+/// the reader is nil". Without it every `Message.create!` that did not
+/// name a creator failed the presence validation the SAME declaration
+/// installs, which reads as the app being wrong about its own model:
+/// campfire creates messages, rooms and boosts from `Current.user`
+/// alone in seven tests.
+///
+/// The guard is on the FOREIGN KEY, not the reader. `creator.nil?`
+/// would issue a SELECT on every validation (the reader is the
+/// row-loading one), and the two agree by construction — the synthesized
+/// writer stores 0 for nil, which is the same pair `inline_belongs_to_
+/// check` tests in validations.rs.
+///
+/// The ASSIGNMENT goes through the writer rather than the ivar, because
+/// the default lambda yields a RECORD (`Current.user`) and `creator=`
+/// is what turns one into an id — including the nil case, which it
+/// stores as 0 and the validation then rejects, exactly as Rails
+/// rejects a default that evaluated to nil.
+fn push_belongs_to_defaults(methods: &mut Vec<MethodDef>, model: &Model) {
+    for assoc in model.associations() {
+        let crate::dialect::Association::BelongsTo {
+            name, foreign_key, default: Some(default), ..
+        } = assoc
+        else {
+            continue;
+        };
+        let span = default.span;
+        let fk = Expr::new(span, ExprNode::Ivar { name: foreign_key.clone() });
+        let unset = Expr::new(
+            span,
+            ExprNode::BoolOp {
+                op: crate::expr::BoolOpKind::Or,
+                surface: crate::expr::BoolOpSurface::default(),
+                left: Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(fk.clone()),
+                        method: Symbol::from("nil?"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: false,
+                    },
+                ),
+                right: Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(fk),
+                        method: Symbol::from("=="),
+                        args: vec![Expr::new(span, ExprNode::Lit { value: Literal::Int { value: 0 } })],
+                        block: None,
+                        parenthesized: false,
+                    },
+                ),
+            },
+        );
+        let assign = Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(Expr::new(span, ExprNode::SelfRef)),
+                method: Symbol::from(format!("{}=", name.as_str())),
+                args: vec![default.clone()],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let stmt = Expr::new(
+            span,
+            ExprNode::If {
+                cond: unset,
+                then_branch: assign,
+                else_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+            },
+        );
+        fold_into_or_push(methods, model, "before_validation", stmt);
+    }
+}
+
 /// Lifecycle hook names that appear as block-form Unknown items. Names
 /// not in this set fall through to plain Unknown (they're future
 /// lowerer or emit work). Includes the `_commit` variants Rails sugar
@@ -488,6 +573,12 @@ pub(crate) const BLOCK_CALLBACK_HOOKS: &[&str] = &[
 /// no-op hooks. One body walk so declaration order is preserved
 /// across both forms when they target the same hook.
 pub(super) fn push_callback_methods(methods: &mut Vec<MethodDef>, model: &Model) {
+    // AHEAD of the declared callbacks: Rails registers the
+    // `belongs_to … default:` callback when the association is
+    // declared, and campfire declares its associations above its
+    // callbacks. A user callback that reads `creator` therefore sees
+    // the default already applied, which is the order that matters.
+    push_belongs_to_defaults(methods, model);
     for item in &model.body {
         match item {
             ModelBodyItem::Callback { callback, .. } => {

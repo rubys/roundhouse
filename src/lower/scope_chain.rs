@@ -862,6 +862,42 @@ impl AssocRegistry {
     }
 }
 
+/// A bare association read, rewritten to its explicit-`self` form so
+/// the owner-shape match below has one case instead of two.
+///
+/// Only fires with an enclosing model (`instance_self`) that actually
+/// declares a has_many by that name — a bare zero-arg call is otherwise
+/// just a method call, and turning one into an association read would
+/// be guessing.
+fn self_qualified_assoc_read(r: Expr, ctx: &Ctx) -> Expr {
+    {
+        let ExprNode::Send { recv: None, method, args, block, .. } = &*r.node else {
+            return r;
+        };
+        if !args.is_empty() || block.is_some() {
+            return r;
+        }
+        let Some(self_model) = ctx.instance_self.as_ref() else { return r };
+        if ctx.assocs.has_many_fk(self_model, method).is_none() {
+            return r;
+        }
+    }
+    let mut out = r;
+    let span = out.span;
+    let ExprNode::Send { method, args, block, parenthesized, .. } = &*out.node else {
+        unreachable!()
+    };
+    let replacement = ExprNode::Send {
+        recv: Some(syn(span, ExprNode::SelfRef)),
+        method: method.clone(),
+        args: args.clone(),
+        block: block.clone(),
+        parenthesized: *parenthesized,
+    };
+    *out.node = replacement;
+    out
+}
+
 /// Does this association-scope lambda select the same rows the bare
 /// foreign-key query would?
 ///
@@ -2172,6 +2208,17 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
             // read: registered scopes thread the seed, chain methods and
             // terminals ride it as receiver. Plain iteration (`each`/`map`)
             // keeps the Array and the reader's preload cache.
+            //
+            // A BARE association read (`bans.create!(…)` — implicit
+            // self) is spelled `Send { recv: None }` and reads as the
+            // same association `self.bans` does, so it is normalized to
+            // the SelfRef form before the match below rather than given
+            // a parallel arm. Model bodies write both spellings and
+            // concerns write the bare one almost exclusively;
+            // campfire's `User::Bannable#create_bans_from_sessions` is
+            // `bans.create!(ip_address: ip)` and kept the reader's
+            // folded Array until this normalization existed.
+            let mut r = self_qualified_assoc_read(r, ctx);
             if let ExprNode::Send { recv: Some(ir), method: aname, args: aargs, .. } = &*r.node {
                 // Association EXTENSION (`has_many :memberships do def
                 // grant_to … end end`): the model lowerer flattened it
@@ -2937,6 +2984,126 @@ mod tests {
             panic!("expected join SQL, got {:?}", join_args[0].node);
         };
         assert_eq!(value, "INNER JOIN stories story ON story.id = comments.story_id");
+    }
+
+    /// A BARE association read is the same read `self.<assoc>` is —
+    /// the spelling a model CONCERN uses almost exclusively.
+    /// `bans.create!(ip_address: ip)` in `User::Bannable` kept the
+    /// reader's folded Array until `self_qualified_assoc_read`
+    /// normalized it.
+    #[test]
+    fn bare_assoc_constructor_resolves_through_instance_self() {
+        let user = ingest(
+            "class User < ApplicationRecord\n  has_many :bans\nend\n",
+            "app/models/user.rb",
+        );
+        let ban = ingest(
+            "class Ban < ApplicationRecord\n  belongs_to :user\nend\n",
+            "app/models/ban.rb",
+        );
+        let models_v = vec![user, ban];
+        let scopes = build_scope_registry(&models_v);
+        let models = model_set(&models_v);
+        let assocs = build_assoc_registry(&models_v);
+        let bare_read = Expr::new(
+            span(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("bans"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let mut expr = Expr::new(
+            span(),
+            ExprNode::Send {
+                recv: Some(bare_read),
+                method: Symbol::from("create!"),
+                args: vec![Expr::new(
+                    span(),
+                    ExprNode::Hash {
+                        entries: vec![(
+                            Expr::new(
+                                span(),
+                                ExprNode::Lit { value: Literal::Sym { value: Symbol::from("ip_address") } },
+                            ),
+                            Expr::new(span(), ExprNode::Var { id: VarId(0), name: Symbol::from("ip") }),
+                        )],
+                        kwargs: true,
+                    },
+                )],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        let owner = ClassId(Symbol::from("User"));
+        rewrite_call_site(&mut expr, &regs(&scopes, &models, &assocs), None, Some(&owner));
+
+        // `Ban.create!(ip_address: ip, user_id: @id)`
+        let ExprNode::Send { recv: Some(r), method, args, .. } = &*expr.node else {
+            panic!("expected Send, got {:?}", expr.node);
+        };
+        assert_eq!(method.as_str(), "create!");
+        assert!(
+            matches!(&*r.node, ExprNode::Const { path } if path.last().unwrap().as_str() == "Ban"),
+            "receiver should be the target model, got {:?}",
+            r.node
+        );
+        let ExprNode::Hash { entries, .. } = &*args[0].node else {
+            panic!("expected a kwargs hash, got {:?}", args[0].node);
+        };
+        assert_eq!(entries.len(), 2, "caller attrs plus the association's foreign key");
+        assert!(
+            matches!(&*entries[1].0.node,
+                ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "user_id"),
+            "the appended key should be the foreign key, got {:?}",
+            entries[1].0.node
+        );
+    }
+
+    /// A bare zero-arg call that is NOT an association stays a plain
+    /// method call — the normalization must not guess.
+    #[test]
+    fn a_bare_non_assoc_read_is_left_alone() {
+        let user = ingest(
+            "class User < ApplicationRecord\n  has_many :bans\nend\n",
+            "app/models/user.rb",
+        );
+        let models_v = vec![user];
+        let scopes = build_scope_registry(&models_v);
+        let models = model_set(&models_v);
+        let assocs = build_assoc_registry(&models_v);
+        let bare_read = Expr::new(
+            span(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("whatever"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let mut expr = Expr::new(
+            span(),
+            ExprNode::Send {
+                recv: Some(bare_read),
+                method: Symbol::from("create!"),
+                args: vec![],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        let owner = ClassId(Symbol::from("User"));
+        rewrite_call_site(&mut expr, &regs(&scopes, &models, &assocs), None, Some(&owner));
+        let ExprNode::Send { recv: Some(r), .. } = &*expr.node else {
+            panic!("expected Send, got {:?}", expr.node);
+        };
+        assert!(
+            matches!(&*r.node, ExprNode::Send { recv: None, .. }),
+            "a non-association bare read keeps its shape, got {:?}",
+            r.node
+        );
     }
 
     #[test]

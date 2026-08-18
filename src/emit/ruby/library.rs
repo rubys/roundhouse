@@ -715,6 +715,24 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     for lc in lcs.iter_mut() {
         // Models gain their scope class methods (already chain-normalized).
         let is_model = app.models.iter().any(|m| m.name == lc.name);
+        // A model CONCERN is a model body too — the third family
+        // `lower::for_each_model_body` names. `module User::Bannable`'s
+        // instance methods run on a `User`, so a bare `bans.create!` in
+        // one is the same association read it would be in user.rb, and
+        // resolving it needs the same owner. Without this the concern's
+        // body reached `rewrite_call_site` with NO self model and the
+        // reader's folded Array kept the call: `undefined method
+        // 'create!' for an instance of Array`, which is what campfire's
+        // `User::Bannable#create_bans_from_sessions` raised.
+        //
+        // MODULES ONLY, and only when the namespace names a model: a
+        // plain nested class under a model namespace is its own
+        // receiver, not the model's.
+        let concern_owner: Option<crate::ident::ClassId> = (!is_model && lc.is_module)
+            .then(|| lc.name.0.as_str().rsplit_once("::").map(|(ns, _)| ns.to_string()))
+            .flatten()
+            .map(|ns| crate::ident::ClassId(crate::ident::Symbol::from(ns.as_str())))
+            .filter(|ns| app.models.iter().any(|m| &m.name == ns));
         if let Some(model) = app.models.iter().find(|m| m.name == lc.name) {
             crate::lower::model_to_library::push_scope_methods(
                 &mut lc.methods,
@@ -819,13 +837,15 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
             if m.name.as_str().starts_with("__scope_") {
                 continue;
             }
-            let class_self = (is_model && m.receiver == MethodReceiver::Class)
-                .then(|| lc.name.clone());
+            let class_self = (m.receiver == MethodReceiver::Class)
+                .then(|| if is_model { Some(lc.name.clone()) } else { concern_owner.clone() })
+                .flatten();
             // A model's own INSTANCE methods know their self model too —
             // `self.<has_many>.<scope>` there seeds a Relation from the
             // association's foreign key (recent_threads' comment chain).
-            let instance_self = (is_model && m.receiver == MethodReceiver::Instance)
-                .then(|| lc.name.clone());
+            let instance_self = (m.receiver == MethodReceiver::Instance)
+                .then(|| if is_model { Some(lc.name.clone()) } else { concern_owner.clone() })
+                .flatten();
             if crate::lower::scope_chain::mentions_scope(&m.body, &names)
                 || crate::lower::scope_chain::mentions_model_chain_start(&m.body, &models)
                 || crate::lower::scope_chain::mentions_assoc_constructor(&m.body, &assocs)

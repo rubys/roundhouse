@@ -1023,6 +1023,7 @@ fn parse_association(
     let mut scope: Option<crate::expr::Expr> = None;
     let mut polymorphic: Option<bool> = None;
     let mut as_interface: Option<String> = None;
+    let mut belongs_to_default: Option<crate::expr::Expr> = None;
 
     for arg in iter {
         // Positional lambda between name and kwargs — the association
@@ -1064,6 +1065,23 @@ fn parse_association(
                 "join_table" => join_table = string_value(&value),
                 "polymorphic" => polymorphic = bool_value(&value),
                 "as" => as_interface = symbol_value(&value),
+                // `default: -> { Current.user }` — the lambda BODY, not
+                // the lambda. Rails calls it with `instance_exec`, so
+                // the body is already written against the record; a
+                // param-taking form would need the record threaded and
+                // nothing in the corpus writes one.
+                "default" => {
+                    belongs_to_default = value
+                        .as_lambda_node()
+                        .filter(|l| {
+                            l.parameters()
+                                .and_then(|p| p.as_block_parameters_node().and_then(|b| b.parameters()))
+                                .map(|pn| pn.requireds().iter().next().is_none())
+                                .unwrap_or(true)
+                        })
+                        .and_then(|l| l.body())
+                        .and_then(|b| ingest_expr(&b, file).ok());
+                }
                 _ => {}
             }
         }
@@ -1153,6 +1171,7 @@ fn parse_association(
             // Filled by `resolve_polymorphic_targets` once every
             // model's inverse `as:` declarations are ingested.
             polymorphic_targets: Vec::new(),
+            default: belongs_to_default,
         }),
         "has_and_belongs_to_many" => Some(Association::HasAndBelongsToMany {
             name: name.clone(),

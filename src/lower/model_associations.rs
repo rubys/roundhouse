@@ -291,6 +291,7 @@ mod tests {
             optional: false,
             polymorphic: false,
             polymorphic_targets: vec![],
+            default: None,
         }
     }
 

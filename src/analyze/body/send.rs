@@ -18,6 +18,50 @@ use crate::ty::Ty;
 use super::{BodyTyper, Ctx, union_many, union_of, unknown};
 
 impl<'a> BodyTyper<'a> {
+    /// `pluck(:col)` / `pick(:col)` on a relation over a known model.
+    ///
+    /// The class-side registration in `analyze/mod.rs` types these
+    /// `Array<Untyped>` because "column type unknowable from the name
+    /// alone" — true of the METHOD, false of the CALL. Here the column
+    /// is a Symbol literal and the model is known, so the schema
+    /// answers: `sessions.pluck(:ip_address)` is `Array[Str]`, not an
+    /// open var.
+    ///
+    /// That distinction is what `compact_blank` needs. `lower::blank`
+    /// grounds ActiveSupport's blank family through the ELEMENT type
+    /// and files residue when it cannot; campfire's
+    /// `sessions.pluck(:ip_address).compact_blank.uniq` was the residue
+    /// entry, and an untyped element is exactly the receiver every
+    /// strict target cannot compile ([[feedback_types_are_performance_
+    /// avoid_bags]]).
+    ///
+    /// MULTI-COLUMN `pluck(:a, :b)` is not claimed: Rails answers an
+    /// Array of tuples, which is `Ty::Array<Ty::Array<...>>` only if
+    /// the columns share a type. The registered `Array<Untyped>`
+    /// stands for that form.
+    fn column_projection(
+        &self,
+        model: &ClassId,
+        method: &Symbol,
+        args: &[Expr],
+    ) -> Option<Ty> {
+        if !matches!(method.as_str(), "pluck" | "pick") {
+            return None;
+        }
+        let [arg] = args else { return None };
+        let ExprNode::Lit { value: crate::expr::Literal::Sym { value: col } } = &*arg.node else {
+            return None;
+        };
+        let cls = self.classes().get(model)?;
+        let col_ty = cls.instance_methods.get(col)?.clone();
+        Some(match method.as_str() {
+            // `pick` is `pluck(...).first` — the column value, or nil
+            // when the relation is empty.
+            "pick" => Ty::Union { variants: vec![col_ty, Ty::Nil] },
+            _ => Ty::Array { elem: Box::new(col_ty) },
+        })
+    }
+
     /// Build the Ctx used to analyze a block passed to `recv.method(...) { |p1, p2| ... }`.
     /// Seeds the block's local_bindings with parameter types derived from the receiver
     /// and method (e.g. `array.each { |x| }` binds `x` to the array's element type).
@@ -569,6 +613,9 @@ impl<'a> BodyTyper<'a> {
                 // (`Array[Self]`) — named scopes plus the query builders —
                 // resolves on the relation and re-returns the relation.
                 if let Ty::Class { id, .. } = elem {
+                    if let Some(t) = self.column_projection(id, method, args) {
+                        return t;
+                    }
                     if let Some(cls) = self.classes().get(id) {
                         match cls.class_methods.get(method) {
                             Some(scope_ret @ Ty::Array { .. }) => {
@@ -667,6 +714,9 @@ impl<'a> BodyTyper<'a> {
             //      element (`each`/`map`/`size`/…) — same types the
             //      Array representation gives.
             Some(Ty::Relation { of }) => {
+                if let Some(t) = self.column_projection(of, method, args) {
+                    return t;
+                }
                 if let Some(entry) = crate::catalog::lookup(
                     method.as_str(),
                     crate::catalog::ReceiverContext::Relation,

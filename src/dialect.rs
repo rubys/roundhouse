@@ -287,6 +287,16 @@ pub enum Association {
         polymorphic: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         polymorphic_targets: Vec<ClassId>,
+        /// `belongs_to :creator, default: -> { Current.user }` — the
+        /// lambda's BODY. Rails registers a `before_validation` at
+        /// declaration time that writes this value whenever the reader
+        /// is nil, which is how campfire's Room/Message/Boost get a
+        /// creator without every call site naming one. Recorded here
+        /// rather than expanded at ingest because the expansion needs
+        /// the foreign-key ivar, which the model lowerer owns
+        /// ([[feedback_self_describing_ir]]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<Expr>,
     },
     HasMany {
         name: Symbol,

@@ -263,6 +263,7 @@ fn parse_sequel_association(
             optional: fk_nullable(schema, owner_table, &format!("{name_str}_id")),
             polymorphic: false,
             polymorphic_targets: Vec::new(),
+            default: None,
         },
         "many_to_many" => Association::HasAndBelongsToMany {
             name: name.clone(),

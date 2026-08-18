@@ -153,6 +153,7 @@ pub fn synthesize_record_model(app: &mut App) {
             optional: false,
             polymorphic: true,
             polymorphic_targets: Vec::new(),
+            default: None,
         },
         leading_comments: Vec::new(),
         leading_blank_line: false,
