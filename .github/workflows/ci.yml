@@ -735,12 +735,16 @@ jobs:
       # `app/helpers/cable_helper.rb` calls without a `require
       # "pathname"` — resolves bare on Ruby 4.0 but not on the 3.4 this
       # job pins. (The BUNDLED table that writes that require lives in
-      # `spin_shape`, so the ruby target never gets it. Real gap; costs
-      # two files.) The floor is whatever a clean runner reaches, and it
-      # goes UP by the notice below, never by assertion.
+      # `spin_shape`, so the ruby target never gets it — fixed at the
+      # root in 49a12bf2, which gives the ruby family the table too.)
+      # With the gems installed above and that fix in, a clean runner
+      # independently reaches the same 72/8 the dev box did: the number
+      # was right, its REPRODUCIBILITY was not. The floor is whatever a
+      # runner reaches, and it goes UP by the notice below, never by
+      # assertion.
         env:
-          FLOOR_TESTS: 59
-          FLOOR_FILES: 5
+          FLOOR_TESTS: 72
+          FLOOR_FILES: 8
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)
