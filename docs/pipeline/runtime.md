@@ -365,6 +365,24 @@ effects. The corpus caller (campfire's `Room has_many :memberships do
 def grant_to … end end`) inserts Membership rows whose callbacks are
 inert.
 
+### `increment!` / `decrement!` are read-modify-write, not atomic
+
+Rails issues `UPDATE … SET col = col + 1`, so two concurrent callers
+both land. `lower::column_ops` rewrites the call site to `self.col =
+self.col + 1; touch`, which reads, adds and writes — the same answer
+with one writer, a LOST UPDATE with two.
+
+**Why the call site at all.** The alternative is a shared
+`increment!(name, by, touch:)`, whose column parameter means
+`self[name] = …` — an index write through a variable key, the shape
+that keeps `touch` no-arg (see below). At the call site the column is a
+literal, so the write is an ordinary typed attribute assignment.
+
+Only the `touch: true` spelling is claimed, which is what the corpus
+writes. The bare `increment!(:col)` keeps its NoMethodError: reproducing
+it would mean persisting the counter WITHOUT stamping `updated_at`, and
+a silently wrong timestamp is worse than a missing method.
+
 ### `remote_connections.disconnect` selects an empty set
 
 `ActionCable.server.remote_connections.where(current_user: user)

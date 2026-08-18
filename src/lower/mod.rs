@@ -84,7 +84,7 @@ pub mod relation_residue;
 pub mod send_dispatch;
 pub(crate) mod secure_password;
 pub mod attached;
-pub mod touch_column;
+pub mod column_ops;
 pub(crate) mod secure_token;
 pub mod rich_text;
 pub mod capture_inline;
@@ -261,7 +261,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // lowerer reads what it records, and that runs later, at emit.
     ("html_safe", &["tag_builder"]),
     ("transaction_ground", &[]),
-    ("touch_column", &[]),
+    ("column_ops", &[]),
     ("partial_qualify", &[]),
     ("capture_inline", &["tag_builder"]),
     ("and_return", &[]),
@@ -420,8 +420,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("html_safe");
     transaction_ground::apply_transaction_grounding(app);
     ran!("transaction_ground");
-    touch_column::apply_touch_column_lowering(app);
-    ran!("touch_column");
+    column_ops::apply_column_ops_lowering(app);
+    ran!("column_ops");
     partial_qualify::apply_partial_qualification(app);
     ran!("partial_qualify");
     capture_inline::apply_capture_inline(app);
