@@ -329,6 +329,49 @@ class TestBase
     assert_difference(expression, 0, message, &block)
   end
 
+  # ---- Turbo::Broadcastable::TestHelper ---------------------------
+  #
+  # `assert_turbo_stream_broadcasts [ users(:david), :rooms ], count: 1
+  # do … end` — run the block, count what it broadcast to that stream.
+  #
+  # Reads `Broadcasts::LOG`, which already carries action/stream/target/
+  # html for every broadcast the app makes; nothing is captured or
+  # stubbed. Rails' own helper reads the ActionCable test adapter's
+  # pubsub queue, which is the same fact one layer down.
+  #
+  # THE STREAM NAME IS THE CONTRACT. `lower::broadcasts::stream_name`
+  # spells the publish side and `turbo_stream_from` the subscribe side;
+  # a test that spelled it a third way would pass while the app talked
+  # to nobody. `dom_id` is what both use for a record, so this asks the
+  # same module function the views and the lowering ask.
+  def turbo_stream_name(streamables)
+    parts = streamables.is_a?(Array) ? streamables : [streamables]
+    parts.map { |part|
+      part.is_a?(Symbol) || part.is_a?(String) ? part.to_s : dom_id(part)
+    }.join(":")
+  end
+
+  # The broadcasts a block adds to the log, filtered to one stream.
+  # Length-delta rather than a clear: a test may assert twice in one
+  # method, and clearing would hide what an earlier block did.
+  def capture_turbo_stream_broadcasts(streamables, &block)
+    before = Broadcasts.log.length
+    block.call
+    stream = turbo_stream_name(streamables)
+    Broadcasts.log[before..].select { |entry| entry[:stream] == stream }
+  end
+
+  def assert_turbo_stream_broadcasts(streamables, count: 1, &block)
+    actual = capture_turbo_stream_broadcasts(streamables, &block).length
+    return if actual == count
+    raise("assert_turbo_stream_broadcasts failed: expected #{count} " \
+          "broadcast(s) to #{turbo_stream_name(streamables).inspect}, got #{actual}")
+  end
+
+  def assert_no_turbo_stream_broadcasts(streamables, &block)
+    assert_turbo_stream_broadcasts(streamables, count: 0, &block)
+  end
+
   # `assert_changes -> { record.reload.token } do … end`, optionally
   # pinned with `from:`/`to:`.
   #

@@ -24,6 +24,7 @@
 //! top by transforming each action's `body` Expr before it's hung off
 //! the synthesized `MethodDef`.
 
+mod broadcasts;
 mod process_action;
 pub mod params;
 pub mod rewrites;
@@ -429,6 +430,28 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             // chained dispatch picks up the concrete `Str`.
             method.body = self::params::rewrite_typed_bracket_to_field(
                 &method.body, &params_specs,
+            );
+            crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
+            // `broadcast_prepend_to user, :rooms, target: [@room, :list],
+            // partial: …` — the Rails broadcast API written from a
+            // CONTROLLER, a home `lower::broadcast_calls` (models and
+            // the concerns beside them) never visits. Emitted verbatim
+            // until now, i.e. an undefined method: those actions raise
+            // in a real server, not only under test.
+            //
+            // HERE, in the typed loop, and not in `lower_action_body`:
+            // the model-side rewriter resolves its record from a
+            // `belongs_to` on the owning model, and a controller has no
+            // owner — what it has is the analyzer's `Ty::Class` stamp on
+            // `user` / `@room`, which does not exist until
+            // `type_method_body` has run. Placed before the arel pass
+            // for the same reason its neighbours are: the pass re-types
+            // afterwards, so the synthesized `Views::…` payload and
+            // `<record>.id` reads carry their types downstream.
+            method.body = self::broadcasts::rewrite_broadcast_to(
+                &method.body,
+                views_module_name(controller).as_deref(),
+                &partials,
             );
             crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
             // Arel pass — when schema is provided, lift recognized
@@ -1468,21 +1491,35 @@ fn lower_action_body(
     route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
 ) -> Expr {
     let unwrapped = unwrap_respond_to_with_format_dispatch(body, format_breadth);
-    let with_render = if is_public {
-        let synth = synthesize_implicit_render(&unwrapped, action_name, variants);
-        let ivars = ivars_in_scope(controller, action_name, &synth, privs);
-        let module_name = views_module_name(controller);
+    // `is_public` gates the SYNTHESIS — a private helper's caller does
+    // the rendering, so nothing is appended to its body — and nothing
+    // else. The render REWRITE runs on both: a private helper that
+    // calls `render_to_string(partial: "x", locals: {…})` needs the
+    // same def-site binding a public action's `render partial:` gets,
+    // and campfire writes exactly that (`each_user_and_html_for`
+    // renders the room partial ONCE and broadcasts the string to each
+    // member). Gating the rewrite too left `render_to_string` standing
+    // in the emit as an undefined method — the doc on `action_to_method`
+    // has always said "implicit-render synthesis", which is the
+    // behaviour this restores.
+    let base = if is_public {
+        synthesize_implicit_render(&unwrapped, action_name, variants)
+    } else {
+        unwrapped
+    };
+    let module_name = views_module_name(controller);
+    let with_render = {
+        let ivars = ivars_in_scope(controller, action_name, &base, privs);
         rewrite_render_to_views(
-            &synth,
+            &base,
             module_name.as_deref(),
             &ivars,
             view_ivars,
             partials,
             action_name,
         )
-    } else {
-        unwrapped
     };
+
     // Render `location: @ivar` kwarg → `RouteHelpers.<x>_path(@x.id)`
     // — Rails' POST-201 idiom (`render :show, status: :created,
     // location: @article`) passes a record where the runtime's render

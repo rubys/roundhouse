@@ -33,6 +33,91 @@ use super::util::map_expr;
 // here are a follow-on lowerer's problem.
 // ---------------------------------------------------------------------------
 
+/// `partial: "users/sidebars/rooms/shared", locals: { room: room }` →
+/// `Views::Users::Sidebars::Rooms.shared(room)`, bound against the
+/// partial's DEF-SITE contract: the record by the partial's record-arg
+/// convention, closure ivars as `@<name>` (a same-named local wins),
+/// extras from `locals:` (nil-filled, trailing-trimmed).
+///
+/// Shared by the render rewrite and the broadcast rewrite — a broadcast
+/// that names a partial renders exactly what `render partial:` renders,
+/// and two copies of this binding would be two chances to disagree
+/// about a partial's argument order.
+///
+/// `module_name` is the controller's own view module, used only for a
+/// bare (slash-free) partial name. `None` declines rather than guessing.
+pub(super) fn partial_view_call(
+    partial: &str,
+    locals: &[(Symbol, Expr)],
+    module_name: Option<&str>,
+    partials: &super::PartialMap,
+    span: Span,
+) -> Option<Expr> {
+    partial_view_call_with_record(partial, locals, None, module_name, partials, span)
+}
+
+/// `partial_view_call` with the record supplied directly, for a caller
+/// whose record is not in `locals:`.
+///
+/// `membership.broadcast_prepend_to membership.user, :rooms, partial:
+/// "users/sidebars/rooms/direct"` names no locals at all — Rails binds
+/// the partial's own local to the RECEIVER. Without the override the
+/// record position fell to `nil` and the emit called
+/// `Views::…Rooms.direct(nil)`, which renders an empty row instead of
+/// failing. `locals:` still wins when it names the record.
+pub(super) fn partial_view_call_with_record(
+    partial: &str,
+    locals: &[(Symbol, Expr)],
+    record_override: Option<&Expr>,
+    module_name: Option<&str>,
+    partials: &super::PartialMap,
+    span: Span,
+) -> Option<Expr> {
+    let (module_dir, base_name) = match partial.rsplit_once('/') {
+        // `camelize_PATH`, matching how `partial_call_contracts` spells
+        // this key. Plain `camelize` leaves the slashes in
+        // (`users/sidebars/rooms` → `Users/sidebars/rooms`) so the
+        // contract lookup below missed every NESTED partial and the
+        // render stood unrewritten. A single-segment dir spells the same
+        // either way, which is why a flat view tree never showed it.
+        Some((d, n)) => (
+            crate::naming::camelize_path(&crate::naming::snake_case(d)),
+            n.to_string(),
+        ),
+        None => (module_name?.to_string(), partial.to_string()),
+    };
+    let stem = base_name.trim_start_matches('_').to_string();
+    let contract = partials.get(&(module_dir.clone(), stem.clone()))?;
+    let lookup = |name: &str| -> Option<Expr> {
+        locals
+            .iter()
+            .find(|(k, _)| k.as_str() == name)
+            .map(|(_, v)| v.clone())
+    };
+    let mut view_args: Vec<Expr> = vec![lookup(&contract.record)
+        .or_else(|| record_override.cloned())
+        .unwrap_or_else(|| nil_expr(span))];
+    for n in &contract.closure {
+        view_args.push(lookup(n).unwrap_or_else(|| ivar(n.as_str(), span)));
+    }
+    let bound: Vec<Option<Expr>> = contract.extras.iter().map(|n| lookup(n)).collect();
+    if let Some(last) = bound.iter().rposition(|b| b.is_some()) {
+        for b in bound.into_iter().take(last + 1) {
+            view_args.push(b.unwrap_or_else(|| nil_expr(span)));
+        }
+    }
+    Some(Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(const_path(&["Views", &module_dir], span)),
+            method: crate::lower::view::view_method_name(&stem),
+            args: view_args,
+            block: None,
+            parenthesized: true,
+        },
+    ))
+}
+
 pub(super) fn rewrite_render_to_views(
     expr: &Expr,
     module_name: Option<&str>,
@@ -104,43 +189,8 @@ pub(super) fn rewrite_render_to_views(
                     }
                 }
                 if let Some(pname) = partial_name {
-                    let module = module_name?;
-                    let (module_dir, base_name) = match pname.rsplit_once('/') {
-                        Some((d, n)) => {
-                            (crate::naming::camelize(&crate::naming::snake_case(d)), n.to_string())
-                        }
-                        None => (module.to_string(), pname.clone()),
-                    };
-                    let stem = base_name.trim_start_matches('_').to_string();
-                    let contract = partials.get(&(module_dir.clone(), stem.clone()))?;
-                    let lookup = |name: &str| -> Option<Expr> {
-                        locals_entries
-                            .iter()
-                            .find(|(k, _)| k.as_str() == name)
-                            .map(|(_, v)| v.clone())
-                    };
-                    let mut view_args: Vec<Expr> = Vec::new();
-                    view_args.push(lookup(&contract.record).unwrap_or_else(|| nil_expr(e.span)));
-                    for n in &contract.closure {
-                        view_args.push(lookup(n).unwrap_or_else(|| ivar(n.as_str(), e.span)));
-                    }
-                    let bound: Vec<Option<Expr>> =
-                        contract.extras.iter().map(|n| lookup(n)).collect();
-                    if let Some(last) = bound.iter().rposition(|b| b.is_some()) {
-                        for b in bound.into_iter().take(last + 1) {
-                            view_args.push(b.unwrap_or_else(|| nil_expr(e.span)));
-                        }
-                    }
-                    let view_call = Expr::new(
-                        e.span,
-                        ExprNode::Send {
-                            recv: Some(const_path(&["Views", &module_dir], e.span)),
-                            method: crate::lower::view::view_method_name(&stem),
-                            args: view_args,
-                            block: None,
-                            parenthesized: true,
-                        },
-                    );
+                    let view_call =
+                        partial_view_call(&pname, &locals_entries, module_name, partials, e.span)?;
                     if to_string {
                         return Some(view_call);
                     }
