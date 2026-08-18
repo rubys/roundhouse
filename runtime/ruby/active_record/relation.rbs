@@ -29,6 +29,7 @@ module ActiveRecord
     def group: (*untyped parts) -> Relation
     def having: (untyped condition, *untyped args) -> Relation
     def joins: (untyped spec) -> Relation
+    def join_fragment: (untyped spec) -> String
     def left_outer_joins: (untyped spec) -> Relation
     def left_joins: (untyped spec) -> Relation
     # Two methods sharing a name: field args PROJECT columns and keep

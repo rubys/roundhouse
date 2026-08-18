@@ -574,10 +574,19 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // untyped parameter, so the send off it is untyped and the local
     // rides on it. Nothing that was typed became untyped.
     //
+    // 2026-08-18 707 -> 712 — `Relation#join_fragment`, the guard that
+    // makes `joins(:assoc)` RAISE instead of appending the bare symbol
+    // as SQL (`FROM rooms users`, which SQLite reads as an alias and
+    // answers the wrong rows). FIVE nodes, every one rooted in the
+    // `untyped spec` parameter `joins` has always declared: the param,
+    // the `is_a?` send off it, the guarded return, and the two nodes of
+    // the raise's interpolation. Above the 1-3 budget below, and worth
+    // it: the alternative is a wrong answer nothing reports.
+    //
     // This ceiling moved on EVERY runtime/ruby method this session, and
     // `cargo test` is the only gate that reads it — budget ~1-3 nodes
     // per added method before touching the number here.
-    const CEILING: usize = 707;
+    const CEILING: usize = 712;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions exceeds ceiling of {CEILING}.\n\

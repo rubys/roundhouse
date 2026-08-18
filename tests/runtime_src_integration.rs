@@ -922,7 +922,16 @@ fn every_runtime_method_body_concretely_typed() {
     // already contribute across this file; the two callers
     // (`delete_all`, `update_all`) each lost a line and gained none.
     // +2 sites; ceiling raised 277 -> 279.
-    const CEILING: usize = 279;
+    // 2026-08-18 `Relation#join_fragment` — the guard that makes
+    // `joins(:assoc)` RAISE rather than append the bare symbol as SQL,
+    // where SQLite reads it as a table alias and answers the wrong rows
+    // instead of failing. Two sites, both on `spec`, whose `untyped` is
+    // declared by `joins` itself: the guarded `return spec` and the
+    // interpolation in the raise. The check is a type test on a value
+    // whose type the caller decides, which is what this file's other
+    // `untyped`-parameter sites all are.
+    // +2 sites; ceiling raised 279 -> 281.
+    const CEILING: usize = 281;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

@@ -187,16 +187,42 @@ module ActiveRecord
       self
     end
 
+    # `joins("INNER JOIN memberships ON …")` — a raw SQL fragment, which
+    # is what reaches this runtime. The ASSOCIATION form
+    # (`joins(:users)`) is resolved at transpile time by
+    # `lower::scope_chain`, which owns the only table that knows a
+    # join's ON clause; a Symbol arriving here means that lowering
+    # DECLINED, and appending the bare name produces `FROM rooms users`
+    # — which SQLite reads as an alias, so the query runs and answers
+    # the wrong rows.
+    #
+    # `AssocRegistry`'s own doc says an unresolvable shape is "left
+    # untouched (visible at runtime rather than silently mis-joined)".
+    # It was not visible: this method made it silent. Raising is what
+    # that sentence always meant, and it names the association so the
+    # ledger line and the failure agree.
+    #
+    # Found via `Rooms::Direct.all.joins(:users)` — an STI subclass is
+    # not in the registry, so nothing could resolve it.
     def joins(spec)
       @records = nil
-      @joins << spec.to_s
+      @joins << join_fragment(spec)
       self
     end
 
     def left_outer_joins(spec)
       @records = nil
-      @joins << spec.to_s
+      @joins << join_fragment(spec)
       self
+    end
+
+    def join_fragment(spec)
+      return spec if spec.is_a?(String)
+      raise("joins(#{spec}): an association join is resolved at transpile " \
+            "time and this one was not — the receiver's class has no entry " \
+            "in the association registry (an STI subclass, a habtm, or an " \
+            "unresolvable `through`). Appending the name raw would answer " \
+            "the wrong rows rather than fail.")
     end
 
     # `left_joins` — Rails alias for `left_outer_joins`.
