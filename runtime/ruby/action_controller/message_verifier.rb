@@ -61,12 +61,41 @@ module ActionController
 
     # The signed string for `value` under `purpose`. `sha1` selects the
     # cookie digest; signed ids pass false for the SHA-256 one.
+    #
+    # A cookie's message is a String and never expires, so this is the
+    # String/no-exp face of `envelope` below.
     def self.generate(secret, salt, value, purpose, sha1)
-      message = Base64.strict_encode64(json_string(value))
-      envelope = "{\"_rails\":{\"message\":\"" + message +
-                 "\",\"exp\":null,\"pur\":\"" + purpose + "\"}}"
-      payload = Base64.strict_encode64(envelope)
+      envelope(secret, salt, json_string(value), purpose, "null", sha1)
+    end
+
+    # The general form, for callers that serialize the message
+    # themselves. `message_json` is the JSON of the payload — a signed
+    # id's is a bare Integer (`123`), NOT the quoted `"123"` a String
+    # message produces, and getting that wrong is invisible until a
+    # token minted here meets a real Rails. `exp` is the JSON for the
+    # envelope's `exp` slot: "null", or a quoted `iso8601_ms` instant.
+    def self.envelope(secret, salt, message_json, purpose, exp, sha1)
+      message = Base64.strict_encode64(message_json)
+      env = "{\"_rails\":{\"message\":\"" + message +
+            "\",\"exp\":" + exp + ",\"pur\":\"" + purpose + "\"}}"
+      payload = Base64.strict_encode64(env)
       payload + "--" + digest_for(secret, salt, payload, sha1)
+    end
+
+    # ISO8601 in UTC with exactly three fractional digits — the shape
+    # `ActiveSupport::Messages::Metadata` writes into `exp`
+    # (`expires_at.utc.iso8601(3)`). That form is fixed-width and
+    # zero-padded in a single zone, so LEXICOGRAPHIC order on it is
+    # chronological order: expiry is a string compare and this runtime
+    # needs no date parser to check one.
+    def self.iso8601_ms(t)
+      u = t.utc
+      f = u.to_f
+      ms = ((f - f.to_i) * 1000).to_i
+      format(
+        "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+        u.year, u.mon, u.mday, u.hour, u.min, u.sec, ms
+      )
     end
 
     # The value carried by `signed`, or "" when the signature does not
@@ -75,16 +104,31 @@ module ActionController
     # what Rails does too (it returns nil and the app treats it as signed
     # out).
     def self.verified(secret, salt, signed, purpose, sha1)
+      json = verified_json(secret, salt, signed, purpose, sha1)
+      return "" if json == ""
+      json_value(json)
+    end
+
+    # The message JSON carried by `signed`, or "" for every rejection:
+    # bad shape, bad signature, wrong purpose, or an `exp` already
+    # past. Callers that signed a non-String message read this and
+    # deserialize themselves.
+    def self.verified_json(secret, salt, signed, purpose, sha1)
       sep = signed.index("--")
       return "" if sep.nil?
       payload = signed[0, sep]
       supplied = signed[sep + 2, signed.length - sep - 2]
       return "" if supplied != digest_for(secret, salt, payload, sha1)
-      envelope = Base64.strict_decode64(payload)
-      return "" if extract(envelope, "\"pur\":\"") != purpose
-      message = extract(envelope, "\"message\":\"")
+      env = Base64.strict_decode64(payload)
+      return "" if extract(env, "\"pur\":\"") != purpose
+      # `"exp":null` does not match the quoted prefix, so an
+      # unexpiring message reads "" here and skips the compare — which
+      # is every signed cookie this file writes.
+      exp = extract(env, "\"exp\":\"")
+      return "" if exp != "" && exp <= iso8601_ms(Time.now)
+      message = extract(env, "\"message\":\"")
       return "" if message == ""
-      json_value(Base64.strict_decode64(message))
+      Base64.strict_decode64(message)
     end
 
     def self.digest_for(secret, salt, payload, sha1)

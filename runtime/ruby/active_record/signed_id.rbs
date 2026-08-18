@@ -1,0 +1,11 @@
+# Typing contract for signed_id.rb beside this file.
+#
+# `expires_in` is seconds (0 = never) and `verified_id` answers 0 for
+# every rejection, so neither side of this pair carries a nilable —
+# see the divergence note in the .rb.
+module ActiveRecord
+  module SignedId
+    def self.generate: (Integer id, String purpose, Integer expires_in) -> String
+    def self.verified_id: (String token, String purpose) -> Integer
+  end
+end

@@ -896,7 +896,16 @@ fn every_runtime_method_body_concretely_typed() {
     // def revoke_from(users) destroy_by user: users end end` is the
     // caller that wanted them.
     // +2 sites; ceiling raised 273 -> 275.
-    const CEILING: usize = 275;
+    // 2026-08-18 `active_record/signed_id.rb` — ONE site for the whole
+    // file: `Time.now + expires_in`. `Time#+` is deliberately
+    // `Ty::Untyped` in `time_method` (the receiver-only dispatch cannot
+    // tell a Duration arg, which gives a Time, from a Time arg, which
+    // gives a Float), and this is the ordinary consumer of that. The
+    // result feeds `iso8601_ms`, whose `::Time` parameter absorbs it.
+    // Its neighbour `action_controller/message_verifier.rb` gained
+    // three methods in the same change and contributes nothing here.
+    // +1 site; ceiling raised 275 -> 276.
+    const CEILING: usize = 276;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

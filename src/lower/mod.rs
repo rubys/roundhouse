@@ -85,6 +85,7 @@ pub mod send_dispatch;
 pub(crate) mod secure_password;
 pub mod attached;
 pub mod column_ops;
+pub mod signed_id;
 pub(crate) mod secure_token;
 pub mod rich_text;
 pub mod capture_inline;
@@ -262,6 +263,11 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("html_safe", &["tag_builder"]),
     ("transaction_ground", &[]),
     ("column_ops", &[]),
+    // `signed_id(purpose: :avatar)` → the runtime SignedId call, with
+    // the model name folded into the purpose. BEFORE `duration`: the
+    // `expires_in:` argument this wraps in `.to_i` is an
+    // `ActiveSupport::Duration`, and `duration` is what grounds one.
+    ("signed_id", &[]),
     ("partial_qualify", &[]),
     ("capture_inline", &["tag_builder"]),
     ("and_return", &[]),
@@ -422,6 +428,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("transaction_ground");
     column_ops::apply_column_ops_lowering(app);
     ran!("column_ops");
+    signed_id::apply_signed_id_lowering(app);
+    ran!("signed_id");
     partial_qualify::apply_partial_qualification(app);
     ran!("partial_qualify");
     capture_inline::apply_capture_inline(app);
@@ -528,18 +536,32 @@ pub(crate) fn for_each_model_body(
     app: &mut crate::app::App,
     f: &mut impl FnMut(&mut crate::expr::Expr),
 ) {
+    for_each_model_body_named(app, &mut |_model, e| f(e));
+}
+
+/// [`for_each_model_body`], with the OWNING MODEL's name handed to the
+/// callback. A concern's body reads as `User::Avatar`'s and an
+/// association extension's as the association's, but Rails runs all
+/// three on a `User`; a rewrite that needs the model name (Rails'
+/// `combine_signed_id_purposes` prefixes it) must be told which one,
+/// because the body itself does not say.
+pub(crate) fn for_each_model_body_named(
+    app: &mut crate::app::App,
+    f: &mut impl FnMut(&str, &mut crate::expr::Expr),
+) {
     let model_names: std::collections::HashSet<String> =
         app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
     for model in &mut app.models {
+        let name = model.name.0.as_str().to_string();
         for item in &mut model.body {
             match item {
-                crate::dialect::ModelBodyItem::Method { method, .. } => f(&mut method.body),
+                crate::dialect::ModelBodyItem::Method { method, .. } => f(&name, &mut method.body),
                 crate::dialect::ModelBodyItem::Association {
                     assoc: crate::dialect::Association::HasMany { extension, .. },
                     ..
                 } => {
                     for m in extension.iter_mut() {
-                        f(&mut m.body);
+                        f(&name, &mut m.body);
                     }
                 }
                 _ => {}
@@ -554,8 +576,9 @@ pub(crate) fn for_each_model_body(
         if !model_names.contains(namespace) {
             continue;
         }
+        let name = namespace.to_string();
         for m in &mut lc.methods {
-            f(&mut m.body);
+            f(&name, &mut m.body);
         }
     }
 }

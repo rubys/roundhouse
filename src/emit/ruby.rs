@@ -21,7 +21,7 @@ use crate::lower::controller::body::FormatBreadth;
 const SPINEL_TEST_HELPER: &str =
     include_str!("../../runtime/spinel/test/test_helper.rb");
 
-mod expr;
+pub(crate) mod expr;
 mod library;
 mod rbs;
 pub mod shake;

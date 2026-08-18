@@ -383,6 +383,42 @@ writes. The bare `increment!(:col)` keeps its NoMethodError: reproducing
 it would mean persisting the counter WITHOUT stamping `updated_at`, and
 a silently wrong timestamp is worse than a missing method.
 
+### A bad signed id raises `RecordNotFound`, not `InvalidSignature`
+
+`record.signed_id(purpose:)` and `Model.find_signed(id, purpose:)` are
+rewritten at the call site by `lower::signed_id` — Rails'
+`combine_signed_id_purposes` reads `self.class.name`, and this runtime
+is deliberately reflection-free, so the model name is folded into the
+purpose string at compile time (`signed_id(purpose: :avatar)` in
+`User::Avatar` becomes the literal `"user/avatar"`).
+
+The WIRE FORMAT is not a divergence: `ActiveRecord::SignedId` signs
+through the same envelope the cookie jar uses, and
+`runtime/ruby/test/action_controller/message_verifier_test.rb` pins the
+emitted bytes against tokens minted by a real ActiveSupport 8.1.3. A
+token this runtime writes is one Rails reads, and vice versa — which is
+what a migration needs, because campfire puts a signed id in the URL of
+every rendered avatar.
+
+What diverges is the FAILURE. `ActiveRecord::SignedId.verified_id`
+answers `0` for a token that does not verify — tampered, wrong purpose,
+or expired — the same non-nil-sentinel posture as the verifier's `""`.
+The lowered `find_signed!` is therefore `Model.find(0)`, which raises
+`ActiveRecord::RecordNotFound` where Rails raises
+`ActiveSupport::MessageVerifier::InvalidSignature`.
+
+**What it costs.** Both are a 404 through the dispatcher, so a plain
+app sees the same response. A controller that rescues the signature
+error BY NAME does not catch this one — campfire's
+`Users::AvatarsController` has exactly that
+`rescue_from(ActiveSupport::MessageVerifier::InvalidSignature)`, and it
+would go unfired.
+
+Rails' `expires_at:` (an absolute instant) is not claimed; only
+`expires_in:`. A call passing it is left alone rather than rewritten,
+so it fails by name instead of silently minting a token that never
+expires.
+
 ### `remote_connections.disconnect` selects an empty set
 
 `ActionCable.server.remote_connections.where(current_user: user)
