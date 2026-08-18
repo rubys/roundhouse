@@ -196,8 +196,25 @@ unless opts[:skip_build] && File.executable?(BIN)
   File.write(db_rb, db_rb_orig) if db_rb_orig
   build_s = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0).round(1)
   unless ok
-    tail = (File.readlines(log).last(15).join rescue "")
-    die("build", "spin build failed after #{build_s}s", tail)
+    lines = (File.readlines(log) rescue [])
+    # NOT a raw tail. spinel emits the whole of a Ruby line as ONE C line,
+    # so cc echoes the offending source at thousands of columns and marks
+    # it with a caret line just as long: a 15-line tail of this log is
+    # one error wide, whatever the build actually said. That is not a
+    # cosmetic loss — a published run reported a single `sp_box_str`
+    # error while the build had eight, and the lane read as one bug from
+    # green when it was four. Keep the error LINES (trimmed), and put the
+    # COUNT in the headline, which is the part the page quotes.
+    errs = lines.grep(/(?:error|fatal error):/)
+    ctx =
+      if errs.empty?
+        lines.last(15).map { |l| l[0, 300].rstrip + "\n" }.join
+      else
+        errs.first(12).map { |l| l.strip[0, 200] + "\n" }.join +
+          (errs.size > 12 ? "… and #{errs.size - 12} more\n" : "")
+      end
+    count = errs.empty? ? "" : " (#{errs.size} C error#{errs.size == 1 ? "" : "s"})"
+    die("build", "spin build failed after #{build_s}s#{count}", ctx)
   end
   BUILD_SECONDS = build_s
   # TWO PRODUCERS WRITE "warning:" INTO THIS LOG AND THEY MEAN DIFFERENT
