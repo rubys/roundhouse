@@ -489,6 +489,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             &app.fixtures,
             &app.models,
             test_extras,
+            &crate::lower::routes::helper_id_segments(app),
         );
         for lowered in &test_lowered {
             let lc = &lowered.test_class;

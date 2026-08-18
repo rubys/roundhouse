@@ -124,6 +124,43 @@ pub fn standard_resource_actions() -> &'static [(&'static str, HttpMethod, &'sta
 /// `only`/`except` filters); Root becomes `GET /`; Explicit
 /// passes through with its `as:` name preserved; Scope entries
 /// compose their path/module/helper facets onto everything nested.
+/// Per generated route helper, which of its positional segments are
+/// ID-SHAPED — `id` or `<x>_id`, the same rule `routes_to_library`'s
+/// `param_ty` uses to decide a helper parameter is an Integer.
+///
+/// `rewrite_route_helpers` projects a record argument to `.id`
+/// shape-directed: an Ivar reaching a `<x>_path` call becomes
+/// `@x.id`. That is right for `article_path(@article)` and WRONG for
+/// campfire's `join_url(@join_code)`, where `@join_code` holds a
+/// string column and the helper's only segment is `:join_code` — the
+/// emit called `.id` on a String and every test on that page died.
+///
+/// The route's own segment is the signal that works. A type stamp is
+/// not: the ivar is assigned in `setup` and read in the test method,
+/// and nothing types an ivar across that boundary (measured — a
+/// `is_scalar_ty` veto over `arg.ty` never fired).
+///
+/// Keyed by the `_path` spelling, which is what `rewrite_route_helpers`
+/// dispatches on after folding `_url` onto its twin. Unnamed routes
+/// generate no helper and are skipped. When two routes share an
+/// `as_name` (a resources index and create), the first wins — they
+/// describe the same path template.
+pub fn helper_id_segments(app: &App) -> std::collections::HashMap<String, Vec<bool>> {
+    let mut out: std::collections::HashMap<String, Vec<bool>> = std::collections::HashMap::new();
+    for r in flatten_routes(app) {
+        if !r.named || r.as_name.is_empty() {
+            continue;
+        }
+        let shape: Vec<bool> = r
+            .path_params
+            .iter()
+            .map(|p| p == "id" || p.ends_with("_id"))
+            .collect();
+        out.entry(format!("{}_path", r.as_name)).or_insert(shape);
+    }
+    out
+}
+
 pub fn flatten_routes(app: &App) -> Vec<FlatRoute> {
     let mut out = Vec::new();
     let ctx = Ctx::default();

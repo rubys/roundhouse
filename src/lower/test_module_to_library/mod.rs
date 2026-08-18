@@ -52,8 +52,9 @@ pub fn lower_test_modules_to_library_classes(
     fixtures: &[Fixture],
     models: &[Model],
     extras: Vec<(ClassId, ClassInfo)>,
+    route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
 ) -> Vec<LibraryClass> {
-    lower_test_modules_with_inner(test_modules, fixtures, models, extras)
+    lower_test_modules_with_inner(test_modules, fixtures, models, extras, route_id_segments)
         .into_iter()
         .map(|m| m.test_class)
         .collect()
@@ -68,6 +69,10 @@ pub fn lower_test_modules_with_inner(
     fixtures: &[Fixture],
     models: &[Model],
     extras: Vec<(ClassId, ClassInfo)>,
+    // Which route-helper segments are id-shaped, so a record argument
+    // projects to `.id` only where an id is what the segment holds —
+    // `crate::lower::routes::helper_id_segments`.
+    route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
 ) -> Vec<LoweredTestModule> {
     let mut classes: HashMap<ClassId, ClassInfo> = HashMap::new();
     for (id, info) in extras {
@@ -155,7 +160,7 @@ pub fn lower_test_modules_with_inner(
     let mut out: Vec<LoweredTestModule> = Vec::new();
     let mut all_lcs: Vec<LibraryClass> = test_modules
         .iter()
-        .map(build_library_class)
+        .map(|tm| build_library_class(tm, route_id_segments))
         .map(|mut lc| {
             for m in &mut lc.methods {
                 m.body = crate::lower::rewrite_fixture_calls(&m.body, &fixture_names);
@@ -509,11 +514,17 @@ fn collect_self_setter_ivars(body: &Expr, out: &mut HashMap<Symbol, Ty>) {
 
 /// Single-module entry point — kept for tests/probes. For whole-app
 /// emit, prefer the bulk entry which threads a shared registry.
-pub fn lower_test_module_to_library_class(tm: &TestModule) -> LibraryClass {
-    build_library_class(tm)
+pub fn lower_test_module_to_library_class(
+    tm: &TestModule,
+    route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
+) -> LibraryClass {
+    build_library_class(tm, route_id_segments)
 }
 
-fn build_library_class(tm: &TestModule) -> LibraryClass {
+fn build_library_class(
+    tm: &TestModule,
+    route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
+) -> LibraryClass {
     // Inline setup body at the start of every test method. The
     // body-typer's Seq walk picks up `@article = articles(:one)` and
     // propagates the type to downstream reads. Self-describing IR —
@@ -531,7 +542,9 @@ fn build_library_class(tm: &TestModule) -> LibraryClass {
     let mut methods: Vec<MethodDef> = tm
         .tests
         .iter()
-        .map(|t| test_to_method_def(&tm.name, t, tm.setup.as_ref(), &helper_shadows))
+        .map(|t| {
+            test_to_method_def(&tm.name, t, tm.setup.as_ref(), &helper_shadows, route_id_segments)
+        })
         .collect();
     // Helpers (non-test, non-setup `def` items in the test class
     // body — e.g. `setup_adapter_with_stub_row`) lower as ordinary
@@ -549,6 +562,7 @@ fn build_library_class(tm: &TestModule) -> LibraryClass {
         m.body = crate::lower::controller_to_library::rewrites::rewrite_route_helpers(
             &m.body,
             &helper_shadows,
+            route_id_segments,
         );
         if m.signature.is_none() {
             let param_pairs: Vec<(Symbol, Ty)> = m
@@ -584,6 +598,7 @@ fn test_to_method_def(
     t: &Test,
     setup: Option<&Expr>,
     shadows: &std::collections::HashSet<Symbol>,
+    route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
 ) -> MethodDef {
     let snake = sanitize_test_name(&t.name);
     let method_name = Symbol::from(format!("test_{snake}"));
@@ -600,6 +615,7 @@ fn test_to_method_def(
     let body = crate::lower::controller_to_library::rewrites::rewrite_route_helpers(
         &raw_body,
         shadows,
+        route_id_segments,
     );
     MethodDef {
         name: method_name,

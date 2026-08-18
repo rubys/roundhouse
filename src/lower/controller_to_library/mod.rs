@@ -228,6 +228,11 @@ pub struct LowerControllerOptions<'a> {
         Option<&'a std::collections::HashMap<ClassId, std::collections::HashSet<Symbol>>>,
     /// Whether to synthesize the full format-dispatch breadth.
     pub format_breadth: FormatBreadth,
+    /// Per route helper, which positional segments are id-shaped —
+    /// `crate::lower::routes::helper_id_segments`. Empty (the default)
+    /// means the record→`.id` projection stays purely shape-directed,
+    /// which is what it was before the table existed.
+    pub route_id_segments: Option<&'a std::collections::HashMap<String, Vec<bool>>>,
 }
 
 pub fn lower_controllers_with_arel_views_assocs_and_routes(
@@ -242,7 +247,12 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         assocs,
         routed_by_controller,
         format_breadth,
+        route_id_segments,
     } = opts;
+    // `None` (every wrapper's default) means the projection stays
+    // purely shape-directed — what it was before this table existed.
+    let empty_segments = std::collections::HashMap::new();
+    let route_id_segments = route_id_segments.unwrap_or(&empty_segments);
     // Scan source-shape action bodies for `permit(...)` declarations.
     // Each unique resource yields one `<Resource>Params` synthesized
     // class plus the (resource, fields, class_id) record we need to
@@ -268,7 +278,7 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         // `None` → legacy: every public method is an action.
         let routed = routed_by_controller
             .map(|m| m.get(&controller.name).cloned().unwrap_or_default());
-        let methods = build_methods(controller, controllers, &params_specs, &json_actions, &turbo_stream_actions, routed.as_ref(), &view_ivars, &partials, format_breadth);
+        let methods = build_methods(controller, controllers, &params_specs, &json_actions, &turbo_stream_actions, routed.as_ref(), &view_ivars, &partials, format_breadth, route_id_segments);
         all_methods.push((methods, controller));
     }
 
@@ -492,6 +502,7 @@ pub fn lower_controller_to_library_class(controller: &Controller) -> LibraryClas
         &view_ivars,
         &partials,
         FormatBreadth::NARROW,
+        &std::collections::HashMap::new(),
     );
     LibraryClass {
         name: controller.name.clone(),
@@ -544,6 +555,7 @@ fn build_methods(
     // routed-aware too) cannot resolve. Everyone else keeps the narrow
     // html(+simple-json) flatten, emit unchanged.
     format_breadth: FormatBreadth,
+    route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
 ) -> Vec<MethodDef> {
     let mut methods: Vec<MethodDef> = Vec::new();
 
@@ -672,14 +684,14 @@ fn build_methods(
         methods.push(action_to_method(
             a, controller, &privs, &params_privs, /*is_public=*/ true, params_specs, json_actions,
             turbo_stream_actions, view_ivars,
-            partials, format_breadth, &shadows,
+            partials, format_breadth, &shadows, route_id_segments,
         ));
     }
     for a in &privs_kept {
         methods.push(action_to_method(
             a, controller, &privs, &params_privs, /*is_public=*/ false, params_specs, json_actions,
             turbo_stream_actions, view_ivars,
-            partials, format_breadth, &shadows,
+            partials, format_breadth, &shadows, route_id_segments,
         ));
     }
     // Public methods no route reaches are helpers/filters, not actions:
@@ -690,7 +702,7 @@ fn build_methods(
         methods.push(action_to_method(
             a, controller, &privs, &params_privs, /*is_public=*/ false, params_specs, json_actions,
             turbo_stream_actions, view_ivars,
-            partials, format_breadth, &shadows,
+            partials, format_breadth, &shadows, route_id_segments,
         ));
     }
 
@@ -1303,6 +1315,7 @@ fn action_to_method(
     partials: &PartialMap,
     format_breadth: FormatBreadth,
     shadows: &std::collections::HashSet<Symbol>,
+    route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
 ) -> MethodDef {
     let method_name = method_name_for_action(a.name.as_str());
     // Required positionals first, then optional positionals with their
@@ -1339,6 +1352,7 @@ fn action_to_method(
         partials,
         format_breadth,
         shadows,
+        route_id_segments,
     );
     // Action params type to Untyped for now — Rails action signatures
     // are conventionally `def show(id)` with all-string CGI inputs;
@@ -1451,6 +1465,7 @@ fn lower_action_body(
     partials: &PartialMap,
     format_breadth: FormatBreadth,
     shadows: &std::collections::HashSet<Symbol>,
+    route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
 ) -> Expr {
     let unwrapped = unwrap_respond_to_with_format_dispatch(body, format_breadth);
     let with_render = if is_public {
@@ -1502,7 +1517,7 @@ fn lower_action_body(
     // a fallback for anything Arel doesn't recognize. See
     // project_arel_compile_time_first.md.
     let with_destroy = rewrite_destroy_bang(&with_assoc);
-    let with_routes = rewrite_route_helpers(&with_destroy, shadows);
+    let with_routes = rewrite_route_helpers(&with_destroy, shadows, route_id_segments);
     // Some rewrites (rewrite_assoc_through_parent in particular)
     // produce nested Seqs — `Seq { ..., Seq { stmts }, ... }`. The
     // body-typer's Seq walker only propagates ivar bindings from

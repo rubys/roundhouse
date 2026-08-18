@@ -1585,7 +1585,11 @@ fn polymorphic_path(ivar_name: &Symbol, span: Span) -> Expr {
 // has 120 controller methods with this shape.
 // ---------------------------------------------------------------------------
 
-pub fn rewrite_route_helpers(expr: &Expr, shadowed: &HashSet<Symbol>) -> Expr {
+pub fn rewrite_route_helpers(
+    expr: &Expr,
+    shadowed: &HashSet<Symbol>,
+    id_segments: &std::collections::HashMap<String, Vec<bool>>,
+) -> Expr {
     map_expr(expr, &|e| match &*e.node {
         ExprNode::Send { recv: None, method, args, block, parenthesized }
             if (method.as_str().ends_with("_path")
@@ -1615,10 +1619,23 @@ pub fn rewrite_route_helpers(expr: &Expr, shadowed: &HashSet<Symbol>) -> Expr {
             // Already-projected args (`@article.id`) pass through
             // since they're Sends with method `id` — adding another
             // `.id` would double-wrap, so detect that shape.
+            // …and only where the SEGMENT this argument fills is
+            // id-shaped. campfire's `join_url(@join_code)` fills
+            // `:join_code`, a string column, and the blind projection
+            // emitted `@join_code.id` — `undefined method 'id' for an
+            // instance of String`, on the page every join link points
+            // at. A helper this table does not know keeps the old
+            // blind behaviour: the table is built from the app's own
+            // routes, so a miss means the call is not a route helper
+            // and the shape test below is the only signal there is.
+            let shape = id_segments.get(dispatch_method.as_str());
             let projected_args: Vec<Expr> = args
                 .iter()
-                .map(|arg| {
-                    let needs_id = match &*arg.node {
+                .enumerate()
+                .map(|(i, arg)| {
+                    let id_segment =
+                        shape.map_or(true, |s| s.get(i).copied().unwrap_or(true));
+                    let needs_id = id_segment && match &*arg.node {
                         ExprNode::Ivar { .. } => true,
                         ExprNode::Send { recv: Some(r), method, .. }
                             if method.as_str() != "id" =>
@@ -1648,7 +1665,7 @@ pub fn rewrite_route_helpers(expr: &Expr, shadowed: &HashSet<Symbol>) -> Expr {
                             },
                         )
                     } else {
-                        rewrite_route_helpers(arg, shadowed)
+                        rewrite_route_helpers(arg, shadowed, id_segments)
                     }
                 })
                 .collect();
@@ -1658,7 +1675,9 @@ pub fn rewrite_route_helpers(expr: &Expr, shadowed: &HashSet<Symbol>) -> Expr {
                     recv: Some(const_path(&["RouteHelpers"], e.span)),
                     method: dispatch_method,
                     args: projected_args,
-                    block: block.as_ref().map(|b| rewrite_route_helpers(b, shadowed)),
+                    block: block
+                        .as_ref()
+                        .map(|b| rewrite_route_helpers(b, shadowed, id_segments)),
                     parenthesized: *parenthesized,
                 },
             ))

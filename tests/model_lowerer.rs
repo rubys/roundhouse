@@ -1168,6 +1168,7 @@ fn lowered_real_blog_typing_residual() {
         &app.fixtures,
         &app.models,
         test_extras,
+        &roundhouse::lower::routes::helper_id_segments(&app),
     );
 
     let mut all_untyped: Vec<String> = Vec::new();

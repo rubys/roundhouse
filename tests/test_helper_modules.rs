@@ -110,6 +110,7 @@ fn a_spliced_helper_gets_the_fixture_and_route_rewrites() {
         &app.fixtures,
         &app.models,
         Vec::new(),
+        &roundhouse::lower::routes::helper_id_segments(&app),
     );
     let body = lcs
         .iter()
@@ -144,6 +145,7 @@ fn a_variable_fixture_label_routes_through_by_label() {
         &app.fixtures,
         &app.models,
         Vec::new(),
+        &roundhouse::lower::routes::helper_id_segments(&app),
     );
     let body = lcs
         .iter()

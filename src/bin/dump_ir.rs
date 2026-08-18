@@ -392,6 +392,7 @@ fn lower_all(app: &roundhouse::App) -> Vec<LibraryClass> {
         &app.fixtures,
         &app.models,
         test_extras,
+        &roundhouse::lower::routes::helper_id_segments(app),
     );
 
     let mut all = Vec::new();

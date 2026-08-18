@@ -490,6 +490,7 @@ fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth) -> Vec
     for r in crate::lower::flatten_routes(app) {
         routed.entry(r.controller).or_default().insert(r.action);
     }
+    let route_ids = crate::lower::routes::helper_id_segments(app);
     crate::lower::lower_controllers_with_arel_views_assocs_and_routes(
         &app.controllers,
         model_extras,
@@ -500,6 +501,7 @@ fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth) -> Vec
             assocs: &assocs,
             routed_by_controller: Some(&routed),
             format_breadth,
+            route_id_segments: Some(&route_ids),
         },
     )
 }
@@ -889,6 +891,7 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
             &app.fixtures,
             &app.models,
             fixture_extras,
+            &crate::lower::routes::helper_id_segments(app),
         );
         // A test body writes the same relation chains an app body does —
         // `@room.messages.ordered`, `user.push_subscriptions.find_by(…)`,
