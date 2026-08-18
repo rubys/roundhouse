@@ -9,6 +9,15 @@
 //! the name-keyed signature matcher (runtime_src). Models only:
 //! nothing else in the corpus calls bare `transaction`, and a helper
 //! module's bare send should stay honest residue.
+//!
+//! "A model body" includes the method bodies inside an ASSOCIATION
+//! EXTENSION block (`has_many :memberships do def revise(…) … end
+//! end`) — campfire's `Room#memberships.revise` wraps its grant/revoke
+//! pair in a bare `transaction`. Those bodies hang off the association
+//! rather than off `model.body`, so the walk below has to reach them
+//! explicitly; without that they compiled to a bare send and raised
+//! NoMethodError at the first call, while the identical spelling one
+//! method over worked.
 
 use crate::app::App;
 use crate::expr::{Expr, ExprNode};
@@ -17,8 +26,19 @@ use crate::ident::Symbol;
 pub fn apply_transaction_grounding(app: &mut App) {
     for model in &mut app.models {
         for item in &mut model.body {
-            if let crate::dialect::ModelBodyItem::Method { method, .. } = item {
-                rewrite(&mut method.body);
+            match item {
+                crate::dialect::ModelBodyItem::Method { method, .. } => {
+                    rewrite(&mut method.body);
+                }
+                crate::dialect::ModelBodyItem::Association {
+                    assoc: crate::dialect::Association::HasMany { extension, .. },
+                    ..
+                } => {
+                    for method in extension.iter_mut() {
+                        rewrite(&mut method.body);
+                    }
+                }
+                _ => {}
             }
         }
     }

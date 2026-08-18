@@ -68,6 +68,47 @@ module ActionCable
       Broadcasts::TRANSPORTS[0].broadcast(stream, payload)
       nil
     end
+
+    # `ActionCable.server.remote_connections.where(current_user: user)
+    # .disconnect(reconnect:)` — Rails' "kick this user's sockets"
+    # API. campfire calls it from `User#deactivate` and
+    # `User#reset_remote_connections`.
+    #
+    # The set it selects is EMPTY here, and that is a fact about this
+    # runtime rather than a stub: a remote connection is identified by
+    # its connection identifiers (`current_user`), and no connection in
+    # this runtime ever registers one. Turbo's streams subscribe by
+    # signed stream name through `Cable::Connection#handle_message`,
+    # and channel subscription dispatch — the half that would run
+    # `identified_by :current_user` — is not implemented (see the
+    # header, and the `Channel::Base` methods below that raise for the
+    # same reason). Disconnecting an empty set is a no-op, so this
+    # returns without raising instead of pretending to disconnect
+    # somebody.
+    #
+    # THE DIVERGENCE THAT COSTS: once subscription dispatch lands, a
+    # deactivated or banned user's live socket must actually be closed,
+    # and this method is where that happens. Recorded in
+    # docs/pipeline/runtime.md rather than left as a silent no-op.
+    def remote_connections
+      RemoteConnections.new
+    end
+  end
+
+  # The `where(…)` half of the above: a selection over connections
+  # identified by their connection identifiers. Holds no state because
+  # the selection is always empty; `disconnect` is what a caller does
+  # with it.
+  class RemoteConnections
+    def where(_identifiers)
+      RemoteConnection.new
+    end
+  end
+
+  class RemoteConnection
+    def disconnect(reconnect: false)
+      nil
+    end
   end
 
   SERVER = Server.new

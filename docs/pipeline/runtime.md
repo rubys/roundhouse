@@ -365,6 +365,24 @@ effects. The corpus caller (campfire's `Room has_many :memberships do
 def grant_to … end end`) inserts Membership rows whose callbacks are
 inert.
 
+### `remote_connections.disconnect` selects an empty set
+
+`ActionCable.server.remote_connections.where(current_user: user)
+.disconnect` returns without closing anything. A remote connection is
+selected by its connection *identifiers*, and no connection in this
+runtime ever registers one: Turbo's streams subscribe by signed stream
+name through `Cable::Connection#handle_message`, and channel
+subscription dispatch — the half that would run `identified_by
+:current_user` — is not implemented. The selected set is genuinely
+empty, so the no-op is accurate rather than a stub.
+
+**What it costs.** campfire calls this from `User#deactivate` and
+`User#reset_remote_connections`: a deactivated or banned user's live
+socket stays open. Nothing in the corpus's own tests can observe it
+(they assert on the database rows the same method deletes), which is
+exactly why it is written down here. When subscription dispatch lands,
+`ActionCable::RemoteConnections#where` is where the real selection goes.
+
 ### A `has_secure_token` column fills at CREATE, not at initialize
 
 Rails 7.1+ defaults `has_secure_token` to `on: :initialize`, so
