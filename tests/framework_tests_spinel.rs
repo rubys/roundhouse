@@ -139,12 +139,18 @@ fn build_and_run(test_file: &Path, tag: &str) {
     // .turbo_stream_from), JSON (used by the same). Same pattern the
     // real-blog scaffold uses.
     let runtime_spinel = Path::new("runtime/spinel");
-    for entry in ["base64.rb", "json.rb", "message_digest.rb"] {
+    // No `exists()` guard, unlike the discovered list above: this one is
+    // HAND-WRITTEN, so a name that no longer resolves is a rename someone
+    // forgot here, never an optional file. Skipping it silently is how
+    // `runtime/spinel/json.rb` -> `json_impl.rb` got this far — the copy
+    // was a no-op and the failure surfaced later and elsewhere, as
+    // `test_helper.rb: cannot load such file -- runtime/json_impl.rb`.
+    for entry in ["base64.rb", "json_impl.rb", "message_digest.rb"] {
         let src = runtime_spinel.join(entry);
-        if src.exists() {
-            std::fs::copy(&src, scratch_runtime.join(entry))
-                .unwrap_or_else(|_| panic!("copy {entry}"));
-        }
+        assert!(src.exists(), "{} is named in this copy list but does not exist \
+                               — was it renamed?", src.display());
+        std::fs::copy(&src, scratch_runtime.join(entry))
+            .unwrap_or_else(|_| panic!("copy {entry}"));
     }
 
     std::fs::create_dir_all(scratch.join("test")).expect("mkdir test");
