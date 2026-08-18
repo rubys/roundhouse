@@ -101,9 +101,15 @@ unless src.include?("BenchDriver")
   # The require must be TOP LEVEL and unconditional: spinel resolves
   # requires at compile time, so one tucked inside an `if` leaves the
   # constant undefined at run time (uninitialized constant BenchDriver).
-  req_anchor = %(require_relative "runtime/db")
+  #
+  # Anchored on main.rb's own require of the boot chain: the chain
+  # itself (runtime/db included) moved into boot.rb in 78b9ca0a, so
+  # anchoring on a chain member looks for it in the wrong file and the
+  # lane dies at stage. Injected AFTER boot, so everything the driver
+  # touches is already in the require graph.
+  req_anchor = %(require_relative "boot")
   die("stage", "main.rb require anchor not found") unless src.include?(req_anchor)
-  src = src.sub(req_anchor, %(require_relative "bench_driver"\n) + req_anchor)
+  src = src.sub(req_anchor, req_anchor + %(\nrequire_relative "bench_driver"))
 
   boot_anchor = "Main.configure_default_adapter!"
   die("stage", "main.rb boot anchor not found") unless src.include?(boot_anchor)
