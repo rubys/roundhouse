@@ -32,6 +32,12 @@
 #   --filter PAT Only run test files whose path matches PAT (grep -E).
 #   --tally FILE Write the `STATUS|file|passed|total|first-error` table
 #                to FILE.
+#   --fail-log FILE  Write EVERY failing test's line (`file|Class#test|msg`)
+#                to FILE. The tally keeps only a file's FIRST failure, which
+#                is the right thing to work on but the wrong thing to rank by:
+#                it credits that one wall with every unpassed test in the file,
+#                and `messages_controller_test` reads as 12 tests behind
+#                `fresh_when` when only 3 of them ever call it. Rank from this.
 #
 # Exit status is 0 when the run completes, whatever the tally — this
 # reports a number, it does not gate on one. A CI rung that pins a floor
@@ -50,6 +56,7 @@ STUBS=1
 REUSE=""
 FILTER=""
 TALLY=""
+FAIL_LOG=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -59,6 +66,7 @@ while [[ $# -gt 0 ]]; do
         --no-stubs)  STUBS=0;  shift ;;
         --filter)    FILTER="$2"; shift 2 ;;
         --tally)     TALLY="$2"; shift 2 ;;
+        --fail-log)  FAIL_LOG="$2"; shift 2 ;;
         -h|--help)   sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
         -*)          echo "unknown flag: $1" >&2; exit 2 ;;
         *)           APP="$1"; shift ;;
@@ -143,6 +151,7 @@ fail=0
 tests_total=0
 tests_pass=0
 table=""
+fail_lines=""
 for t in "${TESTS[@]}"; do
     # The emitted autorun shim (emit/ruby.rs::render_autorun_shim) runs
     # EVERY test and prints one `FAIL <Class>#<test>: <msg>` line per
@@ -180,6 +189,14 @@ for t in "${TESTS[@]}"; do
         # trailing `<Class>: X of N tests failed` raise is a summary,
         # not a diagnosis, so it is only the fallback — and for an
         # aborted file it is absent and the load error shows instead.
+        # Every per-test failure, for ranking (see --fail-log above).
+        # Same `|| true` reason as the pipelines around it.
+        if [[ -n "$FAIL_LOG" ]]; then
+            while IFS= read -r line; do
+                [[ -z "$line" ]] && continue
+                fail_lines+="$t|${line#FAIL }"$'\n'
+            done < <(printf '%s\n' "$out" | grep -E '^FAIL ' | cut -c1-200 || true)
+        fi
         why=$(printf '%s\n' "$out" | grep -E '^FAIL ' | head -1 | cut -c1-160 || true)
         if [[ -z "$why" ]]; then
             why=$(printf '%s\n' "$out" | grep -vE '^\s|^$' | head -1 |
@@ -194,6 +211,11 @@ if [[ -n "$TALLY" ]]; then
     printf '%s' "$table" > "$TALLY"
     echo ""
     echo "tally written to $TALLY"
+fi
+
+if [[ -n "$FAIL_LOG" ]]; then
+    printf '%s' "$fail_lines" > "$FAIL_LOG"
+    echo "per-test failures written to $FAIL_LOG"
 fi
 
 step "$tests_pass of $tests_total tests pass ($pass of $((pass + fail)) files green)"
