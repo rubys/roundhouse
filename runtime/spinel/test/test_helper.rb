@@ -22,7 +22,7 @@
 # `runtime/db.rb` (FFI-backed). Same require path, target-appropriate
 # implementation.
 require_relative "../runtime/base64"
-require_relative "../runtime/json"
+require_relative "../runtime/json_impl"
 require_relative "../runtime/db"
 # Params — narrowing accessors the synthesized `<Resource>Params.
 # from_raw` calls. THIRD entry point that needs it, alongside the two

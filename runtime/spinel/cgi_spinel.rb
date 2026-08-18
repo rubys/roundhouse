@@ -5,6 +5,15 @@
 # story (stories/_listdetail), routed to the tep Url percent-encoder.
 # `unescape_html` (extras/html_encoder) and `parse` (extras/github OAuth) are
 # off the benchmark path — real, but not tuned.
+#
+# NOT NAMED `cgi.rb`: this shim substitutes for a stdlib library on
+# spinel ONLY — the CRuby/JRuby boot reaches the real one with a bare
+# `require "cgi"` (ruby_overlay/boot.rb). `walk_dir_flat` copies every
+# runtime/spinel/*.rb into EVERY target tree, so under the library's
+# own name this file would answer that bare require whenever
+# `runtime/` is on `$LOAD_PATH` — which the emitted Rakefile does
+# (`t.libs << "runtime"`) — handing CRuby the AOT subset instead of
+# the stdlib. See runtime/json_impl.rb for the same rule.
 module CGI
   def self.escape(s)
     Url.escape(s)

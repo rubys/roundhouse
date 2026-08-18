@@ -30,7 +30,7 @@
 # (emit::ruby::library::restore_extras_facades), so the gem remains the
 # authority wherever it is installed and this file only ever runs under
 # the AOT binary.
-require_relative "../../runtime/cgi"
+require_relative "../../runtime/cgi_spinel"
 
 module HtmlEncoder
   # `type` mirrors the gem's instruction argument. Only :decimal is

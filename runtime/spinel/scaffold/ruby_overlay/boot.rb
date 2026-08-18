@@ -48,7 +48,7 @@ require_relative "runtime/db"
 # the stdlib equivalents with semantically-identical implementations
 # for the surface framework Ruby actually uses.
 require_relative "runtime/base64"
-require_relative "runtime/json"
+require_relative "runtime/json_impl"
 # JsonBuilder — the JSON encoding primitives the Jbuilder lowerer
 # emits calls to (`Views::Articles.article_json` etc.). Separate from
 # `runtime/json.rb`'s `JSON.generate` shim: this module exposes

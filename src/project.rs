@@ -1735,21 +1735,21 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     }
 
     // CGI shim sidecar — spinel has no stdlib CGI; the flat walk emits
-    // runtime/cgi.rb but only .rb, so pair its typing contract (escape ->
+    // runtime/cgi_spinel.rb but only .rb, so pair its typing contract (escape ->
     // String, parse -> Hash[String, Array[String]]) here.
     {
-        let rbs = fs::read_to_string("runtime/spinel/cgi.rbs")
-            .map_err(|e| format!("read runtime/spinel/cgi.rbs: {e}"))?;
-        files.push(("sig/runtime/cgi.rbs".to_string(), rbs));
+        let rbs = fs::read_to_string("runtime/spinel/cgi_spinel.rbs")
+            .map_err(|e| format!("read runtime/spinel/cgi_spinel.rbs: {e}"))?;
+        files.push(("sig/runtime/cgi_spinel.rbs".to_string(), rbs));
     }
 
     // ERB::Util shim sidecar — same story as CGI: spinel has no stdlib
-    // ERB, the flat walk emits runtime/erb.rb, and the .rbs pins
+    // ERB, the flat walk emits runtime/erb_spinel.rb, and the .rbs pins
     // html_escape's String return so callers concatenating it stay typed.
     {
-        let rbs = fs::read_to_string("runtime/spinel/erb.rbs")
-            .map_err(|e| format!("read runtime/spinel/erb.rbs: {e}"))?;
-        files.push(("sig/runtime/erb.rbs".to_string(), rbs));
+        let rbs = fs::read_to_string("runtime/spinel/erb_spinel.rbs")
+            .map_err(|e| format!("read runtime/spinel/erb_spinel.rbs: {e}"))?;
+        files.push(("sig/runtime/erb_spinel.rbs".to_string(), rbs));
     }
 
     // `db_jruby.rb` is the JRuby/JDBC Db backend — it uses Java interop

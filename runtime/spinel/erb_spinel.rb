@@ -13,6 +13,15 @@
 # `html_escape` is the same five-entity substitution, it is already the
 # hot path every view goes through, and one implementation means one place
 # to tune (see the CGI shim's note on `Url.escape`).
+#
+# NOT NAMED `erb.rb`: this shim substitutes for a stdlib library on
+# spinel ONLY — the CRuby/JRuby boot reaches the real one with a bare
+# `require "erb"` (ruby_overlay/boot.rb). `walk_dir_flat` copies every
+# runtime/spinel/*.rb into EVERY target tree, so under the library's
+# own name this file would answer that bare require whenever
+# `runtime/` is on `$LOAD_PATH` — which the emitted Rakefile does
+# (`t.libs << "runtime"`) — handing CRuby the AOT subset instead of
+# the stdlib. See runtime/json_impl.rb for the same rule.
 module ERB
   module Util
     # `to_s` is faithful, not a widening dodge: stdlib ERB::Util is

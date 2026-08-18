@@ -1,3 +1,9 @@
+# Minitest-shaped: this is a CRuby-only framework test, quarantined
+# out of the spin shape by `project.rs::spin_shape` (it is not a spin
+# test program and gets no snapshot). It therefore loads its own
+# runner — `test_helper` deliberately does not, because the EMITTED
+# tests inherit `TestBase` and carry their own driver shim.
+require "minitest/autorun"
 require_relative "../test_helper"
 require "models/article"
 require "models/article_params"

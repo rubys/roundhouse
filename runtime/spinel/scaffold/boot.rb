@@ -29,7 +29,7 @@ require_relative "runtime/db"
 # the stdlib equivalents with semantically-identical implementations
 # for the surface framework Ruby actually uses.
 require_relative "runtime/base64"
-require_relative "runtime/json"
+require_relative "runtime/json_impl"
 # JsonBuilder — the JSON encoding primitives the Jbuilder lowerer
 # emits calls to (`Views::Articles.article_json` etc.). Separate from
 # `runtime/json.rb`'s `JSON.generate` shim: this module exposes
@@ -103,11 +103,11 @@ require_relative "runtime/tep/tep"
 # Spinel-only CGI shim (escape/unescape_html/parse) — CRuby/JRuby use stdlib
 # `require "cgi"`. After tep so `Url` (the percent-encoder CGI.escape routes
 # to) is defined.
-require_relative "runtime/cgi"
+require_relative "runtime/cgi_spinel"
 # Spinel-only ERB::Util shim (html_escape) — CRuby/JRuby get it from the
 # stdlib Rails loads. After action_controller, whose require chain defines
 # the ActionView::ViewHelpers.html_escape this delegates to.
-require_relative "runtime/erb"
+require_relative "runtime/erb_spinel"
 # Action Cable WebSocket glue — the /cable endpoint + the Broadcasts
 # transport that fans Turbo Stream fragments out to subscribers. Loaded
 # after tep (uses Tep::WebSocket / Scheduler / Broadcast) and broadcasts
