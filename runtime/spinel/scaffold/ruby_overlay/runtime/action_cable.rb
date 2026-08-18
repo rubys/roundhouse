@@ -11,7 +11,7 @@
 #    message rides Turbo, the unread-room badge beside it rides this.
 #
 #    The payload stays a Ruby Hash the whole way to
-#    `Cable::Connection#push`, and that is what makes the envelope right.
+#    `Cable::Registry.deliver`, and that is what makes the envelope right.
 #    Action Cable's `message` field carries the VALUE, so `{roomId: 1}`
 #    has to arrive as a JSON object; pre-serializing it to a String here
 #    would ship `"message":"{\"roomId\":1}"` — valid JSON, wrong shape,

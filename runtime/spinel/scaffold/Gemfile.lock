@@ -191,6 +191,7 @@ PLATFORMS
 
 DEPENDENCIES
   minitest
+  nio4r (~> 2.0)
   puma
   rack
   rack-test

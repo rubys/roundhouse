@@ -35,15 +35,13 @@ use Rack::Static, urls: ["/assets", "/icon.png", "/icon.svg"], root: "static"
 # future spinel serving shapes.
 
 app = lambda do |env|
-  # WebSocket upgrade: `/cable`. Hijack the socket from Puma and
-  # spawn a per-connection thread that runs the read loop. The Rack
-  # tuple returned (-1, {}, []) is Rack's convention for "the
-  # response was handled out-of-band" — Puma stops touching the
-  # connection.
+  # WebSocket upgrade: `/cable`. Cable hijacks the socket out of Puma
+  # and hands it to the reactor thread, which owns every connection
+  # from that point on; this returns as soon as the attach is queued.
+  # The Rack tuple (-1, {}, []) is Rack's convention for "the response
+  # was handled out-of-band" — Puma stops touching the connection.
   if env["PATH_INFO"] == "/cable"
-    socket = env["rack.hijack"].call
-    conn = Cable::Connection.new(env, socket)
-    Thread.new { conn.run }
+    Cable.upgrade(env)
     return [-1, {}, []]
   end
 

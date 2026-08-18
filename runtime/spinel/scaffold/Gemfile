@@ -30,6 +30,11 @@ gem "rack"
 # (deferred). Pinned to 0.8.x — the API stabilized in that line.
 gem "websocket-driver", "~> 0.8.0"
 
+# The cable reactor's selector. Already in the bundle as a Puma
+# dependency; named here because cable.rb requires it directly, so the
+# dependency is ours and must not vanish if Puma ever drops it.
+gem "nio4r", "~> 2.0"
+
 # Spinel-subset compliance gate (CI). Runs against the shipped tree
 # (scaffold + runtime + lowered emit) after toolchain-spinel emits
 # into the scratch dir; catches reflection/concurrency/singleton-class

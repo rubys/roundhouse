@@ -179,7 +179,7 @@ lives in roundhouse's `src/project.rs` (`spin_shape`).
     check_spinel_subset.rb       grep-based linter
   main.rb                        entry point: Tep::Server::Scheduled (spinel binary)
   config.ru                      CRuby-only; Rack adapter to Main.run
-  cable.rb                       CRuby-only; Puma rack-hijack WebSocket Registry
+  cable.rb                       CRuby-only; nio4r reactor + WebSocket Registry
   Gemfile  Rakefile  Makefile
 ```
 
@@ -202,8 +202,9 @@ rides tep's fiber-scheduled WebSocket codec.)
    `config/puma.rb`) terminates HTTP and WebSocket on the Puma side,
    lifts each request into the CGI shape, calls `Main.run`, and parses
    the CGI response back into a Rack tuple. WebSocket upgrades hijack
-   the Puma socket and run a per-connection read loop. This layer uses
-   Threads, Mutex, IO.select — things spinel doesn't support — so the
+   the Puma socket and hand it to a single nio4r reactor thread that
+   multiplexes every connection. This layer uses Threads, Mutex and a
+   selector — things spinel doesn't support — so the
    spinel binary instead uses the vendored tep transport (`runtime/tep/`:
    sphttp FFI + fiber `Tep::Scheduler` + `Tep::WebSocket` codec), driven
    by `runtime/cable.rb` ([tep](https://github.com/OriPekelman/tep)).
@@ -234,7 +235,7 @@ Turbo clients) is layered on top of that log by `cable.rb`'s
 | HTTP entry point | `main.rb` parses CGI, dispatches, writes response with status + headers + body |
 | HTTP server (CRuby) | Puma + Rack adapter (`config.ru`) — terminates HTTP/1.1, lifts requests into CGI shape, calls `Main.run`, parses the response back to a Rack tuple. `Rack::Static` serves `/assets/*` and root icons. |
 | HTTP server (spinel) | `Tep::Server::Scheduled` — fiber-per-connection, poll(2)-driven, sphttp FFI transport; serves the compiled binary's HTTP + WebSocket on one port |
-| WebSocket (CRuby) | `ruby_overlay/cable.rb`'s `Cable::Registry` — Puma `rack.hijack` per `/cable` upgrade; per-connection read loop; subscription dispatch into in-memory broadcasts log |
+| WebSocket (CRuby) | `ruby_overlay/cable.rb`'s `Cable::Registry` — Puma `rack.hijack` per `/cable` upgrade, then ONE `NIO::Selector` reactor thread multiplexing every connection, with the shared heartbeat riding its select timeout (Action Cable's own layering). Broadcasts are posted onto the reactor and encoded once per envelope, so a request thread never writes to a socket |
 | WebSocket (spinel) | `runtime/cable.rb` on tep's `Tep::WebSocket` codec + `Tep::Scheduler` fibers + `Tep::Broadcast` fan-out — `/cable` upgrade, `actioncable-v1-json` welcome/ping/subscribe/confirm, live Turbo Stream broadcasts |
 | Asset pipeline | Tailwind v4 via `npx @tailwindcss/cli`; turbo.min.js copied from gem dir |
 
@@ -396,7 +397,8 @@ Things real-blog uses that this fixture *doesn't* reproduce:
   single self-contained executable with no Ruby dependency. SQLite
   links via FFI (`runtime/db.rb`).
 - **WebSocket:** in-process for both targets — Puma `rack.hijack`
-  under CRuby (`ruby_overlay/cable.rb`, websocket-driver gem),
+  handing off to an nio4r reactor under CRuby
+  (`ruby_overlay/cable.rb`, websocket-driver gem),
   fiber-multiplexed under spinel (`runtime/cable.rb` on tep's
   `Tep::WebSocket` codec + `Tep::Scheduler` + `Tep::Broadcast`). Both
   speak `actioncable-v1-json` and fan model after-commit Turbo Stream
