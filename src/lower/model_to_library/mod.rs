@@ -872,6 +872,10 @@ fn build_methods(
     // before `push_user_methods` for the usual reason (a hand-written
     // method in the model body wins).
     crate::lower::rich_text::push_rich_text_methods(&mut methods, model);
+    // `has_one_attached` — the attachment-EXISTENCE reader, over the
+    // synthesized `ActiveStorage::Attachment` row. Same ordering
+    // rationale as the macros above (a hand-written method wins).
+    crate::lower::attached::push_attached_methods(&mut methods, model);
     push_user_methods(&mut methods, model);
     push_dom_prefix_method(&mut methods, model);
     push_broadcasts_methods(&mut methods, model);

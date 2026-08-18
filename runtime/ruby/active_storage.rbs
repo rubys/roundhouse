@@ -1,0 +1,18 @@
+# Typing contract for active_storage.rb beside this file.
+#
+# `attached?` is the one question this half of Active Storage can
+# answer; the rest raise (see the body for why).
+module ActiveStorage
+  class Attached
+    @record_type: String
+    @record_id: Integer
+    @name: String
+    def initialize: (String record_type, Integer record_id, String name) -> void
+    def attached?: () -> bool
+    def variable?: () -> bool
+    def variant: (untyped transformations) -> untyped
+    def url: () -> String
+    def attach: (untyped attachable) -> void
+    def purge: () -> void
+  end
+end

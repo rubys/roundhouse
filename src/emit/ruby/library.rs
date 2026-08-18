@@ -3932,6 +3932,11 @@ fn require_path_for_body_const(
         // is a lowered model and resolves under `app/models/` like any
         // other, which is exactly the split this entry preserves.
         "ActionText" => Some("runtime/action_text".to_string()),
+        // `ActiveStorage::Attached` — the value half, what a
+        // `has_one_attached` reader returns. `ActiveStorage::Attachment`
+        // is NOT here for the same reason `ActionText::RichText` is
+        // not: it is a lowered model under `app/models/`.
+        "ActiveStorage" => Some("runtime/active_storage".to_string()),
         "Inflector" => Some("runtime/inflector".to_string()),
         "ViewHelpers" => Some("runtime/action_view".to_string()),
         "RouteHelpers" => Some("app/route_helpers".to_string()),

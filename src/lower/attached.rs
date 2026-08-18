@@ -1,0 +1,154 @@
+//! Active Storage's EXISTENCE half — `has_one_attached :logo` expanded
+//! to a reader that can answer "is anything attached?", over the real
+//! `active_storage_attachments` row.
+//!
+//! # What this is and is not
+//!
+//! Active Storage is three things: attachment ROWS (which record, which
+//! blob, under which name), BLOBS (bytes in a service), and VARIANTS
+//! (derivatives produced by an image processor). Only the first is
+//! modeled here, and that is a deliberate line rather than a stopping
+//! point:
+//!
+//! * The attachment ROW is read straight from
+//!   `active_storage_attachments` by the value object, composing SQL
+//!   the way `Relation` itself does. Synthesizing an
+//!   `ActiveStorage::Attachment` MODEL — the `ActionText::RichText`
+//!   treatment — was written and then backed out: nothing reads or
+//!   writes those rows as records yet, so it emitted a model file per
+//!   app to serve no caller. It becomes the right shape the moment
+//!   `attach`/`purge` land, and not before.
+//! * `has_one_attached :name` is a MACRO. It expands to a reader whose
+//!   scope is the three columns Rails scopes on (`record_id`,
+//!   `record_type`, `name`), written out rather than declared for the
+//!   same reason `has_rich_text`'s is: a bare `has_one` would find the
+//!   FIRST attachment on the record regardless of name, which is right
+//!   for a model with one attachment and silently wrong for a model
+//!   with two.
+//! * Blobs and variants are NOT modeled, and the reader's value object
+//!   says so by raising rather than by answering something plausible.
+//!
+//! # Why the existence half alone is worth having
+//!
+//! `ApplicationHelper.account_logo_body_class` is `"account-has-logo"
+//! if Current.account&.logo&.attached?` — it is on the layout, so it
+//! runs on EVERY rendered page, and with `logo` undefined every one of
+//! those requests raised. Measured on campfire's own suite, answering
+//! just `attached?` is +7 tests and a 7th green file; variants remain
+//! the long pole for the avatar/logo tests themselves.
+//!
+//! # The reader never returns nil
+//!
+//! Rails' `record.logo` hands back an `Attached::One` proxy whether or
+//! not anything is attached, so `logo.attached?` is false rather than a
+//! NoMethodError on nil. This keeps that contract: the reader always
+//! constructs an `ActiveStorage::Attached` (the value type, in
+//! `runtime/ruby/active_storage.rb` beside `ActionText::Content` for
+//! the same reason — it has no table), carrying the answer to the one
+//! question that can be answered.
+
+use crate::dialect::{AccessorKind, MethodDef, MethodReceiver, Model, ModelBodyItem};
+use crate::effect::EffectSet;
+use crate::expr::{Expr, ExprNode, Literal};
+use crate::ident::{ClassId, Symbol};
+use crate::span::Span;
+use crate::ty::Ty;
+
+fn attached_class() -> ClassId {
+    ClassId(Symbol::from("ActiveStorage::Attached"))
+}
+
+/// `has_one_attached :logo` declarations this pass expands, with the
+/// span of the declaration. The BLOCK form (`do |attachable|
+/// attachable.variant … end`) declares variants, which are not
+/// modeled — the attachment half still expands, and the unclaimed
+/// diagnostic keeps naming the declaration so the variant gap stays
+/// visible.
+pub fn attached_attrs(model: &Model) -> Vec<(Span, Symbol)> {
+    let mut out = Vec::new();
+    for item in &model.body {
+        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
+        if method.as_str() != "has_one_attached" || args.len() != 1 {
+            continue;
+        }
+        if let ExprNode::Lit { value: Literal::Sym { value } } = &*args[0].node {
+            out.push((expr.span, Symbol::from(value.as_str())));
+        }
+    }
+    out
+}
+
+
+/// Synthesize each `has_one_attached` reader onto the declaring model.
+pub(crate) fn push_attached_methods(methods: &mut Vec<MethodDef>, model: &Model) {
+    for (span, attr) in attached_attrs(model) {
+        let before = methods.len();
+        push_reader(methods, model, &attr);
+        for m in &mut methods[before..] {
+            m.body.inherit_span(span);
+        }
+    }
+}
+
+/// `def logo; ActiveStorage::Attached.new("Account", @id, "logo"); end`
+///
+/// A plain constructor, NOT a folded `ActiveStorage::Attachment
+/// .where(...).exists?` chain: the query specializer inlines such a
+/// chain into a multi-statement SQL block (`stmt = Db.prepare(…);
+/// results = []; while Db.step?(stmt) …`), which cannot sit in an
+/// argument position — the emit was syntactically invalid and took the
+/// whole suite from 47 passing tests to 0. The query belongs in the
+/// value object, which runs it at ASK time; a record can be attached to
+/// between two reads, so a boolean captured at construction would be
+/// stale anyway.
+fn push_reader(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol) {
+    if super::model_to_library::model_defines_instance_method(model, attr)
+        || methods
+            .iter()
+            .any(|m| m.name == *attr && m.receiver == MethodReceiver::Instance)
+    {
+        return;
+    }
+    let str_lit = |v: &str| {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit { value: Literal::Str { value: v.to_string() } },
+        )
+    };
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Const {
+                    path: attached_class().0.as_str().split("::").map(Symbol::from).collect(),
+                },
+            )),
+            method: Symbol::from("new"),
+            args: vec![
+                str_lit(model.name.0.as_str()),
+                Expr::new(Span::synthetic(), ExprNode::Ivar { name: Symbol::from("id") }),
+                str_lit(attr.as_str()),
+            ],
+            block: None,
+            parenthesized: true,
+        },
+    );
+    methods.push(MethodDef {
+        name: attr.clone(),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        signature: Some(super::model_to_library::fn_sig(
+            vec![],
+            Ty::Class { id: attached_class(), args: vec![] },
+        )),
+        effects: EffectSet::default(),
+        enclosing_class: Some(model.name.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    });
+}
