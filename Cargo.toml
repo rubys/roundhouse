@@ -45,3 +45,28 @@ version = "1"
 version = "2"
 default-features = false
 features = ["deflate"]
+
+# Build-time profile tuning. `target/debug/deps` had grown to 73G across
+# 2.45M `.rcgu.o` files: macOS defaults dev builds to
+# `split-debuginfo = "unpacked"`, which leaves per-codegen-unit object
+# files in `deps/` for the debug map, and cargo never collects them. With
+# 144 separate integration-test binaries in `tests/`, each carrying full
+# debuginfo, that accumulates fast and every fingerprint pass then pays
+# lookups in a multi-million-entry directory.
+#
+# `debug = 1` keeps line tables — backtraces still carry file/line — but
+# drops local-variable info, so an lldb session can't inspect locals.
+# Raise back to 2 if you need to step through roundhouse itself.
+[profile.dev]
+debug = 1
+
+# Dependencies are never stepped into; their debuginfo is pure cost.
+[profile.dev.package."*"]
+debug = false
+
+# Same treatment for the test profile, which is what `cargo test` builds.
+[profile.test]
+debug = 1
+
+[profile.test.package."*"]
+debug = false
