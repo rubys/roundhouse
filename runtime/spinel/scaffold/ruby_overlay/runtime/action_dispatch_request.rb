@@ -13,6 +13,8 @@
 # alongside the env. `env` is a plain mutable Hash copy — callers
 # write scratch keys into it (`exception_notifier.exception_data`),
 # which the real ENV object would reject for non-String values.
+require "stringio"
+
 module ActionDispatch
   class Request
     attr_reader :env
@@ -101,6 +103,26 @@ module ActionDispatch
     # seam one caller uses to build a request on either target.
     def self.for(env, params = {})
       new(env, params)
+    end
+
+    # `request.body` — the raw body, as an IO, because that is what
+    # Rails hands back and what app code does with it: campfire's bot
+    # endpoint reads `reading(request.body) { |b| … }`, which calls
+    # `rewind` / `read` / `force_encoding`. A String would answer none
+    # of those.
+    #
+    # The WRITER takes a String (the CGI dispatcher's body, or the test
+    # harness's `post url, params: "raw text"`) and wraps it here, so
+    # the caller stays target-neutral — the harness is transpiled for
+    # spinel too, where `StringIO` is a CRuby thing that does not
+    # exist. Wrapping at the overlay boundary keeps that knowledge on
+    # the CRuby side, where the rest of this file already lives.
+    def body=(value)
+      @body = value.is_a?(String) ? StringIO.new(value) : value
+    end
+
+    def body
+      @body ||= StringIO.new(@env["RAW_POST_DATA"].to_s)
     end
 
     def xhr?

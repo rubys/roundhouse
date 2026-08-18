@@ -444,11 +444,22 @@ module RequestDispatch
     # to hold a Hash value. `path_params.dup` keeps the StrStrHash
     # shape, which spinel then refuses to assign a Hash into.
     merged = stringify_keys(matched.path_params)
-    params.each do |k, v|
-      if v.is_a?(Hash)
-        merged[k.to_s] = stringify_keys(v)
-      else
-        merged[k.to_s] = v
+    # `post url, params: "Hello Bot World!"` — Rails' integration tests
+    # take a STRING `params:` as the raw request BODY, not as a
+    # parameter hash. campfire's bot endpoint is written that way (a bot
+    # POSTs plain text and the controller reads `request.body`), and the
+    # harness iterated it: `undefined method 'each' for an instance of
+    # String`, every test in the file.
+    request_body = +""
+    if params.is_a?(String)
+      request_body = params.to_s
+    else
+      params.each do |k, v|
+        if v.is_a?(Hash)
+          merged[k.to_s] = stringify_keys(v)
+        else
+          merged[k.to_s] = v
+        end
       end
     end
     controller.params  = merged
@@ -488,6 +499,7 @@ module RequestDispatch
     env["PATH_INFO"]      = request_path
     env["QUERY_STRING"]   = request_query
     controller.request = ActionDispatch::Request.for(env, merged)
+    controller.request.body = request_body
     # Same object where module-function helpers reach it, and the
     # controller alongside — mirrors the dispatcher's pair.
     ActionController::Current.request = controller.request
