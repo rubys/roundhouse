@@ -10,14 +10,26 @@
 //! nothing else in the corpus calls bare `transaction`, and a helper
 //! module's bare send should stay honest residue.
 //!
-//! "A model body" includes the method bodies inside an ASSOCIATION
-//! EXTENSION block (`has_many :memberships do def revise(…) … end
-//! end`) — campfire's `Room#memberships.revise` wraps its grant/revoke
-//! pair in a bare `transaction`. Those bodies hang off the association
-//! rather than off `model.body`, so the walk below has to reach them
-//! explicitly; without that they compiled to a bare send and raised
-//! NoMethodError at the first call, while the identical spelling one
-//! method over worked.
+//! "A model body" includes two families that do not live in
+//! `model.body`, and each one was found only after the previous fix
+//! shipped:
+//!
+//! * ASSOCIATION EXTENSION blocks (`has_many :memberships do def
+//!   revise(…) … end end`) — campfire's `Room#memberships.revise`
+//!   wraps its grant/revoke pair in a bare `transaction`. Those hang
+//!   off the association.
+//! * MODEL CONCERNS (`app/models/user/bannable.rb`, emitted as
+//!   `module User::Bannable` inside `class User`) — their methods run
+//!   on model instances exactly like the ones in `user.rb`, and
+//!   campfire spells `transaction do` in three of them
+//!   (`Bannable#ban`, `#unban`, `Bot#regenerate_key`). They live in
+//!   `app.library_classes`, so `user.rb`'s own `deactivate` grounded
+//!   while the concern one file over raised NoMethodError.
+//!
+//! A concern is recognized by its NAMESPACE naming a model
+//! (`User::Bannable`), which is also how it is emitted — nested inside
+//! `class User`. A plain helper module is not a model concern and
+//! keeps its bare send as honest residue, per the paragraph above.
 
 use crate::app::App;
 use crate::expr::{Expr, ExprNode};
@@ -40,6 +52,24 @@ pub fn apply_transaction_grounding(app: &mut App) {
                 }
                 _ => {}
             }
+        }
+    }
+    // Model concerns: `module User::Bannable` in app.library_classes.
+    // Grounding is model-INDEPENDENT (it targets `ActiveRecord::Base`),
+    // so the concern does not need resolving to its includer — only
+    // recognizing as belonging to a model at all.
+    let model_names: std::collections::HashSet<String> =
+        app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
+    for lc in &mut app.library_classes {
+        if !lc.is_module {
+            continue;
+        }
+        let Some((namespace, _)) = lc.name.0.as_str().rsplit_once("::") else { continue };
+        if !model_names.contains(namespace) {
+            continue;
+        }
+        for m in &mut lc.methods {
+            rewrite(&mut m.body);
         }
     }
 }
