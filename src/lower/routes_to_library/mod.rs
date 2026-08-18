@@ -504,7 +504,7 @@ fn build_helper_function(
     helper_name: &str,
     route: &FlatRoute,
     app: &App,
-    query_keys: &[String],
+    query_keys: &[QueryKey],
 ) -> LibraryFunction {
     let slug_id = model_overrides_to_param(route.controller.0.as_str(), helper_name, app);
     // Slugness is PER PARAM: a nested parent's segment names its model
@@ -714,16 +714,25 @@ fn build_helper_function(
     let mut query_sig: Vec<crate::ty::Param> = Vec::new();
     if !query_keys.is_empty() {
         for key in query_keys {
-            let sym = Symbol::from(key.clone());
+            let sym = Symbol::from(key.name.clone());
             params.push(Param::keyword(sym.clone(), Some(nil_default())));
             // KEYWORD in the signature too, not just in the `def`.
             // `fn_sig` types every param `Required`, which renders the
             // `.rbs` as a positional — spinel binds from the signature,
             // so a keyword declared positionally is a call it cannot
             // make.
+            // An array key takes `Array[T]`, where T is what the
+            // SINGULAR key would have been: `user_ids: [ user.id ]`
+            // carries ids, and `param_ty` is name-based, so the
+            // singular is what it must be asked about.
+            let value_ty = if key.array {
+                Ty::Array { elem: Box::new(param_ty(singular_key(&key.name), false)) }
+            } else {
+                param_ty(&key.name, false)
+            };
             query_sig.push(crate::ty::Param {
                 name: sym,
-                ty: Ty::Union { variants: vec![param_ty(key, false), Ty::Nil] },
+                ty: Ty::Union { variants: vec![value_ty, Ty::Nil] },
                 kind: crate::ty::ParamKind::Keyword { required: false },
             });
         }
@@ -790,6 +799,20 @@ fn build_helper_function(
 /// call-site survey instead (it varies per route).
 const NON_QUERY_OPTIONS: &[&str] = &["format", "anchor"];
 
+/// One query key a helper must accept, and whether every call site
+/// passes it an ARRAY (`user_ids: [ user.id ]`), which Rails renders as
+/// repeated `k[]=v` pairs rather than one `k=v`.
+///
+/// Mixed usage across call sites resolves to SCALAR: one helper, one
+/// signature, and the scalar rendering is the one that was already
+/// shipping. A wrong URL is worse than a missing helper — the same
+/// reasoning that kept arrays out entirely until now.
+#[derive(Clone, Debug)]
+pub(crate) struct QueryKey {
+    pub(crate) name: String,
+    pub(crate) array: bool,
+}
+
 /// Query-string keys each route helper is actually called with —
 /// `autocompletable_users_path(room_id: room.id)` demands `room_id`.
 ///
@@ -804,14 +827,14 @@ const NON_QUERY_OPTIONS: &[&str] = &["format", "anchor"];
 fn query_param_demand(
     app: &App,
     helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
-) -> std::collections::HashMap<String, Vec<String>> {
-    let mut out: std::collections::HashMap<String, std::collections::BTreeSet<String>> =
-        Default::default();
+) -> std::collections::HashMap<String, Vec<QueryKey>> {
+    type Demand = std::collections::HashMap<String, std::collections::BTreeMap<String, bool>>;
+    let mut out: Demand = Default::default();
     let mut collect = |e: &Expr| {
         fn walk(
             e: &Expr,
             helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
-            out: &mut std::collections::HashMap<String, std::collections::BTreeSet<String>>,
+            out: &mut Demand,
         ) {
             if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
                 if let Some((segments, required)) = helpers.get(method.as_str()) {
@@ -841,18 +864,25 @@ fn query_param_demand(
                                 }
                                 // An Array value renders as `k[]=a&k[]=b`
                                 // in Rails (lobsters/campfire both write
-                                // one). Left out rather than rendered as
-                                // the array's `to_s`: a wrong URL is
-                                // worse than a missing helper.
-                                if matches!(&*v.node, ExprNode::Array { .. }) {
-                                    continue;
-                                }
+                                // one), which is why the key carries
+                                // whether every site passes one — the
+                                // helper needs a different parameter TYPE
+                                // and a different rendering, not just a
+                                // different value.
+                                let is_array = matches!(&*v.node, ExprNode::Array { .. });
                                 let helper = method
                                     .as_str()
                                     .strip_suffix("_url")
                                     .map(|stem| format!("{stem}_path"))
                                     .unwrap_or_else(|| method.as_str().to_string());
-                                out.entry(helper).or_default().insert(key.to_string());
+                                let seen = out
+                                    .entry(helper)
+                                    .or_default()
+                                    .entry(key.to_string())
+                                    .or_insert(is_array);
+                                // Any scalar site demotes the key: see
+                                // `QueryKey`.
+                                *seen = *seen && is_array;
                             }
                         }
                     }
@@ -863,7 +893,16 @@ fn query_param_demand(
         walk(e, helpers, &mut out);
     };
     for_each_route_call_site(app, &mut collect);
-    out.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect()
+    out.into_iter()
+        .map(|(helper, keys)| {
+            (
+                helper,
+                keys.into_iter()
+                    .map(|(name, array)| QueryKey { name, array })
+                    .collect(),
+            )
+        })
+        .collect()
 }
 
 /// Every body a route helper can be called from. `for_each_hook_body_ref`
@@ -900,20 +939,21 @@ fn for_each_route_call_site(app: &App, f: &mut impl FnMut(&Expr)) {
 /// well-formed query string. Values go through the same `url_encode` the
 /// view helpers use — a raw `q=` value carrying a space or `&` would
 /// otherwise produce a URL that means something else.
-fn append_query_string(path: Expr, keys: &[String]) -> Expr {
+fn append_query_string(path: Expr, keys: &[QueryKey]) -> Expr {
     let mut out = path;
     for (i, key) in keys.iter().enumerate() {
         let is_nil = |k: &str| -> Expr {
             send_method(var_ref(k), "nil?", Vec::new())
         };
+        let key_name = key.name.as_str();
         // `?` only while nothing earlier was rendered. The first key
         // needs no test — nothing can precede it.
         let separator = if i == 0 {
             None
         } else {
             Some({
-            let mut cond = is_nil(&keys[0]);
-            for earlier in &keys[1..i] {
+            let mut cond = is_nil(&keys[0].name);
+            for earlier in keys[1..i].iter().map(|k| k.name.as_str()) {
                 cond = Expr::new(
                     Span::synthetic(),
                     ExprNode::BoolOp {
@@ -934,35 +974,81 @@ fn append_query_string(path: Expr, keys: &[String]) -> Expr {
             )
             })
         };
-        let encoded = Expr::new(
-            Span::synthetic(),
-            ExprNode::Send {
-                recv: Some(Expr::new(
+        let url_encode = |value: Expr| -> Expr {
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Const {
+                            path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")],
+                        },
+                    )),
+                    method: Symbol::from("url_encode"),
+                    args: vec![send_method(value, "to_s", Vec::new())],
+                    block: None,
+                    parenthesized: true,
+                },
+            )
+        };
+        // Rails renders an Array option as one `k[]=v` pair per
+        // element, percent-encoding the brackets. Built with
+        // `map { … }.join("&")` rather than a loop: the same
+        // records-to-strings shape the association `_ids` reader uses,
+        // and the one every target compiles (a `while` over an index
+        // does not survive the block-free targets).
+        let pair = if key.array {
+            let elem = Symbol::from("rh_query_value");
+            let body = send_method(
+                lit_str(format!("{key_name}%5B%5D=")),
+                "+",
+                vec![url_encode(Expr::new(
                     Span::synthetic(),
-                    ExprNode::Const {
-                        path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")],
-                    },
-                )),
-                method: Symbol::from("url_encode"),
-                args: vec![send_method(var_ref(key), "to_s", Vec::new())],
-                block: None,
-                parenthesized: true,
-            },
-        );
-        let mut parts: Vec<InterpPart> = Vec::new();
-        match separator {
-            None => parts.push(InterpPart::Text { value: format!("?{key}=") }),
-            Some(sep) => {
-                parts.push(InterpPart::Expr { expr: sep });
-                parts.push(InterpPart::Text { value: format!("{key}=") });
+                    ExprNode::Var { id: crate::ident::VarId(0), name: elem.clone() },
+                ))],
+            );
+            let mapped = Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(var_ref(key_name)),
+                    method: Symbol::from("map"),
+                    args: Vec::new(),
+                    block: Some(Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Lambda {
+                            params: vec![elem],
+                            block_param: None,
+                            body,
+                            block_style: crate::expr::BlockStyle::Brace,
+                        },
+                    )),
+                    parenthesized: false,
+                },
+            );
+            let joined = send_method(mapped, "join", vec![lit_str("&".to_string())]);
+            let mut parts: Vec<InterpPart> = Vec::new();
+            match separator {
+                None => parts.push(InterpPart::Text { value: "?".to_string() }),
+                Some(sep) => parts.push(InterpPart::Expr { expr: sep }),
             }
-        }
-        parts.push(InterpPart::Expr { expr: encoded });
-        let pair = Expr::new(Span::synthetic(), ExprNode::StringInterp { parts });
+            parts.push(InterpPart::Expr { expr: joined });
+            Expr::new(Span::synthetic(), ExprNode::StringInterp { parts })
+        } else {
+            let mut parts: Vec<InterpPart> = Vec::new();
+            match separator {
+                None => parts.push(InterpPart::Text { value: format!("?{key_name}=") }),
+                Some(sep) => {
+                    parts.push(InterpPart::Expr { expr: sep });
+                    parts.push(InterpPart::Text { value: format!("{key_name}=") });
+                }
+            }
+            parts.push(InterpPart::Expr { expr: url_encode(var_ref(key_name)) });
+            Expr::new(Span::synthetic(), ExprNode::StringInterp { parts })
+        };
         let arm = Expr::new(
             Span::synthetic(),
             ExprNode::If {
-                cond: send_method(var_ref(key), "nil?", Vec::new()),
+                cond: send_method(var_ref(key_name), "nil?", Vec::new()),
                 then_branch: lit_str(String::new()),
                 else_branch: pair,
             },
@@ -990,6 +1076,12 @@ fn send_method(recv: Expr, method: &str, args: Vec<Expr>) -> Expr {
 /// the route's model overrides `to_param` (`slug_id`): Rails fills
 /// the segment from the override's (string) value, so the helper
 /// takes a String.
+/// `user_ids` -> `user_id`, so `param_ty`'s name-based rule sees the
+/// shape it knows. Anything not plural is its own singular.
+fn singular_key(name: &str) -> &str {
+    name.strip_suffix('s').unwrap_or(name)
+}
+
 fn param_ty(name: &str, slug_id: bool) -> Ty {
     if name == "id" || name.ends_with("_id") {
         if slug_id { Ty::Str } else { Ty::Int }

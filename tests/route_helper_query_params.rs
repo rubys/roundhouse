@@ -159,18 +159,59 @@ fn format_and_anchor_take_no_parameter() {
 }
 
 /// An Array value renders as `k[]=a&k[]=b` in Rails (campfire writes
-/// `rooms_directs_path(user_ids: [ user.id ])`). Left out rather than
-/// rendered as the array's `to_s`: a wrong URL is worse than a missing
-/// helper parameter.
+/// `rooms_directs_path(user_ids: [ user.id ])`), so the parameter it
+/// demands is an ARRAY — a scalar parameter would render the array's
+/// `to_s` into the URL, and a wrong URL is worse than a missing helper.
+///
+/// This test previously pinned the opposite: arrays were declined
+/// outright, which left the call site passing an argument to a 0-arg
+/// helper (`wrong number of arguments (given 1, expected 0)`, 10 tests
+/// of campfire's suite). Declining was the honest placeholder; typing
+/// it is the implementation.
 #[test]
-fn an_array_valued_option_declines() {
+fn an_array_valued_option_takes_an_array_parameter() {
     let app = app_with(
         ROUTES,
         "<%= link_to \"a\", autocompletable_notes_path(user_ids: [ 1 ]) %>\n",
     );
+    let ps = params(&app, "autocompletable_notes_path");
+    let user_ids = ps
+        .iter()
+        .find(|p| p.name.as_str() == "user_ids")
+        .unwrap_or_else(|| panic!("no user_ids parameter: {ps:?}"));
+    // `Array[Integer] | Nil` — nilable because every query key is a
+    // keyword defaulting to nil, and `Integer` because `param_ty`
+    // types the SINGULAR (`user_id`) it is named after.
+    let Ty::Union { variants } = &user_ids.ty else {
+        panic!("expected a nilable union: {:?}", user_ids.ty)
+    };
     assert!(
-        params(&app, "autocompletable_notes_path").is_empty(),
-        "array values are not modeled"
+        variants.iter().any(|v| matches!(v, Ty::Array { elem } if matches!(**elem, Ty::Int))),
+        "user_ids should be Array[Integer]: {variants:?}"
+    );
+}
+
+/// A key passed an array at ONE call site and a scalar at another
+/// resolves to the scalar: one helper, one signature, and the scalar
+/// rendering is the one that was already shipping.
+#[test]
+fn a_mixed_array_and_scalar_option_stays_scalar() {
+    let app = app_with(
+        ROUTES,
+        "<%= link_to \"a\", autocompletable_notes_path(user_ids: [ 1 ]) %>\n\
+         <%= link_to \"b\", autocompletable_notes_path(user_ids: 2) %>\n",
+    );
+    let ps = params(&app, "autocompletable_notes_path");
+    let user_ids = ps
+        .iter()
+        .find(|p| p.name.as_str() == "user_ids")
+        .unwrap_or_else(|| panic!("no user_ids parameter: {ps:?}"));
+    let Ty::Union { variants } = &user_ids.ty else {
+        panic!("expected a nilable union: {:?}", user_ids.ty)
+    };
+    assert!(
+        !variants.iter().any(|v| matches!(v, Ty::Array { .. })),
+        "mixed usage must not claim an array: {variants:?}"
     );
 }
 

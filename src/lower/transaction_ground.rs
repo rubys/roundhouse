@@ -36,42 +36,10 @@ use crate::expr::{Expr, ExprNode};
 use crate::ident::Symbol;
 
 pub fn apply_transaction_grounding(app: &mut App) {
-    for model in &mut app.models {
-        for item in &mut model.body {
-            match item {
-                crate::dialect::ModelBodyItem::Method { method, .. } => {
-                    rewrite(&mut method.body);
-                }
-                crate::dialect::ModelBodyItem::Association {
-                    assoc: crate::dialect::Association::HasMany { extension, .. },
-                    ..
-                } => {
-                    for method in extension.iter_mut() {
-                        rewrite(&mut method.body);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    // Model concerns: `module User::Bannable` in app.library_classes.
-    // Grounding is model-INDEPENDENT (it targets `ActiveRecord::Base`),
-    // so the concern does not need resolving to its includer — only
-    // recognizing as belonging to a model at all.
-    let model_names: std::collections::HashSet<String> =
-        app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
-    for lc in &mut app.library_classes {
-        if !lc.is_module {
-            continue;
-        }
-        let Some((namespace, _)) = lc.name.0.as_str().rsplit_once("::") else { continue };
-        if !model_names.contains(namespace) {
-            continue;
-        }
-        for m in &mut lc.methods {
-            rewrite(&mut m.body);
-        }
-    }
+    // `for_each_model_body` is the shared walk over the three families
+    // this pass needed one at a time (model methods, association
+    // extensions, model concerns) — see its note for why it exists.
+    super::for_each_model_body(app, &mut rewrite);
 }
 
 fn rewrite(expr: &mut Expr) {

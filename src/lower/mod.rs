@@ -84,6 +84,7 @@ pub mod relation_residue;
 pub mod send_dispatch;
 pub(crate) mod secure_password;
 pub mod attached;
+pub mod touch_column;
 pub(crate) mod secure_token;
 pub mod rich_text;
 pub mod capture_inline;
@@ -260,6 +261,7 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // lowerer reads what it records, and that runs later, at emit.
     ("html_safe", &["tag_builder"]),
     ("transaction_ground", &[]),
+    ("touch_column", &[]),
     ("partial_qualify", &[]),
     ("capture_inline", &["tag_builder"]),
     ("and_return", &[]),
@@ -418,6 +420,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("html_safe");
     transaction_ground::apply_transaction_grounding(app);
     ran!("transaction_ground");
+    touch_column::apply_touch_column_lowering(app);
+    ran!("touch_column");
     partial_qualify::apply_partial_qualification(app);
     ran!("partial_qualify");
     capture_inline::apply_capture_inline(app);
@@ -499,6 +503,63 @@ pub fn apply_post_analyze_lowerings(
 /// views rejoin when the view pipeline migrates to shared lowerings).
 /// Test-module and fixture bodies are excluded too (they run on CRuby
 /// lanes; extendable when a strict-target test lane needs it).
+/// Every body that runs on a MODEL INSTANCE, in one place.
+///
+/// Three families, and they are NOT all in `model.body`:
+///
+///   * the model's own methods;
+///   * an ASSOCIATION EXTENSION's methods (`has_many :memberships do
+///     def revise(…) … end end`), which hang off the association;
+///   * a model CONCERN's methods (`module User::Bannable`), which live
+///     in `app.library_classes` under a namespace naming the model.
+///
+/// This exists because `transaction_ground` hand-rolled the first
+/// family, shipped, then needed the second, shipped, then needed the
+/// third — three commits for one fact. A pass that rewrites "what a
+/// model instance can call" walks all three or it drifts, so the walk
+/// is written once and shared.
+///
+/// NOT the same set as [`for_each_hook_body`], which also covers
+/// controllers, plain library classes and seeds. A pass keyed to model
+/// instances specifically (a bare `transaction`, a bare `touch`) wants
+/// this narrower one — the wider walk would rewrite a helper module's
+/// send, which is somebody else's method.
+pub(crate) fn for_each_model_body(
+    app: &mut crate::app::App,
+    f: &mut impl FnMut(&mut crate::expr::Expr),
+) {
+    let model_names: std::collections::HashSet<String> =
+        app.models.iter().map(|m| m.name.0.as_str().to_string()).collect();
+    for model in &mut app.models {
+        for item in &mut model.body {
+            match item {
+                crate::dialect::ModelBodyItem::Method { method, .. } => f(&mut method.body),
+                crate::dialect::ModelBodyItem::Association {
+                    assoc: crate::dialect::Association::HasMany { extension, .. },
+                    ..
+                } => {
+                    for m in extension.iter_mut() {
+                        f(&mut m.body);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for lc in &mut app.library_classes {
+        if !lc.is_module {
+            continue;
+        }
+        let Some((namespace, _)) = lc.name.0.as_str().rsplit_once("::") else { continue };
+        if !model_names.contains(namespace) {
+            continue;
+        }
+        for m in &mut lc.methods {
+            f(&mut m.body);
+        }
+    }
+}
+
 pub(crate) fn for_each_hook_body(
     app: &mut crate::app::App,
     f: &mut impl FnMut(&mut crate::expr::Expr),
