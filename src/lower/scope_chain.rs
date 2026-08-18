@@ -1659,10 +1659,57 @@ fn relation_new(span: crate::span::Span, model: &ClassId) -> Expr {
 /// Returns the association names whose join in the RECEIVER chain must
 /// be re-emitted with its Rails alias — see the nested-hash arm.
 #[must_use]
+/// `where(col: a..b)` → `where("<table>.col >= ? AND <table>.col <= ?", a, b)`.
+///
+/// Rails renders a Range condition as a comparison (`>=` / `<=`, `<`
+/// for an exclusive end, and either half alone for a beginless or
+/// endless range). The runtime `Relation` cannot: `column_predicate`
+/// dispatches on Relation / Array / nil / Base and falls through to
+/// `col = <value>` for everything else, so a Range compared equal to a
+/// column matches nothing — silently, which is the worst kind.
+///
+/// Converted at the CALL SITE rather than taught to the runtime
+/// because there is no `Ty::Range` in the type system and no target
+/// ships a Range: a `val.is_a?(Range)` arm in `runtime/ruby` would
+/// have to compile on all eleven. Here the range is a literal, so what
+/// crosses into the runtime is the raw fragment + binds it already
+/// understands (`substitute_binds`).
+///
+/// Returns `None` for anything it will not convert — a multi-key hash
+/// (the fragment would have to compose the other predicates), a
+/// non-Symbol key, or a range with neither end.
+fn range_condition_fragment(model: &ClassId, arg: &Expr) -> Option<(Expr, Vec<Expr>)> {
+    let ExprNode::Hash { entries, .. } = &*arg.node else { return None };
+    let [(k, v)] = &entries[..] else { return None };
+    let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else { return None };
+    let ExprNode::Range { begin, end, exclusive } = &*v.node else { return None };
+    let table = crate::naming::pluralize_snake(model.0.as_str());
+    let col = format!("{table}.{key}");
+    let mut clauses: Vec<String> = Vec::new();
+    let mut binds: Vec<Expr> = Vec::new();
+    if let Some(b) = begin {
+        clauses.push(format!("{col} >= ?"));
+        binds.push(b.clone());
+    }
+    if let Some(e) = end {
+        // `a...b` excludes its end; `a..b` includes it.
+        clauses.push(format!("{col} {} ?", if *exclusive { "<" } else { "<=" }));
+        binds.push(e.clone());
+    }
+    if clauses.is_empty() {
+        return None;
+    }
+    let fragment = Expr::new(
+        arg.span,
+        ExprNode::Lit { value: Literal::Str { value: clauses.join(" AND ") } },
+    );
+    Some((fragment, binds))
+}
+
 fn lower_relation_args(
     model: &ClassId,
     method: &Symbol,
-    args: &mut [Expr],
+    args: &mut Vec<Expr>,
     ctx: &Ctx,
 ) -> Vec<Symbol> {
     let mut aliases: Vec<Symbol> = Vec::new();
@@ -1683,6 +1730,29 @@ fn lower_relation_args(
         // `user:` to `user_id:` on one spelling and emits the
         // nonexistent `memberships.user` column on the next.
         "where" | "not" | "find_by" | "find_by!" | "destroy_by" | "delete_by" | "exists?" => {
+            // `where(connected_at: TTL.ago..)` — a RANGE value. Rails
+            // renders `>=` / `<=` / `<` / BETWEEN; the runtime's
+            // `column_predicate` has no Range arm and falls through to
+            // `col = <the range object>`, which matches nothing and
+            // says nothing. Converted HERE, where the range is a
+            // literal, because the alternative is teaching every
+            // target's runtime what a Range is — there is no `Ty::Range`
+            // and no target ships one.
+            //
+            // Single-entry hashes only: a mixed hash would have to
+            // compose the fragment with the other keys' predicates, and
+            // half a conversion is worse than none (the multi-key form
+            // keeps its current, honest, matches-nothing behavior until
+            // a corpus app writes one).
+            if matches!(method.as_str(), "where" | "not" | "find_by" | "find_by!")
+                && args.len() == 1
+            {
+                if let Some((fragment, binds)) = range_condition_fragment(model, &args[0]) {
+                    args[0] = fragment;
+                    args.extend(binds);
+                    return aliases;
+                }
+            }
             for a in args.iter_mut() {
                 let span = a.span;
                 let ExprNode::Hash { entries, .. } = &mut *a.node else { continue };
