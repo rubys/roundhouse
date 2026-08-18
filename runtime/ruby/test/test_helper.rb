@@ -47,6 +47,11 @@ require "action_view/view_helpers"
 # reopen here cannot leak into them.
 require "action_view/view_helpers_ext"
 require "action_dispatch/router"
+# The shared Request (request_test.rb). Its aggregator is the scaffold's
+# boot.rb, not `action_dispatch.rb`, so this helper names it directly —
+# the same "a second list of the same thing" the CookieJar note below
+# describes.
+require "action_dispatch/request"
 require "action_controller/base"
 # The CookieJar reopen (cookies_test.rb). Safe to load here even though
 # base_test.rb is also run by the strict-target lanes: those ingest only

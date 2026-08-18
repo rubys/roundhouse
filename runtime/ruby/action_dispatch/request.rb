@@ -40,6 +40,23 @@ module ActionDispatch
       @format = "html"
       @body = +""
       @env = {}
+      # `@params` too, and for a reason `@env` shows: `Request.for`
+      # COPIES into both (`params.each { |k, v| r.params[k] = v }`),
+      # which READS the slot before anything writes it. Unset, that read
+      # is nil on a dynamic target and a null `sp_StrPolyHash *` under
+      # spinel AOT — `sp_StrPolyHash_set` then dereferences it and the
+      # whole test binary segfaults with no output.
+      #
+      # It went unnoticed because the two trees run DIFFERENT Request
+      # classes: the CRuby lane loads the overlay twin
+      # (`runtime/action_dispatch_request.rb`), so `ruby_toolchain`
+      # passes the same test file this one dies on. Every ivar this
+      # class declares gets a value here, or only the AOT lane finds
+      # out.
+      @params = {}
+      # Declared in the .rbs and previously left unset — the same
+      # defect `@params` had, one read away from surfacing.
+      @user_agent = +""
     end
 
     # Rails accepts a symbol (`request.format = :json`); store the
