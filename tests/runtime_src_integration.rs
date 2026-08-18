@@ -913,7 +913,16 @@ fn every_runtime_method_body_concretely_typed() {
     // put `.to_s` on the seven `env[...]` reads, which coerce a declared
     // `untyped` into the String the attribute holds and add nothing here.
     // +1 site; ceiling raised 276 -> 277.
-    const CEILING: usize = 277;
+    // 2026-08-18 `Relation#scoped_write_where` — the WHERE a bulk write
+    // takes, an `IN (SELECT …)` subquery when the scope carries a JOIN
+    // (SQL gives a DELETE nowhere to put one). Two sites, both rooted in
+    // `@model`: the constructor's parameter is untyped by declaration,
+    // so `@model.primary_key` is a gradual send and the `key` local it
+    // binds inherits that. Exactly the shape `@wheres`/`@joins` reads
+    // already contribute across this file; the two callers
+    // (`delete_all`, `update_all`) each lost a line and gained none.
+    // +2 sites; ceiling raised 277 -> 279.
+    const CEILING: usize = 279;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

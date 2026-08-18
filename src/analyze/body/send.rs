@@ -1126,7 +1126,10 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         // `drop`/`take` (and their block forms) return a same-element
         // sub-array — the tail of a splat destructuring (`a, *rest =`
         // desugars `rest` to `arr.drop(n)`) among other uses.
-        | "drop" | "take" | "drop_while" | "take_while" => {
+        | "drop" | "take" | "drop_while" | "take_while"
+        // ActiveSupport's `without` / `excluding` — the receiver minus
+        // the named elements, so same-element.
+        | "without" | "excluding" => {
             Ty::Array { elem: Box::new(elem.clone()) }
         }
         // `delete(x)` returns the deleted element or nil.

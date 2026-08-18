@@ -584,8 +584,7 @@ module ActiveRecord
     # Rails contract: no callbacks, no per-row loads, returns the
     # affected-row count. ORDER/LIMIT don't apply to bulk ops.
     def delete_all
-      sql = "DELETE FROM #{@table}"
-      sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
+      sql = "DELETE FROM #{@table}#{scoped_write_where}"
       ActiveRecord.adapter.execute_ddl(sql)
       ActiveRecord.adapter.changes
     end
@@ -631,10 +630,40 @@ module ActiveRecord
       else
         updates.to_s
       end
-      sql = "UPDATE #{@table} SET #{set_sql}"
-      sql = "#{sql} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
+      sql = "UPDATE #{@table} SET #{set_sql}#{scoped_write_where}"
       ActiveRecord.adapter.execute_ddl(sql)
       ActiveRecord.adapter.changes
+    end
+
+    # The WHERE clause a bulk WRITE takes — the one place `delete_all`
+    # and `update_all` differ from every read on this class.
+    #
+    # A read appends `@joins` to its FROM; SQL has no such place in a
+    # DELETE or an UPDATE, and dropping the join while KEEPING the
+    # conditions that name it emits a statement about a table that is
+    # not in the query. campfire's `User#deactivate` runs
+    # `memberships.without_direct_rooms.delete_all`, whose scope is
+    # `joins(:room).where.not(room: { type: "Rooms::Direct" })`, and it
+    # produced `DELETE FROM memberships WHERE … AND NOT (room.type =
+    # 'Rooms::Direct')` — "no such column: room.type".
+    #
+    # Rails answers the same way: scope the write by a subquery on the
+    # primary key, which is where the join CAN live. The `IN (SELECT …)`
+    # form is what SQLite supports (it has no `DELETE … USING`), and it
+    # is portable to every adapter this runtime might grow.
+    #
+    # Returns "" for the unscoped case so an unconditional `delete_all`
+    # still emits a bare `DELETE FROM <table>` — Rails' truncate-shaped
+    # statement, not a subquery over every row.
+    def scoped_write_where
+      return "" if @wheres.length == 0 && @joins.length == 0
+      if @joins.length == 0
+        return " WHERE #{@wheres.join(" AND ")}"
+      end
+      key = "#{@table}.#{@model.primary_key}"
+      inner = "SELECT #{key} FROM #{@table} #{@joins.join(" ")}"
+      inner = "#{inner} WHERE #{@wheres.join(" AND ")}" if @wheres.length > 0
+      " WHERE #{@model.primary_key} IN (#{inner})"
     end
 
     # `pluck(:col)` — a single column projected to an Array of its raw

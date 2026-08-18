@@ -583,6 +583,31 @@ pub(crate) fn for_each_model_body_named(
     }
 }
 
+/// Every body a TEST MODULE holds — each test's, the `setup` hook's,
+/// and each helper method's.
+///
+/// Deliberately NOT folded into [`for_each_hook_body`]: most passes
+/// that use that walk are about app semantics and have their own
+/// reasons for skipping test bodies (the blank pass says so in its
+/// header). A pass that wants test bodies asks for them by name, which
+/// keeps the widening reviewable one pass at a time.
+pub(crate) fn for_each_test_body(
+    app: &mut crate::app::App,
+    f: &mut impl FnMut(&mut crate::expr::Expr),
+) {
+    for tm in &mut app.test_modules {
+        if let Some(setup) = &mut tm.setup {
+            f(setup);
+        }
+        for t in &mut tm.tests {
+            f(&mut t.body);
+        }
+        for h in &mut tm.helpers {
+            f(&mut h.body);
+        }
+    }
+}
+
 pub(crate) fn for_each_hook_body(
     app: &mut crate::app::App,
     f: &mut impl FnMut(&mut crate::expr::Expr),

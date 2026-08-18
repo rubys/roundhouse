@@ -82,6 +82,20 @@ pub fn apply_duration_lowering(app: &mut App) {
     super::for_each_hook_body(app, &mut |body| {
         apply_duration_rewrites(body, temporal_predicates)
     });
+    // TEST BODIES TOO. `1.day.ago` is not a method on any target's
+    // Integer — this pass IS what grounds it — so a test writing one
+    // got `undefined method 'day' for an instance of Integer` and no
+    // diagnostic, because the pass simply never looked. campfire's
+    // `rooms/refreshes_controller_test` opens with `travel_to
+    // 1.day.ago do`.
+    //
+    // Safe to widen where the blank pass is not: this rewrite produces
+    // `ActiveSupport::Duration.<unit>(n)`, a call every target's
+    // runtime answers, rather than leaning on a CRuby overlay the
+    // strict-target test lanes do not ship.
+    super::for_each_test_body(app, &mut |body| {
+        apply_duration_rewrites(body, temporal_predicates)
+    });
 }
 
 /// The pass order the view vestige must mirror

@@ -82,11 +82,23 @@ pub(super) fn push_schema_methods(
     }
 
     // def self.table_name
+    //
+    // `model.table` — the name INGEST computed — not a second
+    // derivation from the class name. The two disagree exactly where
+    // Rails does: `pluralize_snake` keeps the namespace
+    // (`push::subscriptions`) while Rails DEMODULIZES and prepends the
+    // module parent's `table_name_prefix`, which is the entire reason
+    // campfire's four-line `app/models/push.rb` exists. Ingest reads
+    // both rules; this emitted the wrong name, so
+    // `user.push_subscriptions.delete_all` issued `DELETE FROM
+    // push::subscriptions` and SQLite answered "unrecognized token
+    // ':'". Third copy of this rule found in one session
+    // ([[feedback_port_dont_derive_inflections]]).
     methods.push(MethodDef {
         name: Symbol::from("table_name"),
         receiver: MethodReceiver::Class,
         params: Vec::new(),
-        body: lit_str(pluralize_snake(model.name.0.as_str())),
+        body: lit_str(model.table.0.as_str().to_string()),
         signature: Some(fn_sig(vec![], Ty::Str)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),

@@ -565,10 +565,19 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // a better-typed signed_id.rb could retire; widening the harness
     // to load action_controller's RBS is what would.
     //
+    // 2026-08-18 705 -> 707 — `Relation#scoped_write_where`, the WHERE
+    // clause `delete_all` / `update_all` take when the scope carries a
+    // JOIN (SQL has no place for one in a DELETE, so the write is
+    // scoped by an `IN (SELECT …)` subquery instead). TWO nodes, both
+    // the shape every entry above describes: the `@model.primary_key`
+    // send and the `key` local it binds. `@model` is the constructor's
+    // untyped parameter, so the send off it is untyped and the local
+    // rides on it. Nothing that was typed became untyped.
+    //
     // This ceiling moved on EVERY runtime/ruby method this session, and
     // `cargo test` is the only gate that reads it — budget ~1-3 nodes
     // per added method before touching the number here.
-    const CEILING: usize = 705;
+    const CEILING: usize = 707;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions exceeds ceiling of {CEILING}.\n\

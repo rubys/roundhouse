@@ -76,6 +76,16 @@ pub(crate) type TimeFormats = BTreeMap<Symbol, crate::app::TimeFormat>;
 pub fn apply_time_current_lowering(app: &mut App) {
     let formats = std::mem::take(&mut app.time_formats);
     super::for_each_hook_body(app, &mut |body| rewrite_time_current(body, &formats));
+    // TEST BODIES TOO, for the reason the `to_fs` note above gives: it
+    // is a hole we opened ourselves, and a test body reaches it the
+    // same way an app body does — campfire's
+    // `rooms/refreshes_controller_test` asserts against
+    // `message.created_at.to_fs(:number)`, the exact spelling
+    // `routes_to_library::direct` emits into the URL it is checking.
+    // Both halves of this pass expand into vocabulary every target
+    // already speaks (`Time.now.utc`, `strftime`), so nothing here
+    // leans on a CRuby overlay the strict-target test lanes lack.
+    super::for_each_test_body(app, &mut |body| rewrite_time_current(body, &formats));
     app.time_formats = formats;
 }
 

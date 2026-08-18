@@ -202,4 +202,21 @@ class Array
   def fifth
     self[4]
   end
+
+  # AS `without` / `excluding` (core_ext/enumerable.rb): the receiver
+  # minus the named elements. `Relation` already answers both (they are
+  # what `Room.opens.without(current)` needs); an Array did not, and a
+  # test body holding a materialized association is exactly where the
+  # Array form turns up — campfire's `rooms/refreshes_controller_test`
+  # writes `@room.messages.without(@old_message)`.
+  #
+  # Rails compares with `==`; two loads of the same row are different
+  # objects here, so this is IDENTITY on a model unless the model
+  # defines `==`. Recorded rather than worked around: `Base` documents
+  # why it defines no equality protocol.
+  def without(*values)
+    reject { |x| values.include?(x) }
+  end
+
+  alias_method :excluding, :without
 end

@@ -90,6 +90,9 @@ module ActiveRecord
     def destroy_by: (untyped conditions) -> Array[untyped]
     def delete_by: (untyped conditions) -> Integer
     def update_all: (untyped updates) -> Integer
+    # The WHERE a bulk write takes — a plain clause, or an
+    # `IN (SELECT …)` subquery when the scope carries a join.
+    def scoped_write_where: () -> String
     # `pluck`/`pick` hand back whatever the COLUMN holds — Integer for an
     # INTEGER column, Float for REAL, String for TEXT, nil for NULL —
     # because they read straight through `select_rows` without a cast.

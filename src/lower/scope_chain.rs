@@ -774,6 +774,17 @@ pub struct AssocRegistry {
     /// even though the receiver's class is statically unknown; ambiguous
     /// names are never tracked.
     has_many_by_name: HashMap<Symbol, Option<(ClassId, Symbol)>>,
+    /// model -> its REAL table name, straight off the ingested `Model`.
+    ///
+    /// Not `pluralize_snake(class_name)`, which is a second copy of a
+    /// rule that has already drifted once: Rails DEMODULIZES
+    /// (`Push::Subscription` is `subscriptions`, not
+    /// `push::subscriptions`) and prepends a module parent's
+    /// `table_name_prefix`, which is why `app/models/push.rb` exists at
+    /// all. Ingest reads both; deriving the name a second time here
+    /// emitted `DELETE FROM push::subscriptions` — "unrecognized token
+    /// ':'" — from `user.push_subscriptions.delete_all`.
+    tables: HashMap<ClassId, String>,
     /// `(model, has_many name)` pairs the FK seed CANNOT reproduce, so
     /// the rewriter declines them and the chain keeps its source shape.
     ///
@@ -820,6 +831,16 @@ pub struct AssocRegistry {
 }
 
 impl AssocRegistry {
+    /// The table `model` stores in. Falls back to Rails' derivation for
+    /// a class that is not an ingested model (a `class_name:` naming
+    /// something outside `app/models/`), which is the best guess
+    /// available and matches what the emitted `table_name` would say.
+    fn table_for(&self, model: &ClassId) -> String {
+        match self.tables.get(model) {
+            Some(t) => t.clone(),
+            None => crate::naming::rails_table_name(model.0.as_str()),
+        }
+    }
     fn join_tail(&self, model: &ClassId, assoc: &Symbol) -> Option<&String> {
         self.join_tails.get(&(model.clone(), assoc.clone()))
     }
@@ -929,11 +950,14 @@ fn scope_is_row_preserving(scope: &Expr) -> bool {
 pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
     let mut reg = AssocRegistry::default();
     for m in models {
-        let own = pluralize_snake(m.name.0.as_str());
+        reg.tables.insert(m.name.clone(), m.table.0.as_str().to_string());
+    }
+    for m in models {
+        let own = reg.table_for(&m.name);
         for a in m.associations() {
             match a {
                 Association::BelongsTo { name, target, foreign_key, .. } => {
-                    let t = pluralize_snake(target.0.as_str());
+                    let t = reg.table_for(target);
                     reg.join_tails.insert(
                         (m.name.clone(), name.clone()),
                         format!("{t} ON {t}.id = {own}.{foreign_key}"),
@@ -967,7 +991,7 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     {
                         reg.has_many_unseedable.insert((m.name.clone(), name.clone()));
                     }
-                    let t = pluralize_snake(target.0.as_str());
+                    let t = reg.table_for(target);
                     reg.join_tails.insert(
                         (m.name.clone(), name.clone()),
                         format!("{t} ON {t}.{foreign_key} = {own}.id"),
@@ -995,7 +1019,7 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                         .or_insert(Some(entry));
                 }
                 Association::HasOne { name, target, foreign_key, .. } => {
-                    let t = pluralize_snake(target.0.as_str());
+                    let t = reg.table_for(target);
                     reg.join_tails.insert(
                         (m.name.clone(), name.clone()),
                         format!("{t} ON {t}.{foreign_key} = {own}.id"),
@@ -1034,8 +1058,8 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     else {
                         continue;
                     };
-                    let thr_table = pluralize_snake(thr_target.0.as_str());
-                    let target_table = pluralize_snake(target.0.as_str());
+                    let thr_table = reg.table_for(thr_target);
+                    let target_table = reg.table_for(target);
                     reg.join_tails.insert(
                         (m.name.clone(), name.clone()),
                         format!(
@@ -1714,11 +1738,17 @@ fn relation_new(span: crate::span::Span, model: &ClassId) -> Expr {
 /// Returns `None` for anything it will not convert — a multi-key hash
 /// (the fragment would have to compose the other predicates), a
 /// non-Symbol key, or a range with neither end.
-fn range_condition_fragment(model: &ClassId, arg: &Expr) -> Option<(Expr, Vec<Expr>)> {
+fn range_condition_fragment(
+    model: &ClassId,
+    arg: &Expr,
+    ctx: &Ctx,
+) -> Option<(Expr, Vec<Expr>)> {
     let ExprNode::Hash { entries, .. } = &*arg.node else { return None };
     let [(k, v)] = &entries[..] else { return None };
     let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else { return None };
-    let table = crate::naming::pluralize_snake(model.0.as_str());
+    // The registry's table, not a second derivation of it — see
+    // `AssocRegistry::tables`.
+    let table = ctx.assocs.table_for(model);
     let col = format!("{table}.{key}");
     let mut binds: Vec<Expr> = Vec::new();
     let sql = match &*v.node {
@@ -1831,7 +1861,7 @@ fn lower_relation_args(
             if matches!(method.as_str(), "where" | "not" | "find_by" | "find_by!")
                 && args.len() == 1
             {
-                if let Some((fragment, binds)) = range_condition_fragment(model, &args[0]) {
+                if let Some((fragment, binds)) = range_condition_fragment(model, &args[0], ctx) {
                     args[0] = fragment;
                     args.extend(binds);
                     return aliases;
@@ -2915,6 +2945,29 @@ mod tests {
         Expr::new(span(), ExprNode::Var { id: VarId(0), name: Symbol::from(name) })
     }
 
+    /// A `Ctx` with EMPTY registries, which is what these fragment
+    /// tests want: with no ingested model behind the name,
+    /// `table_for` falls back to Rails' own derivation, so the
+    /// expected SQL is the same one a real `Membership` produces and
+    /// the test does not have to build a whole app to say so.
+    fn fragment_ctx<'a>(
+        scopes: &'a ScopeRegistry,
+        models: &'a HashSet<ClassId>,
+        assocs: &'a AssocRegistry,
+    ) -> Ctx<'a> {
+        Ctx {
+            scopes,
+            models,
+            assocs,
+            assoc_class_methods: empty_assoc_cm(),
+            scope_body: None,
+            self_const_is_implicit: false,
+            class_self: None,
+            user_returns: empty_returns(),
+            instance_self: None,
+        }
+    }
+
     fn fragment_sql(f: &Expr) -> &str {
         match &*f.node {
             ExprNode::Lit { value: Literal::Str { value } } => value.as_str(),
@@ -2928,10 +2981,13 @@ mod tests {
     #[test]
     fn a_range_condition_becomes_comparisons() {
         let m = ClassId(Symbol::from("Membership"));
+        let (sc, md, ac) = (ScopeRegistry::new(), HashSet::new(), AssocRegistry::default());
+        let ctx = fragment_ctx(&sc, &md, &ac);
 
         let (sql, binds) = range_condition_fragment(
             &m,
             &cond_hash("connected_at", range(Some(cutoff("a")), Some(cutoff("b")), false)),
+            &ctx,
         )
         .expect("both ends");
         assert_eq!(
@@ -2944,6 +3000,7 @@ mod tests {
         let (sql, _) = range_condition_fragment(
             &m,
             &cond_hash("connected_at", range(Some(cutoff("a")), Some(cutoff("b")), true)),
+            &ctx,
         )
         .expect("exclusive end");
         assert!(fragment_sql(&sql).contains("< ?"), "{}", fragment_sql(&sql));
@@ -2952,6 +3009,7 @@ mod tests {
         let (sql, binds) = range_condition_fragment(
             &m,
             &cond_hash("connected_at", range(Some(cutoff("a")), None, false)),
+            &ctx,
         )
         .expect("endless");
         assert_eq!(fragment_sql(&sql), "memberships.connected_at >= ?");
@@ -2959,7 +3017,7 @@ mod tests {
 
         // Neither end has no comparison to make.
         assert!(
-            range_condition_fragment(&m, &cond_hash("connected_at", range(None, None, false)))
+            range_condition_fragment(&m, &cond_hash("connected_at", range(None, None, false)), &ctx)
                 .is_none()
         );
     }
@@ -2972,6 +3030,8 @@ mod tests {
     #[test]
     fn an_array_of_alternatives_becomes_an_or() {
         let m = ClassId(Symbol::from("Membership"));
+        let (sc, md, ac) = (ScopeRegistry::new(), HashSet::new(), AssocRegistry::default());
+        let ctx = fragment_ctx(&sc, &md, &ac);
         let value = Expr::new(
             span(),
             ExprNode::Array {
@@ -2982,7 +3042,7 @@ mod tests {
                 style: Default::default(),
             },
         );
-        let (sql, binds) = range_condition_fragment(&m, &cond_hash("connected_at", value))
+        let (sql, binds) = range_condition_fragment(&m, &cond_hash("connected_at", value), &ctx)
             .expect("nil + range");
         assert_eq!(
             fragment_sql(&sql),
@@ -2997,6 +3057,8 @@ mod tests {
     #[test]
     fn an_array_with_a_scalar_member_declines() {
         let m = ClassId(Symbol::from("Membership"));
+        let (sc, md, ac) = (ScopeRegistry::new(), HashSet::new(), AssocRegistry::default());
+        let ctx = fragment_ctx(&sc, &md, &ac);
         let value = Expr::new(
             span(),
             ExprNode::Array {
@@ -3007,7 +3069,7 @@ mod tests {
                 style: Default::default(),
             },
         );
-        assert!(range_condition_fragment(&m, &cond_hash("connected_at", value)).is_none());
+        assert!(range_condition_fragment(&m, &cond_hash("connected_at", value), &ctx).is_none());
     }
 
     // ---- build_assoc_registry: has_many :through ----------------------
