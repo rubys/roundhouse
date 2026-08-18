@@ -690,12 +690,25 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
-      # The emitted tree's `runtime/db.rb` is the gem-backed shim
-      # (`require "sqlite3"`), and the suite runs each test file with a
-      # bare `ruby -Itest`, so the gem has to be on the default path — a
-      # bundler-cached vendor/bundle would not be seen.
-      - name: Install the sqlite3 gem
-        run: gem install sqlite3 --no-document
+      # Two gems, from two different places, both needed by a bare
+      # `ruby -Itest` — which is how the suite runs each file, so they
+      # have to land on the DEFAULT gem path; a bundler-cached
+      # vendor/bundle would not be seen.
+      #
+      #   sqlite3 — the emitted `runtime/db.rb` is the gem-backed shim
+      #             (`require "sqlite3"`).
+      #   bcrypt  — from the APP, not from us: campfire's own
+      #             `test/fixtures/users.yml` opens with
+      #             `<% BCrypt::Password.create("secret123456") %>`, and
+      #             the emitted fixture carries that through. Our
+      #             `runtime/ruby/bcrypt_facade.rb` has no `require
+      #             "bcrypt"` — reading that as "the gem is not needed"
+      #             is what shipped this job red on its first run, with
+      #             `uninitialized constant UsersFixtures::BCrypt` in 49
+      #             of 52 files. A dev box that has bcrypt installed for
+      #             any other reason hides it completely.
+      - name: Install the gems the emitted suite loads
+        run: gem install sqlite3 bcrypt --no-document
       - name: Fetch once-campfire at the pinned SHA
         run: |
           set -euo pipefail
