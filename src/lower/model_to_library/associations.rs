@@ -103,6 +103,20 @@ pub(super) fn push_association_methods(
                     scope.as_ref(),
                 ));
                 methods.push(synth_preload_setter(owner, name, target));
+                {
+                    // A model that writes its own `<singular>_ids`
+                    // wins, same as every other synthesizer here — the
+                    // emit drops duplicate definitions, so an
+                    // unguarded push would shadow the hand-written one.
+                    let ids = synth_has_many_id_reader(owner, name);
+                    if !model_defines_instance_method(model, &ids.name)
+                        && !methods.iter().any(|x| {
+                            x.name == ids.name && x.receiver == MethodReceiver::Instance
+                        })
+                    {
+                        methods.push(ids);
+                    }
+                }
                 for m in synth_assoc_extension_methods(owner, name, extension) {
                     if !model_defines_instance_method(model, &m.name)
                         && !methods
@@ -388,6 +402,96 @@ fn synth_has_many_reader(
         is_async: false,
             mutates_self: false,
             block_param: None,
+    }
+}
+
+/// `<singular>_ids` — the id list Rails generates for every has_many
+/// (`room.user_ids` for `has_many :users, through: :memberships`).
+///
+/// Delegates to the association reader rather than composing its own
+/// query: the reader already carries the whole recipe — the fk
+/// condition, the polymorphic `as:` type half, a `scope:`, and for a
+/// `:through` the JOIN — and a second copy of that recipe is the drift
+/// this file keeps paying for.
+///
+/// `map { |r| r.id }`, NOT `pluck(:id)`, and the difference is a target
+/// fact: the reader's TYPE is not the same everywhere. Ruby-family
+/// targets hand back an `ActiveRecord::Relation` (which has `pluck`,
+/// and would project one column server-side), while C# hands back a
+/// `List<Comment>` — `Pluck` is not a method on it and the app fails to
+/// compile. `map` is defined on both, because Relation is Enumerable,
+/// and `scope_chain.rs` already synthesizes this exact records-to-ids
+/// shape. The cost is loading whole records where a Relation could have
+/// projected; the alternative is a body that only some targets compile.
+///
+/// Reader-only. Rails also generates `<singular>_ids=`, which assigns
+/// the collection by id; that is the collection writer's job (see the
+/// `:through` writer above) and it is not synthesized here, so it
+/// stays a NoMethodError rather than a half-writer.
+fn synth_has_many_id_reader(owner: &ClassId, name: &Symbol) -> MethodDef {
+    let method_name =
+        Symbol::from(format!("{}_ids", crate::naming::singularize(name.as_str())));
+    // No leading underscore: Elixir reads `_name` as "deliberately
+    // ignored" and warns when the body then uses it, which the elixir
+    // toolchain compiles with warnings-as-errors. (`scope_chain.rs`
+    // spells its own records-to-ids block `__rh_rec`; that one has not
+    // reached the elixir corpus yet.)
+    let rec = Symbol::from("rh_id_record");
+    let id_read = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Var { id: crate::ident::VarId(0), name: rec.clone() },
+            )),
+            method: Symbol::from("id"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: None,
+                    method: name.clone(),
+                    args: vec![],
+                    block: None,
+                    parenthesized: false,
+                },
+            )),
+            method: Symbol::from("map"),
+            args: vec![],
+            block: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Lambda {
+                    params: vec![rec],
+                    block_param: None,
+                    body: id_read,
+                    block_style: crate::expr::BlockStyle::Brace,
+                },
+            )),
+            parenthesized: false,
+        },
+    );
+    MethodDef {
+        name: method_name,
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        // `id` is `Integer` on every model, so unlike `pluck` (whose
+        // own RBS hands back `Array[untyped]`) this projection can name
+        // the element type it actually produces.
+        signature: Some(fn_sig(vec![], Ty::Array { elem: Box::new(Ty::Int) })),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
     }
 }
 
