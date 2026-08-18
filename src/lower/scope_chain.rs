@@ -1368,6 +1368,16 @@ fn is_relation_chain_method(name: &str) -> bool {
             // chain once puts all of them on Relation, which already
             // defines them.
             | "excluding"
+            // `without` is `excluding`'s ALIAS, on Relation and on
+            // Enumerable both, and Rails apps write whichever reads
+            // better at the site. Listing one and not the other is the
+            // shape that drifts: campfire's refreshes controller writes
+            // `@room.messages.without(@new_messages).with_creator`, and
+            // with only `excluding` here the chain stayed on the
+            // reader's folded Array — where `without` exists (the AS
+            // core_ext) and answers an Array, so the NEXT hop
+            // (`with_creator`, a scope) was the one that failed.
+            | "without"
     )
 }
 

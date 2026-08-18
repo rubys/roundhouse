@@ -249,6 +249,15 @@ class TestBase
   def teardown
   end
 
+  # `dom_id(record)` — `ActionView::RecordIdentifier`, which Rails mixes
+  # into integration tests so an assertion can name the element the view
+  # rendered (`assert_select "#" + dom_id(@message)`). Delegates to the
+  # same module function the VIEWS call, so the two cannot disagree
+  # about what a record's element id is — the point of the seam.
+  def dom_id(record, suffix = nil)
+    ActionView::ViewHelpers.dom_id(record, suffix)
+  end
+
   # ---- ActiveSupport::Testing::TimeHelpers -----------------------
   #
   # Rails stubs `Time.now` itself; the shared runtime cannot reopen a
