@@ -652,6 +652,97 @@ jobs:
       - name: cargo test --test framework_tests_spinel -- --ignored
         run: cargo test --test framework_tests_spinel -- --ignored --nocapture
 
+  # Campfire conformance — ONCE Campfire's OWN test suite, run against a
+  # roundhouse emit of it. The C4 rung of the coverage ladder, and the
+  # first time that number is produced by anything but a human at a
+  # terminal: it was hand-run per session before this, so it could drift
+  # between them with nothing to say so.
+  #
+  # IN CI, NOT ON THE BENCH BOX — the opposite call from lobsters
+  # conformance, and for one reason: the INPUT IS PINNED. `CAMPFIRE_SHA`
+  # fixes the app, so every movement in the number belongs to a commit
+  # here, which is the only thing CI can attribute. `scripts/lobsters-specs`
+  # deliberately does NOT pin ("a ledger answers a present-tense question…
+  # record the input, don't freeze it"), so per-commit attribution is
+  # impossible there and the cron box is its home. Nor is this job
+  # timing-sensitive the way the benchmarks are, so a shared runner is
+  # fine. Bumping CAMPFIRE_SHA moves the number deliberately, and the
+  # commit that bumps it owns the delta.
+  #
+  # BLOCKING, NOT ADVISORY. `framework-tests-spinel` above is
+  # `continue-on-error` because it tracks matz/spinel master unpinned and
+  # upstream churn must not gate unrelated work — but the cost is that a
+  # break there is invisible in the run's conclusion (learned the hard
+  # way: a rename broke all 8 and CI still reported success). Nothing here
+  # is unpinned, so there is no churn to excuse noise and no reason to
+  # reach for that hatch.
+  #
+  # Cheap, unlike its lobsters sibling: `campfire-suite` runs the EMIT's
+  # own tests, so it needs no Rails bundle and no mise-pinned ruby — just
+  # cargo, ruby, the sqlite3 gem, and the sqlite3 CLI.
+  campfire-conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+      # The emitted tree's `runtime/db.rb` is the gem-backed shim
+      # (`require "sqlite3"`), and the suite runs each test file with a
+      # bare `ruby -Itest`, so the gem has to be on the default path — a
+      # bundler-cached vendor/bundle would not be seen.
+      - name: Install the sqlite3 gem
+        run: gem install sqlite3 --no-document
+      - name: Fetch once-campfire at the pinned SHA
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
+          mkdir -p /tmp/campfire
+          tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
+      - name: Run campfire's suite against the emit
+        run: scripts/campfire-suite --tally /tmp/campfire-tally.txt /tmp/campfire
+      # The harness reports a number and never gates on one (by design —
+      # see its header), so the floor lives here. `>=`, so progress is
+      # never a failure; exceeding it emits a notice asking for the bump,
+      # which is how the floor stays honest instead of decorative.
+      - name: Enforce the floor
+        env:
+          FLOOR_TESTS: 72
+          FLOOR_FILES: 8
+        run: |
+          set -euo pipefail
+          tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)
+          total=$(awk -F'|' '{t += $4} END {print t+0}' /tmp/campfire-tally.txt)
+          files=$(grep -c '^PASS' /tmp/campfire-tally.txt || true)
+          echo "campfire conformance: $tests of $total tests, $files of $(grep -c . /tmp/campfire-tally.txt) files green"
+          echo "floor: $FLOOR_TESTS tests / $FLOOR_FILES files"
+          rc=0
+          if [ "$tests" -lt "$FLOOR_TESTS" ]; then
+            echo "::error::campfire tests regressed: $tests < $FLOOR_TESTS (see the tally artifact for the first error per file)"
+            rc=1
+          fi
+          if [ "$files" -lt "$FLOOR_FILES" ]; then
+            echo "::error::campfire green files regressed: $files < $FLOOR_FILES"
+            rc=1
+          fi
+          if [ "$tests" -gt "$FLOOR_TESTS" ] || [ "$files" -gt "$FLOOR_FILES" ]; then
+            echo "::notice::floor is stale — raise FLOOR_TESTS/FLOOR_FILES to $tests/$files"
+          fi
+          exit $rc
+      # Always: a regression is exactly when the per-file first-error
+      # column is worth reading, and that is the run where the step above
+      # failed.
+      - name: Upload the tally
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: campfire-conformance-tally
+          path: /tmp/campfire-tally.txt
+          if-no-files-found: warn
+
   toolchain-elixir:
     needs: generate-fixture
     runs-on: ubuntu-latest
