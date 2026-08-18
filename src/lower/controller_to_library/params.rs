@@ -185,30 +185,29 @@ pub fn collect_specs(controllers: &[Controller]) -> ParamsSpecs {
 fn scan_create_demand(controllers: &[Controller], specs: &mut ParamsSpecs) {
     let mut demand: Vec<(ClassId, bool)> = Vec::new();
     let mut to_attrs: Vec<ClassId> = Vec::new();
+    // Read-only for the whole walk; the two demand lists are applied
+    // after it, which is what keeps this a shared borrow.
+    let specs_ro: &ParamsSpecs = specs;
     for c in controllers {
         let actions: Vec<crate::dialect::Action> = c.actions().cloned().collect();
-        let helpers = helper_spec_map(&actions, specs);
-        if helpers.is_empty() {
-            continue;
-        }
+        let helpers = helper_spec_map(&actions, specs_ro);
+        // NO `helpers.is_empty()` skip: a controller that writes the
+        // permit chain inline (lobsters' `HatsController#approve_request`)
+        // has no `<x>_params` helper at all, and its `to_attrs` demand is
+        // exactly the one that has to be counted.
+        let helper_classes: BTreeMap<Symbol, ClassId> =
+            helpers.iter().map(|(n, s)| (n.clone(), s.class_id.clone())).collect();
         for action in &actions {
             walk_all(&action.body, &mut |e| {
                 let ExprNode::Send { recv: Some(recv), method, args, .. } = &*e.node else {
                     return;
                 };
-                // `<helper>.to_attrs` — the attribute-hash conversion
-                // `params_merge` writes at a call site whose callee takes
-                // a hash, not a params object.
+                // `<params-source>.to_attrs` — the attribute-hash
+                // conversion `params_merge` writes at a call site whose
+                // callee takes a hash, not a params object.
                 if method.as_str() == "to_attrs" && args.is_empty() {
-                    let ExprNode::Send { recv: None, method: h, args: hargs, block: None, .. } =
-                        &*recv.node
-                    else {
-                        return;
-                    };
-                    if hargs.is_empty() {
-                        if let Some(spec) = helpers.get(h) {
-                            to_attrs.push(spec.class_id.clone());
-                        }
+                    if let Some(class) = params_source_class(recv, &helper_classes, specs_ro) {
+                        to_attrs.push(class);
                     }
                     return;
                 }
@@ -507,6 +506,38 @@ pub fn helper_spec_map<'a>(
         }
     }
     out
+}
+
+/// The params class an expression yields, in any of the spellings a
+/// call site uses for one.
+///
+/// Three, and a rewrite that recognizes only the first sees a params
+/// object where the callee wants an attribute hash:
+///   - the helper: `hat_params`
+///   - the permit chain written inline: `params.require(:hat_request)
+///     .permit(:hat, :link, :reason)` — lobsters' `HatsController`
+///     writes it straight into `update!`
+///   - either of those under an in-place filter: `.except(:reason)`,
+///     `.compact`. Both narrow WHICH fields the object reports as
+///     provided and return the object itself, so the class is the
+///     receiver's.
+pub(crate) fn params_source_class(
+    expr: &Expr,
+    helpers: &BTreeMap<Symbol, ClassId>,
+    specs: &ParamsSpecs,
+) -> Option<ClassId> {
+    if let ExprNode::Send { recv: Some(recv), method, block: None, .. } = &*expr.node {
+        if matches!(method.as_str(), "except" | "compact") {
+            return params_source_class(recv, helpers, specs);
+        }
+    }
+    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
+        if args.is_empty() {
+            return helpers.get(method).cloned();
+        }
+    }
+    let (resource, fields) = match_permit_call(expr)?;
+    specs.find(&resource, &fields).map(|s| s.class_id.clone())
 }
 
 /// Match either of the two source forms:

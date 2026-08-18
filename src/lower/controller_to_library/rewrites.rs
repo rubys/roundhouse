@@ -774,7 +774,7 @@ pub(super) fn rewrite_assoc_through_parent_typed(
                 if outer_args.is_empty() {
                     return Some(expand_build_bare(&model_class, &fk, parent_name, lhs, e.span));
                 }
-                if let Some(spec) = match_params_helper(&outer_args[0], &helper_specs) {
+                if let Some(spec) = match_params_helper(&outer_args[0], &helper_specs, params_specs) {
                     return Some(expand_build_typed(
                         &model_class,
                         &fk,
@@ -792,7 +792,7 @@ pub(super) fn rewrite_assoc_through_parent_typed(
             // into build+save here would only restate it.
             AssocKind::Create { bang } => {
                 let lhs = lhs.expect("checked above");
-                let spec = match_params_helper(&outer_args[0], &helper_specs)?;
+                let spec = match_params_helper(&outer_args[0], &helper_specs, params_specs)?;
                 expand_create_typed(
                     &model_class,
                     &fk,
@@ -860,15 +860,40 @@ pub(super) fn rewrite_assoc_through_parent_typed(
     })
 }
 
-/// True-when-Some: `arg` is a bare call to one of this controller's
-/// `<x>_params` helpers, and that helper's body declared a permit list.
-/// Returns the spec, so the caller reaches the right class even when the
-/// helper's name doesn't match its resource (`bot_params` permits
-/// `:user`) or when the resource carries several lists.
+/// True-when-Some: `arg` evaluates to a params object. Returns the spec,
+/// so the caller reaches the right class even when the helper's name
+/// doesn't match its resource (`bot_params` permits `:user`) or when the
+/// resource carries several lists.
+///
+/// Three spellings, because a call site is free to use any of them and
+/// they all arrive at the same typed object:
+///   - a bare call to one of this controller's `<x>_params` helpers;
+///   - the typed factory the permit chain has ALREADY become — this runs
+///     after `rewrite_to_from_raw`, so a chain written inline at the call
+///     site reads `<Class>.from_raw(@params)` by now;
+///   - either of those under an in-place filter (`.except(:reason)`,
+///     `.compact`), which clears presence flags and returns the object
+///     itself. lobsters writes exactly that:
+///     `@hat_request.update!(params.require(:hat_request)
+///     .permit(:hat, :link, :reason).except(:reason))`. Matching only the
+///     first spelling left the typed object in a plain `update!`, whose
+///     parameter is Rails' attribute Hash — a mismatch no dynamic target
+///     notices and every strict one refuses.
 fn match_params_helper<'a>(
     arg: &Expr,
     helper_specs: &BTreeMap<Symbol, &'a ParamsSpec>,
+    params_specs: &'a ParamsSpecs,
 ) -> Option<&'a ParamsSpec> {
+    if let ExprNode::Send { recv: Some(recv), method, block: None, .. } = &*arg.node {
+        if matches!(method.as_str(), "except" | "compact") {
+            return match_params_helper(recv, helper_specs, params_specs);
+        }
+        if method.as_str() == "from_raw" {
+            let ExprNode::Const { path } = &*recv.node else { return None };
+            let class = path.last()?;
+            return params_specs.iter().find(|s| &s.class_id.0 == class);
+        }
+    }
     let ExprNode::Send { recv: None, method, args, block: None, .. } = &*arg.node else {
         return None;
     };
@@ -1228,10 +1253,11 @@ pub(super) fn rewrite_model_new_to_from_params(
     privs: &[Action],
     params_specs: &ParamsSpecs,
 ) -> Expr {
+    // No empty-map bail: `match_params_helper` also recognizes the
+    // permit chain written inline at the call site (by now a
+    // `<Class>.from_raw(@params)`), and a controller that writes it that
+    // way defines no `<x>_params` helper at all.
     let helper_specs = super::params::helper_spec_map(privs, params_specs);
-    if helper_specs.is_empty() {
-        return expr.clone();
-    }
     map_expr(expr, &|e| {
         let ExprNode::Send {
             recv: Some(model_recv),
@@ -1251,7 +1277,7 @@ pub(super) fn rewrite_model_new_to_from_params(
         let ExprNode::Const { path } = &*model_recv.node else {
             return None;
         };
-        let spec = match_params_helper(&args[0], &helper_specs)?;
+        let spec = match_params_helper(&args[0], &helper_specs, params_specs)?;
         // The typed factories live on the model whose resource this list
         // permits; `Membership.create(boost_params)` has none to reach.
         let model = path.last()?;
@@ -1296,10 +1322,11 @@ pub(super) fn rewrite_update_to_typed_variant(
     privs: &[Action],
     params_specs: &ParamsSpecs,
 ) -> Expr {
+    // No empty-map bail: `match_params_helper` also recognizes the
+    // permit chain written inline at the call site (by now a
+    // `<Class>.from_raw(@params)`), and a controller that writes it that
+    // way defines no `<x>_params` helper at all.
     let helper_specs = super::params::helper_spec_map(privs, params_specs);
-    if helper_specs.is_empty() {
-        return expr.clone();
-    }
     map_expr(expr, &|e| {
         let ExprNode::Send { recv: Some(recv), method, args, block: None, parenthesized } =
             &*e.node
@@ -1314,7 +1341,7 @@ pub(super) fn rewrite_update_to_typed_variant(
         if args.len() != 1 {
             return None;
         }
-        let spec = match_params_helper(&args[0], &helper_specs)?;
+        let spec = match_params_helper(&args[0], &helper_specs, params_specs)?;
         Some(Expr::new(
             e.span,
             ExprNode::Send {

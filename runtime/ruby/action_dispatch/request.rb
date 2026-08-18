@@ -150,15 +150,28 @@ module ActionDispatch
       # type 'sp_StrStrHash *'`). Same reason `stringify_keys` exists
       # in the test harness rather than a `.dup`.
       env.each { |k, v| r.env[k] = v }
-      r.params = params
-      r.request_method = env["REQUEST_METHOD"] || "GET"
-      r.path = env["PATH_INFO"] || "/"
-      r.query_string = env["QUERY_STRING"] || ""
-      r.script_name = env["SCRIPT_NAME"] || ""
-      r.host = env["HTTP_HOST"] || env["SERVER_NAME"] || "localhost"
-      r.remote_ip = env["REMOTE_ADDR"] || "127.0.0.1"
-      r.referer = env["HTTP_REFERER"] || ""
-      r.user_agent = env["HTTP_USER_AGENT"] || ""
+      # `params` is copied for the same reason, and additionally because
+      # its own default is an empty literal: a bare `{}` is Symbol-keyed
+      # on a strict target, which is not what `@params` is declared to
+      # hold. `k.to_s` bridges both the default and a Symbol-keyed
+      # caller.
+      params.each { |k, v| r.params[k.to_s] = v }
+      # `.to_s` on every read: `env` holds `untyped` BY CONTRACT (see
+      # above), so a read is a dynamic value, and these attributes are
+      # Strings. A dynamic target coerces on assignment and never
+      # mentions it; spinel refuses the assignment outright (matz's
+      # 91307939 keeps an untyped RBS parameter untyped rather than
+      # narrowing it to whatever the first caller passed, which is what
+      # made this visible). The `|| default` still supplies the value
+      # for a missing key — `nil.to_s` is `""`, not the default.
+      r.request_method = (env["REQUEST_METHOD"] || "GET").to_s
+      r.path = (env["PATH_INFO"] || "/").to_s
+      r.query_string = (env["QUERY_STRING"] || "").to_s
+      r.script_name = (env["SCRIPT_NAME"] || "").to_s
+      r.host = (env["HTTP_HOST"] || env["SERVER_NAME"] || "localhost").to_s
+      r.remote_ip = (env["REMOTE_ADDR"] || "127.0.0.1").to_s
+      r.referer = (env["HTTP_REFERER"] || "").to_s
+      r.user_agent = (env["HTTP_USER_AGENT"] || "").to_s
       r
     end
   end

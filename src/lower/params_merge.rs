@@ -74,7 +74,8 @@ use crate::span::Span;
 use crate::ty::Ty;
 
 use super::controller_to_library::params::{
-    collect_specs, helper_spec_map, model_from_params_name, ParamsSpec, ParamsSpecs,
+    collect_specs, helper_spec_map, model_from_params_name, params_source_class, ParamsSpec,
+    ParamsSpecs,
 };
 
 /// `(callee class, method, parameter index)`.
@@ -418,12 +419,12 @@ fn convert_attrs_call_sites(
             .into_iter()
             .map(|(name, spec)| (name, spec.class_id.clone()))
             .collect();
-        if helpers.is_empty() {
-            continue;
-        }
+        // No `helpers.is_empty()` skip — the permit chain written inline
+        // at the call site names no helper, and it is a params object
+        // just the same (`params_source_class`).
         for item in &mut controller.body {
             let crate::dialect::ControllerBodyItem::Action { action, .. } = item else { continue };
-            convert_in(&mut action.body, &helpers, &assoc, bindings);
+            convert_in(&mut action.body, &helpers, specs, &assoc, bindings);
         }
     }
 }
@@ -431,6 +432,7 @@ fn convert_attrs_call_sites(
 fn convert_in(
     e: &mut Expr,
     helpers: &BTreeMap<Symbol, ClassId>,
+    specs: &ParamsSpecs,
     assoc: &AssocCtx<'_>,
     bindings: &HashMap<BindKey, Binding>,
 ) {
@@ -442,12 +444,12 @@ fn convert_in(
                 else {
                     continue;
                 };
-                let ExprNode::Send { recv: None, method: h, args: hargs, block: None, .. } =
-                    &*arg.node
-                else {
-                    continue;
-                };
-                if !hargs.is_empty() || helpers.get(h) != Some(want) {
+                // The argument is a params object in any of its
+                // spellings — helper, inline permit chain, or either
+                // under `.except(…)` / `.compact`. `.to_attrs` goes on
+                // the OUTSIDE: the filters run first (clearing presence
+                // flags), the conversion reads what survives.
+                if params_source_class(arg, helpers, specs).as_ref() != Some(want) {
                     continue;
                 }
                 let span = arg.span;
@@ -465,7 +467,7 @@ fn convert_in(
             }
         }
     }
-    e.node.for_each_child_mut(&mut |c| convert_in(c, helpers, assoc, bindings));
+    e.node.for_each_child_mut(&mut |c| convert_in(c, helpers, specs, assoc, bindings));
 }
 
 fn rewrite_method(

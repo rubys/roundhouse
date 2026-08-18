@@ -905,7 +905,15 @@ fn every_runtime_method_body_concretely_typed() {
     // Its neighbour `action_controller/message_verifier.rb` gained
     // three methods in the same change and contributes nothing here.
     // +1 site; ceiling raised 275 -> 276.
-    const CEILING: usize = 276;
+    // 2026-08-18 `Request.for`'s `params` copy — the sibling of the `env`
+    // copy two entries above, and untyped for the same declared reason
+    // (`@params` is `Hash[String, untyped]`). It stopped being an
+    // assignment because a bare `{}` default is Symbol-keyed on a strict
+    // target, so the block's value read is the one new site. Same change
+    // put `.to_s` on the seven `env[...]` reads, which coerce a declared
+    // `untyped` into the String the attribute holds and add nothing here.
+    // +1 site; ceiling raised 276 -> 277.
+    const CEILING: usize = 277;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
