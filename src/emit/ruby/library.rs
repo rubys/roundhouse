@@ -2199,6 +2199,22 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
     let slug_models = models_overriding_to_param(app);
     let assoc_targets = singular_association_targets(app);
     let collection_targets = collection_association_targets(app);
+    // `direct :name do |record, options| … end` helpers take their
+    // arguments VERBATIM — Rails hands them to the block, and the block
+    // decides what to read. campfire's
+    // `direct :fresh_user_avatar do |user, options| route_for
+    // :user_avatar, user.avatar_token, v: user.updated_at… end` wants
+    // the RECORD; projecting it to `user.id` first handed the block an
+    // Integer and every call died on `undefined method 'updated_at'`.
+    // Skipping them by name is the one place this pass can tell the
+    // difference: a generated resource helper's segment is a param, a
+    // direct helper's argument is whatever its block says it is.
+    let direct_helpers: std::collections::HashSet<String> = app
+        .routes
+        .direct_helpers
+        .iter()
+        .map(|h| format!("{}_path", h.name.as_str()))
+        .collect();
     for lc in lcs.iter_mut() {
         for m in &mut lc.methods {
             rewrite_route_params(
@@ -2207,6 +2223,7 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
                 &slug_models,
                 &assoc_targets,
                 &collection_targets,
+                &direct_helpers,
             );
         }
     }
@@ -2297,14 +2314,23 @@ fn rewrite_route_params(
     slug_models: &std::collections::HashSet<String>,
     assoc_targets: &std::collections::HashMap<String, String>,
     collection_targets: &std::collections::HashMap<String, String>,
+    direct_helpers: &std::collections::HashSet<String>,
 ) {
     expr.node.for_each_child_mut(&mut |e| {
-        rewrite_route_params(e, all_models, slug_models, assoc_targets, collection_targets)
+        rewrite_route_params(
+            e,
+            all_models,
+            slug_models,
+            assoc_targets,
+            collection_targets,
+            direct_helpers,
+        )
     });
     let is_helper_call = matches!(
         &*expr.node,
         ExprNode::Send { recv: Some(r), method, block: None, .. }
             if method.as_str().ends_with("_path")
+                && !direct_helpers.contains(method.as_str())
                 && matches!(&*r.node, ExprNode::Const { path }
                     if path.last().map(|s| s.as_str() == "RouteHelpers").unwrap_or(false))
     );
