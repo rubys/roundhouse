@@ -138,3 +138,36 @@ fn spinel_target_require_graph_is_closed() {
     let files = target_files(&app, &fixture, BuildTarget::Spinel).expect("spinel target files");
     assert_require_graph_closed(&files, "spinel (spin shape)");
 }
+
+/// A bundled library (`pathname`, `set`, `json`, …) that the tree names
+/// but never requires.
+///
+/// Separate from the `require_relative` graph above and for the same
+/// reason: the rule was written down once, inside `spin_shape`, so only
+/// the spinel tree got it. Ruby 4.0 autoloads `Set` and `Pathname` and
+/// hides the gap; Ruby 3.4 — what the scaffold claims and what
+/// `campfire-conformance` runs — raises, and campfire lost two test
+/// files to a `Pathname()` in a helper. Every ruby-family target is
+/// checked here so the next target to be added is checked too.
+fn assert_no_missing_bundled_requires(files: &[(String, String)], label: &str) {
+    let gaps = roundhouse::project::missing_bundled_requires(files);
+    assert!(
+        gaps.is_empty(),
+        "{label}: {} file(s) name a bundled-library constant with no require:\n{}",
+        gaps.len(),
+        gaps.join("\n"),
+    );
+}
+
+#[test]
+fn bundled_requires_are_written_for_every_target() {
+    let (app, fixture) = blog();
+    for (target, label) in [
+        (BuildTarget::Ruby, "ruby"),
+        (BuildTarget::Jruby, "jruby"),
+        (BuildTarget::Spinel, "spinel"),
+    ] {
+        let files = target_files(&app, &fixture, target).expect("target files");
+        assert_no_missing_bundled_requires(&files, label);
+    }
+}

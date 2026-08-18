@@ -593,8 +593,12 @@ pub fn target_files(
     let files = match target {
         BuildTarget::Blog => blog_files(fixture),
         BuildTarget::Spinel => spinel_files(app, fixture).and_then(spin_shape),
-        BuildTarget::Ruby => ruby_runtime_files(app, fixture),
-        BuildTarget::Jruby => jruby_runtime_files(app, fixture),
+        // The ruby family gets the bundled-library requires too: the
+        // table used to live inside `spin_shape` and so reached only
+        // the spinel tree, which cost campfire two test files on a
+        // Ruby 3.4 runner (`Pathname()`).
+        BuildTarget::Ruby => ruby_runtime_files(app, fixture).map(with_bundled_requires),
+        BuildTarget::Jruby => jruby_runtime_files(app, fixture).map(with_bundled_requires),
         BuildTarget::Roda => Ok(sort_files(emit::roda::emit(app))),
         BuildTarget::Crystal => Ok(sort_files(emit::crystal::emit(app))),
         BuildTarget::Elixir => Ok(sort_files(emit::elixir::emit(app))),
@@ -2088,6 +2092,108 @@ fn defines_constant(src: &str, konst: &str) -> bool {
     })
 }
 
+/// `write_bundled_requires` in the value-passing shape `target_files`'
+/// match arms want.
+fn with_bundled_requires(mut files: Vec<(String, String)>) -> Vec<(String, String)> {
+    write_bundled_requires(&mut files);
+    files
+}
+
+/// Constant → bundled library that provides it. One table, read by
+/// both the pass that writes the requires and the gate that checks a
+/// tree for missing ones — a second copy is how the rule drifts.
+const BUNDLED: [(&str, &str); 10] = [
+    ("Base64", "base64"),
+    ("CSV", "csv"),
+    ("Digest", "digest"),
+    ("ERB", "erb"),
+    ("JSON", "json"),
+    ("OptionParser", "optparse"),
+    ("Pathname", "pathname"),
+    ("Set", "set"),
+    ("StringIO", "stringio"),
+    ("StringScanner", "strscan"),
+];
+
+/// Every gap in a tree, as `(file index, require line)`. One walk,
+/// read by both the pass that writes the requires and the gate that
+/// checks a tree for missing ones — a second copy is how the rule
+/// drifts.
+///
+/// Per FILE, not per tree: spin compiles bin/blog.rb and each entry of
+/// SPINEL_TESTS as separate programs, and `test/cruby/` is compiled by
+/// neither, so "something in the tree requires it" does not mean the
+/// program being built does. `require` is idempotent, so the file that
+/// names the constant carries the require, the way a Ruby author would
+/// write it. (A tree-wide check let `test/cruby/cgi_io_test.rb`'s
+/// `require "stringio"` mask a missing one in `app/models/story.rb`.)
+fn bundled_require_gaps(files: &[(String, String)]) -> Vec<(usize, String)> {
+    let mut gaps = Vec::new();
+    for (konst, feature) in BUNDLED {
+        // The program defines the constant itself, so the bundled
+        // library is not what the name refers to.
+        if files
+            .iter()
+            .any(|(p, c)| p.ends_with(".rb") && defines_constant(c, konst))
+        {
+            continue;
+        }
+        let require_line = format!("require {feature:?}");
+        for (i, (path, content)) in files.iter().enumerate() {
+            if path.ends_with(".rb")
+                && names_constant(content, konst)
+                && !content.contains(&require_line)
+            {
+                gaps.push((i, require_line.clone()));
+            }
+        }
+    }
+    gaps
+}
+
+/// Files in an emitted tree that name a bundled-library constant with
+/// no require for it — `"path: require \"x\""` per gap. The emitted
+/// tree is the thing that runs, so the gate reads IT rather than
+/// re-deriving which targets `write_bundled_requires` was wired into:
+/// the table lived inside `spin_shape` for months and the ruby family
+/// silently never got it.
+pub fn missing_bundled_requires(files: &[(String, String)]) -> Vec<String> {
+    bundled_require_gaps(files)
+        .into_iter()
+        .map(|(i, line)| format!("{}: {line}", files[i].0))
+        .collect()
+}
+
+/// Bundled-library requires. spinel resolves `Set`, `StringIO` and
+/// their siblings only when the program requires the library by name.
+/// CRuby autoloads two of them outright — `Set.new` and `Pathname.new`
+/// work in a bare script, the other eight raise NameError — and Rails
+/// loads several more as a side effect of booting, so an app carried
+/// over from Rails names them with no require anywhere and spinel
+/// refuses the build: "X is provided by the bundled Y library, which
+/// this program does not require" (matz/spinel 83658c1e). Write the
+/// require the app never had to.
+///
+/// **Not spinel-only, though it lived inside `spin_shape` until now.**
+/// The two CRuby autoloads are the ones a dev box hides: `Pathname()`
+/// (campfire's `app/helpers/cable_helper.rb` calls the Kernel
+/// conversion method) resolves bare on Ruby 4.0 and raises on 3.4, and
+/// 3.4 is what the scaffold README claims and what
+/// `campfire-conformance` pins — two test files died on a clean runner
+/// that passed on a laptop. The other eight raise on every CRuby, so
+/// the ruby family needs this table at least as much as spinel does.
+///
+/// The three conditions mirror spinel's own check: the constant is
+/// named in code, the program does not define it itself (runtime/erb.rb
+/// and runtime/base64.rb define theirs), and nothing requires it yet.
+/// Sorted by constant so a tree that needs two requires gets them in a
+/// stable order.
+fn write_bundled_requires(files: &mut [(String, String)]) {
+    for (i, require_line) in bundled_require_gaps(files) {
+        files[i].1.insert_str(0, &format!("{require_line}\n"));
+    }
+}
+
 fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, String> {
     use std::collections::HashSet;
 
@@ -2202,58 +2308,7 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         files.retain(|(p, _)| p != "runtime/bcrypt_facade.rbs");
     }
 
-    // Bundled-library requires. spinel resolves `Set`, `StringIO` and
-    // their siblings only when the program requires the library by name.
-    // CRuby autoloads two of them outright — `Set.new` and `Pathname.new`
-    // work in a bare script, the other eight raise NameError — and Rails
-    // loads several more as a side effect of booting, so an app carried
-    // over from Rails names them with no require anywhere and spinel
-    // refuses the build: "X is provided by the bundled Y library, which
-    // this program does not require" (matz/spinel 83658c1e). Write the
-    // require the app never had to.
-    //
-    // The three conditions mirror spinel's own check: the constant is
-    // named in code, the program does not define it itself (runtime/erb.rb
-    // and runtime/base64.rb define theirs), and nothing requires it yet.
-    // Sorted by constant so a tree that needs two requires gets them in a
-    // stable order.
-    const BUNDLED: [(&str, &str); 10] = [
-        ("Base64", "base64"),
-        ("CSV", "csv"),
-        ("Digest", "digest"),
-        ("ERB", "erb"),
-        ("JSON", "json"),
-        ("OptionParser", "optparse"),
-        ("Pathname", "pathname"),
-        ("Set", "set"),
-        ("StringIO", "stringio"),
-        ("StringScanner", "strscan"),
-    ];
-    // Per FILE, not per tree: spin compiles bin/blog.rb and each entry of
-    // SPINEL_TESTS as separate programs, and `test/cruby/` is compiled by
-    // neither, so "something in the tree requires it" does not mean the
-    // program being built does. `require` is idempotent, so the file that
-    // names the constant carries the require, the way a Ruby author would
-    // write it. (A tree-wide check let `test/cruby/cgi_io_test.rb`'s
-    // `require "stringio"` mask a missing one in `app/models/story.rb`.)
-    for (konst, feature) in BUNDLED {
-        let require_line = format!("require {feature:?}");
-        if files
-            .iter()
-            .any(|(p, c)| p.ends_with(".rb") && defines_constant(c, konst))
-        {
-            continue;
-        }
-        for (path, content) in files.iter_mut() {
-            if path.ends_with(".rb")
-                && names_constant(content, konst)
-                && !content.contains(&require_line)
-            {
-                content.insert_str(0, &format!("{require_line}\n"));
-            }
-        }
-    }
-
+    write_bundled_requires(&mut files);
     // 6. Package manifest + compile root.
     let mut manifest = String::from(
         "# spin manifest — generated by Roundhouse (spinel target).\n\
