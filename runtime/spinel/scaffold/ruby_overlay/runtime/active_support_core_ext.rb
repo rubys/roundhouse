@@ -176,4 +176,30 @@ class Array
     else "#{self[0..-2].join(', ')}, and #{self[-1]}"
     end
   end
+
+  # AS's ordinal readers (core_ext/array/access.rb). Rails ships
+  # `second` through `fifth` plus `forty_two`; the corpus reaches
+  # `third` (campfire's `messages_controller_test` pages relative to
+  # `@messages.third`), and the neighbours come with it because they
+  # are the same one-liner and a list that stops at the first caller is
+  # the shape that drifts.
+  #
+  # `forty_two` is deliberately NOT here: it is a joke method, and a
+  # reader who meets it in this file should find it in Rails' docs
+  # rather than in ours.
+  def second
+    self[1]
+  end
+
+  def third
+    self[2]
+  end
+
+  def fourth
+    self[3]
+  end
+
+  def fifth
+    self[4]
+  end
 end

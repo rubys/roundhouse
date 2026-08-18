@@ -1097,7 +1097,11 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
     let transformed_elem = || block_ret.cloned().unwrap_or_else(|| elem.clone());
     match method.as_str() {
         "length" | "size" | "count" => Ty::Int,
-        "first" | "last" => Ty::Union {
+        // ActiveSupport's ordinal readers are `first`/`last`'s
+        // neighbours in every way that matters here: an index read that
+        // can miss. See `Array#third` in the CRuby overlay's
+        // active_support_core_ext.rb.
+        "first" | "last" | "second" | "third" | "fourth" | "fifth" => Ty::Union {
             variants: vec![elem.clone(), Ty::Nil],
         },
         "[]" => Ty::Union {

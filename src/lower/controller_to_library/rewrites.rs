@@ -1741,27 +1741,10 @@ pub fn project_route_helper_ids(expr: &Expr) -> Expr {
         if !(method.as_str().ends_with("_path") || method.as_str().ends_with("_url")) {
             return None;
         }
-        if !args.iter().any(records_a_model) {
+        if !args.iter().any(arg_carries_a_model) {
             return None;
         }
-        let projected: Vec<Expr> = args
-            .iter()
-            .map(|a| {
-                if !records_a_model(a) {
-                    return a.clone();
-                }
-                Expr::new(
-                    a.span,
-                    ExprNode::Send {
-                        recv: Some(a.clone()),
-                        method: Symbol::from("id"),
-                        args: vec![],
-                        block: None,
-                        parenthesized: false,
-                    },
-                )
-            })
-            .collect();
+        let projected: Vec<Expr> = args.iter().map(project_arg).collect();
         Some(Expr::new(
             e.span,
             ExprNode::Send {
@@ -1773,6 +1756,56 @@ pub fn project_route_helper_ids(expr: &Expr) -> Expr {
             },
         ))
     })
+}
+
+/// A route-helper argument with every model instance in it projected
+/// to its id — the argument itself, or the VALUES of a trailing kwargs
+/// hash.
+///
+/// The hash is Rails' query-string half: `room_messages_url(@room,
+/// before: @messages.third)` renders `?before=<param>`, and Rails puts
+/// each value through `to_param`, which on a record is its id. The
+/// generated helper calls `.to_s`, so a record reaching one rendered
+/// `?before=%23%3CMessage%3A0x...%3E` and the router matched no route
+/// at all — campfire's `messages_controller_test` pages this way twice.
+///
+/// Only the VALUES move. A key is a Symbol by construction.
+fn project_arg(a: &Expr) -> Expr {
+    if let ExprNode::Hash { entries, kwargs } = &*a.node {
+        if entries.iter().any(|(_, v)| records_a_model(v)) {
+            let projected = entries
+                .iter()
+                .map(|(k, v)| (k.clone(), if records_a_model(v) { id_of(v) } else { v.clone() }))
+                .collect();
+            return Expr::new(a.span, ExprNode::Hash { entries: projected, kwargs: *kwargs });
+        }
+        return a.clone();
+    }
+    if records_a_model(a) {
+        return id_of(a);
+    }
+    a.clone()
+}
+
+/// Is there a model instance anywhere `project_arg` would reach?
+fn arg_carries_a_model(a: &Expr) -> bool {
+    match &*a.node {
+        ExprNode::Hash { entries, .. } => entries.iter().any(|(_, v)| records_a_model(v)),
+        _ => records_a_model(a),
+    }
+}
+
+fn id_of(a: &Expr) -> Expr {
+    Expr::new(
+        a.span,
+        ExprNode::Send {
+            recv: Some(a.clone()),
+            method: Symbol::from("id"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    )
 }
 
 /// Does this argument carry a model instance? Only a positively

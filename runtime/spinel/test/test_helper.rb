@@ -384,32 +384,41 @@ module RequestDispatch
   # `reject_banned_ip`'s `request.remote_ip`, a push subscription's
   # `request.user_agent` — needs this to reach the env, not just the
   # params.
-  def get(path, params: {}, headers: {})
-    dispatch_request("GET", path, params, headers)
+  #
+  # `env:` is Rails' OTHER spelling of the same thing and campfire
+  # writes both (`get new_session_url, env: { "HTTP_USER_AGENT" => … }`
+  # in `sessions_controller_test`). In Rails the two differ only in
+  # normalization — `headers:` accepts wire-shaped names and rewrites
+  # them, `env:` is raw — and since this harness takes `headers:` RAW
+  # already, they are the same hash here. Merged with `env:` last, so a
+  # test naming a key in both gets the rawer one, which is Rails'
+  # order too.
+  def get(path, params: {}, headers: {}, env: {})
+    dispatch_request("GET", path, params, headers.merge(env))
   end
 
-  def post(path, params: {}, headers: {})
-    dispatch_request("POST", path, params, headers)
+  def post(path, params: {}, headers: {}, env: {})
+    dispatch_request("POST", path, params, headers.merge(env))
   end
 
-  def patch(path, params: {}, headers: {})
-    dispatch_request("PATCH", path, params, headers)
+  def patch(path, params: {}, headers: {}, env: {})
+    dispatch_request("PATCH", path, params, headers.merge(env))
   end
 
   # Rails' integration tests define all five verbs plus `head`; the four
   # the blog happened to use were the four that existed. campfire's
   # `put account_user_url(...)` is the first `put` in the corpus, and it
   # failed as a missing METHOD rather than as an unrouted request.
-  def put(path, params: {}, headers: {})
-    dispatch_request("PUT", path, params, headers)
+  def put(path, params: {}, headers: {}, env: {})
+    dispatch_request("PUT", path, params, headers.merge(env))
   end
 
-  def delete(path, params: {}, headers: {})
-    dispatch_request("DELETE", path, params, headers)
+  def delete(path, params: {}, headers: {}, env: {})
+    dispatch_request("DELETE", path, params, headers.merge(env))
   end
 
-  def head(path, params: {}, headers: {})
-    dispatch_request("HEAD", path, params, headers)
+  def head(path, params: {}, headers: {}, env: {})
+    dispatch_request("HEAD", path, params, headers.merge(env))
   end
 
   # The browser. An integration test's requests share cookie state the
@@ -461,7 +470,22 @@ module RequestDispatch
     # flat. The harness searched `table` alone, so `get "/"` — the one
     # request every app answers — was "No route matches" in a controller
     # test and a 200 in production.
-    matched = ActionDispatch::Router.match(method, path, [RouteTable.root] + RouteTable.table)
+    # SPLIT THE QUERY OFF BEFORE MATCHING. A route pattern describes a
+    # PATH; `?before=6` is not part of one, and the router compared it
+    # against the pattern verbatim and answered "No route matches GET
+    # /rooms/3/messages?before=6". Every production dispatcher splits
+    # here (main.rb reads PATH_INFO and QUERY_STRING as separate env
+    # keys), and the env built further down already partitioned the
+    # same string — the match was simply reading the unsplit one.
+    #
+    # campfire's `messages_controller_test` pages with
+    # `room_messages_url(@room, before: @messages.third)`, which is how
+    # a query string reaches a test path at all: a route helper renders
+    # its non-segment options into one.
+    match_path, _, query = path.partition("?")
+    matched = ActionDispatch::Router.match(
+      method, match_path, [RouteTable.root] + RouteTable.table
+    )
     raise "No route matches #{method} #{path}" if matched.nil?
     controller = case matched.controller
                  when :articles then ArticlesController.new
@@ -486,6 +510,16 @@ module RequestDispatch
     # POSTs plain text and the controller reads `request.body`), and the
     # harness iterated it: `undefined method 'each' for an instance of
     # String`, every test in the file.
+    # Query-string pairs are parameters too, and they arrive UNDER the
+    # explicit `params:` — Rails merges the request's own parameters
+    # first and lets the caller's hash win on a collision.
+    # `CgiIo.parse_form_into` — THE SAME PARSER the production
+    # dispatcher uses on `QUERY_STRING` (`parse_request` calls it on
+    # exactly this string), so the harness cannot disagree with
+    # production about what a query string means. Not `CGI.parse`: Ruby
+    # 4.0 no longer ships it, and a hand-rolled split would be a second
+    # copy of a table this tree already owns.
+    CgiIo.parse_form_into(query, merged) unless query.empty?
     request_body = +""
     if params.is_a?(String)
       request_body = params.to_s
@@ -554,6 +588,16 @@ module RequestDispatch
       flash:    controller.flash,
       cookies:  ActionController::CookieJar.new(controller.cookies.pending),
     )
+    # Rails' OWN names, alongside the `__`-prefixed ones the harness
+    # methods read. An integration test writes `@response.body` and
+    # `@response.content_type` directly — campfire's
+    # `users/sidebars_controller_test` asserts on the rendered body that
+    # way, and got `undefined method 'body' for nil`. The prefixed pair
+    # stays because a test class may define its own `@response`; these
+    # two are what the test SOURCE says, so they are assigned last and a
+    # test that overwrites one only affects itself.
+    @request = @__request
+    @response = @__response
     @__response
   end
 
