@@ -101,16 +101,19 @@ cp "$REPO_ROOT/scripts/campfire-walk-drive.rb" "$OUT/walk_drive.rb"
 
 if (( STUBS )); then
     cp "$REPO_ROOT/scripts/campfire-walk-stubs.rb" "$OUT/walk_stubs.rb"
-    # Ahead of `app/models`, which is the first emitted code to reference an
-    # unmodeled base class at LOAD time.
+    # Into BOOT.rb, not main.rb: 78b9ca0a moved the require chain there
+    # (main.rb is boot plus the server), taking `app/models` — the first
+    # emitted code to reference an unmodeled base class at LOAD time,
+    # which the stubs have to precede — out of the file this used to
+    # patch. Same splice scripts/campfire-suite makes, for the same reason.
     ruby -e '
       path = ARGV[0]
       src = File.read(path)
       anchor = %(require_relative "app/models")
-      abort "campfire-walk: no #{anchor} in main.rb" unless src.include?(anchor)
+      abort "campfire-walk: no #{anchor} in boot.rb" unless src.include?(anchor)
       File.write(path, src.sub(anchor, %(require_relative "walk_stubs"\n) + anchor))
-    ' "$OUT/main.rb"
-    echo "  spliced walk_stubs.rb ($(grep -c '^# GAP' "$OUT/walk_stubs.rb") ledger entries) into main.rb"
+    ' "$OUT/boot.rb"
+    echo "  spliced walk_stubs.rb ($(grep -c '^# GAP' "$OUT/walk_stubs.rb") ledger entries) into boot.rb"
 else
     step "walking WITHOUT stubs"
 fi

@@ -145,7 +145,13 @@ WALK_LATE_PATCHES << lambda do
     def self.create!(user_params)
       Account.create!(name: ACCOUNT_NAME)
       room = Rooms::Open.new(name: FIRST_ROOM_NAME)
-      administrator = User.from_params(user_params)
+      # `User.new(attrs)`, not `User.from_params`: the call site is
+      # `FirstRun.create!(self.user_params.to_attrs)` — an unmodeled callee
+      # is handed plain attrs, not the typed *Params object whose
+      # `name_provided` flags `from_params` reads. The attrs hash is the
+      # same one the emitted `initialize` takes (`password` included),
+      # and `User.create!(user_params)` is what campfire itself writes.
+      administrator = User.new(user_params)
       administrator.role = 1
       administrator.save! # ← autosave would have done this
       room.creator = administrator
