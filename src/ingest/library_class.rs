@@ -1113,6 +1113,44 @@ fn unknown_is_block_callback(item: &crate::dialect::ModelBodyItem) -> bool {
             .contains(&method.as_str())
 }
 
+/// Model-DSL MACROS that a lowering expands back out of the
+/// `ModelBodyItem::Unknown` holding pen rather than from a variant of
+/// their own — `lower::attached`, `lower::rich_text`,
+/// `lower::secure_token`, `lower::secure_password`, `lower::has_json`,
+/// `lower::typed_store`, `lower::broadcasts`.
+///
+/// Each one is per-includer DSL exactly like a `has_many`, so a
+/// concern's `included do` has to carry it. It didn't: campfire's
+/// `Message::Attachment` declares `has_one_attached :attachment` there,
+/// the item was dropped on the floor, and `Message#attachment` was
+/// never synthesized — six tests died on `undefined local variable or
+/// method 'attachment'` while the concern's own `attachment?`, which
+/// calls it, emitted right beside the hole.
+///
+/// Named, not inferred: `Unknown` is a holding pen for everything the
+/// classifier doesn't claim, and most of what lands there really does
+/// belong to the module rather than to its includers.
+const CONCERN_MODEL_MACROS: &[&str] = &[
+    "has_one_attached",
+    "has_rich_text",
+    "has_secure_token",
+    "has_secure_password",
+    "has_json",
+    "typed_store",
+    "broadcasts_to",
+];
+
+/// True when an Unknown body item is one of [`CONCERN_MODEL_MACROS`].
+/// The block form counts — `has_one_attached :avatar do |attachable|
+/// attachable.variant … end` declares variants we don't model, and the
+/// attachment half still has to expand.
+fn unknown_is_model_macro(item: &crate::dialect::ModelBodyItem) -> bool {
+    use crate::expr::ExprNode;
+    let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { return false };
+    let ExprNode::Send { recv: None, method, .. } = &*expr.node else { return false };
+    CONCERN_MODEL_MACROS.contains(&method.as_str())
+}
+
 /// Second return value: `enum` columns declared inside an `included
 /// do`, keyed by the concern module. They belong to every includer
 /// exactly as the DSL items do; the splice folds them into each
@@ -1208,7 +1246,9 @@ pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItem
                                 // includer. Other Unknowns stay with the
                                 // module.
                                 ModelBodyItem::Unknown { .. } => {
-                                    if unknown_is_block_callback(&item) {
+                                    if unknown_is_block_callback(&item)
+                                        || unknown_is_model_macro(&item)
+                                    {
                                         items.push(item);
                                     }
                                 }

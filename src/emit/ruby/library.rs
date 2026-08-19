@@ -904,7 +904,9 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
 /// The through-model's `belongs_to` whose target matches the assoc's
 /// target supplies the source foreign key (works for `source:` renames —
 /// `upvoted_stories, through: :votes, source: :story` finds
-/// `Vote.belongs_to :story`). Nested chains — the source association on
+/// `Vote.belongs_to :story`); when the source is a `has_many` instead
+/// the key is on the target table and the join reverses (campfire's
+/// `reachable_messages, through: :rooms, source: :messages`). Nested chains — the source association on
 /// the join model is itself `:through` (`Category has_many :stories,
 /// through: :tags` where `Tag#stories` goes through taggings), or the
 /// first hop is — recurse, adding one INNER JOIN per hop. Shapes a hop
@@ -952,8 +954,8 @@ pub(crate) fn apply_through_assoc_lowering(lcs: &mut [LibraryClass], app: &App) 
 /// the owner's id. One recursion per indirection: a first hop that is
 /// itself `:through`, or a join-model source association that is.
 /// `None` when a hop can't be proven — missing join model, no
-/// `belongs_to`/through source matching the target class — and for
-/// pathological depth (cyclic `through:` declarations).
+/// `belongs_to`/`has_many`/through source matching the target class —
+/// and for pathological depth (cyclic `through:` declarations).
 fn resolve_through_chain(
     models: &[crate::dialect::Model],
     model: &crate::dialect::Model,
@@ -992,6 +994,23 @@ fn resolve_through_chain(
     }) {
         let mut joins =
             vec![format!("INNER JOIN {thr_table} ON {thr_table}.{src_fk} = {target_table}.id")];
+        joins.extend(back_joins);
+        return Some((joins, edge_table, edge_fk));
+    }
+    // The source is a plain `has_many` on the join model, so the
+    // foreign key is on the TARGET table and the join points the other
+    // way (campfire: `has_many :reachable_messages, through: :rooms,
+    // source: :messages` — Room#messages, `messages.room_id`). The
+    // belongs_to branch above cannot serve this: there is no column on
+    // the join table naming the target.
+    if let Some(src_fk) = thr_model.associations().find_map(|a| match a {
+        Association::HasMany { target: t, foreign_key, through: None, .. } if t == target => {
+            Some(foreign_key)
+        }
+        _ => None,
+    }) {
+        let mut joins =
+            vec![format!("INNER JOIN {thr_table} ON {thr_table}.id = {target_table}.{src_fk}")];
         joins.extend(back_joins);
         return Some((joins, edge_table, edge_fk));
     }

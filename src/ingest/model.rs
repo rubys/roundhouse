@@ -1279,6 +1279,17 @@ fn parse_association(
             // assoc-name-derived "UpvotedStory" phantom). class_name
             // still wins when both are given, per Rails.
             //
+            // SINGULARIZED, because the source association can be a
+            // has_many and then its name is PLURAL: campfire's
+            // `has_many :reachable_messages, through: :rooms, source:
+            // :messages` means Room#messages, so the class is Message.
+            // Camelizing alone produced a `Messages` phantom — and
+            // campfire has a `Messages::` controller MODULE by that
+            // name, so the reader resolved to it and failed at the
+            // `where` instead of at the missing constant. Singular
+            // sources are unaffected (Rails' inflector answers
+            // "story" for "story"), which is every other corpus use.
+            //
             // `source_type:` disambiguates a *polymorphic* source
             // reflection, naming the concrete class directly
             // (`has_many :comment_references, through: :mod_mail_references,
@@ -1290,7 +1301,7 @@ fn parse_association(
             target: class_name
                 .map(|s| ClassId(Symbol::from(s.as_str())))
                 .or_else(|| source_type.map(|s| ClassId(Symbol::from(s.as_str()))))
-                .or_else(|| source.map(|s| ClassId(Symbol::from(camelize(s.as_str())))))
+                .or_else(|| source.map(|s| ClassId(Symbol::from(singularize_camelize(s.as_str())))))
                 .unwrap_or_else(|| ClassId(Symbol::from(singularize_camelize(name_str.as_str())))),
             // `as: :notifiable` — the rows point back through the
             // interface columns, not an owner-named key.
