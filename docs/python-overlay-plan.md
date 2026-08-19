@@ -1,9 +1,12 @@
 # Python universal-IR overlay (the CtrlWalker retirement)
 
-> **ACTIVE** — phases A–B landed 2026-08-19; C's dispatch leg proven
-> the same day (both fixtures serve `index` end-to-end through
-> `app/v2/dispatch.py` in the driver tests); remaining = http.py /
-> TestClient wiring (C), switchover (D), teardown (E).
+> **ACTIVE** — phases A–D landed 2026-08-19: the overlay IS the live
+> dispatch path (server + TestClient route through
+> `app/v2/dispatch.handle`), verified by python_toolchain 3/3, all 21
+> emitted unittests, and `scripts/compare python` **7/7 paths** DOM/
+> JSON-equivalent to live Rails. Remaining = Phase E teardown
+> (delete the per-artifact controller path + `CtrlWalker`, then the
+> per-artifact model/view emit + the legacy `http.py` Router).
 
 Python is the last emitter deriving controllers per-artifact through
 `lower::CtrlWalker` (`src/emit/python/controller.rs` implements the
@@ -74,11 +77,26 @@ models + views + controllers + route helpers + dispatch together.
   `content_type` into `http.ActionResponse` and dispatch by class
   registry (or the transpiled `app/router.py` match).
 
-- **D. Switchover.** `emit()` ships the overlay; `app/routes.py` and
-  TestClient dispatch through it; the per-artifact controller path
-  (`emit_controllers_pass2` + the `CtrlWalker` impl) is deleted.
-  Gates: `python_toolchain` (tiny-blog), `compare` matrix python leg
-  (real-blog DOM), `smoke (python)` floor.
+- **D. Switchover — DONE.** `emit()` ships the overlay including
+  `app/v2/routes.py` (RouteTable from
+  `lower_routes_to_dispatch_functions`) and a `handle()` bridge in
+  dispatch.py: known-format extension strip BEFORE match (the
+  crystal/ts glue rule — an unconstrained `:id` would capture
+  "1.json" on the exact pass), transpiled `Router.match`, bracket-key
+  param nesting (`article[title]` → nested, the strong-params shape),
+  dispatch, JSON-vs-layout branch, `Flash.to_persisted` diff for the
+  cookie. `server.py` and TestClient both route through it. The
+  drive-to-green fixed, at their semantic homes: jbuilder views
+  merged into the overlay `Views` classes; `Hash#merge` and a
+  **nested-ternary parenthesization bug** (Python's right-associative
+  conditional silently reordered `dom_id`'s persisted/suffix logic)
+  in the walker; nilable receivers accepted by `emit_for_each`;
+  kwargs-marked call-site hashes render as Python keyword arguments
+  inside library-emitted bodies only (legacy defs take positional
+  dicts; the hand-written `Broadcasts` glue is dual-accepting);
+  `Params.str`→`str_`; module-alias imports for
+  Inflector/JsonBuilder/Roundhouse.RhDateTime/Broadcasts. Gates run:
+  python_toolchain 3/3, 21/21 emitted unittests, compare 7/7.
 
 - **E. Teardown.** Delete `src/lower/controller_walk.rs` and its
   `lower::mod` re-exports; update `docs/pipeline/lower.md` +

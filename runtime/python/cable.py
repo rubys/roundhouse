@@ -254,18 +254,26 @@ class Broadcasts:
     the structured shape the shared model lowering emits (matches the
     go/rust/ts `Broadcasts` twins)."""
 
+    # Dual-accepting: the legacy per-artifact emit passes one positional
+    # dict; the overlay's library-emitted bodies pass the Ruby kwargs
+    # as real keyword arguments. Either binds.
+
     @staticmethod
-    def prepend(opts: dict) -> None:
+    def prepend(opts: dict | None = None, **kw) -> None:
+        opts = opts or kw
         _dispatch(opts["stream"], turbo_stream_html("prepend", opts["target"], opts["html"]))
 
     @staticmethod
-    def append(opts: dict) -> None:
+    def append(opts: dict | None = None, **kw) -> None:
+        opts = opts or kw
         _dispatch(opts["stream"], turbo_stream_html("append", opts["target"], opts["html"]))
 
     @staticmethod
-    def replace(opts: dict) -> None:
+    def replace(opts: dict | None = None, **kw) -> None:
+        opts = opts or kw
         _dispatch(opts["stream"], turbo_stream_html("replace", opts["target"], opts["html"]))
 
     @staticmethod
-    def remove(opts: dict) -> None:
+    def remove(opts: dict | None = None, **kw) -> None:
+        opts = opts or kw
         _dispatch(opts["stream"], turbo_stream_html("remove", opts["target"], ""))

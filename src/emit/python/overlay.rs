@@ -42,6 +42,7 @@ pub struct OverlayLcs {
     pub views: Vec<LibraryClass>,
     pub route_helpers: Option<LibraryClass>,
     pub importmap: Option<LibraryClass>,
+    pub route_table: Option<LibraryClass>,
 }
 
 /// Lower the app to overlay shape — the same assembly the Go emitter
@@ -67,8 +68,16 @@ pub fn lower_overlay(app: &App) -> OverlayLcs {
         &app.views,
         &assocs,
     );
-    let views =
-        crate::lower::lower_views_to_library_classes(&app.views, app, model_extras);
+    let mut views =
+        crate::lower::lower_views_to_library_classes(&app.views, app, model_extras.clone());
+    // JBuilder (`*.json.jbuilder`) views produce the `<action>_json`
+    // methods on the same `Views::<Resource>` classes — the merge per
+    // resource happens in emit_views. Mirrors the Go emitter.
+    views.extend(crate::lower::lower_jbuilder_to_library_classes(
+        &app.views,
+        app,
+        model_extras,
+    ));
     let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
     let route_helpers = if route_helper_funcs.is_empty() {
         None
@@ -87,7 +96,16 @@ pub fn lower_overlay(app: &App) -> OverlayLcs {
             &importmap_funcs,
         ))
     };
-    OverlayLcs { controllers, models, views, route_helpers, importmap }
+    let dispatch_funcs = crate::lower::lower_routes_to_dispatch_functions(app);
+    let route_table = if dispatch_funcs.is_empty() {
+        None
+    } else {
+        Some(crate::lower::module_funcs_to_library_class(
+            "RouteTable",
+            &dispatch_funcs,
+        ))
+    };
+    OverlayLcs { controllers, models, views, route_helpers, importmap, route_table }
 }
 
 /// Emit the overlay file set. Fails loudly on the first class the
@@ -108,6 +126,16 @@ pub fn emit_overlay_files(app: &App) -> Result<Vec<EmittedFile>, String> {
     if let Some(im) = &lcs.importmap {
         files.push(file("app/v2/importmap.py", emit_module_class(im)?));
     }
+    if let Some(rt) = &lcs.route_table {
+        // RouteTable.root()/.table() build the transpiled
+        // ActionDispatch Route objects the transpiled Router.match
+        // consumes; the namespace collapse renders
+        // `ActionDispatch::Router::Route.new(...)` as `Route(...)`.
+        let mut out = String::from(HEADER);
+        out.push_str("\nfrom app.router import Route\n\n");
+        out.push_str(&emit_library_class(rt)?);
+        files.push(file("app/v2/routes.py", out));
+    }
     // The TRANSPILED view helpers, under the overlay's own path: the
     // legacy world ships hand-written `app/view_helpers.py` in place
     // of this unit (its degradations are noted at `LIVE_FRAMEWORK`),
@@ -120,7 +148,14 @@ pub fn emit_overlay_files(app: &App) -> Result<Vec<EmittedFile>, String> {
     if let Some(unit) = vh.into_iter().next() {
         files.push(file("app/v2/view_helpers.py", unit.content));
     }
-    files.push(file("app/v2/dispatch.py", emit_dispatch(&lcs.controllers)));
+    let has_layout = lcs
+        .views
+        .iter()
+        .any(|lc| last_segment(lc.name.0.as_str()) == "Layouts");
+    files.push(file(
+        "app/v2/dispatch.py",
+        emit_dispatch(&lcs.controllers, lcs.route_table.as_ref(), has_layout),
+    ));
     Ok(files)
 }
 
@@ -208,6 +243,12 @@ fn emit_models(models: &[LibraryClass]) -> Result<String, String> {
         ("Db.", "from app.db import Db\n"),
         ("RecordNotFound", "from app.errors import RecordNotFound\n"),
         ("RecordInvalid", "from app.errors import RecordInvalid\n"),
+        // The temporal intrinsics (`ActiveSupport.db_now` et al)
+        // render as `Roundhouse.RhDateTime.*` — same content-scan
+        // import the legacy model emit makes.
+        ("Roundhouse.RhDateTime", "from app.rh_datetime import Roundhouse\n"),
+        // Turbo Stream broadcast hooks (`after_*_commit`).
+        ("Broadcasts.", "from app.cable import Broadcasts\n"),
     ] {
         if body.contains(needle) {
             out.push_str(import);
@@ -264,6 +305,15 @@ fn emit_views(
         // `ActionView::ViewHelpers` as bare `ViewHelpers`.
         out.push_str("from app.v2.view_helpers import ViewHelpers\n");
     }
+    if body.contains("Inflector.") {
+        // The inflector unit is Mode::Module (bare functions) — alias
+        // the module so `Inflector.pluralize(...)` resolves.
+        out.push_str("from app import inflector as Inflector\n");
+    }
+    if body.contains("JsonBuilder.") {
+        // Same Mode::Module aliasing for the jbuilder views' encoder.
+        out.push_str("from app import json_builder as JsonBuilder\n");
+    }
     out.push_str(&body);
     // Namespace facade: controller/model bodies call `Views.<Resource>.<fn>`.
     out.push_str("\n\nclass Views:\n");
@@ -286,7 +336,11 @@ fn emit_controllers(
     // ActionController's transpiled base — ApplicationController
     // subclasses its `Base`. Explicit imports throughout: a star
     // import of models would shadow this `Base` with ActiveRecord's.
+    // `params as Params`: the strong-param classes' from_raw bodies
+    // narrow through the hand-written ParamValue primitives
+    // (`Params.sub` / `Params.str_` — see runtime/python/params.py).
     out.push_str("\nfrom app.action_controller_base import Base\n");
+    out.push_str("from app import params as Params\n");
     let names = model_names(models);
     if !names.is_empty() {
         out.push_str(&format!("from app.v2.models import {}\n", names.join(", ")));
@@ -315,10 +369,23 @@ fn emit_module_class(rh: &LibraryClass) -> Result<String, String> {
 /// performs (see runtime/crystal/server.cr steps 4-5). The caller
 /// (http.py Router, once wired) reads response state back off the
 /// returned controller: status / body / location / content_type.
-fn emit_dispatch(controllers: &[LibraryClass]) -> String {
+fn emit_dispatch(
+    controllers: &[LibraryClass],
+    route_table: Option<&LibraryClass>,
+    has_layout: bool,
+) -> String {
     let mut out = String::from(HEADER);
-    out.push_str("\nfrom app.v2.controllers import *  # noqa: F401, F403\n");
-    out.push_str("from app.v2.view_helpers import ViewHelpers\n\n");
+    out.push_str("\nfrom app import http as _http\n");
+    out.push_str("from app.v2.controllers import *  # noqa: F401, F403\n");
+    out.push_str("from app.v2.view_helpers import ViewHelpers\n");
+    if route_table.is_some() {
+        out.push_str("from app.router import Router\n");
+        out.push_str("from app.v2.routes import RouteTable\n");
+    }
+    if has_layout {
+        out.push_str("from app.v2.views import Views\n");
+    }
+    out.push('\n');
     out.push_str("CONTROLLERS = {\n");
     for lc in controllers {
         let class_name = last_segment(lc.name.0.as_str());
@@ -360,6 +427,93 @@ fn emit_dispatch(controllers: &[LibraryClass]) -> String {
          \x20   ViewHelpers.reset_slots_bang()\n\
          \x20   c.process_action(action)\n\
          \x20   return c\n",
+    );
+    let Some(rt) = route_table else { return out };
+
+    // `handle` — the full request cycle: transpiled Router.match over
+    // the RouteTable, dispatch, layout wrap, ActionResponse
+    // translation. The server glue and TestClient both route through
+    // it (see runtime/python/server.py / test_support.py).
+    let has_root = rt.methods.iter().any(|m| m.name.as_str() == "root");
+    let table_expr = if has_root {
+        "[RouteTable.root()] + RouteTable.table()"
+    } else {
+        "RouteTable.table()"
+    };
+    out.push_str("\n\n_TABLE = None\n\n");
+    out.push_str(&format!(
+        "def _route_table():\n    global _TABLE\n    if _TABLE is None:\n        _TABLE = {table_expr}\n    return _TABLE\n"
+    ));
+    out.push_str(
+        "\n\ndef _nest_params(flat):\n\
+         \x20   \"\"\"Rails bracket keys nest: {\"article[title]\": v} becomes\n\
+         \x20   {\"article\": {\"title\": v}} — the shape the strong-param\n\
+         \x20   classes narrow (Params.sub). One level deep, matching the\n\
+         \x20   form encoder; other keys pass through flat.\"\"\"\n\
+         \x20   out = {}\n\
+         \x20   for k, v in flat.items():\n\
+         \x20       if \"[\" in k and k.endswith(\"]\"):\n\
+         \x20           outer, inner = k.split(\"[\", 1)\n\
+         \x20           sub = out.setdefault(outer, {})\n\
+         \x20           if isinstance(sub, dict):\n\
+         \x20               sub[inner[:-1]] = v\n\
+         \x20           continue\n\
+         \x20       out[k] = v\n\
+         \x20   return out\n",
+    );
+    out.push_str(
+        "\n\ndef handle(method: str, path: str, params=None, flash=None):\n\
+         \x20   \"\"\"Match + dispatch + translate — the full request cycle.\n\
+         \x20   Returns an ActionResponse, or None when no route matches.\n\
+         \x20   `flash` is the carried-in Flash (from the cookie); the\n\
+         \x20   response's `flash` dict is what the action newly set\n\
+         \x20   (Flash.to_persisted's diff), for the server to persist.\"\"\"\n\
+         \x20   # Strip a known format extension BEFORE matching, like the\n\
+         \x20   # crystal/ts server glue: an unconstrained `:id` segment\n\
+         \x20   # would otherwise capture \"1.json\" on the exact-match\n\
+         \x20   # pass (Router.match's own ext-retry only runs after an\n\
+         \x20   # exact miss).\n\
+         \x20   fmt = None\n\
+         \x20   last = path.rsplit(\"/\", 1)[-1]\n\
+         \x20   if \".\" in last:\n\
+         \x20       base, ext = path.rsplit(\".\", 1)\n\
+         \x20       if Router.format_extension(ext):\n\
+         \x20           path, fmt = base, ext\n\
+         \x20   m = Router.match(method, path, _route_table())\n\
+         \x20   if m is None:\n\
+         \x20       return None\n\
+         \x20   p = _nest_params(dict(params or {}))\n\
+         \x20   p.update(m.path_params)\n\
+         \x20   # Format: a route-declared format wins; else the stripped\n\
+         \x20   # `.ext`; else anything the matcher's own ext-retry put in\n\
+         \x20   # params[\"format\"].\n\
+         \x20   fmt = m.req_format or fmt or p.get(\"format\") or \"html\"\n\
+         \x20   c = dispatch(m.controller, m.action, params=p, flash=flash,\n\
+         \x20                request_method=method, request_path=path,\n\
+         \x20                request_format=fmt)\n\
+         \x20   location = c.location or \"\"\n\
+         \x20   persisted = c.flash.to_persisted()\n\
+         \x20   if fmt != \"html\":\n\
+         \x20       ct = c.content_type or \"application/json; charset=utf-8\"\n\
+         \x20       return _http.ActionResponse(body=c.body, status=c.status,\n\
+         \x20                                   location=location,\n\
+         \x20                                   content_type=ct, flash=persisted)\n\
+         \x20   body = c.body\n",
+    );
+    if has_layout {
+        out.push_str(
+            "\x20   # Layout wrap for rendered HTML; redirects (3xx, empty\n\
+             \x20   # body) ship bare. Same sequence as crystal server.cr:\n\
+             \x20   # set_yield feeds the layout's `yield` slot.\n\
+             \x20   if body and not (300 <= c.status < 400):\n\
+             \x20       ViewHelpers.set_yield(body)\n\
+             \x20       body = Views.Layouts.application(body, c.flash[\"notice\"],\n\
+             \x20                                        c.flash[\"alert\"])\n",
+        );
+    }
+    out.push_str(
+        "\x20   return _http.ActionResponse(body=body, status=c.status,\n\
+         \x20                               location=location, flash=persisted)\n",
     );
     out
 }

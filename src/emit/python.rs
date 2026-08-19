@@ -228,6 +228,15 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         files.push(importmap::emit_py_importmap(app));
         files.push(main::emit_py_main(app));
         files.extend(controller::emit_controllers_pass2(app));
+        // The universal-IR overlay (app/v2/) — the LIVE dispatch path:
+        // server.py and TestClient route every request through
+        // app/v2/dispatch.handle. The per-artifact controllers above
+        // still ship but are no longer routed to; they retire in
+        // Phase E (docs/python-overlay-plan.md).
+        match overlay::emit_overlay_files(app) {
+            Ok(v2) => files.extend(v2),
+            Err(e) => panic!("python overlay emit failed: {e}"),
+        }
     }
     files.extend(view::emit_py_views(app));
     if !app.routes.entries.is_empty() {

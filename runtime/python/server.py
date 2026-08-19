@@ -126,24 +126,21 @@ def _build_app(layout: Callable[[], str] | None) -> web.Application:
 
 
 async def _dispatch_request(request: web.Request) -> web.StreamResponse:
-    """Core dispatcher: parse body (with `_method` override), look up
-    the matched handler via `http.Router.match`, await the result,
-    then wrap HTML responses in the layout. Exceptions surface as
-    500s with the traceback on stderr so the compare tool sees the
-    same message it would from wsgiref."""
+    """Core dispatcher: parse body (with `_method` override), then run
+    the full request cycle through the overlay's
+    `app.v2.dispatch.handle` (transpiled Router.match + controller
+    process_action + layout wrap). Exceptions surface as 500s with
+    the traceback on stderr so the compare tool sees the same message
+    it would from wsgiref."""
+    from .v2 import dispatch as _v2
+
     _view_helpers.reset_render_state()
 
     method = request.method.upper()
+    # The raw path, extension included — the transpiled Router.match
+    # handles Rails' `(.:format)` suffix itself and reports the
+    # format on its MatchResult.
     path = request.rel_url.path
-
-    # Per-request format inference: strip a `.json` suffix before route
-    # matching so `/articles/1.json` and `/articles/1` share one route
-    # entry, and remember the format so the controller's implicit-render
-    # branch picks the json view + Content-Type. Mirrors the TS server.
-    request_format = "html"
-    if path.endswith(".json"):
-        request_format = "json"
-        path = path[:-5]
 
     body_text, body_params = await _read_form_body(request)
 
@@ -157,27 +154,10 @@ async def _dispatch_request(request: web.Request) -> web.StreamResponse:
             if override in ("PATCH", "PUT", "DELETE"):
                 method = override
 
-    matched = _http.Router.match(method, path)
-    if matched is None:
-        return web.Response(
-            status=404,
-            text="Not Found",
-            content_type="text/plain",
-            charset="utf-8",
-        )
-
-    handler, path_params = matched
-    params: dict[str, Any] = {}
-    params.update(path_params)
-    params.update(body_params)
-
-    ctx = _http.ActionContext(
-        params=params,
-        request_format=request_format,
-        flash=_read_flash_cookie(request),
-    )
     try:
-        result = handler(ctx)
+        result = _v2.handle(
+            method, path, params=body_params, flash=_read_flash_cookie(request)
+        )
         if inspect.isawaitable(result):
             result = await result
     except Exception:
@@ -189,12 +169,16 @@ async def _dispatch_request(request: web.Request) -> web.StreamResponse:
             charset="utf-8",
         )
 
-    if not isinstance(result, _http.ActionResponse):
-        result = _http.ActionResponse()
+    if result is None:
+        return web.Response(
+            status=404,
+            text="Not Found",
+            content_type="text/plain",
+            charset="utf-8",
+        )
 
     status = result.status or 200
     body = result.body or ""
-    layout = request.app["roundhouse.layout"]
     is_redirect = 300 <= status < 400 and bool(result.location)
 
     if is_redirect:
@@ -211,28 +195,22 @@ async def _dispatch_request(request: web.Request) -> web.StreamResponse:
     # JSON responses ship the controller body verbatim under the
     # controller-supplied Content-Type and skip the html layout wrap.
     # Mirrors the TS server's `request_format === "json"` branch.
-    if request_format == "json" or result.content_type:
+    # Non-HTML (json/turbo-stream) ships the controller body verbatim
+    # under the controller-supplied Content-Type. HTML arrives already
+    # layout-wrapped by `handle` — no server-side wrap.
+    if result.content_type:
         resp = web.Response(
             status=status,
             text=body,
-            content_type=result.content_type or "application/json",
+            content_type=result.content_type.split(";")[0],
             charset="utf-8",
         )
         _apply_flash_cookie(resp, result.flash)
         return resp
 
-    # Wrap the view body in the emitted layout (when present). The
-    # fallback when no layout is provided matches the rust/typescript
-    # runtimes' minimal shell — Tailwind CDN + plain Turbo importmap.
-    if layout is not None:
-        _view_helpers.set_yield(body)
-        wrapped = layout()
-    else:
-        wrapped = _fallback_layout(body)
-
     resp = web.Response(
         status=status,
-        text=wrapped,
+        text=body,
         content_type="text/html",
         charset="utf-8",
     )

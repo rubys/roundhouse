@@ -115,8 +115,9 @@ class TestResponse:
 
 
 class TestClient:
-    """Pure in-process HTTP client — dispatches through
-    `http.Router.match` directly. No real HTTP, no asyncio event
+    """Pure in-process HTTP client — dispatches through the overlay's
+    `app.v2.dispatch.handle` (transpiled Router.match + controller
+    process_action + layout wrap). No real HTTP, no asyncio event
     loop (actions that return awaitables get awaited here so
     tests can stay synchronous)."""
 
@@ -138,19 +139,16 @@ class TestClient:
     def _dispatch(
         self, method: str, path: str, body: dict[str, Any]
     ) -> TestResponse:
-        matched = _http.Router.match(method, path)
-        if matched is None:
+        # Imported lazily: app.v2.dispatch star-imports the controller
+        # world, and test modules import test_support before the DB is
+        # seeded — the late import keeps module-load order forgiving.
+        from .v2 import dispatch as _v2
+
+        result = _v2.handle(method, path, params=dict(body))
+        if result is None:
             raise AssertionError(f"no route for {method} {path}")
-        handler, path_params = matched
-        params: dict[str, Any] = {}
-        params.update(path_params)
-        params.update(body)
-        context = _http.ActionContext(params=params)
-        result = handler(context)
         if inspect.isawaitable(result):
             result = asyncio.get_event_loop().run_until_complete(result)
-        if not isinstance(result, _http.ActionResponse):
-            result = _http.ActionResponse()
         return TestResponse(result)
 
 

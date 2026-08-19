@@ -85,6 +85,53 @@ pub(super) fn with_body_params<R>(params: Vec<String>, f: impl FnOnce() -> R) ->
     r
 }
 
+/// Render a call's argument list, honoring the IR's trailing-kwargs
+/// marker: a final `Hash { kwargs: true }` whose keys are all literal
+/// Sym/Str legal identifiers renders as Python keyword arguments
+/// (`truncate(s, length=100)` — matching the transpiled def's
+/// keyword parameters) instead of a positional dict, which would bind
+/// the whole dict to the first optional parameter. Non-literal or
+/// non-identifier keys fall back to the positional dict form.
+fn py_call_args(args: &[Expr], args_s: &[String]) -> String {
+    // Library-emit bodies only (the INJECT_SELF_SENDS scope): there
+    // both caller and callee are transpiled from Ruby, so a Ruby
+    // kwarg-style def became real Python keyword parameters. The
+    // legacy per-artifact world's defs take positional dicts
+    // (`__init__(self, attrs={})`) — keyword form would not bind.
+    if !INJECT_SELF_SENDS.with(|c| c.get()) {
+        return args_s.join(", ");
+    }
+    let Some((last, rest_s)) = args
+        .last()
+        .zip(args_s.split_last().map(|(_, rest)| rest))
+    else {
+        return args_s.join(", ");
+    };
+    let ExprNode::Hash { entries, kwargs: true, .. } = &*last.node else {
+        return args_s.join(", ");
+    };
+    let mut pairs = Vec::new();
+    for (k, v) in entries {
+        let key = match &*k.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+            ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+            _ => return args_s.join(", "),
+        };
+        let legal = !key.is_empty()
+            && key.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !legal {
+            return args_s.join(", ");
+        }
+        // The callee def legalized its parameter names through
+        // py_ident — mirror it so the keyword lines up.
+        pairs.push(format!("{}={}", super::shared::py_ident(&key), emit_expr(v)));
+    }
+    let mut parts: Vec<String> = rest_s.to_vec();
+    parts.extend(pairs);
+    parts.join(", ")
+}
+
 /// Ruby Kernel/module methods that stay receiverless in a class-method
 /// body (they are not implicit-self calls). Mirrors the TS emitter's
 /// `is_kernel_call`.
@@ -488,6 +535,12 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
             let c = if *until_form { format!("not ({c})") } else { c };
             format!("while {c}:\n{}", emit_block_body(body, true))
         }
+        // Valueless `next`/`break` in statement position: the each/while
+        // bodies above emit as native Python loops, where these are
+        // `continue`/`break`. A value-carrying form (map's `next v`)
+        // still degrades through the generic reporter.
+        ExprNode::Next { value: None } => "continue".to_string(),
+        ExprNode::Break { value: None } => "break".to_string(),
         _ => {
             if let Some(s) = try_emit_raise_stmt(e) {
                 s
@@ -552,24 +605,26 @@ fn lvalue_str(t: &LValue) -> String {
 }
 
 /// Render a constant path, collapsing the framework namespaces the
-/// flat-module Python layout doesn't reify: `ActionDispatch::Session`
-/// is imported as bare `Session` (see the PYTHON_RUNTIME import
-/// tables), so the qualifier would be an undefined name at runtime.
-/// Mirrors Kotlin's namespaces-collapse rule. App-level namespaces
+/// flat-module Python layout doesn't reify: the library emit flattens
+/// every nested framework class to a top-level `class`, and the
+/// PYTHON_RUNTIME import tables bring them in as bare names — so
+/// `ActionDispatch::Session` is `Session` and
+/// `ActionDispatch::Router::MatchResult` is `MatchResult` (NOT
+/// `Router.MatchResult`; `Router` has no such attribute). Mirrors
+/// Kotlin's namespaces-collapse rule. App-level namespaces
 /// (`Views::Articles`) keep their dotted form — the overlay defines
 /// them as real classes.
 fn py_const_path(path: &[crate::ident::Symbol]) -> String {
-    let flattened: &[crate::ident::Symbol] = match path.first().map(|s| s.as_str()) {
+    match path.first().map(|s| s.as_str()) {
         Some("ActionDispatch" | "ActionController" | "ActionView") if path.len() >= 2 => {
-            &path[1..]
+            path.last().unwrap().to_string()
         }
-        _ => path,
-    };
-    flattened
-        .iter()
-        .map(|s| s.to_string())
-        .collect::<Vec<_>>()
-        .join(".")
+        _ => path
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .join("."),
+    }
 }
 
 /// True for an `If`'s absent else branch — Ruby's `x if cond` lowers to
@@ -614,7 +669,9 @@ fn emit_if_stmt(cond: &Expr, then_branch: &Expr, else_branch: &Expr, void: bool)
 /// wrong loop) — the block body would otherwise be silently dropped.
 fn emit_for_each(recv: &Expr, params: &[String], body: &Expr) -> Option<String> {
     let recv_s = emit_expr(recv);
-    let (vars, iter) = match (params.len(), recv.ty.as_ref()) {
+    // strip_nullable: a nil-guarded `pins.each` receiver is statically
+    // `Array | Nil` — the guard already ruled nil out at runtime.
+    let (vars, iter) = match (params.len(), strip_nullable(recv.ty.as_ref()).as_ref()) {
         (2, Some(Ty::Hash { .. })) => {
             (format!("{}, {}", params[0], params[1]), format!("{recv_s}.items()"))
         }
@@ -761,8 +818,24 @@ pub(super) fn emit_expr(e: &Expr) -> String {
             // called in an expression position (non-expression If flow
             // lives in the controller/view emitters with their own
             // statement-form handlers).
-            let cond_s = emit_expr(cond);
-            let then_s = emit_expr(then_branch);
+            //
+            // A nested If in the THEN (or cond) slot must be
+            // parenthesized: Python's conditional expression is
+            // right-associative, so the flat
+            // `A if c1 else B if c2 else …` binds c1 FIRST and
+            // silently reorders a Ruby `if p then (s ? x : y) else …`
+            // — the dom_id new_-prefix bug. The ELSE slot chains
+            // correctly unparenthesized.
+            let wrap = |e: &Expr| {
+                let s = emit_expr(e);
+                if matches!(&*e.node, ExprNode::If { .. }) {
+                    format!("({s})")
+                } else {
+                    s
+                }
+            };
+            let cond_s = wrap(cond);
+            let then_s = wrap(then_branch);
             let else_s = emit_expr(else_branch);
             format!("{then_s} if {cond_s} else {else_s}")
         }
@@ -917,6 +990,13 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
                 (Some("JSON"), "parse", 1) => {
                     return format!("json.loads({})", args_s[0]);
                 }
+                // The ParamValue primitives module (hand-written
+                // runtime/python/params.py) spells its `str` narrowing
+                // helper `str_` — module-level `def str` would shadow
+                // the builtin inside that module.
+                (Some("Params"), "str", _) => {
+                    return format!("Params.str_({})", args_s.join(", "));
+                }
                 _ => {}
             }
         }
@@ -968,10 +1048,10 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
     // `new` elsewhere falls through to the generic call.
     if method == "new" {
         if let Some(r) = recv {
-            return format!("{}({})", emit_expr(r), args_s.join(", "));
+            return format!("{}({})", emit_expr(r), py_call_args(args, &args_s));
         }
         if INJECT_SELF_SENDS.with(|c| c.get()) {
-            return format!("{}({})", SELF_REF.with(|c| c.get()), args_s.join(", "));
+            return format!("{}({})", SELF_REF.with(|c| c.get()), py_call_args(args, &args_s));
         }
     }
     // Ruby reflection `x.class` → Python `type(x)`. `class` is a Python
@@ -1142,13 +1222,13 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
                 return if args_s.is_empty() {
                     format!("{recv}.{m}()")
                 } else {
-                    format!("{recv}.{m}({})", args_s.join(", "))
+                    format!("{recv}.{m}({})", py_call_args(args, &args_s))
                 };
             }
             if args_s.is_empty() {
                 method.to_string()
             } else {
-                format!("{}({})", method, args_s.join(", "))
+                format!("{}({})", method, py_call_args(args, &args_s))
             }
         }
         Some(r) => {
@@ -1172,7 +1252,9 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
             // accepts either. Requires `import re` in the emitted module
             // (regex-literal use already injects it; json_builder relies
             // on that).
-            if matches!(method, "gsub" | "sub") {
+            if matches!(method, "gsub" | "sub")
+                && matches!(strip_nullable(r.ty.as_ref()).as_ref(), Some(Ty::Str))
+            {
                 if let [pat, repl] = args {
                     let count = if method == "sub" { ", count=1" } else { "" };
                     let repl_s = if matches!(
@@ -1213,7 +1295,7 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
                     format!("{recv_s}.{m}")
                 }
             } else {
-                format!("{recv_s}.{m}({})", args_s.join(", "))
+                format!("{recv_s}.{m}({})", py_call_args(args, &args_s))
             }
         }
     }
@@ -1298,6 +1380,11 @@ fn map_builtin_method(recv: &str, method: &str, ty: Option<&Ty>, args_s: &[Strin
         // gating rationale as fetch.
         "key?" | "has_key?" if one_arg && matches!(ty, Some(Ty::Hash { .. })) => {
             format!("({} in {recv})", args_s[0])
+        }
+        // Ruby `Hash#merge(other)` returns a NEW hash with `other`'s
+        // entries winning — Python's dict-unpacking spread, exactly.
+        "merge" if one_arg && matches!(ty, Some(Ty::Hash { .. })) => {
+            format!("{{**{recv}, **{}}}", args_s[0])
         }
         // Ruby `Array#join(sep)` → Python `sep.join(list)` (the receiver
         // and argument swap). No-arg join uses the empty separator (Ruby's
