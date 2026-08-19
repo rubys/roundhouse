@@ -1260,7 +1260,15 @@ fn build_class_info(
         fn_sig(vec![(Symbol::from("value"), Ty::Int)], Ty::Int),
     );
     insert_default(&mut info.instance_methods, "save", fn_sig(vec![], Ty::Bool));
-    insert_default(&mut info.instance_methods, "save!", fn_sig(vec![], Ty::Bool));
+    // `save!` answers the RECORD, not a bool: `runtime/ruby/active_record/
+    // base.rb` raises on failure and returns `self`, its sidecar declares
+    // `save!: () -> Base`, and the catalog types it `ReturnKind::SelfType`.
+    // Declaring Bool here made every method whose tail is `x.save!` carry a
+    // `-> bool` signature its own body contradicts — invisible under CRuby,
+    // a refused AOT build once spinel judged return seeds (matz/spinel#4005):
+    // lobsters' `Domain#ban_by_user_for_reason!`, `#unban_by_user_for_reason!`
+    // and `SavedStory.save_story_for_user` all ended in a `save!`.
+    insert_default(&mut info.instance_methods, "save!", fn_sig(vec![], owner_ty.clone()));
     insert_default(&mut info.instance_methods, "destroy", fn_sig(vec![], owner_ty.clone()));
     insert_default(&mut info.instance_methods, "destroyed?", fn_sig(vec![], Ty::Bool));
     insert_default(&mut info.instance_methods, "persisted?", fn_sig(vec![], Ty::Bool));
