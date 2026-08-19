@@ -57,6 +57,14 @@ thread_local! {
     /// Off for module functions (inflector/json_builder) and app-code
     /// fallback paths, where bare calls are genuine free functions.
     static INJECT_SELF_SENDS: Cell<bool> = const { Cell::new(false) };
+
+    /// Ruby-side names of the parameters of the method body being
+    /// emitted. A bare zero-arg send matching one is a PARAMETER READ
+    /// (Ruby can't spell the difference; the ingester made it a Send),
+    /// not an implicit-self call — the view lowering's `notice`/`alert`
+    /// locals-become-params are the canonical case. Checked before
+    /// self-injection.
+    static BODY_PARAMS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Run `f` with implicit-self injection for bare non-kernel calls on
@@ -65,6 +73,15 @@ pub(super) fn with_self_sends<R>(on: bool, f: impl FnOnce() -> R) -> R {
     let prev = INJECT_SELF_SENDS.with(|c| c.replace(on));
     let r = f();
     INJECT_SELF_SENDS.with(|c| c.set(prev));
+    r
+}
+
+/// Run `f` with `BODY_PARAMS` set to the enclosing method's parameter
+/// names (see above), restoring the previous set after.
+pub(super) fn with_body_params<R>(params: Vec<String>, f: impl FnOnce() -> R) -> R {
+    let prev = BODY_PARAMS.with(|c| c.replace(params));
+    let r = f();
+    BODY_PARAMS.with(|c| *c.borrow_mut() = prev);
     r
 }
 
@@ -357,7 +374,14 @@ pub(super) fn emit_stmt(e: &Expr, is_last: bool, void_return: bool) -> String {
             format!("{} = {}", super::shared::py_ident(name.as_str()), emit_expr(value))
         }
         ExprNode::Assign { target: LValue::Ivar { name }, value } => {
-            format!("self.{} = {}", name.as_str(), emit_expr(value))
+            // `SELF_REF`: `cls` inside a classmethod (module-singleton
+            // state like ViewHelpers' `@slots`), `self` otherwise.
+            format!(
+                "{}.{} = {}",
+                SELF_REF.with(|c| c.get()),
+                name.as_str(),
+                emit_expr(value)
+            )
         }
         // Attribute write through an explicit receiver (`self.<col>_raw =
         // …`, the synthesized temporal writer's storage store). Python
@@ -516,15 +540,36 @@ fn range_slice(begin: &Option<Expr>, end: &Option<Expr>, exclusive: bool) -> Str
 fn lvalue_str(t: &LValue) -> String {
     match t {
         LValue::Var { name, .. } => super::shared::py_ident(name.as_str()),
-        LValue::Ivar { name } => format!("self.{}", name.as_str()),
+        LValue::Ivar { name } => {
+            format!("{}.{}", SELF_REF.with(|c| c.get()), name.as_str())
+        }
         LValue::Attr { recv, name } => {
             format!("{}.{}", emit_expr(recv), name.as_str())
         }
         LValue::Index { recv, index } => format!("{}[{}]", emit_expr(recv), emit_expr(index)),
-        LValue::Const { path } => {
-            path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(".")
-        }
+        LValue::Const { path } => py_const_path(path),
     }
+}
+
+/// Render a constant path, collapsing the framework namespaces the
+/// flat-module Python layout doesn't reify: `ActionDispatch::Session`
+/// is imported as bare `Session` (see the PYTHON_RUNTIME import
+/// tables), so the qualifier would be an undefined name at runtime.
+/// Mirrors Kotlin's namespaces-collapse rule. App-level namespaces
+/// (`Views::Articles`) keep their dotted form — the overlay defines
+/// them as real classes.
+fn py_const_path(path: &[crate::ident::Symbol]) -> String {
+    let flattened: &[crate::ident::Symbol] = match path.first().map(|s| s.as_str()) {
+        Some("ActionDispatch" | "ActionController" | "ActionView") if path.len() >= 2 => {
+            &path[1..]
+        }
+        _ => path,
+    };
+    flattened
+        .iter()
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 /// True for an `If`'s absent else branch — Ruby's `x if cond` lowers to
@@ -684,11 +729,11 @@ pub(super) fn emit_expr(e: &Expr) -> String {
     }
     match &*e.node {
         ExprNode::Lit { value } => emit_literal(value),
-        ExprNode::Const { path } => {
-            path.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(".")
-        }
+        ExprNode::Const { path } => py_const_path(path),
         ExprNode::Var { name, .. } => super::shared::py_ident(name.as_str()),
-        ExprNode::Ivar { name } => format!("self.{}", name.as_str()),
+        ExprNode::Ivar { name } => {
+            format!("{}.{}", SELF_REF.with(|c| c.get()), name.as_str())
+        }
         ExprNode::SelfRef => SELF_REF.with(|c| c.get()).to_string(),
         // `recv.map { |x| EXPR }` / `.collect` → Python list comprehension
         // `[EXPR for x in recv]`. Expression-position iteration (the
@@ -855,6 +900,27 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
         }
     }
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+    // Ruby stdlib module calls with direct Python stdlib equivalents.
+    // `Base64.strict_encode64(s)` → b64encode over the UTF-8 bytes,
+    // decoded back to str (Python's b64encode is bytes→bytes);
+    // `JSON.generate`/`JSON.parse` → json.dumps/json.loads. The
+    // stdlib imports ride each consuming unit's entry imports.
+    if let Some(r) = recv {
+        if let ExprNode::Const { path } = &*r.node {
+            match (path.last().map(|s| s.as_str()), method, args.len()) {
+                (Some("Base64"), "strict_encode64", 1) => {
+                    return format!("base64.b64encode(({}).encode()).decode()", args_s[0]);
+                }
+                (Some("JSON"), "generate", 1) => {
+                    return format!("json.dumps({})", args_s[0]);
+                }
+                (Some("JSON"), "parse", 1) => {
+                    return format!("json.loads({})", args_s[0]);
+                }
+                _ => {}
+            }
+        }
+    }
     // Temporal reader intrinsic: `ActiveSupport.parse_db_time(s)` parses a
     // stored ISO-8601 `str` into a native `datetime`. Renders to the
     // Python runtime helper (nil-safe: `str | None` → `datetime | None`).
@@ -1060,6 +1126,14 @@ pub(super) fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr], parent
             // TS emit rewrite. `name` is Ruby's `Module#name` (the class
             // name) → Python's `cls.__name__`.
             if INJECT_SELF_SENDS.with(|c| c.get()) && !is_kernel_call(method) {
+                // A bare zero-arg send naming one of the enclosing
+                // method's parameters is that parameter, not an
+                // implicit-self call.
+                if args_s.is_empty()
+                    && BODY_PARAMS.with(|c| c.borrow().iter().any(|p| p == method))
+                {
+                    return super::shared::py_ident(method);
+                }
                 let recv = SELF_REF.with(|c| c.get());
                 if method == "name" && args_s.is_empty() {
                     return format!("{recv}.__name__");
@@ -1211,6 +1285,20 @@ fn map_builtin_method(recv: &str, method: &str, ty: Option<&Ty>, args_s: &[Strin
         // in parens since `in` is a comparison-precedence operator and may
         // sit inside a larger boolean expression.
         "include?" if one_arg && is_seq => format!("({} in {recv})", args_s[0]),
+        // Ruby `Hash#fetch(k)` raises on a missing key — Python `d[k]`
+        // raises KeyError, the same contract; `fetch(k, default)` is
+        // `d.get(k, default)`. Gated to Hash so Flash#fetch /
+        // Session#fetch (user methods) keep their own definitions.
+        "fetch" if matches!(ty, Some(Ty::Hash { .. })) => match args_s.len() {
+            1 => format!("{recv}[{}]", args_s[0]),
+            2 => format!("{recv}.get({}, {})", args_s[0], args_s[1]),
+            _ => return None,
+        },
+        // Ruby `Hash#key?(k)` / `has_key?(k)` → membership. Same
+        // gating rationale as fetch.
+        "key?" | "has_key?" if one_arg && matches!(ty, Some(Ty::Hash { .. })) => {
+            format!("({} in {recv})", args_s[0])
+        }
         // Ruby `Array#join(sep)` → Python `sep.join(list)` (the receiver
         // and argument swap). No-arg join uses the empty separator (Ruby's
         // `$,` default is nil → ""). Gated to Array so a user `join`

@@ -139,10 +139,76 @@ fn overlay_gate(fixture: &Path, scratch: &str) {
     );
 }
 
+/// Phase C driver: assemble the real emitted tree plus the overlay in
+/// a scratch dir, boot an in-memory DB, and dispatch
+/// `GET <resource>#index` through `app/v2/dispatch.py` — an actual
+/// request through the overlay, not just a compile. Runtime gaps
+/// (unresolved imports, degraded helper bodies) surface here as
+/// Python tracebacks.
+fn overlay_request_driver(fixture: &Path, scratch: &str, resource: &str) {
+    if !py3() {
+        return;
+    }
+    let mut app = ingest_app(fixture).expect("ingest fixture");
+    analyze_and_lower(&mut app);
+    let dir = std::path::PathBuf::from(scratch);
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut files = roundhouse::emit::python::emit(&app);
+    files.extend(emit_overlay_files(&app).expect("assemble overlay files"));
+    for f in &files {
+        let path = dir.join(&f.path);
+        if let Some(p) = path.parent() {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        std::fs::write(&path, &f.content).unwrap();
+    }
+    let driver = format!(
+        "from app.db import setup_test_db\n\
+         from app.schema_sql import CREATE_TABLES\n\
+         setup_test_db(CREATE_TABLES)\n\
+         from app.v2.dispatch import dispatch\n\
+         c = dispatch(\"{resource}\", \"index\", request_path=\"/{resource}\")\n\
+         assert c.status == 200, f\"status={{c.status}}\"\n\
+         assert c.body, \"empty body\"\n\
+         print(f\"OK {resource}#index status={{c.status}} bytes={{len(c.body)}}\")\n"
+    );
+    std::fs::write(dir.join("overlay_driver.py"), driver).unwrap();
+    let out = Command::new("python3")
+        .arg("overlay_driver.py")
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "overlay driver failed for {fixture:?}:\n--- stdout:\n{}\n--- stderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    println!("  {}", String::from_utf8_lossy(&out.stdout).trim());
+}
+
 /// tiny-blog: the always-present fixture.
 #[test]
 fn tiny_blog_overlay_emits_and_compiles() {
     overlay_gate(Path::new("fixtures/tiny-blog"), "tmp/rh-py-overlay-tiny");
+}
+
+#[test]
+fn tiny_blog_overlay_serves_index() {
+    overlay_request_driver(
+        Path::new("fixtures/tiny-blog"),
+        "tmp/rh-py-overlay-drive-tiny",
+        "posts",
+    );
+}
+
+#[test]
+fn real_blog_overlay_serves_index() {
+    overlay_request_driver(
+        Path::new("fixtures/real-blog"),
+        "tmp/rh-py-overlay-drive-real",
+        "articles",
+    );
 }
 
 /// real-blog: the Phase-1 fixture (generated; present in CI's unit

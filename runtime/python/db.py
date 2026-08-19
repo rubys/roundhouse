@@ -250,6 +250,14 @@ class Db:
         return "NULL" if n is None else str(int(n))
 
     @staticmethod
+    def escape_int_list(ids: "list[int]") -> str:
+        """Integer list for `IN (...)` eager-load queries. An empty
+        list renders NULL — matching no rows — because an empty
+        `IN ()` is a SQL syntax error. Mirrors the crystal/rust/go
+        siblings."""
+        return "NULL" if not ids else ", ".join(str(int(n)) for n in ids)
+
+    @staticmethod
     def escape_float_opt(f: "float | None") -> str:
         return "NULL" if f is None else str(float(f))
 

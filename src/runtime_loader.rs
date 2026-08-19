@@ -1844,7 +1844,9 @@ const PYTHON_RUNTIME: &[RuntimeEntry] = &[
         namespace: "ActionDispatch",
         out_path: "app/session.py",
         mode: Mode::Library,
-        imports: NO_IMPORTS,
+        // `ENCODE_PATTERN = re.compile(...)` — the transpiled Regexp
+        // constant needs the stdlib module at import time.
+        imports: &[("re", "")],
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },
@@ -1871,7 +1873,15 @@ const PYTHON_RUNTIME: &[RuntimeEntry] = &[
         namespace: "",
         out_path: "app/view_helpers.py",
         mode: Mode::Library,
-        imports: &[("Base", "app.active_record_base")],
+        // `re`: HTML_ESCAPE_PATTERN and friends are transpiled Regexp
+        // constants; `base64`/`json`: turbo_stream_from's stream-name
+        // encoding rides the Base64/JSON stdlib mappings.
+        imports: &[
+            ("Base", "app.active_record_base"),
+            ("re", ""),
+            ("base64", ""),
+            ("json", ""),
+        ],
         prelude: NO_PRELUDE,
         extra_roots: NO_EXTRA_ROOTS,
     },

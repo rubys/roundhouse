@@ -1,6 +1,9 @@
 # Python universal-IR overlay (the CtrlWalker retirement)
 
-> **ACTIVE** — phases A–B landed 2026-08-19; C–E remaining.
+> **ACTIVE** — phases A–B landed 2026-08-19; C's dispatch leg proven
+> the same day (both fixtures serve `index` end-to-end through
+> `app/v2/dispatch.py` in the driver tests); remaining = http.py /
+> TestClient wiring (C), switchover (D), teardown (E).
 
 Python is the last emitter deriving controllers per-artifact through
 `lower::CtrlWalker` (`src/emit/python/controller.rs` implements the
@@ -47,17 +50,29 @@ models + views + controllers + route helpers + dispatch together.
   `module_funcs_to_library_class` moved to its shared home in
   `src/lower/` (was duplicated in the rust and go emitters).
 
-- **C. Runtime wiring.** Route requests through the overlay:
-  - `app/v2/routes.py` from `lower_routes_to_dispatch_functions`
-    (`RouteTable` data) + the transpiled `app/router.py` match, OR
-    the hand-written `http.py` Router matched by class registry —
-    decide by whichever keeps `test_support.py`'s TestClient simplest.
-  - Translate the returned controller's `status`/`body`/`location`/
-    `content_type` into `http.ActionResponse`.
-  - The view-helper gap: overlay views call
-    `ActionView.ViewHelpers.*`; either graduate the transpiled
-    `action_view/view_helpers` unit into `LIVE_FRAMEWORK` or shim the
-    hand-written `app/view_helpers.py` under those names.
+- **C. Runtime wiring — dispatch leg DONE.** The driver tests
+  (`*_overlay_serves_index`) boot an in-memory DB and serve
+  `GET index` end-to-end through `app/v2/dispatch.py` on both
+  fixtures. The run surfaced and fixed a chain of
+  ship-but-unexercised runtime gaps, most in the Python walker:
+  Ruby `Hash#fetch`/`key?` on Hash receivers now map to `[k]` /
+  `.get(k, v)` / `in` (STATUS_CODES and `self.params` were
+  AttributeErrors); the Action* framework namespaces collapse in
+  Const paths (Kotlin's rule — `ActionDispatch.Session` was an
+  undefined name); `Base64.strict_encode64`/`JSON.generate` map to
+  the Python stdlib; ivars honor `SELF_REF` so module-singleton
+  state (`@slots`) binds `cls`; a bare zero-arg send naming a method
+  parameter is a parameter read, not an implicit-self call; the
+  session/view_helpers units carry their stdlib imports;
+  `Db.escape_int_list` joined the hand-written primitives; and
+  `dispatch()` resets view slots per request like every other
+  target's glue. The transpiled view_helpers ships at
+  `app/v2/view_helpers.py` (the hand-written one stays for the
+  legacy world until Phase E).
+  Remaining wiring: route table + `http.py`/TestClient integration —
+  translate the returned controller's `status`/`body`/`location`/
+  `content_type` into `http.ActionResponse` and dispatch by class
+  registry (or the transpiled `app/router.py` match).
 
 - **D. Switchover.** `emit()` ships the overlay; `app/routes.py` and
   TestClient dispatch through it; the per-artifact controller path
