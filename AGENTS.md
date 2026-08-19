@@ -20,6 +20,7 @@ README and CI win.**
 | Pipeline internals (analyze / lower / emit / runtime / verification) | [`docs/pipeline/`](docs/pipeline/) — architecture, not status |
 | Compiler inputs (Ruby+ERB, schema/routes/seeds, method catalog, DB adapter) | [`docs/data/`](docs/data/) |
 | Why do this at all (the argument, option value) | [`WHY.md`](WHY.md) |
+| Why this attempt is different (lineage, the three bets, risks) | [`BETS.md`](BETS.md) |
 
 Pipeline shape: `Ruby AST → analyze (typed IR) → lower (target-neutral IR) →
 emit (per-target project + runtime/<target>/ glue)`. Key files are mapped in
@@ -33,8 +34,8 @@ defect even if the build is green.
 1. **Zero *error* diagnostics is the contract.** The subset of Rails we
    transpile is *defined* as "produces no error diagnostics." Warnings are the
    modeling-debt ledger and are expected; **errors are the invariant.** Guarded
-   by `tests/real_blog.rs` (`ingests_without_errors`, and the diagnostics
-   assertions around it).
+   by `tests/real_blog.rs` (`ingests_without_errors` plus
+   `type_analysis_coverage`, the zero-error + zero-unresolved-type gate).
 
 2. **Features land once, in a shared home — never duplicated per target.** New
    framework behavior belongs in `runtime/ruby/` (transpiled to every target) or
@@ -48,10 +49,12 @@ defect even if the build is green.
    inference engine has to resolve every body. Non-void methods end in a read.
    Quick self-check: emit Rust and `cargo check`.
 
-4. **Ruby emit is the round-trip forcing function.** `src/emit/ruby.rs` must be
-   the exact inverse of `src/ingest.rs` (round-trip identity is tested on the
-   fixtures). Other targets may approximate until a fixture sharpens them; Ruby
-   may not.
+4. **Ruby emit is lowered-IR-only; Spinel compile-equivalence is the forcing
+   function.** Whole-app source-equivalence round-trip was retired (see the
+   header of `src/emit/ruby.rs`); the emit-side gates are
+   `tests/lowered_ruby_emit.rs` and `tests/spinel_toolchain.rs`.
+   Expression-level IR round-trip (`roundhouse-ast --round-trip`, Ruby input
+   only) still holds: ingest → emit-ruby → ingest must reach a fixed point.
 
 5. **A new `runtime/ruby/<stem>.rb` must be registered in
    `src/project.rs::spinel_files`** or the Spinel target silently omits it.

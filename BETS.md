@@ -73,7 +73,7 @@ Each bet has been tried in isolation by predecessors. The combination has not.
 | Opal | Rejects (any Ruby) | No | Single-target, non-idiomatic output |
 | Sorbet Compiler | Requires annotations | No | Single LLVM target; same deployment shape |
 | RubyMotion | Partial | Limited | Single iOS target; hostile platform owner |
-| Roundhouse | Accepts | Yes | 7 targets, idiomatic output |
+| Roundhouse | Accepts | Yes | 10 targets, idiomatic output |
 
 - **Opal** takes a different position on bet 1: accept all of Ruby (including metaprogramming) and pay for that with semantic-shim machinery in the output. The trade-off is that the output isn't idiomatic JavaScript, which bounds how naturally it integrates with the broader JS ecosystem. A real value proposition for the audience that wants exactly that trade-off; roundhouse makes a different one.
 - **Sorbet Compiler** is the inverse: requires annotations, generates LLVM IR, produces native shared libraries that MRI loads via FFI. Speeds up CRuby on the same deployment shape; doesn't change deployment economics or reachability. Natural audience: shops that have already invested in Sorbet annotations.

@@ -160,7 +160,7 @@ Which targets are live, how far each has passed the conformance
 gates, and the current benchmark numbers move week to week; the
 [README](README.md) tracks them and is the authoritative snapshot.
 The durable claim is the discipline behind those numbers: a DOM-diff
-harness holds every emitted target to byte-level parity with the
+harness holds every emitted target to DOM-level equivalence with the
 original Rails app on every commit, so a template that renders
 differently anywhere is a bug, not a variant.
 

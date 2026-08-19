@@ -46,7 +46,8 @@ database.
 That inference is a product in its own right, not just the compiler's
 enabler. The same engine that emits Rust answers an editor's or an
 agent's questions — *what's the type here? can this be nil?* — through
-an LSP server, an MCP server, and an
+an LSP server, an MCP server (the `roundhouse-lsp` and
+`roundhouse-mcp` binaries), and an
 [in-browser IDE](https://rubys.github.io/roundhouse/ide/): no
 annotations, no app boot, no database, no warm server to babysit. A
 whole-application pass over Mastodon — 1,173 files, all 337
@@ -145,9 +146,9 @@ real-blog as a CI invariant — Rust, TypeScript, Crystal, Elixir, Go,
 Kotlin, Swift, Python, C#/.NET, and Spinel-shape Ruby. Each boots an
 HTTP + Action Cable server, serves the generated blog with working
 forms, validation error display, Turbo streams, and Tailwind styling. A
-`compare-<target>` job in `.github/workflows/ci.yml` runs on every push
-to `main` (JRuby is compared too, serving the same emit on the JVM), so
-any drift turns CI red.
+compare matrix in `.github/workflows/ci.yml` diffs every target against
+Rails on each push to `main` (JRuby is compared too, serving the same
+emit on the JVM), so any drift turns CI red.
 
 Cross-runtime correctness is enforced by `tools/compare/`, which
 fetches the same URL from Rails and from any roundhouse-emitted runtime
@@ -250,6 +251,9 @@ Cleanup: `bin/rh clean <target | fixture>`.
 
 Targets: `spinel`, `ruby`, `jruby`, `crystal`, `csharp`, `elixir`, `go`,
 `kotlin`, `python`, `rust`, `swift`, `typescript`, `typescript-worker`.
+(An experimental `roda` target — the Roda + Sequel RFC, issue #67 —
+is reachable via `roundhouse --target roda` but isn't part of the
+`bin/rh` surface yet.)
 
 ## Supporting pieces worth knowing
 
@@ -273,20 +277,30 @@ cargo test --test real_blog             # the Phase-1 forcing functions
 cargo test --test rust_toolchain -- --ignored   # Rust end-to-end boot
 ```
 
+The `<target>_toolchain` tests are dev-loop harnesses; in CI the same
+ground is covered by per-target compare and smoke jobs (see
+[`docs/pipeline/verification.md`](docs/pipeline/verification.md)).
+
 The `real-blog` fixture is generated on demand — `bin/rh fixture` runs
 `scripts/create-blog` and materializes it under `fixtures/real-blog/`.
 CI regenerates the fixture once per run and shares it across the unit
-job and each per-target toolchain job.
+job and every per-target job.
 
 ## Documentation
 
 - [`DEVELOPMENT.md`](DEVELOPMENT.md) — day-to-day dev loop, the
-  `roundhouse-ast` debugging tool, adding a new IR variant.
+  debugging tools, adding a new IR variant, repo map.
+- [`AGENTS.md`](AGENTS.md) — orientation and the invariants not to
+  break, for AI agents and new contributors alike.
+- [`docs/README.md`](docs/README.md) — index of all architecture docs
+  and working plans.
 - [`docs/data/`](docs/data/) — the compiler's inputs, one doc each for
-  Ruby + ERB, schema/routes/seeds, the method catalog, and the
+  Ruby + templates, schema/routes/seeds, the method catalog, and the
   database adapter.
 - [`docs/pipeline/`](docs/pipeline/) — pipeline internals: analyze,
   lower, emit, runtime integration, verification.
+- [`BETS.md`](BETS.md) — why this attempt is structured differently
+  from its predecessors: lineage, the three bets, acknowledged risks.
 
 ## Prior art
 

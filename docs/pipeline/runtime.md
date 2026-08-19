@@ -51,29 +51,39 @@ app emission depended on the result.
 
 ## Target primitives — what's in each `runtime/<target>/`
 
-Conventional file roles (file names vary by target — see inventory below):
+Conventional file roles (file names vary by target):
 
 | Role | Description |
 |------|-------------|
-| Model base / shims | `ActiveRecordAdapter` trait, validation error type, framework-test adapter |
+| Model base / shims | `ActiveRecordAdapter` trait / adapter interface, validation error type |
 | DB connection | Lifecycle (open, with_conn borrow, test-mode in-memory) |
 | HTTP server | Production HTTP entry — listens on a port, dispatches through Router |
 | Action Cable | WebSocket endpoint |
 | View helpers | Delegates into transpiled framework Ruby (where present) or implements helpers directly (legacy) |
 | Test support | TestClient + TestResponse + Rails-shaped assertions |
 
-The shape varies per target — newer targets (Rust, Crystal) carry
-adapter + framework-test scaffolding the older ones don't yet. The
-current inventory:
+The exact file set varies per target and rots fast in prose; the
+authoritative inventories are the `include_str!` tables in each
+target's emitter (`src/emit/typescript.rs`, `src/emit/go2.rs`,
+`src/emit/elixir2.rs`, …) and, for the Ruby family, the runtime walk
+in `src/project.rs`. Shape notes worth knowing:
 
-| Target | Files |
-|--------|-------|
-| `runtime/rust/` | `active_record_adapter.rs`, `cable.rs`, `db.rs`, `errors_ext.rs`, `flash.rs`, `framework_test_adapter.rs`, `hash_ext.rs`, `http.rs`, `param_value.rs`, `runtime.rs`, `server.rs`, `session.rs`, `test_support.rs`, `view_helpers.rs` |
-| `runtime/crystal/` | `broadcasts.cr`, `cable.cr`, `db.cr`, `framework_test_adapter.cr`, `http.cr`, `param_value.cr`, `server.cr`, `test_helper.cr`, `test_support.cr` |
-| `runtime/typescript/` | DB / server / Cable primitives (`db.ts`, `db-libsql.ts`, `db_worker.ts`, `server.ts`, `server-libsql.ts`, `server-worker.ts`, `broadcasts.ts`, `client.ts`, `param_value.ts`, `sqlite_wasm_engine.ts`), the worker bridge (`juntos*.ts`), and async/sync minitest adapters (`minitest.ts`, `minitest-async.ts`). Framework-runtime files (`active_record_base.ts`, `action_controller_base.ts`, `inflector.ts`, `json_builder.ts`, …) are emitter-generated from `runtime/ruby/` and appear under `src/` in emitted projects, not in this directory. |
-| `runtime/go/`, `runtime/python/`, `runtime/elixir/` | Conventional 7-file primitive set (`cable`, `db`, `http`, `runtime`, `server`, `test_support`, `view_helpers`) |
-| `runtime/kotlin/`, `runtime/swift/`, `runtime/csharp/` | Newer-target primitives (per-target file set) |
-| `runtime/spinel/` | Per-target primitives for the Ruby/Spinel target (`base64.rb`, `broadcasts.rb`, `cgi_io.rb`, `db.rb`, `db_cruby.rb`, `importmap.rb`, `json.rb`, `sqlite_adapter.rb`) plus a `scaffold/` tree (Gemfile, inner Makefile, main.rb, Tailwind config) overlaid into every emitted Ruby/Spinel project, and a `test/` tree of target-specific test files |
+- `runtime/go/` and `runtime/elixir/` keep their primitives under a
+  `v2/` sublayout — the go2/elixir2 emitters copy from there.
+- `runtime/typescript/` carries db/server variants selected by the
+  `DeploymentProfile` (sync sqlite, libsql, worker), the worker
+  bridge (`juntos*.ts`), and async/sync minitest adapters.
+  Framework-runtime files (`active_record_base.ts`,
+  `action_controller_base.ts`, …) are emitter-generated from
+  `runtime/ruby/` and appear under `src/` in emitted projects, not in
+  this directory.
+- `runtime/spinel/` is by far the largest: per-target Ruby primitives
+  (DB adapters per interpreter, CGI/ERB shims, message digests, …)
+  plus `tep/` (an embedded HTTP/WebSocket server), `facades/`
+  (hand-written typed stand-ins, each with an RBS sidecar), a
+  `scaffold/` tree overlaid into
+  every emitted Ruby/Spinel project, and a `test/` tree of
+  target-specific test files.
 
 ## Framework runtime — `runtime/ruby/`
 
@@ -88,7 +98,12 @@ runtime/ruby/
   action_dispatch/      Routing helpers
   action_text.rb        Content (the has_rich_text coder), Attachment
   inflector.rb          camelize / pluralize / dasherize
+  ...                   plus mailer/job/storage/params modules and the
+                        runtime's own test suite — see the directory
 ```
+
+`runtime/ruby/test/` is the framework runtime's own test suite, run
+per target by the `framework-tests-<target>` CI jobs.
 
 `action_text.rb` holds only Action Text's VALUE layer.
 `ActionText::RichText` is absent because it has a table: it is
@@ -97,7 +112,7 @@ every target through the model machinery. That split — table-backed
 things are models, values are framework Ruby — is the general rule,
 not an Action Text special case.
 
-Each `.rb` ships with a `.rbs` sidecar declaring the public typed
+Nearly every `.rb` ships with a `.rbs` sidecar declaring the public typed
 surface (see `analyze.md` on RBS-paired ingestion). The `.rbs` is
 what makes the framework runtime typeable without annotating every
 internal expression — only the public boundary commits to a type.
@@ -116,14 +131,26 @@ const DB_SOURCE: &str = include_str!("../../runtime/rust/db.rs");
 These strings are written verbatim into the generated project as
 `src/runtime.rs`, `src/db.rs`, etc.
 
-Framework runtime files (TS, eventually all targets) ship via the
-same emit pipeline that compiles user apps — `runtime/ruby/active_record/`
-is ingested with its RBS sidecar (`src/runtime_src.rs`), lowered, and
-emitted into the generated project as `src/active_record_base.ts`
-(etc.) by the same code path that compiles user controllers and
-models. There is no separate `bin/build-runtime` binary; emission
-runs inline as part of `cargo run --bin roundhouse -- --target <t>`
-(or `--site` for the full archive matrix).
+Framework runtime files ship via the same emit pipeline that compiles
+user apps — `runtime/ruby/active_record/` is ingested with its RBS
+sidecar, lowered, and emitted into the generated project as
+`src/active_record_base.ts` (etc.) by the same code path that
+compiles user controllers and models. The driver is
+`src/runtime_loader.rs`: a per-target `TargetEmit` hook set plus
+per-target entry points (`typescript_units`, `crystal_units`,
+`rust_units`, `go_units`, `elixir_units`, `kotlin_units`,
+`swift_units`, `csharp_units`, `python_units`, …) — most targets have
+one today. The parse layer underneath is `src/runtime_src.rs`. There
+is no separate `bin/build-runtime` binary; emission runs inline as
+part of `cargo run --bin roundhouse -- --target <t>` (or `--site` for
+the full archive matrix).
+
+The Ruby family is the asymmetry: Spinel / Ruby / JRuby receive the
+framework Ruby VERBATIM — the Ruby-family assembly in
+`src/project.rs` walks `runtime/ruby/` into the emitted tree as text,
+and a text-level tree-shake (`emit::ruby::shake`, run from
+`src/project.rs::target_files`) trims what the app doesn't reference
+— while every other target gets the IR transpile described above.
 
 ## Why hand-write the primitives?
 
@@ -165,9 +192,10 @@ function is a compile failure in the generated project.
 | `runtime/rust/` | Rust primitives |
 | `runtime/typescript/` | TS primitives (framework runtime is emitter-generated from `runtime/ruby/`) |
 | `runtime/crystal/` | Crystal primitives |
-| `runtime/{go,python,elixir,kotlin,swift,csharp,spinel}/` | Sibling targets, partial |
+| `runtime/{go,python,elixir,kotlin,swift,csharp,spinel}/` | Sibling targets (go/elixir under a `v2/` sublayout) |
 | `src/emit/<target>.rs` | Emitter side that reads + embeds the runtime |
-| `src/runtime_src.rs` | Framework-Ruby ingestion + transpile pipeline |
+| `src/runtime_loader.rs` | Framework-transpile driver — `TargetEmit` hooks + per-target `*_units` entry points |
+| `src/runtime_src.rs` | Parse layer: runtime Ruby + RBS → `MethodDef`s (no emission) |
 
 ## Deliberate divergences from Rails
 
@@ -186,7 +214,7 @@ weighed it.
 **Why.** A nullable primary key means `Option<i64>` in Rust and `Int?`
 in Kotlin/Swift/C#, with an unwrap at every foreign-key comparison, path
 helper and join. The sentinel keeps ids plain machine integers across
-all thirteen targets. Foreign keys follow the same convention — the
+every target. Foreign keys follow the same convention — the
 synthesized `belongs_to` readers test `@creator_id == 0`.
 
 **What depends on it.** `ty_of_column_slot` excludes the primary key

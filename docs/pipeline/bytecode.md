@@ -1,29 +1,34 @@
 # Bytecode
 
 An experimental additional emission target alongside the source-code
-targets (Rust, TypeScript, Crystal, Elixir, Go, Kotlin, Swift, Python,
-C#/.NET, and Spinel-shape Ruby). Instead of emitting target-language
-source, emit a
+targets (see [`emit.md`](emit.md) for the roster). Instead of emitting
+target-language source, emit a
 typed stack-based bytecode and execute it in a VM that reuses the
 existing Rust runtime.
 
 **Source:** `src/bytecode/` (format types, VM, IR→bytecode walker),
 `tests/bytecode_format.rs`, `tests/bytecode_vm.rs`, `tests/bytecode_emit.rs`.
 
-Status: experimental, parked. M1 (format), M2 (minimal VM), and M3a
+Status: experimental, parked. The module is consumed only by the
+`tests/bytecode_*.rs` suites — it is not reachable from any CLI
+target (no `BuildTarget` or `profile::Target` variant exists for it).
+M1 (format), M2 (minimal VM), and M3a
 (IR→bytecode walker, `src/bytecode/walker.rs`) have landed on `main`.
-M3a covers the subset of `ExprNode` whose lowering maps cleanly to the
-M2 VM's opcodes: `Lit`, `Var`, `Let`, `Seq`, `If`, `Assign` to
-`LValue::Var`, and `Send` for arithmetic/comparison on `Ty::Int`
-receivers. Everything else returns `WalkError::NotYetSupported` until
+The walker covers the subset of `ExprNode` whose lowering maps cleanly
+to the VM's opcodes: `Lit`, `Var`, `Let`, `Seq`, `If`, `Assign` to
+`LValue::Var`, `Send` for arithmetic/comparison on `Ty::Int`
+receivers, and Bool-typed `BoolOp` (short-circuit via branches); it
+also carries the user-function declaration hooks (`declare_user_fn` /
+`begin_user_fn_body` / `end_user_fn_body`) that pair with the VM's
+`CallUser`. Everything else returns `WalkError::NotYetSupported` until
 the corresponding M3b+ work lands.
 
 Phase B (source-code targets at parity) was the originally-cited gate
 for resuming Phase C work. The universal post-lowering IR
-(`LibraryClass | LibraryFunction`) that Phase B waited on has now
-largely landed — Spinel/Ruby, TypeScript, Crystal, Rust, and Python
-run on the thin path, with only Go and Elixir still on the legacy
-derivation (see [`emit.md`](emit.md)). The bytecode emitter will
+(`LibraryClass | LibraryFunction`) that Phase B waited on has since
+landed across the source-code targets (Python's per-artifact emitter
+is the remaining exception — see [`emit.md`](emit.md)). The bytecode
+emitter will
 consume the same `LibraryClass` shape every other thin emitter sees,
 so resuming Phase C is now gated on picking the work up rather than on
 the shape stabilizing.
@@ -59,8 +64,9 @@ Phase A (framework) and Phase C (emitter + integration) were originally
 separated by Phase B (**complete the existing targets first**), so
 that lifts from bringing each target to 5/5 parity could benefit the
 bytecode emitter the same way they benefit each other. The
-LibraryClass-shape migration Phase B waited on has largely landed
-(most source-code targets are thin; Go and Elixir remain). Phase C is
+LibraryClass-shape migration Phase B waited on has landed (go2 and
+elixir2 shipped; Python's per-artifact emitter is the remaining
+exception). Phase C is
 parked by priority, not by a missing shape; M3a walker is landed,
 M3b+ deferred.
 
@@ -69,7 +75,7 @@ M3b+ deferred.
 | M1 | Bytecode format + roundtrip tests | A | ✅ landed |
 | M2 | Minimal VM: arithmetic, locals, branches | A | ✅ landed |
 | — | Variant experiments (stack vs register, dispatch strategies) | A | ⏳ parked |
-| — | All targets migrated to LibraryClass-shape thin emitters | B | ⏳ Go/Elixir remain |
+| — | All targets migrated to LibraryClass-shape thin emitters | B | ✅ shipped (Python remains per-artifact — see emit.md) |
 | M3 | Bytecode emitter for tiny-blog | C | ⏳ parked |
 | M4 | VM runs one controller action end-to-end | C | ⏳ parked |
 | M5 | tiny-blog controller tests pass through VM | C | ⏳ parked |
@@ -119,10 +125,11 @@ pub struct Program {
 }
 ```
 
-31 opcodes across seven categories: literal pushes, locals, integer
+The opcode set (see the `Op` enum in `format.rs` for the
+authoritative list) spans literal pushes, locals, integer
 arithmetic, string concatenation, typed comparisons, control flow
 (jumps carry signed `i32` offsets relative to the next instruction),
-calls (user and runtime), stack manipulation, collections, string
+calls (user and runtime), stack manipulation, collections, and string
 interpolation.
 
 The serialization format itself is deferred. Types derive
@@ -139,10 +146,12 @@ Defined in [`src/bytecode/vm.rs`](../../src/bytecode/vm.rs).
 Alternatives (separate stacks per type, universal word slots) are
 variant-experiment material; this is the baseline.
 
-**State** — operand stack (`Vec<Value>`), locals (`Vec<Value>`),
-program counter (`usize`). No call-frame stack yet: M2's scope is
-straight-line execution with branches. M3+ introduces frames for
-function calls.
+**State** — operand stack (`Vec<Value>`), a call-frame stack (a
+`frames` vec of `Frame { locals, return_pc }`), and a program counter
+(`usize`). The operand stack is shared across frames — arguments flow
+in through it. `CallUser` pushes a frame and `Return` pops it, so
+user-function calls execute for real; only the opcodes below remain
+deferred.
 
 **Dispatch** — `match` on `Op` inside a loop. Each `Op` clones per
 iteration (a memcpy of ~16 bytes; `Op` has no heap fields) to avoid
@@ -150,9 +159,10 @@ the borrow dance of matching on a reference while also mutating
 `pc`. Computed-goto / direct-threaded dispatch is one of the variant
 experiments.
 
-**Deferred opcodes** — `CallUser`, `CallRt`, `ConcatStr`, `NewArray`,
+**Deferred opcodes** — `CallRt`, `ConcatStr`, `NewArray`,
 `NewHash`, `IndexLoad`, `IndexStore`, `InterpStr` return
-`VmError::NotYetSupported(name)` rather than panicking. Tests catch
+`VmError::NotYetSupported(name)` rather than panicking (`CallUser`
+graduated to a real implementation). Tests catch
 accidental reliance before the emitter lands.
 
 ## Variant experiments (between M2 and M3)
@@ -169,8 +179,9 @@ is low: write both, measure both, keep the winner.
 | `minimal_runtime_calls` | No `CALL_RT` opcode, everything inlined — isolates the runtime-call overhead itself. |
 
 Each is a few days of work once the framework exists. Each answers a
-specific question. Variants that lose stay under `bench/variants/` as
-published measurement; the winner advances to M3.
+specific question. Losing variants would keep their measurements
+published (a dedicated home under `bench/` is aspirational — none
+exists yet); the winner advances to M3.
 
 Variant-picking benchmarks are cheap and fast (microbenchmark + one
 real-blog endpoint at fixed concurrency, ~1 minute per variant) and
@@ -182,8 +193,9 @@ roundhouse, hour-long runs, pinned-governor Hetzner host).
 - **Where the VM ultimately ships.** `src/bytecode/vm.rs` is where M2
   lives today (compiles as part of the roundhouse crate, tests run in
   the repo). For M3+, the VM becomes the thing a user invokes to run a
-  compiled bytecode file — either extract to `runtime/rust/vm/` and
-  copy like the other runtime files, or ship a `roundhouse-vm` binary
+  compiled bytecode file — either extract to a new `vm/` dir under
+  `runtime/rust/` and copy like the other runtime files, or ship a
+  `roundhouse-vm` binary
   in the roundhouse crate. Clean options either way; defer until the
   decision has consequences.
 - **On-disk format.** serde_json today is a placeholder for tests; a

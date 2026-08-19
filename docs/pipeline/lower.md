@@ -19,6 +19,53 @@ logic that's identical across targets as IR-level lowerings; each
 emitter consumes the lowered form. Adding a new target becomes "write
 renders" rather than "re-implement the logic."
 
+## The post-analyze pass pipeline
+
+The organizing principle of the directory: after the analyzer
+converges, a pipeline of several dozen small passes rewrites the App
+before emit. `POST_ANALYZE_PASS_ORDER` in `src/lower/mod.rs` is the
+single authority on their ordering — a topologically-ordered table of
+`(pass_name, &[passes_that_must_run_before_it])` entries whose list
+order is the intended call order. The ordering knowledge that used to
+live only in prose scattered across the passes ("AFTER
+send_dispatch, by contract") now lives in that one table; soundness
+(every declared predecessor precedes its dependent) and code↔list
+correspondence are enforced by debug assertions and a unit test.
+
+The entry point is `apply_post_analyze_lowerings(&mut App, registry)`
+(`src/lower/mod.rs`): it mutates the App in place, pass by pass, and
+returns the residue diagnostics — sites a pass had to leave dynamic,
+with the reason. `registry` is the analyzer's post-fixpoint class
+table (`Analyzer::class_registry`); passes that synthesize dispatches
+consult it to stamp what analyze would have computed. The pipeline is
+invoked from `src/session.rs::analyze_and_lower`, the shared seam
+every emit-bound driver runs after ingest.
+
+### Pass families
+
+A map of the families, not an inventory (`src/lower/mod.rs` declares
+the full list):
+
+- **Query algebra** — `src/lower/arel/` (compile-time query IR),
+  `scope_chain.rs`, `chain.rs`.
+- **Functionalize** — `src/lower/functionalize/`:
+  imperative→functional rewrites (while→recursion,
+  mutation→struct-return), deliberately Elixir-only — an explicit
+  exception to lower-once-render-N-ways, since the recursion form is
+  strictly worse for imperative targets, which keep the native
+  `while`.
+- **JSON / serialization** — `src/lower/jbuilder_to_library/`,
+  `as_json_shape.rs`, `as_json_writer.rs`.
+- **ActiveSupport grounding** — `blank.rs`, `duration.rs`,
+  `inquiry.rs`, ….
+- **Rails-API grounding** — `secure_password.rs`, `signed_id.rs`,
+  `rich_text.rs`, ….
+- **Params / strong parameters** — `params_merge.rs`, `kwsplat.rs`, ….
+- **Dispatch / typing** — `send_dispatch.rs`,
+  `ty_coerce_insertion.rs`.
+- **View classification** — `view.rs`, the shared view-helper
+  classifier (distinct from `view_to_library/`).
+
 ## The two-shape contract
 
 After the lowerer boundary, every emitter sees the IR in one of two
@@ -95,8 +142,8 @@ Each lowerer:
 |---------|-------|--------|
 | `view_to_library` (via `flatten_lcs_to_functions`) | ERB-lowered view template | One `LibraryFunction` per template; `module_path` derived from view directory (`["Views", "Articles"]`) |
 | `routes_to_library` | `app.routes` (after `flatten_routes`) | One `LibraryFunction` per named route under `module_path: ["RouteHelpers"]`; body is a typed `StringInterp` building the path from path-params |
-| `importmap_to_library` | `app.importmap` | Two `LibraryFunction`s (`json`, `tags`) under `module_path: ["Importmap"]` |
-| `schema_to_library` | `Schema` | One `LibraryFunction` (`create_tables`) under `module_path: ["Schema"]`; body is the rendered DDL as a `Lit::Str` |
+| `importmap_to_library` | `app.importmap` | Two `LibraryFunction`s (`pins`, `entry`) under `module_path: ["Importmap"]` |
+| `schema_to_library` | `Schema` | One `LibraryFunction` (`statements`) under `module_path: ["Schema"]`; returns the rendered DDL as an `Array<Str>` of `Lit::Str` statements |
 | `seeds_to_library` | `app.seeds` (typed Expr) | One `LibraryFunction` (`run`) under `module_path: ["Seeds"]`; body is the seeds Expr verbatim |
 
 Why this group: each is "module of functions" rather than "class with
@@ -110,7 +157,18 @@ returns the class-shape (consumed by the body-typer registry to type
 cross-class dispatch like `Views::Articles.article(x)`),
 `flatten_lcs_to_functions` pivots that output into per-template
 `LibraryFunction`s for emission. Both share the same body-typing
-work.
+work. `jbuilder_to_library` (`src/lower/jbuilder_to_library/`) joins
+the same pipeline for `*.json.jbuilder` templates:
+`lower_jbuilder_to_library_classes` produces `<name>_json` methods on
+the same `Views::*` modules, in the same string-accumulator shape ERB
+bodies use.
+
+`routes_to_library` also emits the dispatch surface —
+`lower_routes_to_dispatch_functions` builds `RouteTable.table` /
+`RouteTable.root` under `module_path: ["RouteTable"]` — plus
+URL-option helpers (`lower_url_option_helpers`) for helper calls
+carrying extra query options, and its `direct.rs` lowers
+`direct :name` custom URL helpers into real `RouteHelpers` functions.
 
 ## Pre-emit lowering passes
 
@@ -126,12 +184,18 @@ framework supplies one implicitly from the action name (`index` →
 response terminal and appends the synthesized render call, so every
 downstream pass sees a uniform "body ends with a response" shape.
 
-### `unwrap_respond_to`
+### `unwrap_respond_to_with_format_dispatch`
 
-`respond_to do |format| format.html; format.json end` blocks get
-collapsed to the HTML branch (the only format every target emits
-today). JSON / Turbo Stream formats will re-enter as separate
-rendered outputs once a second format matters.
+`respond_to do |format| … end` blocks are lowered by
+`unwrap_respond_to_with_format_dispatch`
+(`src/lower/controller/body.rs`), which `controller_to_library`
+calls. A `FormatBreadth` widening lattice decides which non-HTML arms
+survive as `request_format` conditionals — json and rss arms are
+preserved per emit path's capability (the two widenings have
+different runtime costs; see the struct's doc). The plain
+`unwrap_respond_to` — collapse to the HTML branch only — survives for
+per-target paths that can't emit the dispatch; its own doc comment
+calls that the legacy behavior.
 
 ### `resolve_before_actions` + `inline_before_filters`
 
@@ -155,10 +219,12 @@ above:
 | `flatten_routes` | `RouteTable` | `Vec<FlatRoute>` (one entry per `(method, path, controller, action)`) | `routes_to_library`, controller-test dispatch |
 | `lower_broadcasts` | Model `broadcasts_to` declarations | `LoweredBroadcasts` (turbo-stream actions per association edge) | `model_to_library` |
 | `resolve_has_many` | Model associations | `HasManyRef` (target class + foreign key) | `model_to_library`, view-helper resolution |
-| `erb_trim::trim_view` | ERB-derived view tree | Whitespace-normalized view tree | `view_to_library` (runs first) |
 
-Each pass is pure: same input → same output, no side effects, no
-target awareness. Re-exports live in `src/lower/mod.rs`.
+These support passes and the `*_to_library` shape producers are
+derivations: same input → same output, no target awareness. The
+post-analyze pass family is deliberately not that — it mutates the
+App in place and accumulates a residue ledger. Re-exports live in
+`src/lower/mod.rs`.
 
 ## Self-describing IR
 
@@ -183,26 +249,37 @@ two emitters could disagree.
 
 ## Status of legacy per-target derivation
 
-The older shape — `CtrlWalker` trait, `WalkCtx` / `WalkState`,
-`SendKind` classifier in `src/lower/controller/` — walks controller
-bodies through a target-implemented dispatch trait, with each target
-overriding leaf `write_*` / `render_*` methods.
+The older shape — the `CtrlWalker` trait with `WalkCtx` / `WalkState`
+(`src/lower/controller_walk.rs`) and the `SendKind` classifier
+(`src/lower/controller/send.rs`) — walks controller bodies through a
+target-implemented dispatch trait, with each target overriding leaf
+`write_*` / `render_*` methods.
 
 Migration status:
 
-- **On the universal IR** (no longer use `CtrlWalker`): Spinel/Ruby,
-  TypeScript, Crystal, Rust, and Python were rip-and-replaced
-  end-to-end against the `LibraryClass | LibraryFunction` shape; the
-  newer Kotlin, Swift, and C#/.NET targets were built on it from the
-  start. Rust's rip-and-replace landed 2026-05-20 —
-  `src/emit/rust.rs::emit` now delegates unconditionally to
-  `super::rust2::emit`.
-- **In flight:** `src/emit/go2/` and `src/emit/elixir2/` — thin
-  rewrites of the Go and Elixir emitters, not yet the default dispatch.
-- **Still on the legacy path:** `src/emit/go.rs` and
-  `src/emit/elixir.rs` (the live Go/Elixir dispatch until go2/elixir2
-  land); the CtrlWalker code stays in tree until the last consumer is
-  gone.
+- **On the universal IR** (no longer use `CtrlWalker`): every shipped
+  target but one. Spinel/Ruby, TypeScript, and Crystal were
+  rip-and-replaced end-to-end against the
+  `LibraryClass | LibraryFunction` shape; the newer Kotlin, Swift,
+  and C#/.NET targets were built on it from the start. Rust delegates
+  unconditionally to rust2 (`src/emit/rust.rs::emit` →
+  `super::rust2::emit`). Go and Elixir shipped their v2 rewrites and
+  made them the default dispatch: `src/emit/go.rs` and
+  `src/emit/elixir.rs` are thin shims — each emits shared
+  target-infrastructure files and delegates the app modules to
+  `go2` / `elixir2` `emit_overlay_files` (their module headers
+  describe the collapse and why the shims keep their names).
+- **Still on the legacy path:** Python is the sole remaining
+  `CtrlWalker` consumer — `src/emit/python/controller.rs` implements
+  the trait. The CtrlWalker code stays in tree until that last
+  consumer is gone.
+
+One target sidesteps these lowerings entirely: the Roda target
+(`emit::roda`, the issue #67 conversion spike) emits Roda + Sequel
+source that runs on the real gems, so it works from the ingest-shape
+App — the transpile driver (`src/bin/roundhouse.rs`) skips
+`analyze_and_lower` for it (see the `BuildTarget::Roda` doc comment
+in `src/project.rs`).
 
 New work shouldn't extend the legacy form; existing per-target
 emitters either migrate to the universal IR or get rip-and-replaced
@@ -212,7 +289,7 @@ emitters either migrate to the universal IR or get rip-and-replaced
 
 | File | Role |
 |------|------|
-| `src/lower/mod.rs` | Module layout + re-exports |
+| `src/lower/mod.rs` | `POST_ANALYZE_PASS_ORDER` + `apply_post_analyze_lowerings` (the pass pipeline), module layout, re-exports |
 | `src/dialect.rs` | `LibraryClass`, `LibraryFunction`, `MethodDef`, `AccessorKind` |
 | `src/lower/typing.rs` | `fn_sig`, `lit_str`, `type_method_body`, `with_ty` — shared typing helpers used by every shape-producing lowerer |
 | `src/lower/model_to_library/` | Model dialect → `LibraryClass` |
@@ -222,9 +299,11 @@ emitters either migrate to the universal IR or get rip-and-replaced
 | `src/lower/fixture_to_library/` | YAML fixtures → `LibraryClass` per fixture file |
 | `src/lower/routes_to_library/` | Routes → `LibraryFunction` (RouteHelpers) |
 | `src/lower/importmap_to_library/` | Importmap → `LibraryFunction` (Importmap module) |
-| `src/lower/schema_to_library/` | Schema → `LibraryFunction` (`Schema.create_tables`) |
+| `src/lower/schema_to_library/` | Schema → `LibraryFunction` (`Schema.statements`) |
+| `src/lower/jbuilder_to_library/` | `*.json.jbuilder` → `<name>_json` methods on the `Views::*` classes |
 | `src/lower/seeds_to_library/` | Seeds → `LibraryFunction` (`Seeds.run`) |
-| `src/lower/controller/`, `controller_walk.rs` | Legacy per-target derivation (being torn down) |
+| `src/lower/controller_walk.rs` | Legacy `CtrlWalker` / `WalkCtx` / `WalkState` (Python is the last consumer) |
+| `src/lower/controller/` | Shared controller-body machinery — `send.rs` (`SendKind`), `body.rs` (`FormatBreadth`, respond_to lowering), `actions.rs` (before-action resolution) |
 | `src/lower/validations.rs` | `LoweredValidation`, `Check` enum |
 | `src/lower/routes.rs` | `flatten_routes`, `FlatRoute` |
 | `src/lower/persistence.rs` | `LoweredPersistence` |
@@ -232,7 +311,6 @@ emitters either migrate to the universal IR or get rip-and-replaced
 | `src/lower/fixtures.rs` | Fixture load plan |
 | `src/lower/associations.rs` | has_many resolution |
 | `src/lower/controller_test.rs` | Test-body classification |
-| `src/lower/erb_trim.rs` | ERB whitespace normalization |
 
 ## Related docs
 

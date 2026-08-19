@@ -1,4 +1,4 @@
-//! Bytecode: roundhouse's seventh emission target.
+//! Bytecode: an experimental additional roundhouse emission target.
 //!
 //! This module defines the typed, stack-based bytecode format that the
 //! bytecode emitter produces from analyzed IR, plus a minimal VM that

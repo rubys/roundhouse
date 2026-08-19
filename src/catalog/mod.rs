@@ -35,12 +35,11 @@
 //! AR methods only. The catalog will grow to include view helpers
 //! (`form_with`, `link_to`, `render`), controller helpers (`render`,
 //! `redirect_to`, `head`), and route DSL over time — but today's
-//! scope is the ~45 AR methods the current analyzer knows.
+//! scope is the AR method surface the compiler recognizes.
 //!
-//! Return-type signatures are *not yet* in the struct — they
-//! require a `Relation<T>` type kind that doesn't exist yet. When
-//! that lands, return types join as a facet; existing entries get
-//! augmented without breaking consumers.
+//! Return types are the `return_kind` facet (`ReturnKind`), keyed to
+//! the receiver context — in `Relation` context, `Self` means the
+//! relation's element model. See `ReceiverContext` below.
 
 use std::collections::BTreeSet;
 

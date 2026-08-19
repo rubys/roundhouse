@@ -18,6 +18,7 @@ every ActiveRecord Send site to decide two things:
 pub trait DatabaseAdapter: Send + Sync {
     fn classify_ar_method(&self, method: &str) -> ArMethodKind;
     fn is_suspending_effect(&self, effect: &Effect) -> bool { false }
+    fn async_seed_methods(&self) -> &'static [&'static str] { &[] }
 }
 
 pub enum ArMethodKind { Read, Write, Unknown }
@@ -26,6 +27,10 @@ pub enum ArMethodKind { Read, Write, Unknown }
 `Send + Sync` so `Analyzer` can hold a boxed adapter and share it
 across threads. The default `is_suspending_effect` returns `false`
 uniformly — sync-backend adapters need no override.
+`async_seed_methods` names the methods on the runtime AR adapter
+object that this backend implements asynchronously — the seed set
+for the async function-coloring pass (see below). The default empty
+slice means "nothing is async"; sync backends leave it alone.
 
 ## Why backend-specific, not language-specific
 
@@ -49,6 +54,13 @@ impl.
   `crate::catalog::AR_CATALOG` for classification — anything the
   catalog marks `DbRead` → `ArMethodKind::Read`, `DbWrite` →
   `Write`, `Pure` → `Unknown` (no effect attached).
+- **Filters out `ReceiverContext::Relation` entries before
+  classifying.** The trait's lookup is receiver-blind (a method
+  name, no receiver context), so — per the comment on the lookup in
+  `src/adapter.rs` — it must not classify names that only exist
+  under the Relation context (`to_a`, `page`, `merge`, …): that
+  would attach effects to Sends the analyzer doesn't yet type as
+  relations.
 - `is_suspending_effect` stays at default `false`. Everything is
   synchronous.
 
@@ -77,11 +89,20 @@ async backend becomes "new adapter impl, same emit path."
 2. `Analyzer::with_adapter(app, Box::new(...))` swaps in a different
    adapter when the caller knows which backend the generated project
    will ship against.
-3. During the effect walk (`visit_effects` in `src/analyze/mod.rs`), each
-   `Send` on an AR receiver hands its method name to
-   `adapter.classify_ar_method(name)`. The result attaches
-   `Effect::DbRead { table }` or `Effect::DbWrite { table }` — or
-   nothing, if `Unknown`.
+3. During the effect walk (`visit_effects` in
+   `src/analyze/effects.rs`), each `Send` on an AR receiver hands its
+   method name to `adapter.classify_ar_method(name)`. The result
+   attaches `Effect::DbRead { table }` or `Effect::DbWrite { table }`
+   — or nothing, if `Unknown`.
+
+Which adapter is active comes from the deployment profile
+(`DeploymentProfile` in `src/profile.rs`): its `adapter()` method
+maps the profile's `Database` to an impl — `SqliteSync` →
+`SqliteAdapter`, `SqliteAsync` → `SqliteAsyncAdapter`, and
+`Postgres` / `D1` / `IndexedDb` currently resolve to
+`SqliteAsyncAdapter` as a fallback (all three are async
+sqlite-shaped at the AR-method level) until their dedicated
+adapters land.
 
 ## How emitters use it
 
@@ -92,9 +113,25 @@ sites — RHS of an assign, condition of an `if`, body of an
 expression-statement — to decide whether `await` belongs in the
 emitted output.
 
-Sync emitters (Ruby, Crystal, Elixir, Go) ignore the suspension bit
-entirely. Async emitters (TypeScript today; Rust and Python in
-flight) consult it at every site.
+Which target/database pairings emit sync vs async code is a profile
+question, not a fixed per-language list — see `Target` and
+`Database` (with its `is_async()`) in `src/profile.rs`. Emitters for
+sync profiles ignore the suspension bit entirely; async-capable
+emitters consult it at every site.
+
+## Async coloring
+
+Suspension isn't only a per-call-site question — whole methods
+change color. `SqliteAsyncAdapter::async_seed_methods` names the
+Promise-returning methods on the runtime adapter/Db surface (`all`,
+`find`, `exec`, `prepare`, …); the coloring pass in
+`src/analyze/async_color.rs` marks those seeds `is_async = true` and
+then propagates the flag transitively through the call graph to a
+fixed point, so anything that calls an async method — directly or
+through framework Ruby — becomes async itself. The TypeScript
+emitter consumes the flag, declaring colored methods `async` and
+inserting `await` at their call sites. Under a sync profile the seed
+list is empty and the pass is a no-op — emit output is unchanged.
 
 ## Extending with a new adapter
 
@@ -108,7 +145,13 @@ impl DatabaseAdapter for PostgresAdapter {
         // For now, accept the same catalog coverage as SqliteAdapter —
         // Postgres supports the full AR query builder.
         // Reject methods Postgres-but-not-SQLite can't express later.
-        for entry in crate::catalog::lookup_any(method) {
+        //
+        // Keep the Relation-context exclusion (same as SqliteAdapter):
+        // this lookup is receiver-blind, and Relation-only names
+        // (`to_a`, `page`, `merge`, …) must not pick up effects here.
+        for entry in crate::catalog::lookup_any(method)
+            .filter(|e| e.receiver != crate::catalog::ReceiverContext::Relation)
+        {
             match entry.effect {
                 crate::catalog::EffectClass::DbRead => return ArMethodKind::Read,
                 crate::catalog::EffectClass::DbWrite => return ArMethodKind::Write,
@@ -151,7 +194,9 @@ demands it):
 |------|------|
 | `src/adapter.rs` | Trait + the two SQLite impls |
 | `src/catalog/mod.rs` | The method table the adapters consult |
-| `src/analyze/mod.rs` | Consumer: effect inference |
+| `src/analyze/effects.rs` | Consumer: effect inference (`visit_effects`, the `classify_ar_method` call site) |
+| `src/analyze/async_color.rs` | Consumer: async coloring — seeds from `async_seed_methods`, propagates `is_async` |
+| `src/profile.rs` | `DeploymentProfile::adapter()` — which adapter a `Database` selects |
 | `src/lower/controller_walk.rs` | Consumer: `await` emission decision |
 | `src/effect.rs` | `Effect` enum (`DbRead`, `DbWrite`, `Io`, …) |
 
