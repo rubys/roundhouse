@@ -348,7 +348,8 @@ fn collect_from_expr(
             }
         }
     }
-    if let Some((resource, fields)) = match_permit_call(expr) {
+    if let Some((resource, fields, nested)) = match_permit_call_full(expr) {
+        warn_nested_keys(&resource, &nested, controller, expr.span);
         record(resource, fields, controller, expr.span, Wants::default(), index, specs);
         // Stop here. The merge form (`permit(...).merge(k: v)`) matched
         // this node with the WIDER field set; recursing would reach the
@@ -357,6 +358,41 @@ fn collect_from_expr(
         return;
     }
     walk_children(expr, &mut |c| collect_from_expr(c, controller, index, specs));
+}
+
+/// Record the array-valued permit keys this pass drops.
+///
+/// One warning per (controller, key): the ledger entry for a field the
+/// request may send and the emitted app will not assign. Deliberately
+/// not an error — the rest of the list lowers, which is strictly more
+/// than the whole helper staying dynamic (see
+/// [`match_permit_call_full`]) — and deliberately not silent, because
+/// Rails WOULD assign it.
+fn warn_nested_keys(resource: &Symbol, nested: &[Symbol], controller: &ClassId, span: Span) {
+    use crate::diagnostic::{Diagnostic, DiagnosticKind};
+
+    for key in nested {
+        let kind = DiagnosticKind::LowerResidue {
+            pass: Symbol::from("params_nested_filter"),
+            construct: Symbol::from("permit"),
+            reason: Symbol::from("array-valued key"),
+        };
+        let d = Diagnostic {
+            span,
+            severity: Diagnostic::default_severity(&kind),
+            kind,
+            message: format!(
+                "permitted key `{key}: []` on `{resource}` in `{controller}` is \
+                 array-valued — a synthesized params record carries String fields \
+                 only, so this key is dropped from the permit list and the emitted \
+                 app will not assign it; the rest of the list still lowers",
+                key = key.as_str(),
+                resource = resource.as_str(),
+                controller = controller.0.as_str(),
+            ),
+        };
+        crate::emit::diagnostics::push(d);
+    }
 }
 
 /// Name each spec, and decide which one owns the unqualified name.
@@ -547,6 +583,29 @@ pub(crate) fn params_source_class(
 ///
 /// Returns the (resource, fields) tuple on success.
 fn match_permit_call(expr: &Expr) -> Option<(Symbol, Vec<Symbol>)> {
+    match_permit_call_full(expr).map(|(resource, fields, _)| (resource, fields))
+}
+
+/// [`match_permit_call`] plus the permitted keys the synthesized record
+/// cannot carry: the ARRAY-VALUED ones (`permit(:title, tags_a: [])`).
+///
+/// Every field of a `<Resource>Params` is `Ty::Str` — the shape a CGI
+/// request actually delivers, narrowed by `Params.str` — so a key
+/// declared `tags_a: []` has no slot to land in. Recognizing the form
+/// anyway and dropping just that key is what keeps the rest of the list
+/// lowered: before this, one array-valued key made `match_permit_call`
+/// answer `None` for the WHOLE permit, so the helper kept its source
+/// shape and the emitted tree called `require`/`permit` — methods no
+/// target defines. lobsters' `StoriesController#story_params` is the
+/// case: nine scalar keys and `tags_a: []`, and the emitted helper was
+/// a `NoMethodError` waiting to be called (it also broke the Spinel
+/// build outright, matz/spinel#4005).
+///
+/// The drop is warned about by the caller that collects specs, not
+/// hidden — the array-valued key is a real modeling gap (`Ty` has no
+/// `Array[String]` params field yet), and per AGENTS.md a gap gets
+/// recorded rather than papered over.
+fn match_permit_call_full(expr: &Expr) -> Option<(Symbol, Vec<Symbol>, Vec<Symbol>)> {
     let ExprNode::Send { recv: Some(recv), method, args, .. } = &*expr.node else {
         return None;
     };
@@ -562,15 +621,15 @@ fn match_permit_call(expr: &Expr) -> Option<(Symbol, Vec<Symbol>)> {
         }
         let (k, v) = &entries[0];
         let resource = sym_of(k)?;
-        let fields = sym_array(v)?;
-        return Some((resource, fields));
+        let (fields, nested) = sym_array(v)?;
+        return Some((resource, fields, nested));
     }
 
     // Form 2: `<x>.permit(...)` where `<x>` is `params.require(:resource)`.
     if method.as_str() == "permit" {
         let (resource, _) = match_require_chain(recv)?;
-        let fields = collect_permit_args(args)?;
-        return Some((resource, fields));
+        let (fields, nested) = collect_permit_args(args)?;
+        return Some((resource, fields, nested));
     }
 
     // Form 3: `<permit-chain>.merge(field: expr, …)` — server-side
@@ -582,11 +641,11 @@ fn match_permit_call(expr: &Expr) -> Option<(Symbol, Vec<Symbol>)> {
     // the wider spec wins the per-resource slot.
     if method.as_str() == "merge" && args.len() == 1 {
         let ExprNode::Hash { entries, .. } = &*args[0].node else { return None };
-        let (resource, mut fields) = match_permit_call(recv)?;
+        let (resource, mut fields, nested) = match_permit_call_full(recv)?;
         for (k, _) in entries {
             fields.push(sym_of(k)?);
         }
-        return Some((resource, fields));
+        return Some((resource, fields, nested));
     }
 
     None
@@ -610,27 +669,72 @@ fn match_require_chain(expr: &Expr) -> Option<(Symbol, ())> {
 }
 
 /// `permit` accepts either a single Array arg (`permit([:f1, :f2])`) or
-/// a splat of Sym args (`permit(:f1, :f2)`). Normalize to Vec<Symbol>.
-fn collect_permit_args(args: &[Expr]) -> Option<Vec<Symbol>> {
+/// a splat of Sym args (`permit(:f1, :f2)`), and either spelling may
+/// carry a trailing keyword hash of ARRAY-valued keys
+/// (`permit(:f1, tags_a: [])`). Returns (scalar fields, array-valued
+/// keys) — see [`match_permit_call_full`] for why the second half is
+/// separated rather than folded in or rejected.
+fn collect_permit_args(args: &[Expr]) -> Option<(Vec<Symbol>, Vec<Symbol>)> {
     if args.len() == 1 {
         // Single Array arg form.
         if let ExprNode::Array { elements, .. } = &*args[0].node {
-            let mut out = Vec::with_capacity(elements.len());
-            for el in elements {
-                out.push(sym_of(el)?);
-            }
-            return Some(out);
+            return sym_list(elements);
         }
         // Single Sym arg form (1-permit case).
         if let Some(s) = sym_of(&args[0]) {
-            return Some(vec![s]);
+            return Some((vec![s], Vec::new()));
+        }
+        // Single keyword-hash form: `permit(tags_a: [])` permits
+        // nothing this record can hold, but it is still a permit.
+        if let Some(nested) = nested_keys(&args[0]) {
+            return Some((Vec::new(), nested));
         }
         return None;
     }
     // Splat-of-Syms form.
-    let mut out = Vec::with_capacity(args.len());
-    for a in args {
-        out.push(sym_of(a)?);
+    sym_list(args)
+}
+
+/// Split a permit list into its Sym elements and the array-valued keys
+/// of a trailing keyword hash. Anything else in the list is
+/// unrecognized and fails the whole match, as before.
+fn sym_list(elements: &[Expr]) -> Option<(Vec<Symbol>, Vec<Symbol>)> {
+    let mut fields = Vec::with_capacity(elements.len());
+    for (i, el) in elements.iter().enumerate() {
+        if let Some(s) = sym_of(el) {
+            fields.push(s);
+            continue;
+        }
+        // Only the LAST element may be the keyword hash — that is where
+        // Ruby puts `tags_a: []`, and a hash anywhere else is a shape
+        // this recognizer has never claimed.
+        if i + 1 == elements.len() {
+            if let Some(nested) = nested_keys(el) {
+                return Some((fields, nested));
+            }
+        }
+        return None;
+    }
+    Some((fields, Vec::new()))
+}
+
+/// The keys of a permit hash whose values are all Array literals —
+/// `tags_a: []`, `tag_ids: [:id]`. A value of any other shape (a nested
+/// permit hash, an expression) is not recognized, so the caller falls
+/// back to leaving the permit alone rather than guessing at it.
+fn nested_keys(e: &Expr) -> Option<Vec<Symbol>> {
+    let ExprNode::Hash { entries, .. } = &*e.node else {
+        return None;
+    };
+    if entries.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(entries.len());
+    for (k, v) in entries {
+        if !matches!(&*v.node, ExprNode::Array { .. }) {
+            return None;
+        }
+        out.push(sym_of(k)?);
     }
     Some(out)
 }
@@ -642,15 +746,14 @@ fn sym_of(e: &Expr) -> Option<Symbol> {
     }
 }
 
-fn sym_array(e: &Expr) -> Option<Vec<Symbol>> {
+/// The `expect(article: [...])` list — same split as
+/// [`collect_permit_args`], since Rails 8 spells the nested keys the
+/// same way inside the array (`expect(story: [:title, tags_a: []])`).
+fn sym_array(e: &Expr) -> Option<(Vec<Symbol>, Vec<Symbol>)> {
     let ExprNode::Array { elements, .. } = &*e.node else {
         return None;
     };
-    let mut out = Vec::with_capacity(elements.len());
-    for el in elements {
-        out.push(sym_of(el)?);
-    }
-    Some(out)
+    sym_list(elements)
 }
 
 fn is_bare_params(e: &Expr) -> bool {

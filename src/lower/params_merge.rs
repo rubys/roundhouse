@@ -86,6 +86,10 @@ pub fn apply_params_merge_lowering(app: &mut App) -> Vec<Diagnostic> {
     if specs.iter().next().is_none() {
         return Vec::new();
     }
+    // Before the binding scan, and outside its early return: this site
+    // needs no binding to prove, because the callee is the runtime's
+    // own `attributes=`.
+    convert_attributes_assignments(app, &specs);
     let bindings = scan_bindings(app, &specs);
     if bindings.is_empty() {
         return Vec::new();
@@ -393,6 +397,64 @@ fn scan_body(
             }
         }
     });
+}
+
+/// `@story.attributes = <params object>` → `… = <params>.to_attrs`.
+///
+/// `attributes=` is the runtime's own mass-assignment writer and takes
+/// the Symbol-keyed attribute hash `initialize(attrs)` consumes — so
+/// unlike [`convert_attrs_call_sites`] there is no user-defined callee
+/// to read a `Binding::Attrs` off, and the conversion is keyed on the
+/// writer's name instead.
+///
+/// It stayed unwritten because the one fixture that assigns a params
+/// object this way — lobsters' `StoriesController#update_story_attributes`
+/// — had a `story_params` helper that never lowered (its permit list
+/// carries `tags_a: []`; see `match_permit_call_full`), so the
+/// right-hand side was not yet a params object to convert. Lowering
+/// that helper is what exposed the site.
+fn convert_attributes_assignments(app: &mut App, specs: &ParamsSpecs) {
+    for controller in &mut app.controllers {
+        let actions: Vec<crate::dialect::Action> = controller.actions().cloned().collect();
+        let helpers: BTreeMap<Symbol, ClassId> = helper_spec_map(&actions, specs)
+            .into_iter()
+            .map(|(name, spec)| (name, spec.class_id.clone()))
+            .collect();
+        for item in &mut controller.body {
+            let crate::dialect::ControllerBodyItem::Action { action, .. } = item else { continue };
+            convert_attributes_in(&mut action.body, &helpers, specs);
+        }
+    }
+}
+
+fn convert_attributes_in(
+    e: &mut Expr,
+    helpers: &BTreeMap<Symbol, ClassId>,
+    specs: &ParamsSpecs,
+) {
+    if let ExprNode::Send { method, args, .. } = &mut *e.node {
+        if method.as_str() == "attributes=" && args.len() == 1 {
+            if params_source_class(&args[0], helpers, specs).is_some() {
+                let span = args[0].span;
+                let inner = args[0].clone();
+                // `.to_attrs` goes OUTSIDE any `.except(…)` / `.compact`,
+                // as in `convert_attrs_call_sites`: the filters clear
+                // presence flags first, and the conversion reports what
+                // survives.
+                args[0] = Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(inner),
+                        method: Symbol::from("to_attrs"),
+                        args: Vec::new(),
+                        block: None,
+                        parenthesized: false,
+                    },
+                );
+            }
+        }
+    }
+    e.node.for_each_child_mut(&mut |c| convert_attributes_in(c, helpers, specs));
 }
 
 /// Rewrite `<helper>` to `<helper>.to_attrs` at every call site whose
