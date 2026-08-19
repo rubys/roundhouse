@@ -44,6 +44,7 @@ mod importmap;
 mod library;
 mod main;
 mod model;
+pub mod overlay;
 mod pyproject;
 mod route;
 mod schema_sql;

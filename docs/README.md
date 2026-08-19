@@ -44,6 +44,7 @@ disagrees with [`README.md`](../README.md) or CI, README and CI win
 Point-in-time design documents; each records its own status at the
 top. When one completes, it moves to [`archive/`](archive/).
 
+- [`python-overlay-plan.md`](python-overlay-plan.md)
 - [`relation-convergence-plan.md`](relation-convergence-plan.md)
 - [`relation-type-plan.md`](relation-type-plan.md)
 - [`maintainability-refactor-plan-2.md`](maintainability-refactor-plan-2.md)

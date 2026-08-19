@@ -318,7 +318,7 @@ func main() {\n\
             if route_helper_funcs.is_empty() {
                 Vec::new()
             } else {
-                lower::lower_for_go(vec![module_funcs_to_library_class(
+                lower::lower_for_go(vec![crate::lower::module_funcs_to_library_class(
                     "RouteHelpers",
                     &route_helper_funcs,
                 )])
@@ -332,7 +332,7 @@ func main() {\n\
             if importmap_funcs.is_empty() {
                 Vec::new()
             } else {
-                lower::lower_for_go(vec![module_funcs_to_library_class(
+                lower::lower_for_go(vec![crate::lower::module_funcs_to_library_class(
                     "Importmap",
                     &importmap_funcs,
                 )])
@@ -1001,46 +1001,6 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
     }
 }
 
-/// Bundle a flat list of `LibraryFunction`s (e.g. route helpers,
-/// importmap entries) into a module-flavored `LibraryClass` so the
-/// shared `library::emit_library_class_with_registry` pipeline can
-/// produce bare `<Module>_<name>(...)` functions. Mirrors the same-
-/// named helper in `src/emit/rust.rs`; duplicated here to keep go
-/// independent of rust internals.
-fn module_funcs_to_library_class(
-    name: &str,
-    funcs: &[crate::dialect::LibraryFunction],
-) -> crate::dialect::LibraryClass {
-    use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
-    use crate::ident::ClassId;
-    let methods: Vec<MethodDef> = funcs
-        .iter()
-        .map(|f| MethodDef {
-            name: f.name.clone(),
-            receiver: MethodReceiver::Class,
-            params: f.params.clone(),
-            body: f.body.clone(),
-            signature: f.signature.clone(),
-            effects: f.effects.clone(),
-            enclosing_class: Some(crate::ident::Symbol::from(name)),
-            kind: AccessorKind::Method,
-            is_async: f.is_async,
-            mutates_self: false,
-            block_param: None,
-        })
-        .collect();
-    LibraryClass {
-        name: ClassId(crate::ident::Symbol::from(name)),
-        is_module: true,
-        parent: None,
-        includes: Vec::new(),
-        methods,
-        nullable_columns: Vec::new(),
-        origin: None,
-        constants: Vec::new(),
-        unknown_calls: Vec::new(),
-    }
-}
 
 /// Rewrite a `package app` Go file (as produced by the runtime loader
 /// and per-LC emit functions) to `package <target_pkg>`, and inject a

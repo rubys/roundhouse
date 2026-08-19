@@ -835,6 +835,47 @@ pub use view::{
     ViewHelperKind, ViewUrlArg,
 };
 
+/// Bundle module-level `LibraryFunction`s (RouteHelpers, Importmap,
+/// …) into a module-flavored `LibraryClass` so the per-target
+/// library-emit pipelines can render them like any other class-shaped
+/// artifact. Each function becomes a class-receiver `MethodDef`.
+/// Shared home for the helper that had grown identical copies in the
+/// Rust and Go emitters.
+pub fn module_funcs_to_library_class(
+    name: &str,
+    funcs: &[crate::dialect::LibraryFunction],
+) -> crate::dialect::LibraryClass {
+    use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
+    use crate::ident::ClassId;
+    let methods: Vec<MethodDef> = funcs
+        .iter()
+        .map(|f| MethodDef {
+            name: f.name.clone(),
+            receiver: MethodReceiver::Class,
+            params: f.params.clone(),
+            body: f.body.clone(),
+            signature: f.signature.clone(),
+            effects: f.effects.clone(),
+            enclosing_class: Some(crate::ident::Symbol::from(name)),
+            kind: AccessorKind::Method,
+            is_async: f.is_async,
+            mutates_self: false,
+            block_param: None,
+        })
+        .collect();
+    LibraryClass {
+        name: ClassId(crate::ident::Symbol::from(name)),
+        is_module: true,
+        parent: None,
+        includes: Vec::new(),
+        methods,
+        nullable_columns: Vec::new(),
+        origin: None,
+        constants: Vec::new(),
+        unknown_calls: Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod pass_order_tests {
     use super::{post_analyze_pass_order_is_sound, POST_ANALYZE_PASS_ORDER};

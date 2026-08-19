@@ -514,7 +514,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 
     let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
     let route_helpers_lc: Option<crate::dialect::LibraryClass> = if !route_helper_funcs.is_empty() {
-        let mut lcs = vec![module_funcs_to_library_class("RouteHelpers", &route_helper_funcs)];
+        let mut lcs = vec![crate::lower::module_funcs_to_library_class("RouteHelpers", &route_helper_funcs)];
         let registry = crate::emit::rust::decide::str_color::build_registry(&lcs, &[]);
         crate::emit::rust::decide::str_color::color_classes(&mut lcs, &registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
@@ -527,7 +527,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 
     let importmap_funcs = crate::lower::lower_importmap_to_library_functions(app);
     let importmap_lc: Option<crate::dialect::LibraryClass> = if !importmap_funcs.is_empty() {
-        let mut lcs = vec![module_funcs_to_library_class("Importmap", &importmap_funcs)];
+        let mut lcs = vec![crate::lower::module_funcs_to_library_class("Importmap", &importmap_funcs)];
         let registry = crate::emit::rust::decide::str_color::build_registry(&lcs, &[]);
         crate::emit::rust::decide::str_color::color_classes(&mut lcs, &registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
@@ -2283,43 +2283,3 @@ fn collect_global_class_methods(
     }
 }
 
-/// Build a synthetic `LibraryClass` from a flat list of
-/// `LibraryFunction`s sharing a module path. Each function becomes a
-/// class-receiver method on the synthetic class; the library emit
-/// path handles it via `emit_module_singleton`. Used for
-/// `RouteHelpers` / `Importmap` and analogous module-only outputs
-/// from the per-module lowerers.
-fn module_funcs_to_library_class(
-    name: &str,
-    funcs: &[crate::dialect::LibraryFunction],
-) -> crate::dialect::LibraryClass {
-    use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
-    use crate::ident::ClassId;
-    let methods: Vec<MethodDef> = funcs
-        .iter()
-        .map(|f| MethodDef {
-            name: f.name.clone(),
-            receiver: MethodReceiver::Class,
-            params: f.params.clone(),
-            body: f.body.clone(),
-            signature: f.signature.clone(),
-            effects: f.effects.clone(),
-            enclosing_class: Some(crate::ident::Symbol::from(name)),
-            kind: AccessorKind::Method,
-            is_async: f.is_async,
-            mutates_self: false,
-            block_param: None,
-        })
-        .collect();
-    LibraryClass {
-        name: ClassId(crate::ident::Symbol::from(name)),
-        is_module: true,
-        parent: None,
-        includes: Vec::new(),
-        methods,
-        nullable_columns: Vec::new(),
-        origin: None,
-        constants: Vec::new(),
-        unknown_calls: Vec::new(),
-    }
-}
