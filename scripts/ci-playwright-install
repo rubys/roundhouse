@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Install Playwright's Chromium and its system deps, BOUNDED.
+#
+# `npx playwright install --with-deps` shells out to apt itself and
+# takes no `-o DPkg::Lock::Timeout`, so the flag 49c596a0 put on every
+# apt call in this workflow never reaches it — that commit said so, and
+# named this as the residual gap to close "if it recurs". It recurred:
+# in run 32207123547 both `browser-smoke-typescript` and `smoke (kotlin)`
+# sat in this step from 02:05 to 02:34 with no output and were killed by
+# the job timeout, which cancels the WHOLE RUN — so a green campfire
+# floor and nine green toolchains reported as "cancelled".
+#
+# Two bounds, since the stall is external:
+#
+#   * the background upgrader that holds the dpkg lock is stopped first,
+#     which is the usual cause on the hosted images;
+#   * each attempt gets its own timeout and the step retries, so a
+#     stalled apt mirror socket costs one attempt rather than the job's
+#     entire budget. Worst case here is 3x240s = 12m, inside the 20m
+#     the smoke matrix allows; the observed normal time is well under a
+#     minute.
+#
+# NOT the other half of 49c596a0's prescription ("an explicit apt-get of
+# the dep list plus a bare `playwright install chromium`"): that list is
+# per-browser and per-image, it changes when either moves, and a
+# hand-copied list that drifts from what Playwright actually needs is
+# the single most common defect in this repo. Asking Playwright for the
+# deps and bounding the call keeps one source of truth.
+set -euo pipefail
+
+ATTEMPTS="${PLAYWRIGHT_INSTALL_ATTEMPTS:-3}"
+PER_ATTEMPT="${PLAYWRIGHT_INSTALL_TIMEOUT:-240}"
+
+# `|| true` on both: neither unit exists on every image, and their
+# absence is the state we want anyway.
+sudo systemctl stop unattended-upgrades.service 2>/dev/null || true
+sudo systemctl stop apt-daily-upgrade.service 2>/dev/null || true
+
+for attempt in $(seq 1 "$ATTEMPTS"); do
+    if timeout "$PER_ATTEMPT" npx playwright install --with-deps chromium; then
+        exit 0
+    fi
+    echo "::warning::playwright install attempt ${attempt}/${ATTEMPTS} did not finish within ${PER_ATTEMPT}s"
+    # A killed apt can leave dpkg mid-transaction; the next attempt
+    # cannot proceed until that is settled.
+    sudo dpkg --configure -a 2>/dev/null || true
+done
+
+echo "::error::playwright install did not finish in ${ATTEMPTS} bounded attempts of ${PER_ATTEMPT}s"
+exit 1

@@ -357,7 +357,7 @@ jobs:
         run: npm ci
         working-directory: tests/browser_smoke
       - name: Install Playwright Chromium (+ system deps)
-        run: npx playwright install --with-deps chromium
+        run: $GITHUB_WORKSPACE/scripts/ci-playwright-install
         working-directory: tests/browser_smoke
       - name: Run SharedWorker browser smoke (emit → vite build → drive)
         run: npm test
@@ -469,7 +469,7 @@ jobs:
         run: npm ci
         working-directory: tests/browser_smoke
       - name: Install Playwright Chromium (+ system deps)
-        run: npx playwright install --with-deps chromium
+        run: $GITHUB_WORKSPACE/scripts/ci-playwright-install
         working-directory: tests/browser_smoke
       - name: Serve wasm/ and verify the /ide/ + /playground/ pages
         run: |
@@ -1322,7 +1322,7 @@ jobs:
         run: |
           cd e2e
           npm install --no-audit --no-fund
-          npx playwright install --with-deps chromium
+          "$GITHUB_WORKSPACE/scripts/ci-playwright-install"
       - name: scripts/smoke ${{ matrix.target }}
         run: scripts/smoke --tgz browse/${{ matrix.target }}.tgz ${{ matrix.target }}
 
@@ -1366,7 +1366,7 @@ jobs:
         run: |
           cd e2e
           npm install --no-audit --no-fund
-          npx playwright install --with-deps chromium
+          "$GITHUB_WORKSPACE/scripts/ci-playwright-install"
       - name: scripts/smoke spinel
         run: scripts/smoke --tgz browse/spinel.tgz spinel
 
