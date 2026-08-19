@@ -28,12 +28,9 @@ if [ "$#" -eq 0 ]; then
     exit 2
 fi
 
-APT_OPTS=(
-    -o DPkg::Lock::Timeout=120
-    -o Acquire::Retries=3
-    -o Acquire::http::Timeout=20
-    -o Acquire::https::Timeout=20
-)
+# The bounds live in an apt.conf.d drop-in rather than on this command
+# line, so the apt calls we do NOT make (playwright's) get them too.
+"$(dirname "$0")/ci-apt-bound"
 
-sudo DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" update -q
-sudo DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" install -y -q "$@"
+sudo DEBIAN_FRONTEND=noninteractive apt-get update -q
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$@"

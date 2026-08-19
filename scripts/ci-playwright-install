@@ -31,18 +31,22 @@ set -euo pipefail
 ATTEMPTS="${PLAYWRIGHT_INSTALL_ATTEMPTS:-3}"
 PER_ATTEMPT="${PLAYWRIGHT_INSTALL_TIMEOUT:-240}"
 
-# `|| true` on both: neither unit exists on every image, and their
-# absence is the state we want anyway.
-sudo systemctl stop unattended-upgrades.service 2>/dev/null || true
-sudo systemctl stop apt-daily-upgrade.service 2>/dev/null || true
+# Bounds for the apt PLAYWRIGHT runs, which takes no flags from us.
+"$(dirname "$0")/ci-apt-bound"
 
 for attempt in $(seq 1 "$ATTEMPTS"); do
     if timeout "$PER_ATTEMPT" npx playwright install --with-deps chromium; then
         exit 0
     fi
     echo "::warning::playwright install attempt ${attempt}/${ATTEMPTS} did not finish within ${PER_ATTEMPT}s"
-    # A killed apt can leave dpkg mid-transaction; the next attempt
-    # cannot proceed until that is settled.
+    # `timeout` kills the npx PARENT; the `sudo apt-get` it spawned
+    # survives and keeps the dpkg lock, so every retry failed instantly
+    # with "held by process N" until this was here. Reap the orphan, let
+    # dpkg settle, then try again.
+    sudo pkill -TERM -x apt-get 2>/dev/null || true
+    sudo pkill -TERM -x dpkg 2>/dev/null || true
+    sleep 5
+    sudo pkill -KILL -x apt-get 2>/dev/null || true
     sudo dpkg --configure -a 2>/dev/null || true
 done
 

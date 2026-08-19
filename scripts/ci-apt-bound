@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Bound EVERY apt on this runner, including the ones we do not invoke.
+#
+# `-o` flags only reach the apt WE run. `npx playwright install
+# --with-deps` shells out to its own `sudo apt-get`, which is why
+# 49c596a0's lock flag never covered it and why bounding our own calls
+# was not enough: in run 32215008703 playwright's apt stalled for the
+# whole 240s attempt budget, and because `timeout` killed the npx PARENT
+# and not the apt CHILD, the orphan kept /var/lib/dpkg/lock-frontend and
+# both retries died instantly on "held by process 2862".
+#
+# A drop-in under /etc/apt/apt.conf.d is apt's own documented way to set
+# these once for every caller on the box, so there is no per-call flag to
+# forget and no hand-rolled retry to get wrong:
+#
+#   Acquire::Retries          — a stalled mirror socket is retried
+#   Acquire::*::Timeout       — ...after failing fast instead of hanging
+#   DPkg::Lock::Timeout       — a held lock WAITS rather than erroring,
+#                               which is what makes a retry able to win
+set -euo pipefail
+
+sudo tee /etc/apt/apt.conf.d/99-roundhouse-ci >/dev/null <<'CONF'
+Acquire::Retries "3";
+Acquire::http::Timeout "20";
+Acquire::https::Timeout "20";
+Acquire::ftp::Timeout "20";
+DPkg::Lock::Timeout "180";
+CONF
+
+# The image's background upgrader is the usual holder of that lock.
+sudo systemctl stop unattended-upgrades.service 2>/dev/null || true
+sudo systemctl stop apt-daily-upgrade.service 2>/dev/null || true
