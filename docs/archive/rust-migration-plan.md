@@ -179,7 +179,7 @@ Total 4,852 LOC across 13 files. Categories:
 
 ## Phase 1.5 result — Base/Validations inheritance: **Option A (trait + struct composition)**
 
-Three prototypes hand-written in `docs/rust-migration-spike/`. All
+Three prototypes hand-written in `docs/archive/rust-migration-spike/`. All
 three compile + tests pass. Comparison:
 
 | Axis | A: trait + composition | B: macro-driven | C: flat mega-struct |
@@ -221,6 +221,6 @@ three compile + tests pass. Comparison:
 - No `Ty` changes needed for the inheritance pattern itself.
 - Future Phase 4 may surface `Ty::Ref(Box<Ty>)` pressure for closure lifetimes (independent of the inheritance choice).
 
-**Spike artifacts:** preserved in `docs/rust-migration-spike/{option_a_trait_composition, option_b_derive_macro, option_c_flat_struct}/` for re-validation and comparison if the decision needs revisiting.
+**Spike artifacts:** preserved in `docs/archive/rust-migration-spike/{option_a_trait_composition, option_b_derive_macro, option_c_flat_struct}/` for re-validation and comparison if the decision needs revisiting.
 
 Phase 2 (framework runtime transpile) is now unblocked.

@@ -27,8 +27,7 @@ use crate::App;
 use crate::emit::{self, EmittedFile};
 use crate::ingest::ingest_app;
 
-/// Targets the `roundhouse` binary can produce. Matches the
-/// `TARGETS` list in the legacy `build-site` binary plus the `Blog`
+/// Targets the `roundhouse` binary can produce, plus the `Blog`
 /// pseudo-target (verbatim source archive).
 ///
 /// The transpile targets (`Spinel` through `TypescriptWorker`) are
@@ -61,7 +60,7 @@ pub enum BuildTarget {
     /// matrix as of the e2e-kotlin gate (the emitted archive builds via
     /// `gradle installDist` and boots — see `scripts/e2e kotlin`).
     /// Still incomplete (partial e2e/compare coverage), like several
-    /// published targets — see `docs/kotlin-migration-plan.md`.
+    /// published targets — see `docs/archive/kotlin-migration-plan.md`.
     Kotlin,
     Python,
     Rust,
@@ -69,13 +68,13 @@ pub enum BuildTarget {
     /// as of the compare/bench/CI gates closing (the emitted archive
     /// builds via `swift build` and boots; Server.swift serves
     /// `/assets/*`). Still incomplete (no frameworks/e2e gates, like
-    /// several published targets) — see `docs/swift-migration-plan.md`
+    /// several published targets) — see `docs/archive/swift-migration-plan.md`
     /// and issue #34.
     Swift,
     /// C# / .NET emit (backend-only). Scaffold stage — `emit` produces the
     /// .NET project scaffold (`roundhouse-app.csproj`, `Program.cs`) and the
     /// `ty`/`naming` mappings; models/controllers/views/runtime land in later
-    /// phases. See `docs/csharp-migration-plan.md`.
+    /// phases. See `docs/archive/csharp-migration-plan.md`.
     CSharp,
     Typescript,
     /// TypeScript emit under the `worker` deployment profile
@@ -85,7 +84,7 @@ pub enum BuildTarget {
 
 impl BuildTarget {
     /// All targets that participate in `--site` archive generation,
-    /// in the same order the legacy `build-site` binary iterated them.
+    /// in site-archive order.
     pub const ALL: &'static [BuildTarget] = &[
         BuildTarget::Blog,
         BuildTarget::Spinel,
@@ -686,7 +685,7 @@ fn ships_e2e(target: BuildTarget) -> bool {
 
 /// The Playwright specs, verbatim from the repo's `e2e/` harness — the
 /// single source for both the legacy `scripts/e2e` path and the
-/// in-archive suite. Compiled in via `include_str!` so build-site
+/// in-archive suite. Compiled in via `include_str!` so `--site`
 /// needs no disk layout beyond the crate itself.
 const E2E_SPECS: &[(&str, &str)] = &[
     ("e2e/index.spec.js", include_str!("../e2e/index.spec.js")),

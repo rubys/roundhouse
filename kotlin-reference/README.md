@@ -1,7 +1,7 @@
 # Kotlin target — Phase R reference
 
 Hand-written reference output for the Kotlin target (see
-`docs/kotlin-migration-plan.md`). This is the **forcing function**: a
+`docs/archive/kotlin-migration-plan.md`). This is the **forcing function**: a
 minimal, compileable Kotlin app that serves `GET /articles` from the
 real-blog sqlite DB, in the shape the `src/emit/kotlin` emitter must
 reproduce. It is not generated — it is the spec the generator is driven

@@ -5,7 +5,7 @@ Code and assets shared by the three published in-browser surfaces — `/playgrou
 emitted TypeScript blog live), and `/ide/` (the analyzer as a browser IDE —
 inferred-type hover, completion, and the coverage ledger over a whole Rails app).
 Factored out in rung D, Phase 4 of
-`docs/browser-demo-plan.md` ("share code, separate surface").
+`docs/archive/browser-demo-plan.md` ("share code, separate surface").
 
 | File | Role | Tracked |
 |---|---|---|

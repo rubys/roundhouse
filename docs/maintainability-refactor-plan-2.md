@@ -1,6 +1,6 @@
 # Maintainability refactor plan 2 — mechanical remainder
 
-Written 2026-07-18. Continuation of docs/maintainability-refactor-plan.md (phases 1, 2,
+Written 2026-07-18. Continuation of docs/archive/maintainability-refactor-plan.md (phases 1, 2,
 3.1/3.2/3.4, 4.1, 7.1, 7.2 of which are DONE — see its Execution log). This plan is the
 behavior-neutral mechanical slice that remains, deliberately scoped to run **in parallel**
 with docs/relation-type-plan.md in a separate session. Self-contained: executable by a

@@ -125,9 +125,9 @@ signature annotation or rely on Kotlin inference for locals.
 ## Phased build plan
 
 The pipeline-first architecture means lowering is already done; phases track emitter +
-runtime maturity. Structure mirrors `docs/rust-migration-plan.md` (Phase 0 audit →
+runtime maturity. Structure mirrors `docs/archive/rust-migration-plan.md` (Phase 0 audit →
 file-by-file runtime transpile → strict-target inheritance spike → verification gates) and
-`docs/jbuilder-lowerer-plan.md` (reference-fixture lock-in first).
+`docs/archive/jbuilder-lowerer-plan.md` (reference-fixture lock-in first).
 
 **Phase R (reference-output lock-in) — forcing function, do first.**
 Before touching the emitter, hand-write a minimal Kotlin reference of real-blog covering one
@@ -260,7 +260,7 @@ Two layers, matching every existing target:
    carries (`typescript.rs:55-97`).
 5. **View rendering parity.** HTML-string views must match Rails byte-for-byte enough to pass
    `compare`. Risk is string-template escaping (`html_safe`, ERB `<%= %>` vs `<%== %>`).
-   Mirror the jbuilder string-concatenation discipline (`docs/jbuilder-lowerer-plan.md`
+   Mirror the jbuilder string-concatenation discipline (`docs/archive/jbuilder-lowerer-plan.md`
    Phase 6 risk).
 6. **Tuple/Record → data class.** Kotlin lacks N-tuples; `Router.match`'s typed return and any
    `Ty::Tuple{elems}` with >3 elements need generated `data class`es. Crystal gets

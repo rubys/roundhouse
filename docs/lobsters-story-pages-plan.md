@@ -15,7 +15,7 @@ convergence.
 
 ## L0 — Housekeeping (2 minutes)
 
-If `git status` still shows modified-uncommitted `docs/maintainability-refactor-plan.md`
+If `git status` still shows modified-uncommitted `docs/archive/maintainability-refactor-plan.md`
 and `docs/relation-type-plan.md` (execution-log lines left by the 07-18/19 sessions),
 commit them as a docs commit before starting.
 

@@ -1,6 +1,6 @@
 # Studio (rung D)
 
-"The blog, editable" — the rung D surface from `docs/browser-demo-plan.md`: edit
+"The blog, editable" — the rung D surface from `docs/archive/browser-demo-plan.md`: edit
 Ruby → recompile in-browser → run the emitted **TypeScript** blog live against a
 sqlite-wasm database, no server and no container. TypeScript-only, because it is
 the one target with a browser runtime (decisions #5/#6); there is no target
@@ -106,4 +106,4 @@ cd studio && node verify-studio.mjs
 The CI `build-site` job copies this dir into `_site/studio/` alongside
 `_site/lib/` and `_site/playground/`, so the surface lands at
 `rubys.github.io/roundhouse/studio/`. See the "Publishing to Pages" section of
-`docs/browser-demo-plan.md`.
+`docs/archive/browser-demo-plan.md`.

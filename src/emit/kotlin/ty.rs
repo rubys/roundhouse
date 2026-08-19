@@ -1,6 +1,6 @@
 //! `Ty` → Kotlin type-string.
 //!
-//! Kotlin is a *soft* strict target (see `docs/kotlin-migration-plan.md`):
+//! Kotlin is a *soft* strict target (see `docs/archive/kotlin-migration-plan.md`):
 //! unlike Rust/Go — which elevate any reachable `Ty::Untyped` to an
 //! emit-time error — Kotlin maps `Untyped`/`Var` to `Any?`, so the
 //! gradual-typing escape hatch survives emission. Modeled on

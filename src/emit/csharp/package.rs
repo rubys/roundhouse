@@ -3,7 +3,7 @@
 //! `src/emit/typescript/package.rs` (`package.json`/`tsconfig.json`).
 //! Locked stack: .NET SDK + ASP.NET Core / Kestrel (HTTP),
 //! `Microsoft.Data.Sqlite` (DB), System.Text.Json (JSON), built-in
-//! WebSockets (Action Cable) — see `docs/csharp-migration-plan.md`.
+//! WebSockets (Action Cable) — see `docs/archive/csharp-migration-plan.md`.
 
 use std::path::PathBuf;
 
@@ -55,7 +55,7 @@ var app = builder.Build();
 
 app.MapGet("/", () =>
     "Roundhouse C# target — scaffold. Models, controllers, and views are " +
-    "emitted in later phases (see docs/csharp-migration-plan.md).");
+    "emitted in later phases (see docs/archive/csharp-migration-plan.md).");
 
 var port = Environment.GetEnvironmentVariable("PORT") ?? "3000";
 app.Run($"http://0.0.0.0:{port}");

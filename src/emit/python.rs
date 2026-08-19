@@ -26,7 +26,7 @@
 //! live in `shared`; the generic `Expr` walker lives in `expr` and is
 //! reused by the model-method emitter and the controller fallback; type
 //! rendering lives in `ty` (with `python_ty` re-exported here for the
-//! external surface that `bin/build-site` uses).
+//! external surface that site generation (`roundhouse --site`) uses).
 
 use std::fmt::Write;
 use std::path::PathBuf;
@@ -56,10 +56,10 @@ mod view;
 pub use ty::python_ty;
 
 // Framework-runtime transpile surface, consumed by
-// `runtime_loader::python_units` (the `PYTHON_TARGET` hooks). Dormant
-// until a `PYTHON_RUNTIME` entry is wired into `emit()`; exists so the
-// hand-written `runtime/python/*.py` files can be strangled one at a
-// time.
+// `runtime_loader::python_units` (the `PYTHON_TARGET` hooks). Partially
+// live: `emit()` ships the units named in `LIVE_FRAMEWORK` via
+// `python_units_subset`; the hand-written `runtime/python/*.py` files
+// are strangled one at a time as entries graduate into that list.
 pub use library::{emit_expr_for_runtime, emit_library_class, emit_module};
 
 /// Emit a typed `MethodDef` as a standalone Python function

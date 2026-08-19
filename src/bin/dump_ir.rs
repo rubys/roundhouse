@@ -73,7 +73,7 @@ use roundhouse::lower::{
     class_info_from_library_class,
     lower_fixtures_to_library_classes, lower_jbuilder_to_library_classes,
     lower_models_with_registry, lower_test_modules_to_library_classes,
-    lower_view_to_library_class, lower_views_to_library_classes,
+    lower_views_to_library_classes,
 };
 use roundhouse::ty::Ty;
 

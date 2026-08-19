@@ -1,3 +1,17 @@
+//! `emit_preview` — dev-loop shortcut: ingest + analyze a fixture and
+//! write one target's emitted tree to disk, skipping `--site` packaging.
+//!
+//!   cargo run --bin emit_preview -- --target rust [--out DIR] [FIXTURE]
+//!
+//! Defaults: `--target typescript`, FIXTURE=`fixtures/real-blog`, and a
+//! per-target `/tmp/rh-*-pass2` out dir (override with `--out` when two
+//! harnesses could clobber each other — tests/browser_smoke does).
+//! `--profile node-sync|node-async|worker` selects the TypeScript
+//! deployment profile; other targets don't branch on profile yet.
+//! Consumed by `scripts/bench` and tests/browser_smoke; unlike
+//! `roundhouse --target`, output is bare emitted files with no archive
+//! or runtime packaging.
+
 use std::path::Path;
 use roundhouse::analyze::Analyzer;
 use roundhouse::emit::{crystal, csharp, elixir, go, kotlin, python, rust, swift, typescript};

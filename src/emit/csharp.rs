@@ -1,5 +1,5 @@
 //! C# / .NET emitter — backend-only target (see
-//! `docs/csharp-migration-plan.md`).
+//! `docs/archive/csharp-migration-plan.md`).
 //!
 //! Lowerer-first, like every roundhouse target: the Rails DSL is already
 //! lowered to the universal post-lowering IR; this emitter renders it to
@@ -14,7 +14,7 @@
 //! the synthesized `<Model>Row`/`<Model>Params` siblings) as `app/models/
 //! *.cs`. Views are stubbed (the `after_*_commit` broadcast callbacks
 //! reference view modules); controllers + the transpiled framework runtime
-//! land in Phase 3. See `docs/csharp-migration-plan.md`.
+//! land in Phase 3. See `docs/archive/csharp-migration-plan.md`.
 
 
 use super::EmittedFile;

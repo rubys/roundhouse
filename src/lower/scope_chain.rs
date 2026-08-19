@@ -21,7 +21,6 @@ use std::collections::{HashMap, HashSet};
 use crate::dialect::{Association, Model, ModelBodyItem, Param};
 use crate::expr::{BlockStyle, Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
-use crate::naming::pluralize_snake;
 
 /// model class id -> (scope name -> the scope's user params, in order).
 /// The params are the lambda's own parameters (NOT the synthesized trailing
@@ -2200,7 +2199,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
             *expr = put(span, None, method, args, block, parenthesized);
             None
         }
-        Some(mut r) => {
+        Some(r) => {
             // Class-level call on a model constant.
             if let Some(m) = const_model(&r, ctx.models) {
                 // `<Model>.insert_all(rows)` — Rails' bulk insert over an

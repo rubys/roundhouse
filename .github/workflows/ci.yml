@@ -1462,10 +1462,10 @@ jobs:
           cp fixtures/real-blog/app/javascript/application.js          build/assets/
           cp fixtures/real-blog/app/javascript/controllers/*.js        build/assets/controllers/
           echo "baked asset graph:"; (cd build/assets && find . -type f | sort)
-      - name: cargo run --bin build-site
+      - name: roundhouse --site
         env:
           ROUNDHOUSE_ASSETS_DIR: build/assets
-        run: cargo run --release --bin build-site
+        run: cargo run --release --bin roundhouse -- --site
 
       # Live SharedWorker blog demo → _site/blog/. Emits real-blog under
       # the worker profile, vite-builds it with ROUNDHOUSE_BASE set to the
@@ -1500,7 +1500,7 @@ jobs:
       # from the just-built real-blog so it tracks create-blog. The compiler wasm
       # is built fresh from source by the parallel build-wasm job and pulled in
       # as an artifact (NOT committed) — see wasm/vendor/ruby-rbs-sys/README.md
-      # and the "Publishing to Pages" section of docs/browser-demo-plan.md. Pure
+      # and the "Publishing to Pages" section of docs/archive/browser-demo-plan.md. Pure
       # static files (no npm/vite, no COOP/COEP), so they serve straight off Pages.
       - name: Bundle the in-browser playground + studio demos (→ _site/lib, _site/playground, _site/studio)
         run: |

@@ -35,7 +35,6 @@
 use crate::app::App;
 use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
-use crate::span::Span;
 
 pub fn apply_column_ops_lowering(app: &mut App) {
     super::for_each_model_body(app, &mut rewrite_stmt);
@@ -195,6 +194,7 @@ fn column_op(e: &Expr) -> Option<ColumnOp> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::span::Span;
 
     fn touch_call(arg: Option<&str>) -> Expr {
         Expr::new(

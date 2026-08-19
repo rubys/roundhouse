@@ -587,7 +587,7 @@ fn streamables(
 /// `target:` → the DOM id turbo would compute. An array is
 /// `dom_id(record, prefix)` — prefix FIRST, measured — and a literal
 /// string is itself.
-fn dom_target(value: &Expr, model: &Model, owner: Option<&OwnerRef>, span: Span) -> Option<Expr> {
+fn dom_target(value: &Expr, _model: &Model, owner: Option<&OwnerRef>, span: Span) -> Option<Expr> {
     match &*value.node {
         ExprNode::Lit { value: Literal::Str { .. } } => Some(value.clone()),
         ExprNode::Array { elements, .. } => {

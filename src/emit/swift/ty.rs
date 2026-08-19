@@ -1,7 +1,7 @@
 //! `Ty` → Swift type-string.
 //!
 //! Swift is a *soft* strict target, exactly like Kotlin (see
-//! `docs/swift-migration-plan.md`): unlike Rust/Go — which elevate any
+//! `docs/archive/swift-migration-plan.md`): unlike Rust/Go — which elevate any
 //! reachable `Ty::Untyped` to an emit-time error — Swift maps
 //! `Untyped`/`Var` to `Any?`, so the gradual-typing escape hatch survives
 //! emission. Ported from `src/emit/kotlin/ty.rs` (the template).

@@ -3779,7 +3779,6 @@ mod predicate_naming_tests {
 /// COLUMN's pointer field (`interface{}` → `*string` / `*int64` / …).
 /// `None` when the field isn't one, or the value is already typed.
 fn nullable_column_converter(field_ruby: &str, value: &Expr) -> Option<&'static str> {
-    use crate::ty::Ty;
     let go_ty = nullable_column_go_ty(field_ruby)?;
     // Convert unless the RHS is ALREADY the field's pointer type. Two
     // shapes need it: the untyped attrs bag (`interface{}`) and a plain

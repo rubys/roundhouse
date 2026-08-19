@@ -570,7 +570,7 @@ where
 }
 
 /// Rust runtime entries — Phase 2 of the rust migration (see
-/// `docs/rust-migration-plan.md`). Populated file-by-file in
+/// `docs/archive/rust-migration-plan.md`). Populated file-by-file in
 /// dependency order matching Crystal's RUNTIME_ORDER. Phase 3 layers
 /// hand-written primitive runtime (`runtime/rust/`) on top.
 const RUST_RUNTIME: &[RuntimeEntry] = &[
@@ -1071,7 +1071,7 @@ where
 // namespace, so imports are unnecessary (same-namespace resolution) and
 // namespaces collapse — `wrap_namespace` is a no-op like Kotlin's. The
 // runtime is grown one file at a time (inflector → json_builder → …),
-// mirroring the Kotlin/Swift arc (see `docs/csharp-migration-plan.md`).
+// mirroring the Kotlin/Swift arc (see `docs/archive/csharp-migration-plan.md`).
 
 const CSHARP_TARGET: TargetEmit = TargetEmit {
     emit_module: crate::emit::csharp::emit_module,
@@ -1224,7 +1224,7 @@ where
 // module, so imports are unnecessary (same-module resolution) and
 // namespaces collapse — `wrap_namespace` is a no-op like Kotlin's. The
 // runtime is grown one file at a time (inflector → json_builder → …),
-// mirroring the Kotlin arc (see `docs/swift-migration-plan.md`).
+// mirroring the Kotlin arc (see `docs/archive/swift-migration-plan.md`).
 
 const SWIFT_TARGET: TargetEmit = TargetEmit {
     emit_module: crate::emit::swift::emit_module,
@@ -1727,10 +1727,11 @@ where
 // `NAME = value`). The framework files land under `app/*.py`, replacing
 // the hand-written `runtime/python/*.py` duplicates one entry at a time.
 //
-// This path is DORMANT: nothing in `emit::python::emit` consumes
-// `python_units` yet, so the shipping Python target stays green. A test
-// drives it to keep the inventory signal live; entries graduate from
-// hand-written to transpiled as the body walker is confirmed per file.
+// This path is PARTIALLY LIVE: `emit::python` ships the units named in
+// its `LIVE_FRAMEWORK` list via `python_units_subset`; the rest stay
+// hand-written. Entries graduate from hand-written to transpiled as the
+// body walker is confirmed per file, and a test keeps the full
+// `python_units` inventory signal live.
 
 const PYTHON_TARGET: TargetEmit = TargetEmit {
     emit_module: crate::emit::python::emit_module,

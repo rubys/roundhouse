@@ -2,7 +2,7 @@
 //! The analog of `src/emit/typescript/package.rs` (which emits
 //! `package.json`/`tsconfig.json`). Locked stack: Gradle (Kotlin DSL),
 //! Javalin (HTTP), xerial `sqlite-jdbc` (DB) — see
-//! `docs/kotlin-migration-plan.md`.
+//! `docs/archive/kotlin-migration-plan.md`.
 
 use std::path::PathBuf;
 

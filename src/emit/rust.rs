@@ -7,7 +7,7 @@
 //! dependency on the deleted modules.
 //!
 //! Why keep `rust.rs` at all? Public callers
-//! (`src/bin/build-site.rs`, `tests/preview_ts.rs`, the
+//! (`src/project.rs` site generation, `tests/preview_ts.rs`, the
 //! `--target rust` flag in `src/bin/emit_preview.rs`,
 //! `scripts/compare rust`) reach this through
 //! `crate::emit::rust::emit`. Renaming would ripple across the call
@@ -394,9 +394,8 @@ fn rt_emit_string_interp(parts: &[InterpPart]) -> String {
     }
 }
 
-/// Phase 7.3 (2026-05-20): unconditional delegation to rust2. The
-/// `ROUNDHOUSE_RUST_V2_LEGACY=1` escape hatch retires alongside the
-/// legacy submodule files — there's nothing left to fall back to.
+/// Phase 7.3 (2026-05-20): unconditional delegation to rust2 — the
+/// legacy submodule files are gone and there's nothing to fall back to.
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     super::rust2::emit(app)
 }

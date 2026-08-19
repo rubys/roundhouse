@@ -813,7 +813,6 @@ impl Analyzer {
             .filter(|lc| lc.is_module)
             .map(|lc| (lc.name.clone(), lc.includes.clone()))
             .collect();
-        let concern_filters_map = app.concern_filters.clone();
 
         // ── Phase A: type Unknown body items + every action body
         // ── once per controller, with no parent inheritance.
@@ -2840,7 +2839,7 @@ fn build_sourced_filter_chain(
                 chain.push((filter.clone(), source));
             }
             ControllerBodyItem::Unknown { expr, .. } => {
-                let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node
+                let ExprNode::Send { recv: None, method, args: _, block, .. } = &*expr.node
                 else {
                     continue;
                 };

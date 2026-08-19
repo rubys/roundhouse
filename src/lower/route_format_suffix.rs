@@ -27,7 +27,6 @@
 use crate::app::App;
 use crate::expr::{Expr, ExprNode, InterpPart, Literal};
 use crate::ident::Symbol;
-use crate::span::Span;
 
 pub fn apply_route_format_suffix_lowering(app: &mut App) {
     let helpers = route_helper_names(app);

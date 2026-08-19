@@ -1,5 +1,5 @@
 //! Swift emitter — backend-only target (see
-//! `docs/swift-migration-plan.md`).
+//! `docs/archive/swift-migration-plan.md`).
 //!
 //! Lowerer-first, like every roundhouse target: the Rails DSL is already
 //! lowered to the universal post-lowering IR; this emitter renders it to

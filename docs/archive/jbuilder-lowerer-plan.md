@@ -23,7 +23,7 @@ rather than N hand-written per-target Jbuilder DSL implementations.
   shape, zero per-target emitter changes for the common case.
 - Highest-leverage single parallel slice currently available. Smaller
   than the Rust migration (16-26 days; already underway in
-  `docs/rust-migration-plan.md`), larger than rack-adapter glue
+  `docs/archive/rust-migration-plan.md`), larger than rack-adapter glue
   (~½ day) or railsbench HTML gaps (~few days).
 
 ## Decisions locked in (provisional — confirm at Phase 0)
@@ -44,7 +44,7 @@ rather than N hand-written per-target Jbuilder DSL implementations.
   through the whole pipeline and trips Group 2 emitters (Rust/Go) on
   `Ty::Untyped` Hash erasure. Concatenated literals stay typed.
 - **Format-aware controller dispatch is out of scope** for this plan —
-  see `docs/rust-migration-plan.md` for Phase 2.5 Parameters
+  see `docs/archive/rust-migration-plan.md` for Phase 2.5 Parameters
   specialization, and assume `respond_to do |format| format.json {...} end`
   lowering lands separately. This plan delivers the Jbuilder→library
   path and the helper runtime; the controller side is a small follow-on.
@@ -302,7 +302,7 @@ all four methods return `String`.
 
 ### Phase 7 — Rust verification (½-1 day, gated)
 
-- Blocked on `docs/rust-migration-plan.md` reaching Phase 4
+- Blocked on `docs/archive/rust-migration-plan.md` reaching Phase 4
   (`framework_tests_rust` 8/8) — until then, Rust still consumes
   hand-written emit and Jbuilder lowering isn't visible to it.
 - Once `rust2` consumes `runtime/ruby/` + lowered library classes,
@@ -418,7 +418,7 @@ JSON rendering primitives work; otherwise debugging is two-axis.
 
 1. Pull `~/git/roundhouse` (this repo) to current state.
 2. Read this file end-to-end.
-3. Read `docs/rust-migration-plan.md` for the architectural pattern
+3. Read `docs/archive/rust-migration-plan.md` for the architectural pattern
    this plan inherits (strangler-fig + IR contract + Group 1 vs 2).
 4. Read `src/ingest/view.rs` (38 LOC) and
    `src/lower/view_to_library/mod.rs` (head 100 LOC of 1276) for

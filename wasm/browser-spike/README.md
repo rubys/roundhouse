@@ -1,6 +1,6 @@
 # Browser spike (rung A, Phase 0)
 
-De-risk spike for `docs/browser-demo-plan.md`: proves the roundhouse compiler
+De-risk spike for `docs/archive/browser-demo-plan.md`: proves the roundhouse compiler
 runs **in a browser tab** — no WebContainer, no npm, no bundler. Three static
 files (`.mjs` + `.wasm` + `.json`) served over plain HTTP.
 

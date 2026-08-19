@@ -5,7 +5,6 @@ use crate::dialect::{AccessorKind, Association, MethodDef, MethodReceiver, Model
 use crate::effect::EffectSet;
 use crate::expr::{ArrayStyle, BoolOpKind, BoolOpSurface, Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
-use crate::naming::pluralize_snake;
 use crate::schema::{Column, Table};
 use crate::span::Span;
 use crate::ty::Ty;

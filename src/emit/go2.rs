@@ -87,11 +87,11 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
     // Hand-written runtime — copied verbatim under `app/v2/`.
     // Emitted FIRST so the transpiled framework runtime files can
     // assume their types resolve at parse time.
-    // Always-on overlay shims — stdlib-only imports, ship unconditionally
-    // with `ROUNDHOUSE_GO_V2=1`. Model-only shims (db, broadcasts) ship
-    // below behind the models env var so the default toolchain test
-    // (which doesn't tidy go.mod for app-only sqlite dependencies)
-    // stays clean.
+    // Always-on overlay shims — stdlib-only imports, ship
+    // unconditionally. Model-only shims (db, broadcasts) ship below
+    // only when the app has models, so the base toolchain test (which
+    // doesn't tidy go.mod for app-only sqlite dependencies) stays
+    // clean.
     for (name, src) in [
         ("adapter_interface.go", RT_V2_ADAPTER_INTERFACE),
         ("param_value.go", RT_V2_PARAM_VALUE),
@@ -183,12 +183,9 @@ pub fn emit_overlay_files(app: &App) -> Vec<EmittedFile> {
         });
     }
 
-    // Phase 6 step 2 (2026-05-24): the ROUNDHOUSE_GO_V2_MODELS env
-    // gate is gone — model + controller + view + test emit now ship
-    // unconditionally whenever the app has models. Pre-flip, this
-    // block was opt-in to let inflector_v2_compiles_and_runs (the
-    // base toolchain smoke test) stay clean during the model emit
-    // build-out; that smoke now passes alongside the full v2 path.
+    // Model + controller + view + test emit ship whenever the app has
+    // models; model-less apps keep the stdlib-only overlay so the base
+    // toolchain smoke test stays clean.
     if !app.models.is_empty() {
         // Model-only runtime shims. Db_* bridges database/sql for the
         // per-model adapter_emit lowerer's `Db.prepare(sql)` /

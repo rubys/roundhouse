@@ -43,12 +43,9 @@ comments that reference it.
 
 | Var | Default | State | When to remove |
 |-----|---------|-------|----------------|
-| `ROUNDHOUSE_ELIXIR_V1` | `0` | **live** (`scripts/compare:131,154,512`) — selects the legacy `App.Main.run` entry point and drops the `.json` paths. | Delete when the v1 Elixir app shell is removed (per the comment at `scripts/compare:129`). |
-| `ROUNDHOUSE_RUST_V2` | — | **vestigial** — `rust::emit` delegates to `rust2::emit` unconditionally (`src/emit/rust.rs:400`); name survives only in comments. | Remove now; there is no v1 rust path left. |
-| `ROUNDHOUSE_RUST_V2_LEGACY` | — | **vestigial** — the escape hatch retired with the legacy submodule (`src/emit/rust.rs:398`); comment-only. | Remove now. |
-| `ROUNDHOUSE_GO_V2` | — | **vestigial** — `go::emit` delegates to `go2::emit_overlay_files` unconditionally and `scripts/compare:383` builds from `cmd/v2/` unconditionally (Phase 6 step 2, 2026-05-24); comment-only. | Remove now; scrub the `scripts/compare:344-348` comment. |
-| `ROUNDHOUSE_GO_V2_MODELS` | — | **vestigial** — model/controller/view/test emit ships whenever the app has models (`src/emit/go2.rs:180`); comment-only. | Remove now. |
+| `ROUNDHOUSE_ELIXIR_V1` | `0` | **live** (`scripts/compare`) — selects the legacy `App.Main.run` entry point and drops the `.json` paths. | Delete when the v1 Elixir app shell is removed (per the comment in `scripts/compare`). |
 
-> The vestigial rows are documented (not deleted) deliberately: this catalog is a
-> Phase 1 docs-only step. Removing the dead toggle references is a separate,
-> behavior-neutral cleanup.
+> Removed 2026-08-19: `ROUNDHOUSE_RUST_V2`, `ROUNDHOUSE_RUST_V2_LEGACY`,
+> `ROUNDHOUSE_GO_V2`, `ROUNDHOUSE_GO_V2_MODELS` — all four had become
+> comment-only after their migrations went unconditional; the stale
+> comment references are scrubbed.

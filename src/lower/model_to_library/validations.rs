@@ -1,7 +1,7 @@
 //! Validations: lower `validates :attr, presence: true, length: { ... }` into
 //! a single `def validate` body. Each rule expands to inline IR (`if cond
 //! then errors << "msg" end`) rather than a helper-call into the runtime
-//! Validations module — the Phase 2.5(a) lowerer per docs/rust-migration-plan.md.
+//! Validations module — the Phase 2.5(a) lowerer per docs/archive/rust-migration-plan.md.
 //!
 //! Inline expansion wins three ways: (1) error messages are string-literal
 //! constants, no runtime interpolation, (2) typed targets (Rust, Crystal,

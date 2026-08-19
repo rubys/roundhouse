@@ -111,7 +111,7 @@ fn article_renders_validate_with_inline_checks() {
     let src = find(&files, "article.rb");
     assert!(src.contains("def validate"), "{src}");
     // Presence rules expand to inline IR (Phase 2.5(a) lowerer per
-    // docs/rust-migration-plan.md) — no helper-call into the
+    // docs/archive/rust-migration-plan.md) — no helper-call into the
     // Validations runtime module. Error messages become string-literal
     // constants; the type-erased `value: untyped` channel is gone.
     // The Ruby emitter uses postfix-modifier form for single-line

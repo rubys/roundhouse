@@ -335,17 +335,15 @@ if (( SKIP_EMIT == 0 )); then
             ;;
         spinel)
             # Spinel mirrors the ruby path but uses `bin/rh transpile
-            # spinel`, which additionally vendors Tep transport
-            # (precompiles sphttp.o + sed-substitutes @TEP_SPHTTP_O@ in
-            # net.rb so the FFI cflags resolve at AOT-compile time).
+            # spinel`. The Tep transport rides spinel's auto-linked
+            # sp_net, so there's no C shim to vendor or precompile.
             (cd "$REPO_ROOT" && bin/rh transpile spinel >/dev/null)
             ;;
         *)
-            # ROUNDHOUSE_GO_V2=1 / ROUNDHOUSE_GO_V2_MODELS=1 — opt-in
-            # path that emits the go2 strangler-fig overlay alongside
-            # legacy go. Both sets of files land in /tmp/rh-go-pass2;
-            # the build step below picks the v2 binary (cmd/v2/) when
-            # ROUNDHOUSE_GO_V2=1 is set. No-op for other targets.
+            # emit_preview writes the target's emitted tree to its
+            # per-target /tmp/rh-*-pass2 dir. For go that includes the
+            # v2 overlay (always on); the build step below builds the
+            # v2 binary from cmd/v2/.
             (cd "$REPO_ROOT" && cargo run --quiet --bin emit_preview -- --target "$TARGET" "$FIXTURE" >/dev/null)
             ;;
     esac

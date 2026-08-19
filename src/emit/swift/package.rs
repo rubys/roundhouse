@@ -2,7 +2,7 @@
 //! The analog of `src/emit/kotlin/package.rs` (which emits the Gradle
 //! scaffold). Locked stack: Swift Package Manager, Hummingbird 2.x
 //! (HTTP), the system SQLite3 C API via a CSQLite systemLibrary target
-//! (DB) — see `docs/swift-migration-plan.md`.
+//! (DB) — see `docs/archive/swift-migration-plan.md`.
 
 use std::path::PathBuf;
 

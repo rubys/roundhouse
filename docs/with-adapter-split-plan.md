@@ -7,7 +7,7 @@ Suggested executor: Opus — this is pure code motion with a byte-identical gate
 
 ## Why now / sequencing (read first)
 
-This is refactor-plan step 4.3 (docs/maintainability-refactor-plan.md), queued until the
+This is refactor-plan step 4.3 (docs/archive/maintainability-refactor-plan.md), queued until the
 Relation[T] plan landed — it has (R1–R6 done, commits 33ebdd74..ac4e438d). It must land
 **BEFORE** docs/relation-convergence-plan.md executes: that plan modifies the scope-seed
 and registration logic that lives in `with_adapter`, and motion-then-modify beats rebasing

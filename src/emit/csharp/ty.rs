@@ -1,7 +1,7 @@
 //! `Ty` → C# type-string.
 //!
 //! C# is a *soft* strict target like Kotlin (see
-//! `docs/csharp-migration-plan.md`): unlike Rust/Go — which elevate any
+//! `docs/archive/csharp-migration-plan.md`): unlike Rust/Go — which elevate any
 //! reachable `Ty::Untyped` to an emit-time error — C# maps `Untyped`/`Var`
 //! to `object?`, so the gradual-typing escape hatch survives emission.
 //! Modeled on `src/emit/kotlin/ty.rs`, with the C# spellings substituted:

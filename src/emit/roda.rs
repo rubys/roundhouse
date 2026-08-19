@@ -1213,13 +1213,6 @@ impl BodyCx<'_> {
     }
 }
 
-fn statements(body: &Expr) -> Vec<&Expr> {
-    match &*body.node {
-        ExprNode::Seq { exprs } => exprs.iter().collect(),
-        _ => vec![body],
-    }
-}
-
 fn statements_owned(body: &Expr) -> Vec<Expr> {
     match &*body.node {
         ExprNode::Seq { exprs } => exprs.clone(),

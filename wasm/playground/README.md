@@ -1,6 +1,6 @@
 # Playground (rung A, Phase 1)
 
-The multi-target playground from `docs/browser-demo-plan.md` Phase 1: an
+The multi-target playground from `docs/archive/browser-demo-plan.md` Phase 1: an
 editable Monaco source tree → in-browser `transpile` (wasm) → emitted output,
 with a target dropdown. No WebContainer, no npm, no bundler.
 
@@ -82,7 +82,7 @@ published demo lands at `rubys.github.io/roundhouse/playground/`. It also
 bundles the Lobsters app (`RUBY_BENCH_SHA`) into `_site/lib/app-lobsters.json`
 and ONCE Campfire (`CAMPFIRE_SHA`) into `_site/lib/app-campfire.json`, then
 writes `_site/lib/apps.json` for the app selector. See the "Publishing to
-Pages" section of `docs/browser-demo-plan.md`.
+Pages" section of `docs/archive/browser-demo-plan.md`.
 
 ## The compiler wasm (built, not committed)
 

@@ -5,7 +5,7 @@
 //! deltas — `\(...)` interpolation, `??` for nil-coalescing `||`,
 //! `switch` for `case`, trailing closures for blocks, `let`/`var`
 //! inference for local assignments, `as!` downcasts where Kotlin chained
-//! `.toString().toLong()` (see `docs/swift-migration-plan.md` delta 6),
+//! `.toString().toLong()` (see `docs/archive/swift-migration-plan.md` delta 6),
 //! and `fatalError(...)` raise placeholders until the Phase 3
 //! `throws`-propagation pass exists.
 //!

@@ -1,21 +1,10 @@
-//! Rust target — `rust2` parallel emit (Phase 1+ of the rust migration).
+//! Rust target — the live Rust emitter (lowered IR + transpiled
+//! `runtime/ruby/`).
 //!
-//! Strangler-fig orchestrator running alongside the legacy
-//! `src/emit/rust.rs` while the migration to Group 1 (lowered IR +
-//! transpiled `runtime/ruby/`) lands phase-by-phase. The legacy
-//! emitter keeps shipping real-blog; this one grows in parallel until
-//! it passes the same gates, then takes over in one switchover commit
-//! (Phase 7 of the migration plan — see `docs/rust-migration-plan.md`).
-//!
-//! Selected at runtime via `ROUNDHOUSE_RUST_V2=1` env var checked in
-//! `src/emit/rust.rs::emit`. Without the env var, the legacy emitter
-//! runs unchanged.
-//!
-//! Phase 1 scope (this file): emit a minimal compilable Cargo.toml +
-//! `src/lib.rs` + `src/main.rs` + `src/db.rs` stub. Empty App must
-//! produce a "hello world" crate that builds cleanly. No framework
-//! runtime transpile, no app code emit yet — those land in Phases
-//! 2-6.
+//! Grew as a strangler-fig alongside the legacy per-target emitter
+//! and took over in the Phase 7 switchover; `src/emit/rust.rs` is now
+//! a shim that delegates here unconditionally, kept only so public
+//! callers keep the `emit::rust::emit` path.
 
 use std::path::PathBuf;
 

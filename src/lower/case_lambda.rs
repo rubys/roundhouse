@@ -27,7 +27,7 @@
 //! consumes the grounded form.
 
 use crate::app::App;
-use crate::expr::{Arm, Expr, ExprNode, Literal, Pattern};
+use crate::expr::{Expr, ExprNode, Literal, Pattern};
 use crate::ident::Symbol;
 use crate::span::Span;
 

@@ -15,7 +15,7 @@ Three active threads converge on one modeling gap — the analyzer has no relati
 2. **Ufuk's Relation[T] challenge (RubyConf)**: (a) relation→class delegation
    (`Story.recent.for_user(u)` — scopes callable on relations), (b) scope body-return
    inference. Phases R3/R4.
-3. **Catalog registry unification**: refactor step 4.2 (docs/maintainability-refactor-plan.md)
+3. **Catalog registry unification**: refactor step 4.2 (docs/archive/maintainability-refactor-plan.md)
    is blocked on `ReceiverContext::Relation` + missing `ReturnKind` variants. Phase R2/R4.
 
 ## Design decisions — SETTLED, do not relitigate
