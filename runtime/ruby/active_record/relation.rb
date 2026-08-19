@@ -230,22 +230,35 @@ module ActiveRecord
       left_outer_joins(spec)
     end
 
-    # `select(:id, :username, "raw AS x")` — Symbols qualify against this
-    # relation's table (as Rails renders them); raw strings ride verbatim.
+    # `select(:id, :username, "raw AS x")` — the PROJECTION, and the
+    # only thing this name means here. Symbols qualify against this
+    # relation's table (as Rails renders them); raw strings ride
+    # verbatim.
     #
-    # WITH A BLOCK it is a different method sharing the name:
+    # WITH A BLOCK Rails means a different method sharing the name:
     # Enumerable's filter over the loaded records, answering an Array.
-    # Zero args means that form — `select()` with neither args nor block
-    # is meaningless in Rails too, so `specs.empty?` decides it without
-    # needing `block_given?` (which nothing in this runtime may use;
-    # every method here has to be statically resolvable).
+    # That form lives on `filter` below, and `relation_select_block`
+    # lowers every relation-typed `select { … }` call site onto it — so
+    # this method answers a Relation and nothing else.
     #
-    # Getting this wrong was silent until something forced the query:
-    # `memberships.select { |m| m.room.direct? }` left `@select_sql` an
-    # EMPTY string and answered a Relation, so the caller's next hop
-    # emitted `SELECT  FROM memberships …`.
+    # It is worth saying why the fork is a lowering rather than a
+    # `specs.empty?` branch here, which is what it used to be. A method
+    # answering `Relation | Array` types its whole receiver chain POLY,
+    # and on the strict targets poly is not merely the slow path: it is
+    # a DIFFERENT dispatch path. spinel's does not apply the
+    # braceless-keyword-args → trailing-positional-Hash conversion, so
+    # `Story.select(:id).where(merged_story_id: id)` bound `where`'s
+    # optional `condition` to its `nil` default and dropped the filter
+    # on the floor — lobsters' `/s/:story_id` rendered the comments of
+    # every merged story instead of its own, with no warning anywhere.
+    #
+    # Zero specs therefore means the lowering did not fire, which is a
+    # compiler bug and not a shape to guess at: the old branch's failure
+    # mode (`@select_sql` an EMPTY string, so the next hop emitted
+    # `SELECT  FROM memberships …`) was silent until something forced
+    # the query. Raise instead.
     def select(*specs)
-      return to_a.select { |x| yield x } if specs.empty?
+      raise ArgumentError, "select: no columns (a block form reached the projection)" if specs.empty?
       @records = nil
       cols = []
       specs.each do |spec|
@@ -365,10 +378,10 @@ module ActiveRecord
       to_a
     end
 
-    # `filter { |r| … }` / `select { |r| … }`-with-block are Enumerable
-    # on the loaded records. (`select(*cols)` — the projection form —
-    # is the separate chain method above; lowered call sites use
-    # `filter` for the block form, matching the corpus.)
+    # `filter { |r| … }` — Enumerable's filter over the loaded records.
+    # `select { |r| … }` is Rails' other spelling of this method and
+    # arrives here renamed (`relation_select_block`), which leaves the
+    # projection `select(*specs)` above monomorphic.
     def filter
       out = []
       to_a.each { |x| out << x if yield x }

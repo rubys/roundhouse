@@ -81,6 +81,7 @@ pub mod html_safe;
 pub mod rails_cache;
 pub mod session_options;
 pub mod relation_residue;
+pub mod relation_select_block;
 pub mod send_dispatch;
 pub(crate) mod secure_password;
 pub mod attached;
@@ -119,6 +120,7 @@ pub use arel_attribute::apply_arel_attribute_lowering;
 pub use exclude_predicate::apply_exclude_predicate_lowering;
 pub use in_predicate::apply_in_predicate_lowering;
 pub use including::apply_including_lowering;
+pub use relation_select_block::apply_relation_select_block_lowering;
 pub use enum_symbols::apply_enum_symbol_lowering;
 pub use has_json::apply_has_json_lowering;
 pub use route_format_suffix::apply_route_format_suffix_lowering;
@@ -216,6 +218,13 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `xs.including(a)` → `xs.to_a + [a]`; same shape and same lack of
     // ordering constraints as `exclude_predicate` above.
     ("including", &[]),
+    // `<relation>.select { … }` → `.filter { … }`, so the projection
+    // `select(*specs)` is the only thing left on the name and answers a
+    // Relation and nothing else. Reads the receiver's analyzer type
+    // (Relation, or untyped) and rewrites only the method name, so it
+    // has no ordering constraint of its own — it just has to run before
+    // the `relation_residue` ledger reads the final chain shape.
+    ("relation_select_block", &[]),
     // `x_path(format: :json)` → `x_path() + ".json"`. Must run before
     // the route-helper lowering surveys call sites for query keys; the
     // two do not overlap (`format` is on NON_QUERY_OPTIONS) but the
@@ -400,6 +409,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("in_predicate");
     including::apply_including_lowering(app);
     ran!("including");
+    relation_select_block::apply_relation_select_block_lowering(app);
+    ran!("relation_select_block");
     route_format_suffix::apply_route_format_suffix_lowering(app);
     ran!("route_format_suffix");
     enum_symbols::apply_enum_symbol_lowering(app);
