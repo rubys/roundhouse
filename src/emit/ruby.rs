@@ -1192,6 +1192,7 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
         // used by any assertion the lowered tests reach, so dropping
         // it is safe.
         writeln!(s, "__t = {class_name}.new").unwrap();
+        writeln!(s, "__ok = true").unwrap();
         writeln!(s, "begin").unwrap();
         // Truncate + fixture-load INSIDE the guard: they are this
         // shim's spelling of minitest's fixture setup, and a fixture
@@ -1203,11 +1204,46 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
         }
         writeln!(s, "  __t.setup").unwrap();
         writeln!(s, "  __t.{tm}").unwrap();
-        writeln!(s, "rescue => __e").unwrap();
+        // `rescue Exception`, not a bare rescue: a bare one catches
+        // StandardError, and an assertion library may deliberately put
+        // its failure OUTSIDE that. `Mocha::ExpectationError <
+        // Exception` exactly so a test's own `rescue => e` cannot
+        // swallow an unmet expectation — and this shim's rescue was
+        // swallowing nothing, it was MISSING it, so the error walked
+        // out of the file and took the remaining tests with it.
+        // Minitest's own runner rescues Exception here for the same
+        // reason.
+        writeln!(s, "rescue Exception => __e").unwrap();
+        writeln!(s, "  __ok = false").unwrap();
         writeln!(s, "  __failed = __failed + 1").unwrap();
         writeln!(s, "  puts {:?} + __e.message", format!("FAIL {class_name}#{tm}: ")).unwrap();
         writeln!(s, "end").unwrap();
-        writeln!(s, "__t.teardown").unwrap();
+        // Teardown gets a guard of its OWN, for the reason the comment
+        // above gives for the reset lines: unguarded, a raise here
+        // aborts the FILE and hides every test behind it. It did —
+        // `mocha_verify` raises on an unmet `expects`, which is a
+        // failure of THIS test, and one of them took
+        // `membership_test` from 8 of 9 to 0 of 9.
+        //
+        // Its own begin/end rather than moving it above the rescue:
+        // teardown has to run even when the test raised, or a stub
+        // installed on a real object outlives the test that made it.
+        // `__ok` keeps a test that already failed from being counted
+        // twice — `__failed` is the tally's numerator and must not
+        // exceed the test count.
+        writeln!(s, "begin").unwrap();
+        writeln!(s, "  __t.teardown").unwrap();
+        writeln!(s, "rescue Exception => __e").unwrap();
+        writeln!(s, "  if __ok").unwrap();
+        writeln!(s, "    __failed = __failed + 1").unwrap();
+        writeln!(
+            s,
+            "    puts {:?} + __e.message",
+            format!("FAIL {class_name}#{tm}: ")
+        )
+        .unwrap();
+        writeln!(s, "  end").unwrap();
+        writeln!(s, "end").unwrap();
     }
     let n = test_methods.len();
     writeln!(s, "if __failed > 0").unwrap();

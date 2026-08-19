@@ -1868,6 +1868,46 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     Ok(files)
 }
 
+/// How a test body asks for a gem: by naming a constant, or by writing
+/// one of its method spellings.
+enum Marker {
+    Constant(&'static str),
+    AnyText(&'static [&'static str]),
+}
+
+/// `Mocha::API` mixed into TestBase, with the three lifecycle calls it
+/// requires. `mocha/minitest` would do this itself; it also refuses to
+/// load without Minitest, which the emitted helper deliberately does not
+/// have.
+///
+/// `mocha_verify` in teardown is the half that makes an `expects`
+/// assertion mean anything — without it an unmet expectation passes
+/// silently, which is worse than not having the gem. `mocha_teardown`
+/// runs in an `ensure` so a failed verify still unstubs; leaving a stub
+/// installed would leak into the next test in the file.
+///
+/// Anchored on the two shapes the shared helper has always had, and
+/// silent if either moves — the demand for mocha comes from the app, so
+/// a tree that misses this patch fails loudly on the first `stubs` call
+/// rather than passing with stubs that never took.
+fn patch_mocha_lifecycle(helper: &mut String) {
+    const SETUP: &str = "  def setup\n    SchemaSetup.reset! if defined?(SchemaSetup)";
+    const TEARDOWN: &str = "  def teardown\n  end";
+
+    if helper.contains("Mocha::API") {
+        return;
+    }
+    if let Some(at) = helper.find(SETUP) {
+        let with_include =
+            format!("  include Mocha::API\n\n  def setup\n    mocha_setup\n    SchemaSetup.reset! if defined?(SchemaSetup)");
+        helper.replace_range(at..at + SETUP.len(), &with_include);
+    }
+    if let Some(at) = helper.find(TEARDOWN) {
+        let verified = "  def teardown\n    mocha_verify\n  ensure\n    mocha_teardown\n  end";
+        helper.replace_range(at..at + TEARDOWN.len(), verified);
+    }
+}
+
 /// Test-only gems the APP's own suite reaches for, which our emitted
 /// `test/test_helper.rb` drops by construction: that file is our shim,
 /// not the app's, so every `require` the app's helper made is gone.
@@ -1887,16 +1927,35 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
 /// pretends otherwise. Same seam the tree already uses for sqlite3 and
 /// bcrypt.
 fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
-    // (constant a test body names, gem, the gem's Minitest entry point)
-    const TEST_GEMS: [(&str, &str, &str); 1] =
-        [("WebMock", "webmock", "webmock/minitest")];
+    // (marker a test body writes, gem, the require that gives it)
+    //
+    // WebMock is named as a CONSTANT (`WebMock.stub_request`), so the
+    // same scan the bundled-library table uses finds it. Mocha never
+    // appears by name at all — a test writes `Resolv.stubs(:getaddress)`
+    // or `Webhook.any_instance` — so its demand is a METHOD, and the
+    // marker is the call spelling.
+    //
+    // `mocha/api`, NOT `mocha/minitest`: the latter raises "Minitest must
+    // be loaded *before* `require 'mocha/minitest'`" and our emitted
+    // test/test_helper.rb is deliberately Minitest-free. `mocha/api` is
+    // the documented entry point for a foreign test framework, and it
+    // needs the lifecycle wiring below.
+    const TEST_GEMS: [(Marker, &str, &str); 2] = [
+        (Marker::Constant("WebMock"), "webmock", "webmock/minitest"),
+        (Marker::AnyText(&[".stubs(", ".expects(", ".any_instance"]), "mocha", "mocha/api"),
+    ];
 
     let mut needed: Vec<(&str, &str)> = Vec::new();
-    for (konst, gem, entry) in TEST_GEMS {
-        let named = files.iter().any(|(p, c)| {
-            p.starts_with("test/") && p.ends_with(".rb") && names_constant(c, konst)
+    for (marker, gem, entry) in TEST_GEMS {
+        let demanded = files.iter().any(|(p, c)| {
+            p.starts_with("test/")
+                && p.ends_with(".rb")
+                && match marker {
+                    Marker::Constant(konst) => names_constant(c, konst),
+                    Marker::AnyText(needles) => needles.iter().any(|n| c.contains(n)),
+                }
         });
-        if named {
+        if demanded {
             needed.push((gem, entry));
         }
     }
@@ -1911,6 +1970,9 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
             if !helper.contains(&line) {
                 helper.insert_str(0, &format!("{line}\n"));
             }
+        }
+        if needed.iter().any(|(gem, _)| *gem == "mocha") {
+            patch_mocha_lifecycle(helper);
         }
     }
     // Declared as well as required: a tree whose tests load a gem its

@@ -705,6 +705,12 @@ jobs:
       #             `uninitialized constant UsersFixtures::BCrypt` in 49
       #             of 52 files. A dev box that has bcrypt installed for
       #             any other reason hides it completely.
+      #   mocha   — same story as webmock: the app declares it in
+      #             `group :test` and stubs `Resolv.getaddress` /
+      #             `SecureRandom` / `Webhook.any_instance` with it.
+      #             `apply_test_gem_wiring` writes `require "mocha/api"`
+      #             (not mocha/minitest — the emitted helper is
+      #             Minitest-free) plus the lifecycle calls.
       #   webmock — also from the app, and the one WE now write the
       #             require for: campfire's own test_helper opens with
       #             `require "webmock/minitest"`, our emitted helper is a
@@ -721,7 +727,7 @@ jobs:
       #             gap; installing it here is parity with what the emit
       #             actually loads.
       - name: Install the gems the emitted suite loads
-        run: gem install sqlite3 bcrypt nokogiri webmock --no-document
+        run: gem install sqlite3 bcrypt nokogiri webmock mocha --no-document
       - name: Fetch once-campfire at the pinned SHA
         run: |
           set -euo pipefail
