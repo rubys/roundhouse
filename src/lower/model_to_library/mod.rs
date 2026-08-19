@@ -849,6 +849,9 @@ fn build_methods(
     push_dependent_destroy(&mut methods, model);
     push_unknown_marker_methods(&mut methods, model);
     push_attr_accessor_methods(&mut methods, model);
+    // AFTER the accessors: the constructor assigns exactly what they
+    // declare, and it checks `methods` for an existing `initialize`.
+    self::validations::push_active_model_constructor(&mut methods, model);
     // `attribute :name, :type` (Rails Attributes API) — typed virtual
     // readers + cast writers; same before-user-methods ordering.
     self::markers::push_attribute_api_methods(&mut methods, model);

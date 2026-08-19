@@ -81,6 +81,79 @@ fn is_abstract_class(model: &Model) -> bool {
 /// virtual-attribute story when an app that uses them is brought up there).
 /// Skips any name a column/def/association already defined, and skips
 /// abstract base classes.
+/// The symbols in `X = %i[a b c]` declared in this model's own body.
+/// Empty for anything that is not a literal array of symbols — a
+/// computed list is not something to guess at.
+fn const_symbol_array(model: &Model, path: &[Symbol]) -> Vec<Symbol> {
+    let Some(wanted) = path.last() else { return Vec::new() };
+    for item in &model.body {
+        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Assign { target: LValue::Const { path: target }, value } = &*expr.node else {
+            continue;
+        };
+        if target.last() != Some(wanted) {
+            continue;
+        }
+        let ExprNode::Array { elements, .. } = &*value.node else { continue };
+        return elements
+            .iter()
+            .filter_map(|e| match &*e.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
+                _ => None,
+            })
+            .collect();
+    }
+    Vec::new()
+}
+
+/// The names one `attr_accessor` / `attr_reader` / `attr_writer` call
+/// declares, splat included.
+///
+/// `attr_accessor *ATTRIBUTES` — the splat form, which campfire's
+/// `Opengraph::Metadata` uses to name its four fields from the constant
+/// right above it. Expanded from that constant's own literal in this
+/// class body: a model has no `constants` map (an `X = [...]` lands in
+/// `ModelBodyItem::Unknown`), so the fold reads the assignment where it
+/// sits. Unexpanded, the class emitted NO accessors at all and every
+/// read of `title` was a NoMethodError.
+fn accessor_names(model: &Model, args: &[Expr]) -> Vec<Symbol> {
+    let mut names: Vec<Symbol> = Vec::new();
+    for arg in args {
+        match &*arg.node {
+            ExprNode::Lit { value: Literal::Sym { value } } => names.push(value.clone()),
+            ExprNode::Splat { value } => {
+                if let ExprNode::Const { path } = &*value.node {
+                    names.extend(const_symbol_array(model, path));
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// Every attribute this model declares through the `attr_*` family, in
+/// declaration order. The constructor `ActiveModel::Model` supplies
+/// assigns exactly these.
+pub(super) fn declared_attr_names(model: &Model) -> Vec<Symbol> {
+    let mut out: Vec<Symbol> = Vec::new();
+    for item in &model.body {
+        let ModelBodyItem::Unknown { expr, .. } = item else { continue };
+        let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else {
+            continue;
+        };
+        if !matches!(method.as_str(), "attr_accessor" | "attr_reader" | "attr_writer") {
+            continue;
+        }
+        for name in accessor_names(model, args) {
+            if !out.contains(&name) {
+                out.push(name);
+            }
+        }
+    }
+    out
+}
+
 pub(super) fn push_attr_accessor_methods(methods: &mut Vec<MethodDef>, model: &Model) {
     if is_abstract_class(model) {
         return;
@@ -96,10 +169,16 @@ pub(super) fn push_attr_accessor_methods(methods: &mut Vec<MethodDef>, model: &M
             "attr_writer" => (false, true),
             _ => continue,
         };
-        for arg in args {
-            let ExprNode::Lit { value: Literal::Sym { value: name } } = &*arg.node else {
-                continue;
-            };
+        // `attr_accessor *ATTRIBUTES` — the splat form, which campfire's
+        // `Opengraph::Metadata` uses to name its four fields from the
+        // constant right above it. Expanded from that constant's own
+        // literal in this class body: a model has no `constants` map
+        // (an `X = [...]` lands in `ModelBodyItem::Unknown`), so the
+        // fold reads the assignment where it sits. Unexpanded, the
+        // class emitted NO accessors at all and every read of `title`
+        // was a NoMethodError.
+        let names = accessor_names(model, args);
+        for name in &names {
             let setter = Symbol::from(format!("{}=", name.as_str()));
             if want_reader && !methods.iter().any(|m| m.name == *name) {
                 methods.push(MethodDef {

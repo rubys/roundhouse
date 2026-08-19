@@ -85,6 +85,106 @@ pub(super) fn push_validate_method(methods: &mut Vec<MethodDef>, model: &Model) 
     }
 }
 
+/// `ActiveModel::Model`'s attribute-hash constructor —
+/// `Metadata.new(title: …, url: …)`, which the module supplies and
+/// `ActiveModel::Validations` alone does NOT. campfire's
+/// `Opengraph::Metadata` is built exactly once, by
+/// `new attributes.merge(…)` in its own `from_url`, and without this
+/// the call was "wrong number of arguments (given 1, expected 0)" —
+/// the class had only Object's zero-arg `initialize`.
+///
+/// Assigns the attributes the model declares through `attr_*`, which is
+/// what the module does: unknown keys raise `UnknownAttributeError` in
+/// Rails, and dropping them here is the same shape as the permitted-
+/// field ledger elsewhere rather than a silent write to nowhere.
+///
+/// Skipped when the source writes its own `initialize` — campfire's
+/// `Opengraph::Location` does, and its one positional arg is the whole
+/// point of that class.
+pub(super) fn push_active_model_constructor(methods: &mut Vec<MethodDef>, model: &Model) {
+    if !includes_active_model_model(model) {
+        return;
+    }
+    let defines_initialize = model.body.iter().any(|item| matches!(
+        item,
+        crate::dialect::ModelBodyItem::Method { method, .. }
+            if method.name.as_str() == "initialize"
+    )) || methods.iter().any(|m| m.name.as_str() == "initialize");
+    if defines_initialize {
+        return;
+    }
+    let names = super::markers::declared_attr_names(model);
+    if names.is_empty() {
+        return;
+    }
+    let span = model.span;
+    let attrs = Symbol::from("attrs");
+    let stmts: Vec<Expr> = names
+        .iter()
+        .map(|name| {
+            Expr::new(
+                span,
+                ExprNode::Assign {
+                    target: crate::expr::LValue::Ivar { name: name.clone() },
+                    // `attrs[:name]` as the `[]` send every target
+                    // already lowers — there is no Index node.
+                    value: Expr::new(
+                        span,
+                        ExprNode::Send {
+                            recv: Some(Expr::new(
+                                span,
+                                ExprNode::Var { id: crate::ident::VarId(0), name: attrs.clone() },
+                            )),
+                            method: Symbol::from("[]"),
+                            args: vec![Expr::new(
+                                span,
+                                ExprNode::Lit { value: Literal::Sym { value: name.clone() } },
+                            )],
+                            block: None,
+                            parenthesized: true,
+                        },
+                    ),
+                },
+            )
+        })
+        .collect();
+    let mut param = crate::dialect::Param::positional(attrs);
+    param.default = Some(Expr::new(
+        span,
+        ExprNode::Hash { entries: Vec::new(), kwargs: false },
+    ));
+    methods.push(MethodDef {
+        name: Symbol::from("initialize"),
+        receiver: MethodReceiver::Instance,
+        params: vec![param],
+        body: seq(stmts),
+        signature: None,
+        effects: EffectSet::default(),
+        enclosing_class: Some(model.name.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+        block_param: None,
+    });
+}
+
+/// `include ActiveModel::Model` in the class body. The narrower
+/// `ActiveModel::Validations` brings `valid?`/`errors` and no
+/// constructor, so the two are not interchangeable here.
+fn includes_active_model_model(model: &Model) -> bool {
+    model.body.iter().any(|item| {
+        let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { return false };
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else {
+            return false;
+        };
+        method.as_str() == "include"
+            && args.iter().any(|a| matches!(&*a.node,
+                ExprNode::Const { path } if path.len() == 2
+                    && path[0].as_str() == "ActiveModel"
+                    && path[1].as_str() == "Model"))
+    })
+}
+
 /// `valid?` + `errors` mirroring the runtime Base implementations,
 /// for `include ActiveModel::Validations` classes with no superclass.
 fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Model) {
