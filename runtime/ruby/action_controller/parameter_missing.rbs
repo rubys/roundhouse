@@ -1,0 +1,7 @@
+module ActionController
+  class ParameterMissing < StandardError
+    @param: String
+    def initialize: (String param) -> void
+    def param: () -> String
+  end
+end

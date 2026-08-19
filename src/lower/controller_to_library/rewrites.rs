@@ -1462,8 +1462,100 @@ pub(super) fn rewrite_params(expr: &Expr) -> Expr {
         {
             Some(Expr::new(e.span, ExprNode::Ivar { name: Symbol::from("params") }))
         }
+        // `params.require(:r).permit(...)` — NOT ours. That chain belongs
+        // to the permit rewrite, and half-rewriting it would leave
+        // `.permit` hanging off a plain Hash: one NoMethodError traded
+        // for another, with the emit looking fixed. Matched here, ahead
+        // of the `require` arm below, and returned with only the bare
+        // `params` swapped for `@params` — `map_expr` is top-down and
+        // does not recurse into a replacement, so this shields the
+        // inner `require` from the arm that follows.
+        ExprNode::Send { recv: Some(permit_recv), method, args, block, parenthesized }
+            if method.as_str() == "permit" =>
+        {
+            let ExprNode::Send {
+                recv: Some(inner_recv),
+                method: inner,
+                args: inner_args,
+                block: None,
+                parenthesized: inner_paren,
+            } = &*permit_recv.node
+            else {
+                return None;
+            };
+            if inner.as_str() != "require" || !is_bare_params(inner_recv) {
+                return None;
+            }
+            let shielded = Expr::new(
+                permit_recv.span,
+                ExprNode::Send {
+                    recv: Some(Expr::new(
+                        inner_recv.span,
+                        ExprNode::Ivar { name: Symbol::from("params") },
+                    )),
+                    method: inner.clone(),
+                    args: inner_args.clone(),
+                    block: None,
+                    parenthesized: *inner_paren,
+                },
+            );
+            Some(Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: Some(shielded),
+                    method: method.clone(),
+                    args: args.clone(),
+                    block: block.clone(),
+                    parenthesized: *parenthesized,
+                },
+            ))
+        }
+        // `params.require(:url)` STANDING ALONE — Rails' assertion that a
+        // parameter was supplied, answering the value. `@params` is a
+        // plain Hash and `require` on one reaches Kernel's PRIVATE
+        // method, which is how this announced itself: "private method
+        // 'require' called for an instance of Hash", in four tests
+        // across three files.
+        //
+        // Only when it is not the receiver of a `.permit` — that chain
+        // is the permit rewrite's, and half-rewriting it would leave
+        // `.permit` hanging off a Hash, trading one NoMethodError for
+        // another while looking fixed.
+        ExprNode::Send { recv: Some(recv), method, args, block: None, .. }
+            if method.as_str() == "require"
+                && args.len() == 1
+                && is_bare_params(recv)
+                && sym_or_str_arg(&args[0]).is_some() =>
+        {
+            let key = sym_or_str_arg(&args[0])?;
+            Some(Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: Some(const_path(&["Params"], e.span)),
+                    method: Symbol::from("require_key"),
+                    args: vec![
+                        Expr::new(e.span, ExprNode::Ivar { name: Symbol::from("params") }),
+                        Expr::new(
+                            e.span,
+                            ExprNode::Lit { value: Literal::Str { value: key } },
+                        ),
+                    ],
+                    block: None,
+                    parenthesized: true,
+                },
+            ))
+        }
         _ => None,
     })
+}
+
+/// The literal key of a `require(:sym)` / `require("str")` argument.
+fn sym_or_str_arg(arg: &Expr) -> Option<String> {
+    match &*arg.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------

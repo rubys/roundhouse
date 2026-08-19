@@ -331,7 +331,11 @@ fn rewrite_send(e: &Expr) -> Option<Expr> {
                 "refute_predicate failed".to_string(),
             ))
         }
-        "assert_raises" if !args.is_empty() => {
+        // `assert_raise` is Test::Unit's spelling, aliased by Rails and
+        // written by campfire's `unfurl_links_controller_test`. Same
+        // assertion, one fewer letter — recognized here rather than in
+        // a second lowering, so the two cannot diverge.
+        "assert_raises" | "assert_raise" if !args.is_empty() => {
             lower_assert_raises(span, args, block.as_ref())
         }
         "assert_difference" | "assert_no_difference" => {

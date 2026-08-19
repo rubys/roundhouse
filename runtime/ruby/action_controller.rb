@@ -16,3 +16,6 @@ require_relative "action_controller/current"
 require_relative "message_digest"
 require_relative "action_controller/message_verifier"
 require_relative "action_controller/cookies"
+# The error `Params.require_key` raises; travels with its consumer for
+# the same reason message_digest does.
+require_relative "action_controller/parameter_missing"

@@ -69,6 +69,31 @@ module Params
   # The `is_a?` stays in narrowing position (returning the value or
   # nil); the answer is then a plain nil check on a `String?` local,
   # which every target handles — unlike a nil check on the union itself.
+  # `params.require(:url)` — Rails' assertion that a key was supplied,
+  # answering the value so the caller can go on using it.
+  #
+  # RAISES on absent-or-blank, which is the whole point of the method:
+  # a controller writes it to turn a missing parameter into a 400
+  # instead of a nil that fails somewhere later. `Params.sub` is the
+  # forgiving twin (missing yields `{}`) and is what the permit chain
+  # uses; the two are not interchangeable, and campfire's
+  # `unfurl_links_controller` asserts precisely this raise.
+  #
+  # A free function over the Hash rather than a method on it: `@params`
+  # IS a plain Hash here, and `require` on one reaches Kernel's private
+  # method — "private method 'require' called for an instance of Hash",
+  # which is how this gap announced itself in four tests.
+  def self.require_key(params, key)
+    value = params.fetch(key, "")
+    if value.is_a?(String) && value.empty?
+      raise(ActionController::ParameterMissing.new(key))
+    end
+    unless params.key?(key)
+      raise(ActionController::ParameterMissing.new(key))
+    end
+    value
+  end
+
   def self.provided(sub, key)
     return false unless sub.key?(key)
     value = sub.fetch(key, "")

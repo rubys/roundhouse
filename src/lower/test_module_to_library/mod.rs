@@ -716,6 +716,8 @@ const MINITEST_INSTANCE_METHODS: &[(&str, SigBuilder)] = &[
     ("assert_includes", || fn_sig_two(Ty::Untyped, Ty::Untyped, Ty::Nil)),
     ("assert_match", || fn_sig_two(Ty::Untyped, Ty::Untyped, Ty::Nil)),
     ("assert_raises", || fn_sig_one(Ty::Untyped, Ty::Untyped)),
+    // Test::Unit's spelling of the same assertion, which Rails aliases.
+    ("assert_raise", || fn_sig_one(Ty::Untyped, Ty::Untyped)),
     ("assert_difference", || fn_sig_one(Ty::Untyped, Ty::Untyped)),
     ("assert_no_difference", || fn_sig_one(Ty::Untyped, Ty::Untyped)),
     ("refute", || fn_sig_one(Ty::Untyped, Ty::Nil)),

@@ -931,7 +931,14 @@ fn every_runtime_method_body_concretely_typed() {
     // whose type the caller decides, which is what this file's other
     // `untyped`-parameter sites all are.
     // +2 sites; ceiling raised 279 -> 281.
-    const CEILING: usize = 281;
+    // 2026-08-19 `Params.require_key` — Rails' `params.require(:url)`,
+    // which asserts a parameter was supplied and answers its value.
+    // Two sites, both on the value read out of the params tree: it is a
+    // `Roundhouse::ParamValue` (the String | Hash | Array union), so
+    // the `fetch` and the value it binds are gradual by declaration —
+    // the same shape every other reader in params.rb contributes.
+    // +2 sites; ceiling raised 281 -> 283.
+    const CEILING: usize = 283;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
