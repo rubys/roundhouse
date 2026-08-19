@@ -1,13 +1,17 @@
 # Python universal-IR overlay (the CtrlWalker retirement)
 
-> **ACTIVE** — phases A–D landed 2026-08-19; Phase E's controller leg
-> landed the same day: **`CtrlWalker` is deleted**
-> (`src/lower/controller_walk.rs`, the per-artifact controller emit,
-> the legacy `app/routes.py` module-handler registration, and
-> `http.py`'s Router/`ActionContext`/`FormatRouter` are all gone —
-> `http.py` is now just `ActionResponse`). Remaining = the
-> per-artifact model/view/test emit, which still ships alongside the
-> overlay's own models/views.
+> **COMPLETE — all phases landed 2026-08-19.** `CtrlWalker` is
+> deleted, and the whole Python app rides the overlay: models, views,
+> controllers, dispatch, route table, fixtures
+> (`app/v2/fixtures.py` + `load_all()`), and the LC-emitted unittest
+> suite (`tests/test_*.py` over the `TestCase` / `IntegrationTest`
+> twins in `app/test_support.py`). The per-artifact emitters
+> (model/view/spec/controller_test/fixture) and the hand-written
+> `view_helpers.py` / `runtime.py` are deleted; `__main__.py` is
+> four lines. Residue for a future sweep: `cable.py` still carries
+> the legacy `register_partial` / `broadcast_*_to` API (unused —
+> overlay broadcasts render inline) and `TestClient` remains for
+> hand-written callers.
 
 Python is the last emitter deriving controllers per-artifact through
 `lower::CtrlWalker` (`src/emit/python/controller.rs` implements the

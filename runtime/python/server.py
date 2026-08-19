@@ -26,7 +26,6 @@ from aiohttp import web
 from . import cable as _cable
 from . import db as _db
 from . import http as _http
-from . import view_helpers as _view_helpers
 from .flash import Flash
 
 # Flash is cookie-backed and per-session (per browser), so parallel clients
@@ -133,8 +132,6 @@ async def _dispatch_request(request: web.Request) -> web.StreamResponse:
     the traceback on stderr so the compare tool sees the same message
     it would from wsgiref."""
     from .v2 import dispatch as _v2
-
-    _view_helpers.reset_render_state()
 
     method = request.method.upper()
     # The raw path, extension included — the transpiled Router.match

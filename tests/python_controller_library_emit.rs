@@ -117,6 +117,50 @@ fn overlay_gate(fixture: &Path, scratch: &str) {
         &family_inventory(&lcs.views, &dir.join("view"), py),
     );
 
+    // Phase E remainder: the fixture + test-module LC families,
+    // assembled the way the Ruby (spinel) emit does. Measured here
+    // ahead of the per-artifact test-emit retirement.
+    let fixture_lcs = roundhouse::lower::lower_fixtures_to_library_classes(&app);
+    let (_, model_registry) = roundhouse::lower::lower_models_with_registry(
+        &app.models,
+        &app.schema,
+        Vec::new(),
+    );
+    let fixture_extras: Vec<_> = fixture_lcs
+        .iter()
+        .map(|lc| {
+            (lc.name.clone(), roundhouse::lower::class_info_from_library_class(lc))
+        })
+        .chain(model_registry)
+        .collect();
+    let test_lcs = roundhouse::lower::lower_test_modules_to_library_classes(
+        &app.test_modules,
+        &app.fixtures,
+        &app.models,
+        fixture_extras,
+        &roundhouse::lower::routes::helper_id_segments(&app),
+    );
+    assert_all_green(
+        "fixtures",
+        &family_inventory(&fixture_lcs, &dir.join("fixture"), py),
+    );
+    let tests_inv = family_inventory(&test_lcs, &dir.join("test"), py);
+    let ok = tests_inv.iter().filter(|(_, r)| r.is_ok()).count();
+    println!("  test modules: {ok}/{}", tests_inv.len());
+    for (name, r) in &tests_inv {
+        if let Err(e) = r {
+            println!("    FAIL  {name} — {e}");
+        }
+    }
+    if let Some(first) = test_lcs.first() {
+        if let Ok(src) = roundhouse::emit::python::emit_library_class(first) {
+            println!("  --- sample test class head ({}):", first.name.0.as_str());
+            for l in src.lines().take(20) {
+                println!("  | {l}");
+            }
+        }
+    }
+
     let files = emit_overlay_files(&app).expect("assemble overlay files");
     assert!(files.iter().any(|f| f.path.ends_with("dispatch.py")));
     let mut failures = Vec::new();

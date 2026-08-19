@@ -54,29 +54,3 @@ pub fn python_ty(ty: &Ty) -> String {
     }
 }
 
-pub(super) fn py_literal_for(value: &str, ty: &Ty) -> String {
-    match ty {
-        Ty::Str | Ty::Sym => format!("{value:?}"),
-        Ty::Int => {
-            if value.parse::<i64>().is_ok() {
-                value.to_string()
-            } else {
-                format!("0  # TODO: coerce {value:?}")
-            }
-        }
-        Ty::Float => {
-            if value.parse::<f64>().is_ok() {
-                value.to_string()
-            } else {
-                format!("0.0  # TODO: coerce {value:?}")
-            }
-        }
-        Ty::Bool => match value {
-            "true" | "1" => "True".into(),
-            "false" | "0" => "False".into(),
-            _ => format!("False  # TODO: coerce {value:?}"),
-        },
-        Ty::Class { id, .. } if id.0.as_str() == "Time" => format!("{value:?}"),
-        _ => format!("{value:?}"),
-    }
-}

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import unittest
 from typing import Any
 
 from . import http as _http
@@ -150,6 +151,94 @@ class TestClient:
         if inspect.isawaitable(result):
             result = asyncio.get_event_loop().run_until_complete(result)
         return TestResponse(result)
+
+
+class TestCase(unittest.TestCase):
+    """`ActiveSupport::TestCase` twin: every test starts on a fresh
+    in-memory DB with all fixtures loaded — the Rails per-test
+    transaction-rollback contract, done by rebuild (SQLite :memory:
+    makes it cheap)."""
+
+    def setUp(self) -> None:
+        from . import db as _db
+        from .schema_sql import CREATE_TABLES
+
+        _db.setup_test_db(CREATE_TABLES)
+        try:
+            from .v2 import fixtures as _fixtures
+        except ImportError:
+            return
+        _fixtures.load_all()
+
+
+class TestCase_NoFixtures(TestCase):
+    """Escape hatch for suites that manage their own records."""
+
+    def setUp(self) -> None:  # pragma: no cover - trivial
+        from . import db as _db
+        from .schema_sql import CREATE_TABLES
+
+        _db.setup_test_db(CREATE_TABLES)
+
+
+class IntegrationTest(TestCase):
+    """`ActionDispatch::IntegrationTest` twin: request helpers over
+    the overlay's `app.v2.dispatch.handle`, with Rails-shaped
+    assertion names. `self.response` holds the last `TestResponse`."""
+
+    response: TestResponse
+
+    def _request(self, method: str, path: str, params=None) -> TestResponse:
+        from .v2 import dispatch as _v2
+
+        resp = _v2.handle(method, path, params=dict(params or {}))
+        if resp is None:
+            raise AssertionError(f"no route for {method} {path}")
+        self.response = TestResponse(resp)
+        return self.response
+
+    def get(self, path: str) -> TestResponse:
+        return self._request("GET", path)
+
+    def post(self, path: str, params=None) -> TestResponse:
+        return self._request("POST", path, params)
+
+    def patch(self, path: str, params=None) -> TestResponse:
+        return self._request("PATCH", path, params)
+
+    def put(self, path: str, params=None) -> TestResponse:
+        return self._request("PUT", path, params)
+
+    def delete(self, path: str) -> TestResponse:
+        return self._request("DELETE", path)
+
+    def assert_response(self, kind) -> None:
+        s = self.response.status
+        checks = {
+            "success": 200 <= s < 300,
+            "redirect": 300 <= s < 400,
+            "missing": s == 404,
+            "error": s >= 500,
+            "unprocessable_entity": s == 422,
+            "unprocessable_content": s == 422,
+        }
+        ok = checks.get(kind, s == kind if isinstance(kind, int) else None)
+        if ok is None:
+            raise AssertionError(f"unknown response kind {kind!r}")
+        if not ok:
+            raise AssertionError(f"expected {kind!r} response, got {s}")
+
+    def assert_select(self, selector: str, text=None, minimum=None) -> None:
+        if minimum is not None:
+            self.response.assert_select_min(selector, int(minimum))
+            return
+        if text is None:
+            self.response.assert_select(selector)
+        else:
+            self.response.assert_select_text(selector, text)
+
+    def assert_redirected_to(self, path: str) -> None:
+        self.response.assert_redirected_to(path)
 
 
 def _selector_fragment(selector: str) -> str:

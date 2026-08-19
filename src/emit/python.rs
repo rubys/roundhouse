@@ -33,21 +33,16 @@ use crate::App;
 use crate::dialect::MethodDef;
 use crate::ty::Ty;
 
-mod controller_test;
 mod expr;
-mod fixture;
 mod importmap;
 mod library;
 mod main;
-mod model;
 pub mod overlay;
 mod pyproject;
 mod route;
 mod schema_sql;
 mod shared;
-mod spec;
 mod ty;
-mod view;
 
 // External API: kept for anything that keys off `python_ty` directly.
 pub use ty::python_ty;
@@ -99,7 +94,6 @@ pub fn emit_method(m: &MethodDef) -> String {
     out
 }
 
-const RUNTIME_SOURCE: &str = include_str!("../../runtime/python/runtime.py");
 const DB_SOURCE: &str = include_str!("../../runtime/python/db.py");
 const PARAMS_SOURCE: &str = include_str!("../../runtime/python/params.py");
 /// Native-`datetime` seam for temporal columns: `Roundhouse.RhDateTime.
@@ -118,10 +112,6 @@ const HTTP_SOURCE: &str = include_str!("../../runtime/python/http.py");
 /// Rails-shaped assertions. Ships as `app/test_support.py`.
 const TEST_SUPPORT_SOURCE: &str =
     include_str!("../../runtime/python/test_support.py");
-/// View helpers — `link_to`, `button_to`, `FormBuilder`, etc.
-/// Ships as `app/view_helpers.py` when views emit.
-const VIEW_HELPERS_SOURCE: &str =
-    include_str!("../../runtime/python/view_helpers.py");
 /// aiohttp-based HTTP server + /cable route + method-override +
 /// layout-wrap. Ships as `app/server.py` when controllers emit so
 /// `uv run python3 -m app` (via the emitted `__main__.py` +
@@ -141,9 +131,10 @@ const CABLE_SOURCE: &str = include_str!("../../runtime/python/cable.py");
 /// trip the transpile fail-policy) AND import cleanly in the project.
 ///
 /// All eight files below transpile degrade-free after the Super / Yield /
-/// Return / runtime-ism work. `view_helpers` stays out: it still carries
-/// degrades (complex nested each-blocks, `<<`-append, `%()` literals) and
-/// a hand-written `app/view_helpers.py` is shipped in its place.
+/// Return / runtime-ism work. `view_helpers` ships transpiled too, but at
+/// the overlay's own path (`app/v2/view_helpers.py`, see
+/// `overlay::emit_overlay_files`) — the hand-written twin was deleted
+/// with the per-artifact retirement.
 const LIVE_FRAMEWORK: &[&str] = &[
     "app/inflector.py",
     "app/json_builder.py",
@@ -174,11 +165,6 @@ fn live_framework_units() -> Vec<EmittedFile> {
 pub fn emit(app: &App) -> Vec<EmittedFile> {
     let mut files = Vec::new();
     if !app.models.is_empty() {
-        files.push(model::emit_models(app));
-        files.push(EmittedFile {
-            path: PathBuf::from("app/runtime.py"),
-            content: RUNTIME_SOURCE.to_string(),
-        });
         files.push(EmittedFile {
             path: PathBuf::from("app/db.py"),
             content: DB_SOURCE.to_string(),
@@ -208,10 +194,6 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             content: TEST_SUPPORT_SOURCE.to_string(),
         });
         files.push(EmittedFile {
-            path: PathBuf::from("app/view_helpers.py"),
-            content: VIEW_HELPERS_SOURCE.to_string(),
-        });
-        files.push(EmittedFile {
             path: PathBuf::from("app/server.py"),
             content: SERVER_SOURCE.to_string(),
         });
@@ -233,25 +215,13 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             Err(e) => panic!("python overlay emit failed: {e}"),
         }
     }
-    files.extend(view::emit_py_views(app));
-    if !app.fixtures.is_empty() {
-        files.push(fixture::emit_py_fixtures(app));
-        // tests/ needs __init__.py so unittest can discover
+    if !app.test_modules.is_empty() {
+        // tests/ needs __init__.py so unittest discovery works; the
+        // test files themselves ride the overlay emission.
         files.push(EmittedFile {
             path: PathBuf::from("tests/__init__.py"),
             content: String::new(),
         });
-    }
-    if !app.test_modules.is_empty() {
-        for tm in &app.test_modules {
-            files.push(spec::emit_py_test(tm, app));
-        }
-        if app.fixtures.is_empty() {
-            files.push(EmittedFile {
-                path: PathBuf::from("tests/__init__.py"),
-                content: String::new(),
-            });
-        }
     }
     files
 }

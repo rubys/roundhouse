@@ -29,7 +29,11 @@ fn emits_expected_files() {
     let app = analyzed_app();
     let files = python::emit(&app);
     let paths: Vec<_> = files.iter().map(|f| f.path.display().to_string()).collect();
-    assert!(paths.contains(&"app/models.py".to_string()), "got {paths:?}");
+    assert!(paths.contains(&"app/v2/models.py".to_string()), "got {paths:?}");
+    assert!(
+        !paths.contains(&"app/models.py".to_string()),
+        "legacy models.py returned: {paths:?}"
+    );
     // Controllers, dispatch, and the route table live in the overlay
     // (`app/v2/`) — the per-artifact `app/controllers/` modules and the
     // module-handler `app/routes.py` retired with the CtrlWalker
@@ -44,14 +48,18 @@ fn emits_expected_files() {
     );
     assert!(paths.contains(&"app/route_helpers.py".to_string()), "got {paths:?}");
     assert!(paths.contains(&"app/test_support.py".to_string()), "got {paths:?}");
-    assert!(paths.contains(&"app/views.py".to_string()), "got {paths:?}");
+    assert!(paths.contains(&"app/v2/views.py".to_string()), "got {paths:?}");
+    assert!(
+        !paths.contains(&"app/views.py".to_string()),
+        "legacy views.py returned: {paths:?}"
+    );
 }
 
 #[test]
 fn models_are_classes_with_type_hints() {
     let app = analyzed_app();
     let files = python::emit(&app);
-    let content = find(&files, "app/models.py");
+    let content = find(&files, "app/v2/models.py");
     assert!(content.contains("from __future__ import annotations"), "got:\n{content}");
     // Models now emit through the shared model->LibraryClass lowering
     // (same path as TS), so each is a thin subclass of ApplicationRecord
@@ -68,7 +76,7 @@ fn models_are_classes_with_type_hints() {
 fn model_methods_annotate_return_type() {
     let app = analyzed_app();
     let files = python::emit(&app);
-    let content = find(&files, "app/models.py");
+    let content = find(&files, "app/v2/models.py");
     // Lowered models annotate return types throughout — e.g. the
     // per-model `table_name` class method the lowering synthesizes.
     // (The old bespoke path's `normalize_title` reader is gone: the

@@ -45,6 +45,8 @@ pub struct OverlayLcs {
     pub route_helpers: Option<LibraryClass>,
     pub importmap: Option<LibraryClass>,
     pub route_table: Option<LibraryClass>,
+    pub fixtures: Vec<LibraryClass>,
+    pub tests: Vec<LibraryClass>,
 }
 
 /// Lower the app to overlay shape — the same assembly the Go emitter
@@ -107,7 +109,26 @@ pub fn lower_overlay(app: &App) -> OverlayLcs {
             &dispatch_funcs,
         ))
     };
-    OverlayLcs { controllers, models, views, route_helpers, importmap, route_table }
+    // Fixtures + test modules, assembled the way the Ruby (spinel)
+    // emit does: fixture-LC infos join the model registry as extras so
+    // test bodies resolve `articles(:one)`-rewritten calls and model
+    // chains alike.
+    let fixtures = crate::lower::lower_fixtures_to_library_classes(app);
+    let (_, test_model_registry) =
+        crate::lower::lower_models_with_registry(&app.models, &app.schema, Vec::new());
+    let fixture_extras: Vec<_> = fixtures
+        .iter()
+        .map(|lc| (lc.name.clone(), crate::lower::class_info_from_library_class(lc)))
+        .chain(test_model_registry)
+        .collect();
+    let tests = crate::lower::lower_test_modules_to_library_classes(
+        &app.test_modules,
+        &app.fixtures,
+        &app.models,
+        fixture_extras,
+        &crate::lower::routes::helper_id_segments(app),
+    );
+    OverlayLcs { controllers, models, views, route_helpers, importmap, route_table, fixtures, tests }
 }
 
 /// Emit the overlay file set. Fails loudly on the first class the
@@ -149,6 +170,13 @@ pub fn emit_overlay_files(app: &App) -> Result<Vec<EmittedFile>, String> {
     )?;
     if let Some(unit) = vh.into_iter().next() {
         files.push(file("app/v2/view_helpers.py", unit.content));
+    }
+    if !lcs.fixtures.is_empty() {
+        files.push(file("app/v2/fixtures.py", emit_fixtures(&lcs.fixtures, &lcs.models)?));
+    }
+    for lc in &lcs.tests {
+        let (path, content) = emit_test_file(lc, &lcs)?;
+        files.push(EmittedFile { path: PathBuf::from(path), content });
     }
     let has_layout = lcs
         .views
@@ -357,6 +385,84 @@ fn emit_controllers(
     out.push_str(&missing_parent_aliases(controllers));
     out.push_str(&body);
     Ok(out)
+}
+
+/// `app/v2/fixtures.py` — one `<Plural>Fixtures` class per fixture
+/// set plus `load_all()`, the per-test reset hook the
+/// `app.test_support.TestCase` base calls from `setUp`.
+fn emit_fixtures(
+    fixtures: &[LibraryClass],
+    models: &[LibraryClass],
+) -> Result<String, String> {
+    let mut body = String::new();
+    for lc in fixtures {
+        body.push('\n');
+        body.push_str(&emit_library_class(lc)?);
+    }
+    let mut out = String::from(HEADER);
+    let names = model_names(models);
+    if !names.is_empty() {
+        out.push_str(&format!("\nfrom app.v2.models import {}\n", names.join(", ")));
+    }
+    if body.contains("Db.") {
+        out.push_str("from app.db import Db\n");
+    }
+    out.push_str(&body);
+    out.push_str("\n\ndef load_all() -> None:\n");
+    for lc in fixtures {
+        out.push_str(&format!(
+            "    {}._fixtures_load_bang()\n",
+            last_segment(lc.name.0.as_str())
+        ));
+    }
+    Ok(out)
+}
+
+/// One emitted unittest file per test-module LC —
+/// `tests/test_<snake>.py` so `python -m unittest` discovery finds
+/// it. The LC's parent renders as its last segment
+/// (`ActiveSupport::TestCase` → `TestCase`,
+/// `ActionDispatch::IntegrationTest` → `IntegrationTest`), supplied
+/// by the twin base classes in `app.test_support`.
+fn emit_test_file(
+    lc: &LibraryClass,
+    lcs: &OverlayLcs,
+) -> Result<(String, String), String> {
+    let class_name = last_segment(lc.name.0.as_str());
+    let stem = crate::naming::snake_case(
+        class_name.strip_suffix("Test").unwrap_or(class_name),
+    );
+    let body = emit_library_class(lc)?;
+    let parent = lc
+        .parent
+        .as_ref()
+        .map(|p| last_segment(p.0.as_str()).to_string())
+        .unwrap_or_else(|| "TestCase".to_string());
+
+    let mut out = String::from(HEADER);
+    out.push_str(&format!("\nfrom app.test_support import {parent}\n"));
+    let names = model_names(&lcs.models);
+    if !names.is_empty() {
+        out.push_str(&format!("from app.v2.models import {}\n", names.join(", ")));
+    }
+    let fixture_names: Vec<String> = lcs
+        .fixtures
+        .iter()
+        .map(|f| last_segment(f.name.0.as_str()).to_string())
+        .filter(|n| body.contains(n.as_str()))
+        .collect();
+    if !fixture_names.is_empty() {
+        out.push_str(&format!(
+            "from app.v2.fixtures import {}\n",
+            fixture_names.join(", ")
+        ));
+    }
+    if body.contains("RouteHelpers.") {
+        out.push_str("from app.v2.route_helpers import RouteHelpers\n");
+    }
+    out.push('\n');
+    out.push_str(&body);
+    Ok((format!("tests/test_{stem}.py"), out))
 }
 
 fn emit_module_class(rh: &LibraryClass) -> Result<String, String> {

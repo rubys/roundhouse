@@ -63,8 +63,18 @@ fn assert_emitted_lives_in(emitted: &str, file_path: &str) {
 
 #[test]
 fn inflector_pluralize_lives_in_runtime_python() {
+    // The CtrlWalker/per-artifact retirement (2026-08-19) deleted
+    // hand-written runtime/python/view_helpers.py — the overlay
+    // transpiles `runtime/ruby/action_view/view_helpers.rb` into
+    // `app/v2/view_helpers.py` instead, so there's no hand-written
+    // destination to validate against (mirrors the elixir/go
+    // retirements below). The emit itself stays pinned: the emitted
+    // function must remain well-formed.
     let emitted = roundhouse::emit::python::emit_method(&pluralize_method());
-    assert_emitted_lives_in(&emitted, "runtime/python/view_helpers.py");
+    assert!(
+        emitted.contains("def pluralize(count: int, word: str) -> str:"),
+        "got:\n{emitted}"
+    );
 }
 
 #[test]

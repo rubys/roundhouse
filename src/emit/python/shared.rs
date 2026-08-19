@@ -116,14 +116,4 @@ pub(super) fn py_string_literal(s: &str) -> String {
     out
 }
 
-pub(super) fn test_name_snake_py(desc: &str) -> String {
-    let mut s: String = desc
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
-        .collect();
-    while s.contains("__") {
-        s = s.replace("__", "_");
-    }
-    s.trim_matches('_').to_string()
-}
 

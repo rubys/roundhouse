@@ -372,6 +372,13 @@ fn try_emit_raise_stmt(e: &Expr) -> Option<String> {
             });
         }
     }
+    // The parsed `Raise` node (some ingest paths produce it directly —
+    // the inline-assertion lowering's `raise "…" if cond` guards
+    // among them). Same argument conventions as the Send form.
+    if let ExprNode::Raise { value } = &*e.node {
+        let args = std::slice::from_ref(value);
+        return Some(format!("raise {}", raise_exception_expr(args)));
+    }
     None
 }
 
