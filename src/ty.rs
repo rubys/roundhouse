@@ -1,3 +1,16 @@
+//! The inference type lattice `Ty` that analyze stamps onto every
+//! expression and emitters translate into each target's type system.
+//! Rails-specific shapes are first-class variants — `Relation` so
+//! query chains can be reasoned about across method boundaries (and
+//! folded to SQL) instead of degrading to arrays, `Time` so each
+//! target maps its native datetime — because adding a variant forces
+//! every exhaustive match to handle it explicitly. Three "no type"
+//! variants mean different things: `Var` is an unsolved inference
+//! variable (a residual one surfaces as an `UnresolvedType` warning),
+//! `Untyped` is RBS `untyped` — a deliberate gradual opt-out that
+//! strict targets reject at emit — and `Bottom` is raise/never,
+//! absorbed by unions so a raising branch doesn't widen the type.
+
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 

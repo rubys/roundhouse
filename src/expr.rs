@@ -1,3 +1,15 @@
+//! The language-core expression IR: `Expr` (span, inferred type,
+//! effects, annotations) wrapping the ~15-variant `ExprNode` that
+//! Ruby's ~80 Prism node kinds collapse into. Ingest builds these
+//! bare; analyze stamps `ty` and `effects`; lowerers rewrite trees
+//! and tag `IrHint`s; every emitter walks the result. The
+//! surface-preservation fields (`ArrayStyle`, `BlockStyle`,
+//! `parenthesized`, `leading_blank_line`) carry the author's spelling
+//! so ingest → emit-ruby reproduces the source — the discipline
+//! `roundhouse-ast --round-trip` checks. `PartialEq` deliberately
+//! ignores `span`: round-trip tests compare re-ingested IR whose
+//! byte offsets legitimately differ.
+
 use serde::{Deserialize, Serialize};
 
 use crate::diagnostic::DiagnosticKind;

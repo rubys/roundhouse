@@ -1,3 +1,13 @@
+//! The database-schema IR: tables, columns, indexes, and foreign keys
+//! in target-neutral form. `ingest::schema` builds it from
+//! `db/schema.rb` — or by folding `db/migrate/*.rb` in timestamp order
+//! when no schema.rb ships — and `ingest::sequel_migration` produces
+//! the same shape for non-Rails apps. This is the pipeline's root
+//! type-evidence source: model ingest derives each model's attribute
+//! types from its table's columns, so a column's `ColumnType` and
+//! `nullable` flag decide the `Ty` (and the `T | Nil` unions) every
+//! target ultimately emits.
+
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 

@@ -1,3 +1,14 @@
+//! The Rails-shaped layer above `expr`: Model, Controller, View,
+//! RouteTable, Fixture, TestModule and their body items — the boundary
+//! where "Ruby code" ends and "Rails application shape" begins. Ingest
+//! classifies each source file into one of these; analyze and the
+//! lowerers rewrite them toward `LibraryClass` / `LibraryFunction`,
+//! the target-neutral lowered contract every emitter consumes.
+//! Recognized DSL calls become typed variants, and anything else lands
+//! in an `Unknown` / `unknown_calls` fallback — that fallback is the
+//! whole reason the body-item enums exist, since without it the Ruby
+//! emitter silently drops every unrecognized source line.
+
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 

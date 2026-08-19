@@ -1,3 +1,15 @@
+//! Effect classification: the `Effect` variants and the `EffectSet`
+//! the analyzer attaches to every expression and to `Ty::Fn`
+//! signatures — per-table `DbRead`/`DbWrite` (from the adapter's
+//! Active Record method classification) plus deliberately coarse
+//! Io/Time/Random/Net/Log/Raises where per-site precision isn't
+//! earned. Populated by `analyze/effects`; downstream, purity is a
+//! license — lowerer hook passes re-evaluate or drop a receiver only
+//! when its subtree is effect-free — and the per-table Db grain is
+//! what lets IDE/MCP consumers report which tables an action reads
+//! and writes. The empty set means pure and is the serde default, so
+//! pure nodes serialize with no effects field at all.
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 

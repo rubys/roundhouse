@@ -1,3 +1,13 @@
+//! Identifier newtypes shared by every IR layer: `Symbol` for names,
+//! `ClassId` / `TableRef` for class and table references, and the
+//! `VarId` / `TyVar` / `EffectVar` counters the analyzer allocates
+//! during inference. Ingest mints the named ones; everything
+//! downstream keys its maps and registries by them. They wrap plain
+//! strings today, but the newtypes are the point: a class reference
+//! can never be confused with a table name or a bare method symbol in
+//! a signature, and the representation can switch to true interning
+//! later without touching a single consumer.
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

@@ -1,3 +1,15 @@
+//! The whole-program IR root: a Rails application as one data
+//! structure. Ingest produces an `App`, analyze annotates it in place,
+//! the post-analyze lowerings reshape it, and every emitter consumes
+//! it — this struct is the deliverable each stage hands the next. It
+//! is serde-serializable end to end because tests, the wasm build, and
+//! the IR dump round-trip it as JSON (`schema_version` names the
+//! shape), so a field that can't serialize can't join the IR. Beyond
+//! the core sections (schema, models, controllers, routes, views),
+//! the trailing maps persist facts analyze already computed — partial
+//! local types, view ivar contexts, render edges — so lowerers and
+//! IDE consumers read them instead of re-deriving.
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};

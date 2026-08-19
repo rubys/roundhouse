@@ -1,3 +1,15 @@
+//! Source positions: `FileId` plus byte-offset `Span`, threaded
+//! through every IR node so diagnostics and IDE features point at real
+//! file/line/column coordinates. Ingest stamps spans and registers
+//! each file as a `SourceFile` in `App::sources` (1-based `FileId`
+//! indexing, with `FileId(0)` the synthetic sentinel); lowerers
+//! backfill synthesized nodes via `Expr::inherit_span`; diagnostic
+//! printers resolve offsets with `SourceFile::line_col`. For
+//! `.html.erb` views the stored text is the raw template, not the
+//! compiled Ruby — view ingest translates compiled-Ruby offsets back
+//! to template coordinates, so a span there lands in the ERB the
+//! author actually wrote.
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
