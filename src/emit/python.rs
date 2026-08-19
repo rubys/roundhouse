@@ -118,10 +118,11 @@ const TEST_SUPPORT_SOURCE: &str =
 /// `pyproject.toml`) can serve both HTTP and WebSocket on one
 /// event loop.
 const SERVER_SOURCE: &str = include_str!("../../runtime/python/server.py");
-/// Action Cable runtime — WebSocket handler + Turbo Streams
-/// broadcaster. Always shipped alongside the server; models with
-/// `broadcasts_to` call `crate::cable::broadcast_*_to` from their
-/// save/destroy methods.
+/// Action Cable runtime — WebSocket handler + the `Broadcasts` Turbo
+/// Streams API. Always shipped alongside the server; the overlay's
+/// models call `Broadcasts.{prepend,append,replace,remove}` from
+/// their `after_*_commit` hooks with the partial html rendered
+/// inline.
 const CABLE_SOURCE: &str = include_str!("../../runtime/python/cable.py");
 
 /// Framework leaf files that have completed the strangler switchover:

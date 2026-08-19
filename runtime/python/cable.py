@@ -2,12 +2,14 @@
 #
 # Hand-written, shipped alongside generated code as `app/cable.py`.
 # Implements the Action Cable WebSocket subprotocol (actioncable-v1-json)
-# on top of aiohttp's WebSocketResponse, plus the Turbo Streams
-# broadcast helpers (`broadcast_{prepend,append,replace,remove}_to`)
-# that generated models call from their save/destroy methods.
+# on top of aiohttp's WebSocketResponse, plus the `Broadcasts` Turbo
+# Streams API the overlay's models call from their after_*_commit
+# hooks — they render the partial inline and hand the html here.
 #
 # Mirrors runtime/rust/cable.rs and runtime/typescript/server.ts's
-# cable handler. Same wire format, same partial-renderer registry.
+# cable handler. Same wire format. (The pre-overlay partial-renderer
+# registry and `broadcast_*_to` helpers retired with the per-artifact
+# model emit, 2026-08-19.)
 
 from __future__ import annotations
 
@@ -15,7 +17,7 @@ import asyncio
 import base64
 import json
 import time
-from typing import Any, Callable
+from typing import Any
 
 # aiohttp is imported only inside `cable_handler` — the rest of
 # this module is duck-typed (calls `ws.send_str` / reads
@@ -23,32 +25,6 @@ from typing import Any, Callable
 # `from app import cable` without having aiohttp installed. The
 # broadcast dispatch path short-circuits when no subscribers are
 # registered, which is the test-context state.
-
-# ── Partial-renderer registry ──────────────────────────────────
-#
-# Models register a callable that renders an instance identified
-# by id into its Turbo Stream partial HTML. Lookup by model class
-# name lets broadcasts on associations (e.g. `comment.article`'s
-# replace) find the parent's partial without the child's model
-# module needing to import the parent's view.
-
-_PARTIAL_RENDERERS: dict[str, Callable[[int], str]] = {}
-
-
-def register_partial(type_name: str, fn: Callable[[int], str]) -> None:
-    """Register a partial renderer for ``type_name`` (the model
-    class name, e.g. ``"Article"``). The callable receives a record
-    id and returns the rendered partial HTML, or empty string on
-    miss."""
-    _PARTIAL_RENDERERS[type_name] = fn
-
-
-def render_partial(type_name: str, id: int) -> str:
-    fn = _PARTIAL_RENDERERS.get(type_name)
-    if fn is None:
-        return f"<div>{type_name} #{id}</div>"
-    return fn(id)
-
 
 # ── Turbo Streams rendering ────────────────────────────────────
 
@@ -60,50 +36,6 @@ def turbo_stream_html(action: str, target: str, content: str) -> str:
             f'<template>{content}</template></turbo-stream>'
         )
     return f'<turbo-stream action="{action}" target="{target}"></turbo-stream>'
-
-
-def _dom_id_for(table: str, id: int) -> str:
-    singular = table[:-1] if table.endswith("s") else table
-    return f"{singular}_{id}"
-
-
-# ── Broadcast helpers ──────────────────────────────────────────
-#
-# Each helper resolves the default target (table name for
-# prepend/append, `<singular>_<id>` for replace/remove), renders
-# the partial (remove skips this), and schedules the frame on the
-# running event loop. If no loop is running (sync test context),
-# the broadcast is a no-op — matches railcar's Python pattern and
-# keeps model unit tests from crashing when they hit save().
-
-
-def broadcast_replace_to(
-    table: str, id: int, type_name: str, channel: str, target: str
-) -> None:
-    t = target or _dom_id_for(table, id)
-    html = render_partial(type_name, id)
-    _dispatch(channel, turbo_stream_html("replace", t, html))
-
-
-def broadcast_prepend_to(
-    table: str, id: int, type_name: str, channel: str, target: str
-) -> None:
-    t = target or table
-    html = render_partial(type_name, id)
-    _dispatch(channel, turbo_stream_html("prepend", t, html))
-
-
-def broadcast_append_to(
-    table: str, id: int, type_name: str, channel: str, target: str
-) -> None:
-    t = target or table
-    html = render_partial(type_name, id)
-    _dispatch(channel, turbo_stream_html("append", t, html))
-
-
-def broadcast_remove_to(table: str, id: int, channel: str, target: str) -> None:
-    t = target or _dom_id_for(table, id)
-    _dispatch(channel, turbo_stream_html("remove", t, ""))
 
 
 # ── Subscriber registry + dispatch ─────────────────────────────
@@ -245,35 +177,25 @@ def _decode_channel(identifier: str) -> str | None:
 
 
 class Broadcasts:
-    """Turbo Stream broadcast API the transpiled models call. The lowered
-    `after_*_commit` callbacks render the partial themselves and hand a
-    `{"stream", "target", "html"}` dict here (the `remove` action omits
-    "html"); each method wraps it in a `<turbo-stream>` frame and pushes
-    it to the stream's subscribers. The hand-written `broadcast_*_to`
-    functions above are the older API that renders internally — this is
-    the structured shape the shared model lowering emits (matches the
-    go/rust/ts `Broadcasts` twins)."""
-
-    # Dual-accepting: the legacy per-artifact emit passes one positional
-    # dict; the overlay's library-emitted bodies pass the Ruby kwargs
-    # as real keyword arguments. Either binds.
+    """Turbo Stream broadcast API the overlay's models call. The
+    lowered `after_*_commit` callbacks render the partial themselves
+    and pass the Ruby kwargs as real keyword arguments (`remove` omits
+    `html`); each method wraps the html in a `<turbo-stream>` frame
+    and pushes it to the stream's subscribers. Matches the
+    go/rust/ts `Broadcasts` twins."""
 
     @staticmethod
-    def prepend(opts: dict | None = None, **kw) -> None:
-        opts = opts or kw
-        _dispatch(opts["stream"], turbo_stream_html("prepend", opts["target"], opts["html"]))
+    def prepend(*, stream: str, target: str, html: str) -> None:
+        _dispatch(stream, turbo_stream_html("prepend", target, html))
 
     @staticmethod
-    def append(opts: dict | None = None, **kw) -> None:
-        opts = opts or kw
-        _dispatch(opts["stream"], turbo_stream_html("append", opts["target"], opts["html"]))
+    def append(*, stream: str, target: str, html: str) -> None:
+        _dispatch(stream, turbo_stream_html("append", target, html))
 
     @staticmethod
-    def replace(opts: dict | None = None, **kw) -> None:
-        opts = opts or kw
-        _dispatch(opts["stream"], turbo_stream_html("replace", opts["target"], opts["html"]))
+    def replace(*, stream: str, target: str, html: str) -> None:
+        _dispatch(stream, turbo_stream_html("replace", target, html))
 
     @staticmethod
-    def remove(opts: dict | None = None, **kw) -> None:
-        opts = opts or kw
-        _dispatch(opts["stream"], turbo_stream_html("remove", opts["target"], ""))
+    def remove(*, stream: str, target: str) -> None:
+        _dispatch(stream, turbo_stream_html("remove", target, ""))

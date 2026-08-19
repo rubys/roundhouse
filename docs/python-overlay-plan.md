@@ -8,10 +8,11 @@
 > twins in `app/test_support.py`). The per-artifact emitters
 > (model/view/spec/controller_test/fixture) and the hand-written
 > `view_helpers.py` / `runtime.py` are deleted; `__main__.py` is
-> four lines. Residue for a future sweep: `cable.py` still carries
-> the legacy `register_partial` / `broadcast_*_to` API (unused —
-> overlay broadcasts render inline) and `TestClient` remains for
-> hand-written callers.
+> four lines. The cable.py legacy API sweep followed the same day:
+> `register_partial` / `render_partial` / `broadcast_*_to` deleted,
+> `Broadcasts` tightened to the kwargs-only shape the overlay's
+> models emit. Remaining residue: `TestClient` in test_support.py,
+> kept for hand-written callers.
 
 Python is the last emitter deriving controllers per-artifact through
 `lower::CtrlWalker` (`src/emit/python/controller.rs` implements the
