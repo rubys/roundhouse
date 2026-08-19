@@ -180,7 +180,22 @@ fn validation_rule_to_calls(attr: &Symbol, rule: &ValidationRule, attr_ty: Optio
             inline_numericality_check(attr, *only_integer, *gt, *lt)
         }
         ValidationRule::Inclusion { values } => vec![inline_inclusion_check(attr, values)],
-        ValidationRule::Uniqueness { .. } | ValidationRule::Custom { .. } => {
+        // `validate :validate_url` — a method the model defines, which
+        // adds to `errors` itself. The synthesized `validate` just
+        // calls it; everything else about the shape (when it runs, what
+        // `valid?` does with `errors` afterwards) is already the same
+        // for a rule-derived check.
+        ValidationRule::Custom { method } => vec![Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: None,
+                method: method.clone(),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        )],
+        ValidationRule::Uniqueness { .. } => {
             // Not yet exercised by real-blog; lands when a fixture forces the issue.
             Vec::new()
         }

@@ -1864,7 +1864,82 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // the rename needs to happen for any of them.
     scaffold_readme_to_specimen(&mut files);
     apply_gemfile_trim(&mut files, app, fixture);
+    apply_test_gem_wiring(&mut files);
     Ok(files)
+}
+
+/// Test-only gems the APP's own suite reaches for, which our emitted
+/// `test/test_helper.rb` drops by construction: that file is our shim,
+/// not the app's, so every `require` the app's helper made is gone.
+/// campfire's opens with `require "mocha/minitest"` and
+/// `require "webmock/minitest"`, and declares both in its Gemfile's
+/// `group :test`.
+///
+/// Detected from the emitted TEST TREE rather than from the app's
+/// Gemfile: a gem listed there but never reached is a dependency we
+/// would be inventing a need for, and the constant in a test body is
+/// the demand itself. The require path is the gem's own documented
+/// Minitest entry point — a two-column table, not a derivation.
+///
+/// Ruby-family only, and honestly so: this hands the emitted tree a
+/// real CRuby gem that intercepts `Net::HTTP`. A strict target needs
+/// the same behaviour built at its own transport seam; nothing here
+/// pretends otherwise. Same seam the tree already uses for sqlite3 and
+/// bcrypt.
+fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
+    // (constant a test body names, gem, the gem's Minitest entry point)
+    const TEST_GEMS: [(&str, &str, &str); 1] =
+        [("WebMock", "webmock", "webmock/minitest")];
+
+    let mut needed: Vec<(&str, &str)> = Vec::new();
+    for (konst, gem, entry) in TEST_GEMS {
+        let named = files.iter().any(|(p, c)| {
+            p.starts_with("test/") && p.ends_with(".rb") && names_constant(c, konst)
+        });
+        if named {
+            needed.push((gem, entry));
+        }
+    }
+    if needed.is_empty() {
+        return;
+    }
+    // One require, in the helper every test file loads — the place the
+    // app put it.
+    if let Some((_, helper)) = files.iter_mut().find(|(p, _)| p == "test/test_helper.rb") {
+        for (_, entry) in &needed {
+            let line = format!("require {entry:?}");
+            if !helper.contains(&line) {
+                helper.insert_str(0, &format!("{line}\n"));
+            }
+        }
+    }
+    // Declared as well as required: a tree whose tests load a gem its
+    // Gemfile does not name is a tree that only runs where the gem
+    // happens to be installed, which is exactly how three ambient
+    // dependencies hid until campfire's suite met a clean runner.
+    if let Some((_, gemfile)) = files.iter_mut().find(|(p, _)| p == "Gemfile") {
+        let mut block = String::from(
+            "\n# Test-only gems the app's own suite reaches for. The emitted\n\
+             # test/test_helper.rb is our shim rather than the app's, so the\n\
+             # requires its helper made are re-added by\n\
+             # `project.rs::apply_test_gem_wiring` — declared here so the\n\
+             # tree runs where the gems are NOT already installed.\n\
+             group :test do\n",
+        );
+        for (gem, _) in &needed {
+            if gemfile.contains(&format!("gem {gem:?}")) {
+                continue;
+            }
+            block.push_str(&format!("  gem {gem:?}\n"));
+        }
+        block.push_str("end\n");
+        if block.contains("  gem ") {
+            if !gemfile.ends_with('\n') {
+                gemfile.push('\n');
+            }
+            gemfile.push_str(&block);
+        }
+    }
 }
 
 /// De-blog the scaffold Makefile's `SPINEL_TESTS` list for the CRuby /

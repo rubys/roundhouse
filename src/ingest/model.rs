@@ -280,6 +280,56 @@ pub(super) fn ingest_model_body_item(
         if let Some(assoc) = parse_association(&call, owner, &method, file) {
             return Ok(ModelBodyItem::Association { assoc, leading_blank_line: false, leading_comments, span });
         }
+        // `validate :method_name, :other` — the CUSTOM-validator form,
+        // where each symbol names an instance method that adds to
+        // `errors` itself. Distinct from `validates` (attribute + rules)
+        // and carried as `ValidationRule::Custom`, a variant the dialect
+        // and `lower::validations` have always had and nothing ever
+        // produced.
+        //
+        // Bare symbols ONLY: `validate :x, on: :update` runs on one
+        // persistence context, `if:`/`unless:` on a condition, and
+        // running such a check unconditionally would reject records
+        // Rails accepts. Those keep today's behaviour (the call falls
+        // through to the unsupported-DSL ledger) rather than being
+        // silently promoted to an always-on check.
+        if method == "validate" {
+            let symbols: Vec<Symbol> = call
+                .arguments()
+                .map(|args| {
+                    args.arguments()
+                        .iter()
+                        .filter_map(|a| symbol_value(&a).map(|s| Symbol::from(s.as_str())))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let arg_count = call
+                .arguments()
+                .map(|args| args.arguments().iter().count())
+                .unwrap_or(0);
+            if !symbols.is_empty() && symbols.len() == arg_count {
+                // ONE Validation carrying one Custom rule per symbol:
+                // this function returns a single body item, and
+                // `push_validate_method` walks `rules`, so the list
+                // rides where it is already read. The attribute names
+                // the first method — a custom validator faults whatever
+                // field it likes, so there is no attribute to record,
+                // and leaving it self-describing beats a placeholder.
+                let attribute = symbols[0].clone();
+                return Ok(ModelBodyItem::Validation {
+                    validation: crate::dialect::Validation {
+                        attribute,
+                        rules: symbols
+                            .into_iter()
+                            .map(|m| crate::dialect::ValidationRule::Custom { method: m })
+                            .collect(),
+                    },
+                    leading_comments,
+                    leading_blank_line: false,
+                    span,
+                });
+            }
+        }
         if method == "validates" {
             let mut parsed = parse_validates(&call);
             if let Some(first) = parsed.first().cloned() {

@@ -65,6 +65,7 @@ pub mod values_at_splat;
 pub mod request_index;
 pub mod arel_attribute;
 pub mod exclude_predicate;
+pub mod in_predicate;
 pub mod including;
 pub mod enum_symbols;
 pub mod has_json;
@@ -117,6 +118,7 @@ pub use parameterize::apply_parameterize_grounding;
 pub use request_index::apply_request_index_lowering;
 pub use arel_attribute::apply_arel_attribute_lowering;
 pub use exclude_predicate::apply_exclude_predicate_lowering;
+pub use in_predicate::apply_in_predicate_lowering;
 pub use including::apply_including_lowering;
 pub use enum_symbols::apply_enum_symbol_lowering;
 pub use has_json::apply_has_json_lowering;
@@ -209,6 +211,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `x.exclude?(y)` → `!x.include?(y)`; total rewrite, no ordering
     // constraints (no other pass produces or consumes `exclude?`).
     ("exclude_predicate", &[]),
+    // `x.in?(xs)` → `xs.include?(x)`; the `exclude_predicate` mirror,
+    // same total rewrite and same lack of ordering constraints.
+    ("in_predicate", &[]),
     // `xs.including(a)` → `xs.to_a + [a]`; same shape and same lack of
     // ordering constraints as `exclude_predicate` above.
     ("including", &[]),
@@ -392,6 +397,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("session_options");
     exclude_predicate::apply_exclude_predicate_lowering(app);
     ran!("exclude_predicate");
+    in_predicate::apply_in_predicate_lowering(app);
+    ran!("in_predicate");
     including::apply_including_lowering(app);
     ran!("including");
     route_format_suffix::apply_route_format_suffix_lowering(app);
