@@ -17,7 +17,7 @@ require 'open3'
 require 'shellwords'
 
 ROUNDHOUSE_ROOT = File.expand_path('..', __dir__)
-TARGETS = %w[spinel ruby jruby crystal elixir go kotlin python rust swift typescript typescript-worker].freeze
+TARGETS = %w[spinel ruby jruby crystal csharp elixir go kotlin python rust swift typescript typescript-worker].freeze
 SITE_BASE = 'https://rubys.github.io/roundhouse'
 
 def main(argv)
@@ -388,13 +388,13 @@ end
 # Subcommand: transpile
 #
 # `cargo run --release --bin roundhouse -- --target <t> -o <out>
-# <fixture>` produces a runnable tree for <t>. Two targets need a
+# <fixture>` produces a runnable tree for <t>. Some targets need a
 # post-build step:
 #   - ruby:    seed the demo SQLite DB from real-blog's Rails-populated
 #              storage/development.sqlite3 (binary; can't ride along
 #              with the text-only emit).
-#   - spinel:  compile sphttp.o (the FFI HTTP server's C extension)
-#              and substitute its path into runtime/tep/net.rb.
+#   - crystal: build Tailwind CSS + stage turbo.min.js (see below).
+# (spinel needs none — its transport rides the auto-linked sp_net.)
 
 def cmd_transpile(argv)
   OptionParser.new do |o|
