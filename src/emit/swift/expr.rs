@@ -568,9 +568,22 @@ fn is_known_instance_method(recv: &Expr, method: &str) -> bool {
     };
     let cls = super::naming::type_name(id.0.as_str());
     let name = camel(method);
-    CLASS_INSTANCE_METHODS.with(|m| {
+    let own = CLASS_INSTANCE_METHODS.with(|m| {
         m.borrow().get(&cls).map_or(false, |s| s.contains(&name))
-    })
+    });
+    // ...or on an ANCESTOR. A method a model inherits from
+    // `ActiveRecordBase` is still a method, and a zero-arg send to one
+    // needs its call parens: `instance._noteHydrated` without them is a
+    // function reference, which swift rejects outright ("function is
+    // unused"). Only the receiver's own class was consulted here, so
+    // every inherited zero-arg method was a latent instance of this —
+    // `markPersistedBang` escaped only because the lowerer synthesizes
+    // it per model.
+    //
+    // `ancestor_has` is the walk this file already uses to decide
+    // `override` marking, so the two answers cannot disagree about what
+    // the parent chain holds.
+    own || ancestor_has(&cls, &name, false)
 }
 
 /// Install the property-type map for the class about to be emitted.

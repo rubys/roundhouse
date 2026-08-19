@@ -461,6 +461,14 @@ module ActiveRecord
       {}
     end
 
+    # ONE leading underscore, like `_adapter_*` beside it: this is
+    # called ACROSS the class boundary (a model's `from_row` reaching
+    # Base's method), and Python mangles a `__`-prefixed name per class
+    # — `Base.__note_hydrated` becomes `_Base__note_hydrated`, which the
+    # subclass's call cannot see. The `__`-prefixed names in this file
+    # (`__track_saved_changes`) are all called from within Base itself,
+    # where the mangling is consistent.
+    #
     # Called by the hydration factories (`from_row` / `from_stmt`) on a
     # record read from the DB: what it just received is its state as
     # SAVED, not a change. No-op here for the same reason
@@ -468,8 +476,11 @@ module ActiveRecord
     # ruby-family connection.rb reopen, and the strict lanes carry the
     # not-tracked subset where every Dirty answer is already the honest
     # default.
-    def __note_hydrated
-      nil
+    # EMPTY body, not `nil`, exactly like the lifecycle hooks below:
+    # a `nil` tail on a void method emits as a bare `None;` in rust
+    # ("cannot infer type of the type parameter T"). An empty body is
+    # the shape every target already renders for a no-op.
+    def _note_hydrated
     end
 
     # The argument-taking half of the ActiveModel::Dirty read surface,
@@ -513,6 +524,30 @@ module ActiveRecord
     end
 
     def saved_change_to_attribute(name)
+      changes = saved_changes
+      changes[name]
+    end
+
+    # The PREVIOUS value of an attribute the last save changed — the
+    # value half of the Dirty pair, which the per-column
+    # `<col>_previously_was` readers delegate to.
+    #
+    # NO `[0]` here, and that is the whole reason this method exists
+    # instead of the readers indexing the diff themselves: the pair is
+    # `[prev, value]` in a heterogeneous Hash, and indexing it renders
+    # as an index on `interface{}` in go ("cannot index __prev"), on
+    # `object?` in C#, and so on through every strict lane. The
+    # indexing belongs in the ruby-family reopen, where the diff is
+    # real; here the empty diff makes this nil, which is the honest
+    # strict answer and matches every Dirty predicate answering false.
+    #
+    # It ENDS IN A READ rather than in a bare `nil`, exactly like
+    # `saved_change_to_attribute` above
+    # ([[project_shared_runtime_strict_return_shapes]]). A `nil` tail
+    # gave swift no contextual type ("'nil' requires a contextual
+    # type") and made rust emit an associated function rather than a
+    # method, so `Article` could not find it at all.
+    def attribute_previously_was(name)
       changes = saved_changes
       changes[name]
     end

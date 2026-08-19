@@ -938,7 +938,15 @@ fn every_runtime_method_body_concretely_typed() {
     // the `fetch` and the value it binds are gradual by declaration —
     // the same shape every other reader in params.rb contributes.
     // +2 sites; ceiling raised 281 -> 283.
-    const CEILING: usize = 283;
+    // 2026-08-19 the ActiveModel::Dirty VALUE half —
+    // `attribute_previously_was` on both layers plus `_note_hydrated`.
+    // Four sites, all on the `name` parameter (a caller-chosen Symbol)
+    // and the diff's heterogeneous values, which is what every other
+    // entry in params.rb and this file's Dirty surface already
+    // contributes. The method exists twice because the strict lanes
+    // cannot index the `[prev, value]` pair, so each layer pays its own.
+    // +2 sites; ceiling raised 283 -> 285.
+    const CEILING: usize = 285;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

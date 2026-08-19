@@ -1209,10 +1209,13 @@ fn synth_from_row(owner: &ClassId, table: &Table, fire_after_initialize: bool) -
         Span::synthetic(),
         ExprNode::Send {
             recv: Some(var_ref(instance.clone())),
-            method: Symbol::from("__note_hydrated"),
+            method: Symbol::from("_note_hydrated"),
             args: vec![],
             block: None,
-            parenthesized: false,
+            // Parenthesized: go renders an unparenthesized zero-arg
+            // Send as a method VALUE ("instance.NoteHydrated (value of
+            // type func()) is not used"), not a call.
+            parenthesized: true,
         },
     ));
 
@@ -1328,10 +1331,13 @@ fn synth_from_stmt(owner: &ClassId, table: &Table, fire_after_initialize: bool) 
         Span::synthetic(),
         ExprNode::Send {
             recv: Some(var_ref(instance.clone())),
-            method: Symbol::from("__note_hydrated"),
+            method: Symbol::from("_note_hydrated"),
             args: vec![],
             block: None,
-            parenthesized: false,
+            // Parenthesized: go renders an unparenthesized zero-arg
+            // Send as a method VALUE ("instance.NoteHydrated (value of
+            // type func()) is not used"), not a call.
+            parenthesized: true,
         },
     ));
 
@@ -1435,79 +1441,22 @@ fn prev_was_name(col: &Column) -> Symbol {
 /// answers nil for every column, as every Dirty predicate there
 /// already answers false.
 fn synth_column_prev_was(owner: &ClassId, col: &Column) -> MethodDef {
-    let saved_changes = Expr::new(
+    // `self.attribute_previously_was(:<col>)` — the reader DELEGATES
+    // rather than indexing the diff itself. The diff's entries are
+    // `[prev, value]` pairs in a heterogeneous Hash, and an index into
+    // one renders as an index on `interface{}` in go ("cannot index
+    // __prev"), `object?` in C#, and the equivalent in every other
+    // strict lane. Base answers nil there and the ruby-family reopen
+    // does the indexing, which is the same split `saved_changes`
+    // already takes.
+    let body = Expr::new(
         Span::synthetic(),
         ExprNode::Send {
             recv: Some(self_ref()),
-            method: Symbol::from("saved_changes"),
-            args: vec![],
-            block: None,
-            parenthesized: false,
-        },
-    );
-    let entry = Expr::new(
-        Span::synthetic(),
-        ExprNode::Send {
-            recv: Some(saved_changes),
-            method: Symbol::from("[]"),
+            method: Symbol::from("attribute_previously_was"),
             args: vec![lit_sym(col.name.clone())],
             block: None,
-            parenthesized: false,
-        },
-    );
-    // Bound to a local before the nil test and the index: the same
-    // precaution `saved_change_to_attribute?` documents — elixir2's
-    // receiver typing does not see through a method-call receiver.
-    let local = Symbol::from("__prev");
-    let bind = Expr::new(
-        Span::synthetic(),
-        ExprNode::Assign {
-            target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: local.clone() },
-            value: entry,
-        },
-    );
-    let local_ref =
-        || Expr::new(Span::synthetic(), ExprNode::Var { id: crate::ident::VarId(0), name: local.clone() });
-    let is_nil = Expr::new(
-        Span::synthetic(),
-        ExprNode::Send {
-            recv: Some(local_ref()),
-            method: Symbol::from("nil?"),
-            args: vec![],
-            block: None,
-            parenthesized: false,
-        },
-    );
-    let first = Expr::new(
-        Span::synthetic(),
-        ExprNode::Send {
-            recv: Some(local_ref()),
-            method: Symbol::from("[]"),
-            args: vec![Expr::new(
-                Span::synthetic(),
-                ExprNode::Lit { value: crate::expr::Literal::Int { value: 0 } },
-            )],
-            block: None,
-            parenthesized: false,
-        },
-    );
-    let body = Expr::new(
-        Span::synthetic(),
-        ExprNode::Seq {
-            exprs: vec![
-                bind,
-                Expr::new(
-                    Span::synthetic(),
-                    ExprNode::If {
-                        cond: is_nil,
-                        then_branch: Expr::new(
-                            Span::synthetic(),
-                            ExprNode::Lit { value: crate::expr::Literal::Nil },
-                        ),
-                        else_branch: first,
-                    },
-                ),
-            ],
+            parenthesized: true,
         },
     );
     MethodDef {

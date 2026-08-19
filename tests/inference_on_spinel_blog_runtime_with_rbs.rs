@@ -583,10 +583,25 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // the raise's interpolation. Above the 1-3 budget below, and worth
     // it: the alternative is a wrong answer nothing reports.
     //
+    // 2026-08-19 712 -> 727 — the ActiveModel::Dirty VALUE half:
+    // `attribute_previously_was` in both base.rb (the compile surface,
+    // ending in a `saved_changes` read) and connection.rb (the real
+    // one, indexing slot 0 of the `[prev, value]` pair), plus
+    // `_note_hydrated` taking the hydration baseline. FIFTEEN nodes,
+    // every one hanging off the same two untyped things this file's
+    // entries always hang off: the `name` parameter, which is a caller-
+    // chosen Symbol, and the diff's values, which are a heterogeneous
+    // Hash by construction. Nothing that was typed became untyped.
+    //
+    // Above the 1-3 budget below, and the reason is the SPLIT rather
+    // than the feature: the same method exists twice, once per layer,
+    // because the strict lanes cannot index the pair. Each copy pays
+    // its own nodes.
+    //
     // This ceiling moved on EVERY runtime/ruby method this session, and
     // `cargo test` is the only gate that reads it — budget ~1-3 nodes
     // per added method before touching the number here.
-    const CEILING: usize = 712;
+    const CEILING: usize = 727;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions exceeds ceiling of {CEILING}.\n\

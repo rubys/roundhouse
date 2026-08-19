@@ -316,7 +316,16 @@ module ActiveRecord
     # campfire's `involvement_previously_was.inquiry.invisible?` found
     # this. The note above ("baseline-at-hydration is future work") is
     # what this closes.
-    def __note_hydrated
+    # The real value half: slot 0 of the `[prev, value]` pair. Bound to
+    # a local before the nil test and the index, the same precaution
+    # `saved_change_to_attribute?` documents. Ruby-family only — see
+    # base.rb's stub for why the indexing cannot live there.
+    def attribute_previously_was(name)
+      pair = saved_changes[name]
+      pair.nil? ? nil : pair[0]
+    end
+
+    def _note_hydrated
       @__last_saved_attributes = attributes
       nil
     end

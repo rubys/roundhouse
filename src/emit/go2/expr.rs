@@ -3184,6 +3184,16 @@ fn is_known_class_method(name: &str) -> bool {
         // `<col>_previously_changed?` predicates as
         // `self.saved_changes[:col]` — indexing needs the call.
         | "saved_changes"
+        // Same case as `mark_persisted!` above: a Base method the
+        // hydration factories call on a freshly built instance
+        // (`instance._note_hydrated`, taking the ActiveModel::Dirty
+        // baseline). Bare, it emits as a method-value reference and
+        // `go vet` rejects it — "instance.NoteHydrated (value of type
+        // func()) is not used".
+        | "_note_hydrated"
+        // The value half of the Dirty read surface, called by the
+        // synthesized `<col>_previously_was` readers.
+        | "attribute_previously_was"
     )
 }
 

@@ -11,7 +11,7 @@
 //! none — so its first update reported `[nil, value]` for every column
 //! and this reader answered nil for all of them. connection.rb's own
 //! comment deferred that ("baseline-at-hydration is future work"); the
-//! hydration factories now call `__note_hydrated`, whose Base no-op is
+//! hydration factories now call `_note_hydrated`, whose Base no-op is
 //! what the strict lanes compile.
 
 use std::collections::HashMap;
@@ -43,21 +43,22 @@ fn emitted() -> String {
         .clone()
 }
 
+/// The reader DELEGATES rather than indexing the diff itself.
+///
+/// The diff's entries are `[prev, value]` pairs in a heterogeneous
+/// Hash, and an index into one renders as an index on `interface{}` in
+/// go ("cannot index __prev"), `object?` in C#, and the equivalent in
+/// every other strict lane. Base answers nil there; the ruby-family
+/// reopen does the indexing. Same split `saved_changes` already takes,
+/// and the reason this test pins the CALL rather than the arithmetic.
 #[test]
-fn the_value_half_reads_the_prev_slot_of_the_diff_pair() {
+fn the_value_half_delegates_rather_than_indexing_the_pair() {
     let src = emitted();
     assert!(src.contains("def involvement_previously_was"), "{src}");
-    assert!(src.contains("saved_changes[:involvement]"), "{src}");
-    // `[prev, value]` — the previous value is slot 0.
-    assert!(src.contains("[0]"), "{src}");
-}
-
-/// Nil when the column did not change, which is Rails: the diff has no
-/// entry and `attribute_previously_was` reads through it rather than
-/// falling back to the current value.
-#[test]
-fn an_unchanged_column_answers_nil_rather_than_its_current_value() {
-    let src = emitted();
+    assert!(
+        src.contains("attribute_previously_was(:involvement)"),
+        "{src}",
+    );
     let body = src
         .split("def involvement_previously_was")
         .nth(1)
@@ -65,8 +66,10 @@ fn an_unchanged_column_answers_nil_rather_than_its_current_value() {
         .split("end")
         .next()
         .unwrap_or("");
-    assert!(body.contains("nil?"), "{src}");
-    assert!(body.contains("nil"), "{src}");
+    assert!(
+        !body.contains("[0]"),
+        "the pair index belongs in the ruby-family reopen:\n{src}",
+    );
 }
 
 /// Both hydration factories take the baseline — a record read through
@@ -76,8 +79,8 @@ fn both_hydration_factories_note_the_baseline() {
     let src = emitted();
     let from_row = src.split("def self.from_row").nth(1).expect("no from_row");
     let (from_row_body, rest) = from_row.split_once("def self.from_stmt").expect("no from_stmt");
-    assert!(from_row_body.contains("__note_hydrated"), "from_row:\n{src}");
-    assert!(rest.contains("__note_hydrated"), "from_stmt:\n{src}");
+    assert!(from_row_body.contains("_note_hydrated"), "from_row:\n{src}");
+    assert!(rest.contains("_note_hydrated"), "from_stmt:\n{src}");
 }
 
 /// `id` is answered by the save path's own flag, not the snapshot diff —
