@@ -707,6 +707,15 @@ jobs:
       #             `uninitialized constant UsersFixtures::BCrypt` in 49
       #             of 52 files. A dev box that has bcrypt installed for
       #             any other reason hides it completely.
+      #   webmock — also from the app, and the one WE now write the
+      #             require for: campfire's own test_helper opens with
+      #             `require "webmock/minitest"`, our emitted helper is a
+      #             shim that dropped it, and `apply_test_gem_wiring`
+      #             re-adds it. Adding that require without adding the
+      #             gem here is what took this job red — the same
+      #             ambient-dependency trap as bcrypt below, walked into
+      #             from the other direction: the gem was on the laptop,
+      #             so the emit looked fine.
       #   nokogiri — also from the app: `app/models/opengraph/document.rb`
       #             calls `Nokogiri::HTML(html)` and campfire carries it
       #             transitively (rails-html-sanitizer). The emitted tree
@@ -714,7 +723,7 @@ jobs:
       #             gap; installing it here is parity with what the emit
       #             actually loads.
       - name: Install the gems the emitted suite loads
-        run: gem install sqlite3 bcrypt nokogiri --no-document
+        run: gem install sqlite3 bcrypt nokogiri webmock --no-document
       - name: Fetch once-campfire at the pinned SHA
         run: |
           set -euo pipefail
