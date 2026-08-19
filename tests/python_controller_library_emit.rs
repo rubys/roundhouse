@@ -4,13 +4,12 @@
 //! `emit::python`'s library walker, plus the assembled overlay file
 //! set through py_compile.
 //!
-//! Python is the last emitter deriving controllers per-artifact via
-//! `lower::CtrlWalker` (`src/emit/python/controller.rs`). Every class
-//! that emits and py_compiles here is ready for the switchover; every
-//! failure line is the worklist. First run (2026-08-19) measured
-//! all-green across all three families on both fixtures, so the pins
-//! below are exact — the remaining port work is dispatch wiring, not
-//! walker coverage. See src/emit/python/overlay.rs and
+//! Historically the forcing function for the CtrlWalker retirement:
+//! the first run (2026-08-19) measured all-green across all three
+//! families on both fixtures, the overlay became the live dispatch
+//! path the same day, and the per-artifact controller emit + the
+//! `CtrlWalker` trait were deleted. The gate remains as the overlay's
+//! standing walker-coverage pin. See src/emit/python/overlay.rs and
 //! docs/python-overlay-plan.md.
 //!
 //! Mirrors `tests/python_framework_units.rs`'s inventory style.

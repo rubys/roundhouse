@@ -1,12 +1,13 @@
 # Python universal-IR overlay (the CtrlWalker retirement)
 
-> **ACTIVE** — phases A–D landed 2026-08-19: the overlay IS the live
-> dispatch path (server + TestClient route through
-> `app/v2/dispatch.handle`), verified by python_toolchain 3/3, all 21
-> emitted unittests, and `scripts/compare python` **7/7 paths** DOM/
-> JSON-equivalent to live Rails. Remaining = Phase E teardown
-> (delete the per-artifact controller path + `CtrlWalker`, then the
-> per-artifact model/view emit + the legacy `http.py` Router).
+> **ACTIVE** — phases A–D landed 2026-08-19; Phase E's controller leg
+> landed the same day: **`CtrlWalker` is deleted**
+> (`src/lower/controller_walk.rs`, the per-artifact controller emit,
+> the legacy `app/routes.py` module-handler registration, and
+> `http.py`'s Router/`ActionContext`/`FormatRouter` are all gone —
+> `http.py` is now just `ActionResponse`). Remaining = the
+> per-artifact model/view/test emit, which still ships alongside the
+> overlay's own models/views.
 
 Python is the last emitter deriving controllers per-artifact through
 `lower::CtrlWalker` (`src/emit/python/controller.rs` implements the
@@ -98,12 +99,20 @@ models + views + controllers + route helpers + dispatch together.
   Inflector/JsonBuilder/Roundhouse.RhDateTime/Broadcasts. Gates run:
   python_toolchain 3/3, 21/21 emitted unittests, compare 7/7.
 
-- **E. Teardown.** Delete `src/lower/controller_walk.rs` and its
-  `lower::mod` re-exports; update `docs/pipeline/lower.md` +
-  `emit.md` (the "legacy path" section disappears); decide the fate
-  of the remaining per-artifact model/view emit (they can follow the
-  same switch once the overlay proves out, retiring `model.rs` /
-  `view.rs` / the `FormatRouter` machinery in `http.py`).
+- **E. Teardown — controller leg DONE.** Deleted:
+  `src/lower/controller_walk.rs` + its `lower::mod` re-exports
+  (`CtrlWalker`/`Stmt`/`WalkCtx`/`WalkState`),
+  `src/emit/python/controller.rs` (the last trait impl), the legacy
+  `app/routes.py` emission and its side-effect imports (main.py,
+  emitted tests), and `http.py`'s Router / `ActionContext` /
+  `FormatRouter` / stubs — the module is now just `ActionResponse`.
+  `docs/pipeline/lower.md`'s legacy section and `adapter.md`'s
+  consumer story updated (`is_suspending_effect` stays as the
+  contract's suspension oracle; per-site `expr_suspends` died with
+  the walker). Remaining: the per-artifact model/view/test emit
+  (`model.rs` / `view.rs` / hand-written `view_helpers.py`) — the
+  overlay already emits its own models/views, so this is a
+  consumer-by-consumer swap of the emitted tests and glue.
 
 ## Traps named
 

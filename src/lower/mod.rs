@@ -30,7 +30,6 @@ pub mod functionalize;
 pub mod model_associations;
 pub mod persistence;
 pub mod controller_to_library;
-pub mod controller_walk;
 pub mod fixture_to_library;
 pub mod importmap_to_library;
 pub mod jbuilder_to_library;
@@ -761,7 +760,6 @@ pub(crate) fn for_each_hook_body_ref(
         f(seeds);
     }
 }
-pub use controller_walk::{CtrlWalker, Stmt, WalkCtx, WalkState};
 
 pub use associations::{
     build_has_many_table, resolve_has_many, resolve_has_many_on_local, HasManyRef, HasManyRow,

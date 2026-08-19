@@ -30,13 +30,18 @@ fn emits_expected_files() {
     let files = python::emit(&app);
     let paths: Vec<_> = files.iter().map(|f| f.path.display().to_string()).collect();
     assert!(paths.contains(&"app/models.py".to_string()), "got {paths:?}");
-    // Pass-2 emits one controller module per resource under
-    // `app/controllers/`, not a single `controllers.py` file.
+    // Controllers, dispatch, and the route table live in the overlay
+    // (`app/v2/`) — the per-artifact `app/controllers/` modules and the
+    // module-handler `app/routes.py` retired with the CtrlWalker
+    // teardown.
+    assert!(paths.contains(&"app/v2/controllers.py".to_string()), "got {paths:?}");
+    assert!(paths.contains(&"app/v2/dispatch.py".to_string()), "got {paths:?}");
+    assert!(paths.contains(&"app/v2/routes.py".to_string()), "got {paths:?}");
+    assert!(!paths.contains(&"app/routes.py".to_string()), "legacy routes.py returned: {paths:?}");
     assert!(
-        paths.contains(&"app/controllers/posts_controller.py".to_string()),
-        "got {paths:?}",
+        !paths.iter().any(|p| p.starts_with("app/controllers/")),
+        "legacy per-artifact controllers returned: {paths:?}"
     );
-    assert!(paths.contains(&"app/routes.py".to_string()), "got {paths:?}");
     assert!(paths.contains(&"app/route_helpers.py".to_string()), "got {paths:?}");
     assert!(paths.contains(&"app/test_support.py".to_string()), "got {paths:?}");
     assert!(paths.contains(&"app/views.py".to_string()), "got {paths:?}");
@@ -73,44 +78,43 @@ fn model_methods_annotate_return_type() {
 }
 
 #[test]
-fn controller_actions_are_module_functions() {
-    // Pass-2 shape: one module per controller under
-    // `app/controllers/`, with module-level `def <action>(context)`
-    // functions returning `http.ActionResponse`. The Router resolves
-    // actions via `getattr(module, action_name)`.
+fn controllers_are_overlay_classes_with_process_action() {
+    // Overlay shape: controller CLASSES subclassing the transpiled
+    // ActionController Base, with a synthesized `process_action`
+    // dispatcher — the universal-IR contract every target shares.
     let app = analyzed_app();
     let files = python::emit(&app);
-    let content = find(&files, "app/controllers/posts_controller.py");
-    for action in &[
-        "def index(",
-        "def show(",
-        "def create(",
-        "def destroy(",
-    ] {
+    let content = find(&files, "app/v2/controllers.py");
+    // tiny-blog has no explicit ApplicationController — the overlay
+    // aliases the missing parent to the framework Base.
+    assert!(content.contains("ApplicationController = Base"), "got:\n{content}");
+    assert!(
+        content.contains("class PostsController(ApplicationController):"),
+        "got:\n{content}"
+    );
+    assert!(content.contains("def process_action(self, action_name: str)"), "got:\n{content}");
+    for action in &["def index(", "def show(", "def create(", "def destroy("] {
         assert!(content.contains(action), "missing {action} in:\n{content}");
     }
-    assert!(content.contains("http.ActionResponse"), "got:\n{content}");
 }
 
 #[test]
-fn routes_register_on_router() {
-    // Pass-2 shape: routes.py side-effect-imports controller
-    // modules and calls `Router.resources(...)` / `Router.root(...)`
-    // at module load, wiring the runtime match table.
+fn routes_emit_as_route_table() {
+    // Overlay shape: `app/v2/routes.py` holds the RouteTable data the
+    // transpiled `app/router.py` matches over; `app/v2/dispatch.py`'s
+    // `handle` runs the full request cycle. No module-handler
+    // registration remains.
     let app = analyzed_app();
     let files = python::emit(&app);
-    let content = find(&files, "app/routes.py");
-    assert!(content.contains("from app.http import Router"), "got:\n{content}");
-    assert!(content.contains("Router.reset()"), "got:\n{content}");
+    let content = find(&files, "app/v2/routes.py");
+    assert!(content.contains("from app.router import Route"), "got:\n{content}");
     assert!(
-        content.contains("from app.controllers import posts_controller as PostsController"),
+        content.contains("Route(\"GET\", \"/posts\", \"posts\", \"index\")"),
         "got:\n{content}",
     );
-    // tiny-blog uses explicit get/post routes, not `resources`.
-    assert!(
-        content.contains("Router.get(\"/posts\", PostsController, \"index\")"),
-        "got:\n{content}",
-    );
+    let dispatch = find(&files, "app/v2/dispatch.py");
+    assert!(dispatch.contains("def handle(method: str, path: str"), "got:\n{dispatch}");
+    assert!(dispatch.contains("\"posts\": PostsController,"), "got:\n{dispatch}");
 }
 
 #[test]

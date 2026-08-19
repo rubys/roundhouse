@@ -43,9 +43,6 @@ pub(super) fn emit_py_test(tm: &TestModule, app: &App) -> EmittedFile {
     writeln!(s, "import unittest").unwrap();
     writeln!(s).unwrap();
     if is_controller_test {
-        // Side-effect import: app.routes registers handlers on the
-        // Router at module load. Needed before any dispatch.
-        writeln!(s, "import app.routes  # noqa: F401").unwrap();
         writeln!(s, "from app.test_support import TestClient").unwrap();
         writeln!(s, "from app.route_helpers import *  # noqa: F401, F403").unwrap();
     }

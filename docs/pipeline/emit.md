@@ -31,15 +31,15 @@ Python. Spinel/Ruby, TypeScript, Crystal, Rust, Go, and Elixir run on
 the thin path — the Rust/Go/Elixir strangler rewrites shipped, became
 the default, and now own their targets' names outright — and
 the newer Kotlin, Swift, and C#/.NET targets were built on it from
-the start. Python is the remaining per-artifact emitter: one
-submodule per output kind (`model.rs`, `controller.rs`, `view.rs`,
-`route.rs`, …), controllers rendered through `lower`'s shared
-`CtrlWalker` (`src/lower/controller_walk.rs`). Its `library.rs` universal-IR
-walker exists but is dormant — reserved for strangling the
-hand-written `runtime/python/*.py` files via
-`runtime_loader::python_units`. Roda sits deliberately outside the
-universal IR: it is a source-to-source Rails→Roda+Sequel converter
-consuming the INGEST-shape `App` (see `src/emit/roda.rs`).
+the start. Python's controllers, dispatch, and route table ride its
+overlay (`src/emit/python/overlay.rs`, `app/v2/` — the live dispatch
+path; the per-artifact controller emit and the `CtrlWalker` trait it
+implemented were deleted 2026-08-19, see
+`docs/python-overlay-plan.md`); its per-artifact model/view emit
+still ships alongside and retires next. Roda sits deliberately
+outside the universal IR: it is a source-to-source Rails→Roda+Sequel
+converter consuming the INGEST-shape `App` (see
+`src/emit/roda.rs`).
 
 | Target | Models | Views | Controllers | Tests | Schema/Routes/Seeds | Notes |
 |--------|--------|-------|-------------|-------|---------------------|-------|
@@ -50,7 +50,7 @@ consuming the INGEST-shape `App` (see `src/emit/roda.rs`).
 | Go (`src/emit/go/`) | thin | thin | thin | thin | thin | Strangler rewrite (go2) shipped 2026-05-24; `entry.rs` assembles overlay + go.mod/root main |
 | Elixir (`src/emit/elixir/`) | thin | thin | thin | thin | thin | Sole app-module path since Phase D; `entry.rs` emits the mix/Db/SchemaSQL shell around the `V2.*` overlay |
 | Kotlin, Swift, C#/.NET | thin | thin | thin | thin | thin | Built on the universal IR from the start |
-| Python | per-target | per-target | per-target | per-target | per-target | The remaining per-artifact emitter (`CtrlWalker` controllers); its `library.rs` is dormant, awaiting the runtime strangle |
+| Python | per-target | per-target | thin (overlay) | per-target | thin (overlay) | Controllers/dispatch/routes ride the `app/v2/` overlay (the live path); per-artifact models/views/tests retire next |
 | Roda | — | — | — | — | — | Ingest-shape source-to-source converter (issue #67); not on either path by design |
 
 "thin" = consumes the universal IR (`LibraryClass` or

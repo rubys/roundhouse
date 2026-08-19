@@ -20,7 +20,6 @@ pub(super) fn emit_py_main(app: &App) -> EmittedFile {
     writeln!(s).unwrap();
     writeln!(s, "from app import server").unwrap();
     writeln!(s, "from app.schema_sql import CREATE_TABLES").unwrap();
-    writeln!(s, "from app import routes as _routes  # noqa: F401").unwrap();
     // Import views module so its side-effect imports (models,
     // view_helpers) are satisfied and the layout fn is bound.
     let has_layout = app

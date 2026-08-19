@@ -106,12 +106,15 @@ adapters land.
 
 ## How emitters use it
 
-The controller walker (`src/lower/controller_walk.rs::WalkCtx`)
-carries a reference to the active adapter. Async-capable emitters
-call `WalkCtx::expr_suspends(expr)` at statement-level expression
-sites — RHS of an assign, condition of an `if`, body of an
-expression-statement — to decide whether `await` belongs in the
-emitted output.
+Async emission flows through the coloring pass: the adapter's
+`async_seed_methods` names the suspending driver surface,
+`src/analyze/async_color.rs` propagates `is_async` to a fixed point,
+and async-capable emitters read the flag per method. The
+`is_suspending_effect` trait method remains the adapter contract's
+per-effect suspension oracle (pinned by the tests in
+`src/adapter.rs` / `src/profile.rs`); its per-site consumer — the
+legacy controller walker's `expr_suspends` — retired with the
+CtrlWalker teardown.
 
 Which target/database pairings emit sync vs async code is a profile
 question, not a fixed per-language list — see `Target` and
@@ -197,7 +200,6 @@ demands it):
 | `src/analyze/effects.rs` | Consumer: effect inference (`visit_effects`, the `classify_ar_method` call site) |
 | `src/analyze/async_color.rs` | Consumer: async coloring — seeds from `async_seed_methods`, propagates `is_async` |
 | `src/profile.rs` | `DeploymentProfile::adapter()` — which adapter a `Database` selects |
-| `src/lower/controller_walk.rs` | Consumer: `await` emission decision |
 | `src/effect.rs` | `Effect` enum (`DbRead`, `DbWrite`, `Io`, …) |
 
 ## Related docs

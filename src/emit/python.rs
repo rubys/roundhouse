@@ -8,12 +8,9 @@
 //! - Models as classes with type-hinted fields (`id: int`). No
 //!   `@dataclass` yet — constructors and defaults are a Phase 3
 //!   runtime concern.
-//! - Controllers as classes with `async def` per action. Railcar's
-//!   Python output uses module-level `async def` functions (aiohttp
-//!   handler convention). The class shape is a deliberate choice for
-//!   scaffold consistency with TS; Phase 3 can pivot to module-level
-//!   if the Juntos-equivalent Python runtime prefers it.
-//! - Routes as a `list[dict]` dispatch table.
+//! - Controllers, dispatch, and the route table ride the universal-IR
+//!   overlay (`overlay.rs`, emitted under `app/v2/`) — the live
+//!   dispatch path since the CtrlWalker retirement.
 //!
 //! Python-specific idioms:
 //! - `from __future__ import annotations` so forward references in
@@ -36,7 +33,6 @@ use crate::App;
 use crate::dialect::MethodDef;
 use crate::ty::Ty;
 
-mod controller;
 mod controller_test;
 mod expr;
 mod fixture;
@@ -113,10 +109,10 @@ const PARAMS_SOURCE: &str = include_str!("../../runtime/python/params.py");
 /// Ships as `app/rh_datetime.py`; imported by models.py when a temporal
 /// column's reader `@property` references `Roundhouse.RhDateTime`.
 const RH_DATETIME_SOURCE: &str = include_str!("../../runtime/python/rh_datetime.py");
-/// Python HTTP runtime — Phase 4d pass-2 shape. `ActionResponse`,
-/// `ActionContext`, and the Router match table live here; copied
-/// verbatim into generated projects as `app/http.py` when any
-/// controller emits. Mirrors the six sibling twins.
+/// Python HTTP runtime — the `ActionResponse` value type
+/// `app/v2/dispatch.handle` returns and the server/TestClient glue
+/// consumes. Copied verbatim into generated projects as
+/// `app/http.py` when any controller emits.
 const HTTP_SOURCE: &str = include_str!("../../runtime/python/http.py");
 /// Pass-2 test-support runtime. `TestClient` + `TestResponse` with
 /// Rails-shaped assertions. Ships as `app/test_support.py`.
@@ -227,7 +223,6 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         files.push(route::emit_py_route_helpers(app));
         files.push(importmap::emit_py_importmap(app));
         files.push(main::emit_py_main(app));
-        files.extend(controller::emit_controllers_pass2(app));
         // The universal-IR overlay (app/v2/) — the LIVE dispatch path:
         // server.py and TestClient route every request through
         // app/v2/dispatch.handle. The per-artifact controllers above
@@ -239,9 +234,6 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         }
     }
     files.extend(view::emit_py_views(app));
-    if !app.routes.entries.is_empty() {
-        files.push(route::emit_routes(app));
-    }
     if !app.fixtures.is_empty() {
         files.push(fixture::emit_py_fixtures(app));
         // tests/ needs __init__.py so unittest can discover

@@ -371,7 +371,7 @@ case "$TARGET" in
         # the compare run so startup failures don't masquerade as
         # HTTP-level diffs.
         step "refreshing python pycache + syncing uv venv"
-        (cd "$BUILD_DIR" && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; uv sync --quiet && uv run python3 -c "import app, app.server, app.routes")
+        (cd "$BUILD_DIR" && find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; uv sync --quiet && uv run python3 -c "import app, app.server, app.v2.dispatch")
         ;;
     go)
         # Phase 6 step 2 (2026-05-24): build from cmd/v2/ unconditionally.

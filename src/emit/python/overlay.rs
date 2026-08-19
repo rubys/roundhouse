@@ -1,6 +1,7 @@
-//! Python universal-IR overlay — the strangler replacing the
-//! per-artifact emit (models/views/controllers derived from
-//! Rails-shape IR, controllers via `lower::CtrlWalker`).
+//! Python universal-IR overlay — the live dispatch path (the
+//! strangler that replaced the per-artifact controller emit and the
+//! `CtrlWalker` trait it implemented; the per-artifact model/view
+//! emit still ships alongside and retires next).
 //!
 //! Mirrors the go/elixir overlay pattern: lower the whole app to
 //! `LibraryClass` shape with the same call chain the Go emitter runs,
@@ -21,10 +22,11 @@
 //! top; models.py binds `Views` at its BOTTOM, after every class is
 //! defined, so whichever module loads first completes.
 //!
-//! NOT yet wired into `emit()` — exercised by
-//! `tests/python_controller_library_emit.rs` (emit + py_compile
-//! inventory) until the http.py dispatch glue lands and the
-//! switchover flips. See docs/python-overlay-plan.md.
+//! Shipped by `emit()`; `server.py` and TestClient route every
+//! request through `dispatch.handle`. Gated by
+//! `tests/python_controller_library_emit.rs` (per-family walker
+//! inventory + whole-set py_compile + live index-request drivers).
+//! See docs/python-overlay-plan.md.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;

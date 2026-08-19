@@ -89,19 +89,7 @@ pub(super) fn py_ident(name: &str) -> String {
     }
 }
 
-pub(super) fn is_bare_py_ident(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    if bytes.is_empty() { return false; }
-    let first = bytes[0];
-    if !(first.is_ascii_lowercase() || first == b'_') { return false; }
-    bytes.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_')
-}
 
-pub(super) fn controller_class_name(short: &str) -> String {
-    let mut s = crate::naming::camelize(short);
-    s.push_str("Controller");
-    s
-}
 
 pub(super) fn py_string_literal(s: &str) -> String {
     // A correct, double-quoted Python literal. Rust's `{:?}` is NOT a
@@ -139,7 +127,3 @@ pub(super) fn test_name_snake_py(desc: &str) -> String {
     s.trim_matches('_').to_string()
 }
 
-pub(super) fn py_view_fn(model_class: &str, suffix: &str) -> String {
-    let plural = crate::naming::pluralize_snake(model_class);
-    format!("render_{plural}_{}", suffix.to_lowercase())
-}

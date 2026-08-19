@@ -247,30 +247,19 @@ already knew (was this a method or an attr? does this Send need
 parens? is this body's return Nil?). Each rediscovery was a place
 two emitters could disagree.
 
-## Status of legacy per-target derivation
+## Legacy per-target derivation: retired
 
-The older shape — the `CtrlWalker` trait with `WalkCtx` / `WalkState`
-(`src/lower/controller_walk.rs`) and the `SendKind` classifier
-(`src/lower/controller/send.rs`) — walks controller bodies through a
-target-implemented dispatch trait, with each target overriding leaf
-`write_*` / `render_*` methods.
-
-Migration status:
-
-- **On the universal IR** (no longer use `CtrlWalker`): every shipped
-  target but one. Spinel/Ruby, TypeScript, and Crystal were
-  rip-and-replaced end-to-end against the
-  `LibraryClass | LibraryFunction` shape; the newer Kotlin, Swift,
-  and C#/.NET targets were built on it from the start. Rust, Go, and
-  Elixir shipped their strangler rewrites (`rust2`/`go2`/`elixir2`),
-  made them the default dispatch, and the `*2` names were folded away
-  in the 2026-08-19 rename — each module's header
-  (`src/emit/rust.rs`, `src/emit/go.rs`, `src/emit/elixir.rs`)
-  records the lineage.
-- **Still on the legacy path:** Python is the sole remaining
-  `CtrlWalker` consumer — `src/emit/python/controller.rs` implements
-  the trait. The CtrlWalker code stays in tree until that last
-  consumer is gone.
+Every shipped target consumes the universal IR for controllers. The
+older shape — a `CtrlWalker` trait walking controller bodies through
+target-implemented leaf methods — was deleted 2026-08-19 when its
+last consumer (Python's per-artifact controller emit) switched to the
+overlay (`docs/python-overlay-plan.md`). Spinel/Ruby, TypeScript, and
+Crystal were rip-and-replaced end-to-end; Kotlin, Swift, and C#/.NET
+were built on the universal IR from the start; Rust, Go, and Elixir
+arrived via strangler rewrites whose `*2` names folded away in the
+same-day rename (each module's header records the lineage). The
+`SendKind` classifier (`src/lower/controller/send.rs`) survives — it
+serves the shared controller lowering, not the retired walker.
 
 One target sidesteps these lowerings entirely: the Roda target
 (`emit::roda`, the issue #67 conversion spike) emits Roda + Sequel
@@ -300,7 +289,6 @@ emitters either migrate to the universal IR or get rip-and-replaced
 | `src/lower/schema_to_library/` | Schema → `LibraryFunction` (`Schema.statements`) |
 | `src/lower/jbuilder_to_library/` | `*.json.jbuilder` → `<name>_json` methods on the `Views::*` classes |
 | `src/lower/seeds_to_library/` | Seeds → `LibraryFunction` (`Seeds.run`) |
-| `src/lower/controller_walk.rs` | Legacy `CtrlWalker` / `WalkCtx` / `WalkState` (Python is the last consumer) |
 | `src/lower/controller/` | Shared controller-body machinery — `send.rs` (`SendKind`), `body.rs` (`FormatBreadth`, respond_to lowering), `actions.rs` (before-action resolution) |
 | `src/lower/validations.rs` | `LoweredValidation`, `Check` enum |
 | `src/lower/routes.rs` | `flatten_routes`, `FlatRoute` |
