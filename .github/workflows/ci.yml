@@ -74,7 +74,10 @@ jobs:
   # -------------------------------------------------------------------
   build-wasm:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # The job normally finishes in a few minutes; a hung apt install
+    # once rode the old 45-minute ceiling and stalled the whole
+    # build-site → smoke → deploy tail behind it (2026-08-19).
+    timeout-minutes: 20
     env:
       WASI_SDK_VERSION: "33.0"
     steps:
