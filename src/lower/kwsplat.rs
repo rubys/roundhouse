@@ -82,7 +82,7 @@
 //! `ArgumentError`, and an extra key in `h` is ignored where Ruby
 //! raises. Both are malformed-input paths — the well-formed call is
 //! exact. `fetch` would be closer for the missing-key half, but only
-//! elixir2 emits the one-argument form; `[]` every target handles.
+//! elixir emits the one-argument form; `[]` every target handles.
 
 use std::collections::HashMap;
 

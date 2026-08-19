@@ -225,7 +225,7 @@ fn lower_models_inner(
         // reads these signatures to decide whether a value needs
         // wrapping for a nullable column, so claiming `String | nil`
         // where the class returns `String` silently drops the `Some(…)`
-        // rust2 needs.
+        // rust needs.
         let mut register = |name: Symbol, ty: Ty| {
             info.instance_methods.insert(name.clone(), fn_sig(vec![], ty.clone()));
             info.instance_method_kinds
@@ -1283,7 +1283,7 @@ fn build_class_info(
     // validation-rule push site (every `errors << "..."` arm in
     // `validations.rs` shoves a String literal). The earlier
     // `Array[untyped]` predated the RBS sidecar; widening was load-
-    // bearing for nothing. Tightening to `Str` lets rust2's `<<` emit
+    // bearing for nothing. Tightening to `Str` lets rust's `<<` emit
     // pick the Vec<String>-shaped push coercion uniformly.
     insert_default(
         &mut info.instance_methods,

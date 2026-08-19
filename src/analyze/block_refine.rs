@@ -3,7 +3,7 @@
 //! refine the forwarder's `MethodDef.signature` block slot to match.
 //!
 //! Stage 3 of issue #25 (Proc-as-IR-value). Without this pass, the
-//! forwarder's rust2 emit falls back to the `Box<dyn FnOnce()>`
+//! forwarder's rust emit falls back to the `Box<dyn FnOnce()>`
 //! placeholder from `render_block_param_placeholder` — too loose to
 //! satisfy a callee that expects `FnOnce(String) -> i32`. After this
 //! pass, the forwarder's signature carries the callee's block sig,
@@ -76,7 +76,7 @@ pub fn propagate_one(class: &mut LibraryClass) {
 /// Extract the block-Ty from a method's signature, if present. RBS
 /// carries the block sig as a `ParamKind::Block` entry in the params
 /// vec (see `src/rbs.rs`); reading that path keeps the refined sigs
-/// shaped the same as RBS-derived sigs so rust2 emit's existing
+/// shaped the same as RBS-derived sigs so rust emit's existing
 /// `render_block_closure_param` consumes both uniformly.
 fn callee_block_ty(sig: &Ty) -> Option<Ty> {
     let Ty::Fn { params, .. } = sig else { return None };

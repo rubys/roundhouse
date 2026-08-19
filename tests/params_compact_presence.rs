@@ -26,7 +26,7 @@
 //!
 //! Presence is a different fact from value, so it gets its own slot. Nilable slots were tried first and cost
 //! more: `if !p.name.nil? { self.name = p.name }` needs the emitter to
-//! flow-narrow an Option through the guard, which rust2 doesn't do (6
+//! flow-narrow an Option through the guard, which rust doesn't do (6
 //! fresh `cargo check` errors, measured) and every other strict target
 //! would need too. A Bool beside a String needs nothing from any emitter.
 

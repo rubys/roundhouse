@@ -15,7 +15,7 @@
 //! Mechanics (see [[project_mutation_threading_pass4]] for the design):
 //! - `@x` read → `record.x` (a no-arg `Send` on the `record` var).
 //! - `@x = v` write → `record = %{record | x: v}`, bridged through a
-//!   synthetic `record.__struct_put__(:x, v)` `Send` that the elixir2
+//!   synthetic `record.__struct_put__(:x, v)` `Send` that the elixir
 //!   emitter renders as the struct-update literal. (Conditional writes
 //!   ride the emitter's existing cond-rebind lift — no work here.)
 //! - the method returns `record` (a trailing `nil` is replaced).
@@ -272,7 +272,7 @@ fn has_value_return(e: &Expr) -> bool {
 
 /// Thread a constructor (`initialize`) body for struct-update emit: the
 /// `@field = v` writes become `record` updates and the body returns
-/// `record`. The caller (elixir2's `emit_constructor`) seeds
+/// `record`. The caller (elixir's `emit_constructor`) seeds
 /// `record = %Struct{}` ahead of this. Used only for non-flat
 /// constructors (flat `@field = value` ones emit a struct literal
 /// directly).
@@ -1279,7 +1279,7 @@ mod tests {
             constants: Vec::new(),
             unknown_calls: Vec::new(),
         };
-        crate::emit::elixir2::emit_library_class(&class).expect("emit")
+        crate::emit::elixir::emit_library_class(&class).expect("emit")
     }
 
     /// Transform a whole method set through one shared registry (so
@@ -1505,7 +1505,7 @@ mod tests {
             constants: Vec::new(),
             unknown_calls: Vec::new(),
         };
-        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         eprintln!("--- ctor ---\n{ex}\n------------");
         assert!(ex.contains("def new(other \\\\ nil)"), "default param:\n{ex}");
         assert!(ex.contains("record = %Flash{}"), "seeds struct:\n{ex}");

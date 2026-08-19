@@ -89,7 +89,7 @@ const ADAPTER_INTERFACE_KT: &str = include_str!("../../../runtime/kotlin/adapter
 /// each taking a kwargs bag lowered to a `MutableMap<String, Any?>` carrying
 /// `stream`/`target`/`html`). Composes the `<turbo-stream>` fragment and
 /// hands it to the cable fan-out (`Cable.dispatch`). Mirrors the
-/// go2/rust2/crystal Broadcasts shim.
+/// go/rust/crystal Broadcasts shim.
 const BROADCASTS_KT: &str = include_str!("../../../runtime/kotlin/broadcasts.kt");
 
 /// Action Cable WebSocket + Turbo Streams broadcaster — the per-target

@@ -3,8 +3,8 @@
 //! Walks each Send in each method body and, where a positional arg's
 //! `Ty` is narrower than the callee's declared param `Ty`, wraps the
 //! arg in `ExprNode::Cast { value, target_ty }`. Downstream emitters
-//! consume the Cast nodes per-target — rust2 widens
-//! `HashMap<K,V>` via `into_iter().map().collect()`, go2 produces a
+//! consume the Cast nodes per-target — rust widens
+//! `HashMap<K,V>` via `into_iter().map().collect()`, go produces a
 //! `map[string]any` conversion, TS/Crystal/Ruby treat Cast as identity
 //! (their typers handle widening natively, so the Cast node is a
 //! pass-through).
@@ -56,9 +56,9 @@ pub fn insert_ty_coercions(lcs: &mut [LibraryClass]) {
 /// the rewrite targets. Lets a per-batch lowering (controllers only)
 /// resolve cross-class calls (Post.find from a controller body) by
 /// seeing the model LCs' signatures even though they aren't being
-/// rewritten in this call. Mirrors the rust2 wiring's implicit
+/// rewritten in this call. Mirrors the rust wiring's implicit
 /// behavior — there it works because all classes flow through one
-/// emit pass; go2's overlay does batches.
+/// emit pass; go's overlay does batches.
 pub fn insert_ty_coercions_with_extras(
     targets: &mut [LibraryClass],
     extras: &[&LibraryClass],
@@ -185,7 +185,7 @@ fn rewrite_expr(expr: &Expr, registry: &CalleeRegistry, class_name: &str) -> Exp
                 // get Cast wrappers when `instance` / `@member` are typed
                 // to a class with a matching method signature in the
                 // registry. Same id-last-segment rule the cross-LC
-                // dispatch in `emit/rust2/expr/send` uses.
+                // dispatch in `emit/rust/expr/send` uses.
                 Some(ExprNode::Var { .. } | ExprNode::Ivar { .. }) => {
                     new_recv.as_ref().and_then(|r| match r.ty.as_ref()? {
                         Ty::Class { id, .. } => {
@@ -421,14 +421,14 @@ fn needs_hash_widening(param_ty: &Ty, arg: &Expr) -> bool {
 }
 
 /// Some-wrap trigger: param is `Option<U>` (`Union { Nil, U }`) and
-/// arg's body-typer ty is exactly `U` (not nilable). Mirrors rust2's
+/// arg's body-typer ty is exactly `U` (not nilable). Mirrors rust's
 /// Family 6 gates so wrapping behavior matches what Family 6 produces
 /// when no Cast is present.
 ///
 /// Two branches:
 ///   - Owned-producing arg (`Var`/`Send`/`Ivar`) whose `arg.ty == U`
 ///   - Literal `Str`/`Sym` arg with inner `U` being `Str`/`Sym`
-///     (rust2 emits `Some(literal.to_string())` to widen `&'static str`
+///     (rust emits `Some(literal.to_string())` to widen `&'static str`
 ///     → owned `String`; other emitters can choose their own shape)
 fn needs_some_wrap(param_ty: &Ty, arg: &Expr) -> bool {
     if matches!(&*arg.node, ExprNode::Cast { .. }) {
@@ -471,9 +471,9 @@ fn needs_some_wrap(param_ty: &Ty, arg: &Expr) -> bool {
 ///   - Spinel: sp_RbVal → const char * / int
 ///   - Ruby (for spinel typer benefit): poly value → narrowed type via to_s/to_i
 ///
-/// rust2 consumes via its existing Cast arm (`coerce_arg_for_field_ty`
+/// rust consumes via its existing Cast arm (`coerce_arg_for_field_ty`
 /// has the Value→primitive narrowing); ruby consumes via Stage 5's
-/// emit_cast; go2 consumes via emit_cast's primitive arm.
+/// emit_cast; go consumes via emit_cast's primitive arm.
 fn needs_value_to_primitive(param_ty: &Ty, arg: &Expr) -> bool {
     if matches!(&*arg.node, ExprNode::Cast { .. }) {
         return false;
@@ -526,14 +526,14 @@ fn needs_value_to_primitive(param_ty: &Ty, arg: &Expr) -> bool {
 ///   - Spinel: `T → sp_box_T(T)`
 ///   - TS/Crystal: identity (no boxing needed)
 ///
-/// rust2 consumes via the Cast-aware short-circuit in
+/// rust consumes via the Cast-aware short-circuit in
 /// `coerce_arg_for_param_ty` (Family 3).
 fn needs_primitive_to_value(param_ty: &Ty, arg: &Expr) -> bool {
     if matches!(&*arg.node, ExprNode::Cast { .. }) {
         return false;
     }
     // Param must render as a wide value. Either `Untyped` directly
-    // or a known Value-alias `Class` id (matches the rust2-emit
+    // or a known Value-alias `Class` id (matches the rust-emit
     // recognition in `coerce.rs` Family 3 — kept name-keyed at the
     // IR level rather than promoted to a Ty variant since `ParamValue`
     // is a target-rendering decision, not an IR shape).
@@ -555,7 +555,7 @@ fn needs_primitive_to_value(param_ty: &Ty, arg: &Expr) -> bool {
 /// Hash-literal-to-Value trigger: param renders as a wide runtime
 /// value or `Record` shape, AND arg is an inline Hash literal.
 /// Reshapes via `Value::Object(HashMap.into_iter().map().collect())`
-/// at rust2 emit time; Go's `map[string]any` literal, Spinel's
+/// at rust emit time; Go's `map[string]any` literal, Spinel's
 /// `sp_box_object`, etc. The lowerer just records the intent; per-
 /// target emit picks the right reshaping.
 ///
@@ -586,7 +586,7 @@ fn peel_nil(ty: &Ty) -> &Ty {
 }
 
 /// True when `ty` contains a `Ty::Untyped` anywhere — directly or
-/// inside a `Union` variant. Duplicates `emit::rust2::expr::util::
+/// inside a `Union` variant. Duplicates `emit::rust::expr::util::
 /// ty_contains_untyped` because the lowerer is target-neutral.
 fn ty_contains_untyped(ty: &Ty) -> bool {
     match ty {
@@ -598,7 +598,7 @@ fn ty_contains_untyped(ty: &Ty) -> bool {
 
 /// Peel `Option<T>` (`Union { Nil, T }`) to its inner `T`. Returns
 /// `None` when the param isn't a 2-variant Union with one Nil arm.
-/// Mirrors rust2's `is_option_ty` + `peel_nil` shape but as a single
+/// Mirrors rust's `is_option_ty` + `peel_nil` shape but as a single
 /// idiomatic helper for this lowerer.
 fn peel_option(ty: &Ty) -> Option<&Ty> {
     let Ty::Union { variants } = ty else {

@@ -93,8 +93,8 @@ its spec, enforced twice:
    `framework-tests-<target>` CI job.
 
 **Why it exists:** adapter-contract drift is invisible to app suites.
-Canonical example (the `framework-tests-rust` job comment): rust2
-collapsed `is_a?(TrueClass)`/`is_a?(FalseClass)` into one predicate,
+Canonical example (the `framework-tests-rust` job comment): the Rust
+emitter collapsed `is_a?(TrueClass)`/`is_a?(FalseClass)` into one predicate,
 so every `false` serialized as `true` — found by the *TypeScript*
 gate, because rust had none and real-blog has no boolean column. Jobs
 may run a scoped green subset while named gaps close (rust currently

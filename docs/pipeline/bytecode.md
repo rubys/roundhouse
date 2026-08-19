@@ -64,9 +64,9 @@ Phase A (framework) and Phase C (emitter + integration) were originally
 separated by Phase B (**complete the existing targets first**), so
 that lifts from bringing each target to 5/5 parity could benefit the
 bytecode emitter the same way they benefit each other. The
-LibraryClass-shape migration Phase B waited on has landed (go2 and
-elixir2 shipped; Python's per-artifact emitter is the remaining
-exception). Phase C is
+LibraryClass-shape migration Phase B waited on has landed (the Go
+and Elixir rewrites shipped; Python's per-artifact emitter is the
+remaining exception). Phase C is
 parked by priority, not by a missing shape; M3a walker is landed,
 M3b+ deferred.
 

@@ -122,7 +122,7 @@ case "$TARGET" in
         ;;
 esac
 
-# elixir2 (the `*` overlay: models+views+controllers+dispatch/main/
+# The V2.* overlay (models+views+controllers+dispatch/main/
 # server) is the DEFAULT elixir target as of Phase D. The compiler emits
 # it unconditionally; this flag only selects which entry point the run
 # step boots — `Main.run` by default, or the legacy `App.Main.run`

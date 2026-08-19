@@ -67,7 +67,7 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
     // SqliteActiveRecordAdapter). On the
     // Ruby side there's no class declaration — the RBS for
     // `ActiveRecord.adapter` previously returned `untyped`, which
-    // let TS get away with `any` but left rust2 emit producing
+    // let TS get away with `any` but left rust emit producing
     // method calls on `serde_json::Value` (E0599 on
     // `.find/.where/.all/.insert/.update/.delete/.count/.exists/.truncate`).
     // Registering it here gives the body-typer a concrete class to

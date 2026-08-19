@@ -1,0 +1,396 @@
+//! Container and literal emit — Hash, Array, Lambda/closure, String
+//! interpolation, primitive Literal nodes. Each function takes the IR
+//! sub-shape it owns and produces a self-contained Rust expression
+//! string. Tail-position return-type coercion (the
+//! `in_return_tail() && current_return_ty() == Hash<...>` peephole)
+//! lives here because it's a property of the literal in tail position,
+//! not of the surrounding emit.
+
+use crate::expr::{Expr, ExprNode, InterpPart, Literal};
+
+use super::util::indent;
+use super::{
+    coerce_arg_for_param_ty, current_return_ty, emit_expr, in_return_tail,
+};
+
+/// Emit a Hash literal as `std::collections::HashMap::from([(k, v), ...])`.
+/// Empty literals become `HashMap::new()`. Heterogeneous-value tuples
+/// get `.to_string()` coercion to keep type unification happy when the
+/// surrounding map is String-typed.
+pub(super) fn emit_hash(entries: &[(Expr, Expr)]) -> String {
+    if entries.is_empty() {
+        return "std::collections::HashMap::new()".to_string();
+    }
+    // Tuple-type unification: HashMap::from([(k, v), ...]) infers from
+    // the first tuple; later tuples must share that type. Coerce
+    // string-literal values to String when any sibling value is a
+    // non-literal String-typed expression.
+    let has_non_literal_str_value = entries.iter().any(|(_, v)| {
+        !matches!(&*v.node, ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } })
+            && matches!(v.ty.as_ref(), Some(crate::ty::Ty::Str) | Some(crate::ty::Ty::Sym))
+    });
+    // Tail-position return-type coercion: when the literal is the
+    // method body's tail AND the declared return is `Hash<String, V>`,
+    // coerce keys to String and values to V's storage. Without this,
+    // tuple inference picks the first value's type and trips E0308.
+    let return_hash_kv: Option<(crate::ty::Ty, crate::ty::Ty)> = if in_return_tail() {
+        match current_return_ty() {
+            Some(crate::ty::Ty::Hash { key, value }) => Some((*key, *value)),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    // Heterogeneous primitive-value detection. When entries mix a
+    // string-typed value (Ty::Str / Sym) with a non-string primitive
+    // (Ty::Int / Bool / Float), `HashMap::from([(k, v), ...])` infers
+    // V from the first entry's type and rejects later entries — even
+    // when callers will wrap the result in `.into_iter().map(...)
+    // .collect()` to coerce K/V at the boundary, the inner array
+    // literal must already type-unify. Render values as
+    // `serde_json::Value::from(v)` and keys as `(k).to_string()` so
+    // V uniforms to `Value` at the literal level and the produced
+    // map is `HashMap<String, Value>` — the AR shape that
+    // `Model::new(attrs)` / `Model::create(attrs)` callees expect.
+    // Gated on all-string-typed keys (the typical Ruby hash literal
+    // shape) so non-string-key maps aren't accidentally coerced.
+    // Tail-position lit (return_hash_kv set) keeps its own coerce path.
+    let any_str_value = entries
+        .iter()
+        .any(|(_, v)| matches!(v.ty.as_ref(), Some(crate::ty::Ty::Str | crate::ty::Ty::Sym)));
+    let any_nonstr_primitive = entries.iter().any(|(_, v)| {
+        matches!(
+            v.ty.as_ref(),
+            Some(crate::ty::Ty::Int | crate::ty::Ty::Bool | crate::ty::Ty::Float)
+        )
+    });
+    let all_str_keys = entries
+        .iter()
+        .all(|(k, _)| matches!(k.ty.as_ref(), Some(crate::ty::Ty::Str | crate::ty::Ty::Sym)));
+    let is_heterogeneous = any_str_value && any_nonstr_primitive && all_str_keys;
+    if is_heterogeneous && return_hash_kv.is_none() {
+        let pairs: Vec<String> = entries
+            .iter()
+            .map(|(k, v)| {
+                let k_s = emit_expr(k);
+                let v_s = emit_expr(v);
+                format!("(({k_s}).to_string(), serde_json::Value::from({v_s}))")
+            })
+            .collect();
+        return format!("std::collections::HashMap::from([{}])", pairs.join(", "));
+    }
+    let pairs: Vec<String> = entries
+        .iter()
+        .map(|(k, v)| {
+            let str_color_handled = super::has_str_coercion(v);
+            let v_raw = emit_expr(v);
+            let v_s = if let Some((_, ref v_ty)) = return_hash_kv {
+                // Return-tail Hash storage: keys/values land in the
+                // declared HashMap<K, V>, not at a callee param. Family
+                // 4's `Str→&str` Borrow is wrong here — V is `String`
+                // (owned), not `&str`. For Str-storage of an Ivar/Var/
+                // Send (owned-String producers), emit `.clone()` and
+                // strip any prior STR_BORROW bit so the value is
+                // owned String at the storage slot. Other v_ty shapes
+                // fall through to the param-position coerce.
+                if matches!(v_ty, crate::ty::Ty::Str | crate::ty::Ty::Sym)
+                    && matches!(
+                        &*v.node,
+                        ExprNode::Ivar { .. } | ExprNode::Var { .. } | ExprNode::Send { .. }
+                    )
+                {
+                    // Strip any leading `&(...)` Borrow coercion str_
+                    // color applied (it expected an &str arg position),
+                    // then clone for ownership at the storage slot.
+                    let bare = if v.decisions & super::super::decide::bits::STR_BORROW != 0 {
+                        // `&(raw)` ⇒ `raw`
+                        v_raw
+                            .strip_prefix("&(")
+                            .and_then(|s| s.strip_suffix(")"))
+                            .map(|s| s.to_string())
+                            .unwrap_or(v_raw.clone())
+                    } else {
+                        v_raw.clone()
+                    };
+                    format!("{bare}.clone()")
+                } else {
+                    coerce_arg_for_param_ty(v, v_ty)
+                }
+            } else if !str_color_handled
+                && has_non_literal_str_value
+                && matches!(&*v.node, ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } })
+            {
+                format!("{v_raw}.to_string()")
+            } else {
+                v_raw
+            };
+            let k_raw = emit_expr(k);
+            let k_s = if let Some((ref k_ty, _)) = return_hash_kv {
+                match k_ty {
+                    crate::ty::Ty::Str | crate::ty::Ty::Sym
+                        if matches!(
+                            &*k.node,
+                            ExprNode::Lit { value: Literal::Str { .. } | Literal::Sym { .. } }
+                        ) && !super::has_str_coercion(k) =>
+                    {
+                        format!("{k_raw}.to_string()")
+                    }
+                    _ => k_raw,
+                }
+            } else {
+                k_raw
+            };
+            format!("({k_s}, {v_s})")
+        })
+        .collect();
+    format!("std::collections::HashMap::from([{}])", pairs.join(", "))
+}
+
+/// Emit an Array literal as a `vec![...]` macro invocation. Tail-position
+/// return-type coercion forces string-literal elements to `String` when
+/// the function returns `Vec<String>` / `Vec<Sym>`.
+pub(super) fn emit_array(elements: &[Expr]) -> String {
+    let return_elem_ty: Option<crate::ty::Ty> = if in_return_tail() {
+        match current_return_ty() {
+            Some(crate::ty::Ty::Array { elem }) => Some(*elem),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let coerce_to_string_elem = matches!(
+        return_elem_ty.as_ref(),
+        Some(crate::ty::Ty::Str | crate::ty::Ty::Sym)
+    );
+    // Ty::Record and Ty::Untyped both render as `serde_json::Value` at
+    // the rust emit. A Vec of either reaches the function tail wanting
+    // Value-shaped elements; route through coerce_arg_for_param_ty so
+    // the Hash-literal-to-Value transform fires per element.
+    let coerce_via_param_ty = matches!(
+        return_elem_ty.as_ref(),
+        Some(crate::ty::Ty::Untyped) | Some(crate::ty::Ty::Record { .. })
+    );
+    let parts: Vec<String> = elements
+        .iter()
+        .map(|e| {
+            if coerce_via_param_ty {
+                // Vec<Value> return — route each element through the
+                // shared Family 3 / Hash-literal-to-Value transform so
+                // HashMap literals and primitive elements emit as
+                // `serde_json::Value` for the storage slot.
+                if let Some(ty) = return_elem_ty.as_ref() {
+                    return coerce_arg_for_param_ty(e, ty);
+                }
+            }
+            let raw = emit_expr(e);
+            if coerce_to_string_elem
+                && matches!(
+                    &*e.node,
+                    ExprNode::Lit {
+                        value: Literal::Str { .. } | Literal::Sym { .. }
+                    }
+                )
+                && !super::has_str_coercion(e)
+            {
+                format!("{raw}.to_string()")
+            } else {
+                raw
+            }
+        })
+        .collect();
+    format!("vec![{}]", parts.join(", "))
+}
+
+/// Build a Rust closure literal `|params| body` from a Lambda IR
+/// node. Single-line bodies inline; multi-line bodies wrap in
+/// `{ ... }`. No type annotations on params — call-site inference
+/// handles the cases we hit; explicit types come later when generic
+/// Lambda usage forces them.
+pub(super) fn emit_closure(params: &[crate::ident::Symbol], body: &Expr) -> String {
+    let ps: Vec<String> = params.iter().map(|p| p.to_string()).collect();
+    let body_s = emit_expr(body);
+    if body_s.contains('\n') {
+        format!("|{}| {{\n{}\n}}", ps.join(", "), indent(&body_s, 1))
+    } else {
+        format!("|{}| {{ {body_s} }}", ps.join(", "))
+    }
+}
+
+/// Append a block-as-closure to a `recv.method(...)` call. The block's
+/// IR shape determines what gets spliced as the last arg:
+///   - `Lambda { params, body }`: emit a closure literal `|p1,..| { body }`.
+///   - `Var { name }`: emit the bare identifier — `&block` forwarding
+///     idiom (issue #25 stage 2). The slot context (`Send.block:`)
+///     signals "this Var is a Proc forward", so no new IR variant
+///     is needed. The forwarded name matches the def-site closure
+///     param (see `render_block_param_placeholder` in method.rs).
+pub(super) fn attach_block(base: &str, block: &Expr) -> String {
+    let closure = match &*block.node {
+        ExprNode::Lambda { params, body, .. } => emit_closure(params, body),
+        ExprNode::Var { name, .. } => name.as_str().to_string(),
+        _ => format!(
+            "/* TODO rust2: non-Lambda/non-Var block: {:?} */",
+            std::mem::discriminant(&*block.node)
+        ),
+    };
+    if let Some(stripped) = base.strip_suffix("()") {
+        format!("{stripped}({closure})")
+    } else if let Some(stripped) = base.strip_suffix(')') {
+        format!("{stripped}, {closure})")
+    } else {
+        format!("{base}({closure})")
+    }
+}
+
+/// `recv.is_a?(Class)` → serde_json predicate where the class name
+/// maps to a Value variant, else `false` with a marker comment.
+pub(super) fn emit_is_a(recv: &Expr, class_arg: &Expr) -> String {
+    let class_name = match &*class_arg.node {
+        ExprNode::Const { path } => path.last().map(|s| s.to_string()).unwrap_or_default(),
+        _ => return format!("/* is_a? unknown class: {} */ false", emit_expr(class_arg)),
+    };
+    let recv_s = emit_expr(recv);
+    let predicate = match class_name.as_str() {
+        "Hash" => Some("is_object"),
+        "Array" => Some("is_array"),
+        "String" => Some("is_string"),
+        "Integer" => Some("is_i64"),
+        "Float" => Some("is_f64"),
+        "NilClass" => Some("is_null"),
+        _ => None,
+    };
+    // `TrueClass` and `FalseClass` are DISTINCT Ruby classes, and code
+    // that tests them tests them separately — JsonBuilder's `encode_value`
+    // returns "true" for one and "false" for the other. Both mapping to
+    // `is_boolean()` made the first arm swallow the second, so
+    // `encode_value(false)` answered "true". Compare the value itself.
+    match class_name.as_str() {
+        "TrueClass" => return format!("{recv_s} == true"),
+        "FalseClass" => return format!("{recv_s} == false"),
+        _ => {}
+    }
+    match predicate {
+        Some(p) => format!("{recv_s}.{p}()"),
+        None => format!("/* is_a?({class_name}): no Value variant */ false"),
+    }
+}
+
+/// `#{x} is #{y}` → `format!("{} is {}", x, y)`. Literal text escapes
+/// `{`/`}` as `{{`/`}}`; each interp `Expr` becomes a `{}` placeholder
+/// + arg.
+pub(super) fn emit_string_interp(parts: &[InterpPart]) -> String {
+    let (fmt, args) = string_interp_fmt_and_args(parts);
+    let mut out = format!("format!(\"{fmt}\"");
+    if !args.is_empty() {
+        out.push_str(", ");
+        out.push_str(&args.join(", "));
+    }
+    out.push(')');
+    out
+}
+
+/// Same lowering split into (format-string body, rendered args) so
+/// `ops.rs::try_string_append` can splice the pieces into
+/// `write!(io, "...", args)` — formatting directly into the
+/// accumulator instead of allocating an intermediate `String` via
+/// `format!` and copying it in with `push_str` (roundhouse#32).
+pub(super) fn string_interp_fmt_and_args(parts: &[InterpPart]) -> (String, Vec<String>) {
+    let mut fmt = String::new();
+    let mut args: Vec<String> = Vec::new();
+    for p in parts {
+        match p {
+            InterpPart::Text { value } => {
+                for c in value.chars() {
+                    match c {
+                        '"' => fmt.push_str("\\\""),
+                        '\\' => fmt.push_str("\\\\"),
+                        '\n' => fmt.push_str("\\n"),
+                        '\r' => fmt.push_str("\\r"),
+                        '\t' => fmt.push_str("\\t"),
+                        '{' => fmt.push_str("{{"),
+                        '}' => fmt.push_str("}}"),
+                        other => fmt.push(other),
+                    }
+                }
+            }
+            InterpPart::Expr { expr } => {
+                fmt.push_str("{}");
+                // String interpolation in Ruby calls `to_s` on each
+                // interp value (`"#{x}"` == `x.to_s`). Rust's `"{}"`
+                // format spec uses `Display`, which for
+                // `serde_json::Value` is the JSON serialization —
+                // `Value::String("foo")` displays as `"\"foo\""`,
+                // not `foo`. Route Untyped/Record-typed exprs
+                // through `RubyToS::ruby_to_s` (defined in
+                // `runtime/rust/http.rs`) so the interpolation
+                // matches Ruby's identity-on-String semantics. The
+                // trait dispatches at compile time to the right
+                // impl for `&str`/`String`/`&Value`, so emitting
+                // `.ruby_to_s()` for Untyped exprs is safe even
+                // when the body-typer's annotation imprecisely
+                // marks an actually-`&String` closure param as
+                // Untyped.
+                let arg = emit_expr(expr);
+                // Fire on Untyped / Record (lowered IR's serde_json
+                // ::Value alias) and on missing-Ty Sends whose recv
+                // is itself Value-shaped — the body-typer doesn't
+                // always propagate the result Ty through nested
+                // `value[key]` index Sends, but emit-side
+                // inspection of the recv catches the same pattern.
+                // The trait dispatch picks the right impl at
+                // compile time, so a false positive on a `&str`
+                // expression still compiles (the impl for `str`
+                // returns `self.to_string()`).
+                let needs_ruby_to_s = matches!(
+                    expr.ty.as_ref(),
+                    Some(crate::ty::Ty::Untyped) | Some(crate::ty::Ty::Record { .. })
+                ) || expr_recv_is_value(expr);
+                if needs_ruby_to_s {
+                    args.push(format!("({arg}).ruby_to_s()"));
+                } else {
+                    args.push(arg);
+                }
+            }
+        }
+    }
+    (fmt, args)
+}
+
+/// Returns `true` when `expr` is an index/send into a recv whose
+/// body-typer Ty is `Untyped`/`Record` — i.e. the result is `&Value`
+/// at runtime even though the typing pass didn't propagate the
+/// inner result Ty. Currently only catches `recv[key]` and
+/// `recv.method()` shapes; deeper chains land here recursively
+/// through the index recv.
+fn expr_recv_is_value(expr: &Expr) -> bool {
+    use crate::expr::ExprNode;
+    let recv_opt: Option<&Expr> = match &*expr.node {
+        ExprNode::Send { recv: Some(r), .. } => Some(r),
+        _ => None,
+    };
+    let Some(recv) = recv_opt else { return false };
+    matches!(
+        recv.ty.as_ref(),
+        Some(crate::ty::Ty::Untyped) | Some(crate::ty::Ty::Record { .. })
+    )
+}
+
+/// Primitive literal → Rust literal. `nil` → `None` so Option-typed
+/// fields work; integer literals get the `_i64` suffix to commit to
+/// the rust integer convention; floats get a `.0` to keep them
+/// floating-typed when the value has no fractional part.
+pub(crate) fn emit_literal(lit: &Literal) -> String {
+    match lit {
+        Literal::Nil => "None".to_string(),
+        Literal::Bool { value } => value.to_string(),
+        Literal::Int { value } => format!("{value}_i64"),
+        Literal::Float { value } => {
+            let s = value.to_string();
+            if s.contains('.') { s } else { format!("{s}.0") }
+        }
+        Literal::Str { value } => format!("{value:?}"),
+        Literal::Sym { value } => format!("{:?}", value.as_str()),
+        Literal::Regex { pattern, .. } => format!("/* TODO rust2: Regex({pattern:?}) */"),
+    }
+}

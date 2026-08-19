@@ -98,9 +98,9 @@ pub struct Expr {
     /// Bit-packed decisions stamped by per-target decide passes.
     /// Bits 0–31 are reserved for cross-target concerns (e.g.
     /// `NEEDS_PARENS`, `LAST_USE`) populated by shared analyses;
-    /// bits 32–63 are per-target-local (e.g. rust2's `OWNED`,
-    /// `CLONE_AT`). See `src/emit/rust2/decide/bits.rs` for the
-    /// rust2 bit allocation. Default `0` = "no decisions" — emitters
+    /// bits 32–63 are per-target-local (e.g. rust's `OWNED`,
+    /// `CLONE_AT`). See `src/emit/rust/decide/bits.rs` for the
+    /// rust bit allocation. Default `0` = "no decisions" — emitters
     /// that don't run a decide pass see no behavioral change.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub decisions: u64,

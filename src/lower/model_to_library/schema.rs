@@ -312,7 +312,7 @@ pub(super) fn push_schema_methods(
 /// `updated_at` is stamped on every save, `created_at` only on insert
 /// (`if creating`) — matching the Base semantics exactly. The `now`
 /// local is used at up to two sites; that's the same shape Base's
-/// hand-written body already presents to the rust2 `str_color`
+/// hand-written body already presents to the rust `str_color`
 /// ownership pass, so no new clone-insertion handling is needed.
 /// Names of the optional synthesized per-model surface — methods this
 /// module creates for every model that exist only in case app code
@@ -462,7 +462,7 @@ fn synth_column_predicate(owner: &ClassId, col: &Column) -> MethodDef {
     let nilable = matches!(slot_ty, Ty::Union { .. });
     // The nil-excluded value. `Cast` is the IR's narrowing bridge: the
     // ruby family unwraps it to the bare read, Crystal renders `.as(T)`,
-    // rust2 unwraps the Option — all guarded by the `!nil?` conjunct
+    // rust unwraps the Option — all guarded by the `!nil?` conjunct
     // that precedes it, which short-circuits in every target.
     let scalar_read = |ty: Ty| {
         let read = col_ivar(col, if nilable { slot_ty.clone() } else { ty.clone() });
@@ -1682,7 +1682,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
             // `<col>=` MethodDef without a property-setter
             // counterpart for the computed getter (tsc TS2540). On
             // the lenient ruby-family runtime the intrinsic passes
-            // stored-text strings through unchanged. rust2 strips the
+            // stored-text strings through unchanged. rust strips the
             // guard (let-binding constructor can't express it —
             // honest not-normalized subset); hydration is unaffected
             // (`from_row`/`from_stmt` write `<col>_raw=` directly).
@@ -2076,7 +2076,7 @@ fn synth_index_read(owner: &ClassId, table: &Table) -> MethodDef {
             // (Go's `*string`) can unbox — `record[:col]` yields the
             // value or nil, never a pointer. Every other column keeps
             // the bare read it always had; wrapping those too cost
-            // them the ivar-read `.clone()` rust2 adds, moving out of
+            // them the ivar-read `.clone()` rust adds, moving out of
             // `&self`.
             body: {
                 let read = Expr::new(
@@ -2471,7 +2471,7 @@ fn synth_update_hash(
         // a type zero.
         //
         // `synth_initialize`'s `attrs[:col] || <default>` shape is NOT
-        // reusable here: rust2 compiles the constructor through a
+        // reusable here: rust compiles the constructor through a
         // let-binding path that coerces hash reads on its own, and
         // outside it a bare `serde_json::Value` reaches the typed setter
         // unconverted. The Hash-shaped `update` had never been compiled
@@ -2538,7 +2538,7 @@ fn synth_update_hash(
                 },
             );
             // The nil test rides the CAST value, not the raw hash read:
-            // `nil?` on an untyped hash value is a known rust2 gap (it
+            // `nil?` on an untyped hash value is a known rust gap (it
             // renders `is_none()`, and `serde_json::Value` answers
             // `is_null()`), while the cast has already produced the
             // slot's own nilable type.
@@ -2557,7 +2557,7 @@ fn synth_update_hash(
     //
     // `synth_initialize` does support them, reading `attrs[:room].id`
     // through a `Cast` to the target class. That only compiles because
-    // rust2 routes the constructor through a let-binding path that
+    // rust routes the constructor through a let-binding path that
     // strips the statement: an attrs Hash is `HashMap<String,
     // serde_json::Value>` on every strict target, and a model instance
     // cannot be a `serde_json::Value`. Emitting it from an ordinary

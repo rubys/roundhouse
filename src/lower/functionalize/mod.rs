@@ -10,14 +10,14 @@
 //!
 //! The pass family (issue #29):
 //!   1. `while`/`until`/`loop` → recursion  ← [`while_to_recursion`] (this slice)
-//!   2. early `return` → expression          (currently in the elixir2 walker; migrate here)
+//!   2. early `return` → expression          (currently in the elixir walker; migrate here)
 //!   3. mutable local reassignment → SSA/`Let` (the cond-rebind fold; migrate here)
 //!   4. `self.x =` instance mutation → struct-update return-threading
 //!
 //! **Gating.** This is *not* in the universal pre-emit pipeline — the
 //! recursion form is strictly worse for imperative targets, which keep
 //! the native `while`. Only functional emitters call [`functionalize`]
-//! (the elixir2 overlay does, via its `elixir_units` transform).
+//! (the elixir overlay does, via its `elixir_units` transform).
 //!
 //! **Graceful degradation.** A pass only rewrites shapes it fully
 //! supports; anything else is left untouched and falls through to the
@@ -95,7 +95,7 @@ pub fn functionalize_with_external_duals(
 
 /// `@ivar` field → its container `Ty`, inferred from a literal
 /// initializer: `@data = {}` → `Ty::Hash`, `@errors = []` → `Ty::Array`;
-/// an index write (`@data[k] = v`) also implies Hash. The elixir2
+/// an index write (`@data[k] = v`) also implies Hash. The elixir
 /// emitter routes container methods (`key?`/`keys`/`empty?`/…) to
 /// `Map.*`/`Enum.*` only on a typed receiver, so stamping a field's
 /// `__field__` reads with this Ty is what lets `record.data.key?(k)`

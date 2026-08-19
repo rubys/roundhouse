@@ -186,7 +186,7 @@ fn synth_row_attr_writer(owner: &ClassId, col: &Column) -> MethodDef {
 ///
 /// Each `@col` is initialized via the column's literal-default form
 /// (lit_str("") / lit_int(0) / lit_bool(false) / lit_float(0.0)),
-/// matching `synth_default_for_ty` in rust2 emit — so the field's
+/// matching `synth_default_for_ty` in rust emit — so the field's
 /// inferred type from `collect_ivar_types` (the assign-shape walker)
 /// agrees with the setter's `col_ty`, and the strict-target struct
 /// renders all five slots with their column types.
@@ -226,7 +226,7 @@ fn synth_row_initialize(owner: &ClassId, table: &Table) -> MethodDef {
 }
 
 /// Per-Ty literal default for `synth_row_initialize`. Symmetric with
-/// rust2 emit's `synth_default_for_ty`; producing the IR-side literal
+/// rust emit's `synth_default_for_ty`; producing the IR-side literal
 /// avoids dragging emit-shape concerns into the lowerer.
 fn default_for_col_ty(ty: &Ty) -> Expr {
     match ty {

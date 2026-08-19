@@ -32,7 +32,7 @@ flagged *vestigial (remove)* below.
 | Var | Default | Read at | Effect |
 |-----|---------|---------|--------|
 | `ROUNDHOUSE_PARAM_BINDS` | `0` (off) | `src/lower/arel/visitor.rs:51` | `=1` emits the placeholder-bind form for `Db.prepare` read paths (prototype; default-off pending lobsters spinel hit-rate measurement). |
-| `ROUNDHOUSE_RUST_V2_EMIT_TESTS` | on (only `=0` disables) | `src/emit/rust2.rs:1148` | Opt-*out* for emitting the rust2 target's test files. |
+| `ROUNDHOUSE_RUST_V2_EMIT_TESTS` | on (only `=0` disables) | `src/emit/rust.rs` | Opt-*out* for emitting the Rust target's test files (the `_V2_` in the name is a strangler-era relic; the var is live). |
 
 ## Migration toggles (temporary — track for removal)
 

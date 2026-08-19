@@ -10,7 +10,7 @@
 //! Rails' `touch(*names)` stamps the named columns along with
 //! `updated_at`. The shared runtime's `touch` is NO-ARG on purpose:
 //! taking the column as a parameter means `self[name] = …`, an index
-//! write through a VARIABLE key, and rust2 colors an index-write key
+//! write through a VARIABLE key, and rust colors an index-write key
 //! for a Hash receiver and for nothing else — the owned `String` lands
 //! in `set_index`'s `&str` slot and the app crate fails to compile.
 //!

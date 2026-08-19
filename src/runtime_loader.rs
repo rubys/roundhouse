@@ -169,10 +169,10 @@ fn crystal_format_constant(name: &str, value: &Expr) -> String {
 }
 
 const RUST_TARGET: TargetEmit = TargetEmit {
-    emit_module: crate::emit::rust2::library::emit_module,
-    emit_library_class: crate::emit::rust2::library::emit_library_class,
+    emit_module: crate::emit::rust::library::emit_module,
+    emit_library_class: crate::emit::rust::library::emit_library_class,
     format_import: rust_format_import,
-    format_constant: crate::emit::rust2::library::format_constant,
+    format_constant: crate::emit::rust::library::format_constant,
     format_module_ivar: None,
     wrap_namespace: rust_wrap_namespace,
     module_prelude: "",
@@ -625,7 +625,7 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
             // `RubyToS` trait — the `inner_v.to_s` / `v.to_s` sends
             // in `render_attrs` lower to `(recv).ruby_to_s()` via
             // the `Ty::Untyped` arm in
-            // `src/emit/rust2/expr/send/dispatch.rs`; the trait
+            // `src/emit/rust/expr/send/dispatch.rs`; the trait
             // needs to be in scope for those method calls to
             // resolve. Trait lives in `runtime/rust/http.rs` so it
             // ships alongside the hand-written response shape.
@@ -682,7 +682,7 @@ const RUST_RUNTIME: &[RuntimeEntry] = &[
     // `RecordInvalid` reach those via emit-side mapping (deferred
     // emit fix).
     //
-    // HWIA intentionally NOT transpiled to rust2 — per Phase 2.5(b),
+    // HWIA intentionally NOT transpiled to rust — per Phase 2.5(b),
     // `@flash` and `@session` move to per-app ActionDispatch::Flash /
     // ActionDispatch::Session structs. Phase 3 hand-writes those in
     // `runtime/rust/{flash,session}.rs` with the same HWIA-shape API.
@@ -865,7 +865,7 @@ where
 // single `roundhouse` package, so imports are unnecessary (same-package
 // resolution) and namespaces collapse — `wrap_namespace` is a no-op like
 // TypeScript's. The runtime is grown one file at a time (inflector →
-// json_builder → … → action_controller/base), mirroring elixir2/go2.
+// json_builder → … → action_controller/base), mirroring elixir/go.
 
 const KOTLIN_TARGET: TargetEmit = TargetEmit {
     emit_module: crate::emit::kotlin::emit_module,
@@ -1355,17 +1355,17 @@ where
 // -------- Go target (Phase 1: scaffolded, stubs only) --------
 //
 // Mirrors the Rust target wiring above. The `GO_TARGET` callbacks
-// dispatch into `src/emit/go2/library.rs`, which emits
+// dispatch into `src/emit/go/library.rs`, which emits
 // SYNTACTICALLY-valid Go for every method shape but populates
-// bodies with `panic("go2 stub")`. The point of Phase 1 is to make
+// bodies with `panic("go stub")`. The point of Phase 1 is to make
 // end-to-end emit run, not to produce correct Go semantics —
 // `go build ./...` will surface a real error inventory we can drive
-// subsequent sessions against. See `src/emit/go2.rs` for the
+// subsequent sessions against. See `src/emit/go.rs` for the
 // overlay strategy.
 
 const GO_TARGET: TargetEmit = TargetEmit {
-    emit_module: crate::emit::go2::emit_module,
-    emit_library_class: crate::emit::go2::emit_library_class,
+    emit_module: crate::emit::go::emit_module,
+    emit_library_class: crate::emit::go::emit_library_class,
     format_import: go_format_import,
     format_constant: go_format_constant_thunk,
     format_module_ivar: Some(go_format_module_ivar_thunk),
@@ -1379,11 +1379,11 @@ fn go_format_import(_name: &str, source: &str) -> String {
     format!("import {source:?}\n")
 }
 
-/// Forwards to the go2 stub. Crystal/Rust have a dedicated emit-side
-/// constant renderer; go2 doesn't yet, so the stub emits `var NAME
+/// Forwards to the go stub. Crystal/Rust have a dedicated emit-side
+/// constant renderer; go doesn't yet, so the stub emits `var NAME
 /// interface{} = nil` placeholders.
 fn go_format_constant_thunk(name: &str, value: &Expr) -> String {
-    crate::emit::go2::format_constant(name, value)
+    crate::emit::go::format_constant(name, value)
 }
 
 /// Module-level `@ivar = value` → Go `var <Owner>_<ivar>_slot = <value>`.
@@ -1391,10 +1391,10 @@ fn go_format_constant_thunk(name: &str, value: &Expr) -> String {
 /// declared inside (e.g. `"ActionView::ViewHelpers"`); the formatter
 /// strips `::` to produce the Go-legal identifier. The `_slot` suffix
 /// and the namespacing rule mirror the read-side emit in
-/// `src/emit/go2/expr.rs::ExprNode::Ivar`, so `@slots` writes here
+/// `src/emit/go/expr.rs::ExprNode::Ivar`, so `@slots` writes here
 /// and `@slots` reads there resolve to the same package var.
 fn go_format_module_ivar_thunk(owner: &str, name: &str, value: &Expr) -> String {
-    crate::emit::go2::format_module_ivar(owner, name, value)
+    crate::emit::go::format_module_ivar(owner, name, value)
 }
 
 /// Go's package-per-directory model means namespaces collapse into
@@ -1407,7 +1407,7 @@ fn go_wrap_namespace(_namespace: &str, body: &str) -> String {
 }
 
 /// Go runtime transpile table. Mirrors `RUST_RUNTIME` 1:1 by source
-/// file. Out paths flatten under `app/` (the go2 overlay then
+/// file. Out paths flatten under `app/` (the go overlay then
 /// relocates each to `app/v2/<name>.go`). The `prelude` line emits
 /// `package app\n` so the file file-parses before the overlay
 /// rewrites the package to `v2`.
@@ -1499,7 +1499,7 @@ const GO_RUNTIME: &[RuntimeEntry] = &[
 ];
 
 /// Parse + emit the Go runtime files. Phase 1 scaffold — emit shape
-/// is stubbed (see `src/emit/go2/library.rs`).
+/// is stubbed (see `src/emit/go/library.rs`).
 pub fn go_units<F>(mut transform: F) -> Result<Vec<RuntimeUnit>, String>
 where
     F: FnMut(&str, Vec<LibraryClass>) -> Vec<LibraryClass>,
@@ -1515,17 +1515,17 @@ where
 // -------- Elixir target (Phase 1: scaffolded, stubs only) --------
 //
 // Mirrors the Go/Rust target wiring above. The `ELIXIR_TARGET`
-// callbacks dispatch into `src/emit/elixir2/library.rs`, which emits
+// callbacks dispatch into `src/emit/elixir/library.rs`, which emits
 // syntactically-valid Elixir for every method shape but stubs bodies
-// with `raise "elixir2 stub"`. The point of Phase 1 is end-to-end
+// with `raise "elixir stub"`. The point of Phase 1 is end-to-end
 // emit, not correct semantics — `mix compile --warnings-as-errors`
 // over the `lib/v2/` overlay surfaces a real error inventory for
-// subsequent sessions. See `src/emit/elixir2.rs` for the overlay
+// subsequent sessions. See `src/emit/elixir.rs` for the overlay
 // strategy.
 
 const ELIXIR_TARGET: TargetEmit = TargetEmit {
-    emit_module: crate::emit::elixir2::emit_module,
-    emit_library_class: crate::emit::elixir2::emit_library_class,
+    emit_module: crate::emit::elixir::emit_module,
+    emit_library_class: crate::emit::elixir::emit_library_class,
     format_import: elixir_format_import,
     format_constant: elixir_format_constant,
     // Elixir has no module-level mutable state (modules are static).
@@ -1545,11 +1545,11 @@ fn elixir_format_import(name: &str, _source: &str) -> String {
 }
 
 /// Module-level constant → Elixir module attribute (delegated to
-/// `elixir2`, which renders the value and strips `.freeze`). Emitted
+/// `elixir`, which renders the value and strips `.freeze`). Emitted
 /// just ahead of the class body so it sits INSIDE the module the
 /// namespace wrapper supplies.
 fn elixir_format_constant(name: &str, value: &Expr) -> String {
-    crate::emit::elixir2::format_constant(name, value)
+    crate::emit::elixir::format_constant(name, value)
 }
 
 /// Each class already emits its own `defmodule V2.<Name>` (see
@@ -1592,7 +1592,7 @@ fn elixir_wrap_namespace(_namespace: &str, body: &str) -> String {
 }
 
 /// Elixir runtime transpile table. Widened one file at a time as
-/// `elixir2`'s body walker grows, keeping the `lib/v2/` overlay
+/// `elixir`'s body walker grows, keeping the `lib/v2/` overlay
 /// compile-clean so the inventory signal is whether the CURRENT scope
 /// passes. Each class self-names as `V2.<Module>` in
 /// `emit_library_class`, so the `namespace` field is unused for Elixir
@@ -1670,7 +1670,7 @@ const ELIXIR_RUNTIME: &[RuntimeEntry] = &[
 ];
 
 /// Parse + emit the Elixir runtime files. Phase 1 scaffold — emit shape
-/// is stubbed (see `src/emit/elixir2/library.rs`).
+/// is stubbed (see `src/emit/elixir/library.rs`).
 pub fn elixir_units<F>(mut transform: F) -> Result<Vec<RuntimeUnit>, String>
 where
     F: FnMut(&str, Vec<LibraryClass>) -> Vec<LibraryClass>,

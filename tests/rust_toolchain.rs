@@ -48,12 +48,12 @@ fn generate_project(fixture_path: &Path, out: &Path) {
 }
 
 // `tiny_blog_cargo_check_passes` retired in Phase 7.3 (2026-05-20).
-// The legacy rust emit path it exercised is gone; rust2 doesn't
+// The legacy rust emit path it exercised is gone; rust doesn't
 // yet cover tiny-blog's specific shape (Importmap LC absent,
 // no `<Resource>Params` synthesis, `self.params["id"]` Value→i64
-// coerce miss, `Posts::show` view-method-missing). When rust2
+// coerce miss, `Posts::show` view-method-missing). When rust
 // closes those gaps, a fresh tiny-blog smoke test can re-land
-// against the rust2 path. Until then, `real_blog_cargo_test_passes`
+// against the rust path. Until then, `real_blog_cargo_test_passes`
 // + `scripts/compare rust` carry the authoritative coverage.
 
 #[test]
@@ -92,7 +92,7 @@ fn real_blog_cargo_test_passes() {
 /// HTML, and are *structurally blind* to this N+1: eager-load and 1+N
 /// render the same bytes — only the query strategy differs. So a query
 /// counter is the only instrument that catches a regression. This was a
-/// real, silent bug: rust2 cloned the `iter_mut()` receiver of the
+/// real, silent bug: rust cloned the `iter_mut()` receiver of the
 /// `_preload_comments` distribute loop, so the writes hit a throwaway
 /// temporary and `/articles` ran 1+N instead of 2 — undetectable by
 /// every existing gate.

@@ -570,7 +570,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
                     declared_local_ty(view, p.name.as_str(), &known_models, lx.app)
                 },
                 // These are Ruby KEYWORD params (`show_story: false`), not
-                // positionals — strict targets (rust2 unpack_trailing_kwargs,
+                // positionals — strict targets (rust unpack_trailing_kwargs,
                 // TS destructured-object def) need the Keyword kind to emit
                 // and call them correctly.
                 kind: ParamKind::Keyword { required: p.default.is_none() },
@@ -1135,7 +1135,7 @@ pub(crate) fn insert_framework_stubs(
     // return the previously-stored String, or nil when the slot was
     // never set. Matches the framework Ruby RBS (`String?`) and the
     // runtime semantics (`@slots.fetch(slot, nil)`). The Option<String>
-    // shape lets the rust2 coerce path (Family 7) thread through to
+    // shape lets the rust coerce path (Family 7) thread through to
     // `html_escape(content_for_get(:title))` without manual coercions.
     let option_string = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
     for name in ["content_for_get", "get_slot"] {

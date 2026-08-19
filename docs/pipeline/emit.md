@@ -8,11 +8,11 @@ emitters render that IR into idiomatic source.
 
 **Source:** `src/emit/<target>.rs` plus `src/emit/<target>/` — the
 entry file and its submodule directory are ONE module, not two
-generations. The only generational pairs are `rust`/`rust2`,
-`go`/`go2`, and `elixir`/`elixir2`, and there the unsuffixed file is a
-thin shim delegating to the 2-module (see the module headers in
-`src/emit/rust.rs`, `src/emit/go.rs`, `src/emit/elixir.rs` for why the
-shims stay). Targets: TypeScript (plus a typescript-worker build via
+generations. (Rust, Go, and Elixir were rewritten as strangler-fig
+`*2` modules behind thin shims; the rewrites took over and the `*2`
+names were folded away in the 2026-08-19 rename — each module's
+header records the lineage.) Targets: TypeScript (plus a
+typescript-worker build via
 `typescript::emit_with_profile`), Crystal, Rust, Go, Kotlin, Python,
 Swift, C#/.NET, Elixir, Roda, and the Ruby family (Spinel / Ruby /
 JRuby), which rides `emit::ruby` (`emit_spinel` / `emit_library`) plus
@@ -28,8 +28,8 @@ Roundhouse has completed its migration from per-target derivation to
 thin emitters that consume the universal post-lowering IR
 (`LibraryClass | LibraryFunction`) for every runtime target except
 Python. Spinel/Ruby, TypeScript, Crystal, Rust, Go, and Elixir run on
-the thin path — the `rust2` / `go2` / `elixir2` rewrites shipped and
-are the default, reached through the unsuffixed shim modules — and
+the thin path — the Rust/Go/Elixir strangler rewrites shipped, became
+the default, and now own their targets' names outright — and
 the newer Kotlin, Swift, and C#/.NET targets were built on it from
 the start. Python is the remaining per-artifact emitter: one
 submodule per output kind (`model.rs`, `controller.rs`, `view.rs`,
@@ -46,9 +46,9 @@ consuming the INGEST-shape `App` (see `src/emit/roda.rs`).
 | Spinel / Ruby | thin | thin | thin | thin | thin | Reference shape — drove the universal IR contract; Ruby emit collapsed to lowered-IR-only (2026-05-05) |
 | TypeScript | thin | thin (function) | thin | thin | thin (function) | Rip-and-replace complete; `tsc` green sync + libsql under `tests/typescript_toolchain.rs` (2026-05-07) |
 | Crystal | thin | thin (function) | thin | thin | thin | Rip-and-replace complete; compare-crystal 5/5 + framework_tests 8/8 (2026-05-06 → 2026-05-10) |
-| Rust (`src/emit/rust2/`) | thin | thin | thin | thin | thin | rust2 landed 2026-05-20; `src/emit/rust.rs::emit` delegates to `rust2::emit` |
-| Go (`src/emit/go2/`) | thin | thin | thin | thin | thin | go2 shipped 2026-05-24 (Phase 6 step 3); `src/emit/go.rs::emit` delegates to `go2::emit_overlay_files`; the legacy `go/` tree is deleted |
-| Elixir (`src/emit/elixir2/`) | thin | thin | thin | thin | thin | elixir2 is the sole app-module path (Phase D); `src/emit/elixir.rs` emits the mix/Db/SchemaSQL shell and delegates the rest |
+| Rust (`src/emit/rust/`) | thin | thin | thin | thin | thin | Strangler rewrite (rust2) landed 2026-05-20, renamed to `rust` 2026-08-19 |
+| Go (`src/emit/go/`) | thin | thin | thin | thin | thin | Strangler rewrite (go2) shipped 2026-05-24; `entry.rs` assembles overlay + go.mod/root main |
+| Elixir (`src/emit/elixir/`) | thin | thin | thin | thin | thin | Sole app-module path since Phase D; `entry.rs` emits the mix/Db/SchemaSQL shell around the `V2.*` overlay |
 | Kotlin, Swift, C#/.NET | thin | thin | thin | thin | thin | Built on the universal IR from the start |
 | Python | per-target | per-target | per-target | per-target | per-target | The remaining per-artifact emitter (`CtrlWalker` controllers); its `library.rs` is dormant, awaiting the runtime strangle |
 | Roda | — | — | — | — | — | Ingest-shape source-to-source converter (issue #67); not on either path by design |
@@ -144,7 +144,7 @@ src/emit/<target>/
                            - emit_views_aggregator (TS-specific)
                            - import resolution (TS: collect_imports /
                              collect_imports_for_function in
-                             src/emit/typescript/library.rs; go2 has a
+                             src/emit/typescript/library.rs; go has a
                              dedicated imports module)
                            - rewrite_for_class_method / rewrite_for_constructor /
                              rewrite_for_free_function (see below)
@@ -152,8 +152,8 @@ src/emit/<target>/
 
 Beyond the trio the file set varies per target — compare
 `src/emit/crystal/` (adds `method.rs`, `shared.rs`) with
-`src/emit/go2/` (adds `imports.rs`, `paths.rs`, plus the test emitters)
-and `src/emit/rust2/` (splits `expr` into a directory and adds
+`src/emit/go/` (adds `imports.rs`, `paths.rs`, plus the test emitters)
+and `src/emit/rust/` (splits `expr` into a directory and adds
 `decide/` for borrow/ownership decisions). Packaging is per-ecosystem
 rather than a fixed `package.rs`: TypeScript, Kotlin, and C# carry a
 `package.rs`; Python has `pyproject.rs`; Elixir's mix project lives in
@@ -302,7 +302,7 @@ The surface varies per target rather than being a uniform contract:
 | `emit_method(&MethodDef) -> String` | Standalone typed-method renderer for runtime extraction — present on crystal, go, python, ruby, rust, typescript |
 | `emit_library_class(&LibraryClass) -> Result<String>` | Class-shape renderer; public on most thin targets for tests + cross-target tooling |
 | `emit_library_function(&LibraryFunction) -> Result<String>` | Function-shape renderer — TypeScript-only |
-| `<target>_ty(&Ty) -> String` | Type renderer. The `ty` submodules are mostly private (`mod ty;`); a handful re-export (`typescript::ts_ty`, `python::python_ty`) and go2/rust2 are `pub(crate)` |
+| `<target>_ty(&Ty) -> String` | Type renderer. The `ty` submodules are mostly private (`mod ty;`); a handful re-export (`typescript::ts_ty`, `python::python_ty`) and go/rust are `pub(crate)` |
 
 ## Per-target type rendering
 
@@ -317,7 +317,7 @@ from the `<target>/ty.rs` renderers — `ts_ty`, `rust_ty`, `go_ty`,
 | `Ty::Bottom` | `never` | `!` | `interface{}` | `NoReturn` | `Never` |
 
 The Ruby family renders types only into the RBS sidecars
-(`emit::ruby`'s `ty_to_rbs`); elixir2 emits untyped Elixir and has no
+(`emit::ruby`'s `ty_to_rbs`); Elixir emits untyped Elixir and has no
 `ty` module.
 
 No target elevates `Untyped` itself to a compile error — even the
@@ -344,7 +344,7 @@ A new target needs:
    - an import-resolution pass mapping cross-artifact Const refs to
      import lines (the models: `collect_imports` /
      `collect_imports_for_function` in `src/emit/typescript/library.rs`,
-     or go2's `imports` module)
+     or go's `imports` module)
 4. `runtime/<new>/` — target primitives only (DB, HTTP). Framework
    runtime comes free via transpiling `runtime/ruby/`.
 5. `tests/<new>_toolchain.rs` — the verification gate.
@@ -371,7 +371,7 @@ mechanism (Python's `__init__.py`, Rust's `mod.rs`).
 | `src/emit/<target>/library.rs` | Universal-IR walker + import resolution |
 | `src/emit/diagnostics.rs` | Thread-local diagnostic sink — unsupported constructs self-report and degrade to a raise/panic stub |
 | `src/emit/typescript/{js_ast,printer,sourcemap}.rs` | TS's JS-AST layer: build an AST, print it, carry source maps |
-| `src/emit/rust2/decide/` | rust2's borrow/ownership decision passes (last-use, parens, string coloring) |
+| `src/emit/rust/decide/` | Rust's borrow/ownership decision passes (last-use, parens, string coloring) |
 | `src/emit/shared/` | Cross-cutting helpers (binop classifiers, schema SQL renderer, etc.) |
 | `src/lower/{model,view,jbuilder,controller,test_module,fixture}_to_library/` | LibraryClass producers |
 | `src/lower/{routes,importmap,schema,seeds}_to_library/` | LibraryFunction producers |

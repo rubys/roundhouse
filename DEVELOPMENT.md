@@ -190,7 +190,7 @@ emit-side divergence (the lowered-IR gates in
                                   ▼
                               LibraryClass / LibraryFunction / FlatRoute / ...
                                   │
-                                  │  emit::{ruby, rust2, typescript, ...}
+                                  │  emit::{ruby, rust, typescript, ...}
                                   │  dispatched by src/project.rs::target_files
                                   ▼
                               emitted source code  +  runtime/<target>/ glue
@@ -226,8 +226,7 @@ Key files:
   modules produce the lowered shapes. See
   [`docs/pipeline/lower.md`](docs/pipeline/lower.md).
 - **`src/emit/`** — one module per target (`<target>.rs` +
-  `<target>/` submodules; `rust.rs`/`go.rs`/`elixir.rs` are shims over
-  the live `rust2`/`go2`/`elixir2`). Dispatch lives in
+  `<target>/` submodules). Dispatch lives in
   `src/project.rs::target_files`. See
   [`docs/pipeline/emit.md`](docs/pipeline/emit.md).
 - **`src/runtime_loader.rs`** — transpiles `runtime/ruby/` (the
@@ -255,7 +254,7 @@ The pattern today (example: adding `ExprNode::Array`):
 
 4. **Emit.** Add a match arm in each live emitter's expression module
    (`src/emit/ruby/expr.rs`, `src/emit/typescript/expr.rs`,
-   `src/emit/rust2/expr/`, …). Ruby's arm must invert the ingest —
+   `src/emit/rust/expr/`, …). Ruby's arm must invert the ingest —
    that's what `roundhouse-ast --round-trip` checks; other targets can
    be approximations until a fixture sharpens them.
 

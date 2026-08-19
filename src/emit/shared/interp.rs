@@ -10,7 +10,7 @@
 //! plan, 3.3: the escape tables differ in target-semantic characters).
 //!
 //! Targets whose expression arm is not a plain `open + expr + close`
-//! (swift wraps optionals in `RhString.s(...)`; go2 appends to a
+//! (swift wraps optionals in `RhString.s(...)`; go appends to a
 //! variable) render their interpolations directly and don't use this.
 
 use crate::expr::{Expr, InterpPart};

@@ -824,7 +824,7 @@ fn walk_children<F: FnMut(&Expr)>(expr: &Expr, f: &mut F) {
 /// rather than being encoded as a nil value. Nilable slots were the
 /// first attempt and they cost more than they look: `update`'s
 /// `if !p.name.nil? { self.name = p.name }` needs the emitter to
-/// flow-narrow an Option through the guard, which rust2 doesn't do
+/// flow-narrow an Option through the guard, which rust doesn't do
 /// (`set_name(Option<String>)` — measured, 6 fresh errors) and which
 /// every other strict target would need too. A `Bool` beside a `String`
 /// needs nothing from any emitter.

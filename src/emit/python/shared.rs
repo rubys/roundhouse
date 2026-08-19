@@ -10,7 +10,7 @@ pub(super) fn indent_py(s: &str) -> String {
 /// Legalize a Ruby method name for Python, at both definition and call
 /// sites so the two line up. Index operators map to the dunders that
 /// back native subscript syntax (`flash["k"]`); `?`/`!` suffixes
-/// (predicate / bang) become `_p` / `_bang`, mirroring go2's convention.
+/// (predicate / bang) become `_p` / `_bang`, mirroring go's convention.
 /// Builtin predicates with Python semantics (`nil?`, `is_a?`) are
 /// intercepted by `emit_send` *before* this and never reach it.
 pub(super) fn py_method_name(name: &str) -> String {

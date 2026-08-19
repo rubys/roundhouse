@@ -432,7 +432,7 @@ impl<'a> BodyTyper<'a> {
                 // (BoolOp::Or in `content_for_get(:title) || "Real
                 // Blog"`) where the result type should be `T`, not
                 // `Union<Option<T>, T>`. The lt-narrowed form lets
-                // the rust2 emit's Family 4 (String → &str) fire.
+                // the rust emit's Family 4 (String → &str) fire.
                 let lt_peeled = if matches!(op, crate::expr::BoolOpKind::Or) {
                     narrowing::remove_nil(&lt)
                 } else {
@@ -726,7 +726,7 @@ impl<'a> BodyTyper<'a> {
                 // and every `.nil?` read in agreement.
                 //
                 // Locals only: the hazard is Go's `var x T = nil` decl
-                // path (`emit/go2/expr.rs`, LValue::Var), and ivars emit
+                // path (`emit/go/expr.rs`, LValue::Var), and ivars emit
                 // through package vars / struct fields that never take a
                 // seed-derived decl type.
                 let mut nil_seed: HashMap<Symbol, (usize, Ty)> = HashMap::new();
@@ -1806,7 +1806,7 @@ mod tests {
         // on its Expr, not the un-narrowed Option<String>. This is the
         // "narrowing write-back" gate — emit-side coercion paths read
         // value.ty directly, and a stale Option<String> there triggers
-        // spurious .to_string().unwrap() chains (E0599 on rust2's
+        // spurious .to_string().unwrap() chains (E0599 on rust's
         // action_controller_base render).
         let then_branch = nil_lit();
         let else_branch = var("x");

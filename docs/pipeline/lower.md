@@ -261,14 +261,12 @@ Migration status:
   target but one. Spinel/Ruby, TypeScript, and Crystal were
   rip-and-replaced end-to-end against the
   `LibraryClass | LibraryFunction` shape; the newer Kotlin, Swift,
-  and C#/.NET targets were built on it from the start. Rust delegates
-  unconditionally to rust2 (`src/emit/rust.rs::emit` →
-  `super::rust2::emit`). Go and Elixir shipped their v2 rewrites and
-  made them the default dispatch: `src/emit/go.rs` and
-  `src/emit/elixir.rs` are thin shims — each emits shared
-  target-infrastructure files and delegates the app modules to
-  `go2` / `elixir2` `emit_overlay_files` (their module headers
-  describe the collapse and why the shims keep their names).
+  and C#/.NET targets were built on it from the start. Rust, Go, and
+  Elixir shipped their strangler rewrites (`rust2`/`go2`/`elixir2`),
+  made them the default dispatch, and the `*2` names were folded away
+  in the 2026-08-19 rename — each module's header
+  (`src/emit/rust.rs`, `src/emit/go.rs`, `src/emit/elixir.rs`)
+  records the lineage.
 - **Still on the legacy path:** Python is the sole remaining
   `CtrlWalker` consumer — `src/emit/python/controller.rs` implements
   the trait. The CtrlWalker code stays in tree until that last

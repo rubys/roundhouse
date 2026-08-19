@@ -518,7 +518,7 @@ impl<'a> BodyTyper<'a> {
                 // Ruby Object and return an instance of the same
                 // class — `Article.new.clone` is still an `Article`.
                 // Without this arm the lookup falls through to Var,
-                // which masks downstream coercion (e.g. rust2's
+                // which masks downstream coercion (e.g. rust's
                 // setter-arg Borrow path keys on `recv: Ty::Class`
                 // to wrap String→&str at `instance.clone().set_body
                 // (row.body())` sites).

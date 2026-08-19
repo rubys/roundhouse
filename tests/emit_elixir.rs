@@ -1,7 +1,7 @@
 //! Elixir emitter smoke test.
 //!
 //! Asserts the emitter produces the expected files and their top-level
-//! shapes. As of Phase D the output is the elixir2 (`*`) lowered-IR
+//! shapes. As of Phase D the output is the elixir (`*`) lowered-IR
 //! overlay; these assertions track the v2 module shapes. Elixir is the
 //! target that most aggressively stress-tests IR neutrality (no classes,
 //! no mutation, no method dispatch), so they also double as evidence that

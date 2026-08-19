@@ -440,7 +440,7 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // 2026-07-30 (second bump, same day): 610 -> 625 — measurement moved
     // to 613 when `has_attribute?` and the two `saved_change_to_attribute`
     // readers each bound their collection to a local before calling a
-    // collection method on it. That binding is not style: elixir2's
+    // collection method on it. That binding is not style: elixir's
     // receiver typing does not see through a method-call receiver, so the
     // direct chain lowers `include?`/`key?` as a struct-field access
     // (`saved_changes(record).__struct__`) and fails mix's

@@ -16,7 +16,7 @@
 //!
 //! Only targets/receivers that are plain locals (`ExprNode::Var`) are
 //! rewritten. The conditional forms (`… if cond`) are left as the rebind
-//! inside an `if`; the elixir2 walker's existing cond-rebind lift hoists
+//! inside an `if`; the elixir walker's existing cond-rebind lift hoists
 //! them to `x = if cond, do: <new>, else: x`. So this pass only does the
 //! mutation→rebind step; the conditional handling is shared.
 
@@ -283,7 +283,7 @@ mod tests {
             constants: Vec::new(),
             unknown_calls: Vec::new(),
         };
-        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         eprintln!("--- accumulation ---\n{ex}\n--------------------");
         // push → list append, lifted through the conditional.
         assert!(ex.contains("result = if flag do"), "cond-rebind:\n{ex}");
@@ -330,7 +330,7 @@ mod tests {
             constants: Vec::new(),
             unknown_calls: Vec::new(),
         };
-        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         assert!(ex.contains("acc = acc ++ [v]"), "`<<` → append rebind:\n{ex}");
     }
 
@@ -381,7 +381,7 @@ mod tests {
             constants: Vec::new(),
             unknown_calls: Vec::new(),
         };
-        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         eprintln!("--- string builder ---\n{ex}\n----------------------");
         assert!(ex.contains("io = []"), "Init → empty iolist:\n{ex}");
         assert!(ex.contains("io = [io, article]"), "Append → iodata cons + param resolves:\n{ex}");
@@ -429,7 +429,7 @@ mod tests {
             constants: Vec::new(),
             unknown_calls: Vec::new(),
         };
-        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         assert!(ex.contains("r = %{r | notice: v}"), "attr setter → struct update:\n{ex}");
     }
 
@@ -481,7 +481,7 @@ mod tests {
             constants: Vec::new(),
             unknown_calls: Vec::new(),
         };
-        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         eprintln!("--- block reduce ---\n{ex}\n--------------------");
         assert!(ex.contains("acc = Enum.reduce(coll, acc, fn x, acc ->"), "block → reduce:\n{ex}");
         assert!(ex.contains("acc = Map.put(acc, k, x)"), "inner []= threaded:\n{ex}");
@@ -525,7 +525,7 @@ mod tests {
             constants: Vec::new(),
             unknown_calls: Vec::new(),
         };
-        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         assert!(
             ex.contains("acc = ActionDispatch.Flash.put(acc, k, v)"),
             "struct []= → <Struct>.put:\n{ex}"

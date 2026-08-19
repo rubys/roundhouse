@@ -2,11 +2,11 @@
 //!
 //! Sibling of `framework_tests_crystal.rs` / `framework_tests_typescript.rs`
 //! — ingests one `runtime/ruby/test/**/*_test.rb` file as a TestModule,
-//! drops it onto an otherwise-empty App, runs `rust::emit` (the rust2
+//! drops it onto an otherwise-empty App, runs `rust::emit` (the rust
 //! implementation), and invokes `cargo test` against the result.
 //!
 //! **Why this gate exists, concretely.** `JsonBuilder.encode_value`
-//! dispatches `is_a?(TrueClass)` then `is_a?(FalseClass)`, and rust2
+//! dispatches `is_a?(TrueClass)` then `is_a?(FalseClass)`, and rust
 //! collapsed BOTH to `.is_boolean()` — every `false` serialized as
 //! `true`. The typescript emitter had the identical bug, and it was
 //! caught the day `json_builder_test` was wired to the typescript gate
@@ -162,7 +162,7 @@ fn inflector_test_passes_under_rust() {
     build_and_run(Path::new("runtime/ruby/test/inflector_test.rb"), "inflector");
 }
 
-// ── Deferred: wired, failing, and each on a NAMED rust2 gap ──────────
+// ── Deferred: wired, failing, and each on a NAMED rust gap ──────────
 //
 // These five run (`cargo test --test framework_tests_rust -- --ignored`)
 // and fail to COMPILE the emitted crate — they are a worklist, not a
@@ -196,14 +196,14 @@ fn inflector_test_passes_under_rust() {
 //     `errors_ext::FrameworkError` enum CONST, not a type, and the
 //     test's `RecordNotFound.new("…").message` has nothing to reach.
 //     Wiring the runtime entry was tried and measured; what comes out
-//     needs four things rust2 doesn't do yet:
+//     needs four things rust doesn't do yet:
 //       * `class X < StandardError` → an error struct. The parent is
 //         dropped, so the emit is a fieldless `struct RecordNotFound`
 //         with no `message` field and no Display / std::error::Error.
-//       * `super(message)` inside `initialize` → `/* TODO rust2:
-//         ExprNode::Discriminant(22) */`. rust2's expr emit has no
+//       * `super(message)` inside `initialize` → `/* TODO rust:
+//         ExprNode::Discriminant(22) */`. rust's expr emit has no
 //         `Super` arm at all (only the `decide/` walkers know it).
-//       * optional params. rust2 drops Ruby defaults and makes every
+//       * optional params. rust drops Ruby defaults and makes every
 //         param required, so `RecordNotFound.new()` — which the test
 //         calls, and which is the whole point of the default-message
 //         contract — has no constructor to hit.
@@ -218,9 +218,9 @@ fn inflector_test_passes_under_rust() {
 //     kotlin's `isAssignableFrom`, rust's honest rendering is a
 //     compile-time fold from the emitter's own class table.
 //
-//   ac_base — a rust2 test-emit shape, not a typing gap. Three
+//   ac_base — a rust test-emit shape, not a typing gap. Three
 //     findings, measured against the current tree:
-//       * rust2's `test_extras` is the only per-target test emit that
+//       * rust's `test_extras` is the only per-target test emit that
 //         does NOT seed itself from `app.rbs_signatures` (kotlin,
 //         swift and csharp all do). So the framework `.rbs` never
 //         reaches the test lowering, and the inline `TestController <

@@ -162,11 +162,11 @@ impl StubStyle {
     /// back to `Raise` (a dynamic-target-safe default).
     pub fn for_target(target: &str) -> StubStyle {
         match target {
-            "rust" | "rust2" => StubStyle::RustPanic,
-            "go" | "go2" => StubStyle::GoPanic,
+            "rust" => StubStyle::RustPanic,
+            "go" => StubStyle::GoPanic,
             "typescript" => StubStyle::TsThrow,
             "python" => StubStyle::PythonThrow,
-            // ruby, elixir, elixir2, crystal, and anything else.
+            // ruby, elixir, crystal, and anything else.
             _ => StubStyle::Raise,
         }
     }
@@ -247,11 +247,11 @@ mod tests {
 
     #[test]
     fn stub_style_per_target_matches_existing_raise_equivalents() {
-        assert_eq!(StubStyle::for_target("rust2"), StubStyle::RustPanic);
-        assert_eq!(StubStyle::for_target("go2"), StubStyle::GoPanic);
+        assert_eq!(StubStyle::for_target("rust"), StubStyle::RustPanic);
+        assert_eq!(StubStyle::for_target("go"), StubStyle::GoPanic);
         assert_eq!(StubStyle::for_target("typescript"), StubStyle::TsThrow);
         assert_eq!(StubStyle::for_target("python"), StubStyle::PythonThrow);
-        assert_eq!(StubStyle::for_target("elixir2"), StubStyle::Raise);
+        assert_eq!(StubStyle::for_target("elixir"), StubStyle::Raise);
 
         assert_eq!(StubStyle::Raise.render("x"), r#"raise "roundhouse: x""#);
         assert_eq!(StubStyle::RustPanic.render("x"), r#"panic!("roundhouse: x")"#);

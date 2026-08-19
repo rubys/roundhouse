@@ -64,12 +64,13 @@ Conventional file roles (file names vary by target):
 
 The exact file set varies per target and rots fast in prose; the
 authoritative inventories are the `include_str!` tables in each
-target's emitter (`src/emit/typescript.rs`, `src/emit/go2.rs`,
-`src/emit/elixir2.rs`, …) and, for the Ruby family, the runtime walk
+target's emitter (`src/emit/typescript.rs`, `src/emit/go.rs`,
+`src/emit/elixir.rs`, …) and, for the Ruby family, the runtime walk
 in `src/project.rs`. Shape notes worth knowing:
 
 - `runtime/go/` and `runtime/elixir/` keep their primitives under a
-  `v2/` sublayout — the go2/elixir2 emitters copy from there.
+  `v2/` sublayout (a strangler-era name the emitted tree still uses)
+  — the Go/Elixir emitters copy from there.
 - `runtime/typescript/` carries db/server variants selected by the
   `DeploymentProfile` (sync sqlite, libsql, worker), the worker
   bridge (`juntos*.ts`), and async/sync minitest adapters.

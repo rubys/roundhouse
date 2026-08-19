@@ -866,7 +866,7 @@ mod tests {
             constants: Vec::new(),
             unknown_calls: Vec::new(),
         };
-        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         eprintln!("--- emitted ---\n{ex}\n---------------");
         // No loop construct survives, the entry calls the helper, and the
         // helper recurses — all rendered through the real Elixir walker.
@@ -957,7 +957,7 @@ mod tests {
             constants: Vec::new(),
             unknown_calls: Vec::new(),
         };
-        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         eprintln!("--- match_pattern ---\n{ex}\n---------------------");
         assert!(!ex.contains("while"), "no while:\n{ex}");
         assert!(ex.contains("Map.merge(params,"), "accumulator merge:\n{ex}");
@@ -989,7 +989,7 @@ mod tests {
             constants: Vec::new(),
             unknown_calls: Vec::new(),
         };
-        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         assert!(ex.contains("length(table)"), "list length via Kernel.length:\n{ex}");
         assert!(!ex.contains("String.length(table)"), "should not use String.length:\n{ex}");
     }
@@ -1030,7 +1030,7 @@ mod tests {
             unknown_calls: Vec::new(),
         };
         let class = crate::lower::functionalize::functionalize(vec![class]).pop().unwrap();
-        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         eprintln!("--- instance loop ---\n{ex}\n---------------------");
         assert!(ex.contains("def fill(record, n)"), "entry threads record:\n{ex}");
         assert!(ex.contains("fill__loop(record, n, i)"), "initial call passes record:\n{ex}");
@@ -1083,7 +1083,7 @@ mod tests {
             unknown_calls: Vec::new(),
         };
         let class = crate::lower::functionalize::functionalize(vec![class]).pop().unwrap();
-        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         eprintln!("--- each w/ yield ---\n{ex}\n---------------------");
         assert!(ex.contains("def each(record, block_fn)"), "entry threads record+block_fn:\n{ex}");
         assert!(ex.contains("each__loop(record, keys, i, block_fn)"), "recurse threads both:\n{ex}");
@@ -1160,7 +1160,7 @@ mod tests {
             unknown_calls: Vec::new(),
         };
         let class = crate::lower::functionalize::functionalize(vec![class]).pop().unwrap();
-        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         eprintln!("--- constructor+loop ---\n{ex}\n------------------------");
 
         // Constructor: the guard `if` binds back to `record`, the nil
@@ -1272,7 +1272,7 @@ mod tests {
             constants: Vec::new(),
             unknown_calls: Vec::new(),
         };
-        let ex = crate::emit::elixir2::emit_library_class(&class).expect("emit");
+        let ex = crate::emit::elixir::emit_library_class(&class).expect("emit");
         assert!(ex.contains("all__loop(stmt, results)"), "entry calls drain helper:\n{ex}");
         assert!(ex.contains("def all__loop(stmt, results)"), "helper carries stmt+acc:\n{ex}");
         assert!(ex.contains("results = results ++ [stmt]"), "`<<` → append rebind:\n{ex}");
