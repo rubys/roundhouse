@@ -185,6 +185,18 @@ fn includes_active_model_model(model: &Model) -> bool {
     })
 }
 
+/// `before_validation :sanitize_fields` in the model body. Only the
+/// method-name form — a block callback (`before_validation do … end`)
+/// is synthesized under the same method name, so it is included too;
+/// anything `push_callback_methods` declines to synthesize would leave
+/// this call dangling, which is why the two read the same declaration.
+fn declares_before_validation(model: &Model) -> bool {
+    model.body.iter().any(|item| {
+        matches!(item, crate::dialect::ModelBodyItem::Callback { callback, .. }
+            if callback.hook == crate::dialect::CallbackHook::BeforeValidation)
+    })
+}
+
 /// `valid?` + `errors` mirroring the runtime Base implementations,
 /// for `include ActiveModel::Validations` classes with no superclass.
 fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Model) {
@@ -197,7 +209,36 @@ fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Mo
     let span = model.span;
     let errors_read = || Expr::new(span, ExprNode::Ivar { name: Symbol::from("errors") });
     if !defines("valid?") {
-        let body = seq(vec![
+        // `before_validation :sanitize_fields` runs INSIDE `valid?` for
+        // an ActiveModel class (`ActiveModel::Validations::Callbacks`),
+        // not on save — there is no save. The callback method is
+        // synthesized by `push_callback_methods`, and nothing called
+        // it: campfire's `Opengraph::Metadata` sanitizes its title and
+        // description there, so the raw `<script>` survived into the
+        // record and three tests read it back.
+        //
+        // Ordered first, which is what the name says and what the
+        // sanitize case needs — the presence checks below must see the
+        // sanitized values.
+        let mut body_stmts: Vec<Expr> = Vec::new();
+        // Asked of the model BODY, not of `methods`: this pass runs
+        // before `push_callback_methods` synthesizes the callback (847
+        // vs 890 in mod.rs), so the method does not exist yet — and
+        // reordering the two to suit this read would be the tail
+        // wagging the dog.
+        if declares_before_validation(model) {
+            body_stmts.push(Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from("before_validation"),
+                    args: Vec::new(),
+                    block: None,
+                    parenthesized: false,
+                },
+            ));
+        }
+        body_stmts.extend(vec![
             Expr::new(
                 span,
                 ExprNode::Assign {
@@ -229,6 +270,7 @@ fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Mo
                 },
             ),
         ]);
+        let body = seq(body_stmts);
         methods.push(MethodDef {
             name: Symbol::from("valid?"),
             receiver: MethodReceiver::Instance,

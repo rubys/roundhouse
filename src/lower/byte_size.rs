@@ -35,6 +35,14 @@ use crate::ty::Ty;
 
 pub fn apply_byte_size_lowering(app: &mut App) {
     super::for_each_hook_body(app, &mut rewrite);
+    // TEST bodies too, for the same reason `duration` and `time_current`
+    // walk them: this rewrite produces an integer literal, vocabulary
+    // every target already speaks, rather than leaning on a CRuby
+    // overlay the strict-target test lanes do not ship. campfire's
+    // `opengraph_fetch_test` builds a `1.gigabyte` body to check the
+    // size cap, and a bare `gigabyte` send is a NoMethodError there
+    // exactly as it would be in a model.
+    super::for_each_test_body(app, &mut rewrite);
 }
 
 /// Bytes per unit, as ActiveSupport defines them — binary (1024-based),

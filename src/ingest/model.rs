@@ -215,8 +215,8 @@ pub fn ingest_model(
             // gate, one such item silently dropped the entire model
             // (Mastodon lost `Status` to a single spelled-out scope
             // lambda). Strict mode still aborts.
-            let mut item = match ingest_model_body_item(&stmt, &owner, file, leading) {
-                Ok(item) => item,
+            let items = match ingest_model_body_items(&stmt, &owner, file, leading) {
+                Ok(items) => items,
                 Err(err) if super::survey::is_active() => {
                     super::survey::record(&err);
                     prev_end = Some(stmt.location().end_offset());
@@ -224,8 +224,13 @@ pub fn ingest_model(
                 }
                 Err(err) => return Err(err),
             };
-            item.set_leading_blank_line(leading_blank);
-            body.push(item);
+            // A multi-attribute `validates` expands to one item per
+            // attribute; only the first carries the blank line that
+            // separated the declaration from what came before it.
+            for (i, mut item) in items.into_iter().enumerate() {
+                item.set_leading_blank_line(leading_blank && i == 0);
+                body.push(item);
+            }
             prev_end = Some(stmt.location().end_offset());
         }
     }
@@ -252,6 +257,87 @@ pub fn ingest_model(
 }
 
 /// Classify one class-body statement into its `ModelBodyItem` variant.
+/// One statement of a model body, as one or MORE items.
+///
+/// `validates :title, :url, presence: true` declares one Validation per
+/// ATTRIBUTE, and `ingest_model_body_item` can only answer with one —
+/// its own comment said the tail was dropped and that "no real fixture
+/// triggers this yet". campfire's `Opengraph::Metadata` triggers it:
+/// `validates_presence_of :title, :url, :description` must fault all
+/// three, and the test reads `errors.full_messages` for two of them.
+///
+/// The `validates_*_of` family is the same declaration in Rails' older
+/// spelling — `validates_presence_of :a` IS `validates :a, presence:
+/// true` — so it lands here rather than growing a second rule table.
+/// BARE SYMBOLS ONLY: an options hash (`allow_nil:`, `if:`, `on:`)
+/// narrows or reshapes the check, and the call falls through to the
+/// unsupported-DSL ledger rather than being flattened into an
+/// unconditional one.
+pub(super) fn ingest_model_body_items(
+    stmt: &Node<'_>,
+    owner: &ClassId,
+    file: &str,
+    leading_comments: Vec<Comment>,
+) -> IngestResult<Vec<ModelBodyItem>> {
+    use crate::dialect::{Validation, ValidationRule};
+    let span = Span {
+        file: super::sources::file_id(file),
+        start: stmt.location().start_offset() as u32,
+        end: stmt.location().end_offset() as u32,
+    };
+    if let Some(call) = stmt.as_call_node() {
+        if call.receiver().is_none() {
+            let name = constant_id_str(&call.name()).to_string();
+            let rule = match name.as_str() {
+                "validates_presence_of" => Some(ValidationRule::Presence),
+                "validates_absence_of" => Some(ValidationRule::Absence),
+                _ => None,
+            };
+            let parsed: Vec<Validation> = if name == "validates" {
+                parse_validates(&call)
+            } else if let Some(rule) = rule.clone() {
+                let args: Vec<Node<'_>> = call
+                    .arguments()
+                    .map(|a| a.arguments().iter().collect())
+                    .unwrap_or_default();
+                let attrs: Vec<Symbol> = args
+                    .iter()
+                    .filter_map(|a| symbol_value(a).map(|s| Symbol::from(s.as_str())))
+                    .collect();
+                if attrs.len() == args.len() && !attrs.is_empty() {
+                    attrs
+                        .into_iter()
+                        .map(|attribute| Validation { attribute, rules: vec![rule.clone()] })
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+            if parsed.len() > 1 || (rule.is_some() && !parsed.is_empty()) {
+                return Ok(parsed
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, validation)| ModelBodyItem::Validation {
+                        validation,
+                        // The declaration's comments belong to the
+                        // first of the items it expands to.
+                        leading_comments: if i == 0 {
+                            leading_comments.clone()
+                        } else {
+                            Vec::new()
+                        },
+                        leading_blank_line: false,
+                        span,
+                    })
+                    .collect());
+            }
+        }
+    }
+    Ok(vec![ingest_model_body_item(stmt, owner, file, leading_comments)?])
+}
+
 /// `leading_comments` is attached regardless of variant so every item
 /// keeps its inline docs.
 pub(super) fn ingest_model_body_item(

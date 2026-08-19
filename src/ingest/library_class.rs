@@ -449,6 +449,31 @@ fn walk_decl_body<'pr>(
                             }
                         }
                     }
+                    // `extend self` — the OTHER spelling of the same
+                    // idea, and the one campfire's
+                    // `RestrictedHTTP::PrivateNetworkGuard` uses. Ruby
+                    // makes every instance method a singleton method
+                    // too, so `PrivateNetworkGuard.resolve(host)` reaches
+                    // the `def resolve` below it. Dropped, the module
+                    // emitted its methods as instance-only and every
+                    // dotted call was a NoMethodError — which is what
+                    // left `Opengraph::Metadata.from_url` fetching
+                    // nothing at all.
+                    //
+                    // Same treatment as bare `module_function`: our
+                    // targets call these as `Mod.x(...)`, so only the
+                    // class-method form is needed.
+                    "extend"
+                        if call
+                            .arguments()
+                            .map(|a| {
+                                let args: Vec<_> = a.arguments().iter().collect();
+                                args.len() == 1 && args[0].as_self_node().is_some()
+                            })
+                            .unwrap_or(false) =>
+                    {
+                        module_function_active = true;
+                    }
                     "module_function" => {
                         // Bare `module_function` (no args) — flip the
                         // flag for every subsequent direct `def` in
@@ -1160,25 +1185,37 @@ pub fn ingest_concern_model_items(source: &[u8], file: &str) -> ConcernModelItem
                         }
                     }
                 }
-                match super::model::ingest_model_body_item(&inner, &id, file, Vec::new()) {
-                    Ok(
-                        item @ (ModelBodyItem::Association { .. }
-                        | ModelBodyItem::Scope { .. }
-                        | ModelBodyItem::Validation { .. }
-                        | ModelBodyItem::Callback { .. }),
-                    ) => items.push(item),
-                    // Block-form lifecycle callbacks (`after_initialize
-                    // do … end` — lobsters' Token concern generates its
-                    // unique token there) surface as Unknown items;
-                    // keep the ones the callback lowering understands
-                    // so the concern splice carries them into each
-                    // includer. Other Unknowns stay with the module.
-                    Ok(item @ ModelBodyItem::Unknown { .. }) => {
-                        if unknown_is_block_callback(&item) {
-                            items.push(item);
+                // `_items`, plural: a multi-attribute `validates` (or
+                // its `validates_presence_of` spelling) declares one
+                // per attribute, and a concern splices ALL of them into
+                // every includer — keeping only the first would fault
+                // one field of several.
+                match super::model::ingest_model_body_items(&inner, &id, file, Vec::new()) {
+                    Ok(parsed) => {
+                        for item in parsed {
+                            match item {
+                                ModelBodyItem::Association { .. }
+                                | ModelBodyItem::Scope { .. }
+                                | ModelBodyItem::Validation { .. }
+                                | ModelBodyItem::Callback { .. } => items.push(item),
+                                // Block-form lifecycle callbacks
+                                // (`after_initialize do … end` —
+                                // lobsters' Token concern generates its
+                                // unique token there) surface as Unknown
+                                // items; keep the ones the callback
+                                // lowering understands so the concern
+                                // splice carries them into each
+                                // includer. Other Unknowns stay with the
+                                // module.
+                                ModelBodyItem::Unknown { .. } => {
+                                    if unknown_is_block_callback(&item) {
+                                        items.push(item);
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
                     }
-                    Ok(_) => {}
                     Err(err) => super::survey::record(&err),
                 }
             }
