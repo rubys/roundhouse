@@ -87,8 +87,7 @@ jobs:
           workspaces: wasm
       - name: Install libclang (host bindgen)
         run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y libclang-dev
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libclang-dev
       - name: Cache WASI SDK
         id: wasi-sdk
         uses: actions/cache@v4
@@ -257,8 +256,7 @@ jobs:
           swift-version: '6.1'
       - name: Install libsqlite3-dev (CSQLite systemLibrary)
         run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -q
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -q libsqlite3-dev
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev
       # Unfiltered: all five wired suites (inflector, router,
       # view_helpers, errors, ac_base) run. The last two joined when the
       # class-reflection `< StandardError` emit and the inline
@@ -868,8 +866,7 @@ jobs:
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: Install libsqlite3-dev
         run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y libsqlite3-dev
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
@@ -1029,8 +1026,7 @@ jobs:
       - name: Install libsqlite3-dev (Swift CSQLite systemLibrary)
         if: matrix.target == 'swift'
         run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -q
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -q libsqlite3-dev
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev
       - name: Install .NET (C#)
         if: matrix.target == 'csharp'
         uses: actions/setup-dotnet@v4
@@ -1182,8 +1178,7 @@ jobs:
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: Install libsqlite3-dev
         run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y libsqlite3-dev
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
@@ -1278,8 +1273,7 @@ jobs:
       - name: Install libsqlite3-dev (Swift CSQLite systemLibrary)
         if: matrix.target == 'swift'
         run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -q
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -q libsqlite3-dev
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev
       - name: Install .NET (C#)
         if: matrix.target == 'csharp'
         uses: actions/setup-dotnet@v4
@@ -1357,8 +1351,7 @@ jobs:
           echo "$PWD/spinel-dist" >> $GITHUB_PATH
       - name: Install libsqlite3-dev
         run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y libsqlite3-dev
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libsqlite3-dev
       - uses: actions/setup-node@v5
         with:
           node-version: '20'

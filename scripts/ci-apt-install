@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# `apt-get update` + `apt-get install`, BOUNDED ON THE NETWORK.
+#
+# Usage: scripts/ci-apt-install libsqlite3-dev [more packages...]
+#
+# 49c596a0 bounded the dpkg LOCK (`-o DPkg::Lock::Timeout=120`) after
+# three legs froze for 1h42m. Tonight two more froze, and the lock flag
+# was already on the call that froze: `build-wasm` in run 32209637575
+# printed `Get:5 … noble-security InRelease` at 02:45:53 and nothing
+# more until the 45-minute job timeout killed it. The playwright hang in
+# the run before it stopped at the SAME line. That is a stalled mirror
+# SOCKET, not a held lock, and apt waits on it forever by default —
+# `DPkg::Lock::Timeout` cannot help, because dpkg was never reached.
+#
+# apt's own knobs are the fix, so there is nothing hand-rolled to drift:
+#
+#   Acquire::http::Timeout / https::Timeout  — fail a stalled socket
+#   Acquire::Retries                          — and try another mirror
+#
+# A killed job cancels the WHOLE RUN, which is why this matters beyond
+# the wasted minutes: run 32207123547 reported "cancelled" while
+# campfire's floor and every toolchain in it were green. A run
+# conclusion that says nothing is worse than one that says no.
+set -euo pipefail
+
+if [ "$#" -eq 0 ]; then
+    echo "usage: $0 <package> [package...]" >&2
+    exit 2
+fi
+
+APT_OPTS=(
+    -o DPkg::Lock::Timeout=120
+    -o Acquire::Retries=3
+    -o Acquire::http::Timeout=20
+    -o Acquire::https::Timeout=20
+)
+
+sudo DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" update -q
+sudo DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" install -y -q "$@"
