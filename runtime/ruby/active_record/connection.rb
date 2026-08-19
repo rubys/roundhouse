@@ -308,5 +308,17 @@ module ActiveRecord
     def saved_changes
       @saved_changes || {}
     end
+
+    # The Dirty baseline for a record that came from the DB. Without
+    # it `__track_saved_changes` diffs the first update against a nil
+    # snapshot and reports every column as `[nil, value]` — so
+    # `<col>_previously_was` answered nil for all of them, which is how
+    # campfire's `involvement_previously_was.inquiry.invisible?` found
+    # this. The note above ("baseline-at-hydration is future work") is
+    # what this closes.
+    def __note_hydrated
+      @__last_saved_attributes = attributes
+      nil
+    end
   end
 end

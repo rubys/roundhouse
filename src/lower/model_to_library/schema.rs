@@ -78,6 +78,7 @@ pub(super) fn push_schema_methods(
         if col.name.as_str() != "id" {
             methods.push(synth_column_dirty_pred(owner, col, prev_changed_name(col)));
             methods.push(synth_column_dirty_pred(owner, col, saved_change_name(col)));
+            methods.push(synth_column_prev_was(owner, col));
         }
     }
 
@@ -340,6 +341,7 @@ pub fn shakeable_synthesized_names(table: &Table) -> Vec<Symbol> {
         if col.name.as_str() != "id" {
             names.push(prev_changed_name(col));
             names.push(saved_change_name(col));
+            names.push(prev_was_name(col));
         }
     }
     // Mirrors `synth_update_typed(.., bang: true)`.
@@ -1188,6 +1190,32 @@ fn synth_from_row(owner: &ClassId, table: &Table, fire_after_initialize: bool) -
         ));
     }
 
+    // The ActiveModel::Dirty baseline. A record hydrated from the DB
+    // has just been given every column, and none of that is a CHANGE —
+    // but `__track_saved_changes` diffs against a snapshot that was
+    // still nil, so the first update reported `[nil, value]` for every
+    // column and `<col>_previously_was` answered nil for all of them.
+    // connection.rb's own comment called this out and deferred it
+    // ("baseline-at-hydration is future work"); campfire's
+    // `involvement_previously_was.inquiry.invisible?` is the caller
+    // that needs it, and it needs the value rather than the predicate,
+    // which is why nil showed rather than a wrong bool.
+    //
+    // A hook rather than an assignment here: the snapshot ivar belongs
+    // to the ruby-family reopen, and `from_row` is synthesized for
+    // every target. Base's no-op is what the strict lanes compile,
+    // where the whole Dirty surface is already the empty subset.
+    stmts.push(Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(var_ref(instance.clone())),
+            method: Symbol::from("__note_hydrated"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    ));
+
     // Rails fires after_initialize on find/hydration too; same gate
     // as the synthesized initialize tail.
     if fire_after_initialize {
@@ -1293,6 +1321,20 @@ fn synth_from_stmt(owner: &ClassId, table: &Table, fire_after_initialize: bool) 
             parenthesized: false,
         },
     ));
+    // Same Dirty baseline as `from_row` — `from_stmt` is the other
+    // hydration factory, and a record read through it is just as much
+    // "already saved" as one read through a row.
+    stmts.push(Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(var_ref(instance.clone())),
+            method: Symbol::from("__note_hydrated"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    ));
+
     // Rails fires after_initialize on find/hydration too; same gate
     // as the synthesized initialize tail.
     if fire_after_initialize {
@@ -1367,6 +1409,120 @@ fn prev_changed_name(col: &Column) -> Symbol {
 /// documents the two as the same question.
 fn saved_change_name(col: &Column) -> Symbol {
     Symbol::from(format!("saved_change_to_{}?", col.name.as_str()))
+}
+
+/// `<col>_previously_was` — the VALUE half of the Dirty pair beside it.
+/// The predicates answer WHETHER the last save changed the column;
+/// this answers what it held BEFORE (campfire:
+/// `@membership.involvement_previously_was.inquiry.invisible?`, which
+/// decides whether a room appearing in a sidebar is a new grant or a
+/// visibility change).
+fn prev_was_name(col: &Column) -> Symbol {
+    Symbol::from(format!("{}_previously_was", col.name.as_str()))
+}
+
+/// `def <col>_previously_was; saved_changes[:<col>] ... [0]; end` — the
+/// previous value out of the last save's diff, whose entries are
+/// `[prev, value]` pairs.
+///
+/// Answers nil when the column did not change, which is Rails: the
+/// diff has no entry, and `attribute_previously_was` reads through it
+/// rather than falling back to the current value.
+///
+/// Same `saved_changes` seam as the predicates, so the ruby-family
+/// trees get the real snapshot diff from the connection.rb reopen and
+/// the strict lanes get the honest empty-Hash subset — where this
+/// answers nil for every column, as every Dirty predicate there
+/// already answers false.
+fn synth_column_prev_was(owner: &ClassId, col: &Column) -> MethodDef {
+    let saved_changes = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(self_ref()),
+            method: Symbol::from("saved_changes"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let entry = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(saved_changes),
+            method: Symbol::from("[]"),
+            args: vec![lit_sym(col.name.clone())],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    // Bound to a local before the nil test and the index: the same
+    // precaution `saved_change_to_attribute?` documents — elixir2's
+    // receiver typing does not see through a method-call receiver.
+    let local = Symbol::from("__prev");
+    let bind = Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: crate::expr::LValue::Var { id: crate::ident::VarId(0), name: local.clone() },
+            value: entry,
+        },
+    );
+    let local_ref =
+        || Expr::new(Span::synthetic(), ExprNode::Var { id: crate::ident::VarId(0), name: local.clone() });
+    let is_nil = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(local_ref()),
+            method: Symbol::from("nil?"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let first = Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(local_ref()),
+            method: Symbol::from("[]"),
+            args: vec![Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: crate::expr::Literal::Int { value: 0 } },
+            )],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let body = Expr::new(
+        Span::synthetic(),
+        ExprNode::Seq {
+            exprs: vec![
+                bind,
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::If {
+                        cond: is_nil,
+                        then_branch: Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Lit { value: crate::expr::Literal::Nil },
+                        ),
+                        else_branch: first,
+                    },
+                ),
+            ],
+        },
+    );
+    MethodDef {
+        name: prev_was_name(col),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        signature: Some(fn_sig(vec![], Ty::Untyped)),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    }
 }
 
 /// `def <name>; !saved_changes[:<col>].nil?; end` — the per-attribute

@@ -107,6 +107,47 @@ fn tail_is_inquiry(body: &Expr) -> bool {
 }
 
 fn rewrite(expr: &mut Expr, inquirers: &std::collections::HashSet<String>) {
+    // `<recv>.inquiry.<name>?` — the DIRECT pair, matched BEFORE the
+    // recursive walk folds the `.inquiry` away.
+    //
+    // The `Ty::Str` gate below cannot see this one: campfire writes
+    // `involvement_previously_was.inquiry.invisible?`, and the receiver
+    // is a synthesized Dirty reader whose value comes out of an untyped
+    // saved-changes diff. The `inquirers` set does not cover it either —
+    // that set is for a METHOD whose body ends in `.inquiry`, and here
+    // the call is at the SITE.
+    //
+    // Which makes this the strongest evidence of the three and the only
+    // one the pass was throwing away: an explicit `.inquiry` in the
+    // source says the author meant the inquirer, whatever the receiver
+    // types as. Same reason the doc above gives for collecting
+    // `inquirers` first — the rewrite destroys the evidence — applied
+    // one level in.
+    if let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node {
+        if args.is_empty() {
+            if let Some(label) = method.as_str().strip_suffix('?') {
+                if !label.is_empty() {
+                    if let ExprNode::Send {
+                        recv: Some(inner),
+                        method: inner_method,
+                        args: inner_args,
+                        block: None,
+                        ..
+                    } = &*recv.node
+                    {
+                        if inner_method.as_str() == "inquiry" && inner_args.is_empty() {
+                            let mut inner = inner.clone();
+                            rewrite(&mut inner, inquirers);
+                            let span = expr.span;
+                            *expr = eq_label(span, inner, label);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     expr.node.for_each_child_mut(&mut |c| rewrite(c, inquirers));
 
     let ExprNode::Send { recv: Some(recv), method, args, block: None, .. } = &*expr.node else {
@@ -140,17 +181,28 @@ fn rewrite(expr: &mut Expr, inquirers: &std::collections::HashSet<String>) {
     }
     let recv = recv.clone();
     let span = expr.span;
-    *expr = Expr::new(
+    *expr = eq_label(span, recv, label);
+}
+
+/// `<recv> == "<label>"`, stamped Bool. The one shape both the direct
+/// `.inquiry.<label>?` pair and the typed-receiver predicate fold to,
+/// so the two cannot drift.
+fn eq_label(span: crate::span::Span, recv: Expr, label: &str) -> Expr {
+    let mut out = Expr::new(
         span,
         ExprNode::Send {
             recv: Some(recv),
             method: Symbol::from("=="),
-            args: vec![Expr::new(span, ExprNode::Lit { value: Literal::Str { value: label.to_string() } })],
+            args: vec![Expr::new(
+                span,
+                ExprNode::Lit { value: Literal::Str { value: label.to_string() } },
+            )],
             block: None,
             parenthesized: false,
         },
     );
-    expr.ty = Some(Ty::Bool);
+    out.ty = Some(Ty::Bool);
+    out
 }
 
 /// True when any app class defines `inquiry` itself.

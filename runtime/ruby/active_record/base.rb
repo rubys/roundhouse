@@ -461,6 +461,17 @@ module ActiveRecord
       {}
     end
 
+    # Called by the hydration factories (`from_row` / `from_stmt`) on a
+    # record read from the DB: what it just received is its state as
+    # SAVED, not a change. No-op here for the same reason
+    # `saved_changes` is empty here — the snapshot lives in the
+    # ruby-family connection.rb reopen, and the strict lanes carry the
+    # not-tracked subset where every Dirty answer is already the honest
+    # default.
+    def __note_hydrated
+      nil
+    end
+
     # The argument-taking half of the ActiveModel::Dirty read surface,
     # for call sites that name the attribute at runtime rather than in
     # the method name (`saved_change_to_attribute?(:url)`,

@@ -33,6 +33,7 @@ module ActiveRecord
     # Ruby-family overrides of base.rb's Array-returning fallbacks.
     def self.where: (Hash[Symbol, untyped] conditions) -> Relation
     def self.all: () -> Relation
+    def __note_hydrated: () -> void
     def self.first: () -> untyped
     def update_attribute: (Symbol name, untyped value) -> bool
     # Ruby-family overrides of base.rb's dirty-tracking stubs.

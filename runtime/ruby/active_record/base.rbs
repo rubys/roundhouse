@@ -102,6 +102,7 @@ module ActiveRecord
     # Saved-change tracking (ActiveModel::Dirty subset) — see save.
     def __track_saved_changes: (bool was_new) -> void
     def saved_changes: () -> Hash[Symbol, untyped]
+    def __note_hydrated: () -> void
     def saved_change_to_attribute?: (Symbol name) -> bool
     def saved_change_to_attribute: (Symbol name) -> untyped
     def id_previously_changed?: () -> bool
