@@ -327,6 +327,95 @@ repr in that emitter"); a third option is now visible, teaching the
 classifier that a ternary with two relation arms yields a relation,
 which makes the type precise but produces the same emit error.
 
+### Residue RUNG classification — all 207 lobsters sites, 2026-08-20
+
+P0a classified the residue by param-ness. That is the right axis for
+pricing a splice and the wrong one for choosing an ARCHITECTURE. This
+pass re-cuts the same population by what each site would actually need
+emitted for it, which is the question behind "should the runtime
+Relation be monomorphized per model."
+
+**Method.** `roundhouse --target ruby --allow-unsupported <lobsters>`,
+grep `relation chain stays dynamic`, take each site's `file:line:col`,
+slice the source line from `col` and join continuation lines while
+parens/brackets are unbalanced or the next line opens with `.`. That
+yields the chain expression at its head. Classify by: chain root (a
+`Const`, an implicit self, or a local the file assigns), whether the
+enclosing line is a ternary, and whether any argument group holds
+something other than a literal/symbol/keyword-key after strings are
+blanked. Scratch scripts, not committed; the recipe above is the
+artifact. **207 sites** (the ledger's own count at `16a91223`).
+
+| rung | what it needs emitted | sites | share |
+|---|---|---|---|
+| 1 — zero-hole | a literal statement; only a wider recognizer | 46 | 22% |
+| 2a — holes | per-site function + prepared statement with binds | 131 | 63% |
+| 2b — branch-enumerable | N statements + a runtime flag | 16 | 8% |
+| 3 — accumulated | (heuristic said 14 — it does not survive) | 14 | 7% |
+
+**Rung 3 is empty in lobsters, and that is the finding.** All 14 were
+hand-checked. Every one is a let-bound local or a relation-taking
+method parameter — `hottest = Story.base(@user)…; hottest =
+hottest.filter_tags(…); hottest.order('hotness')` in
+`story_repository.rb`, `def with_tags(base, tag_scopes)` in
+`search.rb`. Substitutable by inlining, not accumulation. A separate
+whole-app scan for self-extending assignment (`x = x.…`) finds 10, of
+which 4 are relation-related and **none is inside a loop**. The shape
+settled decision #3 names as tier 3 — "predicates accumulated in
+loops" — does not occur in this app.
+
+The nearest hard case is a different shape than the plan anticipated: a
+relation crossing an OBJECT boundary in an ivar. `StoriesPaginator`
+takes one from the controller into `@scope`; `Search` assigns one to
+`results`, refines it later (`self.results = self.results.limit(…)
+.offset(…)`), and consumes it in another method. Those need
+specialization across the boundary, or an object.
+
+**The ledger under-counts, and its blind spot is exactly rung 3.**
+`Search#results` is NOT among the 207: `results` is an `attr_accessor`
+on a PORO, and `0433c335` (correctly) stopped seeding the AR query
+surface onto non-AR classes, so the attribute is `Untyped` and the
+chain is invisible. Any number quoted from this pass is a lower bound
+on precisely the sites that would justify per-model relation classes.
+
+**Revised ladder, cheapest first.** ~93% of sites are a FUNCTION —
+with binds, without, or a small set chosen by a flag. Not an object.
+
+1. **Widen `try_build_arel`.** Its base arm knows `all`, `count`,
+   `where`, `find_by`, `exists?`; its chain arm knows `order`, `limit`,
+   `includes`/`preload`/`eager_load`. It does not know `.first` as a
+   terminal, `joins`, a scope reference, `where.not`, or
+   `group(…).count`. That gap — not dynamism — is why sites like
+   `User.where(email: …).first` and `scope :unmerged, -> { where(
+   merged_story_id: nil) }` are in the ledger at all. 22%, no new
+   concepts.
+2. **Per-site function with binds** — tier 2, prepared-statement
+   shaped, the `ROUNDHOUSE_PARAM_BINDS` alignment P0a already named.
+   63%.
+3. **Inline let-bound relation locals; specialize relation-taking
+   helpers per call site.** Converts most of the remaining 7%.
+4. **Per-model relation objects** — serves only the boundary-crossing
+   residue, and possibly nothing once (3) exists.
+
+**Consequence for P0a's recommendation.** It priced per-model
+monomorphization against 50 sites and deferred it to "a strict target
+becoming a driven lane." Both halves need adjusting: the population is
+207, not 50, and the architecture conclusion runs the other way —
+per-model relation classes are the LAST rung, not the alternative to
+contribution-with-holes. Three cheaper rungs stand between the problem
+and them, and rung 1 is nearly free. The allocation measurement below
+is unaffected: it says the dynamic path is ~10% of allocated bytes and
+lane-shared, which is an argument for removing sites by ANY rung, not
+for which rung to build.
+
+**Error bars.** Regex over extracted source, not over the IR. All 14
+rung-3 hand-verified; 8 each sampled from rungs 1 and 2a and correctly
+placed. `holes` slightly overstates — a literal-only argument
+(`Story.hottest(nil, [])`, P0a's own example) reads as a hole and folds
+like rung 1. lobsters only: campfire's 80 are shaped oppositely (P0a
+found it "almost entirely param-less scope chaining"), so its rung-1
+share should be much higher and is unmeasured.
+
 ### P0a — splice pricing, measured 2026-08-13
 
 Measured at roundhouse `9518913c`, lobsters `9e849fd4`, once-campfire `2aa4141`.
