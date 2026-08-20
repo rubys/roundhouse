@@ -115,6 +115,7 @@ impl Analyzer {
             let self_ty = Ty::Class { id: model.name.clone(), args: vec![] };
             let array_of_self =
                 Ty::Array { elem: Box::new(self_ty.clone()) };
+            let relation_of_self = Ty::Relation { of: model.name.clone() };
 
             let mut cls = ClassInfo::default();
             cls.table = Some(model.table.clone());
@@ -173,28 +174,29 @@ impl Analyzer {
             cls.class_methods.insert(Symbol::from("column_names"), Ty::Array { elem: Box::new(Ty::Str) });
             cls.class_methods.insert(Symbol::from("columns_hash"), Ty::Untyped);
             // `Model.unscoped`/`Model.none` return a relation
-            // (`Array<Model>`, the chainable stand-in) so chains through
-            // them stay typed instead of leaking to `untyped`. (The block
-            // form `unscoped { }` returns the block value, which we don't
+            // (`Relation { of: Model }`) so chains through them stay
+            // typed instead of leaking to `untyped`. (The block form
+            // `unscoped { }` returns the block value, which we don't
             // track — the relation type is the better default for the
             // common bare/chained use.) `delete_all`/`update_all` return
             // Int (affected row count).
-            cls.class_methods.insert(Symbol::from("unscoped"), array_of_self.clone());
-            cls.class_methods.insert(Symbol::from("none"), array_of_self.clone());
+            cls.class_methods.insert(Symbol::from("unscoped"), relation_of_self.clone());
+            cls.class_methods.insert(Symbol::from("none"), relation_of_self.clone());
             cls.class_methods.insert(Symbol::from("delete_all"), Ty::Int);
             cls.class_methods.insert(Symbol::from("update_all"), Ty::Int);
 
             // Chainable query-builder methods beyond the catalog set.
-            // Each returns the relation (modeled as `Array<Self>`, the
-            // same chainable stand-in the catalog uses), so a scope or
-            // controller chain types end-to-end rather than leaking to
-            // `untyped` at the first uncatalogued link, and the
-            // `Array<Self>` re-chain in `send.rs` resolves the next step.
+            // Each returns the relation (`Relation { of: Self }`, the
+            // same representation the catalog's Class-context builders
+            // use), so a scope or controller chain types end-to-end
+            // rather than leaking to `untyped` at the first
+            // uncatalogued link, and Relation-receiver dispatch in
+            // `send.rs` resolves the next step.
             // `entry().or_insert` so a catalog entry or named scope still
             // wins. `not`/`missing` are really `WhereChain` methods
             // (`where.not(...)`/`where.missing(...)`); since `where`
-            // already yields the relation, the chain lands on
-            // `Array<Self>` and these resolve there — typing `Model.not`
+            // already yields the relation, the chain lands on the
+            // relation and these resolve there — typing `Model.not`
             // directly is harmless (not real code) and beats `untyped`.
             for builder in [
                 "or", "and", "rewhere", "reorder", "reselect", "regroup",
@@ -205,7 +207,7 @@ impl Analyzer {
             ] {
                 cls.class_methods
                     .entry(Symbol::from(builder))
-                    .or_insert_with(|| array_of_self.clone());
+                    .or_insert_with(|| relation_of_self.clone());
             }
 
             // Relation-terminal methods Rails delegates from the class to

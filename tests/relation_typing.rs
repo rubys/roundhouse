@@ -55,6 +55,7 @@ end
   scope :recent, -> { order(score: :desc).limit(10) }
   scope :top, -> { recent.where("score > 0") }
   scope :titles_only, -> { pluck(:title) }
+  scope :filtered, ->(uid) { uid ? where(user_id: uid) : all }
 
   def self.for_user(user_id)
     where(user_id: user_id)
@@ -79,7 +80,7 @@ end
     @classm = Story.for_user(1)
     @scope_on_scope = Story.top
     @terminal_scope = Story.titles_only
-    @mixed = Story.where(user_id: 1).recent
+    @mixed = Story.filtered(1).recent
   end
 
   def build_probe
@@ -192,15 +193,20 @@ fn scope_rooted_at_sibling_scope_types_as_relation() {
 
 #[test]
 fn relation_typed_scope_delegates_on_array_representation_receiver() {
-    // Mixed-representation chain: `Story.where(...)` starts an
-    // inline chain (Array representation, settled staging decision)
-    // and `.recent` — a scope whose seed carries the Relation
-    // representation — must still delegate, preserving the
-    // RECEIVER's representation: `Array<Story>`, not Var. This is
-    // the Mastodon `Account.with_username(u).with_domain(d)`
-    // regression (CI browser-smoke-ide): the unflipped ternary-body
-    // scope keeps the chain on the Array representation, and the
-    // flipped scope's hop poisoned it to Var → Untyped.
+    // Mixed-representation chain. C1 converged class-side chain
+    // starts (`Story.where(...)`) onto the Relation representation,
+    // so this pins the seam that C1 did NOT close: a scope whose
+    // body the seed classifier can't read (`filtered`'s ternary)
+    // still falls back to `Array<Story>`, and `.recent` — a scope
+    // whose seed carries the Relation representation — must still
+    // delegate on it, preserving the RECEIVER's representation:
+    // `Array<Story>`, not Var. This is exactly the Mastodon
+    // `Account.with_username(u).with_domain(d)` regression (CI
+    // browser-smoke-ide) in its original shape: the unflipped
+    // ternary-body scope keeps the chain on the Array
+    // representation, and the flipped scope's hop poisoned it to
+    // Var → Untyped. Retire this test only when the scope-seed
+    // fallback itself converges.
     let app = analyzed_app();
     assert_eq!(
         ivar_ty(&app, "mixed"),

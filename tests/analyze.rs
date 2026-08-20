@@ -24,25 +24,21 @@ fn analyzed_app() -> roundhouse::App {
 }
 
 #[test]
-fn post_all_has_type_array_of_post() {
+fn post_all_has_type_relation_of_post() {
     let app = analyzed_app();
     let index = app.controllers[0]
         .actions()
         .find(|a| a.name.as_str() == "index")
         .unwrap();
-    // body is `@posts = Post.all`. value's ty should be Array<Post>.
+    // body is `@posts = Post.all`. A class-side chain start is the lazy
+    // relation, same as a scope call — `Relation[Post]`, not the
+    // materialized `Array<Post>` its terminals produce.
     let ExprNode::Assign { value, .. } = &*index.body.node else {
         panic!("expected Assign at top of index body");
     };
     match value.ty.as_ref().expect("analyzer populated value.ty") {
-        Ty::Array { elem } => match &**elem {
-            Ty::Class { id, args } => {
-                assert_eq!(id, &ClassId(Symbol::from("Post")));
-                assert!(args.is_empty());
-            }
-            other => panic!("expected Array<Post>, got Array<{other:?}>"),
-        },
-        other => panic!("expected Array, got {other:?}"),
+        Ty::Relation { of } => assert_eq!(of, &ClassId(Symbol::from("Post"))),
+        other => panic!("expected Relation, got {other:?}"),
     }
 }
 
@@ -159,13 +155,11 @@ fn scope_body_self_is_model_class() {
         .find(|m| m.name.0.as_str() == "Post")
         .unwrap();
     let scope = post.scopes().next().expect("first scope");
-    // Scope body: `limit(10)` — the top-level Send's ty should be Array<Post>.
+    // Scope body: `limit(10)` — a builder on the implicit `self` root,
+    // so the top-level Send's ty is `Relation[Post]`.
     match scope.body.ty.as_ref().expect("scope body ty populated") {
-        Ty::Array { elem } => match &**elem {
-            Ty::Class { id, .. } => assert_eq!(id.0.as_str(), "Post"),
-            other => panic!("expected Array<Post>, got Array<{other:?}>"),
-        },
-        other => panic!("expected Array, got {other:?}"),
+        Ty::Relation { of } => assert_eq!(of.0.as_str(), "Post"),
+        other => panic!("expected Relation, got {other:?}"),
     }
 }
 
@@ -1049,14 +1043,11 @@ fn articles_index_view_ivar_resolves_from_controller_action() {
         !articles_reads.is_empty(),
         "articles/index should read @articles somewhere"
     );
-    // Every @articles read should type as Array<Article>.
+    // Every @articles read should carry the controller's relation type.
     for (_, ty) in &articles_reads {
         match ty {
-            Some(Ty::Array { elem }) => match &**elem {
-                Ty::Class { id, .. } => assert_eq!(id.0.as_str(), "Article"),
-                other => panic!("expected Array<Article>, got Array<{other:?}>"),
-            },
-            other => panic!("expected @articles : Array<Article>, got {other:?}"),
+            Some(Ty::Relation { of }) => assert_eq!(of.0.as_str(), "Article"),
+            other => panic!("expected @articles : Relation[Article], got {other:?}"),
         }
     }
 }
