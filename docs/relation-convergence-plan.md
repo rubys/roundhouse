@@ -124,6 +124,113 @@ classes. R7 items 5/6 (assoc-context revisit, strict-lane story) — decisions, 
 (P0b asset pointer; C1 parity evidence, deleted-shim list, ledger re-counts; C2
 effects-migration list or stop verdict)
 
+### C1 — EXECUTED 2026-08-20 (`b39fb587`, `eb57882f`)
+
+Class-side chain starts converged onto `Ty::Relation`. Two commits, not
+the three the plan sketched — see "the fold needed nothing" below.
+
+**Gate result: emit byte-identical.** 3 fixtures (real-blog, tiny-blog,
+roda-blog) × 13 targets, `--allow-unsupported` output trees compared
+file-by-file: **0 differences** across 3494 files. All 39 strict runs
+exit 0, same as parent. `cargo test --all-targets` 1597 passed / 0
+failed / 86 ignored (parent 1596/0/86; +1 is a new unit test).
+
+**Risk zone 1 (fold parity) needed no work, and that is a finding.**
+The plan told the executor to teach `try_build_arel` and its callers
+about `Relation` receivers BEFORE retyping, on the hypothesis that they
+key off `Array`-typing. They do not: `try_build_arel` matches call-site
+SHAPE (a `Const` receiver that resolves to a model, plus a recognized
+method name) and never reads a `.ty`. So every folded chain folds
+identically after the retype — which the byte-identical emit confirms
+empirically rather than by reading. If a future phase needs the same
+assurance, the cheap version is: retype, then diff the emit.
+
+**Risk zone 2 (new strict-target errors): zero on fixtures, one real
+finding on lobsters.**
+
+| app / target | parent | after C1 |
+|---|---|---|
+| fixtures × 13 targets, strict | 39/39 exit 0 | 39/39 exit 0 |
+| once-campfire (rust/crystal/ruby) | 56 type errors | **54** |
+| lobsters (rust/crystal/ruby) | 47 type errors | 47 |
+| lobsters, ruby only | 0 unsupported | **2** |
+
+The campfire improvement and six of the lobsters lines come from the
+same place: the Relation-receiver delegation arm was strictly narrower
+than the Array-receiver arm beside it (details in `b39fb587`). Lobsters
+holding at 47 is not "no change" — six errors moved from `… on Array {
+elem: Class { Story } }` to `… on Relation { of: Story }`. Same defect,
+new spelling.
+
+**The one regression, and why it is not C1's to fix.** lobsters' ruby
+target gains two `relation_type` unsupported errors, both from a single
+emitted RBS line:
+
+```
+sig/app/models/application_helper.rbs:8:
+  def self.page_numbers_for_pagination:
+    (untyped max, RoundhouseUnsupportedRelation cur) -> …
+```
+
+`cur` is harvested from the only call site, `page_numbers_for_pagination(
+@search.page_count, @search.page)` in `app/views/search/index.html.erb`.
+`Search` is a plain PORO in `app/models` — `include
+ActiveModel::Validations`, no table — with `attr_accessor :results,
+:page, …`. `@search.page` resolves to **kaminari's class-side `page`
+builder**, not to the attr_accessor, because instance dispatch on a
+`Ty::Class` receiver consults `class_methods` BEFORE `instance_methods`
+(`src/analyze/body/send.rs`, the parent-chain walk). That ordering, and
+the AR query surface being seeded onto a table-less PORO at all, both
+predate this plan. Parent mistyped `@search.page` exactly as wrongly —
+as `Array[Search]` — and got away with it only because an `Array` is
+renderable and a `Relation` is not. **This is the dual representation
+having hidden a real gap, which is the case the plan said to report
+rather than paper over.** Options, all Sam's:
+
+1. Fix the dispatch order (instance methods ahead of class methods on
+   an instance receiver). Correct, and the widest blast radius here.
+2. Don't seed the AR class-side query surface onto a model whose table
+   is absent from the schema. Narrow and principled; changes what a
+   table-less `app/models` PORO resolves.
+3. Accept the two errors on a target where the mistyping was already
+   present, and let the eventual dispatch fix collect them.
+
+**Ledger counts moved, for a reason the plan didn't anticipate.** The
+plan expected the blog fixtures to stay at 0 and only lobsters to
+widen. Measured: real-blog 0 → 1, tiny-blog 0 → 3, roda-blog 0 → 1,
+lobsters 50 → 50, once-campfire 29 → 29. The five new fixture sites are
+`Post.all`, `Post.limit(…)`, `Article.order(…)` and friends — chains
+that **do** fold. `apply_relation_residue_ledger` runs inside
+`apply_post_analyze_lowerings`, but `rewrite_arel_in_expr` runs later,
+inside `controller_to_library` / `model_to_library`. So the ledger has
+always read a PRE-fold tree; while only scope-rooted chains were
+Relation-typed this was invisible, because `try_build_arel` doesn't
+recognize a scope root anyway. Now that inline chains are
+Relation-typed too, the ledger counts sites that specialize seconds
+later. The count means "Relation-typed chain heads", not "chains that
+stayed dynamic", and the lobsters/campfire figures inherit that caveat.
+Fixing it means asking `try_build_arel` (the pass itself, not a second
+copy of its rule) whether a head would fold — deliberately NOT bundled
+into C1, since it moves a number the plan uses as a decision input.
+
+**What C1 did not converge.** The Array representation is still
+produced by two sources, so both delegation shims and `array_method`'s
+relation arms stay live and are NOT deleted:
+
+1. `scope_return_seed`'s fallback — a scope body the classifier can't
+   read (block hop, cross-model root, ternary) still seeds
+   `Array[Self]`.
+2. **Every `has_many` / HABTM read.** `association_member_ty` returns
+   `Array<Target>`; `story.comments` and `story.comments.where(…)` are
+   both Array-typed today.
+
+(2) is worth flagging against the plan's own text: "Why this work"
+lists chains starting at an assoc as already `Relation`-typed. They are
+not, and never were. Converging them is the natural C2-or-later step
+and is a bigger decision than it looks — every emitter routes a
+reachable `Relation` to an Error, and blog views iterate
+`article.comments` directly. Measure before flipping.
+
 ### P0a — splice pricing, measured 2026-08-13
 
 Measured at roundhouse `9518913c`, lobsters `9e849fd4`, once-campfire `2aa4141`.
