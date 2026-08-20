@@ -1,0 +1,277 @@
+#!/usr/bin/env ruby
+# scripts/campfire-suite-summary — turn a scripts/campfire-suite run into
+# the machine-readable report the published page is rendered from.
+#
+# The campfire twin of the JSON half of scripts/lobsters-specs. That
+# script runs the suite and writes its own summary.json because it is
+# Ruby all the way down; campfire-suite is bash, so the clustering lives
+# here and `campfire-suite --json` calls it.
+#
+# SEPARATE SCRIPT, NOT INLINE, for one reason beyond tidiness: triage
+# iterates. Editing bench/campfire/suite-causes.json and re-running this
+# against a SAVED tally re-clusters 240 tests in a second, where re-running
+# the suite costs a cargo build and four minutes. The tally is the run;
+# this is a pure function of it.
+#
+# WHAT A "FAILURE" IS HERE. campfire's suite is Minitest run by the
+# emitted autorun shim, which reports per-test `FAIL <Class>#<test>: <msg>`
+# lines — but only for files that LOAD. A file that dies at require time
+# contributes its whole test count with no per-test message at all, and
+# those are exactly the interesting ones. So the unit is an UNPASSED TEST
+# (`total - passed` per file), attributed either to its own message or,
+# for an aborted file, to the file's load error carrying the weight of
+# every test that never ran. The cause counts sum to the unpassed total;
+# they are not a count of FAIL lines.
+#
+# Usage:
+#   scripts/campfire-suite-summary --tally FILE [options]
+#
+#   --tally FILE      the `STATUS|file|passed|total|first-error` table
+#                     (required — it is the run)
+#   --fail-log FILE   the `file|Class#test|msg` per-test failures. Without
+#                     it every unpassed test in a file is attributed to
+#                     that file's first error, which over-credits the
+#                     first wall; the JSON records which was used.
+#   --emit-log FILE   the transpile's stderr, for the diagnostic counts
+#   --app DIR         the campfire checkout, for its SHA
+#   --campfire-sha S  state the SHA directly (CI pins it and never clones
+#                     a git tree — the tarball has no .git)
+#   --stubs FILE      the spliced ledger (default
+#                     scripts/campfire-walk-stubs.rb)
+#   --no-stubs        the run spliced nothing
+#   --out PATH        where to write (default build/campfire-suite/summary.json)
+
+require "json"
+require "time"
+require "open3"
+
+ROOT = File.expand_path("..", __dir__)
+CAUSES_FILE = File.join(ROOT, "bench", "campfire", "suite-causes.json")
+
+opts = {
+  tally: nil, fail_log: nil, emit_log: nil, app: nil, sha: nil,
+  stubs: File.join(ROOT, "scripts", "campfire-walk-stubs.rb"),
+  out: File.join(ROOT, "build", "campfire-suite", "summary.json"),
+}
+args = ARGV.dup
+until args.empty?
+  case (a = args.shift)
+  when "--tally"        then opts[:tally] = args.shift
+  when "--fail-log"     then opts[:fail_log] = args.shift
+  when "--emit-log"     then opts[:emit_log] = args.shift
+  when "--app"          then opts[:app] = args.shift
+  when "--campfire-sha" then opts[:sha] = args.shift
+  when "--stubs"        then opts[:stubs] = args.shift
+  when "--no-stubs"     then opts[:stubs] = nil
+  when "--out"          then opts[:out] = args.shift
+  when "-h", "--help"
+    puts File.readlines(__FILE__).drop(1).take_while { |l| l.start_with?("#") }.map { |l| l.sub(/^# ?/, "") }
+    exit 0
+  else abort "campfire-suite-summary: unknown argument #{a}"
+  end
+end
+abort "campfire-suite-summary: --tally is required" unless opts[:tally]
+abort "campfire-suite-summary: no tally at #{opts[:tally]}" unless File.exist?(opts[:tally])
+
+def git(dir, *a)
+  out, _, st = Open3.capture3("git", "-C", dir, *a)
+  st.success? ? out.strip : nil
+end
+
+# ── The run ──────────────────────────────────────────────────────────
+by_file = File.readlines(opts[:tally]).filter_map do |line|
+  line = line.chomp
+  next if line.empty?
+  status, file, passed, total, why = line.split("|", 5)
+  { "file" => file.to_s, "status" => status.to_s.downcase,
+    "tests" => total.to_i, "passed" => passed.to_i,
+    "failed" => total.to_i - passed.to_i,
+    # A file that failed with nothing passing and no per-test line ran
+    # nothing at all — see the header. Marked here rather than inferred
+    # by the renderer, which should not have to re-derive it.
+    "first_error" => why.to_s.strip }
+end
+abort "campfire-suite-summary: tally at #{opts[:tally]} has no rows" if by_file.empty?
+
+# ── Per-test failures ────────────────────────────────────────────────
+fails_by_file = Hash.new { |h, k| h[k] = [] }
+# Whether the LOG was kept, not whether it had lines: an all-green run
+# has no failures to list, and reporting that as "no per-test
+# attribution" would raise the page's alarm on the best possible result.
+have_fail_log = !!(opts[:fail_log] && File.exist?(opts[:fail_log]))
+if have_fail_log
+  File.readlines(opts[:fail_log]).each do |line|
+    line = line.chomp
+    next if line.empty?
+    file, rest = line.split("|", 2)
+    test, msg = rest.to_s.split(": ", 2)
+    fails_by_file[file.to_s] << { "test" => test.to_s, "msg" => msg.to_s.strip }
+  end
+end
+
+# One record per UNPASSED test. A file whose per-test lines do not cover
+# its unpassed count gets one record for the shortfall, carrying that
+# weight and the file's first error — which for an aborted file is the
+# load error and for a truncated one is the first wall.
+records = []
+by_file.each do |f|
+  unpassed = f["failed"]
+  next if unpassed <= 0
+  listed = fails_by_file[f["file"]]
+  listed.first(unpassed).each do |t|
+    records << { "file" => f["file"], "test" => t["test"], "msg" => t["msg"], "weight" => 1 }
+  end
+  short = unpassed - [listed.size, unpassed].min
+  next if short <= 0
+  f["aborted"] = listed.empty?
+  records << { "file" => f["file"],
+               "test" => listed.empty? ? "(file did not run)" : "(#{short} more)",
+               "msg" => f["first_error"], "weight" => short }
+end
+
+# ── Cluster into named causes ────────────────────────────────────────
+rules = File.exist?(CAUSES_FILE) ? JSON.parse(File.read(CAUSES_FILE))["causes"] : []
+buckets = Hash.new { |h, k| h[k] = [] }
+unclassified = []
+records.each do |r|
+  rule = rules.find { |x| x["match"] && r["msg"] =~ Regexp.new(x["match"]) }
+  (rule ? buckets[rule["slug"]] : unclassified) << r
+end
+
+weigh = ->(rs) { rs.sum { |r| r["weight"] } }
+unpassed_total = weigh.(records)
+sample = lambda do |rs, n|
+  rs.first(n).map do |r|
+    { "example" => "#{r["file"]} · #{r["test"]}",
+      "error" => r["msg"].to_s[0, 200] }
+  end
+end
+
+causes = rules.map do |x|
+  hits = buckets[x["slug"]]
+  { "slug" => x["slug"], "title" => x["title"], "owner" => x["owner"],
+    "failures" => weigh.(hits),
+    "share" => unpassed_total.zero? ? 0.0 : (weigh.(hits).to_f / unpassed_total).round(4),
+    "note" => x["note"], "stale_rule" => hits.empty?,
+    "examples" => sample.(hits, 5) }
+end.sort_by { |c| -c["failures"] }
+
+# Untriaged is a first-class todo, not a rounding error: its size is how
+# much of the failure surface nobody has looked at yet.
+if unclassified.any?
+  causes << {
+    "slug" => "unclassified", "title" => "Not yet triaged", "owner" => "unknown",
+    "failures" => weigh.(unclassified),
+    "share" => (weigh.(unclassified).to_f / unpassed_total).round(4),
+    "note" => "No rule in bench/campfire/suite-causes.json matches these. Triage, then add a rule.",
+    "stale_rule" => false,
+    "examples" => sample.(unclassified, 12),
+  }
+end
+
+# ── Emit diagnostics ─────────────────────────────────────────────────
+emit = {}
+if opts[:emit_log] && File.exist?(opts[:emit_log])
+  log = File.read(opts[:emit_log])
+  diags = log.scan(/\b(error|warning)\[([a-z_]+)\]/)
+  emit["errors"] = diags.count { |k, _| k == "error" }
+  emit["warnings"] = diags.count { |k, _| k == "warning" }
+  emit["by_kind"] = diags.group_by { |_, k| k }.transform_values(&:size)
+                         .sort_by { |_, n| -n }.to_h
+  emit["files"] = log[/wrote (\d+) files/, 1]&.to_i
+end
+
+# ── The stub ledger ──────────────────────────────────────────────────
+# Every entry is something the emit could not do for itself, spliced in
+# before the count was taken. A pass rate propped up by the harness is
+# not a pass rate about the emit, so the page lists them.
+stubs = { "spliced" => !opts[:stubs].nil? }
+if opts[:stubs] && File.exist?(opts[:stubs])
+  stubs["file"] = opts[:stubs].sub("#{ROOT}/", "")
+  blocks = []
+  current = nil
+  File.readlines(opts[:stubs]).each do |line|
+    if line =~ /^# GAP\b/
+      blocks << current if current
+      current = [line.sub(/^#\s?/, "").chomp]
+    elsif current && line.start_with?("#")
+      current << line.sub(/^#\s?/, "").chomp
+    elsif current
+      blocks << current
+      current = nil
+    end
+  end
+  blocks << current if current
+  stubs["entries"] = blocks.map do |b|
+    text = b.join(" ").gsub(/\s+/, " ").strip
+    why = text.sub(/\AGAP\b/, "").strip
+    # Entries open in several shapes — "GAP: x", "GAP ×2, both …: x",
+    # "GAP, NEW: x". The qualifier before the colon is bookkeeping; what
+    # names the gap comes after it, so the split is on the first colon
+    # when there is a plausible qualifier ahead of it.
+    lead, rest = why.split(":", 2)
+    src = (rest && lead.to_s.length <= 160) ? rest.strip : why.sub(/\A[\s,:—-]+/, "")
+    src = src.sub(/\A\*\s*/, "")  # a multi-gap block opens with a bullet
+    # A clause that ends in a sentence break is a whole name; anything
+    # longer is cut at a word and marked as cut.
+    head = src[/\A.{0,110}?(?=\. |\z)/]
+    if head.nil?
+      cut = src[0, 110]
+      head = "#{cut[0, cut.rindex(" ") || 110].rstrip}…"
+    end
+    { "what" => head.strip, "why" => why }
+  end
+  stubs["count"] = stubs["entries"].size
+end
+
+# ── Provenance ───────────────────────────────────────────────────────
+campfire = { "repo" => "basecamp/once-campfire", "pinned" => true }
+campfire["path"] = opts[:app] if opts[:app]
+campfire["sha"] = opts[:sha] || (opts[:app] && git(opts[:app], "rev-parse", "HEAD"))
+rh = {
+  "sha" => git(ROOT, "rev-parse", "HEAD"),
+  "dirty" => !git(ROOT, "status", "--porcelain", "--untracked-files=no").to_s.empty?,
+}
+
+files_green = by_file.count { |f| f["status"] == "pass" }
+out = {
+  "generated_at" => Time.now.utc.iso8601,
+  "campfire" => campfire,
+  "roundhouse" => rh,
+  "ruby" => { "version" => RUBY_VERSION },
+  "emit" => emit,
+  "stubs" => stubs,
+  "attribution" => {
+    "per_test" => have_fail_log,
+    "note" => !have_fail_log ?
+      "No --fail-log for this run: every unpassed test is attributed to its file's first error, " \
+      "which over-credits the first wall in each file." :
+      "Each unpassed test carries its own message; a file that never ran contributes its whole " \
+      "count against its load error.",
+  },
+  "tests" => {
+    "total" => by_file.sum { |f| f["tests"] },
+    "passed" => by_file.sum { |f| f["passed"] },
+    "failed" => unpassed_total,
+  },
+  "files" => {
+    "total" => by_file.size,
+    "green" => files_green,
+    "aborted" => by_file.count { |f| f["aborted"] },
+  },
+  "scope" => {
+    "note" => "Every test file campfire's own suite declares, read from the emitted Makefile's " \
+              "SPINEL_TESTS rather than restated here — a `find test -name '*_test.rb'` would " \
+              "also sweep in the scaffold's own tests, which are not campfire's.",
+  },
+  "causes" => causes,
+  "by_file" => by_file.sort_by { |f| [-f["failed"], f["file"]] },
+}
+
+require "fileutils"
+FileUtils.mkdir_p(File.dirname(opts[:out]))
+File.write(opts[:out], JSON.pretty_generate(out))
+warn "campfire-suite-summary: wrote #{opts[:out]}"
+warn "  #{out["tests"]["passed"]}/#{out["tests"]["total"]} tests · " \
+     "#{files_green}/#{by_file.size} files green · #{unpassed_total} unpassed across " \
+     "#{causes.count { |c| c["failures"] > 0 }} cause(s)"

@@ -244,7 +244,21 @@ Deliberately **blocking**, not advisory — its comment in ci.yml says
 why: the input is pinned, so every movement in the number belongs to
 a roundhouse commit. (Lobsters conformance is the opposite call:
 `scripts/lobsters-specs` deliberately tracks upstream HEAD, so it
-runs on the bench box, off CI.) The same principle pins every
+runs on the bench box, off CI.)
+
+Both lanes **publish a worklist**, not just a floor.
+`scripts/campfire-suite --json` writes a `summary.json` — provenance,
+per-file tally, spliced-stub ledger, and the failures clustered into
+named causes by `bench/campfire/suite-causes.json` — which
+`scripts/campfire-suite-report` renders to
+`/bench/campfire-suite/`. build-site consumes that artifact from the
+same run WITHOUT gating on the job's conclusion: a run that trips the
+floor is precisely the run whose page someone needs to read. The
+lobsters twin (`scripts/lobsters-spec-report` →
+`/bench/lobsters-specs/`) keeps the same contract over data fetched
+from the bench box. Re-running either report against a saved tally is
+how cause rules are iterated — the clustering is a pure function of
+the run, so triage costs a second rather than a suite run. The same principle pins every
 upstream app CI consumes — `MASTODON_SHA`, `RUBY_BENCH_SHA`,
 `CAMPFIRE_SHA` in ci.yml's env — so published metrics and demos move
 only when a commit moves them.

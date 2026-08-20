@@ -737,8 +737,18 @@ jobs:
           curl -fsSL "https://codeload.github.com/basecamp/once-campfire/tar.gz/${CAMPFIRE_SHA}" -o /tmp/campfire.tar.gz
           mkdir -p /tmp/campfire
           tar -xzf /tmp/campfire.tar.gz -C /tmp/campfire --strip-components=1
+      # --json is what the published page is rendered from; --fail-log is
+      # what makes its ranking honest. Without the fail log every unpassed
+      # test in a file is charged to that file's FIRST error, which reads
+      # as one wall blocking twelve tests when only three of them ever
+      # reach it (the trap dfa42be3 fixed for the terminal tally).
       - name: Run campfire's suite against the emit
-        run: scripts/campfire-suite --tally /tmp/campfire-tally.txt /tmp/campfire
+        run: |
+          scripts/campfire-suite \
+            --tally /tmp/campfire-tally.txt \
+            --fail-log /tmp/campfire-failures.txt \
+            --json /tmp/campfire-suite/summary.json \
+            /tmp/campfire
       # The harness reports a number and never gates on one (by design —
       # see its header), so the floor lives here. `>=`, so progress is
       # never a failure; exceeding it emits a notice asking for the bump,
@@ -790,6 +800,20 @@ jobs:
         with:
           name: campfire-conformance-tally
           path: /tmp/campfire-tally.txt
+          if-no-files-found: warn
+      # The site job's input. `always()` for the same reason the tally is
+      # uploaded that way, and it matters more here: a run that trips the
+      # floor is precisely the run whose published worklist someone needs
+      # to read. build-site consumes this without gating on this job's
+      # conclusion (see its `if:`), so a red floor still publishes the
+      # page that explains itself — the same "deliberately ungated on
+      # content" contract the lobsters conformance page keeps.
+      - name: Upload the conformance summary
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: campfire-conformance-summary
+          path: /tmp/campfire-suite/summary.json
           if-no-files-found: warn
 
   toolchain-elixir:
@@ -1395,7 +1419,16 @@ jobs:
   # rebuilding the site.
   # -------------------------------------------------------------------
   build-site:
-    needs: [generate-fixture, build-wasm]
+    # campfire-conformance is here for ORDERING ONLY — its summary.json is
+    # this job's input. The `if:` deliberately does not require it to have
+    # SUCCEEDED: that job is blocking (pinned input, so a red floor is a
+    # real regression and must fail the run), but the page it feeds is the
+    # thing that says WHAT regressed, and suppressing the page on the run
+    # where it is most useful would be exactly backwards. A missing
+    # artifact degrades to a skipped render and a warning, not a broken
+    # site build.
+    needs: [generate-fixture, build-wasm, campfire-conformance]
+    if: ${{ !cancelled() && needs.generate-fixture.result == 'success' && needs.build-wasm.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1753,6 +1786,33 @@ jobs:
       - name: Render lobsters conformance page
         if: steps.fetch-lobsters-specs.outputs.specs_data == 'present'
         run: scripts/lobsters-spec-report _site/bench/lobsters-specs _site/bench/lobsters-specs/index.html
+
+      # Campfire conformance — ONCE Campfire's own Minitest suite run
+      # against an emit of the pinned CAMPFIRE_SHA, by the
+      # campfire-conformance job in THIS run. Unlike its lobsters sibling
+      # the data is not fetched from a bench box: the input is pinned, so
+      # the suite runs in CI and the page published beside this commit
+      # describes this commit.
+      #
+      # `continue-on-error`, because the artifact is absent whenever that
+      # job died before writing it — which must degrade to "no page", not
+      # "no site".
+      - name: Fetch campfire conformance data
+        id: fetch-campfire-suite
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: campfire-conformance-summary
+          path: _site/bench/campfire-suite
+      - name: Render campfire conformance page
+        run: |
+          if [ -f _site/bench/campfire-suite/summary.json ]; then
+            scripts/campfire-suite-report _site/bench/campfire-suite _site/bench/campfire-suite/index.html
+          else
+            echo "::warning::campfire conformance summary unavailable; skipping conformance page render"
+            rm -rf _site/bench/campfire-suite
+            rmdir _site/bench 2>/dev/null || true
+          fi
 
       # The per-target archives, for the e2e-<target> jobs to download and
       # boot — the exact bytes published to rubys.github.io/roundhouse.

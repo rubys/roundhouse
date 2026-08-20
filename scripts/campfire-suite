@@ -38,6 +38,10 @@
 #                it credits that one wall with every unpassed test in the file,
 #                and `messages_controller_test` reads as 12 tests behind
 #                `fresh_when` when only 3 of them ever call it. Rank from this.
+#   --json FILE  Write the machine-readable summary the published page is
+#                rendered from (scripts/campfire-suite-summary, then
+#                scripts/campfire-suite-report). Implies --tally and
+#                --fail-log; both go to temp files unless also asked for.
 #
 # Exit status is 0 when the run completes, whatever the tally — this
 # reports a number, it does not gate on one. A CI rung that pins a floor
@@ -57,6 +61,9 @@ REUSE=""
 FILTER=""
 TALLY=""
 FAIL_LOG=""
+JSON=""
+TMP_TALLY=""
+TMP_FAIL=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -67,11 +74,24 @@ while [[ $# -gt 0 ]]; do
         --filter)    FILTER="$2"; shift 2 ;;
         --tally)     TALLY="$2"; shift 2 ;;
         --fail-log)  FAIL_LOG="$2"; shift 2 ;;
+        --json)      JSON="$2"; shift 2 ;;
         -h|--help)   sed -n '2,/^$/p' "$0" | sed 's/^# \?//'; exit 0 ;;
         -*)          echo "unknown flag: $1" >&2; exit 2 ;;
         *)           APP="$1"; shift ;;
     esac
 done
+
+# The summary is a pure function of the tally and the fail-log, so --json
+# just guarantees both exist. Asking for them explicitly as well keeps
+# them; otherwise they are scratch.
+if [[ -n "$JSON" ]]; then
+    if [[ -z "$TALLY" ]]; then
+        TALLY="$(mktemp -t campfire-tally.XXXXXX)"; TMP_TALLY="$TALLY"
+    fi
+    if [[ -z "$FAIL_LOG" ]]; then
+        FAIL_LOG="$(mktemp -t campfire-faillog.XXXXXX)"; TMP_FAIL="$FAIL_LOG"
+    fi
+fi
 
 command -v sqlite3 >/dev/null || { echo "campfire-suite: needs the sqlite3 CLI" >&2; exit 2; }
 
@@ -87,6 +107,8 @@ fi
 
 cleanup() {
     local code=$?
+    if [[ -n "$TMP_TALLY" ]]; then rm -f "$TMP_TALLY"; fi
+    if [[ -n "$TMP_FAIL" ]]; then rm -f "$TMP_FAIL"; fi
     if (( KEEP )); then
         echo ""
         echo "emit retained at $OUT"
@@ -216,6 +238,20 @@ fi
 if [[ -n "$FAIL_LOG" ]]; then
     printf '%s' "$fail_lines" > "$FAIL_LOG"
     echo "per-test failures written to $FAIL_LOG"
+fi
+
+if [[ -n "$JSON" ]]; then
+    # The SHA, not the checkout: CI unpacks a tarball, which has no .git.
+    # $CAMPFIRE_SHA is what pinned it, so it is the authority when set.
+    summary_args=(--tally "$TALLY" --fail-log "$FAIL_LOG" --out "$JSON")
+    if [[ -f "$OUT.log" ]]; then summary_args+=(--emit-log "$OUT.log"); fi
+    if [[ -n "${CAMPFIRE_SHA:-}" ]]; then
+        summary_args+=(--campfire-sha "$CAMPFIRE_SHA")
+    else
+        summary_args+=(--app "$APP")
+    fi
+    if (( ! STUBS )); then summary_args+=(--no-stubs); fi
+    ruby "$REPO_ROOT/scripts/campfire-suite-summary" "${summary_args[@]}"
 fi
 
 step "$tests_pass of $tests_total tests pass ($pass of $((pass + fail)) files green)"

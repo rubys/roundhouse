@@ -1,0 +1,170 @@
+{
+  "_comment": [
+    "Curated root causes for scripts/campfire-suite. Unpassed tests are clustered",
+    "mechanically by failure message; this file is what turns a cluster into a",
+    "named todo with an owner. Rules are tried in order; FIRST MATCH WINS, so the",
+    "specific ones sit above the general ones.",
+    "",
+    "The unit is an UNPASSED TEST, not a FAIL line: a file that dies at load",
+    "contributes its whole count against its load error. See the header of",
+    "scripts/campfire-suite-summary.",
+    "",
+    "Counts churn — 130 unpassed is a shadow. Causes are the worklist, so they",
+    "carry stable slugs you can still discuss forty commits later.",
+    "",
+    "owner:",
+    "  compiler — roundhouse modeling debt. Ours to fix.",
+    "  app      — a campfire idiom that could change upstream. Only ever a",
+    "             plain-Rails change that stands on its own merits under stock",
+    "             Rails; the port never asks for app-side divergence.",
+    "  gem      — a gem whose surface we shim, or one deliberately out of scope.",
+    "  spinel   — upstream spinel.",
+    "  harness  — this harness's own gap, not the emit's.",
+    "  unknown  — the cluster is real, its root cause is not yet known.",
+    "",
+    "THE TAIL IS FLAT. Nothing here blocks more than a handful of tests, and the",
+    "clusters are shapes of wall rather than single fixes — following ONE test",
+    "down its chain has repeatedly beaten ranking the clusters, because a fix",
+    "usually exposes the next wall rather than greening a file. Read the ranking",
+    "as a map of what KINDS of thing are missing, not as a queue.",
+    "",
+    "A rule matching zero tests is reported too: the cause may be cleared, or its",
+    "message may have moved."
+  ],
+
+  "causes": [
+    {
+      "slug": "test-harness-surface",
+      "title": "The emitted test base class is missing Rails' test surface",
+      "owner": "compiler",
+      "match": "undefined method '(file_fixture|fixture_file_upload|assert[a-z_]*|response|parsed_body)' for an instance of \\S*Test\\b",
+      "note": "Not the app's code failing — the scaffolding around it. `file_fixture` and `fixture_file_upload` read from test/fixtures/files, `response` is the integration-test response object, and the bare `assert` family comes from Minitest itself. Every one of these is a method the emitted TestBase would have to answer before the assertion behind it is even reached, so this cluster hides an unknown number of further walls."
+    },
+    {
+      "slug": "fixture-accessors",
+      "title": "A fixture accessor the emitted loader never defined",
+      "owner": "compiler",
+      "match": "undefined method '\\w+' for an instance of \\S*Test\\b",
+      "note": "`users(:david)`-style accessors are generated per fixture file. Where one is missing the test cannot name its own data, so nothing behind it has been seen. Distinct from the test-harness surface above only in that the name comes from the app's fixtures rather than from Rails."
+    },
+    {
+      "slug": "sti-becomes",
+      "title": "`becomes!` — recasting a record to an STI sibling",
+      "owner": "compiler",
+      "match": "undefined method 'becomes!' for an instance of",
+      "note": "campfire opens and closes rooms by recasting: `room.becomes!(Rooms::Open)` rewrites the type column and returns the record as the sibling class. The STI read and write halves both landed (7aad7ba7, 7245435a); the recast is the half that did not."
+    },
+    {
+      "slug": "params-object-representation",
+      "title": "A params object read as a Hash",
+      "owner": "compiler",
+      "match": "(for an instance of \\w*Params\\b|undefined method 'to_attrs' for an instance of Hash|method 'require' called for an instance of Hash)",
+      "note": "The emit gives each permitted set its own type (`RoomParams`), and the app then indexes it, deletes from it, or hands it somewhere expecting a Hash. Both directions are the same modeling question — what a params object IS — and it is the one the indifferent-access design addresses."
+    },
+    {
+      "slug": "relation-vs-array",
+      "title": "A relation answering as an Array, or an Array asked for relation methods",
+      "owner": "compiler",
+      "match": "for an instance of (ActiveRecord::Relation|Array)\\b",
+      "note": "Both directions of one gap: a query lowered to an Array is then asked for `find_by`/`new`/a dynamic finder, or a Relation is asked for an Enumerable method the shim does not carry. `Model.where(...)` is a relation, not an array of records (eb57882f) — this is the residue of that same distinction."
+    },
+    {
+      "slug": "globalid-sgid",
+      "title": "Global IDs — minting and dereferencing an sgid",
+      "owner": "compiler",
+      "match": "(attachable_sgid|to_gid_param|uninitialized constant ActionText::Fragment)",
+      "note": "`Message#mentionees` dereferences an sgid out of rich text (`body.body.attachables.grep(User)`), so the ledger line in docs/pipeline/runtime.md that says nothing here dereferences one is now false. Needs mint plus resolve plus a name-keyed class dispatch — a body of work of its own, not a method."
+    },
+    {
+      "slug": "rails-module-facade",
+      "title": "`Rails.configuration` and the routes object",
+      "owner": "compiler",
+      "match": "(undefined method 'configuration' for module Rails|uninitialized constant Rails::Application::Routes)",
+      "note": "The emitted `Rails` module answers a small surface; the app reaches past it for configuration and for the application's route set (to build URLs outside a request). Each addition here is a decision about what part of Rails' global state the port models at all, rather than a missing method."
+    },
+    {
+      "slug": "turbo-streams-channel",
+      "title": "`Turbo::StreamsChannel` as a constant the app can name",
+      "owner": "compiler",
+      "match": "uninitialized constant Turbo::StreamsChannel",
+      "note": "Broadcasts lower to `Broadcasts.record`, which is the portable shape; the app also names the channel class directly to broadcast or to assert. The constant has no emitted counterpart, so those tests stop before reaching the broadcast at all."
+    },
+    {
+      "slug": "broadcast-assertions",
+      "title": "Broadcast assertions over a queue that is a log",
+      "owner": "compiler",
+      "match": "(assert(_turbo_stream)?_broadcasts failed|undefined method 'broadcast_append_to')",
+      "note": "The emit records broadcasts into `Broadcasts.log` rather than delivering them through a cable adapter, so the app's own `assert_broadcasts` counts a different thing than it was written against. Ties into the cable work — the dispatch half, not the streaming half."
+    },
+    {
+      "slug": "view-helper-in-helper-module",
+      "title": "A view helper called from a helper MODULE",
+      "owner": "compiler",
+      "match": "undefined method '(button_to|form_with|link_to|mail_to|image_tag|tag|content_tag)' for module",
+      "note": "Inside a template these expand at transpile time. Inside a helper module the expansion has no template to splice into, so the call survives to runtime and lands on a bare module. Already the shape behind several closed findings (`button_to` with a block, `link_to` with a block); the remaining ones are the same wall a method away from the template."
+    },
+    {
+      "slug": "belongs-to-autosave",
+      "title": "`belongs_to` autosave — an unsaved target saved with its owner",
+      "owner": "compiler",
+      "match": "Validation failed: Creator must exist",
+      "note": "Assigning an unsaved record and saving the owner saves the target first in Rails. The emit reads `value.id` (0) and the presence validation fails. Carries a stub entry in scripts/campfire-walk-stubs.rb, so the count here is what the stub does NOT cover."
+    },
+    {
+      "slug": "active-storage-attachments",
+      "title": "Active Storage — the attachment scopes and the bytes",
+      "owner": "compiler",
+      "match": "(with_attached_attachment|ActiveStorage::)",
+      "note": "The metadata half answers (205c3031); the macro-generated preload scopes and the bytes do not. Avatars and logos reach it through the fixture-file helpers above, so clearing those will move tests INTO this cause rather than out of it."
+    },
+    {
+      "slug": "conditional-get",
+      "title": "`fresh_when` / `stale?` — conditional GET",
+      "owner": "compiler",
+      "match": "undefined method '(fresh_when|stale\\?)'",
+      "note": "ETag/Last-Modified handling on the controller. Small in surface and shared by every target once the response object carries the headers; the tests behind it assert 304s, so they are only reachable after it lands."
+    },
+    {
+      "slug": "route-helper-takes-a-record",
+      "title": "A route helper interpolated a record instead of its id",
+      "owner": "compiler",
+      "match": "expected redirect to \"[^\"]*\", got \"[^\"]*#<",
+      "note": "`room_path(room)` rendered `#<Room:0x…>` into the path. Route helpers project to `.id` only where the SEGMENT holds one (8b4258e5); these are the sites that projection does not reach yet. Visible only as a wrong string, which is why they surface as redirect assertions rather than exceptions."
+    },
+    {
+      "slug": "out-of-scope-gems",
+      "title": "A gem the emit does not carry",
+      "owner": "gem",
+      "match": "uninitialized constant (\\S*RQRCode|\\S*WebPush\\b|\\S*Concurrent\\b|\\S*Sentry\\b)",
+      "note": "QR codes, web push, concurrent-ruby. Each is a decision about gem fate rather than modeling debt — shim the surface the app calls, or declare it out of scope and ledger it. None of them is on the path to more coverage than the tests naming it."
+    },
+    {
+      "slug": "pagination",
+      "title": "Pagy's controller surface",
+      "owner": "gem",
+      "match": "set_page_and_extract_portion_from",
+      "note": "campfire paginates with pagy, whose concern injects this into the controller. A shim of the portion-extraction surface is small; whether the port carries pagy or lowers pagination itself is the question underneath it."
+    },
+    {
+      "slug": "id-zero-sentinel",
+      "title": "An unsaved `id` is 0, not nil — and a lookup used it",
+      "owner": "compiler",
+      "match": "Couldn't find \\w+ with id=0",
+      "note": "A deliberate divergence, ledgered in docs/pipeline/runtime.md: `ActiveRecord::Base#initialize` seeds `@id = 0` so ids stay plain machine integers across every target, where Rails answers nil. This is where that choice becomes visible — a code path that would have skipped a nil lookup instead performs one for id 0."
+    },
+    {
+      "slug": "arity-divergence",
+      "title": "An emitted method's arity does not match its caller",
+      "owner": "compiler",
+      "match": "wrong number of arguments \\(given",
+      "note": "The receiver exists and the name resolves; the shape does not. Usually a lowering that dropped or added a parameter — kwargs folded into a positional, a block-form helper emitted in its non-block shape. Each needs the emitted definition read against its call site."
+    },
+    {
+      "slug": "silent-divergence",
+      "title": "The emit ran and answered differently",
+      "owner": "unknown",
+      "match": "\\A(assertion failed|assert_equal failed|assert_difference failed|assert_enqueued_jobs failed|not all expectations|expected |UNIQUE constraint)",
+      "note": "NOT a root cause — the bucket of tests that still need one. Nothing raised: the emitted code ran to completion and produced a different answer, so each of these has to be followed down its own chain. This is the most valuable cluster on the page and the most expensive: a missing method names itself, a wrong answer does not."
+    }
+  ]
+}

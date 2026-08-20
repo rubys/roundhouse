@@ -33,6 +33,7 @@
     <div class="cta-row">
       <a class="primary" href="../ide/?app=campfire">Explore its types (IDE)</a>
       <a href="../playground/?app=campfire">Transpile it (Playground)</a>
+      <a href="../bench/campfire-suite/">Conformance (their test suite)</a>
     </div>
 
     <h2>Why Campfire</h2>
@@ -71,6 +72,19 @@
       line. That ledger is the worklist — the same bar the blog already meets
       perfectly, Lobsters is close to, and Mastodon is climbing toward. Serving
       a live room is the next rung, not a finished claim.
+    </p>
+    <p>
+      A diagnostic says a construct wasn't modeled; it doesn't say whether what
+      <em>was</em> emitted behaves. Campfire's own test suite answers that, and
+      the <strong><a href="../bench/campfire-suite/">conformance page</a></strong>
+      publishes the result: every test file the app declares, run against a
+      Roundhouse emit of it, with the failures clustered into a ranked list of
+      what each one is waiting on. Two things make that number worth reading.
+      The app is <em>pinned</em> to a fixed commit, so it is rebuilt on every
+      push to this repo and any movement belongs to a Roundhouse change rather
+      than to upstream drift. And the page lists what the harness stubs in to
+      get the suite running at all — a pass rate propped up by the harness is
+      not a pass rate about the emit, so the props are on the page beside it.
     </p>
 
     <h2>Further reading</h2>
