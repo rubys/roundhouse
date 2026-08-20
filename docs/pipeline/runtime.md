@@ -388,11 +388,28 @@ attributes, in a file that prices every target. Inlining costs nothing
 to an app that never calls it, and leaves strict targets an honest
 unsupported diagnostic rather than a method that compiles and misbehaves.
 
-**What it costs.** N statements instead of one, and callbacks Rails
-would not run — visible on any model whose `after_create` has side
-effects. The corpus caller (campfire's `Room has_many :memberships do
-def grant_to … end end`) inserts Membership rows whose callbacks are
-inert.
+**Conflicts are SKIPPED, and that took a fix.** Measured against
+ActiveRecord 8.1.3: `insert_all` renders `INSERT … ON CONFLICT DO
+NOTHING`, so a row that already exists is a silent no-op — only
+`insert_all!` raises `RecordNotUnique`. A bare per-row save raises, i.e.
+it implemented `insert_all!` under the other name, and campfire's
+`memberships.revise` (re-granting a membership to a user who already has
+one) died on a UNIQUE index where Rails does nothing at all. Each row is
+now guarded by an existence check on the table's unique keys, built from
+the schema by `lower::scope_chain::build_unique_keys`.
+
+The guard is a pre-check, not the database's atomic `DO NOTHING` — the
+same read-then-write shape `increment!` below already carries, and under
+single-threaded dispatch the window it opens is not observable. A unique
+index over a NULLABLE column is skipped when building the guard:
+`where(col: nil)` asks whether a row holds SQL NULL, which is a
+different question, and in SQLite such rows never conflict anyway.
+
+**What it costs.** N statements instead of one, plus one SELECT per row
+for the conflict check, and callbacks Rails would not run — visible on
+any model whose `after_create` has side effects. The corpus caller
+(campfire's `Room has_many :memberships do def grant_to … end end`)
+inserts Membership rows whose callbacks are inert.
 
 ### `increment!` / `decrement!` are read-modify-write, not atomic
 

@@ -706,12 +706,14 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     let names = crate::lower::scope_chain::all_scope_names(&scopes);
     let models = crate::lower::scope_chain::model_set(&app.models);
     let user_returns = crate::lower::scope_chain::build_user_method_returns(&app.models);
+    let unique_keys = crate::lower::scope_chain::build_unique_keys(&app.models, &app.schema);
     let regs = crate::lower::scope_chain::Registries {
         scopes: &scopes,
         models: &models,
         assocs: &assocs,
         assoc_class_methods: &assoc_class_methods,
         user_returns: &user_returns,
+        unique_keys: &unique_keys,
     };
     for lc in lcs.iter_mut() {
         // Models gain their scope class methods (already chain-normalized).

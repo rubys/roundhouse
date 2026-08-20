@@ -28,6 +28,40 @@ use crate::ident::{ClassId, Symbol, VarId};
 /// threaded relation lands in the `__rel` slot (see `thread_rel`).
 pub type ScopeRegistry = HashMap<ClassId, HashMap<Symbol, Vec<Param>>>;
 
+/// Per-model UNIQUE key column sets — the conflict targets an
+/// `insert_all` has to skip on (see the inlining in [`rewrite`]).
+///
+/// Only indexes whose every column is NOT NULL are carried. A unique
+/// index over a nullable column is a conflict target the guard cannot
+/// read: `where(col: nil)` asks for rows whose column IS NULL, which is
+/// a different question from "no value here" and, in SQLite, is not
+/// even the question the index answers (NULLs compare distinct, so such
+/// rows never conflict). Dropping those indexes leaves the guard
+/// conservative — it skips only rows it positively found.
+pub type UniqueKeys = HashMap<ClassId, Vec<Vec<Symbol>>>;
+
+/// Read the unique keys off the schema, keyed by model.
+pub fn build_unique_keys(models: &[Model], schema: &crate::schema::Schema) -> UniqueKeys {
+    let mut out: UniqueKeys = HashMap::new();
+    for m in models {
+        let Some(table) = schema.tables.get(&m.table.0) else { continue };
+        let not_null = |name: &Symbol| {
+            table.columns.iter().any(|c| &c.name == name && !c.nullable)
+        };
+        let keys: Vec<Vec<Symbol>> = table
+            .indexes
+            .iter()
+            .filter(|i| i.unique && !i.columns.is_empty())
+            .filter(|i| i.columns.iter().all(not_null))
+            .map(|i| i.columns.clone())
+            .collect();
+        if !keys.is_empty() {
+            out.insert(m.name.clone(), keys);
+        }
+    }
+    out
+}
+
 /// Build `model -> {scope name -> params}` from the app's models.
 ///
 /// Alongside declared scopes, a user-written CLASS method whose body
@@ -1411,6 +1445,11 @@ pub struct Ctx<'a> {
     /// Name-keyed relation return types of user instance methods (see
     /// `build_user_method_returns`).
     pub user_returns: &'a UserMethodReturns,
+    /// UNIQUE key column sets per model — what an inlined `insert_all`
+    /// must skip on (see [`UniqueKeys`]). Empty where a caller has no
+    /// schema to read, which makes the guard vanish and the inline
+    /// behave as it did before.
+    pub unique_keys: &'a UniqueKeys,
     /// `Some(model)` when rewriting a model's own INSTANCE method:
     /// `self.<has_many>` there is an association read whose target model
     /// is known, so a scope following it can seed a Relation from the
@@ -1453,6 +1492,7 @@ impl Ctx<'_> {
             scopes: self.scopes,
             models: self.models,
             assocs: self.assocs,
+            unique_keys: self.unique_keys,
             assoc_class_methods: self.assoc_class_methods,
             scope_body: self.scope_body.clone(),
             self_const_is_implicit: self.self_const_is_implicit,
@@ -1708,6 +1748,109 @@ fn var_expr(span: crate::span::Span, name: &Symbol) -> Expr {
 }
 
 /// `ActiveRecord::Relation.new(Model)`.
+/// Wrap an inlined `insert_all` row-save in the conflict guard Rails'
+/// `ON CONFLICT DO NOTHING` stands for:
+///
+/// ```text
+///   <save>  ->  <save> unless <Model>.where(<key cols>).exists?
+/// ```
+///
+/// One `unless` per unique key, OR'd, so a table with two unique
+/// indexes skips a row conflicting on either. A model with no usable
+/// unique key (none declared, or every one of them nullable — see
+/// [`UniqueKeys`]) keeps the bare save: there is nothing to conflict on
+/// that this can read.
+fn guard_on_unique_keys(
+    span: crate::span::Span,
+    model: &ClassId,
+    attrs: &Symbol,
+    save: Expr,
+    ctx: &Ctx<'_>,
+) -> Expr {
+    let Some(keys) = ctx.unique_keys.get(model) else { return save };
+    let mut cond: Option<Expr> = None;
+    for key in keys {
+        // `<Model>.where(col: __attrs[:col], …).exists?`
+        let entries = key
+            .iter()
+            .map(|col| {
+                let k = syn(span, ExprNode::Lit { value: Literal::Sym { value: col.clone() } });
+                let v = syn(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(var_expr(span, attrs)),
+                        method: Symbol::from("[]"),
+                        args: vec![syn(
+                            span,
+                            ExprNode::Lit { value: Literal::Sym { value: col.clone() } },
+                        )],
+                        block: None,
+                        parenthesized: true,
+                    },
+                );
+                (k, v)
+            })
+            .collect::<Vec<_>>();
+        let where_call = syn(
+            span,
+            ExprNode::Send {
+                recv: Some(relation_new(span, model)),
+                method: Symbol::from("where"),
+                args: vec![syn(span, ExprNode::Hash { entries, kwargs: true })],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        let mut exists = syn(
+            span,
+            ExprNode::Send {
+                recv: Some(where_call),
+                method: Symbol::from("exists?"),
+                args: vec![],
+                block: None,
+                parenthesized: true,
+            },
+        );
+        exists.ty = Some(crate::ty::Ty::Bool);
+        cond = Some(match cond {
+            None => exists,
+            Some(prev) => syn(
+                span,
+                ExprNode::BoolOp {
+                    op: crate::expr::BoolOpKind::Or,
+                    surface: crate::expr::BoolOpSurface::Word,
+                    left: prev,
+                    right: exists,
+                },
+            ),
+        });
+    }
+    let Some(cond) = cond else { return save };
+    // `if !exists?` rather than an If with the branches swapped: the
+    // swapped form emits a `nil` then-branch every target has to render,
+    // and `!` is the negation spelling the other lowerings already use
+    // (exclude_predicate, and_return, typed_store).
+    let mut negated = syn(
+        span,
+        ExprNode::Send {
+            recv: Some(cond),
+            method: Symbol::from("!"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+    );
+    negated.ty = Some(crate::ty::Ty::Bool);
+    syn(
+        span,
+        ExprNode::If {
+            cond: negated,
+            then_branch: save,
+            else_branch: syn(span, ExprNode::Lit { value: Literal::Nil }),
+        },
+    )
+}
+
 fn relation_new(span: crate::span::Span, model: &ClassId) -> Expr {
     let recv = syn(
         span,
@@ -2234,6 +2377,28 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 // Rails skips the SAVE callbacks too and issues ONE
                 // multi-row INSERT — is recorded in
                 // docs/pipeline/runtime.md.
+                //
+                // CONFLICTS ARE SKIPPED, because that is what `insert_all`
+                // MEANS. Measured against ActiveRecord 8.1.3: `insert_all`
+                // renders `INSERT … ON CONFLICT DO NOTHING`, so inserting a
+                // row that already exists is a silent no-op; only
+                // `insert_all!` raises. A bare per-row save raises, i.e. it
+                // implements `insert_all!` under the other name — which is
+                // how campfire's `revise` (re-granting a membership to a
+                // user who already has one) died on a UNIQUE index where
+                // Rails does nothing at all. So each row is guarded by an
+                // existence check on the table's unique keys:
+                //
+                //   rows.each { |__attrs|
+                //     Membership.new(__attrs).save_after_validation unless
+                //       Relation.new(Membership)
+                //         .where(room_id: __attrs[:room_id],
+                //                user_id: __attrs[:user_id]).exists? }
+                //
+                // A pre-check, not the database's atomic DO NOTHING: it is
+                // the same read-then-write shape `increment!` already
+                // carries, and under single-threaded dispatch the window
+                // it opens is not observable. Ledgered with the rest.
                 if method.as_str() == "insert_all" && args.len() == 1 && block.is_none() {
                     let attrs = Symbol::from("__attrs");
                     let build = syn(
@@ -2256,6 +2421,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                             parenthesized: true,
                         },
                     );
+                    let save = guard_on_unique_keys(span, &m, &attrs, save, ctx);
                     let mut args = args;
                     *expr = syn(
                         span,
@@ -2618,10 +2784,15 @@ fn rewrite_relation_taking_body(
     // after this runs) — conservative empty registries.
     let empty_returns = UserMethodReturns::new();
     let empty_assoc_cm = AssocClassMethods::new();
+    // A scope body's `insert_all` (none in the corpus) keeps the
+    // unguarded inline: this entry point takes registries, not the app,
+    // so there is no schema here to read a conflict target from.
+    let empty_unique = UniqueKeys::new();
     let ctx = Ctx {
         scopes,
         models,
         assocs,
+        unique_keys: &empty_unique,
         assoc_class_methods: &empty_assoc_cm,
         scope_body: Some((self_model.clone(), rel_param.clone())),
         self_const_is_implicit,
@@ -2647,6 +2818,7 @@ pub fn rewrite_call_site(
         scopes: regs.scopes,
         models: regs.models,
         assocs: regs.assocs,
+        unique_keys: regs.unique_keys,
         assoc_class_methods: regs.assoc_class_methods,
         scope_body: None,
         self_const_is_implicit: false,
@@ -2667,6 +2839,7 @@ pub struct Registries<'a> {
     pub assocs: &'a AssocRegistry,
     pub assoc_class_methods: &'a AssocClassMethods,
     pub user_returns: &'a UserMethodReturns,
+    pub unique_keys: &'a UniqueKeys,
 }
 
 #[cfg(test)]
@@ -2762,6 +2935,11 @@ mod tests {
         EMPTY.get_or_init(AssocClassMethods::new)
     }
 
+    fn empty_unique_keys() -> &'static UniqueKeys {
+        static EMPTY: std::sync::OnceLock<UniqueKeys> = std::sync::OnceLock::new();
+        EMPTY.get_or_init(UniqueKeys::new)
+    }
+
     fn regs<'a>(
         scopes: &'a ScopeRegistry,
         models: &'a HashSet<ClassId>,
@@ -2773,6 +2951,7 @@ mod tests {
             assocs,
             assoc_class_methods: empty_assoc_cm(),
             user_returns: empty_returns(),
+            unique_keys: empty_unique_keys(),
         }
     }
 
@@ -2785,6 +2964,7 @@ mod tests {
             scopes,
             models,
             assocs,
+            unique_keys: empty_unique_keys(),
             assoc_class_methods: empty_assoc_cm(),
             scope_body: None,
             self_const_is_implicit: false,
@@ -2983,6 +3163,7 @@ mod tests {
             scopes,
             models,
             assocs,
+            unique_keys: empty_unique_keys(),
             assoc_class_methods: empty_assoc_cm(),
             scope_body: None,
             self_const_is_implicit: false,
