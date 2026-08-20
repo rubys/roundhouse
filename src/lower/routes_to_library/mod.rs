@@ -238,6 +238,27 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
             }
         }
     }
+    // Format variants are registered in the survey BEFORE it runs, and
+    // that ordering is load-bearing: `route_format_suffix` has already
+    // renamed `x_path(bot_key: k, format: :json)` to
+    // `x_json_path(bot_key: k)`, so a survey keyed on the BASE name no
+    // longer sees that call at all. A helper whose only call site
+    // carried a format then lost its query keys and the variant was
+    // generated without them (`unknown keyword: :bot_key`). Registering
+    // the variant under its own name collects them against the variant,
+    // where they belong.
+    let declared: std::collections::HashSet<String> =
+        flat.iter().filter(|r| r.named).map(|r| format!("{}_path", r.as_name)).collect();
+    let variants = format_variant_demand(app, &declared);
+    for (name, (as_name, _)) in &variants {
+        let base = helper_shape.get(&format!("{as_name}_path")).cloned();
+        if let Some(shape) = base {
+            let stem = name.strip_suffix("_path").unwrap_or(name);
+            for suffix in ["_path", "_url"] {
+                helper_shape.entry(format!("{stem}{suffix}")).or_insert_with(|| shape.clone());
+            }
+        }
+    }
     let query_keys = query_param_demand(app, &helper_shape);
     for route in &flat {
         // Unnamed dynamic routes (`get "/comments/page/:page"`, no `as:`)
@@ -258,6 +279,25 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
             route,
             app,
             query_keys.get(&helper).map(|v| v.as_slice()).unwrap_or(&[]),
+            None,
+        ));
+    }
+    // Format variants — one function per (route, format) a call site
+    // actually asked for. See `format_variant_demand`.
+    for (name, (as_name, ext)) in &variants {
+        let Some(route) = flat.iter().find(|r| r.named && &r.as_name == as_name) else {
+            continue;
+        };
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        funcs.push(build_helper_function(
+            &module_path,
+            name,
+            route,
+            app,
+            query_keys.get(name).map(|v| v.as_slice()).unwrap_or(&[]),
+            Some(ext),
         ));
     }
     // Hash-form `url_for` resolvers ride along here rather than at each
@@ -505,6 +545,10 @@ fn build_helper_function(
     route: &FlatRoute,
     app: &App,
     query_keys: &[QueryKey],
+    // `Some("json")` builds the MONOMORPHIZED variant a call site's
+    // `format: :json` asks for — see `format_variant_demand`. The
+    // extension is a literal here, so it costs the base helper nothing.
+    ext: Option<&str>,
 ) -> LibraryFunction {
     let slug_id = model_overrides_to_param(route.controller.0.as_str(), helper_name, app);
     // Slugness is PER PARAM: a nested parent's segment names its model
@@ -700,6 +744,26 @@ fn build_helper_function(
                     recv: Some(body),
                     method: Symbol::from("+"),
                     args: vec![suffix],
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            Ty::Str,
+        );
+    }
+    // The monomorphized extension goes exactly where the dynamic one
+    // above would: after the PATH and before the query string. That
+    // placement is the whole point of this variant — `x_path(room_id: 2)
+    // + ".json"` at the call site put it after `?room_id=2`, so the
+    // parameter VALUE became "2.json" and the lookup missed.
+    if let Some(ext) = ext {
+        body = with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(body),
+                    method: Symbol::from("+"),
+                    args: vec![lit_str(format!(".{ext}"))],
                     block: None,
                     parenthesized: false,
                 },
@@ -903,6 +967,72 @@ fn query_param_demand(
             )
         })
         .collect()
+}
+
+/// The `(route, format)` pairs a call site asked for, as
+/// `<as_name>_<ext>_path` -> `(as_name, ext)`.
+///
+/// `lower::route_format_suffix` has already rewritten
+/// `x_path(…, format: :json)` to `x_json_path(…)`, so the demand is
+/// readable straight off the call sites — the same survey shape
+/// `query_param_demand` uses, and for the same reason: the generator
+/// takes an `&App`, not a channel from the earlier pass.
+///
+/// MONOMORPHIZED rather than a `format:` parameter on the base helper.
+/// Rust and Go have no default arguments, so widening one shared
+/// signature charges every caller for the handful that asked; and the
+/// concat form it replaced (`x_path(…) + ".json"`) put the extension
+/// after the QUERY STRING, which is a different URL. A function per pair
+/// costs nothing to the callers that never mention a format.
+fn format_variant_demand(
+    app: &App,
+    declared: &std::collections::HashSet<String>,
+) -> std::collections::BTreeMap<String, (String, String)> {
+    let mut out: std::collections::BTreeMap<String, (String, String)> = Default::default();
+    // `<as_name>` for every named route, longest first: `story_path` and
+    // `story_comments_path` both end in `_path`, and a name must split
+    // against the LONGEST route name it starts with or `story_comments`
+    // reads as route `story` with format `comments`.
+    let mut names: Vec<String> =
+        flatten_routes(app).into_iter().filter(|r| r.named).map(|r| r.as_name).collect();
+    names.sort();
+    names.dedup();
+    names.sort_by_key(|n| std::cmp::Reverse(n.len()));
+    let mut collect = |e: &Expr| {
+        fn walk(
+            e: &Expr,
+            names: &[String],
+            declared: &std::collections::HashSet<String>,
+            out: &mut std::collections::BTreeMap<String, (String, String)>,
+        ) {
+            if let ExprNode::Send { recv: None, method, .. } = &*e.node {
+                let raw = method.as_str();
+                if let Some(stem) = raw.strip_suffix("_path").or_else(|| raw.strip_suffix("_url")) {
+                    // A real helper of that name wins — never shadow a
+                    // route the app actually declared.
+                    if !declared.contains(&format!("{stem}_path")) {
+                        for n in names {
+                            if let Some(ext) = stem.strip_prefix(n.as_str()).and_then(|r| r.strip_prefix('_')) {
+                                if !ext.is_empty()
+                                    && ext.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                                {
+                                    out.insert(
+                                        format!("{stem}_path"),
+                                        (n.clone(), ext.to_string()),
+                                    );
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            e.node.for_each_child(&mut |c| walk(c, names, declared, out));
+        }
+        walk(e, &names, declared, &mut out);
+    };
+    for_each_route_call_site(app, &mut collect);
+    out
 }
 
 /// Every body a route helper can be called from. `for_each_hook_body_ref`
