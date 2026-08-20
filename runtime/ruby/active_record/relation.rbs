@@ -117,7 +117,6 @@ module ActiveRecord
     def find: (Integer id) -> untyped
     def find_by: (untyped conditions) -> untyped
     def find_by!: (untyped conditions) -> untyped
-    def new: (?Hash[Symbol, untyped] attributes) -> untyped
     def first_or_initialize: () -> untyped
 
     def to_sql: () -> String

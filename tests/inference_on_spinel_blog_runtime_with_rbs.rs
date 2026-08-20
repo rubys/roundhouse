@@ -608,12 +608,15 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // shape a typed element cannot describe. The four nodes are the
     // reads off it — `statement[0]`, `statement.length`,
     // `statement[bind]`, and the escape call's argument.
-    // 2026-08-20 731 -> 738 — three surface methods the campfire suite
-    // named, all inside the 1-3 budget: `Relation#collect` (map's second
-    // name, paying what map pays), `Relation#new` (one merged
-    // `scope_attributes.merge(attributes)` loop rather than two, so the
-    // caller's layer costs no second iteration), and `Base#destroy!`
-    // (~1 — it calls `destroy`, which is typed `Base`).
+    // 2026-08-20 731 -> 735 — two surface methods the campfire suite
+    // named, both inside the 1-3 budget: `Relation#collect` (map's
+    // second name, paying what map pays) and `Base#destroy!` (~1 — it
+    // calls `destroy`, which is typed `Base`).
+    //
+    // A `Relation#new` landed here too and was REVERTED at 735: see the
+    // note in runtime/ruby/active_record/relation.rb — a method named
+    // `new` on a class cannot exist under spinel, whose constructor for
+    // that class is already `sp_Relation_new`.
     //
     // The STI recast that landed with them adds NOTHING here, and that
     // is the load-bearing part: its first draft was a shared-runtime
@@ -623,7 +626,7 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // polymorphic dispatch the strict targets are built to avoid). The
     // copy moved into the lowerer, which knows the schema and unrolls
     // it column by column. Both problems had the same fix.
-    const CEILING: usize = 738;
+    const CEILING: usize = 735;
 
     assert!(
         all_untyped.len() <= CEILING,

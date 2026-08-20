@@ -517,27 +517,27 @@ during this block" are the same set under inline dispatch. The shape
 that separates them — a job enqueued and never run — is one inline
 semantics cannot produce.
 
-### A record built through a SCOPE misses the scope's own columns
+### `ActiveRecord::Relation` has no `new`
 
-Rails seeds a record built through a relation from that relation's
-equality conditions — `User.active_bots.new` comes back with
-`role: :bot` already set. `ActiveRecord::Relation#new` here seeds only
-from `scope_attributes`, which is the ASSOCIATION seed
-(`room.memberships.new` still gets its `room_id`).
+Rails builds a record through a relation — `User.active_bots.new`,
+`room.memberships.new` — seeded from the relation's equality conditions.
+There is no `Relation#new` here, and there cannot be one.
 
-**Why.** By the time `new` is reached, `@wheres` holds rendered SQL
-fragments, not attribute pairs — `where("role = ?", 2)` and
-`where(role: 2)` are the same string there. Reconstructing attributes
-from SQL is a parser; keeping the pairs would mean a second
-representation of every condition carried for the one call site that
-reads it.
+**Why.** Under spinel a class's constructor is already
+`sp_<Class>_new`, so an instance method named `new` on `Relation`
+compiles to a second `sp_Relation_new` and the C compiler rejects the
+program outright (`conflicting types for 'sp_Relation_new'`). The name
+is spoken for on any target that derives a constructor symbol from the
+class name; a runtime method cannot claim it. Measured, not predicted:
+one landed briefly and turned every spinel job red.
 
-**What it costs.** A record built through a named scope starts without
-the scope's columns, so a form rendered from it shows their defaults and
-a `save` straight after it writes a row the scope cannot see. campfire's
-one site (`User.active_bots.new`) feeds a form whose create path stamps
-`role` itself, so the gap is invisible there — which is exactly why it
-is written down here.
+**What it costs.** `relation.new` reaches no method and raises. The
+association form is already served without it — `lower::scope_chain`
+rewrites `new` inside an association-scoped class method to
+`new(__rel.scope_attributes)`, which is where `user.sessions.create!`
+gets its `user_id`. The gap is the SCOPE form, and closing it means
+another call-site rewrite in that same pass rather than a runtime
+method.
 
 ### `destroy!` cannot fail
 

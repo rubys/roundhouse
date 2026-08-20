@@ -757,28 +757,15 @@ module ActiveRecord
       record
     end
 
-    # `relation.new(attrs)` — build an unsaved record through the
-    # relation (campfire's bots controller: `User.active_bots.new`).
-    # Rails' `scope_for_create` is `scope_attributes` here, so a record
-    # built through an association starts with its foreign key set;
-    # the caller's own attributes are applied after, so they win.
-    #
-    # DIVERGENCE, ledgered in docs/pipeline/runtime.md: Rails ALSO seeds
-    # from a scope's own equality conditions (`User.active_bots.new`
-    # gives `role: :bot`), which this cannot do — `@wheres` holds
-    # rendered SQL fragments, not attribute pairs, by the time we get
-    # here. Only the association seed (`where_scope`) survives as
-    # attributes. A scope-built record therefore starts without the
-    # scope's own columns.
-    def new(attributes = {})
-      record = @model.new
-      # One merged loop rather than two: the caller's attributes layer
-      # over the scope's (Rails assigns them second, so an explicit
-      # value wins), and `merge` says that in one expression instead of
-      # paying a second untyped iteration for it.
-      @scope_attributes.merge(attributes).each { |k, v| record[k] = v }
-      record
-    end
+    # NO `new` HERE, AND NOT BY OVERSIGHT. Rails builds records through
+    # a relation (`User.active_bots.new`), but under spinel this class's
+    # constructor is already `sp_Relation_new`, so an instance method of
+    # that name emits a second definition of the same C symbol and the
+    # program does not compile (`conflicting types for
+    # 'sp_Relation_new'`). One landed briefly and turned every spinel
+    # job red. The association form is served by a call-site rewrite in
+    # lower::scope_chain instead; the scope form belongs there too.
+    # Ledgered in docs/pipeline/runtime.md.
 
     # `first_or_initialize` — the first matching row, or a new unsaved
     # record when there is none. The caller assigns the remaining
