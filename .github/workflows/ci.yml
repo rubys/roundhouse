@@ -1008,6 +1008,15 @@ jobs:
       # as a compile failure in the summary and is nothing of the kind.
       # One warm invocation here does the setup once, serially; the
       # env vars keep it from being attempted again.
+      #
+      # THE WARM-UP ALONE WAS NOT ENOUGH (5df2b63b tried it; 465201f0
+      # failed the same way, `MigrationRunner.Run` under
+      # `DotnetFirstTimeUseConfigurer.Configure`). Whatever the warm
+      # invocation settles, the two test threads still reach the
+      # configurer concurrently — so the cargo step below also runs
+      # `--test-threads=1`, which removes the race itself rather than
+      # trying to finish before it. Two dotnet legs at ~1 min each are
+      # not worth a flake that reads as a C# compile failure.
       - name: Warm the dotnet CLI (first-run config is not concurrency-safe)
         env:
           DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
@@ -1019,7 +1028,7 @@ jobs:
           DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
           DOTNET_NOLOGO: '1'
           DOTNET_CLI_TELEMETRY_OPTOUT: '1'
-        run: cargo test --test csharp_toolchain -- --ignored --nocapture
+        run: cargo test --test csharp_toolchain -- --ignored --nocapture --test-threads=1
 
   # -------------------------------------------------------------------
   # DOM equivalence: boot Rails + the target server side-by-side and
