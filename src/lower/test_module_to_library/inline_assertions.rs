@@ -9,13 +9,16 @@
 //! Patterns rewritten at the call site:
 //!   - `assert_equal a, b`              → `raise "…" if a != b`
 //!   - `assert v`                       → `raise "…" if !v`
+//!   (every form also accepts Minitest's trailing message argument,
+//!   which is dropped — the inlined raise carries its own text)
 //!   - `assert_not v` / `refute v`      → `raise "…" if v`
 //!   - `assert_nil v`                   → `raise "…" if !v.nil?`
 //!   - `assert_not_nil v` / `refute_nil v` → `raise "…" if v.nil?`
 //!   - `assert_empty c`                 → `raise "…" if !c.empty?`
 //!   - `assert_not_empty c` / `refute_empty c` → `raise "…" if c.empty?`
 //!   - `assert_includes c, x`           → `raise "…" if !c.include?(x)`
-//!   - `refute_includes c, x`           → `raise "…" if c.include?(x)`
+//!   - `refute_includes c, x` / `assert_not_includes c, x`
+//!                                      → `raise "…" if c.include?(x)`
 //!   - `assert_kind_of K, x`            → `raise "…" if !x.is_a?(K)`
 //!   - `assert_instance_of K, x`        → `raise "…" if !x.instance_of?(K)`
 //!   (`assert_match` and `assert_operator` deliberately not lowered —
@@ -220,15 +223,30 @@ fn rewrite_send(e: &Expr) -> Option<Expr> {
                 "refute_equal failed".to_string(),
             ))
         }
-        "assert" if args.len() == 1 => {
+        // MINITEST'S TRAILING MESSAGE. Every assertion takes an optional
+        // failure message as its LAST argument (`assert test, msg = nil`),
+        // so a one-argument assertion is really one-or-two. Guarding on
+        // `== 1` let `assert outsiders.any?, "need someone outside the
+        // room"` fall through unlowered — and unlowered means dispatched,
+        // to a method no target defines, so the test died with
+        // `undefined method 'assert'` instead of asserting. The
+        // two-argument assertions above have always been `>= 2` for the
+        // same reason; the one-argument family never got it.
+        //
+        // The message argument is DROPPED, not evaluated: the raise
+        // below carries its own text. Minitest only ever reads it to
+        // build a failure string, so the corpus loses nothing — and a
+        // message expression with a side effect would be a bug in the
+        // test, not something to preserve.
+        "assert" if !args.is_empty() => {
             let cond = args[0].clone();
             Some(raise_if(span, not_expr(span, cond), "assertion failed".to_string()))
         }
-        "assert_not" | "refute" if args.len() == 1 => {
+        "assert_not" | "refute" if !args.is_empty() => {
             let cond = args[0].clone();
             Some(raise_if(span, cond, "refute failed".to_string()))
         }
-        "assert_nil" if args.len() == 1 => {
+        "assert_nil" if !args.is_empty() => {
             let val = args[0].clone();
             Some(raise_if(
                 span,
@@ -236,7 +254,7 @@ fn rewrite_send(e: &Expr) -> Option<Expr> {
                 "assert_nil failed".to_string(),
             ))
         }
-        "assert_not_nil" | "refute_nil" if args.len() == 1 => {
+        "assert_not_nil" | "refute_nil" if !args.is_empty() => {
             let val = args[0].clone();
             Some(raise_if(
                 span,
@@ -244,7 +262,7 @@ fn rewrite_send(e: &Expr) -> Option<Expr> {
                 "refute_nil failed".to_string(),
             ))
         }
-        "assert_empty" if args.len() == 1 => {
+        "assert_empty" if !args.is_empty() => {
             let coll = args[0].clone();
             Some(raise_if(
                 span,
@@ -252,7 +270,7 @@ fn rewrite_send(e: &Expr) -> Option<Expr> {
                 "assert_empty failed".to_string(),
             ))
         }
-        "assert_not_empty" | "refute_empty" if args.len() == 1 => {
+        "assert_not_empty" | "refute_empty" if !args.is_empty() => {
             let coll = args[0].clone();
             Some(raise_if(
                 span,
@@ -269,7 +287,7 @@ fn rewrite_send(e: &Expr) -> Option<Expr> {
                 "assert_includes failed".to_string(),
             ))
         }
-        "refute_includes" if args.len() >= 2 => {
+        "refute_includes" | "assert_not_includes" if args.len() >= 2 => {
             let coll = args[0].clone();
             let item = args[1].clone();
             Some(raise_if(
