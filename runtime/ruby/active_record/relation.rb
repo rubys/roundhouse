@@ -502,8 +502,15 @@ module ActiveRecord
     end
 
     def first
+      prior = @limit
       @limit = 1
       rows = to_a
+      @limit = prior
+      # The one-row load must NOT stay memoized: `@records` is the
+      # loaded-relation cache a later `each`/`map` reads, and a cache
+      # holding the single row `first` asked for would answer those with
+      # one row out of many. Same terminal rule as `pluck`.
+      @records = nil
       rows.length == 0 ? nil : rows[0]
     end
 
@@ -756,9 +763,17 @@ module ActiveRecord
       rows.map { |row| row["v"].to_i }
     end
 
+    # `find(id)` — the row with that primary key, raising nothing here
+    # (the lowered `<Model>.find` inlines a primary-key SELECT; this is
+    # the relation-rooted form). The id predicate is POPPED afterwards:
+    # like `pluck`, this is a terminal, and a `WHERE id = 3` left on the
+    # relation would silently narrow every later use of it to that one
+    # row.
     def find(id)
       @wheres << "#{@table}.id = #{ActiveRecord.adapter.escape_value(id)}"
-      first
+      record = first
+      @wheres.pop
+      record
     end
 
     def find_by(conditions)

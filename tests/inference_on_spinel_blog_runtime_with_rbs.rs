@@ -626,7 +626,15 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // polymorphic dispatch the strict targets are built to avoid). The
     // copy moved into the lowerer, which knows the schema and unrolls
     // it column by column. Both problems had the same fix.
-    const CEILING: usize = 735;
+    // 2026-08-20 735 -> 737, +1 each for `Relation#first` and
+    // `Relation#find` closing the same terminal leak `pluck` had — the
+    // saved `prior` limit and the `@wheres.pop` are both untyped reads
+    // off containers declared untyped. Worth naming: this pair greened
+    // ZERO tests. It is here because the previous commit wrote the
+    // terminal invariant into docs/pipeline/runtime.md and named these
+    // two as the outstanding violations of it; a documented invariant
+    // with known live exceptions is worse than two nodes.
+    const CEILING: usize = 737;
 
     assert!(
         all_untyped.len() <= CEILING,

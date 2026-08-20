@@ -556,9 +556,17 @@ query and answers a value, and Rails builds it a query of its own. Any
 terminal that has to touch relation state to build its SQL must put that
 state back.
 
-**Still outstanding, same shape.** `first` sets `@limit = 1` and caches
-a one-row `@records`; `find(id)` appends a `WHERE` that stays. Neither
-has a failing test behind it today.
+`first` and `find(id)` were the same shape and now restore too — `first`
+puts the limit back and drops the one-row `@records` (a cache holding
+the single row it asked for would answer a later `each` with one row out
+of many), `find` pops its id predicate. Neither moved a test; they are
+here so the invariant above has no known live exceptions.
+
+The restore is not exception-safe: a raise inside the terminal leaves
+the state set, because `begin`/`ensure` is not available in this file
+(see the note on `Model.connection` in base.rb — the rescue-carrying
+surface lives in the ruby-family `connection.rb` reopen). The push and
+the pop are symmetric on every path that returns.
 
 ### `ActiveRecord::Relation` has no `new`
 

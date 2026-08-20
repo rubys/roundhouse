@@ -973,7 +973,10 @@ fn every_runtime_method_body_concretely_typed() {
     // src/lower/sti_scope.rs, not here — see the note on the other
     // ceiling in tests/inference_on_spinel_blog_runtime_with_rbs.rs for
     // why that placement was not optional.
-    const CEILING: usize = 291;
+    // 2026-08-20 291 -> 293: `Relation#first` and `#find` restoring the
+    // state they set (the terminal invariant — see the note on the
+    // other ceiling). One site each, and zero tests moved.
+    const CEILING: usize = 293;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
