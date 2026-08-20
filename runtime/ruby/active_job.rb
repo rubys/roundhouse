@@ -6,6 +6,37 @@
 # resolves and the class-body DSL is inert.
 
 module ActiveJob
+  # Jobs that have RUN, by class name, in call order.
+  #
+  # The adapter is inline, so there is no queue to inspect — which is
+  # also true of Rails' own `:inline` adapter, and why Rails' test
+  # helpers require the `:test` one. This log is the equivalent seam:
+  # `perform_later` appends here before dispatching, so
+  # "jobs enqueued during this block" and "jobs run during this block"
+  # are the same set. The divergence is a job enqueued and never run,
+  # which inline semantics cannot produce.
+  #
+  # Same shape as `Broadcasts::LOG` and for the same reasons — a
+  # module-level constant Array rather than a class ivar, because that
+  # is the form every target carries. Entries are class NAMES, not
+  # classes: a class is not a first-class value on the strict targets,
+  # and the test call sites that name one are rewritten to the string
+  # at compile time (`lower::job_test_only`).
+  PERFORMED = []
+
+  def self.record_performed(job_name)
+    PERFORMED << job_name
+    nil
+  end
+
+  # No reset: every helper reads a LENGTH DELTA across its block, the
+  # same way `capture_turbo_stream_broadcasts` reads `Broadcasts::LOG`,
+  # so the log growing across a file's tests is not a problem — and a
+  # clear would hide what an earlier block in the same test did.
+  def self.performed
+    PERFORMED.dup
+  end
+
   class Base
     # `queue_as :default` — queue routing has no meaning inline.
     def self.queue_as(name = nil)

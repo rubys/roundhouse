@@ -233,6 +233,99 @@ module Dom
   end
 end
 
+# ---- ActiveJob::TestHelper ------------------------------------------
+#
+# `assert_enqueued_jobs 1, only: [ Room::PushMessageJob ] do … end` —
+# run the block, count what it enqueued.
+#
+# The adapter is INLINE, so there is no queue to inspect. That is also
+# true of Rails' own `:inline` adapter, which is why Rails' helpers
+# require the `:test` one; `ActiveJob::PERFORMED` is the equivalent
+# seam, appended by the `perform_later` wrapper `lower::job_class_side`
+# synthesizes. "Enqueued during this block" and "ran during this block"
+# are therefore the same set — the only shape that separates them, a job
+# enqueued and never run, inline semantics cannot produce.
+#
+# `only:` is an ARRAY OF CLASS NAMES, empty for "any". The test source
+# writes classes (`only: Bot::WebhookJob`); `lower::job_test_only`
+# rewrites them, because a class is not a first-class value on the
+# strict targets.
+#
+# Length-delta rather than a clear, same as
+# `capture_turbo_stream_broadcasts`: a test may assert twice in one
+# method, and clearing would hide what an earlier block did.
+module ActiveJob
+  module TestHelper
+    def capture_enqueued_jobs(only, &block)
+      before = ActiveJob.performed.length
+      block.call
+      ActiveJob.performed[before..].select { |name| only.empty? || only.include?(name) }
+    end
+
+    def assert_enqueued_jobs(count, only: [], &block)
+      actual = capture_enqueued_jobs(only, &block).length
+      return if actual == count
+      raise("assert_enqueued_jobs failed: expected #{count} " \
+            "job(s)#{only.empty? ? "" : " of #{only.join(", ")}"}, got #{actual}")
+    end
+
+    def assert_no_enqueued_jobs(only: [], &block)
+      assert_enqueued_jobs(0, only: only, &block)
+    end
+
+    # Inline jobs have ALREADY run by the time the block returns, so
+    # there is nothing left to drain — the block itself is the whole
+    # behaviour. Rails' version drains its queue here; ours is a no-op
+    # around the same call, which is the honest inline reading.
+    def perform_enqueued_jobs(only: [], &block)
+      block.call
+    end
+
+    # `assert_enqueued_with(job: RemoveBannedContentJob, args: [ user ])`.
+    #
+    # DIVERGENCE, stated rather than hidden: only the JOB is checked.
+    # Rails also matches the arguments, and matching them here would
+    # need the log to carry them — where a record argument compares by
+    # object identity, not by Rails' GlobalID, so the test's fixture and
+    # the controller's freshly-loaded row would never be equal. A check
+    # that fails for the wrong reason is worse than a narrower one that
+    # says so. Recorded in docs/pipeline/runtime.md.
+    def assert_enqueued_with(job: "", args: nil, &block)
+      actual = capture_enqueued_jobs(job.empty? ? [] : [job], &block).length
+      return if actual > 0
+      raise("assert_enqueued_with failed: no #{job} was enqueued")
+    end
+  end
+end
+
+# ---- ActionCable::TestHelper ----------------------------------------
+#
+# `assert_broadcasts stream, 1 do … end`. Reads `Broadcasts::LOG` — the
+# same log `assert_turbo_stream_broadcasts` reads, one layer lower:
+# that helper names a stream by its streamables, this one takes the
+# stream string an app-defined channel composed
+# (`UnreadRoomsChannel.stream_name_for(id)`).
+module ActionCable
+  module TestHelper
+    def capture_broadcasts_on(stream, &block)
+      before = Broadcasts.log.length
+      block.call
+      Broadcasts.log[before..].select { |entry| entry[:stream] == stream }
+    end
+
+    def assert_broadcasts(stream, count, &block)
+      actual = capture_broadcasts_on(stream, &block).length
+      return if actual == count
+      raise("assert_broadcasts failed: expected #{count} broadcast(s) " \
+            "to #{stream.inspect}, got #{actual}")
+    end
+
+    def assert_no_broadcasts(stream, &block)
+      assert_broadcasts(stream, 0, &block)
+    end
+  end
+end
+
 # In-process request dispatch — equivalent of Rails's
 # ActionDispatch::IntegrationTest. Test classes that need to exercise
 # controller actions extend this module to get get/post/patch/delete.
@@ -273,6 +366,14 @@ end
 # the shim calls (`setup` / `teardown`) plus the per-test DB reset
 # (`SchemaSetup.reset!` if defined).
 class TestBase
+  # Rails puts both of these on `ActiveSupport::TestCase` itself, so a
+  # test that never writes `include ActiveJob::TestHelper` still has
+  # `perform_enqueued_jobs` — campfire's `User::BotTest` is exactly
+  # that. A test that DOES write the include still resolves; including
+  # a module twice is inert.
+  include ActiveJob::TestHelper
+  include ActionCable::TestHelper
+
   # Zero-arg initializer; the shim does `__t = XTest.new` per test
   # method (no Minitest-style name argument needed).
   def initialize

@@ -143,6 +143,44 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                 },
             );
             body.ty = ret_ty.clone();
+            // `perform_later` LOGS before dispatching. Rails' test
+            // helpers count enqueues, and the inline adapter has no
+            // queue to count — so the log is the seam that answers
+            // them, and `perform_later` is the only entry that
+            // enqueues (`perform_now` runs without one, in Rails as
+            // here).
+            let body = if entry == "perform_later" {
+                let mut record = Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(Expr::new(
+                            span,
+                            ExprNode::Const { path: vec![Symbol::from("ActiveJob")] },
+                        )),
+                        method: Symbol::from("record_performed"),
+                        args: vec![{
+                            let mut lit = Expr::new(
+                                span,
+                                ExprNode::Lit {
+                                    value: crate::expr::Literal::Str {
+                                        value: lc.name.0.as_str().to_string(),
+                                    },
+                                },
+                            );
+                            lit.ty = Some(Ty::Str);
+                            lit
+                        }],
+                        block: None,
+                        parenthesized: true,
+                    },
+                );
+                record.ty = Some(Ty::Nil);
+                let mut seq = Expr::new(span, ExprNode::Seq { exprs: vec![record, body] });
+                seq.ty = ret_ty.clone();
+                seq
+            } else {
+                body
+            };
             let mut w = perform.clone();
             w.name = Symbol::from(entry);
             w.receiver = crate::dialect::MethodReceiver::Class;

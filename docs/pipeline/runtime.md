@@ -488,6 +488,35 @@ this runtime defaults a string slot to `""`, so every unsaved record
 carries the same token and the second INSERT dies on the table's UNIQUE
 index.
 
+### `assert_enqueued_with` checks the job, not its arguments
+
+Rails matches both `job:` and `args:`. This runtime's helper
+(`runtime/spinel/test/test_helper.rb`) matches the job class only.
+
+**Why.** Matching the arguments needs the enqueue log to carry them, and
+a record argument would then compare by object identity — the test's
+fixture and the controller's freshly-loaded row are different objects
+where Rails compares serialized GlobalIDs. A check that fails for the
+wrong reason is worse than a narrower one that says so.
+
+**What it costs.** A job enqueued with the RIGHT class and the WRONG
+arguments passes here and fails in Rails. Nothing in the corpus depends
+on the distinction today; campfire's one site asserts a ban job for a
+user, and the class is unique to that path.
+
+### ActiveJob's test helpers count jobs that RAN
+
+The adapter is inline (`lower::job_class_side` makes `perform_later`
+run the job), so there is no queue to inspect — the same reason Rails'
+own `:inline` adapter does not work with these helpers.
+`ActiveJob::PERFORMED` is the seam instead, appended by the
+`perform_later` wrapper.
+
+**Why it is equivalent here.** "Enqueued during this block" and "ran
+during this block" are the same set under inline dispatch. The shape
+that separates them — a job enqueued and never run — is one inline
+semantics cannot produce.
+
 ## Related docs
 
 - [`emit.md`](emit.md) — the universal IR contract; the consumers of

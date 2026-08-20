@@ -876,11 +876,13 @@ fn splice_concerns_into_models(app: &mut App) {
                 },
                 _ => Vec::new(),
             };
+            let model_name = model.name.clone();
             let items: Vec<ModelBodyItem> = concern_ids
                 .iter()
-                .filter_map(|id| app.concern_model_items.get(id))
-                .flatten()
-                .cloned()
+                .filter_map(|id| app.concern_model_items.get(id).map(|items| (id, items)))
+                .flat_map(|(id, items)| {
+                    items.iter().map(|item| rehome_default_fk(item, id, &model_name))
+                })
                 .collect();
             if items.is_empty() {
                 i += 1;
@@ -891,6 +893,46 @@ fn splice_concerns_into_models(app: &mut App) {
             i += n + 1;
         }
     }
+}
+
+/// An owner-derived FOREIGN KEY, recomputed for the model the
+/// association is being spliced into.
+///
+/// `has_one :webhook` inside `User::Bot`'s `included do` defaults its
+/// key from the declaring scope — and the declaring scope at ingest is
+/// the CONCERN, so the key came out `user::bot_id`. Rails derives it
+/// from the class the association ends up on, which is the includer:
+/// `user_id`. The emitted query said `WHERE webhooks.user::bot_id = 5`
+/// and sqlite answered "unrecognized token".
+///
+/// Only a key that still EQUALS the concern-derived default is moved.
+/// An explicit `foreign_key:` differs from it and is left exactly as
+/// written; if it happens to coincide, the two names are equal anyway.
+/// `belongs_to` is untouched — its key derives from the TARGET, which
+/// the splice does not change.
+fn rehome_default_fk(
+    item: &crate::dialect::ModelBodyItem,
+    concern: &crate::ident::ClassId,
+    model: &crate::ident::ClassId,
+) -> crate::dialect::ModelBodyItem {
+    use crate::dialect::{Association, ModelBodyItem};
+    let mut out = item.clone();
+    let ModelBodyItem::Association { assoc, .. } = &mut out else { return out };
+    let concern_default =
+        crate::ident::Symbol::from(format!("{}_id", crate::naming::snake_case(concern.0.as_str())));
+    let model_default =
+        crate::ident::Symbol::from(format!("{}_id", crate::naming::snake_case(model.0.as_str())));
+    match assoc {
+        Association::HasMany { foreign_key, .. } | Association::HasOne { foreign_key, .. } => {
+            if *foreign_key == concern_default {
+                *foreign_key = model_default;
+            }
+        }
+        // `belongs_to`'s key derives from the TARGET, which the splice
+        // does not change.
+        _ => {}
+    }
+    out
 }
 
 /// Copy a model concern's CLASS-side methods onto every model that
