@@ -939,6 +939,17 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
                 })
                 .collect();
             library::apply_scope_lowering(&mut test_lcs, app);
+            // A test class nests under the class it tests
+            // (`class User … class BotTest`), which shadows exactly as
+            // the model-side concern does: campfire's
+            // `User::BotTest#test_deliver_message_by_webhook` names
+            // `Bot::WebhookJob`, and inside `User` that is `User::Bot`,
+            // whose `WebhookJob` does not exist. Same pass, same guard.
+            library::apply_constant_rooting(
+                &mut test_lcs,
+                app,
+                library::RootingScope::AppAndRuntime,
+            );
             let mut it = test_lcs.into_iter();
             for m in &mut test_lowered {
                 m.test_class = it.next().expect("one lowered class per test module");

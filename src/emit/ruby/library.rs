@@ -46,6 +46,7 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     // emits `Broadcasts.append(...)`, and inside `module Broadcasts`
     // that constant is the concern itself. Idempotent (an already-rooted
     // head is skipped), so running it in both pipelines is safe.
+
     apply_constant_rooting(&mut lcs, app, RootingScope::RuntimeOnly);
     lcs.iter()
         .flat_map(|lc| {
@@ -2916,6 +2917,16 @@ pub(crate) fn apply_constant_rooting(
     view_namespaces.sort();
     view_namespaces.dedup();
 
+    // Every class name this emit defines, app and runtime alike — the
+    // authority for "does the inner reading have a target?".
+    let class_names: std::collections::HashSet<String> = app
+        .models
+        .iter()
+        .map(|m| m.name.0.as_str().to_string())
+        .chain(app.library_classes.iter().map(|c| c.name.0.as_str().to_string()))
+        .chain(lcs.iter().map(|c| c.name.0.as_str().to_string()))
+        .collect();
+    let known = |n: &str| class_names.contains(n);
     for lc in lcs.iter_mut() {
         let name = lc.name.0.as_str();
         let mut shadowing: Vec<String> = name
@@ -2928,25 +2939,57 @@ pub(crate) fn apply_constant_rooting(
         }
         shadowing.sort();
         shadowing.dedup();
-        if shadowing.is_empty() {
-            continue;
-        }
+        // NESTING the emit introduced. A source file that writes the
+        // COMPACT form (`module User::Bot`) has lexical scope
+        // [User::Bot, Object] — `User`'s own constants are NOT in it.
+        // The emit nests (`class User … module Bot`), which puts them
+        // in, and campfire's `Bot::WebhookJob` stopped meaning the
+        // top-level job and started meaning the concern itself.
+        //
+        // So: for every enclosing namespace, the constants it defines
+        // are candidates for rooting — but only where the inner reading
+        // has NO target for the FULL path. `User::Bot` exists, which is
+        // the shadow; `User::Bot::WebhookJob` does not, which is what
+        // proves the body meant the outer one.
+        let prefixes: Vec<String> = {
+            let segs: Vec<&str> = name.split("::").collect();
+            (1..segs.len()).map(|i| segs[..i].join("::")).collect()
+        };
         for m in &mut lc.methods {
-            root_shadowed_constants(&mut m.body, &shadowing);
+            root_shadowed_constants(&mut m.body, &shadowing, &prefixes, &known);
         }
     }
 }
 
-fn root_shadowed_constants(expr: &mut Expr, shadowing: &[String]) {
+fn root_shadowed_constants(
+    expr: &mut Expr,
+    shadowing: &[String],
+    prefixes: &[String],
+    known: &dyn Fn(&str) -> bool,
+) {
     expr.node
-        .for_each_child_mut(&mut |c| root_shadowed_constants(c, shadowing));
+        .for_each_child_mut(&mut |c| root_shadowed_constants(c, shadowing, prefixes, known));
     let ExprNode::Const { path } = &mut *expr.node else {
         return;
     };
+    let joined = path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
     let Some(head) = path.first_mut() else { return };
     // Idempotent: a head already carrying the root marker is skipped, so
     // running the pass twice can't produce `::::Stats`.
-    if head.as_str().starts_with("::") || !shadowing.iter().any(|s| s == head.as_str()) {
+    if head.as_str().starts_with("::") {
+        return;
+    }
+    // Either the name's OWN segments shadow it (the pre-existing rule:
+    // `Views::Stats` referencing `Stats`, `Message::Broadcasts`
+    // referencing the runtime's `Broadcasts`) …
+    let by_own_segment = shadowing.iter().any(|s| s == head.as_str());
+    // … or an ENCLOSING namespace defines it and the full path under
+    // that namespace does not exist, which is the nesting the emit
+    // introduced. See the prefix note at the call site.
+    let by_enclosing = prefixes.iter().any(|p| {
+        known(&format!("{p}::{}", head.as_str())) && !known(&format!("{p}::{joined}"))
+    });
+    if !by_own_segment && !by_enclosing {
         return;
     }
     // The path renders as `path.join("::")`, so a leading marker on the
