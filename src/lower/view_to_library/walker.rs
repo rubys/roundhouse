@@ -391,14 +391,33 @@ fn splice_form_wrapper(
     args: &[Expr],
     block: &Expr,
 ) -> Option<Expr> {
-    if args.len() != w.params.len() {
+    // Fewer arguments than parameters is the NORMAL call when the
+    // wrapper's tail is an options hash: `**options` ingests as a
+    // trailing positional defaulting to `{}`, so `profile_form_with
+    // @user` supplies one argument to a two-parameter wrapper. Bind
+    // what was passed and fall back to each remaining parameter's own
+    // default; a parameter with no default and no argument is a call
+    // this pass cannot reconstruct.
+    if args.len() > w.params.len() {
         return None;
     }
     if !args.iter().all(is_pure_read) {
         return None;
     }
-    let binding: std::collections::HashMap<&Symbol, &Expr> =
-        w.params.iter().zip(args.iter()).collect();
+    let mut binding: std::collections::HashMap<&Symbol, &Expr> = std::collections::HashMap::new();
+    for (i, (name, default)) in w.params.iter().enumerate() {
+        match args.get(i) {
+            Some(a) => {
+                binding.insert(name, a);
+            }
+            None => match default {
+                Some(d) => {
+                    binding.insert(name, d);
+                }
+                None => return None,
+            },
+        }
+    }
     let ExprNode::Send { method, args: wargs, parenthesized, .. } = &*w.call.node else {
         return None;
     };
@@ -407,11 +426,64 @@ fn splice_form_wrapper(
         ExprNode::Send {
             recv: None,
             method: method.clone(),
-            args: wargs.iter().map(|a| substitute_vars(a, &binding)).collect(),
+            args: wargs
+                .iter()
+                .map(|a| fold_static_merge(&substitute_vars(a, &binding)))
+                .collect(),
             block: Some(block.clone()),
             parenthesized: *parenthesized,
         },
     ))
+}
+
+/// `{a: 1}.merge({b: 2})` → `{a: 1, b: 2}`, once both sides are
+/// literal.
+///
+/// A wrapper whose tail is `**options` has already been desugared by
+/// `lower::kwsplat` into exactly that merge, so substituting the
+/// caller's options hash leaves a `.merge` chain where `form_with`'s
+/// lowering wants ONE literal hash to walk. Given the chain it declines
+/// — and declining after the splice is worse than declining before it:
+/// the call is gone and nothing replaces it, so the form silently
+/// vanishes from the page instead of failing loudly.
+///
+/// Later keys win, which is Ruby's `merge` and also the point of the
+/// wrapper: the caller's options override the helper's defaults.
+fn fold_static_merge(e: &Expr) -> Expr {
+    let ExprNode::Send { recv: Some(base), method, args, block: None, .. } = &*e.node else {
+        return e.clone();
+    };
+    if method.as_str() != "merge" || args.len() != 1 {
+        return e.clone();
+    }
+    let (ExprNode::Hash { entries: base_entries, kwargs }, ExprNode::Hash { entries: over, .. }) =
+        (&*base.node, &*args[0].node)
+    else {
+        return e.clone();
+    };
+    let key_of = |k: &Expr| match &*k.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+        _ => None,
+    };
+    // A key this cannot compare cannot be overridden safely — leave the
+    // chain alone rather than merge past it.
+    if base_entries.iter().chain(over.iter()).any(|(k, _)| key_of(k).is_none()) {
+        return e.clone();
+    }
+    let mut merged: Vec<(Expr, Expr)> = Vec::new();
+    for (k, v) in base_entries {
+        match over.iter().find(|(ok, _)| key_of(ok) == key_of(k)) {
+            Some((_, ov)) => merged.push((k.clone(), ov.clone())),
+            None => merged.push((k.clone(), v.clone())),
+        }
+    }
+    for (k, v) in over {
+        if !base_entries.iter().any(|(bk, _)| key_of(bk) == key_of(k)) {
+            merged.push((k.clone(), v.clone()));
+        }
+    }
+    Expr::new(e.span, ExprNode::Hash { entries: merged, kwargs: *kwargs })
 }
 
 /// A read with no side effect and no cost worth worrying about, so
@@ -429,6 +501,14 @@ fn is_pure_read(e: &Expr) -> bool {
         ExprNode::Var { .. } | ExprNode::Ivar { .. } | ExprNode::Lit { .. }
         | ExprNode::Const { .. } => true,
         ExprNode::Send { recv: None, args, block: None, .. } => args.is_empty(),
+        // A LITERAL hash of pure reads. It is the options tail every
+        // form wrapper takes (`profile_form_with @user, class: "…"`),
+        // and it is built fresh at the call site — so substituting it
+        // wherever the parameter is named re-allocates rather than
+        // re-observes, which is the property this predicate is about.
+        ExprNode::Hash { entries, .. } => {
+            entries.iter().all(|(k, v)| is_pure_read(k) && is_pure_read(v))
+        }
         _ => false,
     }
 }
@@ -1561,7 +1641,7 @@ mod tests {
         // `form.x` calls together — which is the NoMethodError campfire's
         // room page died on.
         let wrapper = super::super::FormWrapperHelper {
-            params: vec![Symbol::from("room")],
+            params: vec![(Symbol::from("room"), None)],
             call: Expr::new(
                 Span::default(),
                 ExprNode::Send {
@@ -1624,7 +1704,7 @@ mod tests {
         // run a different number of times, or in a different order. Such
         // a site keeps its shape and stays a loud failure.
         let wrapper = super::super::FormWrapperHelper {
-            params: vec![Symbol::from("room")],
+            params: vec![(Symbol::from("room"), None)],
             call: Expr::new(
                 Span::default(),
                 ExprNode::Send {

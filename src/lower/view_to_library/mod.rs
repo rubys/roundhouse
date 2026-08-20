@@ -2630,8 +2630,15 @@ pub(crate) fn dynamic_partial_pools(
 /// campfire's `def composer_form_tag(room, &) = form_with(model: …, url:
 /// …, &)`.
 pub(super) struct FormWrapperHelper {
-    /// The wrapper's own parameters, in declaration order.
-    pub(super) params: Vec<Symbol>,
+    /// The wrapper's own parameters, in declaration order, each with
+    /// its DEFAULT when it has one. `**options` ingests as a trailing
+    /// positional defaulting to `{}` (see the keyword_rest arm in
+    /// `ingest::library_class`), so a call that passes no options is
+    /// short by one argument and has to bind the default rather than
+    /// decline — campfire calls `profile_form_with @user` twice and
+    /// `profile_form_with @user, class: "…"` once, in the same
+    /// template.
+    pub(super) params: Vec<(Symbol, Option<Expr>)>,
     /// The `form_with(…)` call its body is, block stripped.
     pub(super) call: Expr,
 }
@@ -2693,7 +2700,11 @@ fn form_wrapper_helpers(app: &App) -> std::collections::HashMap<String, FormWrap
             out.insert(
                 m.name.as_str().to_string(),
                 FormWrapperHelper {
-                    params: m.params.iter().map(|p| p.name.clone()).collect(),
+                    params: m
+                        .params
+                        .iter()
+                        .map(|p| (p.name.clone(), p.default.clone()))
+                        .collect(),
                     call: Expr::new(
                         body.span,
                         ExprNode::Send {
