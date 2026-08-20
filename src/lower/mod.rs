@@ -60,6 +60,7 @@ pub mod as_json_writer;
 pub mod as_json_super;
 pub mod parameterize;
 pub mod presence_in;
+pub mod controller_class_render;
 pub mod dirty_predicate_kwargs;
 pub mod job_test_only;
 pub mod sti_scope;
@@ -120,6 +121,7 @@ pub use mailer_class_side::apply_mailer_class_side;
 pub use as_json_super::apply_as_json_super_grounding;
 pub use parameterize::apply_parameterize_grounding;
 pub use presence_in::apply_presence_in_grounding;
+pub use controller_class_render::apply_controller_class_render;
 pub use dirty_predicate_kwargs::apply_dirty_predicate_kwargs;
 pub use job_test_only::apply_job_test_only_lowering;
 pub use sti_scope::apply_sti_scope_lowering;
@@ -218,6 +220,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // reads of the same synthesis; no pass produces or consumes either
     // shape, so no ordering constraints.
     ("dirty_predicate_kwargs", &[]),
+    // `<X>Controller.render partial:` → the view-module call. Reads a
+    // shape no pass produces and writes a `Views::` call no pass
+    // consumes, so no ordering constraints.
+    ("controller_class_render", &[]),
     // `sum(:col)` → block form; no ordering constraints (rewrites a
     // literal-symbol arg shape no other pass produces or consumes).
     ("sum_symbol", &[]),
@@ -427,6 +433,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("job_test_only");
     dirty_predicate_kwargs::apply_dirty_predicate_kwargs(app);
     ran!("dirty_predicate_kwargs");
+    controller_class_render::apply_controller_class_render(app);
+    ran!("controller_class_render");
     sum_symbol::apply_sum_symbol_lowering(app);
     ran!("sum_symbol");
     values_at_splat::apply_values_at_splat_lowering(app);
