@@ -529,7 +529,7 @@ pub fn apply_post_analyze_lowerings(
     ran!("duration");
     broadcast_calls::apply_broadcast_calls_lowering(app);
     ran!("broadcast_calls");
-    diags.extend(relation_residue::apply_relation_residue_ledger(app));
+    diags.extend(relation_residue::apply_relation_residue_ledger(app, registry));
     ran!("relation_residue");
     #[cfg(debug_assertions)]
     debug_assert_eq!(

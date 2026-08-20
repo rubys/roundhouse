@@ -195,23 +195,48 @@ rather than paper over.** Options, all Sam's:
 3. Accept the two errors on a target where the mistyping was already
    present, and let the eventual dispatch fix collect them.
 
-**Ledger counts moved, for a reason the plan didn't anticipate.** The
-plan expected the blog fixtures to stay at 0 and only lobsters to
-widen. Measured: real-blog 0 → 1, tiny-blog 0 → 3, roda-blog 0 → 1,
-lobsters 50 → 50, once-campfire 29 → 29. The five new fixture sites are
-`Post.all`, `Post.limit(…)`, `Article.order(…)` and friends — chains
-that **do** fold. `apply_relation_residue_ledger` runs inside
+**Ledger counts moved, for a reason the plan didn't anticipate — and
+CI made the fix mandatory (`c60ff20b`).** The plan expected the blog
+fixtures to stay at 0 and only lobsters to widen. First measurement
+after the retype: real-blog 0 → 1, tiny-blog 0 → 3, roda-blog 0 → 1.
+Five new fixture sites, of which three are chains that **do** fold.
+`apply_relation_residue_ledger` runs inside
 `apply_post_analyze_lowerings`, but `rewrite_arel_in_expr` runs later,
-inside `controller_to_library` / `model_to_library`. So the ledger has
+inside `controller_to_library` / `model_to_library`. So the ledger had
 always read a PRE-fold tree; while only scope-rooted chains were
 Relation-typed this was invisible, because `try_build_arel` doesn't
-recognize a scope root anyway. Now that inline chains are
-Relation-typed too, the ledger counts sites that specialize seconds
-later. The count means "Relation-typed chain heads", not "chains that
-stayed dynamic", and the lobsters/campfire figures inherit that caveat.
-Fixing it means asking `try_build_arel` (the pass itself, not a second
-copy of its rule) whether a head would fold — deliberately NOT bundled
-into C1, since it moves a number the plan uses as a decision input.
+recognize a scope root anyway.
+
+I logged that as a caveat and left it. **`browser-smoke-ide` turned
+main red at `d51d86b3` and was right to**: `wasm/playground/
+verify-playground.mjs` asserts real-blog's baseline carries no warning
+code other than `gradual_untyped`, and the flagship demo had picked up
+a `lower_residue` warning about a chain that folds. The ledger now asks
+`try_build_arel` — the recognizer itself, never a second copy of its
+rule — whether each head would lift, and counts only the ones that
+won't. Fixtures: real-blog 0, roda-blog 0, tiny-blog **2**. The two
+that remain are `scope :recent, -> { limit(10) }` and its sibling:
+implicit-self bodies with no receiver to root an Arel base at, which
+emit `__rel.limit(10)` on the runtime Relation. True positives, newly
+visible, exactly the widening the plan predicted.
+
+**The app numbers this revises are a P0a decision input, so read them
+before pricing the splice again:**
+
+| app | pre-C1 | post-C1, naive | post-C1, fold-aware |
+|---|---|---|---|
+| lobsters | 50 | 219 | **212** |
+| once-campfire | 29 | 81 | **80** |
+
+The jump is convergence, not the ledger bug: pre-C1 the pass could only
+see scope-rooted heads, and every inline `Model.where(…)` chain was
+invisible to it. The fold-aware check removes only 7 and 1 — in a real
+app most inline chains carry a runtime argument or a string condition
+and don't fold anyway. **P0a's "lobsters 50 / campfire 24" table
+describes a strict subset of the residue, not the residue.** Its
+param-ness finding (campfire param-less, lobsters parameterized and on
+the benchmarked routes) is unaffected in kind, but the population it
+was computed over was roughly a quarter of the real one.
 
 **What C1 did not converge.** The Array representation is still
 produced by two sources, so both delegation shims and `array_method`'s

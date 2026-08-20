@@ -18,25 +18,73 @@
 //! positions start fresh chains. Bodies covered are the post-analyze
 //! hook's (`for_each_hook_body`) — views are lowered later and keep
 //! their own channel.
+//!
+//! EXCEPT a head the Arel builder will fold. This pass runs inside
+//! `apply_post_analyze_lowerings`, but `rewrite_arel_in_expr` runs
+//! later still — inside `controller_to_library` / `model_to_library`.
+//! So "survives to this point" is not the same as "stays dynamic": a
+//! `Model.where(...)` chain is Relation-typed here and direct SQL by
+//! emit. The pass therefore ASKS `try_build_arel` — the recognizer
+//! itself, not a re-derivation of its rule — whether each head would
+//! lift, and counts only the ones that won't. Before class-side chain
+//! starts converged onto `Ty::Relation` this gap was invisible, since
+//! the only Relation-typed heads were scope-rooted and `try_build_arel`
+//! doesn't recognize a scope root anyway.
+//!
+//! A head with an IMPLICIT receiver (`scope :recent, -> { limit(10) }`)
+//! is not folded and is correctly counted: it lowers to a call on the
+//! runtime `ActiveRecord::Relation` (`__rel.limit(10)`).
 
+use std::collections::HashMap;
+
+use crate::analyze::ClassInfo;
 use crate::app::App;
 use crate::diagnostic::Diagnostic;
 use crate::expr::{Expr, ExprNode};
+use crate::ident::ClassId;
+use crate::lower::model_associations::AssociationEdge;
+use crate::schema::Schema;
 use crate::ty::Ty;
+
+/// What `walk` needs to answer "would the Arel builder lift this?" —
+/// exactly `try_build_arel_with_assocs`'s inputs, carried together
+/// because `for_each_hook_body` borrows the app mutably.
+struct FoldCtx<'a> {
+    schema: Schema,
+    registry: &'a HashMap<ClassId, ClassInfo>,
+    assocs: Vec<AssociationEdge>,
+}
 
 /// Walk every hook body and ledger each dynamic relation chain.
 /// Pure read — no rewrite; returns the diagnostics for the shared
 /// residue channel.
-pub fn apply_relation_residue_ledger(app: &mut App) -> Vec<Diagnostic> {
+pub fn apply_relation_residue_ledger(
+    app: &mut App,
+    registry: &HashMap<ClassId, ClassInfo>,
+) -> Vec<Diagnostic> {
+    // Cloned/computed up front: `for_each_hook_body` takes `&mut App`,
+    // so nothing can stay borrowed out of it during the walk.
+    let ctx = FoldCtx {
+        schema: app.schema.clone(),
+        registry,
+        assocs: crate::lower::model_associations::compute_association_graph(app),
+    };
     let mut diags = Vec::new();
-    super::for_each_hook_body(app, &mut |body| walk(body, false, &mut diags));
+    super::for_each_hook_body(app, &mut |body| walk(body, false, &ctx, &mut diags));
     diags
 }
 
-fn walk(e: &Expr, in_chain: bool, diags: &mut Vec<Diagnostic>) {
+/// Will the Arel builder lift this Send to direct SQL before emit?
+fn folds_to_sql(e: &Expr, ctx: &FoldCtx) -> bool {
+    crate::lower::arel::try_build_arel_with_assocs(e, &ctx.schema, ctx.registry, &ctx.assocs)
+        .is_some()
+}
+
+fn walk(e: &Expr, in_chain: bool, ctx: &FoldCtx, diags: &mut Vec<Diagnostic>) {
     if let ExprNode::Send { recv, method, args, block, .. } = &*e.node {
-        let is_relation_head =
-            matches!(e.ty.as_ref(), Some(Ty::Relation { .. })) && !in_chain;
+        let is_relation_head = matches!(e.ty.as_ref(), Some(Ty::Relation { .. }))
+            && !in_chain
+            && !folds_to_sql(e, ctx);
         if is_relation_head {
             let of = match e.ty.as_ref() {
                 Some(Ty::Relation { of }) => of.0.as_str().to_string(),
@@ -62,15 +110,15 @@ fn walk(e: &Expr, in_chain: bool, diags: &mut Vec<Diagnostic>) {
         let spine = in_chain
             || matches!(e.ty.as_ref(), Some(Ty::Relation { .. }));
         if let Some(r) = recv {
-            walk(r, spine, diags);
+            walk(r, spine, ctx, diags);
         }
         for a in args {
-            walk(a, false, diags);
+            walk(a, false, ctx, diags);
         }
         if let Some(b) = block {
-            walk(b, false, diags);
+            walk(b, false, ctx, diags);
         }
         return;
     }
-    e.node.for_each_child(&mut |c| walk(c, false, diags));
+    e.node.for_each_child(&mut |c| walk(c, false, ctx, diags));
 }

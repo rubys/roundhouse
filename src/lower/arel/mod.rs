@@ -18,7 +18,7 @@ pub mod build;
 pub mod ir;
 pub mod visitor;
 
-pub use build::try_build_arel;
+pub use build::{try_build_arel, try_build_arel_with_assocs};
 pub use ir::{
     ArelOp, Assignment, ColRef, ColumnSpec, Delete, Direction, Insert, Join, JoinKind, LimitSpec,
     Order, Predicate, PreloadDirective, Select, Update, Value, ValueType,
