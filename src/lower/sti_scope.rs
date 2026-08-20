@@ -25,9 +25,11 @@
 //! worse twice over: the surface is the whole Relation API, and each
 //! method would have to land on every target.
 //!
-//! **Scoped to the RELATION surface.** `new`/`create!` construct (the
-//! type column is a write, not a filter, and the base's writers already
-//! own it); a hand-written class method on the subclass
+//! **Two halves.** The RELATION surface filters; the CONSTRUCTORS
+//! (`new`/`create!`/…) STAMP, folding `type: "Rooms::Open"` into the
+//! attribute hash — without it `Rooms::Open.create!` wrote a row
+//! belonging to no subclass, which the read half above then correctly
+//! could not see. A hand-written class method on the subclass
 //! (`Rooms::Direct.find_or_create_for`) is the subclass's own; and
 //! `find` is left alone because the arel pass inlines `<Model>.find` to
 //! a primary-key SELECT — re-rooting it would move that work onto the
@@ -46,6 +48,13 @@ const STI_RELATION_METHODS: &[&str] = &[
     "any?", "none?", "empty?", "order", "limit", "offset", "joins", "includes", "distinct",
     "group", "maximum", "minimum", "destroy_all", "delete_all", "update_all",
 ];
+
+/// Construction on a subclass, which has to STAMP the type column
+/// rather than filter on it. `Rooms::Open.create!(name: …)` wrote a row
+/// with an empty `type`, so it belonged to no subclass at all — and the
+/// read half above made that visible, because a correctly-scoped
+/// `Rooms::Open.count` then cannot see the row it just created.
+const STI_CONSTRUCTORS: &[&str] = &["new", "create", "create!", "build"];
 
 /// Rails' inheritance column. Not configurable here — `inheritance_column`
 /// is a per-model override no corpus app writes, and guessing at one
@@ -115,14 +124,23 @@ fn sti_bases(app: &App) -> HashMap<ClassId, ClassId> {
 fn rewrite(expr: &mut Expr, bases: &HashMap<ClassId, ClassId>) {
     expr.node.for_each_child_mut(&mut |c| rewrite(c, bases));
     let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node else { return };
-    if !STI_RELATION_METHODS.contains(&method.as_str()) {
+    let constructing = STI_CONSTRUCTORS.contains(&method.as_str());
+    if !constructing && !STI_RELATION_METHODS.contains(&method.as_str()) {
         return;
     }
     let ExprNode::Const { path } = &*r.node else { return };
     let named = ClassId(Symbol::from(
-        path.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::"),
+        path.iter()
+            .map(|s| s.as_str().trim_start_matches("::"))
+            .collect::<Vec<_>>()
+            .join("::"),
     ));
-    let Some(base) = bases.get(&named) else { return };
+    let Some(_) = bases.get(&named) else { return };
+    if constructing {
+        stamp_type(expr, &named);
+        return;
+    }
+    let base = bases.get(&named).expect("checked above");
     let span = expr.span;
     let scoped = Expr::new(
         span,
@@ -170,4 +188,39 @@ fn rewrite(expr: &mut Expr, bases: &HashMap<ClassId, ClassId>) {
         span,
         ExprNode::Send { recv: Some(scoped), method, args, block, parenthesized },
     );
+}
+
+/// Fold `type: "<Sub>"` into a constructor's attribute hash.
+///
+/// The RECEIVER stays the subclass: Ruby's inheritance constructs a
+/// `Rooms::Open`, which is what campfire's `Room#open?` (`is_a?
+/// (Rooms::Open)`) asks about — rerooting on the base would answer that
+/// wrongly while fixing the column. Only the column is missing.
+///
+/// An existing `type:` wins; an argument that is not a literal Hash
+/// (a params object, a variable) is left alone, because there is no
+/// literal to fold into and building a `merge` here would hand the
+/// constructor a shape it does not take.
+fn stamp_type(expr: &mut Expr, sub: &ClassId) {
+    let span = expr.span;
+    let ExprNode::Send { args, .. } = &mut *expr.node else { return };
+    let Some(attrs) = args.last_mut() else { return };
+    let ExprNode::Hash { entries, .. } = &mut *attrs.node else { return };
+    let already = entries.iter().any(|(k, _)| {
+        matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+            if value.as_str() == INHERITANCE_COLUMN)
+    });
+    if already {
+        return;
+    }
+    entries.push((
+        Expr::new(
+            span,
+            ExprNode::Lit { value: Literal::Sym { value: Symbol::from(INHERITANCE_COLUMN) } },
+        ),
+        Expr::new(
+            span,
+            ExprNode::Lit { value: Literal::Str { value: sub.0.as_str().to_string() } },
+        ),
+    ));
 }

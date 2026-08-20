@@ -24,7 +24,6 @@
 
 use crate::app::App;
 use crate::expr::{Expr, ExprNode, Literal};
-use crate::ident::Symbol;
 
 /// The ActiveJob test assertions that take a job-class filter.
 const JOB_FILTER_HELPERS: &[&str] = &[

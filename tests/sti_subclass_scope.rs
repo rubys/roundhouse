@@ -92,12 +92,34 @@ fn all_becomes_the_scope_itself() {
     assert!(!body.contains("\"all\""), "no leftover .all: {body}");
 }
 
-/// Construction is untouched — the type column is a WRITE there, and
-/// the base's writers already own it.
+/// Construction STAMPS instead of filtering. Without it
+/// `Rooms::Open.create!` wrote a row with an empty `type`, belonging to
+/// no subclass — which the read half above then correctly could not
+/// see, so the two halves have to land together.
 #[test]
-fn construction_is_left_alone() {
-    let body = probe_body("Rooms::Open.new(name: \"x\")");
-    assert!(!body.contains("where"), "new must not be scoped: {body}");
+fn construction_stamps_the_type_instead_of_filtering() {
+    let body = probe_body("Rooms::Open.create!(name: \"x\")");
+    assert!(!body.contains("where"), "a constructor is not scoped: {body}");
+    assert!(
+        body.contains("Str { value: \"Rooms::Open\" }"),
+        "the type column must be stamped: {body}"
+    );
+    // The RECEIVER stays the subclass: Ruby's inheritance constructs a
+    // `Rooms::Open`, which is what an `is_a?` predicate asks about.
+    assert!(
+        body.contains("Symbol(\"Rooms\")"),
+        "the receiver stays the subclass: {body}"
+    );
+}
+
+/// An explicit `type:` wins — nothing is overwritten.
+#[test]
+fn an_explicit_type_is_not_overwritten() {
+    let body = probe_body("Rooms::Open.new(type: \"Rooms::Closed\")");
+    assert!(
+        !body.contains("Str { value: \"Rooms::Open\" }"),
+        "an explicit type must win: {body}"
+    );
 }
 
 /// Plain Ruby inheritance is not STI. `Gadget < Widget` with no `type`
