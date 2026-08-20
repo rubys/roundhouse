@@ -18,7 +18,7 @@ use crate::ty::Ty;
 
 /// What kind of `+` this is, in enough detail for a target emitter
 /// to pick the right output form.
-pub enum AddCase<'a> {
+pub enum AddCase {
     /// Int + Int or Float + Float — emit as native `+`.
     Numeric,
     /// Int + Float or Float + Int — most targets auto-coerce; Rust
@@ -27,13 +27,16 @@ pub enum AddCase<'a> {
     /// Str + Str — concatenation per target idiom (Elixir: `<>`,
     /// Rust: `format!`, others: native `+`).
     StringConcat,
-    /// Array[T] + Array[T] where the element types match — concat
-    /// per target idiom (Elixir: `++`, Go: `append(a, b...)`, Rust:
-    /// `.concat()`, TS: spread, others: native `+`).
+    /// A collection `+` a collection — concat per target idiom
+    /// (Elixir: `++`, Go: `append(a, b...)`, Rust: `.concat()`, TS:
+    /// spread, others: native `+`). Either side may be a `Relation`
+    /// rather than an `Array`: Rails' `Relation#+` materializes and
+    /// concatenates, so the two spellings are one case here.
     ArrayConcat {
-        /// The shared element type. Emitters that need to declare
-        /// intermediate storage types (Rust, Go) read it here.
-        elem: &'a Ty,
+        /// A representative element type — lhs's when it has one.
+        /// Owned rather than borrowed because a `Relation`'s element
+        /// is derived, not stored.
+        elem: Ty,
     },
     /// Both sides typed concretely but `+` isn't defined in Ruby
     /// for that pair (`Int + Str`, `Hash + Hash`, etc.). Ruby would
@@ -52,7 +55,7 @@ pub enum AddCase<'a> {
 }
 
 /// Classify a pair of operands for `+` emission.
-pub fn classify_add<'a>(lhs: &'a Expr, rhs: &'a Expr) -> AddCase<'a> {
+pub fn classify_add(lhs: &Expr, rhs: &Expr) -> AddCase {
     let lhs_ty = lhs.ty.as_ref();
     let rhs_ty = rhs.ty.as_ref();
 
@@ -68,18 +71,24 @@ pub fn classify_add<'a>(lhs: &'a Expr, rhs: &'a Expr) -> AddCase<'a> {
         (Ty::Int, Ty::Int) | (Ty::Float, Ty::Float) => AddCase::Numeric,
         (Ty::Int, Ty::Float) | (Ty::Float, Ty::Int) => AddCase::NumericPromote,
         (Ty::Str, Ty::Str) => AddCase::StringConcat,
-        // `Array + Array` is *always* valid Ruby — it concatenates
-        // regardless of element types, yielding `Array<lhs_elem |
-        // rhs_elem>`. Do not require matching element types: a
-        // heterogeneous concat (`Story.select(:id)… + [self.id]`) is
-        // real code, not an error. `elem` is a representative (lhs's);
-        // every emitter consumes `ArrayConcat { .. }` ignoring it, and
-        // the expression's true (union-element) result type is computed
-        // by the body typer, not here.
-        (Ty::Array { elem: l }, Ty::Array { .. }) => {
-            AddCase::ArrayConcat { elem: l.as_ref() }
+        _ => {
+            // Collection `+` collection is *always* valid Ruby — it
+            // concatenates regardless of element types, yielding
+            // `Array<lhs_elem | rhs_elem>`. Do not require matching
+            // element types: a heterogeneous concat
+            // (`Story.select(:id)… + [self.id]`) is real code, not an
+            // error. Asking each side for its element (rather than
+            // matching `Ty::Array` twice) is what lets a lazy
+            // `Relation` operand through: that lobsters site's lhs is
+            // exactly one. `elem` is a representative (lhs's); every
+            // emitter consumes `ArrayConcat { .. }` ignoring it, and
+            // the expression's true (union-element) result type is
+            // computed by the body typer, not here.
+            match (lhs_ty.collection_elem(), rhs_ty.collection_elem()) {
+                (Some(elem), Some(_)) => AddCase::ArrayConcat { elem },
+                _ => AddCase::Incompatible,
+            }
         }
-        _ => AddCase::Incompatible,
     }
 }
 
@@ -87,7 +96,7 @@ pub fn classify_add<'a>(lhs: &'a Expr, rhs: &'a Expr) -> AddCase<'a> {
 mod tests {
     use super::*;
     use crate::expr::{ExprNode, Literal};
-    use crate::ident::{Symbol, VarId};
+    use crate::ident::{ClassId, Symbol, VarId};
     use crate::span::Span;
 
     fn with_ty(node: ExprNode, ty: Ty) -> Expr {
@@ -165,7 +174,26 @@ mod tests {
         let AddCase::ArrayConcat { elem } = case else {
             panic!("expected ArrayConcat");
         };
-        assert_eq!(*elem, Ty::Int);
+        assert_eq!(elem, Ty::Int);
+    }
+
+    #[test]
+    fn relation_plus_array_is_array_concat() {
+        // lobsters `story.rb`'s `merged_comments`: a lazy relation
+        // concatenated with a literal array. `Relation#+` materializes
+        // and concatenates, so this is a concat, not an error — and it
+        // is the site that regressed when class-side chain starts
+        // converged onto `Relation`.
+        let l = var_with(
+            "a",
+            Ty::Relation { of: ClassId(Symbol::from("Story")) },
+        );
+        let r = var_with("b", Ty::Array { elem: Box::new(Ty::Int) });
+        let case = classify_add(&l, &r);
+        let AddCase::ArrayConcat { elem } = case else {
+            panic!("expected ArrayConcat");
+        };
+        assert!(matches!(elem, Ty::Class { .. }));
     }
 
     #[test]

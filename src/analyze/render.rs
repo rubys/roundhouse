@@ -327,12 +327,9 @@ fn interpret_render_call(
         }
         if let Some(name) = partial_name {
             if let Some(coll) = collection_ty {
-                let elem_ty = match coll {
-                    Ty::Array { elem } => *elem,
-                    // Unknown/gradual collection still binds the local —
-                    // gradual element beats an unresolved bare name.
-                    _ => Ty::Untyped,
-                };
+                // Unknown/gradual collection still binds the local —
+                // gradual element beats an unresolved bare name.
+                let elem_ty = coll.collection_elem().unwrap_or(Ty::Untyped);
                 let local = as_name.unwrap_or_else(|| {
                     let base = name.rsplit('/').next().unwrap_or(&name);
                     Symbol::from(base.trim_start_matches('_'))
@@ -351,19 +348,20 @@ fn interpret_render_call(
 }
 
 /// If the receiver type implies a collection/single-record render target,
-/// return (partial_view_name, local_name, element_ty). For `Array<Article>`:
-/// partial `articles/_article`, local `article`, element `Article`.
+/// return (partial_view_name, local_name, element_ty). For
+/// `Array<Article>` / `Relation[Article]`: partial `articles/_article`,
+/// local `article`, element `Article`.
 fn partial_from_receiver_type(ty: &Ty) -> Option<(String, String, Ty)> {
+    if let Some(elem) = ty.collection_elem() {
+        if let Ty::Class { id, .. } = &elem {
+            let class_name = id.0.as_str();
+            let local = crate::naming::snake_case(class_name);
+            let folder = crate::naming::pluralize_snake(class_name);
+            return Some((format!("{folder}/_{local}"), local, elem.clone()));
+        }
+        return None;
+    }
     match ty {
-        Ty::Array { elem } => match &**elem {
-            Ty::Class { id, .. } => {
-                let class_name = id.0.as_str();
-                let local = crate::naming::snake_case(class_name);
-                let folder = crate::naming::pluralize_snake(class_name);
-                Some((format!("{folder}/_{local}"), local, (**elem).clone()))
-            }
-            _ => None,
-        },
         Ty::Class { id, .. } => {
             let class_name = id.0.as_str();
             let local = crate::naming::snake_case(class_name);

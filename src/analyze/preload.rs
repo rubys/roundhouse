@@ -193,13 +193,21 @@ fn instance_model(ty: Option<&Ty>) -> Option<&ClassId> {
     }
 }
 
-/// The relation-typed element class of `Array[M]` / `Array[M]?`.
+/// The relation-typed element class of `Relation[M]` / `Array[M]`
+/// (and their nilable forms).
+///
+/// Both spellings reach here: a lazy chain is `Relation { of }`, and a
+/// materialized collection — `to_a`, an association read, a scope the
+/// seed classifier could not recognize — is `Array[M]`. An N+1 is the
+/// same defect either way (iterate a collection of `M`, touch an
+/// association per element), so both answer with the element class.
 fn relation_elem(ty: Option<&Ty>) -> Option<&ClassId> {
     let ty = match ty? {
         Ty::Union { variants } => variants.iter().find(|v| !matches!(v, Ty::Nil))?,
         other => other,
     };
     match ty {
+        Ty::Relation { of } => Some(of),
         Ty::Array { elem } => match elem.as_ref() {
             Ty::Class { id, .. } => Some(id),
             _ => None,

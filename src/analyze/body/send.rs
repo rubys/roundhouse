@@ -728,15 +728,26 @@ impl<'a> BodyTyper<'a> {
                 if let Some(cls) = self.classes().get(of) {
                     match cls.class_methods.get(method) {
                         Some(ret @ Ty::Relation { .. }) => return ret.clone(),
-                        // A class-side entry still carrying the Array
-                        // representation (builder seeds, scope seeds
-                        // that didn't qualify for the Relation flip):
-                        // chain methods preserve the receiver's
-                        // representation, so re-wrap a single-model
-                        // element as a relation over that model. A
-                        // union-of-models element isn't expressible
-                        // as `Relation { of }` — keep the array form.
-                        Some(Ty::Array { elem }) if is_model_relation_elem(elem) => {
+                        // A class-side entry that answers with a
+                        // COLLECTION. Chain methods preserve the
+                        // receiver's representation, so a single-model
+                        // element (a builder seed, or a scope seed that
+                        // didn't qualify for the Relation flip)
+                        // re-wraps as a relation over that model. Every
+                        // other element answers with its own type: a
+                        // union-of-models element isn't expressible as
+                        // `Relation { of }`, and a hand-written class
+                        // method that returns a plain Array is not a
+                        // relation at all.
+                        //
+                        // The width here is deliberate and must match
+                        // the Array-representation arm above, which
+                        // delegates every Array-returning class method.
+                        // Narrower — model elements only — is how
+                        // lobsters' `merged_comments.arrange_for_user(
+                        // nil)` came to resolve on an Array receiver
+                        // and fail to dispatch on a Relation one.
+                        Some(Ty::Array { elem }) => {
                             return match &**elem {
                                 Ty::Class { id, .. } => Ty::Relation { of: id.clone() },
                                 _ => Ty::Array { elem: elem.clone() },

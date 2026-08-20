@@ -134,6 +134,24 @@ impl Ty {
         matches!(self, Ty::Var { .. } | Ty::Untyped)
     }
 
+    /// The element type of a collection-shaped type: `Array[T]` → `T`,
+    /// `Relation[M]` → the record type `M`. `None` for everything else.
+    ///
+    /// The two spellings are one fact — "many records of this type" —
+    /// held apart only by whether the query has materialized yet, and
+    /// consumers that care about the element (collection renders, the
+    /// N+1 detector, iteration typing) care about neither. This is the
+    /// one place that equivalence is written down; a consumer matching
+    /// `Ty::Array` directly to find an element is a site that will go
+    /// quietly blind the next time a producer flips representation.
+    pub fn collection_elem(&self) -> Option<Ty> {
+        match self {
+            Ty::Array { elem } => Some((**elem).clone()),
+            Ty::Relation { of } => Some(Ty::Class { id: of.clone(), args: vec![] }),
+            _ => None,
+        }
+    }
+
     /// True for the two variants that leave a value's type open to
     /// refinement: [`Ty::Var`] (not yet inferred) and [`Ty::Bottom`]
     /// (the expression diverges, so any type is admissible). Fixpoint
