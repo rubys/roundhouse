@@ -62,7 +62,7 @@ fn app_with(call_tail: &str) -> App {
             "app/helpers/things_helper.rb",
             r#"module ThingsHelper
   def thing_form_with(model, **params, &)
-    form_with model: model, url: thing_path(model), method: :patch, **params, &
+    form_with model: @thing, url: thing_path(model), method: :patch, **params, &
   end
 end
 "#,
@@ -112,6 +112,28 @@ fn a_call_with_an_options_hash_merges_and_overrides() {
     assert!(
         src.contains("form_method = :post"),
         "the caller's `method:` overrides the helper's `:patch`:\n{src}"
+    );
+}
+
+/// The helper's body is read in the VIEW's context. campfire's
+/// `profile_form_with(model, …)` ignores its own parameter and names
+/// `@user`, which is legal because a Rails view helper runs against the
+/// view — and the emitted view is a module function whose ivars became
+/// parameters before the walker ran. Unrewritten, the spliced `@user`
+/// stayed an ivar on a module function (nil), and every field in the
+/// form died on `undefined method '[]' for nil`.
+#[test]
+fn the_helpers_own_ivars_read_as_the_views_locals() {
+    let app = app_with("");
+    let files = roundhouse::emit::ruby::emit_lowered_views(&app);
+    let src = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("things/show.rb"))
+        .map(|f| f.content.clone())
+        .expect("show view");
+    assert!(
+        !src.contains("@thing"),
+        "no ivar may survive into a view module function:\n{src}"
     );
 }
 

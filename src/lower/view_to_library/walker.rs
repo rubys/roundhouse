@@ -965,6 +965,18 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         if let Some(w) = ctx.form_wrappers.get(method.as_str()) {
             if !ctx.is_local(method.as_str()) {
                 if let Some(spliced) = splice_form_wrapper(w, sa, block) {
+                    // The helper's body is read in the VIEW's context,
+                    // which is what Rails does — a view helper runs
+                    // against the view, so its `@user` is the
+                    // controller's ivar. Here the view is a module
+                    // function whose ivars became parameters before the
+                    // walker ran, so the spliced body has to make the
+                    // same move. campfire's `profile_form_with(model,
+                    // …)` ignores its own parameter and names `@user`;
+                    // unrewritten it stayed an ivar on a module
+                    // function — nil — and every field died on
+                    // `[]` for nil.
+                    let spliced = super::rewrite_ivars_to_locals(&spliced);
                     return emit_io_append(&spliced, ctx);
                 }
             }

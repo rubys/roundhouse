@@ -3072,7 +3072,7 @@ pub(crate) fn infer_view_arg(stem: &str, dir: &str, is_partial: bool, _known_mod
 /// Rewrite every `@ivar` read (and Ivar-LValue assign) under `expr`
 /// into a bare `Var` of the same name. The inferred view arg + any
 /// extra params resolve to those rewritten Vars in the emitted body.
-fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
+pub(super) fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
     let new_node = match &*expr.node {
         ExprNode::Ivar { name } => ExprNode::Var {
             id: VarId(0),
