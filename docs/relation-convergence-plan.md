@@ -246,23 +246,86 @@ param-ness finding (campfire param-less, lobsters parameterized and on
 the benchmarked routes) is unaffected in kind, but the population it
 was computed over was roughly a quarter of the real one.
 
-**What C1 did not converge.** The Array representation is still
-produced by two sources, so both delegation shims and `array_method`'s
-relation arms stay live and are NOT deleted:
+**What C1 did not converge, and — measured — should not.** The Array
+representation is still produced by two sources, so both delegation
+shims and `array_method`'s relation arms stay live and are NOT deleted:
 
 1. `scope_return_seed`'s fallback — a scope body the classifier can't
    read (block hop, cross-model root, ternary) still seeds
    `Array[Self]`.
 2. **Every `has_many` / HABTM read.** `association_member_ty` returns
    `Array<Target>`; `story.comments` and `story.comments.where(…)` are
-   both Array-typed today.
+   both Array-typed.
 
-(2) is worth flagging against the plan's own text: "Why this work"
-lists chains starting at an assoc as already `Relation`-typed. They are
-not, and never were. Converging them is the natural C2-or-later step
-and is a bigger decision than it looks — every emitter routes a
-reachable `Relation` to an Error, and blog views iterate
-`article.comments` directly. Measure before flipping.
+Both were probed under the full gate, then reverted. Neither is in the
+tree; what follows is the measurement, so the next session doesn't
+re-run it.
+
+### Associations must NOT converge — the plan's premise is wrong twice
+
+"Why this work" lists chains starting at an assoc as already
+`Relation`-typed. They are not, and they should not become so.
+`association_member_ty` flipped to `Relation { of: target }`:
+
+- **Emit byte-identical**, 3 fixtures × 13 targets, 39/39 strict clean.
+  The flip changes no emitted program — it is a rename inside the
+  analyzer with nothing downstream of it.
+- **`Array[T]` is the true type.** The emitted reader is not lazy: it
+  prepares the SELECT, steps it, hydrates, returns a materialized
+  array, and its signature says `def comments: () -> Array[Comment]`.
+  An association read is a TERMINAL — the specialization already
+  happened, at the reader seam. Settled decision #5 (terminals keep
+  their result types) covers it directly.
+- **The flip would mint the very hazard C1 deleted.** That
+  `() -> Array[Comment]` signature comes from the LOWERING-side seed in
+  `model_to_library/associations.rs`, which `association_member_ty`
+  does not touch — which is why emit stayed byte-identical, and which
+  means the analyzer would say `Relation[Comment]` while the emitted
+  contract says `Array[Comment]`. Two copies of one fact, disagreeing.
+- **The residue ledger would count every assoc read as unspecialized**
+  — real-blog 0 → 5, roda-blog 0 → 3, all `article.comments`. Same
+  false-positive class that turned main red at `d51d86b3`.
+
+So the dual representation is not wholly a staging accident. Part of it
+is a real distinction — LAZY query vs MATERIALIZED result — and
+`array_method`'s relation arms are the "chain off a materialized
+collection" surface. **They are permanent. C1's instruction to delete
+them "in the same series" is not achievable and should not be
+attempted, and C2 must not assume one representation.**
+
+### The scope-seed fallback: legitimate, measured, and not worth it yet
+
+This one IS a fabrication — a scope is a lazy query by construction
+(`body_is_relation_query`'s own doc says so), and an unreadable body
+lowers to `__rel.limit(10)` on the runtime Relation, so `Relation` is
+the truthful seed. Flipped `scope_return_seed`'s fallback:
+
+- Fixtures: emit byte-identical, 39/39 strict clean, ledger unmoved.
+- lobsters: **rust 4 → 5 unsupported, crystal 3 → 4**; ledger 212 → 235.
+- once-campfire: unmoved (54 type errors, 3/3/0 unsupported).
+- Two tests fail — both the expectation tests that pin the fallback.
+
+The single new error is `Relation[Comment] reached emit`, from
+`scope :accessible_to_user, ->(user) { user && user.is_moderator? ?
+all : active }` — a ternary body, the exact Mastodon `with_username`
+shape that made the classifier conservative in the first place. Both
+arms yield relations, so the truthful type is `Relation[Comment]`; the
+Array seed is a lie rust can render and Relation is a truth it cannot.
+It joins **4 identical `relation_type` errors already on that lane**,
+so it is not a new failure mode — one more site moving from silently
+mistyped to honestly reported.
+
+**Recommendation: don't land it, for now.** Its whole payoff was
+supposed to be deleting the shims, and the association finding above
+removes that: the shims stay regardless. What is left is truthfulness
+in exchange for one more strict-lane error and 23 more ledger entries.
+Worth doing on the day the strict lobsters lane is being driven to
+zero — the errors it adds are real and would have to be faced then
+anyway — and not worth doing before. The plan named this exact call as
+Sam's ("accept the error as truthful, or map Relation to the array
+repr in that emitter"); a third option is now visible, teaching the
+classifier that a ternary with two relation arms yields a relation,
+which makes the type precise but produces the same emit error.
 
 ### P0a — splice pricing, measured 2026-08-13
 
