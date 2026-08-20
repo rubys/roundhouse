@@ -786,6 +786,7 @@ fn hook_method_name(hook: crate::dialect::CallbackHook) -> &'static str {
         Hook::BeforeDestroy => "before_destroy",
         Hook::AfterDestroy => "after_destroy",
         Hook::AfterCommit => "after_commit",
+        Hook::AfterSaveCommit => "after_save_commit",
         Hook::AfterRollback => "after_rollback",
     }
 }

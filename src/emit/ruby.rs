@@ -817,12 +817,30 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
     // the same gate). Abstract parents like ApplicationRecord have no
     // table → no truncate method → calling it falls through to
     // ActiveRecord::Base and raises NotImplementedError. Skip them.
-    let truncate_lines: Vec<String> = app
+    let mut truncate_lines: Vec<String> = app
         .models
         .iter()
         .filter(|m| app.schema.tables.contains_key(&m.table.0))
         .map(|m| format!("{}._adapter_truncate", m.name.0.as_str()))
         .collect();
+    // A table with NO model still holds rows a test wrote, and
+    // reloading fixtures on top of them is the same bug the shared list
+    // above exists to prevent. campfire's `message_search_index` is the
+    // case: an fts5 virtual table the app keeps in step by hand
+    // (`Message::Searchable`), so every message insert added a row that
+    // nothing cleared, and the second fixture load hit `constraint
+    // failed` on a rowid it had already used.
+    //
+    // `DELETE FROM` rather than a synthesized `_adapter_truncate`:
+    // there is no model to synthesize it onto, and a virtual table has
+    // no AUTOINCREMENT sequence to reset.
+    let modelled: std::collections::HashSet<&str> =
+        app.models.iter().map(|m| m.table.0.as_str()).collect();
+    for (name, _table) in &app.schema.tables {
+        if !modelled.contains(name.as_str()) {
+            truncate_lines.push(format!("Db.exec(\"DELETE FROM {}\")", name.as_str()));
+        }
+    }
 
     // Test bootstrap. The canonical content (LOAD_PATH wiring,
     // SqliteAdapter setup, RequestDispatch + ActionResponse +

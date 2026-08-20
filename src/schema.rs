@@ -24,6 +24,24 @@ pub struct Table {
     pub columns: Vec<Column>,
     pub indexes: Vec<Index>,
     pub foreign_keys: Vec<ForeignKey>,
+    /// `create_virtual_table "message_search_index", "fts5", ["body",
+    /// "tokenize=porter"]` — a table the DB builds from a MODULE rather
+    /// than from a column list. It has no rowid column of its own, no
+    /// types, and no indexes, so the DDL renderer takes a different
+    /// branch entirely; everything else about it is a table, which is
+    /// why it lives here rather than in a parallel collection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtual_module: Option<VirtualModule>,
+}
+
+/// The module and argument list of a `create_virtual_table`. Rendered
+/// back verbatim — the arguments are the module's own DSL (fts5 takes
+/// column names AND `tokenize=…` options in one list), so parsing them
+/// into anything finer would be inventing a grammar per module.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VirtualModule {
+    pub module: String,
+    pub args: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

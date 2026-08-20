@@ -43,6 +43,18 @@ pub fn ingest_schema(source: &[u8], file: &str) -> IngestResult<Schema> {
             // model just like a table, so register its columns —
             // extracted from the SELECT's `AS <alias>` list — as a
             // Table. ReplyingComment is the lobsters case.
+            // `create_virtual_table "message_search_index", "fts5",
+            // ["body", "tokenize=porter"]` — campfire's full-text
+            // search index. It is a real table the app writes to
+            // (`Message::Searchable` keeps it in step through
+            // after_*_commit callbacks), so it has to reach the DDL;
+            // unregistered, every message insert died on "no such
+            // table".
+            "create_virtual_table" => {
+                if let Some((name, table)) = virtual_table_from_call(call) {
+                    schema.tables.insert(name, table);
+                }
+            }
             "create_view" => {
                 // `create_table`s are dumped before views, so the
                 // tables a view projects are already in `schema.tables`
@@ -473,6 +485,52 @@ fn table_from_create_table(call: &ruby_prism::CallNode<'_>) -> Option<(Symbol, T
             columns,
             indexes,
             foreign_keys: vec![],
+            virtual_module: None,
+        },
+    ))
+}
+
+/// `create_virtual_table "name", "module", ["arg", …]` → (key, Table).
+///
+/// The arguments are the MODULE's own DSL, kept verbatim (see
+/// [`crate::schema::VirtualModule`]). Those that name a column — the
+/// ones with no `=` — are registered as Text columns so a query naming
+/// them types, which is what fts5's `body` is. There is no `id`: a
+/// virtual table's implicit key is `rowid`, and declaring one would put
+/// a column in the DDL that fts5 rejects.
+fn virtual_table_from_call(call: &ruby_prism::CallNode<'_>) -> Option<(Symbol, Table)> {
+    let args = call.arguments()?;
+    let mut it = args.arguments().iter();
+    let name = name_value(&it.next()?)?;
+    let module = name_value(&it.next()?)?;
+    let mut module_args: Vec<String> = Vec::new();
+    if let Some(list) = it.next().and_then(|a| a.as_array_node()) {
+        for el in list.elements().iter() {
+            if let Some(v) = string_value(&el).or_else(|| symbol_value(&el).map(|s| s.to_string()))
+            {
+                module_args.push(v);
+            }
+        }
+    }
+    let columns: Vec<Column> = module_args
+        .iter()
+        .filter(|a| !a.contains('='))
+        .map(|a| Column {
+            name: Symbol::from(a.as_str()),
+            col_type: ColumnType::Text,
+            nullable: true,
+            default: None,
+            primary_key: false,
+        })
+        .collect();
+    Some((
+        Symbol::from(name.clone()),
+        Table {
+            name: Symbol::from(name),
+            columns,
+            indexes: vec![],
+            foreign_keys: vec![],
+            virtual_module: Some(crate::schema::VirtualModule { module, args: module_args }),
         },
     ))
 }
@@ -513,6 +571,7 @@ fn view_from_create_view(
             columns,
             indexes: vec![],
             foreign_keys: vec![],
+            virtual_module: None,
         },
     ))
 }

@@ -885,8 +885,32 @@ fn parse_callback(
         "before_destroy" => CallbackHook::BeforeDestroy,
         "after_destroy" => CallbackHook::AfterDestroy,
         "after_commit" => CallbackHook::AfterCommit,
+        // Rails' per-lifecycle SUGAR for `after_commit … on: <event>`.
+        // Only the block form of these was ever recognized
+        // (`BLOCK_CALLBACK_HOOKS`); the symbol form fell through to
+        // Unknown, so campfire's `after_create_commit
+        // :grant_membership_to_open_rooms` and `Rooms::Open`'s
+        // `after_save_commit :grant_access_to_all_users` were DROPPED —
+        // the method emitted and nothing ever called it.
+        //
+        // Each maps to the runtime hook of the same name, which
+        // `save_after_validation` / `destroy` already fire in Rails'
+        // order. `on:` is not accepted alongside them, exactly as Rails
+        // refuses it ("You can't specify on with after_create_commit").
+        "after_create_commit" => CallbackHook::AfterCommit,
+        "after_update_commit" => CallbackHook::AfterCommit,
+        "after_destroy_commit" => CallbackHook::AfterCommit,
+        "after_save_commit" => CallbackHook::AfterSaveCommit,
         "after_rollback" => CallbackHook::AfterRollback,
         _ => return None,
+    };
+    // The lifecycle the sugar spelling pins, which `push_symbol_callback`
+    // reads back off `on:` to pick the hook method.
+    let sugar_on = match method {
+        "after_create_commit" => Some(CallbackOn::Create),
+        "after_update_commit" => Some(CallbackOn::Update),
+        "after_destroy_commit" => Some(CallbackOn::Destroy),
+        _ => None,
     };
 
     let args = call.arguments()?;
@@ -927,6 +951,14 @@ fn parse_callback(
     }
     if targets.is_empty() {
         return None;
+    }
+    // A sugar spelling pins its own lifecycle; an explicit `on:` beside
+    // it is not Rails and is not guessed at.
+    if sugar_on.is_some() {
+        if on.is_some() {
+            return None;
+        }
+        on = sugar_on;
     }
     // `on:` is only expressible where the runtime hook surface can
     // carry it — validation hooks (new_record? guard) and after_commit

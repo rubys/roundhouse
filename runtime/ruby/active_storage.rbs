@@ -12,6 +12,7 @@ module ActiveStorage
     def variable?: () -> bool
     def variant: (untyped transformations) -> untyped
     def url: () -> String
+    def filename: () -> String?
     def attach: (untyped attachable) -> void
     def purge: () -> void
   end

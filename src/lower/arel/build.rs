@@ -489,6 +489,7 @@ mod tests {
                 ],
                 indexes: vec![],
                 foreign_keys: vec![],
+                virtual_module: None,
             },
         );
         let schema = Schema { tables };

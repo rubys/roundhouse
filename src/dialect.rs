@@ -457,6 +457,14 @@ pub enum CallbackHook {
     BeforeDestroy,
     AfterDestroy,
     AfterCommit,
+    /// `after_save_commit` — Rails' sugar for `after_commit … on:
+    /// [:create, :update]`. It gets its own variant rather than an
+    /// `on:` because `CallbackOn` names ONE lifecycle event and this
+    /// one spans two; mapping it onto the bare `after_commit` hook
+    /// instead would also fire it on DESTROY, which is the one event
+    /// Rails excludes. The runtime already defines the hook by that
+    /// name and fires it in the right two places.
+    AfterSaveCommit,
     AfterRollback,
 }
 

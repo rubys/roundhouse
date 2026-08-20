@@ -36,6 +36,21 @@ use crate::schema::{ColumnType, Schema};
 pub fn render_schema_statements(schema: &Schema) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for (_name, table) in &schema.tables {
+        // A virtual table is built by its MODULE, not from a column
+        // list: no types, no NOT NULL, no AUTOINCREMENT key, and the
+        // argument list is the module's own DSL rendered back verbatim
+        // (fts5 mixes column names and `tokenize=…` options in one
+        // list). Rendering it through the branch below produced DDL
+        // sqlite rejects.
+        if let Some(vm) = &table.virtual_module {
+            out.push(format!(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS {} USING {}({})",
+                table.name.as_str(),
+                vm.module,
+                vm.args.join(", ")
+            ));
+            continue;
+        }
         let mut s = String::new();
         writeln!(s, "CREATE TABLE IF NOT EXISTS {} (", table.name.as_str()).unwrap();
         let mut lines: Vec<String> = Vec::new();

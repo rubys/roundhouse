@@ -22,6 +22,7 @@ module ActiveRecord
 
   class Base
     def self.connection: () -> Connection
+    def self.sanitize_sql: (Array[untyped] statement) -> String
     def self.transaction: () { () -> untyped } -> untyped
     def self.update_counters: (untyped id, Hash[Symbol, untyped] counters) -> Integer
     def self.upsert: (Hash[Symbol, untyped] attrs, ?unique_by: untyped, ?on_duplicate: String?, ?returning: untyped) -> Integer

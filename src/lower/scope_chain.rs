@@ -1499,6 +1499,18 @@ fn thread_rel(mut args: Vec<Expr>, rel: Expr, leading: Option<&Vec<Param>>, span
     args
 }
 
+/// Relation terminals that need a seeded Relation when they sit
+/// directly on a model CONST (`Rooms::Open.pluck(:id)` — campfire's
+/// `grant_membership_to_open_rooms`). Rails delegates every terminal
+/// from the class to `all`; here only these two need it, because the
+/// arel pass owns `count` / `exists?` / `find_by` / `all` at a Const
+/// root and re-rooting those would move work out from under it —
+/// `Comment.count` is an inlined `SELECT COUNT(*)`, not a Relation.
+///
+/// `pluck` and `ids` have no such home: they were left as a call on
+/// the class, which no class answers.
+const CLASS_ROOT_TERMINALS: &[&str] = &["pluck", "ids"];
+
 /// Relation TERMINALS our runtime implements — a seeded association
 /// chain may end in one (`@story.merged_stories.ids`). Deliberately
 /// excludes `each`/`map`/iteration: plain reader traversal stays on the
@@ -2269,7 +2281,10 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     *expr = put(span, Some(r), method, args, block, parenthesized);
                     return Some(m);
                 }
-                if is_relation_chain_method(method.as_str()) || method.as_str() == "all" {
+                if is_relation_chain_method(method.as_str())
+                    || method.as_str() == "all"
+                    || CLASS_ROOT_TERMINALS.contains(&method.as_str())
+                {
                     let seed = relation_new(span, &m);
                     if method.as_str() == "all" {
                         *expr = seed;

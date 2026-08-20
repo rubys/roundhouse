@@ -110,6 +110,7 @@ fn ingest_table_stmt(
                 columns: Vec::new(),
                 indexes: Vec::new(),
                 foreign_keys: Vec::new(),
+                virtual_module: None,
             };
             if let Some(body) =
                 call.block().and_then(|b| b.as_block_node()).and_then(|b| b.body())

@@ -925,6 +925,7 @@ mod tests {
                 ],
                 indexes: vec![],
                 foreign_keys: vec![],
+                virtual_module: None,
             },
         );
         (Schema { tables }, ClassId(Symbol::from("Article")))

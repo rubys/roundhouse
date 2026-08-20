@@ -96,6 +96,48 @@ module ActiveRecord
       ActiveRecord::Connection.new
     end
 
+    # Rails' `Model.sanitize_sql(["insert … values (?, ?)", a, b])` —
+    # the array form, which is the one an app writes when it drops
+    # below the Relation layer (campfire's `Message::Searchable` keeps
+    # its FTS index this way). The head is the fragment and the tail
+    # are its binds, escaped left to right, which is exactly what
+    # `Relation`'s `where("… ?", x)` already does — same rule, reached
+    # from the class instead of from a relation.
+    #
+    # HERE and not in `base.rb`: this file is the raw-SQL tier the
+    # strict targets do not stage, and `sanitize_sql` belongs to it
+    # twice over — it escapes through `ActiveRecord.adapter
+    # .escape_value`, which is on the RBS adapter contract but NOT on
+    # the narrower hand-written Go/Rust adapter interfaces, and its one
+    # caller reaches it through `connection.execute`, which lives here
+    # too. Put in base.rb it broke `go vet` on every fixture.
+    #
+    # SPLIT-and-interleave rather than the `sub`-per-bind loop
+    # `Relation#substitute_binds` uses: `String#sub` is Ruby vocabulary
+    # the Go emitter does not carry either ("sql.Sub undefined"), and
+    # Relation gets away with it only because Go does not stage that
+    # file. `split` every target speaks.
+    #
+    # The BIND COUNT is authoritative, not the placeholder count: Ruby
+    # drops a trailing empty field, so `"… where rowid = ?"` splits to
+    # one part, and appending a bind after each part while binds remain
+    # reconstructs it exactly. A `?` with no bind left is dropped, which
+    # is the same shape `substitute_binds` leaves it in.
+    def self.sanitize_sql(statement)
+      parts = statement[0].to_s.split("?")
+      out = ""
+      i = 0
+      while i < parts.length
+        out = out + parts[i].to_s
+        bind = i + 1
+        if bind < statement.length
+          out = out + ActiveRecord.adapter.escape_value(statement[bind])
+        end
+        i += 1
+      end
+      out
+    end
+
     # `Model.transaction { ... }` — the block inside BEGIN/COMMIT, with
     # ROLLBACK + re-raise on any exception. Flat transactions only: the
     # corpus never nests (a nested BEGIN would error in SQLite rather

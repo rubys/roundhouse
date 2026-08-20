@@ -59,6 +59,25 @@ module ActiveStorage
       raise NotImplementedError, "ActiveStorage blob URLs are not modeled"
     end
 
+    # The blob's filename, or NIL when nothing is attached — Rails'
+    # `Attached::One` delegates to its attachment with `allow_nil:
+    # true`, which is what lets campfire write
+    # `attachment&.filename&.to_s` on every message.
+    #
+    # METADATA, not bytes: the name lives in a column of
+    # `active_storage_blobs`, so this is a join away and needs no
+    # storage service. That is why it answers where `variant` / `url` /
+    # `download` still raise — those need the file itself.
+    def filename
+      sql = "SELECT b.filename FROM active_storage_attachments a " +
+            "JOIN active_storage_blobs b ON b.id = a.blob_id WHERE a.record_type = " +
+            ActiveRecord.adapter.escape_value(@record_type) +
+            " AND a.record_id = " + ActiveRecord.adapter.escape_value(@record_id) +
+            " AND a.name = " + ActiveRecord.adapter.escape_value(@name) + " LIMIT 1"
+      rows = ActiveRecord.adapter.select_rows(sql)
+      rows.length > 0 ? rows[0]["filename"] : nil
+    end
+
     def attach(_attachable)
       raise NotImplementedError, "ActiveStorage attach is not modeled"
     end
