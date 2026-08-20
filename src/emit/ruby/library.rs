@@ -733,7 +733,33 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
             .then(|| lc.name.0.as_str().rsplit_once("::").map(|(ns, _)| ns.to_string()))
             .flatten()
             .map(|ns| crate::ident::ClassId(crate::ident::Symbol::from(ns.as_str())))
-            .filter(|ns| app.models.iter().any(|m| &m.name == ns));
+            .filter(|ns| app.models.iter().any(|m| &m.name == ns))
+            // An STI SUBCLASS is the same fact by inheritance rather
+            // than by namespace: `Rooms::Open < Room` declares no table,
+            // so it is not a model, but its instance methods run on a
+            // Room — and `memberships.grant_to(...)` in one is the same
+            // association-extension call it would be in room.rb. Without
+            // this it reached `rewrite_call_site` with no self model and
+            // kept the un-flattened `memberships.grant_to`, which
+            // nothing defines.
+            .or_else(|| {
+                if is_model {
+                    return None;
+                }
+                let mut cursor = lc.parent.clone();
+                for _ in 0..8 {
+                    let parent = cursor?;
+                    if app.models.iter().any(|m| m.name == parent) {
+                        return Some(parent);
+                    }
+                    cursor = app
+                        .library_classes
+                        .iter()
+                        .find(|other| other.name == parent)
+                        .and_then(|other| other.parent.clone());
+                }
+                None
+            });
         if let Some(model) = app.models.iter().find(|m| m.name == lc.name) {
             crate::lower::model_to_library::push_scope_methods(
                 &mut lc.methods,

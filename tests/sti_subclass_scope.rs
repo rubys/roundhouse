@@ -29,7 +29,7 @@ fn tree(files: &[(&str, &str)]) -> HashMap<PathBuf, Vec<u8>> {
 
 fn app(body: &str) -> App {
     let model = format!(
-        "class Room < ApplicationRecord\n  def self.probe\n    {body}\n  end\nend\n"
+        "class Room < ApplicationRecord\n  has_many :memberships\n  def self.probe\n    {body}\n  end\nend\n"
     );
     let mut app = ingest_app_from_tree(tree(&[
         (
@@ -42,14 +42,21 @@ fn app(body: &str) -> App {
   create_table "widgets", force: :cascade do |t|
     t.string "name", null: false
   end
+  create_table "memberships", force: :cascade do |t|
+    t.integer "room_id", null: false
+  end
 end
 "#,
         ),
         ("app/models/room.rb", Box::leak(model.into_boxed_str())),
+        (
+            "app/models/membership.rb",
+            "class Membership < ApplicationRecord\n  belongs_to :room\nend\n",
+        ),
         ("app/models/widget.rb", "class Widget < ApplicationRecord\nend\n"),
         (
             "app/models/rooms/open.rb",
-            "class Rooms::Open < Room\n  def hi\n    1\n  end\nend\n",
+            "class Rooms::Open < Room\n  def hi\n    memberships.first\n  end\nend\n",
         ),
         (
             "app/models/gadget.rb",
@@ -128,4 +135,33 @@ fn an_explicit_type_is_not_overwritten() {
 fn a_base_without_a_type_column_is_not_sti() {
     let body = probe_body("Gadget.pluck(:id)");
     assert!(!body.contains("where"), "not an STI base: {body}");
+}
+
+/// An STI subclass's INSTANCE methods run on a record of the base's
+/// table, so a bare association read in one resolves against the base —
+/// the same fact `apply_scope_lowering` already knew about a model
+/// CONCERN, reached by inheritance instead of by namespace.
+///
+/// Without it campfire's `Rooms::Open#grant_access_to_all_users` kept
+/// the un-flattened `memberships.grant_to(...)`, which nothing defines,
+/// and `Rooms::Direct`'s `joins(:users)` had no association registry
+/// entry for its receiver at all.
+#[test]
+fn a_subclass_instance_body_resolves_against_the_base() {
+    use roundhouse::emit::ruby;
+    let files = ruby::emit_library(&app("nil"));
+    let open = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("rooms/open.rb"))
+        .map(|f| f.content.clone())
+        .unwrap_or_else(|| {
+            panic!(
+                "no rooms/open.rb; got {:?}",
+                files.iter().map(|f| f.path.display().to_string()).collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        open.contains("Relation.new(Membership)") || open.contains("memberships"),
+        "the base's association must resolve inside the subclass:\n{open}"
+    );
 }
