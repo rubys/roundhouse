@@ -13,6 +13,13 @@ module ActiveStorage
     def variant: (untyped transformations) -> untyped
     def url: () -> String
     def filename: () -> String?
+    def content_type: () -> String?
+    def blob_column: (String column) -> String?
+    def video?: () -> bool
+    def image?: () -> bool
+    def audio?: () -> bool
+    def representable?: () -> bool
+    def analyze: () -> nil
     def attach: (untyped attachable) -> void
     def purge: () -> void
   end
