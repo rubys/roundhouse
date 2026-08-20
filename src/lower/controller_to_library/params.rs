@@ -51,7 +51,7 @@ use crate::dialect::{
     MethodReceiver, Param,
 };
 use crate::effect::EffectSet;
-use crate::expr::{Expr, ExprNode, LValue, Literal};
+use crate::expr::{Arm, Expr, ExprNode, LValue, Literal, Pattern};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::naming::camelize;
 use crate::span::Span;
@@ -856,6 +856,7 @@ fn build_params_class(spec: &ParamsSpec) -> LibraryClass {
         methods.push(synth_attr_writer(&spec.class_id, &flag, Ty::Bool));
     }
     methods.push(synth_from_raw(&spec.class_id, &spec.resource, &spec.fields));
+    methods.push(synth_index_read(&spec.class_id, &spec.fields));
     methods.push(synth_to_h(&spec.class_id, &spec.fields));
     if spec.wants_to_attrs {
         methods.push(synth_to_attrs(&spec.class_id, &spec.fields));
@@ -1372,6 +1373,98 @@ fn synth_to_attrs(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
 /// construction. Value type is `Str` (matching the synthesized
 /// attr_reader); strict targets see `Hash[String, String]`, no
 /// `untyped` channel.
+/// `params[:name]` — the Hash face of a params object.
+///
+/// The monomorphized paths never need it: `@room.update! room_params`
+/// lowers to `update_from_room_params!`, which reads the typed fields
+/// directly. This is for the params object that reaches a GENERIC
+/// Hash-consuming API instead — campfire's
+/// `Rooms::Open.create_for(room_params, users:)` hands it to a
+/// user-written method whose parameter is untyped (the same method is
+/// called with a `{}` literal elsewhere, so it cannot be specialized),
+/// and that method calls `create!(attributes)`, whose synthesized
+/// `initialize` reads `attrs[:name]` per column. Without `[]` the
+/// object arrives and the create dies with `undefined method '[]' for
+/// an instance of RoomParams`.
+///
+/// PRESENCE IS NOT HONORED HERE, deliberately, and it is a known gap:
+/// an absent key reads as the `""` the slot was initialized to rather
+/// than as nil, so `create!` on a params object missing a key writes the
+/// empty string where Rails would leave null. `to_h` — the other Hash
+/// face of this object, synthesized right below — has always had exactly
+/// that behavior, so the two agree, and the divergence is one line in
+/// two places rather than a new one here.
+///
+/// Gating on the `_provided` companion slot is what it SHOULD do, and
+/// the flags are already there for it (`update_from_<resource>_params!`
+/// reads them). The blocker is downstream: an
+/// `if @x_provided then @x else nil end` in an arm body emits as
+/// `serde_json::Value::from(if self.x_provided { self.x.clone() })` —
+/// the Rust emitter drops a `Nil` else branch, which is fine in
+/// statement position and E0317 in expression position, and the
+/// Untyped coercion needs to move INSIDE the branches for the typed
+/// form to work at all. Measured on the real-blog rust toolchain gate.
+/// That emitter fix is worth doing on its own; it should not ride in
+/// on a params change.
+///
+/// Modeled on `model_to_library::schema::synth_index_read` — same Case
+/// over Symbol-literal patterns, same `Ty::Sym -> Untyped` signature.
+fn synth_index_read(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
+    let key = Symbol::from("key");
+    let arms: Vec<Arm> = fields
+        .iter()
+        .map(|field| Arm {
+            pattern: Pattern::Lit { value: Literal::Sym { value: field.clone() } },
+            guard: None,
+            body: expr(ExprNode::Ivar { name: field.clone() }, Some(Ty::Str)),
+        })
+        .collect();
+
+    let body = expr(
+        ExprNode::Case {
+            scrutinee: expr(
+                ExprNode::Var { id: VarId(0), name: key.clone() },
+                Some(Ty::Sym),
+            ),
+            arms,
+        },
+        Some(Ty::Untyped),
+    );
+
+    MethodDef {
+        name: Symbol::from("[]"),
+        receiver: MethodReceiver::Instance,
+        params: vec![Param::positional(key.clone())],
+        body,
+        // Heterogeneous: the value when provided, nil when not.
+        signature: Some(crate::lower::typing::fn_sig(
+            vec![(key, Ty::Sym)],
+            Ty::Untyped,
+        )),
+        effects: EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    }
+}
+
+/// Node + type, with the boilerplate every synthesized `Expr` here
+/// repeats.
+fn expr(node: ExprNode, ty: Option<Ty>) -> Expr {
+    Expr {
+        span: Span::synthetic(),
+        node: Box::new(node),
+        ty,
+        effects: EffectSet::default(),
+        leading_blank_line: false,
+        diagnostic: None,
+        hint: None,
+        decisions: 0,
+    }
+}
+
 fn synth_to_h(owner: &ClassId, fields: &[Symbol]) -> MethodDef {
     let entries: Vec<(Expr, Expr)> = fields
         .iter()

@@ -225,3 +225,77 @@ end
         "hash-form create should flow through unchanged, got {body}"
     );
 }
+
+/// The residual case the typed factories above do NOT cover: the params
+/// object handed to a USER-WRITTEN method whose parameter is untyped, so
+/// there is nothing to specialize against.
+///
+/// campfire:
+///
+/// ```ruby
+/// # controller
+/// Rooms::Open.create_for(room_params, users: Current.user)
+/// # model
+/// def create_for(attributes, users:)
+///   create!(attributes).tap { |room| room.memberships.grant_to users }
+/// end
+/// ```
+///
+/// `create_for` cannot be specialized — `Rooms::Direct` calls the same
+/// method with a `{}` literal — so `create!` receives the params object
+/// and its synthesized `initialize` asks for `attrs[:name]`. The params
+/// class answers `[]` for exactly this.
+#[test]
+fn a_params_class_answers_the_hash_index() {
+    let app = app_with(vec![(
+        "app/controllers/users_controller.rb",
+        r#"class UsersController < ApplicationController
+  def create
+    User.create_for(user_params)
+  end
+
+  private
+    def user_params
+      params.require(:user).permit(:name)
+    end
+end
+"#,
+    )]);
+    let specs = roundhouse::lower::controller_to_library::params::collect_specs(&app.controllers);
+    let lcs = roundhouse::lower::controller_to_library::params::synthesize_params_classes(&specs);
+    let names = method_names(&lcs, "UserParams");
+    assert!(names.iter().any(|n| n == "[]"), "no [] on UserParams: {names:?}");
+}
+
+/// The index reads the same slot `to_h` does — the two Hash faces of the
+/// object agree. Presence is NOT gated here, which is a known gap
+/// (documented at the synthesizer): an absent key reads as the `""` the
+/// slot was initialized to, and gating it needs a Rust-emitter fix
+/// first, since an `if`-with-nil-else in an arm body is E0317 in
+/// expression position. This test pins the current shape so that fix has
+/// something to change deliberately.
+#[test]
+fn the_hash_index_reads_the_same_slot_as_to_h() {
+    let app = app_with(vec![(
+        "app/controllers/users_controller.rb",
+        r#"class UsersController < ApplicationController
+  def create
+    User.create_for(user_params)
+  end
+
+  private
+    def user_params
+      params.require(:user).permit(:name)
+    end
+end
+"#,
+    )]);
+    let specs = roundhouse::lower::controller_to_library::params::collect_specs(&app.controllers);
+    let lcs = roundhouse::lower::controller_to_library::params::synthesize_params_classes(&specs);
+    let lc = lcs.iter().find(|lc| lc.name.0.as_str() == "UserParams").expect("UserParams");
+    let m = lc.methods.iter().find(|m| m.name.as_str() == "[]").expect("[]");
+    let body = format!("{:?}", m.body);
+    // One arm per permitted field, reading that field's slot.
+    assert!(body.contains("name"), "{body}");
+    assert!(!body.contains("name_provided"), "presence gated — update the note: {body}");
+}
