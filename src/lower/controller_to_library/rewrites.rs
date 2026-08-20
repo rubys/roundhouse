@@ -1510,6 +1510,70 @@ pub(super) fn rewrite_params(expr: &Expr) -> Expr {
                 },
             ))
         }
+        // `params.require(:user)[:role]` — an INDEX on the required
+        // sub-hash. Rails' `require` answers an
+        // `ActionController::Parameters`, whose access is indifferent;
+        // `@params` is a plain String-keyed Hash, so a Symbol key finds
+        // nothing and the read answers nil. That is a SILENT wrong
+        // answer, not an error: campfire's
+        // `params.require(:user)[:role].presence_in(%w[…]) || "member"`
+        // would have quietly demoted every role change to the default
+        // if the `||` had come first — what it did instead was die on
+        // `presence_in` for nil, one method later.
+        //
+        // Matched AHEAD of the standalone-`require` arm and rebuilt
+        // whole, because `map_expr` is top-down and does not recurse
+        // into a replacement: the index is the outer node, so the
+        // require underneath it has to be lowered here or not at all.
+        // The type-directed index coercion in the Ruby expr emitter
+        // cannot serve this — it keys on a `Hash[String, _]` receiver,
+        // and `require_key` is declared to answer a `ParamValue`.
+        ExprNode::Send { recv: Some(idx_recv), method, args, block: None, parenthesized }
+            if method.as_str() == "[]"
+                && args.len() == 1
+                && sym_arg(&args[0]).is_some()
+                && matches!(&*idx_recv.node,
+                    ExprNode::Send { recv: Some(r), method: m, args: a, block: None, .. }
+                        if m.as_str() == "require"
+                            && a.len() == 1
+                            && is_bare_params(r)
+                            && sym_or_str_arg(&a[0]).is_some()) =>
+        {
+            let ExprNode::Send { args: require_args, .. } = &*idx_recv.node else {
+                return None;
+            };
+            let key = sym_or_str_arg(&require_args[0])?;
+            let required = Expr::new(
+                idx_recv.span,
+                ExprNode::Send {
+                    recv: Some(const_path(&["Params"], idx_recv.span)),
+                    method: Symbol::from("require_key"),
+                    args: vec![
+                        Expr::new(idx_recv.span, ExprNode::Ivar { name: Symbol::from("params") }),
+                        Expr::new(
+                            idx_recv.span,
+                            ExprNode::Lit { value: Literal::Str { value: key } },
+                        ),
+                    ],
+                    block: None,
+                    parenthesized: true,
+                },
+            );
+            let field = sym_arg(&args[0])?;
+            Some(Expr::new(
+                e.span,
+                ExprNode::Send {
+                    recv: Some(required),
+                    method: method.clone(),
+                    args: vec![Expr::new(
+                        args[0].span,
+                        ExprNode::Lit { value: Literal::Str { value: field } },
+                    )],
+                    block: None,
+                    parenthesized: *parenthesized,
+                },
+            ))
+        }
         // `params.require(:url)` STANDING ALONE — Rails' assertion that a
         // parameter was supplied, answering the value. `@params` is a
         // plain Hash and `require` on one reaches Kernel's PRIVATE
@@ -1547,6 +1611,14 @@ pub(super) fn rewrite_params(expr: &Expr) -> Expr {
         }
         _ => None,
     })
+}
+
+/// The literal name of a `[:sym]` index argument.
+fn sym_arg(arg: &Expr) -> Option<String> {
+    match &*arg.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
+        _ => None,
+    }
 }
 
 /// The literal key of a `require(:sym)` / `require("str")` argument.

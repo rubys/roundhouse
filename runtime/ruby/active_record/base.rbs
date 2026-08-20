@@ -49,6 +49,10 @@ module ActiveRecord
   def self.adapter: () -> ActiveRecord::AdapterInterface
   def self.adapter=: (ActiveRecord::AdapterInterface) -> ActiveRecord::AdapterInterface
 
+  # Enum column assigned by LABEL — see `base.rb`. `labels`/`values`
+  # are the declaration's parallel arrays.
+  def self.enum_int: (String text, Array[String] labels, Array[Integer] values) -> Integer
+
   # Base class for all models. Spinel-friendly shape: zero
   # metaprogramming. Per-model subclasses define their own column
   # accessors, attributes hash, and `[]/[]=` indexers; Base supplies

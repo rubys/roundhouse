@@ -239,7 +239,7 @@ pub(super) fn push_schema_methods(
     methods.push(synth_index_read(owner, table));
 
     // def []=(name, value); case name; when :col then @col = value; ...; end; end
-    methods.push(synth_index_write(owner, table));
+    methods.push(synth_index_write(owner, table, model));
 
     // def update(attrs) / update!(attrs) — Rails-shaped: an attribute
     // Hash over the model's writable surface, saved.
@@ -1748,7 +1748,7 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
             let value = if nullable {
                 lookup
             } else {
-                Expr::new(
+                let defaulted = Expr::new(
                     Span::synthetic(),
                     ExprNode::BoolOp {
                         op: crate::expr::BoolOpKind::Or,
@@ -1756,7 +1756,12 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
                         left: lookup,
                         right: default,
                     },
-                )
+                );
+                // `New(role: "administrator")` — the label reaches the
+                // slot whole otherwise. Wrapped OUTSIDE the `||` so the
+                // default still decides the absent case; the helper
+                // passes an integer through untouched.
+                enum_label_cast(model, col, defaulted.clone()).unwrap_or(defaulted)
             };
             stmts.push(Expr::new(
                 Span::synthetic(),
@@ -2118,7 +2123,94 @@ fn synth_index_read(owner: &ClassId, table: &Table) -> MethodDef {
     }
 }
 
-fn synth_index_write(owner: &ClassId, table: &Table) -> MethodDef {
+/// A Rails ENUM column assigned by LABEL: `user.role = "administrator"`
+/// on `enum :role, %i[member administrator bot]` has to store `1`.
+///
+/// `lower::enum_symbols` already translates a literal `role:
+/// :administrator` at the call site, which covers everything an app
+/// writes down. It cannot cover a value that only exists at runtime —
+/// campfire's `Accounts::UsersController` reads the label off the
+/// REQUEST (`params.require(:user)[:role].presence_in(%w[ member
+/// administrator ])`), and the per-column `Cast` to `Int` turned it
+/// into `"administrator".to_i` — **zero**, which is `member`. A role
+/// change silently demoted the user instead of failing.
+///
+/// So the label→integer step moves to the one place that sees the
+/// runtime value, and it stays a shared-runtime call rather than an
+/// inlined table so all thirteen targets get one body.
+///
+/// `None` — leaving today's `Cast` — for a column that is not an enum,
+/// for a NULLABLE one (the surrounding `|| <default>` / nil-guard
+/// shapes decide nil there, and a helper that answers `0` for nil would
+/// overwrite that decision), and for a mapping whose stored values are
+/// not all integers (nothing in the corpus writes one, and a guess
+/// would write the wrong cell).
+fn enum_label_cast(model: &Model, col: &Column, raw: Expr) -> Option<Expr> {
+    if matches!(super::ty_of_column_slot(col), Ty::Union { .. }) {
+        return None;
+    }
+    let mapping = model.enums.get(&col.name)?;
+    if mapping.is_empty() {
+        return None;
+    }
+    let mut labels = Vec::new();
+    let mut values = Vec::new();
+    for (label, stored) in mapping {
+        let Literal::Int { value } = stored else { return None };
+        labels.push(with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Str { value: label.clone() } },
+            ),
+            Ty::Str,
+        ));
+        values.push(with_ty(
+            Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Int { value: *value } }),
+            Ty::Int,
+        ));
+    }
+    let array = |elems: Vec<Expr>, of: Ty| {
+        with_ty(
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Array { elements: elems, style: Default::default() },
+            ),
+            Ty::Array { elem: Box::new(of) },
+        )
+    };
+    Some(with_ty(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const { path: vec![Symbol::from("ActiveRecord")] },
+                )),
+                method: Symbol::from("enum_int"),
+                args: vec![
+                    // `Cast` to Str is the bridge the strict targets
+                    // use for every other attrs read; the ruby family
+                    // unwraps it to the bare value, which compares
+                    // equal to a label just the same.
+                    with_ty(
+                        Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Cast { value: raw, target_ty: Ty::Str },
+                        ),
+                        Ty::Str,
+                    ),
+                    array(labels, Ty::Str),
+                    array(values, Ty::Int),
+                ],
+                block: None,
+                parenthesized: true,
+            },
+        ),
+        Ty::Int,
+    ))
+}
+
+fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef {
     let name = Symbol::from("name");
     let value = Symbol::from("value");
 
@@ -2133,13 +2225,18 @@ fn synth_index_write(owner: &ClassId, table: &Table) -> MethodDef {
         .iter()
         .map(|c| {
             let col_ty = super::ty_of_column_slot(c);
-            let casted_value = Expr::new(
-                Span::synthetic(),
-                ExprNode::Cast {
-                    value: var_ref(value.clone()),
-                    target_ty: col_ty,
-                },
-            );
+            // `self[:role] = "administrator"` — same label problem the
+            // attrs-hash writers have, same answer.
+            let casted_value = enum_label_cast(model, c, var_ref(value.clone()))
+                .unwrap_or_else(|| {
+                    Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Cast {
+                            value: var_ref(value.clone()),
+                            target_ty: col_ty,
+                        },
+                    )
+                });
             crate::expr::Arm {
                 pattern: crate::expr::Pattern::Lit {
                     value: Literal::Sym { value: c.name.clone() },
@@ -2478,10 +2575,15 @@ fn synth_update_hash(
         // by a strict target before — every corpus model carried a
         // permit list, so only the typed variant existed — which is how
         // that gap stayed invisible.
-        let slot_value = Expr::new(
-            Span::synthetic(),
-            ExprNode::Cast { value: lookup(&col.name), target_ty: slot_ty.clone() },
-        );
+        // An enum column takes its LABEL here (`update(role:
+        // "administrator")`) — the `Cast` to `Int` would read that as
+        // zero. See `enum_label_cast`.
+        let slot_value = enum_label_cast(model, col, lookup(&col.name)).unwrap_or_else(|| {
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Cast { value: lookup(&col.name), target_ty: slot_ty.clone() },
+            )
+        });
         let raw_assign = Expr::new(
             Span::synthetic(),
             ExprNode::Send {

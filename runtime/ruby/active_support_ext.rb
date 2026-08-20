@@ -36,4 +36,15 @@ module ActiveSupport
   def self.presence(value)
     blank?(value) ? nil : value
   end
+
+  # Rails' `Object#presence_in(another)` — `in?(another) ? self : nil`,
+  # the allow-list spelling for a value that came off the wire
+  # (campfire's `params.require(:user)[:role].presence_in(%w[ member
+  # administrator ])`). Grounded here rather than as a core_ext reopen
+  # so every target has a method to dispatch; the list is a String
+  # allow-list in every corpus site, which is what lets the parameter
+  # be declared rather than left untyped.
+  def self.presence_in(value, list)
+    list.include?(value.to_s) ? value : nil
+  end
 end

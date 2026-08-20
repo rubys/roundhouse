@@ -59,6 +59,7 @@ pub mod as_json_shape;
 pub mod as_json_writer;
 pub mod as_json_super;
 pub mod parameterize;
+pub mod presence_in;
 pub mod sum_symbol;
 pub mod values_at_splat;
 pub mod request_index;
@@ -115,6 +116,7 @@ pub use errors_full_messages::apply_errors_full_messages_lowering;
 pub use mailer_class_side::apply_mailer_class_side;
 pub use as_json_super::apply_as_json_super_grounding;
 pub use parameterize::apply_parameterize_grounding;
+pub use presence_in::apply_presence_in_grounding;
 pub use request_index::apply_request_index_lowering;
 pub use arel_attribute::apply_arel_attribute_lowering;
 pub use exclude_predicate::apply_exclude_predicate_lowering;
@@ -192,6 +194,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("time_current", &[]),
     ("as_json_super", &[]),
     ("parameterize", &[]),
+    // `value.presence_in(list)` → `ActiveSupport.presence_in(value,
+    // list)`; a receiver-shape rewrite of a name no other pass produces
+    // or consumes, so no ordering constraints.
+    ("presence_in", &[]),
     // `sum(:col)` → block form; no ordering constraints (rewrites a
     // literal-symbol arg shape no other pass produces or consumes).
     ("sum_symbol", &[]),
@@ -393,6 +399,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("as_json_super");
     parameterize::apply_parameterize_grounding(app);
     ran!("parameterize");
+    presence_in::apply_presence_in_grounding(app);
+    ran!("presence_in");
     sum_symbol::apply_sum_symbol_lowering(app);
     ran!("sum_symbol");
     values_at_splat::apply_values_at_splat_lowering(app);

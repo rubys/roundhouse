@@ -6,6 +6,42 @@ module ActiveRecord
     attr_accessor :adapter
   end
 
+  # An enum column assigned by LABEL. Rails' `enum :role, %i[member
+  # administrator bot]` lets `user.role = "administrator"` store `1`;
+  # the synthesized per-column writers cast to the column's slot type,
+  # and `"administrator".to_i` is zero — which is `member`. campfire's
+  # role change silently demoted the user rather than failing, which is
+  # the worst shape a gap can take.
+  #
+  # `lower::enum_symbols` translates the labels an app writes DOWN
+  # (`where(role: :bot)`); this is the half that only exists at
+  # runtime, where the label came off the request.
+  #
+  # `labels`/`values` are parallel — the declaration's order — rather
+  # than a Hash, because the emitters render a two-Array call with one
+  # element type each and a `Hash[String, Integer]` literal argument is
+  # a shape several of them place differently. Scanning three entries
+  # costs nothing next to the write that follows.
+  #
+  # `text`, not an untyped value: the caller wraps the raw attrs read
+  # in a `Cast` to String, which is the seam the strict targets already
+  # use for every other attribute write — and it keeps this body
+  # concretely typed, which the framework-runtime residual gate counts.
+  #
+  # A value that names no label falls through to `to_i`, which is what
+  # an integer (or its string spelling) already meant — the same `to_i`
+  # the per-column `Cast` did before this existed.
+  def self.enum_int(text, labels, values)
+    result = -1
+    i = 0
+    while i < labels.length
+      result = values[i] if labels[i] == text
+      i += 1
+    end
+    result = text.to_i if result == -1
+    result
+  end
+
   # Base class for all models. Designed to contain *zero* metaprogramming:
   # subclasses provide their own `attributes`, `[]`, `[]=`, `update`, and
   # `initialize`-from-attrs methods (typically by writing them out per
