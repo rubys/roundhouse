@@ -79,6 +79,7 @@ fn synth_adapter_find_by_id(owner: &ClassId, table: &Table, schema: &Schema) -> 
     let nilable_owner = Ty::Union { variants: vec![owner_ty, Ty::Nil] };
 
     let op = ArelOp::Select(Select {
+        single_record: true, // _adapter_find_by_id — one record or nil
         table: TableRef(table.name.clone()),
         columns: ColumnSpec::All,
         conditions: Some(eq_id_param(table, &id)),
@@ -107,6 +108,7 @@ fn synth_adapter_all(owner: &ClassId, table: &Table, schema: &Schema) -> MethodD
     let owner_ty = Ty::Class { id: owner.clone(), args: vec![] };
 
     let op = ArelOp::Select(Select {
+        single_record: false, // _adapter_all — a collection
         table: TableRef(table.name.clone()),
         columns: ColumnSpec::All,
         conditions: None,
@@ -142,6 +144,7 @@ fn synth_adapter_last(owner: &ClassId, table: &Table, schema: &Schema) -> Method
     let nilable_owner = Ty::Union { variants: vec![owner_ty, Ty::Nil] };
 
     let op = ArelOp::Select(Select {
+        single_record: true, // _adapter_last — one record or nil
         table: TableRef(table.name.clone()),
         columns: ColumnSpec::All,
         conditions: None,
@@ -278,6 +281,7 @@ fn synth_adapter_delete(owner: &ClassId, table: &Table, schema: &Schema) -> Meth
 
 fn synth_adapter_count(owner: &ClassId, table: &Table, schema: &Schema) -> MethodDef {
     let op = ArelOp::Select(Select {
+        single_record: false, // _adapter_count — a scalar
         table: TableRef(table.name.clone()),
         columns: ColumnSpec::Count,
         conditions: None,
@@ -306,6 +310,7 @@ fn synth_adapter_exists_by_id(owner: &ClassId, table: &Table, schema: &Schema) -
     let id = Symbol::from("id");
 
     let op = ArelOp::Select(Select {
+        single_record: false, // _adapter_exists_by_id — a Bool
         table: TableRef(table.name.clone()),
         columns: ColumnSpec::Exists,
         conditions: Some(eq_id_param(table, &id)),

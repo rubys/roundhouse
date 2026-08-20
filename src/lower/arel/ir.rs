@@ -61,6 +61,20 @@ pub struct Select {
     /// Reserved for joins / includes / preload — Phase 3+. Empty for
     /// every Select built today; visitor ignores.
     pub joins: Vec<Join>,
+    /// Does this Select yield ONE record (or nil), or a collection?
+    ///
+    /// Not derivable from `limit`, which is the trap this field exists
+    /// to close: `find_by(...)` and `.limit(1)` both render `LIMIT 1`
+    /// and mean different things — Rails' `find_by` answers a record or
+    /// nil, while `.limit(1)` answers an Array of at most one. The
+    /// visitor keyed the hydrate shape off `limit == Some(1)` and so
+    /// emitted a single-record read for `Model.all.limit(1)`, handing
+    /// the caller a record where its type said collection. Latent only
+    /// because no fixture or corpus app wrote that chain AND folded it.
+    ///
+    /// Set by the BUILDER, which is the only place that knows which
+    /// source method it recognized.
+    pub single_record: bool,
     /// `includes(:assoc)` eager-load directives captured off the chain.
     /// Empty unless the source chain carried `includes`/`preload`/
     /// `eager_load` AND the lowerer was handed the association graph.

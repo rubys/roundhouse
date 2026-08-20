@@ -290,6 +290,7 @@ fn const_to_class_id(recv: &Expr, registry: &HashMap<ClassId, ClassInfo>) -> Opt
 
 fn build_all(table_ref: &TableRef) -> Select {
     Select {
+        single_record: false, // build_all — a collection
         table: table_ref.clone(),
         columns: ColumnSpec::All,
         conditions: None,
@@ -302,6 +303,7 @@ fn build_all(table_ref: &TableRef) -> Select {
 
 fn build_count(table_ref: &TableRef) -> Select {
     Select {
+        single_record: false, // build_count — a scalar, not a record
         table: table_ref.clone(),
         columns: ColumnSpec::Count,
         conditions: None,
@@ -318,6 +320,7 @@ fn build_count(table_ref: &TableRef) -> Select {
 fn build_where_kwargs(args: &[Expr], table: &Table, table_ref: &TableRef) -> Option<Select> {
     let preds = predicates_from_kwargs(args, table, table_ref)?;
     Some(Select {
+        single_record: false, // where(...) — a collection
         table: table_ref.clone(),
         columns: ColumnSpec::All,
         conditions: Some(preds),
@@ -333,6 +336,7 @@ fn build_where_kwargs(args: &[Expr], table: &Table, table_ref: &TableRef) -> Opt
 fn build_find_by_kwargs(args: &[Expr], table: &Table, table_ref: &TableRef) -> Option<Select> {
     let preds = predicates_from_kwargs(args, table, table_ref)?;
     Some(Select {
+        single_record: true, // find_by(...) — Rails answers a record or nil
         table: table_ref.clone(),
         columns: ColumnSpec::All,
         conditions: Some(preds),
@@ -348,6 +352,7 @@ fn build_find_by_kwargs(args: &[Expr], table: &Table, table_ref: &TableRef) -> O
 fn build_exists_kwargs(args: &[Expr], table: &Table, table_ref: &TableRef) -> Option<Select> {
     let preds = predicates_from_kwargs(args, table, table_ref)?;
     Some(Select {
+        single_record: false, // exists?(...) — a Bool via ColumnSpec::Exists
         table: table_ref.clone(),
         columns: ColumnSpec::Exists,
         conditions: Some(preds),

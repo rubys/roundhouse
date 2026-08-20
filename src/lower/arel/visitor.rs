@@ -129,10 +129,13 @@ fn visit_select(sel: &Select, schema: &Schema, owner: &ClassId) -> Expr {
     match &sel.columns {
         ColumnSpec::Count => emit_count(sel, table, param),
         ColumnSpec::Exists => emit_exists(sel, table, param),
-        ColumnSpec::All => match sel.limit {
-            Some(super::ir::LimitSpec(1)) => emit_single_hydrate(sel, table, owner, param),
-            _ => emit_multi_hydrate(sel, table, owner, schema, param),
-        },
+        // Cardinality comes from the BUILDER (`single_record`), never
+        // from `LIMIT 1` — `find_by(x)` and `.limit(1)` render the same
+        // SQL and mean different things. See `Select::single_record`.
+        ColumnSpec::All if sel.single_record => {
+            emit_single_hydrate(sel, table, owner, param)
+        }
+        ColumnSpec::All => emit_multi_hydrate(sel, table, owner, schema, param),
         ColumnSpec::Named(_) => {
             // Reserved — no Phase 1 builder produces Named yet (it's for
             // find_by(<col>)). Degrade instead of crashing: report the
@@ -959,6 +962,7 @@ mod tests {
     fn select_all_no_limit_emits_array_hydrate() {
         let (schema, owner) = fixture_schema();
         let op = ArelOp::Select(Select {
+            single_record: false,
             table: TableRef(Symbol::from("articles")),
             columns: ColumnSpec::All,
             conditions: None,
@@ -974,9 +978,10 @@ mod tests {
     }
 
     #[test]
-    fn select_all_limit_one_emits_single_hydrate() {
+    fn select_marked_single_record_emits_single_hydrate() {
         let (schema, owner) = fixture_schema();
         let op = ArelOp::Select(Select {
+            single_record: true,
             table: TableRef(Symbol::from("articles")),
             columns: ColumnSpec::All,
             conditions: Some(Predicate::Eq(
@@ -995,9 +1000,44 @@ mod tests {
     }
 
     #[test]
+    fn limit_one_without_single_record_emits_ARRAY_hydrate() {
+        // The regression this field exists for. `Model.all.limit(1)`
+        // renders `LIMIT 1` and returns an Array of at most one — it is
+        // NOT `find_by`. Keying the hydrate shape off the limit handed
+        // the caller a bare record while its type said collection; the
+        // builder now says which it meant.
+        let (schema, owner) = fixture_schema();
+        let op = ArelOp::Select(Select {
+            single_record: false,
+            table: TableRef(Symbol::from("articles")),
+            columns: ColumnSpec::All,
+            conditions: None,
+            orders: vec![],
+            limit: Some(LimitSpec(1)),
+            joins: vec![],
+            preloads: vec![],
+        });
+        let body = SqliteVisitor.visit(&op, &schema, &owner);
+        // Both shapes are 5 statements, so length proves nothing. What
+        // separates them is the accumulator: the array hydrate seeds
+        // `results = []`, the single hydrate `result = nil`.
+        assert_eq!(outer_kind(&body), "seq");
+        let ExprNode::Seq { exprs } = body.node.as_ref() else { panic!("expected Seq") };
+        let ExprNode::Assign { value, .. } = exprs[1].node.as_ref() else {
+            panic!("expected an accumulator assignment, got {:?}", exprs[1].node)
+        };
+        assert!(
+            matches!(value.node.as_ref(), ExprNode::Array { .. }),
+            "expected the ARRAY hydrate for an unmarked LIMIT 1; accumulator seeded with {:?}",
+            value.node,
+        );
+    }
+
+    #[test]
     fn select_count_emits_int_scalar() {
         let (schema, owner) = fixture_schema();
         let op = ArelOp::Select(Select {
+            single_record: false,
             table: TableRef(Symbol::from("articles")),
             columns: ColumnSpec::Count,
             conditions: None,
@@ -1016,6 +1056,7 @@ mod tests {
     fn select_exists_emits_bool_from_step() {
         let (schema, owner) = fixture_schema();
         let op = ArelOp::Select(Select {
+            single_record: false,
             table: TableRef(Symbol::from("articles")),
             columns: ColumnSpec::Exists,
             conditions: Some(Predicate::Eq(
@@ -1113,6 +1154,7 @@ mod tests {
         use crate::ident::TableRef;
         let (schema, owner) = fixture_schema();
         let op = ArelOp::Select(Select {
+            single_record: false,
             table: TableRef(Symbol::from("articles")),
             columns: ColumnSpec::All,
             conditions: None,
@@ -1161,6 +1203,7 @@ mod tests {
         use crate::ident::TableRef;
         let (schema, owner) = fixture_schema();
         let op = ArelOp::Select(Select {
+            single_record: false,
             table: TableRef(Symbol::from("articles")),
             columns: ColumnSpec::All,
             conditions: None,
@@ -1207,6 +1250,7 @@ mod tests {
     fn select_where_predicate_with_runtime_value_round_trips() {
         let (schema, owner) = fixture_schema();
         let op = ArelOp::Select(Select {
+            single_record: false,
             table: TableRef(Symbol::from("articles")),
             columns: ColumnSpec::All,
             conditions: Some(Predicate::Eq(
@@ -1287,6 +1331,7 @@ mod tests {
     fn param_on_single_hydrate_emits_placeholder_and_bind() {
         let (schema, owner) = fixture_schema();
         let sel = Select {
+            single_record: true,
             table: TableRef(Symbol::from("articles")),
             columns: ColumnSpec::All,
             conditions: Some(Predicate::Eq(
@@ -1324,6 +1369,7 @@ mod tests {
         // `?`, no bind call (byte-identical to today).
         let (schema, owner) = fixture_schema();
         let sel = Select {
+            single_record: true,
             table: TableRef(Symbol::from("articles")),
             columns: ColumnSpec::All,
             conditions: Some(Predicate::Eq(
@@ -1353,6 +1399,7 @@ mod tests {
     fn param_on_count_with_where_binds() {
         let (schema, _) = fixture_schema();
         let sel = Select {
+            single_record: false,
             table: TableRef(Symbol::from("articles")),
             columns: ColumnSpec::Count,
             conditions: Some(Predicate::Eq(
@@ -1377,6 +1424,7 @@ mod tests {
         // dispatch the ValueType tag already carries).
         let (schema, _) = fixture_schema();
         let sel = Select {
+            single_record: true,
             table: TableRef(Symbol::from("articles")),
             columns: ColumnSpec::Exists,
             conditions: Some(Predicate::Eq(
