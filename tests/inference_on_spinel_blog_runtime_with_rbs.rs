@@ -601,7 +601,14 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // This ceiling moved on EVERY runtime/ruby method this session, and
     // `cargo test` is the only gate that reads it — budget ~1-3 nodes
     // per added method before touching the number here.
-    const CEILING: usize = 727;
+    //
+    // +4 for `Base.sanitize_sql(statement)`. Its parameter is
+    // `Array[untyped]` and honestly so: Rails' array form is a String
+    // fragment followed by ARBITRARY bind values, which is the one
+    // shape a typed element cannot describe. The four nodes are the
+    // reads off it — `statement[0]`, `statement.length`,
+    // `statement[bind]`, and the escape call's argument.
+    const CEILING: usize = 731;
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions exceeds ceiling of {CEILING}.\n\

@@ -16,8 +16,10 @@
 //! The rewrite is a call-site one, into vocabulary every target already
 //! speaks:
 //!
-//!     Rooms::Open.pluck(:id)  ->  Room.where(type: "Rooms::Open").pluck(:id)
-//!     Rooms::Open.all         ->  Room.where(type: "Rooms::Open")
+//! ```text
+//! Rooms::Open.pluck(:id)  ->  Room.where(type: "Rooms::Open").pluck(:id)
+//! Rooms::Open.all         ->  Room.where(type: "Rooms::Open")
+//! ```
 //!
 //! Synthesizing per-subclass class methods was the alternative and is
 //! worse twice over: the surface is the whole Relation API, and each
