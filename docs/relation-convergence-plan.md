@@ -187,7 +187,7 @@ renderable and a `Relation` is not. **This is the dual representation
 having hidden a real gap, which is the case the plan said to report
 rather than paper over.**
 
-**RESOLVED (`3d1a693b`), Sam's call: don't seed the AR class-side
+**RESOLVED (`0433c335`), Sam's call: don't seed the AR class-side
 query surface onto a class that isn't ActiveRecord.** The producer-side
 fix, not the dispatch-order one — see that commit for why the
 discriminator is INHERITANCE and not "has no table in schema.rb", which
