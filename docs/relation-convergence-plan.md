@@ -327,6 +327,86 @@ repr in that emitter"); a third option is now visible, teaching the
 classifier that a ternary with two relation arms yields a relation,
 which makes the type precise but produces the same emit error.
 
+### Rung 1 probe — the recognizer's real binding constraint, 2026-08-20
+
+Started widening `try_build_arel` per the ladder above. One fix landed
+(`aefc6bb2`, its own commit); the headline change is measured, works,
+and is NOT shipped. Both findings below cost more to rediscover than to
+read.
+
+**Landed: cardinality is not derivable from `LIMIT 1`.** The visitor
+chose single-record vs array hydrate by `limit == Some(1)`, so
+`Model.all.limit(1)` emitted a bare record while its type said
+collection. `Select` now carries `single_record`, set by the builder
+that knows which source method it recognized. Latent — it needs a chain
+that folds AND ends in `.limit(1)`, which no fixture or corpus app has
+— but widening the recognizer makes it reachable, so it had to land
+first.
+
+**Measured, not shipped: the `kwargs` flag is why user-written `where`
+never folds.** `predicates_from_kwargs` and `single_kwargs_hash` both
+required `Hash { kwargs: true }`. That flag records CALL SYNTAX — Prism
+gives `KeywordHashNode` → true, a braced `HashNode` → false — and
+something between ingest and the arel pass leaves a user's
+`where(title: "a")` as `kwargs: false`, while a synthesized has_many
+proxy body keeps true. So the recognizer only ever fired on hashes
+ROUNDHOUSE ITSELF built. Relaxing both gates (2 lines) makes
+`Post.where(title: "a")` fold.
+
+**Why it is not shipped — two independent reasons, in order of
+severity.**
+
+1. **A fold in EXPRESSION position emits broken Ruby.** lobsters
+   `mod_notes_controller.rb`'s `if user = User.find_by(username:
+   @username)` became:
+
+   ```ruby
+   if user = stmt = Db.prepare("SELECT … LIMIT 1")
+   result = nil
+   if Db.step?(stmt) … end
+   Db.finalize(stmt)
+   result
+     @title = …
+   ```
+
+   The visitor's replacement is a statement Seq. The Ruby emitter
+   hoists a Seq correctly out of an assignment RHS at statement level
+   (that is why `@x = Model.all` has always worked) and CANNOT hoist it
+   out of a condition. Pre-existing hazard, currently unreachable
+   because so little folds in expression position; the relax reaches
+   it. Any further widening needs either a position guard in
+   `rewrite_arel_inner` (decline unless the Send sits where a Seq can
+   be hoisted) or an expression form from the visitor. Emitter work,
+   and not ruby-only.
+
+2. **The relax alone barely moves the corpus.** Ledger unchanged —
+   fixtures 0/2/0, lobsters 207, campfire 80 — and exactly TWO lobsters
+   files change, one correctly
+   (`InvitationRequest.where(is_verified: true)` → inline SELECT, the
+   boolean rendering as `is_verified = 1`) and one broken per (1).
+
+**The binding constraint is the VALUE vocabulary, not the method
+vocabulary.** `value_from_expr` accepts a literal int/str/bool/nil or
+an `Ivar`, and declines everything else — so `where(email:
+params[:email])`, `where(user_id: user.id)`, `where(username:
+username)` all decline on the VALUE even with the method gate open.
+That is what nearly every real `where` in lobsters looks like. The
+`Value::Runtime` bind machinery already exists and is what an `Ivar`
+uses; extending it to a `Var` read (pure, cheap) and to `params[:x]`
+is the change that would actually move the 207. A `Send` value needs
+care — hoisting an effectful call into a bind changes evaluation
+order — so `Var` first, then a narrow `params` case.
+
+**Revised rung 1, then.** Not "add `.first`, `joins`, `group`" as the
+classification suggested — those come after. In order:
+
+1. Position guard for the fold (unblocks everything else safely).
+2. `value_from_expr` accepts `Var`; then a narrow `params[:x]`.
+3. Relax the two `kwargs` gates (2 lines, ready, verified correct in
+   statement position).
+4. Then the method vocabulary: `.first`/`.first!` (22 chains),
+   `group(…).count`, `joins`.
+
 ### Residue RUNG classification — all 207 lobsters sites, 2026-08-20
 
 P0a classified the residue by param-ness. That is the right axis for
