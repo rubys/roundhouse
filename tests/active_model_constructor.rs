@@ -95,3 +95,43 @@ end
     assert!(src.contains("def initialize(url)"), "{src}");
     assert!(!src.contains("def initialize(attrs"), "{src}");
 }
+
+/// Ruby's last-definition-wins, at the spelling campfire's
+/// `Opengraph::Location` uses: `attr_accessor :parsed_url` at the top of
+/// the class and a memoizing `def parsed_url` further down. The `def`
+/// REPLACES the accessor — emitting both kept the synthesized
+/// `def parsed_url; @parsed_url; end` and lost the app's body, so the
+/// ivar was never written and the reader answered nil for every
+/// instance. That failed `validate_url` on every URL and made `valid?`
+/// false throughout the subsystem: 9 of its own tests, none of which
+/// named a missing method.
+#[test]
+fn a_def_replaces_the_accessor_it_shadows() {
+    let src = emitted(
+        r#"class Card
+  include ActiveModel::Validations
+
+  attr_accessor :url, :parsed_url
+
+  def initialize(url)
+    @url = url
+  end
+
+  private
+    def parsed_url
+      return @parsed_url if defined? @parsed_url
+      @parsed_url = URI.parse(url)
+    end
+end
+"#,
+    );
+    // The app's own body is what survives...
+    assert!(src.contains("@parsed_url = URI.parse(url)"), "{src}");
+    // ...as the ONLY reader of that name — not beside a synthesized one.
+    assert_eq!(src.matches("def parsed_url\n").count(), 1, "{src}");
+    // The writer half is unshadowed, so `attr_accessor` still supplies it.
+    assert!(src.contains("def parsed_url=(value)"), "{src}");
+    // And an accessor nothing shadows keeps both halves.
+    assert!(src.contains("def url\n"), "{src}");
+    assert!(src.contains("def url=(value)"), "{src}");
+}

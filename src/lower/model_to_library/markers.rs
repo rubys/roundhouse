@@ -177,10 +177,36 @@ pub(super) fn push_attr_accessor_methods(methods: &mut Vec<MethodDef>, model: &M
         // fold reads the assignment where it sits. Unexpanded, the
         // class emitted NO accessors at all and every read of `title`
         // was a NoMethodError.
+        //
+        // A `def` of the same name REPLACES the accessor — Ruby's last
+        // definition wins, and `attr_accessor :foo` is a definition.
+        // Checking only `methods` is not enough: the user's own bodies
+        // arrive later via `push_user_methods`, which DROPS a name a
+        // synthesizer already claimed. So an accessor pushed here for a
+        // name the model defines silently deletes the app's method and
+        // leaves `def foo; @foo; end` in its place — the ivar the app
+        // memoizes into is then never written and the reader answers nil
+        // forever.
+        //
+        // Measured on campfire's `Opengraph::Location`, which declares
+        // `attr_accessor :url, :parsed_url` and then memoizes
+        // `def parsed_url; @parsed_url ||= URI.parse(url); end`. With the
+        // accessor winning, `parsed_url` was permanently nil, so
+        // `validate_url` failed for every URL and `valid?` was false
+        // throughout the subsystem — 9 of its own tests, none of which
+        // named a missing method: they read as bare assertion failures.
+        //
+        // `model_defines_instance_method` is the same yield the temporal
+        // writer in `schema.rs` already performs, and what
+        // `push_synth_instance_method` documents as the rule for every
+        // late synthesizer. This one never got it.
         let names = accessor_names(model, args);
         for name in &names {
             let setter = Symbol::from(format!("{}=", name.as_str()));
-            if want_reader && !methods.iter().any(|m| m.name == *name) {
+            let defines = |n: &Symbol| {
+                crate::lower::model_to_library::model_defines_instance_method(model, n)
+            };
+            if want_reader && !defines(name) && !methods.iter().any(|m| m.name == *name) {
                 methods.push(MethodDef {
                     name: name.clone(),
                     receiver: MethodReceiver::Instance,
@@ -195,7 +221,7 @@ pub(super) fn push_attr_accessor_methods(methods: &mut Vec<MethodDef>, model: &M
                     block_param: None,
                 });
             }
-            if want_writer && !methods.iter().any(|m| m.name == setter) {
+            if want_writer && !defines(&setter) && !methods.iter().any(|m| m.name == setter) {
                 let value = Symbol::from("value");
                 methods.push(MethodDef {
                     name: setter,
