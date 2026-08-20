@@ -65,6 +65,14 @@ pub fn lower_jbuilder_to_library_classes(
         classes.insert(id, info);
     }
     insert_framework_stubs(&mut classes);
+    // The app's OWN route helpers, including the per-format variants
+    // (`article_json_path`). `insert_framework_stubs` carries a
+    // hardcoded stem list that cannot know them, and an unknown helper
+    // types as `Ty::Var` — which the rust emitter reads as "already a
+    // Value" and passes straight into `JsonBuilder::encode_value`,
+    // where it is a String. `json.url article_url(a, format: :json)` is
+    // exactly that call.
+    crate::lower::view_to_library::insert_route_helper_stubs(&mut classes, app);
     for lc in &lcs {
         let info = classes.entry(lc.name.clone()).or_default();
         for m in &lc.methods {

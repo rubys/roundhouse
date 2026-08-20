@@ -84,6 +84,7 @@ pub fn lower_views_to_library_classes(
         classes.insert(id, info);
     }
     insert_framework_stubs(&mut classes);
+    insert_route_helper_stubs(&mut classes, app);
     for lc in &lcs {
         let info = classes.entry(lc.name.clone()).or_default();
         for m in &lc.methods {
@@ -1034,6 +1035,43 @@ pub fn insert_db_stub(
 /// helpers like content_for_set). Args are mostly Untyped — refining
 /// per-helper is future work; the Str-typed return is what unblocks
 /// downstream typing.
+/// Register EVERY route helper the app generates as `-> String`.
+///
+/// `insert_framework_stubs` carries a hardcoded stem list ("article",
+/// "comments", …) with a note saying it cannot enumerate them. It can
+/// now: `lower_routes_to_library_functions` is the same source the view
+/// lowerer already reads for `route_helper_names`, and it includes the
+/// per-format variants (`article_json_path`) that the stem list by
+/// construction cannot predict.
+///
+/// `or_insert` so the precise signatures the stem list (and
+/// `extras_from_funcs`) register keep winning; this only fills names
+/// nothing else typed. A helper left untyped is not a compile error at
+/// the IR level — it is a `Value`/`String` mismatch three layers later
+/// in the rust emit, which is how `encode_value(article_json_path(…))`
+/// reached CI.
+pub(crate) fn insert_route_helper_stubs(
+    classes: &mut std::collections::HashMap<ClassId, crate::analyze::ClassInfo>,
+    app: &crate::App,
+) {
+    use crate::dialect::AccessorKind;
+    use crate::lower::typing::fn_sig;
+    use crate::ty::Ty;
+
+    let funcs = crate::lower::lower_routes_to_library_functions(app);
+    if funcs.is_empty() {
+        return;
+    }
+    let info = classes.entry(ClassId(Symbol::from("RouteHelpers"))).or_default();
+    for f in &funcs {
+        let name = Symbol::from(f.name.as_str());
+        info.class_methods.entry(name.clone()).or_insert_with(|| {
+            fn_sig(vec![(Symbol::from("args"), Ty::Untyped)], Ty::Str)
+        });
+        info.class_method_kinds.entry(name).or_insert(AccessorKind::Method);
+    }
+}
+
 pub(crate) fn insert_framework_stubs(
     classes: &mut std::collections::HashMap<ClassId, crate::analyze::ClassInfo>,
 ) {
