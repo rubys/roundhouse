@@ -111,11 +111,51 @@ impl Analyzer {
             .map(|lc| (&lc.name, &lc.includes))
             .collect();
 
+        // Parent links for the AR-descent walk, built once: a model's
+        // superclass is usually another model (`Story` → `Application
+        // Record` → `ActiveRecord::Base`), so the walk needs every
+        // model's parent before any single model is seeded.
+        let model_parents: HashMap<&ClassId, Option<&ClassId>> =
+            app.models.iter().map(|m| (&m.name, m.parent.as_ref())).collect();
+
         for model in &app.models {
             let self_ty = Ty::Class { id: model.name.clone(), args: vec![] };
             let array_of_self =
                 Ty::Array { elem: Box::new(self_ty.clone()) };
             let relation_of_self = Ty::Relation { of: model.name.clone() };
+            // Is this class actually an ActiveRecord model?
+            //
+            // Everything under `app/models` arrives here as a `Model`,
+            // including plain objects that merely LIVE there — lobsters'
+            // `Search` (`include ActiveModel::Validations`, `attr_accessor
+            // :results, :page, …`) and campfire's `Opengraph::Location` /
+            // `Opengraph::Metadata`. Seeding the AR query surface onto
+            // those fabricates methods the class does not have, and the
+            // fabrication is not inert: an instance receiver resolves
+            // `class_methods` BEFORE `instance_methods` (the parent-chain
+            // walk in `body/send.rs`), so `@search.page` reached kaminari's
+            // class-side `page` builder instead of the `attr_accessor`.
+            // That mistyped as `Array[Search]` for as long as chain starts
+            // were Array-shaped — wrong, but renderable. Convergence
+            // (docs/relation-convergence-plan.md C1) made it
+            // `Relation[Search]`, which no emitter can render, so a latent
+            // wrong answer became a hard error and the gap became visible.
+            //
+            // The discriminator is INHERITANCE, not the schema. "Has no
+            // table in schema.rb" reads like the same question and is not:
+            // plenty of genuine models are analyzed without a schema at
+            // all (every fixture in tests/analyze.rs that doesn't bother
+            // declaring one), and stripping their query surface breaks
+            // real dispatch to fix nothing. Descent from `ActiveRecord::
+            // Base` is the property that actually decides whether the
+            // class has that API.
+            //
+            // What survives the gate is the catalog's own effect
+            // classification: a non-AR class gets no DB-effecting method,
+            // and `EffectClass::Pure` — `new`, `instantiate`,
+            // `schema_column_names` — stays, which is what keeps
+            // `Opengraph::Location.new(image)` typed.
+            let is_ar_model = descends_from_active_record(&model.name, &model_parents);
 
             let mut cls = ClassInfo::default();
             cls.table = Some(model.table.clone());
@@ -138,6 +178,10 @@ impl Analyzer {
                 |kind: ReturnKind| -> Ty { instantiate_return_kind(kind, &model.name) };
             for entry in AR_CATALOG {
                 if entry.receiver != ReceiverContext::Class {
+                    continue;
+                }
+                // No table, no database surface — see `has_table`.
+                if !is_ar_model && entry.effect != crate::catalog::EffectClass::Pure {
                     continue;
                 }
                 let Some(kind) = entry.return_kind else { continue };
@@ -173,67 +217,74 @@ impl Analyzer {
             cls.class_methods.insert(Symbol::from("attribute_names"), Ty::Array { elem: Box::new(Ty::Str) });
             cls.class_methods.insert(Symbol::from("column_names"), Ty::Array { elem: Box::new(Ty::Str) });
             cls.class_methods.insert(Symbol::from("columns_hash"), Ty::Untyped);
-            // `Model.unscoped`/`Model.none` return a relation
-            // (`Relation { of: Model }`) so chains through them stay
-            // typed instead of leaking to `untyped`. (The block form
-            // `unscoped { }` returns the block value, which we don't
-            // track — the relation type is the better default for the
-            // common bare/chained use.) `delete_all`/`update_all` return
-            // Int (affected row count).
-            cls.class_methods.insert(Symbol::from("unscoped"), relation_of_self.clone());
-            cls.class_methods.insert(Symbol::from("none"), relation_of_self.clone());
-            cls.class_methods.insert(Symbol::from("delete_all"), Ty::Int);
-            cls.class_methods.insert(Symbol::from("update_all"), Ty::Int);
+            // The rest of the class-side query surface — everything
+            // from here to the `ids` seed below reads or writes the
+            // database, so it is gated on `is_ar_model` for the same
+            // reason the DB-effecting catalog entries above are. The
+            // catalog can't gate these because they aren't in it.
+            if is_ar_model {
+                // `Model.unscoped`/`Model.none` return a relation
+                // (`Relation { of: Model }`) so chains through them stay
+                // typed instead of leaking to `untyped`. (The block form
+                // `unscoped { }` returns the block value, which we don't
+                // track — the relation type is the better default for the
+                // common bare/chained use.) `delete_all`/`update_all` return
+                // Int (affected row count).
+                cls.class_methods.insert(Symbol::from("unscoped"), relation_of_self.clone());
+                cls.class_methods.insert(Symbol::from("none"), relation_of_self.clone());
+                cls.class_methods.insert(Symbol::from("delete_all"), Ty::Int);
+                cls.class_methods.insert(Symbol::from("update_all"), Ty::Int);
 
-            // Chainable query-builder methods beyond the catalog set.
-            // Each returns the relation (`Relation { of: Self }`, the
-            // same representation the catalog's Class-context builders
-            // use), so a scope or controller chain types end-to-end
-            // rather than leaking to `untyped` at the first
-            // uncatalogued link, and Relation-receiver dispatch in
-            // `send.rs` resolves the next step.
-            // `entry().or_insert` so a catalog entry or named scope still
-            // wins. `not`/`missing` are really `WhereChain` methods
-            // (`where.not(...)`/`where.missing(...)`); since `where`
-            // already yields the relation, the chain lands on the
-            // relation and these resolve there — typing `Model.not`
-            // directly is harmless (not real code) and beats `untyped`.
-            for builder in [
-                "or", "and", "rewhere", "reorder", "reselect", "regroup",
-                "except", "only", "unscope", "reverse_order", "left_joins",
-                "readonly", "lock", "from", "extending", "strict_loading",
-                "create_with", "annotate", "optimizer_hints",
-                "not", "missing",
-            ] {
-                cls.class_methods
-                    .entry(Symbol::from(builder))
-                    .or_insert_with(|| relation_of_self.clone());
-            }
+                // Chainable query-builder methods beyond the catalog set.
+                // Each returns the relation (`Relation { of: Self }`, the
+                // same representation the catalog's Class-context builders
+                // use), so a scope or controller chain types end-to-end
+                // rather than leaking to `untyped` at the first
+                // uncatalogued link, and Relation-receiver dispatch in
+                // `send.rs` resolves the next step.
+                // `entry().or_insert` so a catalog entry or named scope still
+                // wins. `not`/`missing` are really `WhereChain` methods
+                // (`where.not(...)`/`where.missing(...)`); since `where`
+                // already yields the relation, the chain lands on the
+                // relation and these resolve there — typing `Model.not`
+                // directly is harmless (not real code) and beats `untyped`.
+                for builder in [
+                    "or", "and", "rewhere", "reorder", "reselect", "regroup",
+                    "except", "only", "unscope", "reverse_order", "left_joins",
+                    "readonly", "lock", "from", "extending", "strict_loading",
+                    "create_with", "annotate", "optimizer_hints",
+                    "not", "missing",
+                ] {
+                    cls.class_methods
+                        .entry(Symbol::from(builder))
+                        .or_insert_with(|| relation_of_self.clone());
+                }
 
-            // Relation-terminal methods Rails delegates from the class to
-            // `all` (`Story.find_each`, `Category.pluck(:name)`). Unlike the
-            // builders above these don't return a relation, so they sit
-            // outside that loop; their return types match the `Array<Self>`
-            // (relation) dispatch in send.rs so a class-side call and the
-            // equivalent `.all`-chained call agree. `entry().or_insert` so a
-            // catalog entry or named scope still wins. `find_each` &
-            // friends yield the element to a block and return the relation
-            // for chaining; `pluck`/`pick` project column values (column
-            // type unknowable from the name alone → `Array<Untyped>`);
-            // `ids` projects primary keys.
-            for batch in ["find_each", "find_in_batches", "in_batches"] {
+                // Relation-terminal methods Rails delegates from the class to
+                // `all` (`Story.find_each`, `Category.pluck(:name)`). Unlike the
+                // builders above these don't return a relation, so they sit
+                // outside that loop; their return types match the `Array<Self>`
+                // (relation) dispatch in send.rs so a class-side call and the
+                // equivalent `.all`-chained call agree. `entry().or_insert` so a
+                // catalog entry or named scope still wins. `find_each` &
+                // friends yield the element to a block and return the relation
+                // for chaining; `pluck`/`pick` project column values (column
+                // type unknowable from the name alone → `Array<Untyped>`);
+                // `ids` projects primary keys.
+                for batch in ["find_each", "find_in_batches", "in_batches"] {
+                    cls.class_methods
+                        .entry(Symbol::from(batch))
+                        .or_insert_with(|| array_of_self.clone());
+                }
+                for proj in ["pluck", "pick"] {
+                    cls.class_methods
+                        .entry(Symbol::from(proj))
+                        .or_insert_with(|| Ty::Array { elem: Box::new(Ty::Untyped) });
+                }
                 cls.class_methods
-                    .entry(Symbol::from(batch))
-                    .or_insert_with(|| array_of_self.clone());
-            }
-            for proj in ["pluck", "pick"] {
-                cls.class_methods
-                    .entry(Symbol::from(proj))
-                    .or_insert_with(|| Ty::Array { elem: Box::new(Ty::Untyped) });
-            }
-            cls.class_methods
-                .entry(Symbol::from("ids"))
-                .or_insert_with(|| Ty::Array { elem: Box::new(Ty::Int) });
+                    .entry(Symbol::from("ids"))
+                    .or_insert_with(|| Ty::Array { elem: Box::new(Ty::Int) });
+            } // end `if is_ar_model` — class-side query surface
 
             // Instance methods from schema-derived attributes.
             // These are per-model (column names differ across
@@ -2730,6 +2781,42 @@ fn body_tail_terminal_kind(
         return None;
     }
     entry.return_kind
+}
+
+/// Does `start` descend from `ActiveRecord::Base`?
+///
+/// `app/models` is a directory, not a type: a class in it is an
+/// ActiveRecord model only if it says so by inheritance. Rails' own
+/// convention is the whole signal — `ApplicationRecord <
+/// ActiveRecord::Base`, and every model under it.
+///
+/// Conservative in both unknown directions, because a false negative
+/// deletes a real model's entire query surface while a false positive
+/// only restores today's behavior: an ancestor this map doesn't know
+/// (a gem base class) answers YES, and so does a chain long enough to
+/// hit the depth cap. Only a chain that terminates in a class with no
+/// superclass at all — `class Search`, `class Opengraph::Location` —
+/// answers NO.
+fn descends_from_active_record(
+    start: &ClassId,
+    parents: &HashMap<&ClassId, Option<&ClassId>>,
+) -> bool {
+    let mut current = start;
+    for _ in 0..32 {
+        let Some(parent) = parents.get(current) else {
+            // Unmodeled ancestor — can't prove it isn't AR.
+            return true;
+        };
+        let Some(parent) = parent else {
+            // A class with no superclass. Not a model.
+            return false;
+        };
+        if matches!(parent.0.as_str(), "ActiveRecord::Base" | "ApplicationRecord") {
+            return true;
+        }
+        current = parent;
+    }
+    true
 }
 
 /// Instantiate a catalog [`crate::catalog::ReturnKind`] against a

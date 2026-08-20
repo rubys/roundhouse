@@ -1482,6 +1482,107 @@ fn analysis_is_idempotent() {
 // before_action filter ivar seeding -------------------------------------
 
 /// Ingest + analyze a hand-built in-memory app tree.
+/// The value type of the assignment to `@name` in `controller`'s
+/// `index` action.
+fn index_ivar_ty(app: &roundhouse::App, name: &str) -> Ty {
+    let index = app.controllers[0]
+        .actions()
+        .find(|a| a.name.as_str() == "index")
+        .expect("index action");
+    let exprs = match &*index.body.node {
+        ExprNode::Seq { exprs } => exprs.clone(),
+        _ => vec![index.body.clone()],
+    };
+    for e in &exprs {
+        if let ExprNode::Assign { target, value } = &*e.node {
+            if format!("{target:?}").contains(name) {
+                return value.ty.clone().expect("assignment value has a ty");
+            }
+        }
+    }
+    panic!("no assignment to @{name}");
+}
+
+/// A class in `app/models` that doesn't inherit from ActiveRecord is
+/// not a model, and must not be handed the AR query surface.
+///
+/// lobsters' `Search` is the shape: a PORO with `attr_accessor :page`,
+/// living in `app/models`. Because an instance receiver resolves
+/// `class_methods` before `instance_methods`, seeding kaminari's
+/// class-side `page` builder onto it made `@search.page` — an Integer
+/// the object assigns itself in `initialize` — resolve to a relation
+/// over `Search`. That mistyping was invisible while chain starts were
+/// `Array`-shaped and became a hard `relation_type` emit error the day
+/// they converged on `Ty::Relation`.
+#[test]
+fn a_non_activerecord_class_in_app_models_gets_no_query_surface() {
+    let app = app_from_files(&[
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"stories\", force: :cascade do |t|\n    t.string \"title\", null: false\n  end\nend\n",
+        ),
+        (
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\nend\n",
+        ),
+        (
+            "app/models/story.rb",
+            "class Story < ApplicationRecord\nend\n",
+        ),
+        (
+            "app/models/search.rb",
+            r#"class Search
+  include ActiveModel::Validations
+
+  attr_accessor :page, :results
+
+  def initialize
+    @page = 1
+    @results = []
+  end
+end
+"#,
+        ),
+        (
+            "app/controllers/searches_controller.rb",
+            r#"class SearchesController < ApplicationController
+  def index
+    @search = Search.new
+    @page = @search.page
+    @stories = Story.where(title: "x")
+  end
+end
+"#,
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get \"/search\", to: \"searches#index\"\nend\n",
+        ),
+    ]);
+
+    // `Search.new` is `EffectClass::Pure` and survives the gate — a
+    // PORO still constructs.
+    assert!(
+        matches!(index_ivar_ty(&app, "search"), Ty::Class { ref id, .. } if id.0.as_str() == "Search"),
+        "Search.new should still type: got {:?}",
+        index_ivar_ty(&app, "search"),
+    );
+
+    // The attr_accessor answers, NOT kaminari's class-side `page`.
+    let page = index_ivar_ty(&app, "page");
+    assert!(
+        !matches!(page, Ty::Relation { .. } | Ty::Array { .. }),
+        "@search.page must not resolve to the AR `page` builder, got {page:?}",
+    );
+
+    // And a real model in the same app is untouched.
+    assert!(
+        matches!(index_ivar_ty(&app, "stories"), Ty::Relation { ref of } if of.0.as_str() == "Story"),
+        "a real AR model keeps its query surface: got {:?}",
+        index_ivar_ty(&app, "stories"),
+    );
+}
+
 fn app_from_files(files: &[(&str, &str)]) -> roundhouse::App {
     let tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = files
         .iter()

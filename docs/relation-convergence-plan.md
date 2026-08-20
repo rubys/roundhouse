@@ -180,20 +180,28 @@ ActiveModel::Validations`, no table — with `attr_accessor :results,
 builder**, not to the attr_accessor, because instance dispatch on a
 `Ty::Class` receiver consults `class_methods` BEFORE `instance_methods`
 (`src/analyze/body/send.rs`, the parent-chain walk). That ordering, and
-the AR query surface being seeded onto a table-less PORO at all, both
-predate this plan. Parent mistyped `@search.page` exactly as wrongly —
-as `Array[Search]` — and got away with it only because an `Array` is
+the AR query surface being seeded onto a PORO at all, both predate this
+plan. Parent mistyped `@search.page` exactly as wrongly — as
+`Array[Search]` — and got away with it only because an `Array` is
 renderable and a `Relation` is not. **This is the dual representation
 having hidden a real gap, which is the case the plan said to report
-rather than paper over.** Options, all Sam's:
+rather than paper over.**
 
-1. Fix the dispatch order (instance methods ahead of class methods on
-   an instance receiver). Correct, and the widest blast radius here.
-2. Don't seed the AR class-side query surface onto a model whose table
-   is absent from the schema. Narrow and principled; changes what a
-   table-less `app/models` PORO resolves.
-3. Accept the two errors on a target where the mistyping was already
-   present, and let the eventual dispatch fix collect them.
+**RESOLVED (`3d1a693b`), Sam's call: don't seed the AR class-side
+query surface onto a class that isn't ActiveRecord.** The producer-side
+fix, not the dispatch-order one — see that commit for why the
+discriminator is INHERITANCE and not "has no table in schema.rb", which
+was the first thing tried and is a different question. Result: lobsters
+ruby 2 unsupported → **0**, and type errors 47 → **43**, four better
+than pre-C1 (the `search.rb` comparisons on `@search.page` type
+correctly now). campfire unmoved at 54 — its two POROs,
+`Opengraph::Location` and `Opengraph::Metadata`, have no name colliding
+with the query surface, and `EffectClass::Pure` keeps `.new` typed for
+both.
+
+The dispatch order itself is still backwards on an instance receiver
+and is still worth fixing on its own terms; it just no longer has a
+victim in either app.
 
 **Ledger counts moved, for a reason the plan didn't anticipate — and
 CI made the fix mandatory (`c60ff20b`).** The plan expected the blog
