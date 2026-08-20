@@ -718,9 +718,21 @@ module ActiveRecord
 
     # `pluck(:col)` — a single column projected to an Array of its raw
     # values (strings as stored; callers coerce).
+    #
+    # THE PROJECTION IS RESTORED, and that is not housekeeping. `pluck`
+    # is a TERMINAL: Rails builds it a query of its own and leaves the
+    # receiver alone, so the same relation can be plucked and then
+    # loaded. Leaving `users.id AS v` behind meant the NEXT `to_a` on
+    # that object hydrated whole records out of a one-column row —
+    # every field blank, every id 0, no error anywhere. campfire's
+    # `Rooms::Direct.find_or_create_for` does exactly that: `find_for`
+    # plucks the user ids, then hands the SAME relation to `grant_to`,
+    # which built memberships for user 0.
     def pluck(col)
+      prior = @select_sql
       @select_sql = "#{@table}.#{col} AS v"
       rows = ActiveRecord.adapter.select_rows(to_sql)
+      @select_sql = prior
       rows.map { |row| row["v"] }
     end
 
@@ -728,15 +740,19 @@ module ActiveRecord
     # from the first row, or nil when the relation matches nothing.
     # Lobsters reads every Keystore counter through it.
     def pick(col)
+      prior = @limit
       @limit = 1
       rows = pluck(col)
+      @limit = prior
       rows.length == 0 ? nil : rows[0]
     end
 
     # `ids` — primary keys, as integers.
     def ids
+      prior = @select_sql
       @select_sql = "#{@table}.id AS v"
       rows = ActiveRecord.adapter.select_rows(to_sql)
+      @select_sql = prior
       rows.map { |row| row["v"].to_i }
     end
 

@@ -534,6 +534,32 @@ during this block" are the same set under inline dispatch. The shape
 that separates them — a job enqueued and never run — is one inline
 semantics cannot produce.
 
+### A terminal must leave the relation as it found it
+
+`pluck` / `ids` / `pick` set a projection (or a limit) on the relation
+to build their query. They now RESTORE it. This is a note about an
+invariant rather than a divergence, because the alternative was not a
+divergence either — it was silent corruption.
+
+**What it looked like.** `pluck` wrote `@select_sql = "users.id AS v"`
+and left it there. The next `to_a` on that same object hydrated whole
+records out of a one-column row: every field blank, every id `0`, no
+error raised, nothing logged. campfire's
+`Rooms::Direct.find_or_create_for` plucks user ids in `find_for` and
+then hands the SAME relation to `grant_to`, which duly created
+memberships for user 0.
+
+**The invariant.** This Relation is deliberately mutate-and-return-self
+for CHAIN methods (`where`, `order`, `limit` …) — the class doc says so,
+and lowered chains rely on it. A TERMINAL is the other kind: it runs a
+query and answers a value, and Rails builds it a query of its own. Any
+terminal that has to touch relation state to build its SQL must put that
+state back.
+
+**Still outstanding, same shape.** `first` sets `@limit = 1` and caches
+a one-row `@records`; `find(id)` appends a `WHERE` that stays. Neither
+has a failing test behind it today.
+
 ### `ActiveRecord::Relation` has no `new`
 
 Rails builds a record through a relation — `User.active_bots.new`,
