@@ -769,7 +769,7 @@ jobs:
       # runner reaches, and it goes UP by the notice below, never by
       # assertion.
         env:
-          FLOOR_TESTS: 122
+          FLOOR_TESTS: 123
           FLOOR_FILES: 14
         run: |
           set -euo pipefail
@@ -997,7 +997,28 @@ jobs:
       # `dotnet test tests`, which RUNS the transpiled real-blog suite (21) as
       # an xUnit project with an executed-count floor. csharp was the last
       # target whose gates asserted nothing about behavior (#34 §0).
+      # Serialize dotnet's FIRST-RUN configuration before the two legs
+      # race it. Both `real_blog_dotnet_build_passes` and
+      # `real_blog_csharp_tests_pass` shell out to `dotnet`, cargo runs
+      # them on separate threads, and on a cold runner each invocation
+      # tries `DotnetFirstTimeUseConfigurer` — which builds a
+      # `NuGet-Migrations` mutex under /tmp/.dotnet/shm and is NOT
+      # concurrency-safe. The loser dies before running a single test
+      # with `mkdir(…/shm/session…) == -1; errno == EEXIST`, which reads
+      # as a compile failure in the summary and is nothing of the kind.
+      # One warm invocation here does the setup once, serially; the
+      # env vars keep it from being attempted again.
+      - name: Warm the dotnet CLI (first-run config is not concurrency-safe)
+        env:
+          DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
+          DOTNET_NOLOGO: '1'
+          DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+        run: dotnet --info
       - name: cargo test --test csharp_toolchain -- --ignored
+        env:
+          DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
+          DOTNET_NOLOGO: '1'
+          DOTNET_CLI_TELEMETRY_OPTOUT: '1'
         run: cargo test --test csharp_toolchain -- --ignored --nocapture
 
   # -------------------------------------------------------------------
