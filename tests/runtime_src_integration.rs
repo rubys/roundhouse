@@ -956,7 +956,25 @@ fn every_runtime_method_body_concretely_typed() {
     // contributes. The method exists twice because the strict lanes
     // cannot index the `[prev, value]` pair, so each layer pays its own.
     // +2 sites; ceiling raised 283 -> 285.
-    const CEILING: usize = 285;
+    // 2026-08-20 285 -> 297, six methods the campfire suite named, an
+    // average of two sites each:
+    //   relation.rb +8. `collect` is `map`'s second name and pays
+    //     exactly what `map` pays — the element type is `untyped` in
+    //     the runtime RBS by the R5 delegation convention, so the block
+    //     param and the `yield` are both untyped. `new` reads
+    //     `@model.new` (a class-object value) and iterates
+    //     `scope_attributes.merge(attributes)`, whose values are
+    //     `untyped` by declaration.
+    //   flash.rb +4. `mark_shown` and `FlashNow`'s `[]`/`[]=` take an
+    //     untyped key for the same reason CookieJar's do — flash is
+    //     indexed with Symbol constants and String literals alike, and
+    //     the body normalizes via `key.to_s`.
+    //   base.rb +0. `destroy!` calls `destroy`, which is typed `Base`.
+    // The STI recast contributes nothing: its column copy lives in
+    // src/lower/sti_scope.rs, not here — see the note on the other
+    // ceiling in tests/inference_on_spinel_blog_runtime_with_rbs.rs for
+    // why that placement was not optional.
+    const CEILING: usize = 297;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

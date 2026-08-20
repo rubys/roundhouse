@@ -58,6 +58,27 @@ module ActionDispatch
       end
     end
 
+    # `flash.now[:alert] = "…"` — a flash for THIS request only.
+    #
+    # The proxy is what makes `now` a different operation from a plain
+    # write: it sets the value AND moves that key's snapshot forward
+    # (`mark_shown`), so `to_persisted`'s diff reads the key as
+    # unchanged and drops it. The whole show-exactly-once rule stays in
+    # one place — the snapshot — rather than growing a second
+    # "don't persist" flag per field.
+    def now
+      FlashNow.new(self)
+    end
+
+    # Move a key's snapshot up to its current value. Only `now` calls
+    # this; a key marked shown is one the next request must not see.
+    def mark_shown(key)
+      k = key.to_s
+      @notice_was = @notice if k == "notice"
+      @alert_was = @alert if k == "alert"
+      nil
+    end
+
     # HWIA-shape `[key]` accessor — accepts Symbol or String key. Routes
     # through a closed case so each branch's return ty is the
     # corresponding field's ty (`String?`), not a fanned-out untyped
@@ -197,6 +218,29 @@ module ActionDispatch
         result[k] = v
       end
       result
+    end
+  end
+
+  # The receiver `flash.now` returns. Writes land on the Flash and are
+  # marked shown in the same step, so a `flash.now` entry is visible to
+  # this request's render and gone by the next one.
+  #
+  # A proxy object rather than a flag on Flash: `flash.now[:alert] = x`
+  # is a `[]=` send on whatever `now` answers, and the two writers have
+  # to be distinguishable at that call site on every target.
+  class FlashNow
+    def initialize(flash)
+      @flash = flash
+    end
+
+    def []=(key, value)
+      @flash[key] = value
+      @flash.mark_shown(key)
+      value
+    end
+
+    def [](key)
+      @flash[key]
     end
   end
 end

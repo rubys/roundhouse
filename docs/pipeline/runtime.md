@@ -517,6 +517,58 @@ during this block" are the same set under inline dispatch. The shape
 that separates them — a job enqueued and never run — is one inline
 semantics cannot produce.
 
+### A record built through a SCOPE misses the scope's own columns
+
+Rails seeds a record built through a relation from that relation's
+equality conditions — `User.active_bots.new` comes back with
+`role: :bot` already set. `ActiveRecord::Relation#new` here seeds only
+from `scope_attributes`, which is the ASSOCIATION seed
+(`room.memberships.new` still gets its `room_id`).
+
+**Why.** By the time `new` is reached, `@wheres` holds rendered SQL
+fragments, not attribute pairs — `where("role = ?", 2)` and
+`where(role: 2)` are the same string there. Reconstructing attributes
+from SQL is a parser; keeping the pairs would mean a second
+representation of every condition carried for the one call site that
+reads it.
+
+**What it costs.** A record built through a named scope starts without
+the scope's columns, so a form rendered from it shows their defaults and
+a `save` straight after it writes a row the scope cannot see. campfire's
+one site (`User.active_bots.new`) feeds a form whose create path stamps
+`role` itself, so the gap is invisible there — which is exactly why it
+is written down here.
+
+### `destroy!` cannot fail
+
+Rails raises `RecordNotDestroyed` when a `before_destroy` callback
+throws `:abort`. `destroy!` here is `destroy`.
+
+**Why.** This runtime has no abort channel: `before_destroy` returns
+into the void and `destroy` always completes. The bang form is kept as
+its own method so the raise has a home when the channel exists, rather
+than aliasing the two names together.
+
+**What it costs.** Nothing today — no corpus app halts a destroy from a
+callback. An app that did would see the row deleted where Rails would
+have raised.
+
+### A recast row is a NEW OBJECT sharing the old row's id
+
+`record.becomes!(Rooms::Open)` in Rails hands the sibling the SAME
+attribute hash, so writes through either object are visible in both.
+Here (`src/lower/sti_scope.rs`, which unrolls the copy column by
+column into the synthesized `becomes_from`) the sibling gets a COPY.
+
+**Why.** Shared mutable attribute state across two objects is the shape
+the typed targets have no representation for — each carries its columns
+as its own typed slots, not as a hash one can hand around.
+
+**What it costs.** Code that keeps the pre-recast object and writes
+through it loses those writes. The Rails idiom reassigns
+(`@room = @room.becomes!(Rooms::Closed)`), which is what campfire's two
+sites do; a site that kept both handles would diverge silently.
+
 ## Related docs
 
 - [`emit.md`](emit.md) — the universal IR contract; the consumers of

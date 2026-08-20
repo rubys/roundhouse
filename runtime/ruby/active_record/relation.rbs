@@ -66,6 +66,7 @@ module ActiveRecord
     def index_by: () { (untyped) -> untyped } -> Hash[untyped, untyped]
     def find_each: () { (untyped) -> void } -> Array[untyped]
     def map: () { (untyped) -> untyped } -> Array[untyped]
+    def collect: () { (untyped) -> untyped } -> Array[untyped]
     def group_by: () { (untyped) -> untyped } -> Hash[untyped, Array[untyped]]
     def partition: () { (untyped) -> bool } -> Array[Array[untyped]]
     def detect: () { (untyped) -> bool } -> untyped
@@ -116,6 +117,7 @@ module ActiveRecord
     def find: (Integer id) -> untyped
     def find_by: (untyped conditions) -> untyped
     def find_by!: (untyped conditions) -> untyped
+    def new: (?Hash[Symbol, untyped] attributes) -> untyped
     def first_or_initialize: () -> untyped
 
     def to_sql: () -> String

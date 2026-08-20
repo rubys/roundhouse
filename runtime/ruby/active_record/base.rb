@@ -631,6 +631,17 @@ module ActiveRecord
       true
     end
 
+    # `destroy!` — Rails raises `RecordNotDestroyed` when a
+    # `before_destroy` callback throws `:abort`. This runtime has no
+    # abort channel (`before_destroy` returns into the void and
+    # `destroy` always completes), so the bang form is the same
+    # operation. Written out rather than aliased for the strict
+    # targets, and kept as its own method so the raise lands here when
+    # an abort channel does exist.
+    def destroy!
+      destroy
+    end
+
     def destroy
       return self unless persisted?
       before_destroy

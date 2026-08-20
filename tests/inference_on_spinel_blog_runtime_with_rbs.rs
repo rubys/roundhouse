@@ -608,7 +608,23 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // shape a typed element cannot describe. The four nodes are the
     // reads off it — `statement[0]`, `statement.length`,
     // `statement[bind]`, and the escape call's argument.
-    const CEILING: usize = 731;
+    // 2026-08-20 731 -> 738 — three surface methods the campfire suite
+    // named, all inside the 1-3 budget: `Relation#collect` (map's second
+    // name, paying what map pays), `Relation#new` (one merged
+    // `scope_attributes.merge(attributes)` loop rather than two, so the
+    // caller's layer costs no second iteration), and `Base#destroy!`
+    // (~1 — it calls `destroy`, which is typed `Base`).
+    //
+    // The STI recast that landed with them adds NOTHING here, and that
+    // is the load-bearing part: its first draft was a shared-runtime
+    // `Base#becomes_state_from` looping over `source.attributes`, worth
+    // 14 nodes AND a rust_toolchain failure (`no method named
+    // attributes for struct Base` — the generic loop needs the
+    // polymorphic dispatch the strict targets are built to avoid). The
+    // copy moved into the lowerer, which knows the schema and unrolls
+    // it column by column. Both problems had the same fix.
+    const CEILING: usize = 738;
+
     assert!(
         all_untyped.len() <= CEILING,
         "{} untyped sub-expressions exceeds ceiling of {CEILING}.\n\

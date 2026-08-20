@@ -440,6 +440,17 @@ module ActiveRecord
       to_a.map { |x| yield x }
     end
 
+    # `collect` is Enumerable's second name for `map`, and Rails
+    # relations answer it because they delegate the whole of Enumerable
+    # to `to_a`. campfire's membership extension reaches it
+    # (`Array(users).collect { … }` where `users` is a relation).
+    # Duplicated rather than aliased: strict targets want a real
+    # definition, not an alias, and a body forwarding to `map` would
+    # have to forward the block too.
+    def collect
+      to_a.map { |x| yield x }
+    end
+
     # `group_by { |rec| key }` — Enumerable's grouping over the
     # materialized rows (lobsters threads comments with
     # `@comments.group_by(&:parent_comment_id)`). fetch-then-insert
@@ -743,6 +754,29 @@ module ActiveRecord
     def find_by!(conditions)
       record = find_by(conditions)
       raise RecordNotFound, "Couldn't find record in #{@table}" if record.nil?
+      record
+    end
+
+    # `relation.new(attrs)` — build an unsaved record through the
+    # relation (campfire's bots controller: `User.active_bots.new`).
+    # Rails' `scope_for_create` is `scope_attributes` here, so a record
+    # built through an association starts with its foreign key set;
+    # the caller's own attributes are applied after, so they win.
+    #
+    # DIVERGENCE, ledgered in docs/pipeline/runtime.md: Rails ALSO seeds
+    # from a scope's own equality conditions (`User.active_bots.new`
+    # gives `role: :bot`), which this cannot do — `@wheres` holds
+    # rendered SQL fragments, not attribute pairs, by the time we get
+    # here. Only the association seed (`where_scope`) survives as
+    # attributes. A scope-built record therefore starts without the
+    # scope's own columns.
+    def new(attributes = {})
+      record = @model.new
+      # One merged loop rather than two: the caller's attributes layer
+      # over the scope's (Rails assigns them second, so an explicit
+      # value wins), and `merge` says that in one expression instead of
+      # paying a second untyped iteration for it.
+      @scope_attributes.merge(attributes).each { |k, v| record[k] = v }
       record
     end
 

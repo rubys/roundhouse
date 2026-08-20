@@ -22,6 +22,8 @@ module ActionDispatch
 
     def initialize: (?Hash[String, String]? other) -> void
 
+    def now: () -> FlashNow
+    def mark_shown: (untyped key) -> void
     def []: (untyped key) -> String?
     def []=: (untyped key, String? value) -> String?
     def fetch: (untyped key, ?String? default) -> String?
@@ -38,5 +40,15 @@ module ActionDispatch
     def to_h: () -> Hash[String, String]
     def to_persisted: () -> Hash[String, String]
     def merge: (Hash[String, String] other) -> Flash
+  end
+
+  # `flash.now` — writes through to the Flash and marks the key shown,
+  # so `to_persisted` drops it.
+  class FlashNow
+    @flash: Flash
+
+    def initialize: (Flash flash) -> void
+    def []=: (untyped key, String? value) -> String?
+    def []: (untyped key) -> String?
   end
 end

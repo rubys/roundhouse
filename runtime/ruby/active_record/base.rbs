@@ -183,6 +183,7 @@ module ActiveRecord
     def save_after_validation: () -> bool
     def save!: () -> Base
     def destroy: () -> Base
+    def destroy!: () -> Base
     def reload: () -> Base
     # `touch` is no-arg on purpose; see the note on the body.
     def touch: () -> bool
