@@ -117,6 +117,21 @@ module Main
     if matched.nil?
       return [404, "<h1>404 Not Found</h1>", "text/html; charset=utf-8", nil, {}]
     end
+    # A `(.:format)` EXTENSION the router stripped off the path
+    # (`/rooms/3/refresh.turbo_stream`). The `.json` sniff above runs
+    # BEFORE matching and so never sees any other extension; the router
+    # captures them all into `path_params["format"]`, and until now
+    # nothing read it — every `format: :turbo_stream` URL dispatched as
+    # :html and fell through to MissingTemplate.
+    #
+    # Compared against string literals rather than converted with
+    # `to_sym`: the same reason the `req_format` block below names its
+    # formats one at a time — a Symbol materialized from a runtime
+    # String is a shape the strict targets do not share.
+    path_format = matched.path_params.fetch("format", "")
+    request_format = :json if path_format == "json"
+    request_format = :turbo_stream if path_format == "turbo_stream"
+    request_format = :rss if path_format == "rss"
     # A route-forced format (`get "/rss" => "home#index", :format =>
     # "rss"`) overrides the path-suffix sniff — the URL has no
     # extension but the route pins the response format.

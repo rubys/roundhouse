@@ -64,7 +64,13 @@ fn json_actions_for(
         Some(m) => m,
         None => return out,
     };
-    let dir = crate::naming::snake_case(&module);
+    // `underscore`, not `snake_case`: a NAMESPACED controller's module
+    // is `Rooms::Refreshes`, and only `underscore` turns that into the
+    // `rooms/refreshes` a view name is keyed by — `snake_case` leaves
+    // the `::` and the prefix matched nothing, so every namespaced
+    // controller's json/turbo_stream templates were invisible and its
+    // action fell through to the html branch and MissingTemplate.
+    let dir = crate::naming::underscore(&module);
     let prefix = format!("{dir}/");
     for v in views {
         if v.format.as_str() != "json" {
@@ -99,7 +105,9 @@ fn turbo_stream_actions_for(
         Some(m) => m,
         None => return out,
     };
-    let dir = crate::naming::snake_case(&module);
+    // See `json_actions_for`: `underscore` is what a namespaced
+    // controller's module has to go through to match a view name.
+    let dir = crate::naming::underscore(&module);
     let prefix = format!("{dir}/");
     for v in views {
         if v.format.as_str() != "turbo_stream" {

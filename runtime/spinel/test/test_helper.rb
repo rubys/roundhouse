@@ -160,10 +160,20 @@ module Dom
   # historical no-scoping block behavior).
   def self.select(root, selector)
     fragment = fragment_for(selector)
+    attrs = selector_attrs(selector.split(" ")[0].to_s)
     nodes = []
     from = 0
     while (i = root.index(fragment, from))
-      nodes << root
+      # An `[attr=value]` predicate has to hold on the SAME start tag
+      # the fragment matched, not merely somewhere in the document, so
+      # the scan stops at the next ">". Without the predicates this is
+      # the plain substring test it always was.
+      stop = root.index(">", i)
+      tag_end = stop.nil? ? root.length : stop
+      tag = root[i, tag_end - i + 1].to_s
+      ok = true
+      attrs.each { |a| ok = false unless tag.include?(a) }
+      nodes << root if ok
       from = i + fragment.length
     end
     nodes
@@ -177,9 +187,11 @@ module Dom
 
   # Loose selector → substring fragment (the pre-contract rule):
   #   "#id"  → 'id="id"'   ".cls" → 'cls"'   "tag" → "<tag"
-  # Compound selectors take the first whitespace chunk.
+  # Compound selectors take the first whitespace chunk; any
+  # `[attr=value]` predicates are stripped here and checked by `select`.
   def self.fragment_for(selector)
-    first = selector.split(" ").first || ""
+    chunk = selector.split(" ").first || ""
+    first = chunk.split("[")[0].to_s
     if first.start_with?("#")
       %(id="#{first[1..]}")
     elsif first.start_with?(".")
@@ -187,6 +199,37 @@ module Dom
     else
       "<#{first}"
     end
+  end
+
+  # `turbo-stream[action='append'][target='x']` → ['action="append"',
+  # 'target="x"'], each rendered the way an emitted start tag writes it
+  # so the scan is one `include?` per predicate. Both quote styles are
+  # accepted going in — a Rails test writes either — and normalized to
+  # the double quotes every emitter produces. A bare `[connected]`
+  # predicate keeps just the name.
+  #
+  # This engine is a substring stub, and a stub that silently answered
+  # "no match" for every attribute selector made the assertion
+  # UNPASSABLE rather than loose: `assert_select
+  # "turbo-stream[action='append']"` could not succeed against a body
+  # that contained exactly that element.
+  def self.selector_attrs(chunk)
+    out = []
+    parts = chunk.split("[")
+    i = 1
+    while i < parts.length
+      pred = parts[i].to_s.split("]")[0].to_s
+      eq = pred.index("=")
+      if eq.nil?
+        out << pred
+      else
+        name = pred[0, eq].to_s
+        value = pred[eq + 1, pred.length].to_s.gsub("'", "").gsub("\"", "")
+        out << %(#{name}="#{value}")
+      end
+      i += 1
+    end
+    out
   end
 end
 
@@ -595,6 +638,23 @@ module RequestDispatch
     controller.cookies = ActionController::CookieJar.new(cookies.to_h)
     controller.request_method = method
     controller.request_path   = path
+    # The response FORMAT, derived exactly as both production
+    # dispatchers derive it: a `(.:format)` extension the router
+    # stripped off the path, then a route-pinned format on top. The
+    # harness derived neither, so `get room_refresh_url(room, format:
+    # :turbo_stream)` — a URL whose whole point is the format — arrived
+    # as :html and the action fell through to MissingTemplate.
+    #
+    # Compared against string literals rather than converted with
+    # `to_sym`, the same shape main.rb uses and for the same reason: a
+    # Symbol materialized from a runtime String is not a shape the
+    # strict targets share.
+    path_format = matched.path_params.fetch("format", "")
+    controller.request_format = :json if path_format == "json"
+    controller.request_format = :turbo_stream if path_format == "turbo_stream"
+    controller.request_format = :rss if path_format == "rss"
+    controller.request_format = :json if matched.req_format == :json
+    controller.request_format = :rss if matched.req_format == :rss
     # The request object, built the way the dispatcher builds it (see
     # `main.rb`'s `controller.request = ActionDispatch::Request.new(...)`).
     # Without it `controller.request` was nil and any filter touching it

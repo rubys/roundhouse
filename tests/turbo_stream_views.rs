@@ -160,3 +160,46 @@ fn the_option_form_is_left_alone_rather_than_half_lowered() {
         "unsupported spelling must not be lowered: {body}"
     );
 }
+
+/// BLOCK form: `turbo_stream.append target do … end`. The block body is
+/// the `<template>` content, so it walks into its own capture
+/// accumulator and the captured String reaches the same composer — the
+/// `<turbo-stream>` markup keeps one owner.
+///
+/// campfire's `rooms/refreshes/show.turbo_stream.erb` opens with it, and
+/// until this landed the call was left in source shape, where
+/// `turbo_stream` resolves to nothing at all.
+#[test]
+fn the_block_form_captures_its_body_as_the_template() {
+    let app = app_with_template(
+        "<%= turbo_stream.append \"things\" do %>\n  <%= render partial: \"things/thing\", collection: @things %>\n<% end %>\n",
+    );
+    let body = method_body(&app, "create_turbo_stream");
+    assert!(
+        body.contains("turbo_stream_fragment"),
+        "the block form must reach the composer: {body}"
+    );
+    assert!(body.contains("_ts_cap"), "with its own capture accumulator: {body}");
+    assert!(
+        !body.contains("html_escape"),
+        "a turbo-stream fragment is markup, not escaped text: {body}"
+    );
+}
+
+/// OPTION form, the half that is safe to lower: `partial:` names one
+/// template and `locals:` binds it. Resolved through the same
+/// `named_partial_call` a `render partial:` site uses, so there is only
+/// one set of partial rules.
+#[test]
+fn the_partial_option_form_renders_that_partial() {
+    let app = app_with_template(
+        "<%= turbo_stream.replace :box, partial: \"things/thing\", locals: { thing: @thing } %>\n",
+    );
+    let body = method_body(&app, "create_turbo_stream");
+    assert!(body.contains("turbo_stream_fragment"), "got {body}");
+    assert!(body.contains("replace"), "the action: {body}");
+    assert!(
+        body.contains("Views::Things") && body.contains("thing"),
+        "the named partial supplies the template: {body}"
+    );
+}

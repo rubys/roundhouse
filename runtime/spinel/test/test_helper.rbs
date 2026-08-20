@@ -34,6 +34,7 @@ module Dom
   def self.select: (String root, String selector) -> Array[String]
   def self.text: (String node) -> String
   def self.fragment_for: (String selector) -> String
+  def self.selector_attrs: (String chunk) -> Array[String]
 end
 
 # Captured response from a dispatched in-process request. The four

@@ -51,11 +51,46 @@ pub(super) fn is_turbo_stream_builder(recv: Option<&Expr>) -> bool {
     }
 }
 
+/// The `<turbo-stream target=…>` value for a `turbo_stream.<action>`
+/// call's first argument. Shared by all three spellings — positional,
+/// option-hash and block — so they cannot disagree about what a bare
+/// record means.
+///
+/// A bare record is its `dom_id`, which is what Rails does; a Symbol is
+/// the id verbatim; anything else (typically an explicit `dom_id(...)`)
+/// is already a String.
+pub(super) fn turbo_stream_target(target: &Expr, ctx: &ViewCtx) -> Expr {
+    use crate::expr::Literal;
+    match &*target.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => lit_str(value.as_str().to_string()),
+        ExprNode::Var { .. } | ExprNode::Ivar { .. } => {
+            view_helpers_call("dom_id", vec![rewrite_helpers_in_expr(target, ctx)])
+        }
+        _ => rewrite_helpers_in_expr(target, ctx),
+    }
+}
+
+/// `Broadcasts.turbo_stream_fragment("<action>", <target>, <html>)`.
+/// The markup lives in each target's hand-written `Broadcasts` — the
+/// same composer the model-side `broadcast_append_to` path uses — so a
+/// change to the `<turbo-stream>` element has one owner.
+pub(super) fn turbo_stream_fragment_call(action: &str, target: Expr, html: Expr) -> Expr {
+    send(
+        Some(Expr::new(
+            Span::synthetic(),
+            ExprNode::Const { path: vec![Symbol::from("Broadcasts")] },
+        )),
+        "turbo_stream_fragment",
+        vec![lit_str(action.to_string()), target, html],
+        None,
+        true,
+    )
+}
+
 pub(super) fn emit_turbo_stream_fragment(
     ts: &crate::lower::view::TurboStreamCall<'_>,
     ctx: &ViewCtx,
 ) -> Option<Expr> {
-    use crate::expr::Literal;
     use crate::naming::pluralize_snake;
 
     let record_name = |e: &Expr| match &*e.node {
@@ -63,17 +98,7 @@ pub(super) fn emit_turbo_stream_fragment(
         _ => None,
     };
 
-    let target = match &*ts.target.node {
-        // `turbo_stream.replace :next_page_container` — the id verbatim.
-        ExprNode::Lit { value: Literal::Sym { value } } => lit_str(value.as_str().to_string()),
-        _ => match record_name(ts.target) {
-            Some(_) => view_helpers_call(
-                "dom_id",
-                vec![rewrite_helpers_in_expr(ts.target, ctx)],
-            ),
-            None => rewrite_helpers_in_expr(ts.target, ctx),
-        },
-    };
+    let target = turbo_stream_target(ts.target, ctx);
 
     let html = match ts.content {
         None => lit_str(String::new()),
@@ -93,16 +118,7 @@ pub(super) fn emit_turbo_stream_fragment(
         }
     };
 
-    Some(send(
-        Some(Expr::new(
-            Span::synthetic(),
-            ExprNode::Const { path: vec![Symbol::from("Broadcasts")] },
-        )),
-        "turbo_stream_fragment",
-        vec![lit_str(ts.action.to_string()), target, html],
-        None,
-        true,
-    ))
+    Some(turbo_stream_fragment_call(ts.action, target, html))
 }
 
 pub(super) fn emit_view_helper_call(kind: &ViewHelperKind<'_>, ctx: &ViewCtx) -> Option<Expr> {

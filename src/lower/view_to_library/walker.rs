@@ -668,8 +668,111 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 return vec![accumulator_append_call(call, ctx)];
             }
         }
-        // Recognized the builder but not this spelling — the option form
-        // (`partial:`/`collection:`/`locals:`) or the block form. Left in
+        // The two spellings `classify_turbo_stream_call` declines, both
+        // of which campfire's `rooms/refreshes/show.turbo_stream.erb`
+        // writes in six lines:
+        //
+        //   turbo_stream.append dom_id(@room, :messages) do … end
+        //   turbo_stream.replace dom_id(message), partial: "…", locals: {…}
+        //
+        // Both differ from the positional form only in where the
+        // `<template>` CONTENT comes from, so both reuse the same target
+        // builder and the same `Broadcasts.turbo_stream_fragment`
+        // composer — the markup keeps one owner.
+        if super::helpers::is_turbo_stream_builder(recv.as_ref())
+            && matches!(
+                method.as_str(),
+                "append" | "prepend" | "replace" | "update" | "before" | "after"
+            )
+        {
+            // BLOCK form. The content is the block's template body, so
+            // walk it into its own accumulator and hand the composer the
+            // captured String. Emitted as three STATEMENTS rather than
+            // one nested expression: the walker arms already return a
+            // statement list, and a `Seq` in argument position renders as
+            // newline-joined statements on the ruby family.
+            if let (1, Some(ExprNode::Lambda { params, body, .. })) =
+                (sa.len(), block.as_ref().map(|b| &*b.node))
+            {
+                let cap = "_ts_cap";
+                let cap_ctx = ViewCtx {
+                    accumulator: cap.to_string(),
+                    ..ctx.with_locals(params.iter().map(|p| p.as_str().to_string()))
+                };
+                let mut out = vec![assign_accumulator_string_new(cap)];
+                out.extend(walk_body(body, &cap_ctx));
+                out.push(accumulator_append_call(
+                    super::helpers::turbo_stream_fragment_call(
+                        method.as_str(),
+                        super::helpers::turbo_stream_target(&sa[0], ctx),
+                        accumulator_result_ref(cap),
+                    ),
+                    ctx,
+                ));
+                return out;
+            }
+            // OPTION form: `partial:` (+ optional `locals:`) names the
+            // template. Same resolution a `render partial:` call site
+            // gets, through the same `named_partial_call` — a second
+            // partial resolver here would be a second set of rules to
+            // keep in step.
+            if let (2, None) = (sa.len(), block.as_ref()) {
+                if let ExprNode::Hash { entries, .. } = &*sa[1].node {
+                    // ONLY `partial:` (+ `locals:`). `collection:` means
+                    // render the partial once per element, and lowering
+                    // it as a single render would drop every element but
+                    // the first — silently wrong, where declining is
+                    // merely unsupported. Any other option is unread for
+                    // the same reason.
+                    let understood = entries.iter().all(|(k, _)| {
+                        matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
+                            if matches!(value.as_str(), "partial" | "locals"))
+                    });
+                    let opt = |name: &str| {
+                        entries.iter().find_map(|(k, v)| match &*k.node {
+                            ExprNode::Lit { value: Literal::Sym { value } }
+                                if value.as_str() == name =>
+                            {
+                                Some(v)
+                            }
+                            _ => None,
+                        })
+                    };
+                    let partial = opt("partial").and_then(|p| match &*p.node {
+                        ExprNode::Lit { value: Literal::Str { value } } => Some(value.clone()),
+                        _ => None,
+                    });
+                    let locals: Option<Vec<(Expr, Expr)>> =
+                        opt("locals").and_then(|l| match &*l.node {
+                            ExprNode::Hash { entries, .. } => Some(
+                                entries
+                                    .iter()
+                                    .map(|(k, v)| (k.clone(), rewrite_helpers_in_expr(v, ctx)))
+                                    .collect(),
+                            ),
+                            _ => None,
+                        });
+                    if let (true, Some(partial)) = (understood, partial) {
+                        if let Some(html) = super::partial::named_partial_call(
+                            &partial,
+                            None,
+                            locals.as_deref(),
+                            ctx,
+                        ) {
+                            return vec![accumulator_append_call(
+                                super::helpers::turbo_stream_fragment_call(
+                                    method.as_str(),
+                                    super::helpers::turbo_stream_target(&sa[0], ctx),
+                                    html,
+                                ),
+                                ctx,
+                            )];
+                        }
+                    }
+                }
+            }
+        }
+        // Recognized the builder but not this spelling. Left in
         // source shape, where `turbo_stream` resolves to nothing, so say
         // so rather than emitting a call that silently won't run.
         if super::helpers::is_turbo_stream_builder(recv.as_ref()) {
