@@ -273,6 +273,13 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // N+1 lazy reads. Runs last so nothing reprocesses the synthesized
     // bodies (no-op unless the app has scopes AND surviving includes).
     library::apply_preload_lowering(&mut lcs, app);
+    // A belongs_to reader memoizes, and writing the foreign key
+    // invalidates it (no-op for models with no belongs_to). AFTER the
+    // preload pass, which is what puts the `return @<name>_cache if
+    // @<name>_loaded` guard on the reader — this pass memoizes into
+    // that same cache and would have nothing to prepend itself to if it
+    // ran first.
+    library::apply_belongs_to_memoization(&mut lcs, app);
 
     // Synthesized siblings need explicit `require_relative` even when
     // they live in the same directory as their referencer — nothing else

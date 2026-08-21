@@ -918,6 +918,133 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     }
 }
 
+/// Ruby-family pre-emit pass: a `belongs_to` reader MEMOIZES.
+///
+/// Rails loads a belongs_to target once and hands back the same object
+/// on every later read. Ours re-queried, so two reads of
+/// `membership.user` were two different objects — and campfire's
+/// `@membership.user.expects :reset_remote_connections` stubbed one
+/// while the `after_destroy_commit` callback called the other. The
+/// callback fired correctly; the expectation was watching an object
+/// nothing would ever call.
+///
+/// ```ruby
+/// def user
+///   return @user_cache if @user_loaded
+///   @user_cache = (… the query …)
+///   @user_loaded = true
+///   @user_cache
+/// end
+///
+/// def user_id=(value)
+///   @user_id = value
+///   @user_loaded = false        # <- the other half
+/// end
+/// ```
+///
+/// THE INVALIDATION IS NOT OPTIONAL. Rails resets the loaded target
+/// when the foreign key is written directly, and a memoizing reader
+/// without it answers `membership.user` from an object the key no
+/// longer points at. `apply_belongs_to_autosave` above declined to
+/// populate the cache for SAVED targets precisely because that reset
+/// did not exist yet; with it here, the reader can cache every read and
+/// the hazard that note describes is closed.
+///
+/// Ruby-family only, and for a reason the shared lowering states in
+/// `synth_has_many_reader`: a reader that writes an ivar is no longer
+/// read-only, so Rust would emit `&mut self` and every immutable caller
+/// — views iterating a collection and reading each record's
+/// association — would stop borrowing. The strict targets keep the
+/// re-query, which is correct, just not identity-preserving.
+pub(crate) fn apply_belongs_to_memoization(lcs: &mut [LibraryClass], app: &App) {
+    use crate::dialect::Association;
+
+    for lc in lcs.iter_mut() {
+        let Some(model) = app.models.iter().find(|m| m.name == lc.name) else { continue };
+        let names: Vec<(Symbol, Symbol)> = model
+            .associations()
+            .filter_map(|a| match a {
+                Association::BelongsTo { name, foreign_key, polymorphic: false, .. } => {
+                    Some((name.clone(), foreign_key.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        for (name, fk) in names {
+            memoize_reader(lc, &name);
+            invalidate_on_fk_write(lc, &name, &fk);
+        }
+    }
+}
+
+/// `Seq[guard, query]` -> `Seq[guard, @cache = query, @loaded = true, @cache]`.
+///
+/// Splitting on the guard rather than reaching into the query is what
+/// keeps this robust: the reader's second half differs per association
+/// (a `Db.prepare` for most, a preloaded read for others) and this pass
+/// does not need to know which.
+fn memoize_reader(lc: &mut LibraryClass, name: &Symbol) {
+    let cache = Symbol::from(format!("{}_cache", name.as_str()));
+    let loaded = Symbol::from(format!("{}_loaded", name.as_str()));
+    let Some(m) = lc
+        .methods
+        .iter_mut()
+        .find(|m| &m.name == name && m.receiver == MethodReceiver::Instance)
+    else {
+        return;
+    };
+    let ExprNode::Seq { exprs } = &mut *m.body.node else { return };
+    // Exactly the synthesized shape: the loaded-guard, then one
+    // expression that produces the record. Anything else is a
+    // hand-written reader and is left alone.
+    if exprs.len() != 2 {
+        return;
+    }
+    let guard_matches = matches!(&*exprs[0].node,
+        ExprNode::If { cond, .. } if matches!(&*cond.node, ExprNode::Ivar { name } if name == &loaded));
+    if !guard_matches {
+        return;
+    }
+    let span = exprs[1].span;
+    let query = exprs[1].clone();
+    let syn = |n| Expr::new(span, n);
+    *exprs = vec![
+        exprs[0].clone(),
+        syn(ExprNode::Assign { target: LValue::Ivar { name: cache.clone() }, value: query }),
+        syn(ExprNode::Assign {
+            target: LValue::Ivar { name: loaded },
+            value: syn(ExprNode::Lit { value: Literal::Bool { value: true } }),
+        }),
+        syn(ExprNode::Ivar { name: cache }),
+    ];
+}
+
+/// `def <fk>=(value); @<fk> = value; end` gains `@<name>_loaded = false`.
+fn invalidate_on_fk_write(lc: &mut LibraryClass, name: &Symbol, fk: &Symbol) {
+    let writer = Symbol::from(format!("{}=", fk.as_str()));
+    let Some(m) = lc
+        .methods
+        .iter_mut()
+        .find(|m| m.name == writer && m.receiver == MethodReceiver::Instance)
+    else {
+        return;
+    };
+    let span = m.body.span;
+    let reset = Expr::new(
+        span,
+        ExprNode::Assign {
+            target: LValue::Ivar { name: Symbol::from(format!("{}_loaded", name.as_str())) },
+            value: Expr::new(span, ExprNode::Lit { value: Literal::Bool { value: false } }),
+        },
+    );
+    let mut stmts = match &*m.body.node {
+        ExprNode::Seq { exprs } => exprs.clone(),
+        _ => vec![m.body.clone()],
+    };
+    stmts.push(reset);
+    m.body = Expr::new(span, ExprNode::Seq { exprs: stmts });
+}
+
 /// Ruby-family pre-emit pass: an STI row hydrates as its SUBCLASS.
 ///
 /// `Room.first.open?` was false for a row whose `type` column says
