@@ -840,6 +840,34 @@ fn block_callback_on(arg: &Expr) -> Option<crate::dialect::CallbackOn> {
     }
 }
 
+/// NOTE (measured, deliberately NOT widened): the LAMBDA-ARGUMENT
+/// spelling is dropped here, and it is not an oversight.
+///
+/// Rails means the same thing by both of these —
+///
+///     after_create_commit { room.receive(self) }      # a BLOCK
+///     after_create_commit -> { room.receive(self) }   # a lambda ARG
+///
+/// — and campfire's `Message` writes the second, which this `block:
+/// Some(block)` pattern does not match. Accepting `args == [Lambda]`
+/// beside it is four lines and folds correctly: the emitted
+/// `after_create_commit` gains `self.room.receive(self)` next to the
+/// concern's symbol-form `create_in_index`.
+///
+/// It takes the campfire suite from 154 passing to ZERO. `receive`
+/// reaches `push_later`, whose `Room::PushMessageJob.perform_later`
+/// runs INLINE under this runtime's adapter (see `runtime/ruby/
+/// active_job.rb` — a deliberate choice, and the honest one with no
+/// queue daemon in-process). So every message a fixture loads now runs
+/// `Room::MessagePusher`, whose `Push::Subscription.joins(user:
+/// :memberships)` is a nested join the association registry cannot
+/// resolve and which RAISES rather than answer the wrong rows.
+///
+/// Rails' own tests do not hit this: their default adapter is `:test`,
+/// which ENQUEUES without running. That divergence — not the callback
+/// spelling — is what has to land first, and it is a queue with stored
+/// arguments rather than a log of names. Until it does, folding this
+/// callback trades one silently-missing enqueue for a suite-wide raise.
 fn push_block_callback(methods: &mut Vec<MethodDef>, model: &Model, expr: &Expr) {
     {
         let ExprNode::Send { recv: None, method, args, block: Some(block), .. } = &*expr.node else {
