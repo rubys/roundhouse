@@ -1205,6 +1205,74 @@ pub fn mentions_assoc_constructor(expr: &Expr, assocs: &AssocRegistry) -> bool {
 /// them can degrade a cached read into an N+1 because none of them is a
 /// read. campfire's `memberships.destroy_by user: users` is the caller
 /// that showed the gate was narrower than its own reasoning.
+/// Does this body park an association read on a name and then chain
+/// relation surface off that name? The broken-chain twin of
+/// [`mentions_assoc_lookup`], which requires the read and the call to
+/// be one expression.
+///
+/// Two passes, because one would have to guess: collect the names bound
+/// to a `<owner>.<assoc>` read, then look for one of them as the
+/// RECEIVER of something relation-shaped. A body that merely holds an
+/// association in a variable and iterates it does not qualify — that
+/// case must keep its Array and its preload cache.
+///
+/// Approximate on purpose, and only in the safe direction: the method
+/// test here has no target to resolve scopes against, so it asks the
+/// target-free half of the question. `rewrite_send`'s own check is the
+/// precise one, and it runs per call site.
+pub fn mentions_assoc_alias(expr: &Expr, assocs: &AssocRegistry) -> bool {
+    fn bound_names(e: &Expr, assocs: &AssocRegistry, out: &mut HashSet<Symbol>) {
+        if let ExprNode::Assign { target, value } = &*e.node {
+            let key = match target {
+                crate::expr::LValue::Var { name, .. } => Some(alias_key(name, false)),
+                crate::expr::LValue::Ivar { name } => Some(alias_key(name, true)),
+                _ => None,
+            };
+            if let Some(key) = key {
+                if let ExprNode::Send { recv: Some(_), method: aname, args, block: None, .. } =
+                    &*value.node
+                {
+                    if args.is_empty() && assocs.is_has_many_name(aname) {
+                        out.insert(key);
+                    }
+                }
+            }
+        }
+        e.node.for_each_child(&mut |c| bound_names(c, assocs, out));
+    }
+    fn chains_off(e: &Expr, names: &HashSet<Symbol>, found: &mut bool) {
+        if *found {
+            return;
+        }
+        if let ExprNode::Send { recv: Some(r), method, args, block, .. } = &*e.node {
+            let key = match &*r.node {
+                ExprNode::Var { name, .. } => Some(alias_key(name, false)),
+                ExprNode::Ivar { name } => Some(alias_key(name, true)),
+                _ => None,
+            };
+            if let Some(key) = key {
+                if names.contains(&key)
+                    && (is_relation_chain_method(method.as_str())
+                        || is_relation_terminal(method.as_str(), args, block.as_ref())
+                        || matches!(method.as_str(), "build" | "create" | "create!"))
+                {
+                    *found = true;
+                    return;
+                }
+            }
+        }
+        e.node.for_each_child(&mut |c| chains_off(c, names, found));
+    }
+    let mut names = HashSet::new();
+    bound_names(expr, assocs, &mut names);
+    if names.is_empty() {
+        return false;
+    }
+    let mut found = false;
+    chains_off(expr, &names, &mut found);
+    found
+}
+
 pub fn mentions_assoc_lookup(expr: &Expr, assocs: &AssocRegistry) -> bool {
     let mut found = false;
     fn walk(e: &Expr, assocs: &AssocRegistry, found: &mut bool) {
@@ -1706,6 +1774,42 @@ fn owner_reads_once(owner: &Expr) -> bool {
 /// Association resolution for the seed arm: `(target, fk, <owner>.id)`,
 /// from the owner's stamped type, else the owner's NAME, else the assoc
 /// name when it is a unique has_many across models.
+/// Is `value` a SEEDABLE association read — the `<owner>.<assoc>`
+/// shape the seed arm in `rewrite_send` knows how to turn into
+/// `Relation.new(Target).where(fk: <owner>.id)`? Returns the target it
+/// resolved to.
+///
+/// The owner forms and the seedability filter are deliberately the same
+/// three the seed arm itself matches on, so a name recorded here is one
+/// the arm will accept when the expression is swapped back in. Anything
+/// else — an arg-carrying call, a block, an owner that would re-evaluate
+/// — is not recorded at all rather than recorded and later declined.
+fn seedable_assoc_read(ctx: &Ctx, value: &Expr, span: crate::span::Span) -> Option<ClassId> {
+    let ExprNode::Send { recv: Some(owner), method: aname, args, block: None, .. } = &*value.node
+    else {
+        return None;
+    };
+    if !args.is_empty() {
+        return None;
+    }
+    let resolved = match &*owner.node {
+        ExprNode::SelfRef => ctx.instance_self.clone().and_then(|self_model| {
+            if ctx.assocs.is_unseedable(Some(&self_model), aname) {
+                return None;
+            }
+            ctx.assocs.has_many_fk(&self_model, aname).cloned().map(|(target, _)| target)
+        }),
+        ExprNode::Ivar { .. } | ExprNode::Var { .. } => {
+            assoc_owner_seed(ctx, aname, owner, span).map(|(target, _, _)| target)
+        }
+        ExprNode::Send { .. } if owner_reads_once(owner) => {
+            assoc_owner_seed(ctx, aname, owner, span).map(|(target, _, _)| target)
+        }
+        _ => None,
+    };
+    resolved
+}
+
 fn assoc_owner_seed(
     ctx: &Ctx,
     aname: &Symbol,
@@ -2177,10 +2281,47 @@ fn const_model(expr: &Expr, models: &HashSet<ClassId>) -> Option<ClassId> {
     None
 }
 
-/// Local variable -> relation model, accumulated as a method body's
-/// statements are processed in order (so `q = Story.base(u); q.not_deleted`
-/// resolves `not_deleted` against `q`'s Story relation).
-type Locals = HashMap<Symbol, ClassId>;
+/// What the names in scope stand for, accumulated as a method body's
+/// statements are processed in order.
+#[derive(Default)]
+struct Locals {
+    /// Local variable -> relation model, so `q = Story.base(u);
+    /// q.not_deleted` resolves `not_deleted` against `q`'s Story
+    /// relation.
+    rel: HashMap<Symbol, ClassId>,
+    /// Variable OR IVAR -> the association read it was assigned from,
+    /// as the `(target, fk, owner-id)` triple the seed arm below wants.
+    ///
+    /// The seed arm matches `<owner>.<assoc>.<method>` as ONE
+    /// expression. Rails code routinely breaks that chain over an
+    /// assignment — campfire's push-subscriptions controller opens
+    /// every action with `@push_subscriptions = Current.user
+    /// .push_subscriptions` and then calls `.find_by` / `.create!` /
+    /// `.destroy_by` on the ivar — and the association read alone
+    /// arel-folds to an eager Array, so those calls reached
+    /// `undefined method 'find_by' for an instance of Array`. Recording
+    /// what the name was assigned FROM lets the same seed fire on the
+    /// later read.
+    ///
+    /// Locals and ivars share this map, so the key is built by
+    /// [`alias_key`] rather than being the bare Symbol: ingest strips
+    /// the `@` off an ivar name, which would let `@room` and a local
+    /// `room` overwrite each other.
+    ///
+    /// The value is the association-read expression itself plus the
+    /// target it resolved to. Storing the EXPRESSION (rather than the
+    /// seed triple) is what keeps this cheap: the later read swaps it
+    /// back in as the receiver and the existing seed arm then handles
+    /// the call verbatim, one code path for both spellings.
+    assoc: HashMap<Symbol, (ClassId, Expr)>,
+}
+
+/// Alias-map key for a name. Ivars and locals share one map, so the
+/// ivar spelling is prefixed — `@room` and a local `room` are different
+/// bindings and must not overwrite each other.
+fn alias_key(name: &Symbol, ivar: bool) -> Symbol {
+    if ivar { Symbol::from(format!("@{}", name.as_str())) } else { name.clone() }
+}
 
 /// Rewrite scope chains in `expr` (in place). Returns the relation-model of
 /// the whole expression when it evaluates to a Relation of a known model.
@@ -2200,7 +2341,8 @@ pub fn rewrite(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<ClassI
             *expr.node = ExprNode::Seq { exprs: out };
             last
         }
-        // `name = value`: record the local's relation model (if any).
+        // `name = value`: record what the name now stands for — a
+        // relation model, or the association read it was assigned from.
         ExprNode::Assign { .. } => {
             let node = std::mem::replace(&mut *expr.node, ExprNode::Seq { exprs: vec![] });
             let ExprNode::Assign { target, mut value } = node else { unreachable!() };
@@ -2208,10 +2350,28 @@ pub fn rewrite(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<ClassI
             if let crate::expr::LValue::Var { name, .. } = &target {
                 match &m {
                     Some(model) => {
-                        locals.insert(name.clone(), model.clone());
+                        locals.rel.insert(name.clone(), model.clone());
                     }
                     None => {
-                        locals.remove(name);
+                        locals.rel.remove(name);
+                    }
+                }
+            }
+            // Association alias, for both spellings. ALWAYS write or
+            // clear: a name reassigned to something that is not an
+            // association read must lose the old binding, or a later
+            // call would seed off a relation the name no longer holds.
+            if let Some(key) = match &target {
+                crate::expr::LValue::Var { name, .. } => Some(alias_key(name, false)),
+                crate::expr::LValue::Ivar { name } => Some(alias_key(name, true)),
+                _ => None,
+            } {
+                match seedable_assoc_read(ctx, &value, expr.span) {
+                    Some(model) => {
+                        locals.assoc.insert(key, (model, value.clone()));
+                    }
+                    None => {
+                        locals.assoc.remove(&key);
                     }
                 }
             }
@@ -2487,6 +2647,34 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
             // `bans.create!(ip_address: ip)` and kept the reader's
             // folded Array until this normalization existed.
             let mut r = self_qualified_assoc_read(r, ctx);
+            // ...and the same read, one ASSIGNMENT later. Rails code
+            // routinely parks an association on a name and chains off
+            // that: campfire's push-subscriptions controller opens
+            // every action with `@push_subscriptions = Current.user
+            // .push_subscriptions` and then calls `.find_by`,
+            // `.create!`, `.destroy_by` on the ivar. The read alone
+            // arel-folds to an eager Array, so those reached
+            // `undefined method 'find_by' for an instance of Array`.
+            //
+            // Swap the recorded read back in as the receiver and the
+            // arm below seeds it exactly as if the chain had never been
+            // broken. Gated on relation surface actually FOLLOWING, for
+            // the same reason the arm itself is: plain iteration
+            // (`each`/`map`) must keep the Array and the reader's
+            // preload cache, and re-querying there would drop both.
+            if let Some((target, read)) = match &*r.node {
+                ExprNode::Var { name, .. } => locals.assoc.get(&alias_key(name, false)),
+                ExprNode::Ivar { name } => locals.assoc.get(&alias_key(name, true)),
+                _ => None,
+            } {
+                if ctx.scope_of(target, &method)
+                    || is_relation_chain_method(method.as_str())
+                    || is_relation_terminal(method.as_str(), &args, block.as_ref())
+                    || ctx.assoc_class_method_params(target, &method).is_some()
+                {
+                    r = read.clone();
+                }
+            }
             if let ExprNode::Send { recv: Some(ir), method: aname, args: aargs, .. } = &*r.node {
                 // Association EXTENSION (`has_many :memberships do def
                 // grant_to … end end`): the model lowerer flattened it
@@ -2691,7 +2879,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
             // method with a registered (unique) relation return type
             // (`@story.merged_comments` → Comment).
             let r_model = match &*r.node {
-                ExprNode::Var { name, .. } => locals.get(name).cloned(),
+                ExprNode::Var { name, .. } => locals.rel.get(name).cloned(),
                 _ => rewrite(&mut r, ctx, locals),
             };
             let r_model = r_model.or_else(|| match &*r.node {
@@ -2800,7 +2988,7 @@ fn rewrite_relation_taking_body(
         instance_self: None,
         user_returns: &empty_returns,
     };
-    let mut locals = Locals::new();
+    let mut locals = Locals::default();
     rewrite(body, &ctx, &mut locals);
 }
 
@@ -2826,7 +3014,7 @@ pub fn rewrite_call_site(
         instance_self: instance_self.cloned(),
         user_returns: regs.user_returns,
     };
-    let mut locals = Locals::new();
+    let mut locals = Locals::default();
     rewrite(expr, &ctx, &mut locals);
 }
 

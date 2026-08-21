@@ -879,6 +879,7 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                 || crate::lower::scope_chain::mentions_model_chain_start(&m.body, &models)
                 || crate::lower::scope_chain::mentions_assoc_constructor(&m.body, &assocs)
                 || crate::lower::scope_chain::mentions_assoc_lookup(&m.body, &assocs)
+                || crate::lower::scope_chain::mentions_assoc_alias(&m.body, &assocs)
                 || crate::lower::scope_chain::mentions_assoc_extension(&m.body, &assocs)
                 || crate::lower::scope_chain::mentions_model_insert_all(&m.body, &models)
                 || crate::lower::scope_chain::mentions_assoc_class_method(
