@@ -599,6 +599,64 @@ end
     assert!(!names.contains(&"after_validation"), "{names:?}");
 }
 
+/// A column's SCHEMA default is the value Rails gives an unset
+/// attribute: `Membership.new.involvement` is `"mentions"` because
+/// `t.string "involvement", default: "mentions"` says so. The column
+/// is NULLABLE — nothing declares `null: false` — so before this the
+/// slot took a bare `attrs[:involvement]` and answered nil, and
+/// campfire's `INVOLVEMENT_ORDER.index(involvement) + 1` met a nil.
+///
+/// The literal is typed by the COLUMN, not by how the default was
+/// spelled: lobsters declares `t.decimal "hotness", default: "0.0"`
+/// and the slot wants a float.
+#[test]
+fn schema_column_default_backs_the_unset_attribute() {
+    use roundhouse::ingest::{ingest_model, ingest_schema};
+
+    let schema = ingest_schema(
+        br#"
+ActiveRecord::Schema[7.1].define(version: 1) do
+  create_table "memberships", force: :cascade do |t|
+    t.string "involvement", default: "mentions"
+    t.decimal "hotness", precision: 20, scale: 10, default: "0.0", null: false
+    t.string "note"
+  end
+end
+"#,
+        "db/schema.rb",
+    )
+    .expect("ingest schema");
+    let model = ingest_model(
+        b"class Membership < ApplicationRecord\nend\n",
+        "app/models/membership.rb",
+        &schema,
+        &Default::default(),
+    )
+    .expect("ingest")
+    .expect("model");
+    let lc = lower_model_to_library_class(&model, &schema);
+    let init = lc.methods.iter().find(|m| m.name.as_str() == "initialize").expect("initialize");
+    let rendered = format!("{:?}", body_stmts(init));
+
+    // The defaulted nullable column takes the `||` form with the
+    // SCHEMA's literal, not the type-zero `""`.
+    assert!(rendered.contains("mentions"), "schema default missing: {rendered}");
+    // A nullable column with NO default keeps the BARE lookup — its
+    // unset value really is NULL, and `""` in a nullable UNIQUE column
+    // collides on the second row.
+    let arg_is_boolop = |setter: &str| {
+        body_stmts(init).iter().any(|e| matches!(&*e.node,
+            roundhouse::ExprNode::Send { method, args, .. }
+                if method.as_str() == setter
+                && matches!(args.first().map(|a| &*a.node),
+                            Some(roundhouse::ExprNode::BoolOp { .. }))))
+    };
+    assert!(arg_is_boolop("involvement="), "defaulted column has no `||`: {rendered}");
+    assert!(!arg_is_boolop("note="), "undefaulted nullable column gained a `||`: {rendered}");
+    // Float slot, float literal — the decimal's `"0.0"` is not a String.
+    assert!(rendered.contains("Float { value: 0.0 }"), "decimal default not a float: {rendered}");
+}
+
 #[test]
 fn raw_slot_columns_route_through_writers_in_initialize_and_presence() {
     use roundhouse::ingest::{ingest_model, ingest_schema};

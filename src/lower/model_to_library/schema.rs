@@ -1659,9 +1659,18 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
         // nothing. Those columns keep the bare lookup; the slot they
         // assign into is `Ty::Union{[T, Nil]}` (`ty_of_column_slot`),
         // so strict targets have somewhere to put the nil.
+        // …and where the SCHEMA names a default, that is the value
+        // Rails gives an unset attribute — `Membership.new.involvement`
+        // is `"mentions"`, not nil, because `t.string "involvement",
+        // default: "mentions"` says so. A nullable column with a
+        // default therefore also takes the `||` form: its unset value
+        // is the default, and only the type-zero case (no default
+        // declared) leaves it NULL.
         let col_ty = ty_of_column(&col.col_type);
-        let nullable = matches!(super::ty_of_column_slot(col), Ty::Union { .. });
-        let default = default_literal_for_ty(&col_ty);
+        let schema_default = schema_default_literal(col);
+        let nullable = matches!(super::ty_of_column_slot(col), Ty::Union { .. })
+            && schema_default.is_none();
+        let default = schema_default.unwrap_or_else(|| default_literal_for_ty(&col_ty));
         // is_id_column reference retained as a feature flag for
         // future per-column override hooks; today every column flows
         // through the same default-lookup shape.
@@ -2299,6 +2308,57 @@ fn synth_index_write(owner: &ClassId, table: &Table, model: &Model) -> MethodDef
         is_async: false,
             mutates_self: false,
             block_param: None,
+    }
+}
+
+/// The literal a column's SCHEMA default names, typed by the COLUMN
+/// rather than by how the default was spelled — lobsters declares a
+/// decimal column `default: "0.0"`, and the slot wants a float, not
+/// that string.
+///
+/// LIMIT, and it is at ingest rather than here: `parse_column_opts`
+/// reads `default:` with `string_value`, so only a STRING literal is
+/// captured at all. `default: 0` / `default: true` / `default: -> {
+/// … }` arrive as `None` and fall through to the type-zero below,
+/// which is the same value for every `default: 0` in the corpus and a
+/// DIVERGENCE for lobsters' `default: true` and `default: 1`.
+/// Widening the ingest is its own change with its own measurement —
+/// it moves those columns' emitted constructors in a second app.
+fn schema_default_literal(col: &Column) -> Option<Expr> {
+    use crate::schema::ColumnType;
+    let raw = col.default.as_ref()?;
+    match &col.col_type {
+        ColumnType::String { .. } | ColumnType::Text => Some(lit_str(raw.clone())),
+        ColumnType::Integer | ColumnType::BigInt => raw.parse::<i64>().ok().map(lit_int),
+        ColumnType::Float | ColumnType::Decimal { .. } => {
+            raw.parse::<f64>().ok().map(|value| {
+                with_ty(
+                    Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Float { value } }),
+                    Ty::Float,
+                )
+            })
+        }
+        ColumnType::Boolean => match raw.as_str() {
+            "true" | "t" | "1" => Some(with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lit { value: Literal::Bool { value: true } },
+                ),
+                Ty::Bool,
+            )),
+            "false" | "f" | "0" => Some(with_ty(
+                Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Lit { value: Literal::Bool { value: false } },
+                ),
+                Ty::Bool,
+            )),
+            _ => None,
+        },
+        // Temporal / binary / json / reference defaults are SQL
+        // expressions as often as they are literals (`-> { "DATETIME(
+        // 'now') }`), and none of the corpus declares one that isn't.
+        _ => None,
     }
 }
 
