@@ -275,30 +275,47 @@ them correct with no enum type at runtime. Fixing the reader means
 mapping at every read; do it only if an app is found that reads the raw
 attribute.
 
-### Action Text resolves no attachment
+### An attachment sgid resolves only where the caller names its class
 
-`ActionText::Content#attachables` answers `[]` where Rails answers the
-records the fragment's `<action-text-attachment sgid="…">` nodes point
-at.
+`ActionText::Content#attachables` — the untyped list of every record a
+fragment's `<action-text-attachment sgid="…">` nodes point at — still
+answers `[]`. Its per-model twin does not:
+`attachable_ids("User")` verifies each node's sgid and answers the ids
+minted for that model, and `lower::attachables_grep` rewrites the shape
+app code actually writes into a query over them:
 
-**Why.** An `sgid` is a *signed* GlobalID. Turning one back into a
-record needs SignedGlobalID verification against the app's secret,
-a GlobalID URI parse, and a class registry to look the model up in —
-three pieces that do not exist yet, and none of which the HTML scanner
-can approximate.
+```text
+body.attachables.grep(User)  →  User.where(id: body.attachable_ids("User")).to_a
+```
 
-**What still works.** The PARSE is complete: `#attachments` returns
-every node with every attribute it carried (`sgid`, `content_type`,
-`caption`, `filename`, `url`), and `to_plain_text` renders an
-attachment as its caption or filename exactly as Rails does. The
-boundary is dereferencing, not reading.
+**Why the split.** Dereferencing an arbitrary sgid needs a
+name-to-class map, and building one means reflection or per-model
+registration at load. `grep(User)` has already told the compiler which
+class it wants, so that lookup never arises — the name becomes a
+literal. A bare `attachables` has no such caller and keeps the `[]`.
 
-**Where it is visible.** Code that greps attachables for a model —
-mention extraction is the canonical shape (campfire's
-`Message::Mentionee` does `body.body.attachables.grep(User)`) — sees
-no mentions rather than wrong ones. `RichText#to_trix_html` likewise
-hands back the stored markup instead of rendering attachment previews
-into it, so an editor loads the text and shows attachment nodes bare.
+**The wire format is ours, not Rails'.** `ActionText::SignedGlobalId`
+signs `<Model>/<id>` through the same `MessageVerifier` envelope signed
+cookies and `ActiveRecord::SignedId` use, rather than Rails'
+`gid://<app>/<Model>/<id>` SignedGlobalID. One signing implementation
+instead of three, at the cost that an sgid minted by a real Rails
+process does not verify here and vice versa. Both ends of every round
+trip in a transpiled app are this runtime, and nothing in the corpus
+hands an sgid across that boundary.
+
+**What is left.** A stale sgid (the record was deleted) drops out of
+the `where` rather than materializing a MissingAttachable.
+`ActionText::Attachment.from_node` and
+`ActionText::Attachables::MissingAttachable` do not exist, so the tests
+that build an attachment from a parsed node still fail there.
+`RichText#to_trix_html` hands back the stored markup instead of
+rendering attachment previews into it, so an editor loads the text and
+shows attachment nodes bare.
+
+**What always worked.** The PARSE: `#attachments` returns every node
+with every attribute it carried (`sgid`, `content_type`, `caption`,
+`filename`, `url`), and `to_plain_text` renders an attachment as its
+caption or filename exactly as Rails does.
 
 ### Action Text decodes only the entities Rails' escaper emits
 

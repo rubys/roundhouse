@@ -8,6 +8,15 @@ module ActionText
   module Attachable
   end
 
+  module SignedGlobalId
+    SALT: String
+    PURPOSE: String
+    def self.generate: (String model_name, Integer id) -> String
+    def self.model_of: (String sgid) -> String
+    def self.id_of: (String sgid) -> Integer
+    def self.verified_value: (String sgid) -> String
+  end
+
   class Attachment
     def self.tag_name: () -> String
     def initialize: (Hash[String, String] attributes) -> void
@@ -70,6 +79,7 @@ module ActionText
     def links: () -> Array[String]
     def attachments: () -> Array[ActionText::Attachment]
     def attachables: () -> Array[untyped]
+    def attachable_ids: (String model_name) -> Array[Integer]
     def to_plain_text: () -> String
     def self.scoped_element: (String name) -> bool
     def self.close_scoped: (String name, String segment, Array[String] list_names, Array[Integer] list_counts) -> String

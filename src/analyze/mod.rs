@@ -376,6 +376,15 @@ impl Analyzer {
                     .entry(name)
                     .or_insert(Ty::Relation { of: model.name.clone() });
             }
+            // `attachable_sgid` — the signed GlobalID an
+            // `ActionText::Attachable` model mints. Registered for every
+            // model rather than only the attachable ones: this walk has
+            // no `App`, and the method's TYPE is the same either way;
+            // whether it EXISTS is decided at the emit seam, where the
+            // include chain is resolvable (`lower::attachable`).
+            cls.instance_methods
+                .entry(Symbol::from("attachable_sgid"))
+                .or_insert(Ty::Str);
             // Core AR instance methods every model gets. Sourced
             // from the shared catalog — same mechanism as class
             // methods above. Covers mutation (save/update/destroy),

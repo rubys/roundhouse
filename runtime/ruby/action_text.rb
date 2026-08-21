@@ -41,6 +41,67 @@ module ActionText
   module Attachable
   end
 
+  # The signed GlobalID an `<action-text-attachment>` node carries.
+  #
+  # Rails signs a `gid://<app>/<Model>/<id>` URI with
+  # `SignedGlobalID`; the wire format here is `<Model>/<id>` through
+  # `MessageVerifier` — the same envelope signed cookies and
+  # `ActiveRecord::SignedId` use, so there is one signing
+  # implementation rather than three.
+  #
+  # DIVERGENCE, stated: an sgid minted by a real Rails process does not
+  # verify here and vice versa, because the payload differs. Both ends
+  # of every round trip in a transpiled app are this file, and nothing
+  # in the corpus hands an sgid across that boundary. Recorded in
+  # docs/pipeline/runtime.md.
+  #
+  # The MODEL NAME is a parameter, not `self.class.name`: the caller is
+  # the per-model `attachable_sgid` that `lower::attachable`
+  # synthesizes with the name baked in, which is the same rule
+  # `ActiveRecord::SignedId` states for the purpose it is handed.
+  module SignedGlobalId
+    SALT = "ActionText::Attachable"
+    PURPOSE = "attachable"
+
+    def self.generate(model_name, id)
+      ActionController::MessageVerifier.envelope(
+        Rails.application.secret_key_base,
+        SALT,
+        ActionController::MessageVerifier.json_string(model_name + "/" + id.to_s),
+        PURPOSE,
+        "null",
+        false
+      )
+    end
+
+    # The model name `sgid` was minted for, or "" when it does not
+    # verify — a tampered sgid, one signed for another purpose, and a
+    # malformed one are all the same answer, matching what
+    # `MessageVerifier` does everywhere else.
+    def self.model_of(sgid)
+      value = verified_value(sgid)
+      at = value.index("/")
+      return "" if at.nil?
+      value[0, at]
+    end
+
+    # Its record id, or 0 — the same unsaved/absent sentinel
+    # `ActiveRecord::SignedId.verified` answers with, and for the same
+    # reason.
+    def self.id_of(sgid)
+      value = verified_value(sgid)
+      at = value.index("/")
+      return 0 if at.nil?
+      value[at + 1, value.length - at - 1].to_i
+    end
+
+    def self.verified_value(sgid)
+      ActionController::MessageVerifier.verified(
+        Rails.application.secret_key_base, SALT, sgid, PURPOSE, false
+      )
+    end
+  end
+
   # One `<action-text-attachment>` node, as parsed. Rails' Attachment
   # wraps the node plus the dereferenced attachable; this half is the
   # node.
@@ -536,6 +597,39 @@ module ActionText
     # extraction) see no mentions rather than wrong ones.
     def attachables
       []
+    end
+
+    # The record ids the attachment nodes minted for `model_name` carry,
+    # in document order and without repeats.
+    #
+    # This is the half of `attachables` that IS answerable: the caller
+    # (`lower::attachables_grep`, rewriting `attachables.grep(User)`)
+    # names its model class at the call site, so the name-to-class
+    # lookup a full dereference would need never arises — there is no
+    # GlobalID registry here and none is required.
+    #
+    # A node with no `sgid`, one minted for another model, or one that
+    # fails verification simply does not contribute an id. So does an
+    # sgid whose record was deleted: the caller's `where` returns fewer
+    # rows, which is what Rails' MissingAttachable stands in for.
+    #
+    # Deduped HERE rather than by the caller: `uniq` on records compares
+    # by object identity in this runtime, so two reads of one row are
+    # two objects and a trailing `.uniq` in app code would not collapse
+    # them. Integers do.
+    def attachable_ids(model_name)
+      out = []
+      nodes = attachments
+      i = 0
+      while i < nodes.length
+        sgid = nodes[i].attributes.fetch("sgid", "")
+        if sgid != "" && ActionText::SignedGlobalId.model_of(sgid) == model_name
+          id = ActionText::SignedGlobalId.id_of(sgid)
+          out << id if id != 0 && !out.include?(id)
+        end
+        i = i + 1
+      end
+      out
     end
 
     # Rails' PlainTextConversion, transcribed.

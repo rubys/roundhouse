@@ -54,6 +54,8 @@ pub mod dead_default;
 pub mod errors_add;
 pub mod errors_full_messages;
 pub mod assoc_attr_key;
+pub mod attachable;
+pub mod attachables_grep;
 pub mod errors_index;
 pub mod job_class_side;
 pub mod mailer_class_side;
@@ -121,6 +123,7 @@ pub use dead_default::apply_dead_default_lowering;
 pub use errors_add::apply_errors_add_lowering;
 pub use errors_full_messages::apply_errors_full_messages_lowering;
 pub use assoc_attr_key::apply_assoc_attr_key_lowering;
+pub use attachables_grep::apply_attachables_grep_lowering;
 pub use errors_index::apply_errors_index_lowering;
 pub use mailer_class_side::apply_mailer_class_side;
 pub use as_json_super::apply_as_json_super_grounding;
@@ -367,6 +370,11 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // running second leaves exactly the sites it declined, which is the
     // division of labour intended.
     ("assoc_attr_key", &["update_kwargs"]),
+    // `content.attachables.grep(User)` -> `User.where(id:
+    // content.attachable_ids("User")).to_a`. Writes a `Model.where`
+    // chain, which the ruby emit's scope lowering then folds like any
+    // other; consumes a shape no pass produces, so no constraints.
+    ("attachables_grep", &[]),
     ("mailer_class_side", &[]),
     ("job_class_side", &[]),
     ("send_static_dispatch", &[]),
@@ -549,6 +557,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("update_kwargs");
     diags.extend(assoc_attr_key::apply_assoc_attr_key_lowering(app));
     ran!("assoc_attr_key");
+    attachables_grep::apply_attachables_grep_lowering(app);
+    ran!("attachables_grep");
     diags.extend(mailer_class_side::apply_mailer_class_side(app));
     ran!("mailer_class_side");
     diags.extend(job_class_side::apply_job_class_side(app));

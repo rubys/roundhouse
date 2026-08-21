@@ -672,10 +672,16 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     // can declare a rich-text attribute or an attachment and no `scope`
     // at all — and these still have to exist or every call site
     // chaining through them is a NoMethodError.
+    // `attachable_sgid` for the models that mix in
+    // `ActionText::Attachable` (campfire declares it one level down,
+    // through `User::Mentionable`). Ruby-family only, like the
+    // `MessageVerifier` the mint runs through.
+    let attachable = crate::lower::attachable::attachable_models(app);
     for lc in lcs.iter_mut() {
         if let Some(model) = app.models.iter().find(|m| m.name == lc.name) {
             crate::lower::rich_text::push_preload_scope_methods(&mut lc.methods, model);
             crate::lower::attached::push_preload_scope_methods(&mut lc.methods, model);
+            crate::lower::attachable::push_attachable_sgid(&mut lc.methods, model, &attachable);
         }
     }
     let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
