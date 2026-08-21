@@ -1009,7 +1009,15 @@ fn every_runtime_method_body_concretely_typed() {
     // (python emitted `def ==(self, other)` and every tree stopped at a
     // SyntaxError), while the ruby-family reopen in connection.rb has
     // no assignment to type `@id` from.
-    const CEILING: usize = 312;
+    // 2026-08-21 312 -> 315: `ActionText::Fragment`, three sites. Two
+    // are what the `replace` block answers — a filter returns markup,
+    // a sanitizer returns nil, and `.to_s` is what reconciles them,
+    // which is Rails' own contract for that block. The third is
+    // `Fragment.wrap`'s parameter, whose whole job is to accept either
+    // a Fragment or a String. Everything the scanner itself touches is
+    // typed: `Node` carries three declared fields and `Selector` six,
+    // classes rather than hashes precisely so no bag appears here.
+    const CEILING: usize = 315;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

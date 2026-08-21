@@ -212,4 +212,97 @@ class ActionTextContentTest < Minitest::Test
   def test_tag_name_is_the_canonical_attachment_element
     assert_equal "action-text-attachment", ActionText::Attachment.tag_name
   end
+
+  def test_canonicalize_keyword_is_accepted
+    # A filter chain constructs its result with `canonicalize: false`
+    # — "I have just rewritten this markup, do not rewrite it again".
+    # Nothing here canonicalizes, so the keyword is accepted and
+    # ignored; ABSENT it was an ArgumentError on every filtered
+    # message, inside an app-level rescue that turned it into an empty
+    # body.
+    assert_equal "<p>x</p>", ActionText::Content.new("<p>x</p>", canonicalize: false).to_s
+  end
+end
+
+# `ActionText::Fragment` — the element view a `Content::Filter` works
+# through. Rails wraps Nokogiri and takes any CSS or XPath; this is a
+# scanner over the same string, answering the selector shapes an app's
+# filters actually write and REFUSING the rest. The refusal is the part
+# worth testing: a filter chain runs inside a rescue in every app that
+# has one, so a selector quietly matching nothing is indistinguishable
+# from a message with no content.
+class ActionTextFragmentTest < Minitest::Test
+  def test_find_all_by_element_name_returns_outer_html
+    fragment = ActionText::Content.new("<div>Hello <b>world</b>!</div>").fragment
+    assert_equal ["<b>world</b>"], fragment.find_all("b").map { |node| node.to_s }
+  end
+
+  def test_find_all_descends_into_matched_elements
+    fragment = ActionText::Content.new("<div><div>inner</div></div>").fragment
+    assert_equal 2, fragment.find_all("div").length
+  end
+
+  def test_find_all_matches_attribute_predicates
+    html = "<action-text-attachment content-type=\"embed\" url=\"https://pbs.twimg.com/x\"></action-text-attachment>" \
+      "<action-text-attachment content-type=\"mention\"></action-text-attachment>"
+    fragment = ActionText::Content.new(html).fragment
+    # `@name` is the XPath spelling of the same attribute test, which is
+    # how campfire's filters write it.
+    assert_equal 1, fragment.find_all("action-text-attachment[@content-type='embed']").length
+    assert_equal 1, fragment.find_all("action-text-attachment[content-type='mention']").length
+    assert_equal 0, fragment.find_all("action-text-attachment[@content-type='other']").length
+    # `*=` is a substring test; both predicates must hold on ONE element.
+    assert_equal 1,
+      fragment.find_all("action-text-attachment[@content-type='embed'][url*='pbs.twimg.com']").length
+    assert_equal 0,
+      fragment.find_all("action-text-attachment[@content-type='mention'][url*='pbs.twimg.com']").length
+  end
+
+  def test_a_node_reads_its_attributes
+    html = "<action-text-attachment href=\"https://example.com/a\"></action-text-attachment>"
+    node = ActionText::Content.new(html).fragment.find_all("action-text-attachment").first
+    assert_equal "https://example.com/a", node["href"]
+    assert_nil node["sgid"]
+    assert_equal "action-text-attachment", node.name
+  end
+
+  def test_replace_rewrites_the_whole_element
+    fragment = ActionText::Content.new("<div>a<b>keep</b></div>").fragment
+    assert_equal "<em>gone</em>", fragment.replace("div") { "<em>gone</em>" }.to_s
+  end
+
+  def test_replace_with_a_nil_block_removes_the_element_and_its_children
+    fragment = ActionText::Content.new("<div>a<script>evil()</script>b</div>").fragment
+    # `:not(…)` is how an allow-list sanitizer spells itself.
+    assert_equal "<div>ab</div>", fragment.replace(":not(div)") { nil }.to_s
+  end
+
+  def test_replace_leaves_an_allowed_document_alone
+    html = "<div>Hello <b>world</b>!</div>"
+    fragment = ActionText::Content.new(html).fragment
+    assert_equal html, fragment.replace(":not(div):not(b)") { nil }.to_s
+  end
+
+  def test_nested_elements_of_the_same_name_close_correctly
+    fragment = ActionText::Content.new("<div><div>in</div>out</div>tail").fragment
+    assert_equal "<div><div>in</div>out</div>", fragment.find_all("div").first.to_s
+  end
+
+  def test_a_void_element_is_its_own_tag
+    fragment = ActionText::Content.new("<div>a<br>b</div>").fragment
+    assert_equal "<br>", fragment.find_all("br").first.to_s
+  end
+
+  def test_wrap_takes_a_string_or_a_fragment
+    fragment = ActionText::Fragment.wrap("<div>x</div>")
+    assert_equal "<div>x</div>", fragment.to_s
+    assert_equal fragment.to_s, ActionText::Fragment.wrap(fragment).to_s
+  end
+
+  def test_an_unreadable_selector_raises_rather_than_matching_nothing
+    fragment = ActionText::Content.new("<div><span>x</span></div>").fragment
+    assert_raises(RuntimeError) { fragment.find_all("div > span") }
+    assert_raises(RuntimeError) { fragment.find_all(".cls") }
+    assert_raises(RuntimeError) { fragment.find_all("div[disabled]") }
+  end
 end

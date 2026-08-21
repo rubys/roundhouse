@@ -21,8 +21,46 @@ module ActionText
     def to_plain_text: () -> String
   end
 
+  class Node
+    def initialize: (String name, Hash[String, String] attributes, String outer) -> void
+    def name: () -> String
+    def []: (String key) -> String?
+    def attributes: () -> Hash[String, String]
+    def to_s: () -> String
+    def to_html: () -> String
+  end
+
+  class Selector
+    def initialize: (String kind, String name, Array[String] excluded, Array[String] keys, Array[String] values, Array[String] ops) -> void
+    def kind: () -> String
+    def name: () -> String
+    def excluded: () -> Array[String]
+    def keys: () -> Array[String]
+    def values: () -> Array[String]
+    def ops: () -> Array[String]
+  end
+
+  class Fragment
+    def initialize: (String html) -> void
+    def self.wrap: (untyped value) -> Fragment
+    def to_s: () -> String
+    def to_html: () -> String
+    def source: () -> String
+    def find_all: (String selector) -> Array[ActionText::Node]
+    def replace: (String selector) { (ActionText::Node node) -> untyped } -> Fragment
+    def self.next_element: (String html, Integer from) -> Integer
+    def self.tag_end: (String html, Integer at) -> Integer
+    def self.element_end: (String html, Integer at, Integer tag_end, String name, String raw) -> Integer
+    def self.void_element: (String name) -> bool
+    def self.parse_selector: (String selector) -> Selector
+    def self.element_name?: (String text) -> bool
+    def self.not_names: (String text) -> Array[String]
+    def self.matches?: (String name, Hash[String, String] attrs, Selector matcher) -> bool
+  end
+
   class Content
-    def initialize: (?String html) -> void
+    def initialize: (?String html, ?canonicalize: bool) -> void
+    def fragment: () -> ActionText::Fragment
     def to_html: () -> String
     def to_s: () -> String
     def as_json: () -> String

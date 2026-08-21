@@ -94,9 +94,376 @@ module ActionText
     end
   end
 
-  class Content
-    def initialize(html = "")
+  # One element from a [`Fragment`] scan: its name, its attributes, and
+  # its OUTER html (the open tag through its matching close tag, or the
+  # tag alone when it is void). A filter reads it the way it reads a
+  # Nokogiri node — `node["href"]`, `node.to_s`.
+  class Node
+    def initialize(name, attributes, outer)
+      @name = name
+      @attributes = attributes
+      @outer = outer
+    end
+
+    def name
+      @name
+    end
+
+    def [](key)
+      @attributes.fetch(key, nil)
+    end
+
+    def attributes
+      @attributes
+    end
+
+    def to_s
+      @outer
+    end
+
+    def to_html
+      @outer
+    end
+  end
+
+  # A parsed [`Fragment`] selector — see `Fragment.parse_selector`.
+  class Selector
+    def initialize(kind, name, excluded, keys, values, ops)
+      @kind = kind
+      @name = name
+      @excluded = excluded
+      @keys = keys
+      @values = values
+      @ops = ops
+    end
+
+    def kind
+      @kind
+    end
+
+    def name
+      @name
+    end
+
+    def excluded
+      @excluded
+    end
+
+    def keys
+      @keys
+    end
+
+    def values
+      @values
+    end
+
+    def ops
+      @ops
+    end
+  end
+
+  # `ActionText::Fragment` — the element view of a `Content`'s markup,
+  # which is the surface `ActionText::Content::Filter` subclasses work
+  # through.
+  #
+  # Rails wraps a Nokogiri document and takes any CSS or XPath. This is
+  # a SCANNER over the same string every other method in this file
+  # scans, and it answers the selector shapes an app's filters actually
+  # write, refusing the rest. Refusing matters more than usual here: a
+  # filter chain runs inside a rescue in every app that has one (one bad
+  # message must not take down a room), so a selector quietly matching
+  # nothing is indistinguishable from a message with no content.
+  #
+  # The three shapes:
+  #
+  #   "div"                                  an element name
+  #   "action-text-attachment[@content-type='x'][url*='y']"
+  #                                          name plus attribute
+  #                                          predicates, `=` exact and
+  #                                          `*=` substring; a leading
+  #                                          `@` on the name is XPath
+  #                                          spelling of the same thing
+  #   ":not(a):not(b):not(…)"                any element named by NONE
+  #                                          of them — how an allow-list
+  #                                          sanitizer spells itself
+  class Fragment
+    def initialize(html)
       @html = html.to_s
+    end
+
+    # Rails' `ActionText::Fragment.wrap` — a Fragment passes through, a
+    # String becomes one. Tests reach for it directly to get at an
+    # attachment node without building a Content first.
+    def self.wrap(value)
+      return value if value.is_a?(ActionText::Fragment)
+      ActionText::Fragment.new(value.to_s)
+    end
+
+    def to_s
+      @html
+    end
+
+    def to_html
+      @html
+    end
+
+    def source
+      @html
+    end
+
+    # Elements matching `selector`, in document order.
+    def find_all(selector)
+      out = []
+      matcher = Fragment.parse_selector(selector)
+      i = 0
+      n = @html.length
+      while i < n
+        open_at = Fragment.next_element(@html, i)
+        if open_at < 0
+          i = n
+        else
+          tag_end = Fragment.tag_end(@html, open_at)
+          raw = @html[open_at + 1, tag_end - open_at - 1].to_s
+          name = Content.tag_name_of(raw)
+          attrs = Content.parse_attributes(raw)
+          stop = Fragment.element_end(@html, open_at, tag_end, name, raw)
+          if Fragment.matches?(name, attrs, matcher)
+            out << Node.new(name, attrs, @html[open_at, stop - open_at].to_s)
+          end
+          # Into the children either way: a match's descendants are
+          # elements too, and Rails' `css` returns them.
+          i = tag_end + 1
+        end
+      end
+      out
+    end
+
+    # Rails' `ActionText::Fragment#replace`: every matching element's
+    # OUTER html becomes what the block answers for it. A block that
+    # answers nil removes the element and its children, which is how a
+    # `:not(...)` sanitizer strips a disallowed tag.
+    #
+    # A matched element is skipped over WHOLE — its children are gone
+    # with it — while an unmatched one is copied open-tag-first so the
+    # walk continues inside it. That is the same traversal Nokogiri's
+    # `css(...).each { |n| n.replace(…) }` produces for these selectors,
+    # without a second parser.
+    def replace(selector)
+      matcher = Fragment.parse_selector(selector)
+      out = +""
+      i = 0
+      n = @html.length
+      while i < n
+        open_at = Fragment.next_element(@html, i)
+        if open_at < 0
+          out = out + @html[i, n - i].to_s
+          i = n
+        else
+          out = out + @html[i, open_at - i].to_s
+          tag_end = Fragment.tag_end(@html, open_at)
+          raw = @html[open_at + 1, tag_end - open_at - 1].to_s
+          name = Content.tag_name_of(raw)
+          attrs = Content.parse_attributes(raw)
+          stop = Fragment.element_end(@html, open_at, tag_end, name, raw)
+          if Fragment.matches?(name, attrs, matcher)
+            node = Node.new(name, attrs, @html[open_at, stop - open_at].to_s)
+            out = out + (yield node).to_s
+            i = stop
+          else
+            out = out + @html[open_at, tag_end - open_at + 1].to_s
+            i = tag_end + 1
+          end
+        end
+      end
+      Fragment.new(out)
+    end
+
+    # ---- scanning -----------------------------------------------------
+
+    # Index of the next OPEN tag at or after `from`, or -1. Close tags,
+    # comments and doctypes are not elements.
+    def self.next_element(html, from)
+      i = from
+      n = html.length
+      while i < n
+        if html[i, 1].to_s == "<"
+          nxt = html[i + 1, 1].to_s
+          return i if nxt != "/" && nxt != "!" && nxt != ""
+        end
+        i = i + 1
+      end
+      -1
+    end
+
+    # Index of the ">" closing the tag that starts at `at`.
+    def self.tag_end(html, at)
+      i = at + 1
+      n = html.length
+      while i < n && html[i, 1].to_s != ">"
+        i = i + 1
+      end
+      i < n ? i : n - 1
+    end
+
+    # One past the last character of the ELEMENT opened at `at`. A void
+    # or self-closed element is its own tag; anything else runs to its
+    # matching close tag, counting nested opens of the same name so an
+    # inner `<div>` does not end an outer one.
+    #
+    # An unclosed element runs to the end of the string — the same
+    # forgiving reading `to_plain_text` gives bad nesting, and for the
+    # same reason: repairing it would be a second, different parser.
+    def self.element_end(html, at, tag_end, name, raw)
+      return tag_end + 1 if raw[raw.length - 1, 1].to_s == "/"
+      return tag_end + 1 if void_element(name)
+      depth = 1
+      i = tag_end + 1
+      n = html.length
+      stop = n
+      while i < n && depth > 0
+        if html[i, 1].to_s == "<"
+          close = html[i + 1, 1].to_s == "/"
+          start = close ? i + 2 : i + 1
+          j = i + 1
+          while j < n && html[j, 1].to_s != ">"
+            j = j + 1
+          end
+          inner_raw = html[start, j - start].to_s
+          if Content.tag_name_of(inner_raw) == name
+            if close
+              depth = depth - 1
+              stop = j + 1 if depth == 0
+            elsif inner_raw[inner_raw.length - 1, 1].to_s != "/"
+              depth = depth + 1
+            end
+          end
+          i = j + 1
+        else
+          i = i + 1
+        end
+      end
+      stop
+    end
+
+    def self.void_element(name)
+      name == "area" || name == "base" || name == "br" || name == "col" ||
+        name == "embed" || name == "hr" || name == "img" || name == "input" ||
+        name == "link" || name == "meta" || name == "param" ||
+        name == "source" || name == "track" || name == "wbr"
+    end
+
+    # ---- selectors ----------------------------------------------------
+
+    # A parsed selector. A CLASS rather than a Hash because its fields
+    # are of different types and a `Hash[String, untyped]` bag is the
+    # shape the strict targets are built to avoid — one element type
+    # per container ([[reference_spinel_slow_shapes]]). `excluded`,
+    # `keys`, `values` and `ops` are each `Array[String]`.
+    def self.parse_selector(selector)
+      text = selector.to_s.strip
+      return Selector.new("not", "", not_names(text), [], [], []) if text.start_with?(":not(")
+      head = text.split("[")[0].to_s
+      # A plain element NAME, refused otherwise. Combinators, classes
+      # and ids are shapes this scanner does not read, and one that
+      # silently matched nothing would be indistinguishable from a
+      # filter that had nothing to do — inside a rescue, from a message
+      # with no content at all.
+      unless element_name?(head)
+        raise "ActionText::Fragment: unsupported selector #{selector.inspect}"
+      end
+      keys = []
+      values = []
+      ops = []
+      parts = text.split("[")
+      i = 1
+      while i < parts.length
+        pred = parts[i].to_s.split("]")[0].to_s
+        eq = pred.index("=")
+        raise "ActionText::Fragment: unsupported predicate #{pred.inspect}" if eq.nil?
+        substring = pred[eq - 1, 1].to_s == "*"
+        op = substring ? "*=" : "="
+        key = pred[0, substring ? eq - 1 : eq].to_s
+        key = key[1, key.length - 1].to_s if key.start_with?("@")
+        value = pred[eq + 1, pred.length].to_s
+        value = value.gsub("'", "").gsub("\"", "")
+        keys << key
+        values << value
+        ops << op
+        i = i + 1
+      end
+      Selector.new("name", head, [], keys, values, ops)
+    end
+
+    # Letters, digits, `-` and `_` only — `action-text-attachment` is a
+    # name, `div > span` and `.cls` are not.
+    def self.element_name?(text)
+      return false if text == ""
+      i = 0
+      while i < text.length
+        c = text[i, 1].to_s
+        ok = (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") ||
+          (c >= "0" && c <= "9") || c == "-" || c == "_"
+        return false unless ok
+        i = i + 1
+      end
+      true
+    end
+
+    # `:not(a):not(abbr):not(…)` → the names, in order.
+    def self.not_names(text)
+      out = []
+      parts = text.split(":not(")
+      i = 1
+      while i < parts.length
+        out << parts[i].to_s.split(")")[0].to_s
+        i = i + 1
+      end
+      raise "ActionText::Fragment: unsupported selector #{text.inspect}" if out.length == 0
+      out
+    end
+
+    def self.matches?(name, attrs, matcher)
+      return !matcher.excluded.include?(name) if matcher.kind == "not"
+      return false if matcher.name != name
+      keys = matcher.keys
+      values = matcher.values
+      ops = matcher.ops
+      ok = true
+      i = 0
+      while i < keys.length
+        actual = attrs.fetch(keys[i], nil)
+        if actual.nil?
+          ok = false
+        elsif ops[i] == "*="
+          ok = false unless actual.include?(values[i])
+        else
+          ok = false unless actual == values[i]
+        end
+        i = i + 1
+      end
+      ok
+    end
+  end
+
+  class Content
+    # `canonicalize:` is Rails' "re-render the attachments through their
+    # partials before storing" switch. A filter chain passes
+    # `canonicalize: false` for exactly that reason — it has just
+    # rewritten the markup and does not want it rewritten again — and
+    # nothing here canonicalizes in the first place, so the keyword is
+    # ACCEPTED AND IGNORED rather than absent. Absent was a TypeError on
+    # every filtered message, and campfire's `message_presentation`
+    # rescues, so it read as an empty body rather than as an error.
+    def initialize(html = "", canonicalize: true)
+      @html = html.to_s
+      @canonicalize = canonicalize
+    end
+
+    # `ActionText::Content#fragment` — the element view a
+    # `Content::Filter` works through (campfire's filter base is
+    # `delegate :fragment, to: :content`).
+    def fragment
+      ActionText::Fragment.new(@html)
     end
 
     # The stored markup, unchanged. `to_s` is the same string: Rails'
