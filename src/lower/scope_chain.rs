@@ -777,6 +777,12 @@ pub struct AssocRegistry {
     /// (model, belongs_to name) -> foreign-key column, for
     /// `where(user: user)` -> `where(user_id: user && user.id)`.
     belongs_to_fk: HashMap<(ClassId, Symbol), Symbol>,
+    /// (model, association name) -> the association target's CLASS.
+    /// A NESTED join (`joins(user: :memberships)`) resolves its second
+    /// hop against the first hop's target, and only a ClassId can be
+    /// keyed back into these maps — `assoc_table` answers a table name,
+    /// which is a dead end for a second lookup.
+    assoc_target: HashMap<(ClassId, Symbol), ClassId>,
     /// (model, association name) -> the association target's TABLE, for
     /// the nested-hash `where` form: `where(story: {merged_story_id:
     /// id})` names conditions on the JOINED table, not on this model's
@@ -882,6 +888,9 @@ impl AssocRegistry {
     }
     fn assoc_table(&self, model: &ClassId, assoc: &Symbol) -> Option<&Symbol> {
         self.assoc_table.get(&(model.clone(), assoc.clone()))
+    }
+    fn assoc_target(&self, model: &ClassId, assoc: &Symbol) -> Option<&ClassId> {
+        self.assoc_target.get(&(model.clone(), assoc.clone()))
     }
     fn aliased_join_tail(&self, model: &ClassId, assoc: &Symbol) -> Option<&String> {
         self.aliased_join_tails.get(&(model.clone(), assoc.clone()))
@@ -999,6 +1008,8 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                         .insert((m.name.clone(), name.clone()), foreign_key.clone());
                     reg.assoc_table
                         .insert((m.name.clone(), name.clone()), Symbol::from(t.as_str()));
+                    reg.assoc_target
+                        .insert((m.name.clone(), name.clone()), target.clone());
                     if name.as_str() != t {
                         reg.aliased_join_tails.insert(
                             (m.name.clone(), name.clone()),
@@ -1035,6 +1046,8 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     );
                     reg.assoc_table
                         .insert((m.name.clone(), name.clone()), Symbol::from(t.as_str()));
+                    reg.assoc_target
+                        .insert((m.name.clone(), name.clone()), target.clone());
                     if name.as_str() != t {
                         reg.aliased_join_tails.insert(
                             (m.name.clone(), name.clone()),
@@ -1059,6 +1072,8 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     );
                     reg.assoc_table
                         .insert((m.name.clone(), name.clone()), Symbol::from(t.as_str()));
+                    reg.assoc_target
+                        .insert((m.name.clone(), name.clone()), target.clone());
                     if name.as_str() != t {
                         reg.aliased_join_tails.insert(
                             (m.name.clone(), name.clone()),
@@ -1102,6 +1117,8 @@ pub fn build_assoc_registry(models: &[Model]) -> AssocRegistry {
                     );
                     reg.assoc_table
                         .insert((m.name.clone(), name.clone()), Symbol::from(target_table.as_str()));
+                    reg.assoc_target
+                        .insert((m.name.clone(), name.clone()), target.clone());
                 }
                 _ => {}
             }
@@ -2127,6 +2144,57 @@ fn range_clause(col: &str, e: &Expr, binds: &mut Vec<Expr>) -> Option<String> {
     })
 }
 
+/// One `joins` argument as SQL, or None when any hop is unresolvable.
+///
+/// A Symbol is one hop off `model`. A HASH is Rails' NESTED form —
+/// `Push::Subscription.joins(user: :memberships)` joins users off the
+/// subscription and then memberships off the USER, which is why the
+/// registry has to answer a target CLASS and not just a table. Values
+/// nest the same three ways Rails allows (a symbol, an array of them,
+/// another hash), so the recursion mirrors the spec's own shape.
+///
+/// ALL-OR-NOTHING per argument: a spec whose second hop has no entry
+/// (an STI subclass, a habtm, an unresolvable `through`) answers None
+/// and the argument keeps its source shape, which the runtime's
+/// `join_fragment` turns into a raise naming the association. Half a
+/// join would silently answer the wrong rows — the same standard the
+/// single-hop form has always held.
+fn join_spec_sql(model: &ClassId, spec: &Expr, kind: &str, ctx: &Ctx) -> Option<String> {
+    match &*spec.node {
+        ExprNode::Lit { value: Literal::Sym { value } } => {
+            Some(format!("{kind} {}", ctx.assocs.join_tail(model, value)?))
+        }
+        ExprNode::Hash { entries, .. } if !entries.is_empty() => {
+            let mut out = String::new();
+            for (k, v) in entries {
+                let ExprNode::Lit { value: Literal::Sym { value: name } } = &*k.node else {
+                    return None;
+                };
+                let head = ctx.assocs.join_tail(model, name)?;
+                let next = ctx.assocs.assoc_target(model, name)?.clone();
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(&format!("{kind} {head}"));
+                out.push(' ');
+                out.push_str(&join_spec_sql(&next, v, kind, ctx)?);
+            }
+            Some(out)
+        }
+        ExprNode::Array { elements, .. } if !elements.is_empty() => {
+            let mut out = String::new();
+            for el in elements {
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(&join_spec_sql(model, el, kind, ctx)?);
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
 fn lower_relation_args(
     model: &ClassId,
     method: &Symbol,
@@ -2138,9 +2206,8 @@ fn lower_relation_args(
         "joins" | "left_outer_joins" => {
             let kind = if method.as_str() == "joins" { "INNER JOIN" } else { "LEFT OUTER JOIN" };
             for a in args {
-                let ExprNode::Lit { value: Literal::Sym { value } } = &*a.node else { continue };
-                if let Some(tail) = ctx.assocs.join_tail(model, value) {
-                    *a.node = ExprNode::Lit { value: Literal::Str { value: format!("{kind} {tail}") } };
+                if let Some(sql) = join_spec_sql(model, a, kind, ctx) {
+                    *a.node = ExprNode::Lit { value: Literal::Str { value: sql } };
                 }
             }
         }
@@ -3221,9 +3288,19 @@ mod tests {
             (story(), Symbol::from("hidings")),
             "hidden_stories ON hidden_stories.story_id = stories.id".to_string(),
         );
+        reg.assoc_target
+            .insert((story(), Symbol::from("hidings")), ClassId(Symbol::from("HiddenStory")));
         reg.belongs_to_fk.insert(
             (ClassId(Symbol::from("HiddenStory")), Symbol::from("user")),
             Symbol::from("user_id"),
+        );
+        reg.join_tails.insert(
+            (ClassId(Symbol::from("HiddenStory")), Symbol::from("user")),
+            "users ON users.id = hidden_stories.user_id".to_string(),
+        );
+        reg.assoc_target.insert(
+            (ClassId(Symbol::from("HiddenStory")), Symbol::from("user")),
+            ClassId(Symbol::from("User")),
         );
         reg
     }
@@ -3315,6 +3392,74 @@ mod tests {
             &*args[0].node,
             ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == "taggings"
         ));
+    }
+
+    fn hash_arg(entries: Vec<(Expr, Expr)>) -> Expr {
+        Expr::new(span(), ExprNode::Hash { entries, kwargs: true })
+    }
+
+    /// Rails' NESTED form: `joins(hidings: :user)` joins hidden_stories
+    /// off the story and then users off the HIDDEN STORY. The second hop
+    /// is resolved against the first's target class, which is the fact
+    /// `assoc_target` exists to answer.
+    #[test]
+    fn joins_nested_hash_expands_both_hops() {
+        let (scopes, models, assocs) = (ScopeRegistry::new(), HashSet::new(), assoc_fixture());
+        let ctx = ctx_with(&scopes, &models, &assocs);
+        let mut args = vec![hash_arg(vec![(sym_lit("hidings"), sym_lit("user"))])];
+        lower_relation_args(&story(), &Symbol::from("joins"), &mut args, &ctx);
+        let ExprNode::Lit { value: Literal::Str { value } } = &*args[0].node else {
+            panic!("expected Str, got {:?}", args[0].node)
+        };
+        assert_eq!(
+            value,
+            "INNER JOIN hidden_stories ON hidden_stories.story_id = stories.id \
+             INNER JOIN users ON users.id = hidden_stories.user_id"
+        );
+    }
+
+    /// Every hop takes the call's own join kind.
+    #[test]
+    fn left_outer_joins_nested_hash_is_outer_at_every_hop() {
+        let (scopes, models, assocs) = (ScopeRegistry::new(), HashSet::new(), assoc_fixture());
+        let ctx = ctx_with(&scopes, &models, &assocs);
+        let mut args = vec![hash_arg(vec![(sym_lit("hidings"), sym_lit("user"))])];
+        lower_relation_args(&story(), &Symbol::from("left_outer_joins"), &mut args, &ctx);
+        let ExprNode::Lit { value: Literal::Str { value } } = &*args[0].node else {
+            panic!("expected Str")
+        };
+        assert_eq!(value.matches("LEFT OUTER JOIN").count(), 2, "{value}");
+        assert!(!value.contains("INNER JOIN"), "{value}");
+    }
+
+    /// ALL-OR-NOTHING: an unresolvable SECOND hop leaves the whole
+    /// argument alone, so the runtime raises and names the association
+    /// rather than answering a half-joined row set.
+    #[test]
+    fn joins_nested_hash_with_an_unknown_inner_hop_is_left_untouched() {
+        let (scopes, models, assocs) = (ScopeRegistry::new(), HashSet::new(), assoc_fixture());
+        let ctx = ctx_with(&scopes, &models, &assocs);
+        let mut args = vec![hash_arg(vec![(sym_lit("hidings"), sym_lit("taggings"))])];
+        lower_relation_args(&story(), &Symbol::from("joins"), &mut args, &ctx);
+        assert!(matches!(&*args[0].node, ExprNode::Hash { .. }), "{:?}", args[0].node);
+    }
+
+    /// `joins(hidings: [:user])` — an array value is several hops off
+    /// the same parent.
+    #[test]
+    fn joins_nested_array_value_expands_each_hop() {
+        let (scopes, models, assocs) = (ScopeRegistry::new(), HashSet::new(), assoc_fixture());
+        let ctx = ctx_with(&scopes, &models, &assocs);
+        let arr = Expr::new(
+            span(),
+            ExprNode::Array { elements: vec![sym_lit("user")], style: Default::default() },
+        );
+        let mut args = vec![hash_arg(vec![(sym_lit("hidings"), arr)])];
+        lower_relation_args(&story(), &Symbol::from("joins"), &mut args, &ctx);
+        let ExprNode::Lit { value: Literal::Str { value } } = &*args[0].node else {
+            panic!("expected Str, got {:?}", args[0].node)
+        };
+        assert!(value.ends_with("INNER JOIN users ON users.id = hidden_stories.user_id"), "{value}");
     }
 
     #[test]
