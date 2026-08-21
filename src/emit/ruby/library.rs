@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use super::super::EmittedFile;
 use crate::App;
-use crate::dialect::{AccessorKind, LibraryClass, MethodReceiver};
+use crate::dialect::{AccessorKind, LibraryClass, MethodDef, MethodReceiver};
 use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::span::Span;
@@ -1770,6 +1770,7 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
         .filter(|lc| lc.includes.iter().any(|i| i.0.as_str() == "RouteHelpers"))
         .map(|lc| lc.name.0.clone())
         .collect();
+    let helper_ivars = helper_read_ivars(app);
     for lc in lcs.iter_mut() {
         // CONTROLLERS in the index provide `helper_method`s to views:
         // only the call-site rewrite applies to them — their methods
@@ -1822,7 +1823,145 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
                 &own_params,
                 &app.view_visible_controller_methods,
             );
+            // A CONTROLLER IVAR read in a helper body. Rails mixes
+            // helpers into the view instance, which carries the
+            // controller's assigns, so `@room` there IS the
+            // controller's — campfire's `RoomsHelper.link_to_edit_room`
+            // reads it for the edit link's style and data attributes,
+            // and lobsters' `StoriesHelper` reads `@user`/`@ribbon` the
+            // same way. A module function has no instance, so the read
+            // was a bare nil and every `rooms#show` died on
+            // `undefined method 'id' for nil`.
+            //
+            // Routed through the same per-dispatch seam `flash` /
+            // `cookies` / a `helper_method` already use, which is the
+            // one place a module function can reach the live
+            // controller.
+            if is_helper_module {
+                rewrite_helper_ivars(&mut m.body, &helper_ivars);
+            }
         }
+        // The other half: the reader the rewrite dispatches to. It goes
+        // on the BASE controller, so every controller inherits one —
+        // a helper runs under whichever controller is current, and
+        // Rails' answer for an assign that controller never made is
+        // nil, which is exactly what reading an unassigned ivar gives.
+        if is_base_controller(lc) {
+            push_helper_ivar_readers(&mut lc.methods, &helper_ivars, &lc.name);
+        }
+    }
+}
+
+/// Is this the app's base controller — the one every other controller
+/// inherits from (`class ApplicationController < ActionController::Base`)?
+fn is_base_controller(lc: &LibraryClass) -> bool {
+    lc.parent.as_ref().is_some_and(|p| p.0.as_str() == "ActionController::Base")
+}
+
+/// The controller ivars helper-module bodies read.
+///
+/// Helper modules only — a `Views::` module's ivars were already bound
+/// to locals by the view lowering's closure threading, and re-routing
+/// one here would silently prefer a stale controller read over the
+/// value the caller passed.
+///
+/// A name any controller already DEFINES as a method is excluded: the
+/// reader this pass synthesizes would collide with it, and the app's
+/// own method is the one that should win.
+fn helper_read_ivars(app: &App) -> std::collections::BTreeSet<Symbol> {
+    let helper_modules: BTreeSet<ClassId> = app
+        .helper_method_index
+        .values()
+        .filter(|id| !app.controllers.iter().any(|c| &c.name == *id))
+        .cloned()
+        .collect();
+    let mut out = std::collections::BTreeSet::new();
+    for lc in &app.library_classes {
+        if !helper_modules.contains(&lc.name) {
+            continue;
+        }
+        for m in &lc.methods {
+            collect_ivar_reads(&m.body, &mut out);
+        }
+    }
+    let controller_methods: std::collections::HashSet<Symbol> = app
+        .controllers
+        .iter()
+        .flat_map(|c| c.body.iter())
+        .filter_map(|item| match item {
+            crate::dialect::ControllerBodyItem::Action { action, .. } => {
+                Some(action.name.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    out.retain(|n| !controller_methods.contains(n));
+    out
+}
+
+fn collect_ivar_reads(e: &Expr, out: &mut std::collections::BTreeSet<Symbol>) {
+    if let ExprNode::Ivar { name } = &*e.node {
+        out.insert(name.clone());
+    }
+    e.node.for_each_child(&mut |c| collect_ivar_reads(c, out));
+}
+
+/// `@room` -> `ActionController::Current.controller.room`, for the
+/// names `helper_read_ivars` collected.
+fn rewrite_helper_ivars(e: &mut Expr, names: &std::collections::BTreeSet<Symbol>) {
+    e.node.for_each_child_mut(&mut |c| rewrite_helper_ivars(c, names));
+    let name = match &*e.node {
+        ExprNode::Ivar { name } if names.contains(name) => name.clone(),
+        _ => return,
+    };
+    let span = e.span;
+    let controller = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                span,
+                ExprNode::Const {
+                    path: vec![Symbol::from("ActionController"), Symbol::from("Current")],
+                },
+            )),
+            method: Symbol::from("controller"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    *e.node = ExprNode::Send {
+        recv: Some(controller),
+        method: name,
+        args: vec![],
+        block: None,
+        parenthesized: false,
+    };
+}
+
+/// `def room; @room; end` on the base controller, one per name.
+fn push_helper_ivar_readers(
+    methods: &mut Vec<MethodDef>,
+    names: &std::collections::BTreeSet<Symbol>,
+    class_name: &ClassId,
+) {
+    for name in names {
+        if methods.iter().any(|m| &m.name == name) {
+            continue;
+        }
+        methods.push(MethodDef {
+            name: name.clone(),
+            receiver: MethodReceiver::Instance,
+            params: vec![],
+            body: Expr::new(Span::synthetic(), ExprNode::Ivar { name: name.clone() }),
+            signature: None,
+            effects: crate::effect::EffectSet::default(),
+            enclosing_class: Some(class_name.0.clone()),
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        });
     }
 }
 

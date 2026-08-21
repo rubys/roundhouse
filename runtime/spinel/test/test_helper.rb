@@ -676,6 +676,15 @@ module RequestDispatch
     @__request
   end
 
+  # Its twin, and missing for as long as `request` has been here.
+  # `@response` was assigned (the ivar spelling a test writes directly)
+  # but the bare READER was not, so `response.cookies[:last_room]` and
+  # `response.parsed_body` — the spelling Rails' integration tests
+  # actually use — were a NoMethodError on the test instance.
+  def response
+    @__response
+  end
+
   # `host! "once.campfire.test"` — the Host every subsequent request in
   # this test carries. Rails' integration tests set it when the app
   # reads the host back: campfire's messages_controller_test does,
