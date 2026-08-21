@@ -159,10 +159,32 @@ module Db
     st = current_dbh.raw.create_statement
     begin
       st.execute(sql)
+    rescue StandardError => e
+      raise ActiveRecord::RecordNotUnique, e.message if Db.unique_violation?(e.message)
+      raise
     ensure
       st.close
     end
     nil
+  end
+
+  # A UNIQUE-index violation is `ActiveRecord::RecordNotUnique`, not
+  # whatever this driver raises. Rails' contract is what apps write
+  # against — campfire's sign-up rescues it to turn a lost race into a
+  # redirect to the login screen, and its first-run screen does the same
+  # for two people opening a brand-new install at once. Without the
+  # mapping the rescue never matched and the raw driver error reached
+  # the dispatcher as a 500.
+  #
+  # THE TEST IS SQLITE'S OWN MESSAGE, not the driver's exception class,
+  # and that is deliberate: "UNIQUE constraint failed: users.
+  # email_address" comes out of the engine, so the same string appears
+  # in the cruby gem's ConstraintException, in the JDBC SQLException and
+  # in `sqlite3_errmsg` under spinel. One rule, three drivers, no
+  # per-driver class table to keep in step. (The strict targets carry
+  # their own `Db` and their own mapping; this is the ruby-family half.)
+  def self.unique_violation?(message)
+    message.to_s.include?("UNIQUE constraint failed")
   end
 
   # Prepared-statement cache (roundhouse#12). A cache hit reuses the open

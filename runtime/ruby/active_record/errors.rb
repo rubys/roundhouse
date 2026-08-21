@@ -28,13 +28,15 @@ module ActiveRecord
   # no statement-error hierarchy here, StandardError is the honest
   # parent, matching `ValueTooLong` above.
   #
-  # NOT YET RAISED by the adapters: `SqliteAdapter.insert` hands the SQL
-  # to the per-target `Db.exec` primitive, whose error surface differs
-  # per target (CRuby's sqlite3 gem, spinel's FFI, …), so mapping the
-  # driver's constraint error onto this class belongs with each `Db`
-  # rather than here. Defining it is still load-bearing: without the
-  # constant, `rescue ActiveRecord::RecordNotUnique` raises NameError
-  # when the rescue clause is EVALUATED, taking down the happy path too.
+  # RAISED BY EACH `Db`, not from here: the emitted per-model
+  # `_adapter_insert` hands its SQL straight to the per-target `Db.exec`
+  # primitive, and that is the only place holding the driver's error.
+  # The three ruby-family `Db`s (`db.rb`, `db_cruby.rb`, `db_jruby.rb`)
+  # each map it in `exec`, keyed on SQLITE'S OWN message text — "UNIQUE
+  # constraint failed: <table>.<column>" comes out of the engine, so the
+  # same string appears in the cruby gem's ConstraintException, in the
+  # JDBC SQLException and in `sqlite3_errmsg`. The strict targets carry
+  # their own `Db` and owe their own mapping.
   class RecordNotUnique < StandardError
     def initialize(message = "ActiveRecord::RecordNotUnique")
       super(message)
