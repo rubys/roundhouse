@@ -453,7 +453,22 @@ fn button_to_wrapper_parts(
     ctx: &ViewCtx,
 ) -> Option<(Vec<InterpPart>, Vec<InterpPart>)> {
     let url_expr = emit_url_arg(url, ctx)?;
-    let mut opts_entries = hash_entries(opts);
+    Some(button_to_wrapper_markup(url_expr, hash_entries(opts)))
+}
+
+/// The markup itself, with the URL already resolved — everything in
+/// [`button_to_wrapper_parts`] that does not need a view context.
+///
+/// Split out because the same `button_to url, opts do … end` is
+/// written in HELPER MODULES too, where there is no `ViewCtx` and no
+/// template to walk; `lower::tag_builder` expands those beside its
+/// `button_tag` sibling and calls in here for the bytes. One owner for
+/// the markup, so a `<form>` shape measured against Rails once cannot
+/// drift between the two spellings.
+pub(crate) fn button_to_wrapper_markup(
+    url_expr: Expr,
+    mut opts_entries: Vec<(Expr, Expr)>,
+) -> (Vec<InterpPart>, Vec<InterpPart>) {
     let method_expr = take_opt(&mut opts_entries, "method").unwrap_or_else(default_method_sym);
     let form_class_expr =
         take_opt(&mut opts_entries, "form_class").unwrap_or_else(default_form_class);
@@ -495,7 +510,7 @@ fn button_to_wrapper_parts(
         InterpPart::Expr { expr: view_helpers_call("csrf_token_hidden_input", Vec::new()) },
         InterpPart::Text { value: "</form>".to_string() },
     ];
-    Some((parts, suffix))
+    (parts, suffix)
 }
 
 /// Extract the entries Vec from a `Hash` literal opts arg, or empty

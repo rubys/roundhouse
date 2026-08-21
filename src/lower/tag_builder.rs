@@ -264,6 +264,9 @@ fn rewrite(
     if rewrite_button_tag(expr) {
         return;
     }
+    if rewrite_button_to_block(expr) {
+        return;
+    }
 
     let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*expr.node else {
         return;
@@ -401,6 +404,53 @@ fn rewrite_button_tag(expr: &mut Expr) -> bool {
         (None, None) => {}
     }
     parts.push(InterpPart::Text { value: "</button>".to_string() });
+    let mut built = string_interp(parts);
+    qualify_view_helpers(&mut built);
+    *expr = html_safe(built, span);
+    true
+}
+
+/// `button_to url, opts do … end` written in a HELPER body — Rails'
+/// BLOCK spelling, where the first argument is the URL and the block
+/// supplies the button's content.
+///
+/// The view walker already expands this for the ERB spelling
+/// (`helpers::emit_inline_helper_block`); a helper module never
+/// reaches it, so campfire's three `button_to_*` helpers emitted a
+/// bare `button_to` no module defines. The runtime's `button_to` is no
+/// answer either: it is `(text, href, opts)`, the POSITIONAL form, so
+/// qualifying the call would bind the url to `text` and the options to
+/// `href` — a shape that compiles and renders nonsense.
+///
+/// Markup comes from [`button_to_wrapper_markup`], the same owner the
+/// walker calls, so the two spellings cannot drift.
+///
+/// Declines — leaving the site loud rather than guessing — when there
+/// is no URL argument or when the options are not a literal Hash (a
+/// `merge` chain has nothing to split `method:` and `form_class:` out
+/// of at compile time, and those two decide the form, not the button).
+fn rewrite_button_to_block(expr: &mut Expr) -> bool {
+    let ExprNode::Send { recv: None, method, args, block: Some(block), .. } = &*expr.node else {
+        return false;
+    };
+    if method.as_str() != "button_to" {
+        return false;
+    }
+    let Some(url) = args.first() else { return false };
+    let opts = match args.get(1).map(|a| &*a.node) {
+        None => Vec::new(),
+        Some(ExprNode::Hash { entries, .. }) => entries.clone(),
+        Some(_) => return false,
+    };
+    let span = expr.span;
+    let block = block.clone();
+    let (mut parts, suffix) =
+        crate::lower::view_to_library::helpers::button_to_wrapper_markup(url.clone(), opts);
+    // Rails treats what the block yields as the button's HTML content,
+    // so it is CAPTURED, not escaped — campfire's blocks are an
+    // `image_tag` plus a `<span>`, already markup.
+    parts.push(InterpPart::Expr { expr: capture_call(block, span) });
+    parts.extend(suffix);
     let mut built = string_interp(parts);
     qualify_view_helpers(&mut built);
     *expr = html_safe(built, span);

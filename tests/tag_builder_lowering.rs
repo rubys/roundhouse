@@ -198,3 +198,55 @@ fn the_legacy_form_declines_what_it_cannot_resolve() {
     );
     assert_eq!(diags, 1, "and is ledgered:\n{unknown}");
 }
+
+// ── button_to, the BLOCK spelling ────────────────────────────────
+//
+// Rails' `button_to(url, html_options) { … }` — first argument the
+// URL, block the button's content. The view walker owns the ERB
+// spelling; campfire writes three of these in HELPER modules
+// (rooms, users, rooms/involvements), where the emitted call landed
+// on a module that defines no `button_to`.
+
+#[test]
+fn button_to_with_a_block_expands_to_the_form_wrapper() {
+    let (out, _) = helper(
+        r#"button_to "/rooms/1", method: :put, class: "btn" do
+      "content"
+    end"#,
+    );
+    assert!(out.contains("<form action="), "expected the form wrapper:\n{out}");
+    // `method:` decides the FORM's override input, not a button attr.
+    assert!(out.contains("method_override_input"), "expected the _method input:\n{out}");
+    assert!(out.contains(r#"<button type=\"submit\""#), "expected the submit button:\n{out}");
+    // Everything else in the options hash is a `<button>` attribute.
+    assert!(out.contains("class="), "expected the class attr:\n{out}");
+    assert!(out.contains("csrf_token_hidden_input"), "expected the CSRF input:\n{out}");
+    assert!(out.contains("</button>"), "expected the button to close:\n{out}");
+    assert!(out.contains("</form>"), "expected the form to close:\n{out}");
+    // The block is CAPTURED, not escaped — Rails treats what it
+    // yields as the button's HTML content.
+    assert!(!out.contains("button_to \""), "the bare call should be gone:\n{out}");
+}
+
+#[test]
+fn button_to_without_a_block_is_left_to_the_runtime() {
+    // The POSITIONAL form `(text, href, opts)` is what the runtime
+    // `ActionView::ViewHelpers.button_to` implements; this pass claims
+    // only the block spelling.
+    let (out, _) = helper(r#"button_to "Delete", "/rooms/1", method: :delete"#);
+    assert!(out.contains("button_to \""), "positional form should survive:\n{out}");
+    assert!(!out.contains("<form action="), "positional form is not expanded here:\n{out}");
+}
+
+#[test]
+fn button_to_with_computed_options_declines() {
+    // A `merge` chain has nothing to split `method:`/`form_class:` out
+    // of at compile time, and those two decide the FORM rather than the
+    // button. Leave the site loud instead of rendering a POST form for
+    // what the caller meant as a PUT.
+    let (out, _) = helper(r#"button_to "/rooms/1", opts.merge(class: "btn") do
+      "x"
+    end"#);
+    assert!(out.contains("button_to \""), "computed options should decline:\n{out}");
+    assert!(!out.contains("<form action="), "declined site must not expand:\n{out}");
+}

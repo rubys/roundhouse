@@ -26,7 +26,7 @@
 mod predicates;
 mod extra_params;
 mod walker;
-mod helpers;
+pub(crate) mod helpers;
 mod partial;
 mod form_with;
 pub(crate) mod form_builder;
