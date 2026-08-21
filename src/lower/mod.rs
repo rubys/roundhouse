@@ -64,6 +64,7 @@ pub mod controller_class_render;
 pub mod dirty_predicate_kwargs;
 pub mod job_test_only;
 pub mod sti_scope;
+mod sti_subclass_callbacks;
 pub mod sum_symbol;
 pub mod values_at_splat;
 pub mod request_index;
@@ -125,6 +126,7 @@ pub use controller_class_render::apply_controller_class_render;
 pub use dirty_predicate_kwargs::apply_dirty_predicate_kwargs;
 pub use job_test_only::apply_job_test_only_lowering;
 pub use sti_scope::apply_sti_scope_lowering;
+pub use sti_subclass_callbacks::apply_sti_subclass_callbacks;
 pub use request_index::apply_request_index_lowering;
 pub use arel_attribute::apply_arel_attribute_lowering;
 pub use exclude_predicate::apply_exclude_predicate_lowering;
@@ -211,6 +213,13 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // every later pass already reads; consumes nothing any pass
     // produces, so no ordering constraints.
     ("sti_scope", &[]),
+    // Folds an STI subclass's callback declarations into hook methods
+    // on that subclass. Reads `unknown_calls` on a library class and
+    // writes methods on the same class; no other pass produces or
+    // consumes either, so no ordering constraints. Sits beside
+    // `sti_scope` because both exist for the same reason — an STI
+    // subclass is not a Model, so the model-keyed machinery skips it.
+    ("sti_subclass_callbacks", &[]),
     // `only: <JobClass>` → `only: ["JobClass"]` in test bodies. Reads a
     // Const literal nothing else produces and writes a String array
     // nothing else reads, so no ordering constraints.
@@ -429,6 +438,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("presence_in");
     sti_scope::apply_sti_scope_lowering(app);
     ran!("sti_scope");
+    sti_subclass_callbacks::apply_sti_subclass_callbacks(app);
+    ran!("sti_subclass_callbacks");
     job_test_only::apply_job_test_only_lowering(app);
     ran!("job_test_only");
     dirty_predicate_kwargs::apply_dirty_predicate_kwargs(app);
