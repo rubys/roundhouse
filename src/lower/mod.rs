@@ -350,11 +350,6 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // the same body has already baked its humanized prefix — the
     // projection this pass emits reads that text.
     ("errors_index", &["errors_add"]),
-    // `record.update!(creator: user)` -> `update!(creator_id: user.id)`.
-    // Reads a Hash key naming a belongs_to and writes the foreign-key
-    // column; no other pass produces or consumes either shape, so no
-    // ordering constraints.
-    ("assoc_attr_key", &[]),
     ("create_block", &[]),
     // `<params>.merge(k: v)` written a method away from the permit
     // chain → `Model.from_params(p)` + per-key setters, hoisted above
@@ -363,6 +358,15 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // shape this pass matches.
     ("params_merge", &["create_block"]),
     ("update_kwargs", &[]),
+    // `record.update!(creator: user)` -> `update!(creator_id: user.id)`.
+    // AFTER `update_kwargs`, which INLINES the same shape into typed
+    // writer assignments when it can — and a `belongs_to` writer is the
+    // better target (it caches an unsaved record where an id column
+    // cannot). Running first would rewrite the key out from under it
+    // and silently downgrade every site that pass already served;
+    // running second leaves exactly the sites it declined, which is the
+    // division of labour intended.
+    ("assoc_attr_key", &["update_kwargs"]),
     ("mailer_class_side", &[]),
     ("job_class_side", &[]),
     ("send_static_dispatch", &[]),
@@ -537,14 +541,14 @@ pub fn apply_post_analyze_lowerings(
     ran!("errors_full_messages");
     diags.extend(errors_index::apply_errors_index_lowering(app));
     ran!("errors_index");
-    diags.extend(assoc_attr_key::apply_assoc_attr_key_lowering(app));
-    ran!("assoc_attr_key");
     diags.extend(create_block::apply_create_block_inline(app));
     ran!("create_block");
     diags.extend(params_merge::apply_params_merge_lowering(app));
     ran!("params_merge");
     diags.extend(update_kwargs::apply_update_kwargs_inline(app));
     ran!("update_kwargs");
+    diags.extend(assoc_attr_key::apply_assoc_attr_key_lowering(app));
+    ran!("assoc_attr_key");
     diags.extend(mailer_class_side::apply_mailer_class_side(app));
     ran!("mailer_class_side");
     diags.extend(job_class_side::apply_job_class_side(app));

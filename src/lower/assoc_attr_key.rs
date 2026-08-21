@@ -24,6 +24,17 @@
 //! The key becomes the foreign-key column and the value becomes its
 //! `id`, so what reaches the attrs Hash is an Integer.
 //!
+//! SECOND, AFTER [`super::update_kwargs`], and the order is the whole
+//! division of labour. That pass INLINES the same shape into typed
+//! writer assignments (`record.creator = user; record.save!`) whenever
+//! its own gates hold, and a `belongs_to` writer is the better target —
+//! it caches an UNSAVED record where an id column cannot. Running first
+//! rewrote the key out from under it and silently downgraded every site
+//! it already served (measured on lobsters' `@invitation.update(used_at:
+//! …, new_user: @new_user)`); running second leaves exactly the sites it
+//! declined — an untyped receiver, a receiver that is not an
+//! effect-free reader, which is every mass-assignment in a TEST body.
+//!
 //! KEYED ON THE NAME, NOT ON A TYPE, under the uniqueness rule this
 //! codebase holds association names to everywhere else
 //! (`has_many_by_name`, `sole_scope_owner`, `owner_model_from_name`).
