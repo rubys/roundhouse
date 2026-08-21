@@ -37,11 +37,20 @@
 //!
 //! Purely shape-directed, like its two siblings: the receiver of `[]`
 //! must itself be a zero-arg `errors` send, which is what makes the
-//! site our accumulator rather than some other object's `[]`. Scope is
-//! hook bodies, view bodies and TEST bodies — the same three
-//! `errors_full_messages` walks, and for the same reason (an error list
-//! is read from controllers, from an error-list view partial, and from
-//! assertions).
+//! site our accumulator rather than some other object's `[]`.
+//!
+//! VIEWS ARE DELIBERATELY OUT OF SCOPE, unlike
+//! [`super::errors_full_messages`]. The view lowering already owns this
+//! exact shape: `classify_errors_field_predicate` recognizes
+//! `<record>.errors[:field].none? / .any?` — the scaffold's form
+//! partial styles every field from it — and grounds the whole
+//! predicate, `[]` included. Rewriting the inner `[]` here runs FIRST
+//! and leaves that classifier a shape it no longer matches, which takes
+//! the blog's `_form.html.erb` from four grounded predicates to four
+//! `unresolved_type` diagnostics. Scope is therefore hook bodies and
+//! TEST bodies; a view read outside the predicate shape stays exactly
+//! as unsupported as it was, which is honest, and the view lowering is
+//! where it would be claimed.
 
 use crate::app::App;
 use crate::diagnostic::Diagnostic;
@@ -49,16 +58,13 @@ use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 use crate::ty::Ty;
 
-/// Rewrite `errors[:field]` reads across every hook body, view body and
-/// test body. Returns the residue ledger: recognizable `errors[…]`
-/// sites left dynamic, with the reason.
+/// Rewrite `errors[:field]` reads across every hook body and test body
+/// (NOT views — see the module docs). Returns the residue ledger:
+/// recognizable `errors[…]` sites left dynamic, with the reason.
 pub fn apply_errors_index_lowering(app: &mut App) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
     super::for_each_hook_body(app, &mut |body| rewrite(body, &mut diags));
     super::for_each_test_body(app, &mut |body| rewrite(body, &mut diags));
-    for view in &mut app.views {
-        rewrite(&mut view.body, &mut diags);
-    }
     diags
 }
 

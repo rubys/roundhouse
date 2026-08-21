@@ -229,8 +229,21 @@ fn type_analysis_coverage() {
     // shape). Keep this tight — the promise of "full analysis without
     // annotations on a basic MVC blog" is only a promise if we enforce
     // it on every commit.
+    //
+    // THE LOWERINGS RUN BEFORE `diagnose`, because that is the order the
+    // real consumers use: `wasm/src/lib.rs` (the IDE/playground overlay)
+    // and `bin/roundhouse` both analyze, then
+    // `apply_post_analyze_lowerings`, then diagnose. Analyzing alone left
+    // this gate blind to a whole class of regression — a pass that
+    // rewrites a shape ANOTHER pass recognizes. `errors_index` grounding
+    // `article.errors[:title]` inside the scaffold form's
+    // `.none?`/`.any?` predicate is the case that proved it: four
+    // `unresolved_type` diagnostics that only `browser-smoke-ide` could
+    // see, three CI legs and twenty minutes away from the edit.
     let mut app = ingest_app(fixture_path()).expect("ingest");
-    Analyzer::new(&app).analyze(&mut app);
+    let mut analyzer = Analyzer::new(&app);
+    analyzer.analyze(&mut app);
+    roundhouse::lower::apply_post_analyze_lowerings(&mut app, analyzer.class_registry());
     let diags = diagnose(&app);
     let errors: Vec<_> = diags
         .iter()

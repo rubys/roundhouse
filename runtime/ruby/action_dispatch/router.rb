@@ -78,17 +78,37 @@ module ActionDispatch
     # Match a request against the route table. Returns a `MatchResult`
     # on success; nil otherwise.
     def self.match(method, path, table)
-      exact = match_path(method, path, table, +"")
-      return exact unless exact.nil?
       # Rails' `(.:format)`: every route's last segment may carry a
       # `.ext` that names the RESPONSE FORMAT and is not part of the
       # path. `POST /rooms/3/messages.turbo_stream` is the same route as
       # `POST /rooms/3/messages`, with `params["format"]` set.
       #
-      # Tried only AFTER the literal path fails, so a route whose path
-      # genuinely contains a dot (`/manifest.json`, `/robots.txt`) still
-      # wins as itself — matching the extension-stripped form first would
-      # silently reroute those.
+      # THE STRIPPED FORM IS TRIED FIRST, and that order is the whole
+      # point. Rails compiles a dynamic segment to `[^/.?]+` — a dot can
+      # NEVER land inside one — so `(.:format)` is peeled off before any
+      # segment is bound. Trying the literal path first instead let a
+      # `:id` segment SWALLOW the extension: `DELETE /rooms/3/messages/
+      # 6.turbo_stream` matched `/rooms/:room_id/messages/:id` with
+      # `id = "6.turbo_stream"`, and since `find` coerces that back to 6
+      # the action ran and only the FORMAT was lost — the turbo_stream
+      # template was never reached and the request died in
+      # MissingTemplate. The asymmetry hid it: a COLLECTION path
+      # (`/rooms/3/messages.turbo_stream`) has a literal last segment
+      # that cannot swallow anything, so those routes worked and only
+      # member routes were wrong.
+      #
+      # The literal path stays as the FALLBACK, which is what keeps a
+      # route whose path genuinely contains a dot working: `/manifest
+      # .json` strips to `/manifest`, matches no route, and falls
+      # through to itself. `/robots.txt` never strips at all — `txt` is
+      # not a registered format. A dotted segment whose extension is not
+      # a format (`/domains/example.com`) is likewise untouched, which
+      # is exactly Rails' rule for the same URL.
+      #
+      # Divergence, small and named: an app declaring BOTH `/manifest`
+      # and `/manifest.json` gets the former for `/manifest.json`, where
+      # Rails picks by declaration order. No corpus app declares such a
+      # pair.
       #
       # Split on "." rather than `rindex`-and-slice: that is a Ruby
       # string idiom several targets' emitters do not carry, and the
@@ -98,14 +118,17 @@ module ActionDispatch
       # so directly — while splitting twice asks an emitter to
       # materialize a `split` off a local rather than a parameter.
       dotted = path.split(".")
-      return nil if dotted.length < 2
-      ext = dotted[dotted.length - 1]
-      return nil if ext.include?("/")
-      return nil unless format_extension(ext)
-      # Trimming from the FULL path (rather than rewriting the segment
-      # array and re-joining) avoids an array index ASSIGNMENT, which is
-      # another shape not every emitter carries.
-      match_path(method, path[0, path.length - ext.length - 1].to_s, table, ext)
+      if dotted.length >= 2
+        ext = dotted[dotted.length - 1]
+        if !ext.include?("/") && format_extension(ext)
+          # Trimming from the FULL path (rather than rewriting the
+          # segment array and re-joining) avoids an array index
+          # ASSIGNMENT, which is another shape not every emitter carries.
+          stripped = match_path(method, path[0, path.length - ext.length - 1].to_s, table, ext)
+          return stripped unless stripped.nil?
+        end
+      end
+      match_path(method, path, table, +"")
     end
 
     # Is `ext` one of Rails' registered format extensions? The registry

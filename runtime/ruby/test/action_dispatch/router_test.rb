@@ -188,4 +188,52 @@ class RouterTest < Minitest::Test
     raise "expected match" if m.nil?
     assert_equal "12abc", m.path_params["id"]
   end
+
+  # Rails compiles a dynamic segment to `[^/.?]+`, so `(.:format)` is
+  # peeled off BEFORE any segment binds. Matching the literal path first
+  # instead let `:id` swallow the extension — `/articles/42.json` bound
+  # `id = "42.json"` with no format, and since `find` coerces that back
+  # to 42 the action ran and only the RESPONSE FORMAT was lost. The
+  # collection form (`/articles.json`) never had the bug: its last
+  # segment is a literal that cannot swallow anything, which is exactly
+  # what hid it.
+  def test_member_path_format_extension_is_stripped_not_captured
+    m = ActionDispatch::Router.match("GET", "/articles/42.json", TABLE)
+    raise "expected match" if m.nil?
+    assert_equal :show, m.action
+    assert_equal "42", m.path_params["id"]
+    assert_equal "json", m.path_params["format"]
+  end
+
+  def test_collection_path_format_extension_is_stripped
+    m = ActionDispatch::Router.match("GET", "/articles.json", TABLE)
+    raise "expected match" if m.nil?
+    assert_equal :index, m.action
+    assert_equal "json", m.path_params["format"]
+  end
+
+  # An extension that names no registered format is not one: a dotted
+  # segment stays whole, which is what keeps `/domains/example.com`
+  # routing to `:id = "example.com"` — Rails' own answer for that URL.
+  def test_unregistered_extension_stays_in_the_segment
+    m = ActionDispatch::Router.match("GET", "/articles/example.com", TABLE)
+    raise "expected match" if m.nil?
+    assert_equal "example.com", m.path_params["id"]
+    # `fetch(k, default)` rather than `["format"]`: a missing Hash key
+    # raises on Crystal, so an ABSENCE assertion has to read the key the
+    # way both dispatchers read it.
+    assert_equal "", m.path_params.fetch("format", "")
+  end
+
+  # The literal path is the FALLBACK, so a route whose path genuinely
+  # ends in a format-shaped extension still wins as itself.
+  def test_literal_dotted_route_wins_when_the_stripped_form_matches_nothing
+    table = [
+      ActionDispatch::Router::Route.new("GET", "/manifest.json", :pwa_controller, :manifest),
+    ]
+    m = ActionDispatch::Router.match("GET", "/manifest.json", table)
+    raise "expected match" if m.nil?
+    assert_equal :manifest, m.action
+    assert_equal "", m.path_params.fetch("format", "")
+  end
 end
