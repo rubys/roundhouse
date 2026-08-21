@@ -97,6 +97,7 @@ module RequestDispatch
   def patch: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped]) -> ActionResponse
   def put: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped]) -> ActionResponse
   def head: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped]) -> ActionResponse
+  def follow_redirect!: () -> ActionResponse
   def delete: (String path, ?params: Hash[untyped, untyped], ?headers: Hash[untyped, untyped]) -> ActionResponse
 
   def dispatch_request: (

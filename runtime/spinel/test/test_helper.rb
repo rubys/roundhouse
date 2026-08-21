@@ -617,6 +617,22 @@ module RequestDispatch
     dispatch_request("HEAD", path, params, headers.merge(env))
   end
 
+  # Rails' `follow_redirect!` — re-issue the LAST response's redirect as
+  # a GET. campfire's `rooms/closeds_controller_test` revises a room's
+  # membership so as to remove itself, then follows the redirect to the
+  # room to check it bounces on to root.
+  #
+  # GET only, and it raises when the last response was not a redirect —
+  # both are Rails' own contract, not a subset: `follow_redirect!` is
+  # defined as "the browser follows a 3xx", and a browser follows one
+  # with a GET.
+  def follow_redirect!
+    unless @__response.redirect?
+      raise "follow_redirect! called at a non-redirect response (status=#{@__response.status})"
+    end
+    get(@__response.location)
+  end
+
   # The browser. An integration test's requests share cookie state the
   # way a real client does — `sign_in` POSTs, and every later request in
   # that test carries the session cookie — and a test may seed one before
