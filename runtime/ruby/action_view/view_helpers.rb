@@ -159,6 +159,42 @@ module ActionView
       s.gsub(URL_ESCAPE_PATTERN, URL_ESCAPES)
     end
 
+    # The SECOND url encoding. `URL_ESCAPES` above is `CGI.escape` —
+    # FORM encoding, what `Hash#to_query` runs, where a space is `+`. A
+    # `mailto:` URI is a URI COMPONENT, which Rails encodes with
+    # `ERB::Util.url_encode`: the same table with the space as `%20`.
+    # Written out rather than derived from `URL_ESCAPES` because a
+    # constant built by `merge` is not a shape the strict emitters
+    # lower. The KEY SET is identical, so `URL_ESCAPE_PATTERN` drives
+    # both — only the values differ.
+    URI_ESCAPES = {
+      " " => "%20", "!" => "%21", "\"" => "%22", "#" => "%23",
+      "$" => "%24", "%" => "%25", "&" => "%26", "'" => "%27",
+      "(" => "%28", ")" => "%29", "*" => "%2A", "+" => "%2B",
+      "," => "%2C", "/" => "%2F", ":" => "%3A", ";" => "%3B",
+      "<" => "%3C", "=" => "%3D", ">" => "%3E", "?" => "%3F",
+      "@" => "%40", "[" => "%5B", "\\" => "%5C", "]" => "%5D",
+      "^" => "%5E", "`" => "%60", "{" => "%7B", "|" => "%7C",
+      "}" => "%7D",
+    }.freeze
+
+    # `URL_ESCAPE_PATTERN` minus the `@`, for `mail_to`'s address.
+    # Rails spells that encoding `url_encode(addr).gsub("%40", "@")` —
+    # a pattern that never matches `@` says the same thing in one pass,
+    # and a two-string `gsub` is not a shape the strict emitters lower
+    # (C# reads `x.gsub(a, b)` as the regex+table form and emits
+    # `"+".Replace(x, …)`, which compiles nowhere).
+    MAILTO_ESCAPE_PATTERN = /[ !"\#$%&'()*+,\/:;<=>?\[\\\]^`{|}]/.freeze
+
+    # Monomorphic, like `url_encode`.
+    def self.url_encode_component(s)
+      s.gsub(URL_ESCAPE_PATTERN, URI_ESCAPES)
+    end
+
+    def self.url_encode_mailto_address(s)
+      s.gsub(MAILTO_ESCAPE_PATTERN, URI_ESCAPES)
+    end
+
     def self.truncate(s, length: 30, omission: "...")
       return s if s.length <= length
       cutoff = length - omission.length
@@ -233,6 +269,68 @@ module ActionView
       # helper below that merges user opts into a default Hash.
       attrs = render_attrs({ href: href }.merge(opts.to_h))
       "<a#{attrs}>#{html_escape(text)}</a>"
+    end
+
+    # Rails' `mail_to` — a `mailto:` anchor. `mail_to(addr)` labels the
+    # link with the address itself; `mail_to(addr, name)` labels it with
+    # `name`. campfire's user page renders the bare form.
+    #
+    # MEASURED against Rails 8.1, not assumed:
+    #  * the address in the href is url-encoded with `%40` put back as
+    #    `@` (`a<b>@x.com` -> `mailto:a%3Cb%3E@x.com`);
+    #  * the LABEL is the RAW address html-escaped, not that encoding;
+    #  * `cc:`/`bcc:`/`body:`/`subject:`/`reply_to:` are LIFTED OUT of
+    #    the html options into the href's query string, IN THAT ORDER,
+    #    and `reply_to` becomes the `reply-to` mail header. Leaving them
+    #    in would render `subject="…"` as an attribute on the `<a>` —
+    #    the silent kind of wrong, so the lift is not optional.
+    #
+    # Both encodings are `ERB::Util.url_encode`, NOT the `CGI.escape`
+    # that `url_encode` above does — see `URI_ESCAPES` for the one
+    # character the two disagree on.
+    # One mail header appended to a `mailto:` query string. Monomorphic
+    # — three Strings in, one out: the CALLER does the nil test, so the
+    # gradual `opts` value never crosses a call boundary. That is not
+    # style. `opts.fetch(:cc, nil)` types as `Option<Value>` in Rust,
+    # which is fine bound to a local and tested with `.nil?` (what
+    # `button_to` beside it does) and an E0308 the moment it is passed
+    # to a parameter declared `untyped`.
+    def self.mail_query_append(query, header, value)
+      separator = query.empty? ? "?" : "&"
+      "#{query}#{separator}#{header}=#{url_encode_component(value)}"
+    end
+
+    # `name` defaults to `""`, not `nil`, and an EMPTY name falls back
+    # to the address — which is Rails' own rule (`name.presence ||
+    # email_address`), and monomorphic where a `String?` would make the
+    # label a union the strict targets each narrow differently.
+    #
+    # The five headers are unrolled rather than walked over a constant
+    # list because a `next` inside an `each` is not a shape the Rust
+    # emitter lowers, and the `delete`s are separate statements because
+    # a `delete` USED AS A VALUE types as `Option<Value>` there too.
+    def self.mail_to(email, name = "", opts = {})
+      cc = opts.fetch(:cc, nil)
+      bcc = opts.fetch(:bcc, nil)
+      body = opts.fetch(:body, nil)
+      subject = opts.fetch(:subject, nil)
+      reply_to = opts.fetch(:reply_to, nil)
+      query = ""
+      query = mail_query_append(query, "cc", cc.to_s) unless cc.nil?
+      query = mail_query_append(query, "bcc", bcc.to_s) unless bcc.nil?
+      query = mail_query_append(query, "body", body.to_s) unless body.nil?
+      query = mail_query_append(query, "subject", subject.to_s) unless subject.nil?
+      query = mail_query_append(query, "reply-to", reply_to.to_s) unless reply_to.nil?
+      html_opts = opts.to_h.dup
+      html_opts.delete(:cc)
+      html_opts.delete(:bcc)
+      html_opts.delete(:body)
+      html_opts.delete(:subject)
+      html_opts.delete(:reply_to)
+      href = "mailto:#{url_encode_mailto_address(email)}#{query}"
+      attrs = render_attrs({ href: href }.merge(html_opts))
+      label = name.empty? ? email : name
+      "<a#{attrs}>#{html_escape(label)}</a>"
     end
 
     # `link_to raw("Page 2 &gt;&gt;"), url` — the html_safe-text form.

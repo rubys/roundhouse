@@ -976,7 +976,17 @@ fn every_runtime_method_body_concretely_typed() {
     // 2026-08-20 291 -> 293: `Relation#first` and `#find` restoring the
     // state they set (the terminal invariant — see the note on the
     // other ceiling). One site each, and zero tests moved.
-    const CEILING: usize = 293;
+    // 2026-08-21 293 -> 298: `ViewHelpers.mail_to`. FIVE sites, one per
+    // mail header lifted out of the html options — each is an
+    // `opts.fetch(:cc, nil)` bound to a local, the same shape (and the
+    // same reason) as `button_to`'s `opts.fetch(:method, nil)` beside
+    // it: the opts hash is `Hash[Symbol, untyped]` by declaration, so
+    // every read out of it is gradual. They are five rather than one
+    // because the list is UNROLLED — a `next` inside an `each` over a
+    // constant list is not a shape the Rust emitter lowers. Everything
+    // downstream is typed: `mail_query_append` takes three Strings, so
+    // the gradual value never crosses a call boundary.
+    const CEILING: usize = 298;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

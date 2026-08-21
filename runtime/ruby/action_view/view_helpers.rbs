@@ -40,6 +40,8 @@ module ActionView
     def self.html_escape: (String s) -> String
     # Percent-encoding for a query-string value; ASCII-only (see the .rb).
     def self.url_encode: (String s) -> String
+    def self.url_encode_component: (String s) -> String
+    def self.url_encode_mailto_address: (String s) -> String
 
     # Same monomorphization rationale as html_escape: callers handle
     # nil/non-String coercion explicitly. Real-blog's only caller
@@ -69,6 +71,12 @@ module ActionView
     # hash (Symbol or String keys; values flatten through render_attrs).
     def self.link_to: (String text, String href, ?Hash[Symbol, untyped] opts) -> String
     def self.button_to: (String text, String href, ?Hash[Symbol, untyped] opts) -> String
+
+    # `name` defaults to the address itself; the mail-header options
+    # (cc/bcc/body/subject/reply_to) ride in `opts` and are lifted into
+    # the href's query string.
+    def self.mail_to: (String email, ?String name, ?Hash[Symbol, untyped] opts) -> String
+    def self.mail_query_append: (String query, String header, String value) -> String
 
     # html_safe-text variant of link_to (label already escaped/marked
     # safe by the caller — see the `link_to(raw(x), ...)` rewrite).

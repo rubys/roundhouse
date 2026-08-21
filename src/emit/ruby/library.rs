@@ -1864,6 +1864,11 @@ fn is_framework_view_helper(name: &str) -> bool {
             | "distance_of_time_in_words"
             | "raw"
             | "link_to"
+            // campfire's user page links the address with a bare
+            // `mail_to @user.email_address`. The VIEW classifier has no
+            // kind for it, so it falls through to this pass like the
+            // rest of the flat helpers.
+            | "mail_to"
             | "content_for?"
             | "capture"
             | "concat"
@@ -1916,7 +1921,7 @@ fn is_html_safe_call(e: &Expr, index: &HashMap<Symbol, ClassId>) -> bool {
     if joined.ends_with("ViewHelpers") {
         return matches!(
             method.as_str(),
-            "raw" | "link_to" | "link_to_raw" | "button_to" | "image_tag" | "content_tag"
+            "raw" | "link_to" | "link_to_raw" | "button_to" | "mail_to" | "image_tag" | "content_tag"
                 | "javascript_include_tag" | "label_tag" | "submit_tag" | "form_tag"
         );
     }

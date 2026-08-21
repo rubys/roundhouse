@@ -209,6 +209,51 @@ class ViewHelpersTest < Minitest::Test
     assert_includes out, "&lt;b&gt;hi&lt;/b&gt;"
   end
 
+  # Every expectation below is the byte-for-byte output of Rails 8.1's
+  # own `mail_to` for the same call, apart from attribute ORDER (Rails
+  # puts the html options before the href; `link_to` here already
+  # differs the same way, and compare is DOM-equivalence).
+  def test_mail_to_labels_the_link_with_the_address
+    assert_equal %(<a href="mailto:me@example.com">me@example.com</a>),
+                 ViewHelpers.mail_to("me@example.com")
+  end
+
+  def test_mail_to_with_a_name_labels_the_link_with_the_name
+    assert_equal %(<a href="mailto:me@example.com">My email</a>),
+                 ViewHelpers.mail_to("me@example.com", "My email")
+  end
+
+  # Rails' own rule: a BLANK name falls back to the address.
+  def test_mail_to_with_a_blank_name_falls_back_to_the_address
+    assert_equal %(<a href="mailto:me@example.com">me@example.com</a>),
+                 ViewHelpers.mail_to("me@example.com", "")
+  end
+
+  # The href is url-encoded but keeps its `@`; the LABEL is the raw
+  # address html-escaped, which is a different encoding of the same
+  # string.
+  def test_mail_to_encodes_the_href_and_escapes_the_label
+    assert_equal %(<a href="mailto:a%3Cb%3E@example.com">a&lt;b&gt;@example.com</a>),
+                 ViewHelpers.mail_to("a<b>@example.com")
+  end
+
+  # Mail headers are LIFTED OUT of the html options into the query
+  # string — left in, `subject` would render as an `<a>` attribute.
+  # Order is Rails': cc, bcc, body, subject, reply_to; `reply_to`
+  # becomes the `reply-to` header; spaces are `%20`, not `+`.
+  def test_mail_to_lifts_mail_headers_into_the_href
+    assert_equal %(<a href="mailto:me@example.com?cc=c%40x&amp;bcc=b%40x&amp;) +
+                 %(body=a%20b%2Bc&amp;subject=S%20x&amp;reply-to=r%40x">Feedback</a>),
+                 ViewHelpers.mail_to("me@example.com", "Feedback",
+                   body: "a b+c", subject: "S x", cc: "c@x", bcc: "b@x", reply_to: "r@x")
+  end
+
+  def test_mail_to_keeps_html_options_as_attributes
+    out = ViewHelpers.mail_to("me@example.com", "Feedback", subject: "My Subject", class: "btn")
+    assert_includes out, %(class="btn")
+    assert_includes out, %(href="mailto:me@example.com?subject=My%20Subject")
+  end
+
   def test_button_to_emits_form_with_method_input
     out = ViewHelpers.button_to("Delete", "/articles/42", method: :delete)
     assert_includes out, %(action="/articles/42")
