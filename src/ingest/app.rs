@@ -683,7 +683,9 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
             // than dropped — see `ingest::fixture`. A file whose ERB we
             // genuinely can't ingest still records a ledger line and is
             // skipped, via `unwrap_or_record`.
-            if let Some(fixture) = unwrap_or_record(ingest_fixture_file(&source, &entry))? {
+            if let Some(fixture) =
+                unwrap_or_record(ingest_fixture_file(&source, &entry, &fixtures_dir))?
+            {
                 app.fixtures.push(fixture);
             }
         }
@@ -2127,14 +2129,31 @@ fn extract_kwarg_str(arg: &Node<'_>, key: &str) -> Option<String> {
     None
 }
 
+/// Every `.yml`/`.yaml` under `dir`, RECURSIVELY. Rails fixture sets
+/// nest — `test/fixtures/push/subscriptions.yml` is the fixture set
+/// `push_subscriptions` loading `Push::Subscription` — and a flat
+/// `read_dir` silently skipped them: the file was never ingested, so
+/// `push_subscriptions(:david_chrome)` reached no method at all.
+/// Non-YAML files in the tree (campfire's `test/fixtures/files/*.png`,
+/// which `file_fixture` reads) are filtered out here as before.
 fn read_yml_files<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult<Vec<PathBuf>> {
-    let mut out: Vec<PathBuf> = vfs
-        .read_dir(dir)?
-        .into_iter()
-        .filter(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("yml") | Some("yaml")))
-        .collect();
+    let mut out: Vec<PathBuf> = Vec::new();
+    walk_yml(vfs, dir, &mut out)?;
     out.sort();
     Ok(out)
+}
+
+fn walk_yml<V: Vfs + ?Sized>(vfs: &V, dir: &Path, out: &mut Vec<PathBuf>) -> IngestResult<()> {
+    for path in vfs.read_dir(dir)? {
+        if vfs.is_dir(&path) {
+            walk_yml(vfs, &path, out)?;
+            continue;
+        }
+        if matches!(path.extension().and_then(|e| e.to_str()), Some("yml") | Some("yaml")) {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn read_erb_files<V: Vfs + ?Sized>(

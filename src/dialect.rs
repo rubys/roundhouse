@@ -1288,8 +1288,10 @@ impl FixtureValue {
     }
 }
 
-/// A `test/fixtures/<name>.yml` file. `name` is the file stem
-/// (`articles`, `comments`) — conventionally matches the table name.
+/// A `test/fixtures/<path>.yml` file. `name` is the Rails FIXTURE-SET
+/// name — the path under `test/fixtures` with `/` replaced by `_`
+/// (`articles`, `push_subscriptions`) — which is both the accessor a
+/// test calls and, conventionally, the table name.
 /// `records` preserves the label→fields mapping order from the source.
 /// Fixture-to-fixture references (Rails's `article: one` shorthand for
 /// "id of the `one` fixture in articles") are preserved verbatim as
@@ -1304,6 +1306,17 @@ impl FixtureValue {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Fixture {
     pub name: Symbol,
+    /// The same path with its separators intact and no extension —
+    /// `articles`, `push/subscriptions`. Carried ALONGSIDE `name`
+    /// because the two answer different questions: `name` is the
+    /// accessor and the table, `path` is what `naming::classify_path`
+    /// turns into the model class. A fixture in a subdirectory is
+    /// NAMESPACED — `push/subscriptions.yml` loads `Push::Subscription`
+    /// — and the flattened name cannot say that: singularize-camelizing
+    /// it yields `PushSubscription`, a class the app does not have, and
+    /// the fixture silently loads nothing. Equal to `name` for every
+    /// top-level fixture.
+    pub path: Symbol,
     pub records: IndexMap<Symbol, IndexMap<Symbol, FixtureValue>>,
     pub preamble: Vec<Expr>,
 }

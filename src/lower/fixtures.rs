@@ -88,7 +88,13 @@ pub fn lower_fixtures(app: &App) -> LoweredFixtureSet {
 }
 
 fn lower_fixture(fixture: &Fixture, app: &App) -> LoweredFixture {
-    let class_name = crate::naming::singularize_camelize(fixture.name.as_str());
+    // From the PATH, not the flattened name: a fixture in a
+    // subdirectory is namespaced (`push/subscriptions` ->
+    // `Push::Subscription`), and `singularize_camelize` over the
+    // flattened `push_subscriptions` names `PushSubscription` — a class
+    // no model registers, so `model` below comes back `None` and every
+    // field is dropped as "not a known column".
+    let class_name = crate::naming::classify_path(fixture.path.as_str());
     let class = ClassId(Symbol::from(class_name.as_str()));
     let model = app
         .models

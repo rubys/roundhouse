@@ -355,6 +355,22 @@ pub fn singularize_camelize(plural_symbol: &str) -> String {
     camelize(&singularize(plural_symbol))
 }
 
+/// Rails' `String#classify` over a `/`-separated path: singularize the
+/// LAST segment only, then camelize every segment and join with `::`.
+///
+/// This is the fixture-set rule. `test/fixtures/push/subscriptions.yml`
+/// loads `Push::Subscription`, not `PushSubscription` — the directory is
+/// a NAMESPACE, and flattening it first (`push_subscriptions` ->
+/// `singularize_camelize`) loses that and names a class the app does not
+/// have. Namespace segments keep their plurality: `action_text/
+/// rich_texts` is `ActionText::RichText`, never `ActionTexts::RichText`.
+///
+/// A slash-free path degrades to `singularize_camelize`, which is what
+/// every top-level fixture wants (`articles` -> `Article`).
+pub fn classify_path(path: &str) -> String {
+    camelize_path(&singularize_last(path))
+}
+
 pub fn habtm_join_table(owner_class: &str, target_plural_sym: &str) -> String {
     let a = pluralize_snake(owner_class);
     let b = target_plural_sym.to_string();

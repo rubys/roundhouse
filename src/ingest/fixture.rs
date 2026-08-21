@@ -93,14 +93,29 @@ fn split_erb(source: &str) -> SplitErb {
     out
 }
 
-pub fn ingest_fixture_file(source: &[u8], path: &Path) -> IngestResult<Fixture> {
-    let name = path
+/// `root` is the `test/fixtures` directory the file was found under.
+/// It is what turns `<root>/push/subscriptions.yml` into the fixture-set
+/// path `push/subscriptions` — the directory is a NAMESPACE, and only
+/// the part below the root is part of the name. A `path` that is not
+/// under `root` falls back to the file stem, which is the top-level
+/// answer and what every flat fixture wants anyway.
+pub fn ingest_fixture_file(source: &[u8], path: &Path, root: &Path) -> IngestResult<Fixture> {
+    let stem = path
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| IngestError::Unsupported {
             file: path.display().to_string(),
             message: "fixture file has no stem".into(),
         })?;
+    // `articles`, or `push/subscriptions` for a namespaced set.
+    let rel = path
+        .strip_prefix(root)
+        .ok()
+        .and_then(|r| r.with_extension("").to_str().map(str::to_string))
+        .unwrap_or_else(|| stem.to_string());
+    // Rails' fixture-set name: the path with `/` -> `_`. Both the
+    // accessor a test calls and the table the rows land in.
+    let name = rel.replace('/', "_");
     let file = path.display().to_string();
 
     let text = std::str::from_utf8(source).map_err(|e| IngestError::Parse {
@@ -169,7 +184,8 @@ pub fn ingest_fixture_file(source: &[u8], path: &Path) -> IngestResult<Fixture> 
     }
 
     Ok(Fixture {
-        name: Symbol::from(name),
+        name: Symbol::from(name.as_str()),
+        path: Symbol::from(rel.as_str()),
         records,
         preamble,
     })
