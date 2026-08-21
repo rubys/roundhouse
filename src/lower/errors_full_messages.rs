@@ -10,11 +10,21 @@
 //! `full_messages`, so every strict target gets a hard unresolved-method
 //! error at a site whose meaning we already know.
 //!
-//! Scope is `for_each_hook_body` plus view bodies — the construct has
-//! real presence in both (lobsters reads it from controllers, from
-//! models, and from an `application_helper` error-list builder that
-//! views call). That matches [`super::exclude_predicate`], the other
-//! total rewrite with a view presence.
+//! Scope is `for_each_hook_body`, view bodies, and TEST bodies — the
+//! construct has real presence in all three (lobsters reads it from
+//! controllers, from models, and from an `application_helper`
+//! error-list builder that views call). That matches
+//! [`super::exclude_predicate`], the other total rewrite with a view
+//! presence.
+//!
+//! Tests were the last to join, and asking for them by name is the
+//! convention [`super::for_each_test_body`] documents. The site is
+//! campfire's `assert_equal [ "Title can't be blank", … ],
+//! opengraph.errors.full_messages` — an assertion reading the
+//! accumulator directly, which is exactly the shape this pass folds
+//! everywhere else. Left out, it read as a missing method on `Array`
+//! and the identity we already knew went unapplied purely because of
+//! which walk the pass had asked for.
 //!
 //! An equivalent rewrite already existed as `rewrite_errors_full_messages`
 //! in the Roda ingest, applied to view bodies only. That copy is left in
@@ -32,6 +42,7 @@ pub fn apply_errors_full_messages_lowering(app: &mut App) {
         return;
     }
     super::for_each_hook_body(app, &mut rewrite);
+    super::for_each_test_body(app, &mut rewrite);
     for view in &mut app.views {
         rewrite(&mut view.body);
     }
