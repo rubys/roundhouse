@@ -94,3 +94,61 @@ fn after_save_commit_does_not_become_after_commit() {
         "no bare after_commit override was declared:\n{src}"
     );
 }
+
+fn lambda_thing_src(decl: &str) -> String {
+    let model = format!(
+        "class Thing < ApplicationRecord\n  {decl}\n\n  def on_create; end\nend\n"
+    );
+    let app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "things", force: :cascade do |t|
+    t.string "name", null: false
+  end
+end
+"#,
+        ),
+        ("app/models/thing.rb", &model),
+    ]))
+    .expect("ingest callback app");
+    let files = ruby::emit_lowered_models(&app);
+    files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("thing.rb"))
+        .map(|f| f.content.clone())
+        .expect("thing.rb")
+}
+
+/// Rails means the same thing by a BLOCK and a zero-arity LAMBDA
+/// ARGUMENT, and campfire's `Message` writes the second
+/// (`after_create_commit -> { room.receive(self) }`). Matching only the
+/// block form dropped the declaration silently.
+#[test]
+fn a_zero_arity_lambda_argument_is_the_block_form() {
+    let src = lambda_thing_src("after_create_commit -> { on_create }");
+    assert!(
+        src.contains("def after_create_commit"),
+        "the lambda-argument spelling must fold:\n{src}"
+    );
+    let idx = src.find("def after_create_commit").unwrap();
+    let end = (idx + 120).min(src.len());
+    assert!(
+        src[idx..end].contains("on_create"),
+        "the hook must call the lambda's body:\n{}",
+        &src[idx..end]
+    );
+}
+
+/// A lambda WITH PARAMETERS declines: Rails `instance_exec`s the
+/// zero-arity form (so `self` is the record) but passes the record as
+/// an ARGUMENT to this one and leaves `self` as the declaring context.
+/// Splicing its body into a hook method would bind `self` wrong.
+#[test]
+fn a_lambda_with_parameters_still_declines() {
+    let src = lambda_thing_src("after_create_commit ->(record) { record.on_create }");
+    assert!(
+        !src.contains("def after_create_commit"),
+        "an arity-1 lambda must not fold:\n{src}"
+    );
+}

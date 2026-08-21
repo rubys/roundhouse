@@ -840,47 +840,57 @@ fn block_callback_on(arg: &Expr) -> Option<crate::dialect::CallbackOn> {
     }
 }
 
-/// NOTE (measured, deliberately NOT widened): the LAMBDA-ARGUMENT
-/// spelling is dropped here, and it is not an oversight.
-///
-/// Rails means the same thing by both of these —
+/// Rails means the same thing by both of these, and so does this —
 ///
 /// ```text
 /// after_create_commit { room.receive(self) }      # a BLOCK
 /// after_create_commit -> { room.receive(self) }   # a lambda ARG
 /// ```
 ///
-/// — and campfire's `Message` writes the second, which this `block:
-/// Some(block)` pattern does not match. Accepting `args == [Lambda]`
-/// beside it is four lines and folds correctly: the emitted
-/// `after_create_commit` gains `self.room.receive(self)` next to the
-/// concern's symbol-form `create_in_index`.
+/// — campfire's `Message` writes the second, and for three sessions
+/// this function matched only the first, so `room.receive(self)` never
+/// ran and every message's push was silently skipped.
 ///
-/// It takes the campfire suite from 154 passing to ZERO. `receive`
+/// THE FOUR LINES WERE NEVER THE PROBLEM. Folding the lambda form used
+/// to take the campfire suite from 154 passing to ZERO: `receive`
 /// reaches `push_later`, whose `Room::PushMessageJob.perform_later`
-/// runs INLINE under this runtime's adapter (see `runtime/ruby/
-/// active_job.rb` — a deliberate choice, and the honest one with no
-/// queue daemon in-process). So every message a fixture loads now runs
+/// ran INLINE, so every message a FIXTURE loads ran
 /// `Room::MessagePusher`, whose `Push::Subscription.joins(user:
 /// :memberships)` is a nested join the association registry cannot
-/// resolve and which RAISES rather than answer the wrong rows.
+/// resolve and which RAISES rather than answer the wrong rows. Rails'
+/// own tests never reach it because their adapter is `:test`, which
+/// enqueues without running. That divergence landed first
+/// (`lower::job_class_side`'s adapter gate + `ActiveJob::ENQUEUE_ONLY`),
+/// and with it in place this widening is what it always looked like.
 ///
-/// Rails' own tests do not hit this: their default adapter is `:test`,
-/// which ENQUEUES without running. That divergence — not the callback
-/// spelling — is what has to land first, and it is a queue with stored
-/// arguments rather than a log of names. Until it does, folding this
-/// callback trades one silently-missing enqueue for a suite-wide raise.
+/// A lambda WITH PARAMETERS (`->(record) { … }`) still declines: Rails
+/// `instance_exec`s the zero-arity form, so `self` is the record, but
+/// passes the record as an ARGUMENT to the other and leaves `self` as
+/// the declaring context. Two different bindings, and only one of them
+/// is the shape this splices into a hook method body.
 fn push_block_callback(methods: &mut Vec<MethodDef>, model: &Model, expr: &Expr) {
     {
-        let ExprNode::Send { recv: None, method, args, block: Some(block), .. } = &*expr.node else {
+        let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else {
             return;
+        };
+        // The callback body is a BLOCK or a LAMBDA ARGUMENT (see the
+        // doc comment). Either way what follows it is the option hash,
+        // so both spellings share one `on:` parse below.
+        let (callback, opt_args): (&Expr, &[Expr]) = match (block.as_ref(), &args[..]) {
+            (Some(b), rest) => (b, rest),
+            (None, [first, rest @ ..])
+                if matches!(&*first.node, ExprNode::Lambda { params, .. } if params.is_empty()) =>
+            {
+                (first, rest)
+            }
+            _ => return,
         };
         // `before_validation on: :create do … end` — the block form
         // carries its restriction as an option hash where the symbol
         // form carries it as a keyword. Anything else in that hash
         // (`if:`/`unless:`) drops the callback, matching ingest's
         // rejection for the symbol form.
-        let on = match &args[..] {
+        let on = match opt_args {
             [] => None,
             [opts] => match block_callback_on(opts) {
                 Some(on) => Some(on),
@@ -904,7 +914,7 @@ fn push_block_callback(methods: &mut Vec<MethodDef>, model: &Model, expr: &Expr)
             ("before_validation" | "after_validation", Some(_)) => hook,
             _ => return,
         };
-        let ExprNode::Lambda { body: lambda_body, .. } = &*block.node else {
+        let ExprNode::Lambda { body: lambda_body, .. } = &*callback.node else {
             return;
         };
 
