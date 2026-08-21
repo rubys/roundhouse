@@ -54,20 +54,25 @@ module Broadcasts
     TRANSPORTS << transport
   end
 
+  # The four actions go out through `Turbo::StreamsChannel` (below)
+  # rather than straight to `record`. See the note on that module: it is
+  # the seam Rails apps MOCK, and one hop is what makes their own tests
+  # runnable against this runtime.
+
   def self.append(stream:, target:, html:)
-    record(action: :append, stream: stream, target: target, html: html)
+    Turbo::StreamsChannel.broadcast_append_to(stream, target: target, html: html)
   end
 
   def self.prepend(stream:, target:, html:)
-    record(action: :prepend, stream: stream, target: target, html: html)
+    Turbo::StreamsChannel.broadcast_prepend_to(stream, target: target, html: html)
   end
 
   def self.replace(stream:, target:, html:)
-    record(action: :replace, stream: stream, target: target, html: html)
+    Turbo::StreamsChannel.broadcast_replace_to(stream, target: target, html: html)
   end
 
   def self.remove(stream:, target:)
-    record(action: :remove, stream: stream, target: target, html: "")
+    Turbo::StreamsChannel.broadcast_remove_to(stream, target: target)
   end
 
   def self.record(action:, stream:, target:, html:)
@@ -111,4 +116,44 @@ module Broadcasts
   # the constant (see TRANSPORTS above); overlays that wire a real
   # transport replace it via `set_transport`.
   TRANSPORTS[0].broadcast("", "")
+end
+
+# The seam a Rails app's own tests MOCK.
+#
+# `Turbo::StreamsChannel.broadcast_replace_to` is where turbo-rails
+# actually sends a stream, and an app that wants to assert "this action
+# broadcast exactly once" stubs it — campfire's `messages_controller_test`
+# does it four times. Against an emitted tree those four could not even
+# reach their assertion: the constant did not exist, so the test died at
+# `uninitialized constant Turbo::StreamsChannel` before the request ran.
+#
+# RE-DERIVED, because this file used to carry the opposite conclusion:
+# that binding the seam meant a facade in every one of the per-target
+# `Broadcasts` twins. It does not. The seam is only ever reached from a
+# TEST, and the only tests that mock it are the app's own, which run on
+# the ruby family. A strict target has no mocha and no test that names
+# this constant, so its `Broadcasts` twin owes nothing.
+#
+# One hop, and `record` still owns the log: with no stub in place the
+# behaviour is byte-identical to calling `record` directly. With a stub,
+# nothing is logged — which is exactly what Rails does when the channel
+# is mocked out.
+module Turbo
+  module StreamsChannel
+    def self.broadcast_append_to(stream, target:, html:)
+      Broadcasts.record(action: :append, stream: stream, target: target, html: html)
+    end
+
+    def self.broadcast_prepend_to(stream, target:, html:)
+      Broadcasts.record(action: :prepend, stream: stream, target: target, html: html)
+    end
+
+    def self.broadcast_replace_to(stream, target:, html:)
+      Broadcasts.record(action: :replace, stream: stream, target: target, html: html)
+    end
+
+    def self.broadcast_remove_to(stream, target:)
+      Broadcasts.record(action: :remove, stream: stream, target: target, html: "")
+    end
+  end
 end
