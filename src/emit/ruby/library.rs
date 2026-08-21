@@ -2942,18 +2942,125 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
         .iter()
         .map(|h| format!("{}_path", h.name.as_str()))
         .collect();
-    for lc in lcs.iter_mut() {
-        for m in &mut lc.methods {
-            rewrite_route_params(
-                &mut m.body,
-                &all_models,
-                &slug_models,
-                &assoc_targets,
-                &collection_targets,
-                &direct_helpers,
-            );
+    let class_method_targets = record_answering_class_methods(app);
+    let mut sig = RecordSignals {
+        all_models: &all_models,
+        slug_models: &slug_models,
+        assoc_targets: &assoc_targets,
+        collection_targets: &collection_targets,
+        class_method_targets: &class_method_targets,
+        direct_helpers: &direct_helpers,
+        self_returns: std::collections::HashMap::new(),
+    };
+    // What each INSTANCE method in this slice answers, to a fixpoint.
+    //
+    // Across the whole slice, not per class, because the caller and the
+    // method are routinely in different ones: campfire's
+    // `WelcomeController#index` reads `last_room_visited`, which
+    // `ApplicationController` declares. Walking an ancestor chain would
+    // say the same thing for these two and less for a concern; the
+    // uniqueness rule below is what keeps a slice-wide map honest, and
+    // it is the same standard the association maps hold.
+    //
+    // A FIXPOINT because the methods call each other:
+    // `last_room_visited` is `…find_by(id: cookie) || default_room`,
+    // and `default_room` has to be resolved first. Bounded by the
+    // method count; two rounds in practice.
+    {
+        let mut ambiguous: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for _ in 0..8 {
+            let mut grew = false;
+            for lc in lcs.iter() {
+                for m in &lc.methods {
+                    let name = m.name.as_str().to_string();
+                    if m.receiver != MethodReceiver::Instance || ambiguous.contains(&name) {
+                        continue;
+                    }
+                    let Some(model) = arg_record_model(body_tail(&m.body), &sig) else {
+                        continue;
+                    };
+                    match sig.self_returns.get(&name) {
+                        Some(existing) if existing == &model => {}
+                        Some(_) => {
+                            ambiguous.insert(name.clone());
+                            sig.self_returns.remove(&name);
+                            grew = true;
+                        }
+                        None => {
+                            sig.self_returns.insert(name, model);
+                            grew = true;
+                        }
+                    }
+                }
+            }
+            if !grew {
+                break;
+            }
         }
     }
+    for lc in lcs.iter_mut() {
+        for m in &mut lc.methods {
+            rewrite_route_params(&mut m.body, &sig);
+        }
+    }
+}
+
+/// The last expression a body evaluates to — its return value for
+/// every shape this pass reads. A `Seq`'s tail; anything else is
+/// already the tail.
+fn body_tail(body: &Expr) -> &Expr {
+    match &*body.node {
+        ExprNode::Seq { exprs } => exprs.last().unwrap_or(body),
+        _ => body,
+    }
+}
+
+/// Model class methods that answer ONE RECORD of their own model —
+/// a body whose tail is `.first` / `.last`.
+///
+/// campfire's `Room.original` (`order(:created_at).first`) is the
+/// caller: `default_room` reads `Current.user.rooms.original`, whose
+/// receiver is a `has_many :through` and so carries no type at all.
+/// The METHOD NAME carries it instead, on the same uniqueness rule the
+/// association maps use — a name two models declare answers None.
+fn record_answering_class_methods(app: &App) -> std::collections::HashMap<String, String> {
+    let mut out: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut ambiguous: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Read from `app.models`, not from the LibraryClass slice this pass
+    // was handed: the pass runs over CONTROLLERS too, and the class
+    // method a controller body names lives on a model that slice does
+    // not contain.
+    for model_def in &app.models {
+        let model = model_def.name.0.as_str().to_string();
+        for m in model_def.body.iter().filter_map(|item| match item {
+            crate::dialect::ModelBodyItem::Method { method, .. } => Some(method),
+            _ => None,
+        }) {
+            if m.receiver != MethodReceiver::Class {
+                continue;
+            }
+            let tail = body_tail(&m.body);
+            let answers_one = matches!(&*tail.node,
+                ExprNode::Send { recv: Some(_), method, args, block: None, .. }
+                    if args.is_empty() && matches!(method.as_str(), "first" | "last"));
+            if !answers_one {
+                continue;
+            }
+            let key = m.name.as_str().to_string();
+            match out.get(&key) {
+                Some(existing) if existing != &model => {
+                    ambiguous.insert(key);
+                }
+                _ => {
+                    out.insert(key, model.clone());
+                }
+            }
+        }
+    }
+    for k in ambiguous {
+        out.remove(&k);
+    }
+    out
 }
 
 /// Model names (`Tag`, `User`) whose class defines its own `to_param`.
@@ -3035,29 +3142,33 @@ fn singular_association_targets(app: &App) -> std::collections::HashMap<String, 
     out
 }
 
-fn rewrite_route_params(
-    expr: &mut Expr,
-    all_models: &std::collections::HashSet<String>,
-    slug_models: &std::collections::HashSet<String>,
-    assoc_targets: &std::collections::HashMap<String, String>,
-    collection_targets: &std::collections::HashMap<String, String>,
-    direct_helpers: &std::collections::HashSet<String>,
-) {
-    expr.node.for_each_child_mut(&mut |e| {
-        rewrite_route_params(
-            e,
-            all_models,
-            slug_models,
-            assoc_targets,
-            collection_targets,
-            direct_helpers,
-        )
-    });
+/// Everything `arg_record_model` reads, in one place — the signal set
+/// grew past what a positional argument list explains.
+///
+/// `self_returns` is the one that varies per LibraryClass: it maps THIS
+/// class's own method names to the model each one answers, so a bare
+/// `room_path(last_room_visited)` can resolve through the method it
+/// names. The other four are App-wide.
+pub(crate) struct RecordSignals<'a> {
+    all_models: &'a std::collections::HashSet<String>,
+    slug_models: &'a std::collections::HashSet<String>,
+    assoc_targets: &'a std::collections::HashMap<String, String>,
+    collection_targets: &'a std::collections::HashMap<String, String>,
+    /// A model CLASS METHOD whose body answers one record of that model
+    /// — `Room.original` is `order(:created_at).first`. Unambiguous
+    /// names only.
+    class_method_targets: &'a std::collections::HashMap<String, String>,
+    direct_helpers: &'a std::collections::HashSet<String>,
+    self_returns: std::collections::HashMap<String, String>,
+}
+
+fn rewrite_route_params(expr: &mut Expr, sig: &RecordSignals<'_>) {
+    expr.node.for_each_child_mut(&mut |e| rewrite_route_params(e, sig));
     let is_helper_call = matches!(
         &*expr.node,
         ExprNode::Send { recv: Some(r), method, block: None, .. }
             if method.as_str().ends_with("_path")
-                && !direct_helpers.contains(method.as_str())
+                && !sig.direct_helpers.contains(method.as_str())
                 && matches!(&*r.node, ExprNode::Const { path }
                     if path.last().map(|s| s.as_str() == "RouteHelpers").unwrap_or(false))
     );
@@ -3066,15 +3177,14 @@ fn rewrite_route_params(
     }
     let ExprNode::Send { args, .. } = &mut *expr.node else { unreachable!() };
     for arg in args.iter_mut() {
-        let Some(model) = arg_record_model(arg, all_models, assoc_targets, collection_targets)
-        else {
+        let Some(model) = arg_record_model(arg, sig) else {
             continue;
         };
         // A model that overrides `to_param` answers its slug there and
         // the segment is declared `Str`. Every other model's `to_param`
         // IS `id`, and `param_ty` declares that segment `Int` — so call
         // `id` rather than a `to_param` the emitted model doesn't have.
-        let slug = slug_models.contains(&model);
+        let slug = sig.slug_models.contains(&model);
         let (method, ty) = if slug {
             ("to_param", crate::ty::Ty::Str)
         } else {
@@ -3096,12 +3206,10 @@ fn rewrite_route_params(
     }
 }
 
-fn arg_record_model(
-    arg: &Expr,
-    all_models: &std::collections::HashSet<String>,
-    assoc_targets: &std::collections::HashMap<String, String>,
-    collection_targets: &std::collections::HashMap<String, String>,
-) -> Option<String> {
+fn arg_record_model(arg: &Expr, sig: &RecordSignals<'_>) -> Option<String> {
+    let all_models = sig.all_models;
+    let assoc_targets = sig.assoc_targets;
+    let collection_targets = sig.collection_targets;
     // (1) A stamped model type.
     if let Some(crate::ty::Ty::Class { id, .. }) =
         arg.ty.as_ref().map(crate::ty::Ty::peel_nilable)
@@ -3109,6 +3217,17 @@ fn arg_record_model(
         if all_models.contains(id.0.as_str()) {
             return Some(id.0.as_str().to_string());
         }
+    }
+    // (5) `a || b` — Rails' "this one, else that one" (campfire's
+    // `last_room_visited` is `…find_by(id: cookie) || default_room`).
+    // BOTH sides must answer the SAME model: one side resolving proves
+    // nothing about the value that actually arrives.
+    if let ExprNode::BoolOp { op: crate::expr::BoolOpKind::Or, left, right, .. } = &*arg.node {
+        let (l, r) = (arg_record_model(left, sig), arg_record_model(right, sig));
+        return match (l, r) {
+            (Some(a), Some(b)) if a == b => Some(a),
+            _ => None,
+        };
     }
     match &*arg.node {
         // (2) A singular association read, or (4) `.first` / `.last` on
@@ -3123,9 +3242,50 @@ fn arg_record_model(
             {
                 return Some(target.clone());
             }
+            // (7b) `self.<method>` — the same self-call as (7) below,
+            // with the receiver spelled out. campfire writes
+            // `… || self.default_room`, and the emitted controller
+            // keeps that spelling.
+            if matches!(&*r.node, ExprNode::SelfRef) {
+                if let Some(model) = sig.self_returns.get(method.as_str()) {
+                    return Some(model.clone());
+                }
+            }
+            // (6) A model CLASS METHOD that answers one record —
+            // campfire's `Current.user.rooms.original`, where `Room
+            // .original` is `order(:created_at).first`. The receiver's
+            // own type is exactly what does not resolve here; the
+            // METHOD NAME is what carries it, on the same uniqueness
+            // rule the association maps use.
+            if let Some(target) = sig
+                .class_method_targets
+                .get(method.as_str())
+                .filter(|target| all_models.contains(*target))
+            {
+                return Some(target.clone());
+            }
             if !matches!(method.as_str(), "first" | "last") {
                 return None;
             }
+            let ExprNode::Send { method: assoc, args: aargs, block: None, .. } = &*r.node else {
+                return None;
+            };
+            if !aargs.is_empty() {
+                return None;
+            }
+            collection_targets
+                .get(assoc.as_str())
+                .filter(|target| all_models.contains(*target))
+                .cloned()
+        }
+        // (4b) `find_by`/`find`/`find_by!` on a has_many read — ONE
+        // record of the collection's type, exactly like `.first` above
+        // and split out only because those take no arguments. The
+        // receiver stays a zero-arg association read: `@room.messages
+        // .where(…).find_by(…)` is a chain this pass does not follow.
+        ExprNode::Send { recv: Some(r), method, block: None, .. }
+            if matches!(method.as_str(), "find" | "find_by" | "find_by!") =>
+        {
             let ExprNode::Send { method: assoc, args: aargs, block: None, .. } = &*r.node else {
                 return None;
             };
@@ -3152,7 +3312,14 @@ fn arg_record_model(
         }
         ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
             let camel = crate::naming::camelize(method.as_str());
-            all_models.contains(&camel).then_some(camel)
+            if all_models.contains(&camel) {
+                return Some(camel);
+            }
+            // (7) …else a call to one of THIS class's own methods,
+            // resolved through what that method's body answers.
+            // `redirect_to room_path(last_room_visited)` is the shape:
+            // the name is not a model's, and nothing upstream typed it.
+            sig.self_returns.get(method.as_str()).cloned()
         }
         _ => None,
     }
