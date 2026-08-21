@@ -608,6 +608,18 @@ module ActiveRecord
       empty?
     end
 
+    # `one?` — EXACTLY one row, the third of the Enumerable predicates
+    # Rails reaches through a relation. Its siblings have been here
+    # since `any?`; this one had no caller until a `has_many :through`
+    # reader started answering a real Relation, at which point
+    # campfire's `user.rooms.one?` stopped being an Array question.
+    #
+    # Block form is absent for the same reason `any?`'s is: it would
+    # have to materialize and iterate, and no call site asks.
+    def one?
+      count == 1
+    end
+
     # Block form of Enumerable#all? over the materialized rows (the
     # runtime `Base.where` fallback returns a Relation, and dynamic
     # call-sites treat it as the array Rails hands back).
