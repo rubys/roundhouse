@@ -845,8 +845,10 @@ fn block_callback_on(arg: &Expr) -> Option<crate::dialect::CallbackOn> {
 ///
 /// Rails means the same thing by both of these —
 ///
-///     after_create_commit { room.receive(self) }      # a BLOCK
-///     after_create_commit -> { room.receive(self) }   # a lambda ARG
+/// ```text
+/// after_create_commit { room.receive(self) }      # a BLOCK
+/// after_create_commit -> { room.receive(self) }   # a lambda ARG
+/// ```
 ///
 /// — and campfire's `Message` writes the second, which this `block:
 /// Some(block)` pattern does not match. Accepting `args == [Lambda]`
