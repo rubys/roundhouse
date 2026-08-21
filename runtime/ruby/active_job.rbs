@@ -3,6 +3,11 @@ module ActiveJob
   def self.record_performed: (String job_name) -> nil
   def self.performed: () -> Array[String]
 
+  ENQUEUE_ONLY: Array[String]
+  def self.enqueue_only: () -> bool
+  def self.enqueue_without_running: () -> nil
+  def self.run_enqueued: () -> nil
+
   class Base
     def self.queue_as: (?Symbol? name) -> nil
     def self.enqueue_after_transaction_commit=: (bool value) -> nil

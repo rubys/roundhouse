@@ -175,8 +175,65 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                     },
                 );
                 record.ty = Some(Ty::Nil);
-                let mut seq = Expr::new(span, ExprNode::Seq { exprs: vec![record, body] });
-                seq.ty = ret_ty.clone();
+                // …and DISPATCHES ONLY UNDER THE INLINE ADAPTER. Rails'
+                // test environment runs `:test`, which enqueues without
+                // running, and the difference is load-bearing rather
+                // than cosmetic: campfire's `Message` has
+                // `after_create_commit -> { room.receive(self) }` whose
+                // tail is a `perform_later`, so inline dispatch would
+                // run `Room::MessagePusher` for every message a FIXTURE
+                // loads and take the whole suite down in its
+                // unresolvable nested join. Rails' own suite never
+                // reaches that code. `ActiveJob::ENQUEUE_ONLY` is empty
+                // for an app, so a running app is unchanged.
+                let mut gate = Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(Expr::new(
+                            span,
+                            ExprNode::Const { path: vec![Symbol::from("ActiveJob")] },
+                        )),
+                        method: Symbol::from("enqueue_only"),
+                        args: vec![],
+                        block: None,
+                        parenthesized: true,
+                    },
+                );
+                gate.ty = Some(Ty::Bool);
+                let mut cond = Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(gate),
+                        method: Symbol::from("!"),
+                        args: Vec::new(),
+                        block: None,
+                        parenthesized: false,
+                    },
+                );
+                cond.ty = Some(Ty::Bool);
+                let mut nil_arm = Expr::new(
+                    span,
+                    ExprNode::Lit { value: crate::expr::Literal::Nil },
+                );
+                nil_arm.ty = Some(Ty::Nil);
+                let mut guarded = Expr::new(
+                    span,
+                    ExprNode::If {
+                        cond,
+                        then_branch: body,
+                        else_branch: nil_arm.clone(),
+                    },
+                );
+                guarded.ty = Some(Ty::Nil);
+                // The wrapper answers NIL, not the perform's value.
+                // Rails' `perform_later` answers the job (or `false`),
+                // never the result — nothing in any corpus reads it —
+                // and a Nil return is what lets the guarded call sit in
+                // statement position on the strict targets instead of
+                // forcing a `<perform-return> | nil` union.
+                let mut seq =
+                    Expr::new(span, ExprNode::Seq { exprs: vec![record, guarded, nil_arm] });
+                seq.ty = Some(Ty::Nil);
                 seq
             } else {
                 body

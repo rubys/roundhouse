@@ -1,17 +1,25 @@
-//! `assert_enqueued_jobs` over an INLINE adapter.
+//! `assert_enqueued_jobs` and the two adapters.
 //!
 //! Rails' ActiveJob test helpers count enqueues by inspecting the test
-//! adapter's queue. This runtime's adapter is inline — `perform_later`
-//! runs the job — so there is no queue, which is equally true of Rails'
-//! own `:inline` adapter and exactly why Rails' helpers require the
-//! `:test` one.
+//! adapter's queue. This runtime has no queue daemon, so an APP
+//! dispatches inline — `perform_later` runs the job at the call site.
+//! Under TEST it does what Rails' `:test` adapter does instead:
+//! records and returns without dispatching, gated on
+//! `ActiveJob.enqueue_only` (the emitted harness switches it on at
+//! load).
 //!
-//! `ActiveJob::PERFORMED` is the equivalent seam, and it is the same
-//! shape as `Broadcasts::LOG`: the wrapper appends before dispatching,
-//! and every helper reads a LENGTH DELTA across its block. "Enqueued
-//! during this block" and "ran during this block" are then the same
-//! set; the shape that separates them — enqueued and never run —
-//! inline semantics cannot produce.
+//! That difference is load-bearing rather than cosmetic. campfire's
+//! `Message` fires `Room::PushMessageJob.perform_later` from an
+//! `after_create_commit`, so inline dispatch would run the pusher for
+//! every message a FIXTURE loads and take the suite down in an
+//! unresolvable nested join before any assertion ran — which is
+//! exactly the code Rails' own suite never reaches.
+//!
+//! `ActiveJob::PERFORMED` is the queue-inspection seam, and it is the
+//! same shape as `Broadcasts::LOG`: the wrapper appends before the
+//! gate, and every helper reads a LENGTH DELTA across its block. The
+//! log holds NAMES, not arguments, which is what `assert_enqueued_with`
+//! documents its narrower check against.
 //!
 //! Entries are class NAMES. A class is not a first-class value on the
 //! strict targets, so the call sites that name one
@@ -125,6 +133,41 @@ fn perform_later_records_and_perform_now_does_not() {
     assert!(
         !now_body.contains("record_performed"),
         "perform_now enqueues nothing:\n{now_body}"
+    );
+}
+
+/// `perform_later` DISPATCHES ONLY UNDER THE INLINE ADAPTER, and it
+/// answers nil rather than the perform's value — Rails' answers the
+/// job, never the result, and a Nil return is what lets the guarded
+/// call sit in statement position without a `<perform-return> | nil`
+/// union on the strict targets.
+///
+/// `perform_now` is UNGATED: its Rails semantics is "run now", and a
+/// test that calls it is asking for the job to run.
+#[test]
+fn perform_later_is_gated_on_the_adapter_and_perform_now_is_not() {
+    let src = emitted("notify_job.rb");
+    let later = src
+        .split("def self.perform_later")
+        .nth(1)
+        .and_then(|s| s.split("\n  end").next())
+        .unwrap_or_else(|| panic!("no perform_later:\n{src}"));
+    assert!(
+        later.contains("ActiveJob.enqueue_only"),
+        "perform_later must gate its dispatch on the adapter:\n{later}"
+    );
+    assert!(
+        later.trim_end().ends_with("nil"),
+        "perform_later must answer nil:\n{later}"
+    );
+    let now = src
+        .split("def self.perform_now")
+        .nth(1)
+        .and_then(|s| s.split("\n  end").next())
+        .unwrap_or_else(|| panic!("no perform_now:\n{src}"));
+    assert!(
+        !now.contains("enqueue_only"),
+        "perform_now runs unconditionally:\n{now}"
     );
 }
 

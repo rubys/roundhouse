@@ -521,18 +521,54 @@ arguments passes here and fails in Rails. Nothing in the corpus depends
 on the distinction today; campfire's one site asserts a ban job for a
 user, and the class is unique to that path.
 
-### ActiveJob's test helpers count jobs that RAN
+### A job enqueues under test and runs inline in the app
 
-The adapter is inline (`lower::job_class_side` makes `perform_later`
-run the job), so there is no queue to inspect — the same reason Rails'
-own `:inline` adapter does not work with these helpers.
-`ActiveJob::PERFORMED` is the seam instead, appended by the
-`perform_later` wrapper.
+Rails picks its adapter per environment: `:test` enqueues without
+running, the app's runs the job for real. This runtime does the same
+with one seam. `lower::job_class_side` synthesizes
 
-**Why it is equivalent here.** "Enqueued during this block" and "ran
-during this block" are the same set under inline dispatch. The shape
-that separates them — a job enqueued and never run — is one inline
-semantics cannot produce.
+```text
+def self.perform_later(a, b)
+  ActiveJob.record_performed("X")
+  new.perform(a, b) if !ActiveJob.enqueue_only
+  nil
+end
+```
+
+`ActiveJob::ENQUEUE_ONLY` is an empty suspension stack by default, so a
+running app dispatches at the call site — there is no queue daemon
+in-process, which is the `:inline` adapter's semantics. The emitted
+test harness pushes onto that stack at load, so the suite enqueues.
+
+**Why the difference is load-bearing.** campfire's `Message` carries
+`after_create_commit -> { room.receive(self) }`, whose tail is
+`Room::PushMessageJob.perform_later`. Under inline dispatch every
+message a FIXTURE loads runs `Room::MessagePusher`, and the suite dies
+in that job's unresolvable nested join before a single assertion runs.
+Rails' own suite never reaches the code, for exactly this reason.
+
+**What it costs.** `perform_later` answers `nil` rather than the
+perform's value. Rails answers the job (or `false`), never the result,
+so nothing portable reads it — and a Nil return is what lets the
+guarded call sit in statement position instead of forcing a
+`<perform-return> | nil` union on the strict targets.
+
+`perform_now` is ungated in both environments: its Rails semantics is
+already "run now".
+
+### ActiveJob's test helpers count NAMES, and `perform_enqueued_jobs` re-enters inline
+
+`ActiveJob::PERFORMED` is the queue-inspection seam, appended by the
+`perform_later` wrapper before the adapter gate — so it is an ENQUEUE
+log in both environments. It holds class NAMES, not arguments (a class
+is not a first-class value on the strict targets, and the call sites
+that name one are rewritten to the string by `lower::job_test_only`).
+
+`perform_enqueued_jobs { … }` therefore cannot replay a queue: it holds
+no arguments. It switches back to inline dispatch for the block
+instead, so the jobs the block enqueues run as it enqueues them — the
+same observable behaviour for a block that enqueues and then asserts,
+and different only for one that enqueued BEFORE the block opened.
 
 ### A terminal must leave the relation as it found it
 

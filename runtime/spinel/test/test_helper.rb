@@ -238,13 +238,20 @@ end
 # `assert_enqueued_jobs 1, only: [ Room::PushMessageJob ] do … end` —
 # run the block, count what it enqueued.
 #
-# The adapter is INLINE, so there is no queue to inspect. That is also
-# true of Rails' own `:inline` adapter, which is why Rails' helpers
-# require the `:test` one; `ActiveJob::PERFORMED` is the equivalent
-# seam, appended by the `perform_later` wrapper `lower::job_class_side`
-# synthesizes. "Enqueued during this block" and "ran during this block"
-# are therefore the same set — the only shape that separates them, a job
-# enqueued and never run, inline semantics cannot produce.
+# THE SUITE RUNS THE `:test` ADAPTER, as Rails' does: `perform_later`
+# records and returns WITHOUT dispatching (see `ActiveJob::ENQUEUE_ONLY`
+# — switched on at the bottom of this file). The app itself still runs
+# its jobs inline; only the suite enqueues. That is not a convenience:
+# campfire's `Message` fires `Room::PushMessageJob.perform_later` from
+# an `after_create_commit`, so under inline dispatch every message a
+# FIXTURE loads would run the pusher, and the suite would die in its
+# unresolvable nested join before a single assertion ran. Rails' suite
+# never reaches that code for exactly this reason.
+#
+# `ActiveJob::PERFORMED` is the queue-inspection seam, appended by the
+# `perform_later` wrapper `lower::job_class_side` synthesizes — a log of
+# NAMES rather than a queue of arguments, which is what
+# `assert_enqueued_with` documents its narrower check against.
 #
 # `only:` is an ARRAY OF CLASS NAMES, empty for "any". The test source
 # writes classes (`only: Bot::WebhookJob`); `lower::job_test_only`
@@ -273,12 +280,22 @@ module ActiveJob
       assert_enqueued_jobs(0, only: only, &block)
     end
 
-    # Inline jobs have ALREADY run by the time the block returns, so
-    # there is nothing left to drain — the block itself is the whole
-    # behaviour. Rails' version drains its queue here; ours is a no-op
-    # around the same call, which is the honest inline reading.
+    # The suite runs under the `:test` adapter (see the block comment
+    # above), so a job enqueued outside one of these blocks has NOT
+    # run. Rails drains its queue here; we hold no arguments to replay,
+    # so we switch back to inline dispatch for the block instead — the
+    # jobs it enqueues run as it enqueues them, which is the same
+    # observable behaviour for a block that enqueues and then asserts.
+    #
+    # `ensure`, and a STACK in `ActiveJob`, so a nested block and a
+    # raising one both restore what they found.
     def perform_enqueued_jobs(only: [], &block)
-      block.call
+      ActiveJob.run_enqueued
+      begin
+        block.call
+      ensure
+        ActiveJob.enqueue_without_running
+      end
     end
 
     # `assert_enqueued_with(job: RemoveBannedContentJob, args: [ user ])`.
@@ -297,6 +314,13 @@ module ActiveJob
     end
   end
 end
+
+# The switch itself, at load: from here on `perform_later` enqueues and
+# returns. Placed at the top level rather than in `TestBase#setup`
+# because a FIXTURE load runs model callbacks before any test's setup —
+# which is precisely the path (`after_create_commit` →
+# `Room::PushMessageJob.perform_later`) that made this necessary.
+ActiveJob.enqueue_without_running
 
 # ---- ActionCable::TestHelper ----------------------------------------
 #
