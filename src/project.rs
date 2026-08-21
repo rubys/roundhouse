@@ -1475,7 +1475,18 @@ fn apply_controller_dispatch(files: &mut [(String, String)], app: &App, lazy_req
         // previous visitor's user, which is an auth bypass rather than a
         // staleness bug. Rails resets it per request through an executor
         // hook the emitted trees have no equivalent of.
-        if path.ends_with("main.rb") {
+        //
+        // BOTH DISPATCHERS, because there are two. The test harness parks
+        // the same `ActionController::Current` pair as main.rb and then
+        // calls `process_action` the same way, so a controller test
+        // inherits the PREVIOUS request's `Current.user` — which is how
+        // campfire's `users_controller_test` saw `get join_url(code)`
+        // answer 302 to root: an earlier `sign_in` in the same file left
+        // a user parked, `redirect_signed_in_user_to_root` believed it,
+        // and the unauthenticated join page was never reachable. Rails'
+        // integration tests get the reset from the executor in the
+        // middleware stack every `get`/`post` runs through.
+        if path.ends_with("main.rb") || path.ends_with("test/test_helper.rb") {
             for class in current_classes {
                 let marker = "    ActionController::Current.controller = controller";
                 let with_reset =
@@ -3076,6 +3087,59 @@ mod tests {
         // JS-only trim keeps websocket-driver, and vice versa.
         assert!(trim_gemfile(&gemfile, false, true).contains("websocket-driver"));
         assert!(trim_gemfile(&gemfile, true, false).contains("turbo-rails"));
+    }
+
+    /// Both dispatchers reset the app's `CurrentAttributes` subclass.
+    ///
+    /// There are two — `main.rb` serves and `test/test_helper.rb`
+    /// drives controller tests — and they park the same
+    /// `ActionController::Current` pair before calling
+    /// `process_action`. Only main.rb used to clear `Current`, so a
+    /// controller test inherited the previous request's user: campfire's
+    /// `get join_url(code)` answered 302 to root because an earlier
+    /// `sign_in` in the same file was still parked. Reads the REAL
+    /// scaffold files, so a rename of the marker line fails here rather
+    /// than silently dropping the reset from an emitted tree.
+    #[test]
+    fn current_attributes_reset_lands_in_both_dispatchers() {
+        let mut app = App::new();
+        app.current_attribute_classes =
+            vec![crate::ident::ClassId(crate::ident::Symbol::from("Current"))];
+        app.routes.entries.push(crate::dialect::RouteSpec::Root {
+            target: "articles#index".to_string(),
+        });
+
+        let mut files = vec![
+            (
+                "main.rb".to_string(),
+                fs::read_to_string("runtime/spinel/scaffold/ruby_overlay/main.rb").unwrap(),
+            ),
+            (
+                "test/test_helper.rb".to_string(),
+                fs::read_to_string("runtime/spinel/test/test_helper.rb").unwrap(),
+            ),
+        ];
+        apply_controller_dispatch(&mut files, &app, false);
+
+        for (path, content) in &files {
+            assert!(
+                content.contains(
+                    "    ActionController::Current.controller = controller\n    Current.reset"
+                ),
+                "{path} parks the request without resetting Current"
+            );
+            // Once, not once per re-run: the pass runs twice on a CRuby tree.
+            assert_eq!(content.matches("Current.reset").count(), 1, "{path}");
+        }
+
+        // An app with no CurrentAttributes subclass gets no reset call.
+        app.current_attribute_classes.clear();
+        let mut plain = vec![(
+            "main.rb".to_string(),
+            fs::read_to_string("runtime/spinel/scaffold/ruby_overlay/main.rb").unwrap(),
+        )];
+        apply_controller_dispatch(&mut plain, &app, false);
+        assert!(!plain[0].1.contains("Current.reset"));
     }
 
     #[test]
