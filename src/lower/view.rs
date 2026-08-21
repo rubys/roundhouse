@@ -74,6 +74,21 @@ pub enum RenderPartial<'a> {
     /// collection's surface name (used by emitters to derive the
     /// partial-fn name and any foreign-key/class lookups).
     Collection { collection: &'a Expr, name: &'a str },
+    /// `render @post` — render ONE record's partial. Rails picks
+    /// between this and [`Self::Collection`] at runtime, on whether the
+    /// argument answers `to_ary`; statically the discriminator is the
+    /// NAME's number, which is the same rule this lowering's ivar typer
+    /// (`view_to_library::ivar_ty`) already uses to decide `Array[T]`
+    /// vs `T` for the very same ivar.
+    ///
+    /// `name` is the record local's surface name; the partial is its
+    /// PLURAL directory plus its own singular (`@post` →
+    /// `Views::Posts.post(post)`), mirroring Rails'
+    /// `to_partial_path`. A record ivar not named after its model
+    /// (`@edit_user` → `Views::EditUsers.edit_user`) resolves to the
+    /// name's plural, the same convention every other name-directed
+    /// consumer in this lowering follows.
+    Record { record: &'a Expr, name: &'a str },
     /// `render @post.comments` — iterate an association method on
     /// a receiver Var/Ivar, calling a partial per element.
     Association { receiver: &'a Expr, method: &'a str },
@@ -179,6 +194,20 @@ pub fn classify_render_partial<'a>(
                     Some(RenderPartial::DynamicNamed {
                         name: arg,
                         ivar: name.as_str(),
+                    })
+                } else if crate::naming::singularize(name.as_str()) == name.as_str() {
+                    // A SINGULAR name renders one record. Rails decides
+                    // this at runtime (`to_ary`); the name is what a
+                    // static lowering has, and it is the same fact
+                    // `ivar_ty` reads to type the ivar. Left as a
+                    // Collection the emit was not merely different but
+                    // BROKEN: `render @message` became
+                    // `message.each { … Views::Message.message(m) }` —
+                    // `each` on a record, into a module (singular
+                    // `Views::Message`) that no partial ever defines.
+                    Some(RenderPartial::Record {
+                        record: arg,
+                        name: name.as_str(),
                     })
                 } else {
                     Some(RenderPartial::Collection {
@@ -1242,6 +1271,42 @@ mod tests {
 
     fn hash(entries: Vec<(Expr, Expr)>) -> Expr {
         Expr::new(Span::synthetic(), ExprNode::Hash { entries, kwargs: true })
+    }
+
+    #[test]
+    fn render_singular_ivar_is_a_record_render() {
+        // `render @message` renders ONE record. Read as a Collection it
+        // emitted `message.each { … Views::Message.message(m) }` — an
+        // `each` on a record, into a singular module no partial defines.
+        let args = vec![var("message")];
+        let rp =
+            classify_render_partial(None, "render", &args, None, &|_| true, &|_| false).unwrap();
+        match rp {
+            RenderPartial::Record { name, .. } => assert_eq!(name, "message"),
+            other => panic!("expected Record, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_plural_ivar_is_still_a_collection() {
+        let args = vec![var("messages")];
+        let rp =
+            classify_render_partial(None, "render", &args, None, &|_| true, &|_| false).unwrap();
+        match rp {
+            RenderPartial::Collection { name, .. } => assert_eq!(name, "messages"),
+            other => panic!("expected Collection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_options_ivar_still_wins_over_the_record_arm() {
+        // An options ivar (`@above = { partial: "stories/subnav" }`) is
+        // singular-named too; the dynamic dispatch must keep priority.
+        let args = vec![var("above")];
+        let rp =
+            classify_render_partial(None, "render", &args, None, &|_| true, &|n| n == "above")
+                .unwrap();
+        assert!(matches!(rp, RenderPartial::DynamicNamed { ivar: "above", .. }));
     }
 
     #[test]

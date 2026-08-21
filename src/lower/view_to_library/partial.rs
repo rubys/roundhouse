@@ -25,6 +25,31 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             let collection_recv = var_ref(Symbol::from(plural));
             Some(emit_partial_each(&collection_recv, plural, ctx))
         }
+        // `render @message` (one record) — a single append, not an
+        // `each`. Rails resolves the partial through the record's
+        // `to_partial_path`: its own name in its PLURAL directory,
+        // `messages/_message`. Spelled here exactly as
+        // `render_partial_key` spells the graph edge, so the partial's
+        // closure args line up with the call.
+        RenderPartial::Record { name, .. } => {
+            let singular = (*name).to_string();
+            let plural_camel = camelize_path(&crate::naming::pluralize_snake(&singular));
+            let mut call_args = vec![var_ref(Symbol::from(crate::naming::safe_local(&singular)))];
+            call_args.extend(partial_extra_args(ctx, &plural_camel, &singular));
+            let call = send(
+                Some(Expr::new(
+                    Span::synthetic(),
+                    ExprNode::Const {
+                        path: vec![Symbol::from("Views"), Symbol::from(plural_camel)],
+                    },
+                )),
+                &singular,
+                call_args,
+                None,
+                true,
+            );
+            Some(accumulator_append_call(call, ctx))
+        }
         // `render "form", article: @article` — explicit-name partial.
         // Rewrites to `<accumulator> << Views::<Plural>.<method>(arg)`
         // — a single Send append, NOT an each block, since named

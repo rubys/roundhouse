@@ -2591,6 +2591,15 @@ fn render_partial_key(rp: &crate::lower::view::RenderPartial<'_>, dir: &str) -> 
     use crate::lower::view::RenderPartial;
     Some(match rp {
         RenderPartial::Collection { name, .. } => (camelize_path(&snake_case(name)), singularize(name)),
+        // `render @message` — Rails' `to_partial_path`: the record's
+        // own name, in its PLURAL directory (`messages/_message`). The
+        // key has to be spelled the same way `emit_render_partial`
+        // spells the call, or the partial's ivar closure is threaded
+        // into a module nothing renders.
+        RenderPartial::Record { name, .. } => (
+            camelize_path(&crate::naming::pluralize_snake(name)),
+            name.to_string(),
+        ),
         RenderPartial::Association { method, .. } => {
             (camelize_path(&snake_case(method)), singularize(method))
         }
