@@ -378,6 +378,48 @@ module ActiveRecord
       to_a
     end
 
+    # `relation == array` — Rails compares the LOADED RECORDS, and this
+    # covers BOTH orders. Ruby's `Array#==` hands the comparison over to
+    # the other operand whenever that operand answers `to_ary` (which
+    # the method above does), so `[ message ] == Message.search("eel")`
+    # arrives here as `relation == [ message ]`. Without it that
+    # expression fell through to `Object#==` — reference identity
+    # between an Array and a Relation, which is false for every input,
+    # so `assert_equal <array>, <relation>` was an assertion no emitted
+    # tree could pass. campfire's `message_searchable_test` is three
+    # tests written entirely in that shape.
+    #
+    # Relation-to-relation compares records too, rather than Rails'
+    # `to_sql` equality: two relations that differ only in how they were
+    # BUILT are the same result set here, and the result set is what a
+    # caller is asking about.
+    #
+    # PRIMARY KEYS, not `==` on the elements, and that is the whole
+    # point rather than a shortcut. Rails answers this through
+    # `ActiveRecord::Core#==`, where two objects are the same record
+    # when they share a class and a saved id — a row read twice is two
+    # objects. This runtime has no such `Base#==`: an operator
+    # DEFINITION in `base.rb` reaches every strict target, and no
+    # emitter renames one to its host's spelling (measured — python
+    # wrote `def ==(self, other)` verbatim and every emitted tree
+    # stopped at a SyntaxError). A relation's records are all one model
+    # by construction, so comparing ids here is that rule with the class
+    # half already decided. Record-to-record `==` remains identity, and
+    # closing it means teaching each emitter the rename.
+    def ==(other)
+      mine = to_a
+      theirs = other.is_a?(ActiveRecord::Relation) ? other.to_a : other
+      return false if !theirs.is_a?(Array)
+      return false if mine.length != theirs.length
+      i = 0
+      same = true
+      while i < mine.length
+        same = false if mine[i].id != theirs[i].id
+        i += 1
+      end
+      same
+    end
+
     # `filter { |r| … }` — Enumerable's filter over the loaded records.
     # `select { |r| … }` is Rails' other spelling of this method and
     # arrives here renamed (`relation_select_block`), which leaves the

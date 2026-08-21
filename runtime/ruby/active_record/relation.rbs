@@ -56,6 +56,7 @@ module ActiveRecord
 
     def to_a: () -> Array[untyped]
     def to_ary: () -> Array[untyped]
+    def ==: (untyped other) -> bool
     def filter: () { (untyped) -> bool } -> Array[untyped]
     def +: (Array[untyped] other) -> Array[untyped]
     def &: (Array[untyped] other) -> Array[untyped]

@@ -995,7 +995,21 @@ fn every_runtime_method_body_concretely_typed() {
     // `Search.record` is `find_or_create_by(query: query).touch`
     // reached through `user.searches`, and until this existed the
     // emitted body called a method nothing defined.
-    const CEILING: usize = 308;
+    // 2026-08-21 308 -> 312: `Relation#==`, four sites where the other
+    // ceiling counts twelve (that one charges receivers as well). The
+    // four are the `other` parameter, the `theirs` local it flows into,
+    // and the `.id` read on an element of each side — `Array[untyped]`
+    // by the same R5 delegation convention every method in this file
+    // pays. Nothing gradual crosses a call boundary: what leaves is a
+    // `bool`.
+    //
+    // See the note on the other ceiling for why the id comparison is
+    // HERE rather than in a `Base#==`: an operator definition in
+    // base.rb reaches every strict target and no emitter renames one
+    // (python emitted `def ==(self, other)` and every tree stopped at a
+    // SyntaxError), while the ruby-family reopen in connection.rb has
+    // no assignment to type `@id` from.
+    const CEILING: usize = 312;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

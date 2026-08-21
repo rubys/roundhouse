@@ -659,7 +659,38 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // rather than as a lower-time macro-inline is what lets the SCOPE
     // reach the create — `merge_scope_attributes` would have had to
     // merge into a call whose query half needs the same hash.
-    const CEILING: usize = 746;
+    // 2026-08-21 746 -> 758, +12 for `Relation#==` — Rails' relation
+    // equality, which nothing in the emitted trees had. Every node is a
+    // read off the ONE parameter it takes or off an element of a list
+    // the relation's own RBS declares `Array[untyped]`, and the
+    // parameter is untyped for the reason equality always is: `==`
+    // answers for whatever it is handed. The twelve are the two `is_a?`
+    // receivers, the `other.to_a` send and its receiver, the local that
+    // holds the result, the `length` compare, and the `.id` read on
+    // each side of the loop.
+    //
+    // Well above the 1-3 budget, and the number is the method: it is a
+    // type test, a length test and an element walk, and the walk is
+    // where two thirds of it lives. What it buys is not a convenience —
+    // `assert_equal [ message ], Message.search("eel")` was an
+    // assertion NO emitted tree could pass, because Ruby hands an
+    // `Array == <thing that answers to_ary>` comparison to the other
+    // operand and `Object#==` is reference identity between an Array
+    // and a Relation. campfire's suite went 156 -> 160 of 240, 25 -> 26
+    // files, with `message_searchable_test` green.
+    //
+    // Its missing twin `Base#==` adds NOTHING here, and that is worth
+    // naming: written in base.rb it cost 4 more nodes AND broke both
+    // python overlay tests, because no emitter renames an operator
+    // DEFINITION to its host's spelling and `def ==(self, other)`
+    // reached python verbatim. Moved to the ruby-family connection.rb
+    // it cost an UNTYPED `@id`: that reopen is analyzed on its own and
+    // an ivar's type comes from an assignment in the same unit, which a
+    // reopen has none of (the `@x: T` lines in these .rbs files are
+    // documentation — `collect_class_methods` reads methods only). So
+    // the id comparison lives inside this method, where a relation's
+    // records being one model already decides the class half.
+    const CEILING: usize = 758;
 
     assert!(
         all_untyped.len() <= CEILING,
