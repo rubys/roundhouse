@@ -817,6 +817,12 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
     // `<%= 1.hour.ago %>` reaches emit ungrounded unless it takes the
     // rewrite on the way out. No-op for fixtures without ERB.
     library::apply_duration_lowering(&mut fixture_lcs, app);
+    // Rails' fixture accessor is MEMOIZED per test; ours was a fresh
+    // `find` per call, so a mutation and a save through two calls
+    // touched two different objects. Ruby-family only — the cache is
+    // class state on a module, which the strict targets' fixture
+    // modules have no home for. See `apply_fixture_memoization`.
+    library::apply_fixture_memoization(&mut fixture_lcs);
 
     // Per-test truncation, shared by `SchemaSetup.reset!` in the test
     // helper and by each test file's autorun shim below. ONE list: the

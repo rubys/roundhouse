@@ -2751,6 +2751,129 @@ pub(crate) fn apply_time_current_lowering(lcs: &mut [LibraryClass], app: &App) {
 /// pipeline doesn't stamp, so in practice only the unit, predicate and
 /// arithmetic rules bite here; running the full sequence keeps the one
 /// order declaration (`lower::duration::apply_duration_rewrites`).
+/// Ruby-family pre-emit pass: a fixture ACCESSOR is memoized, because
+/// Rails' is.
+///
+/// `ActiveRecord::TestFixtures` keeps a `@fixture_cache` and clears it
+/// between tests, so two `accounts(:signal)` calls in one test answer
+/// the SAME object. The lowered accessor is `Account.find(1)` — a new
+/// object every call — so campfire's `accounts(:signal).settings.
+/// restrict_room_creation_to_administrators = true` followed by
+/// `accounts(:signal).save!` is a mutation of one record and a save of
+/// a DIFFERENT one. The write
+/// vanished and campfire's room-creation restriction was never in
+/// force. It is also what makes `.reload` mean anything: reloading a
+/// throwaway instance is a no-op by construction.
+///
+/// RUBY-FAMILY, not the shared lowering, because the cache is CLASS
+/// STATE on a module — `@__fx_<label>` inside a `def self.<label>`.
+/// Rust, Crystal and Swift each build a fixture module too, and none of
+/// them has a home for that slot; measured, all three dropped the
+/// accessor entirely (`cannot find function 'one' in module
+/// fixtures::articles`). Their accessors keep the per-call lookup,
+/// which is the behaviour they have today.
+///
+/// The slot is cleared at the top of `_fixtures_load!` rather than by a
+/// separate hook: the loader runs once per test, right after the schema
+/// reset, so that IS the between-tests boundary.
+///
+/// Spelled `@slot = <lookup> if @slot.nil?` then a bare read, not
+/// `@slot ||= <lookup>` — the python lowering declines `OpAssign`, and
+/// the two-statement form leaves the method ending in a read.
+pub(crate) fn apply_fixture_memoization(lcs: &mut [LibraryClass]) {
+    for lc in lcs.iter_mut() {
+        let labels: Vec<Symbol> = lc
+            .methods
+            .iter()
+            .filter(|m| m.receiver == MethodReceiver::Class && is_fixture_lookup(&m.body))
+            .map(|m| m.name.clone())
+            .collect();
+        if labels.is_empty() {
+            continue;
+        }
+        for m in &mut lc.methods {
+            if m.receiver != MethodReceiver::Class {
+                continue;
+            }
+            if is_fixture_lookup(&m.body) {
+                m.body = memoized_fixture_body(&m.name, &m.body);
+            } else if m.name.as_str() == "_fixtures_load!" {
+                let mut exprs: Vec<Expr> = labels
+                    .iter()
+                    .map(|label| {
+                        Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Assign {
+                                target: LValue::Ivar { name: fixture_cache_ivar(label) },
+                                value: Expr::new(
+                                    Span::synthetic(),
+                                    ExprNode::Lit { value: Literal::Nil },
+                                ),
+                            },
+                        )
+                    })
+                    .collect();
+                exprs.push(m.body.clone());
+                m.body = Expr::new(Span::synthetic(), ExprNode::Seq { exprs });
+            }
+        }
+    }
+}
+
+/// The lowered accessor shape — `<Model>.find(<literal id>)` and
+/// nothing else. `by_label` (an if/elsif chain) and `_fixtures_load!`
+/// (a Seq of inserts) both fail this, which is how the pass tells the
+/// three kinds of method in a fixture module apart without knowing
+/// their names.
+fn is_fixture_lookup(body: &Expr) -> bool {
+    matches!(&*body.node, ExprNode::Send { recv: Some(r), method, args, block: None, .. }
+        if method.as_str() == "find"
+            && args.len() == 1
+            && matches!(&*args[0].node, ExprNode::Lit { value: Literal::Int { .. } })
+            && matches!(&*r.node, ExprNode::Const { .. }))
+}
+
+/// `@__fx_<label>` — the cache slot. Prefixed so it cannot collide with
+/// anything the fixture file names.
+fn fixture_cache_ivar(label: &Symbol) -> Symbol {
+    Symbol::from(format!("__fx_{}", label.as_str()))
+}
+
+fn memoized_fixture_body(label: &Symbol, lookup: &Expr) -> Expr {
+    let slot = fixture_cache_ivar(label);
+    let read = || {
+        let mut e = Expr::new(Span::synthetic(), ExprNode::Ivar { name: slot.clone() });
+        e.ty = lookup.ty.clone();
+        e
+    };
+    let fill = Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: Expr::new(
+                Span::synthetic(),
+                ExprNode::Send {
+                    recv: Some(read()),
+                    method: Symbol::from("nil?"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: true,
+                },
+            ),
+            then_branch: Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign {
+                    target: LValue::Ivar { name: slot.clone() },
+                    value: lookup.clone(),
+                },
+            ),
+            else_branch: Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }),
+        },
+    );
+    let mut seq = Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![fill, read()] });
+    seq.ty = lookup.ty.clone();
+    seq
+}
+
 pub(crate) fn apply_duration_lowering(lcs: &mut [LibraryClass], app: &App) {
     let temporal_predicates = !crate::lower::duration::app_defines_temporal_predicates(app);
     for lc in lcs.iter_mut() {

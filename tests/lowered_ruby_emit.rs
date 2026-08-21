@@ -50,6 +50,32 @@ fn find<'a>(files: &'a [EmittedFile], suffix: &str) -> &'a str {
         })
 }
 
+/// Rails' fixture accessor is memoized per test (`@fixture_cache`), so
+/// two `articles(:one)` calls in one test are the SAME object. Ours was
+/// a bare `Article.find(1)` per call, which turns a mutate-then-save
+/// pair into two different records — and makes `.reload` a no-op, since
+/// there is nothing held to reload.
+#[test]
+fn a_fixture_accessor_is_memoized_and_the_loader_clears_it() {
+    let app = ingest_app(std::path::Path::new("fixtures/real-blog")).expect("ingest real-blog");
+    let files = ruby::emit_spinel(&app);
+    let src = find(&files, "test/fixtures/articles.rb");
+    assert!(
+        src.contains("@__fx_one = Article.find(1) if @__fx_one.nil?"),
+        "accessor is not memoized:\n{src}",
+    );
+    // The method still ENDS IN A READ — `@slot ||= …` would be shorter
+    // and is a construct the python lowering declines.
+    assert!(src.contains("@__fx_one = Article.find(1) if @__fx_one.nil?\n    @__fx_one\n  end"),
+        "memoized accessor must end in a bare read:\n{src}");
+    // The loader runs once per test, right after the schema reset, so
+    // it is where the cache is cleared.
+    assert!(
+        src.contains("def self._fixtures_load!\n    @__fx_one = nil"),
+        "loader does not clear the cache:\n{src}",
+    );
+}
+
 #[test]
 fn one_file_per_model() {
     let files = lowered_real_blog();
