@@ -47,4 +47,28 @@ module ActiveSupport
   def self.presence_in(value, list)
     list.include?(value.to_s) ? value : nil
   end
+
+  # Rails' `ActiveModel::Errors#[]` — the messages for ONE attribute,
+  # without the humanized attribute prefix (`[ "is not public" ]`, not
+  # `[ "Url is not public" ]`). Reached from `src/lower/errors_index.rs`,
+  # which passes the prefix the `errors.add` / `validates` lowerings
+  # baked in ("Url ", trailing space included so `url` cannot match
+  # `url_host`'s "Url host …" on the space boundary alone).
+  #
+  # Takes the accumulator as an ARGUMENT for the same reason `blank?`
+  # above does: the shared accumulator is a plain `Array[String]` and
+  # Array has no `[]`-by-Symbol to reopen, so the projection has to be a
+  # function over the array rather than a method on it.
+  #
+  # `m[prefix.length, m.length - prefix.length]` rather than a range or
+  # `delete_prefix`: two-integer `String#[]` is the slice spelling every
+  # target lowers, and `sub`/`delete_prefix` are the shapes that have
+  # bitten this runtime before (a two-string `gsub` has no C# lowering).
+  def self.errors_for(errors, prefix)
+    out = []
+    errors.each do |m|
+      out << m[prefix.length, m.length - prefix.length] if m.start_with?(prefix)
+    end
+    out
+  end
 end

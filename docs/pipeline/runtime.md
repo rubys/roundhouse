@@ -681,6 +681,35 @@ through it loses those writes. The Rails idiom reassigns
 (`@room = @room.becomes!(Rooms::Closed)`), which is what campfire's two
 sites do; a site that kept both handles would diverge silently.
 
+### `errors[:field]` re-derives its field from the message text
+
+Rails' error accumulator keeps an attribute alongside every message, so
+`errors[:url]` is an exact lookup. Here the accumulator is a plain
+`Array[String]` of FULL messages (`"Url is not public"`), and
+`src/lower/errors_index.rs` grounds the read as
+`ActiveSupport.errors_for(errors, "Url ")` — a prefix match against the
+humanized field name that `errors.add` / `validates` baked at lower
+time.
+
+**Why.** Adding an attribute column changes `@errors`' type in every
+strict target — `Vec<String>` becomes a vector of pairs, and every
+emitted `validate` body, every `errors <<`, and the `full_messages`
+identity fold move with it. The projection is recoverable from the text
+the runtime already stores, so the type stays.
+
+**What it costs.** Two cases, both named rather than silent:
+
+- One field's humanized name being a PREFIX of another's — `url` and
+  `url_host` humanize to `"Url"` and `"Url host"` — makes
+  `errors[:url]` also answer `"Url host can't be blank"`, with the
+  wrong prefix stripped. No corpus app has such a pair; an app that did
+  would diverge silently, and that is the case that would force the
+  attribute column.
+- `errors[:base]` DECLINES. Rails attaches `:base` messages to the
+  record, so `errors_add` bakes them with no prefix and there is no
+  text to match. Those sites stay dynamic and join the
+  `errors_index` residue ledger.
+
 ## Related docs
 
 - [`emit.md`](emit.md) — the universal IR contract; the consumers of

@@ -5,4 +5,7 @@ module ActiveSupport
 
   def self.presence: (untyped value) -> untyped
   def self.presence_in: (untyped value, Array[String] list) -> untyped
+
+  # `errors[:field]` -> the messages for that field, prefix stripped.
+  def self.errors_for: (Array[String] errors, String prefix) -> Array[String]
 end
