@@ -369,6 +369,13 @@ impl Analyzer {
                     .entry(name)
                     .or_insert(Ty::Relation { of: model.name.clone() });
             }
+            // `has_one_attached :avatar` declares one the same way
+            // (`with_attached_avatar`). Same registration, same reason.
+            for name in crate::lower::attached::preload_scope_names(model) {
+                cls.class_methods
+                    .entry(name)
+                    .or_insert(Ty::Relation { of: model.name.clone() });
+            }
             // Core AR instance methods every model gets. Sourced
             // from the shared catalog — same mechanism as class
             // methods above. Covers mutation (save/update/destroy),

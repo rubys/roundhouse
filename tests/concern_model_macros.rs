@@ -83,6 +83,38 @@ fn model_src(name: &str) -> String {
         })
 }
 
+/// Rails' macro declares `with_attached_<attr>` beside the attachment,
+/// and campfire's `Message.ordered` chains through it — so leaving it
+/// undefined was a NameError on every room page, not a slow query.
+/// IDENTITY, like the `with_rich_text_*` twin: the scope is an
+/// `includes` hint in Rails, and the synthesized reader queries per
+/// record, so there is nothing for the hint to attach to.
+#[test]
+fn the_attachment_preload_scope_exists_and_is_the_identity() {
+    let app = app();
+    let model = app.models.iter().find(|m| m.name.0.as_str() == "Message").unwrap();
+    let names: Vec<String> = roundhouse::lower::attached::preload_scope_names(model)
+        .iter()
+        .map(|s| s.as_str().to_string())
+        .collect();
+    assert_eq!(names, vec!["with_attached_attachment"]);
+
+    let src = model_src("message.rb");
+    assert!(
+        src.contains("def self.with_attached_attachment"),
+        "the preload scope must have a body:\n{src}"
+    );
+    let body = src
+        .split("def self.with_attached_attachment")
+        .nth(1)
+        .and_then(|s| s.split("\n  end").next())
+        .unwrap_or_default();
+    assert!(
+        body.contains("__rel"),
+        "the scope must answer its relation unchanged:\n{body}"
+    );
+}
+
 /// The reader the concern declares lands on the INCLUDER, scoped to the
 /// includer's own record type — not on the module, which has no table.
 #[test]

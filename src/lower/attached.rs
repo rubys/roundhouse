@@ -152,3 +152,77 @@ fn push_reader(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol) {
         block_param: None,
     });
 }
+
+// ── the preload scope ──────────────────────────────────────────
+
+/// The scope Rails' macro declares beside the attachment:
+/// `with_attached_<attr>`.
+///
+/// Shared by the analyzer (which registers it as a relation-returning
+/// class method so call sites type) and the ruby emit seam (which gives
+/// it a body), so the two cannot disagree about which names exist —
+/// the same split `rich_text::preload_scope_names` uses, and for the
+/// same reason.
+pub fn preload_scope_names(model: &Model) -> Vec<Symbol> {
+    attached_attrs(model)
+        .into_iter()
+        .map(|(_span, attr)| Symbol::from(format!("with_attached_{}", attr.as_str())))
+        .collect()
+}
+
+/// Give the preload scope a body: `def self.with_attached_avatar(__rel
+/// = ActiveRecord::Relation.new(self)) = __rel`.
+///
+/// IDENTITY, and that is the whole implementation, exactly as it is for
+/// `with_rich_text_<attr>`. In Rails this is `includes(<name>_attachment:
+/// :blob)` — a QUERY PLAN hint that changes how many round trips a page
+/// costs and NOTHING about which rows come back. The attachment reader
+/// this pass synthesizes runs its query per record at ASK time, so the
+/// hint has nothing to attach to and the scope has nothing to do but
+/// pass the relation along.
+///
+/// The cost is real and stated rather than hidden: a page rendering N
+/// records issues N attachment queries where Rails issues one. That is
+/// an N+1, not a wrong answer — and the alternative, leaving the method
+/// undefined, turns a performance difference into a NameError on every
+/// call site that chains through it (campfire's
+/// `Message.with_attached_attachment` is inside the `ordered` scope
+/// chain that `rooms#show` renders from, so it was every room page).
+///
+/// Ruby-family only, for the same reason `push_scope_methods` is:
+/// `ActiveRecord::Relation` is a CRuby/JRuby runtime class.
+pub(crate) fn push_preload_scope_methods(methods: &mut Vec<MethodDef>, model: &Model) {
+    let rel = Symbol::from("__rel");
+    for name in preload_scope_names(model) {
+        if methods
+            .iter()
+            .any(|m| m.receiver == MethodReceiver::Class && m.name == name)
+        {
+            continue;
+        }
+        methods.push(MethodDef {
+            name,
+            receiver: MethodReceiver::Class,
+            params: vec![crate::dialect::Param::with_default(
+                rel.clone(),
+                super::model_to_library::relation_new_self(),
+            )],
+            body: Expr::new(
+                Span::synthetic(),
+                ExprNode::Var { id: crate::ident::VarId(0), name: rel.clone() },
+            ),
+            // No signature — see the note on the rich-text twin: a
+            // `Ty::Relation` in a signature is a relation REACHING EMIT,
+            // which every emitter reports as unsupported. The analyzer's
+            // own registration types the CALL SITE, which is the half
+            // that matters.
+            signature: None,
+            effects: EffectSet::default(),
+            enclosing_class: Some(model.name.0.clone()),
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: false,
+            block_param: None,
+        });
+    }
+}

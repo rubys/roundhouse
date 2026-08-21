@@ -667,13 +667,15 @@ fn insert_rel_param(m: &mut crate::dialect::MethodDef, rel_param: &Symbol) {
 }
 
 pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
-    // `has_rich_text`'s two preload scopes. Ahead of the `any_scopes`
-    // early return below, because an app can declare a rich-text
-    // attribute and no `scope` at all — and these still have to exist
-    // or every call site chaining through them is a NoMethodError.
+    // `has_rich_text`'s two preload scopes, and `has_one_attached`'s
+    // one. Ahead of the `any_scopes` early return below, because an app
+    // can declare a rich-text attribute or an attachment and no `scope`
+    // at all — and these still have to exist or every call site
+    // chaining through them is a NoMethodError.
     for lc in lcs.iter_mut() {
         if let Some(model) = app.models.iter().find(|m| m.name == lc.name) {
             crate::lower::rich_text::push_preload_scope_methods(&mut lc.methods, model);
+            crate::lower::attached::push_preload_scope_methods(&mut lc.methods, model);
         }
     }
     let scopes = crate::lower::scope_chain::build_scope_registry(&app.models);
