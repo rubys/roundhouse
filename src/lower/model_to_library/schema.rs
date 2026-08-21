@@ -2726,11 +2726,20 @@ fn synth_update_hash(
     // method makes the impossibility a compile error instead of a
     // silently-dropped statement.
     //
-    // The cost is nil — `update(room_id: 3)` is the spelling that works
-    // everywhere and goes through the column loop above. Closing the gap
-    // properly means giving the attrs Hash a value type that can carry a
-    // record, which is a change to the whole mass-assignment seam
-    // (initialize included), not to `update` alone.
+    // THE COST WAS NOT NIL, and this note used to say it was: the key
+    // was SILENTLY DROPPED. campfire's `rooms(:designers).update!
+    // creator: users(:jz)` wrote nothing, `can_administer?` stayed
+    // false, and the test read as a permissions failure with nothing
+    // pointing at mass assignment.
+    //
+    // `lower::assoc_attr_key` closes it at the CALL SITE — the one
+    // place the record is still a typed expression rather than a hash
+    // value — rewriting the key to the foreign-key column and the value
+    // to its `id`, so what arrives here is an Integer and goes through
+    // the column loop above. Giving the attrs Hash a value type that
+    // can carry a record is still the deeper fix, and still a change to
+    // the whole mass-assignment seam (initialize included) rather than
+    // to `update` alone.
     let assoc_names: std::collections::BTreeSet<Symbol> = model
         .associations()
         .into_iter()

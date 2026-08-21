@@ -53,6 +53,7 @@ pub mod bool_fold;
 pub mod dead_default;
 pub mod errors_add;
 pub mod errors_full_messages;
+pub mod assoc_attr_key;
 pub mod errors_index;
 pub mod job_class_side;
 pub mod mailer_class_side;
@@ -119,6 +120,7 @@ pub use group_count::apply_group_count_lowering;
 pub use dead_default::apply_dead_default_lowering;
 pub use errors_add::apply_errors_add_lowering;
 pub use errors_full_messages::apply_errors_full_messages_lowering;
+pub use assoc_attr_key::apply_assoc_attr_key_lowering;
 pub use errors_index::apply_errors_index_lowering;
 pub use mailer_class_side::apply_mailer_class_side;
 pub use as_json_super::apply_as_json_super_grounding;
@@ -348,6 +350,11 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // the same body has already baked its humanized prefix — the
     // projection this pass emits reads that text.
     ("errors_index", &["errors_add"]),
+    // `record.update!(creator: user)` -> `update!(creator_id: user.id)`.
+    // Reads a Hash key naming a belongs_to and writes the foreign-key
+    // column; no other pass produces or consumes either shape, so no
+    // ordering constraints.
+    ("assoc_attr_key", &[]),
     ("create_block", &[]),
     // `<params>.merge(k: v)` written a method away from the permit
     // chain → `Model.from_params(p)` + per-key setters, hoisted above
@@ -530,6 +537,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("errors_full_messages");
     diags.extend(errors_index::apply_errors_index_lowering(app));
     ran!("errors_index");
+    diags.extend(assoc_attr_key::apply_assoc_attr_key_lowering(app));
+    ran!("assoc_attr_key");
     diags.extend(create_block::apply_create_block_inline(app));
     ran!("create_block");
     diags.extend(params_merge::apply_params_merge_lowering(app));
