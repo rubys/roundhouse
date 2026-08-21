@@ -1280,18 +1280,27 @@ pub fn mentions_assoc_lookup(expr: &Expr, assocs: &AssocRegistry) -> bool {
             return;
         }
         if let ExprNode::Send { recv: Some(r), method, args, block, .. } = &*e.node {
-            if is_relation_terminal(method.as_str(), args, block.as_ref())
-                && matches!(
-                    method.as_str(),
-                    "find"
-                        | "find_by"
-                        | "find_by!"
-                        | "destroy_by"
-                        | "delete_by"
-                        | "destroy_all"
-                        | "delete_all"
-                        | "update_all"
-                )
+            // `where` joins on the same test the note above states, not
+            // by analogy: `Array` answers no `where` either, so the site
+            // is a NoMethodError today and a query after. It is the one
+            // member of the family that is a CHAIN method rather than a
+            // terminal, so it is admitted beside the terminal check
+            // instead of through it — with an argument and no block,
+            // which is the only spelling that reaches a relation.
+            let is_where = method.as_str() == "where" && !args.is_empty() && block.is_none();
+            if is_where
+                || is_relation_terminal(method.as_str(), args, block.as_ref())
+                    && matches!(
+                        method.as_str(),
+                        "find"
+                            | "find_by"
+                            | "find_by!"
+                            | "destroy_by"
+                            | "delete_by"
+                            | "destroy_all"
+                            | "delete_all"
+                            | "update_all"
+                    )
             {
                 if let ExprNode::Send { method: aname, args: aargs, block: None, .. } = &*r.node {
                     if aargs.is_empty() && assocs.is_has_many_name(aname) {

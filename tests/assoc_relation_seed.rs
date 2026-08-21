@@ -107,6 +107,21 @@ end
     @tags = @room.tags.alphabetical
     @recent = @room.recent_tags.alphabetical
   end
+
+  # A body whose ONLY relation surface is a `where` on an association
+  # read — it names no scope and starts no model chain, so it reaches
+  # the rewriter only if the gate lets it.
+  def search
+    @room = Room.find(params[:id])
+    @hits = @room.messages.where(body: params[:q])
+  end
+
+  # …and one whose only surface is a bare `count` on the same read,
+  # which the gate deliberately does NOT open.
+  def tally
+    @room = Room.find(params[:id])
+    @n = @room.messages.count
+  end
 end
 "#,
         ),
@@ -182,5 +197,41 @@ fn preload_only_association_scope_still_seeds() {
     assert!(
         show.contains("Tag.alphabetical(ActiveRecord::Relation.new(Tag).where(recent_room_id: @room.id))"),
         "includes-only scope does not block the seed:\n{show}"
+    );
+}
+
+
+/// `where` on an association read opens `apply_scope_lowering`'s gate.
+///
+/// The gate's own rule, applied to one more name that meets its own
+/// test: `Array` answers no `where`, so the site is a NoMethodError
+/// today and a query after — no cached read can degrade into an N+1,
+/// because there is no cached read to degrade. It is the one member of
+/// the family that is a CHAIN method rather than a terminal.
+///
+/// campfire's `users(:david).searches.where(query: "hello").exists?` is
+/// the caller; lobsters had two of its own
+/// (`@story.suggested_taggings.where(user_id: @user.id)`), both raising.
+#[test]
+fn a_where_on_an_association_read_opens_the_gate() {
+    let show = shown();
+    assert!(
+        show.contains("ActiveRecord::Relation.new(Message).where(room_id: @room.id).where(body:"),
+        "a `where` on an assoc read must seed:\n{show}"
+    );
+}
+
+/// The gate stays shut for a body whose only surface is a bare `count`.
+///
+/// That is the MEASURED exclusion the note on `mentions_assoc_constructor`
+/// records: `Array#count` is correct there AND rides the reader's
+/// preload cache, so seeding it turns one cached read into a fresh
+/// `SELECT COUNT(*)` — an N+1 in a per-row view.
+#[test]
+fn a_bare_count_on_an_association_read_leaves_the_gate_shut() {
+    let show = shown();
+    assert!(
+        show.contains("@n = ") && !show.contains("Relation.new(Message).where(room_id: @room.id).count"),
+        "a bare count must NOT seed:\n{show}"
     );
 }
