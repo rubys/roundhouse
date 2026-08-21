@@ -448,6 +448,36 @@ fn convert_attributes_in(
     helpers: &BTreeMap<Symbol, ClassId>,
     specs: &ParamsSpecs,
 ) {
+    // `<params>.merge(k: v)` — the params object is the RECEIVER here,
+    // not an argument, so it needs its own shape. Rails answers `merge`
+    // because Parameters is hash-like; ours is a typed struct, and the
+    // hash it stands for is `to_attrs`. Converting there rather than
+    // synthesizing a `merge` on every params class keeps the result a
+    // plain Symbol-keyed Hash, which is what the constructor on the
+    // other end of it wants.
+    //
+    // Controller actions only, like everything else in this walk. The
+    // model-side spelling (`User.new(user_params.merge(role: …))` in
+    // campfire's FirstRun) is the whole subject of this pass's main
+    // rewrite and must not be short-circuited into a hash here — that
+    // one becomes a typed factory plus an assignment, so the merged key
+    // never has to reach a permit list.
+    if let ExprNode::Send { recv: Some(recv), method, .. } = &mut *e.node {
+        if method.as_str() == "merge" && params_source_class(recv, helpers, specs).is_some() {
+            let span = recv.span;
+            let inner = recv.clone();
+            *recv = Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(inner),
+                    method: Symbol::from("to_attrs"),
+                    args: Vec::new(),
+                    block: None,
+                    parenthesized: false,
+                },
+            );
+        }
+    }
     if let ExprNode::Send { method, args, .. } = &mut *e.node {
         if RUNTIME_ATTRS_SLOTS.contains(&method.as_str()) && args.len() == 1 {
             if params_source_class(&args[0], helpers, specs).is_some() {

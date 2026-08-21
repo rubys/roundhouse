@@ -2671,6 +2671,14 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                     || is_relation_chain_method(method.as_str())
                     || is_relation_terminal(method.as_str(), &args, block.as_ref())
                     || ctx.assoc_class_method_params(target, &method).is_some()
+                    // CollectionProxy constructors too: `@subscriptions
+                    // .create!(attrs)` wants the association's foreign
+                    // key preset exactly as `user.subscriptions
+                    // .create!(attrs)` does. They are not relation
+                    // surface — the arm below answers them with a
+                    // record — but they are the same association hop,
+                    // and `mentions_assoc_alias` already counts them.
+                    || matches!(method.as_str(), "build" | "create" | "create!")
                 {
                     r = read.clone();
                 }
@@ -2768,6 +2776,47 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                                             span,
                                             ExprNode::Hash { entries, kwargs: true },
                                         )])
+                                    }
+                                    // `<anything>.merge(k: v)` — the
+                                    // foreign key joins the LITERAL the
+                                    // merge already carries. The value
+                                    // being merged INTO is opaque here
+                                    // and stays that way; what makes
+                                    // this safe is that `merge` with a
+                                    // kwargs literal is a Hash by
+                                    // construction, whichever way the
+                                    // receiver went. campfire's
+                                    // `subscriptions.create!(params
+                                    // .to_attrs.merge(user_agent: …))`
+                                    // is the shape, and without this it
+                                    // fell into the `Blocked` case that
+                                    // declines a bare parameter.
+                                    ExprNode::Send { recv: Some(r), method: m, args: margs, block: None, .. }
+                                        if m.as_str() == "merge" && margs.len() == 1 =>
+                                    {
+                                        match &*margs[0].node {
+                                            ExprNode::Hash { entries, kwargs: true } => {
+                                                let mut entries = entries.clone();
+                                                entries.push(fk_entry);
+                                                Some(vec![syn(
+                                                    span,
+                                                    ExprNode::Send {
+                                                        recv: Some(r.clone()),
+                                                        method: m.clone(),
+                                                        args: vec![syn(
+                                                            span,
+                                                            ExprNode::Hash {
+                                                                entries,
+                                                                kwargs: true,
+                                                            },
+                                                        )],
+                                                        block: None,
+                                                        parenthesized: true,
+                                                    },
+                                                )])
+                                            }
+                                            _ => None,
+                                        }
                                     }
                                     _ => None,
                                 }
