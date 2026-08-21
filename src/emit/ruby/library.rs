@@ -918,6 +918,147 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     }
 }
 
+/// Ruby-family pre-emit pass: an STI row hydrates as its SUBCLASS.
+///
+/// `Room.first.open?` was false for a row whose `type` column says
+/// `"Rooms::Open"`. Both hydration entry points build the BASE class
+/// unconditionally, so `open?` — which campfire writes as
+/// `is_a?(Rooms::Open)` — asked a question the object could never
+/// answer yes to.
+///
+/// ```ruby
+/// instance = case row.type
+///            when "Rooms::Open" then Rooms::Open.new
+///            when "Rooms::Closed" then Rooms::Closed.new
+///            else Room.new
+///            end
+/// ```
+///
+/// BOTH entry points, and that is the part that cost a probe. A model
+/// has two: `from_stmt` reads the typed `Db.column_*` path, `from_row`
+/// reads a Row through `instantiate`. `Room.first` goes to `to_a` ->
+/// `instantiate` -> `from_row`; patching only `from_stmt` moved
+/// nothing, exactly as adding `Request#head?` to one of the two
+/// Requests moved nothing. When a runtime concept has two doors,
+/// measure which one the failing call uses.
+///
+/// The scrutinee is CLONED off the body's own `instance.type = <expr>`
+/// assignment rather than rebuilt: `from_stmt` reads
+/// `Db.column_text(stmt, 4)` and `from_row` reads `row.type`, and the
+/// column INDEX in the first is a fact only that body knows.
+///
+/// Ruby-family only, like its neighbours. A strict target's `Rooms::
+/// Open` is not a subtype of `Room` — there is no inheritance to make
+/// the case arms share a return type — so this is not expressible
+/// there, and those targets keep hydrating the base class.
+pub(crate) fn apply_sti_hydration(lcs: &mut [LibraryClass], app: &App) {
+    // subclass -> base, from the one authority on the question.
+    let bases = crate::lower::sti_bases(app);
+    if bases.is_empty() {
+        return;
+    }
+    let mut subs_of: HashMap<ClassId, Vec<ClassId>> = HashMap::new();
+    for (sub, base) in &bases {
+        subs_of.entry(base.clone()).or_default().push(sub.clone());
+    }
+    // Deterministic arm order — the map's iteration order is not.
+    for v in subs_of.values_mut() {
+        v.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+    }
+    for lc in lcs.iter_mut() {
+        let Some(subs) = subs_of.get(&lc.name) else { continue };
+        let base = lc.name.clone();
+        for m in lc.methods.iter_mut() {
+            if !matches!(m.name.as_str(), "from_stmt" | "from_row") {
+                continue;
+            }
+            if m.receiver != crate::dialect::MethodReceiver::Class {
+                continue;
+            }
+            let ExprNode::Seq { exprs } = &mut *m.body.node else { continue };
+            // The column writes are SENDS (`instance.type=(row.type)`),
+            // not `Assign { Attr }` — the model lowerer routes every
+            // hydration write through the typed writer method. Both
+            // spellings are matched anyway: this pass reads the body a
+            // sibling pass wrote, and pinning it to one shape is how a
+            // reader goes stale.
+            let Some(type_read) = exprs.iter().find_map(|e| match &*e.node {
+                ExprNode::Send { recv: Some(_), method, args, .. }
+                    if method.as_str() == "type=" && args.len() == 1 =>
+                {
+                    Some(args[0].clone())
+                }
+                ExprNode::Assign { target: LValue::Attr { name, .. }, value }
+                    if name.as_str() == "type" =>
+                {
+                    Some(value.clone())
+                }
+                _ => None,
+            }) else {
+                continue;
+            };
+            for e in exprs.iter_mut() {
+                let ExprNode::Assign { target: LValue::Var { .. }, value } = &mut *e.node else {
+                    continue;
+                };
+                let is_base_new = matches!(&*value.node,
+                    ExprNode::Send { recv: Some(r), method, args, .. }
+                        if method.as_str() == "new"
+                            && args.is_empty()
+                            && matches!(&*r.node, ExprNode::Const { path }
+                                if const_path_is(path, &base)));
+                if !is_base_new {
+                    continue;
+                }
+                *value = sti_dispatch(value.clone(), &type_read, subs, value.span);
+                break;
+            }
+        }
+    }
+}
+
+fn const_path_is(path: &[Symbol], id: &ClassId) -> bool {
+    let joined: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
+    joined.join("::") == id.0.as_str()
+}
+
+/// `case <type_read> when "<Sub>" then <Sub>.new … else <base_new> end`
+fn sti_dispatch(base_new: Expr, type_read: &Expr, subs: &[ClassId], span: Span) -> Expr {
+    let mut arms: Vec<crate::expr::Arm> = subs
+        .iter()
+        .map(|sub| crate::expr::Arm {
+            pattern: crate::expr::Pattern::Lit {
+                value: Literal::Str { value: sub.0.as_str().to_string() },
+            },
+            guard: None,
+            body: Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(Expr::new(
+                        span,
+                        ExprNode::Const {
+                            path: sub.0.as_str().split("::").map(Symbol::from).collect(),
+                        },
+                    )),
+                    method: Symbol::from("new"),
+                    args: vec![],
+                    block: None,
+                    parenthesized: true,
+                },
+            ),
+        })
+        .collect();
+    // `else` — a row whose type names no known subclass (or is empty)
+    // stays the base class, which is what Rails does for a blank
+    // inheritance column.
+    arms.push(crate::expr::Arm {
+        pattern: crate::expr::Pattern::Wildcard,
+        guard: None,
+        body: base_new,
+    });
+    Expr::new(span, ExprNode::Case { scrutinee: type_read.clone(), arms })
+}
+
 /// Ruby-family pre-emit pass: `belongs_to` autosave.
 ///
 /// `room.creator = User.new(attrs); room.save!` is ordinary Rails —

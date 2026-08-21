@@ -126,6 +126,7 @@ pub use controller_class_render::apply_controller_class_render;
 pub use dirty_predicate_kwargs::apply_dirty_predicate_kwargs;
 pub use job_test_only::apply_job_test_only_lowering;
 pub use sti_scope::apply_sti_scope_lowering;
+pub(crate) use sti_scope::sti_bases;
 pub use sti_subclass_callbacks::apply_sti_subclass_callbacks;
 pub use request_index::apply_request_index_lowering;
 pub use arel_attribute::apply_arel_attribute_lowering;

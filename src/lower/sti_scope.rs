@@ -305,7 +305,13 @@ fn no_arg_send(recv: Expr, method: &str) -> Expr {
 /// `parent` chain reaches a Model, and that Model's table has to carry
 /// the inheritance column — without it there is nothing to filter on
 /// and the class is plain Ruby inheritance, not STI.
-fn sti_bases(app: &App) -> HashMap<ClassId, ClassId> {
+/// Public because the Ruby-family hydration pass
+/// (`emit::ruby::library::apply_sti_hydration`) has to ask the SAME
+/// question this file already answers — which classes are STI
+/// subclasses of which base — rather than keeping a second copy of the
+/// parent walk and the inheritance-column check that would drift from
+/// this one.
+pub(crate) fn sti_bases(app: &App) -> HashMap<ClassId, ClassId> {
     let mut out = HashMap::new();
     let model_named = |id: &ClassId| app.models.iter().find(|m| &m.name == id);
     for lc in &app.library_classes {
