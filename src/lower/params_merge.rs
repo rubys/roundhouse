@@ -399,20 +399,36 @@ fn scan_body(
     });
 }
 
-/// `@story.attributes = <params object>` → `… = <params>.to_attrs`.
+/// Runtime slots that take the Symbol-keyed hash a params object has to
+/// become: `@story.attributes = <params>` and the relation's own
+/// conditions slots, `subscriptions.find_by(<params>)`.
 ///
-/// `attributes=` is the runtime's own mass-assignment writer and takes
-/// the Symbol-keyed attribute hash `initialize(attrs)` consumes — so
-/// unlike [`convert_attrs_call_sites`] there is no user-defined callee
-/// to read a `Binding::Attrs` off, and the conversion is keyed on the
-/// writer's name instead.
+/// These are the runtime's OWN methods, so unlike
+/// [`convert_attrs_call_sites`] there is no user-defined callee to read
+/// a `Binding::Attrs` off and no binding to prove — the conversion is
+/// keyed on the method's name.
 ///
-/// It stayed unwritten because the one fixture that assigns a params
-/// object this way — lobsters' `StoriesController#update_story_attributes`
-/// — had a `story_params` helper that never lowered (its permit list
-/// carries `tags_a: []`; see `match_permit_call_full`), so the
-/// right-hand side was not yet a params object to convert. Lowering
-/// that helper is what exposed the site.
+/// The `attributes=` half stayed unwritten because the one fixture that
+/// assigns a params object this way — lobsters'
+/// `StoriesController#update_story_attributes` — had a `story_params`
+/// helper that never lowered (its permit list carries `tags_a: []`; see
+/// `match_permit_call_full`), so the right-hand side was not yet a
+/// params object to convert. Lowering that helper is what exposed it.
+///
+/// The conditions half came from campfire's push-subscriptions
+/// controller, `@push_subscriptions.find_by(push_subscription_params)`,
+/// which is Rails-legal: a params object answers `to_h`, so the hash it
+/// carries becomes the WHERE. Ours is a typed struct, and the relation
+/// rendered it straight into SQL — `unrecognized token: "#"`, from
+/// `#<PushSubscriptionParams:0x…>` reaching the query text.
+///
+/// Only slots whose argument IS the condition hash are listed. `where`
+/// is deliberately absent: its first argument is just as often a SQL
+/// FRAGMENT, and a params object never reaches that spelling in this
+/// corpus — adding it would be a rule with no site to keep it honest.
+const RUNTIME_ATTRS_SLOTS: &[&str] =
+    &["attributes=", "find_by", "find_by!", "destroy_by", "delete_by", "exists?"];
+
 fn convert_attributes_assignments(app: &mut App, specs: &ParamsSpecs) {
     for controller in &mut app.controllers {
         let actions: Vec<crate::dialect::Action> = controller.actions().cloned().collect();
@@ -433,7 +449,7 @@ fn convert_attributes_in(
     specs: &ParamsSpecs,
 ) {
     if let ExprNode::Send { method, args, .. } = &mut *e.node {
-        if method.as_str() == "attributes=" && args.len() == 1 {
+        if RUNTIME_ATTRS_SLOTS.contains(&method.as_str()) && args.len() == 1 {
             if params_source_class(&args[0], helpers, specs).is_some() {
                 let span = args[0].span;
                 let inner = args[0].clone();
