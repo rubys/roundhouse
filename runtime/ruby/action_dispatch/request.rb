@@ -73,6 +73,16 @@ module ActionDispatch
       @request_method == "POST"
     end
 
+    # `head?` sits beside `get?` because Rails' "is this a safe
+    # request" idiom is `request.get? || request.head?` and campfire
+    # writes exactly that (`BlockBannedRequests#safe_request?`). It had
+    # no caller only because the `unless:` guard naming that predicate
+    # was carried and never enforced; enforcing it turned a silently
+    # skipped condition into 128 `undefined method 'head?'`.
+    def head?
+      @request_method == "HEAD"
+    end
+
     def xhr?
       @env.fetch("HTTP_X_REQUESTED_WITH", "").to_s == "XMLHttpRequest"
     end

@@ -147,26 +147,56 @@ fn filter_dispatch_stmt(f: &Filter) -> Expr {
         block: None,
         parenthesized: false,
     });
-    // Guard conjunction: only/except action check, then lambda-form
-    // `if:` / `unless:` bodies (lobsters gates dev-only filters with
-    // `if: -> { Rails.env.development? }` — without the guard the
-    // filter runs unconditionally). Symbol-form guards stay carried-
-    // but-unenforced (see `Filter::if_cond`).
+    // Guard conjunction, in Rails' own order: the only/except action
+    // check, then the `if:` / `unless:` conditions in BOTH spellings.
+    //
+    // The lambda spelling has been enforced since lobsters gated
+    // dev-only filters with `if: -> { Rails.env.development? }`. The
+    // SYMBOL spelling was carried and not enforced, which is a filter
+    // that runs when Rails would have skipped it — campfire's
+    // `before_action :reject_banned_ip, unless: :safe_request?` meant
+    // every GET from a banned IP got a 429 where the app allows it, and
+    // `block_banned_requests_test` said so in as many words: `expected
+    // response :success, got status=429`.
+    //
+    // A symbol guard is a zero-arg predicate on the controller — the
+    // same self-send the filter target itself is — so it builds the
+    // same shape the lambda branch builds from a body expression. If
+    // the predicate does not resolve, that is a real gap surfacing at
+    // the call Rails also makes, not a new one.
     let mut conds: Vec<Expr> = Vec::new();
     if !(f.only.is_empty() && f.except.is_empty()) {
         conds.push(include_check(&f.only, &f.except));
+    }
+    let predicate = |name: &Symbol| {
+        syn(ExprNode::Send {
+            recv: None,
+            method: name.clone(),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        })
+    };
+    let negate = |e: Expr| {
+        syn(ExprNode::Send {
+            recv: Some(e),
+            method: Symbol::from("!"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        })
+    };
+    if let Some(name) = &f.if_cond {
+        conds.push(predicate(name));
+    }
+    if let Some(name) = &f.unless_cond {
+        conds.push(negate(predicate(name)));
     }
     if let Some(c) = &f.if_cond_expr {
         conds.push(c.clone());
     }
     if let Some(c) = &f.unless_cond_expr {
-        conds.push(syn(ExprNode::Send {
-            recv: Some(c.clone()),
-            method: Symbol::from("!"),
-            args: vec![],
-            block: None,
-            parenthesized: false,
-        }));
+        conds.push(negate(c.clone()));
     }
     let Some(cond) = conds.into_iter().reduce(|l, r| {
         syn(ExprNode::BoolOp {

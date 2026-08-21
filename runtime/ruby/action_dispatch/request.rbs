@@ -39,6 +39,7 @@ module ActionDispatch
     def initialize: () -> void
     def get?: () -> bool
     def post?: () -> bool
+    def head?: () -> bool
     def xhr?: () -> bool
     def fullpath: () -> String
     def original_fullpath: () -> String

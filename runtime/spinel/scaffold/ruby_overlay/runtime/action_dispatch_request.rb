@@ -35,6 +35,14 @@ module ActionDispatch
 
     def get? = request_method == "GET"
     def post? = request_method == "POST"
+    # Rails' "is this a safe request" idiom is `request.get? ||
+    # request.head?`, and campfire writes exactly that in
+    # `BlockBannedRequests#safe_request?`. This overlay is the Request
+    # the ruby-family SERVER actually loads — the `runtime/ruby` copy
+    # beside it answers the same questions for the analyzer and the
+    # strict targets, so a predicate has to land in both or the one
+    # that runs is the one still missing it.
+    def head? = request_method == "HEAD"
 
     def path
       @env["PATH_INFO"] || "/"
