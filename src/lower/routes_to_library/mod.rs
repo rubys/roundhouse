@@ -600,9 +600,23 @@ fn build_helper_function(
     // site writes a bare `user_profile_url`.
     //
     // Only honored when the defaulted params form a SUFFIX of the
-    // signature: Ruby cannot write `def f(a = "me", b)`. A default in
-    // the middle keeps its param required, which is the shape the
-    // signature could already express.
+    // signature. NOT because Ruby forbids the other shape — it does
+    // not, `def f(a = "me", b)` is legal and binds `f(x)` to
+    // `a="me", b=x`, which is exactly Rails' rule. The restriction is
+    // for the STRICT targets: Rust has no default arguments, so the
+    // emitter fills them at the CALL SITE by padding MISSING TRAILING
+    // args (`expr::mod::current_class_method_param_tys`). A leading
+    // default would be appended at the end instead of filled in place,
+    // silently swapping the segments in the URL.
+    //
+    // What it costs, in campfire: push_subscriptions is routed under
+    // `scope defaults: { user_id: "me" }`, so Rails accepts
+    // `user_push_subscription_path(record)` — one arg for a two-segment
+    // member route. Here that param stays required and the call raises
+    // `wrong number of arguments (given 1, expected 2)`. The collection
+    // helper is fine (its only defaulted param IS the suffix). Lifting
+    // this means teaching the call-site padders to fill by position
+    // from the left, not appending.
     let default_for = |p: &String| -> Option<&String> {
         route.param_defaults.iter().find(|(n, _)| n == p).map(|(_, v)| v)
     };
