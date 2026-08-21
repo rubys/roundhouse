@@ -57,6 +57,17 @@ end
   scope :last_page, -> { ordered.last(PAGE_SIZE) }
   scope :first_page, -> { ordered.first(PAGE_SIZE) }
   scope :newest, -> { ordered.last }
+  scope :search, ->(q) { where("body like ?", q) }
+  scope :shared, -> { where(room_id: 1) }
+end
+"#,
+        ),
+        (
+            // A SECOND model declaring `shared` — the name now names
+            // nothing, which is what pins the uniqueness guard below.
+            "app/models/note.rb",
+            r#"class Note < ApplicationRecord
+  scope :shared, -> { where(room_id: 1) }
 end
 "#,
         ),
@@ -68,11 +79,19 @@ end
     @head = @room.messages.ordered.first(3)
     @words = summary.split.first(4).join(" ")
     @tail = summary.split.last(2).join(" ")
+    @found = anything.search("hi").last(100)
+    @shared = anything.shared.last(100)
   end
 
   private
     def summary
       "a b c d e f"
+    end
+
+    # Deliberately untypeable — the point of the two assertions that
+    # read through it is that the RECEIVER's type never resolves.
+    def anything
+      Current.whatever
     end
 end
 "#,
@@ -153,5 +172,46 @@ fn counted_terminal_on_a_non_relation_receiver_is_left_alone() {
     assert!(
         show.contains("split.first(4)") && show.contains("split.last(2)"),
         "Array receivers keep Array#first/#last:\n{show}"
+    );
+}
+
+
+/// A receiver whose own type never resolves, but whose OUTERMOST call
+/// NAMES A SCOPE, is a relation — a scope returns one by construction.
+///
+/// campfire's search page is
+/// `Current.user.reachable_messages.search(query).last(100)`, where
+/// `Current.user` is untyped at harvest (an ivar on a lowered
+/// CurrentAttributes class) and takes the whole chain down with it. At
+/// run time every link answers a real Relation; only this rename was
+/// missing, so the call landed on the runtime's ZERO-ARG `last`.
+#[test]
+fn a_receiver_naming_a_scope_is_a_relation_even_when_untyped() {
+    let show = emitted(
+        &ruby::emit_lowered_controllers(&app()),
+        "app/controllers/rooms_controller.rb",
+    );
+    assert!(
+        show.contains(".search(\"hi\").last_n(100)"),
+        "a scope-named receiver renames the counted terminal:\n{show}"
+    );
+}
+
+/// The guard: a scope name TWO models declare names nothing, so it
+/// proves nothing about the receiver. Same standard
+/// `owner_model_from_name` holds association names to.
+#[test]
+fn a_scope_name_two_models_share_proves_nothing() {
+    let show = emitted(
+        &ruby::emit_lowered_controllers(&app()),
+        "app/controllers/rooms_controller.rb",
+    );
+    assert!(
+        show.contains(".shared.last(100)"),
+        "an ambiguous scope name must not rename:\n{show}"
+    );
+    assert!(
+        !show.contains(".shared.last_n(100)"),
+        "an ambiguous scope name must not rename:\n{show}"
     );
 }

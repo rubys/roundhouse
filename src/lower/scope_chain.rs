@@ -1531,6 +1531,25 @@ impl Ctx<'_> {
     fn scope_of(&self, model: &ClassId, method: &Symbol) -> bool {
         self.scopes.get(model).is_some_and(|s| s.contains_key(method))
     }
+    /// The ONE model that declares `name` as a scope — `None` when no
+    /// model does, and `None` when two or more do.
+    ///
+    /// Uniqueness is the same standard `owner_model_from_name` holds
+    /// association names to, and for the same reason: a name two models
+    /// share names nothing.
+    fn sole_scope_owner(&self, name: &Symbol) -> Option<&ClassId> {
+        let mut found: Option<&ClassId> = None;
+        for (model, declared) in self.scopes.iter() {
+            if declared.contains_key(name) {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(model);
+            }
+        }
+        found
+    }
+
     /// The scope's own (user) params, so the rewriter can pad omitted
     /// leading args when threading the relation.
     fn scope_params(&self, model: &ClassId, method: &Symbol) -> Option<&Vec<Param>> {
@@ -2970,6 +2989,33 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 }
                 *expr = put(span, Some(r), method, args, block, parenthesized);
                 return None;
+            }
+
+            // `first(n)` / `last(n)` on a receiver whose own type never
+            // resolved, but whose OUTERMOST call names a scope.
+            //
+            // A scope returns a relation by construction — that is what
+            // a scope IS — so the receiver is one whatever the chain
+            // below it typed as. campfire's search page reads
+            // `Current.user.reachable_messages.search(query).last(100)`,
+            // where `Current.user` is untyped at harvest (an ivar on a
+            // lowered CurrentAttributes class) and takes the whole chain
+            // with it. At RUN TIME every link answers a real Relation;
+            // only this rename was missing, so the call landed on the
+            // runtime's zero-arg `last` — `wrong number of arguments
+            // (given 1, expected 0)` in three of that file's five tests.
+            //
+            // The guard is `sole_scope_owner`: a name TWO models declare
+            // names nothing, and a receiver-blind rename would corrupt
+            // `Array#first(n)` (lobsters' `split.first(words * 2)`),
+            // which is the hazard `counted_terminal`'s own note names.
+            if let Some(counted) = counted_terminal(&method, &args, block.as_ref()) {
+                let names_a_scope = matches!(&*r.node, ExprNode::Send { method: rname, .. }
+                    if ctx.sole_scope_owner(rname).is_some());
+                if names_a_scope {
+                    *expr = put(span, Some(r), counted, args, block, parenthesized);
+                    return None;
+                }
             }
 
             *expr = put(span, Some(r), method, args, block, parenthesized);
