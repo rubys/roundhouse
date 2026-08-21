@@ -45,9 +45,13 @@ pub(super) enum PreambleStmt {
 /// filters whose targets are private methods are instead inlined into
 /// the action bodies upstream (`inline_before_filters`) and don't
 /// appear here.
+/// `publics` is this controller's OWN public actions; `inherited` names
+/// the ones it reaches only through its parent. Both get a dispatch
+/// arm, only the former gets a method.
 pub(super) fn synthesize_process_action(
     preamble: &[PreambleStmt],
     publics: &[Action],
+    inherited: &[Symbol],
     enclosing_class: Symbol,
 ) -> MethodDef {
     let mut stmts: Vec<Expr> = Vec::new();
@@ -76,8 +80,8 @@ pub(super) fn synthesize_process_action(
         }
     }
 
-    if !publics.is_empty() {
-        stmts.push(case_dispatch(publics));
+    if !publics.is_empty() || !inherited.is_empty() {
+        stmts.push(case_dispatch(publics, inherited));
     }
 
     let mut body = match stmts.len() {
@@ -251,30 +255,49 @@ fn include_check(only: &[Symbol], except: &[Symbol]) -> Expr {
 /// `case action_name; when :foo then foo; ...; end` — one arm per
 /// public action. The `:new` action dispatches to `new_action` (Ruby
 /// `def new` would shadow `Object#new`).
-fn case_dispatch(publics: &[Action]) -> Expr {
-    let arms: Vec<Arm> = publics
-        .iter()
-        .map(|a| {
-            let action_name = a.name.as_str();
-            let method_name = method_name_for_action(action_name);
-            let mut dispatch = syn(ExprNode::Send {
-                recv: None,
-                method: Symbol::from(method_name),
-                args: vec![],
-                block: None,
-                parenthesized: false,
-            });
-            // Each dispatch Send attributes to the action it invokes.
-            dispatch.inherit_span(a.body.span);
-            Arm {
-                pattern: Pattern::Lit {
-                    value: Literal::Sym { value: Symbol::from(action_name) },
-                },
-                guard: None,
-                body: dispatch,
-            }
-        })
-        .collect();
+///
+/// INHERITED actions get an arm too, and that is not a nicety. Rails
+/// dispatches an action a controller reaches only through its parent —
+/// campfire's `Rooms::DirectsController < RoomsController` defines
+/// new/create/edit and inherits `destroy`, overriding just `room_scope`
+/// and `ensure_can_administer` to widen who may run it. With no arm the
+/// dispatcher fell off the end of the `case` and answered 200 with no
+/// body, so `destroy only allowed for all room users` saw neither the
+/// redirect nor the deleted row.
+///
+/// The preamble above already knew: `build_filter_preamble` emits
+/// `set_room if [:show, :destroy].include?(action_name)` in that very
+/// method. Two halves of one dispatcher disagreeing about which actions
+/// exist is the shape of the bug.
+///
+/// An inherited arm needs no method here — Ruby finds the parent's, and
+/// re-emitting it on the subclass would shadow an override rather than
+/// use it.
+fn case_dispatch(publics: &[Action], inherited: &[Symbol]) -> Expr {
+    let arm_for = |action_name: &str, span: Option<crate::span::Span>| {
+        let method_name = method_name_for_action(action_name);
+        let mut dispatch = syn(ExprNode::Send {
+            recv: None,
+            method: Symbol::from(method_name),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        });
+        // Each dispatch Send attributes to the action it invokes.
+        if let Some(span) = span {
+            dispatch.inherit_span(span);
+        }
+        Arm {
+            pattern: Pattern::Lit {
+                value: Literal::Sym { value: Symbol::from(action_name) },
+            },
+            guard: None,
+            body: dispatch,
+        }
+    };
+    let mut arms: Vec<Arm> =
+        publics.iter().map(|a| arm_for(a.name.as_str(), Some(a.body.span))).collect();
+    arms.extend(inherited.iter().map(|n| arm_for(n.as_str(), None)));
     syn(ExprNode::Case {
         scrutinee: var_ref("action_name"),
         arms,

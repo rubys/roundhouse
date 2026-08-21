@@ -690,7 +690,46 @@ fn build_methods(
         .cloned()
         .collect();
 
-    if !publics_inlined.is_empty() {
+    // Actions this controller reaches only through its parent. Rails
+    // dispatches them; the `case` in `synthesize_process_action` has to
+    // carry an arm or they fall off the end and answer 200. Nearest
+    // ancestor wins, and anything this controller defines itself (public
+    // OR private — a private override is still the method Ruby finds)
+    // is not inherited.
+    let own_names: std::collections::HashSet<Symbol> =
+        controller.actions().map(|a| a.name.clone()).collect();
+    // The ROUTES decide, not visibility. "Public" in this IR means
+    // "declared above the `private` marker", and lobsters'
+    // ApplicationController declares `authenticate_user`,
+    // `require_logged_in_user` and a dozen other FILTER TARGETS that
+    // way — gating on visibility put a dispatch arm for every one of
+    // them into 25 controllers. An action is what the router can send
+    // here; anything else is a method that happens to be public.
+    //
+    // `routed` is this controller's routed action names, already
+    // plumbed here for the format dispatch. `None` means the caller had
+    // no route table, and then nothing is inherited — declining is the
+    // previous behavior, and guessing without the router is what put
+    // `when :authenticate_user` in 25 files.
+    let mut inherited: Vec<Symbol> = Vec::new();
+    if let Some(routed) = routed {
+        let mut seen: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
+        for ancestor in ancestor_chain(controller, all_controllers).iter().rev() {
+            let (ancestor_pubs, _) = split_public_private_actions(ancestor);
+            for a in ancestor_pubs {
+                if !routed.contains(&a.name)
+                    || own_names.contains(&a.name)
+                    || !seen.insert(a.name.clone())
+                {
+                    continue;
+                }
+                inherited.push(a.name.clone());
+            }
+        }
+    }
+    inherited.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+
+    if !publics_inlined.is_empty() || !inherited.is_empty() {
         // The before_action preamble: everything the body-inlining above
         // can't reach — inherited filters (ApplicationController's
         // `authenticate_user` firing for subclass actions), own filters
@@ -707,6 +746,7 @@ fn build_methods(
         methods.push(synthesize_process_action(
             &preamble,
             &publics_inlined,
+            &inherited,
             controller.name.0.clone(),
         ));
     }
