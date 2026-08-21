@@ -200,6 +200,41 @@ module ActionController
       self
     end
 
+    # ---- conditional GET: ALWAYS FRESH -----------------------------
+    #
+    # Rails' `fresh_when` / `stale?` compare the client's
+    # `If-None-Match` / `If-Modified-Since` against an ETag or
+    # timestamp and answer 304 on a match. Neither half of that
+    # comparison exists here: this controller has no request object
+    # (only `@request_format`), so there is nothing to read the
+    # conditional headers FROM, and the extra-header hash above is
+    # buffered but never sent, so there is nothing to write the
+    # validators TO.
+    #
+    # What IS available is the answer Rails gives when a client sends
+    # no conditional header at all: the response is stale, render it.
+    # That is this implementation, and it is a subset rather than a
+    # stub — always-render is semantically CORRECT for every request,
+    # it just never earns the 304. The cost is bandwidth, not
+    # behavior, which is why it can ship ahead of the plumbing.
+    #
+    # Monomorphic on the shapes the corpus writes — `fresh_when
+    # @messages` and `stale?(etag: record)`. Rails accepts several more
+    # (`fresh_when(etag:, last_modified:)`, `stale?(record)`); each
+    # would be its own method here when a call site asks, rather than
+    # one method with a union parameter no target can narrow.
+    # Empty body, not `nil`: the same no-op idiom
+    # `Base.preload_associations` uses. A body that is only a bare `nil`
+    # gives Rust an `Option` with nothing to infer its parameter from
+    # (`E0282: type annotations needed` on a lone `None;`), where an
+    # empty body is a plain `void`.
+    def fresh_when(record)
+    end
+
+    def stale?(etag: nil)
+      true
+    end
+
     def headers
       @headers
     end

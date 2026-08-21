@@ -601,6 +601,34 @@ a named gap where there was a silent wrong answer. Closing it means
 moving the through rebuild into the shared lowering, where every target
 gets the join.
 
+### Conditional GET is ALWAYS FRESH
+
+`fresh_when(record)` is a no-op and `stale?(etag:)` answers `true`, so
+every conditional-GET request renders instead of ever answering 304.
+
+**Why.** Both halves of Rails' comparison are missing. The controller
+has no request object — only `@request_format` — so there is nothing to
+read `If-None-Match` / `If-Modified-Since` FROM, and the extra-header
+hash on the buffered response is never sent by the CGI harness, so
+there is nothing to write `ETag` / `Last-Modified` TO. Wiring either
+one is a change to the harness, not to this method.
+
+**What it costs.** Bandwidth, not behavior. Always-render is the answer
+Rails itself gives when a client sends no conditional header, so no
+response is ever WRONG — the 304 is simply never earned. That is why
+this can ship ahead of the plumbing, where a raise or a missing method
+could not: three campfire controllers gate real work on `stale?`, and
+without it they answered nothing at all.
+
+**Shape.** Monomorphic on what the corpus writes — `fresh_when
+@messages`, `stale?(etag: record)`. Rails accepts more
+(`fresh_when(etag:, last_modified:)`, `stale?(record)`); each gets its
+own method here when a call site asks, rather than one method with a
+union parameter no strict target can narrow. `fresh_when`'s body is
+EMPTY rather than a bare `nil` — a lone `nil` gives Rust an `Option`
+with nothing to infer from (`E0282` on `None;`), where an empty body is
+a plain `void`.
+
 ### `ActiveRecord::Relation` has no `new`
 
 Rails builds a record through a relation — `User.active_bots.new`,

@@ -82,6 +82,8 @@ module ActionController
     # body, status only; content_type optional.
     def head: (Symbol status, ?content_type: String?) -> void
     def response: () -> Base
+    def fresh_when: (untyped record) -> void
+    def stale?: (?etag: untyped) -> bool
     def headers: () -> Hash[String, String]
     def send_data: (String data, ?type: String, ?disposition: String) -> void
 
