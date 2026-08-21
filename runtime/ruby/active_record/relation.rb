@@ -819,6 +819,29 @@ module ActiveRecord
       record.nil? ? @model.new : record
     end
 
+    # Rails' `find_or_create_by` — the first row matching `conditions`,
+    # or a saved new record carrying them. campfire's `Search.record` is
+    # `find_or_create_by(query: query).touch`, reached through
+    # `user.searches`, and the SCOPE is the point: the created row must
+    # belong to that user, which is what `scope_attributes` carries.
+    #
+    # The caller's own conditions go on the OUTSIDE of the merge, which
+    # is Rails' order — an explicit value wins over the scope's. Same
+    # rule `scope_chain::merge_scope_attributes` applies at lower time
+    # for the plain constructors; here the merge is the runtime's,
+    # because the query half needs the same conditions anyway.
+    #
+    # Reading `scope_attributes` AFTER the find is safe: `find_by`
+    # appends to `@wheres`, and only `where_scope` ever writes the
+    # create-seed slot.
+    def find_or_create_by(conditions)
+      record = find_by(conditions)
+      return record if !record.nil?
+      created = @model.new(scope_attributes.merge(conditions))
+      created.save
+      created
+    end
+
     # ---- SQL composition --------------------------------------------
 
     def to_sql

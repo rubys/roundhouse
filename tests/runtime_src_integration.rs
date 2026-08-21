@@ -986,7 +986,16 @@ fn every_runtime_method_body_concretely_typed() {
     // constant list is not a shape the Rust emitter lowers. Everything
     // downstream is typed: `mail_query_append` takes three Strings, so
     // the gradual value never crosses a call boundary.
-    const CEILING: usize = 298;
+    // 2026-08-21 298 -> 308: `Relation#find_or_create_by`, the same ten
+    // sites the other ceiling itemizes (it counts eight; this counter
+    // also charges the two `nil?`/`save` sends on the untyped locals).
+    // Reads off `conditions` (`Hash[Symbol, untyped]`), off `@model`,
+    // and off what `find_by`/`new` answer — the four sources every
+    // relation method in this file already draws on. campfire's
+    // `Search.record` is `find_or_create_by(query: query).touch`
+    // reached through `user.searches`, and until this existed the
+    // emitted body called a method nothing defined.
+    const CEILING: usize = 308;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

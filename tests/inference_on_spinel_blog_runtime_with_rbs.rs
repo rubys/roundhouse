@@ -640,7 +640,26 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // and it greened a first-run test that had no other way to ask
     // "does this user have exactly one room?" now that a `has_many
     // :through` reader answers a Relation rather than an Array.
-    const CEILING: usize = 738;
+    // 2026-08-21 738 -> 746, +8 for `Relation#find_or_create_by`. Every
+    // one is a read off something the relation's own RBS declares
+    // untyped: the `conditions` parameter is `Hash[Symbol, untyped]`,
+    // `@model` is the model handle, and `find_by`/`new` both answer
+    // untyped — the same four sources `find_by!` and
+    // `first_or_initialize` beside it already draw on. It is EIGHT
+    // rather than two because the method is genuinely two operations,
+    // a find and a scoped build, and the build's
+    // `scope_attributes.merge(conditions)` is three of them on its own.
+    // Trimming the obvious one (a local holding the merge, hoisted
+    // above the find) took it from 10 to 8; the rest are the method.
+    //
+    // It greened campfire's `searches_controller_test` 5/5: `Search
+    // .record` is `find_or_create_by(query: query).touch`, reached as
+    // `user.searches.record(q)`, and until this existed the emitted
+    // body called a method nothing defined. Doing it in the runtime
+    // rather than as a lower-time macro-inline is what lets the SCOPE
+    // reach the create — `merge_scope_attributes` would have had to
+    // merge into a call whose query half needs the same hash.
+    const CEILING: usize = 746;
 
     assert!(
         all_untyped.len() <= CEILING,

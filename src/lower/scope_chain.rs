@@ -1675,6 +1675,17 @@ fn is_relation_terminal(name: &str, args: &[Expr], block: Option<&Expr>) -> bool
                 | "destroy_all"
                 | "delete_all"
                 | "update_all"
+                // Reads the relation and, on a miss, WRITES through it —
+                // so it is a terminal on both counts. Listing it here is
+                // what lets `assoc_scope_shape` see a class method whose
+                // body is `find_or_create_by(...)` as one that runs
+                // against the caller's scope: campfire's `Search.record`,
+                // reached as `user.searches.record(q)`, has to create the
+                // row FOR THAT USER. The scope merge itself is the
+                // runtime's (`Relation#find_or_create_by`), not
+                // `merge_scope_attributes`', because the query half needs
+                // the same conditions anyway.
+                | "find_or_create_by"
         ),
     }
 }

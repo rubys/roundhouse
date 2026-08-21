@@ -119,6 +119,7 @@ module ActiveRecord
     def find_by: (untyped conditions) -> untyped
     def find_by!: (untyped conditions) -> untyped
     def first_or_initialize: () -> untyped
+    def find_or_create_by: (Hash[Symbol, untyped] conditions) -> untyped
 
     def to_sql: () -> String
     def to_subquery_sql: () -> String
