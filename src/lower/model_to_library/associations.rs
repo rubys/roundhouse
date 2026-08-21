@@ -101,6 +101,7 @@ pub(super) fn push_association_methods(
                     foreign_key,
                     as_interface.as_ref(),
                     scope.as_ref(),
+                    through.is_some(),
                 ));
                 methods.push(synth_preload_setter(owner, name, target));
                 {
@@ -286,6 +287,7 @@ fn synth_has_many_reader(
     foreign_key: &Symbol,
     as_interface: Option<&Symbol>,
     scope: Option<&Expr>,
+    through: bool,
 ) -> MethodDef {
     // def comments; Comment.where(article_id: @id); end
     //
@@ -387,15 +389,36 @@ fn synth_has_many_reader(
     // like an attribute. Marking AttributeReader would cause the TS
     // emitter to drop the body and emit a bare field, which would be
     // assigned undefined at construction.
+    // A `through:` reader answers a RELATION, not an Array, and the
+    // difference is not cosmetic. The Ruby-family pre-emit pass
+    // (`emit::ruby::library::apply_through_assoc_lowering`) rebuilds
+    // this body as `ActiveRecord::Relation.new(T).joins(...).where(...)`
+    // — the direct-fk query synthesized above is simply wrong when the
+    // key lives on the join table — and that rebuilt body returns a
+    // live relation. Declaring `Array[T]` here made the signature
+    // disagree with what the method returns, and campfire paid for it
+    // in a way no error named: `Current.user.rooms` typed `Array[Room]`
+    // means `.find_by` is not a known method, so
+    // `last_room_visited` registered `-> untyped`, so
+    // `apply_route_param_lowering` had no model type to see and left
+    // the RECORD in the path — `/rooms/#<Room:0x…>` instead of
+    // `/rooms/1`. `Ty::Relation`'s own doc names an association read as
+    // one of the three places the variant exists for.
+    //
+    // Only the `through:` half moves. A direct has_many's body IS
+    // materialized (the arel fold turns `Comment.where(article_id: @id)`
+    // into an eager row loop), so `Array[T]` states that one correctly.
+    let ret = if through {
+        Ty::Relation { of: target.clone() }
+    } else {
+        Ty::Array { elem: Box::new(Ty::Class { id: target.clone(), args: vec![] }) }
+    };
     MethodDef {
         name: name.clone(),
         receiver: MethodReceiver::Instance,
         params: Vec::new(),
         body,
-        signature: Some(fn_sig(
-            vec![],
-            Ty::Array { elem: Box::new(Ty::Class { id: target.clone(), args: vec![] }) },
-        )),
+        signature: Some(fn_sig(vec![], ret)),
         effects: EffectSet::default(),
         enclosing_class: Some(owner.0.clone()),
         kind: AccessorKind::Method,

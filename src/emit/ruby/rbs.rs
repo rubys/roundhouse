@@ -204,13 +204,20 @@ pub fn ty_to_rbs(ty: &Ty) -> String {
         // apply_datetime_lowering.
         Ty::Time => "Time".into(),
         Ty::Nil => "nil".into(),
-        // Analysis-time relation type — erased by query specialization
-        // before emit (see `Ty::Relation`). The emitted Ruby has no
-        // runtime relation class for this to name, so reaching here is
-        // a coverage gap: report, never degrade to `Array[T]`.
-        Ty::Relation { of } => {
-            return crate::emit::diagnostics::unsupported_relation_ty("ruby", of);
-        }
+        // Analysis-time relation type. On the STRICT targets reaching
+        // here is a coverage gap — a chain that escaped the arel fold
+        // with no runtime to fall back on — and their renderers report
+        // it. The ruby family is the exception this arm exists for:
+        // `runtime/ruby/active_record/relation.rb` IS a real class, the
+        // emitted code names it (`ActiveRecord::Relation.new(Room)` is
+        // what a `has_many :through` reader returns), and the
+        // `lower_residue` diagnostic already says so in as many words —
+        // "executes on the runtime Relation in ruby-family targets,
+        // unsupported at strict-target emit". Naming it here is not a
+        // degrade to `Array[T]`; it is the type the method actually
+        // has. The class is non-generic in v1 (its element type is
+        // `untyped`), so the `of` is dropped rather than rendered.
+        Ty::Relation { .. } => "ActiveRecord::Relation".into(),
         Ty::Array { elem } => format!("Array[{}]", ty_to_rbs(elem)),
         Ty::Hash { key, value } => format!("Hash[{}, {}]", ty_to_rbs(key), ty_to_rbs(value)),
         Ty::Tuple { elems } => {

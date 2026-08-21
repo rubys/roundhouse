@@ -568,6 +568,39 @@ the state set, because `begin`/`ensure` is not available in this file
 surface lives in the ruby-family `connection.rb` reopen). The push and
 the pop are symmetric on every path that returns.
 
+### A `has_many :through` reader is a live Relation — only here
+
+`user.rooms`, `room.users`, `user.reachable_messages`: a reader for an
+association declared `through:` returns an `ActiveRecord::Relation`, not
+an Array of rows. Its declared type says so, and the chains campfire
+writes on top of it — `Current.user.rooms.find_by(id: …)`,
+`room.users.where.not(id: …)`, `Current.user.rooms.original` — resolve
+against the relation surface because of it.
+
+**Why.** The direct-fk query the shared lowering synthesizes for every
+has_many (`Room.where(user_id: @id)`) is simply wrong when the key lives
+on the join table, so the Ruby family rebuilds the body as
+`ActiveRecord::Relation.new(Room).joins("INNER JOIN memberships …")
+.where("memberships.user_id = ?", @id)`
+(`emit::ruby::library::apply_through_assoc_lowering`). That rebuilt body
+returns a relation. Declaring `Array[Room]` over it was a signature that
+disagreed with the method, and nothing raised: `Current.user.rooms`
+typed as an Array means `.find_by` is not a known method, so the
+controller method wrapping it registered `-> untyped`, so the
+route-param lowering had no model type to see and left the RECORD in the
+path — `/rooms/#<Room:0x…>` where Rails writes `/rooms/1`.
+
+**What it costs — and who pays.** The rebuild is Ruby-family only. Every
+other target still carries the direct-fk body, which on Rust reads
+`Story::where(category_id: self.id)` for lobsters'
+`has_many :stories, through: :tags` — a column `stories` does not have.
+That emit compiled and returned the wrong rows. With the reader typed
+`Ty::Relation`, those targets now meet a relation at emit and report
+`relation_type` unsupported instead, which is the ledger doing its job:
+a named gap where there was a silent wrong answer. Closing it means
+moving the through rebuild into the shared lowering, where every target
+gets the join.
+
 ### `ActiveRecord::Relation` has no `new`
 
 Rails builds a record through a relation — `User.active_bots.new`,
