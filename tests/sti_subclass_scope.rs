@@ -119,6 +119,52 @@ fn construction_stamps_the_type_instead_of_filtering() {
     );
 }
 
+/// The call-site stamp above cannot see EVERY construction. campfire's
+/// `Rooms::Open.create_for(...)` runs the BASE class's own class method,
+/// whose body says `create!(attributes)` at implicit self — a call site
+/// that names no subclass, reaching `Base.create!`, whose `new(attrs)`
+/// is also at implicit self and so really does build a `Rooms::Open`.
+/// The row went to the database with a blank `type`, which the read
+/// half then correctly could not see.
+///
+/// So the subclass gets a constructor that stamps the column itself —
+/// Rails' `ensure_proper_type`, which is where Rails puts it too.
+#[test]
+fn a_subclass_constructor_stamps_the_type_for_inherited_call_sites() {
+    let mut app = app("1");
+    roundhouse::lower::apply_sti_subclass_callbacks(&mut app);
+    let open = app
+        .library_classes
+        .iter()
+        .find(|lc| lc.name.0.as_str() == "Rooms::Open")
+        .expect("Rooms::Open");
+    let init = open
+        .methods
+        .iter()
+        .find(|m| m.name.as_str() == "initialize")
+        .expect("a synthesized initialize");
+    let body = format!("{:?}", init.body);
+    assert!(body.contains("Super"), "must call super: {body}");
+    assert!(
+        body.contains("Str { value: \"Rooms::Open\" }"),
+        "must stamp the class name: {body}"
+    );
+    // Guarded, because `super(attrs)` has already assigned an explicit
+    // `type:` by the time this runs — Rails stamps BEFORE assignment,
+    // so the guard is what recovers that order.
+    assert!(body.contains("nil?"), "the stamp must be guarded: {body}");
+
+    // `Gadget < Widget` has no `type` column, so it is not STI and gets
+    // no constructor.
+    let gadget = app.library_classes.iter().find(|lc| lc.name.0.as_str() == "Gadget");
+    if let Some(gadget) = gadget {
+        assert!(
+            !gadget.methods.iter().any(|m| m.name.as_str() == "initialize"),
+            "a non-STI subclass must not be stamped",
+        );
+    }
+}
+
 /// An explicit `type:` wins — nothing is overwritten.
 #[test]
 fn an_explicit_type_is_not_overwritten() {

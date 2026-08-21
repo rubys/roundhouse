@@ -1,4 +1,5 @@
-//! Callbacks declared in an STI SUBCLASS.
+//! What an STI SUBCLASS needs that the model path gives a model:
+//! its callbacks, and the inheritance-column stamp on `new`.
 //!
 //! `class Rooms::Open < Room; after_save_commit :grant_access_to_all_users; end`
 //!
@@ -24,6 +25,21 @@
 //! `condition.is_some()` early return: a callback that runs in the
 //! wrong circumstances is worse than one that does not run, and a
 //! declined declaration stays visible in `unknown_calls`.
+//!
+//! ## The type stamp
+//!
+//! The same "not a Model, so the model path skipped it" fact, one step
+//! further along. Rails' `ensure_proper_type` writes the class name
+//! into the inheritance column when a SUBCLASS is instantiated; ours
+//! did not, so a room created through the base class's own `create_for`
+//! — `Rooms::Open.create_for` reaches `Base.create!`, whose
+//! `new(attrs)` is at implicit self and so really does build a
+//! `Rooms::Open` — went to the database with a BLANK type. Two silent
+//! consequences: `Rooms::Open.all` (`where(type: "Rooms::Open")`) did
+//! not find it, and `after_save_commit :grant_access_to_all_users` —
+//! the callback the half above just connected — is guarded on
+//! `type_previously_changed?(to: "Rooms::Open")`, so the new room
+//! granted membership to its creator and nobody else.
 
 use crate::app::App;
 use crate::expr::{Expr, ExprNode, Literal};
@@ -61,6 +77,13 @@ fn hook_method(name: &str) -> Option<&'static str> {
 pub fn apply_sti_subclass_callbacks(app: &mut App) {
     let models: std::collections::HashSet<ClassId> =
         app.models.iter().map(|m| m.name.clone()).collect();
+    // The type stamp asks a NARROWER question than the callback fold:
+    // `Gadget < Widget` on a `widgets` table with no inheritance column
+    // is plain Ruby inheritance, not STI, and stamping it would write a
+    // column that does not exist. `sti_bases` is the one authority on
+    // which subclasses are STI ones — it is what checks for the column.
+    let sti: std::collections::HashSet<ClassId> =
+        crate::lower::sti_bases(app).into_keys().collect();
     for lc in &mut app.library_classes {
         // An STI subclass is a library class whose parent IS a model.
         if !lc.parent.as_ref().is_some_and(|p| models.contains(p)) {
@@ -93,7 +116,102 @@ pub fn apply_sti_subclass_callbacks(app: &mut App) {
                 fold(lc, hook, &target);
             }
         }
+        if sti.contains(&lc.name) {
+            stamp_inheritance_column(lc);
+        }
     }
+}
+
+/// `def initialize(attrs = {}); super(attrs); self.type = "<Name>" if
+/// self.type.nil? || self.type == ""; end`
+///
+/// CONDITIONAL, and that is Rails' order rather than a hedge:
+/// `ensure_proper_type` runs during `initialize`, BEFORE the attributes
+/// are assigned, so an explicit `type:` in `attrs` wins. `super(attrs)`
+/// has already assigned them by the time this line runs, and the guard
+/// is what recovers that order.
+///
+/// Declines when the subclass writes its own `initialize` — a
+/// hand-written constructor is somebody else's contract.
+fn stamp_inheritance_column(lc: &mut crate::dialect::LibraryClass) {
+    if lc.methods.iter().any(|m| m.name.as_str() == "initialize") {
+        return;
+    }
+    let span = crate::span::Span::synthetic();
+    let attrs = Symbol::from("attrs");
+    let syn = |n| Expr::new(span, n);
+    let read_type = || {
+        syn(ExprNode::Send {
+            recv: Some(syn(ExprNode::SelfRef)),
+            method: Symbol::from("type"),
+            args: vec![],
+            block: None,
+            parenthesized: true,
+        })
+    };
+    let unset = syn(ExprNode::BoolOp {
+        op: crate::expr::BoolOpKind::Or,
+        surface: crate::expr::BoolOpSurface::default(),
+        left: syn(ExprNode::Send {
+            recv: Some(read_type()),
+            method: Symbol::from("nil?"),
+            args: vec![],
+            block: None,
+            parenthesized: true,
+        }),
+        right: syn(ExprNode::Send {
+            recv: Some(read_type()),
+            method: Symbol::from("=="),
+            args: vec![syn(ExprNode::Lit { value: Literal::Str { value: String::new() } })],
+            block: None,
+            parenthesized: false,
+        }),
+    });
+    let stamp = syn(ExprNode::Send {
+        recv: Some(syn(ExprNode::SelfRef)),
+        method: Symbol::from("type="),
+        args: vec![syn(ExprNode::Lit {
+            value: Literal::Str { value: lc.name.0.as_str().to_string() },
+        })],
+        block: None,
+        parenthesized: true,
+    });
+    let body = syn(ExprNode::Seq {
+        exprs: vec![
+            syn(ExprNode::Super {
+                args: Some(vec![syn(ExprNode::Var {
+                    id: crate::ident::VarId(0),
+                    name: attrs.clone(),
+                })]),
+            }),
+            syn(ExprNode::If {
+                cond: unset,
+                then_branch: stamp,
+                else_branch: syn(ExprNode::Lit { value: Literal::Nil }),
+            }),
+        ],
+    });
+    lc.methods.insert(
+        0,
+        crate::dialect::MethodDef {
+            name: Symbol::from("initialize"),
+            receiver: crate::dialect::MethodReceiver::Instance,
+            params: vec![crate::dialect::Param {
+                name: attrs,
+                default: Some(syn(ExprNode::Hash { entries: Vec::new(), kwargs: false })),
+                keyword: false,
+                rest: false,
+            }],
+            body,
+            signature: None,
+            effects: crate::effect::EffectSet::default(),
+            enclosing_class: Some(lc.name.0.clone()),
+            kind: crate::dialect::AccessorKind::Method,
+            is_async: false,
+            mutates_self: true,
+            block_param: None,
+        },
+    );
 }
 
 /// Append `<target>` to the class's `<hook>` method, creating it when
