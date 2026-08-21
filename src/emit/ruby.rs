@@ -218,6 +218,10 @@ pub fn emit_lowered_models(app: &App) -> Vec<EmittedFile> {
     // Relation join through the intermediate table (no-op when no
     // through-assoc resolves).
     library::apply_through_assoc_lowering(&mut lcs, app);
+    // belongs_to autosave: an unsaved target assigned through the
+    // writer is saved at before_validation and its id taken (no-op for
+    // models with no belongs_to). Ruby-family only — see the pass.
+    library::apply_belongs_to_autosave(&mut lcs, app);
     // belongs_to writers are synthesized by the shared model lowering
     // (lower::model_to_library::associations), alongside the readers.
     // App-helper resolution: bare `avatar_img(...)` → `ApplicationHelper.

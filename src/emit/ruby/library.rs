@@ -918,6 +918,268 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
     }
 }
 
+/// Ruby-family pre-emit pass: `belongs_to` autosave.
+///
+/// `room.creator = User.new(attrs); room.save!` is ordinary Rails —
+/// the unsaved creator is saved with its owner and the foreign key
+/// follows. The shared writer stores `value.id` and nothing else, so
+/// the key stayed 0 and campfire's whole first run died on
+/// `Validation failed: Creator must exist` (four tests, two files).
+///
+/// Two edits per non-polymorphic belongs_to:
+///
+///   1. the writer stashes an UNSAVED value in the reader's cache —
+///      a record with no id yet cannot be found again from the foreign
+///      key, so something has to hold it until the save;
+///   2. `_autosave_<name>` saves it and takes the id, folded into
+///      `before_validation`.
+///
+/// ```ruby
+/// def creator=(value)
+///   if value.nil?
+///     @creator_id = 0
+///   else
+///     @creator_id = value.id
+///     if value.id == 0
+///       @creator_cache = value
+///       @creator_loaded = true
+///     end
+///   end
+/// end
+///
+/// def _autosave_creator
+///   if @creator_loaded && @creator_id == 0 && !@creator_cache.nil?
+///     @creator_cache.save
+///     @creator_id = @creator_cache.id
+///   end
+/// end
+/// ```
+///
+/// A SAVED value deliberately does not populate the cache, so the
+/// reader keeps re-querying by foreign key for those and a later direct
+/// write to the key cannot be answered from a stale object.
+///
+/// WHY RUBY-FAMILY AND NOT THE SHARED LOWERING. This started shared and
+/// the strict targets refused it, each in its own way — the two of them
+/// do not even agree on the shape of the slot being read:
+///
+///   * Rust emits the cache field as a plain `Article`, so `.nil?`
+///     became `is_null()` on a struct that has no such method;
+///   * Crystal emits it as `Article?`, so dropping the nil test to
+///     satisfy Rust gave `undefined method 'save' for Nil`;
+///   * `new_record?` lives on the runtime `Base`, which a strict
+///     target's model — a plain struct — never inherits;
+///   * and an unstamped `@fk = <cache>.id` typed the foreign-key column
+///     `Ty::Var`, which Rust reads as "already a Value": `article_id`
+///     flipped from `i64` to `serde_json::Value` and took eleven E0308s
+///     with it.
+///
+/// There is no single spelling that satisfies both, so this joins
+/// `apply_through_assoc_lowering` as a Ruby-family capability and the
+/// strict targets keep the gap they already had, ledgered in
+/// docs/pipeline/runtime.md.
+///
+/// Ordering inside `before_validation` is load-bearing: the autosave
+/// call is pushed BEFORE the belongs_to `default:` statement, which is
+/// guarded on `@creator_id == 0`. Fill the key first or an explicitly
+/// assigned unsaved creator is overwritten by the default.
+pub(crate) fn apply_belongs_to_autosave(lcs: &mut [LibraryClass], app: &App) {
+    use crate::dialect::Association;
+
+    for lc in lcs.iter_mut() {
+        let Some(model) = app.models.iter().find(|m| m.name == lc.name) else { continue };
+        let names: Vec<(Symbol, Symbol)> = model
+            .associations()
+            .filter_map(|a| match a {
+                Association::BelongsTo { name, foreign_key, polymorphic: false, .. } => {
+                    Some((name.clone(), foreign_key.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        for (name, fk) in names {
+            let writer = Symbol::from(format!("{}=", name.as_str()));
+            let Some(w) = lc
+                .methods
+                .iter_mut()
+                .find(|m| m.name == writer && m.receiver == MethodReceiver::Instance)
+            else {
+                continue;
+            };
+            // Only the SYNTHESIZED writer is patched, recognized by its
+            // shape: `if value.nil? then @fk = 0 else @fk = value.id`.
+            // A model that wrote its own `<name>=` keeps it untouched
+            // and gets no autosave either — the stash is the only thing
+            // `_autosave_<name>` reads, and watching a slot nobody
+            // fills would be worse than the gap.
+            let ExprNode::If { else_branch, .. } = &mut *w.body.node else { continue };
+            if !matches!(&*else_branch.node, ExprNode::Assign { target: LValue::Ivar { name: n }, .. } if n == &fk)
+            {
+                continue;
+            }
+            let span = else_branch.span;
+            let assign = else_branch.clone();
+            *else_branch = Expr::new(
+                span,
+                ExprNode::Seq { exprs: vec![assign, stash_unsaved(&name, span)] },
+            );
+            lc.methods.push(autosave_method(&lc.name, &name, &fk));
+            fold_before_validation(&mut lc.methods, &lc.name, &name);
+        }
+    }
+}
+
+/// `if value.id == 0 then @<name>_cache = value; @<name>_loaded = true end`
+fn stash_unsaved(name: &Symbol, span: Span) -> Expr {
+    let syn = |n| Expr::new(span, n);
+    let value = || syn(ExprNode::Var { id: VarId(0), name: Symbol::from("value") });
+    let id_read = syn(ExprNode::Send {
+        recv: Some(value()),
+        method: Symbol::from("id"),
+        args: vec![],
+        block: None,
+        parenthesized: false,
+    });
+    syn(ExprNode::If {
+        cond: syn(ExprNode::Send {
+            recv: Some(id_read),
+            method: Symbol::from("=="),
+            args: vec![syn(ExprNode::Lit { value: Literal::Int { value: 0 } })],
+            block: None,
+            parenthesized: false,
+        }),
+        then_branch: syn(ExprNode::Seq {
+            exprs: vec![
+                syn(ExprNode::Assign {
+                    target: LValue::Ivar {
+                        name: Symbol::from(format!("{}_cache", name.as_str())),
+                    },
+                    value: value(),
+                }),
+                syn(ExprNode::Assign {
+                    target: LValue::Ivar {
+                        name: Symbol::from(format!("{}_loaded", name.as_str())),
+                    },
+                    value: syn(ExprNode::Lit { value: Literal::Bool { value: true } }),
+                }),
+            ],
+        }),
+        else_branch: syn(ExprNode::Lit { value: Literal::Nil }),
+    })
+}
+
+fn autosave_method(
+    owner: &ClassId,
+    name: &Symbol,
+    fk: &Symbol,
+) -> crate::dialect::MethodDef {
+    let span = Span::synthetic();
+    let syn = |n| Expr::new(span, n);
+    let cache = || syn(ExprNode::Ivar { name: Symbol::from(format!("{}_cache", name.as_str())) });
+    let send = |recv: Expr, method: &str| {
+        syn(ExprNode::Send {
+            recv: Some(recv),
+            method: Symbol::from(method),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        })
+    };
+    let and = |l: Expr, r: Expr| {
+        syn(ExprNode::BoolOp {
+            op: crate::expr::BoolOpKind::And,
+            surface: crate::expr::BoolOpSurface::default(),
+            left: l,
+            right: r,
+        })
+    };
+    let fk_zero = syn(ExprNode::Send {
+        recv: Some(syn(ExprNode::Ivar { name: fk.clone() })),
+        method: Symbol::from("=="),
+        args: vec![syn(ExprNode::Lit { value: Literal::Int { value: 0 } })],
+        block: None,
+        parenthesized: false,
+    });
+    let cond = and(
+        and(
+            syn(ExprNode::Ivar { name: Symbol::from(format!("{}_loaded", name.as_str())) }),
+            fk_zero,
+        ),
+        send(send(cache(), "nil?"), "!"),
+    );
+    let body = syn(ExprNode::If {
+        cond,
+        then_branch: syn(ExprNode::Seq {
+            exprs: vec![
+                send(cache(), "save"),
+                syn(ExprNode::Assign {
+                    target: LValue::Ivar { name: fk.clone() },
+                    value: send(cache(), "id"),
+                }),
+            ],
+        }),
+        else_branch: syn(ExprNode::Lit { value: Literal::Nil }),
+    });
+    crate::dialect::MethodDef {
+        name: Symbol::from(format!("_autosave_{}", name.as_str())),
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body,
+        signature: None,
+        effects: crate::effect::EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+        block_param: None,
+    }
+}
+
+/// PREPEND, not append: see the ordering note on
+/// [`apply_belongs_to_autosave`].
+fn fold_before_validation(
+    methods: &mut Vec<crate::dialect::MethodDef>,
+    owner: &ClassId,
+    name: &Symbol,
+) {
+    let span = Span::synthetic();
+    let call = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: None,
+            method: Symbol::from(format!("_autosave_{}", name.as_str())),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    let hook = Symbol::from("before_validation");
+    if let Some(existing) =
+        methods.iter_mut().find(|m| m.name == hook && m.receiver == MethodReceiver::Instance)
+    {
+        let mut stmts = match &*existing.body.node {
+            ExprNode::Seq { exprs } => exprs.clone(),
+            _ => vec![existing.body.clone()],
+        };
+        stmts.insert(0, call);
+        existing.body = Expr::new(span, ExprNode::Seq { exprs: stmts });
+        return;
+    }
+    methods.push(crate::dialect::MethodDef {
+        name: hook,
+        receiver: MethodReceiver::Instance,
+        params: Vec::new(),
+        body: call,
+        signature: None,
+        effects: crate::effect::EffectSet::default(),
+        enclosing_class: Some(owner.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+        block_param: None,
+    });
+}
+
 /// Ruby-family pre-emit pass: correct `has_many :through` readers. The
 /// shared lowering synthesizes EVERY has_many reader as a direct
 /// foreign-key query (`Tag.where(story_id: @id)`) — wrong for `through:`,
