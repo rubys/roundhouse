@@ -153,14 +153,50 @@ fn article_renders_residualized_fill_timestamps() {
     // correct in a shared database.
     assert!(src.contains("now = ActiveSupport.db_now"), "{src}");
     // Timestamps are temporal columns — stamps land on the `<col>_raw`
-    // storage ivar (the public reader parses it to Time).
-    assert!(src.contains("@updated_at_raw = now"), "{src}");
-    assert!(src.contains("@created_at_raw = now if creating"), "{src}");
+    // storage ivar (the public reader parses it to Time), and each
+    // stamp INVALIDATES that reader's parse memo. Without the clear,
+    // `record.save` left `record.updated_at` answering the Time parsed
+    // before the save. That pairs the `if` out of postfix-modifier
+    // form, which is why this assertion reads as two statements rather
+    // than the one line it used to.
+    assert!(src.contains("@__t_updated_at = nil\n    @updated_at_raw = now"), "{src}");
+    assert!(
+        src.contains("if creating\n      @__t_created_at = nil\n      @created_at_raw = now"),
+        "{src}",
+    );
     // The runtime schema probe must be fully residualized away.
     assert!(
         !src.contains(".include?(:updated_at)") && !src.contains(".include?(:created_at)"),
         "fill_timestamps still probes the schema at runtime:\n{src}",
     );
+}
+
+/// `reload` re-reads the row into SELF, so it stores each column with
+/// a plain ivar assign where `from_stmt` builds a fresh instance and
+/// can go through the writers. The temporal reader's parse memo has to
+/// be cleared by that store too — it survived, and
+/// `record.reload.updated_at` answered the value from BEFORE the
+/// reload. Invisible until something holds one instance across a
+/// write, which is exactly what a memoized fixture accessor does.
+#[test]
+fn reload_invalidates_the_temporal_parse_memo() {
+    let files = lowered_real_blog();
+    let src = find(&files, "article.rb");
+    let reload = src
+        .split("def _adapter_reload")
+        .nth(1)
+        .expect("an _adapter_reload method");
+    let reload = reload.split("\n  def ").next().unwrap();
+    assert!(
+        reload.contains("@__t_created_at = nil"),
+        "reload stores created_at without clearing its parse memo:\n{reload}",
+    );
+    assert!(
+        reload.contains("@__t_updated_at = nil"),
+        "reload stores updated_at without clearing its parse memo:\n{reload}",
+    );
+    // Non-temporal columns have no memo and gain no extra statement.
+    assert!(!reload.contains("@__t_title"), "non-temporal column got a memo clear:\n{reload}");
 }
 
 #[test]

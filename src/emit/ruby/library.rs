@@ -3107,33 +3107,9 @@ pub(crate) fn apply_datetime_lowering(lcs: &mut [LibraryClass], app: &App) {
                             m.body = temporal_writer_body(&col, &param.name);
                         }
                     }
-                    // Synthesized `<col>_raw=` writer: invalidate the
-                    // reader memo (below) before storing.
-                    if let Some(base) = m.name.as_str().strip_suffix("_raw=") {
-                        let base_sym = Symbol::from(base);
-                        if temporal.contains(&base_sym) {
-                            m.body = Expr::new(
-                                Span::synthetic(),
-                                ExprNode::Seq {
-                                    exprs: vec![
-                                        Expr::new(
-                                            Span::synthetic(),
-                                            ExprNode::Assign {
-                                                target: LValue::Ivar {
-                                                    name: parse_memo_ivar(&base_sym),
-                                                },
-                                                value: Expr::new(
-                                                    Span::synthetic(),
-                                                    ExprNode::Lit { value: Literal::Nil },
-                                                ),
-                                            },
-                                        ),
-                                        m.body.clone(),
-                                    ],
-                                },
-                            );
-                        }
-                    }
+                    // The synthesized `<col>_raw=` writer's own store
+                    // is invalidated by the general walk below, along
+                    // with every OTHER bare write to the same slot.
                 }
                 // Schema-synthesized temporal reader:
                 // `ActiveSupport.parse_db_time(@<col>_raw)`. Profiling
@@ -3159,6 +3135,29 @@ pub(crate) fn apply_datetime_lowering(lcs: &mut [LibraryClass], app: &App) {
             }
         }
 
+        // EVERY bare `@<col>_raw = …` invalidates the memo, not just
+        // the one inside the `<col>_raw=` writer.
+        //
+        // `_adapter_reload` is why this is a walk rather than a
+        // special case on that writer: it re-reads the row and stores
+        // each column with a plain ivar assign (it writes into `self`,
+        // where `from_stmt` builds a fresh instance and can go through
+        // the writers). The memo survived, so `record.reload.
+        // updated_at` answered the value from BEFORE the reload —
+        // invisible until something holds one instance across a write,
+        // which is exactly what Rails' memoized fixture accessors make
+        // routine.
+        //
+        // Statement positions only (a method body, a `Seq` element, an
+        // `If` branch): the replacement is a two-statement `Seq`, and
+        // a `Seq` spliced into an expression slot is not Ruby.
+        for m in &mut lc.methods {
+            if m.receiver != MethodReceiver::Instance {
+                continue;
+            }
+            invalidate_parse_memo_on_raw_writes(&mut m.body, &temporal);
+        }
+
         // The public `<col>=` writer (`self.<col>_raw =
         // ActiveSupport.format_db_time(value)`) is synthesized by the
         // shared model lowering (`schema::synth_temporal_writer`, kind
@@ -3167,6 +3166,53 @@ pub(crate) fn apply_datetime_lowering(lcs: &mut [LibraryClass], app: &App) {
         // and its raw-writer dispatch picks up the memo invalidation
         // installed above.
     }
+}
+
+/// Rewrite every STATEMENT-position `@<col>_raw = …` for a temporal
+/// column into `@__t_<col> = nil; @<col>_raw = …`, so the parse memo
+/// can never outlive the string it was parsed from.
+fn invalidate_parse_memo_on_raw_writes(e: &mut Expr, temporal: &BTreeSet<Symbol>) {
+    match &mut *e.node {
+        ExprNode::Seq { exprs } => {
+            for x in exprs.iter_mut() {
+                invalidate_parse_memo_on_raw_writes(x, temporal);
+            }
+            return;
+        }
+        ExprNode::If { then_branch, else_branch, .. } => {
+            invalidate_parse_memo_on_raw_writes(then_branch, temporal);
+            invalidate_parse_memo_on_raw_writes(else_branch, temporal);
+            return;
+        }
+        _ => {}
+    }
+    let ExprNode::Assign { target: LValue::Ivar { name }, .. } = &*e.node else {
+        return;
+    };
+    let Some(base) = name.as_str().strip_suffix("_raw") else {
+        return;
+    };
+    let base = Symbol::from(base);
+    if !temporal.contains(&base) {
+        return;
+    }
+    let span = e.span;
+    let store = e.clone();
+    *e = Expr::new(
+        span,
+        ExprNode::Seq {
+            exprs: vec![
+                Expr::new(
+                    span,
+                    ExprNode::Assign {
+                        target: LValue::Ivar { name: parse_memo_ivar(&base) },
+                        value: Expr::new(span, ExprNode::Lit { value: Literal::Nil }),
+                    },
+                ),
+                store,
+            ],
+        },
+    );
 }
 
 /// `@__t_<col>` — the per-instance memo slot for a parsed temporal
