@@ -228,7 +228,13 @@ module ActionController
     # gives Rust an `Option` with nothing to infer its parameter from
     # (`E0282: type annotations needed` on a lone `None;`), where an
     # empty body is a plain `void`.
-    def fresh_when(record)
+    # The parameter is NOT named `record`: the Elixir emitter prepends
+    # the controller struct as an implicit first argument and calls it
+    # `record`, so a same-named parameter of our own emits
+    # `def fresh_when(_record, _record)` — a duplicate match variable,
+    # which that target's `--warnings-as-errors` build rejects. Every
+    # other method here already avoids the name; this one found out why.
+    def fresh_when(subject)
     end
 
     def stale?(etag: nil)

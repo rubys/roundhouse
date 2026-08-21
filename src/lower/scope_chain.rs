@@ -2284,7 +2284,7 @@ fn const_model(expr: &Expr, models: &HashSet<ClassId>) -> Option<ClassId> {
 /// What the names in scope stand for, accumulated as a method body's
 /// statements are processed in order.
 #[derive(Default)]
-struct Locals {
+pub(crate) struct Locals {
     /// Local variable -> relation model, so `q = Story.base(u);
     /// q.not_deleted` resolves `not_deleted` against `q`'s Story
     /// relation.
@@ -2325,7 +2325,7 @@ fn alias_key(name: &Symbol, ivar: bool) -> Symbol {
 
 /// Rewrite scope chains in `expr` (in place). Returns the relation-model of
 /// the whole expression when it evaluates to a Relation of a known model.
-pub fn rewrite(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<ClassId> {
+pub(crate) fn rewrite(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<ClassId> {
     match &*expr.node {
         // Statement sequence: thread `locals` left-to-right; the Seq's value
         // (and model) is its last statement.
