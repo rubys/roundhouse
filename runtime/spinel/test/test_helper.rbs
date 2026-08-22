@@ -45,6 +45,7 @@ class ActionResponse
   def body: () -> String
   def location: () -> String?
   def flash: () -> ActionDispatch::Flash
+  def cookies: () -> ActionController::CookieJar
   def content_type: () -> String
   # Rails' mixed `{max_age: Integer, ?public: true}` — the one bag in
   # the harness, and deliberately not in the shared runtime (see
@@ -56,6 +57,14 @@ class ActionResponse
     body: String,
     location: String?,
     flash: ActionDispatch::Flash,
+    # DECLARED, and load-bearing. This entry was missing while every
+    # parameter after it was required, which is a drift that costs
+    # nothing — until an OPTIONAL one is added behind it. spinel then
+    # binds the call's `cookies:` argument to the first declared
+    # optional it can reach and reports `no implicit conversion of
+    # ActionController::CookieJar into String`, naming the new parameter
+    # rather than the missing one.
+    cookies: ActionController::CookieJar,
     ?content_type: String,
     ?cache_control_max_age: Integer,
     ?cache_control_public: bool
