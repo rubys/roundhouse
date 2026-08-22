@@ -208,20 +208,34 @@ impl SiteShapes {
     /// would replace a typed factory with a hash — lobsters'
     /// `Tag.create(tag_params)` is exactly that, and it is what caught
     /// this. A user-written method has one body and no such split.
-    fn conclude(&self, user_written: bool) -> Option<Binding> {
+    ///
+    /// INSTANCE methods count too, and used not to. The split above is a
+    /// property of the RUNTIME's factories, not of where a method hangs:
+    /// campfire's `User#update_bot!` has one body doing
+    /// `attributes.delete(:webhook_url)`, exactly as its class-side
+    /// sibling `create_bot!` does, and only the sibling was converted.
+    /// `body_needs_hash` — does the callee's OWN BODY use this parameter
+    /// in a way only a Hash answers? The census above says what is
+    /// PASSED; it cannot say what the body NEEDS, and where they
+    /// disagree the body wins. See [`hash_only_params`].
+    fn conclude(&self, user_written: bool, body_needs_hash: bool) -> Option<Binding> {
         if self.saw_other || self.specs.len() != 1 {
             return None;
         }
         let spec = self.specs.iter().next()?.clone();
-        if self.saw_hash {
+        if self.saw_hash || body_needs_hash {
             return user_written.then_some(Binding::Attrs(spec));
         }
         Some(Binding::Spec(spec))
     }
 }
 
-/// `(class, method)` for every class-side method the app declares.
-fn user_class_methods(app: &App) -> std::collections::HashSet<(Symbol, Symbol)> {
+/// `(class, method)` for every method the app declares, class-side or
+/// instance. The key space is the unqualified class name, so a concern
+/// (`User::Bot`) contributes under its own last segment as well —
+/// harmless, because a binding is only ever read back through
+/// `callee_class`, which answers the OWNER's name.
+fn user_declared_methods(app: &App) -> std::collections::HashSet<(Symbol, Symbol)> {
     let mut out = std::collections::HashSet::new();
     let unqualified = |id: &ClassId| {
         Symbol::from(id.0.as_str().rsplit("::").next().unwrap_or(id.0.as_str()))
@@ -229,21 +243,59 @@ fn user_class_methods(app: &App) -> std::collections::HashSet<(Symbol, Symbol)> 
     for model in &app.models {
         for item in &model.body {
             if let crate::dialect::ModelBodyItem::Method { method, .. } = item {
-                if method.receiver == MethodReceiver::Class {
-                    out.insert((unqualified(&model.name), method.name.clone()));
-                }
+                out.insert((unqualified(&model.name), method.name.clone()));
             }
         }
     }
+    let included = including_models(app);
     for lc in &app.library_classes {
         for method in &lc.methods {
-            if method.receiver == MethodReceiver::Class {
-                out.insert((unqualified(&lc.name), method.name.clone()));
+            out.insert((unqualified(&lc.name), method.name.clone()));
+            for owner in included.get(&lc.name).map(Vec::as_slice).unwrap_or(&[]) {
+                out.insert((owner.clone(), method.name.clone()));
             }
         }
     }
     out
 }
+
+/// Which models `include` a module, by the module's `ClassId`.
+///
+/// A concern's instance methods ARE the including model's — that is what
+/// `include` means — so a binding keyed on the RECEIVER's class has to
+/// find `User::Bot#update_bot!` under `User`. Without this the census
+/// filed it under `Bot`, `callee_class(@bot)` asked for `User`, and the
+/// two never met: `create_bot!` (which the concern's `class_methods do`
+/// block puts on the model itself) bound and its instance-side sibling
+/// did not.
+///
+/// Read from the model's OWN `include` statements, not from lexical
+/// nesting. A nested class under a model need not be a concern —
+/// `Room::MessagePusher` is a PORO — and attributing its parameters to
+/// `Room` would bind a method `Room` does not answer.
+fn including_models(app: &App) -> HashMap<ClassId, Vec<Symbol>> {
+    let mut out: HashMap<ClassId, Vec<Symbol>> = HashMap::new();
+    for model in &app.models {
+        let owner = Symbol::from(
+            model.name.0.as_str().rsplit("::").next().unwrap_or(model.name.0.as_str()),
+        );
+        for item in &model.body {
+            let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
+            let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
+            if method.as_str() != "include" {
+                continue;
+            }
+            for arg in args {
+                let ExprNode::Const { path } = &*arg.node else { continue };
+                let joined =
+                    path.iter().map(|p| p.as_str()).collect::<Vec<_>>().join("::");
+                out.entry(ClassId(Symbol::from(joined))).or_default().push(owner.clone());
+            }
+        }
+    }
+    out
+}
+
 
 fn scan_bindings(app: &App, specs: &ParamsSpecs) -> HashMap<BindKey, Binding> {
     let mut seen: HashMap<BindKey, SiteShapes> = HashMap::new();
@@ -316,13 +368,87 @@ fn scan_bindings(app: &App, specs: &ParamsSpecs) -> HashMap<BindKey, Binding> {
         }
     }
 
-    let user = user_class_methods(app);
+    let user = user_declared_methods(app);
+    let needs_hash = hash_only_params(app);
     seen.into_iter()
         .filter_map(|(k, v)| {
             let written = user.contains(&(k.0.clone(), k.1.clone()));
-            v.conclude(written).map(|b| (k, b))
+            let body_hash = needs_hash.contains(&k);
+            v.conclude(written, body_hash).map(|b| (k, b))
         })
         .collect()
+}
+
+/// `(class, method, index)` for every parameter whose OWN BODY uses it
+/// in a way only a Hash answers.
+///
+/// The call-site census cannot see this. campfire's
+/// `User#update_bot!(attributes)` has exactly ONE call site and it
+/// passes `bot_params`, so the census concluded `Spec` — "rewrite the
+/// body to consume the typed params object". But the body opens with
+/// `attributes.delete(:webhook_url)`, which no params object answers,
+/// and `Spec` left the call site alone: the method was handed a params
+/// object and died on `undefined method 'delete'`. Its class-side
+/// sibling `create_bot!` has the identical body and was already `Attrs`
+/// — but only because a TEST happens to call it with a literal hash.
+/// The body was the evidence in both cases; one just had a second
+/// witness.
+///
+/// `delete` and `[]=` only. `merge` is deliberately absent:
+/// `convert_attributes_in` already rewrites a params receiver's `merge`
+/// to `to_attrs.merge` at the site, so a body calling it proves nothing.
+fn hash_only_params(app: &App) -> std::collections::HashSet<BindKey> {
+    let mut out = std::collections::HashSet::new();
+    let unqualified = |id: &ClassId| Symbol::from(id.0.as_str().rsplit("::").next().unwrap_or(id.0.as_str()));
+    let mut visit = |owner: Symbol, method: &MethodDef| {
+        for (i, p) in method.params.iter().enumerate() {
+            if uses_as_hash(&method.body, &p.name) {
+                out.insert((owner.clone(), method.name.clone(), i));
+            }
+        }
+    };
+    for model in &app.models {
+        for item in &model.body {
+            if let crate::dialect::ModelBodyItem::Method { method, .. } = item {
+                visit(unqualified(&model.name), method);
+            }
+        }
+    }
+    let included = including_models(app);
+    for lc in &app.library_classes {
+        for method in &lc.methods {
+            visit(unqualified(&lc.name), method);
+            for owner in included.get(&lc.name).map(Vec::as_slice).unwrap_or(&[]) {
+                visit(owner.clone(), method);
+            }
+        }
+    }
+    out
+}
+
+/// Is `name` the receiver of a hash-only mutation anywhere in `body`?
+fn uses_as_hash(body: &Expr, name: &Symbol) -> bool {
+    let mut found = false;
+    walk(body, &mut |e| {
+        if found {
+            return;
+        }
+        let reads_name = |x: &Expr| {
+            matches!(&*x.node, ExprNode::Var { name: n, .. } if n == name)
+        };
+        match &*e.node {
+            ExprNode::Send { recv: Some(r), method, .. }
+                if matches!(method.as_str(), "delete" | "[]=") && reads_name(r) =>
+            {
+                found = true;
+            }
+            ExprNode::Assign { target: LValue::Index { recv, .. }, .. } if reads_name(recv) => {
+                found = true
+            }
+            _ => {}
+        }
+    });
+    found
 }
 
 /// The class a call site's receiver names, for keying a binding.
@@ -344,18 +470,39 @@ fn callee_class(recv: &Expr, assoc: &AssocCtx<'_>) -> Option<Symbol> {
     if let ExprNode::Const { path } = &*recv.node {
         return path.last().cloned();
     }
-    let ExprNode::Send { recv: Some(owner), method: aname, args, block: None, .. } = &*recv.node
-    else {
-        return None;
-    };
-    if !args.is_empty() {
-        return None;
+    if let ExprNode::Send { recv: Some(owner), method: aname, args, block: None, .. } = &*recv.node
+    {
+        if args.is_empty() {
+            if let Some((_, target, _)) =
+                crate::lower::scope_chain::assoc_read_target(owner, aname, assoc.models, assoc.assocs)
+            {
+                return Some(unqualified(target.0.as_str()));
+            }
+        }
     }
-    let (_, target, _) =
-        crate::lower::scope_chain::assoc_read_target(owner, aname, assoc.models, assoc.assocs)?;
-    // The key space is the UNQUALIFIED name, matching the `Const` arm's
-    // `path.last()`.
-    Some(Symbol::from(target.0.as_str().rsplit("::").next().unwrap_or(target.0.as_str())))
+    // Then the STAMPED TYPE, which is how a plain ivar receiver resolves.
+    // A controller's record usually arrives as one — `@bot = User
+    // .active_bots.find(params[:id])`, inlined from a `before_action` —
+    // and neither arm above sees a class in that. So
+    // `User.create_bot!(bot_params)` got its `.to_attrs` and
+    // `@bot.update_bot!(bot_params)`, one action away in the same
+    // controller, did not: the model method was handed a params object
+    // where its body does `attributes.delete(:webhook_url)`.
+    //
+    // The type is the honest answer and costs nothing when analyze left
+    // the site open — unlike the controller-broadcast rewriter, there is
+    // no NAME fallback here, because a wrong class here would silently
+    // convert an argument that is not an attribute hash.
+    if let Some(Ty::Class { id, .. }) = recv.ty.as_ref() {
+        return Some(unqualified(id.0.as_str()));
+    }
+    None
+}
+
+/// The key space for `callee_class` is the UNQUALIFIED class name,
+/// matching the `Const` arm's `path.last()`.
+fn unqualified(name: &str) -> Symbol {
+    Symbol::from(name.rsplit("::").next().unwrap_or(name))
 }
 
 struct AssocCtx<'a> {
@@ -585,11 +732,10 @@ fn rewrite_method(
     ctx: &Ctx<'_>,
     diags: &mut Vec<Diagnostic>,
 ) {
-    // Only `<Const>.<method>` call sites are scanned, so only class-side
-    // methods can carry a proven binding.
-    if !matches!(method.receiver, MethodReceiver::Class) {
-        return;
-    }
+    // Instance methods are eligible too. This used to bail on them with
+    // "only `<Const>.<method>` call sites are scanned" — true until
+    // `callee_class` learned to read the receiver's stamped type, which
+    // is how `@bot.update_bot!(bot_params)` resolves to `User`.
     let mut bound: Vec<(usize, Symbol, &ParamsSpec)> = Vec::new();
     // Parameters proven to be an ATTRIBUTE HASH rather than a params
     // object. Nothing in the BODY changes for those — `create!(attrs)`

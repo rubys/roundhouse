@@ -57,8 +57,26 @@ fn app() -> roundhouse::App {
         (
             "app/models/room.rb",
             r#"class Room < ApplicationRecord
+  include Retitling
+
   has_many :messages
   has_many :notes
+end
+"#,
+        ),
+        // A CONCERN with an instance method whose body needs a Hash.
+        // Its one call site passes a params helper, so the call-site
+        // census alone concludes "params object"; the body is what says
+        // otherwise.
+        (
+            "app/models/room/retitling.rb",
+            r#"module Room::Retitling
+  extend ActiveSupport::Concern
+
+  def retitle!(attributes)
+    attributes.delete(:draft)
+    update!(attributes)
+  end
 end
 "#,
         ),
@@ -98,6 +116,11 @@ end
     @note = @room.notes.file!(note_params)
   end
 
+  def rename
+    @room = Room.find(params[:room_id])
+    @room.retitle! room_params
+  end
+
   private
     def message_params
       params.require(:message).permit(:body, :client_message_id)
@@ -105,6 +128,10 @@ end
 
     def note_params
       params.require(:note).permit(:text)
+    end
+
+    def room_params
+      params.require(:room).permit(:name)
     end
 end
 "#,
@@ -216,6 +243,27 @@ fn a_single_shape_callee_is_left_alone() {
     assert!(
         !note.contains("scope_attributes"),
         "and it takes no scope — its `create!` argument is not provably a hash:\n{note}"
+    );
+}
+
+/// THE BODY DECIDES, when the call sites cannot.
+///
+/// `Room#retitle!(attributes)` has one call site and it passes a params
+/// helper, so the census concludes "this parameter is a params object"
+/// and rewrites the body to consume one. But the body opens with
+/// `attributes.delete(:draft)`, which no params object answers. A
+/// hash-only use in the callee's own body forces the attribute-hash
+/// binding, so the call site converts instead.
+///
+/// Reaching it at all takes two other things: the receiver is an IVAR,
+/// resolved through its stamped type, and the method lives in a CONCERN,
+/// so it has to be filed under the model that `include`s it.
+#[test]
+fn a_body_that_needs_a_hash_binds_one_however_its_call_sites_look() {
+    let rename = controller();
+    assert!(
+        rename.contains("room_params.to_attrs"),
+        "an ivar receiver's concern method converts at the call site:\n{rename}"
     );
 }
 
