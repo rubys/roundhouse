@@ -253,11 +253,11 @@ defmodule Cable do
     :ok
   end
 
-  def turbo_stream_html(action, target, content) do
+  def turbo_stream_html(action, target, content, attributes \\ "") do
     if content == "" do
-      ~s(<turbo-stream action="#{action}" target="#{target}"></turbo-stream>)
+      ~s(<turbo-stream#{attributes} action="#{action}" target="#{target}"></turbo-stream>)
     else
-      ~s(<turbo-stream action="#{action}" target="#{target}"><template>#{content}</template></turbo-stream>)
+      ~s(<turbo-stream#{attributes} action="#{action}" target="#{target}"><template>#{content}</template></turbo-stream>)
     end
   end
 

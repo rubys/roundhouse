@@ -94,11 +94,12 @@ object Cable {
         }
     }
 
-    fun turboStreamHtml(action: String, target: String, content: String): String =
+    @JvmOverloads
+    fun turboStreamHtml(action: String, target: String, content: String, attributes: String = ""): String =
         if (content.isEmpty())
-            "<turbo-stream action=\"$action\" target=\"$target\"></turbo-stream>"
+            "<turbo-stream$attributes action=\"$action\" target=\"$target\"></turbo-stream>"
         else
-            "<turbo-stream action=\"$action\" target=\"$target\"><template>$content</template></turbo-stream>"
+            "<turbo-stream$attributes action=\"$action\" target=\"$target\"><template>$content</template></turbo-stream>"
 
     private fun pingAll() {
         val now = System.currentTimeMillis() / 1000

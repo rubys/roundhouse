@@ -92,7 +92,11 @@ func recordBroadcast(action string, attrs map[string]interface{}) {
 	// subscribed, so non-cable scenarios (tests, one-shot runs) are
 	// unaffected. Done outside the broadcastsMu critical section —
 	// cable.go owns its own subscriber mutex.
-	dispatch(entry.Stream, TurboStreamHTML(entry.Action, entry.Target, entry.HTML))
+	// `attributes` is rendered attribute text the broadcast lowering
+	// composed. Read from the bag so an app that writes `attributes:`
+	// is not silently stripped of it.
+	dispatch(entry.Stream, TurboStreamHTMLWith(
+		entry.Action, entry.Target, entry.HTML, anyToString(attrs["attributes"])))
 }
 
 func anyToString(v any) string {
@@ -111,8 +115,15 @@ func anyToString(v any) string {
 // (the older keyword/Symbol `render_fragment` spellings had drifted
 // apart between targets).
 func Broadcasts_turbo_stream_fragment(action string, target string, html string) string {
+	return Broadcasts_turbo_stream_fragment_with(action, target, html, "")
+}
+
+// Broadcasts_turbo_stream_fragment plus the element's extra attribute
+// text. See TurboStreamHTMLWith in cable.go on why this is a separate
+// function rather than a defaulted parameter.
+func Broadcasts_turbo_stream_fragment_with(action string, target string, html string, attributes string) string {
 	if action == "remove" {
-		return "<turbo-stream action=\"remove\" target=\"" + target + "\"></turbo-stream>"
+		return "<turbo-stream" + attributes + " action=\"remove\" target=\"" + target + "\"></turbo-stream>"
 	}
-	return "<turbo-stream action=\"" + action + "\" target=\"" + target + "\"><template>" + html + "</template></turbo-stream>"
+	return "<turbo-stream" + attributes + " action=\"" + action + "\" target=\"" + target + "\"><template>" + html + "</template></turbo-stream>"
 }

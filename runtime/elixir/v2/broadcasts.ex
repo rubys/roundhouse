@@ -25,11 +25,19 @@ defmodule Broadcasts do
   # call in a `.turbo_stream.erb` template. Positional and String-typed
   # on purpose: it is the ONE shape the view lowerer emits on every
   # target.
-  def turbo_stream_fragment(action, target, html) do
+  #
+  # `attributes` is the EXTRA attribute text the element carries —
+  # ` maintain_scroll="true"` — rendered by the broadcast lowering, where
+  # the literal hash the app wrote can be read. It carries its own
+  # leading space and rides BEFORE `action`/`target`, where turbo-rails'
+  # `tag.turbo_stream(template, **attributes, action:, target:)` puts it.
+  # Optional, so the three-argument call the view lowerer emits is
+  # unchanged.
+  def turbo_stream_fragment(action, target, html, attributes \\ "") do
     if action == "remove" do
-      ~s(<turbo-stream action="remove" target="#{target}"></turbo-stream>)
+      ~s(<turbo-stream#{attributes} action="remove" target="#{target}"></turbo-stream>)
     else
-      ~s(<turbo-stream action="#{action}" target="#{target}"><template>#{html}</template></turbo-stream>)
+      ~s(<turbo-stream#{attributes} action="#{action}" target="#{target}"><template>#{html}</template></turbo-stream>)
     end
   end
 
@@ -63,7 +71,15 @@ defmodule Broadcasts do
     if is_binary(stream) do
       target = Map.get(attrs, :target, "")
       html = Map.get(attrs, :html, "")
-      Cable.dispatch(stream, Cable.turbo_stream_html(action, to_string(target), to_string(html)))
+      # Rendered attribute text the broadcast lowering composed. Read
+      # here so an app that writes `attributes:` is not silently
+      # stripped of it.
+      attributes = Map.get(attrs, :attributes, "")
+
+      Cable.dispatch(
+        stream,
+        Cable.turbo_stream_html(action, to_string(target), to_string(html), to_string(attributes))
+      )
     end
 
     nil

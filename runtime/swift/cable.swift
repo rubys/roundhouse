@@ -102,11 +102,11 @@ enum Cable {
         }
     }
 
-    static func turboStreamHtml(_ action: String, _ target: String, _ content: String) -> String {
+    static func turboStreamHtml(_ action: String, _ target: String, _ content: String, _ attributes: String = "") -> String {
         if content.isEmpty {
-            return "<turbo-stream action=\"\(action)\" target=\"\(target)\"></turbo-stream>"
+            return "<turbo-stream\(attributes) action=\"\(action)\" target=\"\(target)\"></turbo-stream>"
         }
-        return "<turbo-stream action=\"\(action)\" target=\"\(target)\"><template>\(content)</template></turbo-stream>"
+        return "<turbo-stream\(attributes) action=\"\(action)\" target=\"\(target)\"><template>\(content)</template></turbo-stream>"
     }
 
     // Recover the channel name from Turbo's signed_stream_name. The

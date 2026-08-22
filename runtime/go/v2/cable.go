@@ -38,10 +38,21 @@ import (
 // self-closing element (used by `remove`). Matches the spinel
 // runtime's Broadcasts.render_fragment.
 func TurboStreamHTML(action, target, content string) string {
+	return TurboStreamHTMLWith(action, target, content, "")
+}
+
+// TurboStreamHTMLWith is TurboStreamHTML plus the EXTRA attribute text the
+// element carries — ` maintain_scroll="true"`, rendered by the broadcast
+// lowering, where the literal hash the app wrote can be read. It carries
+// its own leading space and rides BEFORE action/target, where turbo-rails'
+// `tag.turbo_stream(template, **attributes, action:, target:)` puts it.
+// Separate function rather than a defaulted parameter because Go has none;
+// the three-argument spelling above is what every other call site uses.
+func TurboStreamHTMLWith(action, target, content, attributes string) string {
 	if content == "" {
-		return `<turbo-stream action="` + action + `" target="` + target + `"></turbo-stream>`
+		return `<turbo-stream` + attributes + ` action="` + action + `" target="` + target + `"></turbo-stream>`
 	}
-	return `<turbo-stream action="` + action + `" target="` + target + `"><template>` + content + `</template></turbo-stream>`
+	return `<turbo-stream` + attributes + ` action="` + action + `" target="` + target + `"><template>` + content + `</template></turbo-stream>`
 }
 
 // ── Subscriber registry + dispatch ────────────────────────────

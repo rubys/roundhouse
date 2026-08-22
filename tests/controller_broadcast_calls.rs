@@ -63,6 +63,7 @@ end
     broadcast_shared
     broadcast_per_user
     broadcast_gone
+    broadcast_with_attributes
   end
 
   private
@@ -79,6 +80,12 @@ end
 
     def broadcast_gone
       broadcast_remove_to :rooms, target: [ @room, :list ]
+    end
+
+    def broadcast_with_attributes
+      broadcast_append_to :rooms, target: :shared_rooms,
+        partial: "rooms/row", locals: { room: @room },
+        attributes: { maintain_scroll: true, tone: "quiet", missing: nil }
     end
 end
 "#,
@@ -139,6 +146,43 @@ fn remove_carries_no_html() {
     assert!(
         !src.contains("Broadcasts.remove(stream: \"rooms\", target: \"list_room_#{@room.id}\", html"),
         "remove must not carry html:\n{src}",
+    );
+}
+
+/// `attributes:` rides on the turbo-stream ELEMENT, and turbo-rails
+/// writes it AHEAD of `action`/`target` via `tag.turbo_stream(template,
+/// **attributes, action:, target:)`. Rendered here rather than threaded
+/// as a hash, because the value is a literal at every call site.
+///
+/// Measured against ActionView 8.1's `TagBuilder`: the key is written as
+/// SPELLED (nothing dasherizes it — campfire's own JS reads
+/// `hasAttribute("maintain_scroll")`), the value is `to_s` then escaped,
+/// and a `nil` value omits the attribute.
+#[test]
+fn attributes_render_to_element_text_ahead_of_action_and_target() {
+    let src = controller_src();
+    assert!(
+        src.contains(
+            "Broadcasts.append(stream: \"rooms\", target: \"shared_rooms\", \
+             html: Views::Rooms.row(@room), \
+             attributes: \" maintain_scroll=\\\"true\\\" tone=\\\"quiet\\\"\")"
+        ),
+        "{src}",
+    );
+}
+
+/// A broadcast with no `attributes:` emits exactly the call it emitted
+/// before the slot existed — the runtime parameter defaults to the same
+/// empty string, so nothing else in the corpus moves.
+#[test]
+fn a_broadcast_without_attributes_gains_no_argument() {
+    let src = controller_src();
+    assert!(
+        src.contains(
+            "Broadcasts.prepend(stream: \"rooms\", target: \"shared_rooms\", \
+             html: Views::Rooms.row(@room))"
+        ),
+        "{src}",
     );
 }
 

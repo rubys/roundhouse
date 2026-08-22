@@ -31,26 +31,31 @@ module Broadcasts
     @@log.dup
   end
 
-  def self.append(*, stream : String, target : String, html : String) : Nil
-    record("append", stream, target, html)
+  # `attributes` is the EXTRA attribute text the turbo-stream element
+  # carries — ` maintain_scroll="true"` — rendered by the broadcast
+  # lowering, where the literal hash the app wrote can be read. A String
+  # rather than a hash so this twin needs no markup renderer of its own.
+
+  def self.append(*, stream : String, target : String, html : String, attributes : String = "") : Nil
+    record("append", stream, target, html, attributes)
   end
 
-  def self.prepend(*, stream : String, target : String, html : String) : Nil
-    record("prepend", stream, target, html)
+  def self.prepend(*, stream : String, target : String, html : String, attributes : String = "") : Nil
+    record("prepend", stream, target, html, attributes)
   end
 
-  def self.replace(*, stream : String, target : String, html : String) : Nil
-    record("replace", stream, target, html)
+  def self.replace(*, stream : String, target : String, html : String, attributes : String = "") : Nil
+    record("replace", stream, target, html, attributes)
   end
 
-  def self.remove(*, stream : String, target : String) : Nil
-    record("remove", stream, target, "")
+  def self.remove(*, stream : String, target : String, attributes : String = "") : Nil
+    record("remove", stream, target, "", attributes)
   end
 
-  private def self.record(action : String, stream : String, target : String, html : String) : Nil
+  private def self.record(action : String, stream : String, target : String, html : String, attributes : String = "") : Nil
     @@log << {action: action, stream: stream, target: target, html: html}
     if fn = @@broadcaster
-      fn.call(stream, render_fragment(action, target, html))
+      fn.call(stream, render_fragment(action, target, html, attributes))
     end
     nil
   end
@@ -58,19 +63,24 @@ module Broadcasts
   # Compose the `<turbo-stream>` fragment. Pure; doesn't touch the
   # log — used by tests and transport layers that need to ship the
   # fragment over the wire.
-  def self.render_fragment(action : String, target : String, html : String = "") : String
-    turbo_stream_fragment(action, target, html)
+  def self.render_fragment(action : String, target : String, html : String = "", attributes : String = "") : String
+    turbo_stream_fragment(action, target, html, attributes)
   end
 
   # Compose the `<turbo-stream>` element for a `turbo_stream.<action>`
   # call in a `.turbo_stream.erb` template. The ONE shape the view
   # lowerer emits on every target; `render_fragment` delegates so the
   # markup has a single owner.
-  def self.turbo_stream_fragment(action : String, target : String, html : String) : String
+  #
+  # `attributes` carries its own leading space and is written BEFORE
+  # `action`/`target`, where turbo-rails' `tag.turbo_stream(template,
+  # **attributes, action:, target:)` puts it. Optional, so the
+  # three-argument call the view lowerer emits is unchanged.
+  def self.turbo_stream_fragment(action : String, target : String, html : String, attributes : String = "") : String
     if action == "remove"
-      %(<turbo-stream action="remove" target="#{target}"></turbo-stream>)
+      %(<turbo-stream#{attributes} action="remove" target="#{target}"></turbo-stream>)
     else
-      %(<turbo-stream action="#{action}" target="#{target}"><template>#{html}</template></turbo-stream>)
+      %(<turbo-stream#{attributes} action="#{action}" target="#{target}"><template>#{html}</template></turbo-stream>)
     end
   end
 end

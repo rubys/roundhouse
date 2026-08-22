@@ -79,4 +79,37 @@ class BroadcastsTest < Minitest::Test
     assert_includes out, %(action="append")
     assert_includes out, "<template></template>"
   end
+
+  # Custom element attributes ride AHEAD of action/target, which is
+  # where turbo-rails' `tag.turbo_stream(template, **attributes,
+  # action:, target:)` writes them. Byte-checked against ActionView 8.1
+  # rather than assumed — the key keeps its underscore (nothing
+  # dasherizes it) and `true` renders as the string "true".
+  def test_render_fragment_writes_attributes_before_action
+    out = Broadcasts.render_fragment(
+      action: :append, target: "items", html: "<p>x</p>",
+      attributes: %( maintain_scroll="true")
+    )
+    assert_equal(
+      %(<turbo-stream maintain_scroll="true" action="append" target="items">) +
+      "<template><p>x</p></template></turbo-stream>",
+      out
+    )
+  end
+
+  def test_render_fragment_remove_carries_attributes_too
+    out = Broadcasts.render_fragment(
+      action: :remove, target: "items", attributes: %( maintain_scroll="true")
+    )
+    assert_equal %(<turbo-stream maintain_scroll="true" action="remove" target="items"></turbo-stream>), out
+  end
+
+  # The three-argument spelling every view lowerer emits is unchanged,
+  # so no existing turbo_stream template moves.
+  def test_turbo_stream_fragment_without_attributes_is_unchanged
+    assert_equal(
+      %(<turbo-stream action="append" target="items"><template>hi</template></turbo-stream>),
+      Broadcasts.turbo_stream_fragment("append", "items", "hi")
+    )
+  end
 end

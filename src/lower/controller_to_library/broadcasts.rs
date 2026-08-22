@@ -90,16 +90,68 @@ fn try_rewrite(
 
     for (key, _) in &opts {
         match key.as_str() {
-            "target" | "partial" | "locals" | "html" => {}
-            // `attributes: { maintain_scroll: true }` rides on the
-            // turbo-stream ELEMENT, which `Broadcasts.record` has no
-            // slot for. Declining keeps the ledger honest instead of
-            // dropping an attribute the client acts on.
+            "target" | "partial" | "locals" | "html" | "attributes" => {}
             other => return decline(e.span, &format!("broadcast option `{other}:`")),
         }
     }
 
-    Some(broadcasts_call(action, stream, target, html, e.span))
+    // `attributes: { maintain_scroll: true }` rides on the turbo-stream
+    // ELEMENT. Rendered HERE, to the attribute text the element carries,
+    // rather than threaded as a hash: the value is a literal at every
+    // call site, so the compiler already knows the answer — and a String
+    // is the one type all nine `Broadcasts` twins can hold without a
+    // per-target hash-to-markup renderer that would be nine chances to
+    // disagree.
+    let attributes = match opts.iter().find(|(k, _)| k.as_str() == "attributes") {
+        Some((_, value)) => element_attributes(value, e.span)?,
+        None => String::new(),
+    };
+
+    Some(broadcasts_call(action, stream, target, html, &attributes, e.span))
+}
+
+/// `{ maintain_scroll: true }` → ` maintain_scroll="true"`, the text
+/// turbo-rails' `tag.turbo_stream(template, **attributes, action:,
+/// target:)` writes ahead of `action`/`target`.
+///
+/// Measured against ActionView 8.1's `TagBuilder`, not assumed:
+///
+///   * the key is written AS SPELLED — `tag_option` dasherizes nothing,
+///     and campfire's own `maintain_scroll_controller.js` reads
+///     `hasAttribute("maintain_scroll")`, so a helpfully-dasherized name
+///     would reach the client and do nothing;
+///   * the value is `to_s` then HTML-escaped (`true` → `"true"`,
+///     `false` → `"false"` — `maintain_scroll` is not one of Rails'
+///     BOOLEAN_ATTRIBUTES, so `false` is written, not dropped);
+///   * a `nil` value omits the attribute entirely.
+///
+/// LITERALS ONLY. A computed value would have to be composed at run time
+/// on every target; declining leaves the call as written and files the
+/// reason, which is the same trade the rest of this file makes.
+fn element_attributes(value: &Expr, span: Span) -> Option<String> {
+    let ExprNode::Hash { entries, .. } = &*value.node else {
+        return decline(span, "attributes: is not a literal hash");
+    };
+    let mut out = String::new();
+    for (k, v) in entries {
+        let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
+            return decline(span, "attributes: key is not a symbol");
+        };
+        let text = match &*v.node {
+            ExprNode::Lit { value: Literal::Nil } => continue,
+            ExprNode::Lit { value: Literal::Bool { value } } => value.to_string(),
+            ExprNode::Lit { value: Literal::Int { value } } => value.to_string(),
+            ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
+            _ => return decline(span, "attributes: value is not a literal"),
+        };
+        out.push(' ');
+        out.push_str(key.as_str());
+        out.push_str("=\"");
+        out.push_str(&crate::lower::view_to_library::html_escape_fold(&text));
+        out.push('"');
+    }
+    Some(out)
 }
 
 /// The payload: `html:` verbatim, `partial:` bound the way a
@@ -292,6 +344,7 @@ fn broadcasts_call(
     stream: Expr,
     target: Expr,
     html: Option<Expr>,
+    attributes: &str,
     span: Span,
 ) -> Expr {
     let mut entries: Vec<(Expr, Expr)> = vec![
@@ -300,6 +353,12 @@ fn broadcasts_call(
     ];
     if let Some(h) = html {
         entries.push((lit_sym("html", span), h));
+    }
+    // Omitted when empty, so every broadcast that carries no custom
+    // attribute emits exactly the call it emitted before — the runtime
+    // parameter defaults to the same "".
+    if !attributes.is_empty() {
+        entries.push((lit_sym("attributes", span), lit_str(attributes, span)));
     }
     Expr::new(
         span,

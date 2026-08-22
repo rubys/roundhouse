@@ -43,11 +43,25 @@ impl Broadcasts {
     // (the older keyword/Symbol `render_fragment` spellings had drifted
     // apart between targets).
     pub fn turbo_stream_fragment(action: &str, target: &str, html: &str) -> String {
+        Self::turbo_stream_fragment_with(action, target, html, "")
+    }
+
+    /// `turbo_stream_fragment` plus the element's extra attribute text.
+    /// See `cable::turbo_stream_html_with` on why this is a separate
+    /// function rather than a defaulted parameter.
+    pub fn turbo_stream_fragment_with(
+        action: &str,
+        target: &str,
+        html: &str,
+        attributes: &str,
+    ) -> String {
         if action == "remove" {
-            return format!("<turbo-stream action=\"remove\" target=\"{target}\"></turbo-stream>");
+            return format!(
+                "<turbo-stream{attributes} action=\"remove\" target=\"{target}\"></turbo-stream>"
+            );
         }
         format!(
-            "<turbo-stream action=\"{action}\" target=\"{target}\"><template>{html}</template></turbo-stream>"
+            "<turbo-stream{attributes} action=\"{action}\" target=\"{target}\"><template>{html}</template></turbo-stream>"
         )
     }
 
@@ -82,6 +96,11 @@ impl Broadcasts {
         let stream = attrs.get("stream").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let target = attrs.get("target").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let html = attrs.get("html").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        // Rendered attribute text the broadcast lowering composed. Read
+        // from the bag so an app that writes `attributes:` is not
+        // silently stripped of it.
+        let attributes =
+            attrs.get("attributes").and_then(|v| v.as_str()).unwrap_or("").to_string();
         LOG.with(|c| {
             c.borrow_mut().push((
                 action.to_string(),
@@ -99,7 +118,7 @@ impl Broadcasts {
         // broadcast — the e2e action_cable spec. The cable server fans out
         // via per-subscriber mpsc channels, so this is safe to call from
         // any axum worker thread.
-        let fragment = crate::cable::turbo_stream_html(action, &target, &html);
+        let fragment = crate::cable::turbo_stream_html_with(action, &target, &html, &attributes);
         crate::cable::CABLE.broadcast(&stream, &fragment);
     }
 }

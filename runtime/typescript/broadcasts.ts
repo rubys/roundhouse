@@ -29,6 +29,11 @@ interface BroadcastOpts {
   stream: string;
   target?: string;
   html?: string;
+  // Rendered attribute text carrying its own leading space —
+  // ` maintain_scroll="true"`. Composed by the broadcast lowering, where
+  // the literal hash the app wrote can be read; a string rather than a
+  // hash so no target needs a markup renderer of its own.
+  attributes?: string;
 }
 
 function emit(action: string, opts: BroadcastOpts): void {
@@ -36,8 +41,11 @@ function emit(action: string, opts: BroadcastOpts): void {
   const html = opts.html ?? "";
   // Match the turbo-stream wire format the cable speaks: a tagged
   // `<turbo-stream action="…" target="…">…</turbo-stream>` element.
+  // `attributes` rides ahead of `action`/`target`, where turbo-rails'
+  // `tag.turbo_stream(template, **attributes, action:, target:)` puts it.
+  const attributes = opts.attributes ?? "";
   const fragment =
-    `<turbo-stream action="${action}" target="${target}">` +
+    `<turbo-stream${attributes} action="${action}" target="${target}">` +
     `<template>${html}</template>` +
     `</turbo-stream>`;
   broadcast(opts.stream, fragment);
@@ -55,11 +63,21 @@ export class Broadcasts {
   // purpose: it is the ONE shape the view lowerer emits on every target
   // (the older keyword/Symbol `render_fragment` spellings had drifted
   // apart between targets).
-  static turbo_stream_fragment(action: string, target: string, html: string): string {
+  //
+  // `attributes` carries its own leading space and is written BEFORE
+  // `action`/`target`, where turbo-rails' `tag.turbo_stream(template,
+  // **attributes, action:, target:)` puts it. Optional, so the
+  // three-argument call the view lowerer emits is unchanged.
+  static turbo_stream_fragment(
+    action: string,
+    target: string,
+    html: string,
+    attributes: string = "",
+  ): string {
     if (action === "remove") {
-      return `<turbo-stream action="remove" target="${target}"></turbo-stream>`;
+      return `<turbo-stream${attributes} action="remove" target="${target}"></turbo-stream>`;
     }
-    return `<turbo-stream action="${action}" target="${target}"><template>${html}</template></turbo-stream>`;
+    return `<turbo-stream${attributes} action="${action}" target="${target}"><template>${html}</template></turbo-stream>`;
   }
 
   static prepend(opts: BroadcastOpts): void {

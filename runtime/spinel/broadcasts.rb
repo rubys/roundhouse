@@ -59,23 +59,31 @@ module Broadcasts
   # the seam Rails apps MOCK, and one hop is what makes their own tests
   # runnable against this runtime.
 
-  def self.append(stream:, target:, html:)
-    Turbo::StreamsChannel.broadcast_append_to(stream, target: target, html: html)
+  # `attributes:` is the EXTRA attribute text the turbo-stream element
+  # carries — ` maintain_scroll="true"` — already rendered by
+  # `lower::controller_to_library::broadcasts`, which is where the
+  # literal hash the app wrote can be read. A String rather than a hash
+  # so every target's twin holds it without its own markup renderer;
+  # empty is the overwhelming case and writes exactly the element these
+  # methods have always written.
+
+  def self.append(stream:, target:, html:, attributes: "")
+    Turbo::StreamsChannel.broadcast_append_to(stream, target: target, html: html, attributes: attributes)
   end
 
-  def self.prepend(stream:, target:, html:)
-    Turbo::StreamsChannel.broadcast_prepend_to(stream, target: target, html: html)
+  def self.prepend(stream:, target:, html:, attributes: "")
+    Turbo::StreamsChannel.broadcast_prepend_to(stream, target: target, html: html, attributes: attributes)
   end
 
-  def self.replace(stream:, target:, html:)
-    Turbo::StreamsChannel.broadcast_replace_to(stream, target: target, html: html)
+  def self.replace(stream:, target:, html:, attributes: "")
+    Turbo::StreamsChannel.broadcast_replace_to(stream, target: target, html: html, attributes: attributes)
   end
 
-  def self.remove(stream:, target:)
-    Turbo::StreamsChannel.broadcast_remove_to(stream, target: target)
+  def self.remove(stream:, target:, attributes: "")
+    Turbo::StreamsChannel.broadcast_remove_to(stream, target: target, attributes: attributes)
   end
 
-  def self.record(action:, stream:, target:, html:)
+  def self.record(action:, stream:, target:, html:, attributes: "")
     entry = { action: action, stream: stream, target: target, html: html }
     LOG << entry
     # Unconditional dispatch — TRANSPORTS always holds exactly one
@@ -83,7 +91,7 @@ module Broadcasts
     # so there is no empty case to guard. Null-object shape: the seed
     # absorbs test/CGI-one-shot broadcasts at the cost of composing the
     # fragment string nobody ships.
-    fragment = render_fragment(action: action, target: target, html: html)
+    fragment = render_fragment(action: action, target: target, html: html, attributes: attributes)
     TRANSPORTS[0].broadcast(stream, fragment)
     nil
   end
@@ -91,8 +99,8 @@ module Broadcasts
   # Compose the actual <turbo-stream> markup. Pure: doesn't touch the
   # log — used by tests and (eventually) by transport layers that
   # need to ship the fragment over the wire.
-  def self.render_fragment(action:, target:, html: "")
-    turbo_stream_fragment(action.to_s, target, html)
+  def self.render_fragment(action:, target:, html: "", attributes: "")
+    turbo_stream_fragment(action.to_s, target, html, attributes)
   end
 
   # Compose the `<turbo-stream>` element for a `turbo_stream.<action>`
@@ -101,11 +109,17 @@ module Broadcasts
   # target. `render_fragment` above (keyword args, Symbol action) is the
   # model-broadcast spelling and now delegates here, so the markup has a
   # single owner per target.
-  def self.turbo_stream_fragment(action, target, html)
+  #
+  # `attributes` is rendered attribute text carrying its own leading
+  # space, written BEFORE `action`/`target` because that is where
+  # turbo-rails' `tag.turbo_stream(template, **attributes, action:,
+  # target:)` puts it. Optional, so the three-argument call every view
+  # lowerer emits is unchanged.
+  def self.turbo_stream_fragment(action, target, html, attributes = "")
     if action == "remove"
-      %(<turbo-stream action="remove" target="#{target}"></turbo-stream>)
+      %(<turbo-stream#{attributes} action="remove" target="#{target}"></turbo-stream>)
     else
-      %(<turbo-stream action="#{action}" target="#{target}"><template>#{html}</template></turbo-stream>)
+      %(<turbo-stream#{attributes} action="#{action}" target="#{target}"><template>#{html}</template></turbo-stream>)
     end
   end
 
@@ -140,20 +154,20 @@ end
 # is mocked out.
 module Turbo
   module StreamsChannel
-    def self.broadcast_append_to(stream, target:, html:)
-      Broadcasts.record(action: :append, stream: stream, target: target, html: html)
+    def self.broadcast_append_to(stream, target:, html:, attributes: "")
+      Broadcasts.record(action: :append, stream: stream, target: target, html: html, attributes: attributes)
     end
 
-    def self.broadcast_prepend_to(stream, target:, html:)
-      Broadcasts.record(action: :prepend, stream: stream, target: target, html: html)
+    def self.broadcast_prepend_to(stream, target:, html:, attributes: "")
+      Broadcasts.record(action: :prepend, stream: stream, target: target, html: html, attributes: attributes)
     end
 
-    def self.broadcast_replace_to(stream, target:, html:)
-      Broadcasts.record(action: :replace, stream: stream, target: target, html: html)
+    def self.broadcast_replace_to(stream, target:, html:, attributes: "")
+      Broadcasts.record(action: :replace, stream: stream, target: target, html: html, attributes: attributes)
     end
 
-    def self.broadcast_remove_to(stream, target:)
-      Broadcasts.record(action: :remove, stream: stream, target: target, html: "")
+    def self.broadcast_remove_to(stream, target:, attributes: "")
+      Broadcasts.record(action: :remove, stream: stream, target: target, html: "", attributes: attributes)
     end
   end
 end

@@ -81,15 +81,31 @@ pub fn render_partial(type_name: &str, id: i64) -> String {
 /// Render a single `<turbo-stream>` element. Empty content collapses
 /// to a self-closing template (used by `remove` actions).
 pub fn turbo_stream_html(action: &str, target: &str, content: &str) -> String {
+    turbo_stream_html_with(action, target, content, "")
+}
+
+/// `turbo_stream_html` plus the EXTRA attribute text the element carries
+/// — ` maintain_scroll="true"`, rendered by the broadcast lowering, where
+/// the literal hash the app wrote can be read. It carries its own leading
+/// space and rides BEFORE `action`/`target`, which is where turbo-rails'
+/// `tag.turbo_stream(template, **attributes, action:, target:)` puts it.
+/// A separate function rather than a defaulted parameter because Rust has
+/// none; the three-argument spelling above is what every call site uses.
+pub fn turbo_stream_html_with(
+    action: &str,
+    target: &str,
+    content: &str,
+    attributes: &str,
+) -> String {
     if content.is_empty() {
         format!(
-            r#"<turbo-stream action="{}" target="{}"></turbo-stream>"#,
-            action, target
+            r#"<turbo-stream{} action="{}" target="{}"></turbo-stream>"#,
+            attributes, action, target
         )
     } else {
         format!(
-            r#"<turbo-stream action="{}" target="{}"><template>{}</template></turbo-stream>"#,
-            action, target, content,
+            r#"<turbo-stream{} action="{}" target="{}"><template>{}</template></turbo-stream>"#,
+            attributes, action, target, content,
         )
     }
 }

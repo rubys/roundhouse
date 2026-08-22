@@ -11,12 +11,18 @@ object Broadcasts {
     // purpose: it is the ONE shape the view lowerer emits on every target
     // (the older keyword/Symbol `render_fragment` spellings had drifted
     // apart between targets).
+    //
+    // `attributes` carries its own leading space and is written BEFORE
+    // `action`/`target`, where turbo-rails' `tag.turbo_stream(template,
+    // **attributes, action:, target:)` puts it. Optional, so the
+    // three-argument call the view lowerer emits is unchanged.
     @JvmStatic
-    fun turbo_stream_fragment(action: String, target: String, html: String): String =
+    @JvmOverloads
+    fun turbo_stream_fragment(action: String, target: String, html: String, attributes: String = ""): String =
         if (action == "remove") {
-            "<turbo-stream action=\"remove\" target=\"$target\"></turbo-stream>"
+            "<turbo-stream$attributes action=\"remove\" target=\"$target\"></turbo-stream>"
         } else {
-            "<turbo-stream action=\"$action\" target=\"$target\"><template>$html</template></turbo-stream>"
+            "<turbo-stream$attributes action=\"$action\" target=\"$target\"><template>$html</template></turbo-stream>"
         }
 
     fun append(opts: MutableMap<String, Any?>) = record("append", opts)
@@ -28,6 +34,10 @@ object Broadcasts {
         val stream = opts["stream"] as? String ?: return
         val target = opts["target"] as? String ?: ""
         val html = opts["html"] as? String ?: ""
-        Cable.dispatch(stream, Cable.turboStreamHtml(action, target, html))
+        // Rendered attribute text (` maintain_scroll="true"`) the
+        // broadcast lowering composed. Read here so an app that writes
+        // `attributes:` is not silently stripped of it.
+        val attributes = opts["attributes"] as? String ?: ""
+        Cable.dispatch(stream, Cable.turboStreamHtml(action, target, html, attributes))
     }
 }
