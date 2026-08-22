@@ -329,6 +329,12 @@ ActiveJob.enqueue_without_running
 # that helper names a stream by its streamables, this one takes the
 # stream string an app-defined channel composed
 # (`UnreadRoomsChannel.stream_name_for(id)`).
+#
+# Counts BOTH kinds of entry the log carries — a turbo fragment
+# (`Broadcasts.record`) and a raw publish (`ActionCable.server
+# .broadcast`, logged with a `payload:` instead of `html:`) — which is
+# what Rails' own helper counts, because its pubsub queue holds whatever
+# was published. Filtering on `:stream` alone is what makes that work.
 module ActionCable
   module TestHelper
     def capture_broadcasts_on(stream, &block)
@@ -493,6 +499,14 @@ class TestBase
   def setup
     SchemaSetup.reset! if defined?(SchemaSetup)
     ActiveSupport.travel(0) if defined?(ActiveSupport)
+    # AFTER the schema reset, which reloads fixtures — and our fixture
+    # loader runs model callbacks, so a broadcasting `after_create_commit`
+    # would otherwise leave entries in the log before the test began.
+    # Rails clears its Action Cable test adapter between tests for the
+    # same reason; without this, the cumulative counting
+    # `assert_turbo_stream_broadcasts` does (see its note) would carry
+    # one test's broadcasts into the next.
+    Broadcasts.reset_log! if defined?(Broadcasts)
   end
 
   # Default no-op so the shim's `__t.teardown` resolves on test
@@ -619,14 +633,28 @@ class TestBase
     }.join(":")
   end
 
-  # The broadcasts a block adds to the log, filtered to one stream.
-  # Length-delta rather than a clear: a test may assert twice in one
-  # method, and clearing would hide what an earlier block did.
+  # Every broadcast on that stream SO FAR IN THIS TEST — cumulative,
+  # not a delta, and that is turbo-rails' behavior at the version
+  # campfire pins, read from the gem rather than assumed:
+  #
+  #   2.0.16 (campfire's pin), 2.0.17, 2.0.20   `block&.call; broadcasts(name)`
+  #   2.0.21, 2.0.23                            `new_broadcasts_from(...)` — a delta
+  #
+  # A delta was the obvious reading and it is wrong here. campfire's
+  # `rooms/involvements_controller_test` puts twice, one broadcast each,
+  # and asserts `count: 1` then `count: 2` — which only counts if the
+  # second block sees the first block's broadcast too. Ours took a
+  # length-delta, answered 1, and the test failed against a correct app.
+  # `TestBase#setup` clears the log so "this test" is the window, the
+  # same bound Rails gets from clearing its test adapter.
+  #
+  # `assert_broadcasts` next door stays a DELTA on purpose: Action
+  # Cable's own helper takes one (`new_broadcasts_from`) in every
+  # version. The two helpers really do differ.
   def capture_turbo_stream_broadcasts(streamables, &block)
-    before = Broadcasts.log.length
     block.call
     stream = turbo_stream_name(streamables)
-    Broadcasts.log[before..].select { |entry| entry[:stream] == stream }
+    Broadcasts.log.select { |entry| entry[:stream] == stream }
   end
 
   def assert_turbo_stream_broadcasts(streamables, count: 1, &block)
@@ -1074,6 +1102,27 @@ module RequestDispatch
   # for which presence is exact). The block runs against the same body
   # — no real scoping until a real engine lands. `opts` is retained in
   # the signature for call-shape compatibility.
+  #
+  # HONORING `count:` WAS TRIED AND BACKED OUT — 2026-08-22, measured on
+  # campfire: 189/240 -> 184/240. It needs TWO things this stub does not
+  # have, and neither is a small fix:
+  #
+  #   * ELEMENT counting. `Dom.select` fabricates one node per substring
+  #     occurrence, so `.message` (fragment `message"`) counts every
+  #     attribute value ending in `message`, not every element with that
+  #     class — searches_controller's two `count: 0` assertions went red
+  #     against the correct empty page.
+  #   * BLOCK SCOPING. `assert_select "template", count: 1` inside
+  #     `assert_select "turbo-stream[action='append']" do … end` asks
+  #     "one template IN THIS ELEMENT". The block re-scans the whole
+  #     body, which holds two.
+  #
+  # And `count: 0` is not separable: it is exact for an `#id` selector
+  # and wrong for a `.class` one, for the reason above. What the option
+  # needs is the real engine named on `Dom` — mirrored in nine per-target
+  # test runtimes, so it is its own project, not a rung of this ladder.
+  # Until then the degraded check is the honest one: it never claims a
+  # count it cannot count.
   def assert_select(selector, content_or_opts = nil, opts = nil, &block)
     body  = @__response.body.to_s
     nodes = Dom.select(Dom.parse(body), selector)

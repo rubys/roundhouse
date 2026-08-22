@@ -59,12 +59,27 @@ module ActionCable
     # `SeedTransport` exists to document. This file is overlay-only, so
     # it can hand a Hash across that seam.
     #
-    # Not recorded in `Broadcasts::LOG`: LOG's shape
-    # (`action`/`target`/`html`) is the turbo-FRAGMENT contract, and a
-    # raw payload is not a fragment. A test-visible record for raw
-    # publishes belongs with the subscription half, which is what would
-    # give it something to assert against.
+    # RECORDED IN `Broadcasts::LOG`, and this file used to carry the
+    # opposite conclusion: that LOG's `action`/`target`/`html` shape is
+    # the turbo-FRAGMENT contract and a raw payload is not a fragment.
+    # True about the shape, wrong about the log. `ActionCable::TestHelper
+    # #assert_broadcasts` reads LOG and exists precisely to count raw
+    # publishes on an app-named stream — Rails' own reads the test
+    # adapter's pubsub queue, which carries whatever was published. With
+    # only the dispatch here, campfire's "creating a message broadcasts
+    # unread room to each member" counted 0 against a broadcast that had
+    # in fact happened: the two halves of the harness were never joined.
+    #
+    # Logged under `payload:` rather than squeezed into `html:`, so an
+    # entry never claims to be markup it is not. `action: :message` is
+    # what tells the two kinds of entry apart; both readers of the log
+    # (`capture_broadcasts_on`, `capture_turbo_stream_broadcasts`) filter
+    # on `:stream` alone, so the extra key costs them nothing.
+    #
+    # LOG FIRST, then dispatch — the order `Broadcasts.record` uses, so a
+    # transport that raises cannot lose the record of the attempt.
     def broadcast(stream, payload)
+      Broadcasts::LOG << { action: :message, stream: stream, payload: payload }
       Broadcasts::TRANSPORTS[0].broadcast(stream, payload)
       nil
     end

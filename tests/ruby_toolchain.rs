@@ -153,6 +153,13 @@ fn real_blog_spinel_tests_pass() {
         // per-target runtime module, so this is the lane that runs its
         // unit tests. Rides in the same way query_count_test does.
         "test/schematized_json_test.rb",
+        // `runtime/broadcasts.rb` plus the two CAPTURE helpers in
+        // test_helper.rb, which are not the same shape as each other
+        // (`assert_turbo_stream_broadcasts` is cumulative at the pinned
+        // turbo-rails, `assert_broadcasts` is a delta) and had no gate
+        // at all: this file shipped in every ruby emit and nothing ever
+        // ran it. Rides in the same way the two above do.
+        "test/broadcasts_test.rb",
     ] {
         assert_test_passes(&scratch, &gemfile, test);
     }

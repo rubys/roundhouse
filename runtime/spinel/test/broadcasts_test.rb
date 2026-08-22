@@ -4,8 +4,12 @@
 # runner — `test_helper` deliberately does not, because the EMITTED
 # tests inherit `TestBase` and carry their own driver shim.
 require "minitest/autorun"
+# `test_helper` already loads `Broadcasts` — through
+# `runtime/broadcasts` here and through `boot.rb` in an emitted tree,
+# where this file also ships. Naming it again as `require "broadcasts"`
+# resolved only on a load path the emit does not have, which is why the
+# emitted copy could not run and this file sat ungated.
 require_relative "test_helper"
-require "broadcasts"
 
 class BroadcastsTest < Minitest::Test
   def setup
@@ -111,5 +115,48 @@ class BroadcastsTest < Minitest::Test
       %(<turbo-stream action="append" target="items"><template>hi</template></turbo-stream>),
       Broadcasts.turbo_stream_fragment("append", "items", "hi")
     )
+  end
+
+  # ── the two capture helpers really do differ ─────────────────────
+  #
+  # `assert_turbo_stream_broadcasts` is CUMULATIVE at the turbo-rails
+  # version campfire pins (2.0.16/2.0.17/2.0.20 run the block and then
+  # read the whole stream; the `new_broadcasts_from` delta arrives in
+  # 2.0.21). `assert_broadcasts` is Action Cable's own and takes a delta
+  # in every version. Two blocks with one broadcast each therefore
+  # answer 1 then 2 for the first, and 1 then 1 for the second — which
+  # is exactly what campfire's `rooms/involvements_controller_test`
+  # asserts, and what a delta on both got wrong.
+
+  class CaptureHarness < TestBase
+    def response = nil
+  end
+
+  def test_turbo_stream_capture_is_cumulative_across_blocks
+    h = CaptureHarness.new
+    Broadcasts.reset_log!
+    first = h.capture_turbo_stream_broadcasts("designers") do
+      Broadcasts.append(stream: "designers", target: "t", html: "one")
+    end
+    second = h.capture_turbo_stream_broadcasts("designers") do
+      Broadcasts.append(stream: "designers", target: "t", html: "two")
+    end
+    assert_equal 1, first.length
+    assert_equal 2, second.length, "the second block must see the first block's broadcast too"
+  end
+
+  # Same producer, same stream, same two blocks — so the only thing
+  # this can be measuring is the helper.
+  def test_action_cable_capture_stays_a_delta
+    h = CaptureHarness.new
+    Broadcasts.reset_log!
+    first = h.capture_broadcasts_on("user_1_unreads") do
+      Broadcasts.append(stream: "user_1_unreads", target: "t", html: "one")
+    end
+    second = h.capture_broadcasts_on("user_1_unreads") do
+      Broadcasts.append(stream: "user_1_unreads", target: "t", html: "two")
+    end
+    assert_equal 1, first.length
+    assert_equal 1, second.length, "assert_broadcasts counts only what its own block added"
   end
 end
