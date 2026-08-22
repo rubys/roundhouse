@@ -129,17 +129,63 @@ fn rewrite(expr: &mut Expr, map: &EnumMap) {
                 continue;
             };
             let Some(mapping) = map.get(col.as_str()) else { continue };
-            let ExprNode::Lit { value: Literal::Sym { value: label } } = &*value.node else {
-                continue;
-            };
-            let Some(stored) = mapping.get(label.as_str()) else { continue };
-            *value = crate::lower::typing::with_ty(
-                Expr::new(value.span, ExprNode::Lit { value: stored.clone() }),
-                match stored {
-                    Literal::Int { .. } => crate::ty::Ty::Int,
-                    _ => crate::ty::Ty::Str,
-                },
-            );
+            rewrite_value(value, mapping);
         }
     }
+}
+
+/// One attribute VALUE: a bare label, or an ARRAY of them.
+///
+/// `where(status: [ :active, :banned ])` is the same translation as the
+/// scalar — Rails casts each element through the enum's type and renders
+/// `IN (0, 2)`. Without the array arm the symbols reached the SQL
+/// verbatim and the condition matched nothing, silently: campfire's
+/// account page asks for exactly this set and rendered an EMPTY user
+/// list, which reads as a missing feature rather than a wrong query.
+///
+/// Element-wise, and only for elements that ARE labels — the same
+/// narrowing the scalar arm uses. A heterogeneous array is left with its
+/// non-label elements untouched rather than refused, which is also what
+/// Rails does with one.
+fn rewrite_value(
+    value: &mut Expr,
+    mapping: &std::collections::HashMap<String, Literal>,
+) {
+    if let ExprNode::Array { elements, .. } = &mut *value.node {
+        let mut all_int = !elements.is_empty();
+        for el in elements.iter_mut() {
+            let rewrote = rewrite_label(el, mapping);
+            all_int &= rewrote.is_some_and(|l| matches!(l, Literal::Int { .. }));
+        }
+        // The container's own type follows its elements: an `Array[Sym]`
+        // stamped at ingest, left standing over Int elements, is the kind
+        // of disagreement a strict target reads as the element type.
+        if all_int {
+            value.ty = Some(crate::ty::Ty::Array {
+                elem: Box::new(crate::ty::Ty::Int),
+            });
+        }
+        return;
+    }
+    rewrite_label(value, mapping);
+}
+
+/// Replace a label Symbol with its stored value in place; answers the
+/// stored literal when it did.
+fn rewrite_label(
+    value: &mut Expr,
+    mapping: &std::collections::HashMap<String, Literal>,
+) -> Option<Literal> {
+    let ExprNode::Lit { value: Literal::Sym { value: label } } = &*value.node else {
+        return None;
+    };
+    let stored = mapping.get(label.as_str())?.clone();
+    *value = crate::lower::typing::with_ty(
+        Expr::new(value.span, ExprNode::Lit { value: stored.clone() }),
+        match stored {
+            Literal::Int { .. } => crate::ty::Ty::Int,
+            _ => crate::ty::Ty::Str,
+        },
+    );
+    Some(stored)
 }
