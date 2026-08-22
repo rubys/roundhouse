@@ -118,6 +118,16 @@ pub(super) fn emit_form_builder_inline(
         FormBuilderMethod::Button => {
             emit_button(positional.first().copied(), opts.as_slice(), ctx)
         }
+        // `fields_for` without a block renders nothing: its entire
+        // output is what the block writes (Rails captures the block and
+        // returns it; there is no block here to capture). The block form
+        // is `emit_form_builder_block_inline` below. Safe-empty rather
+        // than a refusal, matching `form_with`'s no-model fallback — a
+        // blockless `fields_for` in a template would be dead markup in
+        // Rails too.
+        FormBuilderMethod::FieldsFor => {
+            vec![accumulator_append_call(lit_str(String::new()), ctx)]
+        }
         FormBuilderMethod::UrlField => emit_typed_input_field(
             "url",
             positional.first().copied(),
@@ -1025,6 +1035,7 @@ pub(crate) fn button_open_parts(opts: &[(Expr, Expr)]) -> Vec<InterpPart> {
 /// block body is template buffer ops, so it is WALKED against the outer
 /// accumulator rather than captured.
 pub(super) fn emit_form_builder_block_inline(
+    binding: &FormBuilderBinding,
     kind: FormBuilderMethod,
     args: &[Expr],
     block: &Expr,
@@ -1033,7 +1044,7 @@ pub(super) fn emit_form_builder_block_inline(
     let ExprNode::Lambda { params, body, .. } = &*block.node else {
         return None;
     };
-    let (_positional, opts) = split_args(args);
+    let (positional, opts) = split_args(args);
     match kind {
         FormBuilderMethod::Button => {
             let mut out =
@@ -1043,10 +1054,85 @@ pub(super) fn emit_form_builder_block_inline(
             out.push(accumulator_append_call(lit_str("</button>".to_string()), ctx));
             Some(out)
         }
-        // Other builder methods take no block in the corpus; `fields_for`
-        // does but needs a nested BINDING, not just nested markup.
+        FormBuilderMethod::FieldsFor => {
+            emit_fields_for(binding, &positional, params, body, ctx)
+        }
+        // Every other builder method is blockless in the corpus.
         _ => None,
     }
+}
+
+/// `form.fields_for :settings, obj do |settings_form| … end`.
+///
+/// Renders NO markup of its own — Rails' `fields_for` opens no tag and
+/// closes none. What it does is bind a second FormBuilder whose object
+/// name is `parent[nested]`, so every field inside names
+/// `account[settings][x]` and ids `account_settings_x` (the bracket-to-
+/// underscore step is `field_id`'s, transcribed from Rails).
+///
+/// The nested RECORD is the second positional when given, else Rails'
+/// default — the parent object's reader of the same name. It is bound to
+/// a synthesized local for the same reason `form_with` binds one: the
+/// expression can be an arbitrary chain (`@account.settings`) and the
+/// field-value reads want a plain Var to dispatch on.
+///
+/// GAP worth naming: a nested field with no explicit `value:` reads
+/// `<record>.<field>`, and when the "record" is a `has_json` column that
+/// object does not exist — the store's readers were flattened onto the
+/// PARENT model (`account.settings_x`), so the local holds the raw JSON
+/// String. campfire's only `fields_for` passes `value:` at every field,
+/// so nothing in the corpus reaches that read; an app that does needs
+/// the store-flattening to be taught about nested bindings, not a
+/// workaround here.
+fn emit_fields_for(
+    binding: &FormBuilderBinding,
+    positional: &[&Expr],
+    params: &[Symbol],
+    body: &Expr,
+    ctx: &ViewCtx,
+) -> Option<Vec<Expr>> {
+    let nested = field_symbol(positional.first().copied())?;
+    let nested_param = params
+        .first()
+        .cloned()
+        .unwrap_or_else(|| Symbol::from(format!("{}_form", nested.as_str())));
+    let nested_param_str = nested_param.as_str().to_string();
+
+    let record_expr = positional.get(1).map(|e| (*e).clone()).unwrap_or_else(|| {
+        send(
+            Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Var { id: VarId(0), name: binding.record_var.clone() },
+            )),
+            nested.as_str(),
+            Vec::new(),
+            None,
+            false,
+        )
+    });
+    let record_var = Symbol::from(format!("{nested_param_str}_record"));
+    let mut out = vec![Expr::new(
+        Span::synthetic(),
+        ExprNode::Assign {
+            target: super::LValue::Var { id: VarId(0), name: record_var.clone() },
+            value: record_expr,
+        },
+    )];
+
+    let mut inner = ctx.with_locals([nested_param_str.clone()]);
+    inner.form_records.push(FormBuilderBinding {
+        form_param: nested_param_str.clone(),
+        model_name: format!("{}[{}]", binding.model_name, nested.as_str()),
+        record_var: record_var.clone(),
+        // The parent's, unchanged: `form.submit`'s default text and the
+        // `_method` override belong to the FORM, and `fields_for` opens
+        // no form of its own.
+        form_method_var: binding.form_method_var.clone(),
+        id_prefix: binding.id_prefix.clone(),
+    });
+    let body = super::form_with::rewrite_form_object_reads(body, &nested_param_str, &record_var);
+    out.extend(walk_body(&body, &inner));
+    Some(out)
 }
 
 fn emit_button(

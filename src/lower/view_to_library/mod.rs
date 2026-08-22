@@ -215,6 +215,9 @@ pub struct ViewLowerCtx<'a> {
         std::rc::Rc<std::collections::HashMap<String, std::collections::HashSet<String>>>,
     partial_form_bindings: std::collections::HashMap<ViewKey, PartialFormBinding>,
     route_helper_names: std::rc::Rc<std::collections::HashSet<String>>,
+    /// Generated RouteHelpers function name -> how many REQUIRED
+    /// positionals it takes. See the ViewCtx field of the same name.
+    route_helper_arity: std::rc::Rc<std::collections::HashMap<String, usize>>,
     /// Partials with a `<%# locals: (…) -%>` header, keyed by ViewKey →
     /// their declared keyword locals (excluding the first/positional
     /// record). Render call sites consult it to bind provided locals by
@@ -233,6 +236,25 @@ pub struct ViewLowerCtx<'a> {
 
 impl<'a> ViewLowerCtx<'a> {
     pub fn new(app: &'a App) -> Self {
+        // The GENERATED helpers, surveyed once for both the name set and
+        // the arity map — read off the lowered functions rather than
+        // re-derived from the route table, so the two can't drift.
+        // Arity is the count of REQUIRED positionals: a `(.:format)`
+        // suffix, a Rails optional group, a `scope defaults:` segment and
+        // the query-param keywords all arrive with defaults, and none of
+        // them is an argument a member-path call site has to fill.
+        let route_helpers: Vec<(String, usize)> =
+            crate::lower::lower_routes_to_library_functions(app)
+                .into_iter()
+                .map(|f| {
+                    let required = f
+                        .params
+                        .iter()
+                        .filter(|p| p.default.is_none() && !p.keyword && !p.rest)
+                        .count();
+                    (f.name.as_str().to_string(), required)
+                })
+                .collect();
         Self {
             app,
             known_models: app
@@ -273,11 +295,9 @@ impl<'a> ViewLowerCtx<'a> {
             store_readers: std::rc::Rc::new(store_reader_names(app)),
             partial_form_bindings: partial_form_bindings(&app.views),
             route_helper_names: std::rc::Rc::new(
-                crate::lower::lower_routes_to_library_functions(app)
-                    .into_iter()
-                    .map(|f| f.name.as_str().to_string())
-                    .collect(),
+                route_helpers.iter().map(|(n, _)| n.clone()).collect(),
             ),
+            route_helper_arity: std::rc::Rc::new(route_helpers.into_iter().collect()),
             strict_locals: std::rc::Rc::new(strict_locals_by_key(&app.views)),
             collection_element_locals: std::rc::Rc::new(collection_element_locals(&app.views)),
             form_wrappers: std::rc::Rc::new(form_wrapper_helpers(app)),
@@ -628,6 +648,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         bool_readers: lx.bool_readers.clone(),
         store_readers: lx.store_readers.clone(),
         route_helper_names: lx.route_helper_names.clone(),
+        route_helper_arity: lx.route_helper_arity.clone(),
         form_wrappers: lx.form_wrappers.clone(),
         stylesheets: app.stylesheets.clone(),
         partial_ivars: closures.clone(),
@@ -3507,15 +3528,49 @@ pub(super) struct FormBuilderBinding {
 /// the form declared one), the object name, and the field, joined by
 /// underscores. A model-less form ids by field alone.
 pub(super) fn field_id(id_prefix: &str, model_name: &str, field: &str) -> String {
+    let sanitized = sanitize_object_name(model_name);
     let mut parts: Vec<&str> = Vec::with_capacity(3);
     if !id_prefix.is_empty() {
         parts.push(id_prefix);
     }
-    if !model_name.is_empty() {
-        parts.push(model_name);
+    if !sanitized.is_empty() {
+        parts.push(&sanitized);
     }
     parts.push(field);
     parts.join("_")
+}
+
+/// Rails' `Tags::Base#sanitized_object_name`: the object NAME carries
+/// brackets (`account[settings]` after a `fields_for`), the `id` may
+/// not, so every character that is not id-legal becomes `_` and a
+/// trailing `_` is dropped — `account[settings]` → `account_settings`,
+/// which is exactly the id Rails renders.
+///
+/// A no-op for a plain object name, which is every name a form without
+/// `fields_for` produces. It exists because the alternative — carrying
+/// a second, pre-sanitized name on the binding — makes the two spellings
+/// separately assignable, and they are not: Rails DERIVES one from the
+/// other, and so does this.
+fn sanitize_object_name(name: &str) -> String {
+    // Rails: `gsub(/\]\[|[^-a-zA-Z0-9:.]/, "_").sub(/_$/, "")`.
+    // Transcribed rather than approximated, both halves load-bearing:
+    // the `][` ALTERNATIVE matches first, so a two-level name
+    // (`a[b][c]`) collapses that pair to ONE underscore (`a_b_c`, not
+    // `a_b__c`), and the trailing trim removes exactly ONE — a name
+    // that genuinely ends in `_` keeps the rest.
+    let collapsed = name.replace("][", "_");
+    let mut out = String::with_capacity(collapsed.len());
+    for c in collapsed.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '-' | ':' | '.') {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.ends_with('_') {
+        out.pop();
+    }
+    out
 }
 
 // ── ViewCtx ──────────────────────────────────────────────────────
@@ -3602,6 +3657,22 @@ pub(super) struct ViewCtx {
     /// Empty in single-view test harnesses → both arms (the
     /// pre-gating shape).
     pub(super) route_helper_names: std::rc::Rc<std::collections::HashSet<String>>,
+    /// Generated RouteHelpers function name -> how many REQUIRED
+    /// positionals it takes (`article_path` 1, `articles_path` 0).
+    ///
+    /// The member arm of a resource form — and every record-in-URL
+    /// position — assumes its `<singular>_path` takes an `:id`. A
+    /// SINGULAR Rails resource (`resource :account`, `resource
+    /// :profile`) breaks that: the member helper is the whole route and
+    /// has no dynamic segment, so `RouteHelpers.account_path(account.id)`
+    /// is `wrong number of arguments (given 1, expected 0)`. Rails
+    /// tolerates the extra argument (its non-optimized `url_for` path
+    /// just has nowhere to put it); a generated function does not.
+    ///
+    /// Empty in single-view test harnesses, where `member_path_call`
+    /// keeps the argument — the same "no route table, assume the
+    /// pre-gating shape" convention `route_helper_names` uses.
+    pub(super) route_helper_arity: std::rc::Rc<std::collections::HashMap<String, usize>>,
     /// Helper methods that wrap a builder-yielding form helper
     /// (`form_wrapper_helpers`). A call site passing a block is spliced
     /// to the wrapped call so the form-builder macro-inline can see
@@ -3937,6 +4008,26 @@ pub(super) fn route_helpers_call(method: &str, args: Vec<Expr>) -> Expr {
         ExprNode::Const { path: vec![Symbol::from("RouteHelpers")] },
     );
     send(Some(recv), method, args, None, true)
+}
+
+/// A MEMBER route helper call: `RouteHelpers.<name>_path(<member>)`,
+/// with the member argument dropped when the generated helper takes no
+/// required positional.
+///
+/// One home for the five places that build a record-in-URL call (the
+/// three `form_with` action arms, the bare-record URL arg, and the
+/// association-reader arm). Each of them had the id/`to_param`/whole-
+/// record choice already right and the ARITY question not asked at all,
+/// which is a singular Rails resource's whole failure mode — see
+/// `ViewCtx::route_helper_arity`.
+///
+/// A helper the map does not know keeps the argument: an unknown name is
+/// either a harness with no route table or a helper this pass is not the
+/// oracle for, and dropping an argument there would silently change a
+/// working URL.
+pub(super) fn member_path_call(ctx: &ViewCtx, name: &str, member: Expr) -> Expr {
+    let takes_member = ctx.route_helper_arity.get(name).is_none_or(|n| *n > 0);
+    route_helpers_call(name, if takes_member { vec![member] } else { Vec::new() })
 }
 
 pub(super) fn inflector_call(method: &str, args: Vec<Expr>) -> Expr {

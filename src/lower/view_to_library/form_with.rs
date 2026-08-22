@@ -563,7 +563,8 @@ fn route_helperize(url: Expr, route_helpers: &impl Fn() -> Expr, ctx: &ViewCtx) 
             } else {
                 send(Some(url.clone()), "id", Vec::new(), None, false)
             };
-            let member = super::route_helpers_call(&format!("{name}_path"), vec![member_arg]);
+            let member =
+                super::member_path_call(ctx, &format!("{name}_path"), member_arg);
             let collection = super::route_helpers_call(&format!("{plural}_path"), Vec::new());
             let has_member = ctx.route_helper_names.is_empty()
                 || ctx.route_helper_names.contains(&format!("{name}_path"));
@@ -743,8 +744,7 @@ fn classify_form_with_components(
         } else {
             send(Some(record.clone()), "id", Vec::new(), None, false)
         };
-        let member_path =
-            send(Some(route_helpers()), &member_name, vec![member_arg], None, true);
+        let member_path = super::member_path_call(ctx, &member_name, member_arg);
         let collection_path =
             send(Some(route_helpers()), &collection_name, Vec::new(), None, false);
         let has_member = ctx.route_helper_names.is_empty()
@@ -861,13 +861,8 @@ fn classify_form_with_components(
     } else {
         send(Some(model.clone()), "id", Vec::new(), None, false)
     };
-    let member_path = send(
-        Some(route_helpers()),
-        &format!("{singular}_path"),
-        vec![member_arg],
-        None,
-        true,
-    );
+    let member_path =
+        super::member_path_call(ctx, &format!("{singular}_path"), member_arg);
     let collection_path = send(
         Some(route_helpers()),
         &format!("{plural}_path"),
@@ -1278,6 +1273,7 @@ mod tests {
             bool_readers: Default::default(),
             store_readers: Default::default(),
             route_helper_names: Default::default(),
+            route_helper_arity: Default::default(),
             form_wrappers: Default::default(),
             stylesheets: Vec::new(),
             partial_ivars: Default::default(),

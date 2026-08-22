@@ -689,9 +689,11 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     } = &*inner.node
     {
         if let Some(name) = super::form_with::form_param_ref_name(r) {
-            if ctx.form_records.iter().any(|b| b.form_param == name) {
+            if let Some(binding) = ctx.form_records.iter().find(|b| b.form_param == name) {
                 if let Some(fb) = classify_form_builder_method(method.as_str()) {
-                    if let Some(out) = emit_form_builder_block_inline(fb, sa, block, ctx) {
+                    if let Some(out) =
+                        emit_form_builder_block_inline(binding, fb, sa, block, ctx)
+                    {
                         return out;
                     }
                 }
@@ -1403,6 +1405,7 @@ mod tests {
             bool_readers: Default::default(),
             store_readers: Default::default(),
             route_helper_names: Default::default(),
+            route_helper_arity: Default::default(),
             form_wrappers: Default::default(),
             stylesheets: Vec::new(),
             partial_ivars: Default::default(),

@@ -575,9 +575,10 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
     if let ExprNode::Send { recv: Some(_), method, args, block: None, .. } = &*url.node {
         if args.is_empty() {
             if let Some(target) = ctx.reference_targets.get(method.as_str()) {
-                return Some(route_helpers_call(
+                return Some(super::member_path_call(
+                    ctx,
                     &format!("{target}_path"),
-                    vec![url.clone()],
+                    url.clone(),
                 ));
             }
         }
@@ -609,9 +610,10 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx) -> Option<Expr> {
                 None,
                 false,
             );
-            Some(route_helpers_call(
+            Some(super::member_path_call(
+                ctx,
                 &format!("{singular}_path"),
-                vec![id_expr],
+                id_expr,
             ))
         }
         // `[comment.article, comment]` — nested-resource array. Each

@@ -571,6 +571,12 @@ pub enum FormBuilderMethod {
     EmailField,
     FileField,
     RichTextArea,
+    /// `form.fields_for :settings, obj do |nested| … end` — Rails'
+    /// nested object-name scope. Unlike every sibling it renders no
+    /// markup of its own: it BINDS a second builder whose object name
+    /// is `parent[nested]` and whose fields render inside the parent
+    /// form. Block form only (see the blockless arm in form_builder.rs).
+    FieldsFor,
 }
 
 /// Method name for a view template stem. A digit-leading stem
@@ -637,6 +643,7 @@ pub fn classify_form_builder_method(method: &str) -> Option<FormBuilderMethod> {
         "password_field" => Some(FormBuilderMethod::PasswordField),
         "hidden_field" => Some(FormBuilderMethod::HiddenField),
         "check_box" | "checkbox" => Some(FormBuilderMethod::CheckBox),
+        "fields_for" => Some(FormBuilderMethod::FieldsFor),
         "radio_button" => Some(FormBuilderMethod::RadioButton),
         "select" => Some(FormBuilderMethod::Select),
         "button" => Some(FormBuilderMethod::Button),
