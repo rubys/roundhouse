@@ -1,4 +1,5 @@
-//! A permit list with an ARRAY-VALUED key — `permit(:title, tags_a: [])`.
+//! A permit list with a NON-SCALAR key — `permit(:title, tags_a: [])`
+//! and its sibling spelling `permit(:name, settings: {})`.
 //!
 //! lobsters' `StoriesController#story_params` is the case. Before, one
 //! such key made the whole list unrecognizable: no `StoryParams` was
@@ -9,7 +10,14 @@
 //! outright (the `.except(…)` chained off it dispatched to the only
 //! `except` in the program, `HatRequestParams#except`).
 //!
-//! So the array-valued key is DROPPED and the rest of the list lowers.
+//! campfire's `AccountsController#account_params` is the hash-valued
+//! twin — `permit(:name, :logo, settings: {})`, Rails' "any nested hash
+//! under this key". It failed the same way for the same reason, and the
+//! symptom was better disguised: the surviving `@params.require(:account)`
+//! reached Kernel's PRIVATE `require`, so the error read "private method
+//! 'require' called for an instance of Hash".
+//!
+//! So the non-scalar key is DROPPED and the rest of the list lowers.
 //! Dropping is not free — a request may send `story[tags_a][]` and the
 //! emitted app will not assign it, where Rails would — so it files a
 //! `lower_residue` warning rather than passing silently. Carrying it
@@ -128,8 +136,90 @@ fn dropping_it_files_a_residue_warning() {
         ruby::emit_lowered_controllers(&app)
     });
     assert!(
-        diags.iter().any(|d| d.message.contains("`tags_a: []`")
-            && d.message.contains("array-valued")),
+        diags.iter().any(|d| d.message.contains("permitted key `tags_a`")
+            && d.message.contains("non-scalar")),
+        "the dropped key is on the ledger, not silent: {:?}",
+        diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>(),
+    );
+}
+
+// ── the hash-valued spelling — campfire's `settings: {}` ─────────────
+
+const HASH_SCHEMA: &str = r#"ActiveRecord::Schema.define do
+  create_table "accounts", force: :cascade do |t|
+    t.string "name", null: false
+    t.string "settings"
+  end
+end
+"#;
+
+const HASH_CONTROLLER: &str = r#"class AccountsController < ApplicationController
+  def update
+    @account = Account.first
+    @account.update!(account_params)
+  end
+
+  private
+
+  def account_params
+    params.require(:account).permit(:name, settings: {})
+  end
+end
+"#;
+
+fn hash_lowered() -> roundhouse::App {
+    let mut app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", HASH_SCHEMA),
+        ("app/models/account.rb", "class Account < ApplicationRecord\nend\n"),
+        ("app/controllers/accounts_controller.rb", HASH_CONTROLLER),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    app
+}
+
+/// The whole point: a `key: {}` entry must not take the list down with
+/// it. Before, it did — `nested_keys` accepted only Array values, the
+/// permit went unrecognized, and `require`/`permit` survived into the
+/// emit where nothing defines either.
+#[test]
+fn a_hash_valued_key_does_not_sink_the_permit() {
+    let app = hash_lowered();
+    let c = ruby::emit_lowered_controllers(&app)
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("app/controllers/accounts_controller.rb"))
+        .map(|f| f.content.clone())
+        .expect("emitted controller");
+    assert!(
+        c.contains("AccountParams.from_raw(@params)"),
+        "the helper lowers to the synthesized record:\n{c}"
+    );
+    assert!(
+        !c.contains("permit(") && !c.contains(".require("),
+        "no `require`/`permit` survives into the emit — Hash#require is \
+         Kernel's private one:\n{c}"
+    );
+}
+
+#[test]
+fn the_hash_valued_key_is_dropped_and_ledgered() {
+    let (files, diags) = roundhouse::emit::diagnostics::scope(|| {
+        let app = hash_lowered();
+        ruby::emit_lowered_controllers(&app)
+    });
+    let params = files
+        .iter()
+        .find(|f| f.path.to_string_lossy().ends_with("app/models/account_params.rb"))
+        .map(|f| f.content.clone())
+        .expect("emitted params record");
+    assert!(params.contains("def name"), "the scalar half is carried:\n{params}");
+    assert!(
+        !params.contains("settings"),
+        "a nested hash has no slot in a String-fielded record:\n{params}"
+    );
+    assert!(
+        diags.iter().any(|d| d.message.contains("permitted key `settings`")
+            && d.message.contains("non-scalar")),
         "the dropped key is on the ledger, not silent: {:?}",
         diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>(),
     );

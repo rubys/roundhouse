@@ -360,7 +360,7 @@ fn collect_from_expr(
     walk_children(expr, &mut |c| collect_from_expr(c, controller, index, specs));
 }
 
-/// Record the array-valued permit keys this pass drops.
+/// Record the NON-SCALAR permit keys this pass drops.
 ///
 /// One warning per (controller, key): the ledger entry for a field the
 /// request may send and the emitted app will not assign. Deliberately
@@ -375,17 +375,18 @@ fn warn_nested_keys(resource: &Symbol, nested: &[Symbol], controller: &ClassId, 
         let kind = DiagnosticKind::LowerResidue {
             pass: Symbol::from("params_nested_filter"),
             construct: Symbol::from("permit"),
-            reason: Symbol::from("array-valued key"),
+            reason: Symbol::from("non-scalar key"),
         };
         let d = Diagnostic {
             span,
             severity: Diagnostic::default_severity(&kind),
             kind,
             message: format!(
-                "permitted key `{key}: []` on `{resource}` in `{controller}` is \
-                 array-valued — a synthesized params record carries String fields \
-                 only, so this key is dropped from the permit list and the emitted \
-                 app will not assign it; the rest of the list still lowers",
+                "permitted key `{key}` on `{resource}` in `{controller}` is \
+                 non-scalar (`{key}: []` or `{key}: {{}}`) — a synthesized params \
+                 record carries String fields only, so this key is dropped from the \
+                 permit list and the emitted app will not assign it; the rest of the \
+                 list still lowers",
                 key = key.as_str(),
                 resource = resource.as_str(),
                 controller = controller.0.as_str(),
@@ -964,10 +965,25 @@ fn sym_list(elements: &[Expr]) -> Option<(Vec<Symbol>, Vec<Symbol>)> {
     Some((fields, Vec::new()))
 }
 
-/// The keys of a permit hash whose values are all Array literals —
-/// `tags_a: []`, `tag_ids: [:id]`. A value of any other shape (a nested
-/// permit hash, an expression) is not recognized, so the caller falls
-/// back to leaving the permit alone rather than guessing at it.
+/// The keys of a permit hash whose values are NON-SCALAR — Rails'
+/// two spellings for "this key holds more than a String":
+///
+///   `tags_a: []`, `tag_ids: [:id]`   an array of scalars
+///   `settings: {}`                   an arbitrary nested hash
+///
+/// The two mean different things to Rails and the same thing here: a
+/// synthesized params record carries `Ty::Str` fields, so neither has a
+/// slot, and both are dropped from the field list with the caller's
+/// ledger warning. Recognizing the hash spelling matters because a
+/// permit is all-or-nothing — one unrecognized entry left campfire's
+/// `permit(:name, :logo, settings: {})` in its SOURCE shape, and the
+/// emitted `@params.require(:account)` then reached Kernel's private
+/// `require` ("private method 'require' called for an instance of
+/// Hash"), which is a NoMethodError dressed as a permissions error.
+///
+/// A value of any other shape (an expression) is still unrecognized, so
+/// the caller falls back to leaving the permit alone rather than
+/// guessing at it.
 fn nested_keys(e: &Expr) -> Option<Vec<Symbol>> {
     let ExprNode::Hash { entries, .. } = &*e.node else {
         return None;
@@ -977,7 +993,7 @@ fn nested_keys(e: &Expr) -> Option<Vec<Symbol>> {
     }
     let mut out = Vec::with_capacity(entries.len());
     for (k, v) in entries {
-        if !matches!(&*v.node, ExprNode::Array { .. }) {
+        if !matches!(&*v.node, ExprNode::Array { .. } | ExprNode::Hash { .. }) {
             return None;
         }
         out.push(sym_of(k)?);
