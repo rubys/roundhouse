@@ -127,12 +127,88 @@ module ActiveStorage
       nil
     end
 
-    def attach(_attachable)
-      raise NotImplementedError, "ActiveStorage attach is not modeled"
+    # `logo.attach io:, filename:, content_type:` — the METADATA half of
+    # Rails' attach, which is the half this class has always answered.
+    # Two rows: the blob (what the file IS) and the attachment (what it
+    # is attached TO). Everything the readers above join for —
+    # `attached?`, `filename`, `content_type`, `image?` — becomes true
+    # of the record the moment these land.
+    #
+    # NO BYTES ARE STORED. The shared runtime does no file I/O anywhere
+    # (grep it), because a storage service is a per-target seam rather
+    # than transpiled Ruby, so `url` / `download` /
+    # `Blob.service.path_for` still raise and this method does not
+    # pretend otherwise. `byte_size` is nonetheless REAL — `data` is the
+    # file's actual contents — so the column means what it says rather
+    # than carrying a zero nobody can trust.
+    #
+    # DATA, NOT AN IO. `lower::attached::apply_attach_lowering` rewrites
+    # Rails' `attach(io: f, filename:, content_type:)` to
+    # `attach(f.read, …)` at the call site, because the shared runtime's
+    # RBS has no `File` or `IO` type to name and an `untyped` parameter
+    # here costs every strict target. Same grounding
+    # `signed_id(expires_in:)` and the controller's `expires_in` get.
+    #
+    # `has_one_attached` REPLACES, so the prior attachment goes first.
+    # Rails detaches the old blob and leaves it for a purge job; there
+    # is no job here and an orphaned blob row would make `attached?`
+    # answer for a file no longer attached, so the row goes with it.
+    def attach(data, filename, content_type)
+      purge
+      blob_id = ActiveRecord.adapter.insert("active_storage_blobs", {
+        "key" => blob_key(filename),
+        "filename" => filename,
+        "content_type" => content_type,
+        "metadata" => "{}",
+        "service_name" => "local",
+        "byte_size" => data.length,
+        "checksum" => "",
+        "created_at" => ActiveSupport.db_now,
+      })
+      ActiveRecord.adapter.insert("active_storage_attachments", {
+        "name" => @name,
+        "record_type" => @record_type,
+        "record_id" => @record_id,
+        "blob_id" => blob_id,
+        "created_at" => ActiveSupport.db_now,
+      })
+      nil
     end
 
+    # A value for the blob's `key` column, which is NOT NULL and
+    # uniquely indexed.
+    #
+    # Derived rather than random: randomness is a per-target seam here
+    # (the spinel tree reaches /dev/urandom through FFI, the CRuby tree
+    # through SecureRandom), and the shared runtime cannot name either.
+    # The attachment's own identity plus the clock is unique in every
+    # way that matters — two different records cannot collide at all,
+    # and one record cannot hold two attachments under the same name,
+    # because `attach` purges first.
+    #
+    # It is not Rails' key and nothing round-trips through it yet: no
+    # bytes are stored, so no service ever looks a file up by it.
+    def blob_key(filename)
+      MessageDigest.hmac_sha256_hex(
+        @record_type + "/" + @record_id.to_s + "/" + @name,
+        filename + "/" + ActiveSupport.db_now
+      )
+    end
+
+    # Detach and delete. The rows only — see `attach` on why there are
+    # no bytes to delete beside them.
     def purge
-      raise NotImplementedError, "ActiveStorage purge is not modeled"
+      sql = "SELECT a.id AS attachment_id, b.id AS blob_id " +
+            "FROM active_storage_attachments a " +
+            "JOIN active_storage_blobs b ON b.id = a.blob_id WHERE a.record_type = " +
+            ActiveRecord.adapter.escape_value(@record_type) +
+            " AND a.record_id = " + ActiveRecord.adapter.escape_value(@record_id) +
+            " AND a.name = " + ActiveRecord.adapter.escape_value(@name)
+      ActiveRecord.adapter.select_rows(sql).each do |row|
+        ActiveRecord.adapter.delete("active_storage_attachments", row["attachment_id"].to_i)
+        ActiveRecord.adapter.delete("active_storage_blobs", row["blob_id"].to_i)
+      end
+      nil
     end
   end
 end

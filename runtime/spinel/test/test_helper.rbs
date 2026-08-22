@@ -82,6 +82,7 @@ class TestBase
   def initialize: () -> void
   def setup: () -> void
   def teardown: () -> void
+  def file_fixture: (String name) -> Pathname
 
   # `assert_match` isn't lowered by inline_assertions (nil-handling
   # divergence across targets). Method body stays; RBS pins the

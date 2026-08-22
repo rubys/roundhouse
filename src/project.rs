@@ -1734,7 +1734,22 @@ fn jruby_runtime_files(
 /// `spinel: main.rb: cannot load such file` rather than as anything a
 /// unit test could see. A toolchain test should drive what ships.
 pub fn spinel_base_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, String> {
-    spinel_files(app, fixture)
+    // The bundled-library requires belong HERE, not only in
+    // `spin_shape`. This is the tree `tests/spinel_toolchain.rs`
+    // compiles, and without them it compiles something the CLI never
+    // ships: a `Pathname.new` in the test harness built clean through
+    // `--target spinel` and failed the toolchain lane with "Pathname is
+    // provided by the bundled pathname library, which this program does
+    // not require".
+    //
+    // Exactly the bug `write_bundled_requires`' own doc describes — the
+    // table lived inside `spin_shape` and the ruby family silently never
+    // got it — one layer down. A lane is evidence only if it runs the
+    // same code. Idempotent: the gap scan skips a file that already
+    // requires the library, so `spin_shape` running it again is inert.
+    let mut files = spinel_files(app, fixture)?;
+    write_bundled_requires(&mut files);
+    Ok(files)
 }
 
 /// Spinel-target files: lowered emit (app/, config/, test/) plus

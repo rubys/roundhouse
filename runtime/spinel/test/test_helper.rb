@@ -438,6 +438,23 @@ class TestBase
   def teardown
   end
 
+  # `file_fixture("pixel.bmp")` — Rails' handle on a file under
+  # `test/fixtures/files`. A Pathname, as Rails returns, so the `.open`
+  # every call site chains resolves without inventing a type.
+  #
+  # Anchored on `__dir__` rather than the process's cwd: the suite runs
+  # each file as `ruby -Itest test/models/x_test.rb` from the emit root
+  # today, and a helper that silently depends on that is a trap for the
+  # first runner that does otherwise.
+  #
+  # These files reach the emitted tree at all only because binary
+  # passthrough carries them (`App#binary_assets`) — every emitted
+  # file's content is a String, so before that a `.jpg` could not be
+  # represented and this method would have pointed at nothing.
+  def file_fixture(name)
+    Pathname.new(File.join(__dir__, "fixtures", "files", name))
+  end
+
   # `dom_id(record)` — `ActionView::RecordIdentifier`, which Rails mixes
   # into integration tests so an assertion can name the element the view
   # rendered (`assert_select "#" + dom_id(@message)`). Delegates to the

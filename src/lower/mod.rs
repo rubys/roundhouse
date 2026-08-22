@@ -381,6 +381,13 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // Grounds the plural duration-unit calls that send_static_dispatch
     // synthesizes into case arms, so it must observe that pass's output.
     ("duration", &["send_static_dispatch"]),
+    // Grounds `attach(io:, filename:, content_type:)` to positional
+    // Strings by reading the io at the call site — the runtime's RBS
+    // has no File type, and an `untyped` parameter there is five new
+    // Ty::Untyped sites every strict target pays for. No ordering
+    // constraint of its own: it matches on Rails' own keyword spelling,
+    // which no earlier pass rewrites.
+    ("attach", &[]),
     // Rails-API broadcast calls in ordinary method bodies (a concern's
     // `def broadcast_create`) → `Broadcasts.<action>(…)`. Late, so the
     // `Views::…` render call it synthesizes is not re-walked by the
@@ -571,6 +578,8 @@ pub fn apply_post_analyze_lowerings(
     // this grounding (`send_dispatch::duration_plural`).
     duration::apply_duration_lowering(app);
     ran!("duration");
+    attached::apply_attach_lowering(app);
+    ran!("attach");
     broadcast_calls::apply_broadcast_calls_lowering(app);
     ran!("broadcast_calls");
     diags.extend(relation_residue::apply_relation_residue_ledger(app, registry));

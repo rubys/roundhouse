@@ -64,6 +64,71 @@ fn attached_class() -> ClassId {
 /// modeled — the attachment half still expands, and the unclaimed
 /// diagnostic keeps naming the declaration so the variant gap stays
 /// visible.
+/// `x.attach(io: F, filename: N, content_type: C)` →
+/// `x.attach(F.read, N, C)`.
+///
+/// Ground the io at the CALL SITE, the same way `signed_id(expires_in:)`
+/// and the controller's `expires_in` are grounded. The runtime's
+/// `Attached#attach` wants a length it can measure and a name it can
+/// store; what Rails hands it is a File, and the shared runtime's RBS
+/// has no `File` or `IO` type to name — declaring the parameter
+/// `untyped` instead put five new `Ty::Untyped` sites in the runtime and
+/// tripped the ceiling gate. Reading the bytes here keeps every
+/// parameter a String.
+///
+/// Keyword-form only, which is the only form Rails documents for the
+/// `io:` variant (`attach(io:, filename:, content_type:)`). The
+/// single-argument `attach(uploaded_file)` shape is a DIFFERENT
+/// attachable and is left alone rather than guessed at.
+pub fn apply_attach_lowering(app: &mut crate::app::App) {
+    super::for_each_hook_body(app, &mut rewrite_attach);
+    // Test bodies too: every `attach` in the corpus today is written by
+    // a test, so gating this to app code would lower nothing at all.
+    super::for_each_test_body(app, &mut rewrite_attach);
+}
+
+fn rewrite_attach(e: &mut Expr) {
+    e.node.for_each_child_mut(&mut rewrite_attach);
+    let ExprNode::Send { method, args, .. } = &mut *e.node else { return };
+    if method.as_str() != "attach" || args.len() != 1 {
+        return;
+    }
+    let ExprNode::Hash { entries, kwargs: true } = &*args[0].node else { return };
+    let pick = |name: &str| -> Option<Expr> {
+        entries
+            .iter()
+            .find(|(k, _)| {
+                matches!(&*k.node,
+                    ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == name)
+            })
+            .map(|(_, v)| v.clone())
+    };
+    // All three, and nothing else: an attach carrying an option this
+    // does not reproduce is left to fail by name rather than silently
+    // dropped.
+    let (Some(io), Some(filename), Some(content_type)) =
+        (pick("io"), pick("filename"), pick("content_type"))
+    else {
+        return;
+    };
+    if entries.len() != 3 {
+        return;
+    }
+    let span = io.span;
+    let mut data = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(io),
+            method: Symbol::from("read"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+    );
+    data.ty = Some(Ty::Str);
+    *args = vec![data, filename, content_type];
+}
+
 pub fn attached_attrs(model: &Model) -> Vec<(Span, Symbol)> {
     let mut out = Vec::new();
     for item in &model.body {

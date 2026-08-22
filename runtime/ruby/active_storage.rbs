@@ -20,7 +20,10 @@ module ActiveStorage
     def audio?: () -> bool
     def representable?: () -> bool
     def analyze: () -> nil
-    def attach: (untyped attachable) -> void
+    # `data` is the file's CONTENTS — the lowering reads the io at the
+    # call site so nothing here has to name a File.
+    def attach: (String data, String filename, String content_type) -> void
+    def blob_key: (String filename) -> String
     def purge: () -> void
   end
 end
