@@ -35,6 +35,15 @@ module Dom
   def self.text: (String node) -> String
   def self.fragment_for: (String selector) -> String
   def self.selector_attrs: (String chunk) -> Array[String]
+  def self.target_chunk: (String selector) -> String
+  def self.element_chunk?: (String chunk) -> bool
+  def self.tag_start: (String root, Integer i) -> Integer
+  def self.tag_named?: (String tag, String want) -> bool
+  def self.tag_classes: (String tag) -> Array[String]
+  def self.selector_tag: (String base) -> String
+  def self.selector_id: (String base) -> String
+  def self.selector_classes: (String base) -> Array[String]
+  def self.without_id: (String base) -> String
 end
 
 # Captured response from a dispatched in-process request. The four

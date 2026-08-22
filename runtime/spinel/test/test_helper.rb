@@ -155,26 +155,42 @@ module Dom
   end
 
   # Nodes matching `selector` within `root` (a document or a node).
-  # Stub: one synthetic node (the root's html) per substring-fragment
-  # occurrence, so nested selects re-scan the whole string (the
-  # historical no-scoping block behavior).
+  # Stub: one synthetic node (the root's html) per matching element, so
+  # nested selects re-scan the whole string (the historical no-scoping
+  # block behavior).
+  #
+  # The scan is anchor-then-verify. `fragment_for` picks ONE part of the
+  # compound selector as a cheap way to enumerate candidate positions;
+  # every part is then checked against the START TAG the candidate sits
+  # in, which is recovered by walking back to its `<`. That walk is what
+  # lets a CLASS anchor work at all: a class name is matched mid-tag, so
+  # scanning forward from the hit gives a suffix of the tag rather than
+  # the tag.
   def self.select(root, selector)
+    chunk = target_chunk(selector)
+    base = chunk.split("[")[0].to_s
+    want_tag = selector_tag(base)
+    want_id = selector_id(base)
+    want_classes = selector_classes(base)
+    attrs = selector_attrs(chunk)
     fragment = fragment_for(selector)
-    attrs = selector_attrs(selector.split(" ")[0].to_s)
     nodes = []
+    return nodes if fragment == ""
     from = 0
     while (i = root.index(fragment, from))
-      # An `[attr=value]` predicate has to hold on the SAME start tag
-      # the fragment matched, not merely somewhere in the document, so
-      # the scan stops at the next ">". Without the predicates this is
-      # the plain substring test it always was.
+      from = i + fragment.length
+      start = tag_start(root, i)
       stop = root.index(">", i)
       tag_end = stop.nil? ? root.length : stop
-      tag = root[i, tag_end - i + 1].to_s
-      ok = true
+      tag = root[start, tag_end - start + 1].to_s
+      ok = tag_named?(tag, want_tag)
+      ok = false if want_id != "" && !tag.include?(%(id="#{want_id}"))
+      if ok && want_classes.length > 0
+        present = tag_classes(tag)
+        want_classes.each { |c| ok = false unless present.include?(c) }
+      end
       attrs.each { |a| ok = false unless tag.include?(a) }
       nodes << root if ok
-      from = i + fragment.length
     end
     nodes
   end
@@ -185,19 +201,116 @@ module Dom
     node
   end
 
-  # Loose selector → substring fragment (the pre-contract rule):
-  #   "#id"  → 'id="id"'   ".cls" → 'cls"'   "tag" → "<tag"
-  # Compound selectors take the first whitespace chunk; any
-  # `[attr=value]` predicates are stripped here and checked by `select`.
+  # The index of the `<` that opens the tag position `i` sits inside.
+  def self.tag_start(root, i)
+    j = i
+    while j >= 0
+      return j if root[j, 1] == "<"
+      j -= 1
+    end
+    0
+  end
+
+  # Does this start tag name the element the selector asked for? An
+  # empty want matches anything (the selector named no tag). The
+  # boundary check is why this is not a bare `start_with?`: `<hr` is a
+  # prefix of `<hrefish` too.
+  def self.tag_named?(tag, want)
+    return true if want == ""
+    return false unless tag.start_with?("<" + want)
+    after = tag[want.length + 1, 1].to_s
+    after == "" || after == " " || after == ">" || after == "/" || after == "\n"
+  end
+
+  # The tokens of this start tag's `class` attribute. WHOLE tokens, not
+  # a substring: `.message` must not hold on `class="message__body"`,
+  # and the historical rule (the class attribute ENDS with the name)
+  # could not say that — nor could it match a class that was not last
+  # (`assert_select "#comments .p-4"` against `class="p-4 bg-gray-50
+  # rounded"`, which is real-blog's comment partial).
+  def self.tag_classes(tag)
+    at = tag.index("class=\"")
+    return [] if at.nil?
+    rest = tag[at + 7, tag.length].to_s
+    close = rest.index("\"")
+    value = close.nil? ? rest : rest[0, close].to_s
+    value.split(" ")
+  end
+
+  # The chunk the assertion is ABOUT — the LAST one, not the first.
+  #
+  # `assert_select "turbo-frame#account_users hr.separator.full-width"`
+  # asserts an `hr` INSIDE that frame. This engine cannot scope, so the
+  # honest degradation is to check the TARGET and ignore the ancestor;
+  # taking the first chunk instead checked the ancestor and said nothing
+  # about the thing the assertion names. Worse than loose, it was
+  # UNPASSABLE: a compound first chunk (`turbo-frame#account_users`)
+  # fell through to the tag rule and asked the document to contain the
+  # literal text `<turbo-frame#account_users`, which no emitter writes.
+  #
+  # Combinators (`>`, `+`, `~`) are chunks of their own under a
+  # whitespace split; skip them so `a > b` still targets `b`.
+  #
+  # The split is BRACKET-AWARE, and that is not defensive coding: an
+  # attribute predicate can hold a space (`.btn[title='Copy link']`, a
+  # real campfire assertion), and a plain `split(" ")` cuts it in half.
+  def self.target_chunk(selector)
+    best = ""
+    buf = ""
+    depth = 0
+    i = 0
+    while i < selector.length
+      c = selector[i, 1].to_s
+      if c == "["
+        depth += 1
+        buf = buf + c
+      elsif c == "]"
+        depth -= 1 if depth > 0
+        buf = buf + c
+      elsif depth == 0 && (c == " " || c == "\t" || c == "\n")
+        best = buf if element_chunk?(buf)
+        buf = ""
+      else
+        buf = buf + c
+      end
+      i += 1
+    end
+    best = buf if element_chunk?(buf)
+    best
+  end
+
+  # A chunk that names an element, as opposed to an empty run or a
+  # combinator sitting between two of them.
+  def self.element_chunk?(chunk)
+    chunk != "" && chunk != ">" && chunk != "+" && chunk != "~"
+  end
+
+  # The substring `select` scans for. NOT the whole selector — just a
+  # cheap enumerator of candidate positions, since `select` re-checks
+  # every part against the start tag it lands in.
+  #
+  #   "hr.separator.full-width" → "<hr"
+  #   "#account_users"          → 'id="account_users"'
+  #   ".message"                → "message"
+  #
+  # Tag first (`<hr` is anchored to a start-tag boundary and is the
+  # cheapest filter), then id, then the first class name. A bare class
+  # name is the loosest of the three — it can hit inside an unrelated
+  # attribute or in text — which costs candidates, not correctness:
+  # a false candidate fails the class check that follows.
   def self.fragment_for(selector)
-    chunk = selector.split(" ").first || ""
-    first = chunk.split("[")[0].to_s
-    if first.start_with?("#")
-      %(id="#{first[1..]}")
-    elsif first.start_with?(".")
-      %(#{first[1..]}")
+    base = target_chunk(selector).split("[")[0].to_s
+    tag = selector_tag(base)
+    id = selector_id(base)
+    classes = selector_classes(base)
+    if tag != ""
+      "<" + tag
+    elsif id != ""
+      %(id="#{id}")
+    elsif classes.length > 0
+      classes[0]
     else
-      "<#{first}"
+      ""
     end
   end
 
@@ -230,6 +343,43 @@ module Dom
       i += 1
     end
     out
+  end
+
+  # The three parts of one compound selector chunk. Split by hand rather
+  # than by Regexp: this file is compiled by spinel AOT, where the
+  # pattern surface is not the place to spend a dependency.
+  def self.selector_tag(base)
+    without_id(base).split(".")[0].to_s
+  end
+
+  def self.selector_id(base)
+    hash = base.index("#")
+    return "" if hash.nil?
+    rest = base[hash + 1, base.length].to_s
+    dot = rest.index(".")
+    dot.nil? ? rest : rest[0, dot].to_s
+  end
+
+  def self.selector_classes(base)
+    parts = without_id(base).split(".")
+    out = []
+    i = 1
+    while i < parts.length
+      out << parts[i].to_s if parts[i].to_s != ""
+      i += 1
+    end
+    out
+  end
+
+  # `hr#x.a` → `hr.a`: the id lifted out so the remainder splits on "."
+  # into tag + classes with no special case.
+  def self.without_id(base)
+    hash = base.index("#")
+    return base if hash.nil?
+    head = base[0, hash].to_s
+    rest = base[hash + 1, base.length].to_s
+    dot = rest.index(".")
+    dot.nil? ? head : head + rest[dot, rest.length].to_s
   end
 end
 
@@ -1097,35 +1247,48 @@ module RequestDispatch
   # `assert_select("#comments .p-4", minimum: 1)`, and the block form
   # `assert_select("#articles") { … }`.
   #
-  # `minimum:`/`maximum:`/`count:` opts degrade to a presence check
-  # (the pre-contract behavior; real-blog only passes `minimum: 1`,
-  # for which presence is exact). The block runs against the same body
-  # — no real scoping until a real engine lands. `opts` is retained in
-  # the signature for call-shape compatibility.
+  # `minimum:`/`maximum:` and a NON-ZERO `count:` degrade to a presence
+  # check (the pre-contract behavior; real-blog only passes `minimum:
+  # 1`, for which presence is exact). The block runs against the same
+  # body — no real scoping until a real engine lands. `opts` is retained
+  # in the signature for call-shape compatibility.
   #
-  # HONORING `count:` WAS TRIED AND BACKED OUT — 2026-08-22, measured on
-  # campfire: 189/240 -> 184/240. It needs TWO things this stub does not
-  # have, and neither is a small fix:
+  # `count: 0` IS honored, and the history of that is worth keeping.
+  # Honoring the whole option was tried and backed out (2026-08-22,
+  # measured on campfire: 189/240 -> 184/240) because it needed TWO
+  # things the stub did not have:
   #
-  #   * ELEMENT counting. `Dom.select` fabricates one node per substring
-  #     occurrence, so `.message` (fragment `message"`) counts every
-  #     attribute value ending in `message`, not every element with that
-  #     class — searches_controller's two `count: 0` assertions went red
-  #     against the correct empty page.
+  #   * ELEMENT counting. `Dom.select` fabricated one node per SUBSTRING
+  #     occurrence, so `.message` (fragment `message"`) counted every
+  #     attribute value ending in `message`. searches_controller's two
+  #     `count: 0` assertions went red against a correct empty page.
   #   * BLOCK SCOPING. `assert_select "template", count: 1` inside
   #     `assert_select "turbo-stream[action='append']" do … end` asks
   #     "one template IN THIS ELEMENT". The block re-scans the whole
   #     body, which holds two.
   #
-  # And `count: 0` is not separable: it is exact for an `#id` selector
-  # and wrong for a `.class` one, for the reason above. What the option
-  # needs is the real engine named on `Dom` — mirrored in nine per-target
-  # test runtimes, so it is its own project, not a rung of this ladder.
-  # Until then the degraded check is the honest one: it never claims a
-  # count it cannot count.
+  # The FIRST of those is now fixed — `Dom.select` matches whole class
+  # tokens on a real start tag — which is what makes `count: 0`
+  # separable from the rest of the option: absence is a question about
+  # the SELECTOR, and the selector is now answered exactly. Counting to
+  # a number above zero still is not, because that is the scoping
+  # problem, and scoping is the real engine's job.
+  #
+  # One deliberate divergence: a content constraint beside `count: 0`
+  # (`assert_select "h1", text: /…/, count: 0`) is IGNORED, so the
+  # assertion reads "no such element" rather than Rails' "no such
+  # element WITH THIS TEXT". Narrowing it is not available here —
+  # `Dom.text` answers the whole document for every node — and of the
+  # two available readings, the strict one fails loudly where the loose
+  # one passed vacuously.
   def assert_select(selector, content_or_opts = nil, opts = nil, &block)
     body  = @__response.body.to_s
     nodes = Dom.select(Dom.parse(body), selector)
+    options = content_or_opts.is_a?(Hash) ? content_or_opts : opts
+    if options.is_a?(Hash) && options[:count] == 0
+      raise "expected no #{selector.inspect} in response body" unless nodes.empty?
+      return
+    end
     raise "expected #{selector.inspect} in response body" if nodes.empty?
     content = content_or_opts.is_a?(Hash) ? nil : content_or_opts
     if content.is_a?(String)

@@ -160,6 +160,13 @@ fn real_blog_spinel_tests_pass() {
         // at all: this file shipped in every ruby emit and nothing ever
         // ran it. Rides in the same way the two above do.
         "test/broadcasts_test.rb",
+        // The `Dom` selector stub in test_helper.rb — `assert_select`'s
+        // whole substrate, and string rules all the way down, so a
+        // silently-wrong one makes an assertion UNPASSABLE rather than
+        // loose (which reads as a missing feature in the app under
+        // test, not as a broken matcher). Rides in the same way the
+        // three above do.
+        "test/dom_test.rb",
     ] {
         assert_test_passes(&scratch, &gemfile, test);
     }

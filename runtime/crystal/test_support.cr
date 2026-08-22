@@ -36,15 +36,37 @@ module Roundhouse
     end
 
     # Nodes matching `selector` within `root` (a document or node).
-    # Stub: one synthetic node (the root's html) per substring-fragment
-    # occurrence.
+    # Stub: one synthetic node (the root's html) per matching element.
+    #
+    # Anchor-then-verify, kept in step with the Ruby twin in
+    # runtime/spinel/test/test_helper.rb, which carries the rationale
+    # for every rule below: `fragment_for` enumerates candidate
+    # positions and every part of the compound selector is re-checked
+    # against the START TAG the candidate sits in.
     def self.select(root : String, selector : String) : Array(String)
+      chunk = target_chunk(selector)
+      base = chunk.split("[")[0]
+      want_tag = selector_tag(base)
+      want_id = selector_id(base)
+      want_classes = selector_classes(base)
+      attrs = selector_attrs(chunk)
       fragment = fragment_for(selector)
       nodes = [] of String
+      return nodes if fragment.empty?
       from = 0
       while (i = root.index(fragment, from))
-        nodes << root
         from = i + fragment.size
+        start = tag_start(root, i)
+        stop = root.index(">", i)
+        tag = root[start, (stop.nil? ? root.size : stop) - start + 1]
+        ok = tag_named?(tag, want_tag)
+        ok = false if !want_id.empty? && !tag.includes?(%(id="#{want_id}"))
+        if ok && !want_classes.empty?
+          present = tag_classes(tag)
+          ok = false unless want_classes.all? { |c| present.includes?(c) }
+        end
+        ok = false unless attrs.all? { |a| tag.includes?(a) }
+        nodes << root if ok
       end
       nodes
     end
@@ -54,16 +76,140 @@ module Roundhouse
       node
     end
 
-    # Loose selector → substring fragment (the stub's rule, replaced by
-    # a real CSS engine on upgrade): "#id" → id="id", ".cls" → cls",
-    # "tag" → <tag. Compound selectors take the first chunk.
-    def self.fragment_for(selector : String) : String
-      first = selector.split(/\s+/).first? || ""
-      case first
-      when .starts_with?("#") then %(id="#{first[1..]}")
-      when .starts_with?(".") then %(#{first[1..]}")
-      else                         "<#{first}"
+    # The index of the `<` that opens the tag position `i` sits inside.
+    def self.tag_start(root : String, i : Int32) : Int32
+      j = i
+      while j >= 0
+        return j if root[j] == '<'
+        j -= 1
       end
+      0
+    end
+
+    # An empty want matches anything. The boundary check is why this is
+    # not a bare `starts_with?`: `<hr` is a prefix of `<hrefish` too.
+    def self.tag_named?(tag : String, want : String) : Bool
+      return true if want.empty?
+      return false unless tag.starts_with?("<" + want)
+      after = tag[want.size + 1]?
+      after.nil? || after == ' ' || after == '>' || after == '/' || after == '\n'
+    end
+
+    # WHOLE tokens of this start tag's `class` attribute — `.message`
+    # must not hold on `class="message__body"`, and a class that is not
+    # LAST in the attribute must still match.
+    def self.tag_classes(tag : String) : Array(String)
+      at = tag.index("class=\"")
+      return [] of String if at.nil?
+      rest = tag[(at + 7)..]
+      close = rest.index("\"")
+      value = close.nil? ? rest : rest[0, close]
+      value.split(" ")
+    end
+
+    # The substring `select` scans for: tag, else id, else the first
+    # class name. Just a candidate enumerator — every part is re-checked
+    # above.
+    def self.fragment_for(selector : String) : String
+      base = target_chunk(selector).split("[")[0]
+      tag = selector_tag(base)
+      id = selector_id(base)
+      classes = selector_classes(base)
+      if !tag.empty?
+        "<#{tag}"
+      elsif !id.empty?
+        %(id="#{id}")
+      elsif !classes.empty?
+        classes[0]
+      else
+        ""
+      end
+    end
+
+    # The chunk the assertion is ABOUT — the LAST one. `assert_select "a
+    # b"` names a `b` inside an `a`; this engine cannot scope, so it
+    # checks the target and ignores the ancestor. Bracket-aware, because
+    # an attribute predicate may hold a space.
+    def self.target_chunk(selector : String) : String
+      best = ""
+      buf = ""
+      depth = 0
+      selector.each_char do |c|
+        if c == '['
+          depth += 1
+          buf += c
+        elsif c == ']'
+          depth -= 1 if depth > 0
+          buf += c
+        elsif depth == 0 && c.whitespace?
+          best = buf if element_chunk?(buf)
+          buf = ""
+        else
+          buf += c
+        end
+      end
+      best = buf if element_chunk?(buf)
+      best
+    end
+
+    def self.element_chunk?(chunk : String) : Bool
+      !chunk.empty? && chunk != ">" && chunk != "+" && chunk != "~"
+    end
+
+    # `turbo-stream[action='append']` → ['action="append"'], rendered
+    # the way an emitted start tag writes it. Both quote styles in,
+    # double quotes out; a bare `[connected]` keeps just the name.
+    def self.selector_attrs(chunk : String) : Array(String)
+      out = [] of String
+      parts = chunk.split("[")
+      i = 1
+      while i < parts.size
+        pred = parts[i].split("]")[0]
+        eq = pred.index("=")
+        if eq.nil?
+          out << pred
+        else
+          name = pred[0, eq]
+          value = pred[(eq + 1)..].gsub("'", "").gsub("\"", "")
+          out << %(#{name}="#{value}")
+        end
+        i += 1
+      end
+      out
+    end
+
+    def self.selector_tag(base : String) : String
+      without_id(base).split(".")[0]
+    end
+
+    def self.selector_id(base : String) : String
+      hash = base.index("#")
+      return "" if hash.nil?
+      rest = base[(hash + 1)..]
+      dot = rest.index(".")
+      dot.nil? ? rest : rest[0, dot]
+    end
+
+    def self.selector_classes(base : String) : Array(String)
+      parts = without_id(base).split(".")
+      out = [] of String
+      i = 1
+      while i < parts.size
+        out << parts[i] unless parts[i].empty?
+        i += 1
+      end
+      out
+    end
+
+    # `hr#x.a` → `hr.a`: the id lifted out so the remainder splits on "."
+    # into tag + classes with no special case.
+    def self.without_id(base : String) : String
+      hash = base.index("#")
+      return base if hash.nil?
+      head = base[0, hash]
+      rest = base[(hash + 1)..]
+      dot = rest.index(".")
+      dot.nil? ? head : head + rest[dot..]
     end
   end
 
