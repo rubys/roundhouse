@@ -135,7 +135,12 @@ fn accessor_names(model: &Model, args: &[Expr]) -> Vec<Symbol> {
 /// Every attribute this model declares through the `attr_*` family, in
 /// declaration order. The constructor `ActiveModel::Model` supplies
 /// assigns exactly these.
-pub(super) fn declared_attr_names(model: &Model) -> Vec<Symbol> {
+///
+/// `pub(crate)` because `lower::as_json_poro` needs the same list and
+/// must not re-derive it: the splat expansion below is the only place
+/// that knows `attr_accessor *ATTRIBUTES` names four fields, and a
+/// second copy of that would go stale the first time either moved.
+pub(crate) fn declared_attr_names(model: &Model) -> Vec<Symbol> {
     let mut out: Vec<Symbol> = Vec::new();
     for item in &model.body {
         let ModelBodyItem::Unknown { expr, .. } = item else { continue };

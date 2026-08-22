@@ -67,7 +67,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::app::App;
 use crate::diagnostic::Diagnostic;
-use crate::dialect::{MethodDef, MethodReceiver, Model};
+use crate::dialect::{MethodDef, Model};
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol, VarId};
 use crate::span::Span;

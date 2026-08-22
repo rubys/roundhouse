@@ -42,6 +42,7 @@ pub mod schema_to_library;
 pub mod seeds_to_library;
 pub mod test_module_to_library;
 pub mod create_block;
+pub mod as_json_poro;
 pub mod params_merge;
 pub mod duration;
 pub mod and_return;
@@ -361,6 +362,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // turns `Model.create!(p.merge(...)) { }` into the `Model.new(...)`
     // shape this pass matches.
     ("params_merge", &["create_block"]),
+    // Reads `render json: <expr>` while it is still spelled that way —
+    // `controller_to_library` rewrites it to `JsonRender.encode` at emit
+    // time, and needs the `as_json` this synthesizes to already be there.
+    ("as_json_poro", &[]),
     ("update_kwargs", &[]),
     // `record.update!(creator: user)` -> `update!(creator_id: user.id)`.
     // AFTER `update_kwargs`, which INLINES the same shape into typed
@@ -565,6 +570,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("create_block");
     diags.extend(params_merge::apply_params_merge_lowering(app));
     ran!("params_merge");
+    as_json_poro::apply_as_json_synthesis(app);
+    ran!("as_json_poro");
     diags.extend(update_kwargs::apply_update_kwargs_inline(app));
     ran!("update_kwargs");
     diags.extend(assoc_attr_key::apply_assoc_attr_key_lowering(app));
