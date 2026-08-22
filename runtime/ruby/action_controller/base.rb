@@ -196,7 +196,13 @@ module ActionController
     # text/html stands. (Body-empty responses make Content-Type
     # mostly irrelevant per RFC 7230, but some HTTP clients still
     # parse it, so being explicit costs nothing.)
-    def head(status, content_type: nil)
+    # `location:` is Rails' own option and campfire's bot create writes
+    # it (`head :created, location: message_url(@message)`) — a 201 that
+    # names the resource it made. It is NOT a redirect: `redirect?` gates
+    # on a 3xx status, so setting the location beside a 201 records the
+    # URL without turning the response into one.
+    def head(status, content_type: nil, location: nil)
+      @location = location unless location.nil?
       @status = resolve_status(status)
       @body   = +""
       @performed = true

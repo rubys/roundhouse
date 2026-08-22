@@ -526,6 +526,252 @@ pub fn first_permit_in(expr: &Expr) -> Option<(Symbol, Vec<Symbol>)> {
 /// Call-site rewrites (`Model.new(user_params)`, `@user.update
 /// user_params`) see only the helper name, so this is how they reach
 /// the right class when a resource carries several.
+/// Rewrite an OVERRIDING `<x>_params` helper to yield the params class
+/// its parent's helper yields.
+///
+/// A subclass may override the helper with a shape the permit
+/// recognizer does not read — campfire's
+/// `Messages::ByBotsController#message_params` is
+///
+/// ```text
+/// if params[:attachment]
+///   params.permit(:attachment)              # no `require`, so no resource
+/// else
+///   reading(request.body) { |body| { body: body } }   # a bare Hash
+/// end
+/// ```
+///
+/// Neither branch is a `require(:r).permit(...)` chain, so no spec was
+/// recognized and the method emitted VERBATIM: one branch calling
+/// `permit` on a Hash (undefined), the other returning a Hash the
+/// parent's injected `.to_attrs` then died on. Both were broken; the
+/// Hash one just failed first.
+///
+/// The class comes from the PARENT's helper of the same name, which is
+/// also what Rails means: the callee consuming it
+/// (`create_with_attachment!`) expects the same thing no matter which
+/// subclass supplied it.
+///
+/// Construction is INLINED rather than routed through a new factory.
+/// `from_raw` cannot serve: it opens with `Params.sub(params,
+/// "<resource>")` because the recognized shape nests under
+/// `require(:message)`, and these branches read the TOP level. Inlining
+/// keeps each branch exact — `permit(:attachment)` sets attachment and
+/// nothing else — where a shared flat factory would widen every such
+/// call to the class's full field list.
+///
+/// Declines unless every key is a field of the class. A helper naming
+/// something the parent never permitted is not the same list, and
+/// silently dropping the extra would be mass-assignment by omission.
+pub fn lower_overriding_params_helper(body: &Expr, spec: &ParamsSpec) -> Expr {
+    rewrite_tail(body, spec)
+}
+
+/// Walk to every value the method can RETURN and rewrite it there.
+/// Tail positions only: an intermediate `{ … }` is somebody's argument,
+/// not the helper's product.
+fn rewrite_tail(e: &Expr, spec: &ParamsSpec) -> Expr {
+    match &*e.node {
+        ExprNode::Seq { exprs } if !exprs.is_empty() => {
+            let mut out = exprs.clone();
+            let last = out.len() - 1;
+            out[last] = rewrite_tail(&out[last], spec);
+            Expr { node: Box::new(ExprNode::Seq { exprs: out }), ..e.clone() }
+        }
+        ExprNode::If { cond, then_branch, else_branch } => Expr {
+            node: Box::new(ExprNode::If {
+                cond: cond.clone(),
+                then_branch: rewrite_tail(then_branch, spec),
+                else_branch: rewrite_tail(else_branch, spec),
+            }),
+            ..e.clone()
+        },
+        // `reading(request.body) { |body| … }` — the helper's value is
+        // the BLOCK's, so the rewrite belongs inside it.
+        ExprNode::Send { recv, method, args, block: Some(b), parenthesized } => {
+            let ExprNode::Lambda { params, block_param, body, block_style } = &*b.node else {
+                return e.clone();
+            };
+            let new_block = Expr {
+                node: Box::new(ExprNode::Lambda {
+                    params: params.clone(),
+                    block_param: block_param.clone(),
+                    body: rewrite_tail(body, spec),
+                    block_style: *block_style,
+                }),
+                ..b.clone()
+            };
+            Expr {
+                node: Box::new(ExprNode::Send {
+                    recv: recv.clone(),
+                    method: method.clone(),
+                    args: args.clone(),
+                    block: Some(new_block),
+                    parenthesized: *parenthesized,
+                }),
+                ..e.clone()
+            }
+        }
+        ExprNode::Hash { entries, kwargs: _ } => {
+            let mut pairs: Vec<(Symbol, Expr)> = Vec::new();
+            for (k, v) in entries {
+                let ExprNode::Lit { value: Literal::Sym { value } } = &*k.node else {
+                    return e.clone();
+                };
+                if !spec.fields.contains(value) {
+                    return e.clone();
+                }
+                pairs.push((value.clone(), v.clone()));
+            }
+            if pairs.is_empty() {
+                return e.clone();
+            }
+            build_params_object(e, spec, &pairs, /*from_literal=*/ true)
+        }
+        ExprNode::Send { method, args, block: None, .. } if method.as_str() == "permit" => {
+            let mut pairs: Vec<(Symbol, Expr)> = Vec::new();
+            for a in args {
+                let ExprNode::Lit { value: Literal::Sym { value } } = &*a.node else {
+                    return e.clone();
+                };
+                if !spec.fields.contains(value) {
+                    return e.clone();
+                }
+                pairs.push((value.clone(), a.clone()));
+            }
+            if pairs.is_empty() {
+                return e.clone();
+            }
+            build_params_object(e, spec, &pairs, /*from_literal=*/ false)
+        }
+        _ => e.clone(),
+    }
+}
+
+/// ```text
+/// __params = <Class>.new
+/// __params.<k>_provided = <true | Params.provided(@params, "k")>
+/// __params.<k>         = <value | Params.str(@params, "k", "")>
+/// __params
+/// ```
+///
+/// Presence before value, matching `from_raw`'s ordering so the two read
+/// the same way. A literal's key is provided BY BEING WRITTEN, which is
+/// why that arm is a bare `true` rather than a lookup.
+fn build_params_object(
+    at: &Expr,
+    spec: &ParamsSpec,
+    pairs: &[(Symbol, Expr)],
+    from_literal: bool,
+) -> Expr {
+    use crate::lower::typing::with_ty;
+    let span = at.span;
+    let owner_ty = Ty::Class { id: spec.class_id.clone(), args: vec![] };
+    let local = Symbol::from("__params");
+    let var = || {
+        with_ty(
+            Expr::new(span, ExprNode::Var { id: VarId(0), name: local.clone() }),
+            owner_ty.clone(),
+        )
+    };
+    let param_value_ty =
+        Ty::Class { id: ClassId(Symbol::from("Roundhouse::ParamValue")), args: vec![] };
+    let raw_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(param_value_ty) };
+    let ivar_params = || {
+        with_ty(
+            Expr::new(span, ExprNode::Ivar { name: Symbol::from("params") }),
+            raw_ty.clone(),
+        )
+    };
+    let str_lit = |v: &str| {
+        with_ty(
+            Expr::new(span, ExprNode::Lit { value: Literal::Str { value: v.to_string() } }),
+            Ty::Str,
+        )
+    };
+    let params_call = |method: &str, args: Vec<Expr>, ret: Ty| {
+        with_ty(
+            Expr::new(
+                span,
+                ExprNode::Send {
+                    recv: Some(Expr::new(
+                        span,
+                        ExprNode::Const { path: vec![Symbol::from("Params")] },
+                    )),
+                    method: Symbol::from(method),
+                    args,
+                    block: None,
+                    parenthesized: true,
+                },
+            ),
+            ret,
+        )
+    };
+    let setter = |name: String, value: Expr| {
+        Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(var()),
+                method: Symbol::from(name),
+                args: vec![value],
+                block: None,
+                parenthesized: false,
+            },
+        )
+    };
+
+    let mut stmts: Vec<Expr> = vec![Expr::new(
+        span,
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: local.clone() },
+            value: with_ty(
+                Expr::new(
+                    span,
+                    ExprNode::Send {
+                        recv: Some(Expr::new(
+                            span,
+                            ExprNode::Const { path: vec![spec.class_id.0.clone()] },
+                        )),
+                        method: Symbol::from("new"),
+                        args: Vec::new(),
+                        block: None,
+                        parenthesized: true,
+                    },
+                ),
+                owner_ty.clone(),
+            ),
+        },
+    )];
+    for (field, value) in pairs {
+        let (provided, read) = if from_literal {
+            (
+                with_ty(
+                    Expr::new(span, ExprNode::Lit { value: Literal::Bool { value: true } }),
+                    Ty::Bool,
+                ),
+                value.clone(),
+            )
+        } else {
+            (
+                params_call(
+                    "provided",
+                    vec![ivar_params(), str_lit(field.as_str())],
+                    Ty::Bool,
+                ),
+                params_call(
+                    "str",
+                    vec![ivar_params(), str_lit(field.as_str()), str_lit("")],
+                    Ty::Str,
+                ),
+            )
+        };
+        stmts.push(setter(format!("{}_provided=", field.as_str()), provided));
+        stmts.push(setter(format!("{}=", field.as_str()), read));
+    }
+    stmts.push(var());
+    with_ty(Expr::new(span, ExprNode::Seq { exprs: stmts }), owner_ty)
+}
+
 pub fn helper_spec_map<'a>(
     actions: &[crate::dialect::Action],
     specs: &'a ParamsSpecs,

@@ -42,7 +42,7 @@ use crate::lower::controller::body::{
     unwrap_respond_to_with_format_dispatch, FormatBreadth,
 };
 
-use self::params::ParamsSpecs;
+use self::params::{helper_spec_map, ParamsSpec, ParamsSpecs};
 use self::process_action::{halt_if_performed, synthesize_process_action, PreambleStmt};
 use self::rewrites::{
     rewrite_assoc_through_parent_typed, rewrite_destroy_bang,
@@ -764,7 +764,8 @@ fn build_methods(
         std::collections::HashMap::new();
     for a in &publics_inlined {
         methods.push(action_to_method(
-            a, controller, &privs, &params_privs, /*is_public=*/ true, params_specs, json_actions,
+            a, controller, all_controllers, &privs, &params_privs, /*is_public=*/ true,
+            params_specs, json_actions,
             turbo_stream_actions, view_ivars,
             partials, format_breadth, &shadows, route_id_segments, &deferred_renders,
             &mut deferred_tails,
@@ -788,7 +789,8 @@ fn build_methods(
     let no_deferred: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
     for a in &privs_kept {
         methods.push(action_to_method(
-            a, controller, &privs, &params_privs, /*is_public=*/ false, params_specs, json_actions,
+            a, controller, all_controllers, &privs, &params_privs, /*is_public=*/ false,
+            params_specs, json_actions,
             turbo_stream_actions, view_ivars,
             partials, format_breadth, &shadows, route_id_segments, &no_deferred,
             &mut std::collections::HashMap::new(),
@@ -800,7 +802,8 @@ fn build_methods(
     // the filter-chain work, not here.)
     for a in &helper_publics {
         methods.push(action_to_method(
-            a, controller, &privs, &params_privs, /*is_public=*/ false, params_specs, json_actions,
+            a, controller, all_controllers, &privs, &params_privs, /*is_public=*/ false,
+            params_specs, json_actions,
             turbo_stream_actions, view_ivars,
             partials, format_breadth, &shadows, route_id_segments, &no_deferred,
             &mut std::collections::HashMap::new(),
@@ -1155,6 +1158,32 @@ fn route_helper_shadows(
 /// typical leaf controller). A parent that isn't among the ingested
 /// controllers (ActionController::Base) ends the walk; the depth cap
 /// guards against parent cycles.
+/// The params spec an OVERRIDING `<x>_params` helper should yield —
+/// the one an ancestor's helper of the same name declares.
+///
+/// Only consulted when THIS controller's own body declares no permit
+/// list for that helper: a subclass that writes a full
+/// `require(:r).permit(...)` chain has its own spec and needs nothing
+/// from its parent.
+fn inherited_params_spec<'a>(
+    controller: &Controller,
+    all: &[Controller],
+    helper: &Symbol,
+    specs: &'a ParamsSpecs,
+) -> Option<&'a ParamsSpec> {
+    let own: Vec<crate::dialect::Action> = controller.actions().cloned().collect();
+    if helper_spec_map(&own, specs).contains_key(helper) {
+        return None;
+    }
+    for ancestor in ancestor_chain(controller, all).iter().rev() {
+        let acts: Vec<crate::dialect::Action> = ancestor.actions().cloned().collect();
+        if let Some(spec) = helper_spec_map(&acts, specs).get(helper) {
+            return Some(*spec);
+        }
+    }
+    None
+}
+
 /// Actions of `controller` that a SUBCLASS overrides and reaches with
 /// `super` — the ones whose implicit render must run in the DISPATCHER
 /// rather than at the end of the action body.
@@ -1469,6 +1498,7 @@ fn split_public_private_actions(c: &Controller) -> (Vec<Action>, Vec<Action>) {
 fn action_to_method(
     a: &Action,
     controller: &Controller,
+    all_controllers_for_params: &[Controller],
     privs: &[Action],
     // `privs` plus every inherited `*_params` helper — the MRO-correct
     // list the params-helper rewrites resolve against.
@@ -1507,6 +1537,13 @@ fn action_to_method(
     if json_actions.contains(&a.name) {
         variants.push("json");
     }
+    // An overriding `<x>_params` yields its parent's params class —
+    // see `lower_overriding_params_helper`.
+    let inherited_spec = if a.name.as_str().ends_with("_params") {
+        inherited_params_spec(controller, all_controllers_for_params, &a.name, params_specs)
+    } else {
+        None
+    };
     let (body, deferred_tail) = lower_action_body(
         &a.body,
         controller,
@@ -1522,6 +1559,7 @@ fn action_to_method(
         shadows,
         route_id_segments,
         deferred_renders.contains(&a.name),
+        inherited_spec,
     );
     if let Some(tail) = deferred_tail {
         deferred_out.insert(a.name.clone(), tail);
@@ -1639,7 +1677,15 @@ fn lower_action_body(
     shadows: &std::collections::HashSet<Symbol>,
     route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
     defer_implicit_render: bool,
+    inherited_params_spec: Option<&ParamsSpec>,
 ) -> (Expr, Option<Expr>) {
+    // BEFORE everything else: this turns a helper the permit recognizer
+    // could not read into one that yields the params class, so every
+    // rewrite below sees the shape it expects.
+    let body = &match inherited_params_spec {
+        Some(spec) => self::params::lower_overriding_params_helper(body, spec),
+        None => body.clone(),
+    };
     let unwrapped = unwrap_respond_to_with_format_dispatch(body, format_breadth);
     // `is_public` gates the SYNTHESIS — a private helper's caller does
     // the rendering, so nothing is appended to its body — and nothing
