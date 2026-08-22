@@ -55,8 +55,11 @@ fn emitted() -> String {
 fn the_value_half_delegates_rather_than_indexing_the_pair() {
     let src = emitted();
     assert!(src.contains("def involvement_previously_was"), "{src}");
+    // STRING argument: `saved_changes` diffs `attributes`, whose keys
+    // are column-name Strings (Rails' own shape). A Symbol read a key
+    // that is never present, so every Dirty predicate answered false.
     assert!(
-        src.contains("attribute_previously_was(:involvement)"),
+        src.contains(r#"attribute_previously_was("involvement")"#),
         "{src}",
     );
     let body = src

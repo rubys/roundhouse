@@ -1453,7 +1453,9 @@ fn synth_column_prev_was(owner: &ClassId, col: &Column) -> MethodDef {
         ExprNode::Send {
             recv: Some(self_ref()),
             method: Symbol::from("attribute_previously_was"),
-            args: vec![lit_sym(col.name.clone())],
+            // STRING key, because `saved_changes` is a diff over
+            // `attributes`, and Rails keys that by column-name String.
+            args: vec![super::lit_str(col.name.as_str().to_string())],
             block: None,
             parenthesized: true,
         },
@@ -1501,7 +1503,13 @@ fn synth_column_dirty_pred(owner: &ClassId, col: &Column, name: Symbol) -> Metho
         ExprNode::Send {
             recv: Some(saved_changes),
             method: Symbol::from("[]"),
-            args: vec![lit_sym(col.name.clone())],
+            // STRING key — `saved_changes` diffs `attributes`, whose
+            // keys are column-name Strings (Rails' own shape). A Symbol
+            // here read a key that is never present, so every Dirty
+            // predicate answered false: campfire's `Rooms::Open`
+            // callback is guarded on `type_previously_changed?` and
+            // stopped granting membership to anyone.
+            args: vec![super::lit_str(col.name.as_str().to_string())],
             block: None,
             parenthesized: false,
         },
@@ -2031,23 +2039,35 @@ fn synth_initialize(owner: &ClassId, table: &Table, model: &Model, models: &[Mod
 }
 
 fn synth_attributes(owner: &ClassId, table: &Table) -> MethodDef {
-    // Keys are the PUBLIC column names; values read the storage ivar
-    // (`@col_raw` for temporal columns) — `attributes` carries the
-    // stored-text form, matching the adapter write funnel it feeds.
+    // Keys are the PUBLIC column names as STRINGS, which is what Rails'
+    // `record.attributes` answers — unambiguously, in every version.
+    // Symbols here made the Rails idiom silently empty:
+    // `attributes.slice("endpoint", …)` (campfire's
+    // `users/push_subscriptions_controller_test`) sliced a Symbol-keyed
+    // hash with String keys and got `{}`, and `assert_equal` said only
+    // that it failed.
+    //
+    // The `[]` / `[]=` indexers stay monomorphic on Symbol: those are a
+    // different API, deliberately narrowed
+    // ([[feedback_monomorphize_polymorphic_apis]]), and a String call
+    // site coerces at the lowering.
+    //
+    // Values read the storage ivar (`@col_raw` for temporal columns), so
+    // `attributes` carries the stored-text form.
     let entries: Vec<(Expr, Expr)> = table
         .columns
         .iter()
         .filter(|c| c.name.as_str() != "id")
         .map(|c| {
             let col_ty = super::ty_of_column_slot(c);
-            (lit_sym(c.name.clone()), col_ivar(c, col_ty))
+            (super::lit_str(c.name.as_str().to_string()), col_ivar(c, col_ty))
         })
         .collect();
 
-    // Hash<Sym, ?> — value type is a union of column types; collapsing to
+    // Hash<Str, ?> — value type is a union of column types; collapsing to
     // Untyped is the conservative approximation. Refining to a Record
     // (row-polymorphic) is a follow-up if downstream wants per-key types.
-    let hash_ty = Ty::Hash { key: Box::new(Ty::Sym), value: Box::new(Ty::Untyped) };
+    let hash_ty = Ty::Hash { key: Box::new(Ty::Str), value: Box::new(Ty::Untyped) };
     let body = with_ty(
         Expr::new(
             Span::synthetic(),

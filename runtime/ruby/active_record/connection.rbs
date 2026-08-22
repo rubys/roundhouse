@@ -35,11 +35,11 @@ module ActiveRecord
     def self.where: (Hash[Symbol, untyped] conditions) -> Relation
     def self.all: () -> Relation
     def _note_hydrated: () -> void
-    def attribute_previously_was: (Symbol name) -> untyped
+    def attribute_previously_was: (String name) -> untyped
     def self.first: () -> untyped
     def update_attribute: (Symbol name, untyped value) -> bool
     # Ruby-family overrides of base.rb's dirty-tracking stubs.
     def __track_saved_changes: (bool was_new) -> void
-    def saved_changes: () -> Hash[Symbol, untyped]
+    def saved_changes: () -> Hash[String, untyped]
   end
 end

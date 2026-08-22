@@ -100,14 +100,14 @@ module ActiveRecord
     # Subclass-overridden instance API. `attributes` returns the
     # column hash for adapter writes; `assign_from_row` populates
     # state from a fetched row (raises in Base).
-    def attributes: () -> Hash[Symbol, untyped]
+    def attributes: () -> Hash[String, untyped]
     def assign_from_row: (Hash[String, untyped] _row) -> void
 
     # Saved-change tracking (ActiveModel::Dirty subset) — see save.
     def __track_saved_changes: (bool was_new) -> void
-    def saved_changes: () -> Hash[Symbol, untyped]
+    def saved_changes: () -> Hash[String, untyped]
     def _note_hydrated: () -> void
-    def attribute_previously_was: (Symbol name) -> untyped
+    def attribute_previously_was: (String name) -> untyped
     def saved_change_to_attribute?: (Symbol name) -> bool
     def saved_change_to_attribute: (Symbol name) -> untyped
     def id_previously_changed?: () -> bool
