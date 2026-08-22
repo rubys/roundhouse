@@ -34,11 +34,11 @@ use crate::dialect::{
     AccessorKind, Action, Controller, ControllerBodyItem, Filter, FilterKind, LibraryClass,
     MethodDef, MethodReceiver, Param,
 };
-use crate::expr::{Expr, ExprNode};
+use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 use crate::lower::controller::body::{
-    synthesize_deferred_implicit_render, synthesize_implicit_render,
+    has_toplevel_terminal, synthesize_deferred_implicit_render, synthesize_implicit_render,
     unwrap_respond_to_with_format_dispatch, FormatBreadth,
 };
 
@@ -1158,6 +1158,105 @@ fn route_helper_shadows(
 /// typical leaf controller). A parent that isn't among the ingested
 /// controllers (ActionController::Base) ends the walk; the depth cap
 /// guards against parent cycles.
+/// `render formats: :svg` → `render :<action>, format: :svg`.
+///
+/// Rails' `formats:` names a format with no template: "render THIS
+/// request's template in that format". The internal shape every
+/// downstream pass already understands is a symbol template plus the
+/// singular `format:` marker, which `rewrite_render_to_views` binds to
+/// `Views::…show_svg` and `mime_for_format` tags with the right MIME. So
+/// this only has to supply the template NAME.
+///
+/// Which name is the whole difficulty. campfire writes it inside a
+/// PRIVATE helper — `render_initials`, called from `show` — so the
+/// enclosing method's own name is not the template. The rule is the
+/// UNIQUE CALLER: if exactly one of the controller's public actions
+/// calls this helper, that action's template is the one Rails would
+/// have rendered. Zero callers or several and it declines, because then
+/// the answer genuinely depends on the request and guessing it would
+/// bind a template the app never asked for.
+///
+/// A PUBLIC action writing `render formats:` is its own template, which
+/// falls out of the same rule with no special case.
+fn formats_only_render_template(
+    controller: &Controller,
+    method_name: &Symbol,
+    is_public: bool,
+) -> Option<Symbol> {
+    if is_public {
+        return Some(method_name.clone());
+    }
+    let mut callers = controller
+        .actions()
+        .filter(|a| &a.name != method_name && body_calls_method(&a.body, method_name));
+    let first = callers.next()?;
+    if callers.next().is_some() {
+        return None;
+    }
+    Some(first.name.clone())
+}
+
+/// Does this body call `name` with no receiver (or on `self`)?
+fn body_calls_method(body: &Expr, name: &Symbol) -> bool {
+    let hit = matches!(
+        &*body.node,
+        ExprNode::Send { recv, method, .. }
+            if method == name
+                && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+    );
+    if hit {
+        return true;
+    }
+    let mut found = false;
+    body.node.for_each_child(&mut |c| {
+        if !found && body_calls_method(c, name) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// Rewrite a receiverless `render(formats: :X)` — and nothing else in
+/// the call — to `render(:<template>, format: :X)`.
+fn resolve_formats_only_render(e: &mut Expr, template: &Symbol) {
+    e.node.for_each_child_mut(&mut |c| resolve_formats_only_render(c, template));
+    let ExprNode::Send { recv: None, method, args, block: None, .. } = &mut *e.node else {
+        return;
+    };
+    if method.as_str() != "render" || args.len() != 1 {
+        return;
+    }
+    let ExprNode::Hash { entries, kwargs: true } = &*args[0].node else { return };
+    let [(k, v)] = &entries[..] else { return };
+    let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else { return };
+    if key.as_str() != "formats" {
+        return;
+    }
+    let ExprNode::Lit { value: Literal::Sym { value: fmt } } = &*v.node else { return };
+    let span = e.span;
+    let template_arg = Expr::new(
+        span,
+        ExprNode::Lit { value: Literal::Sym { value: template.clone() } },
+    );
+    let format_kwargs = Expr::new(
+        span,
+        ExprNode::Hash {
+            entries: vec![(
+                Expr::new(
+                    span,
+                    ExprNode::Lit { value: Literal::Sym { value: Symbol::from("format") } },
+                ),
+                Expr::new(
+                    span,
+                    ExprNode::Lit { value: Literal::Sym { value: fmt.clone() } },
+                ),
+            )],
+            kwargs: true,
+        },
+    );
+    *args = vec![template_arg, format_kwargs];
+}
+
 /// The params spec an OVERRIDING `<x>_params` helper should yield —
 /// the one an ancestor's helper of the same name declares.
 ///
@@ -1539,6 +1638,8 @@ fn action_to_method(
     }
     // An overriding `<x>_params` yields its parent's params class —
     // see `lower_overriding_params_helper`.
+    let formats_template =
+        formats_only_render_template(controller, &a.name, is_public);
     let inherited_spec = if a.name.as_str().ends_with("_params") {
         inherited_params_spec(controller, all_controllers_for_params, &a.name, params_specs)
     } else {
@@ -1560,6 +1661,7 @@ fn action_to_method(
         route_id_segments,
         deferred_renders.contains(&a.name),
         inherited_spec,
+        formats_template.as_ref(),
     );
     if let Some(tail) = deferred_tail {
         deferred_out.insert(a.name.clone(), tail);
@@ -1678,12 +1780,23 @@ fn lower_action_body(
     route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
     defer_implicit_render: bool,
     inherited_params_spec: Option<&ParamsSpec>,
+    formats_only_render: Option<&Symbol>,
 ) -> (Expr, Option<Expr>) {
     // BEFORE everything else: this turns a helper the permit recognizer
     // could not read into one that yields the params class, so every
     // rewrite below sees the shape it expects.
     let body = &match inherited_params_spec {
         Some(spec) => self::params::lower_overriding_params_helper(body, spec),
+        None => body.clone(),
+    };
+    // BEFORE the render rewrite: `render formats: :svg` becomes the
+    // internal `render :<action>, format: :svg` that pass already binds.
+    let body = &match formats_only_render {
+        Some(template) => {
+            let mut copy = body.clone();
+            resolve_formats_only_render(&mut copy, template);
+            copy
+        }
         None => body.clone(),
     };
     let unwrapped = unwrap_respond_to_with_format_dispatch(body, format_breadth);
@@ -1704,12 +1817,28 @@ fn lower_action_body(
     // `Views::Messages.create_turbo_stream(@message, …)` using this
     // action's ivar scope. Building it in the dispatcher instead emitted
     // a bare `render(:create)` that resolves to nothing.
+    // Does this body respond through a private HELPER? `contains_terminal`
+    // recognizes only a literal `render`/`redirect_to`/`head`, so a body
+    // whose whole job is to pick a helper — campfire's avatar `show`
+    // choosing between `send_webp_blob_file`, `render_default_bot` and
+    // `render_initials` — looked terminal-free and got the UNGUARDED
+    // synthesized tail. It then raised MissingTemplate over the response
+    // the helper had just produced.
+    //
+    // The always-guarded shape is the fix and costs one `performed?`
+    // check. Gated on actually calling such a helper rather than applied
+    // everywhere, so a body with no terminal anywhere keeps the bare tail
+    // it has always emitted.
+    let responds_via_helper = privs
+        .iter()
+        .any(|p| has_toplevel_terminal(&p.body) && body_calls_method(body, &p.name));
     let base = if !is_public {
         unwrapped
-    } else if defer_implicit_render {
+    } else if defer_implicit_render || responds_via_helper {
         // Always guarded — see `synthesize_deferred_implicit_render`.
-        // The tail is about to move to the dispatcher precisely because
-        // something else (a subclass past `super`) may have responded.
+        // Two reasons to want that: the tail is about to move to the
+        // dispatcher because something else (a subclass past `super`) may
+        // respond, or a private helper in this body already has.
         synthesize_deferred_implicit_render(&unwrapped, action_name, variants)
     } else {
         synthesize_implicit_render(&unwrapped, action_name, variants)

@@ -544,12 +544,20 @@ fn mark_render_format(body: &Expr, fmt: &str) -> Expr {
 }
 
 /// Map a Rails format symbol to its canonical MIME string.
-fn mime_for_format(fmt: &str) -> &'static str {
+///
+/// `pub(crate)` so the render-to-views rewrite tags a format-marked
+/// render from the same table this one uses — two copies of a MIME
+/// string is how the pair drifts.
+pub(crate) fn mime_for_format(fmt: &str) -> &'static str {
     match fmt {
         "json" => "application/json",
         // What Turbo sends in `Accept` and expects back on a form
         // submission it drives.
         "turbo_stream" => "text/vnd.turbo-stream.html",
+        // campfire renders a user's initials as an SVG avatar; the
+        // response is an image and browsers treat it as one only with
+        // this type.
+        "svg" => "image/svg+xml",
         _ => "text/html; charset=utf-8",
     }
 }

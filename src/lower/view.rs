@@ -592,7 +592,17 @@ pub enum FormBuilderMethod {
 /// `manifest.json.erb`, `show.svg.erb`) stay skipped: their bodies
 /// aren't typed and nothing dispatches to them yet.
 pub fn renders_through_view_path(format: &str) -> bool {
-    matches!(format, "html" | "turbo_stream")
+    // `svg` joins them: campfire renders a user's initials as an SVG
+    // avatar (`users/avatars/show.svg.erb`). The stem-collision worry
+    // that kept non-html ERB out is answered the same way — the lowered
+    // method carries the format suffix (`show_svg`) via
+    // `view_method_name_for`, so it sits BESIDE `show`.
+    //
+    // Paired with the ingest gate in `ingest::app`'s `walk_erb`: one
+    // decides whether the template is READ, this one whether it is
+    // EMITTED, and a format listed in only one of them is silently
+    // dropped somewhere in between.
+    matches!(format, "html" | "turbo_stream" | "svg")
 }
 
 /// The lowered method name for a view, format-qualified when the view

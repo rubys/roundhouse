@@ -2269,9 +2269,16 @@ fn walk_erb<V: Vfs + ?Sized>(
                 // jbuilder `_json` variants already use, so it sits
                 // beside `create` rather than on top of it.
                 let format = stem.rsplit_once('.').map(|(_, f)| f);
+                // `.svg.erb` joins them: campfire renders a user's
+                // initials as an SVG avatar (`users/avatars/show.svg.erb`)
+                // and reaches it with `render formats: :svg`. Same naming
+                // answer to the stem-collision worry — the lowered method
+                // carries the format suffix (`show_svg`) and sits beside
+                // `show` rather than on top of it.
                 if stem.ends_with(".html")
                     || !stem.contains('.')
                     || format == Some("turbo_stream")
+                    || format == Some("svg")
                 {
                     out.push((path, engine));
                 } else {

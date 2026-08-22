@@ -393,8 +393,18 @@ pub(super) fn rewrite_render_to_views(
             // its contract is keyed by the format-qualified stem
             // (`create_turbo_stream`), the same name the view lowers to.
             let is_turbo_stream = render_kwargs_have_format(args, "turbo_stream");
+            // The contract is keyed by the FORMAT-QUALIFIED stem, so a
+            // format marker has to be reflected here or the lookup asks
+            // for a template that need not exist. campfire's avatar
+            // action is the case that proves it: `users/avatars/` holds
+            // `show.svg.erb` and NO `show.html.erb`, so looking up bare
+            // `show` missed and the render became MissingTemplate — for a
+            // template that is right there.
+            let is_svg = render_kwargs_have_format(args, "svg");
             let contract_stem = if is_turbo_stream {
                 format!("{}_turbo_stream", view_method.as_str())
+            } else if is_svg {
+                format!("{}_svg", view_method.as_str())
             } else {
                 view_method.as_str().to_string()
             };
@@ -464,6 +474,15 @@ pub(super) fn rewrite_render_to_views(
                     (
                         Symbol::from(format!("{}_json", view_method.as_str())),
                         Some("application/json"),
+                    )
+                } else if is_svg {
+                    // campfire's avatar initials. Same shape as the two
+                    // above — format-qualified view method, MIME from the
+                    // shared table so this arm and `mime_for_format`
+                    // cannot disagree about what an svg is.
+                    (
+                        Symbol::from(format!("{}_svg", view_method.as_str())),
+                        Some(crate::lower::controller::body::mime_for_format("svg")),
                     )
                 } else {
                     (view_method, None)
