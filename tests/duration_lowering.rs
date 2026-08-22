@@ -208,8 +208,8 @@ end
 
 #[test]
 fn non_colliding_singulars_ground_untyped() {
-    // minute/second/week/fortnight have no Time-reader collision, so the
-    // singular grounds even when the receiver's type is unresolved.
+    // minute/week/fortnight name nothing but a duration, so the singular
+    // grounds even when the receiver's type is unresolved.
     let out = lower_and_emit(
         r#"
 class Ttl
@@ -222,5 +222,40 @@ end
     assert!(
         out.contains("ActiveSupport::Duration.minute(n)"),
         "non-colliding singular grounds on an untyped receiver:\n{out}",
+    );
+}
+
+/// `second` is a duration unit AND `Array#second`, ActiveSupport's
+/// ordinal accessor — the only unit that collides with something other
+/// than a `Time` reader, which is why it sat outside the guarded set.
+/// campfire's `@messages.second` lowered to
+/// `ActiveSupport::Duration.second(@messages)` and handed `dom_id` a
+/// Duration.
+#[test]
+fn second_grounds_on_a_number_and_leaves_an_arrays_ordinal_alone() {
+    let out = lower_and_emit(
+        r#"
+class Pager
+  def ttl
+    1.second
+  end
+
+  def runner_up(rows)
+    rows.second
+  end
+end
+"#,
+    );
+    assert!(
+        out.contains("ActiveSupport::Duration.second(1)"),
+        "Int-literal `second` must still ground:\n{out}",
+    );
+    assert!(
+        out.contains("rows.second"),
+        "Array#second must keep its dispatch:\n{out}",
+    );
+    assert!(
+        !out.contains("Duration.second(rows)"),
+        "an ordinal accessor must NOT be rewritten:\n{out}",
     );
 }

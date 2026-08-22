@@ -393,12 +393,26 @@ fn is_duration_const_call(e: &Expr) -> bool {
     )
 }
 
-/// ActiveSupport duration unit method names (`70.days`, `1.week`). The
-/// singular `day`/`hour`/`month`/`year` also name `Time` component
-/// readers (`created_at.day`), so those rewrite only when the receiver
-/// is numeric; the others never collide and rewrite unconditionally.
-fn duration_unit_collides_with_time(unit: &str) -> bool {
-    matches!(unit, "day" | "hour" | "month" | "year")
+/// Duration units whose NAME also names a reader on something that is
+/// not a number, so the rewrite has to see a numeric receiver first.
+/// Enumerated against ActiveSupport itself, not guessed:
+///
+///   day / hour / month / year   `Time` component readers
+///                               (`created_at.day`)
+///   second                      `Array#second` — ActiveSupport's
+///                               ordinal accessor. Rails does NOT alias
+///                               `Time#second`, so this one collides
+///                               with the ARRAY, which is why it read
+///                               as "never collides" until campfire's
+///                               `@messages.second` lowered to
+///                               `ActiveSupport::Duration.second(array)`
+///                               and `dom_id` was handed a Duration.
+///
+/// Every other unit (`seconds`, `minute(s)`, `week(s)`, `fortnight(s)`,
+/// and the plurals of the four above) names nothing else and rewrites
+/// unconditionally.
+fn duration_unit_collides_with_a_reader(unit: &str) -> bool {
+    matches!(unit, "day" | "hour" | "month" | "year" | "second")
 }
 
 fn is_duration_unit(unit: &str) -> bool {
@@ -439,7 +453,7 @@ pub(crate) fn rewrite_durations(expr: &mut Expr) {
         ExprNode::Send { recv: Some(r), method, args, block: None, .. }
             if args.is_empty() && is_duration_unit(method.as_str()) =>
         {
-            !duration_unit_collides_with_time(method.as_str()) || is_numeric_expr(r)
+            !duration_unit_collides_with_a_reader(method.as_str()) || is_numeric_expr(r)
         }
         _ => false,
     };
