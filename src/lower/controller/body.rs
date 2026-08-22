@@ -543,6 +543,24 @@ fn mark_render_format(body: &Expr, fmt: &str) -> Expr {
     Expr::new(body.span, new_node)
 }
 
+/// `head(:no_content)` — Rails' answer when an action falls off the end
+/// with no template to render.
+fn head_no_content(span: Span) -> Expr {
+    Expr::new(
+        span,
+        ExprNode::Send {
+            recv: None,
+            method: Symbol::from("head"),
+            args: vec![Expr::new(
+                span,
+                ExprNode::Lit { value: Literal::Sym { value: Symbol::from("no_content") } },
+            )],
+            block: None,
+            parenthesized: true,
+        },
+    )
+}
+
 /// Map a Rails format symbol to its canonical MIME string.
 ///
 /// `pub(crate)` so the render-to-views rewrite tags a format-marked
@@ -681,12 +699,37 @@ fn add_format_kwarg(args: &[Expr], fmt: &str, span: Span) -> Vec<Expr> {
 /// action with both a jbuilder and a `.turbo_stream.erb` template gets
 /// both. Empty means html only.
 pub fn synthesize_implicit_render(body: &Expr, action_name: &str, variants: &[&str]) -> Expr {
+    synthesize_implicit_render_with_html(body, action_name, variants, true)
+}
+
+/// `html_template_exists = false` makes the HTML fallback `head
+/// :no_content` instead of a render that would resolve to nothing.
+///
+/// Rails' `default_render` raises `MissingTemplate` only for an EXPLICIT
+/// `render :foo`; falling off the end of an action with no template
+/// logs "No template found … rendering head :no_content" and returns
+/// 204. We raised in both cases, so campfire's `Messages::Boosts#destroy`
+/// — a turbo_stream DELETE with no template, asserting `:success` —
+/// died on a template Rails never looks for.
+///
+/// The explicit path keeps raising, which is what lobsters' about/privacy
+/// actions rescue as their normal flow.
+pub fn synthesize_implicit_render_with_html(
+    body: &Expr,
+    action_name: &str,
+    variants: &[&str],
+    html_template_exists: bool,
+) -> Expr {
     if has_toplevel_terminal(body) {
         return body.clone();
     }
     // Build the chain inside-out so the FIRST variant ends up as the
     // outermost test.
-    let mut terminal = render_symbol_send(action_name, body.span);
+    let mut terminal = if html_template_exists {
+        render_symbol_send(action_name, body.span)
+    } else {
+        head_no_content(body.span)
+    };
     for fmt in variants.iter().rev() {
         let branch = mark_render_format(&render_symbol_send(action_name, body.span), fmt);
         terminal = Expr::new(
@@ -756,8 +799,9 @@ pub fn synthesize_deferred_implicit_render(
     body: &Expr,
     action_name: &str,
     variants: &[&str],
+    html_template_exists: bool,
 ) -> Expr {
-    match implicit_render_statement(body, action_name, variants) {
+    match implicit_render_statement(body, action_name, variants, html_template_exists) {
         Some(tail) => append_statement(body, tail),
         None => body.clone(),
     }
@@ -767,11 +811,16 @@ pub fn implicit_render_statement(
     body: &Expr,
     action_name: &str,
     variants: &[&str],
+    html_template_exists: bool,
 ) -> Option<Expr> {
     if has_toplevel_terminal(body) {
         return None;
     }
-    let mut terminal = render_symbol_send(action_name, body.span);
+    let mut terminal = if html_template_exists {
+        render_symbol_send(action_name, body.span)
+    } else {
+        head_no_content(body.span)
+    };
     for fmt in variants.iter().rev() {
         let branch = mark_render_format(&render_symbol_send(action_name, body.span), fmt);
         terminal = Expr::new(

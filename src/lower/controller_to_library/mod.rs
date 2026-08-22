@@ -1832,6 +1832,27 @@ fn lower_action_body(
     let responds_via_helper = privs
         .iter()
         .any(|p| has_toplevel_terminal(&p.body) && body_calls_method(body, &p.name));
+    // Does ANY template exist for this action, in any format?
+    //
+    // Rails' `default_render` splits three ways and only the last is a
+    // 204: a template for THIS format renders it; templates in OTHER
+    // formats but not this one raise `ActionController::UnknownFormat`;
+    // no template at all logs "No template found" and heads
+    // `:no_content`. Asking only about HTML collapsed the middle case
+    // into the last and turned a turbo_stream-only action's HTML branch
+    // into a 204 — which `turbo_stream_views.rs` caught, correctly.
+    //
+    // So the raise stands whenever the action has SOME template, which
+    // keeps that middle case at its current approximation (MissingTemplate
+    // where Rails says UnknownFormat — a closer answer is its own change).
+    // Only a genuinely templateless action, like campfire's
+    // `Messages::Boosts#destroy`, reaches `head :no_content`.
+    let module_key = views_module_name(controller).unwrap_or_default();
+    let any_template_exists = view_ivars
+        .contains_key(&(module_key.clone(), action_name.to_string()))
+        || variants.iter().any(|v| {
+            view_ivars.contains_key(&(module_key.clone(), format!("{action_name}_{v}")))
+        });
     let base = if !is_public {
         unwrapped
     } else if defer_implicit_render || responds_via_helper {
@@ -1839,9 +1860,11 @@ fn lower_action_body(
         // Two reasons to want that: the tail is about to move to the
         // dispatcher because something else (a subclass past `super`) may
         // respond, or a private helper in this body already has.
-        synthesize_deferred_implicit_render(&unwrapped, action_name, variants)
+        synthesize_deferred_implicit_render(&unwrapped, action_name, variants, any_template_exists)
     } else {
-        synthesize_implicit_render(&unwrapped, action_name, variants)
+        crate::lower::controller::body::synthesize_implicit_render_with_html(
+            &unwrapped, action_name, variants, any_template_exists,
+        )
     };
     let module_name = views_module_name(controller);
     let with_render = {

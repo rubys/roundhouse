@@ -114,3 +114,48 @@ fn a_helper_response_guards_the_synthesized_tail() {
         "the tail must be guarded when a helper responds:\n{show_body}"
     );
 }
+
+/// Rails' `default_render`: falling off the end of an action with NO
+/// template logs "No template found … rendering head :no_content" and
+/// returns 204. We raised MissingTemplate instead, so campfire's
+/// `Messages::Boosts#destroy` — a turbo_stream DELETE with no template,
+/// asserting `:success` — died on a template Rails never looks for.
+///
+/// The EXPLICIT `render :foo` path still raises, which is what lobsters'
+/// about/privacy actions rescue as their normal flow. That split is the
+/// whole point: only the SYNTHESIZED tail changed.
+#[test]
+fn an_action_with_no_template_heads_no_content() {
+    let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    tree.insert(PathBuf::from("db/schema.rb"), SCHEMA.as_bytes().to_vec());
+    tree.insert(
+        PathBuf::from("app/models/user.rb"),
+        b"class User < ApplicationRecord\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("config/routes.rb"),
+        b"Rails.application.routes.draw do\n  resources :users\nend\n".to_vec(),
+    );
+    // `destroy` has no template anywhere — the shape Rails 204s.
+    tree.insert(
+        PathBuf::from("app/controllers/users_controller.rb"),
+        b"class UsersController < ApplicationController\n  \
+            def destroy\n    User.first.destroy!\n  end\nend\n"
+            .to_vec(),
+    );
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let src = ruby::emit_lowered_controllers_with_layout(&app)
+        .into_iter()
+        .map(|f| f.content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        src.contains("head(:no_content)"),
+        "a templateless action must 204, not raise:\n{src}"
+    );
+    assert!(
+        !src.contains("MissingTemplate"),
+        "no synthesized raise may survive:\n{src}"
+    );
+}
