@@ -1632,8 +1632,29 @@ fn thread_rel(mut args: Vec<Expr>, rel: Expr, leading: Option<&Vec<Param>>, span
     // A trailing kwargs hash (`base(user, unmerged: unmerged)`) binds
     // the scope's KEYWORD params; the relation is a positional and must
     // land before it. Split it off, pad, thread, re-append.
+    //
+    // ONLY when the callee declares keywords. Ruby hands `f(a: 1)` to a
+    // `def f(h)` as the POSITIONAL hash `h` — which is how campfire's
+    // `messages.create_with_attachment!(creator:, attachment:)` reaches
+    // its one `attributes` param, and how a `**opts` param (ingested as
+    // a positional defaulting to `{}`) is fed. Splitting it off there
+    // padded that param with `nil` and pushed the hash PAST `__rel`,
+    // handing three positionals to a method taking one or two. Left in
+    // place it is an ordinary argument, so it counts toward the padding
+    // below — and its `kwargs` flag has to go, or the emitter renders it
+    // bare and Ruby reads keywords ahead of the `__rel` positional.
+    let takes_keywords = leading.map_or(true, |ps| ps.iter().any(|p| p.keyword));
     let kwargs_tail = match args.last() {
-        Some(e) if matches!(&*e.node, ExprNode::Hash { kwargs: true, .. }) => args.pop(),
+        Some(e) if matches!(&*e.node, ExprNode::Hash { kwargs: true, .. }) => {
+            if takes_keywords {
+                args.pop()
+            } else {
+                let tail = args.pop().expect("matched last");
+                let ExprNode::Hash { entries, .. } = &*tail.node else { unreachable!() };
+                args.push(syn(tail.span, ExprNode::Hash { entries: entries.clone(), kwargs: false }));
+                None
+            }
+        }
         _ => None,
     };
     if let Some(params) = leading {
@@ -3264,6 +3285,43 @@ mod tests {
         let out = thread_rel(vec![supplied], rel_marker(), Some(&leading), span());
         assert_eq!(out.len(), 2);
         assert!(is_rel(&out[1]));
+    }
+
+    #[test]
+    fn thread_rel_keeps_a_kwargs_tail_positional_when_the_callee_takes_no_keywords() {
+        // `create_with_attachment!(attributes)` called as
+        // `create_with_attachment!(creator: u, attachment: f)` — Ruby
+        // binds the hash to `attributes`, so it stays a positional
+        // BEFORE `__rel` (and loses its bare-kwargs rendering), rather
+        // than padding `attributes` with nil and landing after.
+        let leading = vec![Param::positional(Symbol::from("attributes"))];
+        let kw = Expr::new(
+            span(),
+            ExprNode::Hash { entries: vec![(int_lit(1), int_lit(2))], kwargs: true },
+        );
+        let out = thread_rel(vec![kw], rel_marker(), Some(&leading), span());
+        assert_eq!(out.len(), 2);
+        assert!(matches!(&*out[0].node, ExprNode::Hash { kwargs: false, .. }));
+        assert!(is_rel(&out[1]));
+    }
+
+    #[test]
+    fn thread_rel_splits_a_kwargs_tail_when_the_callee_declares_keywords() {
+        // `base(user, unmerged: false)` — the hash binds a KEYWORD param,
+        // so the relation goes before it and the bare rendering stays.
+        let leading = vec![
+            Param::positional(Symbol::from("user")),
+            Param::keyword(Symbol::from("unmerged"), None),
+        ];
+        let user = Expr::new(span(), ExprNode::Var { id: VarId(1), name: Symbol::from("user") });
+        let kw = Expr::new(
+            span(),
+            ExprNode::Hash { entries: vec![(int_lit(1), int_lit(2))], kwargs: true },
+        );
+        let out = thread_rel(vec![user, kw], rel_marker(), Some(&leading), span());
+        assert_eq!(out.len(), 3);
+        assert!(is_rel(&out[1]));
+        assert!(matches!(&*out[2].node, ExprNode::Hash { kwargs: true, .. }));
     }
 
     #[test]

@@ -53,6 +53,14 @@ module ActionDispatch
       def to_s: () -> String
     end
   end
+
+  # Where Rails keeps `fixture_file_upload` — a plain
+  # `ActiveSupport::TestCase` does not get it for free, so a test that
+  # needs it writes `include ActionDispatch::TestProcess` and the module
+  # has to exist under that name. `TestBase` includes it as well.
+  module TestProcess
+    def fixture_file_upload: (String name, ?String content_type) -> ActionDispatch::Http::UploadedFile
+  end
 end
 
 class ActionResponse
@@ -98,7 +106,8 @@ class TestBase
   def setup: () -> void
   def teardown: () -> void
   def file_fixture: (String name) -> Pathname
-  def fixture_file_upload: (String name, ?String content_type) -> ActionDispatch::Http::UploadedFile
+
+  include ActionDispatch::TestProcess
 
   # `assert_match` isn't lowered by inline_assertions (nil-handling
   # divergence across targets). Method body stays; RBS pins the

@@ -385,6 +385,32 @@ module ActionDispatch
   end
 end
 
+# `ActionDispatch::TestProcess` — where Rails keeps `fixture_file_upload`
+# (in its `FixtureFile` submodule, which this module includes). A plain
+# `ActiveSupport::TestCase` does NOT get it for free, which is why
+# campfire's `Message::AttachmentTest` writes the `include` itself — so
+# the module has to EXIST under that name, not just the method under
+# some base class. `TestBase` includes it too, because a test that never
+# writes the include still expects the method (Rails puts it on
+# `ActionController::TestCase` and `ActionDispatch::IntegrationTest`).
+#
+# Rails hands back an `ActionDispatch::Http::UploadedFile`. That object
+# above is its read surface and no more: the name it was uploaded under,
+# its declared type, and its bytes.
+#
+# The bytes only exist here because binary passthrough carries the
+# fixture files into the emitted tree; before that this method would
+# have described a file that was not there.
+module ActionDispatch
+  module TestProcess
+    def fixture_file_upload(name, content_type = "application/octet-stream")
+      ActionDispatch::Http::UploadedFile.new(
+        File.join(__dir__, "fixtures", "files", name), content_type
+      )
+    end
+  end
+end
+
 # In-process request dispatch — equivalent of Rails's
 # ActionDispatch::IntegrationTest. Test classes that need to exercise
 # controller actions extend this module to get get/post/patch/delete.
@@ -453,6 +479,7 @@ class TestBase
   # a module twice is inert.
   include ActiveJob::TestHelper
   include ActionCable::TestHelper
+  include ActionDispatch::TestProcess
 
   # Zero-arg initializer; the shim does `__t = XTest.new` per test
   # method (no Minitest-style name argument needed).
@@ -471,24 +498,6 @@ class TestBase
   # Default no-op so the shim's `__t.teardown` resolves on test
   # classes that don't define one.
   def teardown
-  end
-
-  # `fixture_file_upload("moon.jpg", "image/jpeg")` — a file under
-  # `test/fixtures/files` presented as an UPLOAD, which is what a test
-  # posts as a param or assigns to an attachment.
-  #
-  # Rails hands back an `ActionDispatch::Http::UploadedFile`. This is
-  # that object's read surface and no more: the name it was uploaded
-  # under, its declared type, and its bytes. `to_s` is the filename
-  # because that is what a params hash carrying one stringifies to.
-  #
-  # The bytes only exist here because binary passthrough carries the
-  # fixture files into the emitted tree; before that this method would
-  # have described a file that was not there.
-  def fixture_file_upload(name, content_type = "application/octet-stream")
-    ActionDispatch::Http::UploadedFile.new(
-      File.join(__dir__, "fixtures", "files", name), content_type
-    )
   end
 
   # `file_fixture("pixel.bmp")` — Rails' handle on a file under
