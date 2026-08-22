@@ -4,15 +4,16 @@
 # runner — `test_helper` deliberately does not, because the EMITTED
 # tests inherit `TestBase` and carry their own driver shim.
 #
-# THE QUARANTINE IS A SUBSTRING MATCH ON THIS FILE'S TEXT: `spin_shape`
-# reads a test into the SPINEL lane when the source contains
-# `< TestBase` or `< ActionDispatch::IntegrationTest` anywhere. A helper
-# class subclassing `TestBase` — even one only these Minitest cases use —
-# therefore moves the WHOLE FILE into the AOT lane, where it drags the
-# ActiveRecord graph into a compile that previously needed only
-# `Broadcasts`, and the `smoke-spinel` job goes red on a codegen gap
-# nothing here is about. Do not define one. Coverage that needs a live
-# `TestBase` belongs in a test that is already in the spin lane.
+# The quarantine keys on THIS file declaring a `Minitest::Test`
+# subclass, which spin cannot build (it has no `minitest/autorun`).
+# That rule replaced a whole-file substring match, under which any
+# mention of the spin lane's trigger string — a helper class, or even a
+# comment quoting it — promoted this file into the set spinel
+# AOT-compiles, where it dragged the ActiveRecord graph into a compile
+# that needs only `Broadcasts`. See `project.rs::lane_test_class`.
+#
+# Coverage that needs a live `TestBase` still does not belong here:
+# put it in a test that is already in the spin lane.
 require "minitest/autorun"
 # `test_helper` already loads `Broadcasts` — through
 # `runtime/broadcasts` here and through `boot.rb` in an emitted tree,

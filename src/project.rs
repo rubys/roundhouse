@@ -2419,8 +2419,12 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
         }
         let base = entry.0.rsplit('/').next().unwrap().to_string();
         let top_level = entry.0 == format!("test/{base}");
-        let in_lane = entry.1.contains("< TestBase")
-            || entry.1.contains("< ActionDispatch::IntegrationTest");
+        // A Minitest-shaped file is CRuby-only whatever else it holds;
+        // otherwise the lane is decided by the same structural check
+        // `test_class_and_count` applies below, so the two cannot
+        // disagree. See `lane_test_class` for what this replaced.
+        let in_lane = !entry.1.lines().any(declares_minitest_class)
+            && entry.1.lines().any(|l| lane_test_class(l).is_some());
         let new_path = if in_lane {
             format!("test/{base}")
         } else if top_level {
@@ -2623,6 +2627,46 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
     Ok(files)
 }
 
+/// The class a line DECLARES as a lane test, if it declares one:
+/// `class <Name> < TestBase` / `< ActionDispatch::IntegrationTest`.
+///
+/// STRUCTURAL, not a substring over the whole file — and that
+/// distinction has drawn blood twice. Lane assignment used to ask
+/// `content.contains("< TestBase")`, so ANY mention promoted a file
+/// into the spinel lane: first a Minitest-only helper class in
+/// `broadcasts_test.rb` (which then dragged the ActiveRecord graph into
+/// its AOT compile and reddened `smoke-spinel`), then the COMMENT
+/// written to warn about it — quoting the trigger string was enough to
+/// spring the trap, and this time `test_class_and_count` disagreed with
+/// the lane check and errored with "no test class found".
+///
+/// The two questions — "is this a lane test?" and "which class is it?"
+/// — must be answered by the same code, or they can disagree. They now
+/// are, with one addition: a file declaring a `Minitest::Test` subclass
+/// is CRuby-only regardless (`declares_minitest_class`), which is what
+/// makes a `< TestBase` HELPER class beside a Minitest one harmless.
+fn lane_test_class(line: &str) -> Option<String> {
+    let rest = line.trim_start().strip_prefix("class ")?;
+    if !rest.contains("< TestBase") && !rest.contains("< ActionDispatch::IntegrationTest") {
+        return None;
+    }
+    Some(rest.split_whitespace().next().unwrap_or_default().to_string())
+}
+
+/// Does this line declare a `Minitest::Test` subclass?
+///
+/// A file that does is CRuby-only whatever else it contains: it needs
+/// `minitest/autorun`, which spin does not have (its own build says so —
+/// "'minitest/autorun' is not available in Spinel"). This is the marker
+/// that separates a framework unit test from a spin test program, and it
+/// is why a `< TestBase` HELPER class beside a Minitest one does not
+/// drag the file into the AOT lane.
+fn declares_minitest_class(line: &str) -> bool {
+    line.trim_start()
+        .strip_prefix("class ")
+        .is_some_and(|rest| rest.contains("< Minitest::Test"))
+}
+
 /// The `class <Name> < TestBase` / `< ActionDispatch::IntegrationTest`
 /// line (exactly one per lane test) plus the `def test_*` count —
 /// enough to synthesize the runner's `<Class>: <N> tests passed`
@@ -2630,16 +2674,12 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
 fn test_class_and_count(content: &str, path: &str) -> Result<(String, usize), String> {
     let mut class: Option<String> = None;
     for line in content.lines() {
-        let t = line.trim_start();
-        if let Some(rest) = t.strip_prefix("class ") {
-            if rest.contains("< TestBase") || rest.contains("< ActionDispatch::IntegrationTest") {
-                let name = rest.split_whitespace().next().unwrap_or_default().to_string();
-                if class.replace(name).is_some() {
-                    return Err(format!(
-                        "spin_shape: {path}: multiple test classes in one file — \
-                         snapshot synthesis assumes one"
-                    ));
-                }
+        if let Some(name) = lane_test_class(line) {
+            if class.replace(name).is_some() {
+                return Err(format!(
+                    "spin_shape: {path}: multiple test classes in one file — \
+                     snapshot synthesis assumes one"
+                ));
             }
         }
     }
@@ -3335,7 +3375,14 @@ mod tests {
             ),
             (
                 "test/broadcasts_test.rb".to_string(),
+                // The COMMENT quotes the lane's trigger string, and a
+                // helper class subclasses TestBase — neither makes this
+                // a spin test program, and both used to promote it into
+                // the lane when the check was a whole-file substring.
                 "require_relative \"test_helper\"\n\
+                 # Quarantined because no `class X < TestBase` declares a\n\
+                 # test here — see `lane_test_class`.\n\
+                 class Probe < TestBase\n  def helper\n  end\nend\n\
                  class BroadcastsTest < Minitest::Test\n  def test_x\n  end\nend\n"
                     .to_string(),
             ),
@@ -3362,8 +3409,14 @@ mod tests {
         assert_eq!(get("test/article_test.rb.expected"), "ArticleTest: 2 tests passed\n");
 
         // Minitest shapes are quarantined to test/cruby/, with no
-        // snapshots (they are not spin test programs).
+        // snapshots (they are not spin test programs) — even when the
+        // file MENTIONS the lane's trigger string in a comment and
+        // defines a `< TestBase` helper class beside its Minitest one.
+        // Both of those reddened `smoke-spinel` when lane assignment
+        // was a whole-file substring; the check is now the same
+        // structural one snapshot synthesis applies (`lane_test_class`).
         assert!(paths.contains(&"test/cruby/broadcasts_test.rb"));
+        assert!(!paths.contains(&"test/broadcasts_test.rb"));
         assert!(!paths.iter().any(|p| p.contains("cruby") && p.ends_with(".expected")));
         assert!(get("test/cruby/broadcasts_test.rb").contains("require_relative \"../test_helper\""));
 
