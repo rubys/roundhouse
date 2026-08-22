@@ -40,6 +40,21 @@ end
 # Captured response from a dispatched in-process request. The four
 # attr_readers + `?` query methods are exercised by emitted controller
 # tests via `assert_response` / `assert_redirected_to` / `assert_select`.
+module ActionDispatch
+  module Http
+    class UploadedFile
+      @path: String
+
+      def initialize: (String path, String content_type) -> void
+      def original_filename: () -> String
+      def content_type: () -> String
+      def read: () -> String
+      def size: () -> Integer
+      def to_s: () -> String
+    end
+  end
+end
+
 class ActionResponse
   def status: () -> Integer
   def body: () -> String
@@ -83,6 +98,7 @@ class TestBase
   def setup: () -> void
   def teardown: () -> void
   def file_fixture: (String name) -> Pathname
+  def fixture_file_upload: (String name, ?String content_type) -> ActionDispatch::Http::UploadedFile
 
   # `assert_match` isn't lowered by inline_assertions (nil-handling
   # divergence across targets). Method body stays; RBS pins the

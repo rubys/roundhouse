@@ -350,6 +350,41 @@ module ActionCable
   end
 end
 
+# `ActionDispatch::Http::UploadedFile` — what `fixture_file_upload`
+# hands back, and what a multipart request would carry in production.
+#
+# Read-only and file-backed: nothing here writes, because the only
+# producer is the test harness naming a fixture that already exists on
+# disk. A real multipart parse would construct the same shape over a
+# tempfile.
+module ActionDispatch
+  module Http
+    class UploadedFile
+      attr_reader :original_filename, :content_type
+
+      def initialize(path, content_type)
+        @path = path
+        @original_filename = File.basename(path)
+        @content_type = content_type
+      end
+
+      def read
+        File.binread(@path)
+      end
+
+      def size
+        File.size(@path)
+      end
+
+      # A params hash carrying one stringifies to the uploaded name,
+      # which is what Rails' own `to_s` gives.
+      def to_s
+        @original_filename
+      end
+    end
+  end
+end
+
 # In-process request dispatch — equivalent of Rails's
 # ActionDispatch::IntegrationTest. Test classes that need to exercise
 # controller actions extend this module to get get/post/patch/delete.
@@ -436,6 +471,24 @@ class TestBase
   # Default no-op so the shim's `__t.teardown` resolves on test
   # classes that don't define one.
   def teardown
+  end
+
+  # `fixture_file_upload("moon.jpg", "image/jpeg")` — a file under
+  # `test/fixtures/files` presented as an UPLOAD, which is what a test
+  # posts as a param or assigns to an attachment.
+  #
+  # Rails hands back an `ActionDispatch::Http::UploadedFile`. This is
+  # that object's read surface and no more: the name it was uploaded
+  # under, its declared type, and its bytes. `to_s` is the filename
+  # because that is what a params hash carrying one stringifies to.
+  #
+  # The bytes only exist here because binary passthrough carries the
+  # fixture files into the emitted tree; before that this method would
+  # have described a file that was not there.
+  def fixture_file_upload(name, content_type = "application/octet-stream")
+    ActionDispatch::Http::UploadedFile.new(
+      File.join(__dir__, "fixtures", "files", name), content_type
+    )
   end
 
   # `file_fixture("pixel.bmp")` — Rails' handle on a file under
