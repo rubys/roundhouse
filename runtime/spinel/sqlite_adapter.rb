@@ -127,6 +127,20 @@ module SqliteAdapter
     conditions.map { |k, v| "#{k} = #{escape_value(v)}" }.join(" AND ")
   end
 
+  # A bind value rendered as SQL text.
+  #
+  # A Time goes through `ActiveSupport.format_db_time`, the SAME writer
+  # every temporal COLUMN is stored with, and that is the whole point:
+  # comparison here is string-vs-string, so a bind written in any other
+  # format silently answers the wrong rows rather than erroring.
+  # `Time#to_s` is that other format — it renders local time with a
+  # zone offset (`2026-08-22 15:30:00 -0400`) where the column holds
+  # UTC with microseconds (`2026-08-22 19:30:00.123456`). Both start
+  # with the same date, so the comparison reaches the HOUR and answers
+  # on the zone difference: campfire's `where("created_at < ?",
+  # message.created_at)` matched NOTHING and its `>` twin matched
+  # EVERYTHING, which is a message list paginating backwards into an
+  # empty page and forwards into the whole room.
   def self.escape_value(v)
     if v.is_a?(Integer)
       Db.escape_int(v)
@@ -136,6 +150,8 @@ module SqliteAdapter
       "0"
     elsif v.nil?
       "NULL"
+    elsif v.is_a?(Time)
+      Db.escape_string(ActiveSupport.format_db_time(v).to_s)
     else
       Db.escape_string(v.to_s)
     end

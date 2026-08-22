@@ -167,6 +167,12 @@ fn real_blog_spinel_tests_pass() {
         // test, not as a broken matcher). Rides in the same way the
         // three above do.
         "test/dom_test.rb",
+        // A TIME bind and a temporal COLUMN must be written in the same
+        // format — the adapter inlines escaped values rather than
+        // binding parameters, so a comparison is string-vs-string and a
+        // mismatched bind answers the wrong rows with no error at all.
+        // Rides in the same way the others do.
+        "test/temporal_bind_test.rb",
     ] {
         assert_test_passes(&scratch, &gemfile, test);
     }
