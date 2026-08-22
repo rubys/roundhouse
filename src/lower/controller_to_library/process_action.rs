@@ -53,6 +53,7 @@ pub(super) fn synthesize_process_action(
     publics: &[Action],
     inherited: &[Symbol],
     enclosing_class: Symbol,
+    deferred_tails: &std::collections::HashMap<Symbol, Expr>,
 ) -> MethodDef {
     let mut stmts: Vec<Expr> = Vec::new();
 
@@ -81,7 +82,7 @@ pub(super) fn synthesize_process_action(
     }
 
     if !publics.is_empty() || !inherited.is_empty() {
-        stmts.push(case_dispatch(publics, inherited));
+        stmts.push(case_dispatch(publics, inherited, deferred_tails));
     }
 
     let mut body = match stmts.len() {
@@ -273,7 +274,18 @@ fn include_check(only: &[Symbol], except: &[Symbol]) -> Expr {
 /// An inherited arm needs no method here — Ruby finds the parent's, and
 /// re-emitting it on the subclass would shadow an override rather than
 /// use it.
-fn case_dispatch(publics: &[Action], inherited: &[Symbol]) -> Expr {
+fn case_dispatch(
+    publics: &[Action],
+    inherited: &[Symbol],
+    deferred_tails: &std::collections::HashMap<Symbol, Expr>,
+) -> Expr {
+    // The default render for an action whose body must not carry it —
+    // see `actions_reached_by_super`. Already lowered: it was
+    // synthesized into the body, rode every rewrite there (the render
+    // rewrite above all, which is what binds `render :create` to
+    // `Views::Messages.create_turbo_stream(@message, …)`), and was split
+    // back off. Emitted INSIDE the arm rather than after the whole
+    // `case`, so only the deferred action changes shape.
     let arm_for = |action_name: &str, span: Option<crate::span::Span>| {
         let method_name = method_name_for_action(action_name);
         let mut dispatch = syn(ExprNode::Send {
@@ -295,8 +307,16 @@ fn case_dispatch(publics: &[Action], inherited: &[Symbol]) -> Expr {
             body: dispatch,
         }
     };
-    let mut arms: Vec<Arm> =
-        publics.iter().map(|a| arm_for(a.name.as_str(), Some(a.body.span))).collect();
+    let mut arms: Vec<Arm> = publics
+        .iter()
+        .map(|a| {
+            let mut arm = arm_for(a.name.as_str(), Some(a.body.span));
+            if let Some(tail) = deferred_tails.get(&a.name).cloned() {
+                arm.body = syn(ExprNode::Seq { exprs: vec![arm.body, tail] });
+            }
+            arm
+        })
+        .collect();
     arms.extend(inherited.iter().map(|n| arm_for(n.as_str(), None)));
     syn(ExprNode::Case {
         scrutinee: var_ref("action_name"),

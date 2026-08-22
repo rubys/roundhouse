@@ -38,7 +38,8 @@ use crate::expr::{Expr, ExprNode};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 use crate::lower::controller::body::{
-    synthesize_implicit_render, unwrap_respond_to_with_format_dispatch, FormatBreadth,
+    synthesize_deferred_implicit_render, synthesize_implicit_render,
+    unwrap_respond_to_with_format_dispatch, FormatBreadth,
 };
 
 use self::params::ParamsSpecs;
@@ -729,6 +730,14 @@ fn build_methods(
     }
     inherited.sort_by(|a, b| a.as_str().cmp(b.as_str()));
 
+    // Actions whose default render belongs in the dispatcher because a
+    // subclass reaches this body with `super`. Empty for every
+    // controller nobody subclasses that way, which is all of them
+    // outside campfire's one bot controller — and an empty set leaves
+    // both the bodies and the dispatcher byte-identical.
+    let deferred_renders = actions_reached_by_super(controller, all_controllers);
+    let mut pending_dispatcher: Option<Vec<PreambleStmt>> = None;
+
     if !publics_inlined.is_empty() || !inherited.is_empty() {
         // The before_action preamble: everything the body-inlining above
         // can't reach — inherited filters (ApplicationController's
@@ -743,26 +752,46 @@ fn build_methods(
             &privs,
             /*own_privs_inlined=*/ inlining_ordered,
         );
-        methods.push(synthesize_process_action(
-            &preamble,
-            &publics_inlined,
-            &inherited,
-            controller.name.0.clone(),
-        ));
+        pending_dispatcher = Some(preamble);
     }
 
+    // Actions BEFORE the dispatcher: a deferred action hands its
+    // synthesized tail back here, and the dispatcher needs it. The
+    // dispatcher is spliced in at index 0 afterwards so the emitted
+    // method order is unchanged.
+    let dispatcher_at = methods.len();
+    let mut deferred_tails: std::collections::HashMap<Symbol, Expr> =
+        std::collections::HashMap::new();
     for a in &publics_inlined {
         methods.push(action_to_method(
             a, controller, &privs, &params_privs, /*is_public=*/ true, params_specs, json_actions,
             turbo_stream_actions, view_ivars,
-            partials, format_breadth, &shadows, route_id_segments,
+            partials, format_breadth, &shadows, route_id_segments, &deferred_renders,
+            &mut deferred_tails,
         ));
     }
+    if let Some(preamble) = pending_dispatcher {
+        methods.insert(
+            dispatcher_at,
+            synthesize_process_action(
+                &preamble,
+                &publics_inlined,
+                &inherited,
+                controller.name.0.clone(),
+                &deferred_tails,
+            ),
+        );
+    }
+    // The empty set for both non-public loops below: `is_public: false`
+    // already suppresses the implicit render, so there is never one to
+    // defer.
+    let no_deferred: std::collections::HashSet<Symbol> = std::collections::HashSet::new();
     for a in &privs_kept {
         methods.push(action_to_method(
             a, controller, &privs, &params_privs, /*is_public=*/ false, params_specs, json_actions,
             turbo_stream_actions, view_ivars,
-            partials, format_breadth, &shadows, route_id_segments,
+            partials, format_breadth, &shadows, route_id_segments, &no_deferred,
+            &mut std::collections::HashMap::new(),
         ));
     }
     // Public methods no route reaches are helpers/filters, not actions:
@@ -773,7 +802,8 @@ fn build_methods(
         methods.push(action_to_method(
             a, controller, &privs, &params_privs, /*is_public=*/ false, params_specs, json_actions,
             turbo_stream_actions, view_ivars,
-            partials, format_breadth, &shadows, route_id_segments,
+            partials, format_breadth, &shadows, route_id_segments, &no_deferred,
+            &mut std::collections::HashMap::new(),
         ));
     }
 
@@ -1125,6 +1155,71 @@ fn route_helper_shadows(
 /// typical leaf controller). A parent that isn't among the ingested
 /// controllers (ActionController::Base) ends the walk; the depth cap
 /// guards against parent cycles.
+/// Actions of `controller` that a SUBCLASS overrides and reaches with
+/// `super` — the ones whose implicit render must run in the DISPATCHER
+/// rather than at the end of the action body.
+///
+/// Rails runs the default render AFTER the action returns
+/// (`send_action` then `default_render` unless `performed?`), and we
+/// inline it into the body instead. Those are the same thing until a
+/// subclass writes
+///
+/// ```text
+/// def create
+///   super          # parent body runs...
+///   head :created  # ...and THIS is the response
+/// end
+/// ```
+///
+/// where the inlined version fires the parent's default render while
+/// `super` is still on the stack — before the subclass can respond at
+/// all. campfire's `Messages::ByBotsController#create` is exactly that,
+/// and every bot message died on `ActionView::MissingTemplate` for an
+/// HTML request the subclass was about to answer with `head :created`.
+///
+/// DEMAND-GATED, and the demand is tiny: lobsters has no `super` in any
+/// action, campfire has this one. A controller nobody subclasses this
+/// way keeps a byte-identical body and dispatcher.
+fn actions_reached_by_super(
+    controller: &Controller,
+    all: &[Controller],
+) -> std::collections::HashSet<Symbol> {
+    let mut out = std::collections::HashSet::new();
+    let defines = |name: &Symbol| controller.actions().any(|a| &a.name == name);
+    for sub in all {
+        if sub.name == controller.name {
+            continue;
+        }
+        if !ancestor_chain(sub, all).iter().any(|c| c.name == controller.name) {
+            continue;
+        }
+        for a in sub.actions() {
+            if body_calls_super(&a.body) && defines(&a.name) {
+                out.insert(a.name.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Does this body reach `super` anywhere? Not just at top level — the
+/// campfire case is a bare `super` as the first statement, but a
+/// `super` inside a conditional reaches the parent body just the same,
+/// and the question here is only "can the parent's body run as a
+/// callee", which any occurrence answers.
+fn body_calls_super(body: &Expr) -> bool {
+    if matches!(&*body.node, ExprNode::Super { .. }) {
+        return true;
+    }
+    let mut found = false;
+    body.node.for_each_child(&mut |c| {
+        if !found && body_calls_super(c) {
+            found = true;
+        }
+    });
+    found
+}
+
 fn ancestor_chain<'a>(controller: &Controller, all: &'a [Controller]) -> Vec<&'a Controller> {
     let mut chain: Vec<&'a Controller> = Vec::new();
     let mut cur = controller.parent.as_ref();
@@ -1387,6 +1482,8 @@ fn action_to_method(
     format_breadth: FormatBreadth,
     shadows: &std::collections::HashSet<Symbol>,
     route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
+    deferred_renders: &std::collections::HashSet<Symbol>,
+    deferred_out: &mut std::collections::HashMap<Symbol, Expr>,
 ) -> MethodDef {
     let method_name = method_name_for_action(a.name.as_str());
     // Required positionals first, then optional positionals with their
@@ -1410,7 +1507,7 @@ fn action_to_method(
     if json_actions.contains(&a.name) {
         variants.push("json");
     }
-    let body = lower_action_body(
+    let (body, deferred_tail) = lower_action_body(
         &a.body,
         controller,
         a.name.as_str(),
@@ -1424,7 +1521,11 @@ fn action_to_method(
         format_breadth,
         shadows,
         route_id_segments,
+        deferred_renders.contains(&a.name),
     );
+    if let Some(tail) = deferred_tail {
+        deferred_out.insert(a.name.clone(), tail);
+    }
     // Action params type to Untyped for now — Rails action signatures
     // are conventionally `def show(id)` with all-string CGI inputs;
     // refinement to per-route param types can ride on a later
@@ -1537,7 +1638,8 @@ fn lower_action_body(
     format_breadth: FormatBreadth,
     shadows: &std::collections::HashSet<Symbol>,
     route_id_segments: &std::collections::HashMap<String, Vec<bool>>,
-) -> Expr {
+    defer_implicit_render: bool,
+) -> (Expr, Option<Expr>) {
     let unwrapped = unwrap_respond_to_with_format_dispatch(body, format_breadth);
     // `is_public` gates the SYNTHESIS — a private helper's caller does
     // the rendering, so nothing is appended to its body — and nothing
@@ -1550,10 +1652,21 @@ fn lower_action_body(
     // in the emit as an undefined method — the doc on `action_to_method`
     // has always said "implicit-render synthesis", which is the
     // behaviour this restores.
-    let base = if is_public {
-        synthesize_implicit_render(&unwrapped, action_name, variants)
-    } else {
+    // Synthesized even when it is going to be MOVED: the tail has to
+    // ride every rewrite below with the rest of the body — the render
+    // rewrite in particular, which is what turns `render :create` into
+    // `Views::Messages.create_turbo_stream(@message, …)` using this
+    // action's ivar scope. Building it in the dispatcher instead emitted
+    // a bare `render(:create)` that resolves to nothing.
+    let base = if !is_public {
         unwrapped
+    } else if defer_implicit_render {
+        // Always guarded — see `synthesize_deferred_implicit_render`.
+        // The tail is about to move to the dispatcher precisely because
+        // something else (a subclass past `super`) may have responded.
+        synthesize_deferred_implicit_render(&unwrapped, action_name, variants)
+    } else {
+        synthesize_implicit_render(&unwrapped, action_name, variants)
     };
     let module_name = views_module_name(controller);
     let with_render = {
@@ -1609,7 +1722,35 @@ fn lower_action_body(
     // immediate-child Assigns; nested Seqs swallow their own
     // bindings. Splice nested Seqs into their parent so each
     // assignment is visible to subsequent siblings.
-    flatten_seqs(&with_routes)
+    let lowered = flatten_seqs(&with_routes);
+    if !defer_implicit_render {
+        return (lowered, None);
+    }
+    // Split the synthesized tail back off, now that it has been through
+    // every rewrite the body had. It is the LAST statement — that is
+    // where `synthesize_implicit_render`'s `append_statement` put it —
+    // and it is only ever split off an action the synthesis actually
+    // appended to, so a body that already terminated keeps its shape.
+    split_trailing_statement(lowered)
+}
+
+/// `Seq { a, b, tail }` → `(Seq { a, b }, Some(tail))`. Anything that is
+/// not a multi-statement Seq is returned untouched with no tail: the
+/// synthesis appends, so a body it declined to touch has nothing to give
+/// back.
+fn split_trailing_statement(body: Expr) -> (Expr, Option<Expr>) {
+    let ExprNode::Seq { exprs } = &*body.node else {
+        return (body, None);
+    };
+    if exprs.len() < 2 {
+        return (body, None);
+    }
+    let mut rest = exprs.clone();
+    let tail = rest.pop().expect("len >= 2");
+    let mut trimmed = Expr::new(body.span, ExprNode::Seq { exprs: rest });
+    trimmed.ty = body.ty.clone();
+    trimmed.effects = body.effects.clone();
+    (trimmed, Some(tail))
 }
 
 /// Splice nested `Seq` nodes into their parent: `Seq { ..., Seq {

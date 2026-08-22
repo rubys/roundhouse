@@ -721,6 +721,79 @@ pub fn synthesize_implicit_render(body: &Expr, action_name: &str, variants: &[&s
     append_statement(body, terminal)
 }
 
+/// The implicit render as a STANDALONE statement, for an action whose
+/// default render has to run in the dispatcher instead of at the end of
+/// its own body (see `actions_reached_by_super`).
+///
+/// ALWAYS guarded on `performed?`, where the in-body form guards only
+/// when the body already contains some terminal. The whole reason this
+/// variant exists is that something else may have responded first — a
+/// subclass that called `super` and then `head :created` — so the guard
+/// is the point rather than an optimization.
+///
+/// Returns `None` when the action's own body always responds; there is
+/// no default render to run then, and emitting a dead guarded branch
+/// into every dispatcher arm would be noise.
+/// Append an ALWAYS-guarded default render, for an action whose tail is
+/// about to be moved into the dispatcher.
+///
+/// `synthesize_implicit_render` guards on `performed?` only when the
+/// body already contains some terminal — a sound optimization when the
+/// tail stays put, and WRONG here. The reason this tail moves is that
+/// something else may respond first: a subclass that called `super` and
+/// then `head :created`. Without the guard the dispatcher renders over
+/// the response the subclass just produced, and a body with no terminal
+/// of its own (the common shape) is exactly the case that lost it.
+pub fn synthesize_deferred_implicit_render(
+    body: &Expr,
+    action_name: &str,
+    variants: &[&str],
+) -> Expr {
+    match implicit_render_statement(body, action_name, variants) {
+        Some(tail) => append_statement(body, tail),
+        None => body.clone(),
+    }
+}
+
+pub fn implicit_render_statement(
+    body: &Expr,
+    action_name: &str,
+    variants: &[&str],
+) -> Option<Expr> {
+    if has_toplevel_terminal(body) {
+        return None;
+    }
+    let mut terminal = render_symbol_send(action_name, body.span);
+    for fmt in variants.iter().rev() {
+        let branch = mark_render_format(&render_symbol_send(action_name, body.span), fmt);
+        terminal = Expr::new(
+            body.span,
+            ExprNode::If {
+                cond: request_format_eq(body.span, fmt),
+                then_branch: branch,
+                else_branch: terminal,
+            },
+        );
+    }
+    Some(Expr::new(
+        body.span,
+        ExprNode::If {
+            cond: Expr::new(
+                body.span,
+                ExprNode::Send {
+                    recv: None,
+                    method: Symbol::from("performed?"),
+                    args: Vec::new(),
+                    block: None,
+                    parenthesized: false,
+                },
+            ),
+            then_branch: Expr::new(body.span, ExprNode::Lit { value: Literal::Nil }),
+            else_branch: terminal,
+        },
+    ))
+}
+
 /// True when a response terminal (`render` / `redirect_to` / `head` /
 /// `respond_to`-with-block) appears ANYWHERE in the body — the signal
 /// that the synthesized default render needs a `performed?` guard (see
