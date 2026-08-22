@@ -114,6 +114,9 @@ fn tiny_blog_round_trips() {
     let app = App {
         schema_version: App::SCHEMA_VERSION,
         schema,
+        // Passthrough-only and `serde(skip)` — it never round-trips, so
+        // the roundtrip fixture has nothing to say about it.
+        binary_assets: Vec::new(),
         models: vec![post_model],
         library_classes: vec![],
         current_attribute_classes: vec![],

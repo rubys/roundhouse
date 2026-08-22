@@ -827,7 +827,63 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
     // before anything downstream enumerates models.
     crate::lower::rich_text::synthesize_record_model(&mut app);
 
+    collect_binary_assets(vfs, dir, &mut app);
+
     Ok(app)
+}
+
+/// Source subtrees whose binary files are copied into the emitted tree.
+///
+/// Scoped rather than whole-tree: a Rails checkout also contains
+/// `node_modules`, `.git` and `vendor`, none of which an emitted app
+/// needs, and walking them would cost more than everything else the
+/// ingester does. These three are where an app keeps files it reads at
+/// RUN time — images and fonts it serves, and the fixture files its
+/// tests open.
+const BINARY_ASSET_ROOTS: [&str; 3] = ["app/assets", "public", "test/fixtures/files"];
+
+/// Gather files the text pipeline cannot carry.
+///
+/// The rule is exactly "not valid UTF-8", which is the same condition
+/// that makes a file unrepresentable as an `EmittedFile` (its `content`
+/// is a `String`). Text assets under these roots already reach the emit
+/// through the normal emitters — `public/404.html` and
+/// `app/assets/tailwind.css` both do — so restricting to binary avoids
+/// emitting a second copy and keeps the rule one sentence long.
+///
+/// A TEXT asset under these roots that no emitter produces would still
+/// be dropped. That is a different gap and is deliberately not widened
+/// into here: this closes the one where the pipeline is structurally
+/// incapable, not the one where an emitter simply has no rule yet.
+fn collect_binary_assets<V: Vfs + ?Sized>(vfs: &V, dir: &Path, app: &mut App) {
+    for root in BINARY_ASSET_ROOTS {
+        let start = dir.join(root);
+        if vfs.is_dir(&start) {
+            walk_binary_assets(vfs, dir, &start, app);
+        }
+    }
+    // Deterministic order: the emit is byte-compared across runs, and
+    // `read_dir` order is explicitly unspecified by the trait.
+    app.binary_assets.sort_by(|a, b| a.0.cmp(&b.0));
+}
+
+fn walk_binary_assets<V: Vfs + ?Sized>(vfs: &V, root: &Path, dir: &Path, app: &mut App) {
+    let Ok(entries) = vfs.read_dir(dir) else { return };
+    for entry in entries {
+        if vfs.is_dir(&entry) {
+            walk_binary_assets(vfs, root, &entry, app);
+            continue;
+        }
+        // Valid UTF-8 means an emitter can carry it; only what cannot be
+        // a `String` is our business here.
+        if vfs.read_to_string(&entry).is_ok() {
+            continue;
+        }
+        let Ok(bytes) = vfs.read(&entry) else { continue };
+        let rel = entry.strip_prefix(root).unwrap_or(&entry);
+        app.binary_assets
+            .push((rel.to_string_lossy().replace('\\', "/"), bytes));
+    }
 }
 
 /// Splice each concern's `included do` DSL items (already parsed into

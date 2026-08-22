@@ -74,6 +74,18 @@ pub struct App {
     /// Empty when the app ships no `sig/` directory.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub rbs_signatures: HashMap<ClassId, HashMap<Symbol, Ty>>,
+    /// Source files the text pipeline cannot represent — every emitted
+    /// file's content is a `String`, so an app's images, fonts and
+    /// binary test fixtures were silently dropped on the floor. Carried
+    /// as `(relative path, bytes)` and copied VERBATIM into the emitted
+    /// tree; there is nothing to transpile in a JPEG.
+    ///
+    /// `serde(skip)`: these are a passthrough concern, not IR. The app
+    /// JSON round-trip feeds the analyzer and the browser IDE, and
+    /// neither has any use for blob bytes — encoding them as JSON number
+    /// arrays would bloat every dump for nothing.
+    #[serde(skip)]
+    pub binary_assets: Vec<(String, Vec<u8>)>,
     /// App-helper method registry: maps each method name defined in an
     /// `app/helpers/*.rb` module to the helper module (`ClassId`) that
     /// defines it. Rails mixes all helper modules into every view, so a
@@ -336,6 +348,7 @@ impl App {
         Self {
             schema_version: Self::SCHEMA_VERSION,
             schema: Schema::default(),
+            binary_assets: Vec::new(),
             models: Vec::new(),
             library_classes: Vec::new(),
             controllers: Vec::new(),

@@ -315,9 +315,13 @@ fn run_transpile(
     // output, propagating any hard emit failure now.
     let files = files_result?;
     project::write_to_dir(&files, out)?;
+    // The app's own binary files — images, fonts, binary test fixtures.
+    // They never became `EmittedFile`s (that type's content is a
+    // `String`), so before this they were dropped without a word.
+    let assets = project::write_binary_assets(&app.binary_assets, &files, out)?;
     eprintln!(
         "roundhouse: wrote {} files to {} ({})",
-        files.len(),
+        files.len() + assets,
         out.display(),
         target.as_str()
     );

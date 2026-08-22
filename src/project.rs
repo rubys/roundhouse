@@ -974,6 +974,41 @@ pub fn write_to_dir(files: &[(String, String)], dest: &Path) -> Result<(), Strin
     Ok(())
 }
 
+/// Copy the app's binary assets into an emitted tree.
+///
+/// Separate from [`write_to_dir`] because these never became
+/// `EmittedFile`s: that type's `content` is a `String`, so an image or a
+/// binary test fixture could not be represented at all and was dropped
+/// silently. They are copied VERBATIM — there is nothing in a JPEG to
+/// transpile — which is also why they need no target dispatch.
+///
+/// A path an emitter already wrote WINS. The emit is the authority on
+/// any file it knows how to produce; this only fills the holes the
+/// text-only pipeline leaves.
+///
+/// Returns the number of files copied, so the caller can report a
+/// truthful total.
+pub fn write_binary_assets(
+    assets: &[(String, Vec<u8>)],
+    emitted: &[(String, String)],
+    dest: &Path,
+) -> Result<usize, String> {
+    let mut written = 0usize;
+    for (rel, bytes) in assets {
+        if emitted.iter().any(|(p, _)| p == rel) {
+            continue;
+        }
+        let full = dest.join(rel);
+        if let Some(parent) = full.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        }
+        fs::write(&full, bytes).map_err(|e| format!("write {}: {e}", full.display()))?;
+        written += 1;
+    }
+    Ok(written)
+}
+
 /// Sort the emit output (`Vec<EmittedFile>`) into the `(path, content)`
 /// shape this module uses. Stable by path so the archive matrix is
 /// deterministic.
