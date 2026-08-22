@@ -95,6 +95,7 @@ pub mod relation_select_block;
 pub mod send_dispatch;
 pub(crate) mod secure_password;
 pub mod attached;
+pub mod helper_kwargs;
 pub mod column_ops;
 pub mod signed_id;
 pub(crate) mod secure_token;
@@ -388,6 +389,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // constraint of its own: it matches on Rails' own keyword spelling,
     // which no earlier pass rewrites.
     ("attach", &[]),
+    // Moves a helper call's named keyword into the positional slot its
+    // definition lowered to. No ordering constraint: it matches on the
+    // spelling the source wrote, which no earlier pass rewrites.
+    ("helper_kwargs", &[]),
     // Rails-API broadcast calls in ordinary method bodies (a concern's
     // `def broadcast_create`) → `Broadcasts.<action>(…)`. Late, so the
     // `Views::…` render call it synthesizes is not re-walked by the
@@ -580,6 +585,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("duration");
     attached::apply_attach_lowering(app);
     ran!("attach");
+    helper_kwargs::apply_helper_kwarg_positional_lowering(app);
+    ran!("helper_kwargs");
     broadcast_calls::apply_broadcast_calls_lowering(app);
     ran!("broadcast_calls");
     diags.extend(relation_residue::apply_relation_residue_ledger(app, registry));
