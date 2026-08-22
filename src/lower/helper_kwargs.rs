@@ -45,6 +45,7 @@ use crate::expr::{Expr, ExprNode, Literal};
 use crate::ident::Symbol;
 
 pub fn apply_helper_kwarg_positional_lowering(app: &mut App) {
+    apply_to_test_modules(app);
     let params = helper_param_names(app);
     if params.is_empty() {
         return;
@@ -53,6 +54,59 @@ pub fn apply_helper_kwarg_positional_lowering(app: &mut App) {
     super::for_each_hook_body(app, &mut rewrite);
     for view in &mut app.views {
         rewrite_calls(&mut view.body, &params);
+    }
+}
+
+/// The same repair inside a TEST CLASS.
+///
+/// Ingest lowers a keyword parameter the same way wherever it is
+/// declared, so a test's own private helper has the identical break:
+///
+/// ```text
+/// def stub_successful_request(url: "https://www.example.com/")   # def
+/// stub_successful_request(url: "https://fxtwitter.com/…")        # call
+/// ```
+///
+/// campfire's `unfurl_links_controller_test` then hands WebMock the
+/// HASH and gets "URI should be a String … Got: Hash" — the same shape
+/// that emitted `NOT (id.for_user IS NULL)` from a view helper.
+///
+/// Resolved PER TEST CLASS, not through `helper_method_index`: the
+/// callee is the class's own method, so there is no cross-module
+/// ambiguity to rule out and no reason to require a globally unique
+/// name. Two helpers in ONE class with the same name are still skipped,
+/// because then the call site genuinely does not say which.
+fn apply_to_test_modules(app: &mut App) {
+    for tm in &mut app.test_modules {
+        let mut params: HashMap<Symbol, Vec<Symbol>> = HashMap::new();
+        let mut ambiguous: Vec<Symbol> = Vec::new();
+        for m in &tm.helpers {
+            // Same two exclusions as the module path: a `rest` parameter
+            // ends the simple positional story, and one that SURVIVED as
+            // a keyword is already bound correctly.
+            if m.params.iter().any(|p| p.rest || p.keyword) {
+                continue;
+            }
+            let names: Vec<Symbol> = m.params.iter().map(|p| p.name.clone()).collect();
+            if params.insert(m.name.clone(), names).is_some() {
+                ambiguous.push(m.name.clone());
+            }
+        }
+        for name in ambiguous {
+            params.remove(&name);
+        }
+        if params.is_empty() {
+            continue;
+        }
+        if let Some(setup) = &mut tm.setup {
+            rewrite_calls(setup, &params);
+        }
+        for t in &mut tm.tests {
+            rewrite_calls(&mut t.body, &params);
+        }
+        for m in &mut tm.helpers {
+            rewrite_calls(&mut m.body, &params);
+        }
     }
 }
 

@@ -89,6 +89,66 @@ fn a_splat_helper_keeps_its_hash() {
     );
 }
 
+/// THE SAME BREAK INSIDE A TEST CLASS, where the callee is the class's
+/// own private helper rather than a helper module's method.
+///
+/// campfire's `unfurl_links_controller_test` writes
+/// `stub_successful_request(url: "https://fxtwitter.com/…")` against
+/// `def stub_successful_request(url: "https://www.example.com/")`, and
+/// handed WebMock the HASH: "URI should be a String … Got: Hash".
+#[test]
+fn a_test_classs_own_helper_gets_the_same_repair() {
+    let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    tree.insert(PathBuf::from("db/schema.rb"), SCHEMA.as_bytes().to_vec());
+    tree.insert(
+        PathBuf::from("app/models/room.rb"),
+        b"class Room < ApplicationRecord\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("config/routes.rb"),
+        b"Rails.application.routes.draw do\n  resources :rooms\nend\n".to_vec(),
+    );
+    tree.insert(
+        PathBuf::from("test/models/room_test.rb"),
+        br#"require "test_helper"
+
+class RoomTest < ActiveSupport::TestCase
+  test "named" do
+    assert_equal "HQ", titled(name: "HQ")
+  end
+
+  test "default" do
+    assert_equal "Room", titled
+  end
+
+  private
+    def titled(name: "Room")
+      name
+    end
+end
+"#
+        .to_vec(),
+    );
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    // `emit_spinel` is the shared Rails-shape path; the emitted test
+    // files ride out with it.
+    let src = ruby::emit_spinel(&app)
+        .into_iter()
+        .filter(|f| f.path.to_string_lossy().contains("room_test"))
+        .map(|f| f.content)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        src.contains(r#"titled("HQ")"#),
+        "the keyword must bind to its positional slot:\n{src}"
+    );
+    assert!(
+        !src.contains("titled(name:"),
+        "no call site may keep the keyword spelling:\n{src}"
+    );
+}
+
 /// A key naming no parameter at all declines — the call means something
 /// this pass cannot prove.
 #[test]
