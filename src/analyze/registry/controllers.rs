@@ -57,6 +57,18 @@ pub(in crate::analyze) fn register(
     // public: true`) — side-effecting header writes.
     app_ctrl.class_methods.insert(Symbol::from("expires_in"), Ty::Nil);
     app_ctrl.class_methods.insert(Symbol::from("expires_now"), Ty::Nil);
+    // geared_pagination's controller concern — the gem's engine mixes it
+    // into `ActionController::Base`, so the method is on every controller
+    // of an app that carries the gem and is named nowhere in its source.
+    // Gradual rather than Relation-typed: it answers the SAME relation it
+    // was handed (the windowed receiver), and this registry maps a name to
+    // one type with no way to say "argument 0's". Untyped is honest here —
+    // no call site in the corpus consumes the return value, they all read
+    // `@page` from the view. Implementation:
+    // runtime/ruby/action_controller/pagination.rb.
+    app_ctrl
+        .class_methods
+        .insert(Symbol::from("set_page_and_extract_portion_from"), Ty::Untyped);
     // `flash` (FlashHash) and the current action/controller names are
     // available on the controller via implicit self, same as in views.
     app_ctrl.class_methods.insert(

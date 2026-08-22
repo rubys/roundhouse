@@ -1,0 +1,41 @@
+# Typing contract for pagination.rb beside this file.
+#
+# `scope` and the windowed result are `ActiveRecord::Relation`, whose
+# element type is `untyped` in this runtime (see relation.rbs) — a Page
+# is therefore no less typed than the relation it wraps, and gains an
+# element type for free when Relation does.
+module ActionController
+  class Page
+    @number: Integer
+    @per_page: Integer
+    @records_count: Integer
+    @page_count: Integer
+    @records: ActiveRecord::Relation
+
+    def initialize: (ActiveRecord::Relation scope, Integer number, Integer per_page) -> void
+    def number: () -> Integer
+    def per_page: () -> Integer
+    def records: () -> ActiveRecord::Relation
+    def records_count: () -> Integer
+    def page_count: () -> Integer
+    def first?: () -> bool
+    def last?: () -> bool
+    def only?: () -> bool
+    def before_last?: () -> bool
+    def next_param: () -> Integer
+  end
+
+  class Base
+    # Declared even though NO reader exists for it: `@page` is what the
+    # gem's whole API is, and a consumer reading only signatures would
+    # otherwise never learn the field is there. The controller assigns
+    # it in a method body rather than in `initialize`, and the VIEW is
+    # what reads it — through the compiler's controller-ivar threading,
+    # not through a method on this class, which is why adding a `page`
+    # reader here would be inventing surface the gem does not have.
+    @page: ActionController::Page?
+
+    def set_page_and_extract_portion_from: (ActiveRecord::Relation records, per_page: Integer) -> ActiveRecord::Relation
+    def current_page_number: () -> Integer
+  end
+end

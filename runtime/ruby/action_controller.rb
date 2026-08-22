@@ -19,3 +19,7 @@ require_relative "action_controller/cookies"
 # The error `Params.require_key` raises; travels with its consumer for
 # the same reason message_digest does.
 require_relative "action_controller/parameter_missing"
+# geared_pagination's `set_page_and_extract_portion_from` + the `Page` it
+# sets — a third Base reopen kept off the strict-target tables, for the
+# reason its own header gives.
+require_relative "action_controller/pagination"
