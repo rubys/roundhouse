@@ -62,6 +62,15 @@ module ActiveSupport
     def to_s = @seconds.to_s
     def seconds = @seconds
 
+    # Rails parity: a Duration IS its seconds count for equality, so
+    # `1.year == 31556952` is true and `assert_equal 1.year, n` passes
+    # against a plain Integer. `coerce` below covers `<`/`<=`; equality
+    # does not route through it (Ruby's `==` has no coercion protocol),
+    # which is why this is its own method and not a consequence of that.
+    def ==(other)
+      other.is_a?(Duration) ? @seconds == other.seconds : @seconds == other
+    end
+
     # Numeric comparison protocol: `Time.current - created_at <=
     # 14.days` has a Float receiver, and Ruby's numeric `<=>` resolves
     # an unknown operand through its `coerce` — pair the duration up as

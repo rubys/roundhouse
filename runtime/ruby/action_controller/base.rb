@@ -97,6 +97,15 @@ module ActionController
   class Base
     attr_accessor :params, :session, :flash, :request_method, :request_path, :request_format
     attr_reader   :status, :body, :location, :content_type
+    # Cache-Control, split into two TYPED readers rather than Rails'
+    # one mixed Hash. Rails' `response.cache_control` is
+    # `{public: true, max_age: 31556952}` — an Integer and a boolean in
+    # one container, which is the type bag every strict target pays
+    # for. The two facts are kept apart here and re-assembled into
+    # Rails' Hash shape by the TEST harness
+    # (ActionResponse#cache_control), the only reader that wants the
+    # subscript spelling.
+    attr_reader   :cache_control_max_age, :cache_control_public
 
     def initialize
       @params  = {}
@@ -109,6 +118,12 @@ module ActionController
       @content_type = "text/html; charset=utf-8"
       @headers = {}
       @performed = false
+      # Set unconditionally, not on first `expires_in`: an ivar a strict
+      # target never sees assigned has no type to infer, and the readers
+      # above are reachable on every controller. 0 = "no max-age
+      # stated", which is also what a response without the header means.
+      @cache_control_max_age = 0
+      @cache_control_public = false
     end
 
     # True once render/redirect_to/head has produced a response.
@@ -239,6 +254,37 @@ module ActionController
 
     def stale?(etag: nil)
       true
+    end
+
+    # `expires_in 1.year, public: true` — Rails' Cache-Control writer.
+    # campfire's QR code, avatar and logo actions all open with one, and
+    # the QR test reads the result back
+    # (`response.cache_control[:max_age]`), which is what makes this a
+    # VALUE the harness carries rather than a header it would be enough
+    # to buffer.
+    #
+    # SECONDS, not a Duration. `lower::duration`'s `rewrite_expires_in`
+    # unwraps the corpus' `1.year` at the CALL SITE — the same grounding
+    # `signed_id(expires_in:)` gets — so this signature stays Integer
+    # and no strict target pays for an `untyped` parameter here.
+    # `stale_while_revalidate: 0` means "not stated", which keeps the
+    # parameter Integer rather than nullable; two of campfire's three
+    # call sites pass it, so accepting only `public:` would have turned
+    # a NoMethodError into an ArgumentError at those two and looked like
+    # progress.
+    #
+    # NO HEADER IS WRITTEN. Composing the `Cache-Control` string here
+    # and parking it in the buffered-but-unsent `headers` hash above
+    # would be work nothing reads — and `@headers[k] = v` does not
+    # survive the Rust emitter, which renders a Hash index-assign as
+    # `self.headers[k] = v` where `HashMap` wants `.insert()` (E0594:
+    # `IndexMut` is not implemented). The two readers hold everything
+    # the response needs; the wire spelling is the harness's to compose
+    # when it starts emitting headers at all.
+    def expires_in(seconds, public: false, stale_while_revalidate: 0)
+      @cache_control_max_age = seconds
+      @cache_control_public = public
+      nil
     end
 
     def headers

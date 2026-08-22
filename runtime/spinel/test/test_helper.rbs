@@ -45,12 +45,20 @@ class ActionResponse
   def body: () -> String
   def location: () -> String?
   def flash: () -> ActionDispatch::Flash
+  def content_type: () -> String
+  # Rails' mixed `{max_age: Integer, ?public: true}` — the one bag in
+  # the harness, and deliberately not in the shared runtime (see
+  # ActionController::Base's two typed readers).
+  def cache_control: () -> Hash[Symbol, untyped]
 
   def initialize: (
     status: Integer,
     body: String,
     location: String?,
-    flash: ActionDispatch::Flash
+    flash: ActionDispatch::Flash,
+    ?content_type: String,
+    ?cache_control_max_age: Integer,
+    ?cache_control_public: bool
   ) -> void
 
   def redirect?: () -> bool

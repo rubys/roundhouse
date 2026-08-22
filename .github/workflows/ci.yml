@@ -729,8 +729,14 @@ jobs:
       #             does not DECLARE it in its Gemfile, which is its own
       #             gap; installing it here is parity with what the emit
       #             actually loads.
+      #   rqrcode — also from the app: `QrCodeController#show` renders a
+      #             QR as SVG. Gem façades are spinel-only (spinel AOT
+      #             cannot link native gems and ships a raising stub);
+      #             on the CRuby tree `runtime/gem_facades.rb` is swapped
+      #             for guarded requires of the REAL gems, and rqrcode
+      #             joins that list.
       - name: Install the gems the emitted suite loads
-        run: gem install sqlite3 bcrypt nokogiri webmock mocha --no-document
+        run: gem install sqlite3 bcrypt nokogiri webmock mocha rqrcode --no-document
       - name: Fetch once-campfire at the pinned SHA
         run: |
           set -euo pipefail

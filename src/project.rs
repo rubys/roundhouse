@@ -1093,7 +1093,7 @@ fn ruby_runtime_files(
                         # installed. Keep this list in step with main.rb's. (JRuby swaps in\n\
                         # the commonmark-java Markly shim instead — see jruby_runtime_files.)\n\
                         [\"bcrypt\", \"htmlentities\", \"rotp\", \"markly\", \"nokogiri\", \"parslet\",\n\
-                        \x20\"typeid\", \"SVG/Graph/TimeSeries\"].each do |gem_name|\n\
+                        \x20\"typeid\", \"rqrcode\", \"SVG/Graph/TimeSeries\"].each do |gem_name|\n\
                         \x20\x20begin\n\
                         \x20\x20\x20\x20require gem_name\n\
                         \x20\x20rescue LoadError\n\

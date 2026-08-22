@@ -682,6 +682,16 @@ fn json_render_encode(value: &Expr) -> Expr {
     )
 }
 
+/// Add `key: value` to the trailing kwargs hash — unless the call site
+/// ALREADY passes that key, in which case the author's value stands.
+///
+/// The content type implied by `plain:`/`html:`/`json:` is a DEFAULT, and
+/// Rails lets an explicit `content_type:` override it. Appending
+/// unconditionally emitted the key twice; a Ruby hash literal is
+/// last-wins, so `render plain: svg, content_type: "image/svg+xml"`
+/// shipped as `text/plain` — the author's value written down and then
+/// overwritten one entry later, which reads as correct in the emit right
+/// up until you check which one Ruby keeps.
 fn merge_or_append_kwarg(args: &mut Vec<Expr>, key: &str, value: &str, span: Span) {
     let key_node = Expr::new(
         span,
@@ -701,6 +711,15 @@ fn merge_or_append_kwarg(args: &mut Vec<Expr>, key: &str, value: &str, span: Spa
     );
     if let Some(last) = args.last_mut() {
         if let ExprNode::Hash { entries, kwargs: true } = &*last.node {
+            let already_set = entries.iter().any(|(k, _)| {
+                matches!(
+                    &*k.node,
+                    ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == key
+                )
+            });
+            if already_set {
+                return;
+            }
             let mut new_entries = entries.clone();
             new_entries.push((key_node, val_node));
             *last = Expr::new(

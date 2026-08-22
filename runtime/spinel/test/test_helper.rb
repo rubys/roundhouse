@@ -360,14 +360,35 @@ class ActionResponse
   # Handed back as a jar rather than the raw Hash so a Symbol subscript
   # (`response.cookies[:last_room]`, which is what tests write) hits the
   # same key normalization every other read goes through.
-  attr_reader :status, :body, :location, :flash, :cookies
+  attr_reader :status, :body, :location, :flash, :cookies, :content_type
 
-  def initialize(status:, body:, location:, flash:, cookies:)
+  def initialize(status:, body:, location:, flash:, cookies:, content_type: "text/html; charset=utf-8",
+                 cache_control_max_age: 0, cache_control_public: false)
     @status   = status
     @body     = body
     @location = location
     @flash    = flash
     @cookies  = cookies
+    @content_type = content_type
+    @cache_control_max_age = cache_control_max_age
+    @cache_control_public = cache_control_public
+  end
+
+  # Rails' `response.cache_control` — the one place the two TYPED
+  # controller readers (see ActionController::Base) are re-assembled
+  # into the mixed Hash Rails hands back, because the subscript
+  # spelling is what a test writes:
+  #
+  #   assert_equal 1.year, response.cache_control[:max_age].to_i
+  #   assert response.cache_control[:public]
+  #
+  # `:public` is ABSENT rather than false when the response is private,
+  # which is Rails' own shape and what makes the bare truthiness
+  # assertion above mean what it says.
+  def cache_control
+    out = { max_age: @cache_control_max_age }
+    out[:public] = true if @cache_control_public
+    out
   end
 
   def redirect?
@@ -849,6 +870,9 @@ module RequestDispatch
       location: controller.location,
       flash:    controller.flash,
       cookies:  ActionController::CookieJar.new(controller.cookies.pending),
+      content_type: controller.content_type,
+      cache_control_max_age: controller.cache_control_max_age,
+      cache_control_public: controller.cache_control_public,
     )
     # Rails' OWN names, alongside the `__`-prefixed ones the harness
     # methods read. An integration test writes `@response.body` and

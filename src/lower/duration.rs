@@ -115,6 +115,76 @@ pub(crate) fn apply_duration_rewrites(body: &mut Expr, temporal_predicates: bool
     }
     rewrite_duration_comparisons(body);
     rewrite_time_duration_arith(body);
+    rewrite_expires_in(body);
+}
+
+/// `expires_in <dur>, stale_while_revalidate: <dur>` → seconds.
+///
+/// The same grounding `signed_id`'s `expires_in:` gets, for the
+/// CONTROLLER method of that name: the runtime's
+/// `ActionController::Base#expires_in` takes Integer seconds, so the
+/// corpus' spelling — an `ActiveSupport::Duration`, already grounded to
+/// `ActiveSupport::Duration.year(1)` by `rewrite_durations` above — is
+/// unwrapped here rather than at the callee, which would need an
+/// `untyped` parameter and a `to_i` every strict target pays for.
+///
+/// Unconditional `.to_i`, like the signed_id rewrite: on an Integer it
+/// is the identity, so `expires_in 3600` and `expires_in 1.hour` reach
+/// the runtime as the same thing.
+///
+/// Receiverless only. `expires_in` with a receiver is somebody else's
+/// method, and the `expires_in:` KEYWORD is a hash entry rather than a
+/// send, so neither is matched here.
+fn rewrite_expires_in(expr: &mut Expr) {
+    expr.node.for_each_child_mut(&mut rewrite_expires_in);
+    let matches_shape = matches!(
+        &*expr.node,
+        ExprNode::Send { recv, method, args, .. }
+            if method.as_str() == "expires_in"
+                && !args.is_empty()
+                && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef))
+    );
+    if !matches_shape {
+        return;
+    }
+    let ExprNode::Send { args, .. } = &mut *expr.node else { unreachable!() };
+    args[0] = seconds_of(take(&mut args[0]));
+    // `stale_while_revalidate:` rides the trailing kwargs hash and is a
+    // duration in both call sites that pass one.
+    if let Some(last) = args.last_mut() {
+        if let ExprNode::Hash { entries, kwargs } = &mut *last.node {
+            let kwargs = *kwargs;
+            let mut rebuilt = entries.clone();
+            for (k, v) in rebuilt.iter_mut() {
+                let is_swr = matches!(
+                    &*k.node,
+                    ExprNode::Lit { value: Literal::Sym { value } }
+                        if value.as_str() == "stale_while_revalidate"
+                );
+                if is_swr {
+                    *v = seconds_of(v.clone());
+                }
+            }
+            *last = Expr::new(last.span, ExprNode::Hash { entries: rebuilt, kwargs });
+        }
+    }
+}
+
+/// `<e>` → `<e>.to_i`, stamped Int.
+fn seconds_of(inner: Expr) -> Expr {
+    let span = inner.span;
+    let mut out = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(inner),
+            method: Symbol::from("to_i"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    );
+    out.ty = Some(Ty::Int);
+    out
 }
 
 /// Does any app class define its own `after?` / `before?`? Then the

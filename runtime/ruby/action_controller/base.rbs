@@ -84,6 +84,11 @@ module ActionController
     def response: () -> Base
     def fresh_when: (untyped subject) -> void
     def stale?: (?etag: untyped) -> bool
+    # Integer SECONDS — `lower::duration::rewrite_expires_in` grounds the
+    # corpus' `1.year` / `1.week` before the call reaches here.
+    def expires_in: (Integer seconds, ?public: bool, ?stale_while_revalidate: Integer) -> void
+    def cache_control_max_age: () -> Integer
+    def cache_control_public: () -> bool
     def headers: () -> Hash[String, String]
     def send_data: (String data, ?type: String, ?disposition: String) -> void
 
