@@ -1035,7 +1035,20 @@ fn every_runtime_method_body_concretely_typed() {
     // `.rbs` INSTANCE methods, so its result is `untyped` here however
     // the sidecar declares it. The comparison against it is the whole
     // method.
-    const CEILING: usize = 317;
+    // 2026-08-23 317 -> 319: the three relation TERMINALS that borrow
+    // relation state and now give it back — `find_by` and `exists?(id)`
+    // pop the predicate they pushed, `first_n` restores the limit it
+    // borrowed, the same discipline `find` and `pick` already spell
+    // out one screen up. TWO sites, both the locals the restore
+    // forces: `find_by`'s `record` and `exists?`'s `found` hold the
+    // answer across the pop, and each is the R5 `untyped` every
+    // terminal in this file already pays. Not optional bookkeeping:
+    // campfire's `find_messages` probes `find_by(id: params[
+    // :message_id])` and then pages THE SAME relation, so on a plain
+    // /rooms/1 the leftover `WHERE id IS NULL` made a room of a
+    // hundred messages render zero — behind a 200 and a well-formed
+    // page, which is why no test in the app saw it.
+    const CEILING: usize = 319;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

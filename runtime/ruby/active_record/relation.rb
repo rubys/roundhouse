@@ -122,17 +122,21 @@ module ActiveRecord
       self
     end
 
+    # Answers whether it actually PUSHED a clause — a nil or empty
+    # condition pushes none. `find_by` is the caller that needs the
+    # answer: it borrows a predicate and gives it back, so it has to
+    # know whether there is one to pop. The chain methods ignore it.
     def add_condition(condition, args, negate)
       @records = nil
-      return if condition.nil?
+      return false if condition.nil?
       sql = if condition.is_a?(Hash)
         hash_conditions(condition)
       else
         substitute_binds(condition.to_s, args)
       end
-      return if sql == ""
+      return false if sql == ""
       @wheres << (negate ? "NOT (#{sql})" : "(#{sql})")
-      nil
+      true
     end
 
     def order(*parts)
@@ -578,9 +582,18 @@ module ActiveRecord
     # site once it has PROVEN the receiver is a relation, so an Array
     # receiver keeps `Array#first(n)` — lobsters' `split.first(words * 2)`
     # must not be rewritten.
+    #
+    # Also a TERMINAL, so the borrowed `@limit` is restored — as
+    # `first` and `pick` already do — and the one-page load is not
+    # left memoized. Otherwise a relation that is paged and then
+    # counted carries the page size into the count.
     def first_n(n)
+      prior = @limit
       @limit = n
-      to_a
+      rows = to_a
+      @limit = prior
+      @records = nil
+      rows
     end
 
     # The last n IN RELATION ORDER — Rails does not reverse them
@@ -679,8 +692,13 @@ module ActiveRecord
     # rust2 does not narrow an `Option` across `unless x.nil?`.
     def exists?(id = nil)
       return count > 0 if id.nil?
+      # Popped for the same reason `find` and `find_by` pop: a terminal
+      # that answered a question must not narrow the relation it was
+      # asked on.
       @wheres << "#{@table}.id = #{ActiveRecord.adapter.escape_value(id)}"
-      count > 0
+      found = count > 0
+      @wheres.pop
+      found
     end
 
     def length
@@ -843,9 +861,24 @@ module ActiveRecord
       record
     end
 
+    # A TERMINAL, so its predicate is POPPED — the same rule `find`
+    # above spells out, and omitting it here cost campfire its entire
+    # room page. `find_messages` asks `messages.find_by(id:
+    # params[:message_id])` to decide between two pagings and then
+    # pages THE SAME relation; on a plain `/rooms/1` the id is nil, so
+    # the probe left `WHERE id IS NULL` behind and `last_page` answered
+    # zero rows against a room holding a hundred. The page still came
+    # back 200, complete and well-formed, with an empty message list —
+    # which is exactly the failure the app's own tests cannot see.
+    #
+    # `add_condition` answers whether it pushed — a nil or empty
+    # condition pushes nothing — so the pop is guarded by that rather
+    # than issued unconditionally.
     def find_by(conditions)
-      add_condition(conditions, [], false)
-      first
+      pushed = add_condition(conditions, [], false)
+      record = first
+      @wheres.pop if pushed
+      record
     end
 
     # `find_by!` — `find_by` that raises `RecordNotFound` on no match.

@@ -708,7 +708,16 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // its result goes with it — the assign, its value, the `id` read,
     // the `==`, its receiver, the guarded raise and the trailing read.
     // Writing the verify call out a second time instead cost eight.
-    const CEILING: usize = 767;
+    // +8 for the three RELATION TERMINALS that now give their
+    // borrowed state back (`find_by`, `exists?(id)`, `first_n`): each
+    // needs a local to hold the answer across the restore, and every
+    // read of `@wheres`/`@limit` is untyped here because relation.rbs
+    // declares no ivar types. That is the debt this number tracks —
+    // typing those four ivars would retire far more than eight — not
+    // a reason to leave a terminal narrowing the relation it was
+    // asked on. Campfire's room page rendered zero of forty messages
+    // on exactly that leak.
+    const CEILING: usize = 775;
 
     assert!(
         all_untyped.len() <= CEILING,
