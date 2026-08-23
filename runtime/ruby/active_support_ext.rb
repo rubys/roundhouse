@@ -71,4 +71,23 @@ module ActiveSupport
     end
     out
   end
+
+  # `ActiveSupport::MessageVerifier::InvalidSignature` — what a signed
+  # value that does not verify raises. Rails hangs it off the verifier
+  # class, and the NAME is the whole point: a controller that rescues it
+  # is naming this class, so answering some other error means the rescue
+  # never fires. campfire's `Users::AvatarsController` is
+  # `rescue_from(ActiveSupport::MessageVerifier::InvalidSignature) {
+  # head :not_found }` over an avatar URL that carries a signed id.
+  #
+  # A namespace with no verifier in it, because ours is
+  # `ActionController::MessageVerifier` (it serves the cookie jar first).
+  # The error keeps Rails' path so app code that names it resolves.
+  class MessageVerifier
+    class InvalidSignature < StandardError
+      def initialize(message = "ActiveSupport::MessageVerifier::InvalidSignature")
+        super(message)
+      end
+    end
+  end
 end

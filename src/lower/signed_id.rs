@@ -95,10 +95,22 @@ fn rewritten(model: &str, e: &Expr) -> Option<Expr> {
                 return None;
             }
             let purpose = combined_purpose(model, sym_opt(&opts, "purpose")?);
+            // The BANG form verifies through the raising twin. Rails
+            // separates the two failures — a token that does not verify
+            // is `InvalidSignature`, a token that DOES and names no row
+            // is `RecordNotFound` — and the sentinel cannot: `find(0)`
+            // reports both as "Couldn't find … with id=0". The name is
+            // what a rescue matches, so answering the wrong one means a
+            // `rescue_from` that never fires.
+            let verifier = if method.as_str() == "find_signed!" {
+                "verified_id!"
+            } else {
+                "verified_id"
+            };
             let id = send(
                 span,
                 Some(const_path(span, &["ActiveRecord", "SignedId"])),
-                "verified_id",
+                verifier,
                 vec![token.clone(), str_lit(span, &purpose)],
             );
             let recv = const_path(span, &[model]);
@@ -278,7 +290,11 @@ mod tests {
     }
 
     /// The bang form raises on a miss and the plain one answers nil —
-    /// `find` and `find_by` are that pair over the sentinel id.
+    /// `find` and `find_by` are that pair over the sentinel id. The
+    /// VERIFIER differs too: the bang form uses the raising twin, so a
+    /// token that does not verify is an `InvalidSignature` rather than a
+    /// `RecordNotFound` for id 0. The name is what a `rescue_from`
+    /// matches.
     #[test]
     fn find_signed_pairs_with_find_by_and_the_bang_with_find() {
         let token = || {
@@ -300,7 +316,7 @@ mod tests {
         rewrite("User", &mut bang);
         assert_eq!(
             rendered(&bang),
-            "User.find(ActiveRecord::SignedId.verified_id(sid, \"user/avatar\"))"
+            "User.find(ActiveRecord::SignedId.verified_id!(sid, \"user/avatar\"))"
         );
     }
 

@@ -482,12 +482,19 @@ The lowered `find_signed!` is therefore `Model.find(0)`, which raises
 `ActiveRecord::RecordNotFound` where Rails raises
 `ActiveSupport::MessageVerifier::InvalidSignature`.
 
-**What it costs.** Both are a 404 through the dispatcher, so a plain
-app sees the same response. A controller that rescues the signature
-error BY NAME does not catch this one — campfire's
-`Users::AvatarsController` has exactly that
-`rescue_from(ActiveSupport::MessageVerifier::InvalidSignature)`, and it
-would go unfired.
+**CLOSED for the BANG form.** `find_signed!` verifies through
+`SignedId.verified_id!`, which raises
+`ActiveSupport::MessageVerifier::InvalidSignature` for a token that does
+not verify and leaves `RecordNotFound` to a token that DOES and names no
+row — Rails' own split. The name is the whole point: campfire's
+`Users::AvatarsController` rescues the signature error BY NAME over an
+avatar URL carrying a signed id, and against a `RecordNotFound` that
+rescue never fired.
+
+**Still divergent:** the non-bang `find_signed` reads the same `0`
+sentinel through `find_by(id: 0)`, which answers nil — the same answer
+Rails gives, by a different route. A row whose id really is `0` would
+be indistinguishable, and no schema here mints one.
 
 Rails' `expires_at:` (an absolute instant) is not claimed; only
 `expires_in:`. A call passing it is left alone rather than rewritten,

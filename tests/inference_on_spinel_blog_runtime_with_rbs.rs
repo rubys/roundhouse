@@ -698,7 +698,17 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // This counter charges the receiver as well as the send, which is
     // why it moves by two where the runtime_src_integration ceiling
     // moves by one.
-    const CEILING: usize = 760;
+    // 2026-08-23 760 -> 767: `SignedId.verified_id!` — the raising twin
+    // of the sentinel read, so `find_signed!` answers
+    // `InvalidSignature` for a token that does not verify and
+    // `RecordNotFound` only for one that does and names no row. The
+    // NAME is what a `rescue_from` matches. SEVEN sites, all one
+    // comparison's worth: this gate's registry carries instance methods
+    // only, so a class-method send stays a TyVar and everything reading
+    // its result goes with it — the assign, its value, the `id` read,
+    // the `==`, its receiver, the guarded raise and the trailing read.
+    // Writing the verify call out a second time instead cost eight.
+    const CEILING: usize = 767;
 
     assert!(
         all_untyped.len() <= CEILING,

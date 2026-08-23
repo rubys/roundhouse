@@ -8,4 +8,11 @@ module ActiveSupport
 
   # `errors[:field]` -> the messages for that field, prefix stripped.
   def self.errors_for: (Array[String] errors, String prefix) -> Array[String]
+
+  # Rails' name for "this signed value does not verify" — see the .rb.
+  class MessageVerifier
+    class InvalidSignature < StandardError
+      def initialize: (?String message) -> void
+    end
+  end
 end

@@ -60,5 +60,26 @@ module ActiveRecord
       return 0 if json == ""
       json.to_i
     end
+
+    # The BANG form's half: Rails' `find_signed!` raises
+    # `ActiveSupport::MessageVerifier::InvalidSignature` for a token that
+    # does not verify, and `RecordNotFound` only when a token that DOES
+    # verify names no row. The sentinel above cannot tell those apart —
+    # `find(0)` reports both as "Couldn't find … with id=0" — so the two
+    # readings are two methods rather than one plus a guess.
+    #
+    # It matters because the name is what a rescue matches:
+    # campfire's `Users::AvatarsController` rescues the signature error
+    # BY NAME over an avatar URL carrying a signed id, and against a
+    # RecordNotFound that rescue never fired.
+    # Over `verified_id` rather than beside it: the sentinel already
+    # marks the failure, and a second copy of the verify call would be
+    # eight more untyped sites in the shared corpus for a fact one
+    # comparison already carries. A real row id is never 0.
+    def self.verified_id!(token, purpose)
+      id = ActiveRecord::SignedId.verified_id(token, purpose)
+      raise ActiveSupport::MessageVerifier::InvalidSignature if id == 0
+      id
+    end
   end
 end

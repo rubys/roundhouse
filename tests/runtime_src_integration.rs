@@ -1026,7 +1026,16 @@ fn every_runtime_method_body_concretely_typed() {
     // this file pays (`find_by!` two lines down has the identical
     // guard and the identical site). Nothing new became gradual — the
     // method already read that local to return it.
-    const CEILING: usize = 316;
+    // 2026-08-23 316 -> 317: `SignedId.verified_id!`, the raising twin
+    // of the sentinel read — so `find_signed!` answers
+    // `InvalidSignature` for a token that does not verify and
+    // `RecordNotFound` only for one that does and names no row. ONE
+    // site: `ActiveRecord::SignedId.verified_id(...)` is a class-method
+    // send, and this gate's registry is built from the runtime's own
+    // `.rbs` INSTANCE methods, so its result is `untyped` here however
+    // the sidecar declares it. The comparison against it is the whole
+    // method.
+    const CEILING: usize = 317;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",
