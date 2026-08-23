@@ -1843,47 +1843,82 @@ pub(crate) fn partial_form_bindings(
             if (method.as_str() == "render" || method.as_str() == "render_to_string")
                 && !args.is_empty()
             {
-                if let ExprNode::Hash { entries, kwargs: true } = &*args[0].node {
-                    let mut partial: Option<String> = None;
-                    let mut form_local: Option<String> = None;
-                    let mut record_local: Option<String> = None;
-                    for (k, v) in entries {
-                        let key = match &*k.node {
-                            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str(),
-                            _ => "",
-                        };
-                        match key {
-                            "partial" => {
-                                if let ExprNode::Lit { value: Literal::Str { value } } =
-                                    &*v.node
-                                {
-                                    partial = Some(value.clone());
-                                }
-                            }
-                            "locals" => {
-                                if let ExprNode::Hash { entries: le, .. } = &*v.node {
-                                    for (lk, lv) in le {
-                                        let ExprNode::Lit {
-                                            value: Literal::Sym { value: lname },
-                                        } = &*lk.node
-                                        else {
-                                            continue;
-                                        };
-                                        if simple_ref(lv).is_some_and(|n| n == form_param) {
-                                            form_local =
-                                                Some(lname.as_str().to_string());
-                                        } else if simple_ref(lv)
-                                            .is_some_and(|n| record_refs.contains(&n))
-                                            || is_form_object_read(lv, form_param)
+                // The partial's path and its locals hash, from EITHER
+                // spelling. `render partial: "x", locals: { … }` names
+                // both under keywords; the shorthand `render "x", form:
+                // form, bot: @bot` puts the path positionally and the
+                // locals in the trailing kwargs hash. Both are the same
+                // call to Rails, and `render_locals_keys` — the function
+                // that derives the partial's SIGNATURE — has always read
+                // both. Reading only the keyword form here is what left
+                // campfire's `accounts/bots/_form` unbound: its `form.*`
+                // calls stayed as sends against a `form` local that the
+                // signature filter had already removed, so the emitted
+                // partial called its OWN module function `form()` and
+                // died on arity.
+                let (partial_path, locals): (Option<String>, Option<&Vec<(Expr, Expr)>>) =
+                    match &*args[0].node {
+                        ExprNode::Hash { entries, kwargs: true } => {
+                            let mut p = None;
+                            let mut l = None;
+                            for (k, v) in entries {
+                                let key = match &*k.node {
+                                    ExprNode::Lit { value: Literal::Sym { value } } => {
+                                        value.as_str()
+                                    }
+                                    _ => "",
+                                };
+                                match key {
+                                    "partial" => {
+                                        if let ExprNode::Lit {
+                                            value: Literal::Str { value },
+                                        } = &*v.node
                                         {
-                                            record_local =
-                                                Some(lname.as_str().to_string());
+                                            p = Some(value.clone());
                                         }
                                     }
+                                    "locals" => {
+                                        if let ExprNode::Hash { entries: le, .. } = &*v.node {
+                                            l = Some(le);
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
-                            _ => {}
+                            (p, l)
                         }
+                        ExprNode::Lit { value: Literal::Str { value: pname } } => {
+                            let l = args.get(1).and_then(|h| match &*h.node {
+                                ExprNode::Hash { entries, kwargs: true } => Some(entries),
+                                _ => None,
+                            });
+                            (Some(pname.clone()), l)
+                        }
+                        _ => (None, None),
+                    };
+                {
+                    let mut partial: Option<String> = partial_path;
+                    let mut form_local: Option<String> = None;
+                    let mut record_local: Option<String> = None;
+                    if let Some(le) = locals {
+                        for (lk, lv) in le {
+                            let ExprNode::Lit { value: Literal::Sym { value: lname } } =
+                                &*lk.node
+                            else {
+                                continue;
+                            };
+                            if simple_ref(lv).is_some_and(|n| n == form_param) {
+                                form_local = Some(lname.as_str().to_string());
+                            } else if simple_ref(lv)
+                                .is_some_and(|n| record_refs.contains(&n))
+                                || is_form_object_read(lv, form_param)
+                            {
+                                record_local = Some(lname.as_str().to_string());
+                            }
+                        }
+                    }
+                    if form_local.is_none() {
+                        partial = None;
                     }
                     if let (Some(p), Some(form_local), Some(record_local)) =
                         (partial, form_local, record_local)
