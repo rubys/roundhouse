@@ -9,7 +9,7 @@ use ruby_prism::parse;
 
 use crate::dialect::{LibraryClass, MethodDef, MethodReceiver, Param};
 use crate::effect::EffectSet;
-use crate::expr::{Expr, ExprNode, LValue};
+use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ident::VarId;
 use crate::span::Span;
 use crate::{ClassId, Symbol};
@@ -58,7 +58,13 @@ pub fn ingest_library_classes(
     let root = result.node();
     let mut out = Vec::new();
     for (scope, class) in find_all_classes_with_scope(&root) {
-        out.push(library_class_from_node_with_scope(&class, &scope, file)?);
+        let (lc, struct_base) = library_class_and_struct_base(&class, &scope, file)?;
+        // BEFORE the class it serves: a superclass has to be defined
+        // when the `class X < Y` line runs, and these two share a file.
+        if let Some(base) = struct_base {
+            out.push(base);
+        }
+        out.push(lc);
     }
     for (scope, module) in find_all_modules_with_scope(&root) {
         // A nested `ClassMethods` is not a namespace of its own — it's
@@ -178,6 +184,16 @@ pub(super) fn library_class_from_node_with_scope(
     scope: &[String],
     file: &str,
 ) -> IngestResult<LibraryClass> {
+    library_class_and_struct_base(class, scope, file).map(|(lc, _)| lc)
+}
+
+/// The class, plus the synthesized base a `Struct.new(...)` superclass
+/// expression turned into (`None` for every ordinary class).
+pub(super) fn library_class_and_struct_base(
+    class: &ruby_prism::ClassNode<'_>,
+    scope: &[String],
+    file: &str,
+) -> IngestResult<(LibraryClass, Option<LibraryClass>)> {
     let name_path = class_name_path(class).ok_or_else(|| IngestError::Unsupported {
         file: file.into(),
         message: "library class name must be a simple constant or path".into(),
@@ -189,20 +205,152 @@ pub(super) fn library_class_from_node_with_scope(
     let parent = class.superclass().and_then(|n| {
         constant_path_of(&n).map(|p| ClassId(Symbol::from(p.join("::"))))
     });
+    // A superclass EXPRESSION — `class Image < Struct.new(:asset_path,
+    // :width, :height)`. `constant_path_of` has no answer for a call
+    // node, so the parent used to come back None and the class emitted
+    // as a bare `class Image`: its `super(...)` reached
+    // `BasicObject#initialize` and the app died at LOAD time with
+    // "wrong number of arguments". See `struct_superclass_members`.
+    let struct_members = if parent.is_none() {
+        class.superclass().and_then(|n| struct_superclass_members(&n))
+    } else {
+        None
+    };
+    let parent = match &struct_members {
+        Some(_) => Some(struct_base_id(&owner)),
+        None => parent,
+    };
 
     let (includes, methods, constants, unknown_calls) =
         walk_decl_body(class.body(), &owner, file, false)?;
-    Ok(LibraryClass {
-        name: owner,
+    let base = struct_members
+        .as_ref()
+        .map(|members| struct_base_class(&owner, members));
+    Ok((
+        LibraryClass {
+            name: owner,
+            is_module: false,
+            parent,
+            includes,
+            methods,
+            nullable_columns: Vec::new(),
+            origin: None,
+            constants,
+            unknown_calls,
+        },
+        base,
+    ))
+}
+
+/// `Struct.new(:a, :b, :c)` in SUPERCLASS position → its member names.
+/// `None` for anything else, including the keyword-init form
+/// (`Struct.new(:a, keyword_init: true)`) and a `Struct.new(...) do …
+/// end` carrying a body: both mean something this synthesis does not
+/// supply, and answering as though they were the positional form would
+/// build a class with the wrong constructor.
+fn struct_superclass_members(node: &ruby_prism::Node<'_>) -> Option<Vec<Symbol>> {
+    let call = node.as_call_node()?;
+    if call.name().as_slice() != b"new" || call.block().is_some() {
+        return None;
+    }
+    let recv = call.receiver()?;
+    if constant_path_of(&recv)? != vec!["Struct".to_string()] {
+        return None;
+    }
+    let args = call.arguments()?;
+    let mut members = Vec::new();
+    for arg in args.arguments().iter() {
+        // Symbol literals only — a `keyword_init:` keyword arrives as a
+        // KeywordHashNode and lands here as a non-symbol, which is what
+        // makes this a rejection rather than a silent drop.
+        members.push(Symbol::from(symbol_value(&arg)?));
+    }
+    if members.is_empty() {
+        return None;
+    }
+    Some(members)
+}
+
+/// The name given to the anonymous struct that stood in superclass
+/// position: a SIBLING of the class it serves, not a nested constant.
+/// `Sound::Image` gets `Sound::ImageStruct` — nesting it would put a
+/// constant called `Struct` inside the class and shadow ::Struct for
+/// every body in it.
+fn struct_base_id(owner: &ClassId) -> ClassId {
+    ClassId(Symbol::from(format!("{}Struct", owner.0.as_str())))
+}
+
+/// The class an anonymous `Struct.new(:a, :b)` becomes: a reader and a
+/// writer per member, and a positional constructor that assigns them in
+/// declaration order — which is what makes the subclass's `super(a, b)`
+/// resolve.
+///
+/// WHAT IT IS NOT. `Struct` also gives `to_a`, `==`, `each`, `members`,
+/// `[]` and `deconstruct`. None is reached in the corpus, and each is a
+/// separate decision (`==` in particular is VALUE equality, which is
+/// the whole reason a Ruby author reaches for Struct at all). They are
+/// left out rather than approximated, so a call to one is a
+/// NoMethodError naming the method instead of a wrong answer.
+///
+/// Every parameter defaults to nil, matching Struct: `Point.new(1)`
+/// leaves `y` nil rather than raising.
+fn struct_base_class(owner: &ClassId, members: &[Symbol]) -> LibraryClass {
+    let base = struct_base_id(owner);
+    let mut methods = Vec::new();
+    for m in members {
+        methods.push(synth_attr_reader(&base, m, MethodReceiver::Instance));
+        methods.push(synth_attr_writer(&base, m, MethodReceiver::Instance));
+    }
+    let params: Vec<Param> = members
+        .iter()
+        .map(|m| {
+            let mut p = Param::positional(m.clone());
+            p.default = Some(Expr::new(Span::synthetic(), ExprNode::Lit { value: Literal::Nil }));
+            p
+        })
+        .collect();
+    let assigns: Vec<Expr> = members
+        .iter()
+        .map(|m| {
+            Expr::new(
+                Span::synthetic(),
+                ExprNode::Assign {
+                    target: LValue::Ivar { name: m.clone() },
+                    value: Expr::new(
+                        Span::synthetic(),
+                        ExprNode::Var { id: VarId(0), name: m.clone() },
+                    ),
+                },
+            )
+        })
+        .collect();
+    methods.push(MethodDef {
+        name: Symbol::from("initialize"),
+        receiver: MethodReceiver::Instance,
+        params,
+        body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs: assigns }),
+        signature: None,
+        effects: EffectSet::default(),
+        enclosing_class: Some(base.0.clone()),
+        kind: crate::dialect::AccessorKind::Method,
+        is_async: false,
+        mutates_self: true,
+        block_param: None,
+    });
+    LibraryClass {
+        name: base,
         is_module: false,
-        parent,
-        includes,
+        parent: None,
+        includes: Vec::new(),
         methods,
         nullable_columns: Vec::new(),
-        origin: None,
-        constants,
-        unknown_calls,
-    })
+        origin: Some(crate::dialect::LibraryClassOrigin::StructSuperclass {
+            owner: owner.0.clone(),
+            members: members.to_vec(),
+        }),
+        constants: Vec::new(),
+        unknown_calls: Vec::new(),
+    }
 }
 
 /// Same as `library_class_from_node` but for module-as-namespace

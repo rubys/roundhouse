@@ -716,6 +716,16 @@ pub enum LibraryClassOrigin {
         resource: Symbol,
         fields: Vec<Symbol>,
     },
+    /// The class a `class X < Struct.new(:a, :b)` superclass EXPRESSION
+    /// was turned into. `owner` is the subclass's full path; `members`
+    /// are the struct's fields in declaration order. Carried so a
+    /// reader of the emitted tree — or a later pass — can tell this
+    /// class from one the app wrote, and so a target that has a native
+    /// struct can recognize the shape instead of re-detecting it.
+    StructSuperclass {
+        owner: Symbol,
+        members: Vec<Symbol>,
+    },
 }
 
 fn is_false(b: &bool) -> bool {
