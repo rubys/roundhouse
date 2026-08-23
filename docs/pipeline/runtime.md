@@ -857,6 +857,28 @@ exactly the sizes the custom-logo tests expect. They pass on the
 fallback. A dimension assertion cannot see this divergence; only the
 pixels could.
 
+### A rich text materialized by a READ is not written through
+
+`message.body` answers an `ActionText::RichText` whether or not a row
+exists — that is what makes `body.to_plain_text` safe on a message with
+none. Rails AUTOSAVES that built record, putting an empty row in the
+table for a message nobody ever gave a body; here the autosave skips a
+record that is still unsaved AND still blank.
+
+**Why the difference shows up here and not in Rails.** Rails' fixture
+loader inserts rows with raw SQL and runs no callbacks, so a `Message`
+never reads its own `body` during a load. Ours loads THROUGH the model,
+so campfire's search-index callback read `body`, the read materialized
+an empty rich text, and `after_save` claimed the
+`(record_type, record_id, name)` unique key — before the rich-text
+fixture, whose thirteen records are every message's actual text, could
+insert its own row.
+
+**What it costs.** An app that reads `record.<rich_text>` and then saves,
+without ever assigning, gets no row where Rails would leave a blank one.
+Nothing can observe the difference through the reader (both answer a
+blank content); a direct query for the row can.
+
 ### `destroy!` cannot fail
 
 Rails raises `RecordNotDestroyed` when a `before_destroy` callback

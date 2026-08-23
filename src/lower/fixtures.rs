@@ -108,7 +108,7 @@ fn lower_fixture(fixture: &Fixture, app: &App) -> LoweredFixture {
             label: label.clone(),
             fields: raw_fields
                 .iter()
-                .filter_map(|(k, v)| resolve_field(k, v, model, app))
+                .flat_map(|(k, v)| resolve_field(k, v, model, app))
                 .collect(),
         })
         .collect();
@@ -121,20 +121,35 @@ fn lower_fixture(fixture: &Fixture, app: &App) -> LoweredFixture {
     }
 }
 
-/// Resolve one raw (key, value) entry into a lowered field. Returns
-/// `None` when the key doesn't match a known column or association —
-/// caller silently drops such entries today, mirroring railcar's
-/// tolerance for scaffolding-only columns.
+/// Resolve one raw (key, value) entry into the lowered field(s) it
+/// names. EMPTY when the key doesn't match a known column or
+/// association — caller silently drops such entries today, mirroring
+/// railcar's tolerance for scaffolding-only columns.
+///
+/// A Vec rather than an Option because one key can name TWO columns: a
+/// POLYMORPHIC reference (`record: first (Message)`) writes both the id
+/// and the type, and writing only one of them is worse than writing
+/// neither — a row keyed to the right id under no type belongs to
+/// every model at once.
 fn resolve_field(
     key: &Symbol,
     value: &FixtureValue,
     model: Option<&Model>,
     app: &App,
-) -> Option<LoweredFixtureField> {
+) -> Vec<LoweredFixtureField> {
+    resolve_field_inner(key, value, model, app).unwrap_or_default()
+}
+
+fn resolve_field_inner(
+    key: &Symbol,
+    value: &FixtureValue,
+    model: Option<&Model>,
+    app: &App,
+) -> Option<Vec<LoweredFixtureField>> {
     let model = model?;
 
     if let Some(ty) = model.attributes.fields.get(key) {
-        return Some(LoweredFixtureField {
+        return Some(vec![LoweredFixtureField {
             column: key.clone(),
             value: match value {
                 FixtureValue::Scalar(raw) => {
@@ -154,7 +169,7 @@ fn resolve_field(
                 }
                 FixtureValue::Ruby(expr) => LoweredFixtureValue::Ruby(expr.clone()),
             },
-        });
+        }]);
     }
 
     // Only a scalar can name another fixture's label — `creator: <%=
@@ -182,9 +197,50 @@ fn resolve_field(
             name,
             target,
             foreign_key,
+            polymorphic,
             ..
         } = assoc
         {
+            // A POLYMORPHIC reference names its class inline, which is
+            // how Rails' fixtures spell the two columns as one key:
+            //
+            //   record: first (Message)   ->  record_id, record_type
+            //
+            // The declared `target` is meaningless here (the synthesizer
+            // parks a placeholder), so the class comes from the value.
+            if *polymorphic && name == key {
+                let Some((label, class)) = split_polymorphic_reference(value) else {
+                    continue;
+                };
+                let target_fixture = Symbol::from(
+                    crate::naming::pluralize_snake(class.as_str()).as_str(),
+                );
+                let known = app
+                    .fixtures
+                    .iter()
+                    .find(|f| f.name.as_str() == target_fixture.as_str())
+                    .map(|f| f.records.keys().any(|l| l.as_str() == label))
+                    .unwrap_or(false);
+                if !known {
+                    continue;
+                }
+                return Some(vec![
+                    LoweredFixtureField {
+                        column: foreign_key.clone(),
+                        value: LoweredFixtureValue::FkLookup {
+                            target_fixture,
+                            target_label: Symbol::from(label.as_str()),
+                        },
+                    },
+                    LoweredFixtureField {
+                        column: Symbol::from(format!("{}_type", name.as_str())),
+                        value: LoweredFixtureValue::Literal {
+                            ty: Ty::Str,
+                            raw: class,
+                        },
+                    },
+                ]);
+            }
             if name == key {
                 let target_fixture = Symbol::from(
                     crate::naming::pluralize_snake(target.0.as_str()).as_str(),
@@ -198,18 +254,31 @@ fn resolve_field(
                     .map(|f| f.records.keys().any(|l| l.as_str() == value))
                     .unwrap_or(false)
                 {
-                    return Some(LoweredFixtureField {
+                    return Some(vec![LoweredFixtureField {
                         column: foreign_key.clone(),
                         value: LoweredFixtureValue::FkLookup {
                             target_fixture,
                             target_label,
                         },
-                    });
+                    }]);
                 }
             }
         }
     }
     None
+}
+
+/// `first (Message)` -> `("first", "Message")`. Rails' own spelling for
+/// a polymorphic fixture reference, and the only one it accepts —
+/// anything else (a bare label, a Ruby expression) is not a reference
+/// this can resolve, because the type column has nowhere to come from.
+fn split_polymorphic_reference(scalar: &str) -> Option<(String, String)> {
+    let (label, rest) = scalar.split_once(" (")?;
+    let class = rest.strip_suffix(')')?;
+    if label.is_empty() || class.is_empty() {
+        return None;
+    }
+    Some((label.trim().to_string(), class.trim().to_string()))
 }
 
 /// The value an enum column actually stores for `raw`, when `raw` names

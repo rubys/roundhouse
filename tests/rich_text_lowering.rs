@@ -233,3 +233,60 @@ fn an_option_carrying_declaration_is_not_claimed() {
         "an unclaimed declaration must not synthesize the record model"
     );
 }
+
+/// The synthesized record carries the schema's ATTRIBUTES ROW, not an
+/// empty one.
+///
+/// `Row::closed()` here was not a harmless placeholder.
+/// `lower::fixtures::resolve_field` drops any fixture key that is not a
+/// known column, so campfire's `action_text/rich_texts.yml` — thirteen
+/// records of `record:`, `name:` and `body:` — lowered to thirteen bare
+/// `id` assignments. Every message's rich text loaded EMPTY, and the
+/// webhook payload test read `""` where the fixture says "First post!".
+///
+/// The column ACCESSORS were never missing (`model_to_library` reads the
+/// schema directly); only the typing row was, which is why nothing else
+/// complained.
+#[test]
+fn the_synthesized_record_carries_the_schemas_columns() {
+    let app = app();
+    let rich_text = app
+        .models
+        .iter()
+        .find(|m| m.name.0.as_str() == "ActionText::RichText")
+        .expect("ActionText::RichText synthesized");
+    for col in ["body", "name", "record_id", "record_type"] {
+        assert!(
+            rich_text.attributes.fields.contains_key(&roundhouse::ident::Symbol::from(col)),
+            "column {col} missing from the attributes row: {:?}",
+            rich_text.attributes.fields.keys().collect::<Vec<_>>()
+        );
+    }
+}
+
+/// A rich text materialized by a READ is not written through.
+///
+/// `message.body` answers a RichText whether or not a row exists — that
+/// is what makes `body.to_plain_text` safe on a message with none — and
+/// autosaving THAT put an empty row in the table for a message nobody
+/// ever gave a body. Rails inserts it too and never notices, because its
+/// fixture loader uses raw SQL and runs no callbacks; ours loads through
+/// the model, so a `Message` whose own callbacks read `body` claimed the
+/// `(record_type, record_id, name)` unique key before the rich-text
+/// fixture could.
+#[test]
+fn autosave_skips_a_rich_text_that_was_only_read() {
+    let app = app();
+    let lc = lower(&app, "Message");
+    let save = instance_method(&lc, "_save_rich_text_body")
+        .expect("_save_rich_text_body synthesized");
+    let body = format!("{:?}", save.body);
+    assert!(
+        body.contains("\"id\"") && body.contains("Int { value: 0 }"),
+        "guards on the record being unsaved:\n{body}"
+    );
+    assert!(
+        body.contains("Str { value: \"\" }"),
+        "…and on its body being empty:\n{body}"
+    );
+}

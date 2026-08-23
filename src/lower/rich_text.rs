@@ -53,7 +53,7 @@ use crate::dialect::{
 use crate::expr::{BoolOpKind, BoolOpSurface, Expr, ExprNode, LValue, Literal};
 use crate::ident::{ClassId, Symbol, TableRef, VarId};
 use crate::span::Span;
-use crate::ty::{Row, Ty};
+use crate::ty::Ty;
 use crate::App;
 
 use super::model_to_library::{
@@ -130,9 +130,20 @@ pub fn synthesize_record_model(app: &mut App) {
     if app.models.iter().any(|m| m.name == class) {
         return;
     }
-    if !app.schema.tables.contains_key(&Symbol::from(RECORD_TABLE)) {
-        return;
-    }
+    let Some(table) = app.schema.tables.get(&Symbol::from(RECORD_TABLE)) else { return };
+    // The attributes ROW, from the schema — the same thing an ordinary
+    // model gets at ingest. `Row::closed()` here was not a placeholder
+    // with no consequence: `lower::fixtures::resolve_field` drops any
+    // fixture key that is not a known column, so campfire's
+    // `action_text/rich_texts.yml` — thirteen records of `record:`,
+    // `name:` and `body:` — lowered to thirteen bare `id` assignments.
+    // Every message's rich text loaded EMPTY, and the webhook payload
+    // test read `""` where the fixture says "First post!".
+    //
+    // The column ACCESSORS were never missing (model_to_library reads
+    // the schema directly); only the typing row was, which is why
+    // nothing else complained.
+    let attributes = crate::ingest::model::row_from_table(table);
     // `belongs_to :record, polymorphic: true` is declared (rather than
     // written out) because the has_one side is what needed the scope;
     // this side is an ordinary polymorphic belongs_to and the existing
@@ -164,7 +175,7 @@ pub fn synthesize_record_model(app: &mut App) {
         parent: Some(ClassId(Symbol::from("ApplicationRecord"))),
         table: TableRef(Symbol::from(RECORD_TABLE)),
         primary_key: None,
-        attributes: Row::closed(),
+        attributes,
         body,
         span: Span::synthetic(),
         enums: indexmap::IndexMap::new(),
@@ -484,7 +495,43 @@ fn push_owner_methods(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol
         Expr::new(
             Span::synthetic(),
             ExprNode::If {
-                cond: no_arg_send(ivar(cache.as_str()), "nil?"),
+                // Nothing built, or something built and never written
+                // to. A READ materializes the record — `message.body`
+                // answers a RichText whether or not a row exists, which
+                // is what makes `body.to_plain_text` safe — and writing
+                // THAT through would put an empty row in the table for a
+                // message nobody ever gave a body.
+                //
+                // Rails does insert that row (autosave saves any new
+                // associated record), and it never notices because its
+                // FIXTURE loader inserts rows with raw SQL and runs no
+                // callbacks at all. Ours loads through the model, so a
+                // `Message` whose own callbacks read `body` claimed the
+                // `(record_type, record_id, name)` unique key BEFORE the
+                // rich-text fixture — which is a UNIQUE violation the
+                // moment those fixtures carry a real `record:`.
+                //
+                // An empty rich text is not a rich text. Ledgered.
+                cond: Expr::new(
+                    Span::synthetic(),
+                    ExprNode::BoolOp {
+                        op: BoolOpKind::Or,
+                        surface: BoolOpSurface::default(),
+                        left: no_arg_send(ivar(cache.as_str()), "nil?"),
+                        right: Expr::new(
+                            Span::synthetic(),
+                            ExprNode::BoolOp {
+                                op: BoolOpKind::And,
+                                surface: BoolOpSurface::default(),
+                                left: eq_zero(no_arg_send(ivar(cache.as_str()), "id")),
+                                right: eq_empty_str(no_arg_send(
+                                    no_arg_send(ivar(cache.as_str()), "body"),
+                                    "to_s",
+                                )),
+                            },
+                        ),
+                    },
+                ),
                 then_branch: nil_lit(),
                 else_branch: seq(vec![
                     attr_assign(ivar(cache.as_str()), "record_id", ivar("id")),
@@ -562,6 +609,38 @@ fn content_new(arg: Expr) -> Expr {
             args: vec![arg],
             block: None,
             parenthesized: true,
+        },
+    )
+}
+
+/// `<expr> == 0` — the unsaved-record test. `id` is `0` before save
+/// here, not nil (ledgered in docs/pipeline/runtime.md).
+fn eq_zero(recv: Expr) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(recv),
+            method: Symbol::from("=="),
+            args: vec![Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Int { value: 0 } },
+            )],
+            block: None,
+            parenthesized: false,
+        },
+    )
+}
+
+/// `<expr> == ""`.
+fn eq_empty_str(recv: Expr) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(recv),
+            method: Symbol::from("=="),
+            args: vec![lit_str(String::new())],
+            block: None,
+            parenthesized: false,
         },
     )
 }

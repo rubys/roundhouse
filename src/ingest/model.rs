@@ -1423,7 +1423,7 @@ fn default_habtm_table(owner: &ClassId, target_plural_sym: &str) -> String {
     crate::naming::habtm_join_table(owner.0.as_str(), target_plural_sym)
 }
 
-pub(super) fn row_from_table(table: &Table) -> Row {
+pub(crate) fn row_from_table(table: &Table) -> Row {
     let mut fields = IndexMap::new();
     for col in &table.columns {
         fields.insert(col.name.clone(), ty_of_column_slot(col));
