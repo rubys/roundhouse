@@ -321,7 +321,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             block: Some(block),
             ..
         } if method.as_str() == "each" && args.is_empty() => {
-            let ExprNode::Lambda { params, body, block_style, .. } = &*block.node else {
+            let ExprNode::Lambda { params, rest_param, body, block_style, .. } = &*block.node else {
                 return vec![todo_io_append("each block shape", stmt.span)];
             };
             let var_name = params
@@ -346,7 +346,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             };
             let block_lambda = Expr::new(
                 Span::synthetic(),
-                ExprNode::Lambda { rest_param: None,
+                ExprNode::Lambda { rest_param: rest_param.clone(),
                     params: params.clone(),
                     block_param: None,
                     body: inner_body,
