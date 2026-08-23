@@ -2133,30 +2133,41 @@ fn ingest_importmap<V: Vfs + ?Sized>(
                 if !vfs.is_dir(&walk_dir) {
                     continue;
                 }
-                let mut entries: Vec<PathBuf> = vfs
-                    .read_dir(&walk_dir)?
-                    .into_iter()
-                    .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("js"))
-                    .collect();
+                // RECURSIVE. importmap-rails globs `**/*.js` and names
+                // each pin by its path RELATIVE to the pinned root, so
+                // `app/javascript/lib/autocomplete/helpers.js` pins as
+                // `lib/autocomplete/helpers`. Reading one level deep
+                // dropped seventeen of campfire's modules — every file
+                // under `lib/autocomplete/` and `lib/rich_text/` — from
+                // both the import map and the page's modulepreloads,
+                // which is a page that loads and a composer whose
+                // autocomplete never resolves its imports.
+                let mut entries: Vec<PathBuf> = Vec::new();
+                collect_js_tree(vfs, &walk_dir, &mut entries)?;
                 entries.sort();
                 for entry in entries {
-                    let stem = entry.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                    if stem.is_empty() {
-                        continue;
-                    }
-                    // Rails' importmap-rails pins `index.js` as the
-                    // namespace itself (`"controllers"` not
-                    // `"controllers/index"`) — matches JS module
-                    // resolution where `import "controllers"`
-                    // resolves to the directory's index.
-                    let name = match (&under, stem) {
-                        (Some(ns), "index") => ns.clone(),
-                        (Some(ns), _) => format!("{ns}/{stem}"),
-                        (None, _) => stem.to_string(),
+                    let Ok(rel) = entry.strip_prefix(&walk_dir) else { continue };
+                    let Some(rel) = rel.to_str() else { continue };
+                    // MEASURED against the oracle's rendered import map:
+                    // a trailing `index.js` names its DIRECTORY, at any
+                    // depth (`controllers/index.js` → `controllers`),
+                    // matching JS module resolution.
+                    let stem = rel
+                        .strip_suffix(".js")
+                        .unwrap_or(rel)
+                        .trim_end_matches("index")
+                        .trim_end_matches('/')
+                        .to_string();
+                    let name = match (&under, stem.is_empty()) {
+                        (Some(ns), true) => ns.clone(),
+                        (Some(ns), false) => format!("{ns}/{stem}"),
+                        (None, true) => continue,
+                        (None, false) => stem.clone(),
                     };
+                    let file = rel.strip_suffix(".js").unwrap_or(rel);
                     let path = match &under {
-                        Some(ns) => format!("/assets/{ns}/{stem}.js"),
-                        None => format!("/assets/{stem}.js"),
+                        Some(ns) => format!("/assets/{ns}/{file}.js"),
+                        None => format!("/assets/{file}.js"),
                     };
                     pins.push(ImportmapPin { name, path });
                 }
@@ -2165,6 +2176,23 @@ fn ingest_importmap<V: Vfs + ?Sized>(
         }
     }
     Ok(Importmap { pins })
+}
+
+/// Every `*.js` under `dir`, at any depth — importmap-rails'
+/// `Dir[path.join("**/*.js")]`.
+fn collect_js_tree<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+    out: &mut Vec<PathBuf>,
+) -> IngestResult<()> {
+    for entry in vfs.read_dir(dir)? {
+        if vfs.is_dir(&entry) {
+            collect_js_tree(vfs, &entry, out)?;
+        } else if entry.extension().and_then(|e| e.to_str()) == Some("js") {
+            out.push(entry);
+        }
+    }
+    Ok(())
 }
 
 fn string_literal_value(node: &Node<'_>) -> Option<String> {
