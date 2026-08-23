@@ -787,7 +787,7 @@ jobs:
       # runner reaches, and it goes UP by the notice below, never by
       # assertion.
         env:
-          FLOOR_TESTS: 212
+          FLOOR_TESTS: 216
           FLOOR_FILES: 39
         run: |
           set -euo pipefail
