@@ -1181,6 +1181,7 @@ fn ruby_runtime_files(
     apply_controller_dispatch(&mut files, app, true);
     apply_cable_strip(&mut files, app)?;
     apply_makefile_test_list(&mut files, app);
+    apply_runtime_gem_wiring(&mut files);
     Ok(files)
 }
 
@@ -1720,6 +1721,7 @@ fn jruby_runtime_files(
     // the config.ru seams; the Gemfile trim already ran in spinel_files).
     apply_cable_strip(&mut files, app)?;
     apply_makefile_test_list(&mut files, app);
+    apply_runtime_gem_wiring(&mut files);
     Ok(files)
 }
 
@@ -2106,6 +2108,92 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
         }
         block.push_str("end\n");
         if block.contains("  gem ") {
+            if !gemfile.ends_with('\n') {
+                gemfile.push('\n');
+            }
+            gemfile.push_str(&block);
+        }
+    }
+}
+
+/// The RUNTIME twin of `apply_test_gem_wiring`, and it exists because
+/// `runtime/gem_facades.rb` swallows the failure.
+///
+/// That file guarded-requires the CRuby-path gems — `require gem_name`
+/// inside `rescue LoadError; nil` — so an app whose Gemfile does not name
+/// one does not fail at boot. It fails at REQUEST TIME, as an undefined
+/// constant, in whatever code path first reaches the gem. campfire's is
+/// sign-in: `POST /session` answered 500 with `uninitialized constant
+/// User::BCrypt`, every authenticated page redirected, and nothing in the
+/// tree said a gem was missing.
+///
+/// The rescue is right — the blog uses none of these and must boot without
+/// them installed — so the fix is to DECLARE what this app reaches, which
+/// is the same argument `apply_test_gem_wiring` already makes one function
+/// up: a tree that only runs where a gem happens to be installed is a tree
+/// whose dependencies are ambient. CI installing bcrypt is what kept this
+/// hidden; a clean `bundle install && puma` is what found it.
+///
+/// Detected from `app/`, not from the app's own Gemfile, for the reason
+/// the test table gives: a gem listed there but never reached would be a
+/// dependency we invented. The constant in an emitted body IS the demand.
+///
+/// Ruby-family only, and wired at the CRuby/JRuby forks rather than in
+/// `spinel_files`, beside `apply_makefile_test_list` for the reason that
+/// function's own note gives: the shared scaffold set feeds spinel too,
+/// and a spinel tree that declares nokogiri in a Gemfile its toolchain
+/// lane has to `bundle install` is a build break in a target that never
+/// wanted the gem. The spinel target answers the same demand at its own
+/// seam — `spin_shape` swaps `runtime/bcrypt_facade.rb` for the real spin
+/// package and adds it to the manifest. This is the CRuby half of that
+/// same decision, which had no half until now.
+fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
+    // Kept in step with the guarded list in `runtime/gem_facades.rb`:
+    // (constant an emitted body names, gem that defines it). Only gems
+    // whose absence is a RUNTIME error belong here — the list is the
+    // façade's, not a survey of what an app might like.
+    const RUNTIME_GEMS: [(&str, &str); 8] = [
+        ("BCrypt", "bcrypt"),
+        ("HTMLEntities", "htmlentities"),
+        ("ROTP", "rotp"),
+        ("Markly", "markly"),
+        ("Nokogiri", "nokogiri"),
+        ("Parslet", "parslet"),
+        ("TypeID", "typeid"),
+        ("RQRCode", "rqrcode"),
+    ];
+
+    let mut needed: Vec<&str> = Vec::new();
+    for (konst, gem) in RUNTIME_GEMS {
+        // `app/` only. The runtime tree names several of these itself (the
+        // façade lists all nine), and a scan that saw those would declare
+        // every gem for every app — the same self-fulfilling wiring the
+        // test table had to exclude `test_helper.rb` to avoid.
+        let demanded = files.iter().any(|(p, c)| {
+            p.starts_with("app/") && p.ends_with(".rb") && names_constant(c, konst)
+        });
+        if demanded {
+            needed.push(gem);
+        }
+    }
+    if needed.is_empty() {
+        return;
+    }
+    if let Some((_, gemfile)) = files.iter_mut().find(|(p, _)| p == "Gemfile") {
+        let mut block = String::from(
+            "\n# Gems the emitted app reaches at RUNTIME. runtime/gem_facades.rb\n\
+             # guarded-requires these, so a missing one is not a boot failure —\n\
+             # it is an undefined constant on the first request that needs it.\n\
+             # Declared by `project.rs::apply_runtime_gem_wiring` from the\n\
+             # constants app/ actually names.\n",
+        );
+        for gem in &needed {
+            if gemfile.contains(&format!("gem {gem:?}")) {
+                continue;
+            }
+            block.push_str(&format!("gem {gem:?}\n"));
+        }
+        if block.contains("gem \"") {
             if !gemfile.ends_with('\n') {
                 gemfile.push('\n');
             }
