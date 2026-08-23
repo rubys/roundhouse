@@ -335,11 +335,19 @@ methods on the model. They are now ALSO generated as `ActiveRecord::
 Relation` delegates that answer `self`, so a mid-chain call
 (`find_autocompletable_users.with_attached_avatar.ordered`) resolves.
 
-**Why.** These scopes never pass through `build_scope_registry`, which
-reads the app's own `scope` declarations — they are synthesized at emit
-time beside the attachment macro. So the class-side method existed and
-the relation-side one did not, and a chain on a relation VALUE was a
-NoMethodError on a method that plainly exists.
+**Why.** These scopes are synthesized at emit time beside the
+attachment macro, not declared by the app. So the class-side method
+existed and the relation-side one did not, and a chain on a relation
+VALUE was a NoMethodError on a method that plainly exists.
+
+`build_scope_registry` carries them NOW — that entry is what lets the
+scope-body rewriter thread `__rel` through a bare
+`with_attached_attachment`, and without it the relation was silently
+replaced by a fresh one and every accumulated `where` was lost.
+campfire's `/rooms/1` served another room's messages on exactly that.
+The delegate still bypasses the registry's general `__scope_` path and
+stays identity, because a hop to a body that returns its argument is a
+dispatch for nothing.
 
 **Where it is visible.** Nowhere in the results: the delegate is
 identity for the same reason the class-side body is (below).
@@ -356,6 +364,17 @@ preloaded association for the hint to attach to.
 rendering N records issues N rich-text queries where Rails issues one.
 The methods exist rather than being dropped so that call sites chaining
 through them keep working.
+
+MEASURED, so the cost is a number rather than a shrug: campfire's
+`/rooms/1` with 40 messages makes 172 database round trips where Rails
+makes 13. 161 of the 172 are four readers at ~40 each — the rich text
+here, the message's `boosts`, and the two ActiveStorage lookups
+(`attached?` and `filename`, two because each call builds a fresh
+`Attached`). That is why the emitted tree serves that page at 1.34x
+Rails' latency while beating it on every page with no message list
+(`/searches`: 0.77 ms against 4.5 ms). `scripts/bench-campfire` is what
+measures it; count CACHE MISSES, not `Db.prepare` calls, or the
+per-request query cache flatters the number by half.
 
 ### A `has_json` column reads back as its stored TEXT
 
