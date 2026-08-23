@@ -2243,6 +2243,42 @@ fn is_html_safe_call(e: &Expr, index: &HashMap<Symbol, ClassId>) -> bool {
             method.as_str(),
             "raw" | "link_to" | "link_to_raw" | "button_to" | "mail_to" | "image_tag" | "content_tag"
                 | "javascript_include_tag" | "label_tag" | "submit_tag" | "form_tag"
+                // The rest of FormTagHelper — the BUILDER-LESS field
+                // tags, which return an element exactly the way
+                // `label_tag` and `submit_tag` beside them do. Listed
+                // as a set rather than one at a time because the
+                // dividing line is not which one an app happened to
+                // reach: a helper that returns an ELEMENT is safe, a
+                // helper that returns TEXT (`truncate`, `dom_id`,
+                // `time_ago_in_words`) is not, and every name here is
+                // on the element side. `hidden_field_tag` is how the
+                // omission surfaced: campfire's quick boosts carry
+                // their emoji in one, eight per message, and the
+                // escape shipped `&lt;input …&gt;` — 320 inputs Rails
+                // renders and the room page did not, with the forms
+                // around them all present and correct.
+                | "hidden_field_tag"
+                | "text_field_tag"
+                | "password_field_tag"
+                | "text_area_tag"
+                | "check_box_tag"
+                | "radio_button_tag"
+                | "select_tag"
+                | "button_tag"
+                | "field_set_tag"
+                | "file_field_tag"
+                | "email_field_tag"
+                | "number_field_tag"
+                | "search_field_tag"
+                | "telephone_field_tag"
+                | "url_field_tag"
+                | "date_field_tag"
+                | "color_field_tag"
+                // The `<option>` builders, same rule.
+                | "options_for_select"
+                | "options_from_collection_for_select"
+                | "grouped_options_for_select"
+                | "time_zone_options_for_select"
         );
     }
     index.values().any(|cid| cid.0.as_str() == joined)

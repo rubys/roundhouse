@@ -436,50 +436,27 @@ fn is_void_element(name: &str) -> bool {
 }
 
 /// Build the opening `<element ...attrs...>` tag for the dynamic tag
-/// builder as one accumulator append. Per Rails' `tag_options`: a
-/// literal `true` value → bare ` key`; literal `false`/`nil` → omitted;
-/// any other literal → ` key="html_escape(value)"`. A runtime value is
-/// rendered as a truthiness-guarded boolean attribute (` key` when
-/// truthy, omitted when falsy) — the `open: cond ? true : nil` shape;
-/// a runtime *string*-valued attribute (`key="v"`) isn't exercised and
-/// would render as a bare attribute here.
+/// builder as one accumulator append.
+///
+/// Attributes go through `append_attr_parts` — the ONE renderer that
+/// already carries Rails' `tag_options` rules: `data:`/`aria:` hashes
+/// flatten to `data-turbo-confirm="…"`, boolean attributes render by
+/// presence, nil omits, and a non-literal `data:` defers to the
+/// runtime `render_attrs`. This built its own loop until now, and the
+/// loop knew none of that: a Hash value fell to its runtime catch-all
+/// and rendered as a truthiness-guarded BARE attribute, so campfire's
+/// `tag.details class: …, data: { controller: "popup", … }` opened
+/// forty message menus as `<details class="position-relative" data>`
+/// where Rails writes four `data-*` pairs. Values are helper-rewritten
+/// first, which the old loop did only on the branch it guarded.
 fn emit_open_builder_tag(element: &str, opts: &[(Expr, Expr)], ctx: &ViewCtx) -> Expr {
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text { value: format!("<{element}") });
-    for (k, v) in opts {
-        let ExprNode::Lit { value: Literal::Sym { value: key } } = &*k.node else {
-            // Non-symbol attribute keys aren't exercised; skip to keep
-            // the tag well-formed.
-            continue;
-        };
-        let key = key.as_str();
-        let val = simplify_opts_value(k, v);
-        match &*val.node {
-            ExprNode::Lit { value: Literal::Bool { value: true } } => {
-                parts.push(InterpPart::Text { value: format!(" {key}") });
-            }
-            ExprNode::Lit { value: Literal::Bool { value: false } }
-            | ExprNode::Lit { value: Literal::Nil } => {}
-            ExprNode::Lit { .. } => {
-                parts.push(InterpPart::Text { value: format!(" {key}=\"") });
-                parts.push(InterpPart::Expr {
-                    expr: view_helpers_call("html_escape", vec![val]),
-                });
-                parts.push(InterpPart::Text { value: "\"".to_string() });
-            }
-            _ => {
-                let guarded = Expr::new(
-                    Span::synthetic(),
-                    ExprNode::If {
-                        cond: rewrite_helpers_in_expr(&val, ctx),
-                        then_branch: lit_str(format!(" {key}")),
-                        else_branch: lit_str(String::new()),
-                    },
-                );
-                parts.push(InterpPart::Expr { expr: guarded });
-            }
-        }
-    }
+    let rewritten: Vec<(Expr, Expr)> = opts
+        .iter()
+        .map(|(k, v)| (k.clone(), rewrite_helpers_in_expr(&simplify_opts_value(k, v), ctx)))
+        .collect();
+    super::attr_parts::append_attr_parts(&mut parts, &rewritten);
     parts.push(InterpPart::Text { value: ">".to_string() });
     accumulator_append_call(
         Expr::new(Span::synthetic(), ExprNode::StringInterp { parts }),
