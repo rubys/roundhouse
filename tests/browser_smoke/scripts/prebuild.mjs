@@ -2,7 +2,7 @@
 //
 //   1. `cargo run --bin emit_preview --target typescript --profile worker
 //       --out tests/browser_smoke/.emitted fixtures/real-blog`
-//   2. `npm install --silent` inside `.emitted/` (vite, sqlite-wasm, turbo)
+//   2. `npm install` inside `.emitted/` (vite, sqlite-wasm, turbo)
 //   3. `npm run build` (Vite produces dist/ + manifest meta injection)
 //
 // Runs before `playwright test` (chained via `npm test`). Has to run
@@ -36,7 +36,19 @@ execSync(
 );
 
 console.log(`[smoke] npm install`);
-execSync("npm install --silent", { cwd: EMIT_DIR, stdio: "inherit" });
+// NOT `--silent`. That flag sets npm's loglevel to silent, which
+// suppresses its ERRORS along with its progress — a registry failure in
+// CI printed `Error: Command failed: npm install --silent`, status 254,
+// and not one word about what npm could not reach. `stdio: "inherit"`
+// was already set; there was simply nothing on the pipe.
+//
+// `--loglevel=error` keeps the log as quiet as `--silent` did on the
+// happy path and lets the unhappy one name itself; `--no-audit
+// --no-fund` are what every other npm call in this repo's CI passes.
+execSync("npm install --no-audit --no-fund --loglevel=error", {
+  cwd: EMIT_DIR,
+  stdio: "inherit",
+});
 
 console.log(`[smoke] vite build`);
 execSync("npm run build", { cwd: EMIT_DIR, stdio: "inherit" });
