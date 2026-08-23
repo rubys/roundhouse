@@ -230,14 +230,20 @@ record. The framework never does: `form_with` picks its action from
 `persisted?`, and so does `dom_id`. `record.id.nil?` is `false` here
 where Rails says `true`.
 
-### An absent cookie reads as `""`, not `nil`
+### An absent UNSIGNED cookie reads as `""`, not `nil`
 
-`cookies[:missing]` and `cookies.signed[:missing]` both answer `""`.
-Rails answers `nil`. The signed jar answers `""` for *anything that does
-not verify* too — a tampered payload, a bad signature, a value signed
-for a different cookie name — which is the same thing Rails does
-semantically (it answers `nil` and the app reads as signed out), just
-spelled with a different empty.
+`cookies[:missing]` answers `""`; Rails answers `nil`.
+
+**The SIGNED read is nullable and no longer diverges** —
+`cookies.signed[:missing]` answers `nil`, and so does anything that does
+not verify (a tampered payload, a bad signature, a value signed for a
+different cookie name). That is the read where the difference was
+visible to an app rather than absorbed by a `.to_s`: `if token =
+cookies.signed[:session_token]` is campfire's `SessionLookup`, and an
+empty String is TRUTHY in Ruby, so a signed-out request took the
+signed-in branch and queried for `token: ""` — right by accident, one
+query Rails never makes, and simply wrong for a call site that only
+checked presence. Everything below is about the unsigned jar.
 
 **Why.** The store is `Hash[String, String]`, and a nullable String puts
 every read on spinel's nullable path: `cookies[k].to_s.split(",")`
@@ -246,26 +252,16 @@ yields a null array there, which is how lobsters'
 coerces with `.to_s`, under which `""` and `nil` are identical.
 
 **What depends on it.** `raw` returns `""` as its final fallback, and
-`SignedCookieJar#[]` returns `""` on every verification failure. `delete`
-records a cleared write as `""` rather than a tombstone, so `@out` stays
-a plain String→String map — the harness and both dispatchers read that
-empty as "expire this cookie".
+`delete` records a cleared write as `""` rather than a tombstone, so
+`@out` stays a plain String→String map — the harness and both
+dispatchers read that empty as "expire this cookie". `SignedCookieJar#[]`
+sits ON TOP of `raw` and maps its `""` back to nil, so the nullable read
+costs the store nothing.
 
-**Where it is visible.** Two shapes, both real:
-
-- `if token = cookies.signed[:session_token]` is truthy when signed out,
-  because `""` is truthy in Ruby. campfire's `SessionLookup` has exactly
-  this, and it still behaves correctly — the branch runs
-  `Session.find_by(token: "")`, which finds nothing — but it costs a
-  query Rails would not make, and a call site that *only* checked
-  presence would be wrong.
-- `assert_nil cookies.signed[:session_token]` fails where Rails passes.
-  campfire's `sessions_controller_test` asserts this after a failed
-  sign-in.
-
-Closing it means making the signed read nullable and auditing every
-`.to_s` coercion above; the truthiness shape is the one that would
-justify it.
+**Where it is still visible.** `cookies[:missing]` is truthy where Rails
+is falsy. No corpus call site reads the unsigned jar for presence — every
+one coerces with `.to_s` — which is why the signed read was closed and
+this one was not.
 
 ### An enum attribute reader yields the STORED value
 

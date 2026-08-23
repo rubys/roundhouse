@@ -24,7 +24,8 @@ module ActionController
 
   class SignedCookieJar
     def initialize: (ActionController::CookieJar jar) -> void
-    def []: (untyped key) -> String
+    # NULLABLE, unlike the unsigned jar's read — see the .rb.
+    def []: (untyped key) -> String?
     def []=: (untyped key, untyped value) -> untyped
     def permanent: () -> ActionController::SignedCookieJar
     def delete: (untyped key) -> String

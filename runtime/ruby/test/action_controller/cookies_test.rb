@@ -114,18 +114,29 @@ class ActionControllerCookiesTest < Minitest::Test
     assert_equal "tok", jar.signed[:session_token]
   end
 
+  # NIL, as Rails answers — the signed read is the one nullable read in
+  # this jar. `if token = cookies.signed[:session_token]` is campfire's
+  # `SessionLookup`, and an empty String is TRUTHY in Ruby, so a `""`
+  # here made a signed-out request take the signed-in branch and query
+  # for `token: ""`. The UNSIGNED read below still answers `""`.
   def test_a_tampered_signed_cookie_reads_as_absent
     jar = ActionController::CookieJar.new({})
     jar.signed[:session_token] = "abc123"
     tampered = ActionController::CookieJar.new({"session_token" => jar["session_token"] + "x"})
-    assert_equal "", tampered.signed[:session_token]
+    assert_nil tampered.signed[:session_token]
   end
 
   def test_a_cookie_signed_for_another_name_does_not_verify
     jar = ActionController::CookieJar.new({})
     jar.signed[:session_token] = "abc123"
     moved = ActionController::CookieJar.new({"other_token" => jar["session_token"]})
-    assert_equal "", moved.signed[:other_token]
+    assert_nil moved.signed[:other_token]
+  end
+
+  def test_an_absent_signed_cookie_is_nil_and_an_absent_plain_one_is_empty
+    jar = ActionController::CookieJar.new({})
+    assert_nil jar.signed[:nothing]
+    assert_equal "", jar[:nothing]
   end
 
   # ── Rails' own spelling ─────────────────────────────────────

@@ -161,14 +161,33 @@ module ActionController
       @jar = jar
     end
 
+    # NIL for an absent cookie and for anything that does not verify —
+    # a tampered payload, a bad signature, a value signed for another
+    # name. Rails answers nil for all of those, and it is the one place
+    # in this jar where the difference between nil and `""` is visible
+    # to an app rather than absorbed by a `.to_s`:
+    #
+    #   if token = cookies.signed[:session_token]
+    #
+    # is campfire's `SessionLookup`, and an empty String is TRUTHY in
+    # Ruby. Signed out, that branch ran `Session.find_by(token: "")` —
+    # correct by accident, one query Rails never makes, and a call site
+    # that only checked presence would simply be wrong.
+    #
+    # The UNSIGNED jar keeps `""`, deliberately: its store is
+    # `Hash[String, String]` and a nullable String puts every read on
+    # spinel's nullable path. Only this one read is nullable, which is
+    # where the truthiness shape actually lives. Ledgered in
+    # docs/pipeline/runtime.md.
     def [](key)
       raw = @jar.raw(key)
-      return "" if raw == ""
-      ActionController::MessageVerifier.verified(
+      return nil if raw == ""
+      verified = ActionController::MessageVerifier.verified(
         Rails.application.secret_key_base,
         ActionController::MessageVerifier::SIGNED_COOKIE_SALT,
         raw, "cookie." + key.to_s, true
       )
+      verified == "" ? nil : verified
     end
 
     # Rails takes either a bare value or an options Hash carrying
