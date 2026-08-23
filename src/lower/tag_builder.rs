@@ -267,7 +267,7 @@ fn rewrite(
     if rewrite_button_to_block(expr) {
         return;
     }
-    if rewrite_link_to_block(expr) {
+    if rewrite_link_to_block(expr, diags) {
         return;
     }
 
@@ -479,18 +479,11 @@ fn rewrite_button_to_block(expr: &mut Expr) -> bool {
 ///
 /// Declines when there is no URL argument or when the options are not
 /// a literal Hash, leaving the site loud rather than guessed at.
-fn rewrite_link_to_block(expr: &mut Expr) -> bool {
+fn rewrite_link_to_block(expr: &mut Expr, diags: &mut Vec<Diagnostic>) -> bool {
     let ExprNode::Send { recv: None, method, args, block: Some(block), .. } = &*expr.node else {
         return false;
     };
     if method.as_str() != "link_to" {
-        return false;
-    }
-    // The block has to be a real one. `link_to url, opts, &` — the
-    // FORWARD of the caller's block, which campfire's
-    // `link_to_room`/`link_to_edit_room` both write — has no body to
-    // capture, and treating it as one drops what the caller passed.
-    if !matches!(&*block.node, ExprNode::Lambda { .. }) {
         return false;
     }
     let Some(url) = args.first() else { return false };
@@ -500,6 +493,24 @@ fn rewrite_link_to_block(expr: &mut Expr) -> bool {
     // room page down with `undefined method 'html_safe?'`. Declining
     // leaves it visible.
     if matches!(&*url.node, ExprNode::Array { .. }) {
+        diags.push(super::residue_diagnostic(
+            "tag_builder",
+            "polymorphic-link-url",
+            expr.span,
+            "`link_to [ … ]` in a helper: polymorphic URL",
+            "a polymorphic URL array names its route through the record's \
+             model, which only the routes lowering resolves — the array \
+             reaches the emitted anchor as itself and renders the record's \
+             `inspect` into the href"
+                .to_string(),
+        ));
+        return false;
+    }
+    // The block has to be a real one. `link_to url, opts, &` — the
+    // FORWARD of the caller's block, which campfire's
+    // `link_to_room`/`link_to_edit_room` both write — has no body to
+    // capture, and treating it as one drops what the caller passed.
+    if !matches!(&*block.node, ExprNode::Lambda { .. }) {
         return false;
     }
     let opts = match args.get(1).map(|a| &*a.node) {
