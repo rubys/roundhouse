@@ -128,9 +128,25 @@ def fmt_dec(n, p = 1) ; format("%.#{p}f", n.to_f) ; end
 
 # ── env.json helpers ─────────────────────────────────────────────────
 
+# env.json is written by scripts/bench-env, but this renderer also has to
+# survive one that was hand-assembled or predates a field's current shape:
+# bench-campfire wrote `"host": "<uname>"` where the appendix expects a
+# map, and that one nested read aborted the ENTIRE report — a run's whole
+# page lost to a provenance field nobody reads first. A report degrades to
+# the fields it recognizes; it does not abort on the ones it doesn't.
+def env_dig(env, *keys)
+  keys.reduce(env) { |node, key| node.is_a?(Hash) ? node[key] : nil }
+end
+
+def env_map(env, key)
+  value = env_dig(env, key)
+  value.is_a?(Hash) ? value : {}
+end
+
 def lscpu_field(env, name)
-  rows = env && env.dig('cpu', 'lscpu', 'lscpu')
-  rows && rows.find { |r| r['field'] == "#{name}:" }&.dig('data')
+  rows = env_dig(env, 'cpu', 'lscpu', 'lscpu')
+  return nil unless rows.is_a?(Array)
+  rows.find { |r| r.is_a?(Hash) && r['field'] == "#{name}:" }&.dig('data')
 end
 
 def kv_table(rows)
@@ -338,7 +354,7 @@ html << "<title>Roundhouse bench — #{run_dir}</title>\n<style>#{styles}</style
 html << "<h1>Roundhouse benchmark results</h1>\n"
 provenance = ''
 if env
-  sha = env.dig('git', 'sha').to_s[0, 12]
+  sha = env_dig(env, 'git', 'sha').to_s[0, 12]
   provenance << " · captured #{env['captured_at']}" if env['captured_at']
   provenance << %( · <code>#{sha}</code>) unless sha.empty?
 end
@@ -356,7 +372,7 @@ end
 # from env.json (with a bland fallback when it's absent); exact toolchain
 # versions live in the environment appendix at the bottom of the page.
 if env
-  clock   = env['clock'] || {}
+  clock   = env_map(env, 'clock')
   ghz     = clock['max_khz'] ? fmt_dec(clock['max_khz'].to_i / 1_000_000.0, 1) + ' GHz' : nil
   boost   = clock['boost'] == '0' ? '<strong>boost disabled</strong>' : 'boost enabled'
   machine = [
@@ -366,8 +382,8 @@ if env
     clock['governor'] ? "governor=#{clock['governor']}" : nil,
   ].compact.join(', ')
   machine << ", #{(env['memory_mb'].to_f / 1024).round} GB RAM" if env['memory_mb']
-  machine << ", #{env.dig('os', 'pretty_name')}" if env.dig('os', 'pretty_name')
-  h       = env['harness'] || {}
+  machine << ", #{env_dig(env, 'os', 'pretty_name')}" if env_dig(env, 'os', 'pretty_name')
+  h       = env_map(env, 'harness')
   harness = "workers=#{Array(h['workers']).join('/')}, c=#{h['concurrency']}, " \
             "#{h['runs']}×#{h['duration_sec']}s runs per cell after #{h['warmup_sec']}s warmup"
   appendix_ref = ' Full hardware, toolchain versions, and the exact invocation are in the <a href="#environment">environment appendix</a> below.'
@@ -706,26 +722,48 @@ html << "</tbody></table>\n</details>\n"
 if env
   html << %(<details id="environment">\n<summary>Environment#{env['captured_at'] ? " (captured #{env['captured_at']})" : ''}</summary>\n)
 
-  clock = env['clock'] || {}
+  clock = env_map(env, 'clock')
   html << "<h3>Host</h3>\n"
   html << kv_table([
-    ['hostname', env.dig('host', 'hostname')],
-    ['OS',       env.dig('os', 'pretty_name')],
-    ['kernel',   env.dig('host', 'uname')],
-    ['board',    [env.dig('cpu', 'board_vendor'), env.dig('cpu', 'board_name')].compact.reject(&:empty?).join(' ')],
+    ['hostname', env_dig(env, 'host', 'hostname')],
+    ['OS',       env_dig(env, 'os', 'pretty_name')],
+    ['kernel',   env_dig(env, 'host', 'uname') || (env['host'] if env['host'].is_a?(String))],
+    ['board',    [env_dig(env, 'cpu', 'board_vendor'), env_dig(env, 'cpu', 'board_name')].compact.reject(&:empty?).join(' ')],
     ['CPU',      lscpu_field(env, 'Model name')],
     ['topology', lscpu_field(env, 'CPU(s)') && "#{lscpu_field(env, 'Core(s) per socket')} cores / #{lscpu_field(env, 'CPU(s)')} threads"],
     ['clock',    clock['governor'] && "governor=#{clock['governor']}, boost #{clock['boost'] == '0' ? 'disabled' : 'enabled'}, #{(clock['max_khz'].to_i / 1000)} MHz max"],
     ['memory',   env['memory_mb'] && "#{fmt_int(env['memory_mb'])} MB"],
   ])
 
-  toolchains = env['toolchains'] || {}
+  # The application under test, when the harness knows one. A generic
+  # machine capture cannot: campfire's Gemfile tracks rails/rails main, so
+  # naming "Rails 8.2" is not a pin — the framework is identified only by
+  # the lockfile's git revision, and the app only by its own SHA.
+  oracle = env_map(env, 'oracle')
+  unless oracle.empty?
+    seed = oracle['seed'].is_a?(Hash) ? oracle['seed'] : {}
+    rails = [oracle['rails_version'],
+             oracle['rails_revision'] && "(#{oracle['rails_revision'].to_s[0, 12]})"].compact.join(' ')
+    app_sha = oracle['app_sha'] || oracle['campfire_sha']
+    html << "<h3>Application under test</h3>\n"
+    html << kv_table([
+      ['app',      env['benchmark']],
+      ['revision', app_sha && "<code>#{app_sha.to_s[0, 12]}</code>"],
+      ['Rails',    rails],
+      ['Ruby',     oracle['ruby_version']],
+      ['served',   oracle['serve_env']],
+      ['seed',     seed.empty? ? nil : "#{seed['users']} users, #{seed['rooms']} rooms, " \
+                                       "#{seed['messages_per_room']} messages/room"],
+    ])
+  end
+
+  toolchains = env_map(env, 'toolchains')
   unless toolchains.empty?
     html << "<h3>Toolchains</h3>\n"
     html << kv_table(toolchains.sort.map { |name, ver| [name, "<code>#{ver}</code>"] })
   end
 
-  h = env['harness'] || {}
+  h = env_map(env, 'harness')
   requested  = Array(h['targets'])
   unmeasured = requested - measured_targets
   html << "<h3>Harness</h3>\n"
@@ -740,7 +778,7 @@ if env
     ['not measured', unmeasured.empty? ? nil : "#{unmeasured.join(', ')} (requested but produced no measurements)"],
   ])
 
-  g = env['git'] || {}
+  g = env_map(env, 'git')
   unless g.empty?
     html << "<h3>Source</h3>\n"
     html << kv_table([
@@ -750,7 +788,7 @@ if env
     ])
   end
 
-  c = env['conditions'] || {}
+  c = env_map(env, 'conditions')
   unless c.empty?
     html << "<h3>Conditions at start</h3>\n"
     html << kv_table([

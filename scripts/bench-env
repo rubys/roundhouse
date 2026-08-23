@@ -155,6 +155,11 @@ TOOLCHAINS = {
   'curl'    => '--version',
   'mise'    => '--version',
   'sqlite3' => '--version',
+  # The campfire benchmark's headline IS this process: Rails' deployed
+  # lane reads pre-rendered fragments back out of redis rather than
+  # rendering them. A page reporting that difference has to be able to
+  # name the store it measured.
+  'redis-server' => '--version',
 }.freeze
 
 env['toolchains'] = TOOLCHAINS

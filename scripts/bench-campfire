@@ -79,6 +79,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
+ORIG_ARGS=("$@")
+
 LANES=()
 WORKERS=1
 THREADS=5
@@ -370,20 +372,50 @@ done
 
 # ── provenance ───────────────────────────────────────────────────────
 
-cat > "$OUT_DIR/env.json" <<JSON
-{
-  "benchmark": "campfire",
-  "oracle": $(cat "$ORACLE/oracle.json" 2>/dev/null || echo null),
-  "roundhouse_sha": "$(git -C "$REPO_ROOT" rev-parse HEAD)",
-  "ruby": "$(ruby -e 'print RUBY_DESCRIPTION')",
-  "lanes": "${LANES[*]}",
-  "workers": $WORKERS, "threads": $THREADS,
-  "duration_s": $DURATION, "warmup_s": $WARMUP,
-  "connections": $CONNECTIONS, "wrk_threads": $WRK_THREADS, "runs": $RUNS,
-  "endpoints": "${ENDPOINTS[*]}",
-  "host": "$(uname -srm)"
-}
-JSON
+# The machine-and-toolchain half is scripts/bench-env — the SAME capture
+# the blog bench publishes, so the two pages' appendices are comparable
+# and neither is a hand-rolled second copy free to drift. A hand-rolled
+# one already cost a whole run's page: it wrote `"host": "<uname>"` where
+# bench-report reads a map, and the report aborted on it.
+#
+# Campfire's own half is merged on top. It is the half a reader needs
+# most and the half no generic capture can know: WHICH campfire (the app
+# SHA) and WHICH Rails (campfire's Gemfile tracks rails/rails main, so
+# the framework is pinned only by the lockfile's git revision), plus the
+# seed size and whether the fragment cache was on. campfire-oracle
+# writes those into oracle.json at prepare time.
+"$REPO_ROOT/scripts/bench-env" \
+    --workers     "$WORKERS" \
+    --concurrency "$CONNECTIONS" \
+    --runs        "$RUNS" \
+    --duration    "$DURATION" \
+    --warmup      "$WARMUP" \
+    --threads     "$THREADS" \
+    --wrk-threads "$WRK_THREADS" \
+    --endpoints   "${ENDPOINTS[*]}" \
+    --targets     "${LANES[*]}" \
+    --command     "scripts/bench-campfire ${ORIG_ARGS[*]}" \
+    > "$OUT_DIR/env.base.json" 2>/dev/null || echo '{}' > "$OUT_DIR/env.base.json"
+
+ruby - "$OUT_DIR/env.base.json" "$ORACLE/oracle.json" "$OUT_DIR/env.json" <<'RUBY'
+require "json"
+
+base_path, oracle_path, out_path = ARGV
+
+def read_json(path)
+  JSON.parse(File.read(path))
+rescue Errno::ENOENT, JSON::ParserError
+  nil
+end
+
+env = read_json(base_path) || {}
+env["benchmark"] = "campfire"
+oracle = read_json(oracle_path)
+env["oracle"] = oracle if oracle
+
+File.write(out_path, JSON.pretty_generate(env) + "\n")
+RUBY
+rm -f "$OUT_DIR/env.base.json"
 
 # ── summarize ────────────────────────────────────────────────────────
 # Same shape scripts/bench writes, so bench-report renders either.
