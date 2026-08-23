@@ -394,6 +394,19 @@ fn walk_decl_body<'pr>(
                         if let Some(args) = call.arguments() {
                             for arg in args.arguments().iter() {
                                 if let Some(path) = constant_path_of(&arg) {
+                                    // lobsters' `TimeSeries` includes
+                                    // `ActionView::Helpers::NumberHelper`
+                                    // and calls one member, which emit
+                                    // qualifies to `ActionView::
+                                    // ViewHelpers.number_with_delimiter`
+                                    // anyway. `ActiveModel::*` does NOT
+                                    // drop here — see the predicate's
+                                    // sibling.
+                                    let segs: Vec<&str> =
+                                        path.iter().map(|p| p.as_str()).collect();
+                                    if crate::ingest::util::is_view_helper_marker_include(&segs) {
+                                        continue;
+                                    }
                                     includes.push(ClassId(Symbol::from(path.join("::"))));
                                 } else if is_rails_url_helpers_chain(&arg) {
                                     // `include Rails.application.routes.

@@ -549,3 +549,35 @@ pub(super) fn slice_has_blank_line(bytes: &[u8], from: usize, to: usize) -> bool
     }
     false
 }
+
+/// `ActionView::Helpers::*` (SanitizeHelper, NumberHelper) in an
+/// include list. No target ships the namespace, so the `include` is an
+/// `uninitialized constant` at class-definition time — before any
+/// request, which means it takes the whole tree's boot with it, not one
+/// route. It contributes nothing either way: every member the app calls
+/// through it is qualified to `ActionView::ViewHelpers.<name>` at emit
+/// (`emit::ruby::library::is_framework_view_helper`).
+///
+/// Called from BOTH homes that build an include list —
+/// `analyze::model_includes` for models, `ingest::library_class`'s decl
+/// walk for everything else — because the same source line means the
+/// same thing in either.
+pub(crate) fn is_view_helper_marker_include(path: &[&str]) -> bool {
+    matches!(path, ["ActionView", "Helpers", ..])
+}
+
+/// `ActiveModel::*` (Validations / Conversion / AttributeMethods /
+/// Model) in a MODEL's include list. Same "no target ships the
+/// namespace" argument as above, and here the replacement is already in
+/// hand by the time the list is built: a superclass-less model
+/// including them is lowered to a tableless model whose `valid?` /
+/// `errors` / `validate` surface is synthesized as real methods.
+///
+/// MODELS ONLY, deliberately. A library class gets the same three
+/// methods from `lower::active_model_model`, which runs long after
+/// ingest and READS the include to decide whether to — so dropping it
+/// at ingest would delete the pass's own input and leave the class with
+/// no constructor.
+pub(crate) fn is_active_model_marker_include(path: &[&str]) -> bool {
+    matches!(path, ["ActiveModel", ..])
+}

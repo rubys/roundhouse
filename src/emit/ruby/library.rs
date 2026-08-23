@@ -1801,9 +1801,13 @@ fn graft_chain_root(chain: &Expr, seed: Expr) -> Expr {
 /// strict no-op when the app has no non-empty helpers — the blog's helper
 /// modules are empty, so `helper_method_index` is empty.
 pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
-    if app.helper_method_index.is_empty() {
-        return;
-    }
+    // NO early return on an empty `helper_method_index`. This pass does
+    // two jobs and only one of them is about the app's own helpers: the
+    // other resolves bare FRAMEWORK helper calls (`image_tag`,
+    // `sanitize`, `dom_id`) to `ActionView::ViewHelpers.<name>`, and an
+    // app with no `app/helpers/` directory needs that just as much. The
+    // guard that used to stand here made the qualification depend on
+    // whether some unrelated file existed.
     let helper_modules: BTreeSet<ClassId> =
         app.helper_method_index.values().cloned().collect();
     // Generated route-helper names (`active_path`, `story_path`, …) —
@@ -2198,6 +2202,16 @@ fn is_framework_view_helper(name: &str) -> bool {
             // never reached it, and the bare call raised NoMethodError
             // — inside a `rescue Exception` that hid which call it was.
             | "dom_id"
+            // `ActionView::Helpers::SanitizeHelper`, included into a
+            // MODEL — campfire's `Opengraph::Metadata` calls
+            // `sanitize(strip_tags(title))` on its own attributes. Both
+            // were registry-known (analyze types them) and had no
+            // runtime member to dispatch to until
+            // view_helpers_ext.rb grew them; the bare calls emitted
+            // bare, and the surviving `include` named a namespace no
+            // target ships.
+            | "sanitize"
+            | "strip_tags"
     )
 }
 

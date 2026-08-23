@@ -221,5 +221,177 @@ module ActionView
         end
       end
     end
+
+    # ── Sanitization ─────────────────────────────────────────────────
+
+    # Rails' `strip_tags` — `Rails::HTML5::FullSanitizer#sanitize`,
+    # which is an HTML5 PARSE followed by a text-content serialize, not
+    # a `gsub(/<[^>]*>/, "")`. The difference is observable and was
+    # measured against the real sanitizer, gem version 1.7.1:
+    #
+    #   "<b>Hi</b> &amp; <script>bad()</script>there"
+    #                              -> "Hi &amp; bad()there"
+    #   "a < b and c > d"          -> "a &lt; b and c &gt; d"
+    #   "<b class=\"x>y\">z</b>"   -> "z"
+    #   "unclosed <b tag"          -> "unclosed "
+    #   "<>empty"                  -> "&lt;&gt;empty"
+    #   "<!-- c -->visible"        -> "visible"
+    #   "<!DOCTYPE html>x"         -> "x"
+    #
+    # So: a `<` that does not open a tag is TEXT and comes back
+    # escaped; a `>` in a quoted attribute value does not end the tag;
+    # an unterminated tag or comment swallows the rest of the input;
+    # and the CONTENT of a dropped element survives (`bad()` above),
+    # because only the tags are removed.
+    #
+    # DIVERGENCE, stated because it is invisible at the call site.
+    # Rails DECODES entity references and re-serializes, which needs
+    # HTML5's 2231-entry named-entity table. This pass instead leaves a
+    # well-formed reference (`&name;`, `&#123;`, `&#xAB;`) exactly as
+    # written and escapes a bare `&`. On everything that round-trips —
+    # `&amp;`, `&lt;`, `&nbsp;` — the two agree byte for byte, and on
+    # the rest (`&eacute;` here vs `é` there) they render identically
+    # in a browser. They part company only on malformed input, where
+    # HTML5's legacy no-semicolon matching applies: `&notanentity;` is
+    # `¬anentity;` to Rails and unchanged here. Ledgered in
+    # docs/pipeline/runtime.md.
+    def self.strip_tags(html)
+      s = html.to_s
+      out = +""
+      i = 0
+      n = s.length
+      while i < n
+        c = s[i, 1].to_s
+        if c == "<"
+          if s[i, 4] == "<!--"
+            close = s.index("-->", i + 4)
+            # An unterminated comment eats the remainder, as in Rails.
+            i = close.nil? ? n : close + 3
+          elsif tag_open_at?(s, i)
+            after = tag_end_index(s, i)
+            i = after.nil? ? n : after
+          else
+            out = out + "&lt;"
+            i = i + 1
+          end
+        elsif c == ">"
+          out = out + "&gt;"
+          i = i + 1
+        elsif c == "&"
+          len = entity_reference_length(s, i)
+          if len == 0
+            out = out + "&amp;"
+            i = i + 1
+          else
+            out = out + s[i, len].to_s
+            i = i + len
+          end
+        else
+          out = out + c
+          i = i + 1
+        end
+      end
+      out
+    end
+
+    # Rails' `sanitize` — the SAFE-LIST sanitizer, which keeps an
+    # allow-listed subset of markup (`b`, `a href`, `img src`, …) and
+    # drops the rest while keeping its text.
+    #
+    # NOT IMPLEMENTED for input that contains markup, DELIBERATELY. The
+    # allow-list is a rule table (42 tags, 13 attributes, a per-attribute
+    # URL-protocol list, and CSS sanitizing behind `style`), and the two
+    # ways to fake it are both wrong in a way nobody would see: dropping
+    # every tag silently discards markup the caller asked to keep, and
+    # keeping every tag is a cross-site-scripting hole. A helper named
+    # `sanitize` is the last place to guess.
+    #
+    # What IS implemented is the case the corpus actually has. campfire's
+    # `Opengraph::Metadata#sanitize_fields` writes
+    # `sanitize(strip_tags(title))` — by construction there is no markup
+    # left by the time `sanitize` sees it, and on tagless input Rails'
+    # safe-list sanitizer is the identity (measured, same gem version).
+    # So that call site is exactly right, and any other one raises with
+    # its own name in the message instead of returning something
+    # plausible.
+    def self.sanitize(html)
+      s = html.to_s
+      if s.include?("<")
+        raise NotImplementedError,
+              "ActionView::ViewHelpers.sanitize: the safe-list sanitizer is not " \
+              "modelled; only tagless input (what `sanitize(strip_tags(x))` " \
+              "produces) is served — see runtime/ruby/action_view/view_helpers_ext.rb"
+      end
+      s
+    end
+
+    # Does a tag start at `i` (where `s[i]` is "<")? HTML5 opens an
+    # element on `<` + letter and closes one on `</` + letter; anything
+    # else — `<3`, `< b`, `<>` — is text. `<!` and `<?` are the bogus
+    # comment / markup declaration forms (`<!DOCTYPE html>`, `<?php ?>`),
+    # which end at the next `>` and vanish like a tag.
+    def self.tag_open_at?(s, i)
+      c = s[i + 1, 1].to_s
+      return true if c == "!" || c == "?"
+      c = s[i + 2, 1].to_s if c == "/"
+      # Inline literal, not a module const: a module-const receiver
+      # reads as an unresolved class in the strict typer (same reason
+      # `sanitize_to_id` above spells its alphabet out).
+      "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".include?(c) && c != ""
+    end
+
+    # Index just past the `>` that closes the tag opening at `i`, or nil
+    # if the input ends first. A `>` inside a quoted attribute value does
+    # not close the tag: `<b class="x>y">z</b>` strips to "z", not to
+    # "y\">z".
+    def self.tag_end_index(s, i)
+      j = i + 1
+      n = s.length
+      quote = ""
+      out = nil
+      while j < n && out.nil?
+        c = s[j, 1].to_s
+        if quote != ""
+          quote = "" if c == quote
+        elsif c == "\"" || c == "'"
+          quote = c
+        elsif c == ">"
+          out = j + 1
+        end
+        j = j + 1
+      end
+      out
+    end
+
+    # Length of the entity reference starting at `i` (where `s[i]` is
+    # "&"), or 0 if what follows is not a well-formed one. Three forms:
+    # `&name;`, `&#123;`, `&#xAB;` — the semicolon is required here,
+    # which is where this parts company with HTML5's legacy matching
+    # (see the note on `strip_tags`).
+    def self.entity_reference_length(s, i)
+      n = s.length
+      j = i + 1
+      digits = ""
+      if s[j, 1].to_s == "#"
+        j = j + 1
+        if s[j, 1].to_s == "x" || s[j, 1].to_s == "X"
+          j = j + 1
+          digits = "0123456789abcdefABCDEF"
+        else
+          digits = "0123456789"
+        end
+      else
+        digits = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" + "0123456789"
+        # A named reference must OPEN with a letter: `&1;` is not one.
+        return 0 unless "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".include?(s[j, 1].to_s) && s[j, 1].to_s != ""
+      end
+      start = j
+      while j < n && digits.include?(s[j, 1].to_s) && s[j, 1].to_s != ""
+        j = j + 1
+      end
+      return 0 if j == start
+      return 0 unless s[j, 1].to_s == ";"
+      j + 1 - i
+    end
   end
 end
