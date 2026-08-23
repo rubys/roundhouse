@@ -308,7 +308,42 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
                 .push((&model.name, per[n].as_slice()));
         }
     }
-    if by_name.is_empty() {
+    // The SYNTHESIZED preload scopes — `with_attached_<attr>` and
+    // `with_rich_text_<attr>` — which Rails declares beside the
+    // attachment macro and this compiler adds at emit time
+    // (`attached::push_preload_scope_methods` and its rich-text twin).
+    // They never pass through `build_scope_registry`, which reads the
+    // app's own `scope` declarations, so a call CHAINED ON A RELATION
+    // had no delegate at all: campfire's
+    // `find_autocompletable_users.with_attached_avatar.ordered` is a
+    // NoMethodError on a class method that plainly exists, because the
+    // receiver is a relation value and not the class.
+    //
+    // The delegate is `self`, with no `__scope_` dispatch behind it,
+    // because these scopes ARE identity — Rails' `includes(...)` is a
+    // query-plan hint and the per-record readers this compiler
+    // synthesizes have nothing for it to attach to (the class-side
+    // bodies say the same thing by returning `__rel`). So there is no
+    // arity to detect and no model to pick: every model that declares
+    // the attachment answers the relation unchanged, and a model that
+    // does not never has the name reached on it.
+    let mut identity: std::collections::BTreeSet<String> = Default::default();
+    for model in &app.models {
+        let names = crate::lower::rich_text::preload_scope_names(model)
+            .into_iter()
+            .chain(crate::lower::attached::preload_scope_names(model));
+        for n in names {
+            let n = n.as_str().to_string();
+            // A declared scope of the same name wins — it has a real
+            // body, and shadowing it with identity would drop a filter.
+            // A Relation builtin is never delegated, same rule as above.
+            if by_name.contains_key(&n) || RELATION_BUILTINS.contains(&n.as_str()) {
+                continue;
+            }
+            identity.insert(n);
+        }
+    }
+    if by_name.is_empty() && identity.is_empty() {
         return None;
     }
     let mut skipped: Vec<String> = Vec::new();
@@ -321,6 +356,12 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
                 skipped.push(name.clone());
             }
         }
+    }
+    for name in &identity {
+        body.push_str("\n    # Preload scope (Rails' `includes`) — identity here, so\n");
+        body.push_str("    # the relation passes through unchanged.\n");
+        writeln!(body, "    def {name}").unwrap();
+        body.push_str("      self\n    end\n");
     }
     let mut s = String::from(
         "# Generated Relation scope delegation (see\n\
