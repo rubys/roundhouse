@@ -1968,6 +1968,39 @@ fn patch_mocha_lifecycle(helper: &mut String) {
     }
 }
 
+/// `WebMock::API` mixed into TestBase.
+///
+/// `webmock/minitest` includes it into `Minitest::Test`, which this
+/// helper deliberately is not — the same reason mocha's lifecycle is
+/// wired by hand right above. The module's constant-rooted calls
+/// (`WebMock.stub_request`) resolve without it; its BARE matchers do
+/// not, and campfire's `webhook_test` writes one:
+///
+/// ```text
+/// WebMock.stub_request(:post, url).with(body: hash_including(...))
+/// ```
+///
+/// Anchored on the class line rather than on setup/teardown, because
+/// this adds no lifecycle — and silent if that line moves, for the same
+/// reason the mocha patch is: the demand comes from the app, so a tree
+/// that misses this fails loudly on the first bare matcher.
+fn patch_webmock_api_include(helper: &mut String) {
+    const ANCHOR: &str = "  include Mocha::API\n";
+    const ALT: &str = "  include ActionDispatch::TestProcess\n";
+
+    if helper.contains("include WebMock::API") {
+        return;
+    }
+    let at = match helper.find(ANCHOR) {
+        Some(i) => i + ANCHOR.len(),
+        None => match helper.find(ALT) {
+            Some(i) => i + ALT.len(),
+            None => return,
+        },
+    };
+    helper.insert_str(at, "  include WebMock::API\n");
+}
+
 /// Test-only gems the APP's own suite reaches for, which our emitted
 /// `test/test_helper.rb` drops by construction: that file is our shim,
 /// not the app's, so every `require` the app's helper made is gone.
@@ -2047,6 +2080,9 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
         }
         if needed.iter().any(|(gem, _)| *gem == "mocha") {
             patch_mocha_lifecycle(helper);
+        }
+        if needed.iter().any(|(gem, _)| *gem == "webmock") {
+            patch_webmock_api_include(helper);
         }
     }
     // Declared as well as required: a tree whose tests load a gem its
