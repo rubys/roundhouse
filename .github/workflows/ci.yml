@@ -735,6 +735,23 @@ jobs:
       #             on the CRuby tree `runtime/gem_facades.rb` is swapped
       #             for guarded requires of the REAL gems, and rqrcode
       #             joins that list.
+      #   sentry-ruby — also from the app: campfire's message helpers
+      #             rescue through `Sentry.capture_exception`, and the
+      #             emitted Gemfile DECLARES it now
+      #             (`project.rs::RUNTIME_GEMS`), so the stub that used
+      #             to stand for it left `campfire-walk-stubs.rb`. Not
+      #             adding the gem here took this job red at 197/240 in
+      #             SEVEN files, all `uninitialized constant
+      #             MessagesHelper::Sentry` — the third time this exact
+      #             trap has been walked into, and the second from this
+      #             direction: the gem was on the laptop because the
+      #             emitted tree had just been bundled there, so the
+      #             local suite read 219/240 and the emit looked fine.
+      #             A local run proves nothing about this list unless
+      #             the gem is HIDDEN: put a file that raises LoadError
+      #             first on the load path
+      #             (`RUBYOPT=-I/tmp/nosentry scripts/campfire-suite`)
+      #             and the CI numbers reproduce exactly.
       #   ruby-vips — also from the app, and the only one with a NATIVE
       #             library behind it: campfire's logo and avatar tests
       #             decode the response body and assert its PIXEL
@@ -748,7 +765,7 @@ jobs:
         run: |
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips-dev
       - name: Install the gems the emitted suite loads
-        run: gem install sqlite3 bcrypt nokogiri webmock mocha rqrcode ruby-vips --no-document
+        run: gem install sqlite3 bcrypt nokogiri webmock mocha rqrcode ruby-vips sentry-ruby --no-document
       - name: Fetch once-campfire at the pinned SHA
         run: |
           set -euo pipefail
