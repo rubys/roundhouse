@@ -1685,22 +1685,6 @@ fn jruby_runtime_files(
     let markly_shim = fs::read_to_string("runtime/spinel/markly_jruby.rb")
         .map_err(|e| format!("read runtime/spinel/markly_jruby.rb: {e}"))?;
     files.push(("runtime/markly_jruby.rb".to_string(), markly_shim));
-    for (path, content) in files.iter_mut() {
-        if path == "runtime/gem_facades.rb" {
-            *content = format!(
-                "# On the JRuby tree Markly is provided by the commonmark-java shim\n\
-                 # (markly_jruby.rb); every other gem below is the real one (nokogiri\n\
-                 # ships a java platform build, the rest are pure Ruby). This file is\n\
-                 # also the `require_relative \"runtime/gem_facades\"` anchor and the\n\
-                 # one guarded-require list for this tree — boot.rb requires it rather\n\
-                 # than carrying a second copy.\n\
-                 require_relative \"markly_jruby\"\n\
-                 require_relative \"module_delegate\"\n\
-                 {}",
-                gem_require_block(&["markly"])
-            );
-        }
-    }
 
     // The shim's jars (commonmark-java + org.nibor.autolink) can't ship
     // through the text-only emit; the tree fetches them from Maven
@@ -1731,6 +1715,40 @@ fn jruby_runtime_files(
     // of which run on the JVM — so restore the verbatim emit over the
     // scaffold base's raising façade.
     emit::ruby::restore_extras_facades(&mut files, app);
+
+    // The shim's jars are FETCHED, not shipped (bin/fetch-jars), so
+    // requiring it in a tree that never renders markdown is a LoadError
+    // on a dependency that app does not have. The anchor below is
+    // required from boot.rb now — it used to be reached only when some
+    // model named a gem constant, which is what kept the blog's JRuby
+    // tree booting with no jars — so the shim require has to be
+    // conditional on the app instead of on the require graph's shape.
+    let needs_markly = files
+        .iter()
+        .any(|(p, c)| p.starts_with("app/") && p.ends_with(".rb") && names_constant(c, "Markly"));
+    let markly_require = if needs_markly {
+        "require_relative \"markly_jruby\"\n"
+    } else {
+        "# (this app never names Markly, so the commonmark-java shim — and\n\
+         # the jars bin/fetch-jars pulls — stay out of its require graph)\n"
+    };
+    for (path, content) in files.iter_mut() {
+        if path == "runtime/gem_facades.rb" {
+            *content = format!(
+                "# On the JRuby tree Markly is provided by the commonmark-java shim\n\
+                 # (markly_jruby.rb); every other gem below is the real one (nokogiri\n\
+                 # ships a java platform build, the rest are pure Ruby). This file is\n\
+                 # also the `require_relative \"runtime/gem_facades\"` anchor and the\n\
+                 # one guarded-require list for this tree — boot.rb requires it rather\n\
+                 # than carrying a second copy.\n\
+                 {}\
+                 require_relative \"module_delegate\"\n\
+                 {}",
+                markly_require,
+                gem_require_block(&["markly"])
+            );
+        }
+    }
 
     walk_dir_into(
         Path::new("runtime/spinel/scaffold/ruby_overlay"),
