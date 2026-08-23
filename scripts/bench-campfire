@@ -1,0 +1,426 @@
+#!/usr/bin/env bash
+# scripts/bench-campfire — Rails vs the emitted tree, on campfire.
+#
+# The blog benchmark (scripts/bench) measures a fixture this repo owns;
+# the lobsters one (scripts/bench-lobsters) measures a frozen in-process
+# visit sequence. This one measures a REAL app over HTTP against REAL
+# Rails, both lanes reading the same sqlite file and both signed in as
+# the same user — the shape a published claim about "Rails vs
+# roundhouse" has to have.
+#
+# Usage:  scripts/bench-campfire [options] [LANE ...]
+#
+#   LANE ∈ { rails | rails-int | ruby | ruby-int }   (default: rails ruby)
+#
+#     rails      real Rails, PRODUCTION, YJIT      (the oracle tree)
+#     rails-int  real Rails, PRODUCTION, no JIT    (the baseline lane)
+#     ruby       roundhouse emit on CRuby, YJIT
+#     ruby-int   roundhouse emit on CRuby, no JIT
+#
+# Options:
+#   --workers N       Puma workers per lane (default 1). PIN IT: campfire's
+#                     config/puma.rb sizes itself to the box otherwise, and
+#                     the emit's Puma would not.
+#   --threads N       threads per worker (default 5)
+#   --duration SEC    measurement window (default 20)
+#   --warmup SEC      warmup before each measurement (default 20)
+#   --connections N   wrk concurrency (default 16 — see the note below)
+#   --wrk-threads N   wrk client threads (default 2)
+#   --runs N          repeated runs per cell (default 3)
+#   --endpoint PATH   URL to bench, repeatable. Default: /rooms/1 and
+#                     /rooms/1/messages, the two pages the app exists for.
+#   --port N          base port (default 4300; lanes get N, N+1, …)
+#   --out DIR         results dir (default bench/results/campfire-<stamp>)
+#   --users N / --rooms N / --messages N   seed size, passed to
+#                     `campfire-oracle prepare` (default 50 / 5 / 100)
+#   --skip-prepare    reuse the oracle tree and emit already on disk
+#   --keep            leave servers running on exit
+#
+# WHY 16 CONNECTIONS AND NOT 64. A campfire room page is ~400 KB and
+# takes single-digit milliseconds to build; at 64 connections against one
+# worker the queue depth, not the app, sets the latency, and both lanes
+# converge on the same number. 16 keeps the server the bottleneck.
+#
+# EVERY REQUEST IS AUTHENTICATED. campfire has no anonymous pages worth
+# measuring — an unsigned-in client gets a 302 to /session/new, which is
+# a benchmark of a redirect. Each lane signs in through its own real form
+# (the two trees do not share a cookie secret) and wrk carries that
+# lane's `Cookie:` header.
+#
+# BOTH LANES READ THE SAME FILE. `prepare` seeds once through Rails and
+# copies the result into the emit's storage/, so a row-count difference
+# can never explain a throughput difference.
+#
+# Output:
+#   <out>/per-run.json    raw records, one JSON object per line
+#   <out>/summary.json    median per (lane, endpoint)
+#   <out>/summary.md      rendered table
+#   <out>/parity.txt      tag-tally diff per endpoint, both lanes
+#   <out>/env.json        provenance: campfire SHA, Rails revision, rubies
+#
+# Requires: wrk, ruby, bundler, sqlite3, curl, cargo.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT"
+
+LANES=()
+WORKERS=1
+THREADS=5
+DURATION=20
+WARMUP=20
+CONNECTIONS=16
+WRK_THREADS=2
+RUNS=3
+ENDPOINTS=()
+BASE_PORT=4300
+OUT_DIR=""
+USERS=50
+ROOMS=5
+MESSAGES=100
+SKIP_PREPARE=0
+KEEP=0
+APP="$HOME/git/once-campfire"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --workers)     WORKERS="$2"; shift 2 ;;
+        --threads)     THREADS="$2"; shift 2 ;;
+        --duration)    DURATION="$2"; shift 2 ;;
+        --warmup)      WARMUP="$2"; shift 2 ;;
+        --connections) CONNECTIONS="$2"; shift 2 ;;
+        --wrk-threads) WRK_THREADS="$2"; shift 2 ;;
+        --runs)        RUNS="$2"; shift 2 ;;
+        --endpoint)    ENDPOINTS+=("$2"); shift 2 ;;
+        --port)        BASE_PORT="$2"; shift 2 ;;
+        --out)         OUT_DIR="$2"; shift 2 ;;
+        --users)       USERS="$2"; shift 2 ;;
+        --rooms)       ROOMS="$2"; shift 2 ;;
+        --messages)    MESSAGES="$2"; shift 2 ;;
+        --app)         APP="$2"; shift 2 ;;
+        --skip-prepare) SKIP_PREPARE=1; shift ;;
+        --keep)        KEEP=1; shift ;;
+        -h|--help)     sed -n '2,62p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        rails|rails-int|ruby|ruby-int) LANES+=("$1"); shift ;;
+        *) echo "bench-campfire: unknown argument $1" >&2; exit 2 ;;
+    esac
+done
+
+(( ${#LANES[@]} )) || LANES=(rails ruby)
+(( ${#ENDPOINTS[@]} )) || ENDPOINTS=(/rooms/1 /rooms/1/messages)
+[[ -n "$OUT_DIR" ]] || OUT_DIR="$REPO_ROOT/bench/results/campfire-$(date +%Y%m%d-%H%M%S)"
+
+ORACLE="$REPO_ROOT/build/campfire-oracle"
+EMIT="$REPO_ROOT/build/transpiled-campfire-ruby"
+LOG_DIR="$OUT_DIR/logs"
+mkdir -p "$LOG_DIR"
+
+step() { printf '\033[36m→\033[0m %s\n' "$*"; }
+ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
+fail() { printf '\033[31m✗\033[0m %s\n' "$*" >&2; }
+die()  { fail "$*"; exit 1; }
+
+command -v wrk >/dev/null || die "wrk not on PATH"
+
+SERVER_PID=""
+cleanup() {
+    local code=$?
+    if (( KEEP == 0 )) && [[ -n "$SERVER_PID" ]]; then
+        pkill -P "$SERVER_PID" 2>/dev/null || true
+        kill -TERM "$SERVER_PID" 2>/dev/null || true
+        sleep 0.3
+        kill -KILL "$SERVER_PID" 2>/dev/null || true
+    fi
+    exit "$code"
+}
+trap cleanup EXIT INT TERM
+
+# Sum RSS across a PID and its descendants (KB). Puma's master carries
+# almost nothing; the workers are the measurement.
+sum_rss_kb() {
+    local pids="$1" stack="$1"
+    while [[ -n "$stack" ]]; do
+        local next=""
+        for p in $stack; do
+            for k in $(pgrep -P "$p" 2>/dev/null || true); do
+                pids="$pids $k"; next="$next $k"
+            done
+        done
+        stack="$next"
+    done
+    local total=0 r
+    for p in $pids; do
+        r="$(ps -o rss= -p "$p" 2>/dev/null | tr -d ' ' || echo 0)"
+        total=$(( total + ${r:-0} ))
+    done
+    echo "$total"
+}
+
+wait_for_port() {
+    local url="$1" budget="${2:-60}"
+    local deadline=$(( $(date +%s) + budget ))
+    while (( $(date +%s) < deadline )); do
+        # Any answer means the server is up: campfire 302s an unsigned-in
+        # client, so `curl --fail` would reject a perfectly healthy boot.
+        [[ "$(curl -s -o /dev/null -w '%{http_code}' "$url" 2>/dev/null)" != "000" ]] && return 0
+        sleep 0.3
+    done
+    return 1
+}
+
+# ── prepare ──────────────────────────────────────────────────────────
+
+if (( SKIP_PREPARE == 0 )); then
+    step "preparing the Rails oracle ($USERS users, $ROOMS rooms, $MESSAGES msgs/room)"
+    scripts/campfire-oracle prepare --app "$APP" --out "$ORACLE" \
+        --users "$USERS" --rooms "$ROOMS" --messages "$MESSAGES" >/dev/null \
+        || die "campfire-oracle prepare failed"
+
+    step "transpiling campfire → $EMIT"
+    cargo run --quiet --release --bin roundhouse -- --target ruby "$APP" \
+        -o "$EMIT" --allow-unsupported > "$LOG_DIR/emit.log" 2>&1 \
+        || die "transpile failed (see $LOG_DIR/emit.log)"
+
+    step "bundling the emit"
+    (cd "$EMIT" && bundle install >/dev/null 2>&1) || die "emit bundle install failed"
+
+    step "building the emit's assets"
+    (cd "$EMIT" && rake assets >/dev/null 2>&1) || step "  (no assets task — continuing)"
+fi
+
+# THE SAME ROWS, ALWAYS. Copied on every run, not only on prepare: a
+# previous run's POSTs would otherwise leave the two databases apart, and
+# a benchmark whose lanes read different data is not one.
+step "staging the seeded DB into the emit"
+[[ -f "$ORACLE/storage/db/production.sqlite3" ]] \
+    || die "no seeded production DB at $ORACLE — run without --skip-prepare"
+mkdir -p "$EMIT/storage"
+cp "$ORACLE/storage/db/production.sqlite3" "$EMIT/storage/development.sqlite3"
+
+# ── per-lane lifecycle ───────────────────────────────────────────────
+
+start_lane() {
+    local lane="$1" port="$2"
+    local log="$LOG_DIR/$lane.log"
+    case "$lane" in
+        rails|rails-int)
+            local yjit=1; [[ "$lane" == "rails-int" ]] && yjit=0
+            scripts/campfire-oracle serve --out "$ORACLE" --port "$port" \
+                --workers "$WORKERS" --threads "$THREADS" \
+                $( (( yjit )) || echo --no-yjit ) > "$log" 2>&1 &
+            SERVER_PID=$!
+            ;;
+        ruby|ruby-int)
+            local yjit=1; [[ "$lane" == "ruby-int" ]] && yjit=0
+            ( cd "$EMIT" && RUBY_YJIT_ENABLE="$yjit" RAILS_MAX_THREADS="$THREADS" \
+                bundle exec puma -p "$port" -w "$WORKERS" -t "$THREADS:$THREADS" \
+                config.ru ) > "$log" 2>&1 &
+            SERVER_PID=$!
+            ;;
+    esac
+    wait_for_port "http://127.0.0.1:$port/" || {
+        fail "$lane did not come up within 60s — tail of $log:"
+        tail -20 "$log" >&2
+        return 1
+    }
+}
+
+# Sign in through the lane's OWN form and echo the `Cookie:` header
+# value. The two trees do not share a cookie secret, so a jar minted
+# against one is a 302 against the other; this is not a detail that can
+# be shared between lanes.
+login_cookie() {
+    local lane="$1" port="$2"
+    local jar="$LOG_DIR/jar-$lane.txt"
+    rm -f "$jar"
+    case "$lane" in
+        rails|rails-int)
+            scripts/campfire-oracle login --out "$ORACLE" --port "$port" --jar "$jar" >/dev/null \
+                || { fail "$lane sign-in failed"; return 1; }
+            ;;
+        ruby|ruby-int)
+            # No CSRF token scrape: the emitted tree's session form does
+            # not gate on one, and asking for a token it never issues
+            # would fail for a reason that has nothing to do with speed.
+            local code
+            code="$(curl -sS -c "$jar" -o /dev/null -w '%{http_code}' \
+                    -X POST "http://127.0.0.1:$port/session" \
+                    --data-urlencode "email_address=user1@example.com" \
+                    --data-urlencode "password=secret123456")"
+            [[ "$code" == "302" ]] || { fail "$lane sign-in returned $code"; return 1; }
+            ;;
+    esac
+    awk '/session_token|_campfire_session/ {printf "%s=%s; ", $6, $7}' "$jar"
+}
+
+parse_wrk() {
+    local out="$1" req_sec p50 p99
+    req_sec="$(grep -E '^Requests/sec:' "$out" | awk '{print $2}')"
+    p50="$(awk '/Latency Distribution/{f=1;next} f && /^[[:space:]]*50%/{print $2; exit}' "$out")"
+    p99="$(awk '/Latency Distribution/{f=1;next} f && /^[[:space:]]*99%/{print $2; exit}' "$out")"
+    norm() {
+        [[ -z "$1" ]] && { echo null; return; }
+        awk -v v="$1" 'BEGIN {
+            n = v; gsub(/[a-zA-Z]+$/, "", n)
+            u = v; sub(/^[0-9.]+/, "", u)
+            if (u == "us") printf "%.3f", n/1000
+            else if (u == "ms") printf "%.3f", n+0
+            else if (u == "s") printf "%.3f", n*1000
+            else printf "null"
+        }'
+    }
+    [[ -z "$req_sec" ]] && req_sec=null
+    echo "{\"req_sec\":$req_sec,\"p50_ms\":$(norm "$p50"),\"p99_ms\":$(norm "$p99")}"
+}
+
+# ── run ──────────────────────────────────────────────────────────────
+
+PER_RUN="$OUT_DIR/per-run.json"
+: > "$PER_RUN"
+: > "$OUT_DIR/parity.txt"
+
+port="$BASE_PORT"
+for lane in "${LANES[@]}"; do
+    step "start $lane on :$port ($WORKERS worker(s) x $THREADS thread(s))"
+    if ! start_lane "$lane" "$port"; then
+        fail "$lane failed to start; skipping lane"
+        port=$(( port + 1 )); SERVER_PID=""; continue
+    fi
+    cookie="$(login_cookie "$lane" "$port")" || {
+        fail "$lane sign-in failed; skipping lane"
+        kill -TERM "$SERVER_PID" 2>/dev/null || true
+        port=$(( port + 1 )); SERVER_PID=""; continue
+    }
+    ok "$lane up and signed in"
+
+    # Parity capture BEFORE the load: one authenticated GET per endpoint,
+    # saved so `parity.txt` can say what each lane actually rendered. A
+    # throughput number for a page that is not the same page is not a
+    # comparison, and this is the cheapest possible record of that.
+    for ep in "${ENDPOINTS[@]}"; do
+        body="$LOG_DIR/body-$lane-$(echo "$ep" | tr '/' '_').html"
+        code="$(curl -s -b "$LOG_DIR/jar-$lane.txt" -o "$body" -w '%{http_code}' \
+                "http://127.0.0.1:$port$ep")"
+        tags="$(ruby -e 'print File.read(ARGV[0]).scan(/<([a-zA-Z][-a-zA-Z0-9]*)/).size' "$body")"
+        printf '%s\t%s\tstatus=%s\ttags=%s\tbytes=%s\n' \
+            "$lane" "$ep" "$code" "$tags" "$(wc -c < "$body" | tr -d ' ')" \
+            >> "$OUT_DIR/parity.txt"
+    done
+
+    for ep in "${ENDPOINTS[@]}"; do
+        url="http://127.0.0.1:$port$ep"
+        for run in $(seq 1 "$RUNS"); do
+            step "measure $lane $ep run=$run/$RUNS"
+            wrk -t"$WRK_THREADS" -c"$CONNECTIONS" -d"${WARMUP}s" \
+                -H "Cookie: $cookie" "$url" >/dev/null 2>&1 || true
+            wrk_out="$LOG_DIR/wrk-$lane-$(echo "$ep" | tr '/' '_')-$run.txt"
+            rss_out="$LOG_DIR/rss-$lane-$(echo "$ep" | tr '/' '_')-$run.txt"
+            : > "$rss_out"
+            ( while kill -0 "$SERVER_PID" 2>/dev/null; do
+                  sum_rss_kb "$SERVER_PID" >> "$rss_out"; sleep 1
+              done ) &
+            rss_pid=$!
+            wrk -t"$WRK_THREADS" -c"$CONNECTIONS" -d"${DURATION}s" --latency \
+                -H "Cookie: $cookie" "$url" > "$wrk_out" 2>&1 || true
+            kill "$rss_pid" 2>/dev/null || true
+            wait "$rss_pid" 2>/dev/null || true
+            rss="$(sort -n < "$rss_out" | awk '{a[NR]=$1} END {print NR ? a[int((NR+1)/2)] : 0}')"
+            printf '{"target":"%s","workers":%d,"endpoint":"%s","run":%d,"rss_kb":%s,%s}\n' \
+                "$lane" "$WORKERS" "$ep" "$run" "${rss:-0}" \
+                "$(parse_wrk "$wrk_out" | sed 's/^{//;s/}$//')" >> "$PER_RUN"
+        done
+    done
+
+    kill -TERM "$SERVER_PID" 2>/dev/null || true
+    sleep 0.5
+    kill -KILL "$SERVER_PID" 2>/dev/null || true
+    SERVER_PID=""
+    port=$(( port + 1 ))
+done
+
+# ── provenance ───────────────────────────────────────────────────────
+
+cat > "$OUT_DIR/env.json" <<JSON
+{
+  "benchmark": "campfire",
+  "oracle": $(cat "$ORACLE/oracle.json" 2>/dev/null || echo null),
+  "roundhouse_sha": "$(git -C "$REPO_ROOT" rev-parse HEAD)",
+  "ruby": "$(ruby -e 'print RUBY_DESCRIPTION')",
+  "lanes": "${LANES[*]}",
+  "workers": $WORKERS, "threads": $THREADS,
+  "duration_s": $DURATION, "warmup_s": $WARMUP,
+  "connections": $CONNECTIONS, "wrk_threads": $WRK_THREADS, "runs": $RUNS,
+  "endpoints": "${ENDPOINTS[*]}",
+  "host": "$(uname -srm)"
+}
+JSON
+
+# ── summarize ────────────────────────────────────────────────────────
+# Same shape scripts/bench writes, so bench-report renders either.
+
+ruby - "$PER_RUN" "$OUT_DIR/summary.json" "$OUT_DIR/summary.md" "$OUT_DIR/parity.txt" <<'RUBY'
+require "json"
+per_run, sj, sm, parity = ARGV
+records = File.readlines(per_run, chomp: true).reject(&:empty?).map { |l| JSON.parse(l) }
+abort "no measurements" if records.empty?
+
+def median(xs)
+  xs = xs.compact.sort
+  return nil if xs.empty?
+  xs.size.odd? ? xs[xs.size / 2] : (xs[xs.size / 2 - 1] + xs[xs.size / 2]) / 2.0
+end
+
+cells = records.group_by { |r| [r["target"], r["workers"], r["endpoint"]] }.map do |(t, w, e), runs|
+  rss_kb = median(runs.map { |r| r["rss_kb"] }.reject { |v| v.to_i.zero? })
+  req = median(runs.map { |r| r["req_sec"] })
+  { target: t, workers: w, endpoint: e, runs: runs.size,
+    req_sec: req, p50_ms: median(runs.map { |r| r["p50_ms"] }),
+    p99_ms: median(runs.map { |r| r["p99_ms"] }),
+    rss_kb: rss_kb, rss_mb: rss_kb && rss_kb / 1024.0,
+    rps_per_gb: (req && rss_kb && rss_kb > 0) ? req / (rss_kb / 1024.0 / 1024.0) : nil }
+end
+File.write(sj, JSON.pretty_generate(cells))
+
+md = +"# campfire: Rails vs the emitted tree\n\n"
+md << "_#{records.size} measurements across #{cells.size} cells_\n\n"
+cell = ->(v, p) { v.nil? ? "—" : ("%.#{p}f" % v) }
+cells.group_by { |c| c[:endpoint] }.each do |ep, eg|
+  md << "## `#{ep}`\n\n"
+  md << "| lane | req/sec | p50 (ms) | p99 (ms) | RSS (MB) | req/sec/GB |\n"
+  md << "|------|--------:|---------:|---------:|---------:|-----------:|\n"
+  eg.sort_by { |c| c[:target] }.each do |c|
+    md << "| %s | %s | %s | %s | %s | %s |\n" % [
+      c[:target], cell.(c[:req_sec], 1), cell.(c[:p50_ms], 2),
+      cell.(c[:p99_ms], 2), cell.(c[:rss_mb], 0), cell.(c[:rps_per_gb], 0) ]
+  end
+  # The ratio, stated rather than left to the reader — and only when both
+  # operands were measured in this run.
+  rails = eg.find { |c| c[:target] == "rails" }
+  ruby  = eg.find { |c| c[:target] == "ruby" }
+  if rails && ruby && rails[:req_sec] && ruby[:req_sec] && ruby[:req_sec] > 0
+    r = rails[:req_sec] / ruby[:req_sec]
+    md << "\n_rails / ruby = %.2fx_\n" % r
+  end
+  md << "\n"
+end
+
+if File.exist?(parity) && !File.read(parity).empty?
+  md << "## What each lane rendered\n\n"
+  md << "A throughput number for a page that is not the same page is not\n"
+  md << "a comparison. One authenticated GET per lane per endpoint,\n"
+  md << "before any load:\n\n"
+  md << "| lane | endpoint | status | tags | bytes |\n|---|---|--:|--:|--:|\n"
+  File.readlines(parity, chomp: true).each do |line|
+    lane, ep, st, tags, bytes = line.split("\t")
+    md << "| %s | `%s` | %s | %s | %s |\n" % [lane, ep, st.sub("status=", ""),
+                                              tags.sub("tags=", ""), bytes.sub("bytes=", "")]
+  end
+  md << "\n"
+end
+File.write(sm, md)
+RUBY
+
+ok "results in $OUT_DIR"
+echo
+cat "$OUT_DIR/summary.md"
