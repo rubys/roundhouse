@@ -787,8 +787,8 @@ jobs:
       # runner reaches, and it goes UP by the notice below, never by
       # assertion.
         env:
-          FLOOR_TESTS: 205
-          FLOOR_FILES: 38
+          FLOOR_TESTS: 212
+          FLOOR_FILES: 39
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)
