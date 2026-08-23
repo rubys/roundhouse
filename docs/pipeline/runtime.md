@@ -799,6 +799,28 @@ and do not seed writes. `User.active_bots.new` comes back without its
 `role`. An argument shape the rewrite does not admit — a positional
 value, a splat — is left alone and still raises.
 
+### A scope-INDIFFERENT class method runs unscoped
+
+Rails runs `User.active.find_by_transfer_id(id)` with the relation as
+the current scope, so any query the body makes is filtered by it. Here
+the call reaches a class method that some call site named through a
+relation chain (`scope_chain::collect_relation_class_method_demand`),
+and the method grows the same trailing `__rel` an association-scoped one
+does — defaulted to `Relation.new(self)`, so a direct `Model.x` call is
+unchanged.
+
+**What it costs.** The parameter is only READ when the body's own shape
+says it should be: a constructor merges `__rel.scope_attributes`, a
+query at implicit self roots on `__rel`. A body that does neither —
+campfire's `find_by_transfer_id`, which is `find_signed(id, purpose:
+:transfer)` — takes the relation and ignores it, so its lookup runs
+against the whole table. An inactive user found by a valid transfer id
+comes back here where Rails would answer nil.
+
+The classification is made at SURVEY time, before `find_signed` has been
+lowered to the `find_by` it becomes, which is why this one reads as
+indifferent. Recognizing the sugar earlier would close it.
+
 ### `destroy!` cannot fail
 
 Rails raises `RecordNotDestroyed` when a `before_destroy` callback

@@ -533,6 +533,57 @@ fn walk_demand(
         .for_each_child(&mut |c| walk_demand(c, assocs, scope_names, assoc_locals, out));
 }
 
+/// The MODEL whose relation `expr` is, when the expression is a chain
+/// of relation-preserving hops rooted at the model's own constant and
+/// at least ONE hop deep: `User.active`, `Room.where(open: true)
+/// .ordered`. The depth requirement is the whole point — a bare
+/// `User.some_method` is a plain class-level call with no scope to
+/// carry, and registering it would grow a parameter for nothing.
+///
+/// Loose in the same way [`assoc_read_name`] is loose: a hop is a
+/// Relation built-in or a name SOME model declares as a scope. This
+/// only decides whether to ASK about a method; the ask is resolved
+/// precisely in [`build_assoc_class_methods`].
+fn model_relation_root(
+    expr: &Expr,
+    models: &HashSet<ClassId>,
+    scope_names: &HashSet<Symbol>,
+) -> Option<ClassId> {
+    let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node else { return None };
+    if !(is_relation_chain_method(method.as_str())
+        || method.as_str() == "all"
+        || scope_names.contains(method))
+    {
+        return None;
+    }
+    const_model(r, models).or_else(|| model_relation_root(r, models, scope_names))
+}
+
+/// `(model, method)` for every call whose receiver is a model-rooted
+/// RELATION — the scope-chain twin of [`collect_assoc_method_demand`].
+///
+/// Rails runs `User.active.find_by_transfer_id(id)` with the relation
+/// as the current scope, exactly as it runs the association form. The
+/// association half has always been surveyed; the scope half was not,
+/// so the call reached a Relation that has no such method and died on
+/// `undefined method` — campfire's session-transfer page, whose
+/// `find_by_transfer_id` is a `class_methods do` block on User.
+pub fn collect_relation_class_method_demand(
+    expr: &Expr,
+    models: &HashSet<ClassId>,
+    scope_names: &HashSet<Symbol>,
+    out: &mut HashSet<(ClassId, Symbol)>,
+) {
+    if let ExprNode::Send { recv: Some(r), method, .. } = &*expr.node {
+        if let Some(m) = model_relation_root(r, models, scope_names) {
+            out.insert((m, method.clone()));
+        }
+    }
+    expr.node.for_each_child(&mut |c| {
+        collect_relation_class_method_demand(c, models, scope_names, out)
+    });
+}
+
 /// Survey the whole App for class methods reached through an
 /// association, and resolve them against the models.
 ///
@@ -553,14 +604,23 @@ pub fn survey_assoc_class_methods(
     scopes: &ScopeRegistry,
 ) -> (AssocClassMethods, Vec<DeclinedAssocScope>) {
     let scope_names = all_scope_names(scopes);
+    let models_set = model_set(&app.models);
     let mut demand: HashSet<(Symbol, Symbol)> = HashSet::new();
+    let mut model_demand: HashSet<(ClassId, Symbol)> = HashSet::new();
     crate::lower::for_each_hook_body_ref(app, &mut |body| {
         collect_assoc_method_demand(body, assocs, &scope_names, &mut demand);
+        collect_relation_class_method_demand(body, &models_set, &scope_names, &mut model_demand);
     });
     for view in &app.views {
         collect_assoc_method_demand(&view.body, assocs, &scope_names, &mut demand);
+        collect_relation_class_method_demand(
+            &view.body,
+            &models_set,
+            &scope_names,
+            &mut model_demand,
+        );
     }
-    build_assoc_class_methods(&app.models, assocs, scopes, &demand)
+    build_assoc_class_methods(&app.models, assocs, scopes, &demand, &model_demand)
 }
 
 /// `(model, method)` for the QUERY-shaped half of that survey — the
@@ -603,6 +663,7 @@ pub fn build_assoc_class_methods(
     assocs: &AssocRegistry,
     scopes: &ScopeRegistry,
     demand: &HashSet<(Symbol, Symbol)>,
+    model_demand: &HashSet<(ClassId, Symbol)>,
 ) -> (AssocClassMethods, Vec<DeclinedAssocScope>) {
     let mut reg: AssocClassMethods = HashMap::new();
     let mut declined: Vec<DeclinedAssocScope> = Vec::new();
@@ -652,6 +713,64 @@ pub fn build_assoc_class_methods(
                     reason,
                 }),
             }
+        }
+    }
+    // The scope-chain channel: a class method called on a relation the
+    // MODEL'S OWN constant roots (`User.active.find_by_transfer_id`).
+    // Same resolution, same registry — only the way the target model was
+    // named differs, so there is no association to check for seedability
+    // and nothing to look up.
+    let mut wanted_models: Vec<&(ClassId, Symbol)> = model_demand.iter().collect();
+    wanted_models
+        .sort_by(|a, b| (a.0 .0.as_str(), a.1.as_str()).cmp(&(b.0 .0.as_str(), b.1.as_str())));
+    for (target, mname) in wanted_models {
+        if scopes.get(target).is_some_and(|s| s.contains_key(mname)) {
+            continue;
+        }
+        if !seen.insert((target.clone(), mname.clone())) {
+            continue;
+        }
+        let Some(target_model) = models.iter().find(|m| m.name == *target) else { continue };
+        let Some(method) = target_model.body.iter().find_map(|item| match item {
+            ModelBodyItem::Method { method, .. }
+                if method.receiver == crate::dialect::MethodReceiver::Class
+                    && method.name == *mname =>
+            {
+                Some(method)
+            }
+            _ => None,
+        }) else {
+            continue;
+        };
+        match assoc_scope_shape(method, target, scopes) {
+            // A body that neither constructs nor queries at implicit
+            // self is INDIFFERENT to the scope — but the call still has
+            // to reach it, and a Relation has no such method. Register
+            // it with both halves false: it grows the `__rel` parameter
+            // (defaulted, so direct `Model.x` calls are unchanged) and
+            // the call site re-roots at the constant, which is what
+            // makes the send resolve at all.
+            AssocScopeShape::None => {
+                reg.entry(target.clone()).or_default().insert(
+                    mname.clone(),
+                    AssocScopedMethod {
+                        params: method.params.clone(),
+                        creates: false,
+                        queries: false,
+                    },
+                );
+            }
+            AssocScopeShape::Takes { creates, queries } => {
+                reg.entry(target.clone()).or_default().insert(
+                    mname.clone(),
+                    AssocScopedMethod { params: method.params.clone(), creates, queries },
+                );
+            }
+            AssocScopeShape::Blocked(reason) => declined.push(DeclinedAssocScope {
+                model: target.clone(),
+                method: mname.clone(),
+                reason,
+            }),
         }
     }
     (reg, declined)
