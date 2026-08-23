@@ -752,6 +752,18 @@ jobs:
       #             first on the load path
       #             (`RUBYOPT=-I/tmp/nosentry scripts/campfire-suite`)
       #             and the CI numbers reproduce exactly.
+      #   platform_agent — also from the app, and the ONE with a LOAD-time
+      #             reach: `app/models/application_platform.rb` opens
+      #             `class ApplicationPlatform < PlatformAgent`, so its
+      #             absence is not an undefined constant on one route —
+      #             `app/models.rb` stops requiring and EVERY file fails.
+      #             This job read 0 of 240 when the emitted Gemfile grew
+      #             the declaration (`project.rs::RUNTIME_GEMS`) and this
+      #             list did not: the fourth walk into the trap the
+      #             sentry-ruby note below describes, and the loudest,
+      #             because a load-time gem takes the whole suite rather
+      #             than the files that name it. Its own dependency
+      #             `useragent` arrives with it.
       #   ruby-vips — also from the app, and the only one with a NATIVE
       #             library behind it: campfire's logo and avatar tests
       #             decode the response body and assert its PIXEL
@@ -765,7 +777,7 @@ jobs:
         run: |
           "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips-dev
       - name: Install the gems the emitted suite loads
-        run: gem install sqlite3 bcrypt nokogiri webmock mocha rqrcode ruby-vips sentry-ruby --no-document
+        run: gem install sqlite3 bcrypt nokogiri webmock mocha rqrcode ruby-vips sentry-ruby platform_agent --no-document
       - name: Fetch once-campfire at the pinned SHA
         run: |
           set -euo pipefail
