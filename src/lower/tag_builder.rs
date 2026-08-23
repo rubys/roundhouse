@@ -267,6 +267,9 @@ fn rewrite(
     if rewrite_button_to_block(expr) {
         return;
     }
+    if rewrite_link_to_block(expr) {
+        return;
+    }
 
     let ExprNode::Send { recv: Some(recv), method, args, block, .. } = &*expr.node else {
         return;
@@ -449,6 +452,69 @@ fn rewrite_button_to_block(expr: &mut Expr) -> bool {
     // Rails treats what the block yields as the button's HTML content,
     // so it is CAPTURED, not escaped — campfire's blocks are an
     // `image_tag` plus a `<span>`, already markup.
+    parts.push(InterpPart::Expr { expr: capture_call(block, span) });
+    parts.extend(suffix);
+    let mut built = string_interp(parts);
+    qualify_view_helpers(&mut built);
+    *expr = html_safe(built, span);
+    true
+}
+
+/// `link_to url, opts do … end` written in a HELPER body — Rails'
+/// BLOCK spelling, where the first argument is the URL and the block
+/// supplies the anchor's content.
+///
+/// Exactly the hole `rewrite_button_to_block` above fills, in the
+/// helper that is written far more often. The runtime's `link_to` is
+/// `(text, href, opts)`, the POSITIONAL form, so qualifying the call
+/// binds the URL to `text` and the option hash to `href` — and
+/// `render_attrs` then flattens that hash the way it flattens `data:`,
+/// so campfire's avatars rendered `<a href-title="User 1"
+/// href-class="btn avatar">/users/1</a>`: every attribute prefixed
+/// `href-`, the URL as the link TEXT, and the block — an `image_tag` —
+/// gone. Forty-two of them on one room page, and it compiled.
+///
+/// Markup comes from [`link_to_wrapper_markup`], the same owner the
+/// view walker calls.
+///
+/// Declines when there is no URL argument or when the options are not
+/// a literal Hash, leaving the site loud rather than guessed at.
+fn rewrite_link_to_block(expr: &mut Expr) -> bool {
+    let ExprNode::Send { recv: None, method, args, block: Some(block), .. } = &*expr.node else {
+        return false;
+    };
+    if method.as_str() != "link_to" {
+        return false;
+    }
+    // The block has to be a real one. `link_to url, opts, &` — the
+    // FORWARD of the caller's block, which campfire's
+    // `link_to_room`/`link_to_edit_room` both write — has no body to
+    // capture, and treating it as one drops what the caller passed.
+    if !matches!(&*block.node, ExprNode::Lambda { .. }) {
+        return false;
+    }
+    let Some(url) = args.first() else { return false };
+    // A POLYMORPHIC url (`link_to [ :edit, @room ]`) names a route by
+    // record, which only the routes lowering can resolve. Interpolated
+    // as-is it reached `html_escape` as an Array and took the whole
+    // room page down with `undefined method 'html_safe?'`. Declining
+    // leaves it visible.
+    if matches!(&*url.node, ExprNode::Array { .. }) {
+        return false;
+    }
+    let opts = match args.get(1).map(|a| &*a.node) {
+        None => Vec::new(),
+        Some(ExprNode::Hash { entries, .. }) => entries.clone(),
+        Some(_) => return false,
+    };
+    let span = expr.span;
+    let block = block.clone();
+    let (mut parts, suffix) =
+        crate::lower::view_to_library::helpers::link_to_wrapper_markup(url.clone(), opts);
+    // Rails treats what the block yields as the anchor's HTML content,
+    // so it is CAPTURED, not escaped — the same rule the `button_to`
+    // twin follows, and campfire's blocks are an `image_tag` plus a
+    // `<span>`, already markup.
     parts.push(InterpPart::Expr { expr: capture_call(block, span) });
     parts.extend(suffix);
     let mut built = string_interp(parts);

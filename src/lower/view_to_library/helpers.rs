@@ -358,7 +358,21 @@ fn link_to_wrapper_parts(
     ctx: &ViewCtx,
 ) -> Option<(Vec<InterpPart>, Vec<InterpPart>)> {
     let url_expr = emit_url_arg(url, ctx)?;
-    let opts_entries = hash_entries(opts);
+    Some(link_to_wrapper_markup(url_expr, hash_entries(opts)))
+}
+
+/// The `<a …>` … `</a>` markup, with the URL already resolved —
+/// everything in [`link_to_wrapper_parts`] that does not need a view
+/// context.
+///
+/// Split for the same reason its `button_to` sibling is: `link_to url,
+/// opts do … end` is written in HELPER MODULES too, where there is no
+/// template to walk, and `lower::tag_builder` expands those. One owner
+/// for the markup, so the two spellings cannot drift.
+pub(crate) fn link_to_wrapper_markup(
+    url_expr: Expr,
+    opts_entries: Vec<(Expr, Expr)>,
+) -> (Vec<InterpPart>, Vec<InterpPart>) {
     let mut parts: Vec<InterpPart> = Vec::new();
     parts.push(InterpPart::Text {
         value: "<a href=\"".to_string(),
@@ -374,7 +388,7 @@ fn link_to_wrapper_parts(
         value: ">".to_string(),
     });
     let suffix = vec![InterpPart::Text { value: "</a>".to_string() }];
-    Some((parts, suffix))
+    (parts, suffix)
 }
 
 /// Inline-expand `button_to text, url, opts` into the wrapping
