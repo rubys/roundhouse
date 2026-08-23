@@ -2220,7 +2220,21 @@ pub(crate) fn action_view_ivar_map(
         if dir == "layouts" || base.starts_with('_') {
             continue;
         }
-        if !crate::lower::view::renders_through_view_path(v.format.as_str()) {
+        // `json` joins the ERB formats HERE and not in
+        // `renders_through_view_path`: that predicate is the ingest/emit
+        // MATCHED PAIR for templates rendered through the ERB path, and
+        // a jbuilder template is emitted by a different lowerer
+        // entirely. What it shares is this question — which controller
+        // ivars does the render call site have to pass — and answering
+        // it for json is what lets a jbuilder view read an ivar the
+        // NAME CONVENTION would not have guessed. campfire's
+        // autocomplete index renders `@page.records`, and `@page` is
+        // assigned inside a runtime method, so there is no
+        // controller-side assignment for the fallback to find either:
+        // the call site passed nothing and the def took one argument.
+        if !crate::lower::view::renders_through_view_path(v.format.as_str())
+            && v.format.as_str() != "json"
+        {
             continue;
         }
         // Top-level templates (`views/not_found.erb`-style trees) key
@@ -2250,6 +2264,13 @@ pub(crate) fn action_view_ivar_map(
             format!("{base}_{}", v.format.as_str())
         };
         let key = (module, stem);
+        // A json view has no closure entry (`view_ivar_closures` walks
+        // the ERB render tree, which a jbuilder template is not part
+        // of), so it lands on the direct-reads fallback — which is
+        // exactly right for it: a `json.partial!` child takes its
+        // record from the parent's collection expression, never from an
+        // ivar of its own. The jbuilder lowerer derives its PARAMS from
+        // the same call, so the two sides cannot disagree about arity.
         let ivars = closures
             .get(&key)
             .cloned()

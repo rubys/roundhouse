@@ -25,6 +25,8 @@
 //!   3. `json.array! @col, partial: P, as: V`
 //!                                       → emits a JSON array via P-per-item
 //!   4. `json.partial! P, V: <expr>`    → inlines a single method call to P
+//!   5. `json.partial! partial: P, collection: C, as: V`
+//!                                       → Jbuilder's own alias for (3)
 //!
 //! Lowerer scope is the real-blog `articles/*.json.jbuilder` set.
 //! Stretch DSL forms (block-form `json.<key> do … end`, `json.merge!`,
@@ -142,9 +144,33 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
     // read as plain locals. Mirrors the ERB lowerer.
     let rewritten = rewrite_ivars_to_locals(&view.body);
 
+    // The IVARS THIS TEMPLATE READS decide an action view's parameters,
+    // and the NAME CONVENTION is only the fallback.
+    //
+    // `infer_view_arg` guesses from the stem and directory
+    // (`articles/index` -> `articles`), which is right whenever the
+    // controller named its ivar after the resource — every real-blog
+    // json template — and wrong the moment it did not. campfire's
+    // `autocompletable/users/index.json.jbuilder` renders
+    // `@page.records`: the guess said `users`, the body read `page`, and
+    // the method referenced a local that was never a parameter.
+    //
+    // Same call the render call site's contract uses
+    // (`action_view_ivar_map`, which now carries json), so def site and
+    // call site cannot disagree about arity or order. A PARTIAL keeps
+    // the convention: its record arrives positionally from the parent's
+    // collection, and it reads no ivar at all.
+    let ivar_params: Vec<Symbol> = if is_partial {
+        Vec::new()
+    } else {
+        crate::lower::view_to_library::view_read_ivars(&view.body)
+    };
+
     let nil_default = nil_lit();
     let mut params: Vec<Param> = Vec::new();
-    if !arg_name.is_empty() {
+    if !ivar_params.is_empty() {
+        params.extend(ivar_params.iter().cloned().map(Param::positional));
+    } else if !arg_name.is_empty() {
         params.push(Param::positional(Symbol::from(arg_name.clone())));
     }
     // jbuilder templates today don't reference flash locals; if a
@@ -178,6 +204,12 @@ fn build_library_class(view: &View, app: &App, type_body: bool) -> LibraryClass 
         accumulator: "io".to_string(),
         arg_name: arg_name.clone(),
         arg_columns,
+        direct_helpers: app
+            .routes
+            .direct_helpers
+            .iter()
+            .map(|h| h.name.as_str().to_string())
+            .collect(),
     };
 
     let mut body_stmts: Vec<Expr> = Vec::new();
@@ -266,6 +298,14 @@ struct Ctx {
     /// datetime columns through `JsonBuilder.encode_datetime` rather
     /// than the generic `encode_value`.
     arg_columns: std::collections::HashMap<Symbol, crate::schema::ColumnType>,
+    /// Names declared by `direct :name do |…| … end`, without the
+    /// `_path`/`_url` suffix. A direct helper's block parameter is
+    /// whatever the CALLER hands it — campfire's `direct
+    /// :fresh_user_avatar do |user, options|` reads `user.avatar_token`
+    /// and `user.updated_at`, so it wants the RECORD — where a resource
+    /// member helper wants the `:id` segment. `rewrite_path_arg_local`
+    /// asks this before appending `.id`.
+    direct_helpers: std::collections::HashSet<String>,
 }
 
 /// Classification of a single top-level statement in a jbuilder
@@ -400,7 +440,7 @@ fn walk_template(body: &Expr, ctx: &Ctx) -> Vec<Expr> {
                     &ctx.accumulator,
                     &format!("\"{}\":", key.as_str()),
                 ));
-                let rewritten_value = rewrite_route_helpers(value);
+                let rewritten_value = rewrite_h_escape(&rewrite_route_helpers(value, ctx));
                 out.push(io_append_call(
                     &ctx.accumulator,
                     json_builder_encode(rewritten_value),
@@ -481,6 +521,32 @@ fn classify<'a>(stmt: &'a Expr) -> JbStmt<'a> {
             }
         }
         "partial!" => {
+            // `json.partial! partial: P, collection: C, as: V` — the
+            // COLLECTION form, which Jbuilder documents as the same
+            // thing `array!` does one line up: render each element
+            // through the partial, answer a top-level ARRAY. campfire's
+            // autocomplete index is spelled this way, and matching only
+            // the positional form below left the whole template
+            // Unknown — a lowered method whose body emitted `{}` and
+            // whose only caller then disagreed with it about arity.
+            //
+            // Checked BEFORE the positional shape because this call has
+            // no positional at all: `args.first()` is the options Hash,
+            // and asking it for a string path is what failed.
+            if let Some(opts) = args.iter().find_map(extract_hash) {
+                if let (Some(partial_path), Some(item_var)) = (
+                    hash_get_string(opts, "partial"),
+                    hash_get_symbol(opts, "as"),
+                ) {
+                    if let Some(collection) = hash_get_value(opts, "collection") {
+                        return JbStmt::ArrayPartial {
+                            collection,
+                            partial_path,
+                            item_var,
+                        };
+                    }
+                }
+            }
             // `json.partial! P, V: <expr>`. First positional is the
             // partial path; trailing Hash has one entry whose value
             // is the arg to pass.
@@ -545,6 +611,23 @@ fn hash_get_string(entries: &[(Expr, Expr)], key: &str) -> Option<String> {
         {
             if value.as_str() == key {
                 return string_literal(v);
+            }
+        }
+    }
+    None
+}
+
+/// The VALUE under a Symbol key, whatever its shape — the collection
+/// expression of a `partial!`/`array!` options hash. Its siblings take
+/// a String or a Symbol out; this one takes the expression itself.
+fn hash_get_value<'a>(entries: &'a [(Expr, Expr)], key: &str) -> Option<&'a Expr> {
+    for (k, v) in entries {
+        if let ExprNode::Lit {
+            value: Literal::Sym { value },
+        } = &*k.node
+        {
+            if value.as_str() == key {
+                return Some(v);
             }
         }
     }
@@ -665,9 +748,63 @@ fn partial_target(path: &str, resource_dir: &str) -> (Vec<Symbol>, String) {
         None => (resource_dir.to_string(), path.to_string()),
     };
     let base = base.trim_start_matches('_').to_string();
-    let module_camel = crate::naming::camelize(&crate::naming::snake_case(&dir));
-    let module_path = vec![Symbol::from("Views"), Symbol::from(module_camel)];
+    // `camelize_path`, not `camelize`: a NESTED partial dir carries a
+    // slash (`autocompletable/users`) and the module it names is
+    // `Views::Autocompletable::Users`. The plain camelizer left the
+    // slash in, so the emitted call read `Views::Autocompletable/users
+    // .user_json(user)` — which parses as DIVISION and dies on an
+    // undefined `users`. Same helper the ERB view lowering's
+    // `view_module_id` uses, so the two agree on where a nested view
+    // module lives.
+    let module_camel =
+        crate::naming::camelize_path(&crate::naming::snake_case(&dir));
+    let module_path: Vec<Symbol> = std::iter::once(Symbol::from("Views"))
+        .chain(module_camel.split("::").map(Symbol::from))
+        .collect();
     (module_path, base)
+}
+
+/// `h(x)` in a JSON template is a REAL escape, unlike its ERB twin.
+///
+/// The ERB walker UNWRAPS `h(...)` — the auto-escape wrapper it adds is
+/// the same operation, and leaving both would double-escape. A JSON
+/// value has no such wrapper: `JsonBuilder.encode_value` escapes for
+/// JSON (quotes, backslashes, control characters) and not for HTML, so
+/// dropping the `h` would ship `<script>` verbatim where Rails ships
+/// `&lt;script&gt;`. campfire's autocomplete asserts exactly that on a
+/// user whose name is `David <script>alert(123)</script>`.
+///
+/// Nested `h(h(x))` double-escapes, as it does in Rails.
+fn rewrite_h_escape(e: &Expr) -> Expr {
+    let new_node = match &*e.node {
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if method.as_str() == "h" && args.len() == 1 =>
+        {
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    e.span,
+                    ExprNode::Const {
+                        path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")],
+                    },
+                )),
+                method: Symbol::from("html_escape"),
+                args: vec![rewrite_h_escape(&args[0])],
+                block: None,
+                parenthesized: true,
+            }
+        }
+        ExprNode::Send { recv, method, args, block, parenthesized } => ExprNode::Send {
+            recv: recv.as_ref().map(rewrite_h_escape),
+            method: method.clone(),
+            args: args.iter().map(rewrite_h_escape).collect(),
+            block: block.as_ref().map(rewrite_h_escape),
+            parenthesized: *parenthesized,
+        },
+        _ => return e.clone(),
+    };
+    let mut out = Expr::new(e.span, new_node);
+    out.ty = e.ty.clone();
+    out
 }
 
 // ── route-helper rewrite for pair values ────────────────────────────
@@ -685,7 +822,7 @@ fn partial_target(path: &str, resource_dir: &str) -> (Vec<Symbol>, String) {
 /// pair as a value mismatch. Other kwargs still drop on the floor;
 /// scheme+host (the rest of the `_url` vs `_path` difference) is
 /// per-deployment noise the comparator canonicalizes away.
-fn rewrite_route_helpers(e: &Expr) -> Expr {
+fn rewrite_route_helpers(e: &Expr, ctx: &Ctx) -> Expr {
     let new_node = match &*e.node {
         ExprNode::Send {
             recv: None,
@@ -694,7 +831,8 @@ fn rewrite_route_helpers(e: &Expr) -> Expr {
             block,
             parenthesized,
         } if method.as_str().ends_with("_url") => {
-            let path_name = format!("{}_path", &method.as_str()[..method.as_str().len() - 4]);
+            let stem = &method.as_str()[..method.as_str().len() - 4];
+            let path_name = format!("{stem}_path");
             let format_sym: Option<Symbol> = args.iter().find_map(|a| {
                 if let ExprNode::Hash { kwargs: true, entries } = &*a.node {
                     hash_get_symbol(entries, "format")
@@ -705,7 +843,7 @@ fn rewrite_route_helpers(e: &Expr) -> Expr {
             let path_args: Vec<Expr> = args
                 .iter()
                 .filter(|a| !matches!(&*a.node, ExprNode::Hash { kwargs: true, .. }))
-                .map(rewrite_path_arg_local)
+                .map(|a| rewrite_path_arg_local(a, stem, ctx))
                 .collect();
             let path_call = send(
                 Some(Expr::new(
@@ -737,10 +875,10 @@ fn rewrite_route_helpers(e: &Expr) -> Expr {
             block,
             parenthesized,
         } => ExprNode::Send {
-            recv: recv.as_ref().map(rewrite_route_helpers),
+            recv: recv.as_ref().map(|r| rewrite_route_helpers(r, ctx)),
             method: method.clone(),
-            args: args.iter().map(rewrite_route_helpers).collect(),
-            block: block.as_ref().map(rewrite_route_helpers),
+            args: args.iter().map(|a| rewrite_route_helpers(a, ctx)).collect(),
+            block: block.as_ref().map(|b| rewrite_route_helpers(b, ctx)),
             parenthesized: *parenthesized,
         },
         other => other.clone(),
@@ -752,7 +890,19 @@ fn rewrite_route_helpers(e: &Expr) -> Expr {
 /// `record` — Rails accepts either, but `RouteHelpers.article_path`
 /// takes an Integer. Bare Var/Send-no-args of a presumed local rewrite
 /// to `<local>.id`; anything else passes through unchanged.
-fn rewrite_path_arg_local(arg: &Expr) -> Expr {
+/// The positional argument of a rewritten `<x>_url(…)` call.
+///
+/// A resource member helper is typed for the `:id` SEGMENT
+/// (`article_path(Integer id)`), so a bare record local becomes
+/// `record.id`. A `direct` helper is not: its body is the block the app
+/// wrote, and campfire's `direct :fresh_user_avatar do |user, options|`
+/// reads `user.avatar_token` and `user.updated_at` off it. Handing that
+/// one an Integer is `undefined method 'updated_at' for an instance of
+/// Integer` — at RENDER time, in a template that compiled fine.
+fn rewrite_path_arg_local(arg: &Expr, stem: &str, ctx: &Ctx) -> Expr {
+    if ctx.direct_helpers.contains(stem) {
+        return arg.clone();
+    }
     let name = match &*arg.node {
         ExprNode::Var { name, .. } => Some(name.clone()),
         ExprNode::Send {

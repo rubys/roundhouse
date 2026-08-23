@@ -401,19 +401,26 @@ pub(super) fn rewrite_render_to_views(
             // `show` missed and the render became MissingTemplate — for a
             // template that is right there.
             let is_svg = render_kwargs_have_format(args, "svg");
+            let is_json = render_kwargs_have_format(args, "json");
             let contract_stem = if is_turbo_stream {
                 format!("{}_turbo_stream", view_method.as_str())
             } else if is_svg {
                 format!("{}_svg", view_method.as_str())
+            } else if is_json {
+                // Same reason the two above are qualified: the contract
+                // is keyed by the FORMAT-QUALIFIED stem. Asking for the
+                // bare stem here found the HTML view's contract when
+                // there was one and NOTHING when there wasn't — and
+                // "nothing" fell through to the controller's own
+                // assigned ivars, which for campfire's autocomplete is
+                // the empty set (`@page` is assigned inside a runtime
+                // method). The call site then passed no arguments to a
+                // view that declared one.
+                format!("{}_json", view_method.as_str())
             } else {
                 view_method.as_str().to_string()
             };
             let contract = view_ivars.get(&(render_module.clone(), contract_stem));
-            // Peek ahead for the jbuilder marker (also computed below):
-            // json renders resolve to `<stem>_json` view methods that are
-            // deliberately absent from the html-view contract map, so a
-            // lookup miss is normal for them.
-            let is_json = render_kwargs_have_format(args, "json");
             // A non-json render whose target isn't among the emitted
             // action views means the template doesn't exist in the source
             // tree. Rails raises ActionView::MissingTemplate there — and
