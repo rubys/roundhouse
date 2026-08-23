@@ -2010,6 +2010,15 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
         let demanded = files.iter().any(|(p, c)| {
             p.starts_with("test/")
                 && p.ends_with(".rb")
+                // …but NOT our own shim. `test/test_helper.rb` is the
+                // emitted helper, not a test body, so a gem name in it is
+                // never the app asking for the gem — it is us reaching
+                // for one we have already decided to wire. Scanning it
+                // makes the wiring self-fulfilling: the helper's
+                // `WebMock.reset! if defined?(WebMock)` demanded webmock
+                // for every app, and the blog fixture (which has no such
+                // gem) stopped loading at all.
+                && p != "test/test_helper.rb"
                 && match marker {
                     Marker::Constant(konst) => names_constant(c, konst),
                     Marker::AnyText(needles) => needles.iter().any(|n| c.contains(n)),
@@ -3158,6 +3167,42 @@ fn walk_ruby(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gem-demand scan reads the APP's test bodies, never our own
+    /// shim. `test/test_helper.rb` mentions `WebMock` on purpose (it
+    /// resets the stub registry between tests when the gem is there),
+    /// and counting that as demand wired webmock into every emitted
+    /// tree — including the blog fixture, which then failed to LOAD.
+    #[test]
+    fn the_shim_helper_never_demands_a_test_gem_for_itself() {
+        let mut files = vec![
+            (
+                "test/test_helper.rb".to_string(),
+                "class TestBase\n  def setup\n    WebMock.reset! if defined?(WebMock)\n  end\nend\n"
+                    .to_string(),
+            ),
+            (
+                "test/models/article_test.rb".to_string(),
+                "class ArticleTest < TestBase\n  def test_x\n  end\nend\n".to_string(),
+            ),
+            ("Gemfile".to_string(), "source \"https://rubygems.org\"\n".to_string()),
+        ];
+        apply_test_gem_wiring(&mut files);
+        let gemfile = &files.iter().find(|(p, _)| p == "Gemfile").unwrap().1;
+        assert!(
+            !gemfile.contains("webmock"),
+            "the helper's own mention is not demand:\n{gemfile}"
+        );
+
+        // …and a real test body still is.
+        files[1].1 =
+            "class ArticleTest < TestBase\n  def test_x\n    WebMock.stub_request(:get, \"/\")\n  end\nend\n"
+                .to_string();
+        files[2].1 = "source \"https://rubygems.org\"\n".to_string();
+        apply_test_gem_wiring(&mut files);
+        let gemfile = &files.iter().find(|(p, _)| p == "Gemfile").unwrap().1;
+        assert!(gemfile.contains("webmock"), "a test body's demand stands:\n{gemfile}");
+    }
 
     #[test]
     fn trim_gemfile_drops_assets_and_websocket_blocks() {

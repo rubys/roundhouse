@@ -680,6 +680,14 @@ class TestBase
     # `assert_turbo_stream_broadcasts` does (see its note) would carry
     # one test's broadcasts into the next.
     Broadcasts.reset_log! if defined?(Broadcasts)
+    # WebMock's stub registry is a GLOBAL, and its Minitest integration
+    # empties it in an `after_teardown` hook this TestBase never runs —
+    # the helper is deliberately Minitest-free, which is the same reason
+    # mocha is wired by hand. Without this, a `stub_request` outlives the
+    # test that wrote it: campfire's Opengraph fetch tests register a 302
+    # to another host early in the file, and every later test followed it
+    # to a hostname its own stubs had never heard of.
+    WebMock.reset! if defined?(WebMock)
   end
 
   # Default no-op so the shim's `__t.teardown` resolves on test
