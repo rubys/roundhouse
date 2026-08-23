@@ -1514,7 +1514,50 @@ pub fn mentions_model_chain_start(expr: &Expr, models: &HashSet<ClassId>) -> boo
             return;
         }
         if let ExprNode::Send { recv: Some(r), method, .. } = &*e.node {
-            if (is_relation_chain_method(method.as_str()) || method.as_str() == "all")
+            // Chain methods and `all` open a chain; so do the terminals
+            // that need a seeded Relation at a Const root. Leaving the
+            // latter out is a gate that closes over the very shape
+            // `CLASS_ROOT_TERMINALS` exists to rewrite — a body whose
+            // ONLY relation surface is `Push::Subscription.destroy_by(…)`
+            // never reached the rewriter at all.
+            if (is_relation_chain_method(method.as_str())
+                || method.as_str() == "all"
+                || CLASS_ROOT_TERMINALS.contains(&method.as_str()))
+                && const_model(r, models).is_some()
+            {
+                *found = true;
+                return;
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, models, found));
+    }
+    walk(expr, models, &mut found);
+    found
+}
+
+/// True when `expr` ends a chain in a terminal that has no home on the
+/// model CLASS (`Push::Subscription.destroy_by(…)`) — the
+/// [`CLASS_ROOT_TERMINALS`] set, on a model constant.
+///
+/// A WHOLE-APP gate, separate from `mentions_model_chain_start`'s
+/// per-body one, because `apply_scope_lowering` returns early for an app
+/// with no scopes, no association-scoped class methods and no
+/// association extensions. That early return is right for everything
+/// else it guards — those all need a registry to be non-empty — and
+/// wrong for these: `destroy_by` on a class reaches nothing whether or
+/// not the app declares a single scope.
+///
+/// Kept to this one set on purpose. Asking the same question about
+/// `where`-family chains would make the early return vacuous for
+/// essentially every app.
+pub fn mentions_class_root_terminal(expr: &Expr, models: &HashSet<ClassId>) -> bool {
+    let mut found = false;
+    fn walk(e: &Expr, models: &HashSet<ClassId>, found: &mut bool) {
+        if *found {
+            return;
+        }
+        if let ExprNode::Send { recv: Some(r), method, .. } = &*e.node {
+            if CLASS_ROOT_TERMINALS.contains(&method.as_str())
                 && const_model(r, models).is_some()
             {
                 *found = true;
@@ -1802,7 +1845,14 @@ fn thread_rel(mut args: Vec<Expr>, rel: Expr, leading: Option<&Vec<Param>>, span
 ///
 /// `pluck` and `ids` have no such home: they were left as a call on
 /// the class, which no class answers.
-const CLASS_ROOT_TERMINALS: &[&str] = &["pluck", "ids"];
+///
+/// `destroy_by` / `delete_by` join them for exactly that reason. Both
+/// are `where` + a write, the arel pass claims neither at a Const root,
+/// and `Base` defines neither — so campfire's
+/// `Push::Subscription.destroy_by(endpoint:, user_id:)` reached nothing
+/// at all, with the analyzer saying so (`send_dispatch_failed: no known
+/// method `destroy_by` on Class { Push::Subscription }`).
+const CLASS_ROOT_TERMINALS: &[&str] = &["pluck", "ids", "destroy_by", "delete_by"];
 
 /// Relation TERMINALS our runtime implements — a seeded association
 /// chain may end in one (`@story.merged_stories.ids`). Deliberately

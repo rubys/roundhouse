@@ -744,16 +744,28 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
             push_assoc_scope_skip(&d.model, &d.method, &d.reason);
         }
     }
+    let models = crate::lower::scope_chain::model_set(&app.models);
+    // …and it can call a terminal that has no home on the model CLASS
+    // (`Push::Subscription.destroy_by(…)`), which reaches nothing at all
+    // without the seed this pass writes. Unlike the three conditions
+    // above it is not a question about a REGISTRY — an app with not one
+    // scope in it can still write that call — so it is surveyed over the
+    // app's own bodies.
+    let mut wants_class_root_terminal = false;
+    crate::lower::for_each_hook_body_ref(app, &mut |body| {
+        wants_class_root_terminal = wants_class_root_terminal
+            || crate::lower::scope_chain::mentions_class_root_terminal(body, &models);
+    });
     if !crate::lower::scope_chain::any_scopes(&scopes)
         && assoc_class_methods.is_empty()
         // An app with no scopes at all can still declare an association
         // extension, and its call sites need the same rewrite.
         && !crate::lower::scope_chain::any_assoc_extensions(&assocs)
+        && !wants_class_root_terminal
     {
         return;
     }
     let names = crate::lower::scope_chain::all_scope_names(&scopes);
-    let models = crate::lower::scope_chain::model_set(&app.models);
     let user_returns = crate::lower::scope_chain::build_user_method_returns(&app.models);
     let unique_keys = crate::lower::scope_chain::build_unique_keys(&app.models, &app.schema);
     let regs = crate::lower::scope_chain::Registries {
