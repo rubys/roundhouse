@@ -90,4 +90,24 @@ module ActiveSupport
       end
     end
   end
+
+  # `list.index_by { |x| key }` — the collection as a Hash keyed by the
+  # block's value, last write winning on duplicates (Rails' contract).
+  #
+  # ActiveSupport ships this as an `Enumerable` reopen, which only the
+  # CRuby overlay can host. Grounded here by `lower::enumerable_ext`,
+  # which takes the receiver as an ARGUMENT for the same reason
+  # `blank?` above does: the collection is evaluated exactly once.
+  #
+  # The `ActiveRecord::Relation` twin (relation.rb) stays where it is —
+  # it has a real RBS signature, and routing a typed receiver through
+  # this untyped one would trade a typed call for an untyped one to fix
+  # nothing. Same body shape as that twin, deliberately: `h[yield x] =
+  # x` inside an `each` is the form every target's emitter already
+  # compiles.
+  def self.index_by(list)
+    h = {}
+    list.each { |x| h[yield x] = x }
+    h
+  end
 end

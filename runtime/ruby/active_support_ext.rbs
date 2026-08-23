@@ -15,4 +15,5 @@ module ActiveSupport
       def initialize: (?String message) -> void
     end
   end
+  def self.index_by: (untyped list) { (untyped) -> untyped } -> Hash[untyped, untyped]
 end

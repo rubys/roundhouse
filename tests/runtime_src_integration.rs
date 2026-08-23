@@ -1048,7 +1048,17 @@ fn every_runtime_method_body_concretely_typed() {
     // /rooms/1 the leftover `WHERE id IS NULL` made a room of a
     // hundred messages render zero — behind a 200 and a well-formed
     // page, which is why no test in the app saw it.
-    const CEILING: usize = 319;
+    //
+    // 319 → 324: `ActiveSupport.index_by(list) { … }`, the plain-
+    // collection twin of `Relation#index_by`. Five sites, all the same
+    // one — the collection is `untyped` because this function exists
+    // precisely to serve a receiver no target can dispatch on, and its
+    // key type is whatever the caller's block returns. Typing it would
+    // need an RBS type VARIABLE (`[T, K] (Array[T]) { (T) -> K } ->
+    // Hash[K, T]`), which no signature in this corpus uses yet; the
+    // Relation twin pays the identical `Hash[untyped, untyped]` two
+    // files over.
+    const CEILING: usize = 324;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

@@ -44,6 +44,7 @@ pub mod test_module_to_library;
 pub mod create_block;
 pub mod as_json_poro;
 pub mod active_model_model;
+pub mod enumerable_ext;
 pub mod params_merge;
 pub mod duration;
 pub mod and_return;
@@ -220,6 +221,9 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // list)`; a receiver-shape rewrite of a name no other pass produces
     // or consumes, so no ordering constraints.
     ("presence_in", &[]),
+    // `list.index_by { … }` → `ActiveSupport.index_by(list) { … }`.
+    // Same receiver-shape rewrite, same absence of constraints.
+    ("enumerable_ext", &[]),
     // `Rooms::Open.count` → `Room.where(type: "Rooms::Open").count`.
     // Produces a `where` at a model Const root, which is vocabulary
     // every later pass already reads; consumes nothing any pass
@@ -494,6 +498,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("parameterize");
     presence_in::apply_presence_in_grounding(app);
     ran!("presence_in");
+    enumerable_ext::apply_enumerable_ext_grounding(app);
+    ran!("enumerable_ext");
     sti_scope::apply_sti_scope_lowering(app);
     ran!("sti_scope");
     sti_subclass_callbacks::apply_sti_subclass_callbacks(app);
