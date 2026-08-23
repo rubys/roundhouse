@@ -3066,6 +3066,74 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
             });
 
             if let Some(mr) = r_model {
+                // `<relation>.new(…)` — Rails builds a record THROUGH a
+                // relation (`User.active_bots.new`), seeded from the
+                // relation's create-scope. There is no `Relation#new`
+                // and there cannot be one: under spinel a class's
+                // constructor is already `sp_Relation_new`, so an
+                // instance method of that name is a duplicate C symbol
+                // and the whole program stops compiling (relation.rb
+                // says so at the hole it leaves, and
+                // docs/pipeline/runtime.md ledgers it). The association
+                // form is already served by `merge_scope_attributes`
+                // inside a threaded class-method body; this is the SCOPE
+                // form, and it is the same rewrite one layer out —
+                //
+                //   User.active_bots.new          ->  User.new(__r.scope_attributes)
+                //   room.memberships.new(attrs)   ->  Membership.new(__r.scope_attributes.merge(attrs))
+                //
+                // with the caller's own attributes on the OUTSIDE of the
+                // merge, because Rails assigns them after the scope's.
+                // The receiver stays where it is: a relation is lazy, so
+                // evaluating it to read `scope_attributes` runs no query.
+                //
+                // Same argument shapes `merge_scope_attributes` admits —
+                // absent, a literal Hash, or a bare variable. Anything
+                // else (a positional id, a splat) is left alone rather
+                // than merged against a value whose shape is unknown
+                // here.
+                if method.as_str() == "new" && block.is_none() {
+                    let arg_is_attrs = args.len() == 1
+                        && matches!(
+                            &*args[0].node,
+                            ExprNode::Hash { .. } | ExprNode::Var { .. }
+                        );
+                    if args.is_empty() || arg_is_attrs {
+                        let scope_attrs = syn(
+                            span,
+                            ExprNode::Send {
+                                recv: Some(r),
+                                method: Symbol::from("scope_attributes"),
+                                args: vec![],
+                                block: None,
+                                parenthesized: false,
+                            },
+                        );
+                        let seed = if args.is_empty() {
+                            scope_attrs
+                        } else {
+                            syn(
+                                span,
+                                ExprNode::Send {
+                                    recv: Some(scope_attrs),
+                                    method: Symbol::from("merge"),
+                                    args: vec![args.remove(0)],
+                                    block: None,
+                                    parenthesized: true,
+                                },
+                            )
+                        };
+                        *expr = put(
+                            span,
+                            Some(const_expr(span, &mr)),
+                            method,
+                            vec![seed],
+                            None,
+                            true,
+                        );
+                        return None;
+                    }
+                }
                 if let Some(counted) = counted_terminal(&method, &args, block.as_ref()) {
                     *expr = put(span, Some(r), counted, args, block, parenthesized);
                     return None;

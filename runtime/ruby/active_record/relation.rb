@@ -861,9 +861,11 @@ module ActiveRecord
     # that name emits a second definition of the same C symbol and the
     # program does not compile (`conflicting types for
     # 'sp_Relation_new'`). One landed briefly and turned every spinel
-    # job red. The association form is served by a call-site rewrite in
-    # lower::scope_chain instead; the scope form belongs there too.
-    # Ledgered in docs/pipeline/runtime.md.
+    # job red. Both forms are served by a call-site rewrite in
+    # lower::scope_chain instead — the association one inside a threaded
+    # class-method body, the scope one on the relation receiver itself
+    # (`User.active_bots.new` -> `User.new(User.active_bots
+    # .scope_attributes)`). Ledgered in docs/pipeline/runtime.md.
 
     # `first_or_initialize` — the first matching row, or a new unsaved
     # record when there is none. The caller assigns the remaining

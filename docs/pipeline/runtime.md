@@ -775,13 +775,29 @@ is spoken for on any target that derives a constructor symbol from the
 class name; a runtime method cannot claim it. Measured, not predicted:
 one landed briefly and turned every spinel job red.
 
-**What it costs.** `relation.new` reaches no method and raises. The
-association form is already served without it — `lower::scope_chain`
-rewrites `new` inside an association-scoped class method to
-`new(__rel.scope_attributes)`, which is where `user.sessions.create!`
-gets its `user_id`. The gap is the SCOPE form, and closing it means
-another call-site rewrite in that same pass rather than a runtime
-method.
+**What it costs.** Nothing at the call sites the corpus writes, because
+the call never reaches a method: `lower::scope_chain` rewrites it away.
+Inside an association-scoped class method, `new` becomes
+`new(__rel.scope_attributes)` — that is where `user.sessions.create!`
+gets its `user_id`. On a relation-valued RECEIVER, the same rewrite one
+layer out moves the constructor to the model:
+
+```text
+User.active_bots.new         ->  User.new(User.active_bots.scope_attributes)
+room.memberships.new(attrs)  ->  Membership.new(__rel.scope_attributes.merge(attrs))
+```
+
+The receiver stays where it is — a relation is lazy, so reading
+`scope_attributes` off it runs no query — and the caller's own
+attributes ride on the OUTSIDE of the merge, which is Rails' order.
+
+**Still divergent:** the seed itself. Rails' `scope_for_create` is
+`where_values_hash`, so EVERY equality condition on the relation
+pre-fills the record; here only an association seed (`where_scope`)
+writes the create-seed slot, so a plain scope's conditions filter reads
+and do not seed writes. `User.active_bots.new` comes back without its
+`role`. An argument shape the rewrite does not admit — a positional
+value, a splat — is left alone and still raises.
 
 ### `destroy!` cannot fail
 
