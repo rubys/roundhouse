@@ -116,22 +116,15 @@ require_relative "runtime/typed_store"
 require_relative "runtime/schematized_json"
 require_relative "runtime/action_mailer"
 # App-code gem dependencies, guarded so apps that don't use them (the
-# blog) boot without the gems installed. Under Rails, Bundler
-# auto-requires these; the transpiled tree loads them here so app
-# classes that reach gem constants at LOAD time (lobsters'
-# html_encoder.rb runs `HTMLEntities.new` in its class body) or at
-# request time (bcrypt behind the synthesized User#authenticate, rotp
-# behind 2FA, markly+nokogiri behind Markdowner.to_html) resolve.
-# svg-graph loads via its file path (the gem has no svg-graph.rb entry
-# file; lobsters' Gemfile declares `require: "SVG/Graph/TimeSeries"`).
-["bcrypt", "htmlentities", "rotp", "markly", "nokogiri", "parslet",
- "typeid", "SVG/Graph/TimeSeries"].each do |gem_name|
-  begin
-    require gem_name
-  rescue LoadError
-    nil
-  end
-end
+# blog) boot without the gems installed. The list itself lives in
+# runtime/gem_facades.rb — on a ruby-family tree that file IS the
+# guarded-require block (project.rs rewrites the spinel façades away),
+# and it is also the anchor every emitted class that names a gem
+# constant already requires. This line used to be a second copy of the
+# list, and the copy had drifted: it was missing rqrcode and
+# sentry-ruby, so a gem declared in the Gemfile still went unloaded at
+# server boot unless some model happened to pull the anchor in.
+require_relative "runtime/gem_facades"
 require_relative "runtime/broadcasts"
 require_relative "runtime/cgi_io"
 require_relative "config/routes"

@@ -5150,7 +5150,40 @@ fn require_path_for_parent(parent: &ClassId, app: &App) -> Option<String> {
     if app.controllers.iter().any(|c| c.name.0.as_str() == raw) {
         return Some(format!("app/controllers/{}", crate::naming::underscore(raw)));
     }
+    // A SUPERCLASS that is a gem's class — lobsters' `TimeSeries <
+    // SVG::Graph::TimeSeries`, campfire's `ApplicationPlatform <
+    // PlatformAgent`. Both used to emit no require at all and load only
+    // because boot.rb happened to have pulled the gem in first; a body
+    // reached from the test harness, which builds its own require
+    // chain, saw an undefined superclass and the file did not define.
+    if let Some(root) = raw.split("::").next() {
+        if is_gem_facade_root(root) {
+            return Some("runtime/gem_facades".to_string());
+        }
+    }
     None
+}
+
+/// Roots hosted by `runtime/ruby/gem_facades.rb` — the one file that
+/// stands in for every stubbed gem, so all their roots anchor there.
+/// On a ruby-family tree `project.rs` rewrites that file into the
+/// guarded-require block, and the same anchor loads the real gems.
+fn is_gem_facade_root(root: &str) -> bool {
+    matches!(
+        root,
+        "Markly"
+            | "Nokogiri"
+            | "Mail"
+            | "ROTP"
+            | "BCrypt"
+            | "RQRCode"
+            | "SVG"
+            // campfire's `ApplicationPlatform < PlatformAgent` names
+            // its superclass at LOAD time, so a missing anchor here is
+            // not a lazy failure: the tree does not boot.
+            | "PlatformAgent"
+            | "UserAgent"
+    )
 }
 
 /// Core Ruby classes an app may reopen (monkeypatch) without them being
@@ -5297,9 +5330,7 @@ fn require_path_for_body_const(
         // Gem façades — typed raising stand-ins for write-path-only
         // gem surface (see runtime/ruby/gem_facades.rb). One file
         // hosts every stubbed gem, so all their roots anchor here.
-        "Markly" | "Nokogiri" | "Mail" | "ROTP" | "BCrypt" | "RQRCode" | "SVG" => {
-            Some("runtime/gem_facades".to_string())
-        }
+        _ if is_gem_facade_root(first.as_str()) => Some("runtime/gem_facades".to_string()),
         _ => None,
     }
 }

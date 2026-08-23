@@ -124,3 +124,19 @@ module SVG
     end
   end
 end
+
+class PlatformAgent
+  @user_agent_string: String?
+
+  def initialize: (String? _user_agent_string) -> void
+  def os: () -> String
+  def match?: (Regexp _pattern) -> bool
+  def user_agent: () -> UserAgent
+end
+
+class UserAgent
+  def self.parse: (String? _string) -> UserAgent
+  def browser: () -> String
+  def platform: () -> String
+  def version: () -> String
+end

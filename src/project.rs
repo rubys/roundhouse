@@ -1098,6 +1098,18 @@ fn ruby_runtime_files(
     // placeholder in net.rb would confuse anyone exploring the tree.
     files.retain(|(p, _)| !p.starts_with("runtime/tep/"));
 
+    // `Module#delegate` for the GEMS in the emitted Gemfile — see the
+    // file's own header. Pushed at the fork, never named in the
+    // `spinel_files` stems list: a reopen of `Module` that defines
+    // methods from a computed name is exactly what the strict targets
+    // cannot compile, and nothing in this tree's own emitted code needs
+    // it (an app's `delegate` is lowered at ingest).
+    files.push((
+        "runtime/module_delegate.rb".to_string(),
+        fs::read_to_string("runtime/spinel/module_delegate.rb")
+            .map_err(|e| format!("read runtime/spinel/module_delegate.rb: {e}"))?,
+    ));
+
     // Gem façades are SPINEL-ONLY: spinel AOT can't link the native
     // gems, so it ships loudly-raising stubs. On the CRuby/JRuby path the
     // real gems (markly / nokogiri / mail) ARE available — main.rb
@@ -1121,22 +1133,22 @@ fn ruby_runtime_files(
             // is the harness. Requires are idempotent, so doing them here
             // makes every consumer of the anchor self-sufficient without
             // changing main.rb's behavior.
-            *content = "# Gem façades are spinel-only (no native gems there). On the CRuby\n\
-                        # path the real gems ARE available, so this file guarded-requires\n\
-                        # them rather than shadowing them with raising stubs. Guarded because\n\
-                        # an app that uses none of them (the blog) must boot without them\n\
-                        # installed. Keep this list in step with main.rb's. (JRuby swaps in\n\
-                        # the commonmark-java Markly shim instead — see jruby_runtime_files.)\n\
-                        [\"bcrypt\", \"htmlentities\", \"rotp\", \"markly\", \"nokogiri\", \"parslet\",\n\
-                        \x20\"typeid\", \"rqrcode\", \"SVG/Graph/TimeSeries\",\n\
-                        \x20\"sentry-ruby\"].each do |gem_name|\n\
-                        \x20\x20begin\n\
-                        \x20\x20\x20\x20require gem_name\n\
-                        \x20\x20rescue LoadError\n\
-                        \x20\x20\x20\x20nil\n\
-                        \x20\x20end\n\
-                        end\n"
-                .to_string();
+            *content = format!(
+                "# Gem façades are spinel-only (no native gems there). On the CRuby\n\
+                 # path the real gems ARE available, so this file guarded-requires\n\
+                 # them rather than shadowing them with raising stubs. Guarded because\n\
+                 # an app that uses none of them (the blog) must boot without them\n\
+                 # installed.\n\
+                 #\n\
+                 # THE ONLY LIST. boot.rb used to carry a second copy and the two had\n\
+                 # drifted (it was missing rqrcode and sentry-ruby); it requires this\n\
+                 # file now. (JRuby writes its own copy of this file — it swaps in the\n\
+                 # commonmark-java Markly shim — from the same list, minus that\n\
+                 # one name.)\n\
+                 require_relative \"module_delegate\"\n\
+                 {}",
+                gem_require_block(&[])
+            );
         }
     }
 
@@ -1658,17 +1670,35 @@ fn jruby_runtime_files(
     // real gems — the JRuby analogue of the CRuby neutralization in
     // `ruby_runtime_files`. Apps that never require the anchor (blog)
     // never load the shim, so the jars stay optional.
+    // `Module#delegate` for the GEMS in the emitted Gemfile — see the
+    // file's own header. Pushed at the fork, never named in the
+    // `spinel_files` stems list: a reopen of `Module` that defines
+    // methods from a computed name is exactly what the strict targets
+    // cannot compile, and nothing in this tree's own emitted code needs
+    // it (an app's `delegate` is lowered at ingest).
+    files.push((
+        "runtime/module_delegate.rb".to_string(),
+        fs::read_to_string("runtime/spinel/module_delegate.rb")
+            .map_err(|e| format!("read runtime/spinel/module_delegate.rb: {e}"))?,
+    ));
+
     let markly_shim = fs::read_to_string("runtime/spinel/markly_jruby.rb")
         .map_err(|e| format!("read runtime/spinel/markly_jruby.rb: {e}"))?;
     files.push(("runtime/markly_jruby.rb".to_string(), markly_shim));
     for (path, content) in files.iter_mut() {
         if path == "runtime/gem_facades.rb" {
-            *content = "# On the JRuby tree Markly is provided by the commonmark-java shim\n\
-                        # (markly_jruby.rb); nokogiri (java platform gem) and mail (pure Ruby)\n\
-                        # are the real gems, loaded by main.rb's guarded requires. This file\n\
-                        # keeps the `require_relative \"runtime/gem_facades\"` anchor resolving.\n\
-                        require_relative \"markly_jruby\"\n"
-                .to_string();
+            *content = format!(
+                "# On the JRuby tree Markly is provided by the commonmark-java shim\n\
+                 # (markly_jruby.rb); every other gem below is the real one (nokogiri\n\
+                 # ships a java platform build, the rest are pure Ruby). This file is\n\
+                 # also the `require_relative \"runtime/gem_facades\"` anchor and the\n\
+                 # one guarded-require list for this tree — boot.rb requires it rather\n\
+                 # than carrying a second copy.\n\
+                 require_relative \"markly_jruby\"\n\
+                 require_relative \"module_delegate\"\n\
+                 {}",
+                gem_require_block(&["markly"])
+            );
         }
     }
 
@@ -1830,6 +1860,15 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<Vec<(String, String)>, Stri
     // vectors at bench/gem-shims/markly/). Injected only by
     // `jruby_runtime_files`.
     files.retain(|(p, _)| p != "runtime/markly_jruby.rb");
+
+    // And for `module_delegate.rb` — ActiveSupport's `Module#delegate`,
+    // supplied for the GEMS in the emitted Gemfile (see the file's own
+    // header). A reopen of `Module` that defines methods from a computed
+    // name is exactly what the strict targets cannot compile, and
+    // nothing in an emitted tree's own code needs it: an app's
+    // `delegate` is lowered at ingest. Injected only by
+    // `ruby_runtime_files` / `jruby_runtime_files`.
+    files.retain(|(p, _)| p != "runtime/module_delegate.rb");
 
     // Vendored Tep transport (FFI HTTP server). Both .rb files and
     // sphttp.c (precompiled to sphttp.o at transpile-post time).
@@ -2148,12 +2187,61 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
 /// seam — `spin_shape` swaps `runtime/bcrypt_facade.rb` for the real spin
 /// package and adds it to the manifest. This is the CRuby half of that
 /// same decision, which had no half until now.
+/// The gems every ruby-family tree guarded-requires, written once.
+///
+/// Under Rails, Bundler auto-requires these; the transpiled tree loads
+/// them so app classes that reach gem constants at LOAD time (lobsters'
+/// `html_encoder.rb` runs `HTMLEntities.new` in its class body;
+/// campfire's `ApplicationPlatform < PlatformAgent` names its
+/// superclass) or at request time (bcrypt behind the synthesized
+/// `User#authenticate`, rotp behind 2FA, markly+nokogiri behind
+/// `Markdowner.to_html`) resolve.
+///
+/// svg-graph loads by file path: the gem has no `svg-graph.rb` entry
+/// file, and lobsters' Gemfile declares `require: "SVG/Graph/TimeSeries"`.
+///
+/// Kept in step with `RUNTIME_GEMS` — that table is the DEMAND (what
+/// the emitted Gemfile declares, derived from the constants `app/`
+/// names), this one is the LOAD.
+const GEM_REQUIRES: &[&str] = &[
+    "bcrypt",
+    "htmlentities",
+    "rotp",
+    "markly",
+    "nokogiri",
+    "parslet",
+    "typeid",
+    "rqrcode",
+    "SVG/Graph/TimeSeries",
+    "sentry-ruby",
+    "platform_agent",
+];
+
+/// The guarded-require block, minus any gem this tree provides another
+/// way. Guarded because an app that uses none of them — the blog — must
+/// boot with none installed.
+///
+/// `exclude` takes gem NAMES, not a substring to cut out of rendered
+/// source: JRuby provides Markly through the commonmark-java shim, and
+/// a string surgery that silently missed would put the real gem (which
+/// has no JRuby build) back in the list.
+fn gem_require_block(exclude: &[&str]) -> String {
+    let names: Vec<String> = GEM_REQUIRES
+        .iter()
+        .filter(|g| !exclude.contains(g))
+        .map(|g| format!("{g:?}"))
+        .collect();
+    let mut out = format!("[{}].each do |gem_name|\n", names.join(", "));
+    out.push_str("  begin\n    require gem_name\n  rescue LoadError\n    nil\n  end\nend\n");
+    out
+}
+
 fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
     // Kept in step with the guarded list in `runtime/gem_facades.rb`:
     // (constant an emitted body names, gem that defines it). Only gems
     // whose absence is a RUNTIME error belong here — the list is the
     // façade's, not a survey of what an app might like.
-    const RUNTIME_GEMS: [(&str, &str); 9] = [
+    const RUNTIME_GEMS: [(&str, &str); 10] = [
         ("BCrypt", "bcrypt"),
         ("HTMLEntities", "htmlentities"),
         ("ROTP", "rotp"),
@@ -2169,14 +2257,21 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
         // the Gemfile, which is what this table is for. MEASURED: the
         // real gem loads in the emitted tree under CRuby.
         //
-        // `platform_agent` is deliberately NOT here, and the reason is
-        // worth more than the entry would be: its first line is
-        // `delegate :browser, … , to: :user_agent`, so the gem does not
-        // load without ActiveSupport's `Module#delegate`. Declaring it
-        // buys a Gemfile line and a NoMethodError. Pulling ActiveSupport
-        // in to satisfy one gem is the opposite of what this tree is
-        // for, so the ledger entry stays and now says WHY.
         ("Sentry", "sentry-ruby"),
+        // campfire's `ApplicationPlatform < PlatformAgent`, a LOAD-time
+        // superclass — the gem's absence is not a late NameError on one
+        // route, it is a tree that does not boot.
+        //
+        // It reads `delegate :browser, …, to: :user_agent` on its second
+        // line, which is why this entry was refused once: the gem
+        // declares `activesupport` as a runtime dependency for that one
+        // call, and pulling ActiveSupport into the emitted tree to
+        // satisfy it is the opposite of what the tree is for. Supplying
+        // the one method it names is thirty lines
+        // (`runtime/spinel/module_delegate.rb`, ruby-family only), and
+        // with that defined the real gem loads and answers correctly.
+        // Its own dependency `useragent` arrives through bundler.
+        ("PlatformAgent", "platform_agent"),
     ];
 
     let mut needed: Vec<&str> = Vec::new();
