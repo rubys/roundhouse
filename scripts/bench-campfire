@@ -10,12 +10,26 @@
 #
 # Usage:  scripts/bench-campfire [options] [LANE ...]
 #
-#   LANE ∈ { rails | rails-int | ruby | ruby-int }   (default: rails ruby)
+#   LANE ∈ { rails | rails-nocache | rails-int | ruby | ruby-int }
+#          (default: rails rails-nocache ruby)
 #
-#     rails      real Rails, PRODUCTION, YJIT      (the oracle tree)
-#     rails-int  real Rails, PRODUCTION, no JIT    (the baseline lane)
-#     ruby       roundhouse emit on CRuby, YJIT
-#     ruby-int   roundhouse emit on CRuby, no JIT
+#     rails          real Rails, PRODUCTION, YJIT — AS DEPLOYED, which
+#                    means the Redis-backed fragment cache is ON
+#     rails-nocache  the same, with `perform_caching = false`: Rails
+#                    actually RENDERING
+#     rails-int      real Rails, PRODUCTION, no JIT (fragment cache on)
+#     ruby           roundhouse emit on CRuby, YJIT
+#     ruby-int       roundhouse emit on CRuby, no JIT
+#
+# TWO RAILS LANES, AND THE REASON IS THE WHOLE BENCHMARK. campfire
+# renders its message list as `render partial: …, collection: @messages,
+# cached: true`. With Redis up, the 40 message fragments are read back
+# rather than rendered — `/rooms/1/messages` measures 503 ms cold and
+# 5 ms warm. The emitted tree has no fragment cache and renders all 40
+# every request, so the warm number is not its opponent: it is Redis's
+# throughput. `rails-nocache` is the operand that compares renderers,
+# and `rails` is the operand that says what a deployment costs. Publish
+# both or publish neither.
 #
 # Options:
 #   --workers N       Puma workers per lane (default 1). PIN IT: campfire's
@@ -102,12 +116,12 @@ while [[ $# -gt 0 ]]; do
         --skip-prepare) SKIP_PREPARE=1; shift ;;
         --keep)        KEEP=1; shift ;;
         -h|--help)     sed -n '2,62p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        rails|rails-int|ruby|ruby-int) LANES+=("$1"); shift ;;
+        rails|rails-nocache|rails-int|ruby|ruby-int) LANES+=("$1"); shift ;;
         *) echo "bench-campfire: unknown argument $1" >&2; exit 2 ;;
     esac
 done
 
-(( ${#LANES[@]} )) || LANES=(rails ruby)
+(( ${#LANES[@]} )) || LANES=(rails rails-nocache ruby)
 (( ${#ENDPOINTS[@]} )) || ENDPOINTS=(/rooms/1 /rooms/1/messages)
 [[ -n "$OUT_DIR" ]] || OUT_DIR="$REPO_ROOT/bench/results/campfire-$(date +%Y%m%d-%H%M%S)"
 
@@ -204,11 +218,12 @@ start_lane() {
     local lane="$1" port="$2"
     local log="$LOG_DIR/$lane.log"
     case "$lane" in
-        rails|rails-int)
+        rails|rails-int|rails-nocache)
             local yjit=1; [[ "$lane" == "rails-int" ]] && yjit=0
+            local nocache=""; [[ "$lane" == "rails-nocache" ]] && nocache="--no-fragment-cache"
             scripts/campfire-oracle serve --out "$ORACLE" --port "$port" \
                 --workers "$WORKERS" --threads "$THREADS" \
-                $( (( yjit )) || echo --no-yjit ) > "$log" 2>&1 &
+                $( (( yjit )) || echo --no-yjit ) $nocache > "$log" 2>&1 &
             SERVER_PID=$!
             ;;
         ruby|ruby-int)
@@ -235,7 +250,7 @@ login_cookie() {
     local jar="$LOG_DIR/jar-$lane.txt"
     rm -f "$jar"
     case "$lane" in
-        rails|rails-int)
+        rails|rails-int|rails-nocache)
             scripts/campfire-oracle login --out "$ORACLE" --port "$port" --jar "$jar" >/dev/null \
                 || { fail "$lane sign-in failed"; return 1; }
             ;;
@@ -293,6 +308,20 @@ for lane in "${LANES[@]}"; do
         port=$(( port + 1 )); SERVER_PID=""; continue
     }
     ok "$lane up and signed in"
+
+    # WARM THE FRAGMENT CACHE for the lanes that have one, deliberately
+    # and on the record. The first request to a cached page is 100x the
+    # rest (503 ms against 5 ms), and wrk's own warmup would absorb it
+    # anyway — doing it here means the `rails` lane measures the steady
+    # state it is meant to, rather than one cold render smeared across a
+    # short run.
+    case "$lane" in
+        rails|rails-int)
+            for ep in "${ENDPOINTS[@]}"; do
+                curl -s -b "$LOG_DIR/jar-$lane.txt" -o /dev/null "http://127.0.0.1:$port$ep"
+            done
+            ;;
+    esac
 
     # Parity capture BEFORE the load: one authenticated GET per endpoint,
     # saved so `parity.txt` can say what each lane actually rendered. A
@@ -396,11 +425,20 @@ cells.group_by { |c| c[:endpoint] }.each do |ep, eg|
   end
   # The ratio, stated rather than left to the reader — and only when both
   # operands were measured in this run.
-  rails = eg.find { |c| c[:target] == "rails" }
-  ruby  = eg.find { |c| c[:target] == "ruby" }
-  if rails && ruby && rails[:req_sec] && ruby[:req_sec] && ruby[:req_sec] > 0
-    r = rails[:req_sec] / ruby[:req_sec]
-    md << "\n_rails / ruby = %.2fx_\n" % r
+  ruby = eg.find { |c| c[:target] == "ruby" }
+  if ruby && ruby[:req_sec] && ruby[:req_sec] > 0
+    %w[rails rails-nocache].each do |name|
+      cmp = eg.find { |c| c[:target] == name }
+      next unless cmp && cmp[:req_sec]
+      md << "\n_%s / ruby = %.2fx_\n" % [name, cmp[:req_sec] / ruby[:req_sec]]
+    end
+  end
+  if eg.any? { |c| c[:target] == "rails" } && eg.any? { |c| c[:target] == "rails-nocache" }
+    md << "\n`rails` serves campfire's message fragments from Redis " \
+          "(`cached: true`); `rails-nocache` renders them. The emitted " \
+          "tree has no fragment cache, so `rails-nocache` is the lane " \
+          "that compares renderers and `rails` is the lane that says " \
+          "what a deployment costs.\n"
   end
   md << "\n"
 end

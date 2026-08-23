@@ -23,6 +23,24 @@
 # result is not enough — `prepare` records the revision in oracle.json and
 # the report should print it. See [[feedback_pin_benchmarks_not_ledgers]].
 #
+# FRAGMENT CACHING IS A LANE, NOT A DETAIL. campfire renders its message
+# list as `render partial: …, collection: @messages, cached: true`, and
+# production.rb points `cache_store` at Redis. With Redis up, Rails reads
+# 40 rendered message fragments back out of it and never runs the
+# partial. MEASURED on this box, `/rooms/1/messages` after
+# `redis-cli flushall`: 503 ms cold, 5 ms warm — 100x, and the 18-query
+# request log is the same fact from the other side.
+#
+# That is what a campfire deployment really does, so it is a lane worth
+# measuring. It is NOT a comparison against a tree that has no fragment
+# cache: that number is Redis's, not Rails' renderer's. `serve` takes
+# `--no-fragment-cache`, which sets `perform_caching = false` and the
+# null store through `config/initializers/zz_bench_cache.rb` (written by
+# `prepare`, gated on an env var, and the only file this oracle adds to
+# campfire's own source). Rails RENDERING the same page takes ~46 ms.
+#
+# Publish both or publish neither.
+#
 # THE ORACLE SERVES PRODUCTION. This file used to boot
 # `RAILS_ENV=development`, and that is not a slower Rails — it is a
 # different one: code reloading on every request, a template compile per
@@ -61,6 +79,11 @@
 #   --no-yjit       boot without YJIT (the baseline lane)
 #   --env NAME      RAILS_ENV for `serve` (default production). Development
 #                   is 12x slower on this app and is not a benchmark.
+#   --no-fragment-cache
+#                   Serve with `perform_caching = false` and the null
+#                   store. Default is ON, which is what a campfire
+#                   deployment does — and which makes the message list a
+#                   Redis read rather than a render. See the header.
 #   --jar PATH      cookie jar for `login` (default <out>/tmp/bench-jar.txt)
 #
 # Requires: ruby, bundler, sqlite3, curl. Everything else comes from
@@ -90,6 +113,10 @@ YJIT=1
 #
 # `login` and `prepare` are environment-agnostic; only `serve` reads this.
 RAILS_ENV_NAME="production"
+# 1 = campfire as deployed (Redis-backed fragment cache); 0 = Rails
+# actually rendering. See the header — these are two different
+# measurements and both are real.
+FRAGMENT_CACHE=1
 JAR=""
 
 while [[ $# -gt 0 ]]; do
@@ -103,6 +130,7 @@ while [[ $# -gt 0 ]]; do
         --rooms)    ROOMS="$2"; shift 2 ;;
         --messages) MESSAGES="$2"; shift 2 ;;
         --no-yjit)  YJIT=0; shift ;;
+        --no-fragment-cache) FRAGMENT_CACHE=0; shift ;;
         --env)      RAILS_ENV_NAME="$2"; shift 2 ;;
         --jar)      JAR="$2"; shift 2 ;;
         -h|--help)  sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -143,6 +171,26 @@ cmd_prepare() {
         bin/rails runner "$(cat "$REPO_ROOT/scripts/campfire-oracle-seed.rb")") \
         || die "seeding failed"
 
+    # The one file this oracle adds to campfire's own source, and it is
+    # inert unless the env var is set — see the header on why fragment
+    # caching is a lane rather than a setting.
+    step "installing the fragment-cache lane knob"
+    cat > "$OUT/config/initializers/zz_bench_cache.rb" <<'INIT'
+# Benchmark lane knob, added by roundhouse's scripts/campfire-oracle.
+# NOT campfire's: inert unless DISABLE_FRAGMENT_CACHE=1.
+#
+# campfire renders its message list with `cached: true` against a
+# Redis-backed store. That is what a deployment does, and it means the
+# 40 message fragments are READ BACK rather than rendered — measured at
+# 503 ms cold against 5 ms warm. A tree with no fragment cache cannot be
+# compared against the warm number; this switch produces the other
+# operand, Rails actually rendering.
+if ENV["DISABLE_FRAGMENT_CACHE"] == "1"
+  Rails.application.config.action_controller.perform_caching = false
+  Rails.application.config.cache_store = :null_store
+end
+INIT
+
     # The production DB is a COPY of the seeded development one, not a
     # second seeding run: both lanes of the benchmark have to read the
     # same rows, and `serve` defaults to production (see RAILS_ENV_NAME).
@@ -170,6 +218,7 @@ cmd_prepare() {
   "rails_version": "$(cd "$OUT" && bin/rails runner 'print Rails.version' 2>/dev/null || echo unknown)",
   "ruby_version": "$(ruby -e 'print RUBY_VERSION')",
   "serve_env": "$RAILS_ENV_NAME",
+  "fragment_cache_default": true,
   "seed": { "users": $USERS, "rooms": $ROOMS, "messages_per_room": $MESSAGES }
 }
 JSON
@@ -181,7 +230,7 @@ cmd_serve() {
     if [[ "$RAILS_ENV_NAME" == "production" && ! -f "$OUT/storage/db/production.sqlite3" ]]; then
         die "no production DB — run 'prepare' (it stages one from the seed)"
     fi
-    step "puma :$PORT — $RAILS_ENV_NAME, $WORKERS worker(s), $THREADS thread(s), yjit=$YJIT"
+    step "puma :$PORT — $RAILS_ENV_NAME, $WORKERS worker(s), $THREADS thread(s), yjit=$YJIT, fragment-cache=$FRAGMENT_CACHE"
     cd "$OUT"
     # WEB_CONCURRENCY is what campfire's config/puma.rb reads; without it the
     # oracle sizes itself to the box and the comparison stops being one.
@@ -195,6 +244,7 @@ cmd_serve() {
     # for output the other lane does not produce.
     WEB_CONCURRENCY="$WORKERS" RAILS_MAX_THREADS="$THREADS" \
     RUBY_YJIT_ENABLE="$YJIT" RAILS_ENV="$RAILS_ENV_NAME" DISABLE_SSL=1 \
+    DISABLE_FRAGMENT_CACHE="$(( 1 - FRAGMENT_CACHE ))" \
     RAILS_LOG_LEVEL="${RAILS_LOG_LEVEL:-warn}" \
         exec bundle exec puma -p "$PORT" -e "$RAILS_ENV_NAME" config.ru
 }
