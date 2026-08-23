@@ -119,3 +119,55 @@ end
         "the sibling resource declares no default: {params:?}"
     );
 }
+
+/// A defaulted segment that is NOT the SUFFIX becomes a KEYWORD, and
+/// leaves the positional list entirely.
+///
+/// campfire routes push_subscriptions under the same scope, so Rails
+/// accepts `user_push_subscription_path(record)` — one argument for a
+/// two-segment member route. Keeping `user_id` a positional-with-a-
+/// default is what Ruby would do and what the strict targets cannot:
+/// Rust has no default arguments, so the emitter fills them at the CALL
+/// SITE by padding MISSING TRAILING args, and a LEADING default would be
+/// appended at the end instead of filled in place — silently swapping
+/// the segments in the URL.
+///
+/// The cost, and the direction is the point: Rails also accepts
+/// `user_push_subscription_path(user, record)`. Against a keyword that
+/// is an ARITY ERROR — loud, at the call site, naming the helper —
+/// rather than a URL with its segments swapped.
+const NESTED_MEMBER_SHAPE: &str = r#"
+Rails.application.routes.draw do
+  resources :users, only: :show do
+    scope module: "users" do
+      scope defaults: { user_id: "me" } do
+        resources :push_subscriptions
+      end
+    end
+  end
+end
+"#;
+
+#[test]
+fn a_leading_defaulted_segment_becomes_a_keyword() {
+    let params = helper_params(NESTED_MEMBER_SHAPE, "user_push_subscription_path");
+    assert_eq!(params.len(), 2, "both segments are still parameters: {params:?}");
+    assert_eq!(params[0].name.as_str(), "id", "the undefaulted segment leads: {params:?}");
+    assert_eq!(params[0].kind, ParamKind::Required);
+    assert_eq!(params[1].name.as_str(), "user_id");
+    assert_eq!(
+        params[1].kind,
+        ParamKind::Keyword { required: false },
+        "the defaulted segment is a keyword, not a positional: {params:?}"
+    );
+}
+
+/// …and when the defaults ARE the suffix, nothing moves: the collection
+/// helper under the same scope keeps its single optional positional.
+#[test]
+fn a_trailing_defaulted_segment_stays_positional() {
+    let params = helper_params(NESTED_MEMBER_SHAPE, "user_push_subscriptions_path");
+    assert_eq!(params.len(), 1, "{params:?}");
+    assert_eq!(params[0].name.as_str(), "user_id");
+    assert_eq!(params[0].kind, ParamKind::Optional, "{params:?}");
+}

@@ -635,9 +635,42 @@ fn build_helper_function(
             )
         })
     };
+    // A defaulted segment that is NOT part of the suffix becomes a
+    // KEYWORD, and leaves the positional list entirely.
+    //
+    // campfire routes push_subscriptions under `scope defaults: {
+    // user_id: "me" }`, so Rails accepts
+    // `user_push_subscription_path(record)` — one argument for a
+    // two-segment member route. Keeping `user_id` positional-with-a-
+    // default is what Ruby would do and what the strict targets cannot:
+    // Rust has no default arguments, so the emitter fills them at the
+    // CALL SITE by padding MISSING TRAILING args, and a LEADING default
+    // would be appended at the end instead of filled in place, silently
+    // swapping the segments in the URL. Every call site in the corpus
+    // passes only the non-defaulted segments, so the keyword form binds
+    // all of them and the padder never sees the ambiguity.
+    //
+    // WHAT IT COSTS, and the direction is the point: Rails also accepts
+    // `user_push_subscription_path(user, record)`, filling the segments
+    // left to right. Against a keyword that is an ARITY ERROR — loud,
+    // at the call site, naming the helper — rather than a URL with its
+    // segments swapped. A wrong URL that returns 200 for the wrong
+    // record is the failure this shape must not have.
+    let keyworded = |p: &String| -> bool { !defaults_are_a_suffix && default_for(p).is_some() };
+    let keyword_default = |p: &String| -> Expr {
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit {
+                value: crate::expr::Literal::Str {
+                    value: default_for(p).cloned().unwrap_or_default(),
+                },
+            },
+        )
+    };
     let mut params: Vec<Param> = seg_params
         .iter()
         .enumerate()
+        .filter(|(_, p)| !keyworded(p))
         .map(|(i, p)| {
             let sym = Symbol::from(p.clone());
             if let Some(d) = seg_default(p) {
@@ -652,6 +685,7 @@ fn build_helper_function(
     let mut sig_params: Vec<(Symbol, Ty)> = seg_params
         .iter()
         .enumerate()
+        .filter(|(_, p)| !keyworded(p))
         .map(|(i, p)| {
             let base = param_ty(p, slug_params.contains(p.as_str()));
             let ty = if i < required {
@@ -662,6 +696,18 @@ fn build_helper_function(
             (Symbol::from(p.clone()), ty)
         })
         .collect();
+    // The keyword half, in segment order, appended after the
+    // positionals — `def f(id, user_id: "me")`.
+    let mut segment_keyword_sig: Vec<crate::ty::Param> = Vec::new();
+    for p in seg_params.iter().filter(|p| keyworded(p)) {
+        let sym = Symbol::from(p.clone());
+        params.push(Param::keyword(sym.clone(), Some(keyword_default(p))));
+        segment_keyword_sig.push(crate::ty::Param {
+            name: sym,
+            ty: param_ty(p, slug_params.contains(p.as_str())),
+            kind: crate::ty::ParamKind::Keyword { required: false },
+        });
+    }
     let mut body = if required < seg_params.len() {
         build_optional_path_expr(path, &seg_params, required, &slug_params)
     } else {
@@ -847,6 +893,10 @@ fn build_helper_function(
             effects,
         }
     };
+    // Segment keywords ride with the query keywords: both are keyword
+    // params in the `def`, and `fn_sig` types every param Required, so
+    // declaring one positionally is a call spinel cannot make.
+    query_sig.splice(0..0, segment_keyword_sig);
     let signature = match mark_optional(fn_sig(sig_params, Ty::Str)) {
         Ty::Fn { mut params, block, ret, effects } if !query_sig.is_empty() => {
             params.extend(query_sig);
