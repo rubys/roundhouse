@@ -580,7 +580,7 @@ class ActionResponse
   attr_reader :status, :body, :location, :flash, :cookies, :content_type
 
   def initialize(status:, body:, location:, flash:, cookies:, content_type: "text/html; charset=utf-8",
-                 cache_control_max_age: 0, cache_control_public: false)
+                 cache_control_max_age: 0, cache_control_public: false, headers: {})
     @status   = status
     @body     = body
     @location = location
@@ -589,6 +589,25 @@ class ActionResponse
     @content_type = content_type
     @cache_control_max_age = cache_control_max_age
     @cache_control_public = cache_control_public
+    @extra_headers = headers
+  end
+
+  # Rails' `response.headers` — the header map the dispatcher would
+  # write, ASSEMBLED from the fields this response already carries
+  # rather than kept as a second copy that could disagree with them.
+  # `content_type` and `location` ARE headers; the controller's own
+  # `response.headers["X-Thing"] = …` writes ride alongside.
+  #
+  # LOWERCASE keys, which is Rack 3's normalization and therefore what
+  # Rails hands a test: campfire's logo test reads
+  # `@response.headers["content-type"]`, and against a Hash keyed the
+  # way the header is spelled on the wire that read is nil.
+  def headers
+    out = {}
+    @extra_headers.each { |k, v| out[k.to_s.downcase] = v }
+    out["content-type"] = @content_type
+    out["location"] = @location unless @location.nil?
+    out
   end
 
   # Rails' `response.cache_control` — the one place the two TYPED
@@ -1161,6 +1180,7 @@ module RequestDispatch
       content_type: controller.content_type,
       cache_control_max_age: controller.cache_control_max_age,
       cache_control_public: controller.cache_control_public,
+      headers:  controller.headers,
     )
     # Rails' OWN names, alongside the `__`-prefixed ones the harness
     # methods read. An integration test writes `@response.body` and

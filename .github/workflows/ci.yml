@@ -735,8 +735,19 @@ jobs:
       #             on the CRuby tree `runtime/gem_facades.rb` is swapped
       #             for guarded requires of the REAL gems, and rqrcode
       #             joins that list.
+      #   ruby-vips — also from the app, and the only one with a NATIVE
+      #             library behind it: campfire's logo and avatar tests
+      #             decode the response body and assert its PIXEL
+      #             dimensions, which is the only honest way to check
+      #             that an image endpoint served an image of the right
+      #             size. ruby-vips is an FFI binding, so the gem alone
+      #             installs fine and then fails at LOAD time without
+      #             libvips on the box — which is why the apt step below
+      #             is not optional.
+      - name: Install libvips (ruby-vips binds it through FFI)
+        run: "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips-dev
       - name: Install the gems the emitted suite loads
-        run: gem install sqlite3 bcrypt nokogiri webmock mocha rqrcode --no-document
+        run: gem install sqlite3 bcrypt nokogiri webmock mocha rqrcode ruby-vips --no-document
       - name: Fetch once-campfire at the pinned SHA
         run: |
           set -euo pipefail

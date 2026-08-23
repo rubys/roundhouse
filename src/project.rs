@@ -2000,9 +2000,14 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
     // test/test_helper.rb is deliberately Minitest-free. `mocha/api` is
     // the documented entry point for a foreign test framework, and it
     // needs the lifecycle wiring below.
-    const TEST_GEMS: [(Marker, &str, &str); 2] = [
+    const TEST_GEMS: [(Marker, &str, &str); 3] = [
         (Marker::Constant("WebMock"), "webmock", "webmock/minitest"),
         (Marker::AnyText(&[".stubs(", ".expects(", ".any_instance"]), "mocha", "mocha/api"),
+        // ruby-vips, named as `::Vips::Image` — campfire's logo and
+        // avatar tests decode the response body to assert its PIXEL
+        // dimensions, which is the only honest way to check that an
+        // image endpoint served an image of the right size.
+        (Marker::Constant("Vips"), "ruby-vips", "vips"),
     ];
 
     let mut needed: Vec<(&str, &str)> = Vec::new();
