@@ -117,55 +117,16 @@ pub(super) fn push_active_model_constructor(methods: &mut Vec<MethodDef>, model:
     if names.is_empty() {
         return;
     }
-    let span = model.span;
-    let attrs = Symbol::from("attrs");
-    let stmts: Vec<Expr> = names
-        .iter()
-        .map(|name| {
-            Expr::new(
-                span,
-                ExprNode::Assign {
-                    target: crate::expr::LValue::Ivar { name: name.clone() },
-                    // `attrs[:name]` as the `[]` send every target
-                    // already lowers — there is no Index node.
-                    value: Expr::new(
-                        span,
-                        ExprNode::Send {
-                            recv: Some(Expr::new(
-                                span,
-                                ExprNode::Var { id: crate::ident::VarId(0), name: attrs.clone() },
-                            )),
-                            method: Symbol::from("[]"),
-                            args: vec![Expr::new(
-                                span,
-                                ExprNode::Lit { value: Literal::Sym { value: name.clone() } },
-                            )],
-                            block: None,
-                            parenthesized: true,
-                        },
-                    ),
-                },
-            )
-        })
-        .collect();
-    let mut param = crate::dialect::Param::positional(attrs);
-    param.default = Some(Expr::new(
-        span,
-        ExprNode::Hash { entries: Vec::new(), kwargs: false },
+    // ONE definition of what the module's constructor is — the
+    // library-class twin (`lower::active_model_model`) covers the
+    // classes ingest cannot classify as tableless models (campfire's
+    // `ActionText::Attachment::OpengraphEmbed`, which lives in `lib/`),
+    // and the two must not drift into two constructors.
+    methods.push(crate::lower::active_model_model::attributes_initialize(
+        &model.name,
+        model.span,
+        &names,
     ));
-    methods.push(MethodDef {
-        name: Symbol::from("initialize"),
-        receiver: MethodReceiver::Instance,
-        params: vec![param],
-        body: seq(stmts),
-        signature: None,
-        effects: EffectSet::default(),
-        enclosing_class: Some(model.name.0.clone()),
-        kind: AccessorKind::Method,
-        is_async: false,
-        mutates_self: true,
-        block_param: None,
-    });
 }
 
 /// `include ActiveModel::Model` in the class body. The narrower

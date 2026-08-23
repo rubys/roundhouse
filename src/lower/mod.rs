@@ -43,6 +43,7 @@ pub mod seeds_to_library;
 pub mod test_module_to_library;
 pub mod create_block;
 pub mod as_json_poro;
+pub mod active_model_model;
 pub mod params_merge;
 pub mod duration;
 pub mod and_return;
@@ -367,6 +368,11 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // `controller_to_library` rewrites it to `JsonRender.encode` at emit
     // time, and needs the `as_json` this synthesizes to already be there.
     ("as_json_poro", &[]),
+    // `include ActiveModel::Model` on a library class → a synthesized
+    // `initialize(attributes = {})` / `valid?` / `persisted?`, and the
+    // include dropped. Reads only the class's own writer surface and
+    // writes only new methods, so no ordering constraints.
+    ("active_model_model", &[]),
     ("update_kwargs", &[]),
     // `record.update!(creator: user)` -> `update!(creator_id: user.id)`.
     // AFTER `update_kwargs`, which INLINES the same shape into typed
@@ -580,6 +586,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("params_merge");
     as_json_poro::apply_as_json_synthesis(app);
     ran!("as_json_poro");
+    diags.extend(active_model_model::apply_active_model_model_synthesis(app));
+    ran!("active_model_model");
     diags.extend(update_kwargs::apply_update_kwargs_inline(app));
     ran!("update_kwargs");
     diags.extend(assoc_attr_key::apply_assoc_attr_key_lowering(app));
