@@ -1018,6 +1018,29 @@ sanitizer is unimplemented and raises on input containing markup,
 serving only the tagless case that `sanitize(strip_tags(x))` produces.
 That is a gap, and it names itself when reached.
 
+### `strip_tags` drops `<script>` TEXT on JRuby and keeps it on CRuby
+
+`ActionView::ViewHelpers.strip_tags("<b>Hi</b> &amp; <script>bad()
+</script>there")` is `"Hi &amp; bad()there"` on the CRuby tree and
+`"Hi &amp; there"` on the JRuby one. Same for `<style>`.
+
+**Why.** Both trees serve `strip_tags` from the real
+`rails-html-sanitizer`, and the gem's `best_supported_vendor` answers
+`Rails::HTML5::Sanitizer` only where `Loofah.html5_support?` — which
+needs an HTML5 parser in Nokogiri, and JRuby has none. So JRuby gets
+`Rails::HTML4::Sanitizer`, whose full sanitizer removes the CONTENT of
+`script` and `style` where the HTML5 one removes only the tags.
+
+**Where it is visible.** This one probe and its `<style>` twin. Every
+other sanitize / strip_tags / auto_link behaviour in the corpus was
+checked against both vendors side by side and agrees, so the divergence
+is exactly "the text inside a script or style element". It is Rails'
+own difference, not ours: a Rails app on JRuby answers the same way.
+
+**Where it is pinned.** `tests/overlay_sanitize_autolink.rb` asserts
+BOTH values, branching on the vendor, so a runner whose nokogiri lacks
+HTML5 reads as the other correct answer rather than as a regression.
+
 ### `link_to` / `mail_to` put `href` FIRST; Rails puts it LAST
 
 `ActionView::ViewHelpers.link_to("t", "/u", target: "_blank")` renders

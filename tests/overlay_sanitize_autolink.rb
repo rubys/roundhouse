@@ -54,9 +54,21 @@ check.("sanitize drops a javascript: href, keeps the anchor",
        V.sanitize(%q{<a href="javascript:evil()">j</a>}).to_s, "<a>j</a>")
 check.("sanitize escapes a bare angle bracket",
        V.sanitize("a < b and 5 > 4").to_s, "a &lt; b and 5 &gt; 4")
-check.("strip_tags keeps the text of a dropped element",
+# THE ONE PROBE THAT DEPENDS ON THE VENDOR, asserted both ways rather
+# than avoided — because the split is real and it separates OUR OWN two
+# ruby-family trees. `Rails::HTML5` exists only where Loofah has an
+# HTML5 parser; JRuby has none, so it runs HTML4. And HTML4's full
+# sanitizer DROPS the text inside `script` / `style` where HTML5 KEEPS
+# it. Every other assertion in this file agrees across both vendors
+# (checked by running each probe through `Rails::HTML4::Sanitizer` and
+# `Rails::HTML5::Sanitizer` side by side); this is the only one that
+# does not, and pinning it is what keeps a runner whose nokogiri lacks
+# HTML5 from reading as a regression. Ledgered in
+# docs/pipeline/runtime.md.
+html5 = RH_SANITIZER_VENDOR.name.include?("HTML5")
+check.("strip_tags keeps the text of a dropped element (vendor-dependent)",
        V.strip_tags("<b>Hi</b> &amp; <script>bad()</script>there").to_s,
-       "Hi &amp; bad()there")
+       html5 ? "Hi &amp; bad()there" : "Hi &amp; there")
 check.("strip_tags escapes a `<` that opens nothing",
        V.strip_tags("a < b and c > d").to_s, "a &lt; b and c &gt; d")
 check.("auto_link wraps a url and keeps the html option",

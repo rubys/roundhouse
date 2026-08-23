@@ -204,11 +204,23 @@ jobs:
         run: tar -xzf real-blog.tar.gz
       # `tests/overlay_sanitize_autolink.rs` shells out to ruby and
       # loads the CRuby overlay's escape surface, which serves
-      # `sanitize` / `strip_tags` from the real gem. Without it the
+      # `sanitize` / `strip_tags` from the real gem. Without the gem the
       # overlay falls back to the shared scanner (which refuses markup
-      # by design) and the test fails naming this line. It is the only
+      # by design) and the test fails naming this step. It is the only
       # coverage those helpers have: campfire's suite passes with the
       # gem hidden, and the oracle comparison does not run in CI.
+      #
+      # setup-ruby, not the runner's system ruby, for two reasons. The
+      # first is that `gem install` against the system ruby is a
+      # `Gem::FilePermissionError` — this step shipped without it and
+      # took the job red on its first run. The second is the one that
+      # matters after today: the test asserts EXACT sanitizer output, so
+      # the ruby it runs on is part of the assertion. 3.4 is the version
+      # campfire-conformance pins, so both lanes exercise these helpers
+      # on the same one.
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
       - name: Install the gem the overlay escape surface uses
         run: gem install rails-html-sanitizer --no-document
       - name: cargo test
