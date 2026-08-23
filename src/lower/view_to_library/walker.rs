@@ -1030,7 +1030,26 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
     {
         if let ExprNode::Lambda { rest_param, params, block_param, body, block_style } = &*block.node {
             if block_body_is_template(body) {
-                let cap = "_cap";
+                // NESTED CAPTURES NEED DISTINCT NAMES. A block-with-block
+                // helper (campfire's rooms/show wraps `messages_tag` inside
+                // `message_area_tag`) walks the inner block while the outer
+                // one is still accumulating, and a Ruby block does NOT
+                // introduce a new scope for an assignment to a name the
+                // enclosing block already bound: the inner `_cap =
+                // String.new` REBINDS the outer local. What follows is
+                // silent — `outer << inner_helper { … }` has already
+                // evaluated its receiver, so the wrapped result appends to
+                // a buffer nothing returns, and the outer block hands back
+                // the INNER string. campfire's room page rendered its
+                // composer and its stream source and dropped the message
+                // list and everything before it: 24KB where Rails sends
+                // 456KB, with the app's own controller test still green.
+                //
+                // capture_inline.rs called this shot — "the shared `_cap`
+                // name would shadow if one appears" — on the assumption
+                // that no app in the corpus nested one. campfire does.
+                let cap_owned = next_capture_name(&ctx.accumulator);
+                let cap = cap_owned.as_str();
                 let cap_ctx = ViewCtx {
                     accumulator: cap.to_string(),
                     ..ctx.with_locals(params.iter().map(|p| p.as_str().to_string()))
@@ -1321,6 +1340,25 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
 /// Distinguishes a capture block (`<%= form_tag … do %> INNER <% end %>`)
 /// from a plain value block (`<%= items.map { |x| … } %>`), so only the
 /// former is rewritten into a returned capture accumulator.
+/// The accumulator name for a capture nested inside `outer`.
+///
+/// `io` (a method body) or any non-capture accumulator yields `_cap`;
+/// `_cap` yields `_cap2`, `_cap2` yields `_cap3`. Depth is read off the
+/// enclosing name rather than counted in the context because the walk
+/// reaches nested blocks through several recursion paths and a counter
+/// threaded through all of them is a second source of truth.
+fn next_capture_name(outer: &str) -> String {
+    let Some(rest) = outer.strip_prefix("_cap") else {
+        return "_cap".to_string();
+    };
+    match rest.parse::<u32>() {
+        Ok(n) => format!("_cap{}", n + 1),
+        // bare "_cap" is depth 1
+        Err(_) if rest.is_empty() => "_cap2".to_string(),
+        Err(_) => "_cap".to_string(),
+    }
+}
+
 fn block_body_is_template(body: &Expr) -> bool {
     let stmts: Vec<&Expr> = match &*body.node {
         ExprNode::Seq { exprs } => exprs.iter().collect(),
