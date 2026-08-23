@@ -1871,11 +1871,63 @@ fn polymorphic_path(ivar_name: &Symbol, span: Span) -> Expr {
 // has 120 controller methods with this shape.
 // ---------------------------------------------------------------------------
 
+/// The `Rails.application.routes.url_helpers` receiver chain — Rails'
+/// spelling for reaching a path helper from somewhere with no helper
+/// mixin (a model, a job, a test body).
+fn is_rails_url_helpers_chain(e: &Expr) -> bool {
+    let mut node = &*e.node;
+    for step in ["url_helpers", "routes", "application"] {
+        let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = node else {
+            return false;
+        };
+        if method.as_str() != step || !args.is_empty() {
+            return false;
+        }
+        node = &*r.node;
+    }
+    matches!(node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Rails")
+}
+
+/// Drop that receiver, leaving the BARE call the rewrite below already
+/// knows how to ground.
+///
+/// A pre-pass rather than another arm in the map: the arm would have to
+/// reproduce the id-projection the bare form gets, because `map_expr`
+/// does not descend into a replacement it just made. Normalizing first
+/// means the two spellings take exactly one path, which is the point —
+/// campfire's `Webhook#message_path` and its own test write the same
+/// call, and only the model's was grounded.
+fn strip_url_helpers_receiver(expr: &Expr) -> Expr {
+    map_expr(expr, &|e| {
+        let ExprNode::Send { recv: Some(r), method, args, block, parenthesized } = &*e.node
+        else {
+            return None;
+        };
+        if !(method.as_str().ends_with("_path") || method.as_str().ends_with("_url")) {
+            return None;
+        }
+        if !is_rails_url_helpers_chain(r) {
+            return None;
+        }
+        Some(Expr::new(
+            e.span,
+            ExprNode::Send {
+                recv: None,
+                method: method.clone(),
+                args: args.iter().map(strip_url_helpers_receiver).collect(),
+                block: block.as_ref().map(strip_url_helpers_receiver),
+                parenthesized: *parenthesized,
+            },
+        ))
+    })
+}
+
 pub fn rewrite_route_helpers(
     expr: &Expr,
     shadowed: &HashSet<Symbol>,
     id_segments: &std::collections::HashMap<String, Vec<bool>>,
 ) -> Expr {
+    let expr = &strip_url_helpers_receiver(expr);
     map_expr(expr, &|e| match &*e.node {
         ExprNode::Send { recv: None, method, args, block, parenthesized }
             if (method.as_str().ends_with("_path")

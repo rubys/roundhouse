@@ -110,3 +110,40 @@ end
         "a name nothing defines is still a route helper:\n{out}"
     );
 }
+
+/// `Rails.application.routes.url_helpers.<x>_path(record)` grounds like
+/// the bare call it stands for.
+///
+/// It is Rails' spelling for reaching a path helper from somewhere with
+/// no helper mixin — a model, a job, a TEST body. The emit collapsed
+/// the receiver for app classes but nothing collapsed it for tests, so
+/// campfire's `Webhook#message_path` and the `webhook_test` that asserts
+/// its output wrote the same call and only one of them resolved. Handled
+/// as a PRE-PASS rather than another arm here: an arm would have to
+/// reproduce the id projection the bare form gets, because the map does
+/// not descend into a replacement it just made.
+#[test]
+fn the_url_helpers_receiver_chain_grounds_like_a_bare_call() {
+    let out = emitted(&[(
+        "app/controllers/articles_controller.rb",
+        r#"class ArticlesController < ApplicationController
+  def show
+    @article = Article.find(params[:id])
+    @link = Rails.application.routes.url_helpers.article_path(@article)
+  end
+end
+"#,
+    )]);
+    assert!(
+        out.contains("RouteHelpers"),
+        "the chain collapses to the generated module:\n{out}"
+    );
+    assert!(
+        !out.contains("url_helpers"),
+        "no `url_helpers` hop survives:\n{out}"
+    );
+    assert!(
+        out.contains("\"id\""),
+        "and the record argument is still projected to its id:\n{out}"
+    );
+}
