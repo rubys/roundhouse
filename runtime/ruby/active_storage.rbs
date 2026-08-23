@@ -25,5 +25,7 @@ module ActiveStorage
     def attach: (String data, String filename, String content_type) -> void
     def blob_key: (String filename) -> String
     def purge: () -> void
+    # `Attached::One#destroy` — see the .rb: purge under Rails' name.
+    def destroy: () -> void
   end
 end

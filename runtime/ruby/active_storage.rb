@@ -210,5 +210,18 @@ module ActiveStorage
       end
       nil
     end
+
+    # `account.logo.destroy` — Rails' `Attached::One` has no `destroy`
+    # of its own; the call falls through to the ATTACHMENT record, and
+    # destroying that removes the join row while leaving the blob to a
+    # `purge_later` job.
+    #
+    # There is no job here, and an orphaned blob row would make
+    # `attached?` answer for a file no longer attached — the same
+    # reasoning `attach`'s replace-first already carries. So this is
+    # `purge` under Rails' other name.
+    def destroy
+      purge
+    end
   end
 end

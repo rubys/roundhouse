@@ -821,6 +821,46 @@ The classification is made at SURVEY time, before `find_signed` has been
 lowered to the `find_by` it becomes, which is why this one reads as
 indifferent. Recognizing the sugar earlier would close it.
 
+### `send_file` reads the whole file, and only the options it names
+
+Rails STREAMS the file at `path`; `lower::send_file` grounds the call to
+`send_data File.binread(path)` — the whole file in memory, because this
+controller IS its own buffered response and its body is a String, so
+there is no handle to pass down. Every corpus call site sends an image
+measured in kilobytes.
+
+The read is at the CALL SITE rather than in `runtime/ruby/`, and that is
+deliberate: the shared runtime does no file I/O anywhere, because every
+file under it transpiles to every target. See the pass's own header.
+
+**What it costs.** `:filename`, `:status`, `:url_based_filename`,
+`:stream` and `:buffer_size` are not reproduced, and a call carrying one
+is LEFT ALONE rather than silently stripped — it fails by name, which is
+a ledger entry rather than a response quietly missing a header. A
+missing path raises `Errno::ENOENT` from the read where Rails raises
+`ActionController::MissingFile`.
+
+### `Attached::One#destroy` purges the blob too
+
+Rails' `attached.destroy` falls through to the ATTACHMENT record, whose
+destroy removes the join row and leaves the blob to a `purge_later` job.
+There is no job here and an orphaned blob row would make `attached?`
+answer for a file no longer attached, so `destroy` is `purge` — the same
+reasoning `attach`'s replace-first already carries.
+
+### An account logo is served STOCK, never resized
+
+`variable?` is false and `variant` raises (no blob store, no processor),
+so `Current.account&.logo_variant(size)` answers nil and campfire's logo
+endpoint falls through to its stock icon on every request — including
+the ones where a custom logo IS attached.
+
+Worth naming because of how it MEASURES: campfire's own tests assert the
+response's pixel dimensions, and the stock icon is 512×512 and 192×192 —
+exactly the sizes the custom-logo tests expect. They pass on the
+fallback. A dimension assertion cannot see this divergence; only the
+pixels could.
+
 ### `destroy!` cannot fail
 
 Rails raises `RecordNotDestroyed` when a `before_destroy` callback

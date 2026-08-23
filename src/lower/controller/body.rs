@@ -857,13 +857,28 @@ pub fn implicit_render_statement(
 /// `synthesize_implicit_render`). Deliberately broader than
 /// `has_toplevel_terminal`: that one proves a response always happens;
 /// this one detects that a response MIGHT already have happened.
+/// The sends that RESPOND — after one of these the action has produced
+/// its body, and a synthesized default render would write over it.
+///
+/// `send_data` and `send_file` belong here for exactly the same reason
+/// `render` does: both set the body and mark the response performed.
+/// Leaving them out is not a missing feature, it is a WRONG one —
+/// campfire's account logo picks a stock icon through a two-hop private
+/// helper (`send_stock_icon` -> `send_png_file` -> `send_file`), and the
+/// unguarded tail then ran `head :no_content` over the PNG that helper
+/// had just written. The response was a 204 with an empty body, and the
+/// test failed decoding it: "buffer is not in a known format", which
+/// names the image library and nothing about the terminal.
+const RESPONSE_TERMINALS: &[&str] =
+    &["render", "redirect_to", "head", "send_data", "send_file"];
+
 fn contains_terminal(body: &Expr) -> bool {
     fn walk(e: &Expr, found: &mut bool) {
         if *found {
             return;
         }
         if let ExprNode::Send { recv: None, method, block, .. } = &*e.node {
-            if matches!(method.as_str(), "render" | "redirect_to" | "head")
+            if RESPONSE_TERMINALS.contains(&method.as_str())
                 || (method.as_str() == "respond_to" && block.is_some())
             {
                 *found = true;
@@ -887,7 +902,7 @@ pub fn has_toplevel_terminal(body: &Expr) -> bool {
     match &*body.node {
         ExprNode::Seq { exprs } => exprs.last().map_or(false, has_toplevel_terminal),
         ExprNode::Send { recv: None, method, block, .. } => {
-            matches!(method.as_str(), "render" | "redirect_to" | "head")
+            RESPONSE_TERMINALS.contains(&method.as_str())
                 || (method.as_str() == "respond_to" && block.is_some())
         }
         ExprNode::If { then_branch, else_branch, .. } => {

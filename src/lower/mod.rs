@@ -96,6 +96,7 @@ pub mod relation_select_block;
 pub mod send_dispatch;
 pub(crate) mod secure_password;
 pub mod attached;
+pub mod send_file;
 pub mod helper_kwargs;
 pub mod column_ops;
 pub mod signed_id;
@@ -394,6 +395,13 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // constraint of its own: it matches on Rails' own keyword spelling,
     // which no earlier pass rewrites.
     ("attach", &[]),
+    // `send_file path, content_type:` → `send_data File.binread(path),
+    // type:`. Reads Rails' own keyword spelling, which no earlier pass
+    // rewrites, and writes a `send_data` the runtime already answers —
+    // so no ordering constraint. Beside `attach` because it is the same
+    // move for the same reason: the file read belongs at the call site,
+    // where the app pays for it, not in a runtime every target shares.
+    ("send_file", &[]),
     // Moves a helper call's named keyword into the positional slot its
     // definition lowered to. No ordering constraint: it matches on the
     // spelling the source wrote, which no earlier pass rewrites.
@@ -592,6 +600,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("duration");
     attached::apply_attach_lowering(app);
     ran!("attach");
+    send_file::apply_send_file_lowering(app);
+    ran!("send_file");
     helper_kwargs::apply_helper_kwarg_positional_lowering(app);
     ran!("helper_kwargs");
     broadcast_calls::apply_broadcast_calls_lowering(app);
