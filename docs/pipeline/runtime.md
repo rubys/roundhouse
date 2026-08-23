@@ -1039,12 +1039,19 @@ direction: the `auto_link` port in
 address, where the anchor goes through `mail_to` and comes back with its
 attributes transposed.
 
-**Why it is still here.** The fix is one `merge` reversed in three
-helpers, but `link_to` is in almost every emitted page and every golden
-dump in the corpus; flipping it is a byte-parity change whose blast
-radius has not been measured, and no comparison currently gates on
-attribute order. Worth doing deliberately with the dumps regenerated —
-not as a drive-by.
+**Why it is still here, and what it would cost.** The fix is one `merge`
+reversed in three helpers. The blast radius is MEASURED, not assumed:
+**20 call sites total** — 6 in the campfire emit, 14 in lobsters, and
+ZERO in the blog, because the view walker inlines most anchors as
+literal strings and only reaches these helpers when the URL or the
+attributes are dynamic. Every one of the 20 passes attributes, so every
+one moves.
+
+That is small enough to do, and it was left undone only because it
+arrived at the tail of a session that had already changed the escape
+surface twice. Do it with the golden dumps regenerated in the same
+commit, and check `compare-*` on every target rather than assuming a
+DOM comparison cannot see it.
 
 ## Related docs
 
