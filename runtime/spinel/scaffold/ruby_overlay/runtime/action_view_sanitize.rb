@@ -31,21 +31,39 @@
 # because it IS Rails': `ActionView::Base.safe_list_sanitizer` is this
 # class.
 #
-# GUARDED. An app that never sanitizes must boot without the gem
-# installed, so the requires are conditional and the scanner in the
-# shared file stands when they fail.
+# GUARDED, AND ON THE CONSTANT — not on the require. An app that never
+# sanitizes must boot without the gem installed, and a gem that loads is
+# still not the surface you assumed:
+#
+#   `Rails::HTML5` EXISTS ONLY IF `Loofah.html5_support?`. The gem's own
+#   `sanitizer.rb` closes both its HTML5 sections with `end if
+#   Rails::HTML::Sanitizer.html5_support?`, and Loofah answers false
+#   wherever Nokogiri has no HTML5 parser — which is JRuby. Naming
+#   `Rails::HTML5::SafeListSanitizer` directly took the JRuby blog tree
+#   down at BOOT with `uninitialized constant Rails::HTML5`, after a
+#   `require` that had succeeded. The CRuby lane was green, because
+#   there the constant is there.
+#
+# `best_supported_vendor` is the gem's OWN answer to which one to use
+# (`html5_support? ? Rails::HTML5::Sanitizer : Rails::HTML4::Sanitizer`),
+# so this asks rather than re-deriving the condition — and asks the gem
+# ONCE, at the version that is installed.
 begin
   require "rails-html-sanitizer"
-  RH_SANITIZER_AVAILABLE = true
+  RH_SANITIZER_VENDOR =
+    if defined?(::Rails::HTML::Sanitizer) &&
+       ::Rails::HTML::Sanitizer.respond_to?(:best_supported_vendor)
+      ::Rails::HTML::Sanitizer.best_supported_vendor
+    end
 rescue LoadError
-  RH_SANITIZER_AVAILABLE = false
+  RH_SANITIZER_VENDOR = nil
 end
 
-if RH_SANITIZER_AVAILABLE
+unless RH_SANITIZER_VENDOR.nil?
   module ActionView
     module ViewHelpers
-      RH_SAFE_LIST_SANITIZER = Rails::HTML5::SafeListSanitizer.new
-      RH_FULL_SANITIZER = Rails::HTML5::FullSanitizer.new
+      RH_SAFE_LIST_SANITIZER = RH_SANITIZER_VENDOR.safe_list_sanitizer.new
+      RH_FULL_SANITIZER = RH_SANITIZER_VENDOR.full_sanitizer.new
 
       # Rails' `sanitize` returns an html_safe buffer — the whole point
       # is that the result may be spliced without re-escaping, and a
