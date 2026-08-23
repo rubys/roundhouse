@@ -211,6 +211,16 @@ pub fn lower_controllers_with_arel_views_and_assocs(
 /// value instead of being clobbered by a synthesized `render`. `None`
 /// preserves the legacy "every public method is an action" behavior for
 /// callers that haven't wired routes yet.
+/// A type that answers a Relation — directly, or as the return of a
+/// parameterized scope.
+fn returns_relation(ty: &Ty) -> bool {
+    match ty {
+        Ty::Relation { .. } => true,
+        Ty::Fn { ret, .. } => returns_relation(ret),
+        _ => false,
+    }
+}
+
 /// The optional, feature-gated inputs to
 /// [`lower_controllers_with_arel_views_assocs_and_routes`]. Each field
 /// defaults to "feature off" (empty slice / `None` / `false`), matching
@@ -428,8 +438,32 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
         },
     );
 
+    // Every relation-RETURNING class method the app registers — its
+    // `scope` declarations plus the class methods whose body tail is a
+    // query chain. Read off the analyzer's registry rather than
+    // restated, so "what refines a relation" has one answer.
+    let relation_scope_names: std::collections::HashSet<Symbol> = classes
+        .values()
+        .flat_map(|ci| ci.class_methods.iter())
+        .filter(|(_, ty)| returns_relation(ty))
+        .map(|(n, _)| n.clone())
+        .collect();
+
     let mut out = Vec::new();
     for (mut methods, controller) in all_methods {
+        // Surveyed over the WHOLE controller before any body is
+        // rewritten: which of its own methods does it call and then
+        // chain a relation method onto. See
+        // `arel::relation_refined_method_names` for what that licenses.
+        let mut refined_result_methods: std::collections::HashSet<Symbol> =
+            Default::default();
+        for m in &methods {
+            crate::lower::arel::relation_refined_method_names(
+                &m.body,
+                &relation_scope_names,
+                &mut refined_result_methods,
+            );
+        }
         for method in &mut methods {
             crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
             // Stage 3: now that bodies are typed, rewrite
@@ -467,11 +501,22 @@ pub fn lower_controllers_with_arel_views_assocs_and_routes(
             // AR call chains into inline SELECT/hydrate over the Db
             // primitive surface. Re-type after so the body-typer's
             // earlier annotations on the rewritten subtree refresh.
+            // A method whose RESULT this controller refines with a
+            // relation method keeps its body on the Relation path.
+            // Lifting a chain to a materializing hydrate loop is a
+            // decision the CONSUMER licenses, and the consumer of a
+            // return value is in another body — see
+            // `relation_refined_method_names`, which is the same guard
+            // the pass already applies to a name refined within one
+            // body, asked one scope out.
+            let refined_across_methods = refined_result_methods.contains(&method.name);
             if let Some(schema) = schema {
-                crate::lower::arel::rewrite_arel_in_expr_with_assocs(
-                    &mut method.body, schema, &classes, assocs,
-                );
-                crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
+                if !refined_across_methods {
+                    crate::lower::arel::rewrite_arel_in_expr_with_assocs(
+                        &mut method.body, schema, &classes, assocs,
+                    );
+                    crate::lower::typing::type_method_body(method, &classes, &framework_ivars);
+                }
             }
         }
         out.push(LibraryClass {

@@ -75,6 +75,60 @@ const RELATION_REFINERS: &[&str] = &[
     "select", "where!", "order!", "reorder", "rewhere",
 ];
 
+/// Method names whose RESULT this class then refines with a relation
+/// method — `users_scope.active`, where `users_scope` is a method on
+/// the same class.
+///
+/// The sibling guard below asks the same question about a NAME inside
+/// one body; this asks it across a CLASS, because a method's return
+/// value is consumed by its callers and the arel pass sees one body at
+/// a time. Materializing a chain is a decision only the CONSUMER can
+/// license: campfire's `users_scope` answers `User.all` from one
+/// branch, the pass lifted it to a `from_stmt` hydrate loop (an
+/// Array), and the caller's `.active` then had no relation left to
+/// chain — "undefined method 'active' for an instance of Array", from a
+/// method whose source says `User.all`.
+///
+/// Receiver shapes: a bare self-call (`users_scope.active`) and the
+/// explicit `self.users_scope.active` the controller lowering writes.
+/// `scopes` names the app's own relation-returning class methods —
+/// `User.active`, `User.ordered` — which refine a relation exactly as
+/// `where` does and are the spelling an app actually uses. Reading them
+/// off the analyzer's registry rather than a second list keeps the two
+/// from drifting, and it is what makes this guard fire at all:
+/// campfire's caller is `users_scope.active`, and `active` is a scope.
+pub fn relation_refined_method_names(
+    body: &Expr,
+    scopes: &std::collections::HashSet<crate::ident::Symbol>,
+    out: &mut std::collections::HashSet<crate::ident::Symbol>,
+) {
+    if let ExprNode::Send { recv: Some(r), method, .. } = body.node.as_ref() {
+        if RELATION_REFINERS.contains(&method.as_str()) || scopes.contains(method) {
+            if let Some(name) = self_call_name(r) {
+                out.insert(name);
+            }
+        }
+    }
+    body.node
+        .for_each_child(&mut |c| relation_refined_method_names(c, scopes, out));
+}
+
+/// The method name of a no-argument call on the implicit or explicit
+/// self — the two spellings a controller helper is reached by.
+fn self_call_name(e: &Expr) -> Option<crate::ident::Symbol> {
+    let ExprNode::Send { recv, method, args, block: None, .. } = e.node.as_ref() else {
+        return None;
+    };
+    if !args.is_empty() {
+        return None;
+    }
+    match recv {
+        None => Some(method.clone()),
+        Some(r) if matches!(r.node.as_ref(), ExprNode::SelfRef) => Some(method.clone()),
+        _ => None,
+    }
+}
+
 fn collect_relation_refined_names(
     expr: &Expr,
     out: &mut std::collections::HashSet<crate::ident::Symbol>,
