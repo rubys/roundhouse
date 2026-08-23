@@ -745,7 +745,8 @@ jobs:
       #             libvips on the box — which is why the apt step below
       #             is not optional.
       - name: Install libvips (ruby-vips binds it through FFI)
-        run: "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips-dev
+        run: |
+          "$GITHUB_WORKSPACE/scripts/ci-apt-install" libvips-dev
       - name: Install the gems the emitted suite loads
         run: gem install sqlite3 bcrypt nokogiri webmock mocha rqrcode ruby-vips --no-document
       - name: Fetch once-campfire at the pinned SHA
