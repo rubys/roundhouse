@@ -221,10 +221,10 @@ end
 
 # GAP: `belongs_to :creator, class_name: "User", default: -> { Current.user }`
 # — the DEFAULT LAMBDA is dropped, so nothing sets `creator_id` and every
-# message fails `Creator must exist`. Milestone walk finding #6, and now the
-# only thing standing between the walk and a posted message: the association
-# scope itself works (`@room.messages.create_with_attachment!` carries
-# `room_id` through `where_scope` / `scope_attributes`).
+# message fails `Creator must exist`. Milestone walk finding #6. The
+# association scope itself works (`@room.messages.create_with_attachment!`
+# carries `room_id` through `where_scope` / `scope_attributes`), so this
+# lambda is the whole of what is missing.
 #
 # Rails evaluates the lambda at INITIALIZATION; this stands in for it at
 # validation time, which is close enough to measure what lies behind.
@@ -239,8 +239,7 @@ WALK_LATE_PATCHES << lambda do
   end
 end
 
-# GAP, and a NEW one this walk found: A VIEW HELPER THAT READS A CONTROLLER
-# IVAR. campfire's `link_to_edit_room(room)` ignores its own argument and
+# GAP: A VIEW HELPER THAT READS A CONTROLLER IVAR. campfire's `link_to_edit_room(room)` ignores its own argument and
 # uses `@room` — legal in Rails, where a helper runs in the view's context
 # and shares the controller's ivars. Our helpers lower to module functions
 # with no ivar context at all, so `@room` is nil and the room page dies in
@@ -257,28 +256,6 @@ WALK_LATE_PATCHES << lambda do
   end
 end
 
-# GAP, NEW: `scope defaults: { user_id: "me" }` is not modeled. Rails' route
-# DEFAULTS supply the segment, so campfire's views call
-# `user_push_subscriptions_path` with no arguments at all and get
-# `/users/me/push_subscriptions`. We emit the helper with a REQUIRED
-# `user_id`, so the bare call raises ArgumentError from the room page's nav.
-# The default belongs in the emitted signature.
-WALK_LATE_PATCHES << lambda do
-  module RouteHelpers
-    def self.user_push_subscriptions_path(user_id = "me")
-      "/users/#{user_id}/push_subscriptions"
-    end
-
-    def self.user_sidebar_path(user_id = "me")
-      "/users/#{user_id}/sidebar"
-    end
-
-    def self.user_profile_path(user_id = "me")
-      "/users/#{user_id}/profile"
-    end
-  end
-end
-
 # GAP: `pluck` on a folded association (`room.memberships.pluck(:user_id)`).
 # Same family as `find_by!` above and `index_by` further up — an ActiveRecord
 # /ActiveSupport collection method the folded Array does not answer.
@@ -291,7 +268,7 @@ class Array
   end
 end
 
-# GAP, NEW and arriving WITH a gain: `app/channels/` is ingested now, so
+# GAP, arriving WITH a gain: `app/channels/` is ingested now, so
 # `UnreadRoomsChannel.stream_name_for` — which a MODEL calls on the
 # broadcast path — is real emitted code instead of a stub. The cost is
 # that RoomMessagesChannel `include`s turbo-rails' stream-name module at

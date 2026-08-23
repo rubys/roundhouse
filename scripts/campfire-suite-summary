@@ -133,8 +133,15 @@ end
 rules = File.exist?(CAUSES_FILE) ? JSON.parse(File.read(CAUSES_FILE))["causes"] : []
 buckets = Hash.new { |h, k| h[k] = [] }
 unclassified = []
+# `match` keys on the failure MESSAGE, which is the right key for anything
+# that raised. A divergence has no message of its own — every wrong answer
+# reads as an assertion failure — so a rule may also name the TEST, and
+# then both have to hold.
 records.each do |r|
-  rule = rules.find { |x| x["match"] && r["msg"] =~ Regexp.new(x["match"]) }
+  rule = rules.find do |x|
+    next false unless x["match"] && r["msg"] =~ Regexp.new(x["match"])
+    x["match_test"].nil? || r["test"] =~ Regexp.new(x["match_test"])
+  end
   (rule ? buckets[rule["slug"]] : unclassified) << r
 end
 
@@ -152,7 +159,14 @@ causes = rules.map do |x|
   { "slug" => x["slug"], "title" => x["title"], "owner" => x["owner"],
     "failures" => weigh.(hits),
     "share" => unpassed_total.zero? ? 0.0 : (weigh.(hits).to_f / unpassed_total).round(4),
-    "note" => x["note"], "stale_rule" => hits.empty?,
+    "note" => x["note"],
+    # A rule at zero is three different facts. Reporting them as one sent
+    # a cause the STUB covers (belongs-to-autosave, whose note says so)
+    # into the same footnote as a rule whose message drifted, where a
+    # deliberate result reads as an unexplained one.
+    "stale_rule" => hits.empty? && x["at_zero"].nil? && !x["stubbed"],
+    "at_zero" => hits.empty? ? x["at_zero"] : nil,
+    "stubbed_zero" => hits.empty? && !!x["stubbed"],
     "examples" => sample.(hits, 5) }
 end.sort_by { |c| -c["failures"] }
 
@@ -210,16 +224,31 @@ if opts[:stubs] && File.exist?(opts[:stubs])
     # names the gap comes after it, so the split is on the first colon
     # when there is a plausible qualifier ahead of it.
     lead, rest = why.split(":", 2)
+    qualifier = (rest && lead.to_s.length <= 160) ? lead.sub(/\AGAP\b/, "").strip.sub(/\A[,—-]+\s*/, "") : ""
     src = (rest && lead.to_s.length <= 160) ? rest.strip : why.sub(/\A[\s,:—-]+/, "")
     src = src.sub(/\A\*\s*/, "")  # a multi-gap block opens with a bullet
     # A clause that ends in a sentence break is a whole name; anything
     # longer is cut at a word and marked as cut.
-    head = src[/\A.{0,110}?(?=\. |\z)/]
-    if head.nil?
-      cut = src[0, 110]
-      head = "#{cut[0, cut.rindex(" ") || 110].rstrip}…"
+    if (whole = src[/\A.{0,110}?(?=\. |\z)/])
+      head = whole
+      tail = src[whole.length..].to_s.sub(/\A\.\s*/, "")
+    else
+      keep = (cut = src[0, 110])[0, cut.rindex(" ") || 110].rstrip
+      head = "#{keep}…"
+      # A CUT head is not a duplicate of the text it was cut from — the
+      # ellipsis promises the rest — and resuming mid-sentence reads as
+      # garble, so the why carries the whole thing.
+      tail = src
     end
-    { "what" => head.strip, "why" => why }
+    # The head NAMES the gap and is rendered as the row's label, so the
+    # why is what is LEFT of the comment after it. Printing the whole
+    # comment here made every row read its own name twice, the second
+    # time behind a stray colon. A qualifier ahead of the colon ("×2,
+    # both compiler gaps …") is real context, not bookkeeping, so it
+    # survives as a lead-in.
+    why = [qualifier.empty? ? nil : "#{qualifier.sub(/[.\s]+\z/, "")}.", tail]
+          .compact.reject(&:empty?).join(" ")
+    { "what" => head.strip, "why" => why.empty? ? head.strip : why }
   end
   stubs["count"] = stubs["entries"].size
 end

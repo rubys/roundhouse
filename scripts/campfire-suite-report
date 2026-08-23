@@ -171,7 +171,15 @@ CSS
 html << "</head>\n<body>\n"
 
 html << "<h1>Campfire conformance</h1>\n"
-html << %(<p class="lead">ONCE Campfire's own Minitest suite, run against a Roundhouse emit of the same commit. Most failures name a Rails construct not yet modeled; some are answers that came out wrong, and a few are this harness's own gaps. That makes their tests the worklist generator — so the ranked causes below, not the pass count, are what this page is for.</p>\n)
+# The lead used to claim "a few are this harness's own gaps", a category
+# no rule has ever been filed under. Owners come from the run instead, so
+# the sentence cannot drift from the table under it again.
+owner_tally = Hash.new(0)
+causes.each { |c| owner_tally[c["owner"].to_s] += c["failures"].to_i if c["failures"].to_i > 0 }
+owner_phrase = owner_tally.sort_by { |_, n| -n }
+                          .map { |o, n| "#{n} #{OWNER_LABEL[o] || o}" }.join(" · ")
+html << %(<p class="lead">ONCE Campfire's own Minitest suite, run against a Roundhouse emit of the same commit. A failure here mostly names a Rails construct not yet modeled; some are answers that came out wrong with nothing raised, and some have not been triaged at all. That makes their tests the worklist generator — so the ranked causes below, not the pass count, are what this page is for.</p>\n)
+html << %(<p class="meta">Unpassed tests by who can act: #{esc(owner_phrase)}.</p>\n) if owner_phrase != ""
 
 prov = []
 prov << %(campfire <code>#{esc(cf["sha"].to_s[0, 12])}</code>) if cf["sha"]
@@ -277,11 +285,32 @@ if live.any?
   html << "</table>\n"
 end
 
-# A rule that matches nothing is information: either the cause is cleared
-# or its message moved and the count above is quietly understating.
+# A rule that matches nothing is information, but it is three different
+# pieces of it, and one footnote saying "cleared, or the message moved"
+# let the largest section on this page mean nothing. Cleared rules carry
+# their own explanation in the rules file; a rule the stub holds at zero
+# is a deliberate result; only the remainder is a question.
+cleared = causes.select { |c| c["at_zero"] }
+stubbed_zero = causes.select { |c| c["stubbed_zero"] }
 stale = causes.select { |c| c["stale_rule"] }
-if stale.any?
-  html << %(<p class="caveat">Rules matching nothing this run — either cleared, or the failure's message changed and it is now counted as untriaged: #{stale.map { |c| "<code>#{esc(c["slug"])}</code>" }.join(", ")}.</p>\n)
+if cleared.any? || stubbed_zero.any? || stale.any?
+  html << "<h2>Rules that matched nothing</h2>\n"
+  html << %(<p class="caveat">A rule at zero is kept, not deleted: it is the tripwire that catches the fix coming undone. What it means depends on why it is at zero.</p>\n)
+  if cleared.any?
+    # Not all of these are "cleared" — id-zero-sentinel was never a gap
+    # — so the column names the rule and lets each row say why.
+    html << "<table>\n<tr><th>Rule</th><th>Why it reads zero</th></tr>\n"
+    cleared.each do |c|
+      html << "<tr><td><code>#{esc(c["slug"])}</code></td><td>#{esc(c["at_zero"])}</td></tr>\n"
+    end
+    html << "</table>\n"
+  end
+  if stubbed_zero.any?
+    html << %(<p>Held at zero by the harness, not by the compiler — the stub ledger below covers what would otherwise fail here: #{stubbed_zero.map { |c| "<code>#{esc(c["slug"])}</code>" }.join(", ")}. Deleting the stub is what makes these counts real.</p>\n)
+  end
+  if stale.any?
+    html << %(<p>No explanation recorded, so these are the open question: either the cause is cleared and nobody wrote that down, or the failure's message changed and it is now being counted as untriaged above. #{stale.map { |c| "<code>#{esc(c["slug"])}</code>" }.join(", ")}.</p>\n)
+  end
 end
 
 # ── The stub ledger ──────────────────────────────────────────────────
@@ -328,7 +357,8 @@ end
 # ── Emit diagnostics ─────────────────────────────────────────────────
 if (kinds = emit["by_kind"]) && kinds.any?
   html << "<h2>Emit diagnostics</h2>\n"
-  html << %(<p>From the transpile that produced the tree under test: #{fmt_int(emit["files"])} files, <strong>#{fmt_int(emit["errors"])} errors</strong>, #{fmt_int(emit["warnings"])} warnings. Warnings are a modeling-debt ledger rather than a failure — the Ruby target emits through its gaps — so they are not comparable to the test failures above.</p>\n)
+  html << %(<p>From the transpile that produced the tree under test: #{fmt_int(emit["files"])} files, <strong>#{fmt_int(emit["errors"])} errors</strong>, #{fmt_int(emit["warnings"])} warnings. Warnings are a modeling-debt ledger rather than a failure — the Ruby target emits through its gaps — so the COUNTS are not comparable to the test failures above.</p>\n)
+  html << %(<p class="caveat">They are not independent of them either. <code>send_dispatch_failed</code> in particular names a call the analyzer could not resolve, and three of the fixes on this lane came out of those lines before the suite reached them at all — the analyzer had already written the diagnosis. Read the emit log before the fail log.</p>\n)
   html << "<table>\n<tr><th>Diagnostic</th><th class=num>Count</th></tr>\n"
   kinds.sort_by { |_, n| -n.to_i }.each do |k, n|
     html << "<tr><td><code>#{esc(k)}</code></td><td class=num>#{fmt_int(n)}</td></tr>\n"

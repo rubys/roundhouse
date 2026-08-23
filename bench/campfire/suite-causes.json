@@ -5,6 +5,10 @@
     "named todo with an owner. Rules are tried in order; FIRST MATCH WINS, so the",
     "specific ones sit above the general ones.",
     "",
+    "`match` keys on the failure MESSAGE. A rule may add `match_test`, keyed on the",
+    "test identifier, and then both have to hold — which is the only way to name a",
+    "SILENT divergence, since every wrong answer reads as the same assertion failure.",
+    "",
     "The unit is an UNPASSED TEST, not a FAIL line: a file that dies at load",
     "contributes its whole count against its load error. See the header of",
     "scripts/campfire-suite-summary.",
@@ -29,7 +33,7 @@
     "as a map of what KINDS of thing are missing, not as a queue.",
     "",
     "A rule matching zero tests is reported too: the cause may be cleared, or its",
-    "message may have moved."
+    "A rule matching zero tests is reported too, in one of three ways: cleared (it carries `at_zero` saying so, and stays as a regression tripwire), held at zero by a stub (`stubbed`), or unexplained — which means the cause may be cleared, or its message may have moved and the count is now quietly understating."
   ],
 
   "causes": [
@@ -38,21 +42,23 @@
       "title": "The emitted test base class is missing Rails' test surface",
       "owner": "compiler",
       "match": "undefined method '(file_fixture|fixture_file_upload|assert[a-z_]*|response|parsed_body)' for an instance of \\S*Test\\b",
-      "note": "Not the app's code failing — the scaffolding around it. `file_fixture` and `fixture_file_upload` read from test/fixtures/files, `response` is the integration-test response object, and the bare `assert` family comes from Minitest itself. Every one of these is a method the emitted TestBase would have to answer before the assertion behind it is even reached, so this cluster hides an unknown number of further walls."
+      "note": "Not the app's code failing — the scaffolding around it. `file_fixture` and `fixture_file_upload` read from test/fixtures/files, `response` is the integration-test response object, and the bare `assert` family comes from Minitest itself. Every one of these is a method the emitted TestBase would have to answer before the assertion behind it is even reached, so this cluster hides an unknown number of further walls.",
+      "at_zero": "the family landed over several commits, `fixture_file_upload` last in f86ac0b6; the rule stays as a regression tripwire."
     },
     {
       "slug": "fixture-accessors",
       "title": "A fixture accessor the emitted loader never defined",
       "owner": "compiler",
       "match": "undefined method '\\w+' for an instance of \\S*Test\\b",
-      "note": "`users(:david)`-style accessors are generated per fixture file. Where one is missing the test cannot name its own data, so nothing behind it has been seen. Distinct from the test-harness surface above only in that the name comes from the app's fixtures rather than from Rails."
+      "note": "`users(:david)`-style accessors are generated per fixture file. Where one is missing the test cannot name its own data, so nothing behind it has been seen. The name comes from the app's own fixtures rather than from Rails, which is what separates this from the emitted test base class's own surface."
     },
     {
       "slug": "sti-becomes",
       "title": "`becomes!` — recasting a record to an STI sibling",
       "owner": "compiler",
       "match": "undefined method 'becomes!' for an instance of",
-      "note": "campfire opens and closes rooms by recasting: `room.becomes!(Rooms::Open)` rewrites the type column and returns the record as the sibling class. The STI read and write halves both landed (7aad7ba7, 7245435a); the recast is the half that did not."
+      "note": "campfire opens and closes rooms by recasting: `room.becomes!(Rooms::Open)` rewrites the type column and returns the record as the sibling class. The STI read and write halves landed first (7aad7ba7, 7245435a); the recast followed in f2d42854, where the copy went into the LOWERER.",
+      "at_zero": "`becomes!` landed in f2d42854; the rule stays as a regression tripwire."
     },
     {
       "slug": "params-object-representation",
@@ -69,11 +75,18 @@
       "note": "Both directions of one gap: a query lowered to an Array is then asked for `find_by`/`new`/a dynamic finder, or a Relation is asked for an Enumerable method the shim does not carry. `Model.where(...)` is a relation, not an array of records (eb57882f) — this is the residue of that same distinction."
     },
     {
+      "slug": "actiontext-attachment-from-node",
+      "title": "`ActionText::Attachment.from_node` — building an attachment from a parsed node",
+      "owner": "compiler",
+      "match": "undefined method 'from_node' for class ActionText::Attachment",
+      "note": "Named in docs/pipeline/runtime.md's \"What is left\" for attachments, alongside `ActionText::Attachables::MissingAttachable`. The PARSE already works — `#attachments` returns every node with every attribute it carried — so this is the constructor that turns one of those nodes back into an attachment object, plus the missing-attachable case a stale sgid should land in."
+    },
+    {
       "slug": "globalid-sgid",
       "title": "Global IDs — minting and dereferencing an sgid",
       "owner": "compiler",
       "match": "(attachable_sgid|to_gid_param|uninitialized constant ActionText::Fragment)",
-      "note": "`Message#mentionees` dereferences an sgid out of rich text (`body.body.attachables.grep(User)`), so the ledger line in docs/pipeline/runtime.md that says nothing here dereferences one is now false. Needs mint plus resolve plus a name-keyed class dispatch — a body of work of its own, not a method."
+      "note": "docs/pipeline/runtime.md now carries the split: `attachable_ids(\"User\")` verifies an sgid and `lower::attachables_grep` rewrites `body.attachables.grep(User)` into a query over the ids, so a caller that NAMES its class resolves. What is left is MINTING — `to_gid_param` on a record — and the name-keyed class dispatch a bare `attachables` would need to answer anything but `[]`. Mint plus resolve plus that map is a body of work of its own, not a method."
     },
     {
       "slug": "rails-module-facade",
@@ -87,7 +100,8 @@
       "title": "`Turbo::StreamsChannel` as a constant the app can name",
       "owner": "compiler",
       "match": "uninitialized constant Turbo::StreamsChannel",
-      "note": "Broadcasts lower to `Broadcasts.record`, which is the portable shape; the app also names the channel class directly to broadcast or to assert. The constant has no emitted counterpart, so those tests stop before reaching the broadcast at all."
+      "note": "Broadcasts lower to `Broadcasts.record`, which is the portable shape; the app also names the channel class directly to broadcast or to assert. The constant has no emitted counterpart, so those tests stop before reaching the broadcast at all.",
+      "at_zero": "the constant landed in fd1a3259; the rule stays as a regression tripwire."
     },
     {
       "slug": "broadcast-assertions",
@@ -108,21 +122,23 @@
       "title": "`belongs_to` autosave — an unsaved target saved with its owner",
       "owner": "compiler",
       "match": "Validation failed: Creator must exist",
-      "note": "Assigning an unsaved record and saving the owner saves the target first in Rails. The emit reads `value.id` (0) and the presence validation fails. Carries a stub entry in scripts/campfire-walk-stubs.rb, so the count here is what the stub does NOT cover."
+      "note": "Assigning an unsaved record and saving the owner saves the target first in Rails. The emit reads `value.id` (0) and the presence validation fails. Carries a stub entry in scripts/campfire-walk-stubs.rb, so the count here is what the stub does NOT cover.",
+      "stubbed": true
     },
     {
       "slug": "active-storage-attachments",
       "title": "Active Storage — the attachment scopes and the bytes",
       "owner": "compiler",
       "match": "(with_attached_attachment|ActiveStorage::)",
-      "note": "The metadata half answers (205c3031); the macro-generated preload scopes and the bytes do not. Avatars and logos reach it through the fixture-file helpers above, so clearing those will move tests INTO this cause rather than out of it."
+      "note": "The metadata half answers (205c3031). What is left is the macro-generated preload scopes (`with_attached_*`, `with_rich_text_*`) and everything variant-shaped: `ActiveStorage::VariantWithRecord`, `representation` and `preview` on an `Attached`, and the bytes. Avatars and logos reach it now that the fixture-file helpers in front of them answer — clearing a wall ahead of this cause moves tests INTO it, which is what just happened."
     },
     {
       "slug": "conditional-get",
       "title": "`fresh_when` / `stale?` — conditional GET",
       "owner": "compiler",
       "match": "undefined method '(fresh_when|stale\\?)'",
-      "note": "ETag/Last-Modified handling on the controller. Small in surface and shared by every target once the response object carries the headers; the tests behind it assert 304s, so they are only reachable after it lands."
+      "note": "ETag/Last-Modified handling on the controller. Small in surface and shared by every target once the response object carries the headers; the tests behind it assert 304s, so they are only reachable after it lands.",
+      "at_zero": "`fresh_when` / `stale?` landed in 7ea262e2; the rule stays as a regression tripwire."
     },
     {
       "slug": "route-helper-takes-a-record",
@@ -136,21 +152,23 @@
       "title": "A gem the emit does not carry",
       "owner": "gem",
       "match": "uninitialized constant (\\S*RQRCode|\\S*WebPush\\b|\\S*Concurrent\\b|\\S*Sentry\\b)",
-      "note": "QR codes, web push, concurrent-ruby. Each is a decision about gem fate rather than modeling debt — shim the surface the app calls, or declare it out of scope and ledger it. None of them is on the path to more coverage than the tests naming it."
+      "note": "web push, concurrent-ruby, and sentry-ruby. The RQRCode arm of this rule matches nothing now that qr_code_controller_test is green. Each is a decision about gem fate rather than modeling debt — shim the surface the app calls, or declare it out of scope and ledger it. None of them is on the path to more coverage than the tests naming it."
     },
     {
       "slug": "pagination",
-      "title": "Pagy's controller surface",
-      "owner": "gem",
+      "title": "geared_pagination's controller surface",
+      "owner": "compiler",
       "match": "set_page_and_extract_portion_from",
-      "note": "campfire paginates with pagy, whose concern injects this into the controller. A shim of the portion-extraction surface is small; whether the port carries pagy or lowers pagination itself is the question underneath it."
+      "note": "campfire paginates with geared_pagination — not pagy — whose concern injects `set_page_and_extract_portion_from` into the controller. It answers from a Base reopen in runtime/ruby/action_controller/pagination.rb, so the question underneath it (carry the gem, or lower pagination ourselves) was settled by lowering it.",
+      "at_zero": "landed in 0ef8fb79; the rule stays as a regression tripwire."
     },
     {
       "slug": "id-zero-sentinel",
       "title": "An unsaved `id` is 0, not nil — and a lookup used it",
       "owner": "compiler",
       "match": "Couldn't find \\w+ with id=0",
-      "note": "A deliberate divergence, ledgered in docs/pipeline/runtime.md: `ActiveRecord::Base#initialize` seeds `@id = 0` so ids stay plain machine integers across every target, where Rails answers nil. This is where that choice becomes visible — a code path that would have skipped a nil lookup instead performs one for id 0."
+      "note": "A deliberate divergence, ledgered in docs/pipeline/runtime.md: `ActiveRecord::Base#initialize` seeds `@id = 0` so ids stay plain machine integers across every target, where Rails answers nil. This is where that choice becomes visible — a code path that would have skipped a nil lookup instead performs one for id 0.",
+      "at_zero": "zero is the intended reading. This is a deliberate divergence rather than a gap, and the rule exists to catch the day it becomes visible again."
     },
     {
       "slug": "arity-divergence",
@@ -158,6 +176,21 @@
       "owner": "compiler",
       "match": "wrong number of arguments \\(given",
       "note": "The receiver exists and the name resolves; the shape does not. Usually a lowering that dropped or added a parameter — kwargs folded into a positional, a block-form helper emitted in its non-block shape. Each needs the emitted definition read against its call site."
+    },
+    {
+      "slug": "allow-browser",
+      "title": "`allow_browser` — the modern-browser gate",
+      "owner": "compiler",
+      "match": "expected \"h1\" in response body",
+      "match_test": "incompatible_browser",
+      "note": "campfire's own concern calls `allow_browser versions: VERSIONS, block: -> { render template: \"sessions/incompatible_browser\" }`, so the version FLOOR is the app's (`{ safari: 17.2, chrome: 120, … }`) and what is missing is ours: the macro, its `block:` fallback, and parsing a User-Agent into a browser plus version. Rails reads that last part from the `useragent` gem's rule table — PORT the table, do not derive it. The file is 7/8 on this one test."
+    },
+    {
+      "slug": "params-hash-in-path",
+      "title": "A params hash interpolated into the request PATH",
+      "owner": "compiler",
+      "match": "No route matches [A-Z]+ [^ ]*\\{params:",
+      "note": "The request went out as `POST /users/{params: {push_subscription: {…}}}` — the params object rendered into the path instead of being sent as the body. Bracket-nested query parameters are the shape behind it: the test writes `params: { push_subscription: { endpoint: …, keys: { … } } }` and nothing splits the nesting into a body. Reads as a routing error, which is why it sat untriaged."
     },
     {
       "slug": "silent-divergence",
