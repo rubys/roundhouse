@@ -1018,6 +1018,34 @@ sanitizer is unimplemented and raises on input containing markup,
 serving only the tagless case that `sanitize(strip_tags(x))` produces.
 That is a gap, and it names itself when reached.
 
+### `link_to` / `mail_to` put `href` FIRST; Rails puts it LAST
+
+`ActionView::ViewHelpers.link_to("t", "/u", target: "_blank")` renders
+`<a href="/u" target="_blank">`. Rails renders
+`<a target="_blank" href="/u">` — measured against ActionView 8.2 for
+both helpers, and `mail_to` and `link_to_raw` share the shape.
+
+**Why.** Every one of these builds its attributes as
+`{ href: href }.merge(opts.to_h)`, so the default lands ahead of the
+caller's; Rails merges the other way round.
+
+**Where it is visible.** ATTRIBUTE ORDER only — never in which
+attributes, their values, or the element. `scripts/compare` is a DOM
+comparison (see the note on its own output), so it cannot see this, and
+the campfire tag tallies cannot either. It surfaced from the other
+direction: the `auto_link` port in
+`ruby_overlay/runtime/action_view_sanitize.rb` agrees with the real
+`rails_autolink` gem on 13 of 14 probes, and the fourteenth is an email
+address, where the anchor goes through `mail_to` and comes back with its
+attributes transposed.
+
+**Why it is still here.** The fix is one `merge` reversed in three
+helpers, but `link_to` is in almost every emitted page and every golden
+dump in the corpus; flipping it is a byte-parity change whose blast
+radius has not been measured, and no comparison currently gates on
+attribute order. Worth doing deliberately with the dumps regenerated —
+not as a drive-by.
+
 ## Related docs
 
 - [`emit.md`](emit.md) — the universal IR contract; the consumers of

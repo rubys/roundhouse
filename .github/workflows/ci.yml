@@ -202,6 +202,15 @@ jobs:
           name: real-blog-fixture
       - name: Extract fixture
         run: tar -xzf real-blog.tar.gz
+      # `tests/overlay_sanitize_autolink.rs` shells out to ruby and
+      # loads the CRuby overlay's escape surface, which serves
+      # `sanitize` / `strip_tags` from the real gem. Without it the
+      # overlay falls back to the shared scanner (which refuses markup
+      # by design) and the test fails naming this line. It is the only
+      # coverage those helpers have: campfire's suite passes with the
+      # gem hidden, and the oracle comparison does not run in CI.
+      - name: Install the gem the overlay escape surface uses
+        run: gem install rails-html-sanitizer --no-document
       - name: cargo test
         run: cargo test --all-targets
 
