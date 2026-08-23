@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# scripts/campfire-oracle — stand up REAL Rails campfire, to measure against.
+#
+# The reference side of the campfire benchmark, and the oracle the
+# conformance lane has never had: every number this repo publishes about
+# campfire so far describes the EMIT alone (scripts/campfire-suite runs
+# campfire's tests against our output and never boots Rails at all). A
+# throughput claim needs the other operand, and a DOM-equivalence claim
+# needs it twice — see [[feedback_build_the_oracle_first]].
+#
+# WHY A COPY, NOT ~/git/once-campfire. `bundle install` has to add one
+# line to the lockfile: campfire pins `ffi (1.17.2)` only in its
+# platform-specific variants, and the arm64-darwin build does not install
+# under Ruby 4.0. Bundling in a scratch copy keeps the user's checkout
+# clean, and the divergence is exactly that one line — every other gem,
+# INCLUDING Rails' git revision, resolves byte-identical to the pin.
+# `--check-lock` prints the diff so that stays true rather than assumed.
+#
+# WHAT "RAILS" MEANS HERE, and a published number has to say it: campfire's
+# Gemfile is `gem "rails", github: "rails/rails", branch: "main"`. The app
+# is pinned by SHA; the FRAMEWORK is pinned only by the lockfile's git
+# revision, which moves whenever campfire relocks. Naming "Rails 8.2" in a
+# result is not enough — `prepare` records the revision in oracle.json and
+# the report should print it. See [[feedback_pin_benchmarks_not_ledgers]].
+#
+# LOGIN GOES THROUGH THE REAL FORM. Minting the signed session cookie by
+# hand was tried first and the app read it back as a Hash: the cookie jar's
+# envelope in Rails main is not the one a hand-built MessageVerifier
+# produces. Reconstructing it is precisely the inference this script exists
+# to avoid, so `login` POSTs to /session with a scraped CSRF token and
+# keeps whatever cookie the app sets.
+#
+# Usage:
+#   scripts/campfire-oracle prepare [options]   export, bundle, migrate, seed
+#   scripts/campfire-oracle serve   [options]   boot Puma (blocks)
+#   scripts/campfire-oracle login   [options]   write a logged-in cookie jar
+#   scripts/campfire-oracle check-lock          diff the lockfile vs the pin
+#
+# Options:
+#   --app PATH      campfire checkout to export from (default ~/git/once-campfire)
+#   --out DIR       oracle tree (default build/campfire-oracle)
+#   --port N        HTTP port (default 4100)
+#   --workers N     Puma workers. PIN THIS: campfire's config/puma.rb computes
+#                   `(processor_count * 0.666).ceil`, so an unpinned oracle
+#                   measures the box, not the app. Default 1, to match the
+#                   single-worker shape scripts/bench uses for the ruby lanes.
+#   --threads N     RAILS_MAX_THREADS per worker (default 5)
+#   --users N       seeded users (default 50)
+#   --rooms N       seeded rooms (default 5)
+#   --messages N    seeded messages per room (default 100)
+#   --no-yjit       boot without YJIT (the baseline lane)
+#   --jar PATH      cookie jar for `login` (default <out>/tmp/bench-jar.txt)
+#
+# Requires: ruby, bundler, sqlite3, curl. Everything else comes from
+# campfire's own Gemfile.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+CMD="${1:-}"; [[ $# -gt 0 ]] && shift || true
+APP="$HOME/git/once-campfire"
+OUT="$REPO_ROOT/build/campfire-oracle"
+PORT=4100
+WORKERS=1
+THREADS=5
+USERS=50
+ROOMS=5
+MESSAGES=100
+YJIT=1
+JAR=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --app)      APP="$2"; shift 2 ;;
+        --out)      OUT="$2"; shift 2 ;;
+        --port)     PORT="$2"; shift 2 ;;
+        --workers)  WORKERS="$2"; shift 2 ;;
+        --threads)  THREADS="$2"; shift 2 ;;
+        --users)    USERS="$2"; shift 2 ;;
+        --rooms)    ROOMS="$2"; shift 2 ;;
+        --messages) MESSAGES="$2"; shift 2 ;;
+        --no-yjit)  YJIT=0; shift ;;
+        --jar)      JAR="$2"; shift 2 ;;
+        -h|--help)  sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *)          echo "campfire-oracle: unknown argument $1" >&2; exit 2 ;;
+    esac
+done
+
+JAR="${JAR:-$OUT/tmp/bench-jar.txt}"
+
+# The secret is fixed, not random: a cookie minted against one boot has to
+# survive the next one, and a signed id in a dumped page has to be
+# comparable across runs. It is a benchmark fixture, never a deployment.
+export SECRET_KEY_BASE="${SECRET_KEY_BASE:-campfire-oracle-benchmark-secret-not-a-deployment}"
+
+step() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+die()  { printf '\033[1;31mcampfire-oracle:\033[0m %s\n' "$*" >&2; exit 1; }
+
+cmd_prepare() {
+    [[ -d "$APP" ]] || die "no campfire checkout at $APP"
+    command -v sqlite3 >/dev/null || die "sqlite3 not on PATH"
+
+    local sha
+    sha="$(git -C "$APP" rev-parse HEAD 2>/dev/null || echo unknown)"
+
+    step "exporting $APP @ ${sha:0:12} -> $OUT"
+    rm -rf "$OUT"; mkdir -p "$OUT"
+    (cd "$APP" && git archive HEAD) | tar -x -C "$OUT"
+
+    step "bundling (see the header on why this is a copy)"
+    (cd "$OUT" && bundle install >/dev/null) || die "bundle install failed"
+
+    step "migrating"
+    (cd "$OUT" && RAILS_ENV=development bin/rails db:prepare >/dev/null) \
+        || die "db:prepare failed"
+
+    step "seeding: $USERS users, $ROOMS rooms, $MESSAGES messages/room"
+    (cd "$OUT" && CF_USERS="$USERS" CF_ROOMS="$ROOMS" CF_MESSAGES="$MESSAGES" \
+        bin/rails runner "$(cat "$REPO_ROOT/scripts/campfire-oracle-seed.rb")") \
+        || die "seeding failed"
+
+    # Provenance, so a result can name what it measured. The Rails revision
+    # matters as much as campfire's SHA — see the header.
+    local rails_rev
+    rails_rev="$(awk '/remote: https:\/\/github.com\/rails\/rails/{getline; print $2}' \
+                 "$OUT/Gemfile.lock" 2>/dev/null || echo unknown)"
+    mkdir -p "$OUT/tmp"
+    cat > "$OUT/oracle.json" <<JSON
+{
+  "campfire_sha": "$sha",
+  "rails_revision": "$rails_rev",
+  "rails_version": "$(cd "$OUT" && bin/rails runner 'print Rails.version' 2>/dev/null || echo unknown)",
+  "ruby_version": "$(ruby -e 'print RUBY_VERSION')",
+  "seed": { "users": $USERS, "rooms": $ROOMS, "messages_per_room": $MESSAGES }
+}
+JSON
+    step "ready — $(tr -d '\n ' < "$OUT/oracle.json")"
+}
+
+cmd_serve() {
+    [[ -d "$OUT" ]] || die "no oracle at $OUT — run 'prepare' first"
+    step "puma :$PORT — $WORKERS worker(s), $THREADS thread(s), yjit=$YJIT"
+    cd "$OUT"
+    # WEB_CONCURRENCY is what campfire's config/puma.rb reads; without it the
+    # oracle sizes itself to the box and the comparison stops being one.
+    WEB_CONCURRENCY="$WORKERS" RAILS_MAX_THREADS="$THREADS" \
+    RUBY_YJIT_ENABLE="$YJIT" RAILS_ENV=development \
+        exec bundle exec puma -p "$PORT" -e development config.ru
+}
+
+cmd_login() {
+    mkdir -p "$(dirname "$JAR")"; rm -f "$JAR"
+    local token
+    token="$(curl -sS -c "$JAR" "http://127.0.0.1:$PORT/session/new" \
+             | grep -o 'name="authenticity_token" value="[^"]*"' | head -1 \
+             | sed 's/.*value="//; s/"$//')"
+    [[ -n "$token" ]] || die "no CSRF token at /session/new — is the server up on :$PORT?"
+    local code
+    code="$(curl -sS -b "$JAR" -c "$JAR" -o /dev/null -w '%{http_code}' \
+            -X POST "http://127.0.0.1:$PORT/session" \
+            --data-urlencode "email_address=user1@example.com" \
+            --data-urlencode "password=secret123456" \
+            --data-urlencode "authenticity_token=$token")"
+    [[ "$code" == "302" ]] || die "sign-in returned $code, expected 302"
+    step "signed in — jar at $JAR"
+}
+
+cmd_check_lock() {
+    [[ -f "$OUT/Gemfile.lock" ]] || die "no oracle at $OUT — run 'prepare' first"
+    if diff "$APP/Gemfile.lock" "$OUT/Gemfile.lock"; then
+        step "lockfiles identical"
+    else
+        step "the differences above are the oracle's resolution; anything beyond"
+        step "the generic-platform ffi line means the oracle is NOT the pin"
+    fi
+}
+
+case "$CMD" in
+    prepare)    cmd_prepare ;;
+    serve)      cmd_serve ;;
+    login)      cmd_login ;;
+    check-lock) cmd_check_lock ;;
+    ""|-h|--help) sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *)          die "unknown command '$CMD' (prepare|serve|login|check-lock)" ;;
+esac
