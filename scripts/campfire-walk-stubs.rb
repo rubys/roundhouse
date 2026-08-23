@@ -31,10 +31,21 @@
 WALK_LATE_PATCHES = []
 
 # GAP: the `platform_agent` gem (Basecamp's User-Agent parser).
-# campfire's ApplicationPlatform subclasses it. Out of scope by design —
-# a gem we do not intend to transpile — so this answers the surface the
-# subclass actually calls: `match?`, and a `user_agent` facade carrying
-# `browser` / `platform`.
+# campfire's ApplicationPlatform subclasses it.
+#
+# NOT simply "a gem we decline to transpile" — MEASURED 2026-08-23:
+# declaring `gem "platform_agent"` in the emitted Gemfile and requiring
+# the real thing does not work either. Its first line is
+#   delegate :browser, :version, :product, :os, to: :user_agent
+# so the gem does not load without ActiveSupport's `Module#delegate`,
+# and pulling ActiveSupport into the emitted tree to satisfy one gem is
+# the opposite of what the tree is for. That makes this a gem-fate
+# question (a pure-Ruby replacement or a SpinelGems mirror), not a
+# Gemfile line. Its sibling `sentry-ruby` WAS a Gemfile line and left
+# this file on the same day — see `project.rs::RUNTIME_GEMS`.
+#
+# Answers the surface the subclass actually calls: `match?`, and a
+# `user_agent` facade carrying `browser` / `platform`.
 class PlatformAgent
   def initialize(user_agent = "")
     @user_agent = user_agent.to_s
@@ -298,12 +309,7 @@ module Turbo
   end
 end
 
-# GAP: the `sentry-ruby` gem. campfire's message helpers rescue every
-# Exception and report it before falling back to an "unrenderable"
-# partial, so the constant is reached the moment ANY message render
-# raises. Out of scope by design — a gem we do not intend to transpile.
-module Sentry
-  def self.capture_exception(_error, **_context)
-    nil
-  end
-end
+# RETIRED: the `sentry-ruby` gem. `project.rs::RUNTIME_GEMS` declares it
+# in the emitted Gemfile now, from the `Sentry` constant `app/` names,
+# and the CRuby tree's `gem_facades.rb` guarded-requires the real gem —
+# which loads. A gem the app depends on is a Gemfile line, not a stub.

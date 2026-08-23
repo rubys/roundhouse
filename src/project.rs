@@ -1128,7 +1128,8 @@ fn ruby_runtime_files(
                         # installed. Keep this list in step with main.rb's. (JRuby swaps in\n\
                         # the commonmark-java Markly shim instead — see jruby_runtime_files.)\n\
                         [\"bcrypt\", \"htmlentities\", \"rotp\", \"markly\", \"nokogiri\", \"parslet\",\n\
-                        \x20\"typeid\", \"rqrcode\", \"SVG/Graph/TimeSeries\"].each do |gem_name|\n\
+                        \x20\"typeid\", \"rqrcode\", \"SVG/Graph/TimeSeries\",\n\
+                        \x20\"sentry-ruby\"].each do |gem_name|\n\
                         \x20\x20begin\n\
                         \x20\x20\x20\x20require gem_name\n\
                         \x20\x20rescue LoadError\n\
@@ -2152,7 +2153,7 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
     // (constant an emitted body names, gem that defines it). Only gems
     // whose absence is a RUNTIME error belong here — the list is the
     // façade's, not a survey of what an app might like.
-    const RUNTIME_GEMS: [(&str, &str); 8] = [
+    const RUNTIME_GEMS: [(&str, &str); 9] = [
         ("BCrypt", "bcrypt"),
         ("HTMLEntities", "htmlentities"),
         ("ROTP", "rotp"),
@@ -2161,6 +2162,21 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
         ("Parslet", "parslet"),
         ("TypeID", "typeid"),
         ("RQRCode", "rqrcode"),
+        // campfire's message helpers rescue through
+        // `Sentry.capture_exception`, and the gem was standing in
+        // `scripts/campfire-walk-stubs.rb` as a hand-written module. A
+        // gem the app depends on is not a modeling gap; it is a line in
+        // the Gemfile, which is what this table is for. MEASURED: the
+        // real gem loads in the emitted tree under CRuby.
+        //
+        // `platform_agent` is deliberately NOT here, and the reason is
+        // worth more than the entry would be: its first line is
+        // `delegate :browser, … , to: :user_agent`, so the gem does not
+        // load without ActiveSupport's `Module#delegate`. Declaring it
+        // buys a Gemfile line and a NoMethodError. Pulling ActiveSupport
+        // in to satisfy one gem is the opposite of what this tree is
+        // for, so the ledger entry stays and now says WHY.
+        ("Sentry", "sentry-ruby"),
     ];
 
     let mut needed: Vec<&str> = Vec::new();
@@ -2390,6 +2406,19 @@ fn names_constant(src: &str, konst: &str) -> bool {
     src.lines().any(|line| {
         if line.trim_start().starts_with('#') {
             return false;
+        }
+        // SUPERCLASS position — `class ApplicationPlatform <
+        // PlatformAgent`. The only place a used constant stands at end
+        // of line with no trailing `.`/`(`/`::` to prove it is a use
+        // rather than a definition, so the punctuation rule below
+        // cannot see it. campfire reaches the `platform_agent` gem
+        // exactly once, exactly here, and the gem went undeclared.
+        if let Some(rest) = line.trim().strip_prefix("class ") {
+            if let Some((_, parent)) = rest.split_once('<') {
+                if parent.trim() == konst {
+                    return true;
+                }
+            }
         }
         let b = line.as_bytes();
         let mut i = 0;
