@@ -807,7 +807,39 @@ pub enum LayoutDecl {
     /// `layout :foo` or `layout "foo"`. Resolves to `layouts/<name>`.
     Name { name: Symbol },
     /// `layout false` / `layout nil` — render bare, no layout.
-    None,
+    ///
+    /// SCOPED like a filter. `layout false, only: :index` is ordinary
+    /// Rails and campfire's `MessagesController` writes exactly it:
+    /// the messages index is a turbo-frame fragment lazily loaded INTO
+    /// a page that already has a layout, so wrapping it ships a second
+    /// `<html>` inside the first. Applying the decl to the whole
+    /// controller would be as wrong in the other direction — `show`
+    /// and `edit` are full pages. Empty vectors mean the whole
+    /// controller, which is the unscoped `layout false`.
+    None {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        only: Vec<Symbol>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        except: Vec<Symbol>,
+    },
+}
+
+impl LayoutDecl {
+    /// Does this declaration suppress the layout for `action`?
+    ///
+    /// Unscoped `layout false` covers every action; `only:`/`except:`
+    /// narrow it the way the same options narrow a filter.
+    pub fn suppresses(&self, action: &Symbol) -> bool {
+        match self {
+            LayoutDecl::None { only, except } => {
+                if !only.is_empty() {
+                    return only.contains(action);
+                }
+                !except.contains(action)
+            }
+            _ => false,
+        }
+    }
 }
 
 impl LayoutDecl {

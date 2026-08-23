@@ -1293,7 +1293,7 @@ impl Analyzer {
                     LayoutDecl::Name { name } => {
                         Some(Symbol::from(format!("layouts/{}", name.as_str())))
                     }
-                    LayoutDecl::None => None,
+                    LayoutDecl::None { .. } => None,
                     LayoutDecl::Inherit => Some(Symbol::from("layouts/application")),
                 }
             };

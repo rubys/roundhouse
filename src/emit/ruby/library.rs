@@ -2844,7 +2844,23 @@ pub(crate) fn apply_layout_lowering(lcs: &mut [LibraryClass], app: &App) {
         return;
     }
     for lc in lcs.iter_mut() {
+        // `layout false` on the controller this class came from, scoped
+        // by the `only:`/`except:` the declaration carried. Resolved
+        // per METHOD because the scoping is per action: campfire's
+        // `MessagesController` writes `layout false, only: :index`, so
+        // `index` must render bare — it is a turbo-frame fragment
+        // loaded into a page that already has a layout, and wrapping it
+        // shipped a whole second `<html>` inside the first, 117 tags
+        // Rails does not send — while `show` and `edit` keep theirs.
+        let decl = app
+            .controllers
+            .iter()
+            .find(|c| c.name == lc.name)
+            .map(|c| c.layout.clone());
         for m in &mut lc.methods {
+            if decl.as_ref().is_some_and(|d| d.suppresses(&m.name)) {
+                continue;
+            }
             rewrite_layout_wrap(&mut m.body, app);
         }
     }

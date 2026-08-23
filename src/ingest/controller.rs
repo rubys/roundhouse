@@ -204,7 +204,26 @@ fn parse_layout_call(stmt: &Node<'_>) -> Option<LayoutDecl> {
         return Some(LayoutDecl::Name { name: Symbol::from(name) });
     }
     if first.as_false_node().is_some() || first.as_nil_node().is_some() {
-        return Some(LayoutDecl::None);
+        // `only:`/`except:` scope the suppression exactly as they scope
+        // a filter — campfire writes `layout false, only: :index`, and
+        // reading past the options would strip the layout from `show`
+        // and `edit` too.
+        let mut only: Vec<Symbol> = Vec::new();
+        let mut except: Vec<Symbol> = Vec::new();
+        for arg in all_args.iter().skip(1) {
+            let Some(hash) = arg.as_keyword_hash_node() else { continue };
+            for element in hash.elements().iter() {
+                let Some(pair) = element.as_assoc_node() else { continue };
+                let Some(key) = pair.key().as_symbol_node() else { continue };
+                let Ok(name) = std::str::from_utf8(key.unescaped()) else { continue };
+                match name {
+                    "only" => only = super::util::symbol_list_value(&pair.value()),
+                    "except" => except = super::util::symbol_list_value(&pair.value()),
+                    _ => {}
+                }
+            }
+        }
+        return Some(LayoutDecl::None { only, except });
     }
     None
 }
