@@ -356,6 +356,9 @@ fn rewrite_send(e: &Expr) -> Option<Expr> {
         "assert_raises" | "assert_raise" if !args.is_empty() => {
             lower_assert_raises(span, args, block.as_ref())
         }
+        "assert_throws" if !args.is_empty() => {
+            lower_assert_throws(span, &args[0], block.as_ref())
+        }
         "assert_difference" | "assert_no_difference" => {
             lower_difference(span, method.as_str(), args, block.as_ref())
         }
@@ -442,6 +445,108 @@ fn lower_assert_raises(span: Span, args: &[Expr], block: Option<&Expr>) -> Optio
     let body = Expr::new(
         span,
         ExprNode::Seq { exprs: vec![init, begin_rescue, check, yield_caught] },
+    );
+    Some(Expr::new(
+        span,
+        ExprNode::BeginRescue {
+            body,
+            rescues: vec![],
+            else_branch: None,
+            ensure: None,
+            implicit: false,
+        },
+    ))
+}
+
+/// `assert_throws(:tag) { body }` → Seq of:
+///   __thrown = true
+///   __value = catch(:tag) do
+///     <block body>
+///     __thrown = false
+///     nil
+///   end
+///   raise "assert_throws failed" if !__thrown
+///   __value
+///
+/// Minitest's contract: the block must throw `:tag`, and the assertion
+/// evaluates to the value thrown with it. The flag is what distinguishes
+/// "threw" from "ran to the end" — `catch` answers the block's own last
+/// value when nothing throws, and `nil` is a value a `throw` can carry,
+/// so the returned value cannot tell the two apart. Hence a flag set
+/// BEFORE the block and cleared on the fall-through path, which the
+/// throw skips.
+///
+/// campfire's Opengraph fetch tests assert that a resolved IP — never
+/// the hostname — is what gets connected to, and they prove it by
+/// making the mocked `TCPSocket.open` throw.
+fn lower_assert_throws(span: Span, tag: &Expr, block: Option<&Expr>) -> Option<Expr> {
+    let block_body = match block.map(|b| &*b.node) {
+        Some(ExprNode::Lambda { body, .. }) => body.clone(),
+        _ => return None,
+    };
+    let thrown = Symbol::from("__thrown");
+    let value = Symbol::from("__value");
+    let set_flag = |v: bool| {
+        Expr::new(
+            span,
+            ExprNode::Assign {
+                target: LValue::Var { id: VarId(0), name: thrown.clone() },
+                value: Expr::new(span, ExprNode::Lit { value: Literal::Bool { value: v } }),
+            },
+        )
+    };
+    // The block ends on an explicit `nil` so the catch's fall-through
+    // value is not the flag assignment's `false`.
+    let caught_body = Expr::new(
+        span,
+        ExprNode::Seq {
+            exprs: vec![
+                block_body,
+                set_flag(false),
+                Expr::new(span, ExprNode::Lit { value: Literal::Nil }),
+            ],
+        },
+    );
+    let catch_call = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: None,
+            method: Symbol::from("catch"),
+            args: vec![tag.clone()],
+            block: Some(Expr::new(
+                span,
+                ExprNode::Lambda {
+                    params: vec![],
+                    block_param: None,
+                    body: caught_body,
+                    block_style: crate::expr::BlockStyle::Do,
+                },
+            )),
+            parenthesized: true,
+        },
+    );
+    let capture = Expr::new(
+        span,
+        ExprNode::Assign {
+            target: LValue::Var { id: VarId(0), name: value.clone() },
+            value: catch_call,
+        },
+    );
+    let check = raise_if(
+        span,
+        not_expr(span, Expr::new(span, ExprNode::Var { id: VarId(0), name: thrown.clone() })),
+        "assert_throws failed".to_string(),
+    );
+    let body = Expr::new(
+        span,
+        ExprNode::Seq {
+            exprs: vec![
+                set_flag(true),
+                capture,
+                check,
+                Expr::new(span, ExprNode::Var { id: VarId(0), name: value }),
+            ],
+        },
     );
     Some(Expr::new(
         span,

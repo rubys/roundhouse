@@ -108,3 +108,31 @@ fn assert_not_includes_is_refute_includes() {
     assert!(src.contains("include?"), "{src}");
     assert!(!src.contains("assert_not_includes"), "{src}");
 }
+
+/// `assert_throws(:tag) { … }` inlines to a `catch` whose fall-through
+/// path clears a flag the throw skips.
+///
+/// The flag is the whole trick: `catch` answers the block's own last
+/// value when nothing throws, and `nil` is a value a `throw` can carry,
+/// so the returned value alone cannot tell "threw nil" from "never
+/// threw". Without the assertion at all, campfire's Opengraph fetch
+/// tests — which prove a resolved IP and never a hostname is what gets
+/// connected to, by making the mocked socket throw — died on `undefined
+/// method 'assert_throws'`.
+#[test]
+fn assert_throws_inlines_to_a_catch_with_a_flag() {
+    let src = emitted("assert_throws :done do Post.count end");
+    assert!(src.contains("catch(:done)"), "lowers to a catch:\n{src}");
+    assert!(
+        src.contains("__thrown = true") && src.contains("__thrown = false"),
+        "the flag is set before the block and cleared on fall-through:\n{src}"
+    );
+    assert!(
+        src.contains("assert_throws failed"),
+        "a block that never throws raises:\n{src}"
+    );
+    assert!(
+        !src.lines().any(|l| l.trim_start().starts_with("assert_throws ")),
+        "no dispatched assert_throws survives:\n{src}"
+    );
+}
