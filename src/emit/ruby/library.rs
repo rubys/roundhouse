@@ -2225,6 +2225,15 @@ fn is_framework_view_helper(name: &str) -> bool {
             // target ships.
             | "sanitize"
             | "strip_tags"
+            // `h` — Rails' escape alias, and `auto_link` beside it.
+            // campfire's `message_presentation` is one expression built
+            // from both: `auto_link h(ContentFilters…apply(message.body
+            // .body)), html: { target: "_blank" }`. Unqualified, each
+            // was a NoMethodError inside that method's own `rescue
+            // Exception`, which returns "" — so every message rendered
+            // an EMPTY BODY, with no diagnostic anywhere.
+            | "h"
+            | "auto_link"
     )
 }
 

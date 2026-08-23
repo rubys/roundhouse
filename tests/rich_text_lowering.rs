@@ -274,6 +274,17 @@ fn the_synthesized_record_carries_the_schemas_columns() {
 /// the model, so a `Message` whose own callbacks read `body` claimed the
 /// `(record_type, record_id, name)` unique key before the rich-text
 /// fixture could.
+///
+/// The emptiness test is `body.blank?`, NOT `body.to_s == ""`, and the
+/// difference is load-bearing: `to_s` is Action Text's RENDER — Rails
+/// runs it through `layouts/action_text/contents/_content` and the
+/// CRuby overlay does too, so an app shipping that layout (campfire's
+/// is `<div class="trix-content">`) has a `to_s` that is never empty.
+/// The guard read `to_s == ""` once; the day the overlay started
+/// applying the layout, every message fixture claimed the unique key
+/// and the suite went 219/240 -> 0/240 with a UNIQUE violation in all
+/// 52 files. `Content#blank?` walks the stored `@html` and cannot be
+/// moved by a rendering decision.
 #[test]
 fn autosave_skips_a_rich_text_that_was_only_read() {
     let app = app();
@@ -286,7 +297,12 @@ fn autosave_skips_a_rich_text_that_was_only_read() {
         "guards on the record being unsaved:\n{body}"
     );
     assert!(
-        body.contains("Str { value: \"\" }"),
-        "…and on its body being empty:\n{body}"
+        body.contains("Symbol(\"blank?\")"),
+        "…and on its body being blank — through `blank?`, which reads the \
+         stored html, and never through `to_s`, which renders:\n{body}"
+    );
+    assert!(
+        !body.contains("Symbol(\"to_s\")"),
+        "the emptiness test must not go through a renderer:\n{body}"
     );
 }

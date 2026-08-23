@@ -2233,6 +2233,7 @@ const GEM_REQUIRES: &[&str] = &[
     "SVG/Graph/TimeSeries",
     "sentry-ruby",
     "platform_agent",
+    "rails-html-sanitizer",
 ];
 
 /// The guarded-require block, minus any gem this tree provides another
@@ -2259,15 +2260,15 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
     // (constant an emitted body names, gem that defines it). Only gems
     // whose absence is a RUNTIME error belong here — the list is the
     // façade's, not a survey of what an app might like.
-    const RUNTIME_GEMS: [(&str, &str); 10] = [
-        ("BCrypt", "bcrypt"),
-        ("HTMLEntities", "htmlentities"),
-        ("ROTP", "rotp"),
-        ("Markly", "markly"),
-        ("Nokogiri", "nokogiri"),
-        ("Parslet", "parslet"),
-        ("TypeID", "typeid"),
-        ("RQRCode", "rqrcode"),
+    const RUNTIME_GEMS: [(Marker, &str); 11] = [
+        (Marker::Constant("BCrypt"), "bcrypt"),
+        (Marker::Constant("HTMLEntities"), "htmlentities"),
+        (Marker::Constant("ROTP"), "rotp"),
+        (Marker::Constant("Markly"), "markly"),
+        (Marker::Constant("Nokogiri"), "nokogiri"),
+        (Marker::Constant("Parslet"), "parslet"),
+        (Marker::Constant("TypeID"), "typeid"),
+        (Marker::Constant("RQRCode"), "rqrcode"),
         // campfire's message helpers rescue through
         // `Sentry.capture_exception`, and the gem was standing in
         // `scripts/campfire-walk-stubs.rb` as a hand-written module. A
@@ -2275,7 +2276,7 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
         // the Gemfile, which is what this table is for. MEASURED: the
         // real gem loads in the emitted tree under CRuby.
         //
-        ("Sentry", "sentry-ruby"),
+        (Marker::Constant("Sentry"), "sentry-ruby"),
         // campfire's `ApplicationPlatform < PlatformAgent`, a LOAD-time
         // superclass — the gem's absence is not a late NameError on one
         // route, it is a tree that does not boot.
@@ -2289,17 +2290,43 @@ fn apply_runtime_gem_wiring(files: &mut Vec<(String, String)>) {
         // (`runtime/spinel/module_delegate.rb`, ruby-family only), and
         // with that defined the real gem loads and answers correctly.
         // Its own dependency `useragent` arrives through bundler.
-        ("PlatformAgent", "platform_agent"),
+        (Marker::Constant("PlatformAgent"), "platform_agent"),
+        // rails-html-sanitizer, and it is the first entry whose demand
+        // is OURS rather than the app's: no campfire file names
+        // `Rails::HTML`, but `ActionView::ViewHelpers.sanitize` is what
+        // a bare `sanitize` / `strip_tags` / `auto_link` in an app body
+        // lowers to, and the CRuby overlay serves those from the real
+        // gem. So the marker is the emitted CALL, the same shape the
+        // test table already uses for mocha.
+        //
+        // A Gemfile line rather than a port because the safe-list pass
+        // is HTML5 tree construction, not filtering — see the header of
+        // ruby_overlay/runtime/action_view_sanitize.rb. Its closure is
+        // loofah + crass + nokogiri, and nokogiri is already declared by
+        // an entry above for any app that reaches this one.
+        (
+            Marker::AnyText(&[
+                "ActionView::ViewHelpers.sanitize(",
+                "ActionView::ViewHelpers.strip_tags(",
+                "ActionView::ViewHelpers.auto_link(",
+            ]),
+            "rails-html-sanitizer",
+        ),
     ];
 
     let mut needed: Vec<&str> = Vec::new();
-    for (konst, gem) in RUNTIME_GEMS {
+    for (marker, gem) in RUNTIME_GEMS {
         // `app/` only. The runtime tree names several of these itself (the
         // façade lists all nine), and a scan that saw those would declare
         // every gem for every app — the same self-fulfilling wiring the
         // test table had to exclude `test_helper.rb` to avoid.
         let demanded = files.iter().any(|(p, c)| {
-            p.starts_with("app/") && p.ends_with(".rb") && names_constant(c, konst)
+            p.starts_with("app/")
+                && p.ends_with(".rb")
+                && match marker {
+                    Marker::Constant(konst) => names_constant(c, konst),
+                    Marker::AnyText(needles) => needles.iter().any(|n| c.contains(n)),
+                }
         });
         if demanded {
             needed.push(gem);

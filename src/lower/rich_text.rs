@@ -512,6 +512,21 @@ fn push_owner_methods(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol
                 // moment those fixtures carry a real `record:`.
                 //
                 // An empty rich text is not a rich text. Ledgered.
+                //
+                // `blank?`, NOT `to_s == ""`, and the difference is not
+                // style. `to_s` is Action Text's RENDER — Rails runs it
+                // through `layouts/action_text/contents/_content`, and
+                // the CRuby overlay does too, so an app that ships that
+                // layout (campfire: `<div class="trix-content">`) has a
+                // `to_s` that is never empty. This guard read `to_s ==
+                // ""` and the moment the overlay started applying the
+                // layout, EVERY message fixture claimed the unique key
+                // and the whole suite went from 219/240 to 0/240.
+                //
+                // `Content#blank?` is `to_plain_text == ""`, which
+                // walks the stored `@html` and cannot be moved by a
+                // rendering decision. It is also what Rails asks.
+                // An emptiness test must not go through a renderer.
                 cond: Expr::new(
                     Span::synthetic(),
                     ExprNode::BoolOp {
@@ -524,10 +539,10 @@ fn push_owner_methods(methods: &mut Vec<MethodDef>, model: &Model, attr: &Symbol
                                 op: BoolOpKind::And,
                                 surface: BoolOpSurface::default(),
                                 left: eq_zero(no_arg_send(ivar(cache.as_str()), "id")),
-                                right: eq_empty_str(no_arg_send(
+                                right: no_arg_send(
                                     no_arg_send(ivar(cache.as_str()), "body"),
-                                    "to_s",
-                                )),
+                                    "blank?",
+                                ),
                             },
                         ),
                     },

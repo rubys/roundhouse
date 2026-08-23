@@ -118,6 +118,20 @@ module ActionView
       s.gsub(HTML_ESCAPE_PATTERN, HTML_ESCAPES)
     end
 
+    # Rails' `h` — an ALIAS of `html_escape`, not a second escape. One
+    # implementation, because the CRuby overlay replaces `html_escape`
+    # with an html_safe-aware version and a separately-defined `h` would
+    # quietly keep escaping what Rails passes through.
+    #
+    # `to_s` first, as Rails does: the argument is routinely a value
+    # object rather than a String — campfire's `h(ContentFilters
+    # ::TextMessagePresentationFilters.apply(message.body.body))` hands
+    # it an `ActionText::Content`, whose `to_s` is the markup and is
+    # marked safe on the overlay so this call passes it through.
+    def self.h(value)
+      html_escape(value.to_s)
+    end
+
     # Percent-encoding for a QUERY-STRING VALUE — what Rails' `url_for`
     # applies to the options it turns into a query (`?v=…&size=…`), and
     # what the generated `direct` URL helpers call.

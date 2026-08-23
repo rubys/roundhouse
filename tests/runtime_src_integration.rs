@@ -1058,7 +1058,14 @@ fn every_runtime_method_body_concretely_typed() {
     // Hash[K, T]`), which no signature in this corpus uses yet; the
     // Relation twin pays the identical `Hash[untyped, untyped]` two
     // files over.
-    const CEILING: usize = 324;
+    //
+    // 324 -> 325: `ActionView::ViewHelpers.h`. ONE site, the `value
+    // .to_s` — and it is the method's whole reason for existing.
+    // Rails' `h` takes a String or a value OBJECT (campfire hands it an
+    // `ActionText::Content`) and coerces first; typing the parameter
+    // `String` would make the corpus's actual call site a type error,
+    // and there is no union that names "anything with to_s".
+    const CEILING: usize = 325;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

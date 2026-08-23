@@ -38,6 +38,7 @@ module ActionView
     # backend compiler (V8, YJIT, ZJIT, Spinel, rustc) can specialize
     # against.
     def self.html_escape: (String s) -> String
+  def self.h: (untyped value) -> String
     # Percent-encoding for a query-string value; ASCII-only (see the .rb).
     def self.url_encode: (String s) -> String
     def self.url_encode_component: (String s) -> String

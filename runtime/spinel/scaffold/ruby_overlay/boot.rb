@@ -104,6 +104,11 @@ require_relative "runtime/action_controller"
 # String-identity case, and this overlay's polymorphic is_a? version
 # must redefine it for CRuby's residual dynamic sites.
 require_relative "runtime/action_view_safe_buffer"
+# `sanitize` / `strip_tags` / `auto_link` on the REAL rails-html-sanitizer
+# (guarded — an app that never sanitizes boots without the gem, and the
+# shared runtime's scanner stands). AFTER the safe buffer: these return
+# SafeString, which that file's `html_escape` is the reader of.
+require_relative "runtime/action_view_sanitize"
 require_relative "runtime/action_view_url_for"
 require_relative "runtime/action_view_missing_template"
 require_relative "runtime/action_dispatch_request"
