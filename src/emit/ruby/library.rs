@@ -1830,6 +1830,7 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
         .map(|lc| lc.name.0.clone())
         .collect();
     let helper_ivars = helper_read_ivars(app);
+    let view_ivars = view_assigned_ivars(app);
     for lc in lcs.iter_mut() {
         // CONTROLLERS in the index provide `helper_method`s to views:
         // only the call-site rewrite applies to them — their methods
@@ -1899,6 +1900,9 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
             if is_helper_module {
                 rewrite_helper_ivars(&mut m.body, &helper_ivars);
             }
+            if lc.name.0.as_str().starts_with("Views::") {
+                rewrite_view_ivar_writes(&mut m.body, &view_ivars);
+            }
         }
         // The other half: the reader the rewrite dispatches to. It goes
         // on the BASE controller, so every controller inherits one —
@@ -1907,6 +1911,12 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
         // nil, which is exactly what reading an unassigned ivar gives.
         if is_base_controller(lc) {
             push_helper_ivar_readers(&mut lc.methods, &helper_ivars, &lc.name);
+            // The name a template WRITES needs a reader too, not only
+            // the setter: `page_title_tag` reads what `rooms/show`
+            // set, and a name no helper happens to read still has to
+            // answer nil rather than NoMethodError.
+            push_helper_ivar_readers(&mut lc.methods, &view_ivars, &lc.name);
+            push_helper_ivar_writers(&mut lc.methods, &view_ivars, &lc.name);
         }
     }
 }
@@ -1996,6 +2006,116 @@ fn rewrite_helper_ivars(e: &mut Expr, names: &std::collections::BTreeSet<Symbol>
         block: None,
         parenthesized: false,
     };
+}
+
+/// The ivars a `Views::` module ASSIGNS.
+///
+/// Rails' `@page_title = …` in a template writes the view context the
+/// layout and every mixed-in helper share, so the write has to land
+/// where the helper-side READ already looks — on the live controller.
+/// The view lowering leaves the assign as an Ivar precisely so this
+/// pass can see it; a helper module's ivar is a controller assign it
+/// only reads, which is `helper_read_ivars`' half of the same seam.
+///
+/// Read off `app.views` — the TEMPLATE bodies — not off the lowered
+/// `Views::` classes: `apply_helper_lowering` runs once per emitted
+/// stack, and the stack holding the views is not the one holding the
+/// base controller that has to grow the accessors. Sourced from the
+/// App, both halves see the same names.
+fn view_assigned_ivars(app: &App) -> std::collections::BTreeSet<Symbol> {
+    let mut out = std::collections::BTreeSet::new();
+    for view in &app.views {
+        collect_ivar_writes(&view.body, &mut out);
+    }
+    out
+}
+
+fn collect_ivar_writes(e: &Expr, out: &mut std::collections::BTreeSet<Symbol>) {
+    match &*e.node {
+        ExprNode::Assign { target: LValue::Ivar { name }, .. }
+        | ExprNode::OpAssign { target: LValue::Ivar { name }, .. } => {
+            out.insert(name.clone());
+        }
+        _ => {}
+    }
+    e.node.for_each_child(&mut |c| collect_ivar_writes(c, out));
+}
+
+/// `@page_title = x` -> `ActionController::Current.controller.page_title = x`,
+/// the write half of the seam `rewrite_helper_ivars` reads through.
+fn rewrite_view_ivar_writes(e: &mut Expr, names: &std::collections::BTreeSet<Symbol>) {
+    e.node.for_each_child_mut(&mut |c| rewrite_view_ivar_writes(c, names));
+    let (name, value) = match &*e.node {
+        ExprNode::Assign { target: LValue::Ivar { name }, value } if names.contains(name) => {
+            (name.clone(), value.clone())
+        }
+        _ => return,
+    };
+    let span = e.span;
+    *e.node = ExprNode::Assign {
+        target: LValue::Attr { recv: current_controller_expr(span), name },
+        value,
+    };
+}
+
+/// The `ActionController::Current.controller` receiver both halves of
+/// the seam dispatch through.
+fn current_controller_expr(span: Span) -> Expr {
+    Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                span,
+                ExprNode::Const {
+                    path: vec![Symbol::from("ActionController"), Symbol::from("Current")],
+                },
+            )),
+            method: Symbol::from("controller"),
+            args: vec![],
+            block: None,
+            parenthesized: false,
+        },
+    )
+}
+
+/// `def page_title=(v); @page_title = v; end` on the base controller,
+/// the target of `rewrite_view_ivar_writes`. Paired with the reader
+/// `push_helper_ivar_readers` pushes for the same name — a title a
+/// template sets and the layout's helper reads travels through both.
+fn push_helper_ivar_writers(
+    methods: &mut Vec<MethodDef>,
+    names: &std::collections::BTreeSet<Symbol>,
+    class_name: &ClassId,
+) {
+    for name in names {
+        let setter = Symbol::from(format!("{}=", name.as_str()));
+        if methods.iter().any(|m| m.name == setter) {
+            continue;
+        }
+        let span = Span::synthetic();
+        methods.push(MethodDef {
+            name: setter,
+            receiver: MethodReceiver::Instance,
+            params: vec![crate::dialect::Param::positional(Symbol::from("value"))],
+            body: Expr::new(
+                span,
+                ExprNode::Assign {
+                    target: LValue::Ivar { name: name.clone() },
+                    value: Expr::new(
+                        span,
+                        ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("value") },
+                    ),
+                },
+            ),
+            signature: None,
+            effects: crate::effect::EffectSet::default(),
+            enclosing_class: Some(class_name.0.clone()),
+            kind: AccessorKind::Method,
+            is_async: false,
+            mutates_self: true,
+            block_param: None,
+        });
+    }
 }
 
 /// `def room; @room; end` on the base controller, one per name.

@@ -3202,8 +3202,18 @@ pub(super) fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
             id: VarId(0),
             name: Symbol::from(crate::naming::safe_local(name.as_str())),
         },
+        // An ivar ASSIGNMENT is left as one. A template that writes
+        // `@page_title` is writing the view context Rails shares with
+        // the layout and every helper mixed into it — the local this
+        // used to produce was read by nothing, so campfire's
+        // `<title>` said "Campfire" on every page while
+        // `rooms/show.html.erb` set it to the room's name one frame
+        // earlier. `walker::walk_stmt` splits it into the local (so a
+        // later read in the SAME template still resolves) plus the
+        // write-through the emit routes to the controller seam that
+        // already answers the helper-side READ.
         ExprNode::Assign { target: LValue::Ivar { name }, value } => ExprNode::Assign {
-            target: LValue::Var { id: VarId(0), name: name.clone() },
+            target: LValue::Ivar { name: name.clone() },
             value: rewrite_ivars_to_locals(value),
         },
         ExprNode::Assign { target, value } => ExprNode::Assign {

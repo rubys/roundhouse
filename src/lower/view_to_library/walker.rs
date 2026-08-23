@@ -3,7 +3,7 @@
 //! to the helper / partial / form-with / form-builder sub-modules.
 
 use crate::expr::{Expr, ExprNode, InterpPart, LValue, Literal};
-use crate::ident::Symbol;
+use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 
 use crate::lower::view::{
@@ -107,6 +107,44 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                     ),
                 },
             )]
+        }
+        // `<% @page_title = room_display_name(@room) %>` — a write to
+        // the VIEW CONTEXT, which Rails shares with the layout and
+        // with every helper mixed into it. Two statements: the local,
+        // so a later read in the SAME template resolves the way every
+        // other template local does, and the ivar write-through, which
+        // the emit routes to the per-dispatch controller seam that
+        // already answers the helper-side read (`ApplicationHelper
+        // .page_title_tag` reads `@page_title`). Emitting only the
+        // local — which is what happened until now — left the write
+        // going nowhere and campfire titled every page "Campfire".
+        ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+            let local = Symbol::from(crate::naming::safe_local(name.as_str()));
+            let rewritten = rewrite_predicates(
+                value,
+                &ctx.nullable_locals,
+                &ctx.reference_reads,
+                &ctx.nilable_scalar_reads,
+            );
+            vec![
+                Expr::new(
+                    stmt.span,
+                    ExprNode::Assign {
+                        target: LValue::Var { name: local.clone(), id: VarId(0) },
+                        value: rewritten,
+                    },
+                ),
+                Expr::new(
+                    stmt.span,
+                    ExprNode::Assign {
+                        target: LValue::Ivar { name: name.clone() },
+                        value: Expr::new(
+                            stmt.span,
+                            ExprNode::Var { id: VarId(0), name: local },
+                        ),
+                    },
+                ),
+            ]
         }
         // Template-local assignment (`<% flagged = comment.current_vote
         // && … %>`) — a real statement, not output; later

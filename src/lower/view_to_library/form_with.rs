@@ -927,6 +927,26 @@ fn classify_form_with_components(
 /// known model — that fallback is the whole pre-existing behavior, so an
 /// untyped record is no worse off than before.
 fn record_model_name(model: &Expr, ctx: &ViewCtx, fallback: &str) -> String {
+    // `model: Message.new` — a record CONSTRUCTED in the form call,
+    // which is what a form for a not-yet-persisted resource looks like
+    // when it lives in a HELPER rather than beside its controller.
+    // campfire's composer is that shape (`form_with model: Message.new,
+    // url: room_messages_path(room)` in `MessagesHelper`), and it has
+    // no ivar for the ivar-type map to answer about — so the fallback
+    // named every field after the VIEW that reached the helper and the
+    // composer posted `rooms_show[body]` where Rails posts
+    // `message[body]`. The class is right there in the expression;
+    // Rails' `param_key` is its demodulized name, underscored, whether
+    // or not the constructor took arguments.
+    if let ExprNode::Send { recv: Some(recv), method, .. } = &*model.node {
+        if method.as_str() == "new" {
+            if let ExprNode::Const { path } = &*recv.node {
+                if let Some(last) = path.last() {
+                    return snake_case(last.as_str());
+                }
+            }
+        }
+    }
     let name = match &*model.node {
         ExprNode::Var { name, .. } | ExprNode::Ivar { name } => name.as_str(),
         ExprNode::Send { recv: None, method, args, block: None, .. } if args.is_empty() => {
