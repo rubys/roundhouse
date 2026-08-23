@@ -92,6 +92,40 @@ pub fn build_scope_registry(models: &[Model]) -> ScopeRegistry {
                 _ => {}
             }
         }
+        // The scopes RAILS declares beside `has_one_attached` /
+        // `has_rich_text` — `with_attached_<attr>`,
+        // `with_rich_text_<attr>[_and_embeds]`. Their bodies are
+        // synthesized later (identity, see `attached::
+        // push_preload_scope_methods`), so neither arm above can see
+        // them: they are not a `ModelBodyItem::Scope`, and an identity
+        // body does not "mention a bare chain start".
+        //
+        // WITHOUT THIS ENTRY THE RELATION IS SILENTLY DROPPED, and it
+        // is not a performance difference — it is the wrong rows.
+        // campfire writes
+        //
+        //   scope :with_attachment_details, -> {
+        //     with_rich_text_body_and_embeds
+        //     with_attached_attachment.includes(attachment_blob: …)
+        //   }
+        //
+        // and Rails evaluates a scope lambda with `self` as the current
+        // relation, so the bare `with_attached_attachment` chains onto
+        // it. Unregistered here, the call fell through every arm, took
+        // its own `__rel` default — a FRESH relation — and the
+        // `where(room_id:)` the controller had built vanished. `/rooms/1`
+        // rendered the last 40 messages in the whole table: room 5's.
+        // Every tag count matched Rails because every room is seeded the
+        // same shape, which is exactly why a tag-tally oracle could not
+        // see it.
+        //
+        // No user params: these take `__rel` alone.
+        for name in crate::lower::attached::preload_scope_names(m)
+            .into_iter()
+            .chain(crate::lower::rich_text::preload_scope_names(m))
+        {
+            map.entry(name).or_default();
+        }
     }
     reg
 }

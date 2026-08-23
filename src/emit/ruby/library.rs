@@ -296,10 +296,23 @@ pub(crate) fn emit_relation_scope_delegates(app: &App) -> Option<EmittedFile> {
     > = Default::default();
     for model in &app.models {
         let Some(per) = scopes.get(&model.name) else { continue };
+        // The registry carries the SYNTHESIZED preload scopes too (it
+        // must — the scope-body rewriter reads it to thread `__rel`
+        // through a bare `with_attached_attachment`). They are handled
+        // by the identity arm below, which is both faster and clearer
+        // than a `__scope_` hop to a body that returns its argument;
+        // leaving them here would make `by_name` claim them and the
+        // identity arm skip them as "a declared scope of the same name".
+        let synthesized: std::collections::HashSet<String> =
+            crate::lower::rich_text::preload_scope_names(model)
+                .into_iter()
+                .chain(crate::lower::attached::preload_scope_names(model))
+                .map(|n| n.as_str().to_string())
+                .collect();
         let mut names: Vec<&Symbol> = per.keys().collect();
         names.sort_by_key(|n| n.as_str());
         for n in names {
-            if RELATION_BUILTINS.contains(&n.as_str()) {
+            if RELATION_BUILTINS.contains(&n.as_str()) || synthesized.contains(n.as_str()) {
                 continue;
             }
             by_name
