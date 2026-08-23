@@ -1885,6 +1885,32 @@ jobs:
         if: steps.fetch-lobsters-specs.outputs.specs_data == 'present'
         run: scripts/lobsters-spec-report _site/bench/lobsters-specs _site/bench/lobsters-specs/index.html
 
+      # Campfire bench results page — the Hetzner endpoint's /campfire/ path
+      # (roundbench.showcase.party/campfire/ → _site/bench/campfire/), same
+      # shape as the blog bench above and rendered by the same script.
+      # parity.txt comes along because the report renders a section from it:
+      # the per-lane tag tallies are what make the throughput numbers a
+      # comparison rather than two unrelated measurements.
+      - name: Fetch latest campfire bench data
+        id: fetch-campfire-bench
+        env:
+          BENCH_URL: https://roundbench.showcase.party/campfire
+        run: |
+          mkdir -p _site/bench/campfire
+          if curl -fsSL --max-time 30 "$BENCH_URL/summary.json" -o _site/bench/campfire/summary.json; then
+            for f in env.json per-run.json summary.md parity.txt; do
+              curl -fsSL --max-time 30 "$BENCH_URL/$f" -o "_site/bench/campfire/$f" || true
+            done
+            echo "campfire_bench=present" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::campfire bench data unavailable at $BENCH_URL; skipping page render"
+            rm -rf _site/bench/campfire
+            echo "campfire_bench=absent" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Render campfire bench page
+        if: steps.fetch-campfire-bench.outputs.campfire_bench == 'present'
+        run: scripts/bench-report _site/bench/campfire/summary.json _site/bench/campfire/index.html
+
       # Campfire conformance — ONCE Campfire's own Minitest suite run
       # against an emit of the pinned CAMPFIRE_SHA, by the
       # campfire-conformance job in THIS run. Unlike its lobsters sibling

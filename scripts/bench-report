@@ -865,8 +865,12 @@ if env
   # machine capture cannot: campfire's Gemfile tracks rails/rails main, so
   # naming "Rails 8.2" is not a pin — the framework is identified only by
   # the lockfile's git revision, and the app only by its own SHA.
-  oracle = env_map(env, 'oracle')
-  unless oracle.empty?
+  oracle  = env_map(env, 'oracle')
+  # The app server is part of what was measured, and a harness whose lanes
+  # resolve it separately has to say so — otherwise the only place the two
+  # versions appear is a server log nobody opens.
+  servers = env_map(env, 'servers')
+  unless oracle.empty? && servers.empty?
     seed = oracle['seed'].is_a?(Hash) ? oracle['seed'] : {}
     rails = [oracle['rails_version'],
              oracle['rails_revision'] && "(#{oracle['rails_revision'].to_s[0, 12]})"].compact.join(' ')
@@ -880,6 +884,7 @@ if env
       ['served',   oracle['serve_env']],
       ['seed',     seed.empty? ? nil : "#{seed['users']} users, #{seed['rooms']} rooms, " \
                                        "#{seed['messages_per_room']} messages/room"],
+      *servers.map { |label, version| ["app server (#{label})", version] },
     ])
   end
 

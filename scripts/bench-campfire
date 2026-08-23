@@ -230,7 +230,18 @@ start_lane() {
             ;;
         ruby|ruby-int)
             local yjit=1; [[ "$lane" == "ruby-int" ]] && yjit=0
-            ( cd "$EMIT" && RUBY_YJIT_ENABLE="$yjit" RAILS_MAX_THREADS="$THREADS" \
+            # RAILS_ENV=production, for the same reason the oracle serves it
+            # (see campfire-oracle's header: development measured 11.4 req/s
+            # against production's 141.1 — the SAME app, 12x apart). The emit
+            # reads `Rails.env` too, and with it unset every ruby lane booted
+            # "development" while the lane it is compared against booted
+            # production. On campfire's benchmarked routes that costs nothing
+            # — the only env branch in the emitted tree is in
+            # `users/profiles/show` — but an asymmetry that happens to be
+            # free today is not one to leave in a published comparison. The
+            # database does not move with it: the emit resolves its path from
+            # DB_PATH or the literal `storage/development.sqlite3`.
+            ( cd "$EMIT" && RAILS_ENV=production RUBY_YJIT_ENABLE="$yjit" RAILS_MAX_THREADS="$THREADS" \
                 bundle exec puma -p "$port" -w "$WORKERS" -t "$THREADS:$THREADS" \
                 config.ru ) > "$log" 2>&1 &
             SERVER_PID=$!
@@ -397,10 +408,11 @@ done
     --command     "scripts/bench-campfire ${ORIG_ARGS[*]}" \
     > "$OUT_DIR/env.base.json" 2>/dev/null || echo '{}' > "$OUT_DIR/env.base.json"
 
-ruby - "$OUT_DIR/env.base.json" "$ORACLE/oracle.json" "$OUT_DIR/env.json" <<'RUBY'
+ruby - "$OUT_DIR/env.base.json" "$ORACLE/oracle.json" "$OUT_DIR/env.json" \
+       "$ORACLE/Gemfile.lock" "$EMIT/Gemfile.lock" <<'RUBY'
 require "json"
 
-base_path, oracle_path, out_path = ARGV
+base_path, oracle_path, out_path, rails_lock, emit_lock = ARGV
 
 def read_json(path)
   JSON.parse(File.read(path))
@@ -417,6 +429,22 @@ env["oracle"] = oracle if oracle
 # `rails` without saying what `rails-nocache` is has published the number
 # this harness exists to prevent — and the renderer is generic, so the
 # only place that sentence can live is here, beside the run it describes.
+# The app server is part of the measurement and the two lanes resolve it
+# separately — campfire's lockfile pins one, the emitted Gemfile asks for
+# whatever is current. They came out 7.2.1 and 8.0.1, which the published
+# logs said and the published page did not.
+def puma_version(lock_path)
+  File.read(lock_path)[/^\s+puma \(([^)]+)\)/, 1]
+rescue Errno::ENOENT
+  nil
+end
+
+servers = {
+  "rails lanes" => puma_version(rails_lock)&.then { |v| "puma #{v}" },
+  "emit lanes"  => puma_version(emit_lock)&.then { |v| "puma #{v}" },
+}.compact
+env["servers"] = servers unless servers.empty?
+
 env["notes"] = [
   "<code>rails</code> serves campfire's message fragments from Redis " \
   "(<code>cached: true</code>); <code>rails-nocache</code> renders them. " \
