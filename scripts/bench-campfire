@@ -413,6 +413,22 @@ env["benchmark"] = "campfire"
 oracle = read_json(oracle_path)
 env["oracle"] = oracle if oracle
 
+# The lane note travels WITH the data. A campfire page that carries
+# `rails` without saying what `rails-nocache` is has published the number
+# this harness exists to prevent — and the renderer is generic, so the
+# only place that sentence can live is here, beside the run it describes.
+env["notes"] = [
+  "<code>rails</code> serves campfire's message fragments from Redis " \
+  "(<code>cached: true</code>); <code>rails-nocache</code> renders them. " \
+  "The emitted tree has no fragment cache, so <code>rails-nocache</code> " \
+  "is the lane that compares renderers and <code>rails</code> is the lane " \
+  "that says what a deployment costs. Publish both or publish neither.",
+  "Every lane runs ONE Puma worker with 5 threads. That is not campfire's " \
+  "deployed shape — its <code>config/puma.rb</code> sizes itself to the " \
+  "box — it is the shape in which both lanes are one process, so the " \
+  "comparison is per-process rather than a measurement of core count.",
+]
+
 File.write(out_path, JSON.pretty_generate(env) + "\n")
 RUBY
 rm -f "$OUT_DIR/env.base.json"
