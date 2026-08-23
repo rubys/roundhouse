@@ -1665,9 +1665,33 @@ fn resolve_through_chain(
     Some((joins, edge_table, edge_fk))
 }
 
-/// `return @<name>_cache if @<name>_loaded` + the joined Relation chain
-/// (see `apply_through_assoc_lowering`). Guard shape mirrors the shared
-/// `synth_has_many_reader` so `_preload_<name>` keeps working.
+/// The joined Relation chain, carrying the eager-load cache (see
+/// `apply_through_assoc_lowering`).
+///
+/// ONE return path, and it is a Relation. The shared
+/// `synth_has_many_reader` opens its body with `return @<name>_cache if
+/// @<name>_loaded` — an Array — which is the right answer for a direct
+/// has_many, whose reader materializes rows and is declared
+/// `Array[T]`. A `through:` reader is declared `ActiveRecord::Relation`
+/// (`associations.rs`, and the campfire routing bug its comment names),
+/// so that guard made the method answer two unrelated types. On CRuby
+/// that was latent — a preloaded `user.upvoted_stories.includes(:tags)
+/// .order(...)` would reach `Array#includes`, which does not exist —
+/// and under spinel's AOT it is a hard compile stop: `--rbs seed
+/// contradicted: User#upvoted_stories is declared to return Relation
+/// but this returns int_array` (spinel judges a seeded return as of
+/// 2368afd7; the cache ivar types `int_array` off the bare `[]` in
+/// `initialize` when nothing in the app preloads it). It took the
+/// lobsters spinel bench lane down for three days.
+///
+/// So the preload seam moves ONTO the relation: `_preload_<name>` still
+/// fills the cache ivar, and the reader hands it to the relation it was
+/// going to answer with anyway. `preloaded` seeds the loaded-records
+/// memo when the flag is set and is a no-op when it is not — the flag
+/// cannot be inferred from the cache, which is `[]` both for "empty"
+/// and for "never loaded". A caller that chains on further clears that
+/// memo and re-queries, which is what every chain method here does and
+/// what Rails does to a loaded relation.
 fn through_reader_body(
     name: &Symbol,
     target: &ClassId,
@@ -1676,28 +1700,6 @@ fn through_reader_body(
     assoc_scope: &Option<Expr>,
 ) -> Expr {
     let span = Span::synthetic;
-    let guard = Expr::new(
-        span(),
-        ExprNode::If {
-            cond: Expr::new(
-                span(),
-                ExprNode::Ivar { name: Symbol::from(format!("{}_loaded", name.as_str())) },
-            ),
-            then_branch: Expr::new(
-                span(),
-                ExprNode::Return {
-                    value: Expr::new(
-                        span(),
-                        ExprNode::Ivar {
-                            name: Symbol::from(format!("{}_cache", name.as_str())),
-                        },
-                    ),
-                },
-            ),
-            else_branch: Expr::new(span(), ExprNode::Lit { value: crate::expr::Literal::Nil }),
-        },
-    );
-
     let target_const = Expr::new(
         span(),
         ExprNode::Const {
@@ -1762,7 +1764,28 @@ fn through_reader_body(
         None => chain,
     };
 
-    Expr::new(span(), ExprNode::Seq { exprs: vec![guard, chain] })
+    // Last in the chain, after any scope graft: the scope's conditions
+    // belong to the QUERY, and this hands the finished relation the
+    // records an eager load already fetched.
+    Expr::new(
+        span(),
+        ExprNode::Send {
+            recv: Some(chain),
+            method: Symbol::from("preloaded"),
+            args: vec![
+                Expr::new(
+                    span(),
+                    ExprNode::Ivar { name: Symbol::from(format!("{}_cache", name.as_str())) },
+                ),
+                Expr::new(
+                    span(),
+                    ExprNode::Ivar { name: Symbol::from(format!("{}_loaded", name.as_str())) },
+                ),
+            ],
+            block: None,
+            parenthesized: true,
+        },
+    )
 }
 
 /// Replace the receiver-less root of a `where(...).order(...)` chain

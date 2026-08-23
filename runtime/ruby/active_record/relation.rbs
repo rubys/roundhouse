@@ -52,6 +52,7 @@ module ActiveRecord
     def none: () -> Relation
     def reload: () -> Relation
     def load: () -> Relation
+    def preloaded: (Array[untyped] records, bool loaded) -> Relation
     def klass: () -> Class
 
     def to_a: () -> Array[untyped]

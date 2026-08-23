@@ -352,6 +352,32 @@ module ActiveRecord
       self
     end
 
+    # An eager load's records, handed to the relation that would have
+    # gone and fetched them. A `has_many :through` reader answers a
+    # Relation (the join lives on the intermediate table, so there is no
+    # direct-fk query to materialize), while `includes(:tags)` preloads
+    # through `_preload_tags` into the owner's cache ivar — this is the
+    # seam between the two: the reader builds its joined relation and
+    # seeds the loaded-records memo with what the preload already
+    # fetched, so no query runs and the declared return type stays
+    # Relation on every path through the reader.
+    #
+    # `loaded` is a separate argument because the cache cannot answer
+    # the question: every association ivar starts `[]` in `initialize`,
+    # which is indistinguishable from an association that loaded and
+    # found nothing. False is a plain no-op.
+    #
+    # Chaining on afterwards drops the seed like any other chain method
+    # (`where`/`order`/… all clear `@records`), so a caller that
+    # narrows a preloaded relation re-queries rather than filtering a
+    # stale set — Rails' behavior for a loaded relation, and the reason
+    # the join conditions stay on the relation instead of this method
+    # answering the bare Array.
+    def preloaded(records, loaded)
+      @records = records if loaded
+      self
+    end
+
     # The model class this relation queries — Rails' Relation#klass
     # (lobsters' Search switches on it to pick per-model joins).
     def klass

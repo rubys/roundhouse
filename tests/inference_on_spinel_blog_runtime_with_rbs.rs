@@ -717,7 +717,25 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // a reason to leave a terminal narrowing the relation it was
     // asked on. Campfire's room page rendered zero of forty messages
     // on exactly that leak.
-    const CEILING: usize = 775;
+    // 2026-08-23 775 -> 778, +3 for `Relation#preloaded` — the seam a
+    // `has_many :through` reader hands its eager-loaded records to, in
+    // place of the `return @<name>_cache if @<name>_loaded` guard that
+    // made such a reader answer an Array from one path and a Relation
+    // from the other (`emit::ruby::library::through_reader_body`). The
+    // three are the whole method: the `if` modifier, the ivar assign it
+    // guards, and the assign's value — the `records` parameter, which
+    // relation.rbs declares `Array[untyped]` because a relation is not
+    // generic in its element here, so every read of it is a TyVar. The
+    // `loaded` flag (bool) and the trailing `self` cost nothing.
+    //
+    // Cheap for what it retires: the two-typed reader was a latent
+    // `Array#includes` NoMethodError on a preloaded through
+    // association, and under spinel's AOT — which judges a seeded
+    // return as of its 2368afd7 — a hard compile stop that took the
+    // lobsters bench lane's AOT row down for three days
+    // (`--rbs seed contradicted: User#upvoted_stories is declared to
+    // return Relation but this returns int_array`).
+    const CEILING: usize = 778;
 
     assert!(
         all_untyped.len() <= CEILING,
