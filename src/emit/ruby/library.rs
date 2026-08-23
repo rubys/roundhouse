@@ -4683,7 +4683,12 @@ pub(super) fn emit_library_class_decl_with_synthesized(
     // require them even when they're same-dir siblings (plain Ruby has no
     // Rails autoload). Resolve through the same model/library_class anchor.
     for inc in &lc.includes {
-        let path = vec![inc.0.as_str().to_string()];
+        // SPLIT on `::` — an include's ClassId is one Symbol holding the
+        // whole path, and the const resolver keys on the ROOT segment.
+        // Unsplit, `Turbo::Streams::StreamName::ClassMethods` was its
+        // own root, matched nothing, and campfire's guarded channel
+        // included a module with no require to load it.
+        let path: Vec<String> = inc.0.as_str().split("::").map(str::to_string).collect();
         if let Some(anchor) = require_path_for_body_const(&path, app, name) {
             if anchor != self_anchor {
                 requires.push(relpath(&out_dir, &anchor));
@@ -5338,6 +5343,11 @@ fn require_path_for_body_const(
         // is NOT here for the same reason `ActionText::RichText` is
         // not: it is a lowered model under `app/models/`.
         "ActiveStorage" => Some("runtime/active_storage".to_string()),
+        // `Turbo::Streams::StreamName::ClassMethods`, INCLUDED by a
+        // channel that guards its own stream (campfire's
+        // `RoomMessagesChannel`). An include runs at class-definition
+        // time, so a missing anchor here is a tree that does not boot.
+        "Turbo" => Some("runtime/turbo_streams".to_string()),
         "Inflector" => Some("runtime/inflector".to_string()),
         "ViewHelpers" => Some("runtime/action_view".to_string()),
         "RouteHelpers" => Some("app/route_helpers".to_string()),

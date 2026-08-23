@@ -945,6 +945,60 @@ the runtime already stores, so the type stays.
   text to match. Those sites stay dynamic and join the
   `errors_index` residue ledger.
 
+### A Turbo stream name is not signed
+
+`ActionView::ViewHelpers.turbo_stream_from` writes
+`signed-stream-name="<base64-of-JSON>--unsigned"`, and both readers —
+`Cable::Connection#decode_stream_name` and
+`Turbo::Streams::StreamName.verified` — split on `--` and ignore the
+suffix. Rails HMAC-signs the value with `Turbo.signed_stream_verifier`
+and refuses a name that does not verify.
+
+**Why.** Signing is not the hard part; agreeing on the key is. Our
+`MessageVerifier` derives with 65_536 PBKDF2 iterations where Rails'
+class default is 1_000, so a signature minted here would not verify
+against a Rails-issued cookie or vice versa — and that question is
+already open (see `message_digest.rbs` and spinel#3769). Shipping a
+signature that is real but incompatible would be worse than one that is
+absent and labelled.
+
+**What it costs.** A stream name is tamperable: a client can subscribe
+to any stream whose name it can spell. What that does NOT do is defeat
+a channel that guards its own stream — the name is only its INPUT.
+campfire's `RoomMessagesChannel` re-derives the room from the name and
+then asks `user.rooms.find_by(id: room.id)`, so a forged name buys a
+subscription to a room the user already belongs to. A channel that
+trusted the name alone would be exposed, and none in the corpus does.
+
+Real signing lands in one commit across all three ends —
+`turbo_stream_from`, `decode_stream_name`, and
+`Turbo::Streams::StreamName` — or not at all: two of them agreeing and
+the third not is the failure that looks like it works.
+
+### `strip_tags` leaves entity references alone
+
+`ActionView::ViewHelpers.strip_tags` parses the HTML and serializes the
+text, matching `Rails::HTML5::FullSanitizer` on 24 of 25 measured
+probes — including the ones a regex gets wrong (`"a < b"` →
+`"a &lt; b"`, a `>` inside a quoted attribute value, an unterminated
+tag swallowing the rest, the CONTENT of a `<script>` surviving).
+
+**Why.** The 25th is decoding: Rails turns `&eacute;` into `é`, which
+needs HTML5's 2231-entry named-entity table. A well-formed reference
+(`&name;`, `&#123;`, `&#xAB;`) passes through unchanged here instead,
+and a bare `&` still escapes to `&amp;`.
+
+**What it costs.** Nothing that renders: the two agree byte for byte on
+every reference that round-trips (`&amp;`, `&lt;`, `&nbsp;`) and a
+browser draws `&eacute;` and `é` the same. They part company only on
+malformed input, where HTML5's legacy no-semicolon matching applies —
+`&notanentity;` is `¬anentity;` to Rails and unchanged here.
+
+`sanitize` is a separate matter and is NOT a divergence: the safe-list
+sanitizer is unimplemented and raises on input containing markup,
+serving only the tagless case that `sanitize(strip_tags(x))` produces.
+That is a gap, and it names itself when reached.
+
 ## Related docs
 
 - [`emit.md`](emit.md) — the universal IR contract; the consumers of
