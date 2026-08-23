@@ -332,6 +332,22 @@ indexing, the `to_plain_text.presence` fallbacks. The round trip that
 matters is closed: every entity `ViewHelpers.html_escape` can emit is
 in the table, so escape-then-extract recovers the original text.
 
+### A preload scope on a RELATION is the identity, and now exists
+
+`with_attached_<attr>` / `with_rich_text_<attr>` are generated as class
+methods on the model. They are now ALSO generated as `ActiveRecord::
+Relation` delegates that answer `self`, so a mid-chain call
+(`find_autocompletable_users.with_attached_avatar.ordered`) resolves.
+
+**Why.** These scopes never pass through `build_scope_registry`, which
+reads the app's own `scope` declarations — they are synthesized at emit
+time beside the attachment macro. So the class-side method existed and
+the relation-side one did not, and a chain on a relation VALUE was a
+NoMethodError on a method that plainly exists.
+
+**Where it is visible.** Nowhere in the results: the delegate is
+identity for the same reason the class-side body is (below).
+
 ### A rich-text preload scope is the identity
 
 `with_rich_text_<attr>` and `with_rich_text_<attr>_and_embeds` return
@@ -727,6 +743,23 @@ grounded at the CALL SITE by `lower::duration::rewrite_expires_in` —
 the same `.to_i` unwrap `signed_id(expires_in:)` gets — so the runtime
 signature stays `Integer` and no strict target pays for an `untyped`
 parameter.
+
+### `Relation#find` raises `RecordNotFound` — as Rails does
+
+Recorded because it USED to answer `nil`, and code written against the
+old behavior would now see the raise.
+
+`find(id)` raises when there is no such row; `find_by(conditions)` still
+answers nil. That is Rails' own split, and the raise is what turns a
+missing record into a 404 rather than a nil that NoMethodErrors a few
+frames later — campfire's `Current.user.rooms.find(params[:room_id])
+.users` on a non-member room read "undefined method 'users' for nil",
+against a test asserting `assert_raises ActiveRecord::RecordNotFound`.
+
+**Still divergent:** the message. Rails names the model and the id
+(`Couldn't find Room with 'id'=3`); this names the TABLE, because the
+model is held as an untyped class value here and reading `.name` off it
+would make the message a gradual site.
 
 ### `ActiveRecord::Relation` has no `new`
 

@@ -690,7 +690,15 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // documentation — `collect_class_methods` reads methods only). So
     // the id comparison lives inside this method, where a relation's
     // records being one model already decides the class half.
-    const CEILING: usize = 758;
+    // 2026-08-22 758 -> 760: `Relation#find` raising `RecordNotFound`
+    // on no match — Rails' distinction between it and `find_by`, and
+    // what makes a missing record a 404 instead of a nil that
+    // NoMethodErrors later. TWO sites, both the `record` local the
+    // terminal answered: the `nil?` guard and the read that returns it.
+    // This counter charges the receiver as well as the send, which is
+    // why it moves by two where the runtime_src_integration ceiling
+    // moves by one.
+    const CEILING: usize = 760;
 
     assert!(
         all_untyped.len() <= CEILING,

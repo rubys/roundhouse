@@ -83,6 +83,10 @@ class ActionResponse
   # the harness, and deliberately not in the shared runtime (see
   # ActionController::Base's two typed readers).
   def cache_control: () -> Hash[Symbol, untyped]
+  # A decoded JSON tree is Array-or-Hash-or-scalar all the way down;
+  # `untyped` is what that is, and the second declared bag in this
+  # harness for the same kind of reason as the first.
+  def parsed_body: () -> untyped
 
   def initialize: (
     status: Integer,

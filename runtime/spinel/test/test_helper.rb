@@ -608,6 +608,29 @@ class ActionResponse
     out
   end
 
+  # Rails' `response.parsed_body` — the body decoded according to the
+  # response's own content type.
+  #
+  # JSON ONLY, which is the whole of what the corpus asks for
+  # (campfire's autocomplete reads `response.parsed_body.first["name"]`).
+  # Rails also hands back a Nokogiri document for html and a
+  # `Rack::Utils` hash for form-encoded; both would be a parser this
+  # harness does not have, and answering the raw String for them would
+  # be worse than refusing — `parsed_body["k"]` on a String is a
+  # TypeError three lines from where the test actually went wrong.
+  #
+  # `JSON` is the tree's own (stdlib under CRuby/JRuby, the bundled spin
+  # package under AOT), resolved by the `runtime/json_impl` require at
+  # the head of this file — which is why the harness can call it without
+  # knowing which one it got.
+  def parsed_body
+    unless @content_type.include?("json")
+      raise "parsed_body: no parser for #{@content_type.inspect} " \
+            "(this harness decodes JSON only)"
+    end
+    JSON.parse(@body)
+  end
+
   def redirect?
     !@location.nil? && @status >= 300 && @status < 400
   end

@@ -173,6 +173,13 @@ fn real_blog_spinel_tests_pass() {
         // mismatched bind answers the wrong rows with no error at all.
         // Rides in the same way the others do.
         "test/temporal_bind_test.rb",
+        // `Relation#find` raising `RecordNotFound` (Rails' whole
+        // distinction between it and `find_by`) and the harness's
+        // `parsed_body`. Both are RUNTIME behavior the compiler's own
+        // suite cannot see, and both fail quietly — a nil `find` is a
+        // NoMethodError several frames from the lookup. Rides in the
+        // same way the others do.
+        "test/relation_find_test.rb",
     ] {
         assert_test_passes(&scratch, &gemfile, test);
     }

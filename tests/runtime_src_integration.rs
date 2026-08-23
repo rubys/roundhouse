@@ -1017,7 +1017,16 @@ fn every_runtime_method_body_concretely_typed() {
     // a Fragment or a String. Everything the scanner itself touches is
     // typed: `Node` carries three declared fields and `Selector` six,
     // classes rather than hashes precisely so no bag appears here.
-    const CEILING: usize = 315;
+    // 2026-08-22 315 -> 316: `Relation#find` raising `RecordNotFound`
+    // on no match, which is Rails' whole distinction between it and
+    // `find_by` — and what turns a missing record into a 404 rather
+    // than a nil that NoMethodErrors somewhere later. ONE site: the
+    // `record.nil?` guard on what the terminal answered, which is
+    // `untyped` by the same R5 delegation convention every terminal in
+    // this file pays (`find_by!` two lines down has the identical
+    // guard and the identical site). Nothing new became gradual — the
+    // method already read that local to return it.
+    const CEILING: usize = 316;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}",

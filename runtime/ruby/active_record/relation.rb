@@ -817,16 +817,29 @@ module ActiveRecord
       rows.map { |row| row["v"].to_i }
     end
 
-    # `find(id)` — the row with that primary key, raising nothing here
-    # (the lowered `<Model>.find` inlines a primary-key SELECT; this is
-    # the relation-rooted form). The id predicate is POPPED afterwards:
-    # like `pluck`, this is a terminal, and a `WHERE id = 3` left on the
-    # relation would silently narrow every later use of it to that one
-    # row.
+    # `find(id)` — the row with that primary key, RAISING
+    # `RecordNotFound` when there is none. That raise is Rails' whole
+    # distinction between `find` and the `find_by` below it, and it is
+    # what turns a missing record into a 404 instead of a nil that
+    # NoMethodErrors somewhere later. This answered nil until now, and
+    # campfire's autocomplete is where that showed: `Current.user.rooms
+    # .find(params[:room_id]).users` on a room the user is not a member
+    # of read "undefined method 'users' for nil" — the test asserting
+    # `assert_raises ActiveRecord::RecordNotFound` on exactly that
+    # request.
+    #
+    # The id predicate is POPPED afterwards: like `pluck`, this is a
+    # terminal, and a `WHERE id = 3` left on the relation would silently
+    # narrow every later use of it to that one row. Popped BEFORE the
+    # raise for the same reason — an exception a caller rescues must not
+    # leave the relation altered.
     def find(id)
       @wheres << "#{@table}.id = #{ActiveRecord.adapter.escape_value(id)}"
       record = first
       @wheres.pop
+      if record.nil?
+        raise RecordNotFound, "Couldn't find record in #{@table} with id=#{id}"
+      end
       record
     end
 
