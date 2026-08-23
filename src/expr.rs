@@ -282,6 +282,17 @@ pub enum ExprNode {
     Let { id: VarId, name: Symbol, value: Expr, body: Expr },
     Lambda {
         params: Vec<Symbol>,
+        /// The REST parameter (`|*args|`), without its sigil.
+        ///
+        /// Collected because dropping it is not a degradation but a
+        /// CORRUPTION: the body still reads the name, and in an emitted
+        /// module a bare `args` resolves to whatever else answers that
+        /// name — a module function, or nothing. campfire's Opengraph
+        /// tests stub a socket with `.with { |*args, **| args.first ==
+        /// … }`, and unparameterized that block died on `undefined
+        /// local variable or method 'args'`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rest_param: Option<Symbol>,
         block_param: Option<Symbol>,
         body: Expr,
         /// Surface form when this Lambda represents a block attached to

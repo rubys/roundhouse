@@ -124,7 +124,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             let inner = accumulator_append_call(render_call, ctx);
             let block_lambda = Expr::new(
                 Span::synthetic(),
-                ExprNode::Lambda {
+                ExprNode::Lambda { rest_param: None,
                     params: vec![var_name],
                     block_param: None,
                     body: inner,
@@ -347,7 +347,7 @@ fn emit_partial_each(recv: &Expr, plural_name: &str, ctx: &ViewCtx) -> Expr {
     let inner = accumulator_append_call(render_call, ctx);
     let block_lambda = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda {
+        ExprNode::Lambda { rest_param: None,
             params: vec![var_name],
             block_param: None,
             body: inner,

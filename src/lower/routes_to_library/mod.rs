@@ -1209,7 +1209,7 @@ fn append_query_string(path: Expr, keys: &[QueryKey]) -> Expr {
                     args: Vec::new(),
                     block: Some(Expr::new(
                         Span::synthetic(),
-                        ExprNode::Lambda {
+                        ExprNode::Lambda { rest_param: None,
                             params: vec![elem],
                             block_param: None,
                             body,

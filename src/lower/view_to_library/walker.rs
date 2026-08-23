@@ -346,7 +346,7 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             };
             let block_lambda = Expr::new(
                 Span::synthetic(),
-                ExprNode::Lambda {
+                ExprNode::Lambda { rest_param: None,
                     params: params.clone(),
                     block_param: None,
                     body: inner_body,
@@ -1028,7 +1028,7 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
         parenthesized,
     } = &*inner.node
     {
-        if let ExprNode::Lambda { params, block_param, body, block_style } = &*block.node {
+        if let ExprNode::Lambda { rest_param, params, block_param, body, block_style } = &*block.node {
             if block_body_is_template(body) {
                 let cap = "_cap";
                 let cap_ctx = ViewCtx {
@@ -1040,7 +1040,7 @@ fn emit_io_append(arg: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                 cap_stmts.push(accumulator_result_ref(cap));
                 let new_block = Expr::new(
                     block.span,
-                    ExprNode::Lambda {
+                    ExprNode::Lambda { rest_param: rest_param.clone(),
                         params: params.clone(),
                         block_param: block_param.clone(),
                         body: seq(cap_stmts),
@@ -1459,7 +1459,7 @@ mod tests {
     fn block_helper_call_with(method: &str, args: Vec<Expr>) -> Expr {
         let inner = Expr::new(
             Span::default(),
-            ExprNode::Lambda {
+            ExprNode::Lambda { rest_param: None,
                 params: Vec::new(),
                 block_param: None,
                 body: buf_append(str_lit("inner")),

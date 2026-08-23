@@ -706,7 +706,7 @@ fn emit_array_partial(
 
     let block = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda {
+        ExprNode::Lambda { rest_param: None,
             params: vec![item_var.clone()],
             block_param: None,
             body: partial_call,
@@ -1157,12 +1157,12 @@ fn rewrite_ivars_to_locals(expr: &Expr) -> Expr {
                 .collect(),
             kwargs: *kwargs,
         },
-        ExprNode::Lambda {
+        ExprNode::Lambda { rest_param,
             params,
             block_param,
             body,
             block_style,
-        } => ExprNode::Lambda {
+        } => ExprNode::Lambda { rest_param: rest_param.clone(),
             params: params.clone(),
             block_param: block_param.clone(),
             body: rewrite_ivars_to_locals(body),

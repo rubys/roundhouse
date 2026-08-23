@@ -694,7 +694,7 @@ fn ingest_expr_strict(node: &Node<'_>, file: &str) -> IngestResult<Expr> {
             // opening_loc is `{`); `->(x) do body end` exists but isn't
             // idiomatic and doesn't appear in any fixture yet.
             let block_style = block_style_from_opening(l.opening_loc().as_slice());
-            ExprNode::Lambda { params, block_param: None, body, block_style }
+            ExprNode::Lambda { rest_param: None, params, block_param: None, body, block_style }
         }
         n if n.as_yield_node().is_some() => {
             let y = n.as_yield_node().unwrap();
@@ -1884,7 +1884,7 @@ fn ingest_call_block(
                 );
                 return Ok(Some(Expr::new(
                     sym_span,
-                    ExprNode::Lambda {
+                    ExprNode::Lambda { rest_param: None,
                         params,
                         block_param: None,
                         body,
@@ -1936,6 +1936,7 @@ fn ingest_call_block(
         });
     };
     let params = block_param_names(&b);
+    let rest_param = block_rest_param(&b);
     let body = match b.body() {
         Some(body) => ingest_expr(&body, file)?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
@@ -1943,7 +1944,7 @@ fn ingest_call_block(
     let block_style = block_style_from_opening(b.opening_loc().as_slice());
     Ok(Some(Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda { params, block_param: None, body, block_style },
+        ExprNode::Lambda { rest_param, params, block_param: None, body, block_style },
     )))
 }
 
@@ -1972,6 +1973,28 @@ fn block_param_names(b: &ruby_prism::BlockNode<'_>) -> Vec<Symbol> {
         .filter_map(|req| req.as_required_parameter_node())
         .map(|rp| Symbol::from(constant_id_str(&rp.name())))
         .collect()
+}
+
+/// The block's REST parameter (`|*args|`), without its sigil.
+///
+/// Dropping it is not a degradation but a CORRUPTION: the body still
+/// reads the name, and in an emitted module a bare `args` resolves to
+/// whatever else answers that name — a module function, or nothing at
+/// all. campfire's Opengraph tests stub a socket with
+/// `.with { |*args, **| args.first == … }`, and unparameterized that
+/// block died on `undefined local variable or method 'args'` from
+/// inside the mocha matcher, naming nothing about the block.
+///
+/// An ANONYMOUS rest (`|*|`) has no name to bind and no body reference
+/// to serve, so it stays absent. The trailing `**` in that same
+/// campfire block is likewise nameless.
+fn block_rest_param(b: &ruby_prism::BlockNode<'_>) -> Option<Symbol> {
+    let params_node = b.parameters()?;
+    let bpn = params_node.as_block_parameters_node()?;
+    let pn = bpn.parameters()?;
+    let rest = pn.rest()?;
+    let rp = rest.as_rest_parameter_node()?;
+    Some(Symbol::from(constant_id_str(&rp.name()?)))
 }
 
 /// Map the operator bytes of an `OrNode` / `AndNode` to the surface form.

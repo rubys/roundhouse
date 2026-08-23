@@ -670,7 +670,7 @@ fn map_expr(e: &Expr, f: &dyn Fn(&Expr) -> Option<Expr>) -> Expr {
             args: args.iter().map(|a| map_expr(a, f)).collect(),
             block: block.as_ref().map(|b| map_expr(b, f)),
         },
-        ExprNode::Lambda { params, block_param, body, block_style } => ExprNode::Lambda {
+        ExprNode::Lambda { rest_param, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
             params: params.clone(),
             block_param: block_param.clone(),
             body: map_expr(body, f),

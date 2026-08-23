@@ -1837,7 +1837,7 @@ mod tests {
     use crate::expr::BlockStyle;
 
     fn lambda(params: Vec<&str>, body: Expr) -> Expr {
-        synth(ExprNode::Lambda {
+        synth(ExprNode::Lambda { rest_param: None,
             params: params.into_iter().map(Symbol::from).collect(),
             block_param: None,
             body,

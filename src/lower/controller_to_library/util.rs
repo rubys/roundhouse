@@ -262,7 +262,7 @@ where
             left: map_expr(left, f),
             right: map_expr(right, f),
         },
-        ExprNode::Lambda { params, block_param, body, block_style } => ExprNode::Lambda {
+        ExprNode::Lambda { rest_param, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
             params: params.clone(),
             block_param: block_param.clone(),
             body: map_expr(body, f),

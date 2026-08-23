@@ -929,7 +929,7 @@ mod tests {
         );
         let block = Expr::new(
             Span::synthetic(),
-            ExprNode::Lambda {
+            ExprNode::Lambda { rest_param: None,
                 params: vec![Symbol::from("x")],
                 block_param: None,
                 body: block_body,

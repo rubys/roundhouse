@@ -1061,7 +1061,7 @@ fn each_array_block_shape() {
     // real call site lands in GO_RUNTIME).
     let block = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda {
+        ExprNode::Lambda { rest_param: None,
             params: vec![Symbol::from("x")],
             block_param: None,
             body: Expr::new(
@@ -1142,7 +1142,7 @@ fn each_hash_block_shape() {
     let h_param = Symbol::from("h");
     let block = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda {
+        ExprNode::Lambda { rest_param: None,
             params: vec![Symbol::from("k"), Symbol::from("v")],
             block_param: None,
             body: Expr::new(
@@ -1220,7 +1220,7 @@ fn map_array_block_shape() {
     // IIFE shape, range vars, and the append-tail wiring.
     let block = Expr::new(
         Span::synthetic(),
-        ExprNode::Lambda {
+        ExprNode::Lambda { rest_param: None,
             params: vec![Symbol::from("x")],
             block_param: None,
             body: Expr::new(

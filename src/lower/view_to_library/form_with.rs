@@ -1135,7 +1135,7 @@ pub(super) fn rewrite_errors_each_body(body: &Expr, var_name: &str) -> Expr {
                 })
                 .collect(),
         },
-        ExprNode::Lambda { params, block_param, body, block_style } => ExprNode::Lambda {
+        ExprNode::Lambda { rest_param, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
             params: params.clone(),
             block_param: block_param.clone(),
             body: rewrite_errors_each_body(body, var_name),

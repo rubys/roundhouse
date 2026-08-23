@@ -262,7 +262,7 @@ fn rewrite_expr(expr: &Expr, registry: &CalleeRegistry, class_name: &str) -> Exp
             left: rewrite_expr(left, registry, class_name),
             right: rewrite_expr(right, registry, class_name),
         },
-        ExprNode::Lambda { params, block_param, body, block_style } => ExprNode::Lambda {
+        ExprNode::Lambda { rest_param, params, block_param, body, block_style } => ExprNode::Lambda { rest_param: rest_param.clone(),
             params: params.clone(),
             block_param: block_param.clone(),
             body: rewrite_expr(body, registry, class_name),

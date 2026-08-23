@@ -71,7 +71,7 @@ fn rewrite(expr: &mut Expr) {
     );
     let lambda = Expr::new(
         span,
-        ExprNode::Lambda {
+        ExprNode::Lambda { rest_param: None,
             params: vec![record],
             block_param: None,
             body: read,

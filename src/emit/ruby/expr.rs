@@ -60,8 +60,9 @@ fn emit_node(n: &ExprNode) -> String {
         ExprNode::Let { name, value, body, .. } => {
             format!("{name} = {}\n{}", emit_expr(value), emit_expr(body))
         }
-        ExprNode::Lambda { params, block_param, body, .. } => {
+        ExprNode::Lambda { params, rest_param, block_param, body, .. } => {
             let mut ps: Vec<String> = params.iter().map(|p| p.to_string()).collect();
+            if let Some(r) = rest_param { ps.push(format!("*{r}")); }
             if let Some(b) = block_param { ps.push(format!("&{b}")); }
             if ps.is_empty() {
                 format!("-> {{ {} }}", emit_expr(body))
@@ -1041,7 +1042,7 @@ fn is_setter_method(m: &str) -> bool {
 /// body; `do … end` spans multiple lines when the body has newlines.
 pub(super) fn emit_do_block(base: &str, block: &Expr) -> String {
     use crate::expr::BlockStyle;
-    let ExprNode::Lambda { params, body, block_style, .. } = &*block.node else {
+    let ExprNode::Lambda { params, rest_param, body, block_style, .. } = &*block.node else {
         // A non-Lambda block expression is a Proc FORWARD (`&block` —
         // ingest lowers the block-pass arg to a bare Var in the block
         // slot). Rendering it as a literal `{ block }` block made the
@@ -1061,10 +1062,17 @@ pub(super) fn emit_do_block(base: &str, block: &Expr) -> String {
         };
     };
     let body_str = emit_expr(body);
-    let params_str = if params.is_empty() {
+    // `|a, b|`, and `|*args|` for a block whose parameter is a REST.
+    // The splat has to survive to the emitted source: the body reads
+    // `args`, and an emitted module answers a bare name from its own
+    // functions when no local binds it.
+    let mut ps: Vec<String> = params.iter().map(|p| p.to_string()).collect();
+    if let Some(r) = rest_param {
+        ps.push(format!("*{r}"));
+    }
+    let params_str = if ps.is_empty() {
         String::new()
     } else {
-        let ps: Vec<String> = params.iter().map(|p| p.to_string()).collect();
         format!(" |{}|", ps.join(", "))
     };
     match block_style {
@@ -1278,7 +1286,7 @@ mod tests {
         // modifier-if wrap above.
         let block = Expr::new(
             Span::default(),
-            ExprNode::Lambda {
+            ExprNode::Lambda { rest_param: None,
                 params: vec![],
                 block_param: None,
                 body: lit_sym("body"),

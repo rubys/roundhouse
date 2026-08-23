@@ -611,7 +611,7 @@ fn try_rewrite_compact_blank(
     };
     let block = mk(
         span,
-        ExprNode::Lambda {
+        ExprNode::Lambda { rest_param: None,
             params: vec![name],
             block_param: None,
             body: cond,
