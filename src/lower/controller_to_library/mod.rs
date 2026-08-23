@@ -43,7 +43,9 @@ use crate::lower::controller::body::{
 };
 
 use self::params::{helper_spec_map, ParamsSpec, ParamsSpecs};
-use self::process_action::{halt_if_performed, synthesize_process_action, PreambleStmt};
+use self::process_action::{
+    halt_if_performed, synthesize_process_action, PreambleStmt, RescueHandler,
+};
 use self::rewrites::{
     rewrite_assoc_through_parent_typed, rewrite_destroy_bang,
     rewrite_model_new_to_from_params, rewrite_update_to_typed_variant, rewrite_params,
@@ -825,6 +827,7 @@ fn build_methods(
                 &inherited,
                 controller.name.0.clone(),
                 &deferred_tails,
+                &collect_rescue_handlers(controller, all_controllers),
             ),
         );
     }
@@ -1607,6 +1610,144 @@ fn insert_baseline_controller_methods(info: &mut crate::analyze::ClassInfo) {
     info.instance_method_kinds
         .entry(Symbol::from("request_format"))
         .or_insert(AccessorKind::AttributeReader);
+}
+
+/// `rescue_from <Class>[, <Class>] { … }` / `rescue_from <Class>, with:
+/// :handler` — the controller's exception handlers, ITS OWN first and
+/// then each ancestor's.
+///
+/// Rails registers them on `process_action`, so they cover the filter
+/// chain as well as the action; and it walks the registry in REVERSE,
+/// so a subclass's handler wins over the one it inherits. Order here is
+/// declaration order (own, then nearer ancestors, then further);
+/// `synthesize_process_action` reverses it into Ruby's source-order
+/// `rescue` matching.
+///
+/// The declaration arrives as an `Unknown` class-body item, which is
+/// exactly where it has always been — dropped, silently, because
+/// nothing asked. Two spellings, both from Rails' own docs: a BLOCK,
+/// and `with:` naming a handler method. A block PARAMETER binds the
+/// exception; a `with:` handler is called with it when the method takes
+/// one, and bare when it does not — Rails allows both arities and the
+/// method is on this controller, so the arity is known here.
+///
+/// Anything else — a splat of classes, a String class name, a `with:`
+/// whose value is not a Symbol — is left alone rather than guessed at:
+/// a handler that swallows the wrong exception is worse than one that
+/// never runs.
+fn collect_rescue_handlers(
+    controller: &Controller,
+    all_controllers: &[Controller],
+) -> Vec<RescueHandler> {
+    let mut out: Vec<RescueHandler> = Vec::new();
+    let mut chain: Vec<&Controller> = vec![controller];
+    chain.extend(ancestor_chain(controller, all_controllers));
+    for c in chain {
+        let handler_arity = |name: &Symbol| -> Option<usize> {
+            c.actions().find(|a| &a.name == name).map(|a| a.params.fields.len())
+        };
+        for item in &c.body {
+            let ControllerBodyItem::Unknown { expr, .. } = item else { continue };
+            let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else {
+                continue;
+            };
+            if method.as_str() != "rescue_from" || args.is_empty() {
+                continue;
+            }
+            let span = expr.span;
+            let exc = Symbol::from("__rescued");
+            // Trailing `with:` hash, when present.
+            let with: Option<Symbol> = match args.last().map(|a| &*a.node) {
+                Some(ExprNode::Hash { entries, kwargs: true }) => {
+                    let mut found = None;
+                    for (k, v) in entries {
+                        let key = match &*k.node {
+                            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str(),
+                            _ => "",
+                        };
+                        if key != "with" {
+                            found = None;
+                            break;
+                        }
+                        match &*v.node {
+                            ExprNode::Lit { value: Literal::Sym { value } } => {
+                                found = Some(value.clone())
+                            }
+                            _ => {
+                                found = None;
+                                break;
+                            }
+                        }
+                    }
+                    match found {
+                        Some(sym) => Some(sym),
+                        None => continue,
+                    }
+                }
+                _ => None,
+            };
+            let class_args = if with.is_some() { &args[..args.len() - 1] } else { &args[..] };
+            if class_args.is_empty()
+                || !class_args.iter().all(|a| matches!(&*a.node, ExprNode::Const { .. }))
+            {
+                continue;
+            }
+            let body = match (&with, block) {
+                (Some(name), _) => {
+                    let takes_exception = handler_arity(name) == Some(1);
+                    let args = if takes_exception {
+                        vec![Expr::new(
+                            span,
+                            ExprNode::Var { id: crate::ident::VarId(0), name: exc.clone() },
+                        )]
+                    } else {
+                        Vec::new()
+                    };
+                    Expr::new(
+                        span,
+                        ExprNode::Send {
+                            recv: Some(Expr::new(span, ExprNode::SelfRef)),
+                            method: name.clone(),
+                            args,
+                            block: None,
+                            parenthesized: true,
+                        },
+                    )
+                }
+                (None, Some(b)) => match &*b.node {
+                    ExprNode::Lambda { params, body, .. } => {
+                        // A block parameter names the exception; rewrite
+                        // the reads to the rescue binding rather than
+                        // renaming the binding, which would collide with
+                        // a sibling handler's own parameter name.
+                        match params.first() {
+                            Some(p) => rename_local(body, p, &exc),
+                            None => body.clone(),
+                        }
+                    }
+                    _ => continue,
+                },
+                (None, None) => continue,
+            };
+            out.push(RescueHandler { classes: class_args.to_vec(), body });
+        }
+    }
+    out
+}
+
+/// `from` → `to` for every bare local read in `body`.
+fn rename_local(body: &Expr, from: &Symbol, to: &Symbol) -> Expr {
+    fn walk(e: &Expr, from: &Symbol, to: &Symbol) -> Expr {
+        if let ExprNode::Var { id, name } = &*e.node {
+            if name == from {
+                return Expr::new(e.span, ExprNode::Var { id: *id, name: to.clone() });
+            }
+        }
+        let mut out = e.clone();
+        out.node.for_each_child_mut(&mut |c| *c = walk(c, from, to));
+        out
+    }
+    walk(body, from, to)
 }
 
 /// Walk the controller body in source order, partitioning actions at

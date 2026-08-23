@@ -3,7 +3,7 @@
 
 use crate::dialect::{AccessorKind, Action, Filter, MethodDef, MethodReceiver, Param};
 use crate::effect::EffectSet;
-use crate::expr::{Arm, ArrayStyle, Expr, ExprNode, Literal, Pattern};
+use crate::expr::{Arm, ArrayStyle, Expr, ExprNode, Literal, Pattern, RescueClause};
 use crate::ident::{Symbol, VarId};
 use crate::span::Span;
 use crate::ty::Ty;
@@ -48,12 +48,20 @@ pub(super) enum PreambleStmt {
 /// `publics` is this controller's OWN public actions; `inherited` names
 /// the ones it reaches only through its parent. Both get a dispatch
 /// arm, only the former gets a method.
+/// One `rescue_from` declaration: the exception classes it names and
+/// the body that handles them.
+pub(super) struct RescueHandler {
+    pub classes: Vec<Expr>,
+    pub body: Expr,
+}
+
 pub(super) fn synthesize_process_action(
     preamble: &[PreambleStmt],
     publics: &[Action],
     inherited: &[Symbol],
     enclosing_class: Symbol,
     deferred_tails: &std::collections::HashMap<Symbol, Expr>,
+    rescues: &[RescueHandler],
 ) -> MethodDef {
     let mut stmts: Vec<Expr> = Vec::new();
 
@@ -90,6 +98,32 @@ pub(super) fn synthesize_process_action(
         1 => stmts.into_iter().next().unwrap(),
         _ => syn(ExprNode::Seq { exprs: stmts }),
     };
+    // `rescue_from` wraps the WHOLE dispatcher, filters included —
+    // Rails registers the handlers on `process_action`, so a filter that
+    // raises is caught exactly as an action that raises is.
+    //
+    // LAST DECLARED WINS, which is Rails' order: its `rescue_with_handler`
+    // walks the registry in reverse. Ruby matches `rescue` clauses in
+    // source order, so the clauses are emitted reversed.
+    if !rescues.is_empty() {
+        let exc = Symbol::from("__rescued");
+        body = syn(ExprNode::BeginRescue {
+            body,
+            rescues: rescues
+                .iter()
+                .rev()
+                .map(|h| RescueClause {
+                    classes: h.classes.clone(),
+                    binding: Some(exc.clone()),
+                    body: h.body.clone(),
+                })
+                .collect(),
+            else_branch: None,
+            ensure: None,
+            implicit: false,
+        });
+    }
+
     // Whole-cloth synthesis — attribute the dispatcher scaffolding to
     // the controller's source via its first public action (same file).
     // The per-arm dispatch Sends built in `case_dispatch` carry their
