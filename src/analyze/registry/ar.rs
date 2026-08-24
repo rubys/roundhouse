@@ -115,6 +115,44 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         adapter_iface,
     );
 
+    // Active Storage's value type — what a `has_one_attached` reader
+    // answers. The analyzer knew NOTHING about Active Storage, so the
+    // reader `lower::attached` synthesizes (`def avatar;
+    // ActiveStorage::Attached.new(…); end`) had no type to answer with
+    // and every `user.avatar` read was a dispatch failure — including
+    // the `@bot.avatar` in a partial, which is how it stayed hidden
+    // until `@bot` itself started resolving.
+    //
+    // The method list is `runtime/ruby/active_storage.rbs` verbatim, so
+    // the analyzer and a strict target agree. `variant` is Untyped
+    // because the runtime raises on it (no processor, no variant
+    // records) — the honest type for a method that has no value.
+    {
+        let mut attached = ClassInfo::default();
+        let nilable_str = Ty::Union { variants: vec![Ty::Str, Ty::Nil] };
+        for (m, ty) in [
+            ("attached?", Ty::Bool),
+            ("variable?", Ty::Bool),
+            ("variant", Ty::Untyped),
+            ("url", Ty::Str),
+            ("filename", nilable_str.clone()),
+            ("content_type", nilable_str.clone()),
+            ("blob_column", nilable_str.clone()),
+            ("video?", Ty::Bool),
+            ("image?", Ty::Bool),
+            ("audio?", Ty::Bool),
+            ("representable?", Ty::Bool),
+            ("analyze", Ty::Nil),
+            ("attach", Ty::Nil),
+            ("blob_key", Ty::Str),
+            ("purge", Ty::Nil),
+            ("destroy", Ty::Nil),
+        ] {
+            attached.instance_methods.insert(Symbol::from(m), ty);
+        }
+        classes.insert(ClassId(Symbol::from("ActiveStorage::Attached")), attached);
+    }
+
     // Arel — the low-level SQL AST that advanced scopes reach for
     // (`Model.arel_table[:col].not_in(subquery)`, `relation.arel.exists`,
     // `Arel.sql(...)`). A small class family whose methods all return

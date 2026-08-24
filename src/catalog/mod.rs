@@ -1154,6 +1154,20 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::Terminal,
         return_kind: Some(ReturnKind::SelfOrNil),
     },
+    // `Model.where(…).new(attrs)` — Rails builds a record carrying the
+    // scope's own conditions as attributes, and answers the RECORD.
+    // `build` (its alias) was already here and `new` was not, so
+    // campfire's `User.active_bots.new` fell through to the array
+    // fallback and typed to nothing — which then cost the ivar it was
+    // assigned to (`@bot`) its type in two templates as well. One
+    // missing entry, three reported errors.
+    CatalogedMethod {
+        name: "new",
+        receiver: ReceiverContext::Relation,
+        effect: EffectClass::Pure,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::SelfType),
+    },
     CatalogedMethod {
         name: "find_by",
         receiver: ReceiverContext::Relation,

@@ -376,6 +376,19 @@ impl Analyzer {
                     .entry(name)
                     .or_insert(Ty::Relation { of: model.name.clone() });
             }
+            // And the READER the same macro declares. `lower::attached`
+            // synthesizes `def avatar; ActiveStorage::Attached.new(…);
+            // end` at the emit seam — after this walk — so without the
+            // registration here the method exists in the emitted tree
+            // and not in the analyzer's world, which reports it as
+            // missing. Registering a synthesized name in BOTH registries
+            // is the rule; this one had only half of it.
+            for (_span, attr) in crate::lower::attached::attached_attrs(model) {
+                cls.instance_methods.entry(attr).or_insert(Ty::Class {
+                    id: ClassId(Symbol::from("ActiveStorage::Attached")),
+                    args: vec![],
+                });
+            }
             // `attachable_sgid` — the signed GlobalID an
             // `ActionText::Attachable` model mints. Registered for every
             // model rather than only the attachable ones: this walk has
@@ -1395,6 +1408,7 @@ impl Analyzer {
             for action in controller.actions() {
                 let mut ivars: HashMap<Symbol, Ty> = HashMap::new();
                 extract_ivar_assignments(&action.body, &mut ivars);
+                bind_framework_assigned_ivars(&action.body, &mut ivars);
                 for (filter, _, _) in &chained_filters {
                     if matches!(filter.kind, FilterKind::Before | FilterKind::Around)
                         && before_filter_applies(filter, &action.name)
@@ -3349,6 +3363,37 @@ fn collect_return_types(expr: &Expr, out: &mut Vec<Ty>) {
         ExprNode::While { body, .. } => collect_return_types(body, out),
         _ => {}
     }
+}
+
+/// Ivars a FRAMEWORK method assigns, which no `@x = …` in the action
+/// body can show.
+///
+/// `extract_ivar_assignments` reads syntax, and the syntax is honest
+/// about everything the app writes. It cannot see a runtime method that
+/// assigns on the controller's behalf: geared_pagination's
+/// `set_page_and_extract_portion_from` sets `@page` inside
+/// `runtime/ruby/action_controller/pagination.rb`, the gem exposes no
+/// `page` reader, and the VIEW is the only consumer — so every template
+/// reading `@page.records` / `@page.last?` / `@page.next_param` reported
+/// `@page has no known type`. Six of campfire's, across four templates.
+///
+/// One entry, deliberately: this is a table of framework methods whose
+/// whole purpose is the assignment, not a general effect analysis. A
+/// method that merely *might* touch an ivar does not belong here — the
+/// binding it writes is trusted downstream.
+fn bind_framework_assigned_ivars(body: &Expr, ivars: &mut HashMap<Symbol, Ty>) {
+    fn walk(e: &Expr, out: &mut HashMap<Symbol, Ty>) {
+        if let ExprNode::Send { method, .. } = &*e.node {
+            if method.as_str() == "set_page_and_extract_portion_from" {
+                out.entry(Symbol::from("page")).or_insert_with(|| Ty::Class {
+                    id: ClassId(Symbol::from("ActionController::Page")),
+                    args: vec![],
+                });
+            }
+        }
+        e.node.for_each_child(&mut |c| walk(c, out));
+    }
+    walk(body, ivars);
 }
 
 pub(crate) fn extract_ivar_assignments(expr: &Expr, out: &mut HashMap<Symbol, Ty>) {

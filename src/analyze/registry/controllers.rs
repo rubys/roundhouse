@@ -69,6 +69,36 @@ pub(in crate::analyze) fn register(
     app_ctrl
         .class_methods
         .insert(Symbol::from("set_page_and_extract_portion_from"), Ty::Untyped);
+
+    // The `Page` that method ASSIGNS. `runtime/ruby/action_controller/
+    // pagination.rb` sets `@page = ActionController::Page.new(...)` and
+    // the VIEW is the only reader (`@page.records`, `@page.last?`,
+    // `@page.next_param`) — the gem has no `page` reader, which is why
+    // the surface has to be registered as a class rather than reached
+    // through one. Without it every such view read is `@page has no
+    // known type`; campfire has six across four templates.
+    //
+    // The method list is `pagination.rbs` verbatim, so the two say the
+    // same thing to the analyzer and to a strict target.
+    {
+        let relation_ty = Ty::Untyped;
+        let mut page = ClassInfo::default();
+        for (m, ty) in [
+            ("number", Ty::Int),
+            ("per_page", Ty::Int),
+            ("records", relation_ty.clone()),
+            ("records_count", Ty::Int),
+            ("page_count", Ty::Int),
+            ("first?", Ty::Bool),
+            ("last?", Ty::Bool),
+            ("only?", Ty::Bool),
+            ("before_last?", Ty::Bool),
+            ("next_param", Ty::Int),
+        ] {
+            page.instance_methods.insert(Symbol::from(m), ty);
+        }
+        classes.insert(ClassId(Symbol::from("ActionController::Page")), page);
+    }
     // `flash` (FlashHash) and the current action/controller names are
     // available on the controller via implicit self, same as in views.
     app_ctrl.class_methods.insert(
