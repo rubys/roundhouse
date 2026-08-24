@@ -103,6 +103,15 @@ impl<'a> BodyTyper<'a> {
         method: &Symbol,
     ) -> Option<Vec<Ty>> {
         let recv_ty = recv_ty?;
+        // `then` / `yield_self` / `tap` yield the RECEIVER itself, on
+        // every type — Kernel methods, not container ones, so they are
+        // answered before the shape match rather than repeated inside
+        // each arm. campfire's `Opengraph::Location.new(url).then { |l|
+        // l.read_html }` is the shape: without this the block parameter
+        // is unbound and every read through it goes unresolved.
+        if matches!(method.as_str(), "then" | "yield_self" | "tap") {
+            return Some(vec![recv_ty.clone()]);
+        }
         match recv_ty {
             Ty::Array { elem } => match method.as_str() {
                 "each" | "map" | "collect" | "flat_map" | "collect_concat"
@@ -330,6 +339,17 @@ impl<'a> BodyTyper<'a> {
                 return ty.clone();
             }
         }
+        // `then` / `yield_self` are the receiver-identity pair's mirror:
+        // where `tap` discards the block's value and hands the receiver
+        // back, these hand the BLOCK's value back. Kernel methods, so
+        // they apply to every receiver and have to be resolved here for
+        // the same reason `freeze` is — ahead of the per-type tables,
+        // which have no arm for a class the analyzer models only as a
+        // name. Blockless (`then` returning an Enumerator) is not a
+        // shape any corpus app writes; `Untyped` is the honest answer.
+        if matches!(method.as_str(), "then" | "yield_self") && recv_ty.is_some() {
+            return block_ret.cloned().unwrap_or(Ty::Untyped);
+        }
         // `recv.send(:m, …)` / `public_send` / `__send__` — Ruby's
         // reflective dispatch. With a LITERAL symbol/string argument
         // it's just a renamed call: dispatch the named method on the
@@ -504,6 +524,15 @@ impl<'a> BodyTyper<'a> {
                         "Array" => {
                             return Ty::Array { elem: Box::new(unknown()) };
                         }
+                        // `String.new(x)` is the third builtin
+                        // constructor, and the same argument applies:
+                        // the value is a Str, so `String.new(body)
+                        // .force_encoding("UTF-8")` must dispatch
+                        // through `str_method` rather than looking for
+                        // `force_encoding` in a class table that has
+                        // none. campfire's `Webhook#extract_text_from`
+                        // is the shape.
+                        "String" => return Ty::Str,
                         _ => {}
                     }
                     return Ty::Class { id: id.clone(), args: args.clone() };
@@ -1055,6 +1084,24 @@ fn relation_return_on_array_repr(kind: crate::catalog::ReturnKind, elem: &Ty) ->
     }
 }
 
+/// The non-nil half of an element type — what survives a `compact` /
+/// `compact_blank`. Mirrors `lower::blank::non_nil`, which decides the
+/// same question on the emit side; the two must not disagree.
+fn non_nil_elem(elem: &Ty) -> Ty {
+    match elem {
+        Ty::Union { variants } => {
+            let kept: Vec<Ty> =
+                variants.iter().filter(|v| !matches!(v, Ty::Nil)).cloned().collect();
+            match kept.len() {
+                0 => Ty::Nil,
+                1 => kept.into_iter().next().unwrap(),
+                _ => Ty::Union { variants: kept },
+            }
+        }
+        other => other.clone(),
+    }
+}
+
 pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -> Ty {
     // AR-specific dispatches go FIRST so they win over the generic
     // array methods that share a name (`find` on a relation raises, so
@@ -1142,6 +1189,18 @@ pub(super) fn array_method(method: &Symbol, elem: &Ty, block_ret: Option<&Ty>) -
         // the named elements, so same-element.
         | "without" | "excluding" => {
             Ty::Array { elem: Box::new(elem.clone()) }
+        }
+        // ActiveSupport's `compact_blank` — `reject(&:blank?)`. Same
+        // element type minus its nil half, which is precisely the
+        // rewrite `lower::blank::try_rewrite_compact_blank` performs:
+        // it re-stamps the receiver as `Array[non_nil(elem)]` and every
+        // send READING that receiver keeps whatever the analyzer said
+        // earlier. Without this arm the analyzer said nothing, so
+        // campfire's `[ name, bio ].compact_blank.join(" - ")` reported
+        // `no known method join on Array[Str]` — against a receiver the
+        // lowering had just typed correctly.
+        "compact_blank" | "compact_blank!" => {
+            Ty::Array { elem: Box::new(non_nil_elem(elem)) }
         }
         // `delete(x)` returns the deleted element or nil.
         "delete" | "delete_at" => Ty::Union {
@@ -1438,7 +1497,14 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         | "capitalize" | "swapcase" | "squeeze" | "dup" | "clone"
         | "tr" | "tr_s" | "delete" | "gsub" | "sub" | "lstrip" | "rstrip"
         | "delete_prefix" | "delete_suffix"
-        | "succ" | "next" | "swapcase!" | "+@" | "-@" => Ty::Str,
+        | "succ" | "next" | "swapcase!" | "+@" | "-@"
+        // Encoding re-tags: same bytes, same Str. `force_encoding`
+        // reaches every response body a Rails app reads back off the
+        // wire — campfire's `Webhook#extract_text_from` is
+        // `String.new(response.body).force_encoding("UTF-8")`, and
+        // `Opengraph::Metadata::Fetching` writes the same line for
+        // fxtwitter's encoding-less HTML.
+        | "force_encoding" | "b" | "scrub" | "unicode_normalize" => Ty::Str,
         "to_i" => Ty::Int,
         "to_f" => Ty::Float,
         "to_sym" | "intern" => Ty::Sym,

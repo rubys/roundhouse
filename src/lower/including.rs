@@ -28,6 +28,7 @@
 use crate::app::App;
 use crate::expr::{ArrayStyle, Expr, ExprNode};
 use crate::ident::Symbol;
+use crate::ty::Ty;
 
 pub fn apply_including_lowering(app: &mut App) {
     if app_defines_including(app) {
@@ -72,11 +73,30 @@ fn rewrite(expr: &mut Expr) {
         return;
     }
     let span = expr.span;
-    let elements = Expr::new(
+    // The type `to_a` lands on, read off the receiver we are rewriting.
+    // Identity on an Array, materialization on a Relation — the two
+    // shapes the header names — and NOTHING otherwise: a receiver whose
+    // surface we cannot see is a receiver we cannot claim `to_a` for,
+    // and leaving it unstamped keeps it on the ledger where it belongs.
+    let materialized = match recv.ty.as_ref() {
+        Some(t @ Ty::Array { .. }) => Some(t.clone()),
+        Some(Ty::Relation { of }) => Some(Ty::Array {
+            elem: Box::new(Ty::Class { id: of.clone(), args: vec![] }),
+        }),
+        _ => None,
+    };
+    let elem_ty = match &materialized {
+        Some(Ty::Array { elem }) => (**elem).clone(),
+        _ => Ty::Untyped,
+    };
+    let mut elements = Expr::new(
         span,
         ExprNode::Array { elements: std::mem::take(args), style: ArrayStyle::Brackets },
     );
-    let to_a = Expr::new(
+    if materialized.is_some() {
+        elements.ty = Some(Ty::Array { elem: Box::new(elem_ty) });
+    }
+    let mut to_a = Expr::new(
         span,
         ExprNode::Send {
             recv: Some(recv.clone()),
@@ -86,6 +106,7 @@ fn rewrite(expr: &mut Expr) {
             parenthesized: false,
         },
     );
+    to_a.ty = materialized.clone();
     *expr.node = ExprNode::Send {
         recv: Some(to_a),
         method: Symbol::from("+"),
@@ -93,4 +114,5 @@ fn rewrite(expr: &mut Expr) {
         block: None,
         parenthesized: false,
     };
+    expr.ty = materialized;
 }

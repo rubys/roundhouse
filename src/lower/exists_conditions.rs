@@ -63,7 +63,19 @@ fn rewrite(expr: &mut Expr) {
 
     let span = expr.span;
     let conditions = args[0].clone();
-    let where_call = Expr::new(
+    // The `where` hop is synthesized, so the analyzer never sees it and
+    // never types it. The outer `exists?` already carries `Bool`; the
+    // hop under it carried nothing, and an unstamped send whose receiver
+    // IS typed is exactly what `send_dispatch_failed` reports — campfire's
+    // `Ban.exists?(ip_address:)` read out as `no known method where on
+    // Class(Ban)`, naming the one method every model has.
+    let relation_ty = match recv.ty.as_ref() {
+        Some(crate::ty::Ty::Class { id, .. }) => {
+            Some(crate::ty::Ty::Relation { of: id.clone() })
+        }
+        _ => None,
+    };
+    let mut where_call = Expr::new(
         span,
         ExprNode::Send {
             recv: Some(recv.clone()),
@@ -73,6 +85,7 @@ fn rewrite(expr: &mut Expr) {
             parenthesized: true,
         },
     );
+    where_call.ty = relation_ty;
     *expr = Expr::new(
         span,
         ExprNode::Send {

@@ -657,6 +657,19 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::NotApplicable,
         return_kind: None,
     },
+    // `Model.destroy_by(conditions)` — the unscoped twin of the
+    // `Relation#destroy_by` beside it. Carries a return kind where its
+    // `destroy_all` neighbour carries none, because a catalogued method
+    // with `return_kind: None` still types to nothing: the entry keeps
+    // the effect ledger honest but a CALL of it lands on
+    // `send_dispatch_failed` all the same.
+    CatalogedMethod {
+        name: "destroy_by",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbWrite,
+        chain: ChainKind::NotApplicable,
+        return_kind: Some(ReturnKind::ArrayOfSelf),
+    },
     CatalogedMethod {
         name: "insert",
         receiver: ReceiverContext::Class,

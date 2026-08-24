@@ -396,6 +396,23 @@ module ActiveRecord
       records
     end
 
+    # `Model.destroy_by(conditions)` — the UNSCOPED form of the method
+    # `Relation#destroy_by` already answers. campfire's
+    # `SessionsController#remove_push_subscription` writes
+    # `Push::Subscription.destroy_by(endpoint:, user_id:)` on sign-out.
+    #
+    # Goes to the adapter rather than through `self.where`, for the
+    # reason `destroy_all` reaches for `_adapter_all` next door: the
+    # ruby-family trees OVERRIDE `where` with a lazy Relation (see the
+    # note on `self.where`), and a Relation held across the destroys
+    # would re-query rows the destroys have already removed. The
+    # returned records are the destroyed ones, same as `destroy_all`.
+    def self.destroy_by(conditions)
+      records = ActiveRecord.adapter.where(table_name, conditions.to_h).map { |row| instantiate(row) }
+      records.each { |r| r.destroy() }
+      records
+    end
+
     # `Article.create(title: "...", body: "...")` — convenience that
     # constructs and saves in one call. Mirrors Rails' `create`. The
     # Hash-shaped constructor signature accepts the kwargs-as-hash

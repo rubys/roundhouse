@@ -150,7 +150,7 @@ fn peel_config_chain(expr: &Expr) -> Option<(Expr, Vec<String>)> {
             }
             "configuration" => {
                 segments.reverse();
-                let app = Expr::new(
+                let mut app = Expr::new(
                     r.span,
                     ExprNode::Send {
                         recv: Some(r.clone()),
@@ -160,6 +160,14 @@ fn peel_config_chain(expr: &Expr) -> Option<(Expr, Vec<String>)> {
                         parenthesized: false,
                     },
                 );
+                // The hop is synthesized after the analyzer has run, so
+                // nothing else will ever type it. `Rails.application` is
+                // `Untyped` in the stdlib registry — the answer the
+                // analyzer would have given had the source written the
+                // hop out — and an unstamped node here reads on the
+                // ledger as `no known method application on Class(Rails)`
+                // against a class that plainly has one.
+                app.ty = Some(crate::ty::Ty::Untyped);
                 return Some((app, segments));
             }
             _ => {

@@ -735,7 +735,24 @@ fn untyped_subexpressions_with_rbs_baseline() {
     // lobsters bench lane's AOT row down for three days
     // (`--rbs seed contradicted: User#upvoted_stories is declared to
     // return Relation but this returns int_array`).
-    const CEILING: usize = 778;
+    // 2026-08-24 778 -> 791, +13 for `Base.destroy_by` — the UNSCOPED
+    // twin of `Relation#destroy_by`, which campfire's sign-out path
+    // calls as `Push::Subscription.destroy_by(endpoint:, user_id:)`.
+    // The thirteen are the whole method and they share one root: this
+    // gate's registry carries instance methods only, so a class-method
+    // send stays a TyVar and everything reading its answer goes with
+    // it — here `table_name` and `instantiate`, the `map` over the
+    // adapter rows, the local that holds it, the `each`, the block's
+    // receiver and its `destroy`, and the trailing read. The trailing
+    // read is not optional: a non-void shared-runtime method ends in
+    // one so the strict targets can see the return shape.
+    //
+    // The body goes to the adapter rather than through `self.where`
+    // for a RUNTIME reason, not a typing one: the ruby-family trees
+    // override `where` with a lazy Relation, and a Relation held
+    // across the destroys re-queries rows they have already removed —
+    // the trap `destroy_all` avoids by reaching for `_adapter_all`.
+    const CEILING: usize = 791;
 
     assert!(
         all_untyped.len() <= CEILING,
