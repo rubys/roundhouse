@@ -731,6 +731,26 @@ impl Analyzer {
                 }
             }
         }
+        // Library classes carry theirs on a FIELD rather than as an
+        // `Unknown` body item, so they need their own arm — and without it
+        // every constant a CONCERN or a HELPER declares was invisible here.
+        // That is not a rare corner: campfire keeps `CONNECTION_TTL` in
+        // `Membership::Connectable`, `PAGE_SIZE` in `Message::Pagination`,
+        // `REACTIONS` in `EmojiHelper` and `VERSIONS` in `AllowBrowser`,
+        // and every read of the four fell to the `Ty::Class { id:
+        // ConstName }` fallback — so `CONNECTION_TTL.ago` asked for `ago`
+        // on a class named CONNECTION_TTL, `count > PAGE_SIZE` compared an
+        // Int to one, and the two `each`es iterated one. Five of the
+        // emit's type errors, one missing loop.
+        for lc in &app.library_classes {
+            for (name, value) in &lc.constants {
+                entries.push((
+                    Ty::Class { id: lc.name.clone(), args: vec![] },
+                    name.clone(),
+                    value.clone(),
+                ));
+            }
+        }
 
         let mut map: HashMap<Symbol, Ty> = HashMap::new();
         let mut ambiguous: std::collections::HashSet<Symbol> = std::collections::HashSet::new();

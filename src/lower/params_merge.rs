@@ -590,6 +590,40 @@ fn convert_attributes_assignments(app: &mut App, specs: &ParamsSpecs) {
     }
 }
 
+/// `<params>.to_attrs`, TYPED.
+///
+/// The type matters as much as the node. This pass runs after the
+/// analyzer, so a `Send` built with a bare `Expr::new` carries `ty:
+/// None` forever — nothing types it again. The diagnostic walker then
+/// sees a receiver with a known type and a send with none, which is
+/// exactly its definition of a dispatch failure, and reports `no known
+/// method `to_attrs` on Hash` once per site over a tree that compiles
+/// perfectly (`controller_to_library::params` synthesizes the method on
+/// the generated `<X>Params` class, and the emitted `.rbs` declares it).
+/// Six of campfire's emit errors were this, and every one of them was
+/// the ledger describing a shape that no longer existed.
+///
+/// The receiver's own type is the right answer to carry: in the
+/// pre-lowering view it is the permit-chain Hash, and `to_attrs` is the
+/// identity on it — same keys, same values. See
+/// [[feedback_self_describing_ir]]: when the lowerer knows a fact, the
+/// IR records it.
+fn to_attrs_send(recv: Expr, span: crate::span::Span) -> Expr {
+    let ty = recv.ty.clone();
+    let mut e = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(recv),
+            method: Symbol::from("to_attrs"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+    );
+    e.ty = ty;
+    e
+}
+
 fn convert_attributes_in(
     e: &mut Expr,
     helpers: &BTreeMap<Symbol, ClassId>,
@@ -613,16 +647,7 @@ fn convert_attributes_in(
         if method.as_str() == "merge" && params_source_class(recv, helpers, specs).is_some() {
             let span = recv.span;
             let inner = recv.clone();
-            *recv = Expr::new(
-                span,
-                ExprNode::Send {
-                    recv: Some(inner),
-                    method: Symbol::from("to_attrs"),
-                    args: Vec::new(),
-                    block: None,
-                    parenthesized: false,
-                },
-            );
+            *recv = to_attrs_send(inner, span);
         }
     }
     if let ExprNode::Send { method, args, .. } = &mut *e.node {
@@ -634,16 +659,7 @@ fn convert_attributes_in(
                 // as in `convert_attrs_call_sites`: the filters clear
                 // presence flags first, and the conversion reports what
                 // survives.
-                args[0] = Expr::new(
-                    span,
-                    ExprNode::Send {
-                        recv: Some(inner),
-                        method: Symbol::from("to_attrs"),
-                        args: Vec::new(),
-                        block: None,
-                        parenthesized: false,
-                    },
-                );
+                args[0] = to_attrs_send(inner, span);
             }
         }
     }
@@ -709,16 +725,7 @@ fn convert_in(
                 }
                 let span = arg.span;
                 let inner = arg.clone();
-                *arg = Expr::new(
-                    span,
-                    ExprNode::Send {
-                        recv: Some(inner),
-                        method: Symbol::from("to_attrs"),
-                        args: Vec::new(),
-                        block: None,
-                        parenthesized: false,
-                    },
-                );
+                *arg = to_attrs_send(inner, span);
             }
         }
     }

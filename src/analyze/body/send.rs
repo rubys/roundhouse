@@ -1362,6 +1362,9 @@ pub(super) fn hash_method(
         | "select!" | "filter!" | "reject!" | "keep_if" | "delete_if"
         | "merge!" | "update" | "with_defaults" | "with_defaults!"
         | "reverse_merge" | "reverse_merge!" | "deep_merge" | "deep_merge!"
+        // ActiveSupport's `compact_blank` — `reject(&:blank?)`, so the
+        // same shape as the `compact` beside it.
+        | "compact_blank" | "compact_blank!"
         | "to_unsafe_h" => Ty::Hash {
             key: Box::new(key.clone()),
             value: Box::new(value.clone()),

@@ -369,6 +369,27 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::Terminal,
         return_kind: Some(ReturnKind::Bool),
     },
+    // `Model.any?` / `Model.none?` — the UNSCOPED emptiness predicates.
+    // `runtime/ruby/active_record/base.rb` has carried both for a while
+    // (`count > 0` / `count == 0`, with the scoped forms going through
+    // Relation beside them) and the catalog did not, so campfire's
+    // `Account.any?` and `User.none?` typed to nothing and read as
+    // dispatch failures. A method the runtime answers and the catalog
+    // does not is modeling debt reported as a compiler gap.
+    CatalogedMethod {
+        name: "any?",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Terminal,
+        return_kind: Some(ReturnKind::Bool),
+    },
+    CatalogedMethod {
+        name: "none?",
+        receiver: ReceiverContext::Class,
+        effect: EffectClass::DbRead,
+        chain: ChainKind::Terminal,
+        return_kind: Some(ReturnKind::Bool),
+    },
     CatalogedMethod {
         name: "pluck",
         receiver: ReceiverContext::Class,
