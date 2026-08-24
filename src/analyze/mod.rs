@@ -1968,7 +1968,19 @@ impl Analyzer {
                 for partial in partials {
                     let entry = partial_ivars_by_name.entry(partial.clone()).or_default();
                     for (k, v) in &renderer_ivars {
-                        if noise(v) {
+                        // Noise pollutes a UNION and is dropped there —
+                        // but dropping it when the partial has no entry
+                        // at all is worse than keeping it. A `Var` ivar
+                        // is not a diagnostic in the renderer (an
+                        // unknown type is not an error); ABSENT is,
+                        // because the read then has no binding and
+                        // reports `@room has no known type` in a partial
+                        // whose renderer is perfectly happy with it.
+                        // campfire's `rooms/show` seeds `@room` as Var,
+                        // and its `_invitation` partial — which reads
+                        // the ivar rather than the local it is handed —
+                        // was three errors for exactly this.
+                        if noise(v) && entry.contains_key(k) {
                             continue;
                         }
                         let merged = match entry.get(k) {
