@@ -173,6 +173,30 @@ module Cable
     true
   end
 
+  # Publish an already-composed Action Cable `message` VALUE to every
+  # WebSocket fd subscribed to `stream`.
+  #
+  # `message_json` is JSON TEXT and is spliced UNQUOTED, which is the
+  # whole reason this is separate from `Transport#broadcast` below: that
+  # one ships a turbo-stream fragment, an HTML String, and quotes it.
+  # Action Cable's `message` field carries the VALUE, so a raw publish of
+  # `{roomId: 1}` has to arrive as a JSON OBJECT — quoting it would ship
+  # `"message":"{\"roomId\":1}"`, valid JSON in the wrong shape, and
+  # wrong in the silent way because only the browser notices.
+  #
+  # Returns without publishing when no subscriber has named the stream,
+  # same as `Transport#broadcast`.
+  def self.publish_raw(stream, message_json)
+    id = Tep::APP.cable_identifiers[stream]
+    if id.length == 0
+      return nil
+    end
+    envelope = "{\"identifier\":" + Tep::Json.quote(id) +
+               ",\"message\":" + message_json + "}"
+    Tep::Broadcast.publish(stream, envelope)
+    nil
+  end
+
   # Broadcasts transport: Broadcasts.record calls broadcast(stream,
   # fragment) on every after-commit hook. Wrap the fragment in the
   # Action Cable message envelope (echoing the subscriber's identifier)

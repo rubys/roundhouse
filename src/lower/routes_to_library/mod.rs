@@ -260,6 +260,7 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
         }
     }
     let query_keys = query_param_demand(app, &helper_shape);
+    let string_segments = string_segment_demand(app, &helper_shape);
     for route in &flat {
         // Unnamed dynamic routes (`get "/comments/page/:page"`, no `as:`)
         // get no helper in Rails — their action-name fallback would
@@ -279,6 +280,7 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
             route,
             app,
             query_keys.get(&helper).map(|v| v.as_slice()).unwrap_or(&[]),
+            string_segments.get(&helper),
             None,
         ));
     }
@@ -297,6 +299,7 @@ pub fn lower_routes_to_library_functions(app: &App) -> Vec<LibraryFunction> {
             route,
             app,
             query_keys.get(name).map(|v| v.as_slice()).unwrap_or(&[]),
+            string_segments.get(name),
             Some(ext),
         ));
     }
@@ -545,6 +548,10 @@ fn build_helper_function(
     route: &FlatRoute,
     app: &App,
     query_keys: &[QueryKey],
+    // Segments a call site fills with a String — see
+    // `string_segment_demand`. Overrides the name-based `id`-is-Integer
+    // default for exactly those.
+    string_segments: Option<&std::collections::HashSet<String>>,
     // `Some("json")` builds the MONOMORPHIZED variant a call site's
     // `format: :json` asks for — see `format_variant_demand`. The
     // extension is a literal here, so it costs the base helper nothing.
@@ -559,6 +566,11 @@ fn build_helper_function(
     // route-level heuristic. Typing a slug segment Int made every
     // strict-target call site passing `story.short_id` a C type error.
     let param_is_slug = |p: &str| -> bool {
+        // A call site that fills the segment with a String settles it,
+        // ahead of every name-based rule below.
+        if string_segments.map(|s| s.contains(p)).unwrap_or(false) {
+            return true;
+        }
         if let Some(stem) = p.strip_suffix("_id") {
             if !stem.is_empty() && named_model_overrides_to_param(stem, app) {
                 return true;
@@ -952,6 +964,68 @@ pub(crate) struct QueryKey {
 ///
 /// Surveyed over every body INCLUDING views, which is where most URL
 /// helpers are called from and which the hook-body walk does not cover.
+/// Segments a CALL SITE demonstrably fills with a String.
+///
+/// `param_ty` types an `id`-shaped segment Integer from its NAME. That
+/// is a claim about the value, and a name cannot support it: campfire
+/// writes `resources :qr_code` with no `QrCode` model behind it and
+/// calls `qr_code_path(Base64.urlsafe_encode64(url))`. The generated
+/// signature said `(Integer id)`, and on a strict target that is not a
+/// warning — "a seed is trusted, so the emitted code would reinterpret
+/// the value rather than convert it."
+///
+/// Answering it by NAME the other way (no model behind the route ⇒
+/// String) was tried and is wrong: a route's name flattens what a
+/// model's name nests (`Rooms::OpensController` ⇒ `rooms_open`), and an
+/// `id` routinely belongs to a model the route never names —
+/// campfire's `account_bot_path` carries a User id. Both misses retype
+/// a segment whose call sites pass `record.id`, which breaks the emit
+/// in the same direction it was meant to fix.
+///
+/// So the evidence is the call site itself, read off the analyzer's
+/// type: only a segment somebody actually fills with a String is
+/// demoted, and a helper nobody calls keeps the name-based default.
+fn string_segment_demand(
+    app: &App,
+    helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
+) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
+    type Demand = std::collections::HashMap<String, std::collections::HashSet<String>>;
+    let mut out: Demand = Default::default();
+    let mut collect = |e: &Expr| {
+        fn walk(
+            e: &Expr,
+            helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,
+            out: &mut Demand,
+        ) {
+            if let ExprNode::Send { recv: None, method, args, .. } = &*e.node {
+                if let Some((segments, _)) = helpers.get(method.as_str()) {
+                    // Positionals only — a trailing kwargs hash is the
+                    // query/keyword half and names its own keys.
+                    let positional = args
+                        .iter()
+                        .filter(|a| !matches!(&*a.node, ExprNode::Hash { kwargs: true, .. }))
+                        .collect::<Vec<_>>();
+                    let helper = method
+                        .as_str()
+                        .strip_suffix("_url")
+                        .map(|stem| format!("{stem}_path"))
+                        .unwrap_or_else(|| method.as_str().to_string());
+                    for (i, arg) in positional.iter().enumerate() {
+                        let Some(seg) = segments.get(i) else { break };
+                        if matches!(arg.ty, Some(Ty::Str)) {
+                            out.entry(helper.clone()).or_default().insert(seg.clone());
+                        }
+                    }
+                }
+            }
+            e.node.for_each_child(&mut |c| walk(c, helpers, out));
+        }
+        walk(e, helpers, &mut out);
+    };
+    for_each_route_call_site(app, &mut collect);
+    out
+}
+
 fn query_param_demand(
     app: &App,
     helpers: &std::collections::HashMap<String, (Vec<String>, usize)>,

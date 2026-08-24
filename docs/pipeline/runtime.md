@@ -538,6 +538,60 @@ socket stays open. Nothing in the corpus's own tests can observe it
 exactly why it is written down here. When subscription dispatch lands,
 `ActionCable::RemoteConnections#where` is where the real selection goes.
 
+### A raw cable payload is JSON TEXT on spinel, a Hash on CRuby
+
+`ActionCable.server.broadcast(stream, payload)` — the low-level publish
+that is NOT the Turbo Stream family — carries its payload differently on
+the two Action Cable substrates.
+
+The CRuby overlay keeps the Ruby Hash the whole way to the transport and
+lets it serialize. `runtime/spinel/action_cable.rb` cannot: a `payload`
+parameter that must hold `{room_id: 1}` today and whatever the next app
+writes tomorrow is exactly the untyped bag a strict target has no lane
+for. So the Hash is rendered to JSON text at the boundary
+(`ActionCable.payload_json`) and everything downstream carries String.
+`Cable.publish_raw` splices that text UNQUOTED into the envelope's
+`message` field, which is what keeps the wire shape a JSON *object*
+rather than a JSON string — the silent failure the overlay's own header
+warns about.
+
+**What it costs.** `Broadcasts::LOG` records the rendered text where the
+overlay records the Hash, so a test that reads `entry[:payload]` and
+subscripts it passes on CRuby and does not on spinel. Both entries carry
+`action: :message` and the stream, which is what `assert_broadcasts`
+reads, so the test helper itself agrees across the two. The narrower
+consequence is in the renderer: `payload_json` writes Integer values
+only, because two call sites in one app is the whole surface anybody has
+asked for. A String or nested value needs the renderer widened — and
+that is a monomorphization decision to take deliberately, not a cast to
+sneak in.
+
+### `rails_blob_path` raises rather than returning a URL
+
+Active Storage's engine-mounted route helpers are not in the app's
+`config/routes.rb`, so the generator that reads it never emits them.
+Until now that meant a view writing `rails_blob_path(message.attachment,
+disposition: "attachment")` — campfire's download link, on every
+attachment message — emitted a call to a method NOTHING defined: a
+NoMethodError at render time on CRuby, and `unsupported call:
+(CallNode 'rails_blob_path')` on a strict target, which reads like a
+compiler bug rather than a missing feature.
+
+They now exist, on `RouteHelpers` in `runtime/ruby/active_storage.rb`,
+and they RAISE — the same voice and the same reason as
+`ActiveStorage::Attached#url` beside them: the bytes half of Active
+Storage is a storage service, a processor and a signed-id scheme, none
+of which exist here, and a plausible-looking URL is a page that renders
+a broken image. What changed is that the gap has one named home every
+target compiles instead of a missing method.
+
+**Still open, and visible in any campfire emit:** not every call site is
+qualified. `lower::controller_to_library::rewrites::rewrite_route_helpers`
+adds the `RouteHelpers.` receiver for controllers and tests; a library
+class (campfire's `Messages::AttachmentPresentation`) and at least one
+view interpolation context keep the bare `rails_blob_path(...)`, so the
+same helper is spelled two ways in one emitted tree.
+
 ### A `has_secure_token` column fills at CREATE, not at initialize
 
 Rails 7.1+ defaults `has_secure_token` to `on: :initialize`, so

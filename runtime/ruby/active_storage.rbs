@@ -29,3 +29,11 @@ module ActiveStorage
     def destroy: () -> void
   end
 end
+
+# See the .rb: Active Storage's engine-mounted route helpers, reopened
+# onto the app's generated RouteHelpers so a view that writes one
+# compiles on every target and raises in one named place.
+module RouteHelpers
+  def self.rails_blob_path: (untyped attachment, ?disposition: String?, ?only_path: bool?) -> String
+  def self.rails_blob_url: (untyped attachment, ?disposition: String?, ?only_path: bool?) -> String
+end

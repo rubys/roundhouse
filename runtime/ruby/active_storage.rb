@@ -225,3 +225,43 @@ module ActiveStorage
     end
   end
 end
+
+# Active Storage's ROUTE helpers, reopened onto the app's generated
+# `RouteHelpers` module.
+#
+# They live here rather than in `lower::routes_to_library` because they
+# are not the app's routes: Rails mounts them from the Active Storage
+# engine, so `config/routes.rb` never names them and the generator that
+# reads it cannot know they exist. A view that writes
+# `rails_blob_path(message.attachment, disposition: "attachment")` —
+# campfire's download link, on every attachment message — was emitted as
+# a call to a method NOTHING defined. On CRuby that is a NoMethodError at
+# render time; on a strict target it is `unsupported call:
+# (CallNode 'rails_blob_path')` and the whole build stops.
+#
+# They RAISE, in the same voice and for the same reason as
+# `Attached#url` above: the bytes half of Active Storage is a storage
+# service, a processor and a signed-id scheme, none of which exist here.
+# A plausible-looking URL would be a page that renders a broken image —
+# the failure that looks like success. What changes is only that the gap
+# now has ONE named home that every target compiles, instead of a
+# missing method that reads like a compiler bug.
+#
+# `disposition` and `only_path` are spelled out because those are the
+# two options an ingested app has written; a bag would buy nothing here,
+# since the body cannot use them either way.
+module RouteHelpers
+  def self.rails_blob_path(attachment, disposition: nil, only_path: nil)
+    raise NotImplementedError,
+          "RouteHelpers.rails_blob_path: Active Storage blob URLs are not " \
+          "modeled (no storage service, no signed ids) — see " \
+          "ActiveStorage::Attached#url"
+  end
+
+  def self.rails_blob_url(attachment, disposition: nil, only_path: nil)
+    raise NotImplementedError,
+          "RouteHelpers.rails_blob_url: Active Storage blob URLs are not " \
+          "modeled (no storage service, no signed ids) — see " \
+          "ActiveStorage::Attached#url"
+  end
+end
