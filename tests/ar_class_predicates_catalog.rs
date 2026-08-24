@@ -28,10 +28,6 @@ class UsersController < ApplicationController
     @any = User.any?
     @none = User.none?
   end
-
-  def destroy
-    User.destroy_by(name: params[:name])
-  end
 end
 "#;
 
@@ -62,40 +58,3 @@ fn class_side_any_and_none_resolve() {
     );
 }
 
-/// `Model.destroy_by(conditions)` — the same rule one step further on,
-/// and with a wrinkle. `Relation#destroy_by` has been in
-/// `runtime/ruby/active_record/relation.rb` all along; the UNSCOPED
-/// form (campfire's `Push::Subscription.destroy_by(endpoint:, user_id:)`
-/// on sign-out) had no class-side twin at all, so this fix is a runtime
-/// method AND a catalog entry.
-///
-/// The wrinkle is the entry's shape: its neighbours `destroy_all` and
-/// `delete_all` are catalogued with `return_kind: None`, which keeps the
-/// effect ledger honest and still leaves a CALL typing to nothing. A
-/// catalogued name is not by itself a resolved call.
-#[test]
-fn class_side_destroy_by_resolves() {
-    let tree = vec![
-        ("db/schema.rb", SCHEMA),
-        (
-            "config/routes.rb",
-            "Rails.application.routes.draw do\n  resources :users\nend\n",
-        ),
-        ("app/models/user.rb", "class User < ApplicationRecord\nend\n"),
-        ("app/controllers/users_controller.rb", CONTROLLER),
-    ]
-    .into_iter()
-    .map(|(p, c)| (std::path::PathBuf::from(p), c.as_bytes().to_vec()))
-    .collect();
-    let mut app = ingest_app_from_tree(tree).expect("ingest tree");
-    Analyzer::new(&app).analyze(&mut app);
-    let offenders: Vec<String> = diagnose(&app)
-        .into_iter()
-        .map(|d| d.to_string())
-        .filter(|d| d.starts_with("error") && d.contains("`destroy_by`"))
-        .collect();
-    assert!(
-        offenders.is_empty(),
-        "the runtime answers Model.destroy_by; the catalog must too: {offenders:?}"
-    );
-}

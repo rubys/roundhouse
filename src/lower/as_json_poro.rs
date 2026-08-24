@@ -179,7 +179,20 @@ fn as_json_method(owner: &ClassId, readers: &[Symbol]) -> MethodDef {
                     Span::synthetic(),
                     ExprNode::Lit { value: Literal::Str { value: name.as_str().to_string() } },
                 ),
-                Expr::new(Span::synthetic(), ExprNode::Ivar { name: name.clone() }),
+                {
+                    // Stamped. This pass runs after the analyzer, so
+                    // nothing types these reads afterwards, and an
+                    // unstamped ivar is reported as `@title has no
+                    // known type` — with no file or line, because the
+                    // node is synthetic. `Untyped` is the honest
+                    // answer: the readers here are `attr_*`
+                    // declarations, which declare no type, and it is
+                    // what the emitted RBS says of them.
+                    let mut read =
+                        Expr::new(Span::synthetic(), ExprNode::Ivar { name: name.clone() });
+                    read.ty = Some(crate::ty::Ty::Untyped);
+                    read
+                },
             )
         })
         .collect();

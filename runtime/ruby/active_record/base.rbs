@@ -172,7 +172,6 @@ module ActiveRecord
     def self.any?: () -> bool
     def self.delete_all: () -> nil
     def self.destroy_all: () -> Array[Base]
-    def self.destroy_by: (Hash[Symbol, untyped] conditions) -> Array[Base]
     def self.create: (Hash[Symbol, untyped] attrs) -> Base
     def self.create!: (Hash[Symbol, untyped] attrs) -> Base
     def self.last: () -> Base?

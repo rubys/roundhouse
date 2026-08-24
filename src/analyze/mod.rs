@@ -389,6 +389,32 @@ impl Analyzer {
                     args: vec![],
                 });
             }
+            // `attr_accessor :x` — and `attr_accessor *CONST`, which is
+            // how campfire's `Opengraph::Metadata` names its four. The
+            // reader/writer pair is synthesized by
+            // `lower::model_to_library::markers::push_attr_accessor_methods`
+            // at the emit seam, AFTER this walk, so the rule the
+            // `attached` reader above states applies here too: a name
+            // the pipeline writes must be registered where the analyzer
+            // can see it, or the method exists in the emitted tree and
+            // nowhere else. `self.title = sanitize(strip_tags(title))`
+            // in that model's own `sanitize_fields` reported `no known
+            // method title= on Class(Opengraph::Metadata)`.
+            //
+            // `declared_attr_names` is the LOWERING's list, CALLED
+            // rather than re-derived: it is the only place that knows
+            // the splat form names four fields, and a second copy would
+            // go stale the first time either moved.
+            //
+            // `Untyped` because an `attr_*` declares no type — the same
+            // answer the emitted RBS gives it (`attr_reader title:
+            // untyped`), and the gradual escape rather than a Var so
+            // chains off the reader resolve.
+            for name in crate::lower::model_to_library::markers::declared_attr_names(model) {
+                let writer = Symbol::from(format!("{}=", name.as_str()));
+                cls.instance_methods.entry(name).or_insert(Ty::Untyped);
+                cls.instance_methods.entry(writer).or_insert(Ty::Untyped);
+            }
             // `attachable_sgid` — the signed GlobalID an
             // `ActionText::Attachable` model mints. Registered for every
             // model rather than only the attachable ones: this walk has
