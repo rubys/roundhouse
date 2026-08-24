@@ -459,6 +459,37 @@ any model whose `after_create` has side effects. The corpus caller
 (campfire's `Room has_many :memberships do def grant_to … end end`)
 inserts Membership rows whose callbacks are inert.
 
+**And it answers a different value.** Rails returns an
+`ActiveRecord::Result`; the inlined `rows.each { … }` returns `rows`,
+the Array of attribute hashes it was given. The catalog says
+`ArrayOfUntyped` for that reason — the type of what this pipeline
+actually produces, not of what Rails produces. Both corpus call sites
+discard the value. Saying nothing was not the neutral choice: a catalog
+entry carrying no return kind falls through to the same place an
+UNKNOWN method name does, so campfire's `Membership.insert_all(…)`
+reported `no known method insert_all on Class { Membership }` while the
+emitted code was the inlined loop, correct all along.
+
+### `Random.uuid` reads the CSPRNG, not the PRNG
+
+`securerandom.rb` defines one module, `Random::Formatter`, and extends
+BOTH `Random` and `SecureRandom` with it — `uuid` is the same code
+either way, and only the byte source underneath differs. (It is also why
+`Random.uuid` is undefined until something requires securerandom;
+campfire's `Message#client_message_id ||= Random.uuid` works because
+Rails already has.) Nothing on any target defines it, so
+`lower::random_formatter` rewrites the receiver to `SecureRandom`, the
+name the emitted tree already carries.
+
+The divergence is the generator: Rails' call reads `Random`'s default
+Mersenne Twister, ours reads the OS CSPRNG. The value is a v4 UUID
+string either way and every consumer treats it as an opaque id, so this
+is the safe direction — but an app that wanted a *reproducible* uuid out
+of a seeded `Random` would not get one. Only the names `Random` cannot
+answer on its own are rewritten: `Random.rand`, `Random.bytes`,
+`Random.new_seed`, `Random.srand` and `Random.random_number` are real
+methods on the PRNG class with their own meaning.
+
 ### `increment!` / `decrement!` are read-modify-write, not atomic
 
 Rails issues `UPDATE … SET col = col + 1`, so two concurrent callers

@@ -664,12 +664,22 @@ pub const AR_CATALOG: &[CatalogedMethod] = &[
         chain: ChainKind::NotApplicable,
         return_kind: None,
     },
+    // The one bulk write with a return type, because it is the one
+    // with a LOWERING: `scope_chain` inlines `Model.insert_all(rows)`
+    // to `rows.each { … }`, whose value is `rows` — an Array of
+    // attribute hashes. Rails answers an `ActiveRecord::Result`
+    // instead; every corpus site discards the value, and the
+    // divergence is ledgered in docs/pipeline/runtime.md. Saying
+    // nothing here was not neutral: a catalog entry with no return
+    // kind falls through to the same place an UNKNOWN name does, so
+    // campfire's `Membership.insert_all(…)` reported `no known method
+    // insert_all` while the emitted code was the inlined loop.
     CatalogedMethod {
         name: "insert_all",
         receiver: ReceiverContext::Class,
         effect: EffectClass::DbWrite,
         chain: ChainKind::NotApplicable,
-        return_kind: None,
+        return_kind: Some(ReturnKind::ArrayOfUntyped),
     },
     CatalogedMethod {
         name: "upsert",

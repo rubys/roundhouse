@@ -66,6 +66,7 @@ pub mod as_json_shape;
 pub mod as_json_writer;
 pub mod as_json_super;
 pub mod parameterize;
+pub mod random_formatter;
 pub mod presence_in;
 pub mod controller_class_render;
 pub mod dirty_predicate_kwargs;
@@ -85,6 +86,7 @@ pub mod update_writer_check;
 pub mod route_format_suffix;
 pub mod config_reader;
 pub mod exists_conditions;
+pub mod destroy_by;
 pub mod inquiry;
 pub mod byte_size;
 pub mod tag_builder;
@@ -133,6 +135,7 @@ pub use errors_index::apply_errors_index_lowering;
 pub use mailer_class_side::apply_mailer_class_side;
 pub use as_json_super::apply_as_json_super_grounding;
 pub use parameterize::apply_parameterize_grounding;
+pub use random_formatter::apply_random_formatter_grounding;
 pub use presence_in::apply_presence_in_grounding;
 pub use controller_class_render::apply_controller_class_render;
 pub use dirty_predicate_kwargs::apply_dirty_predicate_kwargs;
@@ -151,6 +154,7 @@ pub use has_json::apply_has_json_lowering;
 pub use route_format_suffix::apply_route_format_suffix_lowering;
 pub use config_reader::apply_config_reader_lowering;
 pub use exists_conditions::apply_exists_conditions_lowering;
+pub use destroy_by::apply_destroy_by_lowering;
 pub use inquiry::apply_inquiry_lowering;
 pub use literal_append::apply_literal_append_lowering;
 pub use html_safe::apply_html_safe_lowering;
@@ -217,6 +221,11 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     ("time_current", &[]),
     ("as_json_super", &[]),
     ("parameterize", &[]),
+    // `Random.uuid` → `SecureRandom.uuid` — the same `Random::Formatter`
+    // method under a byte source that exists. Rewrites a receiver
+    // Const no pass produces and writes a name no pass consumes, so
+    // no ordering constraints.
+    ("random_formatter", &[]),
     // `value.presence_in(list)` → `ActiveSupport.presence_in(value,
     // list)`; a receiver-shape rewrite of a name no other pass produces
     // or consumes, so no ordering constraints.
@@ -307,6 +316,10 @@ const POST_ANALYZE_PASS_ORDER: &[(&str, &[&str])] = &[
     // primitive. Before the emit-time arel rewrite, which then folds
     // the chain when the values are literal.
     ("exists_conditions", &[]),
+    // `Model.destroy_by(col: v)` → `Model.where(col: v).destroy_all`,
+    // Rails' own definition. Same placement and same reasons as
+    // `exists_conditions`: before the arel rewrite that folds the chain.
+    ("destroy_by", &[]),
     // `Rails.application.config.<key>` → `Rails.application.<key>`, the
     // read half of the config lift; no ordering constraints (no other
     // pass produces or consumes the `config` hop).
@@ -496,6 +509,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("as_json_super");
     parameterize::apply_parameterize_grounding(app);
     ran!("parameterize");
+    random_formatter::apply_random_formatter_grounding(app);
+    ran!("random_formatter");
     presence_in::apply_presence_in_grounding(app);
     ran!("presence_in");
     enumerable_ext::apply_enumerable_ext_grounding(app);
@@ -544,6 +559,8 @@ pub fn apply_post_analyze_lowerings(
     ran!("inquiry");
     exists_conditions::apply_exists_conditions_lowering(app);
     ran!("exists_conditions");
+    destroy_by::apply_destroy_by_lowering(app);
+    ran!("destroy_by");
     config_reader::apply_config_reader_lowering(app);
     ran!("config_reader");
     arel_attribute::apply_arel_attribute_lowering(app);

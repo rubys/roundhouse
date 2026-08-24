@@ -790,7 +790,28 @@ impl<'a> BodyTyper<'a> {
                         Some(other) if cls.relation_derived.contains(method) => {
                             return other.clone();
                         }
-                        _ => {}
+                        // Any OTHER class method the model actually
+                        // defines. Rails runs it inside the relation's
+                        // `scoping` block and answers whatever it
+                        // answers, and so does this pipeline: the
+                        // scope-chain survey re-roots the call at the
+                        // constant and threads the relation in as
+                        // `__rel` (`User.active.find_by_transfer_id(id)`
+                        // → `User.find_by_transfer_id(id, User.active)`),
+                        // for any class method, not only the
+                        // relation-returning ones. Declining to type it
+                        // here left the analyzer STRICTER than the
+                        // pipeline it describes: campfire's session
+                        // transfer read out as `no known method
+                        // find_by_transfer_id on Relation { User }` while
+                        // the emitted call site was correct.
+                        //
+                        // Not method_missing: `class_methods.get` already
+                        // said the model defines this name. A name no
+                        // model defines still falls through to the
+                        // Enumerable surface and then to the ledger.
+                        Some(other) => return other.clone(),
+                        None => {}
                     }
                 }
                 let elem = Ty::Class { id: of.clone(), args: vec![] };
