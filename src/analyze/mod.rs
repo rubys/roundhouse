@@ -84,6 +84,21 @@ pub struct Analyzer {
     /// from "a copy the fold wrote last iteration" (overwritten so each
     /// fixpoint round's refinement of the module's returns propagates).
     concern_folded: HashMap<ClassId, (BTreeSet<Symbol>, BTreeSet<Symbol>)>,
+    /// Per-(controller, method) ivar bindings AS REFINED by Phase B,
+    /// carried across fixpoint rounds.
+    ///
+    /// Phase A harvests every binding by typing the body against an
+    /// EMPTY ivar context, so any binding that depends on another ivar
+    /// comes out `Var` — `MessagesController#set_message` is
+    /// `@message = @room.messages.find(…)`, and `@room` is a
+    /// before_action's. Phase B fixes that for the controller it is
+    /// looking at, but into a local, and Phase A rebuilds the table
+    /// from scratch next round, so the refinement never reached a
+    /// SUBCLASS: `Messages::ByBotsController#create` calls `super` and
+    /// then reads `@message`, and the whole chain it inherits said
+    /// `Var`. Persisting it here lets the whole-program fixpoint carry
+    /// the answer the way it carries method returns.
+    refined_action_bindings: HashMap<(ClassId, Symbol), HashMap<Symbol, Ty>>,
 }
 
 
@@ -648,6 +663,7 @@ impl Analyzer {
             inferred_params: HashMap::new(),
             adapter,
             concern_folded: HashMap::new(),
+            refined_action_bindings: HashMap::new(),
         }
     }
 
@@ -893,7 +909,7 @@ impl Analyzer {
     /// (controller→view ivar channel, before_action seeding,
     /// per-model two-pass ivar discovery, partial locals threading)
     /// stays internal to this method; the fixpoint just calls it.
-    fn run_typing_passes(&self, app: &mut App) {
+    fn run_typing_passes(&mut self, app: &mut App) {
         // Global constant registry (`Vote::COMMENT_REASONS` → `Hash[..]`,
         // `User::NEW_USER_DAYS` → `Int`), shared across every class, view,
         // and seeds so cross-class constant references resolve to the
@@ -1165,6 +1181,23 @@ impl Analyzer {
         // (an explicit `layout false`) suppresses the contribution.
         let mut layout_ivars_by_view: HashMap<Symbol, HashMap<Symbol, Ty>> = HashMap::new();
 
+        // Each controller's controller-wide ivar environment, kept so
+        // the CONCERN MODULES it includes can be typed against it
+        // further down. A concern's methods run on the includer and
+        // read its ivars — `TrackedRoomVisit#remember_last_room_visited`
+        // is `cookies.permanent[:last_room] = @room.id`, and `@room` is
+        // RoomsController's `set_room` filter's. Phase A already types
+        // a COPY of each concern method against the includer to harvest
+        // its bindings, but the module's own body — the one `diagnose`
+        // walks, and the one every emitted copy is cut from — was typed
+        // with nothing.
+        let mut controller_ivar_env: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
+
+        // Phase-B refinements, collected here and flushed into
+        // `self.refined_action_bindings` after the loop — `self` is
+        // borrowed immutably inside it.
+        let mut refinements: Vec<((ClassId, Symbol), HashMap<Symbol, Ty>)> = Vec::new();
+
         // ── Phase B: walk each controller's parent chain to build
         // ── inherited (chained) filters + action bindings, then
         // ── re-analyze actions and harvest view ivars.
@@ -1252,13 +1285,33 @@ impl Analyzer {
             // Build chained action_bindings: nearest parent's
             // overlay last so closer-defined targets win.
             let mut chained_bindings: HashMap<Symbol, HashMap<Symbol, Ty>> = HashMap::new();
-            for (_, ancestor) in ancestors.iter().rev() {
+            // Overlay each class's Phase-B refinements onto its Phase-A
+            // harvest as we walk. Per-KEY, and only where the refined
+            // value carries shape, so this can add an answer but never
+            // take one away.
+            let layer = |dst: &mut HashMap<Symbol, HashMap<Symbol, Ty>>,
+                             owner: &ClassId,
+                             name: &Symbol,
+                             ivars: &HashMap<Symbol, Ty>| {
+                let mut merged = ivars.clone();
+                if let Some(refined) =
+                    self.refined_action_bindings.get(&(owner.clone(), name.clone()))
+                {
+                    for (k, v) in refined {
+                        if !v.is_open() {
+                            merged.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                dst.insert(name.clone(), merged);
+            };
+            for (aid, ancestor) in ancestors.iter().rev() {
                 for (name, ivars) in &ancestor.action_bindings {
-                    chained_bindings.insert(name.clone(), ivars.clone());
+                    layer(&mut chained_bindings, aid, name, ivars);
                 }
             }
             for (name, ivars) in &meta.action_bindings {
-                chained_bindings.insert(name.clone(), ivars.clone());
+                layer(&mut chained_bindings, &ctrl_name, name, ivars);
             }
 
             // Controller-wide ivar environment: in Ruby, instance
@@ -1316,9 +1369,7 @@ impl Analyzer {
                     let out: HashMap<Symbol, Ty> = env.into_iter()
                         .map(|(k, v)| (k, v.strip_nil()))
                         .collect();
-                    if std::env::var("RH_DEBUG_IVARS").as_deref() == Ok(ctrl_name.0.as_str()) {
-                        eprintln!("DBG sweep={sweep} wide={:?}", out);
-                    }
+                    controller_ivar_env.insert(ctrl_name.clone(), out.clone());
                     out
                 };
 
@@ -1388,6 +1439,31 @@ impl Analyzer {
                 }
                 if !refined {
                     break;
+                }
+            }
+
+            // Persist this controller's refinements so a SUBCLASS
+            // analyzed later — this round or the next — inherits them.
+            // `chained_bindings` also holds the ancestors' entries, so
+            // only names this controller actually defines are recorded;
+            // an inherited entry stays attributed to the class that
+            // owns it.
+            {
+                let own: BTreeSet<Symbol> =
+                    controller.actions().map(|a| a.name.clone()).collect();
+                for (name, ivars) in &chained_bindings {
+                    if !own.contains(name) {
+                        continue;
+                    }
+                    let shaped: HashMap<Symbol, Ty> = ivars
+                        .iter()
+                        .filter(|(_, v)| !v.is_open())
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    if shaped.is_empty() {
+                        continue;
+                    }
+                    refinements.push(((ctrl_name.clone(), name.clone()), shaped));
                 }
             }
 
@@ -1610,7 +1686,43 @@ impl Analyzer {
                 if let Some(view_name) = view_name_for_action(&ctrl_name, action) {
                     view_targets.push(view_name);
                 }
+                // The CONVENTIONAL template, whenever one exists. An
+                // explicit `render` anywhere in the body — campfire's
+                // `create` has one in a `rescue` — makes
+                // `view_name_for_action` answer THAT template and only
+                // that one, so the action's own
+                // `messages/create.turbo_stream.erb` (the whole
+                // message-post response) was fed by nothing. Rails
+                // renders the conventional template on any path that
+                // does not render or redirect, which is exactly the
+                // path a rescue's render is the exception to. Gated on
+                // the view EXISTING, so no phantom entry is minted for
+                // a private helper or a redirect-only action.
+                let conventional =
+                    Symbol::from(format!("{prefix}/{}", action.name.as_str()).as_str());
+                if existing_view_names.contains(&conventional) {
+                    view_targets.push(conventional);
+                }
                 collect_action_render_views(&action.body, &prefix, &mut view_targets);
+                // FORMAT VARIANTS of each target. Rails picks
+                // `messages/create.turbo_stream.erb` over
+                // `messages/create.html.erb` by the request's format,
+                // and either one is the SAME action's template — but
+                // the variant's view name carries the format suffix
+                // (`messages/create.turbo_stream`) and so matched no
+                // seed at all. campfire's whole message-post response
+                // is that template, and both its reads of `@message`
+                // reported `has no known type` about an ivar the action
+                // two lines up assigns.
+                for target in view_targets.clone() {
+                    let stem = format!("{}.", target.as_str());
+                    view_targets.extend(
+                        existing_view_names
+                            .iter()
+                            .filter(|v| v.as_str().starts_with(&stem))
+                            .cloned(),
+                    );
+                }
                 view_targets.sort();
                 view_targets.dedup();
                 for view_name in view_targets {
@@ -1689,6 +1801,15 @@ impl Analyzer {
                         }
                     }
                 }
+            }
+        }
+        // Flush Phase B's refinements. Later rounds of the whole-program
+        // fixpoint read them back through `layer` above, which is what
+        // carries a parent's refined binding down to a subclass.
+        for (key, ivars) in refinements {
+            let entry = self.refined_action_bindings.entry(key).or_default();
+            for (k, v) in ivars {
+                entry.insert(k, v);
             }
         }
         for model in &mut app.models {
@@ -1880,6 +2001,61 @@ impl Analyzer {
         // Survey the app for those writes and let their VALUE types be
         // the seed. This is evidence, not convention: the type is
         // whatever the app actually assigns.
+        // module → the union of every including controller's ivar
+        // environment. Includes close transitively, the same closure
+        // Phase A's splice walks.
+        let concern_ivar_env: HashMap<ClassId, HashMap<Symbol, Ty>> = {
+            let mut out: HashMap<ClassId, HashMap<Symbol, Ty>> = HashMap::new();
+            let by_name: HashMap<&ClassId, &Controller> =
+                app.controllers.iter().map(|c| (&c.name, c)).collect();
+            for controller in &app.controllers {
+                let Some(env) = controller_ivar_env.get(&controller.name) else { continue };
+                // The includer may be an ANCESTOR. campfire puts
+                // `include TrackedRoomVisit` on ApplicationController,
+                // which has no `@room` — but the concern's
+                // `remember_last_room_visited` is a before_action on
+                // the Rooms controllers, which do. A concern included
+                // high in the chain runs on every controller below it,
+                // so every one of those environments is a source.
+                let mut queue: Vec<ClassId> = controller_includes(controller);
+                {
+                    let mut cursor = controller.parent.clone();
+                    for _ in 0..32 {
+                        let Some(pid) = cursor else { break };
+                        let Some(parent) = by_name.get(&pid) else { break };
+                        queue.extend(controller_includes(parent));
+                        cursor = parent.parent.clone();
+                    }
+                }
+                let mut seen: BTreeSet<ClassId> = queue.iter().cloned().collect();
+                let mut qi = 0;
+                while qi < queue.len() {
+                    let m = queue[qi].clone();
+                    qi += 1;
+                    if let Some(nested) = module_includes.get(&m) {
+                        for n in nested {
+                            if seen.insert(n.clone()) {
+                                queue.push(n.clone());
+                            }
+                        }
+                    }
+                    let entry = out.entry(m).or_default();
+                    for (k, v) in env {
+                        if v.is_open() {
+                            continue;
+                        }
+                        let merged = match entry.remove(k) {
+                            Some(prev) if prev == *v => prev,
+                            Some(prev) => crate::analyze::body::union_of(prev, v.clone()),
+                            None => v.clone(),
+                        };
+                        entry.insert(k.clone(), merged);
+                    }
+                }
+            }
+            out
+        };
+
         let current_attribute_writes: HashMap<ClassId, HashMap<Symbol, Ty>> = {
             let targets: std::collections::HashSet<&ClassId> =
                 app.current_attribute_classes.iter().collect();
@@ -1913,6 +2089,17 @@ impl Analyzer {
             let mut flow_ivars: HashMap<Symbol, Ty> = HashMap::new();
             for method in &lc.methods {
                 extract_ivar_assignments(&method.body, &mut flow_ivars);
+            }
+            // A CONTROLLER CONCERN's ivars are the includer's. Its
+            // methods run on the controller and read what the
+            // controller's filters set, so the module's own body is
+            // typed against the union of every includer's environment.
+            // Its own assignments win — those are the concern's answer
+            // about itself.
+            if let Some(env) = concern_ivar_env.get(&lc_name) {
+                for (k, v) in env {
+                    flow_ivars.entry(k.clone()).or_insert_with(|| v.clone());
+                }
             }
             // The write sites win over the syntactic harvest: for a
             // CurrentAttributes attribute the harvest sees only the

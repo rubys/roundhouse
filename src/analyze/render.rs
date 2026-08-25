@@ -288,6 +288,13 @@ fn interpret_render_call(
     // collection's element, plus Rails' `<name>_counter` index local.
     if let ExprNode::Hash { entries, .. } = &*first.node {
         let mut partial_name: Option<String> = None;
+        // `render layout: "rooms/layouts/edit", locals: { … } do … end`
+        // — a PARTIAL used as a layout. Rails renders `_edit` with the
+        // block as its content, in the caller's view context, so it
+        // reads the caller's ivars and the given locals exactly like
+        // any other partial. Keyed separately so an explicit
+        // `partial:` in the same hash still wins.
+        let mut layout_name: Option<String> = None;
         let mut locals: HashMap<Symbol, Ty> = HashMap::new();
         let mut collection_ty: Option<Ty> = None;
         let mut as_name: Option<Symbol> = None;
@@ -322,10 +329,15 @@ fn interpret_render_call(
                         as_name = Some(value.clone());
                     }
                 }
+                "layout" => {
+                    if let ExprNode::Lit { value: Literal::Str { value } } = &*v.node {
+                        layout_name = Some(value.clone());
+                    }
+                }
                 _ => {}
             }
         }
-        if let Some(name) = partial_name {
+        if let Some(name) = partial_name.or(layout_name) {
             if let Some(coll) = collection_ty {
                 // Unknown/gradual collection still binds the local —
                 // gradual element beats an unresolved bare name.
